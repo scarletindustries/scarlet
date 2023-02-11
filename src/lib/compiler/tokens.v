@@ -1,4 +1,4 @@
-module tokens
+module compiler
 
 pub struct Token {
 pub:
@@ -10,7 +10,7 @@ pub:
 }
 
 pub enum Kind {
-	eof
+	eof // End of file
 	// Literals
 	literal_symbol // Any symbol that is not a keyword
 	literal_number // Any number
@@ -69,5 +69,20 @@ pub enum Kind {
 	punc_open_brace // {
 	punc_close_brace // }
 	punc_open_bracket // [
-	punc_close_bracket // ]
+	punc_close_bracket // ]	
+	punc_at // @
+	// Misc
+	_end_ // Used to mark the end of the token list, used to pull a length
+}
+
+pub const token_length = int(Kind._end_)
+
+// AtKind is used to inject information into the token stream
+// when the @ token is encountered. This is used to get information
+// about the current file, function, etc, at compile time.
+pub enum AtKind {
+	fn_name // @fn – Gets the name of the current function
+	method_name // @method – Gets the name of the current method
+	file_path // @path – Gets the path of the current file
+	line // @line – Gets the line number of the current line where the token appears
 }

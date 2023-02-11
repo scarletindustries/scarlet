@@ -1,11 +1,8 @@
-module main
-
 import os
 import cli
+import lib.compiler as c
 
 fn main() {
-	v_version := '0.0.1'
-
 	mut app := cli.Command{
 		name: 'alc'
 		description: 'al compiler and toolchain'
@@ -15,9 +12,10 @@ fn main() {
 		}
 		commands: [
 			cli.Command{
-				name: 'doctor'
-				execute: fn [v_version] (cmd cli.Command) ! {
-					println('alc version 0.0.1 is running vlang ${v_version}')
+				name: 'info'
+				execute: fn (cmd cli.Command) ! {
+					println('alc version 0.0.1')
+					println('i currently understand ${c.token_length} tokens')
 					return
 				}
 			},
