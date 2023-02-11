@@ -1,0 +1,14 @@
+main
+al
+*.exe
+*.exe~
+*.so
+*.dylib
+*.dll
+bin/
+.DS_Store
+.idea/
+.vscode/
+*.iml
+.env
+*.db
