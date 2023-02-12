@@ -6,7 +6,6 @@ import lib.compiler as c
 
 fn build(cmd cli.Command) ! {
 	println('hello app')
-	return
 }
 
 fn main() {
@@ -19,7 +18,7 @@ fn main() {
 				name: 'info'
 				execute: fn (cmd cli.Command) ! {
 					println('alc version 0.0.1')
-					println('${c.token_length} tokens')
+					println('${c.total_known_tokens} known tokens')
 					return
 				}
 			},

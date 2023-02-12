@@ -75,7 +75,7 @@ pub enum Kind {
 	_end_ // Used to mark the end of the token list, used to pull a length
 }
 
-pub const token_length = int(Kind._end_)
+pub const total_known_tokens = int(Kind._end_)
 
 // AtKind is used to inject information into the token stream
 // when the @ token is encountered. This is used to get information
