@@ -1,23 +1,14 @@
 module compiler
 
+[inline; minify]
 pub struct Token {
 pub:
-	kind Kind   // The token number/enum; for quick comparisons
-	lit  string // Literal representation of the token
-	line int    // The line number in the source where the token occured
-	col  int    // The column in the source where the token occured	
-	len  int    // Length of the literal
-}
-
-[inline]
-pub fn new_token(kind Kind, lit string, line int, col int) Token {
-	return Token{
-		kind: kind
-		lit: lit
-		line: line
-		col: col
-		len: lit.len
-	}
+	kind        Kind   // The token number/enum; for quick comparisons
+	lit         string // Literal representation of the token
+	line        int    // The line number in the source where the token occured
+	col         int    // The column in the source where the token occured
+	len         int    // Length of the literal
+	scanner_pos int    // The scanner position of this token
 }
 
 pub enum Kind {
@@ -80,7 +71,7 @@ pub enum Kind {
 	punc_open_brace // {
 	punc_close_brace // }
 	punc_open_bracket // [
-	punc_close_bracket // ]	
+	punc_close_bracket // ]
 	punc_at // @
 	// Misc
 	_end_ // Used to mark the end of the token list, used to pull a length
@@ -101,7 +92,7 @@ pub enum AtKind {
 pub fn kind_to_string(kind Kind) string {
 	return match kind {
 		.eof { 'eof' }
-		.literal_symbol { 'literal_symbol' }
+		.literal_ident { 'literal_ident' }
 		.literal_number { 'literal_number' }
 		.literal_string { 'literal_string' }
 		// .literal_string_interpolation { 'literal_string_interpolation' }

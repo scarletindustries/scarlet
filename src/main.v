@@ -2,29 +2,28 @@ module main
 
 import os
 import cli
-import lib.compiler as c
-
-fn build(cmd cli.Command) ! {
-	println('hello app')
-}
+import lib.compiler
 
 fn main() {
 	mut app := cli.Command{
-		name: 'alc'
 		description: 'al compiler and toolchain'
-		execute: build
+		version: '1.0.0'
+		posix_mode: true
+		execute: fn (cmd cli.Command) ! {
+			println(cmd.help_message())
+		}
 		commands: [
 			cli.Command{
-				name: 'info'
-				execute: fn (cmd cli.Command) ! {
-					println('alc version 0.0.1')
-					println('${c.total_known_tokens} known tokens')
-					return
-				}
-			},
-			cli.Command{
 				name: 'build'
-				execute: build
+				execute: fn (cmd cli.Command) ! {
+					program_path := '/Users/ali/code/al/program/src/main.al'
+
+					mut scanner := compiler.new_scanner(program_path, os.read_file(program_path)!)
+
+					scanner.scan()
+
+					println(scanner.all_tokens)
+				}
 			},
 		]
 	}
