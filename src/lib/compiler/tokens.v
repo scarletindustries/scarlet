@@ -9,10 +9,21 @@ pub:
 	len  int    // Length of the literal
 }
 
+[inline]
+pub fn new_token(kind Kind, lit string, line int, col int) Token {
+	return Token{
+		kind: kind
+		lit: lit
+		line: line
+		col: col
+		len: lit.len
+	}
+}
+
 pub enum Kind {
 	eof // End of file
 	// Literals
-	literal_symbol // Any symbol that is not a keyword
+	literal_ident // Any identifier that is not a keyword
 	literal_number // Any number
 	literal_string // Any string
 	literal_string_interpolation // Any string interpolation (e.g. "Hello, $name or ${name}")
