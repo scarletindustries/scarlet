@@ -23,4 +23,10 @@ fn main() {
   } else {
     println('User is a minor')
   }
+
+  // All variables are immutable by default
+  // use `mut` keyword to mark a variable as mutable
+  mut name := 'alistair'
+  name = 'alistair 2'
+  println('User is $name and $age years old')
 }

@@ -49,7 +49,6 @@ fn (mut s Scanner) new_token(tok_kind Kind, lit string, len int) Token {
 		col: math.max(1, s.current_column() - len + 1)
 		scanner_pos: s.state.pos - len + 1
 		len: len
-		// tidx: cidx
 	}
 }
 
