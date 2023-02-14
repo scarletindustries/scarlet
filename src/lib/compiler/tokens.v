@@ -95,7 +95,7 @@ pub fn kind_to_string(kind Kind) string {
 		.literal_ident { 'literal_ident' }
 		.literal_number { 'literal_number' }
 		.literal_string { 'literal_string' }
-		// .literal_string_interpolation { 'literal_string_interpolation' }
+		.literal_string_interpolation { 'literal_string_interpolation' }
 		.math_plus { 'math_plus' }
 		.math_minus { 'math_minus' }
 		.math_mul { 'math_mul' }
