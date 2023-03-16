@@ -3,29 +3,27 @@ module compiler
 [inline; minify]
 pub struct Token {
 pub:
-	kind        Kind   // The token number/enum; for quick comparisons
-	lit         string // Literal representation of the token
-	line        int    // The line number in the source where the token occured
-	col         int    // The column in the source where the token occured
-	len         int    // Length of the literal
-	scanner_pos int    // The scanner position of this token
+	kind    Kind   // The token number/enum; for quick comparisons
+	literal string // Literal representation of the token
+	line    int    // The line number in the source where the token occured
 }
 
 pub enum Kind {
-	eof // End of file
+	// End of file
+	eof
 	// Literals
 	literal_ident // Any identifier that is not a keyword
 	literal_number // Any number
 	literal_string // Any string
 	literal_string_interpolation // Any string interpolation (e.g. "Hello, $name or ${name}")
 	// Math
-	math_plus // +
-	math_minus // -
-	math_mul // *
-	math_div // /
-	math_mod // %
-	math_incr // ++
-	math_decr // --
+	math_plus
+	math_minus
+	math_mul
+	math_div
+	math_mod
+	math_incr
+	math_decr
 	// Assignment
 	reassign // =
 	declare // :=
@@ -33,6 +31,7 @@ pub enum Kind {
 	logical_and // &&
 	logical_or // ||
 	logical_not // !
+	// Bitwise
 	bitwise_and // &
 	bitwise_or // |
 	bitwise_xor // ^
@@ -61,6 +60,7 @@ pub enum Kind {
 	kw_assert // assert
 	kw_export // export
 	kw_struct // struct
+	kw_try // try
 	// Punctuation
 	punc_comma // ,
 	punc_colon // :
