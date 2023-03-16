@@ -60,9 +60,11 @@ pub enum Kind {
 	kw_null // null
 	kw_assert // assert
 	kw_export // export
+	kw_struct // struct
 	// Punctuation
 	punc_comma // ,
 	punc_colon // :
+	punc_semicolon // ;
 	punc_dot // .
 	punc_dotdot // ..
 	punc_ellipsis // ...
@@ -72,6 +74,7 @@ pub enum Kind {
 	punc_close_brace // }
 	punc_open_bracket // [
 	punc_close_bracket // ]
+	punc_question_mark // ?
 	punc_at // @
 	// Misc
 	_end_ // Used to mark the end of the token list, used to pull a length

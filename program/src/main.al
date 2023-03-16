@@ -9,7 +9,7 @@ fn print_user(name, age) {
   println('User is $name and $age years old')
 }
 
-fn print_user_strict(name: string, age: number): void {
+fn print_user_strict(name: string, age: i16): void {
   print_user(name, age)
 }
 
