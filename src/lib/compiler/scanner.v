@@ -43,7 +43,21 @@ pub fn (mut s Scanner) scan_next() Token {
 		return s.scan_identifier(ch)
 	}
 
-	panic('unexpected character "${ch.ascii_str()}" at line ${s.line} column ${s.column}')
+	return match ch {
+		`,` { s.new_token(.punc_comma, none) }
+		`(` { s.new_token(.punc_open_paren, none) }
+		`)` { s.new_token(.punc_close_paren, none) }
+		`{` { s.new_token(.punc_open_brace, none) }
+		`}` { s.new_token(.punc_close_brace, none) }
+		`[` { s.new_token(.punc_open_bracket, none) }
+		`]` { s.new_token(.punc_close_bracket, none) }
+		`:` { s.new_token(.punc_colon, none) }
+		`;` { s.new_token(.punc_semicolon, none) }
+		`.` { s.new_token(.punc_dot, none) }
+		else {
+			panic('unexpected character "${ch.ascii_str()}" at line ${s.line} column ${s.column}')
+		}
+	}
 }
 
 pub fn (mut s Scanner) scan_identifier_or_keyword(ch byte) Token {

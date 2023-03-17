@@ -12,10 +12,28 @@ pub:
 }
 
 fn (t &Token) str() string {
+	if literal := t.literal {
+		if t.kind == .literal_string {
+			return '\'${literal}\''
+		}
+	}
+
 	return t.literal or {
 		return match t.kind {
-			.kw_from {'from'}
-			else { panic('unimplemented') }
+			.kw_from { 'from' }
+			.kw_import { 'import' }
+			.kw_function { 'fn' }
+			.kw_return { 'return' }
+			.punc_comma { ',' }
+			.punc_open_paren { '(' }
+			.punc_close_paren { ')' }
+			.punc_open_brace { '{' }
+			.punc_close_brace { '}' }
+			.punc_open_bracket { '[' }
+			.punc_close_bracket { ']' }
+			.punc_colon { ':' }
+			.punc_semicolon { ';' }
+			else { panic('unimplemented Token.str() call for kind ${t.kind.str()}') }
 		}
 	}
 }

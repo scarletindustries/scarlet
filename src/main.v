@@ -24,6 +24,10 @@ fn main() {
 					for {
 						t := scanner.scan_next()
 						println(t)
+
+						if t.kind == .eof {
+							break
+						}
 					}
 				}
 			},

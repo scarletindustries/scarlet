@@ -9,13 +9,11 @@ pub enum Kind {
 	literal_string // Any string
 	literal_string_interpolation // Any string interpolation (e.g. "Hello, $name or ${name}")
 	// Math
-	math_plus
-	math_minus
-	math_mul
-	math_div
-	math_mod
-	math_incr
-	math_decr
+	math_plus // +
+	math_minus // -
+	math_mul // *
+	math_div // /
+	math_mod // %
 	// Assignment
 	reassign // =
 	declare // :=
@@ -35,11 +33,10 @@ pub enum Kind {
 	comp_less_than // <
 	comp_greater_than_or_equal // >=
 	comp_less_than_or_equal // <=
-	// Control flow
-	ctrl_if // if
-	ctrl_else // else
-	ctrl_loop // loop
 	// Keywords
+	kw_if // if
+	kw_else // else
+	kw_loop // loop
 	kw_function // fn
 	kw_return // return
 	kw_break // break
