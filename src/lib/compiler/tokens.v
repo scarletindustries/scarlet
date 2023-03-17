@@ -42,14 +42,15 @@ fn (t &Token) str() string {
 			.eof { 'EOF' }
 			.logical_and { '&&' }
 			.logical_or { '||' }
-			.logical_not { '!' }
 			.bitwise_and { '&' }
 			.bitwise_or { '|' }
 			.bitwise_xor { '^' }
 			.bitwise_not { '~' }
+			.kw_comptime { 'comptime' }
+			.kw_const { 'const' }
 			.kw_if { 'if' }
 			.kw_else { 'else' }
-			.kw_loop { 'loop' }
+			.kw_for { 'for' }
 			.kw_break { 'break' }
 			.kw_continue { 'continue' }
 			.kw_true { 'true' }
@@ -59,9 +60,11 @@ fn (t &Token) str() string {
 			.kw_struct { 'struct' }
 			.kw_in { 'in' }
 			.kw_none { 'none' }
+			.kw_or { 'or' }
 			.punc_dotdot { '..' }
 			.punc_ellipsis { '...' }
 			.punc_question_mark { '?' }
+			.punc_exclamation_mark { '!' }
 			.punc_at { '@' }
 			.punc_equals { '=' }
 			.punc_equals_comparator { '==' }

@@ -104,6 +104,15 @@ pub fn (mut s Scanner) scan_next() Token {
 		`.` {
 			s.new_token(.punc_dot, none)
 		}
+		`+` {
+			s.new_token(.punc_plus, none)
+		}
+		`!` {
+			s.new_token(.punc_exclamation_mark, none)
+		}
+		`?` {
+			s.new_token(.punc_question_mark, none)
+		}
 		`:` {
 			next := s.peek_char()
 			s.incr_pos()
@@ -123,6 +132,16 @@ pub fn (mut s Scanner) scan_next() Token {
 			}
 
 			return s.new_token(.punc_gt, none)
+		}
+		`<` {
+			next := s.peek_char()
+			s.incr_pos()
+
+			if next == `=` {
+				return s.new_token(.punc_lte, none)
+			}
+
+			return s.new_token(.punc_lt, none)
 		}
 		`/` {
 			next := s.peek_char()
@@ -217,7 +236,7 @@ fn (mut s Scanner) scan_identifier(from byte) Token {
 		}
 	}
 
-	return s.new_token(.literal_ident, result)
+	return s.new_token(.ident, result)
 }
 
 fn (mut s Scanner) scan_identifier_or_number(from byte) Token {
