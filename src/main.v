@@ -7,7 +7,7 @@ import lib.compiler
 fn main() {
 	mut app := cli.Command{
 		description: 'al compiler and toolchain'
-		version: '1.0.0'
+		version: '0.0.1'
 		posix_mode: true
 		execute: fn (cmd cli.Command) ! {
 			println(cmd.help_message())
@@ -15,14 +15,16 @@ fn main() {
 		commands: [
 			cli.Command{
 				name: 'build'
+				args: ['entrypoint']
 				execute: fn (cmd cli.Command) ! {
-					program_path := '/Users/ali/code/al/program/src/main.al'
+					entrypoint := '/Users/ali/code/al/program/src/main.al'
 
-					mut scanner := compiler.new_scanner(program_path, os.read_file(program_path)!)
+					mut scanner := compiler.new_scanner(os.read_file(entrypoint)!)
 
-					scanner.scan()
-
-					println(scanner.all_tokens)
+					for {
+						t := scanner.scan_next()
+						println(t)
+					}
 				}
 			},
 		]
