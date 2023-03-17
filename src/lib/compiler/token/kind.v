@@ -6,14 +6,9 @@ pub enum Kind {
 	// Literals
 	literal_ident // Any identifier that is not a keyword
 	literal_number // Any number
-	literal_string // Any string
-	literal_string_interpolation // Any string interpolation (e.g. "Hello, $name or ${name}")
-	// Math
-	math_plus // +
-	math_minus // -
-	math_mul // *
-	math_div // /
-	math_mod // %
+	literal_string // Any string ('Hello, world')
+	literal_string_interpolation // Any string interpolation (e.g. 'Hello, $name or ${name}')
+	literal_char // Any character (`a`)
 	// Logical
 	logical_and // &&
 	logical_or // ||
@@ -23,13 +18,6 @@ pub enum Kind {
 	bitwise_or // |
 	bitwise_xor // ^
 	bitwise_not // ~
-	// Comparison
-	comp_equal // ==
-	comp_not_equal // !=
-	comp_greater_than // >
-	comp_less_than // <
-	comp_greater_than_or_equal // >=
-	comp_less_than_or_equal // <=
 	// Keywords
 	kw_if // if
 	kw_else // else
@@ -62,8 +50,19 @@ pub enum Kind {
 	punc_close_bracket // ]
 	punc_question_mark // ?
 	punc_at // @
-	punc_equal // =
+	punc_equals // =
 	punc_declaration // :=
+	punc_equals_comparator // ==
+	punc_not_equal // !=
+	punc_gt // >
+	punc_lt // <
+	punc_gte // >=
+	punc_lte // <=
+	punc_plus // +
+	punc_minus // -
+	punc_mul // *
+	punc_div // /
+	punc_mod // %
 	// Misc
 	_end_ // Used to mark the end of the token list, used to pull a length
 }

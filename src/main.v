@@ -8,6 +8,7 @@ fn main() {
 	mut app := cli.Command{
 		description: 'al compiler and toolchain'
 		version: '0.0.1'
+		disable_version: true
 		posix_mode: true
 		execute: fn (cmd cli.Command) ! {
 			println(cmd.help_message())
@@ -15,9 +16,11 @@ fn main() {
 		commands: [
 			cli.Command{
 				name: 'build'
+				required_args: 1
 				args: ['entrypoint']
+				description: 'Build and compile an entrypoint to your program'
 				execute: fn (cmd cli.Command) ! {
-					entrypoint := '/Users/ali/code/al/program/src/test.al'
+					entrypoint := cmd.args[0]
 
 					mut scanner := compiler.new_scanner(os.read_file(entrypoint)!)
 

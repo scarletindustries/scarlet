@@ -14,12 +14,7 @@ pub fn is_valid_identifier(ident string, is_fully_qualified bool) bool {
 		return false
 	}
 
-	if is_fully_qualified && ident in keyword_map {
-		return false
-	}
-
-	// All identifiers must be lowercase
-	if ident.to_lower() != ident {
+	if is_fully_qualified && is_keyword(ident) {
 		return false
 	}
 
@@ -52,7 +47,10 @@ pub fn match_keyword(ident ?string) ?Kind {
 	return none
 }
 
+// is_quote returns true if the given character is a quote character.
+// AL supports ' and ` as quote characters. Single quotes for regular strings
+// and backticks for character literals.
 [inline]
 pub fn is_quote(c char) bool {
-	return c == `'` || c == `'`
+	return c == `'` || c == `\``
 }

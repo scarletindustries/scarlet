@@ -35,7 +35,43 @@ fn (t &Token) str() string {
 			.punc_semicolon { ';' }
 			.punc_declaration { ':=' }
 			.punc_dot { '.' }
+			.punc_gt { '>' }
+			.punc_lt { '<' }
+			.punc_gte { '>=' }
+			.punc_lte { '<=' }
 			.eof { 'EOF' }
+			.logical_and { '&&' }
+			.logical_or { '||' }
+			.logical_not { '!' }
+			.bitwise_and { '&' }
+			.bitwise_or { '|' }
+			.bitwise_xor { '^' }
+			.bitwise_not { '~' }
+			.kw_if { 'if' }
+			.kw_else { 'else' }
+			.kw_loop { 'loop' }
+			.kw_break { 'break' }
+			.kw_continue { 'continue' }
+			.kw_true { 'true' }
+			.kw_false { 'false' }
+			.kw_assert { 'assert' }
+			.kw_export { 'export' }
+			.kw_struct { 'struct' }
+			.kw_in { 'in' }
+			.kw_none { 'none' }
+			.punc_dotdot { '..' }
+			.punc_ellipsis { '...' }
+			.punc_question_mark { '?' }
+			.punc_at { '@' }
+			.punc_equals { '=' }
+			.punc_equals_comparator { '==' }
+			.punc_not_equal { '!=' }
+			.punc_plus { '+' }
+			.punc_minus { '-' }
+			.punc_mul { '*' }
+			.punc_div { '/' }
+			.punc_mod { '%' }
+			._end_ { 'end' }
 			else { panic('unimplemented Token.str() call for kind ${t.kind.str()}') }
 		}
 	}
