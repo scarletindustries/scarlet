@@ -33,6 +33,9 @@ fn (t &Token) str() string {
 			.punc_close_bracket { ']' }
 			.punc_colon { ':' }
 			.punc_semicolon { ';' }
+			.punc_declaration { ':=' }
+			.punc_dot { '.' }
+			.eof { 'EOF' }
 			else { panic('unimplemented Token.str() call for kind ${t.kind.str()}') }
 		}
 	}

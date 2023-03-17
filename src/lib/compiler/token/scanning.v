@@ -1,8 +1,41 @@
 module token
 
 [inline]
-pub fn is_name_char(c char) bool {
-	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c == `_`
+pub fn is_name_char(c byte) bool {
+	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c == `_` || c.is_digit()
+}
+
+// is_valid_identifier checks if the given identifier is a valid identifier. It accepts
+// a parameter "is_fully_qualified" which indicates if the identifier is fully qualified.
+// If it is fully qualified, it will not allow keywords to be used as identifiers.
+[inline]
+pub fn is_valid_identifier(ident string, is_fully_qualified bool) bool {
+	if ident.len == 0 {
+		return false
+	}
+
+	if is_fully_qualified && ident in keyword_map {
+		return false
+	}
+
+	// All identifiers must be lowercase
+	if ident.to_lower() != ident {
+		return false
+	}
+
+	// Check first character is
+	if !ident[0].is_letter() && ident[0] != `_` {
+		return false
+	}
+
+	// Check the rest of the characters
+	for i := 1; i < ident.len; i++ {
+		if !is_name_char(ident[i]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 [inline]

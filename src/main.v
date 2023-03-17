@@ -17,7 +17,7 @@ fn main() {
 				name: 'build'
 				args: ['entrypoint']
 				execute: fn (cmd cli.Command) ! {
-					entrypoint := '/Users/ali/code/al/program/src/main.al'
+					entrypoint := '/Users/ali/code/al/program/src/test.al'
 
 					mut scanner := compiler.new_scanner(os.read_file(entrypoint)!)
 

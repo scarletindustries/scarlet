@@ -18,6 +18,10 @@ pub fn new_scanner(input string) &Scanner {
 }
 
 pub fn (mut s Scanner) scan_next() Token {
+	if s.pos == s.input.len {
+		return s.new_token(.eof, none)
+	}
+
 	// Read next character from input
 	ch := s.peek_char()
 	s.incr_pos()
@@ -27,35 +31,52 @@ pub fn (mut s Scanner) scan_next() Token {
 		return s.scan_next()
 	}
 
-	if ch.is_alnum() {
+	if token.is_valid_identifier(ch.ascii_str(), false) {
 		return s.scan_identifier_or_keyword(ch)
 	}
 
-	if ch.is_digit() {
-		return s.scan_number(ch)
+	if ch.is_alnum() {
+		return s.scan_identifier(ch)
 	}
 
 	if token.is_quote(ch) {
 		return s.scan_string(ch)
 	}
 
-	if token.is_name_char(ch) {
-		return s.scan_identifier(ch)
+	if ch == `:` {
+		return s.scan_colon_or_declaration()
 	}
 
 	return match ch {
-		`,` { s.new_token(.punc_comma, none) }
-		`(` { s.new_token(.punc_open_paren, none) }
-		`)` { s.new_token(.punc_close_paren, none) }
-		`{` { s.new_token(.punc_open_brace, none) }
-		`}` { s.new_token(.punc_close_brace, none) }
-		`[` { s.new_token(.punc_open_bracket, none) }
-		`]` { s.new_token(.punc_close_bracket, none) }
-		`:` { s.new_token(.punc_colon, none) }
-		`;` { s.new_token(.punc_semicolon, none) }
-		`.` { s.new_token(.punc_dot, none) }
+		`,` {
+			s.new_token(.punc_comma, none)
+		}
+		`(` {
+			s.new_token(.punc_open_paren, none)
+		}
+		`)` {
+			s.new_token(.punc_close_paren, none)
+		}
+		`{` {
+			s.new_token(.punc_open_brace, none)
+		}
+		`}` {
+			s.new_token(.punc_close_brace, none)
+		}
+		`[` {
+			s.new_token(.punc_open_bracket, none)
+		}
+		`]` {
+			s.new_token(.punc_close_bracket, none)
+		}
+		`;` {
+			s.new_token(.punc_semicolon, none)
+		}
+		`.` {
+			s.new_token(.punc_dot, none)
+		}
 		else {
-			panic('unexpected character "${ch.ascii_str()}" at line ${s.line} column ${s.column}')
+			panic('unexpected character \'${ch.ascii_str()}\' at line ${s.line} column ${s.column}')
 		}
 	}
 }
@@ -115,16 +136,14 @@ fn (s Scanner) new_token(kind token.Kind, literal ?string) Token {
 
 // scan_identifier scans until the next non-alphanumeric character
 fn (mut s Scanner) scan_identifier(from byte) Token {
-	mut current := from
-	mut result := ''
+	mut result := from.ascii_str()
 
 	for {
-		result += current.ascii_str()
-		next := s.peek_char()
+		next := result + s.peek_char().ascii_str()
 
-		if token.is_name_char(next) {
+		if token.is_valid_identifier(next, false) {
 			s.incr_pos()
-			current = next
+			result = next
 		} else {
 			break
 		}
@@ -157,12 +176,24 @@ fn (mut s Scanner) peek_char() byte {
 }
 
 fn (mut s Scanner) incr_pos() {
-	s.pos++
-
 	if s.input[s.pos] == `\n` {
 		s.line++
 		s.column = 0
 	} else {
 		s.column++
 	}
+
+	s.pos++
+}
+
+// scan_colon_or_declaration scans for a colon (:) or a declaration (:=)
+pub fn (mut s Scanner) scan_colon_or_declaration() Token {
+	ch := s.peek_char()
+	s.incr_pos()
+
+	if ch == `=` {
+		return s.new_token(.punc_declaration, none)
+	}
+
+	return s.new_token(.punc_colon, none)
 }

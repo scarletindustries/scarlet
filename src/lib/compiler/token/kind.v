@@ -14,9 +14,6 @@ pub enum Kind {
 	math_mul // *
 	math_div // /
 	math_mod // %
-	// Assignment
-	reassign // =
-	declare // :=
 	// Logical
 	logical_and // &&
 	logical_or // ||
@@ -65,6 +62,8 @@ pub enum Kind {
 	punc_close_bracket // ]
 	punc_question_mark // ?
 	punc_at // @
+	punc_equal // =
+	punc_declaration // :=
 	// Misc
 	_end_ // Used to mark the end of the token list, used to pull a length
 }
