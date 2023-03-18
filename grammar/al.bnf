@@ -3,17 +3,16 @@
 <import> ::= "from" <whitespace> <string> <whitespace> "import" <whitespace> <identifier>{ "," [ <whitespace> ] <identifier> } <newline>
 <comment> ::= "//" { <char> } <newline>
 <constant_declaration> ::= [ <export> <space> ] "const" <whitespace> <identifier> <whitespace> "=" <whitespace> [ "comptime" [<whitespace>] ] [<whitespace>] <expression> [<whitespace>]
-<struct_declaration> ::= [ <export> <space> ] "struct" <space> <struct_name> "{" <struct_member> { "," <struct_member> } "}"
+<struct_declaration> ::= [ <export> <space> ] "struct" <space> <struct_name> <space> "{" <newline> <struct_member> { ( <newline> <struct_member> ) | <newline> } "}"
 <function_declaration> ::= [ <export> <space> ] "fn" <identifier> [ "<" <type_parameter> ">" ] "(" [<parameter_list>] ")" [ ("!" | "?") <type> | <type>] <block>
 <type_parameter> ::= <identifier> { "," <identifier> }
 <export> ::= "export"
-<struct_member> ::= <identifier> ":" <type> [ "=" <expression> ]
+<struct_member> ::= { <space> } <identifier> ":" { <space> } <type> [ { <space> } "=" <space> <expression> ] ","
 <parameter_list> ::= <parameter> { "," <parameter> }
 <parameter> ::= <identifier> [ <type> ]
 <space> ::= " "
 <block> ::= "{" { <statement> } "}"
 <statement> ::= <declaration> | <assignment> | <function_call> | <condition> | <loop> | <return> | <assert> | <comment>
-
 <declaration> ::= <identifier> [<space>] ":=" [<space>] <expression>
 <assignment> ::= <identifier> [<space>] "=" [<space>] <expression>
 <function_call> ::= <identifier> [ "." <identifier> ] "(" [ <expression_list> ] ")"
@@ -25,10 +24,8 @@
 <expression_list> ::= <expression> { "," <expression> }
 <expression> ::= <value> | <identifier> | <function_call> | <error_expression> | <not> <expression> | <binary_operation> | [ "or" ] "{" {<whitespace>} [ statement ] {<whitespace>} <return> [<whitespace>] "}" {<whitespace>}
 <value> ::= <number> | <string> | "none" | "true" | "false" | <struct_instance>
-
 <struct_instance> ::= <identifier> "{" <struct_member_assignment> { "," <struct_member_assignment> } "}"
 <struct_member_assignment> ::= <identifier> ":" <value>
-
 <error_expression> ::= "error" <string>
 <range_expression> ::= <expression> ".." <expression>
 <binary_operation> ::= <expression> <operator> <expression>
