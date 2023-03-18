@@ -1,0 +1,44 @@
+<program> ::= { <import> | <constant_declaration> | <struct_declaration> | <function_declaration> | <comment> }
+<whitespace> ::= " " | "\t" | <newline>
+<import> ::= "from" <whitespace> <string> <whitespace> "import" <whitespace> <identifier>{ "," <whitespace> <identifier> }
+<comment> ::= "//" { <char> } <newline>
+<constant_declaration> ::= [ <export> ] "const" <identifier> "=" [ "comptime" ] <expression>
+<struct_declaration> ::= [ <export> ] "struct" <identifier> "{" <struct_member> { "," <struct_member> } "}"
+<function_declaration> ::= [ <export> ] "fn" <identifier> [ "<" <type_parameter> ">" ] "(" [<parameter_list>] ")" [ ("!" | "?") <type> | <type>] <block>
+<type_parameter> ::= <identifier> { "," <identifier> }
+<export> ::= "export"
+<struct_member> ::= <identifier> ":" <type> [ "=" <expression> ]
+<parameter_list> ::= <parameter> { "," <parameter> }
+<parameter> ::= <identifier> [ <type> ]
+
+<block> ::= "{" { <statement> } "}"
+<statement> ::= <assignment> | <function_call> | <condition> | <loop> | <return> | <assert> | <comment>
+
+<assignment> ::= <identifier> ":=" <expression>
+<function_call> ::= <identifier> [ "." <identifier> ] "(" [ <expression_list> ] ")"
+<condition> ::= "if" <expression> <block> [ "else if" <expression> <block> ] [ "else" <block> ]
+<loop> ::= "for" [ <identifier> "in" <range_expression> | <expression> ] <block>
+<return> ::= "return" [ <expression> ]
+<assert> ::= "assert" <expression> "," <string>
+
+<expression_list> ::= <expression> { "," <expression> }
+<expression> ::= <value> | <identifier> | <function_call> | <error_expression> | "!" <expression> | <binary_operation> | [ "or" ] "{" [ statement ] "}"
+<value> ::= <number> | <string> | "none" | "true" | "false" | <struct_instance>
+
+<struct_instance> ::= <identifier> "{" <struct_member_assignment> { "," <struct_member_assignment> } "}"
+<struct_member_assignment> ::= <identifier> ":" <value>
+
+<error_expression> ::= "error" <string>
+<range_expression> ::= <expression> ".." <expression>
+<binary_operation> ::= <expression> <operator> <expression>
+<operator> ::= "+" | "-" | "*" | "/"
+
+<type> ::= <identifier>
+<number> ::= <digit> { <digit> } [ "." { <digit> } ]
+<string> ::= "'" <chars> "'"
+<identifier> ::= <letter> { <letter> | <digit> | "_" }
+<letter>     ::= "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" | "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z"
+<digit>      ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+<char> ::= <letter> | <digit> | "_" | " " | "." | "," | ":" | ";" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "=" | "+" | "-" | "*" | "/" | "!" | "?" | "'" | "\""
+<chars> ::= <char> { <char> }
+<newline> ::= "\r\n" | "\n"
