@@ -4,18 +4,18 @@
 <comment> ::= "//" { <char> } <newline>
 <constant_declaration> ::= [ <export> <space> ] "const" <whitespace> <identifier> <whitespace> "=" <whitespace> [ "comptime" [<whitespace>] ] [<whitespace>] <expression> [<whitespace>]
 <struct_declaration> ::= [ <export> <space> ] "struct" <space> <struct_name> <space> "{" <newline> <struct_member> { ( <newline> <struct_member> ) | <newline> } "}"
-<function_declaration> ::= [ <export> <space> ] "fn" <identifier> [ "<" <type_parameter> ">" ] "(" [<parameter_list>] ")" [ ("!" | "?") <type> | <type>] <block>
+<function_declaration> ::= [ <export> <space> ] "fn" <space> <identifier> [ "<" <type_parameter> ">" ] "(" [<parameter_list>] ")" <space> [ ( "?" | "!" | "?!") <type> | <type>] <block>
 <type_parameter> ::= <identifier> { "," <identifier> }
 <export> ::= "export"
 <struct_member> ::= { <space> } <identifier> ":" { <space> } <type> [ { <space> } "=" <space> <expression> ] ","
-<parameter_list> ::= <parameter> { "," <parameter> }
+<parameter_list> ::= <parameter> { "," { <space> } <parameter> }
 <parameter> ::= <identifier> [ <type> ]
 <space> ::= " "
-<block> ::= "{" { <statement> } "}"
+<block> ::= "{" { <whitespace> } { <statement> } { <whitespace> } "}"
 <statement> ::= <declaration> | <assignment> | <function_call> | <condition> | <loop> | <return> | <assert> | <comment>
 <declaration> ::= <identifier> [<space>] ":=" [<space>] <expression>
 <assignment> ::= <identifier> [<space>] "=" [<space>] <expression>
-<function_call> ::= <identifier> [ "." <identifier> ] "(" [ <expression_list> ] ")"
+<function_call> ::= <identifier> "(" [ <expression_list> ] ")"
 <condition> ::= "if" <expression> <block> [ "else if" <expression> <block> ] [ "else" <block> ]
 <loop> ::= "for" [ <identifier> "in" <range_expression> | <expression> ] <block>
 <return> ::= "return" [ <space> ] [ <expression> ]
@@ -34,7 +34,7 @@
 <type> ::= <identifier>
 <number> ::= <digit> { <digit> } [ "." { <digit> } ]
 <string> ::= "'" <chars> "'"
-<identifier> ::= <letter> { <letter> | <digit> | "_" } | <identifier> "." <identifier>
+<identifier> ::= <letter> { <letter> | <digit> | "_" } | ( <identifier> "." <identifier> )
 <capitals> ::= "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z"
 <lowers> ::= "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
 <letter>     ::= <lowers> | <capitals>
