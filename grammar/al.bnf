@@ -1,8 +1,8 @@
-<program> ::= { <import> | <constant_declaration> | <struct_declaration> | <function_declaration> | <comment> }
+<program> ::= { <import> | <whitespace> | <constant_declaration> | <struct_declaration> | <function_declaration> | <comment> }
 <whitespace> ::= " " | "\t" | <newline>
-<import> ::= "from" <whitespace> <string> <whitespace> "import" <whitespace> <identifier>{ "," <whitespace> <identifier> }
+<import> ::= "from" <whitespace> <string> <whitespace> "import" <whitespace> <identifier>{ "," [ <whitespace> ] <identifier> } <newline>
 <comment> ::= "//" { <char> } <newline>
-<constant_declaration> ::= [ <export> ] "const" <identifier> "=" [ "comptime" ] <expression>
+<constant_declaration> ::= [ <export> ] "const" <whitespace> <identifier> <whitespace> "=" <whitespace> [ "comptime" [<whitespace>] ] [<whitespace>] <expression> [<whitespace>]
 <struct_declaration> ::= [ <export> ] "struct" <identifier> "{" <struct_member> { "," <struct_member> } "}"
 <function_declaration> ::= [ <export> ] "fn" <identifier> [ "<" <type_parameter> ">" ] "(" [<parameter_list>] ")" [ ("!" | "?") <type> | <type>] <block>
 <type_parameter> ::= <identifier> { "," <identifier> }
@@ -22,7 +22,7 @@
 <assert> ::= "assert" <expression> "," <string>
 
 <expression_list> ::= <expression> { "," <expression> }
-<expression> ::= <value> | <identifier> | <function_call> | <error_expression> | "!" <expression> | <binary_operation> | [ "or" ] "{" [ statement ] "}"
+<expression> ::= <value> | <identifier> | <function_call> | <error_expression> | "!" <expression> | <binary_operation> | [ "or" ] "{" {<whitespace>} [ statement ] {<whitespace>} "}"
 <value> ::= <number> | <string> | "none" | "true" | "false" | <struct_instance>
 
 <struct_instance> ::= <identifier> "{" <struct_member_assignment> { "," <struct_member_assignment> } "}"
