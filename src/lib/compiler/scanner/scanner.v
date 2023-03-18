@@ -1,29 +1,27 @@
-module compiler
+module scanner
 
+import lib.compiler
 import lib.compiler.token
-
-// default_column_n exists because we don't like
-// magic numbers, and we reuse the value in multiple
-// places
-const default_column_n = 0
+import lib.compiler.scanner.state
 
 pub struct Scanner {
 	input string
 mut:
-	pos    int // current position in input (points to current char)
-	column int = compiler.default_column_n
-	line   int = 1
+	state &state.ScannerState
 }
 
+[inline]
 pub fn new_scanner(input string) &Scanner {
 	return &Scanner{
 		input: input
-		pos: 0
+		state: &state.ScannerState{
+			pos: 0
+		}
 	}
 }
 
-pub fn (mut s Scanner) scan_next() Token {
-	if s.pos == s.input.len {
+pub fn (mut s Scanner) scan_next() compiler.Token {
+	if s.state.get_pos() == s.input.len {
 		return s.new_token(.eof, none)
 	}
 
@@ -37,11 +35,23 @@ pub fn (mut s Scanner) scan_next() Token {
 	}
 
 	if token.is_valid_identifier(ch.ascii_str(), false) {
-		return s.scan_identifier_or_keyword(ch)
+		identifier := s.scan_identifier(ch)
+
+		if unwrapped := identifier.literal {
+			if keyword_kind := token.match_keyword(unwrapped) {
+				return s.new_token(keyword_kind, none)
+			}
+		}
+
+		return identifier
 	}
 
 	if ch.is_alnum() {
-		return s.scan_identifier_or_number(ch)
+		if ch.is_digit() {
+			return s.scan_number(ch)
+		}
+
+		return s.scan_identifier(ch)
 	}
 
 	if token.is_quote(ch) {
@@ -148,7 +158,7 @@ pub fn (mut s Scanner) scan_next() Token {
 
 			// Handling a comment, we should skip until the end of the line
 			if next == `/` {
-				mut end_of_line := s.pos
+				mut end_of_line := s.state.get_pos()
 
 				for {
 					if s.input[end_of_line] == `\n` {
@@ -158,7 +168,7 @@ pub fn (mut s Scanner) scan_next() Token {
 					end_of_line++
 				}
 
-				s.set_pos(end_of_line)
+				s.state.set_pos(end_of_line)
 
 				return s.scan_next()
 			}
@@ -176,29 +186,13 @@ pub fn (mut s Scanner) scan_next() Token {
 			return s.new_token(.punc_equals, none)
 		}
 		else {
-			panic('unexpected character \'${ch.ascii_str()}\' at line ${s.line} column ${s.column}')
+			panic('unexpected character \'${ch.ascii_str()}\' at line ${s.state.get_line()} column ${s.state.get_column()}')
 		}
 	}
 }
 
-pub fn (mut s Scanner) scan_identifier_or_keyword(ch byte) Token {
-	identifier := s.scan_identifier(ch)
-
-	if unwrapped := identifier.literal {
-		if keyword_kind := token.match_keyword(unwrapped) {
-			return s.new_token(keyword_kind, none)
-		}
-	}
-
-	return identifier
-}
-
-pub fn (mut s Scanner) set_pos(pos int) {
-	s.pos = pos
-}
-
-pub fn (mut s Scanner) scan_all() []Token {
-	mut tokens := []Token{}
+pub fn (mut s Scanner) scan_all() []compiler.Token {
+	mut tokens := []compiler.Token{}
 
 	for {
 		t := s.scan_next()
@@ -212,17 +206,17 @@ pub fn (mut s Scanner) scan_all() []Token {
 	return tokens
 }
 
-fn (s Scanner) new_token(kind token.Kind, literal ?string) Token {
-	return Token{
+fn (s Scanner) new_token(kind token.Kind, literal ?string) compiler.Token {
+	return compiler.Token{
 		kind: kind
 		literal: literal
-		line: s.line
-		column: s.column
+		line: s.state.get_line()
+		column: s.state.get_column()
 	}
 }
 
 // scan_identifier scans until the next non-alphanumeric character
-fn (mut s Scanner) scan_identifier(from byte) Token {
+fn (mut s Scanner) scan_identifier(from byte) compiler.Token {
 	mut result := from.ascii_str()
 
 	for {
@@ -239,15 +233,7 @@ fn (mut s Scanner) scan_identifier(from byte) Token {
 	return s.new_token(.ident, result)
 }
 
-fn (mut s Scanner) scan_identifier_or_number(from byte) Token {
-	if from.is_digit() {
-		return s.scan_number(from)
-	}
-
-	return s.scan_identifier(from)
-}
-
-fn (mut s Scanner) scan_number(from byte) Token {
+fn (mut s Scanner) scan_number(from byte) compiler.Token {
 	mut result := from.ascii_str()
 
 	for {
@@ -265,20 +251,19 @@ fn (mut s Scanner) scan_number(from byte) Token {
 }
 
 fn (mut s Scanner) peek_char() byte {
-	assert s.pos < s.input.len, 'scanner at end of input'
+	assert s.state.get_pos() < s.input.len, 'scanner at end of input'
 
-	ch := s.input[s.pos]
+	ch := s.input[s.state.get_pos()]
 
 	return ch
 }
 
 fn (mut s Scanner) incr_pos() {
-	if s.input[s.pos] == `\n` {
-		s.line++
-		s.column = compiler.default_column_n
+	if s.input[s.state.get_pos()] == `\n` {
+		s.state.incr_line()
 	} else {
-		s.column++
+		s.state.incr_column()
 	}
 
-	s.pos++
+	s.state.incr_pos()
 }

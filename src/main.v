@@ -2,7 +2,7 @@ module main
 
 import os
 import cli
-import lib.compiler
+import lib.compiler.scanner
 
 fn main() {
 	mut app := cli.Command{
@@ -22,15 +22,16 @@ fn main() {
 				execute: fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 
-					mut scanner := compiler.new_scanner(os.read_file(entrypoint)!)
+					mut s := scanner.new_scanner(os.read_file(entrypoint)!)
 
 					for {
-						t := scanner.scan_next()
-						println(t)
+						t := s.scan_next()
 
 						if t.kind == .eof {
 							break
 						}
+
+						println(t)
 					}
 				}
 			},

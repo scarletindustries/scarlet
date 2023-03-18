@@ -15,7 +15,7 @@ const ip = comptime {
 // Struct
 export struct Person {
     name: string = 'alistair',
-    age:  int,
+    age: int,
 }
 
 // Function
@@ -24,7 +24,7 @@ fn add(a, b) {
 }
 
 // Typed function
-fn add_typed(a: int, b: int) int {
+fn add_typed(a int, b int) int {
     return a + b
 }
 
@@ -54,16 +54,48 @@ fn option() ?int {
     return 1
 }
 
-fn option_result() ?!int {
-    if random() > 0.5 {
-        return error 'Something went wrong'
-    }
-
+fn option() ?int {
     if random() > 0.5 {
         return none
     }
 
     return 1
+}
+
+fn result() !int {
+    if random() > 0.5 {
+        return error 'Something went wrong'
+    }
+
+    return 1
+}
+
+fn option_result() ?!int {
+    if random() > 0.5 {
+        return none
+    }
+
+    if random() > 0.5 {
+        return error 'Something went wrong'
+    }
+
+    return 1
+}
+
+fn asdf() {
+    result := option() or 10
+}
+
+fn asdf2() {
+    result := option() or {
+        return 10
+    }
+}
+
+fn asdf3() {
+    result := result() or {
+        return 10
+    }
 }
 
 fn keywords_and_punctuation() {
@@ -77,6 +109,10 @@ fn keywords_and_punctuation() {
         continue
     }
 
+    for 0..10 {
+        continue
+    }
+
     for {
         break
     }
@@ -87,4 +123,8 @@ fn keywords_and_punctuation() {
     }
 
     assert true, 'This is an error message'
+}
+
+fn generics<T>(a T) T {
+    return a
 }
