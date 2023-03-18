@@ -13,14 +13,14 @@
 <space> ::= " "
 <block> ::= "{" { <whitespace> } { <statement> } { <whitespace> } "}"
 <block_with_return> ::= "{" { <whitespace> } { <statement> } { <whitespace> } <return> { <whitespace> } "}"
-<statement> ::= <declaration> | <assignment> | <function_call> | <condition> | <loop> | <return> | <assert> | <comment>
+<statement> ::= <declaration> | <assignment> | <function_call> | <condition> | <loop> | <return> | <assert> | <comment> | <expression> "." <expression> | <newline>
 <declaration> ::= <identifier> [<space>] ":=" [<space>] <expression>
 <assignment> ::= <identifier> [<space>] "=" [<space>] <expression>
 <function_call> ::= <identifier> "(" [ <expression_list> ] ")"
 <condition> ::= "if" <expression> <block> [ "else if" <expression> <block> ] [ "else" <block> ]
 <loop> ::= "for" [ <identifier> "in" <range_expression> | <expression> ] <block>
 <return> ::= "return" [ <space> ] [ <expression> ]
-<assert> ::= "assert" <expression> "," <string>
+<assert> ::= "assert" <space> <expression> "," <space> <string>
 <not> ::= "!"
 <expression_list> ::= <expression> { "," <expression> }
 <expression> ::= <value> | <identifier> | <function_call> | <error_expression> | <not> <expression> | <binary_operation> | <expression> "." <expression>
