@@ -6,12 +6,6 @@ from './file.al' import a, b, c
 // const
 const name = 'alistair'
 
-// comptime
-const ip = comptime {
-    resp := http.get('https://ifconfig.co')
-    return resp.body
-}
-
 // Struct
 export struct Person {
     name: string = 'alistair',
@@ -109,8 +103,13 @@ fn keywords_and_punctuation() {
         continue
     }
 
-    for 0..10 {
-        continue
+    users := ['bob', 'alice', 'foo']
+    for user in users {
+        println(user.to_upper())
+    }
+
+    for user in ['bob', 'alice', 'foo'] {
+        println(user.to_upper())
     }
 
     for {
@@ -123,8 +122,4 @@ fn keywords_and_punctuation() {
     }
 
     assert true, 'This is an error message'
-}
-
-fn generics<T>(a T) T {
-    return a
 }

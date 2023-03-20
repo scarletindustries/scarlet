@@ -17,7 +17,7 @@ fn main() {
 			cli.Command{
 				name: 'build'
 				required_args: 1
-				args: ['entrypoint']
+				usage: '<entrypoint>'
 				description: 'Build and compile an entrypoint to your program'
 				execute: fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]

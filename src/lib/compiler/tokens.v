@@ -46,7 +46,6 @@ fn (t &Token) str() string {
 			.bitwise_or { '|' }
 			.bitwise_xor { '^' }
 			.bitwise_not { '~' }
-			.kw_comptime { 'comptime' }
 			.kw_const { 'const' }
 			.kw_if { 'if' }
 			.kw_else { 'else' }
