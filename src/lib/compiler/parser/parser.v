@@ -32,7 +32,9 @@ pub fn (mut p Parser) parse_program() !ast.Program {
 	mut program := ast.Program{}
 
 	for p.current_token.kind != .eof {
-		p.parse_statement()!
+		statement := p.parse_statement()!
+		program.body << statement
+		println(statement)
 	}
 
 	return program
@@ -43,11 +45,12 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.kw_from {
 			p.parse_import_statement()!
 		}
-
 		.kw_const {
 			p.parse_const_statement()!
 		}
-
+		.kw_export {
+			p.parse_export_statement()!
+		}
 		else {
 			dump(p.current_token)
 			panic('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
@@ -57,37 +60,61 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 	return result
 }
 
+fn (mut p Parser) parse_export_statement() !ast.Statement {
+	mut statement := ast.ExportStatement{
+		ident: ''
+	}
+
+	p.eat(.kw_export)!
+
+	statement.declaration = p.parse_declaration()!
+
+	return statement
+}
+
+fn (mut p Parser) parse_declaration() !ast.Statement {
+	result := match p.current_token.kind {
+		.kw_const {
+			p.parse_const_statement()!
+		}
+		else {
+			return error('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
+		}
+	}
+
+	return result
+}
 
 fn (mut p Parser) parse_import_statement() !ast.Statement {
-	mut statement := ast.ImportStatement{
+	mut declaration := ast.ImportDeclaration{
 		path: './path-to-module.al'
-		declarations: []
+		specifiers: []
 	}
 
 	p.eat(.kw_from)!
 	str := p.eat(.literal_string)!
 
 	if unwrapped := str.literal {
-		statement.path = unwrapped
+		declaration.path = unwrapped
 	} else {
 		panic('Expected string literal')
 	}
 
 	p.eat(.kw_import)!
 
-	p.parse_ident_list(mut &statement.declarations)!
+	p.parse_import_specifiers(mut &declaration.specifiers)!
 
-	println(statement)
-
-	return statement
+	return declaration
 }
 
-fn (mut p Parser) parse_ident_list(mut list []ast.Identifier) ! {
+fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) ! {
 	current := p.eat(.ident)!
 
 	if unwrapped := current.literal {
-		list << ast.Identifier{
-			name: unwrapped
+		specifiers << ast.ImportSpecifier{
+			ident: ast.Identifier{
+				name: unwrapped
+			}
 		}
 	} else {
 		panic('Expected identifier')
@@ -95,16 +122,14 @@ fn (mut p Parser) parse_ident_list(mut list []ast.Identifier) ! {
 
 	if p.current_token.kind == .punc_comma {
 		p.eat(.punc_comma)!
-		p.parse_ident_list(mut list)!
+		p.parse_import_specifiers(mut specifiers)!
 	}
 
 	return
 }
 
 fn (mut p Parser) parse_const_statement() !ast.Statement {
-	mut statement := ast.ConstStatement{
-		
-	}
+	mut statement := ast.ConstStatement{}
 
 	p.eat(.kw_const)!
 
@@ -120,8 +145,6 @@ fn (mut p Parser) parse_const_statement() !ast.Statement {
 
 	statement.init = p.parse_expression()!
 
-	println(statement)
-
 	return statement
 }
 
@@ -130,7 +153,6 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 		.literal_string {
 			p.parse_string_expression()!
 		}
-
 		else {
 			panic('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
