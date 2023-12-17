@@ -5,6 +5,13 @@ import lib.compiler.token
 import lib.compiler.parser.ast
 import lib.compiler
 
+/*
+ * Parser is responsible for parsing the tokens into an AST.
+ * Some parse functions accept a mut reference to a struct to mutate
+ * the struct in place. Some functions will return a new struct.
+ * Just be aware of this when consuming the parser.
+ */
+
 pub struct Parser {
 mut:
 	scanner       &scanner.Scanner
