@@ -85,14 +85,6 @@ fn (mut p Parser) parse_declaration() !ast.Statement {
 	return result
 }
 
-// Structs look like this:
-/*
-struct Foo {
-	bar: string,
-	baz: string
-}
-*/
-
 fn (mut p Parser) parse_struct_statement() !ast.Statement {
 	mut statement := ast.StructStatement{}
 
