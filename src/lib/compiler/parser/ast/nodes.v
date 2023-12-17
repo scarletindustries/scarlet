@@ -55,7 +55,6 @@ pub mut:
 pub struct ExportStatement {
 	BasicASTNode
 pub mut:
-	identifier  Identifier
 	declaration Statement
 }
 
