@@ -15,14 +15,10 @@ pub mut:
 	value string
 }
 
-pub struct BooleanLiteral {
+pub struct NumberLiteral {
 	BasicASTNode
-	value bool
-}
-
-pub struct IntLiteral {
-	BasicASTNode
-	value int
+pub mut:
+	value string
 }
 
 pub struct Identifier {
@@ -37,34 +33,16 @@ pub struct BinaryExpression {
 	op    string // + - * / % < > <= >= == != etc
 }
 
-pub type Expression = BinaryExpression | BooleanLiteral | IntLiteral | StringLiteral
-
-pub struct ReturnStatement {
-	BasicASTNode
-	value ?Expression
-}
-
-pub struct IfStatement {
-	BasicASTNode
-	condition Expression
-	body      []ASTNode
-}
-
-pub struct ForStatement {
-	BasicASTNode
-	body []ASTNode
-}
-
 pub struct ConstStatement {
 	BasicASTNode
 pub mut:
-	ident string
-	init  Expression
+	identifier Identifier
+	init       Expression
 }
 
 pub struct ImportSpecifier {
 	BasicASTNode
-	ident Identifier
+	identifier Identifier
 }
 
 pub struct ImportDeclaration {
@@ -77,15 +55,30 @@ pub mut:
 pub struct ExportStatement {
 	BasicASTNode
 pub mut:
-	ident       string
+	identifier  Identifier
 	declaration Statement
 }
 
+pub struct StructStatement {
+pub mut:
+	identifier Identifier
+	fields     []StructField
+}
+
+pub struct StructField {
+	BasicASTNode
+pub mut:
+	identifier Identifier
+	typ        Identifier
+	init	   ?Expression
+}
+
+pub type Expression = StringLiteral | NumberLiteral
+
 pub type Statement = ConstStatement
 	| ExportStatement
-	| ForStatement
-	| IfStatement
 	| ImportDeclaration
-	| ReturnStatement
+	| StructField
+	| StructStatement
 
 pub type ASTNode = Expression | Statement

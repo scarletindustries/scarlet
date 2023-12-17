@@ -167,6 +167,7 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			next := s.peek_char()
 
 			// Handling a comment, we should skip until the end of the line
+			// In the future, we should comments as an AST node
 			if next == `/` {
 				mut end_of_line := s.state.get_pos()
 
@@ -240,7 +241,7 @@ fn (mut s Scanner) scan_identifier(from u8) compiler.Token {
 		}
 	}
 
-	return s.new_token(.ident, result)
+	return s.new_token(.identifier, result)
 }
 
 fn (mut s Scanner) scan_number(from u8) compiler.Token {

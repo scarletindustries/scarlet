@@ -9,23 +9,23 @@ pub fn is_name_char(c u8) bool {
 // a parameter "is_fully_qualified" which indicates if the identifier is fully qualified.
 // If it is fully qualified, it will not allow keywords to be used as identifiers.
 @[inline]
-pub fn is_valid_identifier(ident string, is_fully_qualified bool) bool {
-	if ident.len == 0 {
+pub fn is_valid_identifier(identifier string, is_fully_qualified bool) bool {
+	if identifier.len == 0 {
 		return false
 	}
 
-	if is_fully_qualified && is_keyword(ident) {
+	if is_fully_qualified && is_keyword(identifier) {
 		return false
 	}
 
 	// Check first character is a letter or an underscore
-	if !ident[0].is_letter() && ident[0] != `_` {
+	if !identifier[0].is_letter() && identifier[0] != `_` {
 		return false
 	}
 
 	// Check the rest of the characters
-	for i := 1; i < ident.len; i++ {
-		if !is_name_char(ident[i]) {
+	for i := 1; i < identifier.len; i++ {
+		if !is_name_char(identifier[i]) {
 			return false
 		}
 	}
@@ -34,13 +34,13 @@ pub fn is_valid_identifier(ident string, is_fully_qualified bool) bool {
 }
 
 @[inline]
-pub fn is_keyword(ident string) bool {
-	return ident in keyword_map
+pub fn is_keyword(identifier string) bool {
+	return identifier in keyword_map
 }
 
 @[inline]
-pub fn match_keyword(ident ?string) ?Kind {
-	if unwrapped := ident {
+pub fn match_keyword(identifier ?string) ?Kind {
+	if unwrapped := identifier {
 		return keyword_map[unwrapped] or { return none }
 	}
 

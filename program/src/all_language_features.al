@@ -9,7 +9,7 @@ const name = 'alistair'
 // Struct
 export struct Person {
     name: string = 'alistair',
-    age: int,
+    age: int = 19,
 }
 
 // Function

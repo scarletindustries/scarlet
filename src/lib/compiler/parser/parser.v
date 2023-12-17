@@ -25,7 +25,7 @@ fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 		return current
 	}
 
-	return error('Expected ${kind}, got ${p.current_token.kind}')
+	return error('Expected ${kind}, got ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 }
 
 pub fn (mut p Parser) parse_program() !ast.Program {
@@ -52,8 +52,7 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 			p.parse_export_statement()!
 		}
 		else {
-			dump(p.current_token)
-			panic('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
+			return error('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
 	}
 
@@ -61,9 +60,7 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 }
 
 fn (mut p Parser) parse_export_statement() !ast.Statement {
-	mut statement := ast.ExportStatement{
-		ident: ''
-	}
+	mut statement := ast.ExportStatement{}
 
 	p.eat(.kw_export)!
 
@@ -77,6 +74,9 @@ fn (mut p Parser) parse_declaration() !ast.Statement {
 		.kw_const {
 			p.parse_const_statement()!
 		}
+		.kw_struct {
+			p.parse_struct_statement()!
+		}
 		else {
 			return error('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
@@ -85,11 +85,81 @@ fn (mut p Parser) parse_declaration() !ast.Statement {
 	return result
 }
 
-fn (mut p Parser) parse_import_statement() !ast.Statement {
-	mut declaration := ast.ImportDeclaration{
-		path: './path-to-module.al'
-		specifiers: []
+// Structs look like this:
+/*
+struct Foo {
+	bar: string,
+	baz: string
+}
+*/
+
+fn (mut p Parser) parse_struct_statement() !ast.Statement {
+	mut statement := ast.StructStatement{}
+
+	p.eat(.kw_struct)!
+
+	current := p.eat(.identifier)!
+	if unwrapped := current.literal {
+		statement.identifier = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
 	}
+
+	p.eat(.punc_open_brace)!
+	p.parse_struct_fields(mut &statement.fields)!
+	p.eat(.punc_close_brace)!
+
+	return statement
+}
+
+fn (mut p Parser) parse_struct_fields(mut fields []ast.StructField) ! {
+	for p.current_token.kind != .punc_close_brace {
+		field := p.parse_struct_field()!
+		fields << field
+	}
+}
+
+fn (mut p Parser) parse_struct_field() !ast.StructField {
+	mut field := ast.StructField{}
+
+	mut current := p.eat(.identifier)!
+
+	if unwrapped := current.literal {
+		field.identifier = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
+	}
+
+	p.eat(.punc_colon)!
+
+	current = p.eat(.identifier)!
+
+	if unwrapped := current.literal {
+		field.typ = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
+	}
+
+	if p.current_token.kind == .punc_equals {
+		p.eat(.punc_equals)!
+		field.init = p.parse_expression()!
+	}
+
+	if p.current_token.kind == .punc_comma {
+		p.eat(.punc_comma)!
+	}
+
+	return field
+}
+
+fn (mut p Parser) parse_import_statement() !ast.Statement {
+	mut declaration := ast.ImportDeclaration{}
 
 	p.eat(.kw_from)!
 	str := p.eat(.literal_string)!
@@ -97,7 +167,7 @@ fn (mut p Parser) parse_import_statement() !ast.Statement {
 	if unwrapped := str.literal {
 		declaration.path = unwrapped
 	} else {
-		panic('Expected string literal')
+		return error('Expected string literal')
 	}
 
 	p.eat(.kw_import)!
@@ -108,16 +178,16 @@ fn (mut p Parser) parse_import_statement() !ast.Statement {
 }
 
 fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) ! {
-	current := p.eat(.ident)!
+	current := p.eat(.identifier)!
 
 	if unwrapped := current.literal {
 		specifiers << ast.ImportSpecifier{
-			ident: ast.Identifier{
+			identifier: ast.Identifier{
 				name: unwrapped
 			}
 		}
 	} else {
-		panic('Expected identifier')
+		return error('Expected identifier')
 	}
 
 	if p.current_token.kind == .punc_comma {
@@ -133,12 +203,14 @@ fn (mut p Parser) parse_const_statement() !ast.Statement {
 
 	p.eat(.kw_const)!
 
-	current := p.eat(.ident)!
+	current := p.eat(.identifier)!
 
 	if unwrapped := current.literal {
-		statement.ident = unwrapped
+		statement.identifier = ast.Identifier{
+			name: unwrapped
+		}
 	} else {
-		panic('Expected identifier')
+		return error('Expected identifier')
 	}
 
 	p.eat(.punc_equals)!
@@ -153,8 +225,11 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 		.literal_string {
 			p.parse_string_expression()!
 		}
+		.literal_number {
+			p.parse_number_expression()!
+		}
 		else {
-			panic('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
+			return error('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
 	}
 
@@ -162,16 +237,28 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_string_expression() !ast.Expression {
-	mut expression := ast.StringLiteral{
-		value: ''
-	}
+	mut expression := ast.StringLiteral{}
 
 	current := p.eat(.literal_string)!
 
 	if unwrapped := current.literal {
 		expression.value = unwrapped
 	} else {
-		panic('Expected string literal')
+		return error('Expected string literal')
+	}
+
+	return expression
+}
+
+fn (mut p Parser) parse_number_expression() !ast.Expression {
+	mut expression := ast.NumberLiteral{}
+
+	current := p.eat(.literal_number)!
+
+	if unwrapped := current.literal {
+		expression.value = unwrapped
+	} else {
+		return error('Expected number literal')
 	}
 
 	return expression

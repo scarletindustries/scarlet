@@ -3,7 +3,7 @@ module token
 pub enum Kind {
 	// End of file
 	eof
-	ident // Any identifier that is not a keyword
+	identifier // Any identifier that is not a keyword
 	// Literals
 	literal_number // Any number
 	literal_string // Any string ('Hello, world')
