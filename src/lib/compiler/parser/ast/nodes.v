@@ -69,10 +69,10 @@ pub struct StructField {
 pub mut:
 	identifier Identifier
 	typ        Identifier
-	init	   ?Expression
+	init       ?Expression
 }
 
-pub type Expression = StringLiteral | NumberLiteral
+pub type Expression = NumberLiteral | StringLiteral
 
 pub type Statement = ConstStatement
 	| ExportStatement
