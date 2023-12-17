@@ -14,4 +14,5 @@ pub const keyword_map = {
 	'struct':   Kind.kw_struct
 	'in':       Kind.kw_in
 	'none':     Kind.kw_none
+	'const':	Kind.kw_const
 }

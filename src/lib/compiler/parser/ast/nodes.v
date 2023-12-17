@@ -1,38 +1,36 @@
 module ast
 
 pub struct BasicASTNode {
-pub:
-	start int
-	end   int
 }
 
 pub struct Program {
 	BasicASTNode
+pub mut:
 	body []ASTNode
 }
 
 pub struct VariableDeclaration {
 	BasicASTNode
-	name string
+	ident string
 	init Expression
 }
 
 pub struct FunctionDeclaration {
 	BasicASTNode
-	name string
+	ident string
 	args []FunctionArgument
 	body []ASTNode
 }
 
 pub struct StructDeclaration {
 	BasicASTNode
-	name string
+	ident string
 	body []StructMemberDeclaration
 }
 
 pub struct StructMemberDeclaration {
 	BasicASTNode
-	name    string
+	ident    string
 	typ     ?Identifier
 	default ?Expression
 }
@@ -41,12 +39,13 @@ pub type Declaration = FunctionDeclaration | VariableDeclaration
 
 pub struct FunctionArgument {
 	BasicASTNode
-	name string
+	ident string
 	typ  ?Identifier
 }
 
 pub struct StringLiteral {
 	BasicASTNode
+pub mut:
 	value string
 }
 
@@ -74,6 +73,41 @@ pub struct BinaryExpression {
 	op    string // + - * / % < > <= >= == != etc
 }
 
-pub type Expression = BinaryExpression | Literal
+pub type Expression = BinaryExpression | BooleanLiteral | IntLiteral | StringLiteral
 
-pub type ASTNode = Declaration | Expression | Identifier | Program
+// implement statements
+
+pub struct ReturnStatement {
+	BasicASTNode
+	value ?Expression
+}
+
+pub struct IfStatement {
+	BasicASTNode
+	condition Expression
+	body      []ASTNode
+}
+
+pub struct ForStatement {
+	BasicASTNode
+	body      []ASTNode
+}
+
+pub struct ConstStatement {
+	BasicASTNode
+pub mut:
+	ident string
+	init Expression
+}
+
+pub struct ImportStatement {
+	BasicASTNode
+pub mut:
+	path string
+	declarations []Identifier
+}
+
+pub type Statement = ReturnStatement | IfStatement | ForStatement | ImportStatement | ConstStatement
+
+pub type ASTNode = Statement | Declaration | Expression | Identifier | Program
+

@@ -4,13 +4,14 @@ import lib.compiler
 import lib.compiler.token
 import lib.compiler.scanner.state
 
+@[heap]
 pub struct Scanner {
 	input string
 mut:
 	state &state.ScannerState
 }
 
-[inline]
+@[inline]
 pub fn new_scanner(input string) &Scanner {
 	return &Scanner{
 		input: input
@@ -117,6 +118,15 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 		`+` {
 			s.new_token(.punc_plus, none)
 		}
+		`-` {
+			s.new_token(.punc_minus, none)
+		}
+		`*` {
+			s.new_token(.punc_mul, none)
+		}
+		`%` {
+			s.new_token(.punc_mod, none)
+		}
 		`!` {
 			s.new_token(.punc_exclamation_mark, none)
 		}
@@ -216,7 +226,7 @@ fn (s Scanner) new_token(kind token.Kind, literal ?string) compiler.Token {
 }
 
 // scan_identifier scans until the next non-alphanumeric character
-fn (mut s Scanner) scan_identifier(from byte) compiler.Token {
+fn (mut s Scanner) scan_identifier(from u8) compiler.Token {
 	mut result := from.ascii_str()
 
 	for {
@@ -233,7 +243,7 @@ fn (mut s Scanner) scan_identifier(from byte) compiler.Token {
 	return s.new_token(.ident, result)
 }
 
-fn (mut s Scanner) scan_number(from byte) compiler.Token {
+fn (mut s Scanner) scan_number(from u8) compiler.Token {
 	mut result := from.ascii_str()
 
 	for {
@@ -250,7 +260,7 @@ fn (mut s Scanner) scan_number(from byte) compiler.Token {
 	return s.new_token(.literal_number, result)
 }
 
-fn (mut s Scanner) peek_char() byte {
+fn (mut s Scanner) peek_char() u8 {
 	assert s.state.get_pos() < s.input.len, 'scanner at end of input'
 
 	ch := s.input[s.state.get_pos()]

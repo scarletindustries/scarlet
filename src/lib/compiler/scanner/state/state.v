@@ -12,27 +12,27 @@ mut:
 	line   int = 1
 }
 
-[inline]
+@[inline]
 pub fn (mut s ScannerState) get_pos() int {
 	return s.pos
 }
 
-[inline]
+@[inline]
 pub fn (mut s ScannerState) set_pos(pos int) {
 	s.pos = pos
 }
 
-[inline]
+@[inline]
 pub fn (mut s ScannerState) incr_pos() {
 	s.pos++
 }
 
-[inline]
+@[inline]
 pub fn (s ScannerState) get_line() int {
 	return s.line
 }
 
-[inline]
+@[inline]
 pub fn (s ScannerState) get_column() int {
 	return s.column
 }

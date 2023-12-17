@@ -3,6 +3,7 @@ module main
 import os
 import cli
 import lib.compiler.scanner
+import lib.compiler.parser
 
 fn main() {
 	mut app := cli.Command{
@@ -21,18 +22,12 @@ fn main() {
 				description: 'Build and compile an entrypoint to your program'
 				execute: fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
+					file := os.read_file(entrypoint)!
 
-					mut s := scanner.new_scanner(os.read_file(entrypoint)!)
+					mut s := scanner.new_scanner(file)
+					mut p := parser.new_parser(mut s)
 
-					for {
-						t := s.scan_next()
-
-						if t.kind == .eof {
-							break
-						}
-
-						println(t)
-					}
+					p.parse_program()!
 				}
 			},
 		]

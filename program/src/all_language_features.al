@@ -32,12 +32,31 @@ export fn main() {
     }
 }
 
-fn result() !int {
+struct MyErrorType {
+    message: string = 'something went wrong man!!!',
+    lol: int,
+}
+
+fn result() !MyErrorType int {
     if random() > 0.5 {
-        return error 'Something went wrong'
+        error MyErrorType{
+            lol: 1,
+        }
     }
 
     return 1
+}
+
+fn handling_result_1() {
+    // data would be an int here, and err is typed correctly
+    data := result() or err {
+        return err.message
+    }
+}
+
+fn handling_result_2() !MyErrorType {
+    // Append ! to "throw" the error further up the call stack
+    data := result()!
 }
 
 fn option() ?int {
@@ -70,7 +89,7 @@ fn option_result() ?!int {
     }
 
     if random() > 0.5 {
-        return error 'Something went wrong'
+        error 'Something went wrong'
     }
 
     return 1
@@ -101,6 +120,12 @@ fn keywords_and_punctuation() {
 
     for i in 0..10 {
         continue
+    }
+
+    // inline block expression
+    example := {
+        test := 20
+        return test * 10
     }
 
     users := ['bob', 'alice', 'foo']

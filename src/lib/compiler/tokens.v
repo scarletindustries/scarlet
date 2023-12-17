@@ -2,7 +2,7 @@ module compiler
 
 import lib.compiler.token
 
-[inline; minify]
+@[inline; minify]
 pub struct Token {
 pub:
 	kind    token.Kind // The token number/enum; for quick comparisons
