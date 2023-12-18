@@ -1,59 +1,56 @@
 module ast
 
-pub struct BasicASTNode {
-}
+import lib.compiler.token
 
-pub struct Program {
-	BasicASTNode
+pub struct Block {
 pub mut:
 	body []ASTNode
 }
 
 pub struct StringLiteral {
-	BasicASTNode
 pub mut:
 	value string
 }
 
 pub struct NumberLiteral {
-	BasicASTNode
 pub mut:
 	value string
 }
 
 pub struct Identifier {
-	BasicASTNode
+pub mut:
 	name string
 }
 
+pub struct Operator {
+pub mut:
+	kind token.Kind
+}
+
 pub struct BinaryExpression {
-	BasicASTNode
+pub mut:
 	left  Expression
 	right Expression
-	op    string // + - * / % < > <= >= == != etc
+	op    Operator // + - * / % < > <= >= == != etc
 }
 
 pub struct ConstStatement {
-	BasicASTNode
 pub mut:
 	identifier Identifier
 	init       Expression
 }
 
 pub struct ImportSpecifier {
-	BasicASTNode
 	identifier Identifier
 }
 
 pub struct ImportDeclaration {
-	BasicASTNode
 pub mut:
 	path       string
 	specifiers []ImportSpecifier
 }
 
 pub struct ExportStatement {
-	BasicASTNode
 pub mut:
 	declaration Statement
 }
@@ -65,7 +62,6 @@ pub mut:
 }
 
 pub struct StructField {
-	BasicASTNode
 pub mut:
 	identifier Identifier
 	typ        Identifier
@@ -74,23 +70,37 @@ pub mut:
 
 pub struct FunctionStatement {
 pub mut:
-	identifier Identifier
-	params     []FunctionParameter
+	identifier  Identifier
+	return_type ?Identifier
+	params      []FunctionParameter
+	body        []Statement
 }
 
 pub struct FunctionParameter {
 pub mut:
 	identifier Identifier
-	typ        Identifier
+	typ        ?Identifier
 }
 
-pub type Expression = NumberLiteral | StringLiteral
+pub struct FunctionCallExpression {
+    identifier Identifier
+    arguments  []Expression
+}
+
+pub struct ReturnStatement {
+pub:
+	expression Expression
+}
+
+pub type Expression = BinaryExpression | Identifier | NumberLiteral | StringLiteral | FunctionCallExpression
 
 pub type Statement = ConstStatement
 	| ExportStatement
+	| Expression
 	| FunctionParameter
 	| FunctionStatement
 	| ImportDeclaration
+	| ReturnStatement
 	| StructField
 	| StructStatement
 
