@@ -72,10 +72,24 @@ pub mut:
 	init       ?Expression
 }
 
+pub struct FunctionStatement {
+pub mut:
+	identifier Identifier
+	params     []FunctionParameter
+}
+
+pub struct FunctionParameter {
+pub mut:
+	identifier Identifier
+	typ        Identifier
+}
+
 pub type Expression = NumberLiteral | StringLiteral
 
 pub type Statement = ConstStatement
 	| ExportStatement
+	| FunctionParameter
+	| FunctionStatement
 	| ImportDeclaration
 	| StructField
 	| StructStatement

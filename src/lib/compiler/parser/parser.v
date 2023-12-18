@@ -58,12 +58,82 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.kw_export {
 			p.parse_export_statement()!
 		}
+		.kw_function {
+			p.parse_function_statement()!
+		}
 		else {
 			return error('Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
 	}
 
 	return result
+}
+
+fn (mut p Parser) parse_function_statement() !ast.Statement {
+	mut statement := ast.FunctionStatement{}
+
+	p.eat(.kw_function)!
+
+	mut identifier := p.eat(.identifier)!
+
+	if unwrapped := identifier.literal {
+		statement.identifier = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
+	}
+
+	p.parse_parameters(mut &statement.params)!
+
+	return statement
+}
+
+fn (mut p Parser) parse_parameters(mut params []ast.FunctionParameter) ![]ast.FunctionParameter {
+	p.eat(.punc_open_paren)!
+
+	for p.current_token.kind != .punc_close_paren {
+		param := p.parse_parameter()!
+		params << param
+	}
+
+	p.eat(.punc_close_paren)!
+
+	return params
+}
+
+fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
+	mut param := ast.FunctionParameter{}
+
+	mut current := p.eat(.identifier)!
+
+	if unwrapped := current.literal {
+		param.identifier = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
+	}
+
+	if p.current_token.kind == .punc_colon {
+		p.eat(.punc_colon)!
+
+		current = p.eat(.identifier)!
+
+		if unwrapped := current.literal {
+			param.typ = ast.Identifier{
+				name: unwrapped
+			}
+		} else {
+			return error('Expected identifier')
+		}
+	}
+
+	if p.current_token.kind == .punc_comma {
+		p.eat(.punc_comma)!
+	}
+
+	return param
 }
 
 fn (mut p Parser) parse_export_statement() !ast.Statement {
