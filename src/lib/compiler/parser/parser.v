@@ -35,12 +35,14 @@ fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 	return error('Expected ${kind}, got ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 }
 
-fn (mut p Parser) get_token_literal() !string {
-	if unwrapped := p.current_token.literal {
+fn (mut p Parser) get_token_literal(kind token.Kind) !string {
+	eaten := p.eat(kind)!
+
+	if unwrapped := eaten.literal {
 		return unwrapped
 	}
 
-	return error('Expected token literal at ${p.current_token.line}:${p.current_token.column}')
+	return error('Expected token literal for \'${p.current_token}\' ${p.current_token.line}:${p.current_token.column}')
 }
 
 pub fn (mut p Parser) parse_program() !ast.Block {
@@ -182,13 +184,11 @@ fn (mut p Parser) parse_function_body(mut body []ast.Statement) ! {
 }
 
 fn (mut p Parser) parse_export_statement() !ast.Statement {
-	mut statement := ast.ExportStatement{}
-
 	p.eat(.kw_export)!
 
-	statement.declaration = p.parse_declaration()!
-
-	return statement
+	return ast.ExportStatement{
+		declaration: p.parse_declaration()!
+	}
 }
 
 fn (mut p Parser) parse_declaration() !ast.Statement {
@@ -212,11 +212,10 @@ fn (mut p Parser) parse_declaration() !ast.Statement {
 
 fn (mut p Parser) parse_struct_statement() !ast.Statement {
 	p.eat(.kw_struct)!
-	p.eat(.identifier)!
 
 	mut statement := ast.StructStatement{
 		identifier: ast.Identifier{
-			name: p.get_token_literal()!
+			name: p.get_token_literal(.identifier)!
 		}
 	}
 
@@ -394,8 +393,7 @@ fn (mut p Parser) parse_function_call_expression(name string) !ast.Expression {
 }
 
 fn (mut p Parser) parse_identifier_expression() !ast.Expression {
-	p.eat(.identifier)!
-	unwrapped := p.get_token_literal()!
+	unwrapped := p.get_token_literal(.identifier)!
 
 	if p.current_token.kind == .punc_open_paren {
 		return p.parse_function_call_expression(unwrapped)!
@@ -407,17 +405,13 @@ fn (mut p Parser) parse_identifier_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_string_expression() !ast.Expression {
-	p.eat(.literal_string)!
-
 	return ast.StringLiteral{
-		value: p.get_token_literal()!
+		value: p.get_token_literal(.literal_string)!
 	}
 }
 
 fn (mut p Parser) parse_number_expression() !ast.Expression {
-	p.eat(.literal_number)!
-
 	return ast.NumberLiteral{
-		value: p.get_token_literal()!
+		value: p.get_token_literal(.literal_number)!
 	}
 }
