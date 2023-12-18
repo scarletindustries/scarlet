@@ -367,29 +367,29 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 fn (mut p Parser) parse_function_call_expression(name string) !ast.Expression {
 	p.eat(.punc_open_paren)!
 
-    mut arguments := []ast.Expression{}
+	mut arguments := []ast.Expression{}
 
-    // Parse arguments until a closing parenthesis is found
-    for p.current_token.kind != .punc_close_paren {
-        // Parse an expression as an argument
-        argument := p.parse_expression()!
-        arguments << argument
+	// Parse arguments until a closing parenthesis is found
+	for p.current_token.kind != .punc_close_paren {
+		// Parse an expression as an argument
+		argument := p.parse_expression()!
+		arguments << argument
 
-        // If the next token is a comma, consume it and continue parsing arguments
-        if p.current_token.kind == .punc_comma {
-            p.eat(.punc_comma)!
-        }
-    }
+		// If the next token is a comma, consume it and continue parsing arguments
+		if p.current_token.kind == .punc_comma {
+			p.eat(.punc_comma)!
+		}
+	}
 
-    // Consume the closing parenthesis
-    p.eat(.punc_close_paren)!
+	// Consume the closing parenthesis
+	p.eat(.punc_close_paren)!
 
-    return ast.FunctionCallExpression{
-        identifier: ast.Identifier{
+	return ast.FunctionCallExpression{
+		identifier: ast.Identifier{
 			name: name
-		},
-        arguments: arguments,
-    }
+		}
+		arguments: arguments
+	}
 }
 
 fn (mut p Parser) parse_identifier_expression() !ast.Expression {

@@ -83,8 +83,8 @@ pub mut:
 }
 
 pub struct FunctionCallExpression {
-    identifier Identifier
-    arguments  []Expression
+	identifier Identifier
+	arguments  []Expression
 }
 
 pub struct ReturnStatement {
@@ -92,7 +92,11 @@ pub:
 	expression Expression
 }
 
-pub type Expression = BinaryExpression | Identifier | NumberLiteral | StringLiteral | FunctionCallExpression
+pub type Expression = BinaryExpression
+	| FunctionCallExpression
+	| Identifier
+	| NumberLiteral
+	| StringLiteral
 
 pub type Statement = ConstStatement
 	| ExportStatement
