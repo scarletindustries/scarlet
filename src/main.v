@@ -27,10 +27,12 @@ fn main() {
 					mut s := scanner.new_scanner(file)
 					mut p := parser.new_parser(mut s)
 
-					p.parse_program() or {
+					result := p.parse_program() or {
 						println(err.msg())
 						return
 					}
+
+					println(result)
 				}
 			},
 		]

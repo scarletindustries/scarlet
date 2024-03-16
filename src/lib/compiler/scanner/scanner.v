@@ -247,10 +247,16 @@ fn (mut s Scanner) scan_identifier(from u8) compiler.Token {
 fn (mut s Scanner) scan_number(from u8) compiler.Token {
 	mut result := from.ascii_str()
 
+	mut has_dot := false
+
 	for {
 		next := s.peek_char()
 
 		if next.is_digit() {
+			s.incr_pos()
+			result += next.ascii_str()
+		} else if next == `.` && !has_dot {
+			has_dot = true
 			s.incr_pos()
 			result += next.ascii_str()
 		} else {

@@ -28,7 +28,7 @@ export fn main() {
 
     person := Person{
         name: 'not alistair',
-        age:  18,
+        age: 18,
     }
 }
 

@@ -58,7 +58,13 @@ pub mut:
 	init       Expression
 }
 
+pub struct ThrowStatement {
+pub:
+	expression Expression
+}
+
 pub struct ImportSpecifier {
+pub:
 	identifier Identifier
 }
 
@@ -122,7 +128,7 @@ pub type Expression = FunctionCallExpression
 	| NumberLiteral
 	| PropertyAccessExpression
 	| StringLiteral
-	| BinaryExpression
+	| BinaryExpression | StructInitialisation | StructInitialisationField
 
 pub type Statement = ConstStatement
 	| ExportStatement
@@ -132,8 +138,6 @@ pub type Statement = ConstStatement
 	| ImportDeclaration
 	| ReturnStatement
 	| StructField
-	| StructInitialisation
-	| StructInitialisationField
-	| StructStatement | BinaryExpression
+	| StructStatement | BinaryExpression | ThrowStatement
 
 pub type ASTNode = Expression | Statement

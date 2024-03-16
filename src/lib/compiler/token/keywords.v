@@ -15,4 +15,7 @@ pub const keyword_map = {
 	'in':       Kind.kw_in
 	'none':     Kind.kw_none
 	'const':    Kind.kw_const
+	'if':		Kind.kw_if
+	'else':		Kind.kw_else
+	'throw':	Kind.kw_throw
 }

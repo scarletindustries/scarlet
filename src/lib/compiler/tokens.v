@@ -47,6 +47,7 @@ fn (t &Token) str() string {
 			.bitwise_xor { '^' }
 			.bitwise_not { '~' }
 			.kw_const { 'const' }
+			.kw_throw { 'throw' }
 			.kw_if { 'if' }
 			.kw_else { 'else' }
 			.kw_for { 'for' }

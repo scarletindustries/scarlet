@@ -20,6 +20,7 @@ pub enum Kind {
 	// Keywords
 	kw_comptime // comptime
 	kw_const // const
+	kw_throw // throw
 	kw_if // if
 	kw_else // else
 	kw_for // for

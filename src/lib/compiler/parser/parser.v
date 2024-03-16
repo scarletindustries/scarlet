@@ -37,7 +37,7 @@ fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 
 fn (mut p Parser) eat_msg(kind token.Kind, message string) !compiler.Token {
 	return p.eat(kind) or {
-		return error(message)
+		return error('[eat] ${message} [got .${p.current_token.kind} @ ${p.current_token.line}:${p.current_token.column}]')
 	}
 }
 
@@ -55,7 +55,15 @@ pub fn (mut p Parser) parse_program() !ast.Block {
 	mut program := ast.Block{}
 
 	for p.current_token.kind != .eof {
-		statement := p.parse_statement()!
+		statement := p.parse_statement() or {
+			// println(program)
+			println('=====================Compiler Bug=====================')
+			println('| The above is the program parsed up until the error |')
+			println('|   Plz report this on GitHub, with your full code   |')
+			println('======================================================')
+			return error(err.msg())
+		}
+
 		program.body << statement
 	}
 
@@ -76,6 +84,12 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.kw_function {
 			p.parse_function_statement()!
 		}
+		.kw_if {
+			return error('IF statements are not implemtned yet lmao')
+		}
+		.kw_throw {
+			p.parse_throw_statement()!	
+		}
 		.kw_return {
 			p.parse_return_statement()!
 		}
@@ -85,15 +99,6 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.punc_declaration {
 			p.parse_declaration()!
 		}
-		.punc_open_brace {
-			p.parse_struct_initialisation()!
-		}
-		.punc_gt {
-			p.parse_binary_expression(.punc_gt)!
-		}
-		.punc_lt {
-			p.parse_binary_expression(.punc_lt)!
-		}
 		else {
 			return error('[statement] Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
@@ -102,19 +107,15 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 	return result
 }
 
-fn (mut p Parser) parse_binary_expression(operator token.Kind) !ast.Statement {
-	p.eat(.punc_gt)!
+fn (mut p Parser) parse_throw_statement() !ast.Statement {
+	p.eat(.kw_throw)!
 
-	return ast.BinaryExpression{
-		left: p.parse_expression()!
-		right: p.parse_expression()!
-		op: ast.Operator{
-			kind: operator
-		}
+	return ast.ThrowStatement{
+		expression: p.parse_expression()!
 	}
 }
 
-fn (mut p Parser) parse_struct_initialisation() !ast.Statement {
+fn (mut p Parser) parse_struct_initialisation() !ast.Expression {
 	mut statement := ast.StructInitialisation{}
 
 	p.eat(.punc_open_brace)!
@@ -142,7 +143,7 @@ fn (mut p Parser) parse_struct_init_field() !ast.StructInitialisationField {
 		return error('Expected identifier')
 	}
 
-	p.eat(.punc_colon)!
+	p.eat_msg(.punc_colon, 'Expected colon for initial struct field value')!
 
 	field.init = p.parse_expression()!
 
@@ -332,7 +333,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 		return error('Expected identifier')
 	}
 
-	p.eat(.punc_colon)!
+	p.eat_msg(.punc_colon, 'Expected colon for struct field type')!
 
 	current = p.eat(.identifier)!
 
@@ -421,8 +422,12 @@ fn (mut p Parser) parse_const_statement() !ast.Statement {
 fn (mut p Parser) parse_expression() !ast.Expression {
 	mut left := p.parse_primary_expression()!
 
+	if p.current_token.kind == .punc_open_brace {
+		return p.parse_struct_initialisation()!
+	}
+
 	for p.current_token.kind in [.punc_equals_comparator, .punc_not_equal, .punc_plus, .punc_minus,
-		.punc_mul, .punc_div, .punc_mod] {
+		.punc_mul, .punc_div, .punc_mod, .punc_gt, .punc_lt] {
 		operator := p.current_token.kind
 
 		p.eat(operator)!
@@ -430,11 +435,11 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 		right := p.parse_primary_expression()!
 
 		left = ast.BinaryExpression{
+			left: left,
+			right: right,
 			op: ast.Operator{
 				kind: operator
-			}
-			left: left
-			right: right
+			},
 		}
 	}
 
@@ -446,7 +451,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		.literal_string { p.parse_string_expression()! }
 		.literal_number { p.parse_number_expression()! }
 		.identifier { p.parse_identifier_expression()! }
-		else { return error('Expected primary expression') }
+		else { return error('Expected primary expression at ${p.current_token.line}:${p.current_token.column}. Got ${p.current_token.kind}') }
 	}
 
 	for p.current_token.kind == .punc_dot {
