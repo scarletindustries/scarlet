@@ -77,12 +77,57 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.identifier {
 			p.parse_expression()!
 		}
+		.punc_declaration {
+			p.parse_declaration()!
+		}
+		.punc_open_brace {
+			p.parse_struct_initialisation()!
+		}
 		else {
 			return error('[statement] Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
 	}
 
 	return result
+}
+
+fn (mut p Parser) parse_struct_initialisation() !ast.Statement {
+	mut statement := ast.StructInitialisation{}
+
+	p.eat(.punc_open_brace)!
+
+	for p.current_token.kind != .punc_close_brace {
+		field := p.parse_struct_init_field()!
+		statement.fields << field
+	}
+
+	p.eat(.punc_close_brace)!
+
+	return statement
+}
+
+fn (mut p Parser) parse_struct_init_field() !ast.StructInitialisationField {
+	mut field := ast.StructInitialisationField{}
+
+	mut current := p.eat(.identifier)!
+
+	if unwrapped := current.literal {
+		field.identifier = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
+	}
+
+	p.eat(.punc_equals)!
+
+	// field.init = p.parse_expression()!
+
+	if p.current_token.kind == .punc_comma {
+		p.eat(.punc_comma)!
+	}
+
+	return field
 }
 
 fn (mut p Parser) parse_return_statement() !ast.Statement {
@@ -202,12 +247,20 @@ fn (mut p Parser) parse_declaration() !ast.Statement {
 		.kw_function {
 			p.parse_function_statement()!
 		}
+		.punc_declaration {
+			p.parse_declaration_declaration()!
+		}
 		else {
 			return error('[declaration] Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
 	}
 
 	return result
+}
+
+fn (mut p Parser) parse_declaration_declaration() !ast.Statement {
+	p.eat(.punc_declaration)!
+	return p.parse_expression()!
 }
 
 fn (mut p Parser) parse_struct_statement() !ast.Statement {
@@ -356,11 +409,39 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_primary_expression() !ast.Expression {
-	return match p.current_token.kind {
+	println(p.current_token)
+
+	mut expr := match p.current_token.kind {
 		.literal_string { p.parse_string_expression()! }
 		.literal_number { p.parse_number_expression()! }
 		.identifier { p.parse_identifier_expression()! }
 		else { return error('Expected primary expression') }
+	}
+
+	for p.current_token.kind == .punc_dot {
+		expr = p.parse_dot_expression(expr)!
+	}
+
+	return expr
+}
+
+fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
+	// Consume the dot
+	p.eat(.punc_dot)!
+
+	// The next token must be an identifier (property or method)
+	property := p.get_token_literal(.identifier)!
+
+	if p.current_token.kind == .punc_open_paren {
+		return p.parse_function_call_expression(property)!
+	}
+
+	// Otherwise, it's a property access
+	return ast.PropertyAccessExpression{
+		expression: left
+		identifier: ast.Identifier{
+			name: property
+		}
 	}
 }
 

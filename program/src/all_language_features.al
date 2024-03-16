@@ -32,14 +32,14 @@ export fn main() {
     }
 }
 
-struct MyErrorType {
+export struct MyErrorType {
     message: string = 'something went wrong man!!!',
     lol: int,
 }
 
-fn result() !MyErrorType int {
+fn result() int, MyErrorType {
     if random() > 0.5 {
-        error MyErrorType{
+        throw MyErrorType{
             lol: 1,
         }
     }
@@ -54,7 +54,7 @@ fn handling_result_1() {
     }
 }
 
-fn handling_result_2() !MyErrorType {
+fn handling_result_2() void, MyErrorType {
     // Append ! to "throw" the error further up the call stack
     data := result()!
 }
@@ -75,21 +75,13 @@ fn option() ?int {
     return 1
 }
 
-fn result() !int {
-    if random() > 0.5 {
-        return error 'Something went wrong'
-    }
-
-    return 1
-}
-
-fn option_result() ?!int {
+fn option_result() ?int, Error  {
     if random() > 0.5 {
         return none
     }
 
     if random() > 0.5 {
-        error 'Something went wrong'
+        throw Error{msg: 'Something went wrong'}
     }
 
     return 1
@@ -100,12 +92,16 @@ fn asdf() {
 }
 
 fn asdf2() {
-    result := option() or {
+    result := option() or e -> {
         return 10
     }
 }
 
 fn asdf3() {
+    result := result() or e -> {
+        return 10
+    }
+
     result := result() or {
         return 10
     }

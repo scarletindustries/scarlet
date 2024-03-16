@@ -27,6 +27,24 @@ pub mut:
 	kind token.Kind
 }
 
+pub struct VariableDeclaration {
+pub mut:
+	identifier Identifier
+	init       Expression
+}
+
+pub struct StructInitialisationField {
+pub mut:
+	identifier Identifier
+	value      Expression
+}
+
+pub struct StructInitialisation {
+pub mut:
+	identifier Identifier
+	fields     []StructInitialisationField
+}
+
 pub struct BinaryExpression {
 pub mut:
 	left  Expression
@@ -87,6 +105,12 @@ pub struct FunctionCallExpression {
 	arguments  []Expression
 }
 
+pub struct PropertyAccessExpression {
+pub:
+	expression Expression
+	identifier Identifier
+}
+
 pub struct ReturnStatement {
 pub:
 	expression Expression
@@ -96,6 +120,7 @@ pub type Expression = BinaryExpression
 	| FunctionCallExpression
 	| Identifier
 	| NumberLiteral
+	| PropertyAccessExpression
 	| StringLiteral
 
 pub type Statement = ConstStatement
@@ -106,6 +131,8 @@ pub type Statement = ConstStatement
 	| ImportDeclaration
 	| ReturnStatement
 	| StructField
+	| StructInitialisation
+	| StructInitialisationField
 	| StructStatement
 
 pub type ASTNode = Expression | Statement
