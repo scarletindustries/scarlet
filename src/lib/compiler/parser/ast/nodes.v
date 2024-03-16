@@ -36,7 +36,7 @@ pub mut:
 pub struct StructInitialisationField {
 pub mut:
 	identifier Identifier
-	value      Expression
+	init      Expression
 }
 
 pub struct StructInitialisation {
@@ -90,6 +90,7 @@ pub struct FunctionStatement {
 pub mut:
 	identifier  Identifier
 	return_type ?Identifier
+	throw_type  ?Identifier
 	params      []FunctionParameter
 	body        []Statement
 }
@@ -116,12 +117,12 @@ pub:
 	expression Expression
 }
 
-pub type Expression = BinaryExpression
-	| FunctionCallExpression
+pub type Expression = FunctionCallExpression
 	| Identifier
 	| NumberLiteral
 	| PropertyAccessExpression
 	| StringLiteral
+	| BinaryExpression
 
 pub type Statement = ConstStatement
 	| ExportStatement
@@ -133,6 +134,6 @@ pub type Statement = ConstStatement
 	| StructField
 	| StructInitialisation
 	| StructInitialisationField
-	| StructStatement
+	| StructStatement | BinaryExpression
 
 pub type ASTNode = Expression | Statement

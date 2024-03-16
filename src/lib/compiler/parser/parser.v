@@ -32,7 +32,13 @@ fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 		return current
 	}
 
-	return error('Expected ${kind}, got ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
+	return error('[eat] Expected ${kind}, got ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
+}
+
+fn (mut p Parser) eat_msg(kind token.Kind, message string) !compiler.Token {
+	return p.eat(kind) or {
+		return error(message)
+	}
 }
 
 fn (mut p Parser) get_token_literal(kind token.Kind) !string {
@@ -51,7 +57,6 @@ pub fn (mut p Parser) parse_program() !ast.Block {
 	for p.current_token.kind != .eof {
 		statement := p.parse_statement()!
 		program.body << statement
-		println(statement)
 	}
 
 	return program
@@ -83,12 +88,30 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.punc_open_brace {
 			p.parse_struct_initialisation()!
 		}
+		.punc_gt {
+			p.parse_binary_expression(.punc_gt)!
+		}
+		.punc_lt {
+			p.parse_binary_expression(.punc_lt)!
+		}
 		else {
 			return error('[statement] Unhandled ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
 		}
 	}
 
 	return result
+}
+
+fn (mut p Parser) parse_binary_expression(operator token.Kind) !ast.Statement {
+	p.eat(.punc_gt)!
+
+	return ast.BinaryExpression{
+		left: p.parse_expression()!
+		right: p.parse_expression()!
+		op: ast.Operator{
+			kind: operator
+		}
+	}
 }
 
 fn (mut p Parser) parse_struct_initialisation() !ast.Statement {
@@ -119,13 +142,11 @@ fn (mut p Parser) parse_struct_init_field() !ast.StructInitialisationField {
 		return error('Expected identifier')
 	}
 
-	p.eat(.punc_equals)!
+	p.eat(.punc_colon)!
 
-	// field.init = p.parse_expression()!
+	field.init = p.parse_expression()!
 
-	if p.current_token.kind == .punc_comma {
-		p.eat(.punc_comma)!
-	}
+	p.eat(.punc_comma)!
 
 	return field
 }
@@ -165,7 +186,23 @@ fn (mut p Parser) parse_function_statement() !ast.Statement {
 		}
 	}
 
+	if p.current_token.kind == .punc_comma {
+		p.eat(.punc_comma)!
+		p.eat_msg(.identifier, 'Expected the name of an identifier for the error type')!
+
+		if unwrapped := p.current_token.literal {
+			statement.throw_type = ast.Identifier{
+				name: unwrapped
+			}
+		}
+	}
+
+
+	p.eat(.punc_open_brace)!
+
 	p.parse_function_body(mut &statement.body)!
+
+	p.eat(.punc_close_brace)!
 
 	return statement
 }
@@ -218,14 +255,10 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 }
 
 fn (mut p Parser) parse_function_body(mut body []ast.Statement) ! {
-	p.eat(.punc_open_brace)!
-
 	for p.current_token.kind != .punc_close_brace {
 		statement := p.parse_statement()!
 		body << statement
 	}
-
-	p.eat(.punc_close_brace)!
 }
 
 fn (mut p Parser) parse_export_statement() !ast.Statement {
@@ -409,8 +442,6 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_primary_expression() !ast.Expression {
-	println(p.current_token)
-
 	mut expr := match p.current_token.kind {
 		.literal_string { p.parse_string_expression()! }
 		.literal_number { p.parse_number_expression()! }
