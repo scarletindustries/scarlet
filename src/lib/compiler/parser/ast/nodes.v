@@ -157,6 +157,12 @@ pub:
 	body []Statement
 }
 
+pub struct PostfixExpression {
+pub mut:
+	expression Expression
+	op         Operator
+}
+
 pub struct ForInStatement {
 	body []Statement
 	identifier Identifier
@@ -196,6 +202,7 @@ pub type Expression = FunctionCallExpression
 	| RangeExpression
 	| BlockExpression
 	| ArrayExpression
+	| PostfixExpression
 
 pub type Statement = ConstStatement
 	| ExportStatement

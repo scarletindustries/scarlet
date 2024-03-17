@@ -29,8 +29,13 @@ fn keywords_and_punctuation() {
     }
 
     counter := 0
-    for counter < 10 {
-        counter = counter + 1
+
+    for {
+        if counter >= 10 {
+            break
+        }
+
+        counter++
     }
 
     assert true, 'This is an error message'

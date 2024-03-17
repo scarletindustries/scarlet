@@ -64,7 +64,9 @@ pub enum Kind {
 	punc_gte // >=
 	punc_lte // <=
 	punc_plus // +
+	punc_plusplus // ++
 	punc_minus // -
+	punc_minusminus // --
 	punc_mul // *
 	punc_div // /
 	punc_mod // %

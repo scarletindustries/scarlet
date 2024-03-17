@@ -162,7 +162,9 @@ fn (mut p Parser) parse_for_statement() !ast.Statement {
 		}
 	}
 
-	return ast.ForStatement{}
+	return ast.ForStatement{
+		body: p.parse_block('Expected opening brace for the `for` block')!
+	}
 }
 
 fn (mut p Parser) parse_or_statement() !ast.Statement {
@@ -570,6 +572,24 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 
 	mut left := p.parse_primary_expression()!
 
+	if left is ast.NumberLiteral {
+		peeked := p.scanner.peek_token()
+
+		print('peeked: ')
+		println(peeked)
+
+		if peeked.kind == .punc_plusplus || peeked.kind == .punc_minusminus {
+			p.eat(peeked.kind)!
+
+			left = ast.PostfixExpression{
+				expression: left,
+				op: ast.Operator{
+					kind: peeked.kind
+				},
+			}
+		}
+	}
+
 	if p.current_token.kind == .punc_dotdot {
 		p.eat_msg(.punc_dotdot, 'Expected range punctuation')!
 
@@ -582,7 +602,7 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 	}
 
 	for p.current_token.kind in [.punc_equals_comparator, .punc_not_equal, .punc_plus, .punc_minus,
-		.punc_mul, .punc_div, .punc_mod, .punc_gt, .punc_lt] {
+		.punc_mul, .punc_div, .punc_mod, .punc_gt, .punc_lt, .punc_gte] {
 		operator := p.current_token.kind
 
 		p.eat(operator)!
