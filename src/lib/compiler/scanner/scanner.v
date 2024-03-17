@@ -47,6 +47,13 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 		return identifier
 	}
 
+	if ch == `-` && s.peek_char() == `>` {
+		s.incr_pos()
+		s.incr_pos()
+
+		return s.new_token(.punc_arrow, none)
+	}
+
 	if ch.is_alnum() {
 		if ch.is_digit() {
 			return s.scan_number(ch)

@@ -81,7 +81,9 @@ fn option_result() ?int, Error  {
     }
 
     if random() > 0.5 {
-        throw Error{msg: 'Something went wrong'}
+        throw Error{
+            msg: 'Something went wrong',
+        }
     }
 
     return 1
@@ -92,13 +94,13 @@ fn asdf() {
 }
 
 fn asdf2() {
-    result := option() or e -> {
+    result := option() or e {
         return 10
     }
 }
 
 fn asdf3() {
-    result := result() or e -> {
+    result := result() or e {
         return 10
     }
 

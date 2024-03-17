@@ -85,13 +85,16 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 			p.parse_function_statement()!
 		}
 		.kw_if {
-			return error('IF statements are not implemtned yet lmao')
+			p.parse_if_statement()!
 		}
 		.kw_throw {
 			p.parse_throw_statement()!	
 		}
 		.kw_return {
 			p.parse_return_statement()!
+		}
+		.kw_or {
+			p.parse_or_statement()!
 		}
 		.identifier {
 			p.parse_expression()!
@@ -105,6 +108,67 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 	}
 
 	return result
+}
+
+fn (mut p Parser) parse_or_statement() !ast.Statement {
+	p.eat(.kw_or)!
+
+	// or statements can have an argument passed into them like this `fn() or err -> { .. }`
+	// or just by passing a block `fn() or { .. }`
+
+	mut statement := ast.OrStatement{}
+
+	if p.current_token.kind == .identifier {
+		mut current := p.eat(.identifier)!
+
+		if p.current_token.kind == .punc_arrow {
+			println('[INFO] Handling options/results with an `or {}` block does not require an arrow. You can safely remove it.')
+			p.eat(.punc_arrow)!
+		}
+
+		if unwrapped := current.literal {
+			statement.receiver = ast.Identifier {
+				name: unwrapped
+			}
+		} else {
+			return error('Expected a valid identifier for the or {} block\'s receiving argument')
+		}
+	}
+
+	if p.current_token.kind == .punc_open_brace {
+		statement.body = p.parse_block('Expected an opening brace for the `or` block')!
+	} else {
+		statement.body = [p.parse_expression()!]
+	}
+
+	return statement
+}
+
+fn (mut p Parser) parse_block(no_open_brace_message string) ![]ast.Statement {
+	mut statements := []ast.Statement{}
+
+	p.eat_msg(.punc_open_brace, no_open_brace_message)!
+
+	for p.current_token.kind != .punc_close_brace {
+		statements << p.parse_statement()!
+	}
+
+	p.eat(.punc_close_brace)!
+
+	return statements
+}
+
+fn (mut p Parser) parse_if_statement() !ast.Statement {
+	p.eat(.kw_if)!
+
+	condition := p.parse_expression()!
+
+	mut statement := ast.IfStatement{
+		condition: condition,
+		body: p.parse_block('Expected if statement to have an opening brace {')!
+	}
+
+	return statement
 }
 
 fn (mut p Parser) parse_throw_statement() !ast.Statement {
@@ -133,7 +197,7 @@ fn (mut p Parser) parse_struct_initialisation() !ast.Expression {
 fn (mut p Parser) parse_struct_init_field() !ast.StructInitialisationField {
 	mut field := ast.StructInitialisationField{}
 
-	mut current := p.eat(.identifier)!
+	mut current := p.eat_msg(.identifier, 'Expected identifier for struct field name')!
 
 	if unwrapped := current.literal {
 		field.identifier = ast.Identifier{
@@ -165,7 +229,7 @@ fn (mut p Parser) parse_function_statement() !ast.Statement {
 
 	p.eat(.kw_function)!
 
-	mut identifier := p.eat(.identifier)!
+	mut identifier := p.eat_msg(.identifier, 'Expected an identifier when declaring a function')!
 
 	if unwrapped := identifier.literal {
 		statement.identifier = ast.Identifier{
@@ -177,8 +241,13 @@ fn (mut p Parser) parse_function_statement() !ast.Statement {
 
 	p.parse_parameters(mut &statement.params)!
 
-	if p.current_token.kind == .identifier {
-		p.eat(.identifier)!
+	if p.current_token.kind == .identifier || p.current_token.kind == .punc_question_mark {
+		if p.current_token.kind == .punc_question_mark {
+			statement.is_return_option = true
+			p.eat(.punc_question_mark)!
+		}
+
+		p.eat_msg(.identifier, 'Expected an identifier when specifying the return type of a function')!
 
 		if unwrapped := p.current_token.literal {
 			statement.return_type = ast.Identifier{
@@ -237,7 +306,7 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 	if p.current_token.kind == .punc_colon {
 		p.eat(.punc_colon)!
 
-		current = p.eat(.identifier)!
+		current = p.eat_msg(.identifier, 'Expected identifier for function parameter')!
 
 		if unwrapped := current.literal {
 			param.typ = ast.Identifier{
@@ -300,7 +369,7 @@ fn (mut p Parser) parse_declaration_declaration() !ast.Statement {
 fn (mut p Parser) parse_struct_statement() !ast.Statement {
 	p.eat(.kw_struct)!
 
-	mut statement := ast.StructStatement{
+	mut statement := ast.StructDeclarationStatement{
 		identifier: ast.Identifier{
 			name: p.get_token_literal(.identifier)!
 		}
@@ -323,7 +392,7 @@ fn (mut p Parser) parse_struct_fields(mut fields []ast.StructField) ! {
 fn (mut p Parser) parse_struct_field() !ast.StructField {
 	mut field := ast.StructField{}
 
-	mut current := p.eat(.identifier)!
+	mut current := p.eat_msg(.identifier, 'Expected identifier for struct field name')!
 
 	if unwrapped := current.literal {
 		field.identifier = ast.Identifier{
@@ -335,7 +404,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 
 	p.eat_msg(.punc_colon, 'Expected colon for struct field type')!
 
-	current = p.eat(.identifier)!
+	current = p.eat_msg(.identifier, 'Expected identifier for struct type')!
 
 	if unwrapped := current.literal {
 		field.typ = ast.Identifier{
@@ -420,6 +489,13 @@ fn (mut p Parser) parse_const_statement() !ast.Statement {
 }
 
 fn (mut p Parser) parse_expression() !ast.Expression {
+	if p.current_token.kind == .punc_exclamation_mark {
+		p.eat(.punc_exclamation_mark)!
+		return ast.UnaryExpression{
+			expression: p.parse_expression()!
+		}
+	}
+
 	mut left := p.parse_primary_expression()!
 
 	if p.current_token.kind == .punc_open_brace {
@@ -451,6 +527,9 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		.literal_string { p.parse_string_expression()! }
 		.literal_number { p.parse_number_expression()! }
 		.identifier { p.parse_identifier_expression()! }
+		.kw_none { p.eat(.kw_none)!; ast.NoneExpression{} }
+		.kw_true { p.eat(.kw_true)!; ast.BooleanLiteral{ value: true } }
+		.kw_false { p.eat(.kw_false)!; ast.BooleanLiteral{ value: false } }
 		else { return error('Expected primary expression at ${p.current_token.line}:${p.current_token.column}. Got ${p.current_token.kind}') }
 	}
 
@@ -501,11 +580,19 @@ fn (mut p Parser) parse_function_call_expression(name string) !ast.Expression {
 	// Consume the closing parenthesis
 	p.eat(.punc_close_paren)!
 
+	mut has_exclamation_mark := false
+
+	if p.current_token.kind == .punc_exclamation_mark {
+		has_exclamation_mark = true
+		p.eat(.punc_exclamation_mark)!
+	}
+
 	return ast.FunctionCallExpression{
 		identifier: ast.Identifier{
 			name: name
-		}
-		arguments: arguments
+		},
+		arguments: arguments,
+		has_exclamation_mark: has_exclamation_mark
 	}
 }
 

@@ -39,6 +39,7 @@ pub enum Kind {
 	kw_none // none
 	kw_or // or
 	// Punctuation
+	punc_arrow // ->
 	punc_comma // ,
 	punc_colon // :
 	punc_semicolon // ;

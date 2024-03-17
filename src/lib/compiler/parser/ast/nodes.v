@@ -17,6 +17,11 @@ pub mut:
 	value string
 }
 
+pub struct BooleanLiteral {
+pub:
+	value bool
+}
+
 pub struct Identifier {
 pub mut:
 	name string
@@ -79,7 +84,7 @@ pub mut:
 	declaration Statement
 }
 
-pub struct StructStatement {
+pub struct StructDeclarationStatement {
 pub mut:
 	identifier Identifier
 	fields     []StructField
@@ -92,10 +97,13 @@ pub mut:
 	init       ?Expression
 }
 
+pub struct NoneExpression {}
+
 pub struct FunctionStatement {
 pub mut:
 	identifier  Identifier
 	return_type ?Identifier
+	is_return_option bool
 	throw_type  ?Identifier
 	params      []FunctionParameter
 	body        []Statement
@@ -110,6 +118,7 @@ pub mut:
 pub struct FunctionCallExpression {
 	identifier Identifier
 	arguments  []Expression
+	has_exclamation_mark bool
 }
 
 pub struct PropertyAccessExpression {
@@ -123,12 +132,35 @@ pub:
 	expression Expression
 }
 
+pub struct IfStatement {
+pub:
+	condition Expression
+	body 	  []Statement
+}
+
+pub struct OrStatement {
+pub mut:
+	body 	 []Statement
+	receiver ?Identifier
+}
+
+pub struct UnaryExpression {
+pub mut:
+	expression Expression
+	op         Operator
+}
+
 pub type Expression = FunctionCallExpression
 	| Identifier
 	| NumberLiteral
 	| PropertyAccessExpression
 	| StringLiteral
-	| BinaryExpression | StructInitialisation | StructInitialisationField
+	| BinaryExpression
+	| StructInitialisation
+	| StructInitialisationField
+	| NoneExpression
+	| UnaryExpression
+	| BooleanLiteral
 
 pub type Statement = ConstStatement
 	| ExportStatement
@@ -138,6 +170,10 @@ pub type Statement = ConstStatement
 	| ImportDeclaration
 	| ReturnStatement
 	| StructField
-	| StructStatement | BinaryExpression | ThrowStatement
+	| StructDeclarationStatement
+	| BinaryExpression
+	| ThrowStatement
+	| IfStatement
+	| OrStatement
 
 pub type ASTNode = Expression | Statement
