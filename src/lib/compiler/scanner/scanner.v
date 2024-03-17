@@ -21,6 +21,14 @@ pub fn new_scanner(input string) &Scanner {
 	}
 }
 
+pub fn (s Scanner) get_line() int {
+	return s.state.get_line()
+}
+
+pub fn (s Scanner) get_column() int {
+	return s.state.get_column()
+}
+
 pub fn (mut s Scanner) scan_next() compiler.Token {
 	if s.state.get_pos() == s.input.len {
 		return s.new_token(.eof, none)
@@ -49,9 +57,14 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 
 	if ch == `-` && s.peek_char() == `>` {
 		s.incr_pos()
-		s.incr_pos()
 
 		return s.new_token(.punc_arrow, none)
+	}
+
+	// Must do this check before checking for numbers
+	if ch == `.` && s.peek_char() == `.` {
+		s.incr_pos()
+		return s.new_token(.punc_dotdot, none)
 	}
 
 	if ch.is_alnum() {
@@ -174,7 +187,7 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			next := s.peek_char()
 
 			// Handling a comment, we should skip until the end of the line
-			// In the future, we should comments as an AST node
+			// In the future, we should make comments an AST node
 			if next == `/` {
 				mut end_of_line := s.state.get_pos()
 
@@ -251,6 +264,9 @@ fn (mut s Scanner) scan_identifier(from u8) compiler.Token {
 	return s.new_token(.identifier, result)
 }
 
+// Not a big fan of how this is implemented right now, it's
+// too greedy and requires backtracking to figure out
+// if the dots represent other tokens, or just a dotdot
 fn (mut s Scanner) scan_number(from u8) compiler.Token {
 	mut result := from.ascii_str()
 
@@ -259,10 +275,20 @@ fn (mut s Scanner) scan_number(from u8) compiler.Token {
 	for {
 		next := s.peek_char()
 
+		if next == `.` && has_dot {
+			result = result[..result.len - 1]
+			s.decr_pos()
+			break
+		}
+
 		if next.is_digit() {
 			s.incr_pos()
 			result += next.ascii_str()
 		} else if next == `.` && !has_dot {
+
+			// Only works if the chars after the dot
+			// are also numerical
+
 			has_dot = true
 			s.incr_pos()
 			result += next.ascii_str()
@@ -276,10 +302,7 @@ fn (mut s Scanner) scan_number(from u8) compiler.Token {
 
 fn (mut s Scanner) peek_char() u8 {
 	assert s.state.get_pos() < s.input.len, 'scanner at end of input'
-
-	ch := s.input[s.state.get_pos()]
-
-	return ch
+	return s.input[s.state.get_pos()]
 }
 
 fn (mut s Scanner) incr_pos() {
@@ -290,4 +313,14 @@ fn (mut s Scanner) incr_pos() {
 	}
 
 	s.state.incr_pos()
+}
+
+fn (mut s Scanner) decr_pos() {
+	if s.input[s.state.get_pos()] == `\n` {
+		s.state.decr_line()
+	} else {
+		s.state.decr_column()
+	}
+
+	s.state.decr_pos()
 }

@@ -19,4 +19,5 @@ pub const keyword_map = {
 	'else':		Kind.kw_else
 	'throw':	Kind.kw_throw
 	'or':       Kind.kw_or
+	'for': 		Kind.kw_for
 }

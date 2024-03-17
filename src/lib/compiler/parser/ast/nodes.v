@@ -129,13 +129,15 @@ pub:
 
 pub struct ReturnStatement {
 pub:
-	expression Expression
+	expression ?Expression
 }
 
 pub struct IfStatement {
 pub:
 	condition Expression
 	body 	  []Statement
+pub mut:
+	else_statement ?Statement
 }
 
 pub struct OrStatement {
@@ -150,17 +152,50 @@ pub mut:
 	op         Operator
 }
 
+pub struct ForStatement {
+pub:
+	body []Statement
+}
+
+pub struct ForInStatement {
+	body []Statement
+	identifier Identifier
+	expression Expression
+}
+
+pub struct BlockExpression {
+pub:
+	body []Statement
+}
+
+pub struct ContinueStatement {}
+
+pub struct BreakStatement {}
+
+pub struct RangeExpression {
+pub:
+	start Expression
+	end   Expression
+}
+
+pub struct ArrayExpression {
+	elements []Expression
+}
+
 pub type Expression = FunctionCallExpression
-	| Identifier
-	| NumberLiteral
-	| PropertyAccessExpression
 	| StringLiteral
+	| NumberLiteral
+	| BooleanLiteral
+	| Identifier
+	| PropertyAccessExpression
 	| BinaryExpression
 	| StructInitialisation
 	| StructInitialisationField
 	| NoneExpression
 	| UnaryExpression
-	| BooleanLiteral
+	| RangeExpression
+	| BlockExpression
+	| ArrayExpression
 
 pub type Statement = ConstStatement
 	| ExportStatement
@@ -175,5 +210,9 @@ pub type Statement = ConstStatement
 	| ThrowStatement
 	| IfStatement
 	| OrStatement
+	| ForStatement
+	| ForInStatement
+	| ContinueStatement
+	| BreakStatement
 
 pub type ASTNode = Expression | Statement

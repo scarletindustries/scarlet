@@ -75,7 +75,7 @@ fn option() ?int {
     return 1
 }
 
-fn option_result() ?int, Error  {
+fn option_result() ?int, Error {
     if random() > 0.5 {
         return none
     }

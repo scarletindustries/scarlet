@@ -37,6 +37,21 @@ pub fn (s ScannerState) get_column() int {
 	return s.column
 }
 
+@[inline]
+pub fn (mut s ScannerState) decr_pos() {
+	s.pos--
+}
+
+@[inline]
+pub fn (mut s ScannerState) decr_line() {
+	s.line--
+}
+
+@[inline]
+pub fn (mut s ScannerState) decr_column() {
+	s.column--
+}
+
 pub fn (mut s ScannerState) incr_line() {
 	s.line++
 	s.column = state.default_column_n
