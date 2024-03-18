@@ -140,7 +140,8 @@ fn keywords_and_punctuation() {
     }
 
     counter := 0
-    for counter < 10 {
+
+    for {
         counter = counter + 1
     }
 

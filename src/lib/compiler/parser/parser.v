@@ -65,7 +65,7 @@ pub fn (mut p Parser) parse_program() !ast.BlockExpression {
 
 	for p.current_token.kind != .eof {
 		statement := p.parse_statement() or {
-			println(program)
+			// println(program)
 			println('=====================Compiler Bug=====================')
 			println('| The above is the program parsed up until the error |')
 			println('|   Plz report this on GitHub, with your full code   |')
@@ -83,6 +83,14 @@ pub fn (mut p Parser) parse_program() !ast.BlockExpression {
 fn (mut p Parser) peek_next() ?compiler.Token {
 	if p.index + 1 < p.tokens.len {
 		return p.tokens[p.index + 1]
+	}
+
+	return none
+}
+
+fn (mut p Parser) peek_ahead(distance int) ?compiler.Token {
+	if p.index + distance < p.tokens.len {
+		return p.tokens[p.index + distance]
 	}
 
 	return none
@@ -612,14 +620,20 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 	left := p.parse_primary_expression()!
 
 	if left is ast.Identifier {
-		p.eat_msg(.identifier, 'Expected an identifier')!
+		// possible that we're starting a struct initialisation,
+		// so if the next token is an opening brace, we'll parse that.
+		// Couldn't think of a better way than just trying to parse it
+		// and if it fails, reset the index and current token. Can
+		// look and improve this later on.
+		if p.current_token.kind == .punc_open_brace {
+			curr_index := p.index
+			curr_token := p.current_token
 
-		if unwrapped := p.peek_next() {
-			print('unwrapped: ')
-			println(unwrapped)
-
-			if unwrapped.kind == .punc_open_brace {
-				return p.parse_struct_initialisation()!
+			if result := p.parse_struct_initialisation() {
+				return result
+			} else {
+				p.index = curr_index
+				p.current_token = curr_token
 			}
 		}
 	}
@@ -761,7 +775,7 @@ fn (mut p Parser) parse_function_call_expression(name string) !ast.Expression {
 }
 
 fn (mut p Parser) parse_identifier_expression() !ast.Expression {
-	unwrapped := p.get_token_literal(.identifier, 'Expected an identifier')!
+	unwrapped := p.get_token_literal(.identifier, 'Expected an identifier as part of an expression')!
 
 	if p.current_token.kind == .punc_open_paren {
 		return p.parse_function_call_expression(unwrapped)!
