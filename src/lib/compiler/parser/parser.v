@@ -13,32 +13,32 @@ import lib.compiler
  */
 
 pub struct Parser {
+	tokens  []compiler.Token
 mut:
-	scanner       	  &scanner.Scanner
-	current_token 	  compiler.Token
-	all_parsed_tokens []compiler.Token
+	scanner &scanner.Scanner
+	index 	int
+	current_token compiler.Token
 }
 
 pub fn new_parser(mut s scanner.Scanner) Parser {
+	tokens := s.scan_all()
+
 	return Parser{
-		scanner: s
-		current_token: s.scan_next()
-		all_parsed_tokens: [],
+		tokens: tokens,
+		scanner: s,
+		index: 0,
+		current_token: tokens[0],
 	}
-}
-
-fn (mut p Parser) scan_next() !compiler.Token {
-	current := p.current_token
-	p.current_token = p.scanner.scan_next()
-
-	p.all_parsed_tokens << current
-
-	return current
 }
 
 fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 	if p.current_token.kind == kind {
-		return p.scan_next()
+		old := p.current_token
+
+		p.index = p.index + 1
+		p.current_token = p.tokens[p.index]
+
+		return old
 	}
 
 	return error('[eat] Expected ${kind}, got ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
@@ -60,17 +60,16 @@ fn (mut p Parser) get_token_literal(kind token.Kind, message string) !string {
 	return error('Expected token literal for \'${p.current_token}\' ${p.current_token.line}:${p.current_token.column}')
 }
 
-pub fn (mut p Parser) parse_program() !ast.Block {
-	mut program := ast.Block{}
+pub fn (mut p Parser) parse_program() !ast.BlockExpression {
+	mut program := ast.BlockExpression{}
 
 	for p.current_token.kind != .eof {
 		statement := p.parse_statement() or {
-			// println(program)
+			println(program)
 			println('=====================Compiler Bug=====================')
 			println('| The above is the program parsed up until the error |')
 			println('|   Plz report this on GitHub, with your full code   |')
 			println('======================================================')
-			println(p.all_parsed_tokens)
 			return error(err.msg())
 
 		}
@@ -79,6 +78,14 @@ pub fn (mut p Parser) parse_program() !ast.Block {
 	}
 
 	return program
+}
+
+fn (mut p Parser) peek_next() ?compiler.Token {
+	if p.index + 1 < p.tokens.len {
+		return p.tokens[p.index + 1]
+	}
+
+	return none
 }
 
 fn (mut p Parser) parse_statement() !ast.Statement {
@@ -113,11 +120,20 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.kw_continue {
 			p.parse_continue()!
 		}
+		.kw_assert {
+			p.parse_assert()!
+		}
 		.kw_break {
 			p.parse_break()!
 		}
 		.identifier {
-			p.parse_expression()!
+			if unwrapped := p.peek_next() {
+				if unwrapped.kind == .punc_equals {
+					return p.parse_assignment()!
+				}
+			}
+
+			return p.parse_expression()!
 		}
 		.punc_declaration {
 			p.parse_declaration()!
@@ -128,6 +144,41 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 	}
 
 	return result
+}
+
+fn (mut p Parser) parse_assert() !ast.Statement {
+	p.eat(.kw_assert)!
+
+	expression := p.parse_expression()!
+
+	p.eat(.punc_comma)!
+
+	message := p.parse_expression()!
+
+	return ast.AssertStatement{
+		expression: expression,
+		message: message,
+	}
+}
+
+fn (mut p Parser) parse_assignment() !ast.Statement {
+	mut statement := ast.AssignmentStatement{}
+
+	current := p.eat_msg(.identifier, 'Expected identifier for assignment')!
+
+	if unwrapped := current.literal {
+		statement.identifier = ast.Identifier{
+			name: unwrapped
+		}
+	} else {
+		return error('Expected identifier')
+	}
+
+	p.eat(.punc_equals)!
+
+	statement.expression = p.parse_expression()!
+
+	return statement
 }
 
 fn (mut p Parser) parse_continue() !ast.Statement {
@@ -144,21 +195,17 @@ fn (mut p Parser) parse_for_statement() !ast.Statement {
 	p.eat(.kw_for)!
 
 	if p.current_token.kind == .identifier {
-		identifier := p.eat_msg(.identifier, 'Expected identifier for `for` statement')!
+		name := p.get_token_literal(.identifier, 'Expected identifier for `for` block variable')!
 
 		p.eat(.kw_in)!
 
 		expression := p.parse_expression()!
 		body := p.parse_block('Expected an opening brace for the `for` block')!
 
-		if unwrapped := identifier.literal {
-			return ast.ForInStatement{
-				expression: expression,
-				body: body,
-				identifier: ast.Identifier{name: unwrapped},
-			}
-		} else {
-			return error('Expected identifier')
+		return ast.ForInStatement{
+			expression: expression,
+			body: body,
+			identifier: ast.Identifier{name: name},
 		}
 	}
 
@@ -267,7 +314,7 @@ fn (mut p Parser) parse_struct_init_field() !ast.StructInitialisationField {
 			name: unwrapped
 		}
 	} else {
-		return error('Expected identifier')
+		return error('Expected identifier2')
 	}
 
 	p.eat_msg(.punc_colon, 'Expected colon for initial struct field value')!
@@ -280,12 +327,10 @@ fn (mut p Parser) parse_struct_init_field() !ast.StructInitialisationField {
 }
 
 fn (mut p Parser) parse_return_statement() !ast.Statement {
-
-	return_line := p.scanner.get_line()
-	p.eat(.kw_return)!
+	ret := p.eat(.kw_return)!
 
 	// Values being returned must be on the same line
-	if p.scanner.get_line() == return_line {
+	if p.current_token.line == ret.line {
 		return ast.ReturnStatement{
 			expression: p.parse_expression()!
 		}
@@ -295,18 +340,12 @@ fn (mut p Parser) parse_return_statement() !ast.Statement {
 }
 
 fn (mut p Parser) parse_function_statement() !ast.Statement {
-	mut statement := ast.FunctionStatement{}
-
 	p.eat(.kw_function)!
 
-	mut identifier := p.eat_msg(.identifier, 'Expected an identifier when declaring a function')!
-
-	if unwrapped := identifier.literal {
-		statement.identifier = ast.Identifier{
-			name: unwrapped
+	mut statement := ast.FunctionStatement{
+		identifier: ast.Identifier{
+			name: p.get_token_literal(.identifier, 'Expected identifier for function name')!
 		}
-	} else {
-		return error('Expected identifier')
 	}
 
 	p.parse_parameters(mut &statement.params)!
@@ -370,7 +409,7 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 			name: unwrapped
 		}
 	} else {
-		return error('Expected identifier')
+		return error('Expected identifier 4')
 	}
 
 	if p.current_token.kind == .punc_colon {
@@ -383,7 +422,7 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 				name: unwrapped
 			}
 		} else {
-			return error('Expected identifier')
+			return error('Expected identifier 5')
 		}
 	}
 
@@ -469,7 +508,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 			name: unwrapped
 		}
 	} else {
-		return error('Expected identifier')
+		return error('Expected identifier 6')
 	}
 
 	p.eat_msg(.punc_colon, 'Expected colon for struct field type')!
@@ -481,7 +520,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 			name: unwrapped
 		}
 	} else {
-		return error('Expected identifier')
+		return error('Expected identifier 9')
 	}
 
 	if p.current_token.kind == .punc_equals {
@@ -570,25 +609,7 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 		}
 	}
 
-	mut left := p.parse_primary_expression()!
-
-	if left is ast.NumberLiteral {
-		peeked := p.scanner.peek_token()
-
-		print('peeked: ')
-		println(peeked)
-
-		if peeked.kind == .punc_plusplus || peeked.kind == .punc_minusminus {
-			p.eat(peeked.kind)!
-
-			left = ast.PostfixExpression{
-				expression: left,
-				op: ast.Operator{
-					kind: peeked.kind
-				},
-			}
-		}
-	}
+	left := p.parse_primary_expression()!
 
 	if p.current_token.kind == .punc_dotdot {
 		p.eat_msg(.punc_dotdot, 'Expected range punctuation')!
@@ -609,7 +630,7 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 
 		right := p.parse_primary_expression()!
 
-		left = ast.BinaryExpression{
+		return ast.BinaryExpression{
 			left: left,
 			right: right,
 			op: ast.Operator{
@@ -672,7 +693,6 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
-	// Consume the dot
 	p.eat(.punc_dot)!
 
 	// The next token must be an identifier (property or method)

@@ -2,11 +2,6 @@ module ast
 
 import lib.compiler.token
 
-pub struct Block {
-pub mut:
-	body []ASTNode
-}
-
 pub struct StringLiteral {
 pub mut:
 	value string
@@ -169,8 +164,14 @@ pub struct ForInStatement {
 	expression Expression
 }
 
+pub struct AssignmentStatement {
+pub mut:
+	identifier Identifier
+	expression Expression
+}
+
 pub struct BlockExpression {
-pub:
+pub mut:
 	body []Statement
 }
 
@@ -185,7 +186,14 @@ pub:
 }
 
 pub struct ArrayExpression {
+pub:
 	elements []Expression
+}
+
+pub struct AssertStatement {
+pub:
+	expression  Expression
+	message 	Expression
 }
 
 pub type Expression = FunctionCallExpression
@@ -221,5 +229,5 @@ pub type Statement = ConstStatement
 	| ForInStatement
 	| ContinueStatement
 	| BreakStatement
-
-pub type ASTNode = Expression | Statement
+	| AssignmentStatement
+	| AssertStatement

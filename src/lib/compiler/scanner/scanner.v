@@ -21,14 +21,6 @@ pub fn new_scanner(input string) &Scanner {
 	}
 }
 
-pub fn (s Scanner) get_line() int {
-	return s.state.get_line()
-}
-
-pub fn (s Scanner) get_column() int {
-	return s.state.get_column()
-}
-
 pub fn (mut s Scanner) scan_next() compiler.Token {
 	if s.state.get_pos() == s.input.len {
 		return s.new_token(.eof, none)
@@ -310,23 +302,6 @@ fn (mut s Scanner) scan_number(from u8) compiler.Token {
 	return s.new_token(.literal_number, result)
 }
 
-// Peek ahead and scan the next token. This is
-// poorly implemented at the moment, and should be
-// eventually refactored to be more efficient
-pub fn (mut s Scanner) peek_token() compiler.Token {
-	col := s.state.get_column()
-	line := s.state.get_line()
-	pos := s.state.get_pos()
-
-	t := s.scan_next()
-
-	s.state.set_column(col)
-	s.state.set_line(line)
-	s.state.set_pos(pos)
-
-	return t
-}
-
 fn (mut s Scanner) peek_char() u8 {
 	assert s.state.get_pos() < s.input.len, 'scanner at end of input'
 	return s.input[s.state.get_pos()]
@@ -350,4 +325,8 @@ fn (mut s Scanner) decr_pos() {
 	}
 
 	s.state.decr_pos()
+}
+
+pub fn (s Scanner) get_state() &state.ScannerState {
+	return s.state
 }

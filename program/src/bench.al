@@ -9,6 +9,8 @@ fn keywords_and_punctuation() {
         continue
     }
 
+    a.b.c.d.e()
+
     // inline block expression
     example := {
         test := 20
@@ -35,7 +37,7 @@ fn keywords_and_punctuation() {
             break
         }
 
-        counter++
+        counter = counter + 1
     }
 
     assert true, 'This is an error message'
