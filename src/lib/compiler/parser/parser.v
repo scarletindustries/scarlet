@@ -611,6 +611,19 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 
 	left := p.parse_primary_expression()!
 
+	if left is ast.Identifier {
+		p.eat_msg(.identifier, 'Expected an identifier')!
+
+		if unwrapped := p.peek_next() {
+			print('unwrapped: ')
+			println(unwrapped)
+
+			if unwrapped.kind == .punc_open_brace {
+				return p.parse_struct_initialisation()!
+			}
+		}
+	}
+
 	if p.current_token.kind == .punc_dotdot {
 		p.eat_msg(.punc_dotdot, 'Expected range punctuation')!
 
