@@ -287,7 +287,6 @@ fn (mut s Scanner) scan_number(from u8) compiler.Token {
 			s.incr_pos()
 			result += next.ascii_str()
 		} else if next == `.` && !has_dot {
-
 			// Only works if the chars after the dot
 			// are also numerical
 

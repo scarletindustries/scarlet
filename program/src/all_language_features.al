@@ -4,7 +4,7 @@ from './file.al' import a, b, c
 // Comment
 
 // const
-const name = 'alistair'
+const name = 'alistair the third'
 
 // Struct
 export struct Person {
@@ -143,6 +143,10 @@ fn keywords_and_punctuation() {
 
     for {
         counter = counter + 1
+
+        if counter > 10 {
+            break
+        }
     }
 
     assert true, 'This is an error message'

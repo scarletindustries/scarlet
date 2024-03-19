@@ -11,7 +11,7 @@ pub:
 	column  int        // The column number in the source where the token occurred
 }
 
-fn (t &Token) str() string {
+pub fn (t &Token) str() string {
 	if literal := t.literal {
 		if t.kind == .literal_string {
 			return '\'${literal}\''

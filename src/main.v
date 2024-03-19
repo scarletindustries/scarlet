@@ -4,6 +4,7 @@ import os
 import cli
 import lib.compiler.scanner
 import lib.compiler.parser
+import lib.compiler.generator
 
 fn main() {
 	mut app := cli.Command{
@@ -29,15 +30,16 @@ fn main() {
 
 					result := p.parse_program() or {
 						println(err.msg())
-						return
+						return	
 					}
-					
-					println(result)
+
+					println(generator.generate_js_from_block_expression(result).split('\n').map(it.trim(' \t')).join('\n'))
 				}
 			},
 		]
 	}
 
 	app.setup()
+
 	app.parse(os.args)
 }

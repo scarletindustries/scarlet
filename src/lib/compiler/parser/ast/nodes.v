@@ -36,7 +36,7 @@ pub mut:
 pub struct StructInitialisationField {
 pub mut:
 	identifier Identifier
-	init      Expression
+	init       Expression
 }
 
 pub struct StructInitialisation {
@@ -96,12 +96,12 @@ pub struct NoneExpression {}
 
 pub struct FunctionStatement {
 pub mut:
-	identifier  Identifier
-	return_type ?Identifier
+	identifier       Identifier
+	return_type      ?Identifier
 	is_return_option bool
-	throw_type  ?Identifier
-	params      []FunctionParameter
-	body        []Statement
+	throw_type       ?Identifier
+	params           []FunctionParameter
+	body             []Statement
 }
 
 pub struct FunctionParameter {
@@ -111,8 +111,9 @@ pub mut:
 }
 
 pub struct FunctionCallExpression {
-	identifier Identifier
-	arguments  []Expression
+pub:
+	identifier           Identifier
+	arguments            []Expression
 	has_exclamation_mark bool
 }
 
@@ -130,15 +131,16 @@ pub:
 pub struct IfStatement {
 pub:
 	condition Expression
-	body 	  []Statement
+	body      []Statement
 pub mut:
 	else_statement ?Statement
 }
 
 pub struct OrStatement {
 pub mut:
-	body 	 []Statement
-	receiver ?Identifier
+	body       []Statement
+	expression Expression
+	receiver   ?Identifier
 }
 
 pub struct UnaryExpression {
@@ -159,12 +161,19 @@ pub mut:
 }
 
 pub struct ForInStatement {
-	body []Statement
+pub:
+	body       []Statement
 	identifier Identifier
 	expression Expression
 }
 
 pub struct AssignmentStatement {
+pub mut:
+	identifier Identifier
+	expression Expression
+}
+
+pub struct DeclarationStatement {
 pub mut:
 	identifier Identifier
 	expression Expression
@@ -192,42 +201,42 @@ pub:
 
 pub struct AssertStatement {
 pub:
-	expression  Expression
-	message 	Expression
+	expression Expression
+	message    Expression
 }
 
-pub type Expression = FunctionCallExpression
-	| StringLiteral
-	| NumberLiteral
-	| BooleanLiteral
-	| Identifier
-	| PropertyAccessExpression
+pub type Expression = ArrayExpression
 	| BinaryExpression
+	| BlockExpression
+	| BooleanLiteral
+	| FunctionCallExpression
+	| Identifier
+	| NoneExpression
+	| NumberLiteral
+	| PostfixExpression
+	| PropertyAccessExpression
+	| RangeExpression
+	| StringLiteral
 	| StructInitialisation
 	| StructInitialisationField
-	| NoneExpression
 	| UnaryExpression
-	| RangeExpression
-	| BlockExpression
-	| ArrayExpression
-	| PostfixExpression
 
-pub type Statement = ConstStatement
+pub type Statement = AssertStatement
+	| AssignmentStatement
+	| BreakStatement
+	| ConstStatement
+	| ContinueStatement
 	| ExportStatement
 	| Expression
+	| ForInStatement
+	| ForStatement
 	| FunctionParameter
 	| FunctionStatement
-	| ImportDeclaration
-	| ReturnStatement
-	| StructField
-	| StructDeclarationStatement
-	| BinaryExpression
-	| ThrowStatement
 	| IfStatement
+	| ImportDeclaration
 	| OrStatement
-	| ForStatement
-	| ForInStatement
-	| ContinueStatement
-	| BreakStatement
-	| AssignmentStatement
-	| AssertStatement
+	| ReturnStatement
+	| StructDeclarationStatement
+	| StructField
+	| ThrowStatement
+	| DeclarationStatement
