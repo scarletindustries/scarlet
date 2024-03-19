@@ -133,7 +133,7 @@ pub:
 	condition Expression
 	body      []Statement
 pub mut:
-	else_statement ?Statement
+	else_body ?[]Statement
 }
 
 pub struct OrStatement {

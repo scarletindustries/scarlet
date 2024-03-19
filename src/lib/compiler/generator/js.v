@@ -62,13 +62,11 @@ pub fn generate_js(node ast.Statement) string {
 			}\n\n'
 		}
 		ast.IfStatement {
-			if else_statement := node.else_statement {
+			if else_body := node.else_body {
 				return 'if (${generate_js_from_expression(node.condition)}) {
 					${generate_js_from_statements(node.body)}
 				} else {
-					${generate_js_from_statements([
-					else_statement,
-				])}
+					${generate_js_from_statements(else_body)}
 				}'
 			}
 

@@ -292,7 +292,13 @@ fn (mut p Parser) parse_if_statement() !ast.Statement {
 	if p.current_token.kind == .kw_else {
 		p.eat(.kw_else)!
 
-		statement.else_statement = p.parse_statement()!
+		if p.current_token.kind == .kw_if {
+			statement.else_body = [p.parse_if_statement()!]
+		} else if p.current_token.kind == .punc_open_brace {
+			statement.else_body = p.parse_block('Expected else statement to have an opening brace {')!
+		} else {
+			statement.else_body = [p.parse_statement()!]
+		}
 	}
 
 	return statement
