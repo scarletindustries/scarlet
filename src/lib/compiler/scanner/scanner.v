@@ -93,7 +93,32 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				break
 			}
 
-			result += next.ascii_str()
+			mut next_char := next.ascii_str()
+
+			if next == `\\` {
+				peeked := s.peek_char()
+				s.incr_pos()
+
+				if peeked == `n` {
+					next_char = '\n'
+				} else if peeked == `t` {
+					next_char = '\t'
+				} else if peeked == `r` {
+					next_char = '\r'
+				} else if peeked == `0` {
+					next_char = '\0'
+				} else if peeked == `"` {
+					next_char = '"'
+				} else if peeked == `'` {
+					next_char = '\''
+				} else if peeked == `\\` {
+					next_char = '\\'
+				} else {
+					panic('unknown escape sequence \'${peeked}\'')
+				}
+			}
+
+			result += next_char
 		}
 
 		return s.new_token(.literal_string, result)
