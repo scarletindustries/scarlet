@@ -168,7 +168,7 @@ pub fn generate_js_from_expression(node ast.Expression) string {
 			return '${generate_js_from_expression(node.expression)}${generate_js_from_operator(node.op)}'
 		}
 		ast.PropertyAccessExpression {
-			return '${node.identifier.name}.${generate_js_from_expression(node.expression)}'
+			return '${generate_js_from_expression(node.left)}.${generate_js_from_expression(node.right)}'
 		}
 		ast.RangeExpression {
 			return 'Array.from({length: ${generate_js_from_expression(node.end)} - ${generate_js_from_expression(node.start)} + 1}, (_, i) => ${generate_js_from_expression(node.start)} + i)'

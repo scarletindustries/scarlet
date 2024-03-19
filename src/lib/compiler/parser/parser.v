@@ -65,7 +65,7 @@ pub fn (mut p Parser) parse_program() !ast.BlockExpression {
 
 	for p.current_token.kind != .eof {
 		statement := p.parse_statement() or {
-			// println(program)
+			println(program)
 			println('=====================Compiler Bug=====================')
 			println('| The above is the program parsed up until the error |')
 			println('|   Plz report this on GitHub, with your full code   |')
@@ -717,6 +717,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		}
 	}
 
+
 	for p.current_token.kind == .punc_dot {
 		expr = p.parse_dot_expression(expr)!
 	}
@@ -760,13 +761,16 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 	property := p.get_token_literal(.identifier, 'Expected an identifier for property access')!
 
 	if p.current_token.kind == .punc_open_paren {
-		return p.parse_function_call_expression(property)!
+		return ast.PropertyAccessExpression{
+			left: left
+			right: p.parse_function_call_expression(property)!
+		}
 	}
 
 	// Otherwise, it's a property access
 	return ast.PropertyAccessExpression{
-		expression: left
-		identifier: ast.Identifier{
+		left: left
+		right: ast.Identifier{
 			name: property
 		}
 	}

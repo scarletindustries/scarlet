@@ -119,8 +119,8 @@ pub:
 
 pub struct PropertyAccessExpression {
 pub:
-	expression Expression
-	identifier Identifier
+	left  Expression
+	right Expression
 }
 
 pub struct ReturnStatement {
