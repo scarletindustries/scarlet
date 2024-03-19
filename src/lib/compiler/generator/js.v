@@ -177,7 +177,7 @@ pub fn generate_js_from_expression(node ast.Expression) string {
 			return '${generate_js_from_expression(node.left)}.${generate_js_from_expression(node.right)}'
 		}
 		ast.RangeExpression {
-			return 'Array.from({length: ${generate_js_from_expression(node.end)} - ${generate_js_from_expression(node.start)} + 1}, (_, i) => ${generate_js_from_expression(node.start)} + i)'
+			return 'Array.from({length: ${generate_js_from_expression(node.end)} - ${generate_js_from_expression(node.start)}}, (_, i) => ${generate_js_from_expression(node.start)} + i)'
 		}
 		ast.StructInitialisation {
 			return 'new ${node.identifier.name}({
@@ -189,6 +189,9 @@ pub fn generate_js_from_expression(node ast.Expression) string {
 		}
 		ast.UnaryExpression {
 			return '${generate_js_from_operator(node.op)}${generate_js_from_expression(node.expression)}'
+		}
+		ast.ArrayIndexExpression {
+			return '${generate_js_from_expression(node.identifier)}${generate_js_from_expression(node.index)}'
 		}
 	}
 }

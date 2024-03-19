@@ -641,17 +641,30 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 		// Couldn't think of a better way than just trying to parse it
 		// and if it fails, reset the index and current token. Can
 		// look and improve this later on.
-		if p.current_token.kind == .punc_open_brace {
-			curr_index := p.index
-			curr_token := p.current_token
+		curr_index := p.index
+		curr_token := p.current_token
 
-			if result := p.parse_struct_initialisation(left) {
-				return result
-			} else {
-				p.index = curr_index
-				p.current_token = curr_token
+		match p.current_token.kind {
+			.punc_open_brace {
+				if result := p.parse_struct_initialisation(left) {
+					return result
+				} 
 			}
+
+			.punc_open_bracket {
+				if result := p.parse_expression() {
+					return ast.ArrayIndexExpression{
+						identifier: left
+						index: result
+					}
+				}
+			}
+
+			else {}
 		}
+
+		p.index = curr_index
+		p.current_token = curr_token
 	}
 
 	if p.current_token.kind == .punc_dotdot {

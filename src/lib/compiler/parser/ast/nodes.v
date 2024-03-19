@@ -194,6 +194,12 @@ pub:
 	end   Expression
 }
 
+pub struct ArrayIndexExpression {
+pub:
+	identifier Expression
+	index Expression
+}
+
 pub struct ArrayExpression {
 pub:
 	elements []Expression
@@ -220,6 +226,7 @@ pub type Expression = ArrayExpression
 	| StructInitialisation
 	| StructInitialisationField
 	| UnaryExpression
+	| ArrayIndexExpression
 
 pub type Statement = AssertStatement
 	| AssignmentStatement
