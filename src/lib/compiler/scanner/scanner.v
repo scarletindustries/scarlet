@@ -124,6 +124,20 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 		return s.new_token(.literal_string, result)
 	}
 
+	if ch == `&` {
+		if s.peek_char() == `&` {
+			s.incr_pos()
+			return s.new_token(.logical_and, none)
+		}
+	}
+
+	if ch == `|` {
+		if s.peek_char() == `|` {
+			s.incr_pos()
+			return s.new_token(.logical_or, none)
+		}
+	}
+
 	return match ch {
 		`,` {
 			s.new_token(.punc_comma, none)

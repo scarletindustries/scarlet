@@ -709,7 +709,7 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 	}
 
 	for p.current_token.kind in [.punc_equals_comparator, .punc_not_equal, .punc_plus, .punc_minus,
-		.punc_mul, .punc_div, .punc_mod, .punc_gt, .punc_lt, .punc_gte] {
+		.punc_mul, .punc_div, .punc_mod, .punc_gt, .punc_lt, .punc_gte, .punc_lte, .logical_and, .logical_or] {
 		operator := p.current_token.kind
 
 		p.eat(operator)!
@@ -738,6 +738,12 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		}
 		.identifier {
 			p.parse_identifier_expression()!
+		}
+		.punc_open_paren {
+			p.eat(.punc_open_paren)!
+			expression := p.parse_expression()!
+			p.eat(.punc_close_paren)!
+			return expression
 		}
 		.kw_none {
 			p.eat(.kw_none)!

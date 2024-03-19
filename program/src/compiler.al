@@ -5,6 +5,17 @@ struct Token {
   value string,
 }
 
+fn isLetter(c string) boolean {
+  isLetterLower := (c >= 'a') && (c <= 'z')
+  isLetterUpper := (c >= 'A') && (c <= 'Z')
+
+  return isLetterLower || isLetterUpper
+}
+
+fn isDigit(c string) boolean {
+  return (c >= '0') && (c <= '9')
+}
+
 fn lex(input string) []Token {
   // Implement lexer logic here
 }
