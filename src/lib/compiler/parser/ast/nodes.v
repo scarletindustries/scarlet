@@ -22,6 +22,13 @@ pub mut:
 	name string
 }
 
+pub struct TypeIdentifier {
+pub:
+	is_array bool
+	is_option bool
+	identifier Identifier
+}
+
 pub struct Operator {
 pub mut:
 	kind token.Kind
@@ -88,7 +95,7 @@ pub mut:
 pub struct StructField {
 pub mut:
 	identifier Identifier
-	typ        Identifier
+	typ        TypeIdentifier
 	init       ?Expression
 }
 
@@ -97,7 +104,7 @@ pub struct NoneExpression {}
 pub struct FunctionStatement {
 pub mut:
 	identifier       Identifier
-	return_type      ?Identifier
+	return_type      ?TypeIdentifier
 	is_return_option bool
 	throw_type       ?Identifier
 	params           []FunctionParameter
@@ -107,7 +114,7 @@ pub mut:
 pub struct FunctionParameter {
 pub mut:
 	identifier Identifier
-	typ        ?Identifier
+	typ        ?TypeIdentifier
 }
 
 pub struct FunctionCallExpression {
@@ -227,6 +234,7 @@ pub type Expression = ArrayExpression
 	| StructInitialisationField
 	| UnaryExpression
 	| ArrayIndexExpression
+	| TypeIdentifier
 
 pub type Statement = AssertStatement
 	| AssignmentStatement

@@ -57,7 +57,13 @@ pub fn generate_js(node ast.Statement) string {
 			return node.identifier.name
 		}
 		ast.FunctionStatement {
-			return 'function ${node.identifier.name}(${node.params.map(generate_js(it)).join(', ')}) {
+			mut rtn_typ := 'void'
+
+			if unwrapped := node.return_type {
+				rtn_typ = ': ${generate_js_from_expression(unwrapped)}'
+			}
+
+			return '/** @returns {${rtn_typ}} */ function ${node.identifier.name}(${node.params.map(generate_js(it)).join(', ')}) {
 				${generate_js_from_statements(node.body)}
 			}\n\n'
 		}
@@ -192,6 +198,9 @@ pub fn generate_js_from_expression(node ast.Expression) string {
 		}
 		ast.ArrayIndexExpression {
 			return '${generate_js_from_expression(node.identifier)}${generate_js_from_expression(node.index)}'
+		}
+		ast.TypeIdentifier {
+			return node.identifier.name
 		}
 	}
 }

@@ -133,6 +133,9 @@ fn (mut p Parser) parse_statement() !ast.Statement {
 		.kw_break {
 			p.parse_break()!
 		}
+		.kw_struct {
+			p.parse_struct_statement()!
+		}
 		.identifier {
 			if unwrapped := p.peek_next() {
 				if unwrapped.kind == .punc_equals {
@@ -375,18 +378,28 @@ fn (mut p Parser) parse_function_statement() !ast.Statement {
 
 	p.parse_parameters(mut &statement.params)!
 
-	if p.current_token.kind == .identifier || p.current_token.kind == .punc_question_mark {
+	if p.current_token.kind == .identifier || p.current_token.kind == .punc_open_bracket || p.current_token.kind == .punc_question_mark {
 		if p.current_token.kind == .punc_question_mark {
 			statement.is_return_option = true
 			p.eat(.punc_question_mark)!
 		}
 
-		p.eat_msg(.identifier, 'Expected an identifier when specifying the return type of a function')!
+		mut is_array := false
 
-		if unwrapped := p.current_token.literal {
-			statement.return_type = ast.Identifier{
-				name: unwrapped
+		if p.current_token.kind == .punc_open_bracket {
+			is_array = true
+			p.eat(.punc_open_bracket)!
+			p.eat(.punc_close_bracket)!
+		}
+
+		literal := p.get_token_literal(.identifier, 'Expected an identifier when specifying the return type of a function')!
+
+		statement.return_type = ast.TypeIdentifier{
+			identifier: ast.Identifier{
+				name: literal
 			}
+			is_array: is_array,
+			is_option: false
 		}
 	}
 
@@ -436,18 +449,26 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 		return error('Expected identifier 4')
 	}
 
-	if p.current_token.kind == .punc_colon {
-		p.eat(.punc_colon)!
 
-		current = p.eat_msg(.identifier, 'Expected identifier for function parameter type')!
+	mut is_array := false
 
-		if unwrapped := current.literal {
-			param.typ = ast.Identifier{
+	if p.current_token.kind == .punc_open_bracket {
+		is_array = true
+		p.eat(.punc_open_bracket)!
+		p.eat(.punc_close_bracket)!
+	}
+
+	current = p.eat_msg(.identifier, 'Expected identifier for function parameter type')!
+
+	if unwrapped := current.literal {
+		param.typ = ast.TypeIdentifier{
+			identifier: ast.Identifier{
 				name: unwrapped
-			}
-		} else {
-			return error('Expected identifier 5')
+			},
+			is_array: is_array
 		}
+	} else {
+		return error('Expected identifier 5')
 	}
 
 	if p.current_token.kind == .punc_comma {
@@ -535,13 +556,22 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 		return error('Expected identifier 6')
 	}
 
-	p.eat_msg(.punc_colon, 'Expected colon for struct field type')!
+	mut is_array := false
+
+	if p.current_token.kind == .punc_open_bracket {
+		is_array = true
+		p.eat(.punc_open_bracket)!
+		p.eat(.punc_close_bracket)!
+	}
 
 	current = p.eat_msg(.identifier, 'Expected identifier for struct type')!
 
 	if unwrapped := current.literal {
-		field.typ = ast.Identifier{
-			name: unwrapped
+		field.typ = ast.TypeIdentifier{
+			identifier: ast.Identifier{
+				name: unwrapped
+			}
+			is_array: is_array
 		}
 	} else {
 		return error('Expected identifier 9')
