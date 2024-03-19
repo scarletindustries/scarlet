@@ -33,7 +33,7 @@ fn main() {
 						return	
 					}
 
-					println(generator.generate_js_from_block_expression(result).split('\n').map(it.trim(' \t')).join('\n'))
+					println(generator.generate_js_root(result).split('\n').map(it.trim(' \t')).join('\n'))
 				}
 			},
 		]

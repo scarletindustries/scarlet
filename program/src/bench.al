@@ -1,4 +1,11 @@
 users := ['bob', 'alice', 'foo']
+
 for user in users {
-    println(user.to_upper())
+    println(user)
+}
+
+if users.length > 2 {
+    println('There are more than 2 users')
+} else {
+    println('There are less than 2 users')
 }

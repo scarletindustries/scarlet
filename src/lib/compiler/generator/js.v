@@ -3,6 +3,14 @@ module generator
 import lib.compiler.parser.ast
 import lib.compiler
 
+pub fn generate_js_root(stmt ast.BlockExpression) string {
+	return "(() => {
+		const println = console.log;
+
+		${generate_js_from_block_expression(stmt)}
+	})()"
+}
+
 pub fn generate_js(node ast.Statement) string {
 	match node {
 		ast.AssertStatement {
@@ -36,7 +44,7 @@ pub fn generate_js(node ast.Statement) string {
 			return '${generate_js_from_expression(node)};\n'
 		}
 		ast.ForInStatement {
-			return 'for (const ${node.identifier.name} in ${generate_js_from_expression(node.expression)}) {
+			return 'for (const ${node.identifier.name} of ${generate_js_from_expression(node.expression)}) {
 				${generate_js_from_statements(node.body)}
 			}\n\n'
 		}
