@@ -29,7 +29,6 @@ export fn compile(input string) string {
 }
 
 fn main() {
-  const exampleCode = 'const x = \'Hello, AL\''
-  result := compile(exampleCode)
+  result := compile(source)
   // Handle the result, such as saving to a file or executing
 }

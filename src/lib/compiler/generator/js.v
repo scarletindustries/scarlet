@@ -60,7 +60,7 @@ pub fn generate_js(node ast.Statement) string {
 			mut rtn_typ := 'void'
 
 			if unwrapped := node.return_type {
-				rtn_typ = ': ${generate_js_from_expression(unwrapped)}'
+				rtn_typ = '${generate_js_from_expression(unwrapped)}'
 			}
 
 			return '/** @returns {${rtn_typ}} */ function ${node.identifier.name}(${node.params.map(generate_js(it)).join(', ')}) {
