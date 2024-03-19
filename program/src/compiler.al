@@ -5,6 +5,22 @@ struct Token {
   value string,
 }
 
+struct AL_Array {
+    data []any = []
+
+    fn push(value any) {
+        this.data.push(value)
+    }
+
+    fn copy() AL_Array {
+        copy := AL_Array{
+            data: [].concat(this.data),
+        }
+
+        return copy
+    }
+}
+
 fn isLetter(c string) boolean {
   isLetterLower := (c >= 'a') && (c <= 'z')
   isLetterUpper := (c >= 'A') && (c <= 'Z')
@@ -35,8 +51,7 @@ fn generate(node Node) string {
 export fn compile(input string) string {
   tokens := lex(input)
   ast := parse(tokens)
-  output := generate(ast)
-  return output
+  return generate(ast)
 }
 
 fn main() {

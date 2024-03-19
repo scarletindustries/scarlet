@@ -58,12 +58,21 @@ pub fn generate_js(node ast.Statement) string {
 		}
 		ast.FunctionStatement {
 			mut rtn_typ := 'void'
+			mut throw_typ := 'never'
 
 			if unwrapped := node.return_type {
 				rtn_typ = '${generate_js_from_expression(unwrapped)}'
+
+				if unwrapped.is_array {
+					rtn_typ = 'Array<${rtn_typ}>'
+				}
 			}
 
-			return '/** @returns {${rtn_typ}} */ function ${node.identifier.name}(${node.params.map(generate_js(it)).join(', ')}) {
+			if unwrapped := node.throw_type {
+				throw_typ = '${generate_js_from_expression(unwrapped)}'
+			}
+
+			return '/** @returns {${rtn_typ}}\n@throws {${throw_typ}} */ function ${node.identifier.name}(${node.params.map(generate_js(it)).join(', ')}) {
 				${generate_js_from_statements(node.body)}
 			}\n\n'
 		}
@@ -99,6 +108,12 @@ pub fn generate_js(node ast.Statement) string {
 		ast.StructDeclarationStatement {
 			return 'class ${node.identifier.name} {
 				${node.fields.map(generate_js(it)).join('')}
+
+				constructor(init) {
+					${node.fields.filter(fn (it ast.StructField) bool {
+						return it.typ.identifier.name != 'Function'
+					}).map(it.identifier.name).map('this.' + it + ' = init.' + it).join(';\n')}
+				}
 			}\n\n'
 		}
 		ast.StructField {
@@ -113,8 +128,7 @@ pub fn generate_js(node ast.Statement) string {
 pub fn generate_js_from_struct_field(node ast.StructField) string {
 	return '
 		${node.identifier.name} = ${generate_js_from_optional_expression(node.init,
-		'undefined')}
-	\n'
+		'undefined')}\n'
 }
 
 pub fn generate_js_from_optional_expression(node ?ast.Expression, default string) string {

@@ -546,6 +546,26 @@ fn (mut p Parser) parse_struct_fields(mut fields []ast.StructField) ! {
 fn (mut p Parser) parse_struct_field() !ast.StructField {
 	mut field := ast.StructField{}
 
+	if p.current_token.kind == .kw_function {
+		fn_stmt := p.parse_function_statement()!
+
+		field.typ = ast.TypeIdentifier{
+			identifier: ast.Identifier{
+				name: 'Function'
+			}
+		}
+
+		if fn_stmt is ast.FunctionStatement {
+			field.identifier = fn_stmt.identifier
+		}
+
+		field.init = ast.BlockExpression{
+			body: [fn_stmt]
+		}
+
+		return field
+	}
+
 	mut current := p.eat_msg(.identifier, 'Expected identifier for struct field name')!
 
 	if unwrapped := current.literal {

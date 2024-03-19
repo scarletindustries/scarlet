@@ -1,5 +1,4 @@
-users := ['bob']
-// users := ['bob', 'alice', 'foo']
+users := ['bob', 'alice', 'foo']
 
 if users.length > 2 {
     println('There are more than 2 users')
