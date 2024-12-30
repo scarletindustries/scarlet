@@ -17,6 +17,28 @@ fn add(a, b) {
     return a + b
 }
 
+export enum MySubEnum {
+    D,
+    E,
+}
+
+export enum MyEnum {
+    A,
+    B,
+    C(MySubEnum),
+}
+
+fn test(arg MyEnum) {
+    result := match arg {
+        MyEnum.A => 'a',
+        MyEnum.B => 'b',
+        MyEnum.C(sub) => match sub {
+            MySubEnum.D => 'a',
+            MySubEnum.E => 'b',
+        },
+    }
+}
+
 // Typed function
 fn add_typed(a int, b int) int {
     return a + b

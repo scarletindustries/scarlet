@@ -1,0 +1,34 @@
+{
+  "name": "al-lang",
+  "displayName": "AL Language Support",
+  "description": "Syntax highlighting for AL language files",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "al",
+        "aliases": [
+          "AL",
+          "al"
+        ],
+        "extensions": [
+          ".al"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "al",
+        "scopeName": "source.al",
+        "path": "./syntaxes/al.tmLanguage.json"
+      }
+    ]
+  }
+}
