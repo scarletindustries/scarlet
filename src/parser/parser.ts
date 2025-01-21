@@ -123,12 +123,21 @@ export class Parser {
     return this.tokens[idx];
   }
 
+  private debugLog(msg: string) {
+    console.debug(
+      `[Parser Debug] index=${this.index}, current=${tokenKindToString(
+        this.current.kind
+      )} => ${msg}`
+    );
+  }
+
   /**
    * Recursive descent parse for statements.
    * This might dispatch to many different parse functions
    * depending on the token kind (function, const, struct, etc.).
    */
   private parseStatement(): Statement {
+    this.debugLog("parseStatement() entered");
     switch (this.current.kind) {
       case TokenKind.KW_FUNCTION:
         return this.parseFunctionStatement();
@@ -161,9 +170,9 @@ export class Parser {
         return this.parseContinueStatement();
 
       case TokenKind.KW_MATCH:
-        // Match is also an expression, but might appear as a statement
-        // in our language. So parse it as an expression, then turn to statement.
-        // Adjust to your actual AST design.
+        this.debugLog(
+          "Detected 'match' keyword – going to parse as an expression"
+        );
         return this.parseExpression() as Statement;
 
       case TokenKind.KW_EXPORT:
@@ -532,7 +541,7 @@ export class Parser {
   //---------------------------------------------------------------------------
 
   /**
-   * Handles "expr or err { block }" or "expr or defaultValue" or "expr or e { block }".
+   * Handles "expr or err { block }" or "expr or expr"
    */
   private parseExpression(): Expression {
     const primary = this.parseAssignmentExpression();
@@ -619,8 +628,8 @@ export class Parser {
   /**
    * Comparison expressions: ==, !=, <, <=, >, >=
    */
-  private parseComparisonExpression(isMatchPattern = false): Expression {
-    let expr = this.parseAdditiveExpression(isMatchPattern);
+  private parseComparisonExpression(): Expression {
+    let expr = this.parseAdditiveExpression();
 
     while (
       this.current.kind === TokenKind.PUNC_EQUALS_EQUALS ||
@@ -650,7 +659,7 @@ export class Parser {
       })();
 
       this.advance();
-      const right = this.parseAdditiveExpression(isMatchPattern);
+      const right = this.parseAdditiveExpression();
       expr = {
         type: "BinaryExpression",
         operator,
@@ -665,8 +674,8 @@ export class Parser {
   /**
    * Additive expressions: +, -
    */
-  private parseAdditiveExpression(isMatchPattern = false): Expression {
-    let expr = this.parseMultiplicativeExpression(isMatchPattern);
+  private parseAdditiveExpression(): Expression {
+    let expr = this.parseMultiplicativeExpression();
 
     while (
       this.current.kind === TokenKind.PUNC_PLUS ||
@@ -674,7 +683,7 @@ export class Parser {
     ) {
       const operator = this.current.kind === TokenKind.PUNC_PLUS ? "+" : "-";
       this.advance();
-      const right = this.parseMultiplicativeExpression(isMatchPattern);
+      const right = this.parseMultiplicativeExpression();
       expr = {
         type: "BinaryExpression",
         operator,
@@ -689,8 +698,8 @@ export class Parser {
   /**
    * Multiplicative expressions: *, /, %
    */
-  private parseMultiplicativeExpression(isMatchPattern = false): Expression {
-    let expr = this.parseUnaryExpression(isMatchPattern);
+  private parseMultiplicativeExpression(): Expression {
+    let expr = this.parseUnaryExpression();
 
     while (
       this.current.kind === TokenKind.PUNC_STAR ||
@@ -704,7 +713,7 @@ export class Parser {
           ? "/"
           : "%";
       this.advance();
-      const right = this.parseUnaryExpression(isMatchPattern);
+      const right = this.parseUnaryExpression();
       expr = {
         type: "BinaryExpression",
         operator,
@@ -719,14 +728,14 @@ export class Parser {
   /**
    * Unary expressions: !, -
    */
-  private parseUnaryExpression(isMatchPattern = false): Expression {
+  private parseUnaryExpression(): Expression {
     if (
       this.current.kind === TokenKind.PUNC_BANG ||
       this.current.kind === TokenKind.PUNC_MINUS
     ) {
       const operator = this.current.kind === TokenKind.PUNC_BANG ? "!" : "-";
       this.advance();
-      const right = this.parseUnaryExpression(isMatchPattern);
+      const right = this.parseUnaryExpression();
       return {
         type: "UnaryExpression",
         operator,
@@ -734,49 +743,70 @@ export class Parser {
       };
     }
 
-    return this.parsePrimaryExpression(isMatchPattern);
+    return this.parsePrimaryExpression();
   }
 
-  /**
-   * The main "atomic" level of expressions: literals, variables, function calls, property access, etc.
-   * If isMatchPattern is true, we might limit or adjust the parse of expansions (like ignoring function calls).
-   */
-  private parsePrimaryExpression(isMatchPattern: boolean): Expression {
+  private parsePrimaryExpression(): Expression {
+    this.debugLog(
+      "parsePrimaryExpression() start: current token = " +
+        tokenKindToString(this.current.kind)
+    );
+
     let expr: Expression;
 
     // Handle special "match" directly if found
     if (this.current.kind === TokenKind.KW_MATCH) {
+      this.debugLog(
+        "parsePrimaryExpression() found `match` -> parseMatchExpression()"
+      );
       return this.parseMatchExpression();
     }
 
     switch (this.current.kind) {
       case TokenKind.LITERAL_STRING:
+        this.debugLog("parsePrimaryExpression() -> LITERAL_STRING");
         expr = this.parseStringLiteral();
         break;
       case TokenKind.LITERAL_NUMBER:
+        this.debugLog("parsePrimaryExpression() -> LITERAL_NUMBER");
         expr = this.parseNumberLiteral();
         break;
       case TokenKind.KW_TRUE:
       case TokenKind.KW_FALSE:
+        this.debugLog("parsePrimaryExpression() -> BooleanLiteral");
         expr = this.parseBooleanLiteral();
         break;
       case TokenKind.KW_NONE:
+        this.debugLog("parsePrimaryExpression() -> NoneLiteral");
         expr = this.parseNoneLiteral();
         break;
       case TokenKind.PUNC_OPEN_BRACKET:
+        this.debugLog("parsePrimaryExpression() -> parseArrayExpression()");
         expr = this.parseArrayExpression();
         break;
       case TokenKind.IDENTIFIER:
+        this.debugLog("parsePrimaryExpression() -> parseIdentifier()");
         expr = this.parseIdentifier();
         break;
       default:
-        this.error(`Unexpected token ${tokenKindToString(this.current.kind)}`);
+        this.error(
+          `Unexpected token ${tokenKindToString(
+            this.current.kind
+          )} in parsePrimaryExpression()`
+        );
     }
 
+    // Now parse trailing property accesses, function calls, brackets, etc.
     while (true) {
+      this.debugLog(
+        "parsePrimaryExpression() [loop], looking at token = " +
+          tokenKindToString(this.current.kind)
+      );
       const currentKind = this.current.kind as TokenKind;
-      if (currentKind === TokenKind.PUNC_DOT && !isMatchPattern) {
-        // property access or qualified enum
+
+      if (currentKind === TokenKind.PUNC_DOT) {
+        // property access
+        this.debugLog("parsePrimaryExpression() -> property access");
         this.advance();
         const right = this.parseIdentifier();
         expr = {
@@ -784,24 +814,25 @@ export class Parser {
           left: expr,
           right,
         };
-      } else if (!isMatchPattern && currentKind === TokenKind.PUNC_OPEN_PAREN) {
+      } else if (currentKind === TokenKind.PUNC_OPEN_PAREN) {
         // function call
+        this.debugLog("parsePrimaryExpression() -> parseFunctionCall()");
         expr = this.parseFunctionCall(expr);
-      } else if (
-        !isMatchPattern &&
-        currentKind === TokenKind.PUNC_OPEN_BRACKET
-      ) {
+      } else if (currentKind === TokenKind.PUNC_OPEN_BRACKET) {
         // array indexing
+        this.debugLog("parsePrimaryExpression() -> parseArrayIndex()");
         expr = this.parseArrayIndex(expr);
       } else if (
-        !isMatchPattern &&
         currentKind === TokenKind.PUNC_OPEN_BRACE &&
         expr.type === "Identifier"
       ) {
         // struct initialization
+        this.debugLog(
+          `parsePrimaryExpression() -> parseStructInitialization(${expr.name})`
+        );
         expr = this.parseStructInitialization(expr as Identifier);
-      } else if (!isMatchPattern && currentKind === TokenKind.PUNC_DOTDOT) {
-        // range expression
+      } else if (currentKind === TokenKind.PUNC_DOTDOT) {
+        this.debugLog("parsePrimaryExpression() -> parse RangeExpression `..`");
         this.advance();
         const end = this.parseExpression();
         expr = {
@@ -810,10 +841,14 @@ export class Parser {
           end,
         };
       } else {
+        // no more trailing tokens that belong to this expression
         break;
       }
     }
 
+    this.debugLog(
+      "parsePrimaryExpression() end, returning expr of type " + expr.type
+    );
     return expr;
   }
 
@@ -846,6 +881,7 @@ export class Parser {
   }
 
   private parseStructInitialization(id: Identifier): Expression {
+    this.debugLog(`parseStructInitialization() for identifier '${id.name}'`);
     this.eat(TokenKind.PUNC_OPEN_BRACE);
     const fields: { identifier: Identifier; init: Expression }[] = [];
 
@@ -853,6 +889,14 @@ export class Parser {
       this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
       !this.isAtEnd()
     ) {
+      this.debugLog(
+        `parseStructInitialization() inside loop - current token = ${tokenKindToString(
+          this.current.kind
+        )}`
+      );
+
+      // This is where "Expected ':' but got ..." might be triggered if the parser
+      // thinks it's reading a struct field but sees the wrong token.
       const fieldName = this.parseIdentifier();
       this.eat(TokenKind.PUNC_COLON);
       const init = this.parseExpression();
@@ -861,7 +905,9 @@ export class Parser {
     }
 
     this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
+    this.debugLog(
+      `parseStructInitialization() done, created a StructInitialization for '${id.name}'`
+    );
     return {
       type: "StructInitialization",
       identifier: id,
@@ -874,9 +920,8 @@ export class Parser {
   //---------------------------------------------------------------------------
 
   private parseMatchExpression(): MatchExpression {
-    // match expression: match expr { pattern => expr, pattern => expr, ... }
+    this.debugLog("parseMatchExpression() entered");
     this.eat(TokenKind.KW_MATCH);
-
     const expression = this.parseExpression();
 
     this.eat(TokenKind.PUNC_OPEN_BRACE);
@@ -886,6 +931,7 @@ export class Parser {
       this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
       !this.isAtEnd()
     ) {
+      this.debugLog("parseMatchExpression() -> parsing one match case...");
       cases.push(this.parseMatchCase());
       this.match(TokenKind.PUNC_COMMA);
     }
@@ -900,39 +946,20 @@ export class Parser {
   }
 
   private parseMatchCase(): MatchCase {
-    // pattern might be MyEnum.A or MyEnum.C(sub) etc.
-    // We'll treat it as an expression with isMatchPattern = true, so
-    // we skip function calls, array indexing, etc.
-    if (this.current.kind !== TokenKind.IDENTIFIER) {
-      this.error("Expected identifier at start of match pattern");
-    }
-
-    const patternExpr = this.parseExpression();
-    const castedPattern = this.convertExpressionToPattern(patternExpr);
-
-    let binding: Identifier | undefined;
-    if (this.match(TokenKind.PUNC_OPEN_PAREN)) {
-      // parse something like (sub)
-      if (this.current.kind !== TokenKind.IDENTIFIER) {
-        this.error("Expected identifier in match pattern binding");
-      }
-      binding = this.parseIdentifier();
-      this.eat(TokenKind.PUNC_CLOSE_PAREN);
-    }
-
-    const matchPattern: MatchPattern = {
-      type: "MatchPattern",
-      enumPath: [castedPattern as Identifier | PropertyAccess],
-      binding,
-    };
+    this.debugLog("parseMatchCase() entered");
+    const pattern = this.parseEnumPattern();
+    this.debugLog(
+      "after parseEnumPattern(), next token = " +
+        tokenKindToString(this.current.kind)
+    );
 
     if (!this.match(TokenKind.PUNC_ARROW)) {
       this.error("Expected '=>' in match case");
     }
 
-    // parse the body
+    this.debugLog("matched =>, now parsing the body of the case");
     let body: Expression;
-    if ((this.current.kind as TokenKind) === TokenKind.KW_MATCH) {
+    if (this.current.kind === TokenKind.KW_MATCH) {
       body = this.parseMatchExpression();
     } else {
       body = this.parseExpression();
@@ -940,21 +967,54 @@ export class Parser {
 
     return {
       type: "MatchCase",
-      pattern: matchPattern,
+      pattern,
       body,
     };
   }
 
   /**
-   * Converts an Expression into something we can store in the match pattern.
-   * In many languages, we might just store the expression directly.
+   * Parse something like:
+   *   MyEnum.A
+   *   MyEnum.B
+   *   MyEnum.C(subBinding)
+   *
+   * We do NOT treat "(subBinding)" as a function call here!
    */
-  private convertExpressionToPattern(
-    expr: Expression | Identifier
-  ): Identifier | Expression {
-    // If it's an identifier or property access, that's likely okay.
-    // If we want to restrict certain expression types, do so here.
-    return expr;
+  private parseEnumPattern(): MatchPattern {
+    this.debugLog("parseEnumPattern() entered");
+    if (this.current.kind !== TokenKind.IDENTIFIER) {
+      this.error("Expected identifier at start of match variant pattern");
+    }
+
+    let patternNode: Identifier | PropertyAccess = this.parseIdentifier();
+
+    while (this.match(TokenKind.PUNC_DOT)) {
+      const right = this.parseIdentifier();
+      patternNode = {
+        type: "PropertyAccess",
+        left: patternNode,
+        right,
+      };
+    }
+
+    // Optionally something like (binding)
+    let binding: Identifier | undefined;
+    if (this.match(TokenKind.PUNC_OPEN_PAREN)) {
+      if (this.current.kind !== TokenKind.IDENTIFIER) {
+        this.error(
+          "Expected identifier in match pattern binding (e.g. MyEnum.C(sub))"
+        );
+      }
+      binding = this.parseIdentifier();
+      this.eat(TokenKind.PUNC_CLOSE_PAREN);
+    }
+
+    this.debugLog("parseEnumPattern() complete, returning pattern");
+    return {
+      type: "MatchPattern",
+      enumPath: [patternNode],
+      binding,
+    };
   }
 
   //---------------------------------------------------------------------------

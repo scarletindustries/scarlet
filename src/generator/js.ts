@@ -87,8 +87,10 @@ ${this.generateStatements(statements)}
         return this.generateContinueStatement(statement);
       case "EnumDeclaration":
         return this.generateEnumDeclaration(statement);
+      case "ExpressionStatement":
+        return this.generateExpression(statement.expression) + ";";
       default:
-        return this.generateExpression(statement as Expression);
+        throw new Error("Unsupported statement type: " + statement.type);
     }
   }
 
@@ -303,9 +305,7 @@ class ${enumName} {
       case "OrExpression":
         return this.generateOrExpression(expression);
       default:
-        throw new Error(
-          `Unsupported expression type: ${(expression as any).type}`
-        );
+        throw new Error("Unsupported expression type: " + expression.type);
     }
   }
 

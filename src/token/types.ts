@@ -89,7 +89,7 @@ export function tokenKindToString(kind: TokenKind): string {
     [TokenKind.KW_ENUM]: "enum",
     [TokenKind.KW_MATCH]: "match",
     [TokenKind.KW_AS]: "as",
-    [TokenKind.PUNC_ARROW]: "->",
+    [TokenKind.PUNC_ARROW]: "=>",
     [TokenKind.PUNC_DOTDOT]: "..",
     [TokenKind.PUNC_OPEN_PAREN]: "(",
     [TokenKind.PUNC_CLOSE_PAREN]: ")",

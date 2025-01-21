@@ -18,4 +18,6 @@ fn test(arg MyEnum) {
             MySubEnum.E => 'b',
         },
     }
+
+    println(result)
 }
