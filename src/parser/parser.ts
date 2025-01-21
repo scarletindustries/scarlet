@@ -1,4 +1,5 @@
 import type {
+  BlockExpression,
   EnumVariant,
   Expression,
   FunctionParameter,
@@ -15,91 +16,276 @@ import type {
 import type { Token } from "../token/types";
 import { TokenKind, tokenKindToString } from "../token/types";
 
+/**
+ * Main Parser class.
+ * Provides methods to parse tokens into an AST (Program, Statements, Expressions, etc.).
+ */
 export class Parser {
-  private index: number = 0;
-  private currentToken: Token;
+  private tokens: Token[];
+  private index: number;
+  private current: Token;
+  private src: string; // For error-reporting context
 
-  constructor(private tokens: Token[], private src: string) {
-    this.currentToken = tokens[0];
+  constructor(tokens: Token[], source: string) {
+    this.tokens = tokens;
+    this.src = source;
+    this.index = 0;
+    this.current = this.tokens[this.index];
   }
 
+  /**
+   * Entry point: parse the entire program into a root AST node (Program).
+   */
+  public parseProgram(): Statement[] {
+    const statements: Statement[] = [];
+
+    while (!this.isAtEnd()) {
+      statements.push(this.parseStatement());
+    }
+
+    return statements;
+  }
+
+  /**
+   * Consumes a token of a specific kind. If the token doesn't match, throws an error.
+   */
+  private eat(kind: TokenKind, message?: string): Token {
+    if (this.current.kind !== kind) {
+      this.error(
+        message ||
+          `Expected '${tokenKindToString(kind)}' but got '${tokenKindToString(
+            this.current.kind
+          )}'`
+      );
+    }
+    const previous = this.current;
+    this.advance();
+    return previous;
+  }
+
+  /**
+   * Moves to the next token and updates this.current.
+   */
+  private advance(): void {
+    if (!this.isAtEnd()) {
+      this.index++;
+      this.current = this.tokens[this.index];
+    }
+  }
+
+  /**
+   * Optional consumption of a token if it matches.
+   * Returns true if a token was consumed, false otherwise.
+   */
+  private match(kind: TokenKind): boolean {
+    if (this.current.kind === kind) {
+      this.advance();
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Checks if we've reached the end of the tokens (EOF).
+   */
+  private isAtEnd(): boolean {
+    return this.current.kind === TokenKind.EOF;
+  }
+
+  /**
+   * Throws a parse error with helpful context (line, column, snippet).
+   */
   private error(message: string): never {
-    const line = this.currentToken.line;
-    const column = this.currentToken.column;
+    const { line, column } = this.current;
+    const lines = this.src.split("\n");
 
-    const split = this.src.split("\n");
-
-    const theTwoLinesAbove =
-      line > 2 ? split.slice(line - 3, line - 1).join("\n") : "";
-    const theTwoLinesBelow =
-      line < split.length - 1 ? split.slice(line, line + 2).join("\n") : "";
-
-    const lineContent = split[line - 1];
+    const snippetAbove = line > 1 ? lines[line - 2] : "";
+    const snippet = lines[line - 1] || "";
+    const snippetBelow = line < lines.length ? lines[line] : "";
 
     const pointer = " ".repeat(column - 1) + "^";
 
-    const content = `\n${theTwoLinesAbove}\n${lineContent}\n${pointer}\n${theTwoLinesBelow}\n`;
+    const combined = [snippetAbove, snippet, pointer, snippetBelow]
+      .filter(Boolean)
+      .join("\n");
 
     throw new Error(
-      `${message} at line ${line}, column ${column}\n` + `${content}`
+      `${message}\nAt line ${line}, column ${column}:\n${combined}`
     );
   }
 
-  private eat(kind: TokenKind): Token {
-    if (this.currentToken.kind !== kind) {
-      this.error(
-        `Expected \`${tokenKindToString(kind)}\` but got \`${tokenKindToString(
-          this.currentToken.kind
-        )}\``
-      );
+  /**
+   * Peek at the next token without consuming it.
+   */
+  private peek(offset = 1): Token {
+    const idx = this.index + offset;
+    if (idx >= this.tokens.length) return this.tokens[this.tokens.length - 1];
+    return this.tokens[idx];
+  }
+
+  /**
+   * Recursive descent parse for statements.
+   * This might dispatch to many different parse functions
+   * depending on the token kind (function, const, struct, etc.).
+   */
+  private parseStatement(): Statement {
+    switch (this.current.kind) {
+      case TokenKind.KW_FUNCTION:
+        return this.parseFunctionStatement();
+
+      case TokenKind.KW_STRUCT:
+        return this.parseStructDeclaration();
+
+      case TokenKind.KW_ENUM:
+        return this.parseEnumDeclaration();
+
+      case TokenKind.KW_RETURN:
+        return this.parseReturnStatement();
+
+      case TokenKind.KW_IF:
+        return this.parseIfStatement();
+
+      case TokenKind.KW_FOR:
+        return this.parseForStatement();
+
+      case TokenKind.KW_THROW:
+        return this.parseThrowStatement();
+
+      case TokenKind.KW_ASSERT:
+        return this.parseAssertStatement();
+
+      case TokenKind.KW_BREAK:
+        return this.parseBreakStatement();
+
+      case TokenKind.KW_CONTINUE:
+        return this.parseContinueStatement();
+
+      case TokenKind.KW_MATCH:
+        // Match is also an expression, but might appear as a statement
+        // in our language. So parse it as an expression, then turn to statement.
+        // Adjust to your actual AST design.
+        return this.parseExpression() as Statement;
+
+      case TokenKind.KW_EXPORT:
+        return this.parseExportStatement();
+
+      case TokenKind.KW_CONST:
+        return this.parseConstStatement();
+
+      case TokenKind.KW_IMPORT:
+      case TokenKind.KW_FROM:
+        return this.parseImportStatement();
+
+      // If we get an identifier, check if it might be a declaration like:
+      //   myVar := expression
+      case TokenKind.IDENTIFIER:
+        return this.parsePossibleDeclarationOrExpression();
+
+      default:
+        return this.parseExpressionStatement();
+    }
+  }
+
+  /**
+   * If an identifier is encountered, it might be a variable declaration, or
+   * it might be a simple expression. Peek ahead to decide which path to take.
+   */
+  private parsePossibleDeclarationOrExpression(): Statement {
+    const savedIndex = this.index;
+    const savedToken = this.current;
+
+    const id = this.parseIdentifier();
+
+    // In some languages, we might see "identifier :=" or "identifier ="
+    // We'll check for a special token, e.g. PUNC_COLON_EQUALS or something similar.
+    if (this.match(TokenKind.PUNC_COLON_EQUALS)) {
+      // It's a short-hand declaration
+      const init = this.parseExpression();
+      return {
+        type: "DeclarationStatement",
+        identifier: id,
+        init,
+      };
     }
 
-    const token = this.currentToken;
-    this.index++;
-    this.currentToken = this.tokens[this.index];
-    return token;
-  }
+    // Not a short-hand declaration, revert and parse as expression
+    this.index = savedIndex;
+    this.current = savedToken;
+    const expr = this.parseExpression();
 
-  private peek(): Token {
-    return this.tokens[this.index + 1];
-  }
-
-  private isAtEnd(): boolean {
-    return this.currentToken.kind === TokenKind.EOF;
-  }
-
-  private parseIdentifier(): Identifier {
-    const token = this.eat(TokenKind.IDENTIFIER);
-    if (!token.literal) this.error("Expected identifier");
     return {
-      type: "Identifier",
-      name: token.literal,
+      type: "ExpressionStatement",
+      expression: expr,
     };
   }
 
-  private parseTypeIdentifier(): TypeIdentifier {
-    let isArray = false;
+  /**
+   * A fallback when we suspect the token starts an expression rather than specialized statement keywords.
+   */
+  private parseExpressionStatement(): Statement {
+    const expr = this.parseExpression();
+    return {
+      type: "ExpressionStatement",
+      expression: expr,
+    };
+  }
+
+  //---------------------------------------------------------------------------
+  // Declarations & Definitions
+  //---------------------------------------------------------------------------
+
+  private parseFunctionStatement(): Statement {
+    this.eat(TokenKind.KW_FUNCTION);
     const identifier = this.parseIdentifier();
 
-    if (this.currentToken.kind === TokenKind.PUNC_OPEN_BRACKET) {
-      this.eat(TokenKind.PUNC_OPEN_BRACKET);
-      this.eat(TokenKind.PUNC_CLOSE_BRACKET);
-      isArray = true;
+    this.eat(TokenKind.PUNC_OPEN_PAREN);
+    const params = this.parseFunctionParameters();
+    this.eat(TokenKind.PUNC_CLOSE_PAREN);
+
+    // Optionally parse return type
+    let returnType: TypeIdentifier | undefined;
+    let throwType: TypeIdentifier | undefined;
+
+    if (this.current.kind === TokenKind.IDENTIFIER) {
+      returnType = this.parseTypeIdentifier();
     }
 
+    // If there's a comma, we parse the throw type
+    if (this.match(TokenKind.PUNC_COMMA)) {
+      throwType = this.parseTypeIdentifier();
+    }
+
+    // Finally, parse the function body (block)
+    const body = this.parseBlockStatement();
+
     return {
-      type: "TypeIdentifier",
+      type: "FunctionStatement",
       identifier,
-      isArray,
-      isOption: false, // TODO: Implement option types
+      params,
+      body: [body],
+      returnType,
+      throwType,
     };
+  }
+
+  private parseFunctionParameters(): FunctionParameter[] {
+    const params: FunctionParameter[] = [];
+
+    if (this.current.kind !== TokenKind.PUNC_CLOSE_PAREN) {
+      do {
+        params.push(this.parseFunctionParameter());
+      } while (this.match(TokenKind.PUNC_COMMA));
+    }
+
+    return params;
   }
 
   private parseFunctionParameter(): FunctionParameter {
     const identifier = this.parseIdentifier();
-    let typeAnnotation;
 
-    if (this.currentToken.kind === TokenKind.IDENTIFIER) {
+    // Optional type
+    let typeAnnotation: TypeIdentifier | undefined;
+    if (this.current.kind === TokenKind.IDENTIFIER) {
       typeAnnotation = this.parseTypeIdentifier();
     }
 
@@ -110,14 +296,35 @@ export class Parser {
     };
   }
 
+  private parseStructDeclaration(): Statement {
+    this.eat(TokenKind.KW_STRUCT);
+    const identifier = this.parseIdentifier();
+
+    this.eat(TokenKind.PUNC_OPEN_BRACE);
+    const fields: StructField[] = [];
+    while (
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
+      !this.isAtEnd()
+    ) {
+      fields.push(this.parseStructField());
+      this.match(TokenKind.PUNC_COMMA); // optional comma
+    }
+    this.eat(TokenKind.PUNC_CLOSE_BRACE);
+
+    return {
+      type: "StructDeclaration",
+      identifier,
+      fields,
+    };
+  }
+
   private parseStructField(): StructField {
     const identifier = this.parseIdentifier();
     this.eat(TokenKind.PUNC_COLON);
     const typeAnnotation = this.parseTypeIdentifier();
 
-    let init;
-    if (this.currentToken.kind === TokenKind.PUNC_EQUALS) {
-      this.eat(TokenKind.PUNC_EQUALS);
+    let init: Expression | undefined;
+    if (this.match(TokenKind.PUNC_EQUALS)) {
       init = this.parseExpression();
     }
 
@@ -129,103 +336,274 @@ export class Parser {
     };
   }
 
-  private parseImportSpecifier(): ImportSpecifier {
+  private parseEnumDeclaration(): Statement {
+    this.eat(TokenKind.KW_ENUM);
     const identifier = this.parseIdentifier();
+
+    this.eat(TokenKind.PUNC_OPEN_BRACE);
+    const variants: EnumVariant[] = [];
+    while (
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
+      !this.isAtEnd()
+    ) {
+      variants.push(this.parseEnumVariant());
+      this.match(TokenKind.PUNC_COMMA); // optional comma
+    }
+    this.eat(TokenKind.PUNC_CLOSE_BRACE);
+
     return {
-      type: "ImportSpecifier",
+      type: "EnumDeclaration",
       identifier,
+      variants,
     };
   }
 
-  private parseExpression(isMatchPattern: boolean = false): Expression {
-    // Handle match expressions directly
-    if ((this.currentToken.kind as TokenKind) === TokenKind.KW_MATCH) {
-      return this.parseMatchExpression();
+  private parseEnumVariant(): EnumVariant {
+    const name = this.parseIdentifier();
+    let payload: TypeIdentifier | undefined = undefined;
+
+    if (this.match(TokenKind.PUNC_OPEN_PAREN)) {
+      payload = this.parseTypeIdentifier();
+      this.eat(TokenKind.PUNC_CLOSE_PAREN);
     }
 
-    // Parse other expressions
-    let expr = isMatchPattern
-      ? this.parsePrimaryExpression(true)
-      : this.parseAssignmentExpression();
+    return {
+      type: "EnumVariant",
+      name,
+      payload,
+    };
+  }
 
-    // If we're in a match pattern, we need to handle property access here
-    if (isMatchPattern) {
-      while ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_DOT) {
-        this.eat(TokenKind.PUNC_DOT);
-        if ((this.currentToken.kind as TokenKind) !== TokenKind.IDENTIFIER) {
-          this.error("Expected identifier after dot in match pattern");
-        }
-        const right = this.parseIdentifier();
-        expr = {
-          type: "PropertyAccess",
-          left: expr,
-          right,
+  //---------------------------------------------------------------------------
+  // Other Statements
+  //---------------------------------------------------------------------------
+
+  private parseReturnStatement(): Statement {
+    this.eat(TokenKind.KW_RETURN);
+    // Possibly parse an expression if not semicolon (or some other pattern)
+    if (
+      this.current.kind !== TokenKind.PUNC_SEMICOLON &&
+      this.current.kind !== TokenKind.EOF &&
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACE
+    ) {
+      const expression = this.parseExpression();
+      return { type: "ReturnStatement", expression };
+    }
+    return { type: "ReturnStatement" };
+  }
+
+  private parseIfStatement(): Statement {
+    this.eat(TokenKind.KW_IF);
+    const condition = this.parseExpression();
+    const thenBlock = this.parseBlockStatementOrSingle();
+
+    let elseBlock: BlockExpression | undefined;
+    if (this.match(TokenKind.KW_ELSE)) {
+      elseBlock = this.parseBlockStatementOrSingle();
+    }
+
+    return {
+      type: "IfStatement",
+      condition,
+      then: [thenBlock],
+      else: elseBlock && [elseBlock],
+    };
+  }
+
+  private parseForStatement(): Statement {
+    this.eat(TokenKind.KW_FOR);
+    // Distinguish between for-in or standard for:
+    // for i in something { ... }
+    // for { ... } (infinite loop)
+    // Up to you to implement the grammar.
+
+    if (this.peek().kind === TokenKind.KW_IN) {
+      // for i in expression
+      const identifier = this.parseIdentifier();
+      this.eat(TokenKind.KW_IN);
+      const iterator = this.parseExpression();
+      const body = this.parseBlockStatement();
+      return {
+        type: "ForInStatement",
+        identifier,
+        iterator,
+        body: [body],
+      };
+    } else {
+      // for { ... }
+      const body = this.parseBlockStatement();
+      return {
+        type: "ForStatement",
+        body: [body],
+      };
+    }
+  }
+
+  private parseThrowStatement(): Statement {
+    this.eat(TokenKind.KW_THROW);
+    const expression = this.parseExpression();
+    return { type: "ThrowStatement", expression };
+  }
+
+  private parseAssertStatement(): Statement {
+    this.eat(TokenKind.KW_ASSERT);
+    const expression = this.parseExpression();
+    this.eat(TokenKind.PUNC_COMMA);
+    const message = this.parseExpression();
+    return { type: "AssertStatement", expression, message };
+  }
+
+  private parseBreakStatement(): Statement {
+    this.eat(TokenKind.KW_BREAK);
+    return { type: "BreakStatement" };
+  }
+
+  private parseContinueStatement(): Statement {
+    this.eat(TokenKind.KW_CONTINUE);
+    return { type: "ContinueStatement" };
+  }
+
+  private parseExportStatement(): Statement {
+    this.eat(TokenKind.KW_EXPORT);
+    // Usually, the syntax might be "export struct X {...}" or "export fn ..."
+    // So we just parse the next statement and wrap it in an export node
+    const declaration = this.parseStatement();
+    return {
+      type: "ExportStatement",
+      declaration,
+    };
+  }
+
+  private parseConstStatement(): Statement {
+    this.eat(TokenKind.KW_CONST);
+    const id = this.parseIdentifier();
+    this.eat(TokenKind.PUNC_EQUALS);
+    const init = this.parseExpression();
+    return {
+      type: "ConstStatement",
+      identifier: id,
+      init,
+    };
+  }
+
+  private parseImportStatement(): Statement {
+    // Could handle both "from '...' import ..." and "import x from '...'".
+    // Because your language allows both forms, let's unify them.
+    if (this.match(TokenKind.KW_FROM)) {
+      const pathToken = this.eat(TokenKind.LITERAL_STRING);
+      this.eat(TokenKind.KW_IMPORT);
+      const specifiers = this.parseImportSpecifiers();
+      return {
+        type: "ImportDeclaration",
+        specifiers,
+        path: pathToken.literal || "",
+      };
+    } else {
+      this.eat(TokenKind.KW_IMPORT);
+      const specifiers = this.parseImportSpecifiers();
+      this.eat(TokenKind.KW_FROM);
+      const pathToken = this.eat(TokenKind.LITERAL_STRING);
+      return {
+        type: "ImportDeclaration",
+        specifiers,
+        path: pathToken.literal || "",
+      };
+    }
+  }
+
+  private parseImportSpecifiers(): ImportSpecifier[] {
+    const specifiers: ImportSpecifier[] = [];
+    do {
+      specifiers.push(this.parseImportSpecifier());
+    } while (this.match(TokenKind.PUNC_COMMA));
+    return specifiers;
+  }
+
+  private parseImportSpecifier(): ImportSpecifier {
+    const id = this.parseIdentifier();
+    return {
+      type: "ImportSpecifier",
+      identifier: id,
+    };
+  }
+
+  //---------------------------------------------------------------------------
+  // Expressions
+  //---------------------------------------------------------------------------
+
+  /**
+   * Handles "expr or err { block }" or "expr or defaultValue" or "expr or e { block }".
+   */
+  private parseExpression(): Expression {
+    const primary = this.parseAssignmentExpression();
+
+    // If next token is KW_OR, parse the rest
+    if (this.match(TokenKind.KW_OR)) {
+      // We can parse "identifier" if it's the error binding or check for block/open brace
+      let errorBinding: Identifier | undefined;
+      if (this.current.kind === TokenKind.IDENTIFIER) {
+        errorBinding = this.parseIdentifier();
+      }
+
+      // If we find an open brace, parse a block
+      if (this.current.kind === TokenKind.PUNC_OPEN_BRACE) {
+        const handlerBlock = this.parseBlockStatement();
+        return {
+          type: "OrExpression",
+          expression: primary,
+          errorBinding,
+          handler: {
+            type: "BlockExpression",
+            body: handlerBlock.body,
+          },
+        };
+      } else {
+        // Otherwise, parse an expression fallback
+        const fallbackExpr = this.parseExpression();
+        return {
+          type: "OrExpressionFallback",
+          expression: primary,
+          fallback: fallbackExpr,
         };
       }
     }
 
-    if (
-      !isMatchPattern &&
-      (this.currentToken.kind as TokenKind) === TokenKind.KW_OR
-    ) {
-      this.eat(TokenKind.KW_OR);
-      let errorBinding;
-
-      if ((this.currentToken.kind as TokenKind) === TokenKind.IDENTIFIER) {
-        errorBinding = this.parseIdentifier();
-      }
-
-      this.eat(TokenKind.PUNC_OPEN_BRACE);
-      const body: Statement[] = [];
-      while (
-        (this.currentToken.kind as TokenKind) !== TokenKind.PUNC_CLOSE_BRACE &&
-        !this.isAtEnd()
-      ) {
-        body.push(this.parseStatement());
-      }
-      this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-      return {
-        type: "OrExpression",
-        expression: expr,
-        errorBinding,
-        handler: {
-          type: "BlockExpression",
-          body,
-        },
-      };
-    }
-
-    return expr;
+    return primary;
   }
 
+  /**
+   * Assignment expression: a = b, etc.
+   */
   private parseAssignmentExpression(): Expression {
-    let expr = this.parseLogicalExpression();
+    const left = this.parseLogicalExpression();
 
-    if (this.currentToken.kind === TokenKind.PUNC_EQUALS) {
-      this.eat(TokenKind.PUNC_EQUALS);
+    if (this.match(TokenKind.PUNC_EQUALS)) {
+      // For now, treat it as a binary expression "="
+      // or a specialized AST node "AssignmentExpression" if you prefer.
       const right = this.parseAssignmentExpression();
       return {
         type: "BinaryExpression",
         operator: "=",
-        left: expr,
+        left,
         right,
       };
     }
 
-    return expr;
+    return left;
   }
 
+  /**
+   * Logical expressions: &&, ||
+   */
   private parseLogicalExpression(): Expression {
     let expr = this.parseComparisonExpression();
 
     while (
-      this.currentToken.kind === TokenKind.PUNC_AND ||
-      this.currentToken.kind === TokenKind.PUNC_OR
+      this.current.kind === TokenKind.PUNC_AND ||
+      this.current.kind === TokenKind.PUNC_OR
     ) {
-      const operator =
-        this.currentToken.kind === TokenKind.PUNC_AND ? "&&" : "||";
-      this.eat(this.currentToken.kind);
+      const operator = this.current.kind === TokenKind.PUNC_AND ? "&&" : "||";
+      this.advance();
       const right = this.parseComparisonExpression();
       expr = {
         type: "BinaryExpression",
@@ -238,19 +616,22 @@ export class Parser {
     return expr;
   }
 
-  private parseComparisonExpression(): Expression {
-    let expr = this.parseAdditiveExpression();
+  /**
+   * Comparison expressions: ==, !=, <, <=, >, >=
+   */
+  private parseComparisonExpression(isMatchPattern = false): Expression {
+    let expr = this.parseAdditiveExpression(isMatchPattern);
 
     while (
-      this.currentToken.kind === TokenKind.PUNC_EQUALS_EQUALS ||
-      this.currentToken.kind === TokenKind.PUNC_BANG_EQUALS ||
-      this.currentToken.kind === TokenKind.PUNC_GREATER ||
-      this.currentToken.kind === TokenKind.PUNC_GREATER_EQUALS ||
-      this.currentToken.kind === TokenKind.PUNC_LESS ||
-      this.currentToken.kind === TokenKind.PUNC_LESS_EQUALS
+      this.current.kind === TokenKind.PUNC_EQUALS_EQUALS ||
+      this.current.kind === TokenKind.PUNC_BANG_EQUALS ||
+      this.current.kind === TokenKind.PUNC_GREATER ||
+      this.current.kind === TokenKind.PUNC_GREATER_EQUALS ||
+      this.current.kind === TokenKind.PUNC_LESS ||
+      this.current.kind === TokenKind.PUNC_LESS_EQUALS
     ) {
       const operator = (() => {
-        switch (this.currentToken.kind) {
+        switch (this.current.kind) {
           case TokenKind.PUNC_EQUALS_EQUALS:
             return "===";
           case TokenKind.PUNC_BANG_EQUALS:
@@ -268,8 +649,8 @@ export class Parser {
         }
       })();
 
-      this.eat(this.currentToken.kind);
-      const right = this.parseAdditiveExpression();
+      this.advance();
+      const right = this.parseAdditiveExpression(isMatchPattern);
       expr = {
         type: "BinaryExpression",
         operator,
@@ -281,17 +662,19 @@ export class Parser {
     return expr;
   }
 
-  private parseAdditiveExpression(): Expression {
-    let expr = this.parseMultiplicativeExpression();
+  /**
+   * Additive expressions: +, -
+   */
+  private parseAdditiveExpression(isMatchPattern = false): Expression {
+    let expr = this.parseMultiplicativeExpression(isMatchPattern);
 
     while (
-      this.currentToken.kind === TokenKind.PUNC_PLUS ||
-      this.currentToken.kind === TokenKind.PUNC_MINUS
+      this.current.kind === TokenKind.PUNC_PLUS ||
+      this.current.kind === TokenKind.PUNC_MINUS
     ) {
-      const operator =
-        this.currentToken.kind === TokenKind.PUNC_PLUS ? "+" : "-";
-      this.eat(this.currentToken.kind);
-      const right = this.parseMultiplicativeExpression();
+      const operator = this.current.kind === TokenKind.PUNC_PLUS ? "+" : "-";
+      this.advance();
+      const right = this.parseMultiplicativeExpression(isMatchPattern);
       expr = {
         type: "BinaryExpression",
         operator,
@@ -303,22 +686,25 @@ export class Parser {
     return expr;
   }
 
-  private parseMultiplicativeExpression(): Expression {
-    let expr = this.parseUnaryExpression();
+  /**
+   * Multiplicative expressions: *, /, %
+   */
+  private parseMultiplicativeExpression(isMatchPattern = false): Expression {
+    let expr = this.parseUnaryExpression(isMatchPattern);
 
     while (
-      this.currentToken.kind === TokenKind.PUNC_STAR ||
-      this.currentToken.kind === TokenKind.PUNC_SLASH ||
-      this.currentToken.kind === TokenKind.PUNC_PERCENT
+      this.current.kind === TokenKind.PUNC_STAR ||
+      this.current.kind === TokenKind.PUNC_SLASH ||
+      this.current.kind === TokenKind.PUNC_PERCENT
     ) {
       const operator =
-        this.currentToken.kind === TokenKind.PUNC_STAR
+        this.current.kind === TokenKind.PUNC_STAR
           ? "*"
-          : this.currentToken.kind === TokenKind.PUNC_SLASH
+          : this.current.kind === TokenKind.PUNC_SLASH
           ? "/"
           : "%";
-      this.eat(this.currentToken.kind);
-      const right = this.parseUnaryExpression();
+      this.advance();
+      const right = this.parseUnaryExpression(isMatchPattern);
       expr = {
         type: "BinaryExpression",
         operator,
@@ -330,29 +716,40 @@ export class Parser {
     return expr;
   }
 
-  private parseUnaryExpression(): Expression {
+  /**
+   * Unary expressions: !, -
+   */
+  private parseUnaryExpression(isMatchPattern = false): Expression {
     if (
-      this.currentToken.kind === TokenKind.PUNC_BANG ||
-      this.currentToken.kind === TokenKind.PUNC_MINUS
+      this.current.kind === TokenKind.PUNC_BANG ||
+      this.current.kind === TokenKind.PUNC_MINUS
     ) {
-      const operator =
-        this.currentToken.kind === TokenKind.PUNC_BANG ? "!" : "-";
-      this.eat(this.currentToken.kind);
-      const expression = this.parseUnaryExpression();
+      const operator = this.current.kind === TokenKind.PUNC_BANG ? "!" : "-";
+      this.advance();
+      const right = this.parseUnaryExpression(isMatchPattern);
       return {
         type: "UnaryExpression",
         operator,
-        expression,
+        expression: right,
       };
     }
 
-    return this.parsePrimaryExpression(false);
+    return this.parsePrimaryExpression(isMatchPattern);
   }
 
+  /**
+   * The main "atomic" level of expressions: literals, variables, function calls, property access, etc.
+   * If isMatchPattern is true, we might limit or adjust the parse of expansions (like ignoring function calls).
+   */
   private parsePrimaryExpression(isMatchPattern: boolean): Expression {
     let expr: Expression;
 
-    switch (this.currentToken.kind) {
+    // Handle special "match" directly if found
+    if (this.current.kind === TokenKind.KW_MATCH) {
+      return this.parseMatchExpression();
+    }
+
+    switch (this.current.kind) {
       case TokenKind.LITERAL_STRING:
         expr = this.parseStringLiteral();
         break;
@@ -369,64 +766,43 @@ export class Parser {
       case TokenKind.PUNC_OPEN_BRACKET:
         expr = this.parseArrayExpression();
         break;
-      case TokenKind.KW_MATCH:
-        expr = this.parseMatchExpression();
-        break;
       case TokenKind.IDENTIFIER:
         expr = this.parseIdentifier();
         break;
       default:
-        this.error(`Unexpected token ${this.currentToken.kind}`);
+        this.error(`Unexpected token ${tokenKindToString(this.current.kind)}`);
     }
 
-    // Parse property access, function calls, and array indexing
     while (true) {
-      const kind = this.currentToken.kind as TokenKind;
-
-      if (kind === TokenKind.PUNC_DOT && !isMatchPattern) {
-        this.eat(TokenKind.PUNC_DOT);
-        const property = this.parseIdentifier();
+      const currentKind = this.current.kind as TokenKind;
+      if (currentKind === TokenKind.PUNC_DOT && !isMatchPattern) {
+        // property access or qualified enum
+        this.advance();
+        const right = this.parseIdentifier();
         expr = {
           type: "PropertyAccess",
           left: expr,
-          right: property,
+          right,
         };
-      } else if (!isMatchPattern && kind === TokenKind.PUNC_OPEN_PAREN) {
-        this.eat(TokenKind.PUNC_OPEN_PAREN);
-        const args: Expression[] = [];
-        if (
-          (this.currentToken.kind as TokenKind) !== TokenKind.PUNC_CLOSE_PAREN
-        ) {
-          do {
-            args.push(this.parseExpression());
-          } while (
-            (this.currentToken.kind as TokenKind) === TokenKind.PUNC_COMMA &&
-            this.eat(TokenKind.PUNC_COMMA)
-          );
-        }
-        this.eat(TokenKind.PUNC_CLOSE_PAREN);
-        expr = {
-          type: "FunctionCall",
-          identifier: expr,
-          arguments: args,
-        };
-      } else if (!isMatchPattern && kind === TokenKind.PUNC_OPEN_BRACKET) {
-        this.eat(TokenKind.PUNC_OPEN_BRACKET);
-        const index = this.parseExpression();
-        this.eat(TokenKind.PUNC_CLOSE_BRACKET);
-        expr = {
-          type: "ArrayIndexExpression",
-          identifier: expr,
-          index,
-        };
+      } else if (!isMatchPattern && currentKind === TokenKind.PUNC_OPEN_PAREN) {
+        // function call
+        expr = this.parseFunctionCall(expr);
       } else if (
         !isMatchPattern &&
-        kind === TokenKind.PUNC_OPEN_BRACE &&
+        currentKind === TokenKind.PUNC_OPEN_BRACKET
+      ) {
+        // array indexing
+        expr = this.parseArrayIndex(expr);
+      } else if (
+        !isMatchPattern &&
+        currentKind === TokenKind.PUNC_OPEN_BRACE &&
         expr.type === "Identifier"
       ) {
-        expr = this.parseStructInitialization(expr);
-      } else if (!isMatchPattern && kind === TokenKind.PUNC_DOTDOT) {
-        this.eat(TokenKind.PUNC_DOTDOT);
+        // struct initialization
+        expr = this.parseStructInitialization(expr as Identifier);
+      } else if (!isMatchPattern && currentKind === TokenKind.PUNC_DOTDOT) {
+        // range expression
+        this.advance();
         const end = this.parseExpression();
         expr = {
           type: "RangeExpression",
@@ -441,38 +817,155 @@ export class Parser {
     return expr;
   }
 
-  private parseStructInitialization(identifier: Identifier): Expression {
+  private parseFunctionCall(callee: Expression): Expression {
+    // e.g. myFunc(expr1, expr2, ...)
+    this.eat(TokenKind.PUNC_OPEN_PAREN);
+    const args: Expression[] = [];
+    if (this.current.kind !== TokenKind.PUNC_CLOSE_PAREN) {
+      do {
+        args.push(this.parseExpression());
+      } while (this.match(TokenKind.PUNC_COMMA));
+    }
+    this.eat(TokenKind.PUNC_CLOSE_PAREN);
+    return {
+      type: "FunctionCall",
+      callee,
+      arguments: args,
+    };
+  }
+
+  private parseArrayIndex(arrayExpr: Expression): Expression {
+    this.eat(TokenKind.PUNC_OPEN_BRACKET);
+    const index = this.parseExpression();
+    this.eat(TokenKind.PUNC_CLOSE_BRACKET);
+    return {
+      type: "ArrayIndexExpression",
+      array: arrayExpr,
+      index,
+    };
+  }
+
+  private parseStructInitialization(id: Identifier): Expression {
     this.eat(TokenKind.PUNC_OPEN_BRACE);
     const fields: { identifier: Identifier; init: Expression }[] = [];
 
     while (
-      (this.currentToken.kind as TokenKind) !== TokenKind.PUNC_CLOSE_BRACE
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
+      !this.isAtEnd()
     ) {
-      const name = this.parseIdentifier();
+      const fieldName = this.parseIdentifier();
       this.eat(TokenKind.PUNC_COLON);
       const init = this.parseExpression();
-
-      fields.push({
-        identifier: name,
-        init,
-      });
-
-      if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_COMMA) {
-        this.eat(TokenKind.PUNC_COMMA);
-      }
+      fields.push({ identifier: fieldName, init });
+      this.match(TokenKind.PUNC_COMMA);
     }
 
     this.eat(TokenKind.PUNC_CLOSE_BRACE);
+
     return {
       type: "StructInitialization",
-      identifier,
+      identifier: id,
       fields,
     };
   }
 
+  //---------------------------------------------------------------------------
+  // Match Expression
+  //---------------------------------------------------------------------------
+
+  private parseMatchExpression(): MatchExpression {
+    // match expression: match expr { pattern => expr, pattern => expr, ... }
+    this.eat(TokenKind.KW_MATCH);
+
+    const expression = this.parseExpression();
+
+    this.eat(TokenKind.PUNC_OPEN_BRACE);
+    const cases: MatchCase[] = [];
+
+    while (
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
+      !this.isAtEnd()
+    ) {
+      cases.push(this.parseMatchCase());
+      this.match(TokenKind.PUNC_COMMA);
+    }
+
+    this.eat(TokenKind.PUNC_CLOSE_BRACE);
+
+    return {
+      type: "MatchExpression",
+      expression,
+      cases,
+    };
+  }
+
+  private parseMatchCase(): MatchCase {
+    // pattern might be MyEnum.A or MyEnum.C(sub) etc.
+    // We'll treat it as an expression with isMatchPattern = true, so
+    // we skip function calls, array indexing, etc.
+    if (this.current.kind !== TokenKind.IDENTIFIER) {
+      this.error("Expected identifier at start of match pattern");
+    }
+
+    const patternExpr = this.parseExpression();
+    const castedPattern = this.convertExpressionToPattern(patternExpr);
+
+    let binding: Identifier | undefined;
+    if (this.match(TokenKind.PUNC_OPEN_PAREN)) {
+      // parse something like (sub)
+      if (this.current.kind !== TokenKind.IDENTIFIER) {
+        this.error("Expected identifier in match pattern binding");
+      }
+      binding = this.parseIdentifier();
+      this.eat(TokenKind.PUNC_CLOSE_PAREN);
+    }
+
+    const matchPattern: MatchPattern = {
+      type: "MatchPattern",
+      enumPath: [castedPattern as Identifier | PropertyAccess],
+      binding,
+    };
+
+    if (!this.match(TokenKind.PUNC_ARROW)) {
+      this.error("Expected '=>' in match case");
+    }
+
+    // parse the body
+    let body: Expression;
+    if ((this.current.kind as TokenKind) === TokenKind.KW_MATCH) {
+      body = this.parseMatchExpression();
+    } else {
+      body = this.parseExpression();
+    }
+
+    return {
+      type: "MatchCase",
+      pattern: matchPattern,
+      body,
+    };
+  }
+
+  /**
+   * Converts an Expression into something we can store in the match pattern.
+   * In many languages, we might just store the expression directly.
+   */
+  private convertExpressionToPattern(
+    expr: Expression | Identifier
+  ): Identifier | Expression {
+    // If it's an identifier or property access, that's likely okay.
+    // If we want to restrict certain expression types, do so here.
+    return expr;
+  }
+
+  //---------------------------------------------------------------------------
+  // Literal Parsing
+  //---------------------------------------------------------------------------
+
   private parseStringLiteral(): Expression {
     const token = this.eat(TokenKind.LITERAL_STRING);
-    if (!token.literal) this.error("Expected string literal");
+    if (!token.literal) {
+      this.error("String token missing literal value");
+    }
     return {
       type: "StringLiteral",
       value: token.literal,
@@ -481,7 +974,9 @@ export class Parser {
 
   private parseNumberLiteral(): Expression {
     const token = this.eat(TokenKind.LITERAL_NUMBER);
-    if (!token.literal) this.error("Expected number literal");
+    if (!token.literal) {
+      this.error("Number token missing literal value");
+    }
     return {
       type: "NumberLiteral",
       value: token.literal,
@@ -489,8 +984,8 @@ export class Parser {
   }
 
   private parseBooleanLiteral(): Expression {
-    const isTrue = this.currentToken.kind === TokenKind.KW_TRUE;
-    this.eat(this.currentToken.kind);
+    const isTrue = this.current.kind === TokenKind.KW_TRUE;
+    this.advance();
     return {
       type: "BooleanLiteral",
       value: isTrue,
@@ -507,12 +1002,15 @@ export class Parser {
   private parseArrayExpression(): Expression {
     this.eat(TokenKind.PUNC_OPEN_BRACKET);
     const elements: Expression[] = [];
-    while (this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACKET) {
+
+    while (
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACKET &&
+      !this.isAtEnd()
+    ) {
       elements.push(this.parseExpression());
-      if (this.currentToken.kind === TokenKind.PUNC_COMMA) {
-        this.eat(TokenKind.PUNC_COMMA);
-      }
+      this.match(TokenKind.PUNC_COMMA);
     }
+
     this.eat(TokenKind.PUNC_CLOSE_BRACKET);
     return {
       type: "ArrayExpression",
@@ -520,442 +1018,71 @@ export class Parser {
     };
   }
 
-  private parseStatement(): Statement {
-    // Save the current state in case we need to backtrack
-    // Save the current state in case we need to backtrack
-    const savedIndex = this.index;
-    const savedToken = this.currentToken;
+  //---------------------------------------------------------------------------
+  // Helpers
+  //---------------------------------------------------------------------------
 
-    try {
-      switch (this.currentToken.kind) {
-        case TokenKind.KW_FUNCTION:
-          return this.parseFunctionStatement();
-        case TokenKind.KW_RETURN:
-          return this.parseReturnStatement();
-        case TokenKind.KW_CONST:
-          return this.parseConstStatement();
-        case TokenKind.KW_STRUCT:
-          return this.parseStructDeclaration();
-        case TokenKind.KW_IMPORT:
-        case TokenKind.KW_FROM:
-          return this.parseImportDeclaration();
-        case TokenKind.KW_EXPORT:
-          return this.parseExportStatement();
-        case TokenKind.KW_IF:
-          return this.parseIfStatement();
-        case TokenKind.KW_FOR:
-          return this.parseForStatement();
-        case TokenKind.KW_THROW:
-          return this.parseThrowStatement();
-        case TokenKind.KW_ASSERT:
-          return this.parseAssertStatement();
-        case TokenKind.KW_BREAK:
-          return this.parseBreakStatement();
-        case TokenKind.KW_CONTINUE:
-          return this.parseContinueStatement();
-        case TokenKind.KW_ENUM:
-          return this.parseEnumDeclaration();
-        case TokenKind.KW_MATCH:
-          return this.parseMatchExpression();
-        case TokenKind.IDENTIFIER: {
-          const identifier = this.parseIdentifier();
-
-          if (
-            (this.currentToken.kind as TokenKind) ===
-            TokenKind.PUNC_COLON_EQUALS
-          ) {
-            this.eat(TokenKind.PUNC_COLON_EQUALS);
-            const init = this.parseExpression();
-            return {
-              type: "DeclarationStatement",
-              identifier,
-              init,
-            };
-          }
-
-          // If it's not a declaration, backtrack and parse as expression
-          this.index = savedIndex;
-          this.currentToken = savedToken;
-          return this.parseExpression();
-        }
-        default:
-          return this.parseExpression();
-      }
-    } catch (e) {
-      // If parsing fails, restore the state and rethrow
-      this.index = savedIndex;
-      this.currentToken = savedToken;
-      throw e;
+  private parseTypeIdentifier(): TypeIdentifier {
+    // e.g. MyType, or MyType[], or maybe ?MyType for optional.
+    const identifier = this.parseIdentifier();
+    let isArray = false;
+    if (this.match(TokenKind.PUNC_OPEN_BRACKET)) {
+      this.eat(TokenKind.PUNC_CLOSE_BRACKET);
+      isArray = true;
     }
+    // For now, ignore option (?) logic or do so if needed in your language.
+    return {
+      type: "TypeIdentifier",
+      identifier,
+      isArray,
+      isOption: false,
+    };
   }
 
-  private parseFunctionStatement(): Statement {
-    this.eat(TokenKind.KW_FUNCTION);
-    const identifier = this.parseIdentifier();
-    this.eat(TokenKind.PUNC_OPEN_PAREN);
-
-    const params: FunctionParameter[] = [];
-    if (this.currentToken.kind !== TokenKind.PUNC_CLOSE_PAREN) {
-      do {
-        params.push(this.parseFunctionParameter());
-      } while (
-        this.currentToken.kind === TokenKind.PUNC_COMMA &&
-        this.eat(TokenKind.PUNC_COMMA)
+  private parseIdentifier(): Identifier {
+    if (this.current.kind !== TokenKind.IDENTIFIER) {
+      this.error(
+        `Expected identifier, got ${tokenKindToString(this.current.kind)}`
       );
     }
-    this.eat(TokenKind.PUNC_CLOSE_PAREN);
+    const token = this.current;
+    this.advance();
+    return {
+      type: "Identifier",
+      name: token.literal || "",
+    };
+  }
 
-    let returnType;
-    let throwType;
-
-    const nextToken = this.currentToken;
-    if (nextToken.kind === TokenKind.IDENTIFIER) {
-      returnType = this.parseTypeIdentifier();
-    }
-
-    if (this.currentToken.kind === TokenKind.PUNC_COMMA) {
-      this.eat(TokenKind.PUNC_COMMA);
-      throwType = this.parseTypeIdentifier();
-    }
-
+  /**
+   * Parses a block statement: { statement... }
+   */
+  private parseBlockStatement(): BlockExpression {
     this.eat(TokenKind.PUNC_OPEN_BRACE);
-    const body: Statement[] = [];
-    while (
-      this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACE &&
-      !this.isAtEnd()
-    ) {
-      body.push(this.parseStatement());
-    }
-    this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-    return {
-      type: "FunctionStatement",
-      identifier,
-      params,
-      body,
-      returnType,
-      throwType,
-    };
-  }
-
-  private parseReturnStatement(): Statement {
-    this.eat(TokenKind.KW_RETURN);
-    let expression;
-    if (this.currentToken.kind !== TokenKind.PUNC_SEMICOLON) {
-      expression = this.parseExpression();
-    }
-    return {
-      type: "ReturnStatement",
-      expression,
-    };
-  }
-
-  private parseConstStatement(): Statement {
-    this.eat(TokenKind.KW_CONST);
-    const identifier = this.parseIdentifier();
-    this.eat(TokenKind.PUNC_EQUALS);
-    const init = this.parseExpression();
-    return {
-      type: "ConstStatement",
-      identifier,
-      init,
-    };
-  }
-
-  private parseStructDeclaration(): Statement {
-    this.eat(TokenKind.KW_STRUCT);
-    const identifier = this.parseIdentifier();
-    this.eat(TokenKind.PUNC_OPEN_BRACE);
-
-    const fields: StructField[] = [];
-    while (this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACE) {
-      fields.push(this.parseStructField());
-      if (this.currentToken.kind === TokenKind.PUNC_COMMA) {
-        this.eat(TokenKind.PUNC_COMMA);
-      }
-    }
-    this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-    return {
-      type: "StructDeclaration",
-      identifier,
-      fields,
-    };
-  }
-
-  private parseImportDeclaration(): Statement {
-    if (this.currentToken.kind === TokenKind.KW_FROM) {
-      this.eat(TokenKind.KW_FROM);
-      const pathToken = this.eat(TokenKind.LITERAL_STRING);
-      if (!pathToken.literal)
-        this.error("Expected string literal for import path");
-      this.eat(TokenKind.KW_IMPORT);
-
-      const specifiers: ImportSpecifier[] = [];
-      do {
-        specifiers.push(this.parseImportSpecifier());
-        if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_COMMA) {
-          this.eat(TokenKind.PUNC_COMMA);
-        } else {
-          break;
-        }
-      } while (true);
-
-      return {
-        type: "ImportDeclaration",
-        specifiers,
-        path: pathToken.literal,
-      };
-    } else {
-      this.eat(TokenKind.KW_IMPORT);
-      const specifiers: ImportSpecifier[] = [];
-
-      while ((this.currentToken.kind as TokenKind) !== TokenKind.KW_FROM) {
-        specifiers.push(this.parseImportSpecifier());
-        if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_COMMA) {
-          this.eat(TokenKind.PUNC_COMMA);
-        }
-      }
-
-      this.eat(TokenKind.KW_FROM);
-      const pathToken = this.eat(TokenKind.LITERAL_STRING);
-      if (!pathToken.literal)
-        this.error("Expected string literal for import path");
-
-      return {
-        type: "ImportDeclaration",
-        specifiers,
-        path: pathToken.literal,
-      };
-    }
-  }
-
-  private parseExportStatement(): Statement {
-    this.eat(TokenKind.KW_EXPORT);
-    return {
-      type: "ExportStatement",
-      declaration: this.parseStatement(),
-    };
-  }
-
-  private parseIfStatement(): Statement {
-    this.eat(TokenKind.KW_IF);
-    const condition = this.parseExpression();
-    this.eat(TokenKind.PUNC_OPEN_BRACE);
-
-    const body: Statement[] = [];
-    while (
-      this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACE &&
-      !this.isAtEnd()
-    ) {
-      body.push(this.parseStatement());
-    }
-    this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-    let elseBody;
-    const nextToken = this.currentToken;
-    if (nextToken && nextToken.kind === TokenKind.KW_ELSE) {
-      this.eat(TokenKind.KW_ELSE);
-      this.eat(TokenKind.PUNC_OPEN_BRACE);
-      elseBody = [];
-      while (
-        this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACE &&
-        !this.isAtEnd()
-      ) {
-        elseBody.push(this.parseStatement());
-      }
-      this.eat(TokenKind.PUNC_CLOSE_BRACE);
-    }
-
-    return {
-      type: "IfStatement",
-      condition,
-      body,
-      elseBody,
-    };
-  }
-
-  private parseForStatement(): Statement {
-    this.eat(TokenKind.KW_FOR);
-
-    // Check if it's a for-in statement
-    if (this.peek().kind === TokenKind.KW_IN) {
-      const identifier = this.parseIdentifier();
-      this.eat(TokenKind.KW_IN);
-      const expression = this.parseExpression();
-
-      this.eat(TokenKind.PUNC_OPEN_BRACE);
-      const body: Statement[] = [];
-      while (this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACE) {
-        body.push(this.parseStatement());
-      }
-      this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-      return {
-        type: "ForInStatement",
-        identifier,
-        expression,
-        body,
-      };
-    }
-
-    // Regular for statement
-    this.eat(TokenKind.PUNC_OPEN_BRACE);
-    const body: Statement[] = [];
-    while (this.currentToken.kind !== TokenKind.PUNC_CLOSE_BRACE) {
-      body.push(this.parseStatement());
-    }
-    this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-    return {
-      type: "ForStatement",
-      body,
-    };
-  }
-
-  private parseThrowStatement(): Statement {
-    this.eat(TokenKind.KW_THROW);
-    return {
-      type: "ThrowStatement",
-      expression: this.parseExpression(),
-    };
-  }
-
-  private parseAssertStatement(): Statement {
-    this.eat(TokenKind.KW_ASSERT);
-    const expression = this.parseExpression();
-    this.eat(TokenKind.PUNC_COMMA);
-    const message = this.parseExpression();
-    return {
-      type: "AssertStatement",
-      expression,
-      message,
-    };
-  }
-
-  private parseBreakStatement(): Statement {
-    this.eat(TokenKind.KW_BREAK);
-    return { type: "BreakStatement" };
-  }
-
-  private parseContinueStatement(): Statement {
-    this.eat(TokenKind.KW_CONTINUE);
-    return { type: "ContinueStatement" };
-  }
-
-  private parseEnumDeclaration(): Statement {
-    this.eat(TokenKind.KW_ENUM);
-    const identifier = this.parseIdentifier();
-    this.eat(TokenKind.PUNC_OPEN_BRACE);
-
-    const variants: EnumVariant[] = [];
-    while (
-      (this.currentToken.kind as TokenKind) !== TokenKind.PUNC_CLOSE_BRACE
-    ) {
-      const name = this.parseIdentifier();
-      let payload;
-
-      if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_OPEN_PAREN) {
-        this.eat(TokenKind.PUNC_OPEN_PAREN);
-        payload = this.parseTypeIdentifier();
-        this.eat(TokenKind.PUNC_CLOSE_PAREN);
-      }
-
-      variants.push({
-        type: "EnumVariant",
-        name,
-        payload,
-      });
-
-      if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_COMMA) {
-        this.eat(TokenKind.PUNC_COMMA);
-      }
-    }
-
-    this.eat(TokenKind.PUNC_CLOSE_BRACE);
-    return {
-      type: "EnumDeclaration",
-      identifier,
-      variants,
-    };
-  }
-
-  private parseMatchExpression(): MatchExpression {
-    this.eat(TokenKind.KW_MATCH);
-    const expression = this.parseExpression();
-    this.eat(TokenKind.PUNC_OPEN_BRACE);
-
-    const cases: MatchCase[] = [];
-    while (
-      (this.currentToken.kind as TokenKind) !== TokenKind.PUNC_CLOSE_BRACE
-    ) {
-      // Parse the pattern directly
-      // Parse the pattern directly
-      if ((this.currentToken.kind as TokenKind) !== TokenKind.IDENTIFIER) {
-        this.error("Expected identifier at start of match pattern");
-      }
-
-      // Parse the first identifier (e.g. MyEnum)
-      const pattern = this.parseExpression(true) as Identifier | PropertyAccess;
-
-      let binding;
-      if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_OPEN_PAREN) {
-        this.eat(TokenKind.PUNC_OPEN_PAREN);
-        if ((this.currentToken.kind as TokenKind) !== TokenKind.IDENTIFIER) {
-          this.error("Expected identifier in binding");
-        }
-        binding = this.parseIdentifier();
-        this.eat(TokenKind.PUNC_CLOSE_PAREN);
-      }
-
-      const matchPattern: MatchPattern = {
-        type: "MatchPattern",
-        enumPath: [pattern],
-        binding,
-      };
-
-      if ((this.currentToken.kind as TokenKind) !== TokenKind.PUNC_ARROW) {
-        throw new Error(
-          `Expected PUNC_ARROW, got ${this.currentToken.kind} at line ${this.currentToken.line}, column ${this.currentToken.column}`
-        );
-      }
-      this.eat(TokenKind.PUNC_ARROW);
-
-      // Parse the body expression
-      let body;
-      if ((this.currentToken.kind as TokenKind) === TokenKind.KW_MATCH) {
-        body = this.parseMatchExpression();
-      } else {
-        body = this.parseExpression();
-      }
-
-      cases.push({
-        type: "MatchCase",
-        pattern: matchPattern,
-        body,
-      });
-
-      if ((this.currentToken.kind as TokenKind) === TokenKind.PUNC_COMMA) {
-        this.eat(TokenKind.PUNC_COMMA);
-      }
-    }
-
-    this.eat(TokenKind.PUNC_CLOSE_BRACE);
-
-    const result: MatchExpression = {
-      type: "MatchExpression",
-      expression,
-      cases,
-    };
-
-    return result;
-  }
-
-  parseProgram(): Statement[] {
     const statements: Statement[] = [];
-    while (!this.isAtEnd()) {
+    while (
+      !this.isAtEnd() &&
+      this.current.kind !== TokenKind.PUNC_CLOSE_BRACE
+    ) {
       statements.push(this.parseStatement());
     }
-    return statements;
+    this.eat(TokenKind.PUNC_CLOSE_BRACE);
+
+    return {
+      type: "BlockExpression",
+      body: statements,
+    };
+  }
+
+  private parseBlockStatementOrSingle(): BlockExpression {
+    // If next token is a brace, parse a full block. Otherwise parse a single statement and wrap it.
+    if (this.current.kind === TokenKind.PUNC_OPEN_BRACE) {
+      return this.parseBlockStatement();
+    } else {
+      const single = this.parseStatement();
+      return {
+        type: "BlockExpression",
+        body: [single],
+      };
+    }
   }
 }

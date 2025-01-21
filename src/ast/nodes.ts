@@ -111,8 +111,8 @@ export interface BlockExpression {
 export interface IfStatement {
   type: "IfStatement";
   condition: Expression;
-  body: Statement[];
-  elseBody?: Statement[];
+  then: Statement[];
+  else?: Statement[];
 }
 
 export interface ForStatement {
@@ -123,7 +123,7 @@ export interface ForStatement {
 export interface ForInStatement {
   type: "ForInStatement";
   identifier: Identifier;
-  expression: Expression;
+  iterator: Expression;
   body: Statement[];
 }
 
@@ -140,7 +140,7 @@ export interface AssertStatement {
 
 export interface FunctionCall {
   type: "FunctionCall";
-  identifier: Expression;
+  callee: Expression;
   arguments: Expression[];
 }
 
@@ -157,7 +157,7 @@ export interface ArrayExpression {
 
 export interface ArrayIndexExpression {
   type: "ArrayIndexExpression";
-  identifier: Expression;
+  array: Expression;
   index: Expression;
 }
 
@@ -218,6 +218,20 @@ export interface OrExpression {
   handler: BlockExpression;
 }
 
+export interface OrExpressionFallback {
+  type: "OrExpressionFallback";
+  expression: Expression;
+  fallback: Expression;
+}
+
+/**
+ * Used when an expression is placed where a statement is expected.
+ */
+export interface ExpressionStatement {
+  type: "ExpressionStatement";
+  expression: Expression;
+}
+
 export type Expression =
   | StringLiteral
   | NumberLiteral
@@ -235,7 +249,8 @@ export type Expression =
   | RangeExpression
   | TypeIdentifier
   | MatchExpression
-  | OrExpression;
+  | OrExpression
+  | OrExpressionFallback;
 
 export type Statement =
   | FunctionStatement
@@ -253,4 +268,5 @@ export type Statement =
   | BreakStatement
   | ContinueStatement
   | EnumDeclaration
+  | ExpressionStatement
   | Expression;
