@@ -804,7 +804,7 @@ export class Parser {
           tokenKindToString(this.current.kind)
       );
 
-      const currentKind = this.current.kind;
+      const currentKind = this.current.kind as TokenKind; // the `as TokenKind` is needed here because the methods above mutate `this.current` but TypeScript thinks it's still constrained
 
       if (currentKind === TokenKind.PUNC_DOT) {
         // property access
