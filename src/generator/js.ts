@@ -238,30 +238,49 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     const { identifier, variants } = statement;
     const enumName = identifier.name;
 
-    // Generate variant classes and factory methods inside the enum class
-    const variantClassesAndFactories = variants
+    // Generate variant classes and “constructors” inside the enum class
+    // in a way that DOES NOT define the same static property again.
+    //
+    // For example, if the variant is “C(value)”, we do:
+    //   static C_class = class { constructor(value) { this.value = value; } };
+    //   static C(value) { return new MyEnum.C_class(value); }
+    //
+    // If the variant is “A” (no payload), we do:
+    //   static A_class = class { constructor() {} };
+    //   static A = new MyEnum.A_class();
+
+    const variantDefs = variants
       .map((variant) => {
-        const className = `${variant.name.name}`;
-        const constructor = variant.payload
-          ? `constructor(value) { this.value = value; }`
-          : "";
+        const variantName = variant.name.name;
 
-        const staticClass = variant.payload
-          ? `static ${className} = class ${className} {
-          constructor(value) { this.value = value; }
-        }`
-          : `static ${className} = class {}`;
+        // If this variant has a payload, define a class with constructor(value)
+        // and a static method that returns a new instance.
+        // If it has no payload, define a class with an empty constructor, plus a single static instance.
+        if (variant.payload) {
+          return `
+  static ${variantName}_class = class {
+    constructor(value) {
+      this.value = value;
+    }
+  };
 
-        const factoryMethod = variant.payload
-          ? `static ${variant.name.name}(value) { return new this.${className}(value); }`
-          : `static ${variant.name.name} = new this.${className}();`;
+  static ${variantName}(value) {
+    return new ${enumName}.${variantName}_class(value);
+  }
+`;
+        } else {
+          return `
+  static ${variantName}_class = class ${variantName} {};
 
-        return `${staticClass}\n\n  ${factoryMethod}`;
+  static ${variantName} = new ${enumName}.${variantName}_class();
+`;
+        }
       })
-      .join("\n\n  ");
+      .join("\n");
 
+    // Put them together into a “class MyEnum { ... }”
     return `class ${enumName} {
-  ${variantClassesAndFactories}
+${variantDefs}
 }`;
   }
 
@@ -431,7 +450,7 @@ ${statementsJs}
          * to reference it (e.g. MyEnum.A)
          */
         const enumName = this.generateExpression(pattern.enumPath[0]);
-        const className = `${enumName}.${variantName}`;
+        const className = `${enumName}_class`;
 
         if (pattern.binding) {
           // Variant has a payload => use instanceof check,

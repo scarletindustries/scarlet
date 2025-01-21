@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { readFileSync, writeFileSync } from "fs";
+import { readFileSync } from "fs";
 import { Compiler } from "./compiler";
 
 const program = new Command();
@@ -32,8 +32,6 @@ program
     try {
       const source = readFileSync(entrypoint, "utf-8");
       const result = new Compiler().compile(source);
-
-      writeFileSync("output.js", result);
 
       eval(result);
     } catch (error) {
