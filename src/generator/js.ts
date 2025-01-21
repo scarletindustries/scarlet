@@ -238,35 +238,30 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     const { identifier, variants } = statement;
     const enumName = identifier.name;
 
-    // Generate variant classes
-    const variantClasses = variants
+    // Generate variant classes and factory methods inside the enum class
+    const variantClassesAndFactories = variants
       .map((variant) => {
-        const className = `${enumName}_${variant.name.name}`;
+        const className = `${variant.name.name}`;
         const constructor = variant.payload
           ? `constructor(value) { this.value = value; }`
-          : "constructor() {}";
+          : "";
 
-        return `class ${className} {
-  ${constructor}
-}`;
+        const staticClass = variant.payload
+          ? `static ${className} = class ${className} {
+          constructor(value) { this.value = value; }
+        }`
+          : `static ${className} = class {}`;
+
+        const factoryMethod = variant.payload
+          ? `static ${variant.name.name}(value) { return new this.${className}(value); }`
+          : `static ${variant.name.name} = new this.${className}();`;
+
+        return `${staticClass}\n\n  ${factoryMethod}`;
       })
-      .join("\n\n");
+      .join("\n\n  ");
 
-    // Generate static factory methods
-    const factoryMethods = variants
-      .map((variant) => {
-        const methodName = variant.name.name;
-        const className = `${enumName}_${methodName}`;
-        return variant.payload
-          ? `static ${methodName}(value) { return new ${className}(value); }`
-          : `static ${methodName} = new ${className}();`;
-      })
-      .join("\n  ");
-
-    return `${variantClasses}
-
-class ${enumName} {
-  ${factoryMethods}
+    return `class ${enumName} {
+  ${variantClassesAndFactories}
 }`;
   }
 
@@ -421,7 +416,7 @@ ${statementsJs}
       .map(({ pattern, body }) => {
         /**
          * Example: if pattern.enumPath is [MyEnum, A], then
-         * fullPath => "MyEnum.A", and className => "MyEnum_A".
+         * fullPath => "MyEnum.A", and className => "MyEnum.A".
          */
         const fullPath = pattern.enumPath
           .map((node) => this.generateExpression(node))
@@ -432,15 +427,15 @@ ${statementsJs}
         const variantName =
           last.type === "Identifier" ? last.name : last.right.name; // if last is a PropertyAccess
         /**
-         * If the first item in "pattern.enumPath" is the enum name itself,
-         * say "MyEnum", we piece together the class as "MyEnum_VariantName".
+         * The class is now a static member of the enum, so we use the full path
+         * to reference it (e.g. MyEnum.A)
          */
         const enumName = this.generateExpression(pattern.enumPath[0]);
-        const className = `${enumName}_${variantName}`;
+        const className = `${enumName}.${variantName}`;
 
         if (pattern.binding) {
           // Variant has a payload => use instanceof check,
-          // then pull out the value from the variant’s "this.value".
+          // then pull out the value from the variant's "this.value".
           const binding = `const ${pattern.binding.name} = ${valueRef}.value;`;
           return `if (${valueRef} instanceof ${className}) {
   ${binding}

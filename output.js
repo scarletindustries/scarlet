@@ -1,44 +1,39 @@
 const println = console.log;
-export class MySubEnum_D {
-  constructor() {}
-}
-
-class MySubEnum_E {
-  constructor() {}
-}
-
 class MySubEnum {
-  static D = new MySubEnum_D();
-  static E = new MySubEnum_E();
-}
-export class MyEnum_A {
-  constructor() {}
-}
+  static D = class {};
 
-class MyEnum_B {
-  constructor() {}
-}
+  static D = new this.D();
 
-class MyEnum_C {
-  constructor(value) {
-    this.value = value;
-  }
-}
+  static E = class {};
 
+  static E = new this.E();
+}
 class MyEnum {
-  static A = new MyEnum_A();
-  static B = new MyEnum_B();
+  static A = class {};
+
+  static A = new this.A();
+
+  static B = class {};
+
+  static B = new this.B();
+
+  static C = class C {
+    constructor(value) {
+      this.value = value;
+    }
+  };
+
   static C(value) {
-    return new MyEnum_C(value);
+    return new this.C(value);
   }
 }
-export function test(arg) {
+function test(arg) {
   return (() => {
     if (arg === MyEnum.A) {
       return "a is the best!";
     } else if (arg === MyEnum.B) {
       return "b is the best!";
-    } else if (arg instanceof MyEnum.C_C) {
+    } else if (arg instanceof MyEnum.C.C) {
       const sub = arg.value;
       return (() => {
         if (sub === MySubEnum.D) {
