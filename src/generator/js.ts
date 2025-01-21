@@ -90,7 +90,7 @@ ${this.generateStatements(statements)}
       case "ExpressionStatement":
         return this.generateExpression(statement.expression) + ";";
       case "BlockExpression":
-        return this.generateBlockExpression(statement as BlockExpression);
+        return this.generateBlockExpression(statement);
       default:
         throw new Error("Unsupported statement type: " + statement.type);
     }
@@ -99,6 +99,7 @@ ${this.generateStatements(statements)}
   private generateFunctionStatement(statement: FunctionStatement): string {
     const { identifier, params, body, returnType, throwType } = statement;
     const jsDoc = this.generateJSDoc(returnType, throwType);
+
     const functionBody = this.generateStatements(body);
 
     return `${jsDoc}function ${identifier.name}(${params
@@ -416,28 +417,37 @@ ${statementsJs}
 
   private generateMatchExpression(expression: MatchExpression): string {
     const { expression: matchExpr, cases } = expression;
-    const value = this.generateExpression(matchExpr);
+    const valueRef = this.generateExpression(matchExpr);
 
     const caseClauses = cases
       .map(({ pattern, body }) => {
-        const condition = pattern.enumPath
-          .map((p) => this.generateExpression(p))
+        // Example: if pattern.enumPath is [MyEnum, A], fullPath => "MyEnum.A"
+        const fullPath = pattern.enumPath
+          .map((node) => this.generateExpression(node))
           .join(".");
 
-        const binding = pattern.binding
-          ? `const ${pattern.binding.name} = ${value}.value;`
-          : "";
-
-        return `if (${value} instanceof ${condition}) {
+        if (pattern.binding) {
+          // Has payload => check __kind
+          const last = pattern.enumPath[pattern.enumPath.length - 1];
+          const variantName =
+            last.type === "Identifier" ? last.name : last.right.name; // if it's a PropertyAccess
+          const binding = `const ${pattern.binding.name} = ${valueRef}.value;`;
+          return `if (${valueRef} && ${valueRef}.__kind === "${variantName}") {
   ${binding}
   return ${this.generateExpression(body)};
 }`;
+        } else {
+          // No payload => compare directly with "MyEnum.A"
+          return `if (${valueRef} === ${fullPath}) {
+  return ${this.generateExpression(body)};
+}`;
+        }
       })
       .join(" else ");
 
     return `(() => {
   ${caseClauses}
-  throw new Error('No match case found');
+  throw new Error("No match case found");
 })()`;
   }
 

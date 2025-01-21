@@ -34,32 +34,25 @@
       return new MyEnum_C(value);
     }
   }
-
-  console.log(MyEnum);
-
   function test(arg) {
-    (() => {
-      let result = (() => {
-        if (arg instanceof MyEnum.A) {
-          return "a";
-        } else if (arg instanceof MyEnum.B) {
-          return "b";
-        } else if (arg instanceof MyEnum.C) {
-          const sub = arg.value;
-          return (() => {
-            if (sub instanceof MySubEnum.D) {
-              return "a";
-            } else if (sub instanceof MySubEnum.E) {
-              return "b";
-            }
-            throw new Error("No match case found");
-          })();
-        }
-        throw new Error("No match case found");
-      })();
-      println(result);
+    return (() => {
+      if (arg === MyEnum.A) {
+        return "a is the best!";
+      } else if (arg === MyEnum.B) {
+        return "b is the best!";
+      } else if (arg && arg.__kind === "C") {
+        const sub = arg.value;
+        return (() => {
+          if (sub === MySubEnum.D) {
+            return "d is the best!";
+          } else if (sub === MySubEnum.E) {
+            return "e is the best!";
+          }
+          throw new Error("No match case found");
+        })();
+      }
+      throw new Error("No match case found");
     })();
   }
-
-  test(MyEnum.A);
+  println(test(MyEnum.C(MySubEnum.D)));
 })();

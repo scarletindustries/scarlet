@@ -123,21 +123,12 @@ export class Parser {
     return this.tokens[idx];
   }
 
-  private debugLog(msg: string) {
-    console.debug(
-      `[Parser Debug] index=${this.index}, current=${tokenKindToString(
-        this.current.kind
-      )} => ${msg}`
-    );
-  }
-
   /**
    * Recursive descent parse for statements.
    * This might dispatch to many different parse functions
    * depending on the token kind (function, const, struct, etc.).
    */
   private parseStatement(): Statement {
-    this.debugLog("parseStatement() entered");
     switch (this.current.kind) {
       case TokenKind.KW_FUNCTION:
         return this.parseFunctionStatement();
@@ -170,10 +161,7 @@ export class Parser {
         return this.parseContinueStatement();
 
       case TokenKind.KW_MATCH:
-        this.debugLog(
-          "Detected 'match' keyword – going to parse as an expression"
-        );
-        return this.parseExpression() as Statement;
+        return this.parseExpression();
 
       case TokenKind.KW_EXPORT:
         return this.parseExportStatement();
@@ -265,13 +253,13 @@ export class Parser {
     }
 
     // Finally, parse the function body (block)
-    const body = this.parseBlockStatement();
+    const body = this.parseBlock();
 
     return {
       type: "FunctionStatement",
       identifier,
       params,
-      body: [body],
+      body,
       returnType,
       throwType,
     };
@@ -431,19 +419,28 @@ export class Parser {
       const identifier = this.parseIdentifier();
       this.eat(TokenKind.KW_IN);
       const iterator = this.parseExpression();
-      const body = this.parseBlockStatement();
+      const body = this.parseBlock();
       return {
         type: "ForInStatement",
         identifier,
         iterator,
-        body: [body],
+        body: [
+          {
+            type: "BlockExpression",
+            body: this.parseBlock(),
+          },
+        ],
       };
     } else {
       // for { ... }
-      const body = this.parseBlockStatement();
       return {
         type: "ForStatement",
-        body: [body],
+        body: [
+          {
+            type: "BlockExpression",
+            body: this.parseBlock(),
+          },
+        ],
       };
     }
   }
@@ -556,14 +553,13 @@ export class Parser {
 
       // If we find an open brace, parse a block
       if (this.current.kind === TokenKind.PUNC_OPEN_BRACE) {
-        const handlerBlock = this.parseBlockStatement();
         return {
           type: "OrExpression",
           expression: primary,
           errorBinding,
           handler: {
             type: "BlockExpression",
-            body: handlerBlock.body,
+            body: this.parseBlock(),
           },
         };
       } else {
@@ -747,46 +743,32 @@ export class Parser {
   }
 
   private parsePrimaryExpression(): Expression {
-    this.debugLog(
-      "parsePrimaryExpression() start: current token = " +
-        tokenKindToString(this.current.kind)
-    );
-
     let expr: Expression;
 
     // If current token = "match", parse match expression right away
     if (this.current.kind === TokenKind.KW_MATCH) {
-      this.debugLog(
-        "parsePrimaryExpression() found `match` -> parseMatchExpression()"
-      );
       return this.parseMatchExpression();
     }
 
     // Otherwise, handle typical literal or identifier
     switch (this.current.kind) {
       case TokenKind.LITERAL_STRING:
-        this.debugLog("parsePrimaryExpression() -> LITERAL_STRING");
         expr = this.parseStringLiteral();
         break;
       case TokenKind.LITERAL_NUMBER:
-        this.debugLog("parsePrimaryExpression() -> LITERAL_NUMBER");
         expr = this.parseNumberLiteral();
         break;
       case TokenKind.KW_TRUE:
       case TokenKind.KW_FALSE:
-        this.debugLog("parsePrimaryExpression() -> BooleanLiteral");
         expr = this.parseBooleanLiteral();
         break;
       case TokenKind.KW_NONE:
-        this.debugLog("parsePrimaryExpression() -> NoneLiteral");
         expr = this.parseNoneLiteral();
         break;
       case TokenKind.PUNC_OPEN_BRACKET:
-        this.debugLog("parsePrimaryExpression() -> parseArrayExpression()");
         expr = this.parseArrayExpression();
         break;
       case TokenKind.IDENTIFIER:
-        this.debugLog("parsePrimaryExpression() -> parseIdentifier()");
         expr = this.parseIdentifier();
         break;
       default:
@@ -799,16 +781,10 @@ export class Parser {
 
     // Check for trailing calls, property access, struct initialization, etc.
     while (true) {
-      this.debugLog(
-        "parsePrimaryExpression() [loop], looking at token = " +
-          tokenKindToString(this.current.kind)
-      );
-
       const currentKind = this.current.kind as TokenKind; // the `as TokenKind` is needed here because the methods above mutate `this.current` but TypeScript thinks it's still constrained
 
       if (currentKind === TokenKind.PUNC_DOT) {
         // property access
-        this.debugLog("parsePrimaryExpression() -> property access");
         this.advance();
         const right = this.parseIdentifier();
         expr = {
@@ -818,11 +794,9 @@ export class Parser {
         };
       } else if (currentKind === TokenKind.PUNC_OPEN_PAREN) {
         // function call
-        this.debugLog("parsePrimaryExpression() -> parseFunctionCall()");
         expr = this.parseFunctionCall(expr);
       } else if (currentKind === TokenKind.PUNC_OPEN_BRACKET) {
         // array indexing
-        this.debugLog("parsePrimaryExpression() -> parseArrayIndex()");
         expr = this.parseArrayIndex(expr);
       } else if (
         currentKind === TokenKind.PUNC_OPEN_BRACE &&
@@ -830,16 +804,12 @@ export class Parser {
       ) {
         // Peek ahead to decide if it's actually a struct initialization or something else (like match arms).
         if (this.looksLikeStructInitialization()) {
-          this.debugLog(
-            `parsePrimaryExpression() -> parseStructInitialization(${expr.name})`
-          );
           expr = this.parseStructInitialization(expr as Identifier);
         } else {
           // Not a struct literal, so break and let the calling function handle the brace (e.g. match arms).
           break;
         }
       } else if (currentKind === TokenKind.PUNC_DOTDOT) {
-        this.debugLog("parsePrimaryExpression() -> parse RangeExpression `..`");
         this.advance();
         const end = this.parseExpression();
         expr = {
@@ -853,9 +823,6 @@ export class Parser {
       }
     }
 
-    this.debugLog(
-      "parsePrimaryExpression() end, returning expr of type " + expr.type
-    );
     return expr;
   }
 
@@ -916,7 +883,6 @@ export class Parser {
   }
 
   private parseStructInitialization(id: Identifier): Expression {
-    this.debugLog(`parseStructInitialization() for identifier '${id.name}'`);
     this.eat(TokenKind.PUNC_OPEN_BRACE);
     const fields: { identifier: Identifier; init: Expression }[] = [];
 
@@ -924,12 +890,6 @@ export class Parser {
       this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
       !this.isAtEnd()
     ) {
-      this.debugLog(
-        `parseStructInitialization() inside loop - current token = ${tokenKindToString(
-          this.current.kind
-        )}`
-      );
-
       // This is where "Expected ':' but got ..." might be triggered if the parser
       // thinks it's reading a struct field but sees the wrong token.
       const fieldName = this.parseIdentifier();
@@ -940,9 +900,6 @@ export class Parser {
     }
 
     this.eat(TokenKind.PUNC_CLOSE_BRACE);
-    this.debugLog(
-      `parseStructInitialization() done, created a StructInitialization for '${id.name}'`
-    );
     return {
       type: "StructInitialization",
       identifier: id,
@@ -955,7 +912,6 @@ export class Parser {
   //---------------------------------------------------------------------------
 
   private parseMatchExpression(): MatchExpression {
-    this.debugLog("parseMatchExpression() entered");
     this.eat(TokenKind.KW_MATCH);
     const expression = this.parseExpression();
 
@@ -966,7 +922,6 @@ export class Parser {
       this.current.kind !== TokenKind.PUNC_CLOSE_BRACE &&
       !this.isAtEnd()
     ) {
-      this.debugLog("parseMatchExpression() -> parsing one match case...");
       cases.push(this.parseMatchCase());
       this.match(TokenKind.PUNC_COMMA);
     }
@@ -981,18 +936,12 @@ export class Parser {
   }
 
   private parseMatchCase(): MatchCase {
-    this.debugLog("parseMatchCase() entered");
     const pattern = this.parseEnumPattern();
-    this.debugLog(
-      "after parseEnumPattern(), next token = " +
-        tokenKindToString(this.current.kind)
-    );
 
     if (!this.match(TokenKind.PUNC_ARROW)) {
       this.error("Expected '=>' in match case");
     }
 
-    this.debugLog("matched =>, now parsing the body of the case");
     let body: Expression;
     if (this.current.kind === TokenKind.KW_MATCH) {
       body = this.parseMatchExpression();
@@ -1016,7 +965,6 @@ export class Parser {
    * We do NOT treat "(subBinding)" as a function call here!
    */
   private parseEnumPattern(): MatchPattern {
-    this.debugLog("parseEnumPattern() entered");
     if (this.current.kind !== TokenKind.IDENTIFIER) {
       this.error("Expected identifier at start of match variant pattern");
     }
@@ -1044,7 +992,6 @@ export class Parser {
       this.eat(TokenKind.PUNC_CLOSE_PAREN);
     }
 
-    this.debugLog("parseEnumPattern() complete, returning pattern");
     return {
       type: "MatchPattern",
       enumPath: [patternNode],
@@ -1151,7 +1098,7 @@ export class Parser {
   /**
    * Parses a block statement: { statement... }
    */
-  private parseBlockStatement(): BlockExpression {
+  private parseBlock(): Statement[] {
     this.eat(TokenKind.PUNC_OPEN_BRACE);
     const statements: Statement[] = [];
     while (
@@ -1162,16 +1109,13 @@ export class Parser {
     }
     this.eat(TokenKind.PUNC_CLOSE_BRACE);
 
-    return {
-      type: "BlockExpression",
-      body: statements,
-    };
+    return statements;
   }
 
   private parseBlockStatementOrSingle(): BlockExpression {
     // If next token is a brace, parse a full block. Otherwise parse a single statement and wrap it.
     if (this.current.kind === TokenKind.PUNC_OPEN_BRACE) {
-      return this.parseBlockStatement();
+      return { type: "BlockExpression", body: this.parseBlock() };
     } else {
       const single = this.parseStatement();
       return {

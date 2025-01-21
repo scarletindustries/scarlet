@@ -10,16 +10,14 @@ enum MyEnum {
 }
 
 fn test(arg MyEnum) {
-    result := match arg {
-        MyEnum.A => 'a',
-        MyEnum.B => 'b',
+    return match arg {
+        MyEnum.A => 'a is the best!',
+        MyEnum.B => 'b is the best!',
         MyEnum.C(sub) => match sub {
-            MySubEnum.D => 'a',
-            MySubEnum.E => 'b',
+            MySubEnum.D => 'd is the best!',
+            MySubEnum.E => 'e is the best!',
         },
     }
-
-    println(result)
 }
 
-test(MyEnum.A)
+println(test(MyEnum.C(MySubEnum.D)))
