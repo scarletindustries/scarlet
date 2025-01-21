@@ -44,11 +44,10 @@ export class JSGenerator {
   }
 
   generateRoot(statements: Statement[]): string {
-    return `(() => {
-  const println = console.log;
-
-${this.generateStatements(statements)}
-})();`;
+    return `
+      const println = console.log;
+      ${this.generateStatements(statements)}
+    `;
   }
 
   private generateStatements(statements: Statement[]): string {
@@ -178,8 +177,7 @@ ${this.indent}}
   }
 
   private generateExportStatement(statement: ExportStatement): string {
-    // return `export ${this.generateStatement(statement.declaration)}`;
-    throw new Error("Exporting is currently unsupported in the JS backend.");
+    return `export ${this.generateStatement(statement.declaration)}`;
   }
 
   private generateIfStatement(statement: IfStatement): string {
@@ -421,23 +419,35 @@ ${statementsJs}
 
     const caseClauses = cases
       .map(({ pattern, body }) => {
-        // Example: if pattern.enumPath is [MyEnum, A], fullPath => "MyEnum.A"
+        /**
+         * Example: if pattern.enumPath is [MyEnum, A], then
+         * fullPath => "MyEnum.A", and className => "MyEnum_A".
+         */
         const fullPath = pattern.enumPath
           .map((node) => this.generateExpression(node))
           .join(".");
 
+        // We grab the last piece of the pattern to see if there's a payload.
+        const last = pattern.enumPath[pattern.enumPath.length - 1];
+        const variantName =
+          last.type === "Identifier" ? last.name : last.right.name; // if last is a PropertyAccess
+        /**
+         * If the first item in "pattern.enumPath" is the enum name itself,
+         * say "MyEnum", we piece together the class as "MyEnum_VariantName".
+         */
+        const enumName = this.generateExpression(pattern.enumPath[0]);
+        const className = `${enumName}_${variantName}`;
+
         if (pattern.binding) {
-          // Has payload => check __kind
-          const last = pattern.enumPath[pattern.enumPath.length - 1];
-          const variantName =
-            last.type === "Identifier" ? last.name : last.right.name; // if it's a PropertyAccess
+          // Variant has a payload => use instanceof check,
+          // then pull out the value from the variant’s "this.value".
           const binding = `const ${pattern.binding.name} = ${valueRef}.value;`;
-          return `if (${valueRef} && ${valueRef}.__kind === "${variantName}") {
+          return `if (${valueRef} instanceof ${className}) {
   ${binding}
   return ${this.generateExpression(body)};
 }`;
         } else {
-          // No payload => compare directly with "MyEnum.A"
+          // No payload => typically a single static instance => use direct equality
           return `if (${valueRef} === ${fullPath}) {
   return ${this.generateExpression(body)};
 }`;

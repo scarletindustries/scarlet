@@ -1,15 +1,15 @@
-enum MySubEnum {
+export enum MySubEnum {
     D,
     E,
 }
 
-enum MyEnum {
+export enum MyEnum {
     A,
     B,
     C(MySubEnum),
 }
 
-fn test(arg MyEnum) {
+export fn test(arg MyEnum) {
     return match arg {
         MyEnum.A => 'a is the best!',
         MyEnum.B => 'b is the best!',
