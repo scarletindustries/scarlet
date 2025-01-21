@@ -754,7 +754,7 @@ export class Parser {
 
     let expr: Expression;
 
-    // Handle special "match" directly if found
+    // If current token = "match", parse match expression right away
     if (this.current.kind === TokenKind.KW_MATCH) {
       this.debugLog(
         "parsePrimaryExpression() found `match` -> parseMatchExpression()"
@@ -762,6 +762,7 @@ export class Parser {
       return this.parseMatchExpression();
     }
 
+    // Otherwise, handle typical literal or identifier
     switch (this.current.kind) {
       case TokenKind.LITERAL_STRING:
         this.debugLog("parsePrimaryExpression() -> LITERAL_STRING");
@@ -796,13 +797,14 @@ export class Parser {
         );
     }
 
-    // Now parse trailing property accesses, function calls, brackets, etc.
+    // Check for trailing calls, property access, struct initialization, etc.
     while (true) {
       this.debugLog(
         "parsePrimaryExpression() [loop], looking at token = " +
           tokenKindToString(this.current.kind)
       );
-      const currentKind = this.current.kind as TokenKind;
+
+      const currentKind = this.current.kind;
 
       if (currentKind === TokenKind.PUNC_DOT) {
         // property access
@@ -826,11 +828,16 @@ export class Parser {
         currentKind === TokenKind.PUNC_OPEN_BRACE &&
         expr.type === "Identifier"
       ) {
-        // struct initialization
-        this.debugLog(
-          `parsePrimaryExpression() -> parseStructInitialization(${expr.name})`
-        );
-        expr = this.parseStructInitialization(expr as Identifier);
+        // Peek ahead to decide if it's actually a struct initialization or something else (like match arms).
+        if (this.looksLikeStructInitialization()) {
+          this.debugLog(
+            `parsePrimaryExpression() -> parseStructInitialization(${expr.name})`
+          );
+          expr = this.parseStructInitialization(expr as Identifier);
+        } else {
+          // Not a struct literal, so break and let the calling function handle the brace (e.g. match arms).
+          break;
+        }
       } else if (currentKind === TokenKind.PUNC_DOTDOT) {
         this.debugLog("parsePrimaryExpression() -> parse RangeExpression `..`");
         this.advance();
@@ -841,7 +848,7 @@ export class Parser {
           end,
         };
       } else {
-        // no more trailing tokens that belong to this expression
+        // No more trailing tokens that belong to this expression
         break;
       }
     }
@@ -850,6 +857,34 @@ export class Parser {
       "parsePrimaryExpression() end, returning expr of type " + expr.type
     );
     return expr;
+  }
+
+  /**
+   * Peek ahead to see if this '{' is likely a struct literal vs. a match block.
+   * We consider it a struct only if:
+   *   - The next token is '}' (empty struct), or
+   *   - The next token is an IDENTIFIER and the following token is ':'
+   * Otherwise, we assume it's something else (like match arms).
+   */
+  private looksLikeStructInitialization(): boolean {
+    const nextToken = this.peek();
+    if (!nextToken) return false; // no token => definitely not a struct
+
+    // 1) "{}" for an empty struct
+    if (nextToken.kind === TokenKind.PUNC_CLOSE_BRACE) {
+      return true;
+    }
+
+    // 2) "identifier :" form
+    if (nextToken.kind === TokenKind.IDENTIFIER) {
+      const afterNext = this.peek(1);
+      if (afterNext && afterNext.kind === TokenKind.PUNC_COLON) {
+        return true;
+      }
+    }
+
+    // If it doesn't look like a struct, let higher-level code (e.g. match) handle it
+    return false;
   }
 
   private parseFunctionCall(callee: Expression): Expression {

@@ -179,9 +179,9 @@ ${this.indent}}
   }
 
   private generateIfStatement(statement: IfStatement): string {
-    const { condition, body, elseBody } = statement;
+    const { condition, then, else: elseBody } = statement;
     let code = `if (${this.generateExpression(condition)}) {\n`;
-    code += this.generateStatements(body) + "\n}";
+    code += this.generateStatements(then) + "\n}";
 
     if (elseBody) {
       code += " else {\n";
@@ -196,9 +196,9 @@ ${this.indent}}
   }
 
   private generateForInStatement(statement: ForInStatement): string {
-    const { identifier, expression, body } = statement;
+    const { identifier, iterator, body } = statement;
     return `for (const ${identifier.name} of ${this.generateExpression(
-      expression
+      iterator
     )}) {
 ${this.generateStatements(body)}
 }`;
@@ -346,9 +346,7 @@ class ${enumName} {
   }
 
   private generateFunctionCall(expression: FunctionCall): string {
-    return `${this.generateExpression(
-      expression.identifier
-    )}(${expression.arguments
+    return `${this.generateExpression(expression.callee)}(${expression.arguments
       .map((arg) => this.generateExpression(arg))
       .join(", ")})`;
   }
@@ -384,7 +382,7 @@ class ${enumName} {
     expression: ArrayIndexExpression
   ): string {
     return `${this.generateExpression(
-      expression.identifier
+      expression.array
     )}[${this.generateExpression(expression.index)}]`;
   }
 
