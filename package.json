@@ -1,0 +1,21 @@
+{
+  "name": "al",
+  "version": "0.0.1",
+  "description": "al compiler and toolchain",
+  "type": "module",
+  "bin": {
+    "alc": "./dist/alc"
+  },
+  "scripts": {
+    "build": "bun build --compile src/cli.ts --outfile dist/alc",
+    "start": "bun run src/cli.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.7.3"
+  }
+}

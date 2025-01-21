@@ -12,3 +12,5 @@ bin/
 *.iml
 .env
 *.db
+node_modules
+dist

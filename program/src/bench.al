@@ -1,11 +1,23 @@
-users := ['bob', 'alice', 'foo']
-
-if users.length > 2 {
-    println('There are more than 2 users')
-} else {
-    println('There are less than 2 users')
+enum MySubEnum {
+    D,
+    E,
 }
 
-for i in 0..users.length {
-    println(users[i])
+enum MyEnum {
+    A,
+    B,
+    C(MySubEnum),
 }
+
+fn test(arg MyEnum) {
+    return match arg {
+        MyEnum.A => 'a is the best!',
+        MyEnum.B => 'b is the best!',
+        MyEnum.C(sub) => match sub {
+            MySubEnum.D => 'd is the best!',
+            MySubEnum.E => 'e is the worst!',
+        },
+    }
+}
+
+println(test(MyEnum.C(MySubEnum.E)))

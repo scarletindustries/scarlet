@@ -1,0 +1,501 @@
+import type {
+  ArrayExpression,
+  ArrayIndexExpression,
+  AssertStatement,
+  BinaryExpression,
+  BlockExpression,
+  BooleanLiteral,
+  BreakStatement,
+  ConstStatement,
+  ContinueStatement,
+  DeclarationStatement,
+  EnumDeclaration,
+  ExportStatement,
+  Expression,
+  ForInStatement,
+  ForStatement,
+  FunctionCall,
+  FunctionStatement,
+  Identifier,
+  IfStatement,
+  ImportDeclaration,
+  MatchExpression,
+  NoneExpression,
+  NumberLiteral,
+  OrExpression,
+  PropertyAccess,
+  RangeExpression,
+  ReturnStatement,
+  Statement,
+  StringLiteral,
+  StructDeclaration,
+  StructInitialization,
+  ThrowStatement,
+  TypeIdentifier,
+  UnaryExpression,
+} from "../ast/nodes";
+
+export class JSGenerator {
+  private indentLevel: number = 0;
+  private readonly indent = "  ";
+
+  private getIndent(): string {
+    return this.indent.repeat(this.indentLevel);
+  }
+
+  generateRoot(statements: Statement[]): string {
+    return `
+      const println = console.log;
+      ${this.generateStatements(statements)}
+    `;
+  }
+
+  private generateStatements(statements: Statement[]): string {
+    return statements.map((stmt) => this.generateStatement(stmt)).join("\n");
+  }
+
+  private generateStatement(statement: Statement): string {
+    switch (statement.type) {
+      case "FunctionStatement":
+        return this.generateFunctionStatement(statement);
+      case "ReturnStatement":
+        return this.generateReturnStatement(statement);
+      case "ConstStatement":
+        return this.generateConstStatement(statement);
+      case "StructDeclaration":
+        return this.generateStructDeclaration(statement);
+      case "ImportDeclaration":
+        return this.generateImportDeclaration(statement);
+      case "ExportStatement":
+        return this.generateExportStatement(statement);
+      case "IfStatement":
+        return this.generateIfStatement(statement);
+      case "ForStatement":
+        return this.generateForStatement(statement);
+      case "ForInStatement":
+        return this.generateForInStatement(statement);
+      case "ThrowStatement":
+        return this.generateThrowStatement(statement);
+      case "AssertStatement":
+        return this.generateAssertStatement(statement);
+      case "DeclarationStatement":
+        return this.generateDeclarationStatement(statement);
+      case "BreakStatement":
+        return this.generateBreakStatement(statement);
+      case "ContinueStatement":
+        return this.generateContinueStatement(statement);
+      case "EnumDeclaration":
+        return this.generateEnumDeclaration(statement);
+      case "ExpressionStatement":
+        return this.generateExpression(statement.expression) + ";";
+      case "BlockExpression":
+        return this.generateBlockExpression(statement);
+      default:
+        throw new Error("Unsupported statement type: " + statement.type);
+    }
+  }
+
+  private generateFunctionStatement(statement: FunctionStatement): string {
+    const { identifier, params, body, returnType, throwType } = statement;
+    const jsDoc = this.generateJSDoc(returnType, throwType);
+
+    const functionBody = this.generateStatements(body);
+
+    return `${jsDoc}function ${identifier.name}(${params
+      .map((p) => p.identifier.name)
+      .join(", ")}) {
+${this.indent}${functionBody}
+}`;
+  }
+
+  private generateJSDoc(
+    returnType?: TypeIdentifier,
+    throwType?: TypeIdentifier
+  ): string {
+    const parts: string[] = [];
+
+    if (returnType) {
+      let type = returnType.identifier.name;
+      if (returnType.isArray) {
+        type = `Array<${type}>`;
+      }
+      if (returnType.isOption) {
+        type = `${type} | null`;
+      }
+      parts.push(`@returns {${type}}`);
+    }
+
+    if (throwType) {
+      parts.push(`@throws {${throwType.identifier.name}}`);
+    }
+
+    if (parts.length === 0) return "";
+    return `/**\n * ${parts.join("\n * ")}\n */\n`;
+  }
+
+  private generateReturnStatement(statement: ReturnStatement): string {
+    const { expression } = statement;
+    return `${this.getIndent()}return${
+      expression ? " " + this.generateExpression(expression) : ""
+    };`;
+  }
+
+  private generateConstStatement(statement: ConstStatement): string {
+    const { identifier, init } = statement;
+    return `${this.getIndent()}const ${
+      identifier.name
+    } = ${this.generateExpression(init)};`;
+  }
+
+  private generateStructDeclaration(statement: StructDeclaration): string {
+    const { identifier, fields } = statement;
+    const fieldInits = fields
+      .map((field) => {
+        const defaultValue = field.init
+          ? ` = ${this.generateExpression(field.init)}`
+          : "";
+        return `${this.indent}${field.identifier.name}${defaultValue}`;
+      })
+      .join("\n");
+
+    return `class ${identifier.name} {
+${fieldInits}
+
+${this.indent}constructor(init) {
+${this.indent}${this.indent}${fields
+      .map((f) => `this.${f.identifier.name} = init.${f.identifier.name}`)
+      .join(";\n" + this.indent.repeat(2))};
+${this.indent}}
+}`;
+  }
+
+  private generateImportDeclaration(statement: ImportDeclaration): string {
+    const { specifiers, path } = statement;
+    return `import { ${specifiers
+      .map((s) => s.identifier.name)
+      .join(", ")} } from '${path}';`;
+  }
+
+  private generateExportStatement(statement: ExportStatement): string {
+    return `export ${this.generateStatement(statement.declaration)}`;
+  }
+
+  private generateIfStatement(statement: IfStatement): string {
+    const { condition, then, else: elseBody } = statement;
+    let code = `if (${this.generateExpression(condition)}) {\n`;
+    code += this.generateStatements(then) + "\n}";
+
+    if (elseBody) {
+      code += " else {\n";
+      code += this.generateStatements(elseBody) + "\n}";
+    }
+
+    return code;
+  }
+
+  private generateForStatement(statement: ForStatement): string {
+    return `for (;;) {\n${this.generateStatements(statement.body)}\n}`;
+  }
+
+  private generateForInStatement(statement: ForInStatement): string {
+    const { identifier, iterator, body } = statement;
+    return `for (const ${identifier.name} of ${this.generateExpression(
+      iterator
+    )}) {
+${this.generateStatements(body)}
+}`;
+  }
+
+  private generateThrowStatement(statement: ThrowStatement): string {
+    return `throw ${this.generateExpression(statement.expression)};`;
+  }
+
+  private generateAssertStatement(statement: AssertStatement): string {
+    const { expression, message } = statement;
+    return `if (!${this.generateExpression(expression)}) {
+${this.indent}throw new Error(${this.generateExpression(message)});
+}`;
+  }
+
+  private generateDeclarationStatement(
+    statement: DeclarationStatement
+  ): string {
+    const { identifier, init } = statement;
+    return `${this.getIndent()}let ${
+      identifier.name
+    } = ${this.generateExpression(init)};`;
+  }
+
+  private generateBreakStatement(_: BreakStatement): string {
+    return "break;";
+  }
+
+  private generateContinueStatement(_: ContinueStatement): string {
+    return "continue;";
+  }
+
+  private generateEnumDeclaration(statement: EnumDeclaration): string {
+    const { identifier, variants } = statement;
+    const enumName = identifier.name;
+
+    // Generate variant classes and “constructors” inside the enum class
+    // in a way that DOES NOT define the same static property again.
+    //
+    // For example, if the variant is “C(value)”, we do:
+    //   static C_class = class { constructor(value) { this.value = value; } };
+    //   static C(value) { return new MyEnum.C_class(value); }
+    //
+    // If the variant is “A” (no payload), we do:
+    //   static A_class = class { constructor() {} };
+    //   static A = new MyEnum.A_class();
+
+    const variantDefs = variants
+      .map((variant) => {
+        const variantName = variant.name.name;
+
+        // If this variant has a payload, define a class with constructor(value)
+        // and a static method that returns a new instance.
+        // If it has no payload, define a class with an empty constructor, plus a single static instance.
+        if (variant.payload) {
+          return `
+  static ${variantName}_class = class {
+    constructor(value) {
+      this.value = value;
+    }
+  };
+
+  static ${variantName}(value) {
+    return new ${enumName}.${variantName}_class(value);
+  }
+`;
+        } else {
+          return `
+  static ${variantName}_class = class ${variantName} {};
+
+  static ${variantName} = new ${enumName}.${variantName}_class();
+`;
+        }
+      })
+      .join("\n");
+
+    // Put them together into a “class MyEnum { ... }”
+    return `class ${enumName} {
+${variantDefs}
+}`;
+  }
+
+  private generateExpression(expression: Expression): string {
+    switch (expression.type) {
+      case "StringLiteral":
+        return this.generateStringLiteral(expression);
+      case "NumberLiteral":
+        return this.generateNumberLiteral(expression);
+      case "BooleanLiteral":
+        return this.generateBooleanLiteral(expression);
+      case "NoneExpression":
+        return this.generateNoneExpression(expression);
+      case "Identifier":
+        return this.generateIdentifier(expression);
+      case "BinaryExpression":
+        return this.generateBinaryExpression(expression);
+      case "UnaryExpression":
+        return this.generateUnaryExpression(expression);
+      case "BlockExpression":
+        return this.generateBlockExpression(expression as BlockExpression);
+      case "FunctionCall":
+        return this.generateFunctionCall(expression);
+      case "PropertyAccess":
+        return this.generatePropertyAccess(expression);
+      case "StructInitialization":
+        return this.generateStructInitialization(expression);
+      case "ArrayExpression":
+        return this.generateArrayExpression(expression);
+      case "ArrayIndexExpression":
+        return this.generateArrayIndexExpression(expression);
+      case "RangeExpression":
+        return this.generateRangeExpression(expression);
+      case "TypeIdentifier":
+        return this.generateTypeIdentifier(expression);
+      case "MatchExpression":
+        return this.generateMatchExpression(expression);
+      case "OrExpression":
+        return this.generateOrExpression(expression);
+      default:
+        throw new Error("Unsupported expression type: " + expression.type);
+    }
+  }
+
+  private generateStringLiteral(literal: StringLiteral): string {
+    return `'${literal.value.replace(/'/g, "\\'")}'`;
+  }
+
+  private generateNumberLiteral(literal: NumberLiteral): string {
+    return literal.value;
+  }
+
+  private generateBooleanLiteral(literal: BooleanLiteral): string {
+    return literal.value.toString();
+  }
+
+  private generateNoneExpression(_: NoneExpression): string {
+    return "null";
+  }
+
+  private generateIdentifier(identifier: Identifier): string {
+    return identifier.name;
+  }
+
+  private generateBinaryExpression(expression: BinaryExpression): string {
+    return `(${this.generateExpression(expression.left)} ${
+      expression.operator
+    } ${this.generateExpression(expression.right)})`;
+  }
+
+  private generateUnaryExpression(expression: UnaryExpression): string {
+    return `${expression.operator}${this.generateExpression(
+      expression.expression
+    )}`;
+  }
+
+  private generateBlockExpression(expression: BlockExpression): string {
+    const statementsJs = expression.body
+      .map((stmt) => this.generateStatement(stmt))
+      .join("\n");
+
+    return `(() => {
+${statementsJs}
+})()`;
+  }
+
+  private generateFunctionCall(expression: FunctionCall): string {
+    return `${this.generateExpression(expression.callee)}(${expression.arguments
+      .map((arg) => this.generateExpression(arg))
+      .join(", ")})`;
+  }
+
+  private generatePropertyAccess(expression: PropertyAccess): string {
+    return `${this.generateExpression(
+      expression.left
+    )}.${this.generateExpression(expression.right)}`;
+  }
+
+  private generateStructInitialization(
+    expression: StructInitialization
+  ): string {
+    const fields = expression.fields
+      .map(
+        (field) =>
+          `${field.identifier.name}: ${this.generateExpression(field.init)}`
+      )
+      .join(",\n" + this.getIndent());
+
+    return `new ${
+      expression.identifier.name
+    }({\n${this.getIndent()}${fields}\n})`;
+  }
+
+  private generateArrayExpression(expression: ArrayExpression): string {
+    return `[${expression.elements
+      .map((e) => this.generateExpression(e))
+      .join(", ")}]`;
+  }
+
+  private generateArrayIndexExpression(
+    expression: ArrayIndexExpression
+  ): string {
+    return `${this.generateExpression(
+      expression.array
+    )}[${this.generateExpression(expression.index)}]`;
+  }
+
+  private generateRangeExpression(expression: RangeExpression): string {
+    return `Array.from({length: ${this.generateExpression(
+      expression.end
+    )} - ${this.generateExpression(
+      expression.start
+    )}}, (_, i) => ${this.generateExpression(expression.start)} + i)`;
+  }
+
+  private generateTypeIdentifier(identifier: TypeIdentifier): string {
+    let type = identifier.identifier.name;
+    if (identifier.isArray) {
+      type = `Array<${type}>`;
+    }
+    if (identifier.isOption) {
+      type = `${type} | null`;
+    }
+    return type;
+  }
+
+  private generateMatchExpression(expression: MatchExpression): string {
+    const { expression: matchExpr, cases } = expression;
+    const valueRef = this.generateExpression(matchExpr);
+
+    const caseClauses = cases
+      .map(({ pattern, body }) => {
+        /**
+         * Example: if pattern.enumPath is [MyEnum, A], then
+         * fullPath => "MyEnum.A", and className => "MyEnum.A".
+         */
+        const fullPath = pattern.enumPath
+          .map((node) => this.generateExpression(node))
+          .join(".");
+
+        // We grab the last piece of the pattern to see if there's a payload.
+        const last = pattern.enumPath[pattern.enumPath.length - 1];
+        const variantName =
+          last.type === "Identifier" ? last.name : last.right.name; // if last is a PropertyAccess
+        /**
+         * The class is now a static member of the enum, so we use the full path
+         * to reference it (e.g. MyEnum.A)
+         */
+        const enumName = this.generateExpression(pattern.enumPath[0]);
+        const className = `${enumName}_class`;
+
+        if (pattern.binding) {
+          // Variant has a payload => use instanceof check,
+          // then pull out the value from the variant's "this.value".
+          const binding = `const ${pattern.binding.name} = ${valueRef}.value;`;
+          return `if (${valueRef} instanceof ${className}) {
+  ${binding}
+  return ${this.generateExpression(body)};
+}`;
+        } else {
+          // No payload => typically a single static instance => use direct equality
+          return `if (${valueRef} === ${fullPath}) {
+  return ${this.generateExpression(body)};
+}`;
+        }
+      })
+      .join(" else ");
+
+    return `(() => {
+  ${caseClauses}
+  throw new Error("No match case found");
+})()`;
+  }
+
+  private generateOrExpression(expression: OrExpression): string {
+    const { expression: tryExpr, errorBinding, handler } = expression;
+    const tryValue = this.generateExpression(tryExpr);
+    const handlerBody = this.generateBlockExpression(handler);
+
+    if (errorBinding) {
+      return `(() => {
+  try {
+    return ${tryValue};
+  } catch (${errorBinding.name}) {
+    ${handlerBody}
+  }
+})()`;
+    } else {
+      return `(() => {
+  try {
+    return ${tryValue};
+  } catch (e) {
+    ${handlerBody}
+  }
+})()`;
+    }
+  }
+}
