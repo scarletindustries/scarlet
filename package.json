@@ -4,10 +4,10 @@
   "description": "al compiler and toolchain",
   "type": "module",
   "bin": {
-    "alc": "./dist/cli.js"
+    "alc": "./dist/alc"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "bun build --compile src/cli.ts --outfile dist/alc",
     "start": "bun run src/cli.ts",
     "test": "bun test"
   },

@@ -15,9 +15,9 @@ fn test(arg MyEnum) {
         MyEnum.B => 'b is the best!',
         MyEnum.C(sub) => match sub {
             MySubEnum.D => 'd is the best!',
-            MySubEnum.E => 'e is the best!',
+            MySubEnum.E => 'e is the worst!',
         },
     }
 }
 
-println(test(MyEnum.C(MySubEnum.D)))
+println(test(MyEnum.C(MySubEnum.E)))

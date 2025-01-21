@@ -13,3 +13,4 @@ bin/
 .env
 *.db
 node_modules
+dist
