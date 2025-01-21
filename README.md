@@ -1,19 +1,52 @@
-# ali lang
+# al compiler
 
-todo:
+A TypeScript implementation of the al compiler.
 
-- [ ] AST (WIPPP)
-- [x] Basic JS backend
-  - [x] Spit out JS code
-  - [ ] Reimplement native types
-  - [ ] Reimplement globals (so far that's just println)
-- [ ] Rewrite entire fucking thing in itself
-- [ ] add more examples
-- [ ] write [grammar/spec](./grammar/al.bnf) (lol)
-- [ ] basic type checking/system
-- [ ] figure out a kind of backend (llvm ir, c, wasm)
-- [ ] fix bugs🐐🐛
+## Features
 
-### contributing?
+- Lexical analysis (Scanner)
+- Parsing (AST generation)
+- JavaScript code generation
+- CLI interface
 
-good luck :3
+## Installation
+
+```bash
+bun install
+```
+
+## Usage
+
+Build the compiler:
+
+```bash
+bun run build
+```
+
+Run the compiler:
+
+```bash
+bun run start build <entrypoint>
+```
+
+## Development
+
+The compiler consists of three main components:
+
+1. **Scanner** (`src/scanner/scanner.ts`): Performs lexical analysis, converting source code into tokens.
+2. **Parser** (`src/parser/parser.ts`): Parses tokens into an Abstract Syntax Tree (AST).
+3. **Generator** (`src/generator/js.ts`): Generates JavaScript code from the AST.
+
+## Example
+
+```al
+const name = 'alistair'
+
+export fn main() {
+    println(name)
+}
+```
+
+## License
+
+MIT

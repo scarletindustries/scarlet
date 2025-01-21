@@ -1,5 +1,5 @@
 // Import
-// from './file.al' import a, b, c
+from './file.al' import a, b, c
 
 // Comment
 
