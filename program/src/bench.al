@@ -1,9 +1,9 @@
-export enum MySubEnum {
+enum MySubEnum {
     D,
     E,
 }
 
-export enum MyEnum {
+enum MyEnum {
     A,
     B,
     C(MySubEnum),
@@ -21,3 +21,5 @@ fn test(arg MyEnum) {
 
     println(result)
 }
+
+test(MyEnum.A)

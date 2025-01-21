@@ -89,6 +89,8 @@ ${this.generateStatements(statements)}
         return this.generateEnumDeclaration(statement);
       case "ExpressionStatement":
         return this.generateExpression(statement.expression) + ";";
+      case "BlockExpression":
+        return this.generateBlockExpression(statement as BlockExpression);
       default:
         throw new Error("Unsupported statement type: " + statement.type);
     }
@@ -175,7 +177,8 @@ ${this.indent}}
   }
 
   private generateExportStatement(statement: ExportStatement): string {
-    return `export ${this.generateStatement(statement.declaration)}`;
+    // return `export ${this.generateStatement(statement.declaration)}`;
+    throw new Error("Exporting is currently unsupported in the JS backend.");
   }
 
   private generateIfStatement(statement: IfStatement): string {
@@ -285,7 +288,7 @@ class ${enumName} {
       case "UnaryExpression":
         return this.generateUnaryExpression(expression);
       case "BlockExpression":
-        return this.generateBlockExpression(expression);
+        return this.generateBlockExpression(expression as BlockExpression);
       case "FunctionCall":
         return this.generateFunctionCall(expression);
       case "PropertyAccess":
@@ -342,7 +345,13 @@ class ${enumName} {
   }
 
   private generateBlockExpression(expression: BlockExpression): string {
-    return `{\n${this.generateStatements(expression.body)}\n}`;
+    const statementsJs = expression.body
+      .map((stmt) => this.generateStatement(stmt))
+      .join("\n");
+
+    return `(() => {
+${statementsJs}
+})()`;
   }
 
   private generateFunctionCall(expression: FunctionCall): string {
