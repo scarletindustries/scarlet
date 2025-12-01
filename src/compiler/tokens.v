@@ -1,6 +1,6 @@
 module compiler
 
-import lib.compiler.token
+import compiler.token
 
 @[inline; minify]
 pub struct Token {

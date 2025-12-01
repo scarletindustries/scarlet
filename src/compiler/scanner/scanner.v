@@ -1,8 +1,8 @@
 module scanner
 
-import lib.compiler
-import lib.compiler.token
-import lib.compiler.scanner.state
+import compiler
+import compiler.token
+import compiler.scanner.state
 
 @[heap]
 pub struct Scanner {
@@ -47,7 +47,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 
 	if ch == `-` && s.peek_char() == `>` {
 		s.incr_pos()
-
 		return s.new_token(.punc_arrow, none)
 	}
 

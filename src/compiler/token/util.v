@@ -5,9 +5,10 @@ pub fn is_name_char(c u8) bool {
 	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c == `_` || c.is_digit()
 }
 
-// is_valid_identifier checks if the given identifier is a valid identifier. It accepts
-// a parameter "is_fully_qualified" which indicates if the identifier is fully qualified.
-// If it is fully qualified, it will not allow keywords to be used as identifiers.
+// is_valid_identifier checks if the given identifier is a valid identifier. It
+// accepts a parameter "is_fully_qualified" which indicates if the identifier is
+// fully qualified. If it is fully qualified, it will not allow keywords to be
+// used as identifiers.
 @[inline]
 pub fn is_valid_identifier(identifier string, is_fully_qualified bool) bool {
 	if identifier.len == 0 {

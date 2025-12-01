@@ -22,7 +22,9 @@ fn main() {
 					entrypoint := cmd.args[0]
 					file := os.read_file(entrypoint)!
 
-					println(file)
+					mut s := scanner.new_scanner(file)
+
+					println(s.scan_all())
 				}
 			},
 		]
