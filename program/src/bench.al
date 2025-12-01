@@ -20,4 +20,6 @@ fn test(arg MyEnum) string {
     }
 }
 
+println(test(MyEnum.C(MySubEnum.D)))
+println(test(MyEnum.A))
 println(test(MyEnum.C(MySubEnum.E)))

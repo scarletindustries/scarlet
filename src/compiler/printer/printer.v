@@ -16,6 +16,20 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.StringLiteral {
 			"'${expr.value}'"
 		}
+		ast.InterpolatedString {
+			mut s := "'"
+			for part in expr.parts {
+				if part is ast.StringLiteral {
+					s += part.value
+				} else if part is ast.Identifier {
+					s += '\$${part.name}'
+				} else {
+					s += '\${${print_expression(part, level)}}'
+				}
+			}
+			s += "'"
+			s
+		}
 		ast.NumberLiteral {
 			expr.value
 		}
@@ -113,7 +127,7 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.OrExpression {
 			mut s := '${print_expression(expr.expression, level)} or '
 			if receiver := expr.receiver {
-				s += '${receiver.name} '
+				s += '${receiver.name} => '
 			}
 			s += print_expression(expr.body, level)
 			s
@@ -236,6 +250,9 @@ fn print_expression(expr ast.Expression, level int) string {
 				else { '?' }
 			}
 			'${print_expression(expr.expression, level)}${op}'
+		}
+		ast.WildcardPattern {
+			'else'
 		}
 	}
 }

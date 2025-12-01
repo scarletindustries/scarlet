@@ -4,6 +4,7 @@ import compiler.scanner
 import compiler.token
 import compiler.ast
 import compiler
+import compiler.printer
 
 /*
  * Parser is responsible for parsing the tokens into an AST.
@@ -63,7 +64,7 @@ pub fn (mut p Parser) parse_program() !ast.BlockExpression {
 
 	for p.current_token.kind != .eof {
 		expr := p.parse_expression() or {
-			println(program)
+			println(printer.print_expr(program))
 			println('=====================Compiler Bug=====================')
 			println('| The above is the program parsed up until the error |')
 			println('|   Plz report this on GitHub, with your full code   |')
@@ -98,7 +99,7 @@ fn (mut p Parser) parse_expression() !ast.Expression {
 	return p.parse_or_expression()!
 }
 
-// Handle `expr or err { ... }` - lowest precedence
+// Handle `expr or { ... }` or `expr or err => ...` - lowest precedence
 fn (mut p Parser) parse_or_expression() !ast.Expression {
 	mut left := p.parse_binary_expression()!
 
@@ -107,15 +108,16 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 
 		mut receiver := ?ast.Identifier(none)
 
-		// Check for optional receiver: `or err { ... }`
+		// Check for optional receiver: `or err => body`
 		if p.current_token.kind == .identifier {
 			if next := p.peek_next() {
-				// If next token is { then this identifier is the receiver
-				if next.kind == .punc_open_brace {
+				// If next token is => then this identifier is the receiver
+				if next.kind == .punc_arrow {
 					name := p.get_token_literal(.identifier, 'Expected identifier for or receiver')!
 					receiver = ast.Identifier{
 						name: name
 					}
+					p.eat(.punc_arrow)!
 				}
 			}
 		}
@@ -132,19 +134,66 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 	return left
 }
 
-// Binary operators
+// Precedence levels (lowest to highest):
+// 1. || (logical or)
+// 2. && (logical and)
+// 3. ==, != (equality)
+// 4. <, >, <=, >= (comparison)
+// 5. +, - (additive)
+// 6. *, /, % (multiplicative)
+// 7. unary (!, -)
+// 8. postfix (., [], !)
+
 fn (mut p Parser) parse_binary_expression() !ast.Expression {
-	mut left := p.parse_unary_expression()!
+	return p.parse_logical_or()!
+}
 
-	for p.current_token.kind in [.punc_equals_comparator, .punc_not_equal, .punc_plus, .punc_minus,
-		.punc_mul, .punc_div, .punc_mod, .punc_gt, .punc_lt, .punc_gte, .punc_lte, .logical_and,
-		.logical_or] {
+// Level 1: ||
+fn (mut p Parser) parse_logical_or() !ast.Expression {
+	mut left := p.parse_logical_and()!
+
+	for p.current_token.kind == .logical_or {
+		p.eat(.logical_or)!
+		right := p.parse_logical_and()!
+		left = ast.BinaryExpression{
+			left:  left
+			right: right
+			op:    ast.Operator{
+				kind: .logical_or
+			}
+		}
+	}
+
+	return left
+}
+
+// Level 2: &&
+fn (mut p Parser) parse_logical_and() !ast.Expression {
+	mut left := p.parse_equality()!
+
+	for p.current_token.kind == .logical_and {
+		p.eat(.logical_and)!
+		right := p.parse_equality()!
+		left = ast.BinaryExpression{
+			left:  left
+			right: right
+			op:    ast.Operator{
+				kind: .logical_and
+			}
+		}
+	}
+
+	return left
+}
+
+// Level 3: ==, !=
+fn (mut p Parser) parse_equality() !ast.Expression {
+	mut left := p.parse_comparison()!
+
+	for p.current_token.kind in [.punc_equals_comparator, .punc_not_equal] {
 		operator := p.current_token.kind
-
 		p.eat(operator)!
-
-		right := p.parse_unary_expression()!
-
+		right := p.parse_comparison()!
 		left = ast.BinaryExpression{
 			left:  left
 			right: right
@@ -157,7 +206,66 @@ fn (mut p Parser) parse_binary_expression() !ast.Expression {
 	return left
 }
 
-// Unary prefix operators (!)
+// Level 4: <, >, <=, >=
+fn (mut p Parser) parse_comparison() !ast.Expression {
+	mut left := p.parse_additive()!
+
+	for p.current_token.kind in [.punc_lt, .punc_gt, .punc_lte, .punc_gte] {
+		operator := p.current_token.kind
+		p.eat(operator)!
+		right := p.parse_additive()!
+		left = ast.BinaryExpression{
+			left:  left
+			right: right
+			op:    ast.Operator{
+				kind: operator
+			}
+		}
+	}
+
+	return left
+}
+
+// Level 5: +, -
+fn (mut p Parser) parse_additive() !ast.Expression {
+	mut left := p.parse_multiplicative()!
+
+	for p.current_token.kind in [.punc_plus, .punc_minus] {
+		operator := p.current_token.kind
+		p.eat(operator)!
+		right := p.parse_multiplicative()!
+		left = ast.BinaryExpression{
+			left:  left
+			right: right
+			op:    ast.Operator{
+				kind: operator
+			}
+		}
+	}
+
+	return left
+}
+
+// Level 6: *, /, %
+fn (mut p Parser) parse_multiplicative() !ast.Expression {
+	mut left := p.parse_unary_expression()!
+
+	for p.current_token.kind in [.punc_mul, .punc_div, .punc_mod] {
+		operator := p.current_token.kind
+		p.eat(operator)!
+		right := p.parse_unary_expression()!
+		left = ast.BinaryExpression{
+			left:  left
+			right: right
+			op:    ast.Operator{
+				kind: operator
+			}
+		}
+	}
+
+	return left
+}
+
 fn (mut p Parser) parse_unary_expression() !ast.Expression {
 	if p.current_token.kind == .punc_exclamation_mark {
 		p.eat(.punc_exclamation_mark)!
@@ -170,10 +278,20 @@ fn (mut p Parser) parse_unary_expression() !ast.Expression {
 		}
 	}
 
+	if p.current_token.kind == .punc_minus {
+		p.eat(.punc_minus)!
+
+		return ast.UnaryExpression{
+			expression: p.parse_unary_expression()!
+			op:         ast.Operator{
+				kind: .punc_minus
+			}
+		}
+	}
+
 	return p.parse_postfix_expression()!
 }
 
-// Postfix operators (! for propagation, function calls, property access, array index)
 fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 	mut expr := p.parse_primary_expression()!
 
@@ -206,6 +324,12 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 					end:   end
 				}
 			}
+			.punc_plusplus {
+				return error('Increment operator (++) is not supported. Values are immutable in AL - use `x = x + 1` with shadowing instead.')
+			}
+			.punc_minusminus {
+				return error('Decrement operator (--) is not supported. Values are immutable in AL - use `x = x - 1` with shadowing instead.')
+			}
 			else {
 				break
 			}
@@ -220,6 +344,9 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 	expr := match p.current_token.kind {
 		.literal_string {
 			p.parse_string_expression()!
+		}
+		.literal_string_interpolation {
+			p.parse_interpolated_string()!
 		}
 		.literal_number {
 			p.parse_number_expression()!
@@ -374,23 +501,19 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 	}
 }
 
-// If expression: if cond { body } else { body }
+// If expression: if cond expr else expr
+// Body can be any expression (block, literal, etc.)
 fn (mut p Parser) parse_if_expression() !ast.Expression {
 	p.eat(.kw_if)!
 
 	condition := p.parse_expression()!
-	body := p.parse_block_expression()!
+	body := p.parse_expression()!
 
 	mut else_body := ?ast.Expression(none)
 
 	if p.current_token.kind == .kw_else {
 		p.eat(.kw_else)!
-
-		if p.current_token.kind == .kw_if {
-			else_body = p.parse_if_expression()!
-		} else {
-			else_body = p.parse_block_expression()!
-		}
+		else_body = p.parse_expression()!
 	}
 
 	return ast.IfExpression{
@@ -411,7 +534,13 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	mut arms := []ast.MatchArm{}
 
 	for p.current_token.kind != .punc_close_brace {
-		pattern := p.parse_expression()!
+		pattern := if p.current_token.kind == .kw_else {
+			p.eat(.kw_else)!
+			ast.Expression(ast.WildcardPattern{})
+		} else {
+			p.parse_expression()!
+		}
+
 		p.eat(.punc_arrow)!
 		body := p.parse_expression()!
 
@@ -760,7 +889,8 @@ fn (mut p Parser) parse_assert_expression() !ast.Expression {
 fn (mut p Parser) parse_error_expression() !ast.Expression {
 	p.eat(.kw_error)!
 
-	expr := p.parse_expression()!
+	// Use parse_unary_expression to avoid consuming 'or' at this level
+	expr := p.parse_unary_expression()!
 
 	return ast.ErrorExpression{
 		expression: expr
@@ -818,6 +948,82 @@ fn (mut p Parser) parse_string_expression() !ast.Expression {
 	return ast.StringLiteral{
 		value: p.get_token_literal(.literal_string, 'Expected string')!
 	}
+}
+
+// Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
+fn (mut p Parser) parse_interpolated_string() !ast.Expression {
+	raw := p.get_token_literal(.literal_string_interpolation, 'Expected interpolated string')!
+
+	mut parts := []ast.Expression{}
+	mut current := ''
+	mut i := 0
+
+	for i < raw.len {
+		ch := raw[i]
+
+		if ch == `$` {
+			// Save accumulated string part
+			if current.len > 0 {
+				parts << ast.StringLiteral{value: current}
+				current = ''
+			}
+
+			i++
+			if i >= raw.len {
+				return error('Unexpected end of interpolated string after $')
+			}
+
+			if raw[i] == `{` {
+				// ${expr} form - find matching }
+				i++
+				mut expr_str := ''
+				mut brace_depth := 1
+				for i < raw.len && brace_depth > 0 {
+					if raw[i] == `{` {
+						brace_depth++
+					} else if raw[i] == `}` {
+						brace_depth--
+						if brace_depth == 0 {
+							break
+						}
+					}
+					expr_str += raw[i].ascii_str()
+					i++
+				}
+				if brace_depth != 0 {
+					return error('Unclosed { in interpolated string')
+				}
+				i++ // skip closing }
+
+				// Parse the expression
+				mut s := scanner.new_scanner(expr_str)
+				mut expr_parser := new_parser(mut s)
+				expr := expr_parser.parse_expression()!
+				parts << expr
+			} else {
+				// $name form - read identifier
+				mut ident := ''
+				for i < raw.len && (raw[i].is_letter() || raw[i] == `_` || (ident.len > 0 && raw[i].is_digit())) {
+					ident += raw[i].ascii_str()
+					i++
+				}
+				if ident.len == 0 {
+					return error('Expected identifier after $ in interpolated string')
+				}
+				parts << ast.Identifier{name: ident}
+			}
+		} else {
+			current += ch.ascii_str()
+			i++
+		}
+	}
+
+	// Save final string part
+	if current.len > 0 {
+		parts << ast.StringLiteral{value: current}
+	}
+
+	return ast.InterpolatedString{parts: parts}
 }
 
 // Number literal
