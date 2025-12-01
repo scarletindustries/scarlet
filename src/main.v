@@ -4,6 +4,7 @@ import os
 import cli
 import compiler.scanner
 import compiler.parser
+import compiler.printer
 
 fn main() {
 	mut app := cli.Command{
@@ -28,7 +29,7 @@ fn main() {
 
 					ast := p.parse_program()!
 
-					println(ast)
+					println(printer.print_expr(ast))
 				}
 			},
 		]

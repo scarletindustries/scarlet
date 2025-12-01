@@ -616,7 +616,7 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 		identifier: ast.Identifier{
 			name: name
 		}
-		variants: variants
+		variants:   variants
 	}
 }
 
@@ -641,7 +641,7 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 		identifier: ast.Identifier{
 			name: name
 		}
-		payload: payload
+		payload:    payload
 	}
 }
 
