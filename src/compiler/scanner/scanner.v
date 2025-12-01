@@ -186,6 +186,10 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			s.new_token(.punc_mod, none)
 		}
 		`!` {
+			if s.peek_char() == `=` {
+				s.incr_pos()
+				return s.new_token(.punc_not_equal, none)
+			}
 			s.new_token(.punc_exclamation_mark, none)
 		}
 		`?` {
