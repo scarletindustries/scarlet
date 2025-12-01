@@ -8,8 +8,8 @@ const name = 'alistair the third'
 
 // Struct
 export struct Person {
-    name: string = 'alistair',
-    age: int = 19,
+    name string = 'alistair',
+    age  int = 19,
 }
 
 // Function
@@ -55,8 +55,8 @@ export fn main() {
 }
 
 export struct MyErrorType {
-    message: string = 'something went wrong man!!!',
-    lol: int,
+    message string = 'something went wrong man!!!',
+    lol int,
 }
 
 fn result() int, MyErrorType {
