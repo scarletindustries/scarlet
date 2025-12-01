@@ -224,6 +224,11 @@ export interface OrExpressionFallback {
   fallback: Expression;
 }
 
+export interface PropagateExpression {
+  type: "PropagateExpression";
+  expression: Expression;
+}
+
 /**
  * Used when an expression is placed where a statement is expected.
  */
@@ -250,7 +255,8 @@ export type Expression =
   | TypeIdentifier
   | MatchExpression
   | OrExpression
-  | OrExpressionFallback;
+  | OrExpressionFallback
+  | PropagateExpression;
 
 export type Statement =
   | FunctionStatement

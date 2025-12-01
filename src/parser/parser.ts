@@ -243,7 +243,7 @@ export class Parser {
     let returnType: TypeIdentifier | undefined;
     let throwType: TypeIdentifier | undefined;
 
-    if (this.current.kind === TokenKind.IDENTIFIER) {
+    if (this.current.kind === TokenKind.IDENTIFIER || this.current.kind === TokenKind.PUNC_QUESTION) {
       returnType = this.parseTypeIdentifier();
     }
 
@@ -392,18 +392,23 @@ export class Parser {
   private parseIfStatement(): Statement {
     this.eat(TokenKind.KW_IF);
     const condition = this.parseExpression();
-    const thenBlock = this.parseBlockStatementOrSingle();
+    const thenBlock = this.parseBlock();
 
-    let elseBlock: BlockExpression | undefined;
+    let elseBlock: Statement[] | undefined;
     if (this.match(TokenKind.KW_ELSE)) {
-      elseBlock = this.parseBlockStatementOrSingle();
+      if (this.current.kind === TokenKind.KW_IF) {
+        // else if - parse as nested if statement
+        elseBlock = [this.parseIfStatement()];
+      } else {
+        elseBlock = this.parseBlock();
+      }
     }
 
     return {
       type: "IfStatement",
       condition,
-      then: [thenBlock],
-      else: elseBlock && [elseBlock],
+      then: thenBlock,
+      else: elseBlock,
     };
   }
 
@@ -424,23 +429,14 @@ export class Parser {
         type: "ForInStatement",
         identifier,
         iterator,
-        body: [
-          {
-            type: "BlockExpression",
-            body: this.parseBlock(),
-          },
-        ],
+        body,
       };
     } else {
       // for { ... }
+      const body = this.parseBlock();
       return {
         type: "ForStatement",
-        body: [
-          {
-            type: "BlockExpression",
-            body: this.parseBlock(),
-          },
-        ],
+        body,
       };
     }
   }
@@ -768,6 +764,13 @@ export class Parser {
       case TokenKind.PUNC_OPEN_BRACKET:
         expr = this.parseArrayExpression();
         break;
+      case TokenKind.PUNC_OPEN_BRACE:
+        // Inline block expression
+        expr = {
+          type: "BlockExpression",
+          body: this.parseBlock(),
+        };
+        break;
       case TokenKind.IDENTIFIER:
         expr = this.parseIdentifier();
         break;
@@ -817,6 +820,13 @@ export class Parser {
           start: expr,
           end,
         };
+      } else if (currentKind === TokenKind.PUNC_BANG) {
+        // Postfix ! for error propagation (e.g., result()!)
+        this.advance();
+        expr = {
+          type: "PropagateExpression",
+          expression: expr,
+        };
       } else {
         // No more trailing tokens that belong to this expression
         break;
@@ -844,7 +854,7 @@ export class Parser {
 
     // 2) "identifier :" form
     if (nextToken.kind === TokenKind.IDENTIFIER) {
-      const afterNext = this.peek(1);
+      const afterNext = this.peek(2);
       if (afterNext && afterNext.kind === TokenKind.PUNC_COLON) {
         return true;
       }
@@ -1065,19 +1075,19 @@ export class Parser {
   //---------------------------------------------------------------------------
 
   private parseTypeIdentifier(): TypeIdentifier {
-    // e.g. MyType, or MyType[], or maybe ?MyType for optional.
+    // e.g. MyType, or MyType[], or ?MyType for optional.
+    const isOption = this.match(TokenKind.PUNC_QUESTION);
     const identifier = this.parseIdentifier();
     let isArray = false;
     if (this.match(TokenKind.PUNC_OPEN_BRACKET)) {
       this.eat(TokenKind.PUNC_CLOSE_BRACKET);
       isArray = true;
     }
-    // For now, ignore option (?) logic or do so if needed in your language.
     return {
       type: "TypeIdentifier",
       identifier,
       isArray,
-      isOption: false,
+      isOption,
     };
   }
 

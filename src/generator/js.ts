@@ -23,6 +23,8 @@ import type {
   NoneExpression,
   NumberLiteral,
   OrExpression,
+  OrExpressionFallback,
+  PropagateExpression,
   PropertyAccess,
   RangeExpression,
   ReturnStatement,
@@ -38,9 +40,43 @@ import type {
 export class JSGenerator {
   private indentLevel: number = 0;
   private readonly indent = "  ";
+  private scopeStack: Map<string, string>[] = [new Map()];
 
   private getIndent(): string {
     return this.indent.repeat(this.indentLevel);
+  }
+
+  private pushScope(): void {
+    this.scopeStack.push(new Map());
+  }
+
+  private popScope(): void {
+    this.scopeStack.pop();
+  }
+
+  private declareVariable(name: string): string {
+    const currentScope = this.scopeStack[this.scopeStack.length - 1];
+    // Check all scopes for existing declarations
+    let count = 0;
+    for (const scope of this.scopeStack) {
+      if (scope.has(name)) {
+        count++;
+      }
+    }
+    const jsName = count > 0 ? `${name}$${count}` : name;
+    currentScope.set(name, jsName);
+    return jsName;
+  }
+
+  private resolveVariable(name: string): string {
+    // Search from innermost scope outward
+    for (let i = this.scopeStack.length - 1; i >= 0; i--) {
+      const jsName = this.scopeStack[i].get(name);
+      if (jsName !== undefined) {
+        return jsName;
+      }
+    }
+    return name; // Not found, return as-is (could be a global)
   }
 
   generateRoot(statements: Statement[]): string {
@@ -99,7 +135,13 @@ export class JSGenerator {
     const { identifier, params, body, returnType, throwType } = statement;
     const jsDoc = this.generateJSDoc(returnType, throwType);
 
+    this.pushScope();
+    // Declare parameters in the function scope
+    for (const p of params) {
+      this.declareVariable(p.identifier.name);
+    }
     const functionBody = this.generateStatements(body);
+    this.popScope();
 
     return `${jsDoc}function ${identifier.name}(${params
       .map((p) => p.identifier.name)
@@ -221,9 +263,10 @@ ${this.indent}throw new Error(${this.generateExpression(message)});
     statement: DeclarationStatement
   ): string {
     const { identifier, init } = statement;
-    return `${this.getIndent()}let ${
-      identifier.name
-    } = ${this.generateExpression(init)};`;
+    const jsName = this.declareVariable(identifier.name);
+    return `${this.getIndent()}let ${jsName} = ${this.generateExpression(
+      init
+    )};`;
   }
 
   private generateBreakStatement(_: BreakStatement): string {
@@ -320,8 +363,15 @@ ${variantDefs}
         return this.generateMatchExpression(expression);
       case "OrExpression":
         return this.generateOrExpression(expression);
+      case "OrExpressionFallback":
+        return this.generateOrExpressionFallback(expression);
+      case "PropagateExpression":
+        return this.generatePropagateExpression(expression);
       default:
-        throw new Error("Unsupported expression type: " + expression.type);
+        throw new Error(
+          "Unsupported expression type: " +
+            (expression as { type: string }).type
+        );
     }
   }
 
@@ -342,7 +392,7 @@ ${variantDefs}
   }
 
   private generateIdentifier(identifier: Identifier): string {
-    return identifier.name;
+    return this.resolveVariable(identifier.name);
   }
 
   private generateBinaryExpression(expression: BinaryExpression): string {
@@ -497,5 +547,19 @@ ${statementsJs}
   }
 })()`;
     }
+  }
+
+  private generatePropagateExpression(expression: PropagateExpression): string {
+    // The ! operator just evaluates the expression - errors propagate naturally in JS
+    return this.generateExpression(expression.expression);
+  }
+
+  private generateOrExpressionFallback(
+    expression: OrExpressionFallback
+  ): string {
+    const tryValue = this.generateExpression(expression.expression);
+    const fallback = this.generateExpression(expression.fallback);
+    // Use nullish coalescing for option types
+    return `(${tryValue} ?? ${fallback})`;
   }
 }
