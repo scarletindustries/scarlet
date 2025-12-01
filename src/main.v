@@ -3,6 +3,7 @@ module main
 import os
 import cli
 import compiler.scanner
+import compiler.parser
 
 fn main() {
 	mut app := cli.Command{
@@ -23,8 +24,11 @@ fn main() {
 					file := os.read_file(entrypoint)!
 
 					mut s := scanner.new_scanner(file)
+					mut p := parser.new_parser(mut s)
 
-					println(s.scan_all())
+					ast := p.parse_program()!
+
+					println(ast)
 				}
 			},
 		]

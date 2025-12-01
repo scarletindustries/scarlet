@@ -46,7 +46,8 @@ pub fn (t &Token) str() string {
 			.kw_import { 'import' }
 			.kw_function { 'fn' }
 			.kw_const { 'const' }
-			.kw_throw { 'throw' }
+			.kw_enum { 'enum' }
+			.kw_error { 'error' }
 			.kw_if { 'if' }
 			.kw_else { 'else' }
 			.kw_true { 'true' }
@@ -55,9 +56,10 @@ pub fn (t &Token) str() string {
 			.kw_export { 'export' }
 			.kw_struct { 'struct' }
 			.kw_in { 'in' }
+			.kw_match { 'match' }
 			.kw_none { 'none' }
 			.kw_or { 'or' }
-			.punc_arrow { '->' }
+			.punc_arrow { '=>' }
 			.punc_dotdot { '..' }
 			.punc_ellipsis { '...' }
 			.punc_question_mark { '?' }

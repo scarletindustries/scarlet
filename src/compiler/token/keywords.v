@@ -7,13 +7,15 @@ pub const keyword_map = {
 	'true':   Kind.kw_true
 	'false':  Kind.kw_false
 	'assert': Kind.kw_assert
+	'enum':   Kind.kw_enum
 	'export': Kind.kw_export
 	'struct': Kind.kw_struct
 	'in':     Kind.kw_in
+	'match':  Kind.kw_match
 	'none':   Kind.kw_none
 	'const':  Kind.kw_const
 	'if':     Kind.kw_if
 	'else':   Kind.kw_else
-	'throw':  Kind.kw_throw
+	'error':  Kind.kw_error
 	'or':     Kind.kw_or
 }

@@ -20,7 +20,8 @@ pub enum Kind {
 	// Keywords
 	kw_comptime // comptime
 	kw_const    // const
-	kw_throw    // throw
+	kw_enum     // enum
+	kw_error    // error
 	kw_if       // if
 	kw_else     // else
 	kw_function // fn
@@ -32,6 +33,7 @@ pub enum Kind {
 	kw_export   // export
 	kw_struct   // struct
 	kw_in       // in
+	kw_match    // match
 	kw_none     // none
 	kw_or       // or
 	// Punctuation

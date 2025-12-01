@@ -9,8 +9,8 @@ enum MyEnum {
     C(MySubEnum),
 }
 
-fn test(arg MyEnum) {
-    return match arg {
+fn test(arg MyEnum) string {
+    match arg {
         MyEnum.A => 'a is the best!',
         MyEnum.B => 'b is the best!',
         MyEnum.C(sub) => match sub {

@@ -3,173 +3,201 @@ from './file.al' import a, b, c
 
 // Comment
 
-// const
+// Const binding
 const name = 'alistair the third'
 
-// Struct
+// Variable binding (immutable, can shadow)
+x = 10
+x = x + 1
+
+// Struct definition
 export struct Person {
     name string = 'alistair',
     age  int = 19,
 }
 
-// Function
-fn add(a, b) {
-    return a + b
+// Struct instantiation
+person = Person{
+    name: 'not alistair',
+    age: 18,
 }
 
-export enum MySubEnum {
-    D,
-    E,
+// Function (everything is an expression, last expr is return value)
+fn add(a int, b int) int {
+    a + b
 }
 
-export enum MyEnum {
-    A,
-    B,
-    C(MySubEnum),
+// Function with no return value (returns none)
+fn greet(name string) {
+    println('Hello, ' + name)
 }
 
-fn test(arg MyEnum) {
-    result := match arg {
-        MyEnum.A => 'a',
-        MyEnum.B => 'b',
-        MyEnum.C(sub) => match sub {
-            MySubEnum.D => 'a',
-            MySubEnum.E => 'b',
-        },
+// Anonymous function
+callback = fn(x int) int {
+    x * 2
+}
+
+// Function with optional return type
+fn find_user(id int) ?User {
+    match id == 0 {
+        true => none,
+        false => User{ id: id },
     }
 }
 
-// Typed function
-fn add_typed(a int, b int) int {
-    return a + b
+// Function with error type
+fn divide(a int, b int) int!DivisionError {
+    match b == 0 {
+        true => error DivisionError{ message: 'Cannot divide by zero' },
+        false => a / b,
+    }
 }
 
-// Exported function
+// Function that might fail with no success value
+fn validate(x int) !ValidationError {
+    match x < 0 {
+        true => error ValidationError{},
+        false => none,
+    }
+}
+
+// Optional AND fallible
+fn fetch_user(id int) ?User!NetworkError {
+    match id == 0 {
+        true => none,
+        false => User{ id: id },
+    }
+}
+
+// Error handling with or
+fn handling_errors() {
+    // Provide default value
+    result = divide(10, 0) or 0
+
+    // Handle with receiver
+    result = divide(10, 0) or err {
+        println(err.message)
+        0
+    }
+
+    // Propagate error up
+    result = divide(10, 2)!
+}
+
+// Option handling
+fn handling_options() {
+    // Provide default
+    user = find_user(0) or default_user()
+
+    // Handle with block
+    user = find_user(0) or {
+        create_default_user()
+    }
+}
+
+// If expression (returns a value)
+fn max(a int, b int) int {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// If else if chain
+fn classify(n int) string {
+    if n < 0 {
+        'negative'
+    } else if n == 0 {
+        'zero'
+    } else {
+        'positive'
+    }
+}
+
+// Match expression
+fn describe(x int) string {
+    match x {
+        0 => 'zero',
+        1 => 'one',
+        _ => 'many',
+    }
+}
+
+// Match with complex patterns
+fn handle_result(r Result) string {
+    match r {
+        Result.Ok(value) => 'Got: ' + value,
+        Result.Err(e) => 'Error: ' + e.message,
+    }
+}
+
+// Block expression (returns last expression)
+fn example() int {
+    result = {
+        a = 10
+        b = 20
+        a + b
+    }
+    result * 2
+}
+
+// Arrays
+numbers = [1, 2, 3, 4, 5]
+first = numbers[0]
+
+// Range
+range = 0..10
+
+// Method chaining
+result = get_data()
+    .filter(is_valid)
+    .map(transform)
+    .first()
+
+// Property access
+name = person.name
+age = person.age
+
+// Assert
+assert x > 0, 'x must be positive'
+
+// Boolean literals
+yes = true
+no = false
+
+// None literal
+nothing = none
+
+// String interpolation
+greeting = 'Hello, $name!'
+complex = 'Result: ${a + b}'
+
+// Binary operators
+sum = 1 + 2
+diff = 5 - 3
+prod = 4 * 2
+quot = 10 / 2
+rem = 10 % 3
+
+// Comparison
+eq = a == b
+neq = a != b
+lt = a < b
+gt = a > b
+lte = a <= b
+gte = a >= b
+
+// Logical operators
+and_result = a && b
+or_result = a || b
+not_result = !a
+
+// Export
 export fn main() {
-    a().b()
-
-    person := Person{
-        name: 'not alistair',
-        age: 18,
-    }
+    println('Hello, world!')
 }
 
-export struct MyErrorType {
-    message string = 'something went wrong man!!!',
-    lol int,
-}
-
-fn result() int, MyErrorType {
-    if random() > 0.5 {
-        throw MyErrorType{
-            lol: 1,
-        }
-    }
-
-    return 1
-}
-
-fn handling_result_1() {
-    // data would be an int here, and err is typed correctly
-    data := result() or err {
-        return err.message
-    }
-}
-
-fn handling_result_2() void, MyErrorType {
-    // Append ! to "throw" the error further up the call stack
-    data := result()!
-}
-
-fn option() ?int {
-    if random() > 0.5 {
-        return none
-    }
-
-    return 1
-}
-
-fn option() ?int {
-    if random() > 0.5 {
-        return none
-    }
-
-    return 1
-}
-
-fn option_result() ?int, Error {
-    if random() > 0.5 {
-        return none
-    }
-
-    if random() > 0.5 {
-        throw Error{
-            msg: 'Something went wrong',
-        }
-    }
-
-    return 1
-}
-
-fn asdf() {
-    result := option() or 10
-}
-
-fn asdf2() {
-    result := option() or e {
-        return 10
-    }
-}
-
-fn asdf3() {
-    result := result() or e {
-        return 10
-    }
-
-    result := result() or {
-        return 10
-    }
-}
-
-fn keywords_and_punctuation() {
-    if !true {
-        return
-    } else if false {
-        return
-    }
-
-    for i in 0..10 {
-        continue
-    }
-
-    // inline block expression
-    example := {
-        test := 20
-        return test * 10
-    }
-
-    users := ['bob', 'alice', 'foo']
-    for user in users {
-        println(user.to_upper())
-    }
-
-    for user in ['bob', 'alice', 'foo'] {
-        println(user.to_upper())
-    }
-
-    for {
-        break
-    }
-
-    counter := 0
-
-    for {
-        counter = counter + 1
-
-        if counter > 10 {
-            break
-        }
-    }
-
-    assert true, 'This is an error message'
+export struct Config {
+    debug bool = false,
 }
