@@ -964,7 +964,9 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 		if ch == `$` {
 			// Save accumulated string part
 			if current.len > 0 {
-				parts << ast.StringLiteral{value: current}
+				parts << ast.StringLiteral{
+					value: current
+				}
 				current = ''
 			}
 
@@ -1003,14 +1005,17 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 			} else {
 				// $name form - read identifier
 				mut ident := ''
-				for i < raw.len && (raw[i].is_letter() || raw[i] == `_` || (ident.len > 0 && raw[i].is_digit())) {
+				for i < raw.len
+					&& (raw[i].is_letter() || raw[i] == `_` || (ident.len > 0 && raw[i].is_digit())) {
 					ident += raw[i].ascii_str()
 					i++
 				}
 				if ident.len == 0 {
 					return error('Expected identifier after $ in interpolated string')
 				}
-				parts << ast.Identifier{name: ident}
+				parts << ast.Identifier{
+					name: ident
+				}
 			}
 		} else {
 			current += ch.ascii_str()
@@ -1020,10 +1025,14 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 
 	// Save final string part
 	if current.len > 0 {
-		parts << ast.StringLiteral{value: current}
+		parts << ast.StringLiteral{
+			value: current
+		}
 	}
 
-	return ast.InterpolatedString{parts: parts}
+	return ast.InterpolatedString{
+		parts: parts
+	}
 }
 
 // Number literal
