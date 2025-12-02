@@ -6,11 +6,6 @@ import compiler.ast
 import compiler
 import compiler.printer
 
-/*
- * Parser is responsible for parsing the tokens into an AST.
- * Everything is an expression in this language.
- */
-
 pub struct Parser {
 	tokens []compiler.Token
 mut:
@@ -49,7 +44,7 @@ fn (mut p Parser) eat_msg(kind token.Kind, message string) !compiler.Token {
 	}
 }
 
-fn (mut p Parser) get_token_literal(kind token.Kind, message string) !string {
+fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
 	eaten := p.eat_msg(kind, message)!
 
 	if unwrapped := eaten.literal {
@@ -65,10 +60,9 @@ pub fn (mut p Parser) parse_program() !ast.BlockExpression {
 	for p.current_token.kind != .eof {
 		expr := p.parse_expression() or {
 			println(printer.print_expr(program))
-			println('=====================Compiler Bug=====================')
-			println('| The above is the program parsed up until the error |')
-			println('|   Plz report this on GitHub, with your full code   |')
-			println('======================================================')
+			println('=====================Compiler Error=====================')
+			println('|  The above is the program parsed up until the error  |')
+			println('========================================================')
 			return err
 		}
 
@@ -113,7 +107,7 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 			if next := p.peek_next() {
 				// If next token is => then this identifier is the receiver
 				if next.kind == .punc_arrow {
-					name := p.get_token_literal(.identifier, 'Expected identifier for or receiver')!
+					name := p.eat_token_literal(.identifier, 'Expected identifier for or receiver')!
 					receiver = ast.Identifier{
 						name: name
 					}
@@ -422,7 +416,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 
 // Identifier, function call, struct init, or variable binding
 fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
-	name := p.get_token_literal(.identifier, 'Expected identifier')!
+	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
 	// Check if this is a variable binding: `x = expr`
 	if p.current_token.kind == .punc_equals {
@@ -570,7 +564,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 	// Optional name (for anonymous functions)
 	mut identifier := ?ast.Identifier(none)
 	if p.current_token.kind == .identifier {
-		name := p.get_token_literal(.identifier, 'Expected function name')!
+		name := p.eat_token_literal(.identifier, 'Expected function name')!
 		identifier = ast.Identifier{
 			name: name
 		}
@@ -628,7 +622,7 @@ fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
 
 // Parse a single parameter
 fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
-	name := p.get_token_literal(.identifier, 'Expected parameter name')!
+	name := p.eat_token_literal(.identifier, 'Expected parameter name')!
 
 	mut typ := ?ast.TypeIdentifier(none)
 
@@ -639,10 +633,10 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 	}
 
 	return ast.FunctionParameter{
+		typ:        typ
 		identifier: ast.Identifier{
 			name: name
 		}
-		typ:        typ
 	}
 }
 
@@ -662,7 +656,11 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 		p.eat(.punc_close_bracket)!
 	}
 
-	name := p.get_token_literal(.identifier, 'Expected type name')!
+	name := p.eat_token_literal(.identifier, 'Expected type name')!
+
+	if !token.is_type_identifier(name) {
+		return error('Type identifiers must start with capital letters')
+	}
 
 	return ast.TypeIdentifier{
 		is_option:  is_option
@@ -677,7 +675,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	p.eat(.kw_struct)!
 
-	name := p.get_token_literal(.identifier, 'Expected struct name')!
+	name := p.eat_token_literal(.identifier, 'Expected struct name')!
 
 	p.eat(.punc_open_brace)!
 
@@ -700,7 +698,7 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 
 // Parse struct field: name Type = default
 fn (mut p Parser) parse_struct_field() !ast.StructField {
-	name := p.get_token_literal(.identifier, 'Expected field name')!
+	name := p.eat_token_literal(.identifier, 'Expected field name')!
 
 	typ := p.parse_type_identifier()!
 
@@ -728,7 +726,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	p.eat(.kw_enum)!
 
-	name := p.get_token_literal(.identifier, 'Expected enum name')!
+	name := p.eat_token_literal(.identifier, 'Expected enum name')!
 
 	p.eat(.punc_open_brace)!
 
@@ -751,7 +749,7 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 
 // Parse enum variant: Name or Name(Type)
 fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
-	name := p.get_token_literal(.identifier, 'Expected variant name')!
+	name := p.eat_token_literal(.identifier, 'Expected variant name')!
 
 	mut payload := ?ast.TypeIdentifier(none)
 
@@ -781,7 +779,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 	mut fields := []ast.StructInitField{}
 
 	for p.current_token.kind != .punc_close_brace {
-		field_name := p.get_token_literal(.identifier, 'Expected field name')!
+		field_name := p.eat_token_literal(.identifier, 'Expected field name')!
 		p.eat(.punc_colon)!
 		value := p.parse_expression()!
 
@@ -811,7 +809,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 fn (mut p Parser) parse_const_binding() !ast.Expression {
 	p.eat(.kw_const)!
 
-	name := p.get_token_literal(.identifier, 'Expected const name')!
+	name := p.eat_token_literal(.identifier, 'Expected const name')!
 
 	p.eat(.punc_equals)!
 
@@ -855,7 +853,7 @@ fn (mut p Parser) parse_import_declaration() !ast.Expression {
 }
 
 fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) ! {
-	name := p.get_token_literal(.identifier, 'Expected import specifier')!
+	name := p.eat_token_literal(.identifier, 'Expected import specifier')!
 
 	specifiers << ast.ImportSpecifier{
 		identifier: ast.Identifier{
@@ -901,7 +899,7 @@ fn (mut p Parser) parse_error_expression() !ast.Expression {
 fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 	p.eat(.punc_dot)!
 
-	property := p.get_token_literal(.identifier, 'Expected property name')!
+	property := p.eat_token_literal(.identifier, 'Expected property name')!
 
 	if p.current_token.kind == .punc_open_paren {
 		call := p.parse_function_call_expression(property)!
@@ -946,13 +944,13 @@ fn (mut p Parser) parse_function_call_expression(name string) !ast.Expression {
 // String literal
 fn (mut p Parser) parse_string_expression() !ast.Expression {
 	return ast.StringLiteral{
-		value: p.get_token_literal(.literal_string, 'Expected string')!
+		value: p.eat_token_literal(.literal_string, 'Expected string')!
 	}
 }
 
 // Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
 fn (mut p Parser) parse_interpolated_string() !ast.Expression {
-	raw := p.get_token_literal(.literal_string_interpolation, 'Expected interpolated string')!
+	raw := p.eat_token_literal(.literal_string_interpolation, 'Expected interpolated string')!
 
 	mut parts := []ast.Expression{}
 	mut current := ''
@@ -1038,6 +1036,6 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 // Number literal
 fn (mut p Parser) parse_number_expression() !ast.Expression {
 	return ast.NumberLiteral{
-		value: p.get_token_literal(.literal_number, 'Expected number')!
+		value: p.eat_token_literal(.literal_number, 'Expected number')!
 	}
 }

@@ -9,7 +9,7 @@ enum MyEnum {
     C(MySubEnum),
 }
 
-fn test(arg MyEnum) string {
+fn test(arg MyEnum) String {
     match arg {
         MyEnum.A => 'a is the best!',
         MyEnum.B => 'b is the best!',

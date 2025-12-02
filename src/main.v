@@ -69,21 +69,41 @@ fn main() {
 				required_args: 1
 				usage:         '<entrypoint>'
 				description:   'Run a program (.al source or .alb bytecode)'
+				flags:         [
+					cli.Flag{
+						flag:        .bool
+						name:        'debug-printer'
+						description: 'Print the parsed program before execution starts'
+					},
+				]
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 
+					debug_printer := cmd.flags.get_bool('debug-printer')!
+
 					program := if entrypoint.ends_with('.alb') {
-						// Load precompiled bytecode
+						if debug_printer {
+							return error('Cannot run compiled bytecode with `--debug-printer`')
+						}
+
 						data := os.read_bytes(entrypoint)!
 						bytecode.deserialize(data)!
 					} else {
-						// Compile from source
 						file := os.read_file(entrypoint)!
 
 						mut s := scanner.new_scanner(file)
 						mut p := parser.new_parser(mut s)
 
 						ast := p.parse_program()!
+
+						if debug_printer {
+							println('')
+							println('================DEBUG: Printed parsed source code================')
+							println(printer.print_expr(ast))
+							println('=================================================================')
+							println('')
+						}
+
 						bytecode.compile(ast)!
 					}
 

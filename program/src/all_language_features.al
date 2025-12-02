@@ -1,36 +1,36 @@
 struct User {
-    id int,
-    name string,
+    id Int,
+    name String,
 }
 
 struct DivisionError {
-    message string,
+    message String,
 }
 
 struct ValidationError {
-    code int,
+    code Int,
 }
 
 struct NetworkError {
-    status int,
+    status Int,
 }
 
 struct Person {
-    name string,
-    age int,
+    name String,
+    age Int,
 }
 
 struct Config {
-    debug bool,
+    debug Bool,
 }
 
 enum Result {
-    Ok(string),
-    Err(string),
+    Ok(String),
+    Err(String),
 }
 
 enum Option {
-    Some(int),
+    Some(Int),
     None,
 }
 
@@ -44,19 +44,19 @@ person = Person{
     age: 18,
 }
 
-fn add(a int, b int) int {
+fn add(a Int, b Int) Int {
     a + b
 }
 
-fn greet(name string) {
+fn greet(name String) {
     name
 }
 
-callback = fn(x int) int {
+callback = fn(x Int) Int {
     x * 2
 }
 
-fn find_user(id int) ?User {
+fn find_user(id Int) ?User {
     if id == 0 {
         none
     } else {
@@ -64,7 +64,7 @@ fn find_user(id int) ?User {
     }
 }
 
-fn divide(a int, b int) int!DivisionError {
+fn divide(a Int, b Int) Int!DivisionError {
     if b == 0 {
         error DivisionError{ message: 'Cannot divide by zero' }
     } else {
@@ -72,7 +72,7 @@ fn divide(a int, b int) int!DivisionError {
     }
 }
 
-fn validate(x int) !ValidationError {
+fn validate(x Int) !ValidationError {
     if x < 0 {
         error ValidationError{ code: 1 }
     } else {
@@ -80,7 +80,7 @@ fn validate(x int) !ValidationError {
     }
 }
 
-fn max(a int, b int) int {
+fn max(a Int, b Int) Int {
     if a > b {
         a
     } else {
@@ -88,7 +88,7 @@ fn max(a int, b int) int {
     }
 }
 
-fn classify(n int) string {
+fn classify(n Int) String {
     if n < 0 {
         'negative'
     } else if n == 0 {
@@ -98,7 +98,7 @@ fn classify(n int) string {
     }
 }
 
-fn describe(x int) string {
+fn describe(x Int) String {
     match x {
         0 => 'zero',
         1 => 'one',
@@ -106,14 +106,14 @@ fn describe(x int) string {
     }
 }
 
-fn handle_result(r Result) string {
+fn handle_result(r Result) String {
     match r {
         Ok(value) => 'Got: $value',
         Err(e) => 'Error: $e',
     }
 }
 
-fn example() int {
+fn example() Int {
     result = {
         a = 10
         b = 20
@@ -178,6 +178,14 @@ error_with_receiver = divide(10, 0) or err => 0
 success_result = divide(10, 2)!
 
 option_result = find_user(0) or User{ id: 0, name: 'default' }
+
+x = enum G {
+    Test
+    BottledIt
+}
+println('x is:')
+println(x)
+println('what')
 
 results = [add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result]
 results
