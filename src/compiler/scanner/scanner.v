@@ -116,8 +116,8 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				} else if peeked == `\\` {
 					next_char = '\\'
 				} else if peeked == `$` {
-					next_char = '$'
 					// Escaped $, don't mark as interpolation
+					next_char = '$'
 				} else {
 					panic('unknown escape sequence \'${peeked}\'')
 				}
