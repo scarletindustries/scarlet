@@ -119,6 +119,8 @@ fn (mut p Parser) synchronize() {
 			}
 			.struct_init, .struct_def {
 				if p.current_token.kind == .punc_close_brace {
+					p.advance()
+					p.pop_context()
 					return
 				}
 				if p.current_token.kind == .punc_comma {
