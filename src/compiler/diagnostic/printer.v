@@ -11,6 +11,57 @@ const color_blue = '\x1b[34m'
 const link_start = '\x1b]8;;'
 const link_end = '\x07'
 
+enum Editor {
+	unknown
+	vscode
+	sublime
+	intellij
+	atom
+	emacs
+	vim
+}
+
+fn detect_editor() Editor {
+	result := os.execute('ps x -o comm=')
+	if result.exit_code != 0 {
+		return .unknown
+	}
+
+	processes := result.output.to_lower()
+
+	if processes.contains('code') || processes.contains('codium') {
+		return .vscode
+	}
+	if processes.contains('sublime') || processes.contains('subl') {
+		return .sublime
+	}
+	if processes.contains('idea') || processes.contains('webstorm')
+		|| processes.contains('phpstorm') || processes.contains('pycharm') {
+		return .intellij
+	}
+	if processes.contains('atom') {
+		return .atom
+	}
+	if processes.contains('emacs') {
+		return .emacs
+	}
+	if processes.contains('vim') || processes.contains('nvim') {
+		return .vim
+	}
+
+	return .unknown
+}
+
+fn build_editor_url(editor Editor, abs_path string, line int, col int) string {
+	return match editor {
+		.vscode { 'vscode://file${abs_path}:${line}:${col}' }
+		.sublime { 'subl://open?url=file://${abs_path}&line=${line}&column=${col}' }
+		.intellij { 'idea://open?file=${abs_path}&line=${line}&column=${col}' }
+		.atom { 'atom://core/open/file?filename=${abs_path}&line=${line}&column=${col}' }
+		else { 'file://${abs_path}' }
+	}
+}
+
 fn severity_color(severity Severity) string {
 	return match severity {
 		.error { color_red }
@@ -44,7 +95,8 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 
 	abs_path := os.real_path(file_path)
 	location := '${file_path}:${d.span.start_line}:${d.span.start_column}'
-	link_url := 'file://${abs_path}'
+	editor := detect_editor()
+	link_url := build_editor_url(editor, abs_path, d.span.start_line, d.span.start_column)
 	result += '${color_blue}  -->${color_reset} ${link_start}${link_url}${link_end}${location}${link_start}${link_end}\n'
 
 	line_num_width := '${d.span.start_line}'.len
