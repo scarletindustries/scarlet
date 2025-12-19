@@ -143,11 +143,13 @@ const cliOutput = `   ▄▀█ █░░
 
    Usage:
      al run <file.al>      Run a program
-     al build <file.al>    Print the AST
+     al --help             Show all commands
 
    Examples:
      al run hello.al
-     al run examples/fibonacci.al`;
+     al run examples/fibonacci.al
+
+   Learn more: https://al.alistair.sh`;
 
 export function App({ examples }: { examples: RenderedExample[] }) {
   return (
@@ -167,8 +169,7 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         <div className="mt-6 p-4 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
           <div className="mb-2 text-sm font-bold">Install</div>
           <code className="text-xs tracking-tight">
-            curl -fsSL
-            https://raw.githubusercontent.com/alii/al/master/install.sh | bash
+            curl -fsSL al.alistair.sh/install.sh | bash
           </code>
         </div>
       </header>

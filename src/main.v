@@ -21,13 +21,13 @@ fn main() {
 
    Usage:
      al run <file.al>      Run a program
-     al build <file.al>    Print the AST
+     al --help             Show all commands
 
    Examples:
      al run hello.al
      al run examples/fibonacci.al
 
-   Learn more: https://github.com/alii/al
+   Learn more: https://al.alistair.sh
 ')
 		}
 		commands:    [

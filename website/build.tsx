@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
+import plugin from "bun-plugin-tailwind";
+import { existsSync } from "fs";
+import { mkdir, rm } from "fs/promises";
+import path from "path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { codeToHtml } from "shiki";
-import { App, examples } from "./src/app";
 import grammar from "./src/al.tmLanguage.json";
-import { existsSync } from "fs";
-import { rm, mkdir } from "fs/promises";
-import path from "path";
-import plugin from "bun-plugin-tailwind";
+import { App, examples } from "./src/app";
 
 const outdir = path.join(import.meta.dir, "dist");
 
@@ -71,5 +71,10 @@ for (const output of result.outputs) {
     await rm(output.path).catch(() => {});
   }
 }
+
+const installScript = await Bun.file(
+  path.join(import.meta.dir, "../install.sh")
+).text();
+await Bun.write(path.join(outdir, "install.sh"), installScript);
 
 console.log("Done! Output: dist/index.html");

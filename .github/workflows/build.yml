@@ -104,7 +104,7 @@ jobs:
 
           ## Install
           \`\`\`bash
-          curl -fsSL https://raw.githubusercontent.com/alii/al/master/install.sh | bash
+          curl -fsSL al.alistair.sh/install.sh | bash
           \`\`\`" \
             --prerelease \
             "./${{ env.BINARY_NAME }}"

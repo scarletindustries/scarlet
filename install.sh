@@ -2,10 +2,9 @@
 set -e
 
 # AL installer script
-# Usage: curl -fsSL https://raw.githubusercontent.com/alii/al/master/install.sh | bash
+# Usage: curl -fsSL al.alistair.sh/install.sh | bash
 
-REPO="alii/al"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="$HOME/.al/bin"
 BINARY_NAME="al"
 
 echo "Installing AL..."
@@ -33,9 +32,12 @@ if [ "$OS" != "macos" ]; then
 fi
 
 # Download URL
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/canary/al-$OS-$ARCH"
+DOWNLOAD_URL="https://al.alistair.sh/releases/al-$OS-$ARCH"
 
 echo "Downloading from $DOWNLOAD_URL..."
+
+# Create install directory
+mkdir -p "$INSTALL_DIR"
 
 # Create temp file
 TMP_FILE=$(mktemp)
@@ -53,14 +55,71 @@ fi
 
 # Install
 chmod +x "$TMP_FILE"
-
-if [ -w "$INSTALL_DIR" ]; then
-    mv "$TMP_FILE" "$INSTALL_DIR/$BINARY_NAME"
-else
-    echo "Need sudo to install to $INSTALL_DIR"
-    sudo mv "$TMP_FILE" "$INSTALL_DIR/$BINARY_NAME"
-fi
+mv "$TMP_FILE" "$INSTALL_DIR/$BINARY_NAME"
 
 echo "Installed AL to $INSTALL_DIR/$BINARY_NAME"
+
+# Add to PATH if not already there
+add_to_path() {
+    local rc_file="$1"
+    local shell_name="$2"
+
+    if [ -f "$rc_file" ]; then
+        if ! grep -q 'export PATH="$HOME/.al/bin:$PATH"' "$rc_file" 2>/dev/null; then
+            echo "" >> "$rc_file"
+            echo '# AL' >> "$rc_file"
+            echo 'export PATH="$HOME/.al/bin:$PATH"' >> "$rc_file"
+            echo "Added ~/.al/bin to PATH in $rc_file"
+            return 0
+        else
+            return 1  # Already in PATH
+        fi
+    fi
+    return 2  # File doesn't exist
+}
+
+PATH_ADDED=false
+SHELL_NAME=$(basename "$SHELL")
+
+case $SHELL_NAME in
+    zsh)
+        if add_to_path "$HOME/.zshrc" "zsh"; then
+            PATH_ADDED=true
+        fi
+        ;;
+    bash)
+        # Try .bashrc first, then .bash_profile
+        if add_to_path "$HOME/.bashrc" "bash"; then
+            PATH_ADDED=true
+        elif add_to_path "$HOME/.bash_profile" "bash"; then
+            PATH_ADDED=true
+        fi
+        ;;
+    fish)
+        FISH_CONFIG="$HOME/.config/fish/config.fish"
+        if [ -f "$FISH_CONFIG" ]; then
+            if ! grep -q 'set -gx PATH $HOME/.al/bin $PATH' "$FISH_CONFIG" 2>/dev/null; then
+                echo "" >> "$FISH_CONFIG"
+                echo "# AL" >> "$FISH_CONFIG"
+                echo 'set -gx PATH $HOME/.al/bin $PATH' >> "$FISH_CONFIG"
+                echo "Added ~/.al/bin to PATH in $FISH_CONFIG"
+                PATH_ADDED=true
+            fi
+        fi
+        ;;
+esac
+
 echo ""
-echo "Run 'al --help' to get started"
+if [ "$PATH_ADDED" = true ]; then
+    echo "Restart your shell or run:"
+    echo "  source ~/.$SHELL_NAME*rc"
+    echo ""
+    echo "Then run 'al' to get started"
+elif echo "$PATH" | grep -q "$HOME/.al/bin"; then
+    echo "Run 'al' to get started"
+else
+    echo "Add ~/.al/bin to your PATH:"
+    echo "  export PATH=\"\$HOME/.al/bin:\$PATH\""
+    echo ""
+    echo "Then run 'al' to get started"
+fi

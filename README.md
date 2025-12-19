@@ -5,7 +5,7 @@ A small, expressive programming language.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alii/al/master/install.sh | bash
+curl -fsSL al.alistair.sh/install.sh | bash
 ```
 
 ## Usage
