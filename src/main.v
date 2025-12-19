@@ -5,9 +5,12 @@ import cli
 import compiler.scanner
 import compiler.parser
 import compiler.printer
+import compiler.bytecode
+import compiler.vm
 
 fn main() {
 	mut app := cli.Command{
+		name:        'al'
 		description: 'al compiler and toolchain'
 		version:     '0.0.1'
 		posix_mode:  true
@@ -19,7 +22,7 @@ fn main() {
 				name:          'build'
 				required_args: 1
 				usage:         '<entrypoint>'
-				description:   'Build and compile an entrypoint to your program'
+				description:   'Parse and print the AST of a program'
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					file := os.read_file(entrypoint)!
@@ -30,6 +33,47 @@ fn main() {
 					ast := p.parse_program()!
 
 					println(printer.print_expr(ast))
+				}
+			},
+			cli.Command{
+				name:          'run'
+				required_args: 1
+				usage:         '<entrypoint>'
+				description:   'Run a program'
+				flags:         [
+					cli.Flag{
+						flag:        .bool
+						name:        'debug-printer'
+						description: 'Print the parsed program before execution starts'
+					},
+				]
+				execute:       fn (cmd cli.Command) ! {
+					entrypoint := cmd.args[0]
+					debug_printer := cmd.flags.get_bool('debug-printer')!
+
+					file := os.read_file(entrypoint)!
+
+					mut s := scanner.new_scanner(file)
+					mut p := parser.new_parser(mut s)
+
+					ast := p.parse_program()!
+
+					if debug_printer {
+						println('')
+						println('================DEBUG: Printed parsed source code================')
+						println(printer.print_expr(ast))
+						println('=================================================================')
+						println('')
+					}
+
+					program := bytecode.compile(ast)!
+
+					mut v := vm.new_vm(program)
+					result := v.run()!
+
+					if result !is bytecode.NoneValue {
+						println(vm.inspect(result))
+					}
 				}
 			},
 		]

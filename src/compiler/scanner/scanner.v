@@ -81,6 +81,7 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 		}
 
 		mut result := ''
+		mut has_interpolation := false
 
 		for {
 			next := s.peek_char()
@@ -91,6 +92,10 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			}
 
 			mut next_char := next.ascii_str()
+
+			if next == `$` {
+				has_interpolation = true
+			}
 
 			if next == `\\` {
 				peeked := s.peek_char()
@@ -110,6 +115,9 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 					next_char = "'"
 				} else if peeked == `\\` {
 					next_char = '\\'
+				} else if peeked == `$` {
+					// Escaped $, don't mark as interpolation
+					next_char = '$'
 				} else {
 					panic('unknown escape sequence \'${peeked}\'')
 				}
@@ -118,6 +126,9 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			result += next_char
 		}
 
+		if has_interpolation {
+			return s.new_token(.literal_string_interpolation, result)
+		}
 		return s.new_token(.literal_string, result)
 	}
 
@@ -256,11 +267,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				return s.new_token(.punc_equals_comparator, none)
 			}
 
-			if next == `>` {
-				s.incr_pos()
-				return s.new_token(.punc_arrow, none)
-			}
-
 			return s.new_token(.punc_equals, none)
 		}
 		else {
@@ -347,7 +353,9 @@ fn (mut s Scanner) scan_number(from u8) compiler.Token {
 }
 
 fn (mut s Scanner) peek_char() u8 {
-	assert s.state.get_pos() < s.input.len, 'scanner at end of input'
+	if s.state.get_pos() >= s.input.len {
+		return 0 // EOF
+	}
 	return s.input[s.state.get_pos()]
 }
 

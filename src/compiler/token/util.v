@@ -2,7 +2,16 @@ module token
 
 @[inline]
 pub fn is_name_char(c u8) bool {
-	return (c >= `a` && c <= `z`) || (c >= `A` && c <= `Z`) || c == `_` || c.is_digit()
+	return (c >= `a` && c <= `z`) || is_uppercase_ascii(c) || c == `_` || c.is_digit()
+}
+
+pub fn is_uppercase_ascii(c u8) bool {
+	return c >= `A` && c <= `Z`
+}
+
+@[inline]
+pub fn is_type_identifier(identifier string) bool {
+	return is_uppercase_ascii(identifier[0])
 }
 
 // is_valid_identifier checks if the given identifier is a valid identifier. It

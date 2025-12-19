@@ -1,102 +1,95 @@
-// Import
-from './file.al' import a, b, c
+struct User {
+    id Int,
+    name String,
+}
 
-// Comment
+struct DivisionError {
+    message String,
+}
 
-// Const binding
-const name = 'alistair the third'
+struct Error {
+    message String,
+}
 
-// Variable binding (immutable, can shadow)
+struct ValidationError {
+    code Int,
+}
+
+struct NetworkError {
+    status Int,
+}
+
+struct Person {
+    name String,
+    age Int,
+}
+
+struct Config {
+    debug Bool,
+}
+
+enum Result {
+    Ok(String),
+    Err(String),
+}
+
+enum Option {
+    Some(Int),
+    None,
+}
+
+const app_name = 'my app'
+
 x = 10
 x = x + 1
 
-// Struct definition
-export struct Person {
-    name string = 'alistair',
-    age  int = 19,
-}
-
-// Struct instantiation
 person = Person{
-    name: 'not alistair',
+    name: 'alistair',
     age: 18,
 }
 
-// Function (everything is an expression, last expr is return value)
-fn add(a int, b int) int {
+fn add(a Int, b Int) Int {
     a + b
 }
 
-// Function with no return value (returns none)
-fn greet(name string) {
-    println('Hello, ' + name)
+fn greet(name String) {
+    name
 }
 
-// Anonymous function
-callback = fn(x int) int {
+callback = fn(x Int) Int {
     x * 2
 }
 
-// Function with optional return type
-fn find_user(id int) ?User {
-    match id == 0 {
-        true => none,
-        false => User{ id: id },
+fn find_user(id Int) ?User {
+    if id == 0 {
+        none
+    } else {
+        User{ id: id, name: 'found' }
     }
 }
 
-// Function with error type
-fn divide(a int, b int) int!DivisionError {
-    match b == 0 {
-        true => error DivisionError{ message: 'Cannot divide by zero' },
-        false => a / b,
+fn divide(a Int, b Int) Int!DivisionError {
+    if b == 0 {
+        error DivisionError{ message: 'Cannot divide by zero' }
+    } else {
+        a / b
     }
 }
 
-// Function that might fail with no success value
-fn validate(x int) !ValidationError {
-    match x < 0 {
-        true => error ValidationError{},
-        false => none,
+fn validate(x Int) !ValidationError {
+    if x < 0 {
+        error ValidationError{ code: 1 }
+    } else {
+        none
     }
 }
 
-// Optional AND fallible
-fn fetch_user(id int) ?User!NetworkError {
-    match id == 0 {
-        true => none,
-        false => User{ id: id },
-    }
+fn check_positive(x Int) Int!Error {
+    assert x > 0, Error{ message: 'must be positive' }
+    x * 2
 }
 
-// Error handling with or
-fn handling_errors() {
-    // Provide default value
-    result = divide(10, 0) or 0
-
-    // Handle with receiver
-    result = divide(10, 0) or err {
-        println(err.message)
-        0
-    }
-
-    // Propagate error up
-    result = divide(10, 2)!
-}
-
-// Option handling
-fn handling_options() {
-    // Provide default
-    user = find_user(0) or default_user()
-
-    // Handle with block
-    user = find_user(0) or {
-        create_default_user()
-    }
-}
-
-// If expression (returns a value)
-fn max(a int, b int) int {
+fn max(a Int, b Int) Int {
     if a > b {
         a
     } else {
@@ -104,8 +97,7 @@ fn max(a int, b int) int {
     }
 }
 
-// If else if chain
-fn classify(n int) string {
+fn classify(n Int) String {
     if n < 0 {
         'negative'
     } else if n == 0 {
@@ -115,25 +107,30 @@ fn classify(n int) string {
     }
 }
 
-// Match expression
-fn describe(x int) string {
+fn describe(x Int) String {
     match x {
-        0 => 'zero',
-        1 => 'one',
-        _ => 'many',
+        0 -> 'zero',
+        1 -> 'one',
+        else -> 'many',
     }
 }
 
-// Match with complex patterns
-fn handle_result(r Result) string {
+fn handle_result(r Result) String {
     match r {
-        Result.Ok(value) => 'Got: ' + value,
-        Result.Err(e) => 'Error: ' + e.message,
+        Ok(value) -> 'Got: $value',
+        Err(e) -> 'Error: $e',
     }
 }
 
-// Block expression (returns last expression)
-fn example() int {
+fn match_literal(r Result) String {
+    match r {
+        Ok('special') -> 'matched special',
+        Ok(other) -> 'other: $other',
+        Err(e) -> 'error: $e',
+    }
+}
+
+fn example() Int {
     result = {
         a = 10
         b = 20
@@ -142,45 +139,32 @@ fn example() int {
     result * 2
 }
 
-// Arrays
 numbers = [1, 2, 3, 4, 5]
 first = numbers[0]
 
-// Range
 range = 0..10
 
-// Method chaining
-result = get_data()
-    .filter(is_valid)
-    .map(transform)
-    .first()
+person_name = person.name
+person_age = person.age
 
-// Property access
-name = person.name
-age = person.age
-
-// Assert
 assert x > 0, 'x must be positive'
 
-// Boolean literals
 yes = true
 no = false
 
-// None literal
 nothing = none
 
-// String interpolation
-greeting = 'Hello, $name!'
-complex = 'Result: ${a + b}'
+greeting = 'Hello, $app_name!'
+complex = 'Result: ${1 + 2}'
 
-// Binary operators
 sum = 1 + 2
 diff = 5 - 3
 prod = 4 * 2
 quot = 10 / 2
 rem = 10 % 3
 
-// Comparison
+a = 5
+b = 10
 eq = a == b
 neq = a != b
 lt = a < b
@@ -188,16 +172,36 @@ gt = a > b
 lte = a <= b
 gte = a >= b
 
-// Logical operators
-and_result = a && b
-or_result = a || b
-not_result = !a
+and_result = yes && no
+or_result = yes || no
+not_result = !yes
 
-// Export
-export fn main() {
-    println('Hello, world!')
-}
+add_result = add(5, 3)
+max_result = max(10, 20)
+classify_result = classify(5)
+describe_result = describe(1)
+example_result = example()
+enum_result = handle_result(Ok('success'))
 
-export struct Config {
-    debug bool = false,
+error_result = divide(10, 0) or 0
+error_with_receiver = divide(10, 0) or err -> 0
+success_result = divide(10, 2)!
+
+option_result = find_user(0) or User{ id: 0, name: 'default' }
+
+assert_pass = check_positive(5)
+assert_fail = check_positive(-1) or err -> 'ERROR: ${err.message}'
+
+literal_match1 = match_literal(Ok('special'))
+literal_match2 = match_literal(Err('danger'))
+literal_match3 = match_literal(Ok('something else'))
+
+x = enum G {
+    Test
+    BottledIt
 }
+println('x is:')
+println(x)
+println('what')
+
+{[add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result, assert_pass, assert_fail, literal_match1, literal_match2, literal_match3]}

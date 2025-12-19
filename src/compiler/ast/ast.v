@@ -9,6 +9,13 @@ pub mut:
 	value string
 }
 
+// Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
+// Parts alternate between string literals and expressions
+pub struct InterpolatedString {
+pub:
+	parts []Expression // StringLiteral or other expressions
+}
+
 pub struct NumberLiteral {
 pub mut:
 	value string
@@ -91,6 +98,8 @@ pub:
 	pattern Expression
 	body    Expression
 }
+
+pub struct WildcardPattern {}
 
 pub struct MatchExpression {
 pub:
@@ -264,6 +273,7 @@ pub type Expression = ArrayExpression
 	| Identifier
 	| IfExpression
 	| ImportDeclaration
+	| InterpolatedString
 	| MatchExpression
 	| NoneExpression
 	| NumberLiteral
@@ -278,3 +288,4 @@ pub type Expression = ArrayExpression
 	| TypeIdentifier
 	| UnaryExpression
 	| VariableBinding
+	| WildcardPattern
