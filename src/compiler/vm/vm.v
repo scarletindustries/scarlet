@@ -224,9 +224,10 @@ fn (mut vm VM) execute() !bytecode.Value {
 			}
 			.make_array {
 				len := instr.operand
-				mut arr := []bytecode.Value{cap: len}
-				for _ in 0 .. len {
-					arr.prepend(vm.pop()!)
+				// unsafe: we immediately write to every index, no uninitialized reads
+				mut arr := unsafe { []bytecode.Value{len: len} }
+				for i := len - 1; i >= 0; i-- {
+					arr[i] = vm.pop()!
 				}
 				vm.stack << bytecode.Value(arr)
 			}
@@ -309,9 +310,10 @@ fn (mut vm VM) execute() !bytecode.Value {
 				func_idx := instr.operand
 				func := vm.program.functions[func_idx]
 
-				mut captures := []bytecode.Value{cap: func.capture_count}
-				for _ in 0 .. func.capture_count {
-					captures.prepend(vm.pop()!)
+				// unsafe: we immediately write to every index, no uninitialized reads
+				mut captures := unsafe { []bytecode.Value{len: func.capture_count} }
+				for i := func.capture_count - 1; i >= 0; i-- {
+					captures[i] = vm.pop()!
 				}
 
 				vm.stack << bytecode.ClosureValue{
