@@ -80,8 +80,7 @@ fn print_expression(expr ast.Expression, level int) string {
 				.logical_or { '||' }
 				else { '?' }
 			}
-			'${print_expression(expr.left, level)} ${op} ${print_expression(expr.right,
-				level)}'
+			'${print_expression(expr.left, level)} ${op} ${print_expression(expr.right, level)}'
 		}
 		ast.UnaryExpression {
 			op := match expr.op.kind {
@@ -108,8 +107,7 @@ fn print_expression(expr ast.Expression, level int) string {
 			}
 		}
 		ast.IfExpression {
-			mut s := 'if ${print_expression(expr.condition, level)} ${print_expression(expr.body,
-				level)}'
+			mut s := 'if ${print_expression(expr.condition, level)} ${print_expression(expr.body, level)}'
 			if else_body := expr.else_body {
 				s += ' else ${print_expression(else_body, level)}'
 			}
@@ -118,8 +116,7 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.MatchExpression {
 			mut s := 'match ${print_expression(expr.subject, level)} {\n'
 			for arm in expr.arms {
-				s += '${indent(level + 1)}${print_expression(arm.pattern, level + 1)} => ${print_expression(arm.body,
-					level + 1)},\n'
+				s += '${indent(level + 1)}${print_expression(arm.pattern, level + 1)} => ${print_expression(arm.body, level + 1)},\n'
 			}
 			s += '${indent(level)}}'
 			s
@@ -186,8 +183,7 @@ fn print_expression(expr ast.Expression, level int) string {
 			s
 		}
 		ast.ArrayIndexExpression {
-			'${print_expression(expr.expression, level)}[${print_expression(expr.index,
-				level)}]'
+			'${print_expression(expr.expression, level)}[${print_expression(expr.index, level)}]'
 		}
 		ast.RangeExpression {
 			'${print_expression(expr.start, level)}..${print_expression(expr.end, level)}'
@@ -195,8 +191,7 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.StructExpression {
 			mut s := 'struct ${expr.identifier.name} {\n'
 			for field in expr.fields {
-				s += '${indent(level + 1)}${field.identifier.name} ${print_expression(field.typ,
-					level + 1)}'
+				s += '${indent(level + 1)}${field.identifier.name} ${print_expression(field.typ, level + 1)}'
 				if init := field.init {
 					s += ' = ${print_expression(init, level + 1)}'
 				}
@@ -208,8 +203,7 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.StructInitExpression {
 			mut s := '${expr.identifier.name}{\n'
 			for field in expr.fields {
-				s += '${indent(level + 1)}${field.identifier.name}: ${print_expression(field.init,
-					level + 1)},\n'
+				s += '${indent(level + 1)}${field.identifier.name}: ${print_expression(field.init, level + 1)},\n'
 			}
 			s += '${indent(level)}}'
 			s
@@ -240,8 +234,7 @@ fn print_expression(expr ast.Expression, level int) string {
 			'export ${print_expression(expr.expression, level)}'
 		}
 		ast.AssertExpression {
-			'assert ${print_expression(expr.expression, level)}, ${print_expression(expr.message,
-				level)}'
+			'assert ${print_expression(expr.expression, level)}, ${print_expression(expr.message, level)}'
 		}
 		ast.PostfixExpression {
 			op := match expr.op.kind {
@@ -255,7 +248,7 @@ fn print_expression(expr ast.Expression, level int) string {
 			'else'
 		}
 		ast.ErrorNode {
-			'/* error: ${expr.message} */'
+			'/* could not parse: ${expr.message} */'
 		}
 	}
 }
