@@ -5,6 +5,7 @@ import compiler.bytecode
 struct CallFrame {
 mut:
 	func      bytecode.Function
+	func_idx  int
 	ip        int
 	base_slot int
 	captures  []bytecode.Value
@@ -30,6 +31,7 @@ pub fn (mut vm VM) run() !bytecode.Value {
 
 	vm.frames << CallFrame{
 		func:      main_func
+		func_idx:  vm.program.entry
 		ip:        0
 		base_slot: 0
 		captures:  []
@@ -190,12 +192,58 @@ fn (mut vm VM) execute() !bytecode.Value {
 
 					vm.frames << CallFrame{
 						func:      func
+						func_idx:  callee.func_idx
 						ip:        0
 						base_slot: new_base
 						captures:  callee.captures
 					}
 				} else {
 					return error('Cannot call non-function')
+				}
+			}
+			.tail_call {
+				arity := instr.operand
+				callee := vm.pop()!
+
+				if callee is bytecode.ClosureValue {
+					func := vm.program.functions[callee.func_idx]
+
+					if arity != func.arity {
+						return error('Expected ${func.arity} arguments, got ${arity}')
+					}
+
+					// Collect arguments from stack
+					mut args := []bytecode.Value{cap: arity}
+					for _ in 0 .. arity {
+						args << vm.pop()!
+					}
+
+					// Get current frame
+					mut current_frame := &vm.frames[vm.frames.len - 1]
+					base := current_frame.base_slot
+
+					// Clear current frame's stack slots
+					for vm.stack.len > base {
+						vm.stack.pop()
+					}
+
+					// Push arguments back (in reverse since we popped them)
+					for i := arity - 1; i >= 0; i-- {
+						vm.stack << args[i]
+					}
+
+					// Fill remaining locals with none
+					for _ in arity .. func.locals {
+						vm.stack << bytecode.NoneValue{}
+					}
+
+					// Reuse the frame with new function
+					current_frame.func = func
+					current_frame.func_idx = callee.func_idx
+					current_frame.ip = 0
+					current_frame.captures = callee.captures
+				} else {
+					return error('Cannot tail_call non-function')
 				}
 			}
 			.ret {
@@ -322,9 +370,22 @@ fn (mut vm VM) execute() !bytecode.Value {
 					}
 				}
 			}
+			.push_self {
+				// Push the currently-executing closure onto the stack
+				if vm.frames.len > 0 {
+					current_frame := vm.frames[vm.frames.len - 1]
+					vm.stack << bytecode.ClosureValue{
+						func_idx: current_frame.func_idx
+						captures: current_frame.captures
+					}
+				}
+			}
 			.print {
 				val := vm.pop()!
 				println(inspect(val))
+			}
+			.stack_depth {
+				vm.stack << vm.frames.len
 			}
 			.make_enum {
 				variant_name_val := vm.pop()!

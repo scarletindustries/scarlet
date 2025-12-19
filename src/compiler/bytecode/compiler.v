@@ -31,7 +31,13 @@ struct Scope {
 	locals map[string]int
 }
 
+pub struct CompileOptions {
+pub:
+	expose_debug_builtins bool
+}
+
 struct Compiler {
+	options CompileOptions
 mut:
 	program          Program
 	locals           map[string]int
@@ -43,10 +49,13 @@ mut:
 	functions        map[string]FuncSig // function signatures for type inference
 	captures         map[string]int     // captured var name -> capture index
 	capture_names    []string           // ordered list of captured var names
+	current_binding  string             // name of variable being bound (for self-reference)
+	in_tail_position bool               // true when compiling in tail position (for TCO)
 }
 
-pub fn compile(expr ast.Expression) !Program {
+pub fn compile(expr ast.Expression, options CompileOptions) !Program {
 	mut c := Compiler{
+		options:          options
 		program:          Program{
 			constants: []
 			functions: []
@@ -113,6 +122,7 @@ fn (mut c Compiler) get_or_create_local(name string) int {
 struct VarAccess {
 	is_local   bool
 	is_capture bool
+	is_self    bool // self-reference in recursive function
 	index      int
 }
 
@@ -137,6 +147,13 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 	// Search outer scopes (for closures)
 	for scope in c.outer_scopes {
 		if name in scope.locals {
+			// Check if this is a self-reference (recursive function)
+			if name == c.current_binding {
+				return VarAccess{
+					is_self: true
+				}
+			}
+
 			// Found in outer scope - add to captures
 			capture_idx := c.capture_names.len
 			c.captures[name] = capture_idx
@@ -199,10 +216,17 @@ fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type st
 }
 
 fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
+	// Remember if THIS expression is in tail position, then reset for sub-expressions
+	is_tail := c.in_tail_position
+	c.in_tail_position = false
+
 	match expr {
 		ast.BlockExpression {
 			for i, e in expr.body {
+				// Only the last expression inherits tail position
+				c.in_tail_position = is_tail && (i == expr.body.len - 1)
 				c.compile_expr(e)!
+				c.in_tail_position = false
 				if i < expr.body.len - 1 {
 					c.emit(.pop)
 				}
@@ -261,16 +285,21 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 					c.emit_arg(.push_local, access.index)
 				} else if access.is_capture {
 					c.emit_arg(.push_capture, access.index)
+				} else if access.is_self {
+					c.emit(.push_self)
 				}
 			} else {
 				return error('Undefined variable: ${expr.name}')
 			}
 		}
 		ast.VariableBinding {
-			c.compile_expr(expr.init)!
 			idx := c.get_or_create_local(expr.identifier.name)
-			c.emit_arg(.store_local, idx)
 
+			c.current_binding = expr.identifier.name
+			c.compile_expr(expr.init)!
+			c.current_binding = ''
+
+			c.emit_arg(.store_local, idx)
 			c.emit(.push_none)
 		}
 		ast.ConstBinding {
@@ -360,12 +389,16 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			}
 		}
 		ast.IfExpression {
+			// Condition is NOT in tail position (already reset to false)
 			c.compile_expr(expr.condition)!
 
 			else_jump := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
+			// Body inherits tail position
+			c.in_tail_position = is_tail
 			c.compile_expr(expr.body)!
+			c.in_tail_position = false
 
 			end_jump := c.current_addr()
 			c.emit_arg(.jump, 0)
@@ -373,17 +406,20 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			else_addr := c.current_addr()
 			c.program.code[else_jump] = op_arg(.jump_if_false, else_addr)
 
+			// Else body inherits tail position
+			c.in_tail_position = is_tail
 			if else_body := expr.else_body {
 				c.compile_expr(else_body)!
 			} else {
 				c.emit(.push_none)
 			}
+			c.in_tail_position = false
 
 			end_addr := c.current_addr()
 			c.program.code[end_jump] = op_arg(.jump, end_addr)
 		}
 		ast.MatchExpression {
-			c.compile_match(expr)!
+			c.compile_match(expr, is_tail)!
 		}
 		ast.ArrayExpression {
 			for elem in expr.elements {
@@ -418,9 +454,20 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				c.compile_expr_with_hint(arg, expected_type)!
 			}
 
-			if idx := c.locals[expr.identifier.name] {
-				c.emit_arg(.push_local, idx)
-				c.emit_arg(.call, expr.arguments.len)
+			if access := c.resolve_variable(expr.identifier.name) {
+				if access.is_local {
+					c.emit_arg(.push_local, access.index)
+				} else if access.is_capture {
+					c.emit_arg(.push_capture, access.index)
+				} else if access.is_self {
+					c.emit(.push_self)
+				}
+
+				if is_tail {
+					c.emit_arg(.tail_call, expr.arguments.len)
+				} else {
+					c.emit_arg(.call, expr.arguments.len)
+				}
 			} else {
 				c.compile_builtin_call(expr)!
 			}
@@ -718,8 +765,11 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 
 	func_start := c.current_addr()
 
-	// Compile function body (this may populate c.captures)
+	// Compile function body in tail position (for TCO)
+	old_tail := c.in_tail_position
+	c.in_tail_position = true
 	c.compile_expr(func.body)!
+	c.in_tail_position = old_tail
 	c.emit(.ret)
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
@@ -777,7 +827,7 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	}
 }
 
-fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
+fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 	c.compile_expr(m.subject)!
 
 	mut end_jumps := []int{}
@@ -871,7 +921,9 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 					c.emit_arg(.jump_if_false, 0)
 
 					c.emit(.pop) // pop the subject
+					c.in_tail_position = is_tail
 					c.compile_expr(arm.body)!
+					c.in_tail_position = false
 
 					end_jumps << c.current_addr()
 					c.emit_arg(.jump, 0)
@@ -891,7 +943,9 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 				}
 
 				c.emit(.pop) // pop the subject
+				c.in_tail_position = is_tail
 				c.compile_expr(arm.body)!
+				c.in_tail_position = false
 
 				end_jumps << c.current_addr()
 				c.emit_arg(.jump, 0)
@@ -905,7 +959,9 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 			// Wildcard always matches - no comparison needed
 			c.emit(.pop) // pop the dup'd subject
 			c.emit(.pop) // pop the original subject
+			c.in_tail_position = is_tail
 			c.compile_expr(arm.body)!
+			c.in_tail_position = false
 
 			end_jumps << c.current_addr()
 			c.emit_arg(.jump, 0)
@@ -920,7 +976,9 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 		c.emit_arg(.jump_if_false, 0)
 
 		c.emit(.pop)
+		c.in_tail_position = is_tail
 		c.compile_expr(arm.body)!
+		c.in_tail_position = false
 
 		end_jumps << c.current_addr()
 		c.emit_arg(.jump, 0)
@@ -954,6 +1012,15 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0])!
 			c.emit(.to_string)
+		}
+		'__stack_depth__' {
+			if !c.options.expose_debug_builtins {
+				return error('Unknown function: ${call.identifier.name}')
+			}
+			if call.arguments.len != 0 {
+				return error('__stack_depth__ expects 0 arguments')
+			}
+			c.emit(.stack_depth)
 		}
 		else {
 			return error('Unknown function: ${call.identifier.name}')

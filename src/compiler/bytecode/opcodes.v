@@ -35,6 +35,7 @@ pub enum Op {
 	jump_if_false // conditional jump: jump_if_false <addr>
 	jump_if_true  // conditional jump: jump_if_true <addr>
 	call          // call function: call <arity>
+	tail_call     // tail call (reuses stack frame): tail_call <arity>
 	ret           // return top of stack
 
 	// Data structures
@@ -53,6 +54,7 @@ pub enum Op {
 	// Closures
 	make_closure // create closure: pop N captures (N = func.capture_count), push ClosureValue; operand = func_idx
 	push_capture // push captured variable from current closure: push_capture <idx>
+	push_self    // push the currently-executing closure (for self-recursive calls)
 
 	// Error handling
 	make_error       // pop value, push ErrorValue
@@ -65,8 +67,9 @@ pub enum Op {
 	str_concat // pop two strings, push concatenated result
 
 	// Misc
-	print // print top of stack (temporary, for debugging)
-	halt  // stop execution
+	print       // print top of stack (temporary, for debugging)
+	stack_depth // push current stack frame count (for debugging TCO)
+	halt        // stop execution
 }
 
 pub struct Instruction {
