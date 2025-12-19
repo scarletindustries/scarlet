@@ -2,13 +2,11 @@ module bytecode
 
 import compiler.ast
 
-// Struct definition for type checking
 struct StructDef {
 	name   string
 	fields map[string]string // field name -> type name
 }
 
-// Enum definition for type checking
 struct EnumDef {
 	name     string
 	variants map[string]string // variant name -> payload type (empty string if no payload)
@@ -24,7 +22,6 @@ fn (c Compiler) find_enum_for_variant(variant_name string) ?string {
 	return none
 }
 
-// Function signature for type checking
 struct FuncSig {
 	name        string
 	param_types []string // type name for each parameter (enum name, struct name, or empty)
