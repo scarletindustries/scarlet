@@ -35,15 +35,14 @@ struct Compiler {
 mut:
 	program          Program
 	locals           map[string]int
+	outer_scopes     []Scope // for closures: stack of enclosing scopes
 	local_count      int
 	current_func_idx int
 	structs          map[string]StructDef
 	enums            map[string]EnumDef
 	functions        map[string]FuncSig // function signatures for type inference
-	// Closure support
-	outer_scopes  []Scope        // stack of enclosing scopes
-	captures      map[string]int // captured var name -> capture index
-	capture_names []string       // ordered list of captured var names
+	captures         map[string]int     // captured var name -> capture index
+	capture_names    []string           // ordered list of captured var names
 }
 
 pub fn compile(expr ast.Expression) !Program {
@@ -55,12 +54,12 @@ pub fn compile(expr ast.Expression) !Program {
 			entry:     0
 		}
 		locals:           {}
+		outer_scopes:     []
 		local_count:      0
 		current_func_idx: -1
 		structs:          {}
 		enums:            {}
 		functions:        {}
-		outer_scopes:     []
 		captures:         {}
 		capture_names:    []
 	}
@@ -117,9 +116,9 @@ struct VarAccess {
 	index      int
 }
 
-// Resolve a variable: check locals, then captures, then outer scopes
+// Resolve a variable: check current scope locals, then captures, then outer scopes
 fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
-	// Check current locals first
+	// Check current scope's locals first
 	if idx := c.locals[name] {
 		return VarAccess{
 			is_local: true
@@ -135,9 +134,9 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 		}
 	}
 
-	// Search outer scopes (from innermost to outermost)
-	for i := c.outer_scopes.len - 1; i >= 0; i-- {
-		if _ := c.outer_scopes[i].locals[name] {
+	// Search outer scopes (for closures)
+	for scope in c.outer_scopes {
+		if name in scope.locals {
 			// Found in outer scope - add to captures
 			capture_idx := c.capture_names.len
 			c.captures[name] = capture_idx
@@ -657,13 +656,13 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 }
 
 fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
-	// Save current state
+	// Save current state and push to outer scopes
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
 	old_captures := c.captures.clone()
 	old_capture_names := c.capture_names.clone()
 
-	// Push current scope onto outer_scopes so nested functions can capture from it
+	// Push current locals to outer scopes for closure capture
 	c.outer_scopes << Scope{
 		locals: old_locals.clone()
 	}
@@ -672,7 +671,7 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	jump_over := c.current_addr()
 	c.emit_arg(.jump, 0)
 
-	// Reset for new function scope
+	// Reset for new function
 	c.locals = {}
 	c.local_count = 0
 	c.captures = {}
@@ -720,8 +719,7 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 		code_len:      c.current_addr() - func_start - 1
 	}
 
-	// Pop our scope from outer_scopes
-	c.outer_scopes.pop()
+	c.outer_scopes.pop() // remove the scope we pushed
 
 	// Restore previous state
 	c.locals = old_locals.clone()
@@ -856,22 +854,20 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 			continue
 		}
 
-		{
-			// Regular pattern (literal or simple enum variant)
-			c.compile_expr(arm.pattern)!
-			c.emit(.eq)
+		// Regular pattern (literal or simple enum variant)
+		c.compile_expr(arm.pattern)!
+		c.emit(.eq)
 
-			next_arm := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
+		next_arm := c.current_addr()
+		c.emit_arg(.jump_if_false, 0)
 
-			c.emit(.pop)
-			c.compile_expr(arm.body)!
+		c.emit(.pop)
+		c.compile_expr(arm.body)!
 
-			end_jumps << c.current_addr()
-			c.emit_arg(.jump, 0)
+		end_jumps << c.current_addr()
+		c.emit_arg(.jump, 0)
 
-			c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
-		}
+		c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
 	}
 
 	// No match - push none (only reached if no wildcard)
