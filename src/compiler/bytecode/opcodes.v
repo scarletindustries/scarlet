@@ -53,50 +53,43 @@ pub enum Op {
 	match_enum        // check if enum matches variant: pop enum, match_enum <variant_name_idx> -> push bool
 	unwrap_enum       // get payload from enum: pop enum, push payload (or none)
 
-	// Closures	
-	make_closure // create closure: make_closure <func_idx>
+	// Closures
+	make_closure // create closure: pop N captures (N = func.capture_count), push ClosureValue; operand = func_idx
+	push_capture // push captured variable from current closure: push_capture <idx>
 
 	// Error handling
-	make_error      // pop value, push ErrorValue
-	is_error        // pop value, push bool (true if ErrorValue)
-	is_none         // pop value, push bool (true if NoneValue)
+	make_error       // pop value, push ErrorValue
+	is_error         // pop value, push bool (true if ErrorValue)
+	is_none          // pop value, push bool (true if NoneValue)
 	is_error_or_none // pop value, push bool (true if ErrorValue or NoneValue)
-	unwrap          // pop value, if error panic, else push inner value (for !)
-	unwrap_error    // pop ErrorValue, push payload value
-
-	// Concurrency
-	spawn   // spawn process from closure on stack
-	send    // pop message, pop pid, send message
-	receive // receive from mailbox (blocks)
-	self    // push current process PID
+	unwrap           // pop value, if error panic, else push inner value (for !)
+	unwrap_error     // pop ErrorValue, push payload value
 
 	// String operations
-	to_string   // pop value, push string representation
-	str_concat  // pop two strings, push concatenated result
+	to_string  // pop value, push string representation
+	str_concat // pop two strings, push concatenated result
 
 	// Misc
 	print // print top of stack (temporary, for debugging)
 	halt  // stop execution
 }
 
-// Single bytecode instruction
 pub struct Instruction {
 pub:
 	op      Op
 	operand int // optional operand (index, address, count, etc.)
 }
 
-// A compiled function
 pub struct Function {
 pub:
-	name       string
-	arity      int // number of parameters
-	locals     int // number of local variables (including params)
-	code_start int // starting address in bytecode
-	code_len   int // length of function bytecode
+	name          string
+	arity         int // number of parameters
+	locals        int // number of local variables (including params)
+	capture_count int // number of captured variables from enclosing scope
+	code_start    int // starting address in bytecode
+	code_len      int // length of function bytecode
 }
 
-// Runtime values
 pub type Value = int
 	| f64
 	| bool
@@ -105,7 +98,6 @@ pub type Value = int
 	| []Value
 	| StructValue
 	| ClosureValue
-	| PID
 	| EnumValue
 	| ErrorValue
 
@@ -132,15 +124,9 @@ pub mut:
 pub struct ClosureValue {
 pub:
 	func_idx int
-	// captured variables would go here for closures
+	captures []Value
 }
 
-pub struct PID {
-pub:
-	id int
-}
-
-// Compiled program
 pub struct Program {
 pub mut:
 	constants []Value       // constant pool

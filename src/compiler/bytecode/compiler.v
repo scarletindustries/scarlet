@@ -27,6 +27,10 @@ struct FuncSig {
 	param_types []string // type name for each parameter (enum name, struct name, or empty)
 }
 
+struct Scope {
+	locals map[string]int
+}
+
 struct Compiler {
 mut:
 	program          Program
@@ -36,6 +40,10 @@ mut:
 	structs          map[string]StructDef
 	enums            map[string]EnumDef
 	functions        map[string]FuncSig // function signatures for type inference
+	// Closure support
+	outer_scopes  []Scope        // stack of enclosing scopes
+	captures      map[string]int // captured var name -> capture index
+	capture_names []string       // ordered list of captured var names
 }
 
 pub fn compile(expr ast.Expression) !Program {
@@ -52,6 +60,9 @@ pub fn compile(expr ast.Expression) !Program {
 		structs:          {}
 		enums:            {}
 		functions:        {}
+		outer_scopes:     []
+		captures:         {}
+		capture_names:    []
 	}
 
 	main_start := c.program.code.len
@@ -60,11 +71,12 @@ pub fn compile(expr ast.Expression) !Program {
 	c.emit(.halt)
 
 	c.program.functions << Function{
-		name:       '__main__'
-		arity:      0
-		locals:     c.local_count
-		code_start: main_start
-		code_len:   c.program.code.len - main_start
+		name:          '__main__'
+		arity:         0
+		locals:        c.local_count
+		capture_count: 0
+		code_start:    main_start
+		code_len:      c.program.code.len - main_start
 	}
 	c.program.entry = c.program.functions.len - 1
 
@@ -96,6 +108,48 @@ fn (mut c Compiler) get_or_create_local(name string) int {
 	c.locals[name] = idx
 	c.local_count += 1
 	return idx
+}
+
+// Represents how a variable should be accessed
+struct VarAccess {
+	is_local   bool
+	is_capture bool
+	index      int
+}
+
+// Resolve a variable: check locals, then captures, then outer scopes
+fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
+	// Check current locals first
+	if idx := c.locals[name] {
+		return VarAccess{
+			is_local: true
+			index:    idx
+		}
+	}
+
+	// Check if already captured
+	if idx := c.captures[name] {
+		return VarAccess{
+			is_capture: true
+			index:      idx
+		}
+	}
+
+	// Search outer scopes (from innermost to outermost)
+	for i := c.outer_scopes.len - 1; i >= 0; i-- {
+		if _ := c.outer_scopes[i].locals[name] {
+			// Found in outer scope - add to captures
+			capture_idx := c.capture_names.len
+			c.captures[name] = capture_idx
+			c.capture_names << name
+			return VarAccess{
+				is_capture: true
+				index:      capture_idx
+			}
+		}
+	}
+
+	return none
 }
 
 // Compile expression with an optional type hint for inference
@@ -203,8 +257,12 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.push_none)
 		}
 		ast.Identifier {
-			if idx := c.locals[expr.name] {
-				c.emit_arg(.push_local, idx)
+			if access := c.resolve_variable(expr.name) {
+				if access.is_local {
+					c.emit_arg(.push_local, access.index)
+				} else if access.is_capture {
+					c.emit_arg(.push_capture, access.index)
+				}
 			} else {
 				return error('Undefined variable: ${expr.name}')
 			}
@@ -599,14 +657,26 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 }
 
 fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
+	// Save current state
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
+	old_captures := c.captures.clone()
+	old_capture_names := c.capture_names.clone()
 
+	// Push current scope onto outer_scopes so nested functions can capture from it
+	c.outer_scopes << Scope{
+		locals: old_locals.clone()
+	}
+
+	// Jump over function body
 	jump_over := c.current_addr()
 	c.emit_arg(.jump, 0)
 
+	// Reset for new function scope
 	c.locals = {}
 	c.local_count = 0
+	c.captures = {}
+	c.capture_names = []
 
 	// Collect parameter types for function signature
 	mut param_types := []string{}
@@ -621,10 +691,15 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 
 	func_start := c.current_addr()
 
+	// Compile function body (this may populate c.captures)
 	c.compile_expr(func.body)!
 	c.emit(.ret)
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
+
+	// Save capture info before restoring state
+	captured_names := c.capture_names.clone()
+	capture_count := captured_names.len
 
 	func_idx := c.program.functions.len
 	mut name := '__anon__'
@@ -637,23 +712,42 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 		}
 	}
 	c.program.functions << Function{
-		name:       name
-		arity:      func.params.len
-		locals:     c.local_count
-		code_start: func_start
-		code_len:   c.current_addr() - func_start - 1
+		name:          name
+		arity:         func.params.len
+		locals:        c.local_count
+		capture_count: capture_count
+		code_start:    func_start
+		code_len:      c.current_addr() - func_start - 1
 	}
 
+	// Pop our scope from outer_scopes
+	c.outer_scopes.pop()
+
+	// Restore previous state
 	c.locals = old_locals.clone()
 	c.local_count = old_local_count
+	c.captures = old_captures.clone()
+	c.capture_names = old_capture_names.clone()
+
+	// Now emit code to push captured values (from the outer scope's perspective)
+	// and create the closure
+	for cap_name in captured_names {
+		// The captured variable should be accessible from the restored (outer) scope
+		if access := c.resolve_variable(cap_name) {
+			if access.is_local {
+				c.emit_arg(.push_local, access.index)
+			} else if access.is_capture {
+				c.emit_arg(.push_capture, access.index)
+			}
+		}
+	}
+
+	c.emit_arg(.make_closure, func_idx)
 
 	if id := func.identifier {
-		c.emit_arg(.make_closure, func_idx)
 		idx := c.get_or_create_local(id.name)
 		c.emit_arg(.store_local, idx)
 		c.emit(.push_none)
-	} else {
-		c.emit_arg(.make_closure, func_idx)
 	}
 }
 
@@ -806,33 +900,6 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			}
 			c.compile_expr(call.arguments[0])!
 			c.emit(.to_string)
-		}
-		'spawn' {
-			if call.arguments.len != 1 {
-				return error('spawn expects 1 argument (a function)')
-			}
-			c.compile_expr(call.arguments[0])!
-			c.emit(.spawn)
-		}
-		'send' {
-			if call.arguments.len != 2 {
-				return error('send expects 2 arguments (pid, message)')
-			}
-			c.compile_expr(call.arguments[0])! // pid
-			c.compile_expr(call.arguments[1])! // message
-			c.emit(.send)
-		}
-		'receive' {
-			if call.arguments.len != 0 {
-				return error('receive expects 0 arguments')
-			}
-			c.emit(.receive)
-		}
-		'self' {
-			if call.arguments.len != 0 {
-				return error('self expects 0 arguments')
-			}
-			c.emit(.self)
 		}
 		else {
 			return error('Unknown function: ${call.identifier.name}')

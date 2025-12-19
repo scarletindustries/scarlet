@@ -8,6 +8,7 @@ mut:
 	func      bytecode.Function
 	ip        int
 	base_slot int
+	captures  []bytecode.Value
 }
 
 struct Process {
@@ -62,6 +63,7 @@ pub fn (mut vm VM) run() !bytecode.Value {
 		func:      main_func
 		ip:        0
 		base_slot: 0
+		captures:  []
 	}
 
 	for _ in 0 .. main_func.locals {
@@ -293,6 +295,7 @@ fn (mut vm VM) execute_one() !bool {
 						func:      func
 						ip:        0
 						base_slot: new_base
+						captures:  callee.captures
 					}
 				}
 			} else {
@@ -416,9 +419,31 @@ fn (mut vm VM) execute_one() !bool {
 		}
 		.make_closure {
 			func_idx := instr.operand
+			func := vm.program.functions[func_idx]
+
+			// Pop captured values from stack (in reverse order)
+			mut captures := []bytecode.Value{cap: func.capture_count}
+			for _ in 0 .. func.capture_count {
+				captures.prepend(vm.pop_current()!)
+			}
+
 			vm.push_current(bytecode.ClosureValue{
 				func_idx: func_idx
+				captures: captures
 			})
+		}
+		.push_capture {
+			capture_idx := instr.operand
+			if p := vm.processes[vm.current_pid] {
+				if p.frames.len > 0 {
+					current_frame := p.frames[p.frames.len - 1]
+					if capture_idx < current_frame.captures.len {
+						vm.push_current(current_frame.captures[capture_idx])
+					} else {
+						return error('Capture index out of bounds: ${capture_idx}')
+					}
+				}
+			}
 		}
 		.print {
 			val := vm.pop_current()!
@@ -563,6 +588,7 @@ fn (mut vm VM) execute_one() !bool {
 					func:      func
 					ip:        0
 					base_slot: 0
+					captures:  callee.captures
 				}
 
 				vm.processes[new_pid] = new_proc
