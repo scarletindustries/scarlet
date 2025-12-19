@@ -437,13 +437,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				val := vm.pop()!
 				vm.stack << (val is bytecode.ErrorValue || val is bytecode.NoneValue)
 			}
-			.unwrap {
-				val := vm.pop()!
-				if val is bytecode.ErrorValue {
-					return error('Unwrap failed: ${inspect(val.payload)}')
-				}
-				vm.stack << val
-			}
 			.unwrap_error {
 				val := vm.pop()!
 				if val is bytecode.ErrorValue {

@@ -559,7 +559,17 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 		ast.AssertExpression {
 			c.compile_expr(expr.expression)!
 
-			c.emit(.pop)
+			// If true, jump over error path
+			ok_jump := c.current_addr()
+			c.emit_arg(.jump_if_true, 0)
+
+			// Condition was false - create and return AssertionError
+			c.compile_expr(expr.message)!
+			c.emit(.make_error)
+			c.emit(.ret)
+
+			// Condition was true - continue
+			c.program.code[ok_jump] = op_arg(.jump_if_true, c.current_addr())
 			c.emit(.push_none)
 		}
 		ast.ExportExpression {

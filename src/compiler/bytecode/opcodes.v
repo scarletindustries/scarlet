@@ -62,7 +62,6 @@ pub enum Op {
 	is_error         // pop value, push bool (true if ErrorValue)
 	is_none          // pop value, push bool (true if NoneValue)
 	is_error_or_none // pop value, push bool (true if ErrorValue or NoneValue)
-	unwrap           // pop value, if error panic, else push inner value (for !)
 	unwrap_error     // pop ErrorValue, push payload value
 
 	// String operations
