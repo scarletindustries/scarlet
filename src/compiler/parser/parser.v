@@ -691,18 +691,39 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 			p.eat(.kw_else)!
 			ast.Expression(ast.WildcardPattern{})
 		} else {
-			p.parse_expression()!
+			p.parse_expression() or {
+				p.add_error(err.msg())
+				p.synchronize()
+				if p.current_token.kind == .punc_close_brace {
+					break
+				}
+				continue
+			}
 		}
 
-		p.eat(.punc_arrow)!
-		body := p.parse_expression()!
+		p.eat(.punc_arrow) or {
+			p.add_error(err.msg())
+			p.synchronize()
+			if p.current_token.kind == .punc_close_brace {
+				break
+			}
+			continue
+		}
+
+		body := p.parse_expression() or {
+			p.add_error(err.msg())
+			p.synchronize()
+			if p.current_token.kind == .punc_close_brace {
+				break
+			}
+			ast.ErrorNode{ message: err.msg() }
+		}
 
 		arms << ast.MatchArm{
 			pattern: pattern
 			body:    body
 		}
 
-		// Optional comma between arms
 		if p.current_token.kind == .punc_comma {
 			p.eat(.punc_comma)!
 		}

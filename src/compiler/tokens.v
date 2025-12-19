@@ -59,7 +59,7 @@ pub fn (t &Token) str() string {
 			.kw_match { 'match' }
 			.kw_none { 'none' }
 			.kw_or { 'or' }
-			.punc_arrow { '=>' }
+			.punc_arrow { '->' }
 			.punc_dotdot { '..' }
 			.punc_ellipsis { '...' }
 			.punc_question_mark { '?' }
