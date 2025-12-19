@@ -159,13 +159,6 @@ and_result = yes && no
 or_result = yes || no
 not_result = !yes
 
-pid = spawn(fn() {
-    msg = receive()
-    msg
-})
-send(pid, 'hello from spawn')
-my_pid = self()
-
 add_result = add(5, 3)
 max_result = max(10, 20)
 classify_result = classify(5)
