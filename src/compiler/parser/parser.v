@@ -62,19 +62,27 @@ fn (p Parser) current_context() ParseContext {
 }
 
 fn (mut p Parser) add_error(message string) {
-	p.diagnostics << diagnostic.error_at(p.current_token.line, p.current_token.column,
-		message)
+	p.diagnostics << diagnostic.error_at(p.current_token.line, p.current_token.column, message)
 }
 
 fn (mut p Parser) add_warning(message string) {
-	p.diagnostics << diagnostic.warning_at(p.current_token.line, p.current_token.column,
-		message)
+	p.diagnostics << diagnostic.warning_at(p.current_token.line, p.current_token.column, message)
 }
 
 fn (mut p Parser) synchronize() {
 	ctx := p.current_context()
+	mut iterations := 0
 
 	for p.current_token.kind != .eof {
+		iterations++
+		if iterations > 1000 {
+			p.add_error('Parser recovery failed: likely infinite loop detected. This is a bug in the parser.')
+			// Skip to EOF to prevent cascading issues
+			for p.current_token.kind != .eof {
+				p.advance()
+			}
+			return
+		}
 		match ctx {
 			.top_level {
 				if p.current_token.kind in [.kw_function, .kw_struct, .kw_enum, .kw_const, .kw_from,
