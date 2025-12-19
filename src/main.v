@@ -11,7 +11,7 @@ import compiler.vm
 fn main() {
 	mut app := cli.Command{
 		name:        'al'
-		description: 'al compiler and toolchain'
+		description: 'A small, expressive programming language'
 		version:     '0.0.1'
 		posix_mode:  true
 		execute:     fn (cmd cli.Command) ! {
