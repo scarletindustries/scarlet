@@ -130,11 +130,17 @@ fn main() {
 						name:        'expose-debug-builtins'
 						description: 'Expose debug builtins like __stack_depth__()'
 					},
+					cli.Flag{
+						flag:        .bool
+						name:        'experimental-shitty-io'
+						description: 'Enable experimental blocking I/O (file and network)'
+					},
 				]
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					debug_printer := cmd.flags.get_bool('debug-printer')!
 					expose_debug_builtins := cmd.flags.get_bool('expose-debug-builtins')!
+					io_enabled := cmd.flags.get_bool('experimental-shitty-io')!
 
 					file := os.read_file(entrypoint)!
 
@@ -162,7 +168,9 @@ fn main() {
 						expose_debug_builtins: expose_debug_builtins
 					})!
 
-					mut v := vm.new_vm(program)
+					mut v := vm.new_vm(program, vm.VMOptions{
+						io_enabled: io_enabled
+					})
 					run_result := v.run()!
 
 					if run_result !is bytecode.NoneValue {

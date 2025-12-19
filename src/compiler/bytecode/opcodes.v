@@ -70,6 +70,15 @@ pub enum Op {
 	print       // print top of stack (temporary, for debugging)
 	stack_depth // push current stack frame count (for debugging TCO)
 	halt        // stop execution
+
+	// I/O operations (experimental)
+	file_read  // pop path, push file contents as string
+	file_write // pop content, pop path, write to file, push none
+	tcp_listen // pop port, create listener, push SocketValue
+	tcp_accept // pop listener, accept connection, push SocketValue (blocks)
+	tcp_read   // pop socket, read data, push string (blocks)
+	tcp_write  // pop data, pop socket, write data, push bytes written
+	tcp_close  // pop socket, close it, push none
 }
 
 pub struct Instruction {
@@ -98,12 +107,19 @@ pub type Value = int
 	| ClosureValue
 	| EnumValue
 	| ErrorValue
+	| SocketValue
 
 pub struct NoneValue {}
 
 pub struct ErrorValue {
 pub:
 	payload Value
+}
+
+pub struct SocketValue {
+pub:
+	id          int
+	is_listener bool
 }
 
 pub struct EnumValue {
