@@ -787,10 +787,11 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 
 		// Check if this is an enum destructuring pattern
 		mut binding_name := ?string(none)
+		mut literal_pattern := ?ast.Expression(none)
 		mut enum_name := ?string(none)
 		mut variant_name := ?string(none)
 
-		// Full form: EnumName.Variant(binding)
+		// Full form: EnumName.Variant(binding) or EnumName.Variant("literal")
 		if arm.pattern is ast.PropertyAccessExpression {
 			prop := arm.pattern as ast.PropertyAccessExpression
 			if prop.left is ast.Identifier {
@@ -801,9 +802,12 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 						call := prop.right as ast.FunctionCallExpression
 						variant_name = call.identifier.name
 						if call.arguments.len == 1 {
-							if call.arguments[0] is ast.Identifier {
-								binding_id := call.arguments[0] as ast.Identifier
+							arg := call.arguments[0]
+							if arg is ast.Identifier {
+								binding_id := arg as ast.Identifier
 								binding_name = binding_id.name
+							} else if arg is ast.StringLiteral || arg is ast.NumberLiteral || arg is ast.BooleanLiteral {
+								literal_pattern = arg
 							}
 						}
 					} else if prop.right is ast.Identifier {
@@ -815,16 +819,19 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 			}
 		}
 
-		// Shorthand form: Variant(binding) - infer enum from variant name
+		// Shorthand form: Variant(binding) or Variant("literal") - infer enum from variant name
 		if arm.pattern is ast.FunctionCallExpression {
 			call := arm.pattern as ast.FunctionCallExpression
 			if inferred_enum := c.find_enum_for_variant(call.identifier.name) {
 				enum_name = inferred_enum
 				variant_name = call.identifier.name
 				if call.arguments.len == 1 {
-					if call.arguments[0] is ast.Identifier {
-						binding_id := call.arguments[0] as ast.Identifier
+					arg := call.arguments[0]
+					if arg is ast.Identifier {
+						binding_id := arg as ast.Identifier
 						binding_name = binding_id.name
+					} else if arg is ast.StringLiteral || arg is ast.NumberLiteral || arg is ast.BooleanLiteral {
+						literal_pattern = arg
 					}
 				}
 			}
@@ -851,6 +858,27 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 
 				next_arm := c.current_addr()
 				c.emit_arg(.jump_if_false, 0)
+
+				// If there's a literal pattern, also check payload matches
+				if lit := literal_pattern {
+					c.emit(.dup) // dup subject for unwrap
+					c.emit(.unwrap_enum) // get payload
+					c.compile_expr(lit)! // push the literal
+					c.emit(.eq) // compare payload with literal
+					payload_match := c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
+
+					c.emit(.pop) // pop the subject
+					c.compile_expr(arm.body)!
+
+					end_jumps << c.current_addr()
+					c.emit_arg(.jump, 0)
+
+					// Patch both jumps to here (next arm)
+					c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
+					c.program.code[payload_match] = op_arg(.jump_if_false, c.current_addr())
+					continue
+				}
 
 				// If there's a binding, extract the payload
 				if bname := binding_name {

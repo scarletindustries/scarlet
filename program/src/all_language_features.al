@@ -7,6 +7,10 @@ struct DivisionError {
     message String,
 }
 
+struct Error {
+    message String,
+}
+
 struct ValidationError {
     code Int,
 }
@@ -80,8 +84,8 @@ fn validate(x Int) !ValidationError {
     }
 }
 
-fn check_positive(x Int) Int!String {
-    assert x > 0, 'must be positive'
+fn check_positive(x Int) Int!Error {
+    assert x > 0, Error{ message: 'must be positive' }
     x * 2
 }
 
@@ -105,16 +109,24 @@ fn classify(n Int) String {
 
 fn describe(x Int) String {
     match x {
-        0 => 'zero',
-        1 => 'one',
-        else => 'many',
+        0 -> 'zero',
+        1 -> 'one',
+        else -> 'many',
     }
 }
 
 fn handle_result(r Result) String {
     match r {
-        Ok(value) => 'Got: $value',
-        Err(e) => 'Error: $e',
+        Ok(value) -> 'Got: $value',
+        Err(e) -> 'Error: $e',
+    }
+}
+
+fn match_literal(r Result) String {
+    match r {
+        Ok('special') -> 'matched special',
+        Ok(other) -> 'other: $other',
+        Err(e) -> 'error: $e',
     }
 }
 
@@ -172,13 +184,17 @@ example_result = example()
 enum_result = handle_result(Ok('success'))
 
 error_result = divide(10, 0) or 0
-error_with_receiver = divide(10, 0) or err => 0
+error_with_receiver = divide(10, 0) or err -> 0
 success_result = divide(10, 2)!
 
 option_result = find_user(0) or User{ id: 0, name: 'default' }
 
 assert_pass = check_positive(5)
-assert_fail = check_positive(-1) or err -> err
+assert_fail = check_positive(-1) or err -> 'ERROR: ${err.message}'
+
+literal_match1 = match_literal(Ok('special'))
+literal_match2 = match_literal(Err('danger'))
+literal_match3 = match_literal(Ok('something else'))
 
 x = enum G {
     Test
@@ -188,4 +204,4 @@ println('x is:')
 println(x)
 println('what')
 
-{[add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result, assert_pass, assert_fail]}
+{[add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result, assert_pass, assert_fail, literal_match1, literal_match2, literal_match3]}

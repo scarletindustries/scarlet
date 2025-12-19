@@ -267,11 +267,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				return s.new_token(.punc_equals_comparator, none)
 			}
 
-			if next == `>` {
-				s.incr_pos()
-				return s.new_token(.punc_arrow, none)
-			}
-
 			return s.new_token(.punc_equals, none)
 		}
 		else {
