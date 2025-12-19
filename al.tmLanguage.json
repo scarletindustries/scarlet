@@ -1,0 +1,158 @@
+{
+  "name": "AL",
+  "scopeName": "source.al",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#enums" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.al",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.al",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.al",
+              "match": "\\\\."
+            },
+            {
+              "name": "variable.other.interpolation.al",
+              "match": "\\$[a-zA-Z_][a-zA-Z0-9_]*"
+            },
+            {
+              "name": "variable.other.interpolation.al",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "patterns": [{ "include": "$self" }]
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.al",
+          "match": "\\b\\d+(\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.al",
+          "match": "\\b(if|else|match|in|or|assert|error)\\b"
+        },
+        {
+          "name": "keyword.other.al",
+          "match": "\\b(fn|struct|enum|const|import|from|export|comptime)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.al",
+          "match": "\\b(true|false|none)\\b"
+        }
+      ]
+    },
+    "enums": {
+      "patterns": [
+        {
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\.([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.al" },
+            "2": { "name": "constant.other.enum.al" }
+          }
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.al",
+          "match": "\\b[A-Z][a-zA-Z0-9]*\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.al",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.al",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.range.al",
+          "match": "\\.\\.\\.?"
+        },
+        {
+          "name": "keyword.operator.comparison.al",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.al",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.al",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.assignment.al",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.optional.al",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.error.al",
+          "match": "!"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.al",
+          "match": "[,:]"
+        },
+        {
+          "name": "punctuation.accessor.al",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.bracket.al",
+          "match": "[{}\\[\\]()]"
+        }
+      ]
+    }
+  }
+}

@@ -15,7 +15,20 @@ fn main() {
 		version:     '0.0.1'
 		posix_mode:  true
 		execute:     fn (cmd cli.Command) ! {
-			println(cmd.help_message())
+			println('
+   ▄▀█ █░░
+   █▀█ █▄▄
+
+   Usage:
+     al run <file.al>      Run a program
+     al build <file.al>    Print the AST
+
+   Examples:
+     al run hello.al
+     al run examples/fibonacci.al
+
+   Learn more: https://github.com/alii/al
+')
 		}
 		commands:    [
 			cli.Command{
