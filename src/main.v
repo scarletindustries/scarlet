@@ -8,11 +8,13 @@ import compiler.printer
 import compiler.bytecode
 import compiler.vm
 
+const version = $embed_file('../VERSION').to_string().trim_space()
+
 fn main() {
 	mut app := cli.Command{
 		name:        'al'
 		description: 'A small, expressive programming language'
-		version:     '0.0.1'
+		version:     version
 		posix_mode:  true
 		execute:     fn (cmd cli.Command) ! {
 			println('
@@ -46,6 +48,43 @@ fn main() {
 					ast := p.parse_program()!
 
 					println(printer.print_expr(ast))
+				}
+			},
+			cli.Command{
+				name:        'upgrade'
+				description: 'Upgrade to the latest version'
+				execute:     fn (cmd cli.Command) ! {
+					current_exe := os.executable()
+
+					arch := $if arm64 {
+						'arm64'
+					} $else {
+						'x86_64'
+					}
+
+					os_name := $if macos {
+						'macos'
+					} $else $if linux {
+						'linux'
+					} $else {
+						return error('Unsupported OS')
+					}
+
+					asset_name := 'al-${os_name}-${arch}'
+					tmp_dir := os.temp_dir()
+					tmp_path := os.join_path(tmp_dir, asset_name)
+
+					println('Downloading latest version...')
+
+					result := os.execute('gh release download canary --repo alii/al --pattern "${asset_name}" --dir "${tmp_dir}" --clobber')
+					if result.exit_code != 0 {
+						return error('Failed to download: ${result.output}')
+					}
+
+					os.chmod(tmp_path, 0o755)!
+					os.mv(tmp_path, current_exe)!
+
+					println('Upgraded successfully!')
 				}
 			},
 			cli.Command{

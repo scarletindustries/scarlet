@@ -26,12 +26,6 @@ case $OS in
     *) echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
-# For now we only have macOS builds
-if [ "$OS" != "macos" ]; then
-    echo "Only macOS is supported currently"
-    exit 1
-fi
-
 ASSET_NAME="al-$OS-$ARCH"
 
 # Create install directory

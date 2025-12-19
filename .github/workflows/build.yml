@@ -1,16 +1,88 @@
-name: Build and Notarize for macOS
+name: Release
 
 on:
-  push:
-    branches: [master]
+  schedule:
+    # Run nightly at 2am UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'canary'
+        type: choice
+        options:
+          - canary
+          - stable
 
 permissions:
   contents: write
 
 jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_canary: ${{ steps.version.outputs.is_canary }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for changes since last canary
+        id: check
+        run: |
+          # Always build for workflow_dispatch
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # For scheduled runs, check if there are new commits since last canary tag
+          if git rev-parse canary >/dev/null 2>&1; then
+            LAST_CANARY=$(git rev-list -n 1 canary)
+            CURRENT=$(git rev-parse HEAD)
+            if [ "$LAST_CANARY" = "$CURRENT" ]; then
+              echo "No changes since last canary build"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          echo "should_build=true" >> $GITHUB_OUTPUT
+
+      - name: Determine version
+        id: version
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          BASE_VERSION=$(cat VERSION)
+          RELEASE_TYPE="${{ github.event.inputs.release_type || 'canary' }}"
+
+          if [ "$RELEASE_TYPE" = "stable" ]; then
+            echo "version=$BASE_VERSION" >> $GITHUB_OUTPUT
+            echo "tag=v$BASE_VERSION" >> $GITHUB_OUTPUT
+            echo "is_canary=false" >> $GITHUB_OUTPUT
+          else
+            CANARY_VERSION="${BASE_VERSION}-canary.$(date -u +%Y%m%d.%H%M)"
+            echo "version=$CANARY_VERSION" >> $GITHUB_OUTPUT
+            echo "tag=canary" >> $GITHUB_OUTPUT
+            echo "is_canary=true" >> $GITHUB_OUTPUT
+          fi
+
   build:
-    runs-on: macos-latest
+    needs: check-changes
+    if: needs.check-changes.outputs.should_build == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+          - os: ubuntu-latest
+            platform: linux
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -21,6 +93,9 @@ jobs:
         with:
           check-latest: true
 
+      - name: Update VERSION file
+        run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
+
       - name: Build (Production)
         run: v -prod -o al .
 
@@ -28,7 +103,7 @@ jobs:
         run: ./al run program/src/all_language_features.al
 
       - name: Import Code Signing Certificate
-        if: github.ref == 'refs/heads/master'
+        if: matrix.platform == 'macos'
         env:
           CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
@@ -48,7 +123,7 @@ jobs:
           security list-keychain -d user -s $KEYCHAIN_PATH
 
       - name: Sign Binary
-        if: github.ref == 'refs/heads/master'
+        if: matrix.platform == 'macos'
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: |
@@ -61,7 +136,7 @@ jobs:
           codesign -vv -d ./al
 
       - name: Notarize Binary
-        if: github.ref == 'refs/heads/master'
+        if: matrix.platform == 'macos'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -79,51 +154,83 @@ jobs:
             --wait
 
       - name: Prepare Release Binary
-        if: github.ref == 'refs/heads/master'
         run: |
           ARCH=$(uname -m)
-          cp ./al "./al-macos-$ARCH"
-          echo "BINARY_NAME=al-macos-$ARCH" >> $GITHUB_ENV
+          BINARY_NAME="al-${{ matrix.platform }}-$ARCH"
+          cp ./al "./$BINARY_NAME"
+          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
 
-      - name: Update Canary Release
-        if: github.ref == 'refs/heads/master'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}
+          path: ./${{ env.BINARY_NAME }}
+
+      - name: Cleanup Keychain
+        if: always() && matrix.platform == 'macos'
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+
+  release:
+    needs: [check-changes, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare binaries
+        run: |
+          mkdir -p release
+          find artifacts -type f -name 'al-*' -exec mv {} release/ \;
+          chmod +x release/*
+          ls -la release/
+
+      - name: Delete existing canary release
+        if: needs.check-changes.outputs.is_canary == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete canary --yes 2>/dev/null || true
+          gh release delete canary --repo ${{ github.repository }} --yes 2>/dev/null || true
           git push origin :refs/tags/canary 2>/dev/null || true
 
-          gh release create canary \
-            --title "Canary (unstable)" \
-            --notes "Automated build from master branch.
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-changes.outputs.version }}"
+          TAG="${{ needs.check-changes.outputs.tag }}"
+          IS_CANARY="${{ needs.check-changes.outputs.is_canary }}"
 
+          if [ "$IS_CANARY" = "true" ]; then
+            gh release create "$TAG" \
+              --repo ${{ github.repository }} \
+              --title "Canary ($VERSION)" \
+              --notes "Automated canary build.
+
+          **Version:** $VERSION
           **Commit:** ${{ github.sha }}
-          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
 
-          > ⚠️ This is an unstable canary build. Use at your own risk.
+          > This is an unstable canary build. Use at your own risk.
 
           ## Install
           \`\`\`bash
           curl -fsSL al.alistair.sh/install.sh | bash
           \`\`\`" \
-            --prerelease \
-            "./${{ env.BINARY_NAME }}"
+              --prerelease \
+              release/*
+          else
+            gh release create "$TAG" \
+              --repo ${{ github.repository }} \
+              --title "v$VERSION" \
+              --notes "## Install
+          \`\`\`bash
+          curl -fsSL al.alistair.sh/install.sh | bash
+          \`\`\`
 
-      - name: Upload Artifact (Signed)
-        if: github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: al-macos-signed
-          path: ./al
-
-      - name: Upload Artifact (Unsigned)
-        if: github.ref != 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: al-macos-unsigned
-          path: ./al
-
-      - name: Cleanup Keychain
-        if: always()
-        run: |
-          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db 2>/dev/null || true
+          ## Changelog
+          _Release notes for v$VERSION_" \
+              release/*
+          fi
