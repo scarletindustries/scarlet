@@ -28,6 +28,8 @@ fn severity_label(severity Severity) string {
 }
 
 fn get_source_line(source string, line_number int) string {
+	// TODO(@alii): we don't need to split every time
+	// format_diagnostic is called
 	lines := source.split_into_lines()
 	if line_number < 1 || line_number > lines.len {
 		return ''
