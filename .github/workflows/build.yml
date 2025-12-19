@@ -67,7 +67,7 @@ jobs:
           else
             CANARY_VERSION="${BASE_VERSION}-canary.$(date -u +%Y%m%d.%H%M)"
             echo "version=$CANARY_VERSION" >> $GITHUB_OUTPUT
-            echo "tag=canary" >> $GITHUB_OUTPUT
+            echo "tag=$CANARY_VERSION" >> $GITHUB_OUTPUT
             echo "is_canary=true" >> $GITHUB_OUTPUT
           fi
 
@@ -186,14 +186,6 @@ jobs:
           chmod +x release/*
           ls -la release/
 
-      - name: Delete existing canary release
-        if: needs.check-changes.outputs.is_canary == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release delete canary --repo ${{ github.repository }} --yes 2>/dev/null || true
-          git push origin :refs/tags/canary 2>/dev/null || true
-
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -218,6 +210,19 @@ jobs:
           \`\`\`bash
           curl -fsSL al.alistair.sh/install.sh | bash
           \`\`\`" \
+              --prerelease \
+              release/*
+
+            gh release delete canary --repo ${{ github.repository }} --yes 2>/dev/null || true
+            git push origin :refs/tags/canary 2>/dev/null || true
+            gh release create canary \
+              --repo ${{ github.repository }} \
+              --title "Latest Canary" \
+              --notes "This always points to the latest canary build.
+
+          **Current version:** $VERSION
+
+          For a specific version, use \`al upgrade $VERSION\`" \
               --prerelease \
               release/*
           else
