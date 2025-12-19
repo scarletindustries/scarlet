@@ -177,7 +177,7 @@ success_result = divide(10, 2)!
 
 option_result = find_user(0) or User{ id: 0, name: 'default' }
 
-assert_pass = check_positive(5) or 0
+assert_pass = check_positive(5)
 assert_fail = check_positive(-1) or err -> err
 
 x = enum G {
@@ -188,5 +188,4 @@ println('x is:')
 println(x)
 println('what')
 
-results = [add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result, assert_pass, assert_fail]
-results
+{[add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result, assert_pass, assert_fail]}

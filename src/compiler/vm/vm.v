@@ -305,21 +305,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 					return error('Cannot access field on non-struct')
 				}
 			}
-			.set_field {
-				field_name_idx := instr.operand
-				field_name := vm.program.constants[field_name_idx]
-				if field_name !is string {
-					return error('Field name must be string')
-				}
-				val := vm.pop()!
-				mut struct_val := vm.pop()!
-				if mut struct_val is bytecode.StructValue {
-					struct_val.fields[field_name as string] = val
-					vm.stack << struct_val
-				} else {
-					return error('Cannot set field on non-struct')
-				}
-			}
 			.make_closure {
 				func_idx := instr.operand
 				func := vm.program.functions[func_idx]
@@ -393,20 +378,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 					payload:      payload
 				}
 			}
-			.match_enum {
-				variant_name_idx := instr.operand
-				variant_name := vm.program.constants[variant_name_idx]
-				if variant_name !is string {
-					return error('Variant name must be string')
-				}
-
-				enum_val := vm.pop()!
-				if enum_val is bytecode.EnumValue {
-					vm.stack << (enum_val.variant_name == (variant_name as string))
-				} else {
-					return error('Cannot match non-enum value')
-				}
-			}
 			.unwrap_enum {
 				enum_val := vm.pop()!
 				if enum_val is bytecode.EnumValue {
@@ -428,10 +399,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 			.is_error {
 				val := vm.pop()!
 				vm.stack << (val is bytecode.ErrorValue)
-			}
-			.is_none {
-				val := vm.pop()!
-				vm.stack << (val is bytecode.NoneValue)
 			}
 			.is_error_or_none {
 				val := vm.pop()!

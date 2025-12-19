@@ -45,12 +45,10 @@ pub enum Op {
 	index       // pop index, pop array, push element
 	make_struct // create struct: pop type_name, pop N (field_name, value) pairs: make_struct <field_count>
 	get_field   // get struct field: get_field <field_name_idx> (field name in constant pool)
-	set_field   // set struct field: set_field <field_name_idx> (field name in constant pool)
 
 	// Enums
 	make_enum         // create enum: pop variant_name, pop enum_name, push EnumValue (no payload)
 	make_enum_payload // create enum with payload: pop payload, pop variant_name, pop enum_name, push EnumValue
-	match_enum        // check if enum matches variant: pop enum, match_enum <variant_name_idx> -> push bool
 	unwrap_enum       // get payload from enum: pop enum, push payload (or none)
 
 	// Closures
@@ -60,7 +58,6 @@ pub enum Op {
 	// Error handling
 	make_error       // pop value, push ErrorValue
 	is_error         // pop value, push bool (true if ErrorValue)
-	is_none          // pop value, push bool (true if NoneValue)
 	is_error_or_none // pop value, push bool (true if ErrorValue or NoneValue)
 	unwrap_error     // pop ErrorValue, push payload value
 
