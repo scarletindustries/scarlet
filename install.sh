@@ -41,7 +41,6 @@ if ! gh auth status &> /dev/null; then
     exit 1
 fi
 
-echo "Downloading $ASSET_NAME..."
 gh release download canary --repo "$REPO" --pattern "$ASSET_NAME" --dir "$INSTALL_DIR" --clobber
 
 # Install
