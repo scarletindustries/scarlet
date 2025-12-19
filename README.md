@@ -19,6 +19,26 @@ al build <file.al>    Print the AST
 
 AL compiles to bytecode and runs on a stack-based virtual machine. The compiler is written in V, producing a single native binary with no dependencies.
 
+### Error messages
+
+The parser recovers from errors to report multiple issues at once:
+
+```
+error: Unexpected ')'
+  --> example.al:3:8
+   |
+3  |     x = )
+   |         ^
+
+error: Unexpected ']'
+  --> example.al:7:12
+   |
+7  |     value = ]
+   |             ^
+
+Found 2 errors
+```
+
 ## Language
 
 ### Everything is an expression

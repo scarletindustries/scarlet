@@ -6,7 +6,6 @@ import compiler.ast
 import compiler
 import compiler.diagnostic
 
-// ParseContext tracks what we're currently parsing for error recovery
 pub enum ParseContext {
 	top_level
 	block
@@ -18,7 +17,6 @@ pub enum ParseContext {
 	match_arms
 }
 
-// ParseResult contains both the AST and any diagnostics
 pub struct ParseResult {
 pub:
 	ast         ast.BlockExpression
@@ -46,7 +44,6 @@ pub fn new_parser(mut s scanner.Scanner) Parser {
 	}
 }
 
-// Context management
 fn (mut p Parser) push_context(ctx ParseContext) {
 	p.context_stack << ctx
 }
@@ -64,7 +61,6 @@ fn (p Parser) current_context() ParseContext {
 	return .top_level
 }
 
-// Error handling
 fn (mut p Parser) add_error(message string) {
 	p.diagnostics << diagnostic.error_at(
 		p.current_token.line,
@@ -81,21 +77,17 @@ fn (mut p Parser) add_warning(message string) {
 	)
 }
 
-// Synchronization - skip tokens until we find a recovery point
 fn (mut p Parser) synchronize() {
 	ctx := p.current_context()
 
 	for p.current_token.kind != .eof {
-		// Check for recovery tokens based on context
 		match ctx {
 			.top_level {
-				// At top level, recover at statement-starting keywords or identifiers
 				if p.current_token.kind in [.kw_function, .kw_struct, .kw_enum, .kw_const, .kw_from, .kw_export, .identifier] {
 					return
 				}
 			}
 			.block {
-				// In a block, recover at }, statement keywords, or identifiers (for assignments)
 				if p.current_token.kind == .punc_close_brace {
 					return
 				}
@@ -104,7 +96,6 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.function_params {
-				// In function params, recover at ) or {
 				if p.current_token.kind in [.punc_close_paren, .punc_open_brace] {
 					return
 				}
@@ -114,7 +105,6 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.array {
-				// In array, recover at ] or ,
 				if p.current_token.kind == .punc_close_bracket {
 					return
 				}
@@ -124,7 +114,6 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.struct_init, .struct_def {
-				// In struct, recover at } or ,
 				if p.current_token.kind == .punc_close_brace {
 					return
 				}
@@ -134,7 +123,6 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.enum_def {
-				// In enum, recover at } or ,
 				if p.current_token.kind == .punc_close_brace {
 					return
 				}
@@ -144,7 +132,6 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.match_arms {
-				// In match, recover at => or }
 				if p.current_token.kind in [.punc_arrow, .punc_close_brace] {
 					return
 				}
@@ -159,7 +146,6 @@ fn (mut p Parser) synchronize() {
 	}
 }
 
-// Advance to next token
 fn (mut p Parser) advance() {
 	if p.index + 1 < p.tokens.len {
 		p.index++
@@ -642,8 +628,6 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 		expr := p.parse_expression() or {
 			p.add_error(err.msg())
 			p.synchronize()
-			// If we synchronized to a comma, we can continue
-			// Otherwise break out of the array
 			if p.current_token.kind == .punc_close_bracket {
 				break
 			}

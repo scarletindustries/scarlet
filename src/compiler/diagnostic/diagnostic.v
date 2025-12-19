@@ -1,6 +1,5 @@
 module diagnostic
 
-// Span represents a range in source code (LSP-compatible)
 pub struct Span {
 pub:
 	start_line   int
@@ -9,7 +8,6 @@ pub:
 	end_column   int
 }
 
-// Create a span from a single point (for single-character errors)
 pub fn point_span(line int, column int) Span {
 	return Span{
 		start_line:   line
@@ -19,14 +17,12 @@ pub fn point_span(line int, column int) Span {
 	}
 }
 
-// Severity levels for diagnostics
 pub enum Severity {
 	error
 	warning
 	hint
 }
 
-// A single diagnostic (error/warning/hint)
 pub struct Diagnostic {
 pub:
 	span     Span
@@ -34,7 +30,6 @@ pub:
 	message  string
 }
 
-// Create an error diagnostic at a specific location
 pub fn error_at(line int, column int, message string) Diagnostic {
 	return Diagnostic{
 		span:     point_span(line, column)
@@ -43,7 +38,6 @@ pub fn error_at(line int, column int, message string) Diagnostic {
 	}
 }
 
-// Create a warning diagnostic at a specific location
 pub fn warning_at(line int, column int, message string) Diagnostic {
 	return Diagnostic{
 		span:     point_span(line, column)
@@ -52,7 +46,6 @@ pub fn warning_at(line int, column int, message string) Diagnostic {
 	}
 }
 
-// Check if a list of diagnostics contains any errors
 pub fn has_errors(diagnostics []Diagnostic) bool {
 	for d in diagnostics {
 		if d.severity == .error {
@@ -62,7 +55,6 @@ pub fn has_errors(diagnostics []Diagnostic) bool {
 	return false
 }
 
-// Count errors in a list of diagnostics
 pub fn count_errors(diagnostics []Diagnostic) int {
 	mut count := 0
 	for d in diagnostics {
@@ -73,7 +65,6 @@ pub fn count_errors(diagnostics []Diagnostic) int {
 	return count
 }
 
-// Count warnings in a list of diagnostics
 pub fn count_warnings(diagnostics []Diagnostic) int {
 	mut count := 0
 	for d in diagnostics {
