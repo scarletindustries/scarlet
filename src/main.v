@@ -7,6 +7,7 @@ import compiler.parser
 import compiler.printer
 import compiler.bytecode
 import compiler.vm
+import compiler.diagnostic
 
 const version = $embed_file('../VERSION').to_string().trim_space()
 
@@ -45,9 +46,16 @@ fn main() {
 					mut s := scanner.new_scanner(file)
 					mut p := parser.new_parser(mut s)
 
-					ast := p.parse_program()!
+					result := p.parse_program()
 
-					println(printer.print_expr(ast))
+					if result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+						if diagnostic.has_errors(result.diagnostics) {
+							exit(1)
+						}
+					}
+
+					println(printer.print_expr(result.ast))
 				}
 			},
 			cli.Command{
@@ -127,23 +135,30 @@ fn main() {
 					mut s := scanner.new_scanner(file)
 					mut p := parser.new_parser(mut s)
 
-					ast := p.parse_program()!
+					result := p.parse_program()
+
+					if result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+						if diagnostic.has_errors(result.diagnostics) {
+							exit(1)
+						}
+					}
 
 					if debug_printer {
 						println('')
 						println('================DEBUG: Printed parsed source code================')
-						println(printer.print_expr(ast))
+						println(printer.print_expr(result.ast))
 						println('=================================================================')
 						println('')
 					}
 
-					program := bytecode.compile(ast)!
+					program := bytecode.compile(result.ast)!
 
 					mut v := vm.new_vm(program)
-					result := v.run()!
+					run_result := v.run()!
 
-					if result !is bytecode.NoneValue {
-						println(vm.inspect(result))
+					if run_result !is bytecode.NoneValue {
+						println(vm.inspect(run_result))
 					}
 				}
 			},

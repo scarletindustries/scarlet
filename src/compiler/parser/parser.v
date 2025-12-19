@@ -4,14 +4,34 @@ import compiler.scanner
 import compiler.token
 import compiler.ast
 import compiler
-import compiler.printer
+import compiler.diagnostic
+
+// ParseContext tracks what we're currently parsing for error recovery
+pub enum ParseContext {
+	top_level
+	block
+	function_params
+	array
+	struct_init
+	struct_def
+	enum_def
+	match_arms
+}
+
+// ParseResult contains both the AST and any diagnostics
+pub struct ParseResult {
+pub:
+	ast         ast.BlockExpression
+	diagnostics []diagnostic.Diagnostic
+}
 
 pub struct Parser {
 	tokens []compiler.Token
 mut:
-	scanner       &scanner.Scanner
 	index         int
 	current_token compiler.Token
+	diagnostics   []diagnostic.Diagnostic
+	context_stack []ParseContext
 }
 
 pub fn new_parser(mut s scanner.Scanner) Parser {
@@ -19,9 +39,131 @@ pub fn new_parser(mut s scanner.Scanner) Parser {
 
 	return Parser{
 		tokens:        tokens
-		scanner:       s
 		index:         0
 		current_token: tokens[0]
+		diagnostics:   []diagnostic.Diagnostic{}
+		context_stack: [ParseContext.top_level]
+	}
+}
+
+// Context management
+fn (mut p Parser) push_context(ctx ParseContext) {
+	p.context_stack << ctx
+}
+
+fn (mut p Parser) pop_context() {
+	if p.context_stack.len > 1 {
+		p.context_stack.pop()
+	}
+}
+
+fn (p Parser) current_context() ParseContext {
+	if p.context_stack.len > 0 {
+		return p.context_stack.last()
+	}
+	return .top_level
+}
+
+// Error handling
+fn (mut p Parser) add_error(message string) {
+	p.diagnostics << diagnostic.error_at(
+		p.current_token.line,
+		p.current_token.column,
+		message
+	)
+}
+
+fn (mut p Parser) add_warning(message string) {
+	p.diagnostics << diagnostic.warning_at(
+		p.current_token.line,
+		p.current_token.column,
+		message
+	)
+}
+
+// Synchronization - skip tokens until we find a recovery point
+fn (mut p Parser) synchronize() {
+	ctx := p.current_context()
+
+	for p.current_token.kind != .eof {
+		// Check for recovery tokens based on context
+		match ctx {
+			.top_level {
+				// At top level, recover at statement-starting keywords or identifiers
+				if p.current_token.kind in [.kw_function, .kw_struct, .kw_enum, .kw_const, .kw_from, .kw_export, .identifier] {
+					return
+				}
+			}
+			.block {
+				// In a block, recover at }, statement keywords, or identifiers (for assignments)
+				if p.current_token.kind == .punc_close_brace {
+					return
+				}
+				if p.current_token.kind in [.kw_if, .kw_match, .kw_function, .identifier] {
+					return
+				}
+			}
+			.function_params {
+				// In function params, recover at ) or {
+				if p.current_token.kind in [.punc_close_paren, .punc_open_brace] {
+					return
+				}
+				if p.current_token.kind == .punc_comma {
+					p.advance()
+					return
+				}
+			}
+			.array {
+				// In array, recover at ] or ,
+				if p.current_token.kind == .punc_close_bracket {
+					return
+				}
+				if p.current_token.kind == .punc_comma {
+					p.advance()
+					return
+				}
+			}
+			.struct_init, .struct_def {
+				// In struct, recover at } or ,
+				if p.current_token.kind == .punc_close_brace {
+					return
+				}
+				if p.current_token.kind == .punc_comma {
+					p.advance()
+					return
+				}
+			}
+			.enum_def {
+				// In enum, recover at } or ,
+				if p.current_token.kind == .punc_close_brace {
+					return
+				}
+				if p.current_token.kind == .punc_comma {
+					p.advance()
+					return
+				}
+			}
+			.match_arms {
+				// In match, recover at => or }
+				if p.current_token.kind in [.punc_arrow, .punc_close_brace] {
+					return
+				}
+				if p.current_token.kind == .punc_comma {
+					p.advance()
+					return
+				}
+			}
+		}
+
+		p.advance()
+	}
+}
+
+// Advance to next token
+fn (mut p Parser) advance() {
+	if p.index + 1 < p.tokens.len {
+		p.index++
+		p.current_token = p.tokens[p.index]
 	}
 }
 
@@ -35,12 +177,12 @@ fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 		return old
 	}
 
-	return error('[eat] Expected ${kind}, got ${p.current_token.kind} at ${p.current_token.line}:${p.current_token.column}')
+	return error("Expected '${kind}', got '${p.current_token}'")
 }
 
 fn (mut p Parser) eat_msg(kind token.Kind, message string) !compiler.Token {
 	return p.eat(kind) or {
-		return error('[eat] ${message} [got .${p.current_token.kind} @ ${p.current_token.line}:${p.current_token.column}]')
+		return error("${message}, got '${p.current_token}'")
 	}
 }
 
@@ -51,25 +193,32 @@ fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
 		return unwrapped
 	}
 
-	return error('Expected token literal for \'${p.current_token}\' ${p.current_token.line}:${p.current_token.column}')
+	return error('Expected ${message}')
 }
 
-pub fn (mut p Parser) parse_program() !ast.BlockExpression {
+pub fn (mut p Parser) parse_program() ParseResult {
 	mut program := ast.BlockExpression{}
 
 	for p.current_token.kind != .eof {
 		expr := p.parse_expression() or {
-			println(printer.print_expr(program))
-			println('=====================Compiler Error=====================')
-			println('|  The above is the program parsed up until the error  |')
-			println('========================================================')
-			return err
+			// Record the error as a diagnostic
+			p.add_error(err.msg())
+			// Synchronize to find a recovery point
+			p.synchronize()
+			// Add an error node to mark the failed parse
+			program.body << ast.ErrorNode{
+				message: err.msg()
+			}
+			continue
 		}
 
 		program.body << expr
 	}
 
-	return program
+	return ParseResult{
+		ast:         program
+		diagnostics: p.diagnostics
+	}
 }
 
 fn (mut p Parser) peek_next() ?compiler.Token {
@@ -407,7 +556,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			p.parse_error_expression()!
 		}
 		else {
-			return error('Expected expression at ${p.current_token.line}:${p.current_token.column}. Got ${p.current_token.kind}')
+			return error("Unexpected '${p.current_token}'")
 		}
 	}
 
@@ -458,13 +607,23 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 // Block expression: { expr1; expr2; expr3 }
 fn (mut p Parser) parse_block_expression() !ast.Expression {
 	p.eat(.punc_open_brace)!
+	p.push_context(.block)
 
 	mut body := []ast.Expression{}
 
-	for p.current_token.kind != .punc_close_brace {
-		body << p.parse_expression()!
+	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
+		expr := p.parse_expression() or {
+			p.add_error(err.msg())
+			p.synchronize()
+			body << ast.ErrorNode{
+				message: err.msg()
+			}
+			continue
+		}
+		body << expr
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_brace)!
 
 	return ast.BlockExpression{
@@ -475,11 +634,25 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 // Array: [1, 2, 3]
 fn (mut p Parser) parse_array_expression() !ast.Expression {
 	p.eat(.punc_open_bracket)!
+	p.push_context(.array)
 
 	mut elements := []ast.Expression{}
 
-	for p.current_token.kind != .punc_close_bracket {
-		elements << p.parse_expression()!
+	for p.current_token.kind != .punc_close_bracket && p.current_token.kind != .eof {
+		expr := p.parse_expression() or {
+			p.add_error(err.msg())
+			p.synchronize()
+			// If we synchronized to a comma, we can continue
+			// Otherwise break out of the array
+			if p.current_token.kind == .punc_close_bracket {
+				break
+			}
+			elements << ast.ErrorNode{
+				message: err.msg()
+			}
+			continue
+		}
+		elements << expr
 
 		if p.current_token.kind == .punc_comma {
 			p.eat(.punc_comma)!
@@ -488,6 +661,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 		}
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_bracket)!
 
 	return ast.ArrayExpression{
@@ -524,10 +698,11 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	subject := p.parse_expression()!
 
 	p.eat(.punc_open_brace)!
+	p.push_context(.match_arms)
 
 	mut arms := []ast.MatchArm{}
 
-	for p.current_token.kind != .punc_close_brace {
+	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
 		pattern := if p.current_token.kind == .kw_else {
 			p.eat(.kw_else)!
 			ast.Expression(ast.WildcardPattern{})
@@ -549,6 +724,7 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 		}
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_brace)!
 
 	return ast.MatchExpression{
@@ -603,10 +779,11 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 // Parse function parameters
 fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
 	p.eat(.punc_open_paren)!
+	p.push_context(.function_params)
 
 	mut params := []ast.FunctionParameter{}
 
-	for p.current_token.kind != .punc_close_paren {
+	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
 		param := p.parse_parameter()!
 		params << param
 
@@ -615,6 +792,7 @@ fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
 		}
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_paren)!
 
 	return params
@@ -678,14 +856,16 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	name := p.eat_token_literal(.identifier, 'Expected struct name')!
 
 	p.eat(.punc_open_brace)!
+	p.push_context(.struct_def)
 
 	mut fields := []ast.StructField{}
 
-	for p.current_token.kind != .punc_close_brace {
+	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
 		field := p.parse_struct_field()!
 		fields << field
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_brace)!
 
 	return ast.StructExpression{
@@ -729,14 +909,16 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	name := p.eat_token_literal(.identifier, 'Expected enum name')!
 
 	p.eat(.punc_open_brace)!
+	p.push_context(.enum_def)
 
 	mut variants := []ast.EnumVariant{}
 
-	for p.current_token.kind != .punc_close_brace {
+	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
 		variant := p.parse_enum_variant()!
 		variants << variant
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumExpression{
@@ -775,10 +957,11 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 // Struct instantiation: Name { field: value, ... }
 fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 	p.eat(.punc_open_brace)!
+	p.push_context(.struct_init)
 
 	mut fields := []ast.StructInitField{}
 
-	for p.current_token.kind != .punc_close_brace {
+	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
 		field_name := p.eat_token_literal(.identifier, 'Expected field name')!
 		p.eat(.punc_colon)!
 		value := p.parse_expression()!
@@ -795,6 +978,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 		}
 	}
 
+	p.pop_context()
 	p.eat(.punc_close_brace)!
 
 	return ast.StructInitExpression{

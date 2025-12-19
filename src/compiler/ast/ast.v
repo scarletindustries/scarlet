@@ -28,6 +28,12 @@ pub:
 
 pub struct NoneExpression {}
 
+// ErrorNode represents a malformed expression that couldn't be parsed
+pub struct ErrorNode {
+pub:
+	message string
+}
+
 // Identifiers
 
 pub struct Identifier {
@@ -267,6 +273,7 @@ pub type Expression = ArrayExpression
 	| ConstBinding
 	| EnumExpression
 	| ErrorExpression
+	| ErrorNode
 	| ExportExpression
 	| FunctionCallExpression
 	| FunctionExpression

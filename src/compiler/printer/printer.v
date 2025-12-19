@@ -254,5 +254,8 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.WildcardPattern {
 			'else'
 		}
+		ast.ErrorNode {
+			'/* error: ${expr.message} */'
+		}
 	}
 }
