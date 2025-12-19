@@ -75,6 +75,37 @@ jobs:
             --keychain-profile "notary-profile" \
             --wait
 
+      - name: Prepare Release Binary
+        if: github.ref == 'refs/heads/master'
+        run: |
+          ARCH=$(uname -m)
+          cp ./al "./al-macos-$ARCH"
+          echo "BINARY_NAME=al-macos-$ARCH" >> $GITHUB_ENV
+
+      - name: Update Canary Release
+        if: github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete canary --yes 2>/dev/null || true
+          git push origin :refs/tags/canary 2>/dev/null || true
+
+          gh release create canary \
+            --title "Canary (unstable)" \
+            --notes "Automated build from master branch.
+
+          **Commit:** ${{ github.sha }}
+          **Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          > ⚠️ This is an unstable canary build. Use at your own risk.
+
+          ## Install
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/alii/al/master/install.sh | bash
+          \`\`\`" \
+            --prerelease \
+            "./${{ env.BINARY_NAME }}"
+
       - name: Upload Artifact (Signed)
         if: github.ref == 'refs/heads/master'
         uses: actions/upload-artifact@v4
