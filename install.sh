@@ -6,6 +6,7 @@ set -e
 
 INSTALL_DIR="$HOME/.al/bin"
 BINARY_NAME="al"
+REPO="alii/al"
 
 echo "Installing AL..."
 
@@ -31,31 +32,27 @@ if [ "$OS" != "macos" ]; then
     exit 1
 fi
 
-# Download URL
-DOWNLOAD_URL="https://al.alistair.sh/releases/al-$OS-$ARCH"
-
-echo "Downloading from $DOWNLOAD_URL..."
+ASSET_NAME="al-$OS-$ARCH"
 
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-# Create temp file
-TMP_FILE=$(mktemp)
-trap "rm -f $TMP_FILE" EXIT
-
-# Download
-if command -v curl &> /dev/null; then
-    curl -fsSL "$DOWNLOAD_URL" -o "$TMP_FILE"
-elif command -v wget &> /dev/null; then
-    wget -q "$DOWNLOAD_URL" -O "$TMP_FILE"
-else
-    echo "curl or wget required"
+if ! command -v gh &> /dev/null; then
+    echo "GitHub CLI (gh) is required: https://cli.github.com"
     exit 1
 fi
 
+if ! gh auth status &> /dev/null; then
+    echo "Please authenticate with GitHub first: gh auth login"
+    exit 1
+fi
+
+echo "Downloading $ASSET_NAME..."
+gh release download canary --repo "$REPO" --pattern "$ASSET_NAME" --dir "$INSTALL_DIR" --clobber
+
 # Install
-chmod +x "$TMP_FILE"
-mv "$TMP_FILE" "$INSTALL_DIR/$BINARY_NAME"
+mv "$INSTALL_DIR/$ASSET_NAME" "$INSTALL_DIR/$BINARY_NAME"
+chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
 echo "Installed AL to $INSTALL_DIR/$BINARY_NAME"
 
