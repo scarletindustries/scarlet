@@ -62,19 +62,13 @@ fn (p Parser) current_context() ParseContext {
 }
 
 fn (mut p Parser) add_error(message string) {
-	p.diagnostics << diagnostic.error_at(
-		p.current_token.line,
-		p.current_token.column,
-		message
-	)
+	p.diagnostics << diagnostic.error_at(p.current_token.line, p.current_token.column,
+		message)
 }
 
 fn (mut p Parser) add_warning(message string) {
-	p.diagnostics << diagnostic.warning_at(
-		p.current_token.line,
-		p.current_token.column,
-		message
-	)
+	p.diagnostics << diagnostic.warning_at(p.current_token.line, p.current_token.column,
+		message)
 }
 
 fn (mut p Parser) synchronize() {
@@ -83,7 +77,8 @@ fn (mut p Parser) synchronize() {
 	for p.current_token.kind != .eof {
 		match ctx {
 			.top_level {
-				if p.current_token.kind in [.kw_function, .kw_struct, .kw_enum, .kw_const, .kw_from, .kw_export, .identifier] {
+				if p.current_token.kind in [.kw_function, .kw_struct, .kw_enum, .kw_const, .kw_from,
+					.kw_export, .identifier] {
 					return
 				}
 			}
@@ -167,9 +162,7 @@ fn (mut p Parser) eat(kind token.Kind) !compiler.Token {
 }
 
 fn (mut p Parser) eat_msg(kind token.Kind, message string) !compiler.Token {
-	return p.eat(kind) or {
-		return error("${message}, got '${p.current_token}'")
-	}
+	return p.eat(kind) or { return error("${message}, got '${p.current_token}'") }
 }
 
 fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
@@ -716,7 +709,9 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 			if p.current_token.kind == .punc_close_brace {
 				break
 			}
-			ast.ErrorNode{ message: err.msg() }
+			ast.ErrorNode{
+				message: err.msg()
+			}
 		}
 
 		arms << ast.MatchArm{

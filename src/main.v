@@ -108,7 +108,8 @@ fn main() {
 
 					new_version := os.execute('${current_exe} --version')
 					if new_version.exit_code == 0 {
-						println('Upgraded to ${new_version.output.trim_space().replace('al version ', '')}')
+						println('Upgraded to ${new_version.output.trim_space().replace('al version ',
+							'')}')
 					} else {
 						println('Upgraded successfully!')
 					}

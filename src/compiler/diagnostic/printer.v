@@ -55,6 +55,7 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 			caret_padding += ' '
 		}
 	}
+
 	result += '${color_blue}${padding}  |${color_reset} ${caret_padding}${color}^${color_reset}\n'
 
 	return result
