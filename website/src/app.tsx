@@ -147,9 +147,7 @@ const cliOutput = `   ▄▀█ █░░
 
    Examples:
      al run hello.al
-     al run examples/fibonacci.al
-
-   Learn more: https://al.alistair.sh`;
+     al run examples/fibonacci.al`;
 
 export function App({ examples }: { examples: RenderedExample[] }) {
   return (
