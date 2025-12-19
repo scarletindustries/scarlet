@@ -280,6 +280,30 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.push_none)
 		}
 		ast.BinaryExpression {
+			// Short-circuit evaluation for && and ||
+			if expr.op.kind == .logical_and {
+				c.compile_expr(expr.left)!
+				c.emit(.dup) // keep copy for short-circuit result
+				// If left is false, skip right and leave false on stack
+				end_jump := c.current_addr()
+				c.emit_arg(.jump_if_false, 0)
+				c.emit(.pop) // left was true, discard it
+				c.compile_expr(expr.right)!
+				c.program.code[end_jump] = op_arg(.jump_if_false, c.current_addr())
+				return
+			}
+			if expr.op.kind == .logical_or {
+				c.compile_expr(expr.left)!
+				c.emit(.dup) // keep copy for short-circuit result
+				// If left is true, skip right and leave true on stack
+				end_jump := c.current_addr()
+				c.emit_arg(.jump_if_true, 0)
+				c.emit(.pop) // left was false, discard it
+				c.compile_expr(expr.right)!
+				c.program.code[end_jump] = op_arg(.jump_if_true, c.current_addr())
+				return
+			}
+
 			c.compile_expr(expr.left)!
 			c.compile_expr(expr.right)!
 			match expr.op.kind {
@@ -315,12 +339,6 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				}
 				.punc_gte {
 					c.emit(.gte)
-				}
-				.logical_and {
-					c.emit(.and)
-				}
-				.logical_or {
-					c.emit(.or)
 				}
 				else {
 					return error('Unknown binary operator: ${expr.op.kind}')
