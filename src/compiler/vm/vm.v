@@ -1,6 +1,8 @@
 module vm
 
 import compiler.bytecode
+import net
+import os
 
 struct CallFrame {
 mut:
@@ -11,18 +13,31 @@ mut:
 	captures  []bytecode.Value
 }
 
-pub struct VM {
-mut:
-	program bytecode.Program
-	stack   []bytecode.Value
-	frames  []CallFrame
+pub struct VMOptions {
+pub:
+	io_enabled bool
 }
 
-pub fn new_vm(program bytecode.Program) VM {
+pub struct VM {
+	options VMOptions
+mut:
+	program         bytecode.Program
+	stack           []bytecode.Value
+	frames          []CallFrame
+	next_socket_id  int
+	tcp_listeners   map[int]&net.TcpListener
+	tcp_connections map[int]&net.TcpConn
+}
+
+pub fn new_vm(program bytecode.Program, options VMOptions) VM {
 	return VM{
-		program: program
-		stack:   []
-		frames:  []
+		options:         options
+		program:         program
+		stack:           []
+		frames:          []
+		next_socket_id:  1
+		tcp_listeners:   map[int]&net.TcpListener{}
+		tcp_connections: map[int]&net.TcpConn{}
 	}
 }
 
@@ -498,6 +513,158 @@ fn (mut vm VM) execute() !bytecode.Value {
 			.halt {
 				break
 			}
+			.file_read {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				path_val := vm.pop()!
+				if path_val is string {
+					content := os.read_file(path_val) or {
+						vm.stack << bytecode.ErrorValue{payload: 'Failed to read file: ${err}'}
+						continue
+					}
+					vm.stack << content
+				} else {
+					return error('read_file requires string path')
+				}
+			}
+			.file_write {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				content := vm.pop()!
+				path_val := vm.pop()!
+				if path_val is string && content is string {
+					os.write_file(path_val, content) or {
+						vm.stack << bytecode.ErrorValue{payload: 'Failed to write file: ${err}'}
+						continue
+					}
+					vm.stack << bytecode.NoneValue{}
+				} else {
+					return error('write_file requires string path and content')
+				}
+			}
+			.tcp_listen {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				port_val := vm.pop()!
+				if port_val is int {
+					listener := net.listen_tcp(.ip, '0.0.0.0:${port_val}') or {
+						vm.stack << bytecode.ErrorValue{payload: 'Failed to listen: ${err}'}
+						continue
+					}
+					socket_id := vm.next_socket_id
+					vm.next_socket_id += 1
+					vm.tcp_listeners[socket_id] = listener
+					vm.stack << bytecode.SocketValue{
+						id:          socket_id
+						is_listener: true
+					}
+				} else {
+					return error('tcp_listen requires int port')
+				}
+			}
+			.tcp_accept {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				socket_val := vm.pop()!
+				if socket_val is bytecode.SocketValue {
+					if !socket_val.is_listener {
+						return error('tcp_accept requires a listener socket')
+					}
+					if mut listener := vm.tcp_listeners[socket_val.id] {
+						conn := listener.accept() or {
+							vm.stack << bytecode.ErrorValue{payload: 'Failed to accept: ${err}'}
+							continue
+						}
+						conn_id := vm.next_socket_id
+						vm.next_socket_id += 1
+						vm.tcp_connections[conn_id] = conn
+						vm.stack << bytecode.SocketValue{
+							id:          conn_id
+							is_listener: false
+						}
+					} else {
+						return error('Invalid listener socket')
+					}
+				} else {
+					return error('tcp_accept requires socket')
+				}
+			}
+			.tcp_read {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				socket_val := vm.pop()!
+				if socket_val is bytecode.SocketValue {
+					if socket_val.is_listener {
+						return error('tcp_read requires a connection socket, not a listener')
+					}
+					if mut conn := vm.tcp_connections[socket_val.id] {
+						mut buf := []u8{len: 4096}
+						bytes_read := conn.read(mut buf) or {
+							vm.stack << bytecode.ErrorValue{payload: 'Failed to read: ${err}'}
+							continue
+						}
+						if bytes_read == 0 {
+							vm.stack << bytecode.NoneValue{}
+						} else {
+							vm.stack << buf[..bytes_read].bytestr()
+						}
+					} else {
+						return error('Invalid connection socket')
+					}
+				} else {
+					return error('tcp_read requires socket')
+				}
+			}
+			.tcp_write {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				data := vm.pop()!
+				socket_val := vm.pop()!
+				if socket_val is bytecode.SocketValue && data is string {
+					if socket_val.is_listener {
+						return error('tcp_write requires a connection socket, not a listener')
+					}
+					if mut conn := vm.tcp_connections[socket_val.id] {
+						bytes_written := conn.write(data.bytes()) or {
+							vm.stack << bytecode.ErrorValue{payload: 'Failed to write: ${err}'}
+							continue
+						}
+						vm.stack << bytes_written
+					} else {
+						return error('Invalid connection socket')
+					}
+				} else {
+					return error('tcp_write requires socket and string data')
+				}
+			}
+			.tcp_close {
+				if !vm.options.io_enabled {
+					return error('I/O operations require --experimental-shitty-io flag')
+				}
+				socket_val := vm.pop()!
+				if socket_val is bytecode.SocketValue {
+					if socket_val.is_listener {
+						if mut listener := vm.tcp_listeners[socket_val.id] {
+							listener.close() or {}
+							vm.tcp_listeners.delete(socket_val.id)
+						}
+					} else {
+						if mut conn := vm.tcp_connections[socket_val.id] {
+							conn.close() or {}
+							vm.tcp_connections.delete(socket_val.id)
+						}
+					}
+					vm.stack << bytecode.NoneValue{}
+				} else {
+					return error('tcp_close requires socket')
+				}
+			}
 		}
 	}
 
@@ -695,7 +862,7 @@ pub fn inspect(v bytecode.Value) string {
 			return s
 		}
 		bytecode.ClosureValue {
-			return '<fn ${v.func_idx}>'
+			return '<fn#${v.func_idx}>'
 		}
 		bytecode.EnumValue {
 			if p := v.payload {
@@ -706,6 +873,12 @@ pub fn inspect(v bytecode.Value) string {
 		}
 		bytecode.ErrorValue {
 			return 'error(${inspect(v.payload)})'
+		}
+		bytecode.SocketValue {
+			if v.is_listener {
+				return '<listener#${v.id}>'
+			}
+			return '<socket#${v.id}>'
 		}
 	}
 }
