@@ -31,7 +31,13 @@ struct Scope {
 	locals map[string]int
 }
 
+pub struct CompileOptions {
+pub:
+	expose_debug_builtins bool
+}
+
 struct Compiler {
+	options CompileOptions
 mut:
 	program          Program
 	locals           map[string]int
@@ -47,8 +53,9 @@ mut:
 	in_tail_position bool               // true when compiling in tail position (for TCO)
 }
 
-pub fn compile(expr ast.Expression) !Program {
+pub fn compile(expr ast.Expression, options CompileOptions) !Program {
 	mut c := Compiler{
+		options:          options
 		program:          Program{
 			constants: []
 			functions: []
@@ -1007,6 +1014,9 @@ fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 			c.emit(.to_string)
 		}
 		'__stack_depth__' {
+			if !c.options.expose_debug_builtins {
+				return error('Unknown function: ${call.identifier.name}')
+			}
 			if call.arguments.len != 0 {
 				return error('__stack_depth__ expects 0 arguments')
 			}

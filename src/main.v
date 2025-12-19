@@ -125,10 +125,16 @@ fn main() {
 						name:        'debug-printer'
 						description: 'Print the parsed program before execution starts'
 					},
+					cli.Flag{
+						flag:        .bool
+						name:        'expose-debug-builtins'
+						description: 'Expose debug builtins like __stack_depth__()'
+					},
 				]
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					debug_printer := cmd.flags.get_bool('debug-printer')!
+					expose_debug_builtins := cmd.flags.get_bool('expose-debug-builtins')!
 
 					file := os.read_file(entrypoint)!
 
@@ -152,7 +158,9 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(result.ast)!
+					program := bytecode.compile(result.ast, bytecode.CompileOptions{
+						expose_debug_builtins: expose_debug_builtins
+					})!
 
 					mut v := vm.new_vm(program)
 					run_result := v.run()!
