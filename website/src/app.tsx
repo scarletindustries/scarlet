@@ -158,14 +158,6 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         <pre className="text-xs text-neutral-600 dark:text-neutral-400 mb-6 overflow-auto">
           {cliOutput}
         </pre>
-        <p className="text-sm text-neutral-500">
-          <a
-            href="https://github.com/alii/al"
-            className="text-black dark:text-white underline"
-          >
-            github.com/alii/al
-          </a>
-        </p>
         <div className="mt-6 p-4 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800">
           <div className="mb-2 text-sm font-bold">Install</div>
           <code className="text-xs tracking-tight">
