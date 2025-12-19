@@ -84,6 +84,8 @@ fn (mut p Parser) synchronize() {
 			}
 			.block {
 				if p.current_token.kind == .punc_close_brace {
+					p.advance()
+					p.pop_context()
 					return
 				}
 				if p.current_token.kind in [.kw_if, .kw_match, .kw_function, .identifier] {
@@ -91,7 +93,12 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.function_params {
-				if p.current_token.kind in [.punc_close_paren, .punc_open_brace] {
+				if p.current_token.kind == .punc_close_paren {
+					p.advance()
+					p.pop_context()
+					return
+				}
+				if p.current_token.kind == .punc_open_brace {
 					return
 				}
 				if p.current_token.kind == .punc_comma {
@@ -119,6 +126,8 @@ fn (mut p Parser) synchronize() {
 			}
 			.enum_def {
 				if p.current_token.kind == .punc_close_brace {
+					p.advance()
+					p.pop_context()
 					return
 				}
 				if p.current_token.kind == .punc_comma {
