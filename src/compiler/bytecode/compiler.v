@@ -33,16 +33,17 @@ struct Scope {
 
 struct Compiler {
 mut:
-	program          Program
-	locals           map[string]int
-	outer_scopes     []Scope // for closures: stack of enclosing scopes
-	local_count      int
+	program         Program
+	locals          map[string]int
+	outer_scopes    []Scope // for closures: stack of enclosing scopes
+	local_count     int
 	current_func_idx int
-	structs          map[string]StructDef
-	enums            map[string]EnumDef
-	functions        map[string]FuncSig // function signatures for type inference
-	captures         map[string]int     // captured var name -> capture index
-	capture_names    []string           // ordered list of captured var names
+	structs         map[string]StructDef
+	enums           map[string]EnumDef
+	functions       map[string]FuncSig // function signatures for type inference
+	captures        map[string]int     // captured var name -> capture index
+	capture_names   []string           // ordered list of captured var names
+	current_binding string             // name of variable being bound (for self-reference)
 }
 
 pub fn compile(expr ast.Expression) !Program {
