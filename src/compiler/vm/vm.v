@@ -156,16 +156,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				a := vm.pop()!
 				vm.stack << !vm.is_truthy(a)
 			}
-			.and {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << (vm.is_truthy(a) && vm.is_truthy(b))
-			}
-			.or {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << (vm.is_truthy(a) || vm.is_truthy(b))
-			}
 			.jump {
 				vm.frames[vm.frames.len - 1].ip = instr.operand - frame.func.code_start
 			}

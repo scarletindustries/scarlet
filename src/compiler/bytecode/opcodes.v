@@ -29,8 +29,6 @@ pub enum Op {
 
 	// Logic
 	not
-	and
-	or
 
 	// Control flow
 	jump          // unconditional jump: jump <addr>
