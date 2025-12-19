@@ -42,7 +42,7 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 
 	line_num_width := '${d.span.start_line}'.len
 	padding := ' '.repeat(line_num_width)
-	result += '${color_blue}${padding}   |${color_reset}\n'
+	result += '${color_blue}${padding}  |${color_reset}\n'
 
 	source_line := get_source_line(source, d.span.start_line)
 	result += '${color_blue}${d.span.start_line}  |${color_reset} ${source_line}\n'
@@ -55,7 +55,7 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 			caret_padding += ' '
 		}
 	}
-	result += '${color_blue}${padding}   |${color_reset} ${caret_padding}${color}^${color_reset}\n'
+	result += '${color_blue}${padding}  |${color_reset} ${caret_padding}${color}^${color_reset}\n'
 
 	return result
 }
