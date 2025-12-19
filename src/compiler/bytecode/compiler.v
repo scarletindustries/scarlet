@@ -806,7 +806,8 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 							if arg is ast.Identifier {
 								binding_id := arg as ast.Identifier
 								binding_name = binding_id.name
-							} else if arg is ast.StringLiteral || arg is ast.NumberLiteral || arg is ast.BooleanLiteral {
+							} else if arg is ast.StringLiteral || arg is ast.NumberLiteral
+								|| arg is ast.BooleanLiteral {
 								literal_pattern = arg
 							}
 						}
@@ -830,7 +831,8 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 					if arg is ast.Identifier {
 						binding_id := arg as ast.Identifier
 						binding_name = binding_id.name
-					} else if arg is ast.StringLiteral || arg is ast.NumberLiteral || arg is ast.BooleanLiteral {
+					} else if arg is ast.StringLiteral || arg is ast.NumberLiteral
+						|| arg is ast.BooleanLiteral {
 						literal_pattern = arg
 					}
 				}

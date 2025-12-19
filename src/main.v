@@ -52,9 +52,23 @@ fn main() {
 			},
 			cli.Command{
 				name:        'upgrade'
-				description: 'Upgrade to the latest version'
+				usage:       '[version]'
+				description: 'Upgrade to a specific version (default: canary)'
 				execute:     fn (cmd cli.Command) ! {
 					current_exe := os.executable()
+
+					tag := if cmd.args.len > 0 {
+						v := cmd.args[0]
+						if v == 'canary' {
+							'canary'
+						} else if v[0].is_digit() {
+							'v${v}'
+						} else {
+							v
+						}
+					} else {
+						'canary'
+					}
 
 					arch := $if arm64 {
 						'arm64'
@@ -74,9 +88,9 @@ fn main() {
 					tmp_dir := os.temp_dir()
 					tmp_path := os.join_path(tmp_dir, asset_name)
 
-					println('Downloading latest version...')
+					println('Downloading ${tag}...')
 
-					result := os.execute('gh release download canary --repo alii/al --pattern "${asset_name}" --dir "${tmp_dir}" --clobber')
+					result := os.execute('gh release download ${tag} --repo alii/al --pattern "${asset_name}" --dir "${tmp_dir}" --clobber')
 					if result.exit_code != 0 {
 						return error('Failed to download: ${result.output}')
 					}
@@ -84,7 +98,7 @@ fn main() {
 					os.chmod(tmp_path, 0o755)!
 					os.mv(tmp_path, current_exe)!
 
-					println('Upgraded successfully!')
+					println('Upgraded to ${tag}!')
 				}
 			},
 			cli.Command{

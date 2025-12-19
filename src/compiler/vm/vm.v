@@ -381,7 +381,8 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 
 				if val is bytecode.EnumValue {
-					vm.stack << (val.enum_name == (enum_name as string) && val.variant_name == (variant_name as string))
+					vm.stack << (val.enum_name == (enum_name as string)
+						&& val.variant_name == (variant_name as string))
 				} else {
 					vm.stack << false
 				}
