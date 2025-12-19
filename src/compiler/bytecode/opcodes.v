@@ -67,8 +67,9 @@ pub enum Op {
 	str_concat // pop two strings, push concatenated result
 
 	// Misc
-	print // print top of stack (temporary, for debugging)
-	halt  // stop execution
+	print       // print top of stack (temporary, for debugging)
+	stack_depth // push current stack frame count (for debugging TCO)
+	halt        // stop execution
 }
 
 pub struct Instruction {
