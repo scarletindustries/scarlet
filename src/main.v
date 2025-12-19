@@ -26,9 +26,8 @@ fn main() {
      al run <file.al>      Run a program
      al --help             Show all commands
 
-   Examples:
+   Example:
      al run hello.al
-     al run examples/fibonacci.al
 
    Learn more: https://al.alistair.sh
 ')

@@ -145,9 +145,8 @@ const cliOutput = `   ▄▀█ █░░
      al run <file.al>      Run a program
      al --help             Show all commands
 
-   Examples:
-     al run hello.al
-     al run examples/fibonacci.al`;
+   Example:
+     al run hello.al`;
 
 export function App({ examples }: { examples: RenderedExample[] }) {
   return (
