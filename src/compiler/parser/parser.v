@@ -108,6 +108,8 @@ fn (mut p Parser) synchronize() {
 			}
 			.array {
 				if p.current_token.kind == .punc_close_bracket {
+					p.advance()
+					p.pop_context()
 					return
 				}
 				if p.current_token.kind == .punc_comma {
