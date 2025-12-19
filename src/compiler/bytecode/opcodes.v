@@ -49,6 +49,7 @@ pub enum Op {
 	// Enums
 	make_enum         // create enum: pop variant_name, pop enum_name, push EnumValue (no payload)
 	make_enum_payload // create enum with payload: pop payload, pop variant_name, pop enum_name, push EnumValue
+	match_enum        // match variant only (ignore payload): pop variant_name, pop enum_name, pop value, push bool
 	unwrap_enum       // get payload from enum: pop enum, push payload (or none)
 
 	// Closures

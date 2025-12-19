@@ -824,12 +824,12 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression) ! {
 		if ename := enum_name {
 			if vname := variant_name {
 				// Enum pattern (with or without destructuring)
+				// Use match_enum to compare variant only (ignores payload)
 				enum_idx := c.add_constant(ename)
 				c.emit_arg(.push_const, enum_idx)
 				variant_idx := c.add_constant(vname)
 				c.emit_arg(.push_const, variant_idx)
-				c.emit(.make_enum)
-				c.emit(.eq)
+				c.emit(.match_enum)
 
 				next_arm := c.current_addr()
 				c.emit_arg(.jump_if_false, 0)

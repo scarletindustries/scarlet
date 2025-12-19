@@ -378,6 +378,22 @@ fn (mut vm VM) execute() !bytecode.Value {
 					payload:      payload
 				}
 			}
+			.match_enum {
+				// Match variant only, ignore payload
+				variant_name := vm.pop()!
+				enum_name := vm.pop()!
+				val := vm.pop()!
+
+				if variant_name !is string || enum_name !is string {
+					return error('Enum/variant names must be strings')
+				}
+
+				if val is bytecode.EnumValue {
+					vm.stack << (val.enum_name == (enum_name as string) && val.variant_name == (variant_name as string))
+				} else {
+					vm.stack << false
+				}
+			}
 			.unwrap_enum {
 				enum_val := vm.pop()!
 				if enum_val is bytecode.EnumValue {
@@ -531,7 +547,19 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 		}
 		bytecode.EnumValue {
 			if b is bytecode.EnumValue {
-				return a.enum_name == b.enum_name && a.variant_name == b.variant_name
+				if a.enum_name != b.enum_name || a.variant_name != b.variant_name {
+					return false
+				}
+				// Compare payloads
+				a_payload := a.payload
+				b_payload := b.payload
+				if a_payload == none && b_payload == none {
+					return true
+				}
+				if a_payload == none || b_payload == none {
+					return false
+				}
+				return vm.values_equal(a_payload or { return false }, b_payload or { return false })
 			}
 		}
 		else {}
