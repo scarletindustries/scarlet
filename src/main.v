@@ -98,7 +98,12 @@ fn main() {
 					os.chmod(tmp_path, 0o755)!
 					os.mv(tmp_path, current_exe)!
 
-					println('Upgraded to ${tag}!')
+					new_version := os.execute('${current_exe} --version')
+					if new_version.exit_code == 0 {
+						println('Upgraded to ${new_version.output.trim_space().replace('al version ', '')}')
+					} else {
+						println('Upgraded successfully!')
+					}
 				}
 			},
 			cli.Command{
