@@ -59,8 +59,8 @@ fn main() {
 
 					tag := if cmd.args.len > 0 {
 						v := cmd.args[0]
-						if v == 'canary' {
-							'canary'
+						if v.contains('canary') {
+							v
 						} else if v[0].is_digit() {
 							'v${v}'
 						} else {
