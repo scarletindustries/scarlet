@@ -1,11 +1,15 @@
 module diagnostic
 
+import os
+
 const color_reset = '\x1b[0m'
 const color_bold = '\x1b[1m'
 const color_red = '\x1b[31m'
 const color_yellow = '\x1b[33m'
 const color_cyan = '\x1b[36m'
 const color_blue = '\x1b[34m'
+const link_start = '\x1b]8;;'
+const link_end = '\x07'
 
 fn severity_color(severity Severity) string {
 	return match severity {
@@ -38,17 +42,19 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 	label := severity_label(d.severity)
 	result += '${color_bold}${color}${label}${color_reset}: ${d.message}\n'
 
-	result += '${color_blue}  -->${color_reset} ${file_path}:${d.span.start_line}:${d.span.start_column}\n'
+	abs_path := os.real_path(file_path)
+	location := '${file_path}:${d.span.start_line}:${d.span.start_column}'
+	link_url := 'file://${abs_path}'
+	result += '${color_blue}  -->${color_reset} ${link_start}${link_url}${link_end}${location}${link_start}${link_end}\n'
 
 	line_num_width := '${d.span.start_line}'.len
 	padding := ' '.repeat(line_num_width)
-	result += '${color_blue}${padding}  |${color_reset}\n'
 
 	source_line := get_source_line(source, d.span.start_line)
 	result += '${color_blue}${d.span.start_line}  |${color_reset} ${source_line}\n'
 
 	mut caret_padding := ''
-	for i := 0; i < d.span.start_column; i++ {
+	for i := 1; i < d.span.start_column; i++ {
 		if i < source_line.len && source_line[i] == `\t` {
 			caret_padding += '\t'
 		} else {
@@ -56,7 +62,7 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 		}
 	}
 
-	result += '${color_blue}${padding}  |${color_reset} ${caret_padding}${color}^${color_reset}\n'
+	result += '${padding}    ${caret_padding}${color}^${color_reset}\n'
 
 	return result
 }
