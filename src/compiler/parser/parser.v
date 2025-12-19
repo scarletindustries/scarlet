@@ -140,7 +140,12 @@ fn (mut p Parser) synchronize() {
 				}
 			}
 			.match_arms {
-				if p.current_token.kind in [.punc_arrow, .punc_close_brace] {
+				if p.current_token.kind == .punc_close_brace {
+					p.advance()
+					p.pop_context()
+					return
+				}
+				if p.current_token.kind == .punc_arrow {
 					return
 				}
 				if p.current_token.kind == .punc_comma {
