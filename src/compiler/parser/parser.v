@@ -18,7 +18,7 @@ pub enum ParseContext {
 }
 
 pub struct ParseResult {
-pub mut:
+pub:
 	ast         ast.BlockExpression
 	diagnostics []diagnostic.Diagnostic
 }
@@ -211,25 +211,26 @@ fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
 }
 
 pub fn (mut p Parser) parse_program() ParseResult {
-	mut program := ast.BlockExpression{}
+	mut body := []ast.Expression{}
 
 	for p.current_token.kind != .eof {
 		expr := p.parse_expression() or {
 			p.add_error(err.msg())
-
 			p.synchronize()
 
-			program.body << ast.ErrorNode{
+			body << ast.ErrorNode{
 				message: err.msg()
 			}
 			continue
 		}
 
-		program.body << expr
+		body << expr
 	}
 
 	return ParseResult{
-		ast:         program
+		ast:         ast.BlockExpression{
+			body: body
+		}
 		diagnostics: p.diagnostics
 	}
 }

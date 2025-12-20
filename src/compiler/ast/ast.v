@@ -1,7 +1,6 @@
 module ast
 
 import compiler.token
-import compiler.type_def
 
 pub struct Span {
 pub:
