@@ -19,8 +19,6 @@ jobs:
 
       - name: Setup V
         uses: vlang/setup-v@v1.4
-        with:
-          check-latest: true
 
       - name: Format V files
         run: v fmt -w src/
