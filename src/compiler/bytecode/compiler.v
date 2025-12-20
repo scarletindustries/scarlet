@@ -652,58 +652,60 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.make_error)
 		}
 		ast.OrExpression {
-			// expr or { default } or expr or |e| { handle(e) }
-			// Handles both error values and none values (for optional types)
+			// Two forms:
+			// - expr or e -> { handle_error(e) }  -> handles Result (errors), receiver binds error
+			// - expr or { default }               -> handles Option (none)
 			c.compile_expr(expr.expression)!
 
-			// Duplicate to check if error or none
-			c.emit(.dup)
-			c.emit(.is_error_or_none)
-
-			// If not error/none, jump over the or-body
-			not_error_jump := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
-
-			// Is error/none - pop the value (or bind it if error) and execute body
 			if receiver := expr.receiver {
-				// Check if it's actually an error (not none) before unwrapping
+				// Has receiver: handling a Result type (errors only)
 				c.emit(.dup)
 				c.emit(.is_error)
-				not_an_error := c.current_addr()
+
+				// If not error, jump over the or-body
+				not_error_jump := c.current_addr()
 				c.emit_arg(.jump_if_false, 0)
 
-				// It's an error - unwrap and bind
+				// Is error - unwrap and bind to receiver
 				c.emit(.unwrap_error)
 				idx := c.get_or_create_local(receiver.name)
 				c.emit_arg(.store_local, idx)
-				after_bind := c.current_addr()
+
+				c.compile_expr(expr.body)!
+
+				// Jump to end
+				end_jump := c.current_addr()
 				c.emit_arg(.jump, 0)
 
-				// It's none - just pop it and push none for the receiver
-				c.program.code[not_an_error] = op_arg(.jump_if_false, c.current_addr())
-				c.emit(.pop)
-				idx2 := c.get_or_create_local(receiver.name)
-				c.emit(.push_none)
-				c.emit_arg(.store_local, idx2)
+				// Patch not_error_jump to here (value stays on stack)
+				c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
 
-				c.program.code[after_bind] = op_arg(.jump, c.current_addr())
+				// Patch end_jump
+				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 			} else {
-				c.emit(.pop) // discard error/none
+				// No receiver: handling an Option type (none only)
+				c.emit(.dup)
+				c.emit(.is_none)
+
+				// If not none, jump over the or-body
+				not_none_jump := c.current_addr()
+				c.emit_arg(.jump_if_false, 0)
+
+				// Is none - pop it and execute body
+				c.emit(.pop)
+
+				c.compile_expr(expr.body)!
+
+				// Jump to end
+				end_jump := c.current_addr()
+				c.emit_arg(.jump, 0)
+
+				// Patch not_none_jump to here (value stays on stack)
+				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
+
+				// Patch end_jump
+				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 			}
-
-			c.compile_expr(expr.body)!
-
-			// Jump to end
-			end_jump := c.current_addr()
-			c.emit_arg(.jump, 0)
-
-			// Patch not_error_jump to here
-			c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
-
-			// Not error/none - value is already on stack, nothing to do
-
-			// Patch end_jump
-			c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 		}
 		ast.PropagateExpression {
 			// expr! -> if error, return it; else unwrap

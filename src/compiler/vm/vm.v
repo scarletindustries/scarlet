@@ -485,6 +485,10 @@ fn (mut vm VM) execute() !bytecode.Value {
 				val := vm.pop()!
 				vm.stack << (val is bytecode.ErrorValue)
 			}
+			.is_none {
+				val := vm.pop()!
+				vm.stack << (val is bytecode.NoneValue)
+			}
 			.is_error_or_none {
 				val := vm.pop()!
 				vm.stack << (val is bytecode.ErrorValue || val is bytecode.NoneValue)
