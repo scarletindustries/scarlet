@@ -55,29 +55,55 @@ fn get_expr_span(expr ast.Expression) ast.Span {
 fn (mut c TypeChecker) register_builtins() {
 	a := t_var('a')
 
+	socket := TypeStruct{
+		name:   'Socket'
+		fields: map[string]Type{}
+	}
+	c.env.register_struct(socket)
+
 	c.env.register_function('println', TypeFunction{
 		params: [a]
 		ret:    t_none()
 	})
 
-	c.env.register_function('print', TypeFunction{
+	c.env.register_function('inspect', TypeFunction{
 		params: [a]
+		ret:    t_string()
+	})
+
+	c.env.register_function('read_file', TypeFunction{
+		params: [t_string()]
+		ret:    t_string()
+	})
+
+	c.env.register_function('write_file', TypeFunction{
+		params: [t_string(), t_string()]
 		ret:    t_none()
 	})
 
-	c.env.register_function('len', TypeFunction{
-		params: [t_array(a)]
-		ret:    t_int()
-	})
-
-	c.env.register_function('int', TypeFunction{
-		params: [t_string()]
-		ret:    t_int()
-	})
-
-	c.env.register_function('string', TypeFunction{
+	c.env.register_function('tcp_listen', TypeFunction{
 		params: [t_int()]
+		ret:    socket
+	})
+
+	c.env.register_function('tcp_accept', TypeFunction{
+		params: [socket]
+		ret:    socket
+	})
+
+	c.env.register_function('tcp_read', TypeFunction{
+		params: [socket]
 		ret:    t_string()
+	})
+
+	c.env.register_function('tcp_write', TypeFunction{
+		params: [socket, t_string()]
+		ret:    t_none()
+	})
+
+	c.env.register_function('tcp_close', TypeFunction{
+		params: [socket]
+		ret:    t_none()
 	})
 }
 
@@ -153,12 +179,27 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 		}
 		ast.VariableBinding {
 			init_type := c.check_expr(expr.init)
-			// TODO: Check against explicit type annotation if present
+			if annotation := expr.typ {
+				if expected := c.resolve_type_identifier(annotation) {
+					init_span := get_expr_span(expr.init)
+					c.expect_type(init_type, expected, init_span, 'in variable binding')
+					c.env.define(expr.identifier.name, expected)
+					return expected
+				}
+			}
 			c.env.define(expr.identifier.name, init_type)
 			return init_type
 		}
 		ast.ConstBinding {
 			init_type := c.check_expr(expr.init)
+			if annotation := expr.typ {
+				if expected := c.resolve_type_identifier(annotation) {
+					init_span := get_expr_span(expr.init)
+					c.expect_type(init_type, expected, init_span, 'in const binding')
+					c.env.define(expr.identifier.name, expected)
+					return expected
+				}
+			}
 			c.env.define(expr.identifier.name, init_type)
 			return init_type
 		}
@@ -285,6 +326,15 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 		}
 	}
 
+	mut err_type := ?Type(none)
+	if et := expr.error_type {
+		if resolved := c.resolve_type_identifier(et) {
+			err_type = resolved
+		} else {
+			c.error_at_span("Unknown error type '${et.identifier.name}'", et.identifier.span)
+		}
+	}
+
 	for param in expr.params {
 		if pt := param.typ {
 			if resolved := c.resolve_type_identifier(pt) {
@@ -300,8 +350,9 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 	}
 
 	func_type := TypeFunction{
-		params: param_types
-		ret:    ret_type
+		params:     param_types
+		ret:        ret_type
+		error_type: err_type
 	}
 
 	if id := expr.identifier {

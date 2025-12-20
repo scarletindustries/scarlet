@@ -72,15 +72,15 @@ pub mut:
 pub struct VariableBinding {
 pub mut:
 	identifier Identifier
+	typ        ?TypeIdentifier
 	init       Expression
 	span       Span
 }
 
-// Const binding (const x = expr)
-
 pub struct ConstBinding {
 pub mut:
 	identifier Identifier
+	typ        ?TypeIdentifier
 	init       Expression
 	span       Span
 }

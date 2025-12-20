@@ -133,7 +133,15 @@ pub fn types_equal(a Type, b Type) bool {
 						return false
 					}
 				}
-				return types_equal(a.ret, b.ret)
+				if !types_equal(a.ret, b.ret) {
+					return false
+				}
+				a_err := a.error_type
+				b_err := b.error_type
+				if a_err != none && b_err != none {
+					return types_equal(a_err, b_err)
+				}
+				return a_err == none && b_err == none
 			}
 			return false
 		}
@@ -182,7 +190,11 @@ pub fn type_to_string(t Type) string {
 			for param in t.params {
 				params << type_to_string(param)
 			}
-			return 'fn(${params.join(', ')}) ${type_to_string(t.ret)}'
+			mut result := 'fn(${params.join(', ')}) ${type_to_string(t.ret)}'
+			if err := t.error_type {
+				result += ' !${type_to_string(err)}'
+			}
+			return result
 		}
 		TypeStruct {
 			return t.name

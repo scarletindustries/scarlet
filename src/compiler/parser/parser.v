@@ -39,7 +39,7 @@ pub fn new_parser(mut s scanner.Scanner) Parser {
 		tokens:        tokens
 		index:         0
 		current_token: tokens[0]
-		diagnostics:   []diagnostic.Diagnostic{}
+		diagnostics:   s.get_diagnostics()
 		context_stack: [ParseContext.top_level]
 	}
 }
@@ -585,6 +585,13 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		.kw_error {
 			p.parse_error_expression()!
 		}
+		.error {
+			// scanner already reported an error, skip this token and return an error node
+			p.advance()
+			ast.ErrorNode{
+				message: 'Scanner error'
+			}
+		}
 		else {
 			return error("Unexpected '${p.current_token}'")
 		}
@@ -598,7 +605,7 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-	// Check if this is a variable binding: `x = expr`
+	// Check if this is a variable binding: `x = expr` or `x Type = expr`
 	if p.current_token.kind == .punc_equals {
 		p.eat(.punc_equals)!
 		init := p.parse_expression()!
@@ -612,14 +619,27 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 		}
 	}
 
-	// Check if this is a function call: `foo(args)`
+	// check for typed variable binding: `x Int = expr`
+	if p.is_type_start() {
+		typ := p.parse_type_identifier()!
+		p.eat(.punc_equals)!
+		init := p.parse_expression()!
+		return ast.VariableBinding{
+			identifier: ast.Identifier{
+				name: name
+				span: span
+			}
+			typ: typ
+			init: init
+			span: span
+		}
+	}
+
 	if p.current_token.kind == .punc_open_paren {
 		return p.parse_function_call_expression(name, span)!
 	}
 
-	// Check if this is struct instantiation: `Foo { field: value }`
 	if p.current_token.kind == .punc_open_brace {
-		// Try to parse as struct init, backtrack if it fails
 		curr_index := p.index
 		curr_token := p.current_token
 
@@ -627,7 +647,6 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 			return result
 		}
 
-		// Reset and treat as just an identifier
 		p.index = curr_index
 		p.current_token = curr_token
 	}
@@ -877,7 +896,27 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 	}
 }
 
-// Parse a type identifier: ?[]SomeType
+fn (mut p Parser) is_type_start() bool {
+	if p.current_token.kind == .punc_question_mark {
+		return true
+	}
+	
+	if p.current_token.kind == .punc_open_bracket {
+		if next := p.peek_next() {
+			return next.kind == .punc_close_bracket
+		}
+		return false
+	}
+	
+	if p.current_token.kind == .identifier {
+		if name := p.current_token.literal {
+			return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
+		}
+	}
+	
+	return false
+}
+
 fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 	mut is_option := false
 	mut is_array := false
@@ -1047,13 +1086,17 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 	}
 }
 
-// Const binding: const name = expr
 fn (mut p Parser) parse_const_binding() !ast.Expression {
 	span := p.current_span()
 	p.eat(.kw_const)!
 
 	name_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected const name')!
+
+	mut typ := ?ast.TypeIdentifier(none)
+	if p.is_type_start() {
+		typ = p.parse_type_identifier()!
+	}
 
 	p.eat(.punc_equals)!
 
@@ -1064,6 +1107,7 @@ fn (mut p Parser) parse_const_binding() !ast.Expression {
 			name: name
 			span: name_span
 		}
+		typ:  typ
 		init: init
 		span: span
 	}
