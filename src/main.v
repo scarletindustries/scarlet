@@ -56,7 +56,7 @@ fn main() {
 						}
 					}
 
-					check_result := types.check(mut result.ast)
+					check_result := types.check(result.ast)
 					if check_result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
 						if !check_result.success {
@@ -189,7 +189,7 @@ fn main() {
 						}
 					}
 
-					check_result := types.check(mut result.ast)
+					check_result := types.check(result.ast)
 					if check_result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
 						if !check_result.success {

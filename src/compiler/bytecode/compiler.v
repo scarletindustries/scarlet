@@ -1,6 +1,6 @@
 module bytecode
 
-import compiler.ast
+import compiler.typed_ast
 import compiler.type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
 import compiler.types { TypeEnv }
 
@@ -37,7 +37,7 @@ mut:
 	in_tail_position bool           // true when compiling in tail position (for TCO)
 }
 
-pub fn compile(expr ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
+pub fn compile(expr typed_typed_ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
 	mut c := Compiler{
 		options:          options
 		type_env:         type_env
@@ -151,14 +151,14 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 }
 
 // Compile expression with an optional type hint for inference
-fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type string) ! {
+fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_type string) ! {
 	// If we have an expected enum type and this looks like a bare variant, compile it as such
 	if expected_type != '' {
 		if enum_type := c.type_env.lookup_type(expected_type) {
 			if enum_type is TypeEnum {
 				// Check for Variant(payload) form
-				if expr is ast.FunctionCallExpression {
-					call := expr as ast.FunctionCallExpression
+				if expr is typed_ast.FunctionCallExpression {
+					call := expr as typed_ast.FunctionCallExpression
 					if call.identifier.name in enum_type.variants {
 						// This is a bare enum variant with payload
 						enum_idx := c.add_constant(expected_type)
@@ -179,8 +179,8 @@ fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type st
 				}
 
 				// Check for bare Variant form (no payload)
-				if expr is ast.Identifier {
-					ident := expr as ast.Identifier
+				if expr is typed_ast.Identifier {
+					ident := expr as typed_ast.Identifier
 					if ident.name in enum_type.variants {
 						// This is a bare enum variant without payload
 						enum_idx := c.add_constant(expected_type)
@@ -199,13 +199,13 @@ fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type st
 	c.compile_expr(expr)!
 }
 
-fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
+fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 	// Remember if THIS expression is in tail position, then reset for sub-expressions
 	is_tail := c.in_tail_position
 	c.in_tail_position = false
 
 	match expr {
-		ast.BlockExpression {
+		typed_ast.BlockExpression {
 			for i, e in expr.body {
 				// Only the last expression inherits tail position
 				c.in_tail_position = is_tail && i == expr.body.len - 1
@@ -220,7 +220,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				c.emit(.push_none)
 			}
 		}
-		ast.NumberLiteral {
+		typed_ast.NumberLiteral {
 			if expr.value.contains('.') {
 				val := expr.value.f64()
 				idx := c.add_constant(val)
@@ -231,11 +231,11 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				c.emit_arg(.push_const, idx)
 			}
 		}
-		ast.StringLiteral {
+		typed_ast.StringLiteral {
 			idx := c.add_constant(expr.value)
 			c.emit_arg(.push_const, idx)
 		}
-		ast.InterpolatedString {
+		typed_ast.InterpolatedString {
 			// Compile each part and concatenate with str_concat
 			if expr.parts.len == 0 {
 				idx := c.add_constant('')
@@ -253,17 +253,17 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				}
 			}
 		}
-		ast.BooleanLiteral {
+		typed_ast.BooleanLiteral {
 			if expr.value {
 				c.emit(.push_true)
 			} else {
 				c.emit(.push_false)
 			}
 		}
-		ast.NoneExpression {
+		typed_ast.NoneExpression {
 			c.emit(.push_none)
 		}
-		ast.Identifier {
+		typed_ast.Identifier {
 			if access := c.resolve_variable(expr.name) {
 				if access.is_local {
 					c.emit_arg(.push_local, access.index)
@@ -276,7 +276,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				return error('Undefined variable: ${expr.name}')
 			}
 		}
-		ast.VariableBinding {
+		typed_ast.VariableBinding {
 			idx := c.get_or_create_local(expr.identifier.name)
 
 			old_binding := c.current_binding
@@ -287,13 +287,13 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit_arg(.store_local, idx)
 			c.emit(.push_none)
 		}
-		ast.ConstBinding {
+		typed_ast.ConstBinding {
 			c.compile_expr(expr.init)!
 			idx := c.get_or_create_local(expr.identifier.name)
 			c.emit_arg(.store_local, idx)
 			c.emit(.push_none)
 		}
-		ast.BinaryExpression {
+		typed_ast.BinaryExpression {
 			// Short-circuit evaluation for && and ||
 			if expr.op.kind == .logical_and {
 				c.compile_expr(expr.left)!
@@ -359,7 +359,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				}
 			}
 		}
-		ast.UnaryExpression {
+		typed_ast.UnaryExpression {
 			c.compile_expr(expr.expression)!
 			match expr.op.kind {
 				.punc_exclamation_mark {
@@ -373,7 +373,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				}
 			}
 		}
-		ast.IfExpression {
+		typed_ast.IfExpression {
 			// Condition is NOT in tail position (already reset to false)
 			c.compile_expr(expr.condition)!
 
@@ -403,29 +403,29 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			end_addr := c.current_addr()
 			c.program.code[end_jump] = op_arg(.jump, end_addr)
 		}
-		ast.MatchExpression {
+		typed_ast.MatchExpression {
 			c.compile_match(expr, is_tail)!
 		}
-		ast.ArrayExpression {
+		typed_ast.ArrayExpression {
 			for elem in expr.elements {
 				c.compile_expr(elem)!
 			}
 			c.emit_arg(.make_array, expr.elements.len)
 		}
-		ast.ArrayIndexExpression {
+		typed_ast.ArrayIndexExpression {
 			c.compile_expr(expr.expression)!
 			c.compile_expr(expr.index)!
 			c.emit(.index)
 		}
-		ast.RangeExpression {
+		typed_ast.RangeExpression {
 			c.compile_expr(expr.start)!
 			c.compile_expr(expr.end)!
 			c.emit(.make_range)
 		}
-		ast.FunctionExpression {
+		typed_ast.FunctionExpression {
 			c.compile_function(expr)!
 		}
-		ast.FunctionCallExpression {
+		typed_ast.FunctionCallExpression {
 			// Get expected parameter types from type_env for enum inference
 			func_type := c.type_env.lookup_function(expr.identifier.name)
 
@@ -461,18 +461,18 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				c.compile_builtin_call(expr)!
 			}
 		}
-		ast.PropertyAccessExpression {
+		typed_ast.PropertyAccessExpression {
 			// Check if this is an enum variant access (MyEnum.Variant or MyEnum.Variant(payload))
-			if expr.left is ast.Identifier {
-				left_id := expr.left as ast.Identifier
+			if expr.left is typed_ast.Identifier {
+				left_id := expr.left as typed_ast.Identifier
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						// This is an enum variant construction
 						enum_name := left_id.name
 
-						if expr.right is ast.FunctionCallExpression {
+						if expr.right is typed_ast.FunctionCallExpression {
 							// MyEnum.Variant(payload)
-							call := expr.right as ast.FunctionCallExpression
+							call := expr.right as typed_ast.FunctionCallExpression
 							variant_name := call.identifier.name
 
 							if variant_name !in enum_type.variants {
@@ -497,9 +497,9 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 							} else {
 								return error('Variant "${variant_name}" does not take a payload')
 							}
-						} else if expr.right is ast.Identifier {
+						} else if expr.right is typed_ast.Identifier {
 							// MyEnum.Variant (no payload)
-							variant_id := expr.right as ast.Identifier
+							variant_id := expr.right as typed_ast.Identifier
 							variant_name := variant_id.name
 
 							if variant_name !in enum_type.variants {
@@ -526,32 +526,32 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			// Regular property access (struct field)
 			c.compile_expr(expr.left)!
 
-			if expr.right is ast.FunctionCallExpression {
-				call := expr.right as ast.FunctionCallExpression
+			if expr.right is typed_ast.FunctionCallExpression {
+				call := expr.right as typed_ast.FunctionCallExpression
 
 				for arg in call.arguments {
 					c.compile_expr(arg)!
 				}
 
 				return error('Method calls not yet implemented')
-			} else if expr.right is ast.Identifier {
-				id := expr.right as ast.Identifier
+			} else if expr.right is typed_ast.Identifier {
+				id := expr.right as typed_ast.Identifier
 
 				idx := c.add_constant(id.name)
 				c.emit_arg(.get_field, idx)
 			}
 		}
-		ast.StructExpression {
+		typed_ast.StructExpression {
 			// Struct is already registered in type_env by type checker
 			// Struct declarations don't produce a value at runtime
 			c.emit(.push_none)
 		}
-		ast.EnumExpression {
+		typed_ast.EnumExpression {
 			// Enum is already registered in type_env by type checker
 			// Enum declarations don't produce a value at runtime
 			c.emit(.push_none)
 		}
-		ast.StructInitExpression {
+		typed_ast.StructInitExpression {
 			struct_name := expr.identifier.name
 
 			struct_type := c.type_env.lookup_struct(struct_name) or {
@@ -585,7 +585,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit_arg(.push_const, type_idx)
 			c.emit_arg(.make_struct, expr.fields.len)
 		}
-		ast.AssertExpression {
+		typed_ast.AssertExpression {
 			c.compile_expr(expr.expression)!
 
 			// If true, jump over error path
@@ -601,20 +601,20 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.program.code[ok_jump] = op_arg(.jump_if_true, c.current_addr())
 			c.emit(.push_none)
 		}
-		ast.ExportExpression {
+		typed_ast.ExportExpression {
 			// TODO: exports not implemented yet, just compile the inner expression
 			c.compile_expr(expr.expression)!
 		}
-		ast.ImportDeclaration {
+		typed_ast.ImportDeclaration {
 			// TODO: imports not implemented yet
 			c.emit(.push_none)
 		}
-		ast.ErrorExpression {
+		typed_ast.ErrorExpression {
 			// error 'message' -> creates an ErrorValue
 			c.compile_expr(expr.expression)!
 			c.emit(.make_error)
 		}
-		ast.OrExpression {
+		typed_ast.OrExpression {
 			// Two forms based on the type being unwrapped (set by type checker):
 			// - TypeResult: handle errors with `or e -> { ... }`
 			// - TypeOption: handle none with `or { default }`
@@ -677,7 +677,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				}
 			}
 		}
-		ast.PropagateExpression {
+		typed_ast.PropagateExpression {
 			// expr! -> if error/none, return it; else unwrap
 			c.compile_expr(expr.expression)!
 
@@ -721,7 +721,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 	}
 }
 
-fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
+fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 	// Save current state and push to outer scopes
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
@@ -808,7 +808,7 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	}
 }
 
-fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
+fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 	c.compile_expr(m.subject)!
 
 	mut end_jumps := []int{}
@@ -818,34 +818,35 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 
 		// Check if this is an enum destructuring pattern
 		mut binding_name := ?string(none)
-		mut literal_pattern := ?ast.Expression(none)
+		mut literal_pattern := ?typed_ast.Expression(none)
 		mut enum_name := ?string(none)
 		mut variant_name := ?string(none)
 
 		// Full form: EnumName.Variant(binding) or EnumName.Variant("literal")
-		if arm.pattern is ast.PropertyAccessExpression {
-			prop := arm.pattern as ast.PropertyAccessExpression
-			if prop.left is ast.Identifier {
-				left_id := prop.left as ast.Identifier
+		if arm.pattern is typed_ast.PropertyAccessExpression {
+			prop := arm.pattern as typed_ast.PropertyAccessExpression
+			if prop.left is typed_ast.Identifier {
+				left_id := prop.left as typed_ast.Identifier
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						enum_name = left_id.name
-						if prop.right is ast.FunctionCallExpression {
-							call := prop.right as ast.FunctionCallExpression
+						if prop.right is typed_ast.FunctionCallExpression {
+							call := prop.right as typed_ast.FunctionCallExpression
 							variant_name = call.identifier.name
 							if call.arguments.len == 1 {
 								arg := call.arguments[0]
-								if arg is ast.Identifier {
-									binding_id := arg as ast.Identifier
+								if arg is typed_ast.Identifier {
+									binding_id := arg as typed_ast.Identifier
 									binding_name = binding_id.name
-								} else if arg is ast.StringLiteral || arg is ast.NumberLiteral
-									|| arg is ast.BooleanLiteral {
+								} else if arg is typed_ast.StringLiteral
+									|| arg is typed_ast.NumberLiteral
+									|| arg is typed_ast.BooleanLiteral {
 									literal_pattern = arg
 								}
 							}
-						} else if prop.right is ast.Identifier {
+						} else if prop.right is typed_ast.Identifier {
 							// EnumName.Variant (no payload)
-							right_id := prop.right as ast.Identifier
+							right_id := prop.right as typed_ast.Identifier
 							variant_name = right_id.name
 						}
 					}
@@ -854,18 +855,18 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 		}
 
 		// Shorthand form: Variant(binding) or Variant("literal") - infer enum from variant name
-		if arm.pattern is ast.FunctionCallExpression {
-			call := arm.pattern as ast.FunctionCallExpression
+		if arm.pattern is typed_ast.FunctionCallExpression {
+			call := arm.pattern as typed_ast.FunctionCallExpression
 			if inferred_enum := c.find_enum_for_variant(call.identifier.name) {
 				enum_name = inferred_enum
 				variant_name = call.identifier.name
 				if call.arguments.len == 1 {
 					arg := call.arguments[0]
-					if arg is ast.Identifier {
-						binding_id := arg as ast.Identifier
+					if arg is typed_ast.Identifier {
+						binding_id := arg as typed_ast.Identifier
 						binding_name = binding_id.name
-					} else if arg is ast.StringLiteral || arg is ast.NumberLiteral
-						|| arg is ast.BooleanLiteral {
+					} else if arg is typed_ast.StringLiteral || arg is typed_ast.NumberLiteral
+						|| arg is typed_ast.BooleanLiteral {
 						literal_pattern = arg
 					}
 				}
@@ -873,8 +874,8 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 		}
 
 		// Shorthand form: Variant (no payload) - infer enum from variant name
-		if arm.pattern is ast.Identifier {
-			ident := arm.pattern as ast.Identifier
+		if arm.pattern is typed_ast.Identifier {
+			ident := arm.pattern as typed_ast.Identifier
 			if inferred_enum := c.find_enum_for_variant(ident.name) {
 				enum_name = inferred_enum
 				variant_name = ident.name
@@ -938,7 +939,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 			}
 		}
 		// Check for wildcard pattern (else =>)
-		if arm.pattern is ast.WildcardPattern {
+		if arm.pattern is typed_ast.WildcardPattern {
 			// Wildcard always matches - no comparison needed
 			c.emit(.pop) // pop the dup'd subject
 			c.emit(.pop) // pop the original subject
@@ -979,7 +980,7 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 	}
 }
 
-fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
+fn (mut c Compiler) compile_builtin_call(call typed_ast.FunctionCallExpression) ! {
 	match call.identifier.name {
 		'println' {
 			if call.arguments.len != 1 {
