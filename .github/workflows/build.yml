@@ -79,18 +79,21 @@ jobs:
         include:
           - os: macos-latest
             platform: macos
+            v_archive: v_macos_arm64.zip
           - os: ubuntu-latest
             platform: linux
+            v_archive: v_linux.zip
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup V
-        uses: vlang/setup-v@v1.4
-        with:
-          check-latest: true
+      - name: Download V
+        run: |
+          curl -sL https://github.com/vlang/v/releases/latest/download/${{ matrix.v_archive }} -o /tmp/v.zip
+          unzip -q /tmp/v.zip -d /tmp
+          echo "/tmp/v" >> $GITHUB_PATH
 
       - name: Update VERSION file
         run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
