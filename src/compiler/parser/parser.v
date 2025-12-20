@@ -62,11 +62,13 @@ fn (p Parser) current_context() ParseContext {
 }
 
 fn (mut p Parser) add_error(message string) {
-	p.diagnostics << diagnostic.error_at(p.current_token.line, p.current_token.column, message)
+	p.diagnostics << diagnostic.error_at(p.current_token.line, p.current_token.column,
+		message)
 }
 
 fn (mut p Parser) add_warning(message string) {
-	p.diagnostics << diagnostic.warning_at(p.current_token.line, p.current_token.column, message)
+	p.diagnostics << diagnostic.warning_at(p.current_token.line, p.current_token.column,
+		message)
 }
 
 fn (p Parser) current_span() ast.Span {
@@ -317,7 +319,7 @@ fn (mut p Parser) parse_logical_or() !ast.Expression {
 			op:    ast.Operator{
 				kind: .logical_or
 			}
-			span: span
+			span:  span
 		}
 	}
 
@@ -338,7 +340,7 @@ fn (mut p Parser) parse_logical_and() !ast.Expression {
 			op:    ast.Operator{
 				kind: .logical_and
 			}
-			span: span
+			span:  span
 		}
 	}
 
@@ -360,7 +362,7 @@ fn (mut p Parser) parse_equality() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span: span
+			span:  span
 		}
 	}
 
@@ -382,7 +384,7 @@ fn (mut p Parser) parse_comparison() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span: span
+			span:  span
 		}
 	}
 
@@ -404,7 +406,7 @@ fn (mut p Parser) parse_additive() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span: span
+			span:  span
 		}
 	}
 
@@ -426,7 +428,7 @@ fn (mut p Parser) parse_multiplicative() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span: span
+			span:  span
 		}
 	}
 
@@ -614,8 +616,8 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 				name: name
 				span: span
 			}
-			init: init
-			span: span
+			init:       init
+			span:       span
 		}
 	}
 
@@ -629,9 +631,9 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 				name: name
 				span: span
 			}
-			typ: typ
-			init: init
-			span: span
+			typ:        typ
+			init:       init
+			span:       span
 		}
 	}
 
@@ -900,20 +902,20 @@ fn (mut p Parser) is_type_start() bool {
 	if p.current_token.kind == .punc_question_mark {
 		return true
 	}
-	
+
 	if p.current_token.kind == .punc_open_bracket {
 		if next := p.peek_next() {
 			return next.kind == .punc_close_bracket
 		}
 		return false
 	}
-	
+
 	if p.current_token.kind == .identifier {
 		if name := p.current_token.literal {
 			return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
 		}
 	}
-	
+
 	return false
 }
 
@@ -1106,9 +1108,9 @@ fn (mut p Parser) parse_const_binding() !ast.Expression {
 			name: name
 			span: name_span
 		}
-		typ:  typ
-		init: init
-		span: span
+		typ:        typ
+		init:       init
+		span:       span
 	}
 }
 
@@ -1229,8 +1231,8 @@ fn (mut p Parser) parse_function_call_expression(name string, span ast.Span) !as
 			name: name
 			span: span
 		}
-		arguments: arguments
-		span:      span
+		arguments:  arguments
+		span:       span
 	}
 }
 

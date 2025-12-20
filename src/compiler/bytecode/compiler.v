@@ -224,7 +224,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 		ast.BlockExpression {
 			for i, e in expr.body {
 				// Only the last expression inherits tail position
-				c.in_tail_position = is_tail && (i == expr.body.len - 1)
+				c.in_tail_position = is_tail && i == expr.body.len - 1
 				c.compile_expr(e)!
 				c.in_tail_position = false
 				if i < expr.body.len - 1 {

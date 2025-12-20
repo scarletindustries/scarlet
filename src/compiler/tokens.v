@@ -18,7 +18,7 @@ pub fn (t &Token) str() string {
 		}
 	}
 
-	return t.literal or {t.kind.str()}
+	return t.literal or { t.kind.str() }
 }
 
 pub const total_known_tokens = int(token.Kind._end_)

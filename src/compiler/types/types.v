@@ -8,6 +8,7 @@ pub type Type = TypePrimitive
 	| TypeEnum
 	| TypeNone
 	| TypeVar
+	| TypeResult
 
 pub enum PrimitiveKind {
 	t_int
@@ -55,6 +56,12 @@ pub struct TypeNone {}
 pub struct TypeVar {
 pub:
 	name string
+}
+
+pub struct TypeResult {
+pub:
+	success Type // The T in T!E
+	error   Type // The E in T!E
 }
 
 pub fn t_int() Type {
@@ -166,6 +173,12 @@ pub fn types_equal(a Type, b Type) bool {
 			}
 			return false
 		}
+		TypeResult {
+			if b is TypeResult {
+				return types_equal(a.success, b.success) && types_equal(a.error, b.error)
+			}
+			return false
+		}
 	}
 }
 
@@ -208,6 +221,9 @@ pub fn type_to_string(t Type) string {
 		TypeVar {
 			return t.name
 		}
+		TypeResult {
+			return '${type_to_string(t.success)}!${type_to_string(t.error)}'
+		}
 	}
 }
 
@@ -242,9 +258,14 @@ pub fn substitute(t Type, subs map[string]Type) Type {
 				ret:    substitute(t.ret, subs)
 			}
 		}
+		TypeResult {
+			return TypeResult{
+				success: substitute(t.success, subs)
+				error:   substitute(t.error, subs)
+			}
+		}
 		else {
 			return t
 		}
 	}
 }
-

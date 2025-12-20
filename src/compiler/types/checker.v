@@ -110,7 +110,8 @@ fn (mut c TypeChecker) register_builtins() {
 
 fn (mut c TypeChecker) expect_type(actual Type, expected Type, span ast.Span, context string) bool {
 	if !types_equal(actual, expected) {
-		c.error_at_span('Type mismatch: expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}', span)
+		c.error_at_span('Type mismatch: expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}',
+			span)
 		return false
 	}
 	return true
@@ -253,6 +254,65 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 		ast.MatchExpression {
 			return c.check_match(expr)
 		}
+		ast.OrExpression {
+			expr_type := c.check_expr(expr.expression)
+
+			mut success_type := expr_type
+			mut error_type := t_none()
+
+			if expr_type is TypeOption {
+				// Unwrapping ?T gives T, error is None
+				success_type = expr_type.inner
+				error_type = t_none()
+			} else if expr_type is TypeResult {
+				success_type = expr_type.success
+				error_type = expr_type.error
+			}
+
+			if receiver := expr.receiver {
+				c.env.push_scope()
+				c.env.define(receiver.name, error_type)
+			}
+
+			body_type := c.check_expr(expr.body)
+			body_span := get_expr_span(expr.body)
+
+			c.expect_type(body_type, success_type, body_span, "in 'or' fallback")
+
+			if expr.receiver != none {
+				c.env.pop_scope()
+			}
+
+			return success_type
+		}
+		ast.PostfixExpression {
+			inner_type := c.check_expr(expr.expression)
+
+			match expr.op.kind {
+				.punc_exclamation_mark {
+					if inner_type is TypeOption {
+						return inner_type.inner
+					}
+					if inner_type is TypeResult {
+						return inner_type.success
+					}
+					return inner_type
+				}
+				else {
+					return t_none()
+				}
+			}
+		}
+		ast.ErrorExpression {
+			// Check the error value expression to get its type
+			error_type := c.check_expr(expr.expression)
+
+			// The error expression returns the error type
+			// (In a fully-featured implementation, we might want to verify
+			// this matches the enclosing function's declared error type,
+			// but for now just return the type of the error value)
+			return error_type
+		}
 		else {
 			return t_none()
 		}
@@ -269,29 +329,35 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) Type {
 				return t_string()
 			}
 			if !is_numeric(left_type) {
-				c.error_at_span('Left operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(left_type)}', expr.span)
+				c.error_at_span('Left operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(left_type)}',
+					expr.span)
 				return t_int()
 			}
 			if !is_numeric(right_type) {
-				c.error_at_span('Right operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(right_type)}', expr.span)
+				c.error_at_span('Right operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(right_type)}',
+					expr.span)
 				return t_int()
 			}
 			if !types_equal(left_type, right_type) {
-				c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}', expr.span)
+				c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}',
+					expr.span)
 			}
 			return left_type
 		}
 		.punc_minus, .punc_mul, .punc_div, .punc_mod {
 			if !is_numeric(left_type) {
-				c.error_at_span('Left operand of ${expr.op.kind} must be numeric, got ${type_to_string(left_type)}', expr.span)
+				c.error_at_span('Left operand of ${expr.op.kind} must be numeric, got ${type_to_string(left_type)}',
+					expr.span)
 				return t_int()
 			}
 			if !is_numeric(right_type) {
-				c.error_at_span('Right operand of ${expr.op.kind} must be numeric, got ${type_to_string(right_type)}', expr.span)
+				c.error_at_span('Right operand of ${expr.op.kind} must be numeric, got ${type_to_string(right_type)}',
+					expr.span)
 				return t_int()
 			}
 			if !types_equal(left_type, right_type) {
-				c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}', expr.span)
+				c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}',
+					expr.span)
 			}
 			return left_type
 		}
@@ -303,7 +369,8 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) Type {
 		}
 		.punc_equals_comparator, .punc_not_equal {
 			if !types_equal(left_type, right_type) {
-				c.error_at_span('Cannot compare ${type_to_string(left_type)} with ${type_to_string(right_type)}', expr.span)
+				c.error_at_span('Cannot compare ${type_to_string(left_type)} with ${type_to_string(right_type)}',
+					expr.span)
 			}
 			return t_bool()
 		}
@@ -325,7 +392,8 @@ fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) Type {
 	match expr.op.kind {
 		.punc_minus {
 			if !is_numeric(operand_type) {
-				c.error_at_span('Unary minus requires numeric operand, got ${type_to_string(operand_type)}', span)
+				c.error_at_span('Unary minus requires numeric operand, got ${type_to_string(operand_type)}',
+					span)
 			}
 			return operand_type
 		}
@@ -369,7 +437,8 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 				param_types << t_none()
 			}
 		} else {
-			c.error_at_span("Parameter '${param.identifier.name}' requires a type annotation", param.identifier.span)
+			c.error_at_span("Parameter '${param.identifier.name}' requires a type annotation",
+				param.identifier.span)
 			param_types << t_none()
 		}
 	}
@@ -437,7 +506,8 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) Type {
 
 fn (mut c TypeChecker) check_call_with_type(expr ast.FunctionCallExpression, func_type TypeFunction) Type {
 	if expr.arguments.len != func_type.params.len {
-		c.error_at_span("Function '${expr.identifier.name}' expects ${func_type.params.len} arguments, got ${expr.arguments.len}", expr.span)
+		c.error_at_span("Function '${expr.identifier.name}' expects ${func_type.params.len} arguments, got ${expr.arguments.len}",
+			expr.span)
 		return func_type.ret
 	}
 
@@ -454,7 +524,14 @@ fn (mut c TypeChecker) check_call_with_type(expr ast.FunctionCallExpression, fun
 		}
 	}
 
-	return substitute(func_type.ret, subs)
+	ret := substitute(func_type.ret, subs)
+	if err_type := func_type.error_type {
+		return TypeResult{
+			success: ret
+			error:   substitute(err_type, subs)
+		}
+	}
+	return ret
 }
 
 fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Type) bool {
@@ -474,6 +551,11 @@ fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Typ
 		return c.unify(actual.inner, expected.inner, mut subs)
 	}
 
+	if actual is TypeResult && expected is TypeResult {
+		return c.unify(actual.success, expected.success, mut subs)
+			&& c.unify(actual.error, expected.error, mut subs)
+	}
+
 	return types_equal(actual, expected)
 }
 
@@ -487,7 +569,8 @@ fn (mut c TypeChecker) check_if(expr ast.IfExpression) Type {
 	if else_body := expr.else_body {
 		else_type := c.check_expr(else_body)
 		if !types_equal(then_type, else_type) {
-			c.error_at_span('If branches have different types: ${type_to_string(then_type)} and ${type_to_string(else_type)}', expr.span)
+			c.error_at_span('If branches have different types: ${type_to_string(then_type)} and ${type_to_string(else_type)}',
+				expr.span)
 		}
 		return then_type
 	}
@@ -534,7 +617,8 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) Type {
 		if resolved := c.resolve_type_identifier(field.typ) {
 			fields[field.identifier.name] = resolved
 		} else {
-			c.error_at_span("Unknown type '${field.typ.identifier.name}' for field '${field.identifier.name}'", field.identifier.span)
+			c.error_at_span("Unknown type '${field.typ.identifier.name}' for field '${field.identifier.name}'",
+				field.identifier.span)
 		}
 	}
 
@@ -555,7 +639,8 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) Type {
 				init_span := get_expr_span(field.init)
 				c.expect_type(actual_type, expected_type, init_span, "in field '${field.identifier.name}'")
 			} else {
-				c.error_at_span("Unknown field '${field.identifier.name}' in struct '${expr.identifier.name}'", field.identifier.span)
+				c.error_at_span("Unknown field '${field.identifier.name}' in struct '${expr.identifier.name}'",
+					field.identifier.span)
 			}
 		}
 		return struct_def
@@ -573,7 +658,8 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) Type {
 			if resolved := c.resolve_type_identifier(payload) {
 				variants[variant.identifier.name] = resolved
 			} else {
-				c.error_at_span("Unknown type '${payload.identifier.name}' in variant '${variant.identifier.name}'", variant.identifier.span)
+				c.error_at_span("Unknown type '${payload.identifier.name}' in variant '${variant.identifier.name}'",
+					variant.identifier.span)
 				variants[variant.identifier.name] = none
 			}
 		} else {
@@ -598,7 +684,8 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 			if field_type := left_type.fields[expr.right.name] {
 				return field_type
 			}
-			c.error_at_span("Struct '${left_type.name}' has no field '${expr.right.name}'", expr.right.span)
+			c.error_at_span("Struct '${left_type.name}' has no field '${expr.right.name}'",
+				expr.right.span)
 		}
 	}
 
