@@ -214,12 +214,14 @@ pub fn (mut p Parser) parse_program() ParseResult {
 	mut body := []ast.Expression{}
 
 	for p.current_token.kind != .eof {
+		span := p.current_span()
 		expr := p.parse_expression() or {
 			p.add_error(err.msg())
 			p.synchronize()
 
 			body << ast.ErrorNode{
 				message: err.msg()
+				span:    span
 			}
 			continue
 		}
@@ -512,8 +514,11 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			inner
 		}
 		.kw_none {
+			span := p.current_span()
 			p.eat(.kw_none)!
-			ast.NoneExpression{}
+			ast.NoneExpression{
+				span: span
+			}
 		}
 		.kw_true {
 			span := p.current_span()
@@ -568,9 +573,11 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			p.parse_error_expression()!
 		}
 		.error {
+			span := p.current_span()
 			p.advance()
 			ast.ErrorNode{
 				message: 'Scanner error'
+				span:    span
 			}
 		}
 		else {
@@ -642,11 +649,13 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 	mut body := []ast.Expression{}
 
 	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
+		span := p.current_span()
 		expr := p.parse_expression() or {
 			p.add_error(err.msg())
 			p.synchronize()
 			body << ast.ErrorNode{
 				message: err.msg()
+				span:    span
 			}
 			continue
 		}
@@ -669,6 +678,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 	mut elements := []ast.Expression{}
 
 	for p.current_token.kind != .punc_close_bracket && p.current_token.kind != .eof {
+		elem_span := p.current_span()
 		expr := p.parse_expression() or {
 			p.add_error(err.msg())
 			p.synchronize()
@@ -677,6 +687,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 			}
 			elements << ast.ErrorNode{
 				message: err.msg()
+				span:    elem_span
 			}
 			continue
 		}
@@ -732,8 +743,11 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 
 	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
 		pattern := if p.current_token.kind == .kw_else {
+			span := p.current_span()
 			p.eat(.kw_else)!
-			ast.Expression(ast.WildcardPattern{})
+			ast.Expression(ast.WildcardPattern{
+				span: span
+			})
 		} else {
 			p.parse_expression() or {
 				p.add_error(err.msg())
@@ -754,6 +768,7 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 			continue
 		}
 
+		body_span := p.current_span()
 		body := p.parse_expression() or {
 			p.add_error(err.msg())
 			p.synchronize()
@@ -762,6 +777,7 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 			}
 			ast.ErrorNode{
 				message: err.msg()
+				span:    body_span
 			}
 		}
 

@@ -31,11 +31,15 @@ pub:
 	span  Span @[required]
 }
 
-pub struct NoneExpression {}
+pub struct NoneExpression {
+pub:
+	span Span @[required]
+}
 
 pub struct ErrorNode {
 pub:
 	message string
+	span    Span @[required]
 }
 
 pub struct Identifier {
@@ -105,7 +109,10 @@ pub:
 	body    Expression
 }
 
-pub struct WildcardPattern {}
+pub struct WildcardPattern {
+pub:
+	span Span @[required]
+}
 
 pub struct MatchExpression {
 pub:

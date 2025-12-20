@@ -181,13 +181,13 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 			expr.identifier.span
 		}
 		typed_ast.NoneExpression {
-			panic('NoneExpression has no span')
+			expr.span
 		}
 		typed_ast.ErrorNode {
-			panic('ErrorNode has no span')
+			expr.span
 		}
 		typed_ast.WildcardPattern {
-			panic('WildcardPattern has no span')
+			expr.span
 		}
 		typed_ast.ImportDeclaration {
 			panic('ImportDeclaration has no span')
@@ -377,7 +377,9 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			}, t_bool()
 		}
 		ast.NoneExpression {
-			return typed_ast.NoneExpression{}, t_none()
+			return typed_ast.NoneExpression{
+				span: convert_span(expr.span)
+			}, t_none()
 		}
 		ast.Identifier {
 			typ := if t := c.env.lookup(expr.name) {
@@ -486,11 +488,14 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			}, typ
 		}
 		ast.WildcardPattern {
-			return typed_ast.WildcardPattern{}, t_none()
+			return typed_ast.WildcardPattern{
+				span: convert_span(expr.span)
+			}, t_none()
 		}
 		ast.ErrorNode {
 			return typed_ast.ErrorNode{
 				message: expr.message
+				span:    convert_span(expr.span)
 			}, t_none()
 		}
 		ast.TypeIdentifier {
@@ -556,13 +561,6 @@ fn convert_span(s ast.Span) typed_ast.Span {
 		line:   s.line
 		column: s.column
 	}
-}
-
-fn (c TypeChecker) get_expr_type(expr typed_ast.Expression) (typed_ast.Expression, Type) {
-	// This is a helper to extract the type from an already-typed expression
-	// In a more complete implementation, we'd store types on the typed_ast nodes
-	// For now, return t_none() as a placeholder
-	return expr, t_none()
 }
 
 fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_ast.Expression, Type) {
@@ -1219,11 +1217,13 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 
 	// Handle pure property access (right side must be an identifier)
 	if expr.right !is ast.Identifier {
-		c.error_at_span('Expected identifier in property access', get_ast_span(expr.right))
+		span := get_ast_span(expr.right)
+		c.error_at_span('Expected identifier in property access', span)
 		return typed_ast.PropertyAccessExpression{
 			left:  typed_left
 			right: typed_ast.ErrorNode{
 				message: 'Expected identifier'
+				span:    convert_span(span)
 			}
 		}, t_none()
 	}
@@ -1244,6 +1244,8 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 			t_none()
 		}
 	} else {
+		c.error_at_span("Cannot access property '${right.name}' on type '${type_to_string(left_type)}'",
+			right.span)
 		t_none()
 	}
 
