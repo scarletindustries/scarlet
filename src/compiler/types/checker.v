@@ -93,7 +93,45 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 		typed_ast.ArrayExpression { expr.span }
 		typed_ast.ArrayIndexExpression { expr.span }
 		typed_ast.IfExpression { expr.span }
-		else { typed_ast.Span{} }
+		typed_ast.BlockExpression {
+			if expr.body.len > 0 {
+				get_typed_span(expr.body[0])
+			} else {
+				panic('BlockExpression with empty body has no span')
+			}
+		}
+		typed_ast.FunctionExpression {
+			if id := expr.identifier {
+				id.span
+			} else {
+				get_typed_span(expr.body)
+			}
+		}
+		typed_ast.MatchExpression { get_typed_span(expr.subject) }
+		typed_ast.OrExpression { get_typed_span(expr.expression) }
+		typed_ast.PropagateExpression { get_typed_span(expr.expression) }
+		typed_ast.ErrorExpression { get_typed_span(expr.expression) }
+		typed_ast.UnaryExpression { get_typed_span(expr.expression) }
+		typed_ast.PostfixExpression { get_typed_span(expr.expression) }
+		typed_ast.PropertyAccessExpression { get_typed_span(expr.left) }
+		typed_ast.RangeExpression { get_typed_span(expr.start) }
+		typed_ast.StructExpression { expr.identifier.span }
+		typed_ast.StructInitExpression { expr.identifier.span }
+		typed_ast.EnumExpression { expr.identifier.span }
+		typed_ast.AssertExpression { get_typed_span(expr.expression) }
+		typed_ast.ExportExpression { get_typed_span(expr.expression) }
+		typed_ast.InterpolatedString {
+			if expr.parts.len > 0 {
+				get_typed_span(expr.parts[0])
+			} else {
+				panic('InterpolatedString with empty parts has no span')
+			}
+		}
+		typed_ast.TypeIdentifier { expr.identifier.span }
+		typed_ast.NoneExpression { panic('NoneExpression has no span') }
+		typed_ast.ErrorNode { panic('ErrorNode has no span') }
+		typed_ast.WildcardPattern { panic('WildcardPattern has no span') }
+		typed_ast.ImportDeclaration { panic('ImportDeclaration has no span') }
 	}
 }
 
