@@ -3,20 +3,31 @@ module scanner
 import compiler
 import compiler.token
 import compiler.scanner.state
+import compiler.diagnostic
 
 @[heap]
 pub struct Scanner {
 	input string
 mut:
-	state &state.ScannerState
+	state       &state.ScannerState
+	diagnostics []diagnostic.Diagnostic
 }
 
 @[inline]
 pub fn new_scanner(input string) &Scanner {
 	return &Scanner{
-		input: input
-		state: &state.ScannerState{}
+		input:       input
+		state:       &state.ScannerState{}
+		diagnostics: []diagnostic.Diagnostic{}
 	}
+}
+
+fn (mut s Scanner) add_error(message string) {
+	s.diagnostics << diagnostic.error_at(s.state.get_line(), s.state.get_column(), message)
+}
+
+pub fn (s Scanner) get_diagnostics() []diagnostic.Diagnostic {
+	return s.diagnostics
 }
 
 pub fn (mut s Scanner) scan_next() compiler.Token {
@@ -67,12 +78,30 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 	if token.is_quote(ch) {
 		if ch == `\`` {
 			next := s.peek_char()
-			assert next != `\``, 'Char literals must not be empty'
+			if next == `\`` {
+				s.add_error('Character literals must not be empty')
+				s.incr_pos()
+				return s.new_token(.error, none)
+			}
 
 			s.incr_pos()
 
 			expected_closing_quote := s.peek_char()
-			assert expected_closing_quote == `\``, 'Char literals must be a single character and end with a backtick (got ${expected_closing_quote.ascii_str()})'
+			if expected_closing_quote != `\`` {
+				s.add_error("Character literals must be a single character and end with a backtick (got '${expected_closing_quote.ascii_str()}')")
+				// try to skip until we recover
+				for {
+					peek := s.peek_char()
+					if peek == 0 || peek == `\n` || peek == `\`` {
+						if peek == `\`` {
+							s.incr_pos()
+						}
+						break
+					}
+					s.incr_pos()
+				}
+				return s.new_token(.error, none)
+			}
 
 			// Skip the closing quote
 			s.incr_pos()
@@ -82,9 +111,18 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 
 		mut result := ''
 		mut has_interpolation := false
+		mut has_error := false
 
 		for {
 			next := s.peek_char()
+
+			// check for unterminated string
+			if next == 0 || next == `\n` {
+				s.add_error('Unterminated string literal')
+				has_error = true
+				break
+			}
+
 			s.incr_pos()
 
 			if next == ch {
@@ -119,11 +157,17 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 					// Escaped $, don't mark as interpolation
 					next_char = '$'
 				} else {
-					panic('unknown escape sequence \'${peeked}\'')
+					s.add_error("Unknown escape sequence '\\${peeked.ascii_str()}'")
+					// Continue scanning to recover
+					next_char = peeked.ascii_str()
 				}
 			}
 
 			result += next_char
+		}
+
+		if has_error {
+			return s.new_token(.error, result)
 		}
 
 		if has_interpolation {
@@ -269,8 +313,25 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 
 			return s.new_token(.punc_equals, none)
 		}
+		`"` {
+			s.add_error("Double quotes are not valid string delimiters. Use single quotes (') for strings or backticks (`) for character literals.")
+
+			// try to skip until we recover
+			for {
+				next := s.peek_char()
+				if next == 0 || next == `\n` {
+					break
+				}
+				s.incr_pos()
+				if next == `"` {
+					break
+				}
+			}
+			return s.new_token(.error, none)
+		}
 		else {
-			panic('unexpected character \'${ch.ascii_str()}\' at line ${s.state.get_line()} column ${s.state.get_column()}')
+			s.add_error("Unexpected character '${ch.ascii_str()}'")
+			return s.new_token(.error, ch.ascii_str())
 		}
 	}
 }

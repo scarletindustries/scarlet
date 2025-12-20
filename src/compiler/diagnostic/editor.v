@@ -172,7 +172,8 @@ fn detect_editor_macos() Editor {
 	if processes.contains('VSCodium') || processes.contains('vscodium') {
 		return .vscodium
 	}
-	if processes.contains('Visual Studio Code') || processes.contains('Code Helper') || processes.contains('Code.app') {
+	if processes.contains('Visual Studio Code') || processes.contains('Code Helper')
+		|| processes.contains('Code.app') {
 		return .vscode
 	}
 	if processes.contains('Cursor.app') || processes.contains('/Cursor/') {

@@ -520,7 +520,9 @@ fn (mut vm VM) execute() !bytecode.Value {
 				path_val := vm.pop()!
 				if path_val is string {
 					content := os.read_file(path_val) or {
-						vm.stack << bytecode.ErrorValue{payload: 'Failed to read file: ${err}'}
+						vm.stack << bytecode.ErrorValue{
+							payload: 'Failed to read file: ${err}'
+						}
 						continue
 					}
 					vm.stack << content
@@ -536,7 +538,9 @@ fn (mut vm VM) execute() !bytecode.Value {
 				path_val := vm.pop()!
 				if path_val is string && content is string {
 					os.write_file(path_val, content) or {
-						vm.stack << bytecode.ErrorValue{payload: 'Failed to write file: ${err}'}
+						vm.stack << bytecode.ErrorValue{
+							payload: 'Failed to write file: ${err}'
+						}
 						continue
 					}
 					vm.stack << bytecode.NoneValue{}
@@ -551,7 +555,9 @@ fn (mut vm VM) execute() !bytecode.Value {
 				port_val := vm.pop()!
 				if port_val is int {
 					listener := net.listen_tcp(.ip, '0.0.0.0:${port_val}') or {
-						vm.stack << bytecode.ErrorValue{payload: 'Failed to listen: ${err}'}
+						vm.stack << bytecode.ErrorValue{
+							payload: 'Failed to listen: ${err}'
+						}
 						continue
 					}
 					socket_id := vm.next_socket_id
@@ -576,7 +582,9 @@ fn (mut vm VM) execute() !bytecode.Value {
 					}
 					if mut listener := vm.tcp_listeners[socket_val.id] {
 						conn := listener.accept() or {
-							vm.stack << bytecode.ErrorValue{payload: 'Failed to accept: ${err}'}
+							vm.stack << bytecode.ErrorValue{
+								payload: 'Failed to accept: ${err}'
+							}
 							continue
 						}
 						conn_id := vm.next_socket_id
@@ -605,7 +613,9 @@ fn (mut vm VM) execute() !bytecode.Value {
 					if mut conn := vm.tcp_connections[socket_val.id] {
 						mut buf := []u8{len: 4096}
 						bytes_read := conn.read(mut buf) or {
-							vm.stack << bytecode.ErrorValue{payload: 'Failed to read: ${err}'}
+							vm.stack << bytecode.ErrorValue{
+								payload: 'Failed to read: ${err}'
+							}
 							continue
 						}
 						if bytes_read == 0 {
@@ -632,7 +642,9 @@ fn (mut vm VM) execute() !bytecode.Value {
 					}
 					if mut conn := vm.tcp_connections[socket_val.id] {
 						bytes_written := conn.write(data.bytes()) or {
-							vm.stack << bytecode.ErrorValue{payload: 'Failed to write: ${err}'}
+							vm.stack << bytecode.ErrorValue{
+								payload: 'Failed to write: ${err}'
+							}
 							continue
 						}
 						vm.stack << bytes_written

@@ -18,65 +18,7 @@ pub fn (t &Token) str() string {
 		}
 	}
 
-	return t.literal or {
-		return match t.kind {
-			.punc_comma { ',' }
-			.punc_open_paren { '(' }
-			.punc_close_paren { ')' }
-			.punc_open_brace { '{' }
-			.punc_close_brace { '}' }
-			.punc_open_bracket { '[' }
-			.punc_close_bracket { ']' }
-			.punc_colon { ':' }
-			.punc_semicolon { ';' }
-			.punc_declaration { ':=' }
-			.punc_dot { '.' }
-			.punc_gt { '>' }
-			.punc_lt { '<' }
-			.punc_gte { '>=' }
-			.punc_lte { '<=' }
-			.eof { 'EOF' }
-			.logical_and { '&&' }
-			.logical_or { '||' }
-			.bitwise_and { '&' }
-			.bitwise_or { '|' }
-			.bitwise_xor { '^' }
-			.bitwise_not { '~' }
-			.kw_from { 'from' }
-			.kw_import { 'import' }
-			.kw_function { 'fn' }
-			.kw_const { 'const' }
-			.kw_enum { 'enum' }
-			.kw_error { 'error' }
-			.kw_if { 'if' }
-			.kw_else { 'else' }
-			.kw_true { 'true' }
-			.kw_false { 'false' }
-			.kw_assert { 'assert' }
-			.kw_export { 'export' }
-			.kw_struct { 'struct' }
-			.kw_in { 'in' }
-			.kw_match { 'match' }
-			.kw_none { 'none' }
-			.kw_or { 'or' }
-			.punc_arrow { '->' }
-			.punc_dotdot { '..' }
-			.punc_ellipsis { '...' }
-			.punc_question_mark { '?' }
-			.punc_exclamation_mark { '!' }
-			.punc_at { '@' }
-			.punc_equals { '=' }
-			.punc_equals_comparator { '==' }
-			.punc_not_equal { '!=' }
-			.punc_plus { '+' }
-			.punc_minus { '-' }
-			.punc_mul { '*' }
-			.punc_div { '/' }
-			.punc_mod { '%' }
-			._end_ { 'end' }
-			else { panic('unimplemented Token.str() call for kind ${t.kind.str()}') }
-		}
-	}
+	return t.literal or { t.kind.str() }
 }
 
 pub const total_known_tokens = int(token.Kind._end_)

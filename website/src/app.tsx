@@ -146,7 +146,8 @@ const cliOutput = `   ▄▀█ █░░
      al --help             Show all commands
 
    Example:
-     al run hello.al`;
+     al run hello.al
+     al check my_app.al`;
 
 export function App({ examples }: { examples: RenderedExample[] }) {
   return (
