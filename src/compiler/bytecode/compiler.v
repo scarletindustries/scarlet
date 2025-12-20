@@ -4,7 +4,6 @@ import compiler.typed_ast
 import compiler.type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
 import compiler.types { TypeEnv }
 
-// Find which enum a variant belongs to (returns enum name or none)
 fn (c Compiler) find_enum_for_variant(variant_name string) ?string {
 	if enum_type := c.type_env.lookup_enum_by_variant(variant_name) {
 		return enum_type.name
@@ -28,13 +27,13 @@ struct Compiler {
 mut:
 	program          Program
 	locals           map[string]int
-	outer_scopes     []Scope // for closures: stack of enclosing scopes
+	outer_scopes     []Scope
 	local_count      int
 	current_func_idx int
-	captures         map[string]int // captured var name -> capture index
-	capture_names    []string       // ordered list of captured var names
-	current_binding  string         // name of variable being bound (for self-reference)
-	in_tail_position bool           // true when compiling in tail position (for TCO)
+	captures         map[string]int
+	capture_names    []string
+	current_binding  string
+	in_tail_position bool
 }
 
 pub fn compile(expr typed_ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
@@ -100,17 +99,14 @@ fn (mut c Compiler) get_or_create_local(name string) int {
 	return idx
 }
 
-// Represents how a variable should be accessed
 struct VarAccess {
 	is_local   bool
 	is_capture bool
-	is_self    bool // self-reference in recursive function
+	is_self    bool
 	index      int
 }
 
-// Resolve a variable: check current scope locals, then captures, then outer scopes
 fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
-	// Check current scope's locals first
 	if idx := c.locals[name] {
 		return VarAccess{
 			is_local: true
@@ -118,7 +114,6 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 		}
 	}
 
-	// Check if already captured
 	if idx := c.captures[name] {
 		return VarAccess{
 			is_capture: true
@@ -126,17 +121,14 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 		}
 	}
 
-	// Search outer scopes (for closures)
 	for scope in c.outer_scopes {
 		if name in scope.locals {
-			// Check if this is a self-reference (recursive function)
 			if name == c.current_binding {
 				return VarAccess{
 					is_self: true
 				}
 			}
 
-			// Found in outer scope - add to captures
 			capture_idx := c.capture_names.len
 			c.captures[name] = capture_idx
 			c.capture_names << name
@@ -150,17 +142,13 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 	return none
 }
 
-// Compile expression with an optional type hint for inference
 fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_type string) ! {
-	// If we have an expected enum type and this looks like a bare variant, compile it as such
 	if expected_type != '' {
 		if enum_type := c.type_env.lookup_type(expected_type) {
 			if enum_type is TypeEnum {
-				// Check for Variant(payload) form
 				if expr is typed_ast.FunctionCallExpression {
 					call := expr as typed_ast.FunctionCallExpression
 					if call.identifier.name in enum_type.variants {
-						// This is a bare enum variant with payload
 						enum_idx := c.add_constant(expected_type)
 						c.emit_arg(.push_const, enum_idx)
 						variant_idx := c.add_constant(call.identifier.name)
@@ -178,11 +166,9 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 					}
 				}
 
-				// Check for bare Variant form (no payload)
 				if expr is typed_ast.Identifier {
 					ident := expr as typed_ast.Identifier
 					if ident.name in enum_type.variants {
-						// This is a bare enum variant without payload
 						enum_idx := c.add_constant(expected_type)
 						c.emit_arg(.push_const, enum_idx)
 						variant_idx := c.add_constant(ident.name)
@@ -195,19 +181,16 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 		}
 	}
 
-	// No inference needed, compile normally
 	c.compile_expr(expr)!
 }
 
 fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
-	// Remember if THIS expression is in tail position, then reset for sub-expressions
 	is_tail := c.in_tail_position
 	c.in_tail_position = false
 
 	match expr {
 		typed_ast.BlockExpression {
 			for i, e in expr.body {
-				// Only the last expression inherits tail position
 				c.in_tail_position = is_tail && i == expr.body.len - 1
 				c.compile_expr(e)!
 				c.in_tail_position = false
@@ -236,16 +219,13 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.emit_arg(.push_const, idx)
 		}
 		typed_ast.InterpolatedString {
-			// Compile each part and concatenate with str_concat
 			if expr.parts.len == 0 {
 				idx := c.add_constant('')
 				c.emit_arg(.push_const, idx)
 			} else {
-				// First part
 				c.compile_expr(expr.parts[0])!
-				c.emit(.to_string) // convert to string if needed
+				c.emit(.to_string)
 
-				// Remaining parts: compile and concatenate
 				for i := 1; i < expr.parts.len; i++ {
 					c.compile_expr(expr.parts[i])!
 					c.emit(.to_string)
@@ -294,25 +274,24 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.emit(.push_none)
 		}
 		typed_ast.BinaryExpression {
-			// Short-circuit evaluation for && and ||
 			if expr.op.kind == .logical_and {
 				c.compile_expr(expr.left)!
-				c.emit(.dup) // keep copy for short-circuit result
-				// If left is false, skip right and leave false on stack
+				c.emit(.dup)
+
 				end_jump := c.current_addr()
 				c.emit_arg(.jump_if_false, 0)
-				c.emit(.pop) // left was true, discard it
+				c.emit(.pop)
 				c.compile_expr(expr.right)!
 				c.program.code[end_jump] = op_arg(.jump_if_false, c.current_addr())
 				return
 			}
 			if expr.op.kind == .logical_or {
 				c.compile_expr(expr.left)!
-				c.emit(.dup) // keep copy for short-circuit result
-				// If left is true, skip right and leave true on stack
+				c.emit(.dup)
+
 				end_jump := c.current_addr()
 				c.emit_arg(.jump_if_true, 0)
-				c.emit(.pop) // left was false, discard it
+				c.emit(.pop)
 				c.compile_expr(expr.right)!
 				c.program.code[end_jump] = op_arg(.jump_if_true, c.current_addr())
 				return
@@ -374,13 +353,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			}
 		}
 		typed_ast.IfExpression {
-			// Condition is NOT in tail position (already reset to false)
 			c.compile_expr(expr.condition)!
 
 			else_jump := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
-			// Body inherits tail position
 			c.in_tail_position = is_tail
 			c.compile_expr(expr.body)!
 			c.in_tail_position = false
@@ -391,7 +368,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			else_addr := c.current_addr()
 			c.program.code[else_jump] = op_arg(.jump_if_false, else_addr)
 
-			// Else body inherits tail position
 			c.in_tail_position = is_tail
 			if else_body := expr.else_body {
 				c.compile_expr(else_body)!
@@ -426,11 +402,9 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.compile_function(expr)!
 		}
 		typed_ast.FunctionCallExpression {
-			// Get expected parameter types from type_env for enum inference
 			func_type := c.type_env.lookup_function(expr.identifier.name)
 
 			for i, arg in expr.arguments {
-				// Check if this argument should be inferred as an enum variant
 				expected_type := if ft := func_type {
 					if i < ft.params.len {
 						type_to_string(ft.params[i])
@@ -462,16 +436,13 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			}
 		}
 		typed_ast.PropertyAccessExpression {
-			// Check if this is an enum variant access (MyEnum.Variant or MyEnum.Variant(payload))
 			if expr.left is typed_ast.Identifier {
 				left_id := expr.left as typed_ast.Identifier
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
-						// This is an enum variant construction
 						enum_name := left_id.name
 
 						if expr.right is typed_ast.FunctionCallExpression {
-							// MyEnum.Variant(payload)
 							call := expr.right as typed_ast.FunctionCallExpression
 							variant_name := call.identifier.name
 
@@ -479,15 +450,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
 							}
 
-							// Check if variant has a payload (variants map value is ?Type)
-							// If the variant exists but has no payload type, error
 							if _ := enum_type.variants[variant_name] {
-								// Has payload type - compile with payload
 								if call.arguments.len != 1 {
 									return error('Variant "${variant_name}" expects exactly 1 payload argument')
 								}
 
-								// Push enum_name, variant_name, then payload
 								enum_idx := c.add_constant(enum_name)
 								c.emit_arg(.push_const, enum_idx)
 								variant_idx := c.add_constant(variant_name)
@@ -498,7 +465,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 								return error('Variant "${variant_name}" does not take a payload')
 							}
 						} else if expr.right is typed_ast.Identifier {
-							// MyEnum.Variant (no payload)
 							variant_id := expr.right as typed_ast.Identifier
 							variant_name := variant_id.name
 
@@ -506,12 +472,10 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
 							}
 
-							// Check if variant requires a payload
 							if payload_type := enum_type.variants[variant_name] {
 								return error('Variant "${variant_name}" requires a payload of type ${type_to_string(payload_type)}')
 							}
 
-							// Push enum_name, variant_name
 							enum_idx := c.add_constant(enum_name)
 							c.emit_arg(.push_const, enum_idx)
 							variant_idx := c.add_constant(variant_name)
@@ -523,7 +487,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				}
 			}
 
-			// Regular property access (struct field)
 			c.compile_expr(expr.left)!
 
 			if expr.right is typed_ast.FunctionCallExpression {
@@ -542,13 +505,9 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			}
 		}
 		typed_ast.StructExpression {
-			// Struct is already registered in type_env by type checker
-			// Struct declarations don't produce a value at runtime
 			c.emit(.push_none)
 		}
 		typed_ast.EnumExpression {
-			// Enum is already registered in type_env by type checker
-			// Enum declarations don't produce a value at runtime
 			c.emit(.push_none)
 		}
 		typed_ast.StructInitExpression {
@@ -588,39 +547,29 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 		typed_ast.AssertExpression {
 			c.compile_expr(expr.expression)!
 
-			// If true, jump over error path
 			ok_jump := c.current_addr()
 			c.emit_arg(.jump_if_true, 0)
 
-			// Condition was false - create and return AssertionError
 			c.compile_expr(expr.message)!
 			c.emit(.make_error)
 			c.emit(.ret)
 
-			// Condition was true - continue
 			c.program.code[ok_jump] = op_arg(.jump_if_true, c.current_addr())
 			c.emit(.push_none)
 		}
 		typed_ast.ExportExpression {
-			// TODO: exports not implemented yet, just compile the inner expression
 			c.compile_expr(expr.expression)!
 		}
 		typed_ast.ImportDeclaration {
-			// TODO: imports not implemented yet
 			c.emit(.push_none)
 		}
 		typed_ast.ErrorExpression {
-			// error 'message' -> creates an ErrorValue
 			c.compile_expr(expr.expression)!
 			c.emit(.make_error)
 		}
 		typed_ast.OrExpression {
-			// Two forms based on the type being unwrapped (set by type checker):
-			// - TypeResult: handle errors with `or e -> { ... }`
-			// - TypeOption: handle none with `or { default }`
 			c.compile_expr(expr.expression)!
 
-			// resolved_type is guaranteed to be set by type checker
 			resolved := expr.resolved_type
 			if resolved is TypeResult {
 				c.emit(.dup)
@@ -663,10 +612,8 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			}
 		}
 		typed_ast.PropagateExpression {
-			// expr! -> if error/none, return it; else unwrap
 			c.compile_expr(expr.expression)!
 
-			// resolved_type is guaranteed to be set by type checker
 			resolved := expr.resolved_type
 			if resolved is TypeResult {
 				c.emit(.dup)
@@ -697,35 +644,29 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 }
 
 fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
-	// Save current state and push to outer scopes
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
 	old_captures := c.captures.clone()
 	old_capture_names := c.capture_names.clone()
 
-	// Push current locals to outer scopes for closure capture
 	c.outer_scopes << Scope{
 		locals: old_locals.clone()
 	}
 
-	// Jump over function body
 	jump_over := c.current_addr()
 	c.emit_arg(.jump, 0)
 
-	// Reset for new function
 	c.locals = {}
 	c.local_count = 0
 	c.captures = {}
 	c.capture_names = []
 
-	// Register parameters as locals
 	for param in func.params {
 		c.get_or_create_local(param.identifier.name)
 	}
 
 	func_start := c.current_addr()
 
-	// Compile function body in tail position (for TCO)
 	old_tail := c.in_tail_position
 	c.in_tail_position = true
 	c.compile_expr(func.body)!
@@ -734,7 +675,6 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
 
-	// Save capture info before restoring state
 	captured_names := c.capture_names.clone()
 	capture_count := captured_names.len
 
@@ -742,7 +682,6 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 	mut name := '__anon__'
 	if id := func.identifier {
 		name = id.name
-		// Function is already registered in type_env by type checker
 	}
 	c.program.functions << Function{
 		name:          name
@@ -753,18 +692,14 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 		code_len:      c.current_addr() - func_start - 1
 	}
 
-	c.outer_scopes.pop() // remove the scope we pushed
+	c.outer_scopes.pop()
 
-	// Restore previous state
 	c.locals = old_locals.clone()
 	c.local_count = old_local_count
 	c.captures = old_captures.clone()
 	c.capture_names = old_capture_names.clone()
 
-	// Now emit code to push captured values (from the outer scope's perspective)
-	// and create the closure
 	for cap_name in captured_names {
-		// The captured variable should be accessible from the restored (outer) scope
 		if access := c.resolve_variable(cap_name) {
 			if access.is_local {
 				c.emit_arg(.push_local, access.index)
@@ -791,13 +726,11 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 	for arm in m.arms {
 		c.emit(.dup)
 
-		// Check if this is an enum destructuring pattern
 		mut binding_name := ?string(none)
 		mut literal_pattern := ?typed_ast.Expression(none)
 		mut enum_name := ?string(none)
 		mut variant_name := ?string(none)
 
-		// Full form: EnumName.Variant(binding) or EnumName.Variant("literal")
 		if arm.pattern is typed_ast.PropertyAccessExpression {
 			prop := arm.pattern as typed_ast.PropertyAccessExpression
 			if prop.left is typed_ast.Identifier {
@@ -820,7 +753,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 								}
 							}
 						} else if prop.right is typed_ast.Identifier {
-							// EnumName.Variant (no payload)
 							right_id := prop.right as typed_ast.Identifier
 							variant_name = right_id.name
 						}
@@ -829,7 +761,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			}
 		}
 
-		// Shorthand form: Variant(binding) or Variant("literal") - infer enum from variant name
 		if arm.pattern is typed_ast.FunctionCallExpression {
 			call := arm.pattern as typed_ast.FunctionCallExpression
 			if inferred_enum := c.find_enum_for_variant(call.identifier.name) {
@@ -848,7 +779,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			}
 		}
 
-		// Shorthand form: Variant (no payload) - infer enum from variant name
 		if arm.pattern is typed_ast.Identifier {
 			ident := arm.pattern as typed_ast.Identifier
 			if inferred_enum := c.find_enum_for_variant(ident.name) {
@@ -859,8 +789,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 
 		if ename := enum_name {
 			if vname := variant_name {
-				// Enum pattern (with or without destructuring)
-				// Use match_enum to compare variant only (ignores payload)
 				enum_idx := c.add_constant(ename)
 				c.emit_arg(.push_const, enum_idx)
 				variant_idx := c.add_constant(vname)
@@ -870,16 +798,15 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				next_arm := c.current_addr()
 				c.emit_arg(.jump_if_false, 0)
 
-				// If there's a literal pattern, also check payload matches
 				if lit := literal_pattern {
-					c.emit(.dup) // dup subject for unwrap
-					c.emit(.unwrap_enum) // get payload
-					c.compile_expr(lit)! // push the literal
-					c.emit(.eq) // compare payload with literal
+					c.emit(.dup)
+					c.emit(.unwrap_enum)
+					c.compile_expr(lit)!
+					c.emit(.eq)
 					payload_match := c.current_addr()
 					c.emit_arg(.jump_if_false, 0)
 
-					c.emit(.pop) // pop the subject
+					c.emit(.pop)
 					c.in_tail_position = is_tail
 					c.compile_expr(arm.body)!
 					c.in_tail_position = false
@@ -887,21 +814,19 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 					end_jumps << c.current_addr()
 					c.emit_arg(.jump, 0)
 
-					// Patch both jumps to here (next arm)
 					c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
 					c.program.code[payload_match] = op_arg(.jump_if_false, c.current_addr())
 					continue
 				}
 
-				// If there's a binding, extract the payload
 				if bname := binding_name {
-					c.emit(.dup) // dup subject for unwrap
-					c.emit(.unwrap_enum) // get payload
+					c.emit(.dup)
+					c.emit(.unwrap_enum)
 					local_idx := c.get_or_create_local(bname)
 					c.emit_arg(.store_local, local_idx)
 				}
 
-				c.emit(.pop) // pop the subject
+				c.emit(.pop)
 				c.in_tail_position = is_tail
 				c.compile_expr(arm.body)!
 				c.in_tail_position = false
@@ -913,11 +838,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				continue
 			}
 		}
-		// Check for wildcard pattern (else =>)
+
 		if arm.pattern is typed_ast.WildcardPattern {
-			// Wildcard always matches - no comparison needed
-			c.emit(.pop) // pop the dup'd subject
-			c.emit(.pop) // pop the original subject
+			c.emit(.pop)
+			c.emit(.pop)
 			c.in_tail_position = is_tail
 			c.compile_expr(arm.body)!
 			c.in_tail_position = false
@@ -927,7 +851,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			continue
 		}
 
-		// Regular pattern (literal or simple enum variant)
 		c.compile_expr(arm.pattern)!
 		c.emit(.eq)
 
@@ -945,7 +868,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 		c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
 	}
 
-	// No match - push none (only reached if no wildcard)
 	c.emit(.pop)
 	c.emit(.push_none)
 
