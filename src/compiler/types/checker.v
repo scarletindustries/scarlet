@@ -49,7 +49,7 @@ pub fn check(program ast.BlockExpression) CheckResult {
 
 	checker.register_builtins()
 
-	typed_block := checker.check_block(program)
+	typed_block, _ := checker.check_block(program)
 
 	return CheckResult{
 		diagnostics: checker.diagnostics
@@ -82,17 +82,39 @@ fn get_ast_span(expr ast.Expression) ast.Span {
 
 fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 	return match expr {
-		typed_ast.NumberLiteral { expr.span }
-		typed_ast.StringLiteral { expr.span }
-		typed_ast.BooleanLiteral { expr.span }
-		typed_ast.Identifier { expr.span }
-		typed_ast.VariableBinding { expr.span }
-		typed_ast.ConstBinding { expr.span }
-		typed_ast.BinaryExpression { expr.span }
-		typed_ast.FunctionCallExpression { expr.span }
-		typed_ast.ArrayExpression { expr.span }
-		typed_ast.ArrayIndexExpression { expr.span }
-		typed_ast.IfExpression { expr.span }
+		typed_ast.NumberLiteral {
+			expr.span
+		}
+		typed_ast.StringLiteral {
+			expr.span
+		}
+		typed_ast.BooleanLiteral {
+			expr.span
+		}
+		typed_ast.Identifier {
+			expr.span
+		}
+		typed_ast.VariableBinding {
+			expr.span
+		}
+		typed_ast.ConstBinding {
+			expr.span
+		}
+		typed_ast.BinaryExpression {
+			expr.span
+		}
+		typed_ast.FunctionCallExpression {
+			expr.span
+		}
+		typed_ast.ArrayExpression {
+			expr.span
+		}
+		typed_ast.ArrayIndexExpression {
+			expr.span
+		}
+		typed_ast.IfExpression {
+			expr.span
+		}
 		typed_ast.BlockExpression {
 			if expr.body.len > 0 {
 				get_typed_span(expr.body[0])
@@ -107,19 +129,45 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 				get_typed_span(expr.body)
 			}
 		}
-		typed_ast.MatchExpression { get_typed_span(expr.subject) }
-		typed_ast.OrExpression { get_typed_span(expr.expression) }
-		typed_ast.PropagateExpression { get_typed_span(expr.expression) }
-		typed_ast.ErrorExpression { get_typed_span(expr.expression) }
-		typed_ast.UnaryExpression { get_typed_span(expr.expression) }
-		typed_ast.PostfixExpression { get_typed_span(expr.expression) }
-		typed_ast.PropertyAccessExpression { get_typed_span(expr.left) }
-		typed_ast.RangeExpression { get_typed_span(expr.start) }
-		typed_ast.StructExpression { expr.identifier.span }
-		typed_ast.StructInitExpression { expr.identifier.span }
-		typed_ast.EnumExpression { expr.identifier.span }
-		typed_ast.AssertExpression { get_typed_span(expr.expression) }
-		typed_ast.ExportExpression { get_typed_span(expr.expression) }
+		typed_ast.MatchExpression {
+			get_typed_span(expr.subject)
+		}
+		typed_ast.OrExpression {
+			get_typed_span(expr.expression)
+		}
+		typed_ast.PropagateExpression {
+			get_typed_span(expr.expression)
+		}
+		typed_ast.ErrorExpression {
+			get_typed_span(expr.expression)
+		}
+		typed_ast.UnaryExpression {
+			get_typed_span(expr.expression)
+		}
+		typed_ast.PostfixExpression {
+			get_typed_span(expr.expression)
+		}
+		typed_ast.PropertyAccessExpression {
+			get_typed_span(expr.left)
+		}
+		typed_ast.RangeExpression {
+			get_typed_span(expr.start)
+		}
+		typed_ast.StructExpression {
+			expr.identifier.span
+		}
+		typed_ast.StructInitExpression {
+			expr.identifier.span
+		}
+		typed_ast.EnumExpression {
+			expr.identifier.span
+		}
+		typed_ast.AssertExpression {
+			get_typed_span(expr.expression)
+		}
+		typed_ast.ExportExpression {
+			get_typed_span(expr.expression)
+		}
 		typed_ast.InterpolatedString {
 			if expr.parts.len > 0 {
 				get_typed_span(expr.parts[0])
@@ -127,11 +175,21 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 				panic('InterpolatedString with empty parts has no span')
 			}
 		}
-		typed_ast.TypeIdentifier { expr.identifier.span }
-		typed_ast.NoneExpression { panic('NoneExpression has no span') }
-		typed_ast.ErrorNode { panic('ErrorNode has no span') }
-		typed_ast.WildcardPattern { panic('WildcardPattern has no span') }
-		typed_ast.ImportDeclaration { panic('ImportDeclaration has no span') }
+		typed_ast.TypeIdentifier {
+			expr.identifier.span
+		}
+		typed_ast.NoneExpression {
+			panic('NoneExpression has no span')
+		}
+		typed_ast.ErrorNode {
+			panic('ErrorNode has no span')
+		}
+		typed_ast.WildcardPattern {
+			panic('WildcardPattern has no span')
+		}
+		typed_ast.ImportDeclaration {
+			panic('ImportDeclaration has no span')
+		}
 	}
 }
 
@@ -261,17 +319,19 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 	return base_type
 }
 
-fn (mut c TypeChecker) check_block(block ast.BlockExpression) typed_ast.BlockExpression {
+fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockExpression, Type) {
 	mut typed_body := []typed_ast.Expression{}
+	mut last_type := t_none()
 
 	for expr in block.body {
-		typed_expr, _ := c.check_expr(expr)
+		typed_expr, typ := c.check_expr(expr)
 		typed_body << typed_expr
+		last_type = typ
 	}
 
 	return typed_ast.BlockExpression{
 		body: typed_body
-	}
+	}, last_type
 }
 
 fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Type) {
@@ -352,14 +412,8 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 		}
 		ast.BlockExpression {
 			c.env.push_scope()
-			typed_block := c.check_block(expr)
+			typed_block, last_type := c.check_block(expr)
 			c.env.pop_scope()
-			last_type := if typed_block.body.len > 0 {
-				_, t := c.get_expr_type(typed_block.body[typed_block.body.len - 1])
-				t
-			} else {
-				t_none()
-			}
 			return typed_block, last_type
 		}
 		ast.IfExpression {
@@ -1151,7 +1205,16 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
 	typed_left, left_type := c.check_expr(expr.left)
-	typed_right, _ := c.check_expr(expr.right)
+
+	typed_right := if expr.right is ast.Identifier {
+		typed_ast.Expression(typed_ast.Identifier{
+			name: expr.right.name
+			span: convert_span(expr.right.span)
+		})
+	} else {
+		typed_expr, _ := c.check_expr(expr.right)
+		typed_expr
+	}
 
 	result_type := if left_type is TypeStruct {
 		right := expr.right
