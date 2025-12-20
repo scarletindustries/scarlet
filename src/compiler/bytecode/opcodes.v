@@ -57,11 +57,10 @@ pub enum Op {
 	push_self    // push the currently-executing closure (for self-recursive calls)
 
 	// Error handling
-	make_error       // pop value, push ErrorValue
-	is_error         // pop value, push bool (true if ErrorValue)
-	is_none          // pop value, push bool (true if NoneValue)
-	is_error_or_none // pop value, push bool (true if ErrorValue or NoneValue) - deprecated
-	unwrap_error     // pop ErrorValue, push payload value
+	make_error   // pop value, push ErrorValue
+	is_error     // pop value, push bool (true if ErrorValue)
+	is_none      // pop value, push bool (true if NoneValue)
+	unwrap_error // pop ErrorValue, push payload value
 
 	// String operations
 	to_string  // pop value, push string representation

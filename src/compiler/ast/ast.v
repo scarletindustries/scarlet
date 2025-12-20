@@ -1,15 +1,13 @@
 module ast
 
 import compiler.token
+import compiler.type_def { Type }
 
-// Span represents a source location (line and column)
 pub struct Span {
 pub:
 	line   int
 	column int
 }
-
-// Literals
 
 pub struct StringLiteral {
 pub mut:
@@ -17,11 +15,9 @@ pub mut:
 	span  Span
 }
 
-// Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
-// Parts alternate between string literals and expressions
 pub struct InterpolatedString {
 pub:
-	parts []Expression // StringLiteral or other expressions
+	parts []Expression
 }
 
 pub struct NumberLiteral {
@@ -38,13 +34,10 @@ pub:
 
 pub struct NoneExpression {}
 
-// ErrorNode represents a malformed expression that couldn't be parsed
 pub struct ErrorNode {
 pub:
 	message string
 }
-
-// Identifiers
 
 pub struct Identifier {
 pub mut:
@@ -59,19 +52,15 @@ pub:
 	is_function bool
 pub mut:
 	identifier  Identifier
-	param_types []TypeIdentifier // for function types: fn(Int, String) -> these
-	return_type ?&TypeIdentifier // for function types: fn(...) Int
-	error_type  ?&TypeIdentifier // for function types: fn(...) Int!Error
+	param_types []TypeIdentifier
+	return_type ?&TypeIdentifier
+	error_type  ?&TypeIdentifier
 }
-
-// Operators
 
 pub struct Operator {
 pub mut:
 	kind token.Kind
 }
-
-// Variable binding (x = expr)
 
 pub struct VariableBinding {
 pub mut:
@@ -89,8 +78,6 @@ pub mut:
 	span       Span
 }
 
-// Functions
-
 pub struct FunctionParameter {
 pub mut:
 	identifier Identifier
@@ -106,19 +93,16 @@ pub mut:
 	body        Expression
 }
 
-// Control flow
-
 pub struct IfExpression {
-pub:
+pub mut:
 	condition Expression
 	body      Expression
 	span      Span
-pub mut:
 	else_body ?Expression
 }
 
 pub struct MatchArm {
-pub:
+pub mut:
 	pattern Expression
 	body    Expression
 }
@@ -126,31 +110,29 @@ pub:
 pub struct WildcardPattern {}
 
 pub struct MatchExpression {
-pub:
+pub mut:
 	subject Expression
 	arms    []MatchArm
 }
 
 pub struct OrExpression {
 pub mut:
-	expression Expression
-	receiver   ?Identifier
-	body       Expression
+	expression    Expression
+	receiver      ?Identifier
+	body          Expression
+	resolved_type ?Type
 }
 
-// Error handling
-
 pub struct ErrorExpression {
-pub:
+pub mut:
 	expression Expression
 }
 
 pub struct PropagateExpression {
-pub:
-	expression Expression
+pub mut:
+	expression    Expression
+	resolved_type ?Type
 }
-
-// Binary and unary operations
 
 pub struct BinaryExpression {
 pub mut:
@@ -172,28 +154,24 @@ pub mut:
 	op         Operator
 }
 
-// Data structures
-
 pub struct ArrayExpression {
-pub:
+pub mut:
 	elements []Expression
 	span     Span
 }
 
 pub struct ArrayIndexExpression {
-pub:
+pub mut:
 	expression Expression
 	index      Expression
 	span       Span
 }
 
 pub struct RangeExpression {
-pub:
+pub mut:
 	start Expression
 	end   Expression
 }
-
-// Struct definition
 
 pub struct StructField {
 pub mut:
@@ -208,8 +186,6 @@ pub mut:
 	fields     []StructField
 }
 
-// Enum definition
-
 pub struct EnumVariant {
 pub mut:
 	identifier Identifier
@@ -221,8 +197,6 @@ pub mut:
 	identifier Identifier
 	variants   []EnumVariant
 }
-
-// Struct instantiation
 
 pub struct StructInitField {
 pub mut:
@@ -236,37 +210,29 @@ pub mut:
 	fields     []StructInitField
 }
 
-// Property and method access
-
 pub struct PropertyAccessExpression {
-pub:
+pub mut:
 	left  Expression
 	right Expression
 }
 
 pub struct FunctionCallExpression {
-pub:
+pub mut:
 	identifier Identifier
 	arguments  []Expression
 	span       Span
 }
-
-// Block (list of expressions, returns last)
 
 pub struct BlockExpression {
 pub mut:
 	body []Expression
 }
 
-// Assert
-
 pub struct AssertExpression {
-pub:
+pub mut:
 	expression Expression
 	message    Expression
 }
-
-// Imports and exports (top-level only)
 
 pub struct ImportSpecifier {
 pub:

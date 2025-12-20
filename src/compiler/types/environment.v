@@ -1,5 +1,7 @@
 module types
 
+import compiler.type_def { Type, TypeEnum, TypeFunction, TypeStruct, t_bool, t_float, t_int, t_none, t_string }
+
 pub struct TypeEnv {
 mut:
 	scopes    []map[string]Type

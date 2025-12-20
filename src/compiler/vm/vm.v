@@ -13,6 +13,7 @@ mut:
 	captures  []bytecode.Value
 }
 
+@[params]
 pub struct VMOptions {
 pub:
 	io_enabled bool
@@ -488,10 +489,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 			.is_none {
 				val := vm.pop()!
 				vm.stack << (val is bytecode.NoneValue)
-			}
-			.is_error_or_none {
-				val := vm.pop()!
-				vm.stack << (val is bytecode.ErrorValue || val is bytecode.NoneValue)
 			}
 			.unwrap_error {
 				val := vm.pop()!

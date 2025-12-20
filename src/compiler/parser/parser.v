@@ -18,7 +18,7 @@ pub enum ParseContext {
 }
 
 pub struct ParseResult {
-pub:
+pub mut:
 	ast         ast.BlockExpression
 	diagnostics []diagnostic.Diagnostic
 }

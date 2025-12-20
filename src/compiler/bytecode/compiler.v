@@ -1,61 +1,46 @@
 module bytecode
 
 import compiler.ast
-
-struct StructDef {
-	name   string
-	fields map[string]string // field name -> type name
-}
-
-struct EnumDef {
-	name     string
-	variants map[string]string // variant name -> payload type (empty string if no payload)
-}
+import compiler.type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
+import compiler.types { TypeEnv }
 
 // Find which enum a variant belongs to (returns enum name or none)
 fn (c Compiler) find_enum_for_variant(variant_name string) ?string {
-	for enum_name, enum_def in c.enums {
-		if variant_name in enum_def.variants {
-			return enum_name
-		}
+	if enum_type := c.type_env.lookup_enum_by_variant(variant_name) {
+		return enum_type.name
 	}
 	return none
-}
-
-struct FuncSig {
-	name        string
-	param_types []string // type name for each parameter (enum name, struct name, or empty)
 }
 
 struct Scope {
 	locals map[string]int
 }
 
+@[params]
 pub struct CompileOptions {
 pub:
 	expose_debug_builtins bool
 }
 
 struct Compiler {
-	options CompileOptions
+	options  CompileOptions
+	type_env TypeEnv
 mut:
 	program          Program
 	locals           map[string]int
 	outer_scopes     []Scope // for closures: stack of enclosing scopes
 	local_count      int
 	current_func_idx int
-	structs          map[string]StructDef
-	enums            map[string]EnumDef
-	functions        map[string]FuncSig // function signatures for type inference
-	captures         map[string]int     // captured var name -> capture index
-	capture_names    []string           // ordered list of captured var names
-	current_binding  string             // name of variable being bound (for self-reference)
-	in_tail_position bool               // true when compiling in tail position (for TCO)
+	captures         map[string]int // captured var name -> capture index
+	capture_names    []string       // ordered list of captured var names
+	current_binding  string         // name of variable being bound (for self-reference)
+	in_tail_position bool           // true when compiling in tail position (for TCO)
 }
 
-pub fn compile(expr ast.Expression, options CompileOptions) !Program {
+pub fn compile(expr ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
 	mut c := Compiler{
 		options:          options
+		type_env:         type_env
 		program:          Program{
 			constants: []
 			functions: []
@@ -66,9 +51,6 @@ pub fn compile(expr ast.Expression, options CompileOptions) !Program {
 		outer_scopes:     []
 		local_count:      0
 		current_func_idx: -1
-		structs:          {}
-		enums:            {}
-		functions:        {}
 		captures:         {}
 		capture_names:    []
 	}
@@ -171,42 +153,44 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 // Compile expression with an optional type hint for inference
 fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type string) ! {
 	// If we have an expected enum type and this looks like a bare variant, compile it as such
-	if expected_type != '' && expected_type in c.enums {
-		enum_def := c.enums[expected_type]
+	if expected_type != '' {
+		if enum_type := c.type_env.lookup_type(expected_type) {
+			if enum_type is TypeEnum {
+				// Check for Variant(payload) form
+				if expr is ast.FunctionCallExpression {
+					call := expr as ast.FunctionCallExpression
+					if call.identifier.name in enum_type.variants {
+						// This is a bare enum variant with payload
+						enum_idx := c.add_constant(expected_type)
+						c.emit_arg(.push_const, enum_idx)
+						variant_idx := c.add_constant(call.identifier.name)
+						c.emit_arg(.push_const, variant_idx)
 
-		// Check for Variant(payload) form
-		if expr is ast.FunctionCallExpression {
-			call := expr as ast.FunctionCallExpression
-			if call.identifier.name in enum_def.variants {
-				// This is a bare enum variant with payload
-				enum_idx := c.add_constant(expected_type)
-				c.emit_arg(.push_const, enum_idx)
-				variant_idx := c.add_constant(call.identifier.name)
-				c.emit_arg(.push_const, variant_idx)
-
-				if call.arguments.len == 1 {
-					c.compile_expr(call.arguments[0])!
-					c.emit(.make_enum_payload)
-				} else if call.arguments.len == 0 {
-					c.emit(.make_enum)
-				} else {
-					return error('Enum variant takes 0 or 1 argument')
+						if call.arguments.len == 1 {
+							c.compile_expr(call.arguments[0])!
+							c.emit(.make_enum_payload)
+						} else if call.arguments.len == 0 {
+							c.emit(.make_enum)
+						} else {
+							return error('Enum variant takes 0 or 1 argument')
+						}
+						return
+					}
 				}
-				return
-			}
-		}
 
-		// Check for bare Variant form (no payload)
-		if expr is ast.Identifier {
-			ident := expr as ast.Identifier
-			if ident.name in enum_def.variants {
-				// This is a bare enum variant without payload
-				enum_idx := c.add_constant(expected_type)
-				c.emit_arg(.push_const, enum_idx)
-				variant_idx := c.add_constant(ident.name)
-				c.emit_arg(.push_const, variant_idx)
-				c.emit(.make_enum)
-				return
+				// Check for bare Variant form (no payload)
+				if expr is ast.Identifier {
+					ident := expr as ast.Identifier
+					if ident.name in enum_type.variants {
+						// This is a bare enum variant without payload
+						enum_idx := c.add_constant(expected_type)
+						c.emit_arg(.push_const, enum_idx)
+						variant_idx := c.add_constant(ident.name)
+						c.emit_arg(.push_const, variant_idx)
+						c.emit(.make_enum)
+						return
+					}
+				}
 			}
 		}
 	}
@@ -442,13 +426,17 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.compile_function(expr)!
 		}
 		ast.FunctionCallExpression {
-			// Get expected parameter types if we have a signature for this function
-			func_sig := c.functions[expr.identifier.name] or { FuncSig{} }
+			// Get expected parameter types from type_env for enum inference
+			func_type := c.type_env.lookup_function(expr.identifier.name)
 
 			for i, arg in expr.arguments {
 				// Check if this argument should be inferred as an enum variant
-				expected_type := if i < func_sig.param_types.len {
-					func_sig.param_types[i]
+				expected_type := if ft := func_type {
+					if i < ft.params.len {
+						type_to_string(ft.params[i])
+					} else {
+						''
+					}
 				} else {
 					''
 				}
@@ -477,57 +465,61 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			// Check if this is an enum variant access (MyEnum.Variant or MyEnum.Variant(payload))
 			if expr.left is ast.Identifier {
 				left_id := expr.left as ast.Identifier
-				if enum_def := c.enums[left_id.name] {
-					// This is an enum variant construction
-					enum_name := left_id.name
+				if enum_type := c.type_env.lookup_type(left_id.name) {
+					if enum_type is TypeEnum {
+						// This is an enum variant construction
+						enum_name := left_id.name
 
-					if expr.right is ast.FunctionCallExpression {
-						// MyEnum.Variant(payload)
-						call := expr.right as ast.FunctionCallExpression
-						variant_name := call.identifier.name
+						if expr.right is ast.FunctionCallExpression {
+							// MyEnum.Variant(payload)
+							call := expr.right as ast.FunctionCallExpression
+							variant_name := call.identifier.name
 
-						if variant_name !in enum_def.variants {
-							return error('Unknown variant "${variant_name}" in enum ${enum_name}')
+							if variant_name !in enum_type.variants {
+								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
+							}
+
+							// Check if variant has a payload (variants map value is ?Type)
+							// If the variant exists but has no payload type, error
+							if _ := enum_type.variants[variant_name] {
+								// Has payload type - compile with payload
+								if call.arguments.len != 1 {
+									return error('Variant "${variant_name}" expects exactly 1 payload argument')
+								}
+
+								// Push enum_name, variant_name, then payload
+								enum_idx := c.add_constant(enum_name)
+								c.emit_arg(.push_const, enum_idx)
+								variant_idx := c.add_constant(variant_name)
+								c.emit_arg(.push_const, variant_idx)
+								c.compile_expr(call.arguments[0])!
+								c.emit(.make_enum_payload)
+							} else {
+								return error('Variant "${variant_name}" does not take a payload')
+							}
+						} else if expr.right is ast.Identifier {
+							// MyEnum.Variant (no payload)
+							variant_id := expr.right as ast.Identifier
+							variant_name := variant_id.name
+
+							if variant_name !in enum_type.variants {
+								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
+							}
+
+							// Check if variant requires a payload
+							if payload_type := enum_type.variants[variant_name] {
+								return error('Variant "${variant_name}" requires a payload of type ${type_to_string(payload_type)}')
+							}
+
+							// Push enum_name, variant_name
+							enum_idx := c.add_constant(enum_name)
+							c.emit_arg(.push_const, enum_idx)
+							variant_idx := c.add_constant(variant_name)
+							c.emit_arg(.push_const, variant_idx)
+							c.emit(.make_enum)
 						}
-
-						expected_payload := enum_def.variants[variant_name]
-						if expected_payload == '' {
-							return error('Variant "${variant_name}" does not take a payload')
-						}
-
-						if call.arguments.len != 1 {
-							return error('Variant "${variant_name}" expects exactly 1 payload argument')
-						}
-
-						// Push enum_name, variant_name, then payload
-						enum_idx := c.add_constant(enum_name)
-						c.emit_arg(.push_const, enum_idx)
-						variant_idx := c.add_constant(variant_name)
-						c.emit_arg(.push_const, variant_idx)
-						c.compile_expr(call.arguments[0])!
-						c.emit(.make_enum_payload)
-					} else if expr.right is ast.Identifier {
-						// MyEnum.Variant (no payload)
-						variant_id := expr.right as ast.Identifier
-						variant_name := variant_id.name
-
-						if variant_name !in enum_def.variants {
-							return error('Unknown variant "${variant_name}" in enum ${enum_name}')
-						}
-
-						expected_payload := enum_def.variants[variant_name]
-						if expected_payload != '' {
-							return error('Variant "${variant_name}" requires a payload of type ${expected_payload}')
-						}
-
-						// Push enum_name, variant_name
-						enum_idx := c.add_constant(enum_name)
-						c.emit_arg(.push_const, enum_idx)
-						variant_idx := c.add_constant(variant_name)
-						c.emit_arg(.push_const, variant_idx)
-						c.emit(.make_enum)
+						return
 					}
-					return
 				}
 			}
 
@@ -550,55 +542,26 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			}
 		}
 		ast.StructExpression {
-			// Register struct definition
-			struct_name := expr.identifier.name
-			if struct_name in c.structs {
-				return error('Struct already defined: ${struct_name}')
-			}
-			mut fields := map[string]string{}
-			for field in expr.fields {
-				fields[field.identifier.name] = field.typ.identifier.name
-			}
-			c.structs[struct_name] = StructDef{
-				name:   struct_name
-				fields: fields
-			}
+			// Struct is already registered in type_env by type checker
 			// Struct declarations don't produce a value at runtime
 			c.emit(.push_none)
 		}
 		ast.EnumExpression {
-			// Register enum definition
-			enum_name := expr.identifier.name
-			if enum_name in c.enums {
-				return error('Enum already defined: ${enum_name}')
-			}
-			mut variants := map[string]string{}
-			for variant in expr.variants {
-				payload_type := if p := variant.payload {
-					p.identifier.name
-				} else {
-					''
-				}
-				variants[variant.identifier.name] = payload_type
-			}
-			c.enums[enum_name] = EnumDef{
-				name:     enum_name
-				variants: variants
-			}
+			// Enum is already registered in type_env by type checker
 			// Enum declarations don't produce a value at runtime
 			c.emit(.push_none)
 		}
 		ast.StructInitExpression {
 			struct_name := expr.identifier.name
 
-			struct_def := c.structs[struct_name] or {
+			struct_type := c.type_env.lookup_struct(struct_name) or {
 				return error('Unknown struct type: ${struct_name}')
 			}
 
 			mut provided := map[string]bool{}
 			for field in expr.fields {
 				field_name := field.identifier.name
-				if field_name !in struct_def.fields {
+				if field_name !in struct_type.fields {
 					return error('Unknown field "${field_name}" in struct ${struct_name}')
 				}
 				if field_name in provided {
@@ -607,7 +570,7 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 				provided[field_name] = true
 			}
 
-			for field_name, _ in struct_def.fields {
+			for field_name, _ in struct_type.fields {
 				if field_name !in provided {
 					return error('Missing field "${field_name}" in struct ${struct_name}')
 				}
@@ -652,80 +615,105 @@ fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 			c.emit(.make_error)
 		}
 		ast.OrExpression {
-			// Two forms:
-			// - expr or e -> { handle_error(e) }  -> handles Result (errors), receiver binds error
-			// - expr or { default }               -> handles Option (none)
+			// Two forms based on the type being unwrapped (set by type checker):
+			// - TypeResult: handle errors with `or e -> { ... }`
+			// - TypeOption: handle none with `or { default }`
 			c.compile_expr(expr.expression)!
 
-			if receiver := expr.receiver {
-				// Has receiver: handling a Result type (errors only)
-				c.emit(.dup)
-				c.emit(.is_error)
+			// Use resolved_type from type checker to determine if this is Result or Option
+			if resolved := expr.resolved_type {
+				if resolved is TypeResult {
+					// Handling a Result type (errors)
+					c.emit(.dup)
+					c.emit(.is_error)
 
-				// If not error, jump over the or-body
-				not_error_jump := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
+					// If not error, jump over the or-body
+					not_error_jump := c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
 
-				// Is error - unwrap and bind to receiver
-				c.emit(.unwrap_error)
-				idx := c.get_or_create_local(receiver.name)
-				c.emit_arg(.store_local, idx)
+					// Is error - unwrap and optionally bind to receiver
+					c.emit(.unwrap_error)
+					if receiver := expr.receiver {
+						idx := c.get_or_create_local(receiver.name)
+						c.emit_arg(.store_local, idx)
+					} else {
+						c.emit(.pop) // discard error value if no receiver
+					}
 
-				c.compile_expr(expr.body)!
+					c.compile_expr(expr.body)!
 
-				// Jump to end
-				end_jump := c.current_addr()
-				c.emit_arg(.jump, 0)
+					// Jump to end
+					end_jump := c.current_addr()
+					c.emit_arg(.jump, 0)
 
-				// Patch not_error_jump to here (value stays on stack)
-				c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
+					// Patch not_error_jump to here (value stays on stack)
+					c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
 
-				// Patch end_jump
-				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
-			} else {
-				// No receiver: handling an Option type (none only)
-				c.emit(.dup)
-				c.emit(.is_none)
+					// Patch end_jump
+					c.program.code[end_jump] = op_arg(.jump, c.current_addr())
+				} else if resolved is TypeOption {
+					// Handling an Option type (none)
+					c.emit(.dup)
+					c.emit(.is_none)
 
-				// If not none, jump over the or-body
-				not_none_jump := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
+					// If not none, jump over the or-body
+					not_none_jump := c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
 
-				// Is none - pop it and execute body
-				c.emit(.pop)
+					// Is none - pop it and execute body
+					c.emit(.pop)
 
-				c.compile_expr(expr.body)!
+					c.compile_expr(expr.body)!
 
-				// Jump to end
-				end_jump := c.current_addr()
-				c.emit_arg(.jump, 0)
+					// Jump to end
+					end_jump := c.current_addr()
+					c.emit_arg(.jump, 0)
 
-				// Patch not_none_jump to here (value stays on stack)
-				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
+					// Patch not_none_jump to here (value stays on stack)
+					c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
 
-				// Patch end_jump
-				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
+					// Patch end_jump
+					c.program.code[end_jump] = op_arg(.jump, c.current_addr())
+				}
 			}
 		}
 		ast.PropagateExpression {
-			// expr! -> if error, return it; else unwrap
+			// expr! -> if error/none, return it; else unwrap
 			c.compile_expr(expr.expression)!
 
-			// Check if error
-			c.emit(.dup)
-			c.emit(.is_error)
+			// Use resolved_type from type checker to determine if this is Result or Option
+			if resolved := expr.resolved_type {
+				if resolved is TypeResult {
+					// Check if error
+					c.emit(.dup)
+					c.emit(.is_error)
 
-			// If not error, jump to unwrap
-			not_error_jump := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
+					// If not error, jump past return
+					not_error_jump := c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
 
-			// Is error - return it
-			c.emit(.ret)
+					// Is error - return it
+					c.emit(.ret)
 
-			// Patch jump
-			c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
+					// Patch jump
+					c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
+				} else if resolved is TypeOption {
+					// Check if none
+					c.emit(.dup)
+					c.emit(.is_none)
 
-			// Not error - value is on stack (it's already the unwrapped value)
+					// If not none, jump past return
+					not_none_jump := c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
+
+					// Is none - return it
+					c.emit(.ret)
+
+					// Patch jump
+					c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
+				}
+			}
+			// Value is on stack (already unwrapped by the check)
 		}
 		else {
 			return error('Cannot compile expression type: ${expr.type_name()}')
@@ -755,15 +743,9 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	c.captures = {}
 	c.capture_names = []
 
-	// Collect parameter types for function signature
-	mut param_types := []string{}
+	// Register parameters as locals
 	for param in func.params {
 		c.get_or_create_local(param.identifier.name)
-		if typ := param.typ {
-			param_types << typ.identifier.name
-		} else {
-			param_types << ''
-		}
 	}
 
 	func_start := c.current_addr()
@@ -785,11 +767,7 @@ fn (mut c Compiler) compile_function(func ast.FunctionExpression) ! {
 	mut name := '__anon__'
 	if id := func.identifier {
 		name = id.name
-		// Store function signature for type inference
-		c.functions[name] = FuncSig{
-			name:        name
-			param_types: param_types
-		}
+		// Function is already registered in type_env by type checker
 	}
 	c.program.functions << Function{
 		name:          name
@@ -849,25 +827,27 @@ fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 			prop := arm.pattern as ast.PropertyAccessExpression
 			if prop.left is ast.Identifier {
 				left_id := prop.left as ast.Identifier
-				if left_id.name in c.enums {
-					enum_name = left_id.name
-					if prop.right is ast.FunctionCallExpression {
-						call := prop.right as ast.FunctionCallExpression
-						variant_name = call.identifier.name
-						if call.arguments.len == 1 {
-							arg := call.arguments[0]
-							if arg is ast.Identifier {
-								binding_id := arg as ast.Identifier
-								binding_name = binding_id.name
-							} else if arg is ast.StringLiteral || arg is ast.NumberLiteral
-								|| arg is ast.BooleanLiteral {
-								literal_pattern = arg
+				if enum_type := c.type_env.lookup_type(left_id.name) {
+					if enum_type is TypeEnum {
+						enum_name = left_id.name
+						if prop.right is ast.FunctionCallExpression {
+							call := prop.right as ast.FunctionCallExpression
+							variant_name = call.identifier.name
+							if call.arguments.len == 1 {
+								arg := call.arguments[0]
+								if arg is ast.Identifier {
+									binding_id := arg as ast.Identifier
+									binding_name = binding_id.name
+								} else if arg is ast.StringLiteral || arg is ast.NumberLiteral
+									|| arg is ast.BooleanLiteral {
+									literal_pattern = arg
+								}
 							}
+						} else if prop.right is ast.Identifier {
+							// EnumName.Variant (no payload)
+							right_id := prop.right as ast.Identifier
+							variant_name = right_id.name
 						}
-					} else if prop.right is ast.Identifier {
-						// EnumName.Variant (no payload)
-						right_id := prop.right as ast.Identifier
-						variant_name = right_id.name
 					}
 				}
 			}

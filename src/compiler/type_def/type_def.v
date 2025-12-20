@@ -1,4 +1,4 @@
-module types
+module type_def
 
 pub type Type = TypePrimitive
 	| TypeArray

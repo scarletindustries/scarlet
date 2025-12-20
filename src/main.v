@@ -47,7 +47,7 @@ fn main() {
 					mut s := scanner.new_scanner(file)
 					mut p := parser.new_parser(mut s)
 
-					result := p.parse_program()
+					mut result := p.parse_program()
 
 					if result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
@@ -56,7 +56,7 @@ fn main() {
 						}
 					}
 
-					check_result := types.check(result.ast)
+					check_result := types.check(mut result.ast)
 					if check_result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
 						if !check_result.success {
@@ -77,7 +77,7 @@ fn main() {
 					mut s := scanner.new_scanner(file)
 					mut p := parser.new_parser(mut s)
 
-					result := p.parse_program()
+					mut result := p.parse_program()
 
 					if result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
@@ -180,7 +180,7 @@ fn main() {
 					mut s := scanner.new_scanner(file)
 					mut p := parser.new_parser(mut s)
 
-					result := p.parse_program()
+					mut result := p.parse_program()
 
 					if result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
@@ -189,8 +189,7 @@ fn main() {
 						}
 					}
 
-					// Type check
-					check_result := types.check(result.ast)
+					check_result := types.check(mut result.ast)
 					if check_result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
 						if !check_result.success {
@@ -206,13 +205,11 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(result.ast, bytecode.CompileOptions{
+					program := bytecode.compile(result.ast, check_result.env,
 						expose_debug_builtins: expose_debug_builtins
-					})!
+					)!
 
-					mut v := vm.new_vm(program, vm.VMOptions{
-						io_enabled: io_enabled
-					})
+					mut v := vm.new_vm(program, io_enabled: io_enabled)
 					run_result := v.run()!
 
 					if run_result !is bytecode.NoneValue {
