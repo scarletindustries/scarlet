@@ -86,7 +86,7 @@ fn (mut p Parser) synchronize() {
 		iterations++
 		if iterations > 1000 {
 			p.add_error('Parser recovery failed: likely infinite loop detected. This is a bug in the parser.')
-			// Skip to EOF to prevent cascading issues
+
 			for p.current_token.kind != .eof {
 				p.advance()
 			}
@@ -211,26 +211,26 @@ fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
 }
 
 pub fn (mut p Parser) parse_program() ParseResult {
-	mut program := ast.BlockExpression{}
+	mut body := []ast.Expression{}
 
 	for p.current_token.kind != .eof {
 		expr := p.parse_expression() or {
-			// Record the error as a diagnostic
 			p.add_error(err.msg())
-			// Synchronize to find a recovery point
 			p.synchronize()
-			// Add an error node to mark the failed parse
-			program.body << ast.ErrorNode{
+
+			body << ast.ErrorNode{
 				message: err.msg()
 			}
 			continue
 		}
 
-		program.body << expr
+		body << expr
 	}
 
 	return ParseResult{
-		ast:         program
+		ast:         ast.BlockExpression{
+			body: body
+		}
 		diagnostics: p.diagnostics
 	}
 }
@@ -251,12 +251,10 @@ fn (mut p Parser) peek_ahead(distance int) ?compiler.Token {
 	return none
 }
 
-// Main expression parser - everything is an expression
 fn (mut p Parser) parse_expression() !ast.Expression {
 	return p.parse_or_expression()!
 }
 
-// Handle `expr or { ... }` or `expr or err => ...` - lowest precedence
 fn (mut p Parser) parse_or_expression() !ast.Expression {
 	mut left := p.parse_binary_expression()!
 
@@ -265,14 +263,14 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 
 		mut receiver := ?ast.Identifier(none)
 
-		// Check for optional receiver: `or err => body`
 		if p.current_token.kind == .identifier {
 			if next := p.peek_next() {
-				// If next token is => then this identifier is the receiver
 				if next.kind == .punc_arrow {
+					span := p.current_span()
 					name := p.eat_token_literal(.identifier, 'Expected identifier for or receiver')!
 					receiver = ast.Identifier{
 						name: name
+						span: span
 					}
 					p.eat(.punc_arrow)!
 				}
@@ -291,21 +289,10 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 	return left
 }
 
-// Precedence levels (lowest to highest):
-// 1. || (logical or)
-// 2. && (logical and)
-// 3. ==, != (equality)
-// 4. <, >, <=, >= (comparison)
-// 5. +, - (additive)
-// 6. *, /, % (multiplicative)
-// 7. unary (!, -)
-// 8. postfix (., [], !)
-
 fn (mut p Parser) parse_binary_expression() !ast.Expression {
 	return p.parse_logical_or()!
 }
 
-// Level 1: ||
 fn (mut p Parser) parse_logical_or() !ast.Expression {
 	mut left := p.parse_logical_and()!
 
@@ -326,7 +313,6 @@ fn (mut p Parser) parse_logical_or() !ast.Expression {
 	return left
 }
 
-// Level 2: &&
 fn (mut p Parser) parse_logical_and() !ast.Expression {
 	mut left := p.parse_equality()!
 
@@ -347,7 +333,6 @@ fn (mut p Parser) parse_logical_and() !ast.Expression {
 	return left
 }
 
-// Level 3: ==, !=
 fn (mut p Parser) parse_equality() !ast.Expression {
 	mut left := p.parse_comparison()!
 
@@ -369,7 +354,6 @@ fn (mut p Parser) parse_equality() !ast.Expression {
 	return left
 }
 
-// Level 4: <, >, <=, >=
 fn (mut p Parser) parse_comparison() !ast.Expression {
 	mut left := p.parse_additive()!
 
@@ -391,7 +375,6 @@ fn (mut p Parser) parse_comparison() !ast.Expression {
 	return left
 }
 
-// Level 5: +, -
 fn (mut p Parser) parse_additive() !ast.Expression {
 	mut left := p.parse_multiplicative()!
 
@@ -413,7 +396,6 @@ fn (mut p Parser) parse_additive() !ast.Expression {
 	return left
 }
 
-// Level 6: *, /, %
 fn (mut p Parser) parse_multiplicative() !ast.Expression {
 	mut left := p.parse_unary_expression()!
 
@@ -481,7 +463,6 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				}
 			}
 			.punc_exclamation_mark {
-				// Postfix ! for error propagation
 				p.eat(.punc_exclamation_mark)!
 				expr = ast.PropagateExpression{
 					expression: expr
@@ -510,7 +491,6 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 	return expr
 }
 
-// Primary expressions
 fn (mut p Parser) parse_primary_expression() !ast.Expression {
 	expr := match p.current_token.kind {
 		.literal_string {
@@ -588,7 +568,6 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			p.parse_error_expression()!
 		}
 		.error {
-			// scanner already reported an error, skip this token and return an error node
 			p.advance()
 			ast.ErrorNode{
 				message: 'Scanner error'
@@ -602,12 +581,10 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 	return expr
 }
 
-// Identifier, function call, struct init, or variable binding
 fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-	// Check if this is a variable binding: `x = expr` or `x Type = expr`
 	if p.current_token.kind == .punc_equals {
 		p.eat(.punc_equals)!
 		init := p.parse_expression()!
@@ -621,7 +598,6 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 		}
 	}
 
-	// check for typed variable binding: `x Int = expr`
 	if p.is_type_start() {
 		typ := p.parse_type_identifier()!
 		p.eat(.punc_equals)!
@@ -645,7 +621,7 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 		curr_index := p.index
 		curr_token := p.current_token
 
-		if result := p.parse_struct_init_expression(name) {
+		if result := p.parse_struct_init_expression(name, span) {
 			return result
 		}
 
@@ -659,7 +635,6 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 	}
 }
 
-// Block expression: { expr1; expr2; expr3 }
 fn (mut p Parser) parse_block_expression() !ast.Expression {
 	p.eat(.punc_open_brace)!
 	p.push_context(.block)
@@ -686,7 +661,6 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 	}
 }
 
-// Array: [1, 2, 3]
 fn (mut p Parser) parse_array_expression() !ast.Expression {
 	span := p.current_span()
 	p.eat(.punc_open_bracket)!
@@ -724,8 +698,6 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 	}
 }
 
-// If expression: if cond expr else expr
-// Body can be any expression (block, literal, etc.)
 fn (mut p Parser) parse_if_expression() !ast.Expression {
 	span := p.current_span()
 	p.eat(.kw_if)!
@@ -748,7 +720,6 @@ fn (mut p Parser) parse_if_expression() !ast.Expression {
 	}
 }
 
-// Match expression: match subject { pattern => body, ... }
 fn (mut p Parser) parse_match_expression() !ast.Expression {
 	p.eat(.kw_match)!
 
@@ -813,23 +784,21 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 }
 
-// Function expression: fn name(params) ReturnType { body }
 fn (mut p Parser) parse_function_expression() !ast.Expression {
 	p.eat(.kw_function)!
 
-	// Optional name (for anonymous functions)
 	mut identifier := ?ast.Identifier(none)
 	if p.current_token.kind == .identifier {
+		span := p.current_span()
 		name := p.eat_token_literal(.identifier, 'Expected function name')!
 		identifier = ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 
-	// Parameters
 	params := p.parse_parameters()!
 
-	// Optional return type
 	mut return_type := ?ast.TypeIdentifier(none)
 	mut error_type := ?ast.TypeIdentifier(none)
 
@@ -838,13 +807,11 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 		return_type = p.parse_type_identifier()!
 	}
 
-	// Optional error type: !ErrorType
 	if p.current_token.kind == .punc_exclamation_mark {
 		p.eat(.punc_exclamation_mark)!
 		error_type = p.parse_type_identifier()!
 	}
 
-	// Body
 	body := p.parse_block_expression()!
 
 	return ast.FunctionExpression{
@@ -856,7 +823,6 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 	}
 }
 
-// Parse function parameters
 fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
 	p.eat(.punc_open_paren)!
 	p.push_context(.function_params)
@@ -878,13 +844,12 @@ fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
 	return params
 }
 
-// Parse a single parameter
 fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected parameter name')!
 
 	mut typ := ?ast.TypeIdentifier(none)
 
-	// Type is optional in some contexts
 	if p.current_token.kind == .identifier || p.current_token.kind == .punc_open_bracket
 		|| p.current_token.kind == .punc_question_mark || p.current_token.kind == .kw_function {
 		typ = p.parse_type_identifier()!
@@ -894,6 +859,7 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 		typ:        typ
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 }
@@ -952,6 +918,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 }
 
 fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
+	span := p.current_span()
 	p.eat(.kw_function)!
 	p.eat(.punc_open_paren)!
 
@@ -976,7 +943,6 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 		mut ret := p.parse_type_identifier()!
 		return_type = &ret
 
-		// Check for error type: ReturnType!ErrorType
 		if p.current_token.kind == .punc_exclamation_mark {
 			p.eat(.punc_exclamation_mark)!
 			mut err := p.parse_type_identifier()!
@@ -987,16 +953,20 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 	return ast.TypeIdentifier{
 		is_option:   is_option
 		is_function: true
+		identifier:  ast.Identifier{
+			name: 'fn'
+			span: span
+		}
 		param_types: param_types
 		return_type: return_type
 		error_type:  error_type
 	}
 }
 
-// Struct definition: struct Name { field Type, ... }
 fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	p.eat(.kw_struct)!
 
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected struct name')!
 
 	p.eat(.punc_open_brace)!
@@ -1015,13 +985,14 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	return ast.StructExpression{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		fields:     fields
 	}
 }
 
-// Parse struct field: name Type = default
 fn (mut p Parser) parse_struct_field() !ast.StructField {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected field name')!
 
 	typ := p.parse_type_identifier()!
@@ -1040,16 +1011,17 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 	return ast.StructField{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		typ:        typ
 		init:       init
 	}
 }
 
-// Enum definition: enum Name { Variant, Variant(Type), ... }
 fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	p.eat(.kw_enum)!
 
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected enum name')!
 
 	p.eat(.punc_open_brace)!
@@ -1068,18 +1040,18 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	return ast.EnumExpression{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		variants:   variants
 	}
 }
 
-// Parse enum variant: Name or Name(Type)
 fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected variant name')!
 
 	mut payload := ?ast.TypeIdentifier(none)
 
-	// Check for payload type: Variant(Type)
 	if p.current_token.kind == .punc_open_paren {
 		p.eat(.punc_open_paren)!
 		payload = p.parse_type_identifier()!
@@ -1093,19 +1065,20 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	return ast.EnumVariant{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		payload:    payload
 	}
 }
 
-// Struct instantiation: Name { field: value, ... }
-fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
+fn (mut p Parser) parse_struct_init_expression(name string, name_span ast.Span) !ast.Expression {
 	p.eat(.punc_open_brace)!
 	p.push_context(.struct_init)
 
 	mut fields := []ast.StructInitField{}
 
 	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
+		field_span := p.current_span()
 		field_name := p.eat_token_literal(.identifier, 'Expected field name')!
 		p.eat(.punc_colon)!
 		value := p.parse_expression()!
@@ -1113,6 +1086,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 		fields << ast.StructInitField{
 			identifier: ast.Identifier{
 				name: field_name
+				span: field_span
 			}
 			init:       value
 		}
@@ -1128,6 +1102,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 	return ast.StructInitExpression{
 		identifier: ast.Identifier{
 			name: name
+			span: name_span
 		}
 		fields:     fields
 	}
@@ -1160,7 +1135,6 @@ fn (mut p Parser) parse_const_binding() !ast.Expression {
 	}
 }
 
-// Export: export expr
 fn (mut p Parser) parse_export_expression() !ast.Expression {
 	p.eat(.kw_export)!
 
@@ -1171,7 +1145,6 @@ fn (mut p Parser) parse_export_expression() !ast.Expression {
 	}
 }
 
-// Import: from 'path' import a, b, c
 fn (mut p Parser) parse_import_declaration() !ast.Expression {
 	p.eat(.kw_from)!
 
@@ -1190,11 +1163,13 @@ fn (mut p Parser) parse_import_declaration() !ast.Expression {
 }
 
 fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) ! {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected import specifier')!
 
 	specifiers << ast.ImportSpecifier{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 
@@ -1204,7 +1179,6 @@ fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) 
 	}
 }
 
-// Assert: assert expr, message
 fn (mut p Parser) parse_assert_expression() !ast.Expression {
 	p.eat(.kw_assert)!
 
@@ -1220,11 +1194,9 @@ fn (mut p Parser) parse_assert_expression() !ast.Expression {
 	}
 }
 
-// Error expression: error SomeError{}
 fn (mut p Parser) parse_error_expression() !ast.Expression {
 	p.eat(.kw_error)!
 
-	// Use parse_unary_expression to avoid consuming 'or' at this level
 	expr := p.parse_unary_expression()!
 
 	return ast.ErrorExpression{
@@ -1232,7 +1204,6 @@ fn (mut p Parser) parse_error_expression() !ast.Expression {
 	}
 }
 
-// Property/method access: expr.prop or expr.method()
 fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 	p.eat(.punc_dot)!
 
@@ -1256,7 +1227,6 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 	}
 }
 
-// Function call: name(args)
 fn (mut p Parser) parse_function_call_expression(name string, span ast.Span) !ast.Expression {
 	p.eat(.punc_open_paren)!
 
@@ -1282,7 +1252,6 @@ fn (mut p Parser) parse_function_call_expression(name string, span ast.Span) !as
 	}
 }
 
-// String literal
 fn (mut p Parser) parse_string_expression() !ast.Expression {
 	span := p.current_span()
 	return ast.StringLiteral{
@@ -1291,8 +1260,8 @@ fn (mut p Parser) parse_string_expression() !ast.Expression {
 	}
 }
 
-// Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
 fn (mut p Parser) parse_interpolated_string() !ast.Expression {
+	span := p.current_span()
 	raw := p.eat_token_literal(.literal_string_interpolation, 'Expected interpolated string')!
 
 	mut parts := []ast.Expression{}
@@ -1303,10 +1272,10 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 		ch := raw[i]
 
 		if ch == `$` {
-			// Save accumulated string part
 			if current.len > 0 {
 				parts << ast.StringLiteral{
 					value: current
+					span:  span
 				}
 				current = ''
 			}
@@ -1317,7 +1286,6 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 			}
 
 			if raw[i] == `{` {
-				// ${expr} form - find matching }
 				i++
 				mut expr_str := ''
 				mut brace_depth := 1
@@ -1336,15 +1304,13 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 				if brace_depth != 0 {
 					return error('Unclosed { in interpolated string')
 				}
-				i++ // skip closing }
+				i++
 
-				// Parse the expression
 				mut s := scanner.new_scanner(expr_str)
 				mut expr_parser := new_parser(mut s)
 				expr := expr_parser.parse_expression()!
 				parts << expr
 			} else {
-				// $name form - read identifier
 				mut ident := ''
 				for i < raw.len
 					&& (raw[i].is_letter() || raw[i] == `_` || (ident.len > 0 && raw[i].is_digit())) {
@@ -1356,6 +1322,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 				}
 				parts << ast.Identifier{
 					name: ident
+					span: span
 				}
 			}
 		} else {
@@ -1364,10 +1331,10 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 		}
 	}
 
-	// Save final string part
 	if current.len > 0 {
 		parts << ast.StringLiteral{
 			value: current
+			span:  span
 		}
 	}
 
@@ -1376,7 +1343,6 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 	}
 }
 
-// Number literal
 fn (mut p Parser) parse_number_expression() !ast.Expression {
 	span := p.current_span()
 	return ast.NumberLiteral{

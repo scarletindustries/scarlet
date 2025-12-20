@@ -2,54 +2,46 @@ module ast
 
 import compiler.token
 
-// Span represents a source location (line and column)
 pub struct Span {
 pub:
 	line   int
 	column int
 }
 
-// Literals
-
 pub struct StringLiteral {
-pub mut:
+pub:
 	value string
-	span  Span
+	span  Span @[required]
 }
 
-// Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
-// Parts alternate between string literals and expressions
 pub struct InterpolatedString {
 pub:
-	parts []Expression // StringLiteral or other expressions
+	parts []Expression
 }
 
 pub struct NumberLiteral {
-pub mut:
+pub:
 	value string
-	span  Span
+	span  Span @[required]
 }
 
 pub struct BooleanLiteral {
 pub:
 	value bool
-	span  Span
+	span  Span @[required]
 }
 
 pub struct NoneExpression {}
 
-// ErrorNode represents a malformed expression that couldn't be parsed
 pub struct ErrorNode {
 pub:
 	message string
 }
 
-// Identifiers
-
 pub struct Identifier {
-pub mut:
+pub:
 	name string
-	span Span
+	span Span @[required]
 }
 
 pub struct TypeIdentifier {
@@ -57,48 +49,41 @@ pub:
 	is_array    bool
 	is_option   bool
 	is_function bool
-pub mut:
 	identifier  Identifier
-	param_types []TypeIdentifier // for function types: fn(Int, String) -> these
-	return_type ?&TypeIdentifier // for function types: fn(...) Int
-	error_type  ?&TypeIdentifier // for function types: fn(...) Int!Error
+	param_types []TypeIdentifier
+	return_type ?&TypeIdentifier
+	error_type  ?&TypeIdentifier
 }
 
-// Operators
-
 pub struct Operator {
-pub mut:
+pub:
 	kind token.Kind
 }
 
-// Variable binding (x = expr)
-
 pub struct VariableBinding {
-pub mut:
+pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
-	span       Span
+	span       Span @[required]
 }
 
 pub struct ConstBinding {
-pub mut:
+pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
-	span       Span
+	span       Span @[required]
 }
 
-// Functions
-
 pub struct FunctionParameter {
-pub mut:
+pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 }
 
 pub struct FunctionExpression {
-pub mut:
+pub:
 	identifier  ?Identifier
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
@@ -106,14 +91,11 @@ pub mut:
 	body        Expression
 }
 
-// Control flow
-
 pub struct IfExpression {
 pub:
 	condition Expression
 	body      Expression
-	span      Span
-pub mut:
+	span      Span @[required]
 	else_body ?Expression
 }
 
@@ -132,13 +114,11 @@ pub:
 }
 
 pub struct OrExpression {
-pub mut:
+pub:
 	expression Expression
 	receiver   ?Identifier
 	body       Expression
 }
-
-// Error handling
 
 pub struct ErrorExpression {
 pub:
@@ -150,41 +130,37 @@ pub:
 	expression Expression
 }
 
-// Binary and unary operations
-
 pub struct BinaryExpression {
-pub mut:
+pub:
 	left  Expression
 	right Expression
 	op    Operator
-	span  Span
+	span  Span @[required]
 }
 
 pub struct UnaryExpression {
-pub mut:
+pub:
 	expression Expression
 	op         Operator
 }
 
 pub struct PostfixExpression {
-pub mut:
+pub:
 	expression Expression
 	op         Operator
 }
 
-// Data structures
-
 pub struct ArrayExpression {
 pub:
 	elements []Expression
-	span     Span
+	span     Span @[required]
 }
 
 pub struct ArrayIndexExpression {
 pub:
 	expression Expression
 	index      Expression
-	span       Span
+	span       Span @[required]
 }
 
 pub struct RangeExpression {
@@ -193,50 +169,42 @@ pub:
 	end   Expression
 }
 
-// Struct definition
-
 pub struct StructField {
-pub mut:
+pub:
 	identifier Identifier
 	typ        TypeIdentifier
 	init       ?Expression
 }
 
 pub struct StructExpression {
-pub mut:
+pub:
 	identifier Identifier
 	fields     []StructField
 }
 
-// Enum definition
-
 pub struct EnumVariant {
-pub mut:
+pub:
 	identifier Identifier
 	payload    ?TypeIdentifier
 }
 
 pub struct EnumExpression {
-pub mut:
+pub:
 	identifier Identifier
 	variants   []EnumVariant
 }
 
-// Struct instantiation
-
 pub struct StructInitField {
-pub mut:
+pub:
 	identifier Identifier
 	init       Expression
 }
 
 pub struct StructInitExpression {
-pub mut:
+pub:
 	identifier Identifier
 	fields     []StructInitField
 }
-
-// Property and method access
 
 pub struct PropertyAccessExpression {
 pub:
@@ -248,17 +216,13 @@ pub struct FunctionCallExpression {
 pub:
 	identifier Identifier
 	arguments  []Expression
-	span       Span
+	span       Span @[required]
 }
-
-// Block (list of expressions, returns last)
 
 pub struct BlockExpression {
-pub mut:
+pub:
 	body []Expression
 }
-
-// Assert
 
 pub struct AssertExpression {
 pub:
@@ -266,21 +230,19 @@ pub:
 	message    Expression
 }
 
-// Imports and exports (top-level only)
-
 pub struct ImportSpecifier {
 pub:
 	identifier Identifier
 }
 
 pub struct ImportDeclaration {
-pub mut:
+pub:
 	path       string
 	specifiers []ImportSpecifier
 }
 
 pub struct ExportExpression {
-pub mut:
+pub:
 	expression Expression
 }
 
