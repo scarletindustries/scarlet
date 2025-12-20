@@ -130,6 +130,36 @@ fn (mut c TypeChecker) expect_type(actual Type, expected Type, span ast.Span, co
 }
 
 fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
+	if t.is_function {
+		mut param_types := []Type{}
+		for param_type in t.param_types {
+			resolved := c.resolve_type_identifier(param_type) or { return none }
+			param_types << resolved
+		}
+
+		mut ret_type := t_none()
+		if rt := t.return_type {
+			ret_type = c.resolve_type_identifier(*rt) or { return none }
+		}
+
+		mut err_type := ?Type(none)
+		if et := t.error_type {
+			err_type = c.resolve_type_identifier(*et) or { return none }
+		}
+
+		mut base_type := Type(TypeFunction{
+			params:     param_types
+			ret:        ret_type
+			error_type: err_type
+		})
+
+		if t.is_option {
+			base_type = t_option(base_type)
+		}
+
+		return base_type
+	}
+
 	name := t.identifier.name
 
 	is_type_var := name.len > 0 && name[0] >= `a` && name[0] <= `z`

@@ -60,6 +60,19 @@ callback = fn(x Int) Int {
     x * 2
 }
 
+// Function type annotations: fn(ParamTypes...) ReturnType
+fn apply(x Int, f fn(Int) Int) Int {
+    f(x)
+}
+
+// Generic function type annotations
+fn apply_generic(x a, f fn(a) a) a {
+    f(x)
+}
+
+double = fn(n Int) Int { n * 2 }
+triple = fn(n Int) Int { n * 3 }
+
 fn find_user(id Int) ?User {
     if id == 0 {
         none
@@ -218,3 +231,9 @@ println(assert_fail)
 println(literal_match1)
 println(literal_match2)
 println(literal_match3)
+
+// Function type annotation tests
+apply_result = apply(5, double)
+apply_generic_result = apply_generic(5, triple)
+println(apply_result)
+println(apply_generic_result)

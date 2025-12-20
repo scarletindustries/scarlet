@@ -54,10 +54,14 @@ pub mut:
 
 pub struct TypeIdentifier {
 pub:
-	is_array  bool
-	is_option bool
+	is_array    bool
+	is_option   bool
+	is_function bool
 pub mut:
-	identifier Identifier
+	identifier  Identifier
+	param_types []TypeIdentifier // for function types: fn(Int, String) -> these
+	return_type ?&TypeIdentifier // for function types: fn(...) Int
+	error_type  ?&TypeIdentifier // for function types: fn(...) Int!Error
 }
 
 // Operators
