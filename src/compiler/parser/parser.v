@@ -266,9 +266,11 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 		if p.current_token.kind == .identifier {
 			if next := p.peek_next() {
 				if next.kind == .punc_arrow {
+					span := p.current_span()
 					name := p.eat_token_literal(.identifier, 'Expected identifier for or receiver')!
 					receiver = ast.Identifier{
 						name: name
+						span: span
 					}
 					p.eat(.punc_arrow)!
 				}
@@ -787,9 +789,11 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 
 	mut identifier := ?ast.Identifier(none)
 	if p.current_token.kind == .identifier {
+		span := p.current_span()
 		name := p.eat_token_literal(.identifier, 'Expected function name')!
 		identifier = ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 
@@ -841,6 +845,7 @@ fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
 }
 
 fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected parameter name')!
 
 	mut typ := ?ast.TypeIdentifier(none)
@@ -854,6 +859,7 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 		typ:        typ
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 }
@@ -912,6 +918,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 }
 
 fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
+	span := p.current_span()
 	p.eat(.kw_function)!
 	p.eat(.punc_open_paren)!
 
@@ -946,6 +953,10 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 	return ast.TypeIdentifier{
 		is_option:   is_option
 		is_function: true
+		identifier:  ast.Identifier{
+			name: 'fn'
+			span: span
+		}
 		param_types: param_types
 		return_type: return_type
 		error_type:  error_type
@@ -955,6 +966,7 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	p.eat(.kw_struct)!
 
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected struct name')!
 
 	p.eat(.punc_open_brace)!
@@ -973,12 +985,14 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	return ast.StructExpression{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		fields:     fields
 	}
 }
 
 fn (mut p Parser) parse_struct_field() !ast.StructField {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected field name')!
 
 	typ := p.parse_type_identifier()!
@@ -997,6 +1011,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 	return ast.StructField{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		typ:        typ
 		init:       init
@@ -1006,6 +1021,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	p.eat(.kw_enum)!
 
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected enum name')!
 
 	p.eat(.punc_open_brace)!
@@ -1024,12 +1040,14 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	return ast.EnumExpression{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		variants:   variants
 	}
 }
 
 fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected variant name')!
 
 	mut payload := ?ast.TypeIdentifier(none)
@@ -1047,6 +1065,7 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	return ast.EnumVariant{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 		payload:    payload
 	}
