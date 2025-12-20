@@ -17,11 +17,13 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup V
-        uses: vlang/setup-v@v1.4
+      - name: Download V
+        run: |
+          curl -sL https://github.com/vlang/v/releases/latest/download/v_linux.zip -o /tmp/v.zip
+          unzip -q /tmp/v.zip -d /tmp
 
       - name: Format V files
-        run: v fmt -w src/
+        run: /tmp/v/v fmt -w src/
 
       - name: Commit changes
         run: |
