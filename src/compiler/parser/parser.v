@@ -1261,6 +1261,7 @@ fn (mut p Parser) parse_string_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_interpolated_string() !ast.Expression {
+	span := p.current_span()
 	raw := p.eat_token_literal(.literal_string_interpolation, 'Expected interpolated string')!
 
 	mut parts := []ast.Expression{}
@@ -1274,6 +1275,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 			if current.len > 0 {
 				parts << ast.StringLiteral{
 					value: current
+					span:  span
 				}
 				current = ''
 			}
@@ -1320,6 +1322,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 				}
 				parts << ast.Identifier{
 					name: ident
+					span: span
 				}
 			}
 		} else {
@@ -1331,6 +1334,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 	if current.len > 0 {
 		parts << ast.StringLiteral{
 			value: current
+			span:  span
 		}
 	}
 
