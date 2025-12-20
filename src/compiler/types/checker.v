@@ -582,7 +582,6 @@ fn (mut c TypeChecker) check_binding_type(name string, annotation ?ast.TypeIdent
 }
 
 fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_ast.Expression, Type) {
-	// Support recursive functions
 	if expr.init is ast.FunctionExpression {
 		func_expr := expr.init as ast.FunctionExpression
 
@@ -623,7 +622,8 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 	}
 
 	typed_init, init_type := c.check_expr(expr.init)
-	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type, 'in variable binding')
+	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type,
+		'in variable binding')
 
 	return typed_ast.VariableBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -639,7 +639,8 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Exp
 	}
 
 	typed_init, init_type := c.check_expr(expr.init)
-	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type, 'in const binding')
+	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type,
+		'in const binding')
 
 	return typed_ast.ConstBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -1194,7 +1195,6 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
 	typed_left, left_type := c.check_expr(expr.left)
 
-	// Handle method calls and enum variant construction (right side is a function call)
 	if expr.right is ast.FunctionCallExpression {
 		typed_right, right_type := c.check_expr(expr.right)
 		return typed_ast.PropertyAccessExpression{
@@ -1203,7 +1203,6 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		}, right_type
 	}
 
-	// Handle pure property access (right side must be an identifier)
 	if expr.right !is ast.Identifier {
 		span := get_ast_span(expr.right)
 		c.error_at_span('Expected identifier in property access', span)
@@ -1255,9 +1254,19 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	mut first_type := t_none()
 	mut typed_arms := []typed_ast.MatchArm{}
+	mut covered_variants := map[string]bool{}
+	mut has_wildcard := false
 
 	for i, arm in expr.arms {
 		c.env.push_scope()
+
+		if arm.pattern is ast.WildcardPattern {
+			has_wildcard = true
+		} else if arm.pattern is ast.FunctionCallExpression {
+			covered_variants[arm.pattern.identifier.name] = true
+		} else if arm.pattern is ast.Identifier {
+			covered_variants[arm.pattern.name] = true
+		}
 
 		typed_pattern, _ := c.check_pattern(arm.pattern, subject_type)
 
@@ -1274,6 +1283,20 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 		} else {
 			arm_span := get_typed_span(typed_body)
 			c.expect_type(arm_type, first_type, arm_span, 'in match arm')
+		}
+	}
+
+	if subject_type is TypeEnum && !has_wildcard {
+		mut missing := []string{}
+		for variant_name, _ in subject_type.variants {
+			if variant_name !in covered_variants {
+				missing << variant_name
+			}
+		}
+		if missing.len > 0 {
+			subject_span := get_typed_span(typed_subject)
+			c.error_at_span('Match is not exhaustive, missing variants: ${missing.join(', ')}',
+				ast.Span{ line: subject_span.line, column: subject_span.column })
 		}
 	}
 
@@ -1425,6 +1448,6 @@ fn (mut c TypeChecker) check_propagate(expr ast.PropagateExpression) (typed_ast.
 
 	return typed_ast.PropagateExpression{
 		expression:    typed_inner
-		resolved_type: inner_type // Required field - always set
+		resolved_type: inner_type
 	}, result_type
 }
