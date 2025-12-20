@@ -7,6 +7,7 @@ pub struct TypeChecker {
 mut:
 	env         TypeEnv
 	diagnostics []diagnostic.Diagnostic
+	in_function bool
 }
 
 pub struct CheckResult {
@@ -193,6 +194,9 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 			return init_type
 		}
 		ast.ConstBinding {
+			if c.in_function {
+				c.error_at_span('const bindings are only allowed at the top level', expr.span)
+			}
 			init_type := c.check_expr(expr.init)
 			if annotation := expr.typ {
 				if expected := c.resolve_type_identifier(annotation) {
@@ -386,7 +390,10 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 		c.env.define(param.identifier.name, param_types[i])
 	}
 
+	prev_in_function := c.in_function
+	c.in_function = true
 	body_type := c.check_expr(expr.body)
+	c.in_function = prev_in_function
 	c.env.pop_scope()
 
 	if expr.return_type != none {
