@@ -90,8 +90,8 @@ fn print_expression(expr ast.Expression, level int) string {
 			}
 			'${op}${print_expression(expr.expression, level)}'
 		}
-		ast.PropagateExpression {
-			'${print_expression(expr.expression, level)}!'
+		ast.PropagateNoneExpression {
+			'${print_expression(expr.expression, level)}?'
 		}
 		ast.BlockExpression {
 			if expr.body.len == 0 {
@@ -242,14 +242,6 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.AssertExpression {
 			'assert ${print_expression(expr.expression, level)}, ${print_expression(expr.message,
 				level)}'
-		}
-		ast.PostfixExpression {
-			op := match expr.op.kind {
-				.punc_plusplus { '++' }
-				.punc_minusminus { '--' }
-				else { '?' }
-			}
-			'${print_expression(expr.expression, level)}${op}'
 		}
 		ast.WildcardPattern {
 			'else'

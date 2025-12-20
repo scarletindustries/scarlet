@@ -464,9 +464,9 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 					span:       span
 				}
 			}
-			.punc_exclamation_mark {
-				p.eat(.punc_exclamation_mark)!
-				expr = ast.PropagateExpression{
+			.punc_question_mark {
+				p.eat(.punc_question_mark)!
+				expr = ast.PropagateNoneExpression{
 					expression: expr
 				}
 			}

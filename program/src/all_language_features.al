@@ -198,7 +198,6 @@ enum_result = handle_result(Ok('success'))
 
 error_result = divide(10, 0) or 0
 error_with_receiver = divide(10, 0) or err -> 0
-success_result = divide(10, 2)!
 
 option_result = find_user(0) or User{ id: 0, name: 'default' }
 
@@ -224,7 +223,6 @@ println(describe_result)
 println(example_result)
 println(enum_result)
 println(error_result)
-println(success_result)
 println(option_result)
 println(assert_pass)
 println(assert_fail)

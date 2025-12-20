@@ -94,7 +94,7 @@ user = find_user(0) or User{ id: 0, name: 'guest' }
 
 ### Error handling
 
-Functions that can fail use `!` with an error type. Handle with `or`, or propagate with `!`.
+Functions that can fail use `!` with an error type. Handle with `or`.
 
 ```
 fn divide(a Int, b Int) Int!DivisionError {
@@ -106,7 +106,10 @@ fn divide(a Int, b Int) Int!DivisionError {
 }
 
 safe = divide(10, 0) or 0
-result = divide(10, 2)!
+result = divide(10, 2) or err -> {
+    println('Error: ${err.message}')
+    0
+}
 ```
 
 ### Pattern matching

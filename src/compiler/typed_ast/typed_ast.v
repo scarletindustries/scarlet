@@ -134,7 +134,7 @@ pub:
 	expression Expression
 }
 
-pub struct PropagateExpression {
+pub struct PropagateNoneExpression {
 pub:
 	expression    Expression
 	resolved_type Type
@@ -149,12 +149,6 @@ pub:
 }
 
 pub struct UnaryExpression {
-pub:
-	expression Expression
-	op         Operator
-}
-
-pub struct PostfixExpression {
 pub:
 	expression Expression
 	op         Operator
@@ -277,9 +271,8 @@ pub type Expression = ArrayExpression
 	| NoneExpression
 	| NumberLiteral
 	| OrExpression
-	| PostfixExpression
 	| PropertyAccessExpression
-	| PropagateExpression
+	| PropagateNoneExpression
 	| RangeExpression
 	| StringLiteral
 	| StructExpression

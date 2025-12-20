@@ -151,13 +151,10 @@ fn get_ast_span(expr ast.Expression) ast.Span {
 		ast.ErrorExpression {
 			get_ast_span(expr.expression)
 		}
-		ast.PropagateExpression {
+		ast.PropagateNoneExpression {
 			get_ast_span(expr.expression)
 		}
 		ast.UnaryExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.PostfixExpression {
 			get_ast_span(expr.expression)
 		}
 		ast.PropertyAccessExpression {
@@ -233,16 +230,13 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 		typed_ast.OrExpression {
 			get_typed_span(expr.expression)
 		}
-		typed_ast.PropagateExpression {
+		typed_ast.PropagateNoneExpression {
 			get_typed_span(expr.expression)
 		}
 		typed_ast.ErrorExpression {
 			get_typed_span(expr.expression)
 		}
 		typed_ast.UnaryExpression {
-			get_typed_span(expr.expression)
-		}
-		typed_ast.PostfixExpression {
 			get_typed_span(expr.expression)
 		}
 		typed_ast.PropertyAccessExpression {
@@ -543,9 +537,6 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 		ast.OrExpression {
 			return c.check_or(expr)
 		}
-		ast.PostfixExpression {
-			return c.check_postfix(expr)
-		}
 		ast.ErrorExpression {
 			typed_inner, typ := c.check_expr(expr.expression)
 			return typed_ast.ErrorExpression{
@@ -558,8 +549,8 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 		ast.AssertExpression {
 			return c.check_assert(expr)
 		}
-		ast.PropagateExpression {
-			return c.check_propagate(expr)
+		ast.PropagateNoneExpression {
+			return c.check_propagate_none(expr)
 		}
 		ast.ImportDeclaration {
 			return typed_ast.ImportDeclaration{
@@ -1511,44 +1502,6 @@ fn (mut c TypeChecker) check_or(expr ast.OrExpression) (typed_ast.Expression, Ty
 	}, success_type
 }
 
-fn (mut c TypeChecker) check_postfix(expr ast.PostfixExpression) (typed_ast.Expression, Type) {
-	typed_inner, inner_type := c.check_expr(expr.expression)
-	inner_span := get_typed_span(typed_inner)
-
-	result_type := match expr.op.kind {
-		.punc_exclamation_mark {
-			if !c.in_function {
-				c.error_at_span("'!' can only be used inside a function", ast.Span{
-					line:   inner_span.line
-					column: inner_span.column
-				})
-			}
-
-			if inner_type is TypeResult {
-				inner_type.success
-			} else {
-				c.error_at_span("'!' can only be used on Result types, got '${type_to_string(inner_type)}'. Use '?' to propagate none from Option types.",
-					ast.Span{ line: inner_span.line, column: inner_span.column })
-				inner_type
-			}
-		}
-		else {
-			c.error_at_span("Unknown postfix operator '${expr.op.kind.str()}'", ast.Span{
-				line:   inner_span.line
-				column: inner_span.column
-			})
-			t_none()
-		}
-	}
-
-	return typed_ast.PostfixExpression{
-		expression: typed_inner
-		op:         typed_ast.Operator{
-			kind: expr.op.kind
-		}
-	}, result_type
-}
-
 fn (mut c TypeChecker) check_range(expr ast.RangeExpression) (typed_ast.Expression, Type) {
 	typed_start, start_type := c.check_expr(expr.start)
 	typed_end, end_type := c.check_expr(expr.end)
@@ -1586,7 +1539,7 @@ fn (mut c TypeChecker) check_assert(expr ast.AssertExpression) (typed_ast.Expres
 	}, t_none()
 }
 
-fn (mut c TypeChecker) check_propagate(expr ast.PropagateExpression) (typed_ast.Expression, Type) {
+fn (mut c TypeChecker) check_propagate_none(expr ast.PropagateNoneExpression) (typed_ast.Expression, Type) {
 	typed_inner, inner_type := c.check_expr(expr.expression)
 	inner_span := get_typed_span(typed_inner)
 
@@ -1605,7 +1558,7 @@ fn (mut c TypeChecker) check_propagate(expr ast.PropagateExpression) (typed_ast.
 		inner_type
 	}
 
-	return typed_ast.PropagateExpression{
+	return typed_ast.PropagateNoneExpression{
 		expression:    typed_inner
 		resolved_type: inner_type
 	}, result_type

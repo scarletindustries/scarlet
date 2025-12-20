@@ -611,21 +611,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 			}
 		}
-		typed_ast.PropagateExpression {
+		typed_ast.PropagateNoneExpression {
 			c.compile_expr(expr.expression)!
 
 			resolved := expr.resolved_type
-			if resolved is TypeResult {
-				c.emit(.dup)
-				c.emit(.is_error)
-
-				not_error_jump := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
-
-				c.emit(.ret)
-
-				c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
-			} else if resolved is TypeOption {
+			if resolved is TypeOption {
 				c.emit(.dup)
 				c.emit(.is_none)
 

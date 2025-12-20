@@ -66,7 +66,7 @@ user = find_user(0) or User{ id: 0, name: 'guest' }`,
     {
       title: "Error handling with !",
       description:
-        "Functions that can fail use ! with an error type. Handle errors with 'or', or propagate with !.",
+        "Functions that can fail use ! with an error type. Handle errors with 'or'.",
       code: `fn divide(a Int, b Int) Int!DivisionError {
     if b == 0 {
         error DivisionError{ message: 'divide by zero' }
@@ -76,8 +76,7 @@ user = find_user(0) or User{ id: 0, name: 'guest' }`,
 }
 
 safe = divide(10, 0) or 0
-safe_with_err = divide(10, 0) or err -> -1
-result = divide(10, 2)!  // propagate error`,
+safe_with_err = divide(10, 0) or err -> -1`,
     },
     {
       title: "Pattern matching",
