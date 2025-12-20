@@ -67,18 +67,114 @@ fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
 
 fn get_ast_span(expr ast.Expression) ast.Span {
 	return match expr {
-		ast.NumberLiteral { expr.span }
-		ast.StringLiteral { expr.span }
-		ast.BooleanLiteral { expr.span }
-		ast.Identifier { expr.span }
-		ast.VariableBinding { expr.span }
-		ast.ConstBinding { expr.span }
-		ast.BinaryExpression { expr.span }
-		ast.FunctionCallExpression { expr.span }
-		ast.ArrayExpression { expr.span }
-		ast.ArrayIndexExpression { expr.span }
-		ast.IfExpression { expr.span }
-		else { ast.Span{} }
+		ast.NumberLiteral {
+			expr.span
+		}
+		ast.StringLiteral {
+			expr.span
+		}
+		ast.BooleanLiteral {
+			expr.span
+		}
+		ast.NoneExpression {
+			expr.span
+		}
+		ast.ErrorNode {
+			expr.span
+		}
+		ast.Identifier {
+			expr.span
+		}
+		ast.VariableBinding {
+			expr.span
+		}
+		ast.ConstBinding {
+			expr.span
+		}
+		ast.BinaryExpression {
+			expr.span
+		}
+		ast.FunctionCallExpression {
+			expr.span
+		}
+		ast.ArrayExpression {
+			expr.span
+		}
+		ast.ArrayIndexExpression {
+			expr.span
+		}
+		ast.IfExpression {
+			expr.span
+		}
+		ast.WildcardPattern {
+			expr.span
+		}
+		ast.TypeIdentifier {
+			expr.identifier.span
+		}
+		ast.StructExpression {
+			expr.identifier.span
+		}
+		ast.EnumExpression {
+			expr.identifier.span
+		}
+		ast.StructInitExpression {
+			expr.identifier.span
+		}
+		ast.InterpolatedString {
+			if expr.parts.len > 0 {
+				get_ast_span(expr.parts[0])
+			} else {
+				ast.Span{}
+			}
+		}
+		ast.FunctionExpression {
+			if id := expr.identifier {
+				id.span
+			} else {
+				get_ast_span(expr.body)
+			}
+		}
+		ast.BlockExpression {
+			if expr.body.len > 0 {
+				get_ast_span(expr.body[0])
+			} else {
+				ast.Span{}
+			}
+		}
+		ast.MatchExpression {
+			get_ast_span(expr.subject)
+		}
+		ast.OrExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.ErrorExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.PropagateExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.UnaryExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.PostfixExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.PropertyAccessExpression {
+			get_ast_span(expr.left)
+		}
+		ast.RangeExpression {
+			get_ast_span(expr.start)
+		}
+		ast.AssertExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.ExportExpression {
+			get_ast_span(expr.expression)
+		}
+		ast.ImportDeclaration {
+			ast.Span{}
+		}
 	}
 }
 
@@ -759,6 +855,7 @@ fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) (typed_ast.Expressi
 
 fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Expression, Type) {
 	mut param_types := []Type{}
+	mut seen_params := map[string]bool{}
 
 	mut ret_type := t_none()
 	if rt := expr.return_type {
@@ -779,6 +876,11 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 	}
 
 	for param in expr.params {
+		if param.identifier.name in seen_params {
+			c.error_at_span("Duplicate parameter '${param.identifier.name}'", param.identifier.span)
+		}
+		seen_params[param.identifier.name] = true
+
 		if pt := param.typ {
 			if resolved := c.resolve_type_identifier(pt) {
 				param_types << resolved
@@ -1089,6 +1191,11 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Ex
 	mut fields := map[string]Type{}
 
 	for field in expr.fields {
+		if field.identifier.name in fields {
+			c.error_at_span("Duplicate field '${field.identifier.name}' in struct '${expr.identifier.name}'",
+				field.identifier.span)
+			continue
+		}
 		if resolved := c.resolve_type_identifier(field.typ) {
 			fields[field.identifier.name] = resolved
 		} else {
@@ -1135,8 +1242,16 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 		}
 	}
 
+	mut provided_fields := map[string]bool{}
 	mut typed_fields := []typed_ast.StructInitField{}
+
 	for field in expr.fields {
+		if field.identifier.name in provided_fields {
+			c.error_at_span("Duplicate field '${field.identifier.name}' in struct initializer",
+				field.identifier.span)
+		}
+		provided_fields[field.identifier.name] = true
+
 		typed_init, actual_type := c.check_expr(field.init)
 		if expected_type := struct_type.fields[field.identifier.name] {
 			init_span := get_typed_span(typed_init)
@@ -1152,6 +1267,17 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 		}
 	}
 
+	mut missing_fields := []string{}
+	for field_name, _ in struct_type.fields {
+		if field_name !in provided_fields {
+			missing_fields << field_name
+		}
+	}
+	if missing_fields.len > 0 {
+		c.error_at_span("Missing required fields in '${expr.identifier.name}': ${missing_fields.join(', ')}",
+			expr.identifier.span)
+	}
+
 	return typed_ast.StructInitExpression{
 		identifier: convert_identifier(expr.identifier)
 		fields:     typed_fields
@@ -1162,6 +1288,11 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 	mut variants := map[string]?Type{}
 
 	for variant in expr.variants {
+		if variant.identifier.name in variants {
+			c.error_at_span("Duplicate variant '${variant.identifier.name}' in enum '${expr.identifier.name}'",
+				variant.identifier.span)
+			continue
+		}
 		if payload := variant.payload {
 			if resolved := c.resolve_type_identifier(payload) {
 				variants[variant.identifier.name] = resolved
@@ -1382,18 +1513,30 @@ fn (mut c TypeChecker) check_or(expr ast.OrExpression) (typed_ast.Expression, Ty
 
 fn (mut c TypeChecker) check_postfix(expr ast.PostfixExpression) (typed_ast.Expression, Type) {
 	typed_inner, inner_type := c.check_expr(expr.expression)
+	inner_span := get_typed_span(typed_inner)
 
 	result_type := match expr.op.kind {
 		.punc_exclamation_mark {
-			if inner_type is TypeOption {
-				inner_type.inner
-			} else if inner_type is TypeResult {
+			if !c.in_function {
+				c.error_at_span("'!' can only be used inside a function", ast.Span{
+					line:   inner_span.line
+					column: inner_span.column
+				})
+			}
+
+			if inner_type is TypeResult {
 				inner_type.success
 			} else {
+				c.error_at_span("'!' can only be used on Result types, got '${type_to_string(inner_type)}'. Use '?' to propagate none from Option types.",
+					ast.Span{ line: inner_span.line, column: inner_span.column })
 				inner_type
 			}
 		}
 		else {
+			c.error_at_span("Unknown postfix operator '${expr.op.kind.str()}'", ast.Span{
+				line:   inner_span.line
+				column: inner_span.column
+			})
 			t_none()
 		}
 	}
@@ -1445,12 +1588,20 @@ fn (mut c TypeChecker) check_assert(expr ast.AssertExpression) (typed_ast.Expres
 
 fn (mut c TypeChecker) check_propagate(expr ast.PropagateExpression) (typed_ast.Expression, Type) {
 	typed_inner, inner_type := c.check_expr(expr.expression)
+	inner_span := get_typed_span(typed_inner)
+
+	if !c.in_function {
+		c.error_at_span("'?' can only be used inside a function", ast.Span{
+			line:   inner_span.line
+			column: inner_span.column
+		})
+	}
 
 	result_type := if inner_type is TypeOption {
 		inner_type.inner
-	} else if inner_type is TypeResult {
-		inner_type.success
 	} else {
+		c.error_at_span("'?' can only be used on Option types, got '${type_to_string(inner_type)}'. Use '!' to propagate errors from Result types.",
+			ast.Span{ line: inner_span.line, column: inner_span.column })
 		inner_type
 	}
 
