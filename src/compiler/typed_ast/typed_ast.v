@@ -12,7 +12,7 @@ pub:
 pub struct StringLiteral {
 pub:
 	value string
-	span  Span
+	span  Span @[required]
 }
 
 pub struct InterpolatedString {
@@ -23,13 +23,13 @@ pub:
 pub struct NumberLiteral {
 pub:
 	value string
-	span  Span
+	span  Span @[required]
 }
 
 pub struct BooleanLiteral {
 pub:
 	value bool
-	span  Span
+	span  Span @[required]
 }
 
 pub struct NoneExpression {}
@@ -42,7 +42,7 @@ pub:
 pub struct Identifier {
 pub:
 	name string
-	span Span
+	span Span @[required]
 }
 
 pub struct TypeIdentifier {
@@ -66,7 +66,7 @@ pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
-	span       Span
+	span       Span @[required]
 }
 
 pub struct ConstBinding {
@@ -74,7 +74,7 @@ pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
-	span       Span
+	span       Span @[required]
 }
 
 pub struct FunctionParameter {
@@ -96,7 +96,7 @@ pub struct IfExpression {
 pub:
 	condition Expression
 	body      Expression
-	span      Span
+	span      Span @[required]
 	else_body ?Expression
 }
 
@@ -138,7 +138,7 @@ pub:
 	left  Expression
 	right Expression
 	op    Operator
-	span  Span
+	span  Span @[required]
 }
 
 pub struct UnaryExpression {
@@ -156,14 +156,14 @@ pub:
 pub struct ArrayExpression {
 pub:
 	elements []Expression
-	span     Span
+	span     Span @[required]
 }
 
 pub struct ArrayIndexExpression {
 pub:
 	expression Expression
 	index      Expression
-	span       Span
+	span       Span @[required]
 }
 
 pub struct RangeExpression {
@@ -219,7 +219,7 @@ pub struct FunctionCallExpression {
 pub:
 	identifier Identifier
 	arguments  []Expression
-	span       Span
+	span       Span @[required]
 }
 
 pub struct BlockExpression {
