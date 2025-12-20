@@ -1,6 +1,6 @@
 # AL
 
-A small, expressive programming language.
+A small, statically-typed, expression-oriented programming language.
 
 ## Install
 
@@ -12,6 +12,7 @@ curl -fsSL al.alistair.sh/install.sh | bash
 
 ```
 al run <file.al>      Run a program
+al check <file.al>    Type-check without running
 al build <file.al>    Print the AST
 ```
 
@@ -19,9 +20,15 @@ al build <file.al>    Print the AST
 
 AL compiles to bytecode and runs on a stack-based virtual machine. The compiler is written in V, producing a single native binary with no dependencies.
 
+**Statically typed with inference.** Every expression has a type known at compile time. The type checker catches errors before your code runs, while inference keeps the syntax clean.
+
+**Expression-oriented.** No statements—if/else, match, and blocks all return values.
+
+**Unified error handling.** Both optional values (`?T`) and errors (`T!E`) use the same `or` syntax.
+
 ### Error messages
 
-The parser recovers from errors to report multiple issues at once:
+The parser and type checker recover from errors to report multiple issues at once:
 
 ```
 error: Unexpected ')'
@@ -35,6 +42,24 @@ error: Unexpected ']'
    |
 7  |     value = ]
    |             ^
+
+Found 2 errors
+```
+
+Type errors are caught at compile time:
+
+```
+error: Type mismatch: expected Int, got String
+  --> example.al:5:12
+   |
+5  |     return 'oops'
+   |            ^^^^^^
+
+error: Unknown variable: 'undefined_var'
+  --> example.al:8:5
+   |
+8  |     undefined_var + 1
+   |     ^^^^^^^^^^^^^
 
 Found 2 errors
 ```
@@ -138,6 +163,49 @@ result = apply(5, double)
 name = 'world'
 greeting = 'Hello, $name!'
 math = 'Result: ${1 + 2 * 3}'
+```
+
+### Static typing with inference
+
+Types are inferred from context. Annotate when needed, skip when obvious.
+
+```
+// Types inferred
+count = 42
+name = 'alice'
+numbers = [1, 2, 3]
+
+// Explicit annotations
+fn add(a Int, b Int) Int {
+    a + b
+}
+```
+
+### Generics
+
+Use lowercase type variables for polymorphic functions.
+
+```
+fn identity(x a) a {
+    x
+}
+
+fn first(arr []a) a {
+    arr[0]
+}
+
+fn map(arr []a, f fn(a) b) []b {
+    result = []
+    for item in arr {
+        result = result + [f(item)]
+    }
+    result
+}
+
+// Works with any type
+x = identity(42)
+y = identity('hello')
+head = first([1, 2, 3])
 ```
 
 ## License

@@ -3,6 +3,37 @@ import "./globals.css";
 export const examples: { title: string; description: string; code: string }[] =
   [
     {
+      title: "Static typing with inference",
+      description:
+        "Every expression has a type known at compile time. Types are inferred—annotate function signatures, skip the rest.",
+      code: `// Types inferred from values
+count = 42           // Int
+name = 'alice'       // String
+numbers = [1, 2, 3]  // []Int
+
+// Function signatures are explicit
+fn add(a Int, b Int) Int {
+    a + b
+}`,
+    },
+    {
+      title: "Generics",
+      description:
+        "Use lowercase type variables for polymorphic functions. The type checker infers concrete types at each call site.",
+      code: `fn identity(x a) a {
+    x
+}
+
+fn first(arr []a) a {
+    arr[0]
+}
+
+// Works with any type
+n = identity(42)       // Int
+s = identity('hello')  // String
+head = first([1, 2, 3])`,
+    },
+    {
       title: "Everything is an expression",
       description:
         "No statements. If/else, match, and blocks all return values. The last expression in a block is its value.",
@@ -143,6 +174,7 @@ const cliOutput = `   ▄▀█ █░░
 
    Usage:
      al run <file.al>      Run a program
+     al check <file.al>    Type-check without running
      al --help             Show all commands
 
    Example:
@@ -167,12 +199,23 @@ export function App({ examples }: { examples: RenderedExample[] }) {
       <section className="mb-16">
         <h2 className="text-lg font-bold mb-4">How it works</h2>
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
-          AL compiles to bytecode and runs on a stack-based virtual machine. The
-          compiler is written in V, producing a single native binary with no
-          dependencies.
+          AL is{" "}
+          <strong className="text-black dark:text-white">
+            statically typed with full type inference
+          </strong>
+          . Every expression has a type known at compile time. The type checker
+          catches errors before your code runs, while inference keeps the syntax
+          clean—no type annotations needed for local variables.
+        </p>
+        <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
+          The compiler is written in V, producing a single native binary with no
+          dependencies. It compiles to bytecode and runs on a stack-based
+          virtual machine.
         </p>
         <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          The VM supports closures, tagged enums with pattern matching,
+          AL supports{" "}
+          <strong className="text-black dark:text-white">generics</strong> via
+          type variables, closures, tagged enums with pattern matching,
           first-class functions, and a unified error handling model where both
           optional values and errors are handled with the same{" "}
           <code className="text-black dark:text-white">or</code> syntax.
@@ -194,7 +237,14 @@ export function App({ examples }: { examples: RenderedExample[] }) {
 
       <footer className="mt-16 pt-6 border-t border-neutral-200 dark:border-neutral-800">
         <p className="text-xs text-neutral-500">
-          AL is a hobby project. Expect bugs.
+          AL is open source. View the code on{" "}
+          <a
+            href="https://github.com/alistairvu/al"
+            className="underline hover:text-black dark:hover:text-white"
+          >
+            GitHub
+          </a>
+          .
         </p>
       </footer>
     </div>
