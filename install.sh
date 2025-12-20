@@ -27,24 +27,12 @@ case $OS in
 esac
 
 ASSET_NAME="al-$OS-$ARCH"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/canary/$ASSET_NAME"
 
 # Create install directory
 mkdir -p "$INSTALL_DIR"
 
-if ! command -v gh &> /dev/null; then
-    echo "GitHub CLI (gh) is required: https://cli.github.com"
-    exit 1
-fi
-
-if ! gh auth status &> /dev/null; then
-    echo "Please authenticate with GitHub first: gh auth login"
-    exit 1
-fi
-
-gh release download canary --repo "$REPO" --pattern "$ASSET_NAME" --dir "$INSTALL_DIR" --clobber
-
-# Install
-mv "$INSTALL_DIR/$ASSET_NAME" "$INSTALL_DIR/$BINARY_NAME"
+curl -fsSL "$DOWNLOAD_URL" -o "$INSTALL_DIR/$BINARY_NAME"
 chmod +x "$INSTALL_DIR/$BINARY_NAME"
 
 echo "Installed AL to $INSTALL_DIR/$BINARY_NAME"

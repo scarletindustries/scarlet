@@ -126,10 +126,11 @@ fn main() {
 					asset_name := 'al-${os_name}-${arch}'
 					tmp_dir := os.temp_dir()
 					tmp_path := os.join_path(tmp_dir, asset_name)
+					download_url := 'https://github.com/alii/al/releases/download/${tag}/${asset_name}'
 
 					println('Downloading ${tag}...')
 
-					result := os.execute('gh release download ${tag} --repo alii/al --pattern "${asset_name}" --dir "${tmp_dir}" --clobber')
+					result := os.execute('curl -fsSL "${download_url}" -o "${tmp_path}"')
 					if result.exit_code != 0 {
 						return error('Failed to download: ${result.output}')
 					}
