@@ -932,16 +932,15 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 		p.eat(.punc_close_bracket)!
 	}
 
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected type name')!
-
-	// Lowercase names are type variables (generics), uppercase are concrete types
-	// Both are valid in type positions
 
 	return ast.TypeIdentifier{
 		is_option:  is_option
 		is_array:   is_array
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 }

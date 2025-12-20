@@ -185,6 +185,8 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 					c.expect_type(init_type, expected, init_span, 'in variable binding')
 					c.env.define(expr.identifier.name, expected)
 					return expected
+				} else {
+					c.error_at_span("Unknown type '${annotation.identifier.name}'", annotation.identifier.span)
 				}
 			}
 			c.env.define(expr.identifier.name, init_type)
@@ -198,6 +200,8 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 					c.expect_type(init_type, expected, init_span, 'in const binding')
 					c.env.define(expr.identifier.name, expected)
 					return expected
+				} else {
+					c.error_at_span("Unknown type '${annotation.identifier.name}'", annotation.identifier.span)
 				}
 			}
 			c.env.define(expr.identifier.name, init_type)
@@ -340,7 +344,7 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 			if resolved := c.resolve_type_identifier(pt) {
 				param_types << resolved
 			} else {
-				c.error_at_span("Unknown type '${pt.identifier.name}' for parameter '${param.identifier.name}'", param.identifier.span)
+				c.error_at_span("Unknown type '${pt.identifier.name}'", pt.identifier.span)
 				param_types << t_none()
 			}
 		} else {
