@@ -621,7 +621,7 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 		curr_index := p.index
 		curr_token := p.current_token
 
-		if result := p.parse_struct_init_expression(name) {
+		if result := p.parse_struct_init_expression(name, span) {
 			return result
 		}
 
@@ -1071,13 +1071,14 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	}
 }
 
-fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
+fn (mut p Parser) parse_struct_init_expression(name string, name_span ast.Span) !ast.Expression {
 	p.eat(.punc_open_brace)!
 	p.push_context(.struct_init)
 
 	mut fields := []ast.StructInitField{}
 
 	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
+		field_span := p.current_span()
 		field_name := p.eat_token_literal(.identifier, 'Expected field name')!
 		p.eat(.punc_colon)!
 		value := p.parse_expression()!
@@ -1085,6 +1086,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 		fields << ast.StructInitField{
 			identifier: ast.Identifier{
 				name: field_name
+				span: field_span
 			}
 			init:       value
 		}
@@ -1100,6 +1102,7 @@ fn (mut p Parser) parse_struct_init_expression(name string) !ast.Expression {
 	return ast.StructInitExpression{
 		identifier: ast.Identifier{
 			name: name
+			span: name_span
 		}
 		fields:     fields
 	}
@@ -1160,11 +1163,13 @@ fn (mut p Parser) parse_import_declaration() !ast.Expression {
 }
 
 fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) ! {
+	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected import specifier')!
 
 	specifiers << ast.ImportSpecifier{
 		identifier: ast.Identifier{
 			name: name
+			span: span
 		}
 	}
 
