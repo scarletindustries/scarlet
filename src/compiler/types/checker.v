@@ -563,6 +563,24 @@ fn convert_span(s ast.Span) typed_ast.Span {
 	}
 }
 
+fn (mut c TypeChecker) check_binding_type(name string, annotation ?ast.TypeIdentifier, typed_init typed_ast.Expression, init_type Type, context string) Type {
+	if annot := annotation {
+		if expected := c.resolve_type_identifier(annot) {
+			init_span := get_typed_span(typed_init)
+			c.expect_type(init_type, expected, init_span, context)
+			c.env.define(name, expected)
+			return expected
+		} else {
+			c.error_at_span("Unknown type '${annot.identifier.name}'", annot.identifier.span)
+			c.env.define(name, init_type)
+			return init_type
+		}
+	} else {
+		c.env.define(name, init_type)
+		return init_type
+	}
+}
+
 fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_ast.Expression, Type) {
 	// Support recursive functions
 	if expr.init is ast.FunctionExpression {
@@ -605,22 +623,7 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 	}
 
 	typed_init, init_type := c.check_expr(expr.init)
-
-	final_type := if annotation := expr.typ {
-		if expected := c.resolve_type_identifier(annotation) {
-			init_span := get_typed_span(typed_init)
-			c.expect_type(init_type, expected, init_span, 'in variable binding')
-			c.env.define(expr.identifier.name, expected)
-			expected
-		} else {
-			c.error_at_span("Unknown type '${annotation.identifier.name}'", annotation.identifier.span)
-			c.env.define(expr.identifier.name, init_type)
-			init_type
-		}
-	} else {
-		c.env.define(expr.identifier.name, init_type)
-		init_type
-	}
+	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type, 'in variable binding')
 
 	return typed_ast.VariableBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -636,22 +639,7 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Exp
 	}
 
 	typed_init, init_type := c.check_expr(expr.init)
-
-	final_type := if annotation := expr.typ {
-		if expected := c.resolve_type_identifier(annotation) {
-			init_span := get_typed_span(typed_init)
-			c.expect_type(init_type, expected, init_span, 'in const binding')
-			c.env.define(expr.identifier.name, expected)
-			expected
-		} else {
-			c.error_at_span("Unknown type '${annotation.identifier.name}'", annotation.identifier.span)
-			c.env.define(expr.identifier.name, init_type)
-			init_type
-		}
-	} else {
-		c.env.define(expr.identifier.name, init_type)
-		init_type
-	}
+	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type, 'in const binding')
 
 	return typed_ast.ConstBinding{
 		identifier: convert_identifier(expr.identifier)
