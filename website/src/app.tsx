@@ -239,7 +239,7 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         <p className="text-xs text-neutral-500">
           AL is open source. View the code on{" "}
           <a
-            href="https://github.com/alistairvu/al"
+            href="https://github.com/alii/al"
             className="underline hover:text-black dark:hover:text-white"
           >
             GitHub
