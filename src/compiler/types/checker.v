@@ -192,6 +192,47 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 			return t_none()
 		}
 		ast.VariableBinding {
+			// support recursive functions by checking if the rhs is a function expression
+ 			if expr.init is ast.FunctionExpression {
+				func_expr := expr.init as ast.FunctionExpression
+
+				mut param_types := []Type{}
+				for param in func_expr.params {
+					if pt := param.typ {
+						if resolved := c.resolve_type_identifier(pt) {
+							param_types << resolved
+						} else {
+							param_types << t_none()
+						}
+					} else {
+						param_types << t_none()
+					}
+				}
+
+				mut ret_type := t_none()
+				if rt := func_expr.return_type {
+					if resolved := c.resolve_type_identifier(rt) {
+						ret_type = resolved
+					}
+				}
+
+				mut err_type := ?Type(none)
+				if et := func_expr.error_type {
+					if resolved := c.resolve_type_identifier(et) {
+						err_type = resolved
+					}
+				}
+
+				preliminary_func_type := TypeFunction{
+					params:     param_types
+					ret:        ret_type
+					error_type: err_type
+				}
+
+				// and register it so we can call itself
+				c.env.define(expr.identifier.name, preliminary_func_type)
+			}
+
 			init_type := c.check_expr(expr.init)
 			if annotation := expr.typ {
 				if expected := c.resolve_type_identifier(annotation) {
