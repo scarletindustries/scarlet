@@ -1208,27 +1208,39 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
 	typed_left, left_type := c.check_expr(expr.left)
 
-	typed_right := if expr.right is ast.Identifier {
-		typed_ast.Expression(typed_ast.Identifier{
-			name: expr.right.name
-			span: convert_span(expr.right.span)
-		})
-	} else {
-		typed_expr, _ := c.check_expr(expr.right)
-		typed_expr
+	// Handle method calls and enum variant construction (right side is a function call)
+	if expr.right is ast.FunctionCallExpression {
+		typed_right, right_type := c.check_expr(expr.right)
+		return typed_ast.PropertyAccessExpression{
+			left:  typed_left
+			right: typed_right
+		}, right_type
+	}
+
+	// Handle pure property access (right side must be an identifier)
+	if expr.right !is ast.Identifier {
+		c.error_at_span('Expected identifier in property access', get_ast_span(expr.right))
+		return typed_ast.PropertyAccessExpression{
+			left:  typed_left
+			right: typed_ast.ErrorNode{
+				message: 'Expected identifier'
+			}
+		}, t_none()
+	}
+
+	right := expr.right as ast.Identifier
+
+	typed_right := typed_ast.Identifier{
+		name: right.name
+		span: convert_span(right.span)
 	}
 
 	result_type := if left_type is TypeStruct {
-		right := expr.right
-		if right is ast.Identifier {
-			if field_type := left_type.fields[right.name] {
-				field_type
-			} else {
-				c.error_at_span("Struct '${left_type.name}' has no field '${right.name}'",
-					right.span)
-				t_none()
-			}
+		if field_type := left_type.fields[right.name] {
+			field_type
 		} else {
+			c.error_at_span("Struct '${left_type.name}' has no field '${right.name}'",
+				right.span)
 			t_none()
 		}
 	} else {
