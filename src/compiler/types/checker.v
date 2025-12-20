@@ -260,7 +260,24 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) Type {
 	right_type := c.check_expr(expr.right)
 
 	match expr.op.kind {
-		.punc_plus, .punc_minus, .punc_mul, .punc_div, .punc_mod {
+		.punc_plus {
+			if types_equal(left_type, t_string()) && types_equal(right_type, t_string()) {
+				return t_string()
+			}
+			if !is_numeric(left_type) {
+				c.error_at_span('Left operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(left_type)}', expr.span)
+				return t_int()
+			}
+			if !is_numeric(right_type) {
+				c.error_at_span('Right operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(right_type)}', expr.span)
+				return t_int()
+			}
+			if !types_equal(left_type, right_type) {
+				c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}', expr.span)
+			}
+			return left_type
+		}
+		.punc_minus, .punc_mul, .punc_div, .punc_mod {
 			if !is_numeric(left_type) {
 				c.error_at_span('Left operand of ${expr.op.kind} must be numeric, got ${type_to_string(left_type)}', expr.span)
 				return t_int()
@@ -375,9 +392,25 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 	if expr.return_type != none {
 		body_span := get_expr_span(expr.body)
 		c.expect_type(body_type, ret_type, body_span, 'in function return')
+	} else {
+		// Infer return type from body when not explicitly annotated
+		ret_type = body_type
 	}
 
-	return func_type
+	// Build final function type with correct return type (either annotated or inferred)
+	final_func_type := TypeFunction{
+		params:     param_types
+		ret:        ret_type
+		error_type: err_type
+	}
+
+	// Re-register the function with the correct return type if it has a name
+	if id := expr.identifier {
+		c.env.register_function(id.name, final_func_type)
+		c.env.define(id.name, final_func_type)
+	}
+
+	return final_func_type
 }
 
 fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) Type {
