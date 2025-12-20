@@ -4,6 +4,7 @@ import os
 
 const color_reset = '\x1b[0m'
 const color_bold = '\x1b[1m'
+const color_dim = '\x1b[2m'
 const color_red = '\x1b[31m'
 const color_yellow = '\x1b[33m'
 const color_cyan = '\x1b[36m'
@@ -42,13 +43,13 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 
 	color := severity_color(d.severity)
 	label := severity_label(d.severity)
-	result += '${color_bold}${color}${label}${color_reset}: ${d.message}\n'
 
 	abs_path := os.real_path(file_path)
 	location := '${file_path}:${d.span.start_line}:${d.span.start_column}'
 	editor := detect_editor()
 	link_url := build_editor_url(editor, abs_path, d.span.start_line, d.span.start_column)
-	result += '${color_blue}  -->${color_reset} ${link_start}${link_url}${link_end}${location}${link_start}${link_end}\n'
+
+	result += '${color_bold}${color}${label}${color_reset}: ${d.message} ${color_dim}at ${link_start}${link_url}${link_end}${location}${link_start}${link_end}${color_reset}\n'
 
 	line_num_width := '${d.span.start_line}'.len
 	padding := ' '.repeat(line_num_width)
