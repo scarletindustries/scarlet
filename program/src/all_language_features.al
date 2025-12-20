@@ -190,7 +190,7 @@ success_result = divide(10, 2)!
 option_result = find_user(0) or User{ id: 0, name: 'default' }
 
 assert_pass = check_positive(5)
-assert_fail = check_positive(-1) or err -> 'ERROR: ${err.message}'
+assert_fail = check_positive(-1) or err -> -1
 
 literal_match1 = match_literal(Ok('special'))
 literal_match2 = match_literal(Err('danger'))
@@ -204,4 +204,17 @@ println('x is:')
 println(x)
 println('what')
 
-{[add_result, max_result, classify_result, describe_result, example_result, enum_result, error_result, success_result, option_result, assert_pass, assert_fail, literal_match1, literal_match2, literal_match3]}
+println(add_result)
+println(max_result)
+println(classify_result)
+println(describe_result)
+println(example_result)
+println(enum_result)
+println(error_result)
+println(success_result)
+println(option_result)
+println(assert_pass)
+println(assert_fail)
+println(literal_match1)
+println(literal_match2)
+println(literal_match3)

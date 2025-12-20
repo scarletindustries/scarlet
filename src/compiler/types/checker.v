@@ -109,12 +109,24 @@ fn (mut c TypeChecker) register_builtins() {
 }
 
 fn (mut c TypeChecker) expect_type(actual Type, expected Type, span ast.Span, context string) bool {
-	if !types_equal(actual, expected) {
-		c.error_at_span('Type mismatch: expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}',
-			span)
-		return false
+	if types_equal(actual, expected) {
+		return true
 	}
-	return true
+	// Allow T to match T!E (error path is implicit via assert)
+	if expected is TypeResult {
+		if types_equal(actual, expected.success) {
+			return true
+		}
+	}
+	// Allow T to match ?T
+	if expected is TypeOption {
+		if types_equal(actual, expected.inner) {
+			return true
+		}
+	}
+	c.error_at_span('Type mismatch: expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}',
+		span)
+	return false
 }
 
 fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
@@ -494,20 +506,29 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 
 	if expr.return_type != none {
 		body_span := get_expr_span(expr.body)
-		c.expect_type(body_type, ret_type, body_span, 'in function return')
+		// if function declares an error type, expect T!E instead of just T
+		expected_ret := if et := err_type {
+			Type(TypeResult{
+				success: ret_type
+				error:   et
+			})
+		} else {
+			ret_type
+		}
+		c.expect_type(body_type, expected_ret, body_span, 'in function return')
 	} else {
-		// Infer return type from body when not explicitly annotated
+		// infer return type from body when not explicitly annotated
 		ret_type = body_type
 	}
 
-	// Build final function type with correct return type (either annotated or inferred)
+	// build final function type with correct return type (either annotated or inferred)
 	final_func_type := TypeFunction{
 		params:     param_types
 		ret:        ret_type
 		error_type: err_type
 	}
 
-	// Re-register the function with the correct return type if it has a name
+	// re-register the function with the correct return type if it has a name
 	if id := expr.identifier {
 		c.env.register_function(id.name, final_func_type)
 		c.env.define(id.name, final_func_type)
@@ -531,7 +552,7 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) Type {
 		variant_name := expr.identifier.name
 
 		if payload_type := enum_type.variants[variant_name] {
-			// Variant has a payload - check the argument matches
+			// variant has a payload - check the argument matches
 			if expr.arguments.len != 1 {
 				c.error_at_span("Enum variant '${variant_name}' expects 1 argument, got ${expr.arguments.len}",
 					expr.span)
@@ -620,6 +641,28 @@ fn (mut c TypeChecker) check_if(expr ast.IfExpression) Type {
 	if else_body := expr.else_body {
 		else_type := c.check_expr(else_body)
 		if !types_equal(then_type, else_type) {
+			// Check if branches are compatible for optional types
+			// none + T -> ?T
+			if types_equal(then_type, t_none()) {
+				return t_option(else_type)
+			}
+			if types_equal(else_type, t_none()) {
+				return t_option(then_type)
+			}
+			// Check if one branch is an error type (for result types)
+			// error E + T -> T!E
+			if then_type is TypeStruct {
+				return TypeResult{
+					success: else_type
+					error:   then_type
+				}
+			}
+			if else_type is TypeStruct {
+				return TypeResult{
+					success: then_type
+					error:   else_type
+				}
+			}
 			c.error_at_span('If branches have different types: ${type_to_string(then_type)} and ${type_to_string(else_type)}',
 				expr.span)
 		}
