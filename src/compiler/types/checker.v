@@ -527,6 +527,30 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) Type {
 		}
 	}
 
+	if enum_type := c.env.lookup_enum_by_variant(expr.identifier.name) {
+		variant_name := expr.identifier.name
+
+		if payload_type := enum_type.variants[variant_name] {
+			// Variant has a payload - check the argument matches
+			if expr.arguments.len != 1 {
+				c.error_at_span("Enum variant '${variant_name}' expects 1 argument, got ${expr.arguments.len}",
+					expr.span)
+			} else {
+				arg_type := c.check_expr(expr.arguments[0])
+				arg_span := get_expr_span(expr.arguments[0])
+				c.expect_type(arg_type, payload_type, arg_span, "in enum variant '${variant_name}'")
+			}
+		} else {
+			// Variant has no payload - should have no arguments
+			if expr.arguments.len != 0 {
+				c.error_at_span("Enum variant '${variant_name}' expects no arguments, got ${expr.arguments.len}",
+					expr.span)
+			}
+		}
+
+		return enum_type
+	}
+
 	c.error_at_span("Unknown function '${expr.identifier.name}'", expr.span)
 	return t_none()
 }
@@ -720,18 +744,43 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 }
 
 fn (mut c TypeChecker) check_match(expr ast.MatchExpression) Type {
-	c.check_expr(expr.subject)
+	subject_type := c.check_expr(expr.subject)
 
 	if expr.arms.len == 0 {
 		return t_none()
 	}
 
-	first_type := c.check_expr(expr.arms[0].body)
+	mut first_type := t_none()
 
-	for i := 1; i < expr.arms.len; i++ {
-		arm_type := c.check_expr(expr.arms[i].body)
-		arm_span := get_expr_span(expr.arms[i].body)
-		c.expect_type(arm_type, first_type, arm_span, 'in match arm')
+	for i, arm in expr.arms {
+		c.env.push_scope()
+
+		// like Ok(a, b, c)
+		if arm.pattern is ast.FunctionCallExpression {
+			variant_name := arm.pattern.identifier.name
+
+			// subject is an enum, look up the variant's payload type
+			if subject_type is TypeEnum {
+				if payload_type := subject_type.variants[variant_name] {
+					// bind each argument as a variable to the payload type
+					for arg in arm.pattern.arguments {
+						if arg is ast.Identifier {
+							c.env.define(arg.name, payload_type)
+						}
+					}
+				}
+			}
+		}
+
+		arm_type := c.check_expr(arm.body)
+		c.env.pop_scope()
+
+		if i == 0 {
+			first_type = arm_type
+		} else {
+			arm_span := get_expr_span(arm.body)
+			c.expect_type(arm_type, first_type, arm_span, 'in match arm')
+		}
 	}
 
 	return first_type

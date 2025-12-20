@@ -82,3 +82,12 @@ pub fn (e TypeEnv) lookup_type(name string) ?Type {
 
 	return none
 }
+
+pub fn (e TypeEnv) lookup_enum_by_variant(variant_name string) ?TypeEnum {
+	for _, enum_type in e.enums {
+		if variant_name in enum_type.variants {
+			return enum_type
+		}
+	}
+	return none
+}
