@@ -29,7 +29,7 @@ fn main() {
 
    Example:
      al run hello.al
-	 al check my_app.al
+     al check my_app.al
 
    Learn more: https://al.alistair.sh
 ')
