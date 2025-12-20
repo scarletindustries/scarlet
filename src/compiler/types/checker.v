@@ -193,7 +193,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 		}
 		ast.VariableBinding {
 			// support recursive functions by checking if the rhs is a function expression
- 			if expr.init is ast.FunctionExpression {
+			if expr.init is ast.FunctionExpression {
 				func_expr := expr.init as ast.FunctionExpression
 
 				mut param_types := []Type{}
