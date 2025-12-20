@@ -264,7 +264,7 @@ fn (mut c TypeChecker) expect_type(actual Type, expected Type, span typed_ast.Sp
 			return true
 		}
 	}
-	c.error_at_span('expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}',
+	c.error_at_span("Type mismatch ${context}: expected '${type_to_string(expected)}', got '${type_to_string(actual)}'",
 		ast.Span{ line: span.line, column: span.column })
 	return false
 }
@@ -635,7 +635,8 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 
 fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Expression, Type) {
 	if c.in_function {
-		c.error_at_span('const bindings are only allowed at the top level', expr.span)
+		c.error_at_span("'const' declarations are only allowed at the top level, not inside functions",
+			expr.span)
 	}
 
 	typed_init, init_type := c.check_expr(expr.init)
@@ -654,21 +655,22 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 	typed_left, left_type := c.check_expr(expr.left)
 	typed_right, right_type := c.check_expr(expr.right)
 
+	op_str := expr.op.kind.str()
 	result_type := match expr.op.kind {
 		.punc_plus {
 			if types_equal(left_type, t_string()) && types_equal(right_type, t_string()) {
 				t_string()
 			} else if !is_numeric(left_type) {
-				c.error_at_span('Left operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(left_type)}',
+				c.error_at_span("Left operand of '${op_str}' must be numeric or string, got '${type_to_string(left_type)}'",
 					expr.span)
 				t_int()
 			} else if !is_numeric(right_type) {
-				c.error_at_span('Right operand of ${expr.op.kind} must be numeric or string, got ${type_to_string(right_type)}',
+				c.error_at_span("Right operand of '${op_str}' must be numeric or string, got '${type_to_string(right_type)}'",
 					expr.span)
 				t_int()
 			} else {
 				if !types_equal(left_type, right_type) {
-					c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}',
+					c.error_at_span("Cannot apply '${op_str}' to '${type_to_string(left_type)}' and '${type_to_string(right_type)}': operands must have the same type",
 						expr.span)
 				}
 				left_type
@@ -676,16 +678,16 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 		}
 		.punc_minus, .punc_mul, .punc_div, .punc_mod {
 			if !is_numeric(left_type) {
-				c.error_at_span('Left operand of ${expr.op.kind} must be numeric, got ${type_to_string(left_type)}',
+				c.error_at_span("Left operand of '${op_str}' must be numeric, got '${type_to_string(left_type)}'",
 					expr.span)
 				t_int()
 			} else if !is_numeric(right_type) {
-				c.error_at_span('Right operand of ${expr.op.kind} must be numeric, got ${type_to_string(right_type)}',
+				c.error_at_span("Right operand of '${op_str}' must be numeric, got '${type_to_string(right_type)}'",
 					expr.span)
 				t_int()
 			} else {
 				if !types_equal(left_type, right_type) {
-					c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}',
+					c.error_at_span("Cannot apply '${op_str}' to '${type_to_string(left_type)}' and '${type_to_string(right_type)}': operands must have the same type",
 						expr.span)
 				}
 				left_type
@@ -693,7 +695,8 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 		}
 		.punc_lt, .punc_gt, .punc_lte, .punc_gte {
 			if !is_numeric(left_type) || !is_numeric(right_type) {
-				c.error_at_span('Comparison operators require numeric operands', expr.span)
+				c.error_at_span("Cannot compare '${type_to_string(left_type)}' with '${type_to_string(right_type)}': operator '${op_str}' requires numeric operands",
+					expr.span)
 			}
 			t_bool()
 		}
@@ -727,17 +730,18 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) (typed_ast.Expression, Type) {
 	typed_inner, operand_type := c.check_expr(expr.expression)
 	span := get_typed_span(typed_inner)
+	op_str := expr.op.kind.str()
 
 	result_type := match expr.op.kind {
 		.punc_minus {
 			if !is_numeric(operand_type) {
-				c.error_at_span('Unary minus requires numeric operand, got ${type_to_string(operand_type)}',
+				c.error_at_span("Operator '${op_str}' requires a numeric operand, got '${type_to_string(operand_type)}'",
 					ast.Span{ line: span.line, column: span.column })
 			}
 			operand_type
 		}
 		.punc_exclamation_mark {
-			c.expect_type(operand_type, t_bool(), span, 'in logical not')
+			c.expect_type(operand_type, t_bool(), span, "for operator '${op_str}'")
 			t_bool()
 		}
 		else {
@@ -894,7 +898,8 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 		}, enum_type
 	}
 
-	c.error_at_span("Unknown function '${expr.identifier.name}'", expr.span)
+	c.error_at_span("'${expr.identifier.name}' is not defined. Did you mean to define it as a function?",
+		expr.span)
 
 	mut typed_args := []typed_ast.Expression{}
 	for arg in expr.arguments {
@@ -1009,7 +1014,7 @@ fn (mut c TypeChecker) check_if(expr ast.IfExpression) (typed_ast.Expression, Ty
 					error:   else_type
 				})
 			} else {
-				c.error_at_span('If branches have different types: ${type_to_string(then_type)} and ${type_to_string(else_type)}',
+				c.error_at_span("'if' branch returns '${type_to_string(then_type)}' but 'else' branch returns '${type_to_string(else_type)}'",
 					expr.span)
 				then_type
 			}
@@ -1031,7 +1036,8 @@ fn (mut c TypeChecker) check_if(expr ast.IfExpression) (typed_ast.Expression, Ty
 
 fn (mut c TypeChecker) check_array(expr ast.ArrayExpression) (typed_ast.Expression, Type) {
 	if expr.elements.len == 0 {
-		c.error_at_span('Cannot infer type of empty array literal', expr.span)
+		c.error_at_span("Cannot infer type of empty array. Provide a type annotation, e.g.: 'items: []Int = []'",
+			expr.span)
 		return typed_ast.ArrayExpression{
 			elements: []
 			span:     convert_span(expr.span)
@@ -1136,7 +1142,8 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 			init_span := get_typed_span(typed_init)
 			c.expect_type(actual_type, expected_type, init_span, "in field '${field.identifier.name}'")
 		} else {
-			c.error_at_span("Unknown field '${field.identifier.name}' in struct '${expr.identifier.name}'",
+			available := struct_type.fields.keys().join(', ')
+			c.error_at_span("Struct '${expr.identifier.name}' has no field '${field.identifier.name}'. Available fields: ${available}",
 				field.identifier.span)
 		}
 		typed_fields << typed_ast.StructInitField{
@@ -1226,7 +1233,8 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		if field_type := left_type.fields[right.name] {
 			field_type
 		} else {
-			c.error_at_span("Struct '${left_type.name}' has no field '${right.name}'",
+			available := left_type.fields.keys().join(', ')
+			c.error_at_span("Struct '${left_type.name}' has no field '${right.name}'. Available fields: ${available}",
 				right.span)
 			t_none()
 		}
