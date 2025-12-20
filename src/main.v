@@ -8,6 +8,7 @@ import compiler.printer
 import compiler.bytecode
 import compiler.vm
 import compiler.diagnostic
+import compiler.types
 
 const version = $embed_file('../VERSION').to_string().trim_space()
 
@@ -33,6 +34,36 @@ fn main() {
 ')
 		}
 		commands:    [
+			cli.Command{
+				name:          'check'
+				required_args: 1
+				usage:         '<entrypoint>'
+				description:   'Type check a program without running it'
+				execute:       fn (cmd cli.Command) ! {
+					entrypoint := cmd.args[0]
+					file := os.read_file(entrypoint)!
+
+					mut s := scanner.new_scanner(file)
+					mut p := parser.new_parser(mut s)
+
+					result := p.parse_program()
+
+					if result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+						if diagnostic.has_errors(result.diagnostics) {
+							exit(1)
+						}
+					}
+
+					check_result := types.check(result.ast)
+					if check_result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
+						if !check_result.success {
+							exit(1)
+						}
+					}
+				}
+			},
 			cli.Command{
 				name:          'build'
 				required_args: 1
@@ -152,6 +183,15 @@ fn main() {
 					if result.diagnostics.len > 0 {
 						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
 						if diagnostic.has_errors(result.diagnostics) {
+							exit(1)
+						}
+					}
+
+					// Type check
+					check_result := types.check(result.ast)
+					if check_result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
+						if !check_result.success {
 							exit(1)
 						}
 					}

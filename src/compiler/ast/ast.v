@@ -2,11 +2,19 @@ module ast
 
 import compiler.token
 
+// Span represents a source location (line and column)
+pub struct Span {
+pub:
+	line   int
+	column int
+}
+
 // Literals
 
 pub struct StringLiteral {
 pub mut:
 	value string
+	span  Span
 }
 
 // Interpolated string: 'Hello, $name!' or 'Result: ${a + b}'
@@ -19,11 +27,13 @@ pub:
 pub struct NumberLiteral {
 pub mut:
 	value string
+	span  Span
 }
 
 pub struct BooleanLiteral {
 pub:
 	value bool
+	span  Span
 }
 
 pub struct NoneExpression {}
@@ -39,6 +49,7 @@ pub:
 pub struct Identifier {
 pub mut:
 	name string
+	span Span
 }
 
 pub struct TypeIdentifier {
@@ -62,6 +73,7 @@ pub struct VariableBinding {
 pub mut:
 	identifier Identifier
 	init       Expression
+	span       Span
 }
 
 // Const binding (const x = expr)
@@ -70,6 +82,7 @@ pub struct ConstBinding {
 pub mut:
 	identifier Identifier
 	init       Expression
+	span       Span
 }
 
 // Functions
@@ -95,6 +108,7 @@ pub struct IfExpression {
 pub:
 	condition Expression
 	body      Expression
+	span      Span
 pub mut:
 	else_body ?Expression
 }
@@ -139,6 +153,7 @@ pub mut:
 	left  Expression
 	right Expression
 	op    Operator
+	span  Span
 }
 
 pub struct UnaryExpression {
@@ -158,12 +173,14 @@ pub mut:
 pub struct ArrayExpression {
 pub:
 	elements []Expression
+	span     Span
 }
 
 pub struct ArrayIndexExpression {
 pub:
 	expression Expression
 	index      Expression
+	span       Span
 }
 
 pub struct RangeExpression {
@@ -227,6 +244,7 @@ pub struct FunctionCallExpression {
 pub:
 	identifier Identifier
 	arguments  []Expression
+	span       Span
 }
 
 // Block (list of expressions, returns last)
@@ -261,8 +279,6 @@ pub struct ExportExpression {
 pub mut:
 	expression Expression
 }
-
-// The unified Expression type
 
 pub type Expression = ArrayExpression
 	| ArrayIndexExpression

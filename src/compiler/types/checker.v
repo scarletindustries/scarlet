@@ -1,0 +1,529 @@
+module types
+
+import compiler.ast
+import compiler.diagnostic
+
+pub struct TypeChecker {
+mut:
+	env         TypeEnv
+	diagnostics []diagnostic.Diagnostic
+}
+
+pub struct CheckResult {
+pub:
+	diagnostics []diagnostic.Diagnostic
+	success     bool
+}
+
+pub fn check(program ast.BlockExpression) CheckResult {
+	mut checker := TypeChecker{
+		env:         new_env()
+		diagnostics: []diagnostic.Diagnostic{}
+	}
+
+	checker.register_builtins()
+
+	checker.check_block(program)
+
+	return CheckResult{
+		diagnostics: checker.diagnostics
+		success:     checker.diagnostics.len == 0
+	}
+}
+
+fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
+	c.diagnostics << diagnostic.error_at(span.line, span.column, message)
+}
+
+fn get_expr_span(expr ast.Expression) ast.Span {
+	return match expr {
+		ast.NumberLiteral { expr.span }
+		ast.StringLiteral { expr.span }
+		ast.BooleanLiteral { expr.span }
+		ast.Identifier { expr.span }
+		ast.VariableBinding { expr.span }
+		ast.ConstBinding { expr.span }
+		ast.BinaryExpression { expr.span }
+		ast.FunctionCallExpression { expr.span }
+		ast.ArrayExpression { expr.span }
+		ast.ArrayIndexExpression { expr.span }
+		ast.IfExpression { expr.span }
+		else { ast.Span{} }
+	}
+}
+
+fn (mut c TypeChecker) register_builtins() {
+	a := t_var('a')
+
+	c.env.register_function('println', TypeFunction{
+		params: [a]
+		ret:    t_none()
+	})
+
+	c.env.register_function('print', TypeFunction{
+		params: [a]
+		ret:    t_none()
+	})
+
+	c.env.register_function('len', TypeFunction{
+		params: [t_array(a)]
+		ret:    t_int()
+	})
+
+	c.env.register_function('int', TypeFunction{
+		params: [t_string()]
+		ret:    t_int()
+	})
+
+	c.env.register_function('string', TypeFunction{
+		params: [t_int()]
+		ret:    t_string()
+	})
+}
+
+fn (mut c TypeChecker) expect_type(actual Type, expected Type, span ast.Span, context string) bool {
+	if !types_equal(actual, expected) {
+		c.error_at_span('Type mismatch: expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}', span)
+		return false
+	}
+	return true
+}
+
+fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
+	name := t.identifier.name
+
+	is_type_var := name.len > 0 && name[0] >= `a` && name[0] <= `z`
+
+	mut base_type := if is_type_var {
+		t_var(name)
+	} else {
+		c.env.lookup_type(name) or { return none }
+	}
+
+	if t.is_array {
+		base_type = t_array(base_type)
+	}
+
+	if t.is_option {
+		base_type = t_option(base_type)
+	}
+
+	return base_type
+}
+
+fn (mut c TypeChecker) check_block(block ast.BlockExpression) Type {
+	mut last_type := t_none()
+
+	for expr in block.body {
+		last_type = c.check_expr(expr)
+	}
+
+	return last_type
+}
+
+fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
+	match expr {
+		ast.NumberLiteral {
+			if expr.value.contains('.') {
+				return t_float()
+			}
+			return t_int()
+		}
+		ast.StringLiteral {
+			return t_string()
+		}
+		ast.InterpolatedString {
+			for part in expr.parts {
+				c.check_expr(part)
+			}
+			return t_string()
+		}
+		ast.BooleanLiteral {
+			return t_bool()
+		}
+		ast.NoneExpression {
+			return t_none()
+		}
+		ast.Identifier {
+			if t := c.env.lookup(expr.name) {
+				return t
+			}
+			c.error_at_span("Unknown identifier '${expr.name}'", expr.span)
+			return t_none()
+		}
+		ast.VariableBinding {
+			init_type := c.check_expr(expr.init)
+			// TODO: Check against explicit type annotation if present
+			c.env.define(expr.identifier.name, init_type)
+			return init_type
+		}
+		ast.ConstBinding {
+			init_type := c.check_expr(expr.init)
+			c.env.define(expr.identifier.name, init_type)
+			return init_type
+		}
+		ast.BinaryExpression {
+			return c.check_binary(expr)
+		}
+		ast.UnaryExpression {
+			return c.check_unary(expr)
+		}
+		ast.FunctionExpression {
+			return c.check_function(expr)
+		}
+		ast.FunctionCallExpression {
+			return c.check_call(expr)
+		}
+		ast.BlockExpression {
+			c.env.push_scope()
+			result := c.check_block(expr)
+			c.env.pop_scope()
+			return result
+		}
+		ast.IfExpression {
+			return c.check_if(expr)
+		}
+		ast.ArrayExpression {
+			return c.check_array(expr)
+		}
+		ast.ArrayIndexExpression {
+			return c.check_array_index(expr)
+		}
+		ast.StructExpression {
+			return c.check_struct_def(expr)
+		}
+		ast.StructInitExpression {
+			return c.check_struct_init(expr)
+		}
+		ast.EnumExpression {
+			return c.check_enum_def(expr)
+		}
+		ast.PropertyAccessExpression {
+			return c.check_property_access(expr)
+		}
+		ast.MatchExpression {
+			return c.check_match(expr)
+		}
+		else {
+			return t_none()
+		}
+	}
+}
+
+fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) Type {
+	left_type := c.check_expr(expr.left)
+	right_type := c.check_expr(expr.right)
+
+	match expr.op.kind {
+		.punc_plus, .punc_minus, .punc_mul, .punc_div, .punc_mod {
+			if !is_numeric(left_type) {
+				c.error_at_span('Left operand of ${expr.op.kind} must be numeric, got ${type_to_string(left_type)}', expr.span)
+				return t_int()
+			}
+			if !is_numeric(right_type) {
+				c.error_at_span('Right operand of ${expr.op.kind} must be numeric, got ${type_to_string(right_type)}', expr.span)
+				return t_int()
+			}
+			if !types_equal(left_type, right_type) {
+				c.error_at_span('Operands of ${expr.op.kind} must have same type, got ${type_to_string(left_type)} and ${type_to_string(right_type)}', expr.span)
+			}
+			return left_type
+		}
+		.punc_lt, .punc_gt, .punc_lte, .punc_gte {
+			if !is_numeric(left_type) || !is_numeric(right_type) {
+				c.error_at_span('Comparison operators require numeric operands', expr.span)
+			}
+			return t_bool()
+		}
+		.punc_equals_comparator, .punc_not_equal {
+			if !types_equal(left_type, right_type) {
+				c.error_at_span('Cannot compare ${type_to_string(left_type)} with ${type_to_string(right_type)}', expr.span)
+			}
+			return t_bool()
+		}
+		.logical_and, .logical_or {
+			c.expect_type(left_type, t_bool(), expr.span, 'in logical expression')
+			c.expect_type(right_type, t_bool(), expr.span, 'in logical expression')
+			return t_bool()
+		}
+		else {
+			return t_none()
+		}
+	}
+}
+
+fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) Type {
+	operand_type := c.check_expr(expr.expression)
+	span := get_expr_span(expr.expression)
+
+	match expr.op.kind {
+		.punc_minus {
+			if !is_numeric(operand_type) {
+				c.error_at_span('Unary minus requires numeric operand, got ${type_to_string(operand_type)}', span)
+			}
+			return operand_type
+		}
+		.punc_exclamation_mark {
+			c.expect_type(operand_type, t_bool(), span, 'in logical not')
+			return t_bool()
+		}
+		else {
+			return t_none()
+		}
+	}
+}
+
+fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
+	mut param_types := []Type{}
+
+	mut ret_type := t_none()
+	if rt := expr.return_type {
+		if resolved := c.resolve_type_identifier(rt) {
+			ret_type = resolved
+		} else {
+			c.error_at_span("Unknown return type '${rt.identifier.name}'", rt.identifier.span)
+		}
+	}
+
+	for param in expr.params {
+		if pt := param.typ {
+			if resolved := c.resolve_type_identifier(pt) {
+				param_types << resolved
+			} else {
+				c.error_at_span("Unknown type '${pt.identifier.name}' for parameter '${param.identifier.name}'", param.identifier.span)
+				param_types << t_none()
+			}
+		} else {
+			c.error_at_span("Parameter '${param.identifier.name}' requires a type annotation", param.identifier.span)
+			param_types << t_none()
+		}
+	}
+
+	func_type := TypeFunction{
+		params: param_types
+		ret:    ret_type
+	}
+
+	if id := expr.identifier {
+		c.env.register_function(id.name, func_type)
+		c.env.define(id.name, func_type)
+	}
+
+	c.env.push_scope()
+	for i, param in expr.params {
+		c.env.define(param.identifier.name, param_types[i])
+	}
+
+	body_type := c.check_expr(expr.body)
+	c.env.pop_scope()
+
+	if expr.return_type != none {
+		body_span := get_expr_span(expr.body)
+		c.expect_type(body_type, ret_type, body_span, 'in function return')
+	}
+
+	return func_type
+}
+
+fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) Type {
+	if func_type := c.env.lookup_function(expr.identifier.name) {
+		return c.check_call_with_type(expr, func_type)
+	}
+
+	if var_type := c.env.lookup(expr.identifier.name) {
+		if var_type is TypeFunction {
+			return c.check_call_with_type(expr, var_type)
+		}
+	}
+
+	c.error_at_span("Unknown function '${expr.identifier.name}'", expr.span)
+	return t_none()
+}
+
+fn (mut c TypeChecker) check_call_with_type(expr ast.FunctionCallExpression, func_type TypeFunction) Type {
+	if expr.arguments.len != func_type.params.len {
+		c.error_at_span("Function '${expr.identifier.name}' expects ${func_type.params.len} arguments, got ${expr.arguments.len}", expr.span)
+		return func_type.ret
+	}
+
+	mut subs := map[string]Type{}
+
+	for i, arg in expr.arguments {
+		arg_type := c.check_expr(arg)
+		param_type := func_type.params[i]
+		arg_span := get_expr_span(arg)
+
+		if !c.unify(arg_type, param_type, mut subs) {
+			instantiated_param := substitute(param_type, subs)
+			c.expect_type(arg_type, instantiated_param, arg_span, "in argument ${i + 1} of '${expr.identifier.name}'")
+		}
+	}
+
+	return substitute(func_type.ret, subs)
+}
+
+fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Type) bool {
+	if expected is TypeVar {
+		if existing := subs[expected.name] {
+			return types_equal(actual, existing)
+		}
+		subs[expected.name] = actual
+		return true
+	}
+
+	if actual is TypeArray && expected is TypeArray {
+		return c.unify(actual.element, expected.element, mut subs)
+	}
+
+	if actual is TypeOption && expected is TypeOption {
+		return c.unify(actual.inner, expected.inner, mut subs)
+	}
+
+	return types_equal(actual, expected)
+}
+
+fn (mut c TypeChecker) check_if(expr ast.IfExpression) Type {
+	cond_type := c.check_expr(expr.condition)
+	cond_span := get_expr_span(expr.condition)
+	c.expect_type(cond_type, t_bool(), cond_span, 'in if condition')
+
+	then_type := c.check_expr(expr.body)
+
+	if else_body := expr.else_body {
+		else_type := c.check_expr(else_body)
+		if !types_equal(then_type, else_type) {
+			c.error_at_span('If branches have different types: ${type_to_string(then_type)} and ${type_to_string(else_type)}', expr.span)
+		}
+		return then_type
+	}
+
+	return then_type
+}
+
+fn (mut c TypeChecker) check_array(expr ast.ArrayExpression) Type {
+	if expr.elements.len == 0 {
+		c.error_at_span('Cannot infer type of empty array literal', expr.span)
+		return t_array(t_none())
+	}
+
+	first_type := c.check_expr(expr.elements[0])
+
+	for i := 1; i < expr.elements.len; i++ {
+		elem_type := c.check_expr(expr.elements[i])
+		elem_span := get_expr_span(expr.elements[i])
+		c.expect_type(elem_type, first_type, elem_span, 'in array element')
+	}
+
+	return t_array(first_type)
+}
+
+fn (mut c TypeChecker) check_array_index(expr ast.ArrayIndexExpression) Type {
+	arr_type := c.check_expr(expr.expression)
+	idx_type := c.check_expr(expr.index)
+	idx_span := get_expr_span(expr.index)
+
+	c.expect_type(idx_type, t_int(), idx_span, 'as array index')
+
+	if arr_type is TypeArray {
+		return arr_type.element
+	}
+
+	c.error_at_span('Cannot index non-array type ${type_to_string(arr_type)}', expr.span)
+	return t_none()
+}
+
+fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) Type {
+	mut fields := map[string]Type{}
+
+	for field in expr.fields {
+		if resolved := c.resolve_type_identifier(field.typ) {
+			fields[field.identifier.name] = resolved
+		} else {
+			c.error_at_span("Unknown type '${field.typ.identifier.name}' for field '${field.identifier.name}'", field.identifier.span)
+		}
+	}
+
+	struct_type := TypeStruct{
+		name:   expr.identifier.name
+		fields: fields
+	}
+
+	c.env.register_struct(struct_type)
+	return struct_type
+}
+
+fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) Type {
+	if struct_def := c.env.lookup_struct(expr.identifier.name) {
+		for field in expr.fields {
+			if expected_type := struct_def.fields[field.identifier.name] {
+				actual_type := c.check_expr(field.init)
+				init_span := get_expr_span(field.init)
+				c.expect_type(actual_type, expected_type, init_span, "in field '${field.identifier.name}'")
+			} else {
+				c.error_at_span("Unknown field '${field.identifier.name}' in struct '${expr.identifier.name}'", field.identifier.span)
+			}
+		}
+		return struct_def
+	}
+
+	c.error_at_span("Unknown struct '${expr.identifier.name}'", expr.identifier.span)
+	return t_none()
+}
+
+fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) Type {
+	mut variants := map[string]?Type{}
+
+	for variant in expr.variants {
+		if payload := variant.payload {
+			if resolved := c.resolve_type_identifier(payload) {
+				variants[variant.identifier.name] = resolved
+			} else {
+				c.error_at_span("Unknown type '${payload.identifier.name}' in variant '${variant.identifier.name}'", variant.identifier.span)
+				variants[variant.identifier.name] = none
+			}
+		} else {
+			variants[variant.identifier.name] = none
+		}
+	}
+
+	enum_type := TypeEnum{
+		name:     expr.identifier.name
+		variants: variants
+	}
+
+	c.env.register_enum(enum_type)
+	return enum_type
+}
+
+fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) Type {
+	left_type := c.check_expr(expr.left)
+
+	if left_type is TypeStruct {
+		if expr.right is ast.Identifier {
+			if field_type := left_type.fields[expr.right.name] {
+				return field_type
+			}
+			c.error_at_span("Struct '${left_type.name}' has no field '${expr.right.name}'", expr.right.span)
+		}
+	}
+
+	return t_none()
+}
+
+fn (mut c TypeChecker) check_match(expr ast.MatchExpression) Type {
+	c.check_expr(expr.subject)
+
+	if expr.arms.len == 0 {
+		return t_none()
+	}
+
+	first_type := c.check_expr(expr.arms[0].body)
+
+	for i := 1; i < expr.arms.len; i++ {
+		arm_type := c.check_expr(expr.arms[i].body)
+		arm_span := get_expr_span(expr.arms[i].body)
+		c.expect_type(arm_type, first_type, arm_span, 'in match arm')
+	}
+
+	return first_type
+}
