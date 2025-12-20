@@ -313,6 +313,33 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) Type {
 			// but for now just return the type of the error value)
 			return error_type
 		}
+		ast.RangeExpression {
+			start_type := c.check_expr(expr.start)
+			end_type := c.check_expr(expr.end)
+
+			if !types_equal(start_type, t_int()) {
+				start_span := get_expr_span(expr.start)
+				c.error_at_span('Range start must be Int, got ${type_to_string(start_type)}',
+					start_span)
+			}
+
+			if !types_equal(end_type, t_int()) {
+				end_span := get_expr_span(expr.end)
+				c.error_at_span('Range end must be Int, got ${type_to_string(end_type)}',
+					end_span)
+			}
+
+			return t_array(t_int())
+		}
+		ast.AssertExpression {
+			cond_type := c.check_expr(expr.expression)
+			cond_span := get_expr_span(expr.expression)
+			c.expect_type(cond_type, t_bool(), cond_span, 'in assert condition')
+
+			c.check_expr(expr.message)
+
+			return t_none()
+		}
 		else {
 			return t_none()
 		}
