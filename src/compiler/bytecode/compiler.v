@@ -37,7 +37,7 @@ mut:
 	in_tail_position bool           // true when compiling in tail position (for TCO)
 }
 
-pub fn compile(expr typed_typed_ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
+pub fn compile(expr typed_ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
 	mut c := Compiler{
 		options:          options
 		type_env:         type_env
@@ -620,100 +620,75 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			// - TypeOption: handle none with `or { default }`
 			c.compile_expr(expr.expression)!
 
-			// Use resolved_type from type checker to determine if this is Result or Option
-			if resolved := expr.resolved_type {
-				if resolved is TypeResult {
-					// Handling a Result type (errors)
-					c.emit(.dup)
-					c.emit(.is_error)
+			// resolved_type is guaranteed to be set by type checker
+			resolved := expr.resolved_type
+			if resolved is TypeResult {
+				c.emit(.dup)
+				c.emit(.is_error)
 
-					// If not error, jump over the or-body
-					not_error_jump := c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
+				not_error_jump := c.current_addr()
+				c.emit_arg(.jump_if_false, 0)
 
-					// Is error - unwrap and optionally bind to receiver
-					c.emit(.unwrap_error)
-					if receiver := expr.receiver {
-						idx := c.get_or_create_local(receiver.name)
-						c.emit_arg(.store_local, idx)
-					} else {
-						c.emit(.pop) // discard error value if no receiver
-					}
-
-					c.compile_expr(expr.body)!
-
-					// Jump to end
-					end_jump := c.current_addr()
-					c.emit_arg(.jump, 0)
-
-					// Patch not_error_jump to here (value stays on stack)
-					c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
-
-					// Patch end_jump
-					c.program.code[end_jump] = op_arg(.jump, c.current_addr())
-				} else if resolved is TypeOption {
-					// Handling an Option type (none)
-					c.emit(.dup)
-					c.emit(.is_none)
-
-					// If not none, jump over the or-body
-					not_none_jump := c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
-
-					// Is none - pop it and execute body
+				c.emit(.unwrap_error)
+				if receiver := expr.receiver {
+					idx := c.get_or_create_local(receiver.name)
+					c.emit_arg(.store_local, idx)
+				} else {
 					c.emit(.pop)
-
-					c.compile_expr(expr.body)!
-
-					// Jump to end
-					end_jump := c.current_addr()
-					c.emit_arg(.jump, 0)
-
-					// Patch not_none_jump to here (value stays on stack)
-					c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
-
-					// Patch end_jump
-					c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 				}
+
+				c.compile_expr(expr.body)!
+
+				end_jump := c.current_addr()
+				c.emit_arg(.jump, 0)
+
+				c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
+				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
+			} else if resolved is TypeOption {
+				c.emit(.dup)
+				c.emit(.is_none)
+
+				not_none_jump := c.current_addr()
+				c.emit_arg(.jump_if_false, 0)
+
+				c.emit(.pop)
+
+				c.compile_expr(expr.body)!
+
+				end_jump := c.current_addr()
+				c.emit_arg(.jump, 0)
+
+				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
+				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 			}
 		}
 		typed_ast.PropagateExpression {
 			// expr! -> if error/none, return it; else unwrap
 			c.compile_expr(expr.expression)!
 
-			// Use resolved_type from type checker to determine if this is Result or Option
-			if resolved := expr.resolved_type {
-				if resolved is TypeResult {
-					// Check if error
-					c.emit(.dup)
-					c.emit(.is_error)
+			// resolved_type is guaranteed to be set by type checker
+			resolved := expr.resolved_type
+			if resolved is TypeResult {
+				c.emit(.dup)
+				c.emit(.is_error)
 
-					// If not error, jump past return
-					not_error_jump := c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
+				not_error_jump := c.current_addr()
+				c.emit_arg(.jump_if_false, 0)
 
-					// Is error - return it
-					c.emit(.ret)
+				c.emit(.ret)
 
-					// Patch jump
-					c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
-				} else if resolved is TypeOption {
-					// Check if none
-					c.emit(.dup)
-					c.emit(.is_none)
+				c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
+			} else if resolved is TypeOption {
+				c.emit(.dup)
+				c.emit(.is_none)
 
-					// If not none, jump past return
-					not_none_jump := c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
+				not_none_jump := c.current_addr()
+				c.emit_arg(.jump_if_false, 0)
 
-					// Is none - return it
-					c.emit(.ret)
+				c.emit(.ret)
 
-					// Patch jump
-					c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
-				}
+				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
 			}
-			// Value is on stack (already unwrapped by the check)
 		}
 		else {
 			return error('Cannot compile expression type: ${expr.type_name()}')

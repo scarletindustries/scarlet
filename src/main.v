@@ -205,7 +205,7 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(result.ast, check_result.env,
+					program := bytecode.compile(check_result.typed_ast, check_result.env,
 						expose_debug_builtins: expose_debug_builtins
 					)!
 
