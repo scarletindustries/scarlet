@@ -124,7 +124,7 @@ fn (mut c TypeChecker) expect_type(actual Type, expected Type, span ast.Span, co
 			return true
 		}
 	}
-	c.error_at_span('Type mismatch: expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}',
+	c.error_at_span('expected ${type_to_string(expected)}, got ${type_to_string(actual)} ${context}',
 		span)
 	return false
 }
@@ -541,11 +541,13 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) Type {
 
 	prev_in_function := c.in_function
 	c.in_function = true
+	errors_before := c.diagnostics.len
 	body_type := c.check_expr(expr.body)
 	c.in_function = prev_in_function
 	c.env.pop_scope()
 
-	if expr.return_type != none {
+	// Only check return type if body had no errors (avoid cascading errors)
+	if expr.return_type != none && c.diagnostics.len == errors_before {
 		body_span := get_expr_span(expr.body)
 		// if function declares an error type, expect T!E instead of just T
 		expected_ret := if et := err_type {
