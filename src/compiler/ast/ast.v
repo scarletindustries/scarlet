@@ -1,7 +1,7 @@
 module ast
 
 import compiler.token
-import compiler.type_def { Type }
+import compiler.type_def
 
 pub struct Span {
 pub:
@@ -10,7 +10,7 @@ pub:
 }
 
 pub struct StringLiteral {
-pub mut:
+pub:
 	value string
 	span  Span
 }
@@ -21,7 +21,7 @@ pub:
 }
 
 pub struct NumberLiteral {
-pub mut:
+pub:
 	value string
 	span  Span
 }
@@ -40,7 +40,7 @@ pub:
 }
 
 pub struct Identifier {
-pub mut:
+pub:
 	name string
 	span Span
 }
@@ -50,7 +50,6 @@ pub:
 	is_array    bool
 	is_option   bool
 	is_function bool
-pub mut:
 	identifier  Identifier
 	param_types []TypeIdentifier
 	return_type ?&TypeIdentifier
@@ -58,12 +57,12 @@ pub mut:
 }
 
 pub struct Operator {
-pub mut:
+pub:
 	kind token.Kind
 }
 
 pub struct VariableBinding {
-pub mut:
+pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
@@ -71,7 +70,7 @@ pub mut:
 }
 
 pub struct ConstBinding {
-pub mut:
+pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
@@ -79,13 +78,13 @@ pub mut:
 }
 
 pub struct FunctionParameter {
-pub mut:
+pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 }
 
 pub struct FunctionExpression {
-pub mut:
+pub:
 	identifier  ?Identifier
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
@@ -94,7 +93,7 @@ pub mut:
 }
 
 pub struct IfExpression {
-pub mut:
+pub:
 	condition Expression
 	body      Expression
 	span      Span
@@ -102,7 +101,7 @@ pub mut:
 }
 
 pub struct MatchArm {
-pub mut:
+pub:
 	pattern Expression
 	body    Expression
 }
@@ -110,32 +109,30 @@ pub mut:
 pub struct WildcardPattern {}
 
 pub struct MatchExpression {
-pub mut:
+pub:
 	subject Expression
 	arms    []MatchArm
 }
 
 pub struct OrExpression {
-pub mut:
-	expression    Expression
-	receiver      ?Identifier
-	body          Expression
-	resolved_type ?Type
+pub:
+	expression Expression
+	receiver   ?Identifier
+	body       Expression
 }
 
 pub struct ErrorExpression {
-pub mut:
+pub:
 	expression Expression
 }
 
 pub struct PropagateExpression {
-pub mut:
-	expression    Expression
-	resolved_type ?Type
+pub:
+	expression Expression
 }
 
 pub struct BinaryExpression {
-pub mut:
+pub:
 	left  Expression
 	right Expression
 	op    Operator
@@ -143,93 +140,93 @@ pub mut:
 }
 
 pub struct UnaryExpression {
-pub mut:
+pub:
 	expression Expression
 	op         Operator
 }
 
 pub struct PostfixExpression {
-pub mut:
+pub:
 	expression Expression
 	op         Operator
 }
 
 pub struct ArrayExpression {
-pub mut:
+pub:
 	elements []Expression
 	span     Span
 }
 
 pub struct ArrayIndexExpression {
-pub mut:
+pub:
 	expression Expression
 	index      Expression
 	span       Span
 }
 
 pub struct RangeExpression {
-pub mut:
+pub:
 	start Expression
 	end   Expression
 }
 
 pub struct StructField {
-pub mut:
+pub:
 	identifier Identifier
 	typ        TypeIdentifier
 	init       ?Expression
 }
 
 pub struct StructExpression {
-pub mut:
+pub:
 	identifier Identifier
 	fields     []StructField
 }
 
 pub struct EnumVariant {
-pub mut:
+pub:
 	identifier Identifier
 	payload    ?TypeIdentifier
 }
 
 pub struct EnumExpression {
-pub mut:
+pub:
 	identifier Identifier
 	variants   []EnumVariant
 }
 
 pub struct StructInitField {
-pub mut:
+pub:
 	identifier Identifier
 	init       Expression
 }
 
 pub struct StructInitExpression {
-pub mut:
+pub:
 	identifier Identifier
 	fields     []StructInitField
 }
 
 pub struct PropertyAccessExpression {
-pub mut:
+pub:
 	left  Expression
 	right Expression
 }
 
 pub struct FunctionCallExpression {
-pub mut:
+pub:
 	identifier Identifier
 	arguments  []Expression
 	span       Span
 }
 
 pub struct BlockExpression {
-pub mut:
+pub:
 	body []Expression
 }
 
 pub struct AssertExpression {
-pub mut:
+pub:
 	expression Expression
 	message    Expression
 }
@@ -240,13 +237,13 @@ pub:
 }
 
 pub struct ImportDeclaration {
-pub mut:
+pub:
 	path       string
 	specifiers []ImportSpecifier
 }
 
 pub struct ExportExpression {
-pub mut:
+pub:
 	expression Expression
 }
 
