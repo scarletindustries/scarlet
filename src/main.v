@@ -145,6 +145,11 @@ fn main() {
 					},
 					cli.Flag{
 						flag:        .bool
+						name:        'stdin'
+						description: 'Read input from stdin instead of a file'
+					},
+					cli.Flag{
+						flag:        .bool
 						name:        'check'
 						description: 'Check if files are formatted (exit 1 if not)'
 					},
@@ -155,10 +160,26 @@ fn main() {
 					},
 				]
 				execute:     fn (cmd cli.Command) ! {
+					from_stdin := cmd.flags.get_bool('stdin')!
+					debug := cmd.flags.get_bool('debug')!
+
+					if from_stdin {
+						mut content := ''
+						for {
+							line := os.get_raw_line()
+							if line.len == 0 {
+								break
+							}
+							content += line
+						}
+						formatted := formatter.format_with_debug(content, debug)
+						print(formatted)
+						return
+					}
+
 					path := if cmd.args.len > 0 { cmd.args[0] } else { '.' }
 					to_stdout := cmd.flags.get_bool('stdout')!
 					check_only := cmd.flags.get_bool('check')!
-					debug := cmd.flags.get_bool('debug')!
 
 					files := find_al_files(path)!
 

@@ -3,7 +3,7 @@
   "displayName": "AL Language Support",
   "description": "Syntax highlighting and formatting for AL language files",
   "version": "0.0.1",
-  "publisher": "Alistair Smith <hi@alistair.sh>",
+  "publisher": "alistaiir",
   "engines": {
     "vscode": "^1.107.0"
   },
