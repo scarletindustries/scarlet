@@ -66,108 +66,6 @@ fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
 	c.diagnostics << diagnostic.error_at(span.line, span.column, message)
 }
 
-fn get_ast_span(expr ast.Expression) ast.Span {
-	return match expr {
-		ast.NumberLiteral {
-			expr.span
-		}
-		ast.StringLiteral {
-			expr.span
-		}
-		ast.BooleanLiteral {
-			expr.span
-		}
-		ast.NoneExpression {
-			expr.span
-		}
-		ast.ErrorNode {
-			expr.span
-		}
-		ast.Identifier {
-			expr.span
-		}
-		ast.VariableBinding {
-			expr.span
-		}
-		ast.ConstBinding {
-			expr.span
-		}
-		ast.BinaryExpression {
-			expr.span
-		}
-		ast.FunctionCallExpression {
-			expr.span
-		}
-		ast.ArrayExpression {
-			expr.span
-		}
-		ast.ArrayIndexExpression {
-			expr.span
-		}
-		ast.IfExpression {
-			expr.span
-		}
-		ast.WildcardPattern {
-			expr.span
-		}
-		ast.TypeIdentifier {
-			expr.identifier.span
-		}
-		ast.StructExpression {
-			expr.identifier.span
-		}
-		ast.EnumExpression {
-			expr.identifier.span
-		}
-		ast.StructInitExpression {
-			expr.identifier.span
-		}
-		ast.InterpolatedString {
-			expr.span
-		}
-		ast.FunctionExpression {
-			if id := expr.identifier {
-				id.span
-			} else {
-				get_ast_span(expr.body)
-			}
-		}
-		ast.BlockExpression {
-			expr.span
-		}
-		ast.MatchExpression {
-			get_ast_span(expr.subject)
-		}
-		ast.OrExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.ErrorExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.PropagateNoneExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.UnaryExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.PropertyAccessExpression {
-			get_ast_span(expr.left)
-		}
-		ast.RangeExpression {
-			get_ast_span(expr.start)
-		}
-		ast.AssertExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.ExportExpression {
-			get_ast_span(expr.expression)
-		}
-		ast.ImportDeclaration {
-			expr.span
-		}
-	}
-}
-
 fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 	return match expr {
 		typed_ast.NumberLiteral {
@@ -1360,7 +1258,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 	}
 
 	if expr.right !is ast.Identifier {
-		span := get_ast_span(expr.right)
+		span := ast.get_span(expr.right)
 		c.error_at_span('Expected identifier in property access', span)
 		return typed_ast.PropertyAccessExpression{
 			left:  typed_left

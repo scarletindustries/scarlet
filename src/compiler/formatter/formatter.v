@@ -134,7 +134,7 @@ fn (mut f Formatter) emit_trivia_for_span(span ast.Span) {
 
 fn (mut f Formatter) format_block(block ast.BlockExpression, is_top_level bool) {
 	for i, expr in block.body {
-		span := get_span(expr)
+		span := ast.get_span(expr)
 		if span.line > 0 {
 			f.emit_trivia_for_span(span)
 		}
@@ -485,7 +485,7 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 		f.emit('{\n')
 		f.indent++
 		for expr in block.body {
-			span := get_span(expr)
+			span := ast.get_span(expr)
 			if span.line > 0 {
 				f.emit_trivia_for_span(span)
 			}
@@ -533,7 +533,7 @@ fn (f Formatter) is_simple_expr(expr ast.Expression) bool {
 }
 
 fn (f Formatter) has_trivia(expr ast.Expression) bool {
-	span := get_span(expr)
+	span := ast.get_span(expr)
 	return f.has_trivia_at_span(span)
 }
 
@@ -565,104 +565,6 @@ fn (f Formatter) format_expr_to_string(expr ast.Expression) string {
 	}
 	temp.format_expr(expr)
 	return temp.output.str()
-}
-
-fn get_span(expr ast.Expression) ast.Span {
-	return match expr {
-		ast.StringLiteral {
-			expr.span
-		}
-		ast.InterpolatedString {
-			expr.span
-		}
-		ast.NumberLiteral {
-			expr.span
-		}
-		ast.BooleanLiteral {
-			expr.span
-		}
-		ast.NoneExpression {
-			expr.span
-		}
-		ast.Identifier {
-			expr.span
-		}
-		ast.VariableBinding {
-			expr.span
-		}
-		ast.ConstBinding {
-			expr.span
-		}
-		ast.BinaryExpression {
-			expr.span
-		}
-		ast.ArrayExpression {
-			expr.span
-		}
-		ast.ArrayIndexExpression {
-			expr.span
-		}
-		ast.IfExpression {
-			expr.span
-		}
-		ast.BlockExpression {
-			expr.span
-		}
-		ast.FunctionCallExpression {
-			expr.span
-		}
-		ast.ImportDeclaration {
-			expr.span
-		}
-		ast.WildcardPattern {
-			expr.span
-		}
-		ast.ErrorNode {
-			expr.span
-		}
-		ast.FunctionExpression {
-			expr.span
-		}
-		ast.StructExpression {
-			expr.span
-		}
-		ast.EnumExpression {
-			expr.span
-		}
-		ast.MatchExpression {
-			expr.span
-		}
-		ast.AssertExpression {
-			expr.span
-		}
-		ast.ExportExpression {
-			get_span(expr.expression)
-		}
-		ast.UnaryExpression {
-			get_span(expr.expression)
-		}
-		ast.OrExpression {
-			get_span(expr.expression)
-		}
-		ast.ErrorExpression {
-			get_span(expr.expression)
-		}
-		ast.PropagateNoneExpression {
-			get_span(expr.expression)
-		}
-		ast.PropertyAccessExpression {
-			get_span(expr.left)
-		}
-		ast.RangeExpression {
-			get_span(expr.start)
-		}
-		ast.StructInitExpression {
-			expr.identifier.span
-		}
-		ast.TypeIdentifier {
-			expr.identifier.span
-		}
-	}
 }
 
 fn op_to_string(kind token.Kind) string {
