@@ -5,13 +5,21 @@ import compiler.ast
 import compiler.token
 import compiler.scanner
 import compiler.parser
+import compiler.diagnostic
 import strings
 
-pub fn format(input string) string {
+pub struct FormatResult {
+pub:
+	output      string
+	has_errors  bool
+	diagnostics []diagnostic.Diagnostic
+}
+
+pub fn format(input string) FormatResult {
 	return format_with_debug(input, false)
 }
 
-pub fn format_with_debug(input string, debug bool) string {
+pub fn format_with_debug(input string, debug bool) FormatResult {
 	mut s := scanner.new_scanner(input)
 	tokens := s.scan_all()
 
@@ -43,12 +51,25 @@ pub fn format_with_debug(input string, debug bool) string {
 	mut p := parser.new_parser(mut scanner2)
 	result := p.parse_program()
 
+	errors := result.diagnostics.filter(it.severity == .error)
+	if errors.len > 0 {
+		return FormatResult{
+			output:      input
+			has_errors:  true
+			diagnostics: errors
+		}
+	}
+
 	f.format_block(result.ast, true)
 
 	mut final := f.output.str()
 
 	final = final.trim_right('\n') + '\n'
-	return final
+	return FormatResult{
+		output:      final
+		has_errors:  false
+		diagnostics: result.diagnostics
+	}
 }
 
 struct Formatter {
@@ -227,6 +248,9 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.format_expr(arm.body)
 				f.emit(',\n')
 			}
+			if expr.close_span.line > 0 {
+				f.emit_trivia_for_span(expr.close_span)
+			}
 			f.indent--
 			f.emit_indent()
 			f.emit('}')
@@ -300,6 +324,9 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.emit(',\n')
 			}
+			if expr.close_span.line > 0 {
+				f.emit_trivia_for_span(expr.close_span)
+			}
 			f.indent--
 			f.emit_indent()
 			f.emit('}')
@@ -348,6 +375,9 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 					f.emit(')')
 				}
 				f.emit('\n')
+			}
+			if expr.close_span.line > 0 {
+				f.emit_trivia_for_span(expr.close_span)
 			}
 			f.indent--
 			f.emit_indent()
@@ -443,9 +473,10 @@ fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
 }
 
 fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
-	if block.body.len == 0 {
+	has_close_trivia := f.has_trivia_at_span(block.close_span)
+	if block.body.len == 0 && !has_close_trivia {
 		f.emit('{}')
-	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_trivia(block.body[0]) {
+	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_trivia(block.body[0]) && !has_close_trivia {
 		f.emit('{ ')
 		f.format_expr(block.body[0])
 		f.emit(' }')
@@ -462,6 +493,9 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 			}
 			f.format_expr(expr)
 			f.emit('\n')
+		}
+		if block.close_span.line > 0 {
+			f.emit_trivia_for_span(block.close_span)
 		}
 		f.indent--
 		f.emit_indent()
@@ -499,6 +533,10 @@ fn (f Formatter) is_simple_expr(expr ast.Expression) bool {
 
 fn (f Formatter) has_trivia(expr ast.Expression) bool {
 	span := get_span(expr)
+	return f.has_trivia_at_span(span)
+}
+
+fn (f Formatter) has_trivia_at_span(span ast.Span) bool {
 	if span.line > 0 {
 		key := '${span.line}:${span.column}'
 		if _ := f.trivia_map[key] {

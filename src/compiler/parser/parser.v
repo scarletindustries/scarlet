@@ -232,8 +232,9 @@ pub fn (mut p Parser) parse_program() ParseResult {
 
 	return ParseResult{
 		ast:         ast.BlockExpression{
-			body: body
-			span: program_span
+			body:       body
+			span:       program_span
+			close_span: p.current_span()
 		}
 		diagnostics: p.diagnostics
 	}
@@ -666,11 +667,13 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.BlockExpression{
-		body: body
-		span: block_span
+		body:       body
+		span:       block_span
+		close_span: close_span
 	}
 }
 
@@ -797,12 +800,14 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.MatchExpression{
-		subject: subject
-		arms:    arms
-		span:    match_span
+		subject:    subject
+		arms:       arms
+		span:       match_span
+		close_span: close_span
 	}
 }
 
@@ -1027,6 +1032,7 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.StructExpression{
@@ -1036,6 +1042,7 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 		}
 		fields:     fields
 		span:       struct_span
+		close_span: close_span
 	}
 }
 
@@ -1084,6 +1091,7 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumExpression{
@@ -1093,6 +1101,7 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 		}
 		variants:   variants
 		span:       enum_span
+		close_span: close_span
 	}
 }
 

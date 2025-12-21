@@ -415,6 +415,10 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 			line:   block.span.line
 			column: block.span.column
 		}
+		close_span: typed_ast.Span{
+			line:   block.close_span.line
+			column: block.close_span.column
+		}
 	}, last_type
 }
 
@@ -1235,6 +1239,7 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Ex
 		identifier: convert_identifier(expr.identifier)
 		fields:     typed_fields
 		span:       convert_span(expr.span)
+		close_span: convert_span(expr.close_span)
 	}, struct_type
 }
 
@@ -1335,6 +1340,7 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 		identifier: convert_identifier(expr.identifier)
 		variants:   typed_variants
 		span:       convert_span(expr.span)
+		close_span: convert_span(expr.close_span)
 	}, enum_type
 }
 
@@ -1394,9 +1400,10 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	if expr.arms.len == 0 {
 		return typed_ast.MatchExpression{
-			subject: typed_subject
-			arms:    []
-			span:    convert_span(expr.span)
+			subject:    typed_subject
+			arms:       []
+			span:       convert_span(expr.span)
+			close_span: convert_span(expr.close_span)
 		}, t_none()
 	}
 
@@ -1449,9 +1456,10 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 	}
 
 	return typed_ast.MatchExpression{
-		subject: typed_subject
-		arms:    typed_arms
-		span:    convert_span(expr.span)
+		subject:    typed_subject
+		arms:       typed_arms
+		span:       convert_span(expr.span)
+		close_span: convert_span(expr.close_span)
 	}, first_type
 }
 

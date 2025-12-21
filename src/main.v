@@ -72,17 +72,35 @@ fn find_al_files(path string) ![]string {
 	return files
 }
 
-struct FormatResult {
-	changed bool
-	output  string
+struct FormatFileResult {
+	changed    bool
+	output     string
+	has_errors bool
+	errors     []string
 }
 
-fn format_file(path string, debug bool) !FormatResult {
+fn format_file(path string, debug bool) !FormatFileResult {
 	content := os.read_file(path)!
-	formatted := formatter.format_with_debug(content, debug)
-	return FormatResult{
-		changed: formatted != content
-		output:  formatted
+	result := formatter.format_with_debug(content, debug)
+
+	if result.has_errors {
+		mut error_msgs := []string{}
+		for d in result.diagnostics {
+			error_msgs << '${path}:${d.span.start_line}:${d.span.start_column}: ${d.message}'
+		}
+		return FormatFileResult{
+			changed:    false
+			output:     content
+			has_errors: true
+			errors:     error_msgs
+		}
+	}
+
+	return FormatFileResult{
+		changed:    result.output != content
+		output:     result.output
+		has_errors: false
+		errors:     []
 	}
 }
 
@@ -172,8 +190,14 @@ fn main() {
 							}
 							content += line
 						}
-						formatted := formatter.format_with_debug(content, debug)
-						print(formatted)
+						result := formatter.format_with_debug(content, debug)
+						if result.has_errors {
+							for d in result.diagnostics {
+								eprintln('stdin:${d.span.start_line}:${d.span.start_column}: ${d.message}')
+							}
+							exit(1)
+						}
+						print(result.output)
 						return
 					}
 
@@ -189,10 +213,20 @@ fn main() {
 					}
 
 					mut needs_formatting := false
+					mut has_errors := false
 
 					for file in files {
 						result := format_file(file, debug) or {
 							eprintln('Error formatting ${file}: ${err}')
+							has_errors = true
+							continue
+						}
+
+						if result.has_errors {
+							for err_msg in result.errors {
+								eprintln(err_msg)
+							}
+							has_errors = true
 							continue
 						}
 
@@ -202,13 +236,17 @@ fn main() {
 								needs_formatting = true
 							}
 						} else if to_stdout {
-							println(result.output)
+							print(result.output)
 						} else {
 							if result.changed {
 								os.write_file(file, result.output)!
 								println('Formatted ${file}')
 							}
 						}
+					}
+
+					if has_errors {
+						exit(1)
 					}
 
 					if check_only && needs_formatting {

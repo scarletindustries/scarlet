@@ -118,9 +118,10 @@ pub:
 
 pub struct MatchExpression {
 pub:
-	subject Expression
-	arms    []MatchArm
-	span    Span @[required]
+	subject    Expression
+	arms       []MatchArm
+	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct OrExpression {
@@ -185,6 +186,7 @@ pub:
 	identifier Identifier
 	fields     []StructField
 	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct EnumVariant {
@@ -198,6 +200,7 @@ pub:
 	identifier Identifier
 	variants   []EnumVariant
 	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct StructInitField {
@@ -227,8 +230,9 @@ pub:
 
 pub struct BlockExpression {
 pub:
-	body []Expression
-	span Span @[required]
+	body       []Expression
+	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct AssertExpression {

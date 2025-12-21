@@ -27,7 +27,7 @@
         {
           "name": "string.quoted.single.al",
           "begin": "'",
-          "end": "'",
+          "end": "'|$",
           "patterns": [
             {
               "name": "constant.character.escape.al",
@@ -110,7 +110,7 @@
         },
         {
           "name": "keyword.operator.range.al",
-          "match": "\\.\\.\\.?"
+          "match": "\\.\\."
         },
         {
           "name": "keyword.operator.comparison.al",
