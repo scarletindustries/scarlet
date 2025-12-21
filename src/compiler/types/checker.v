@@ -751,12 +751,16 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 		.punc_plus {
 			if types_equal(left_type, t_string()) && types_equal(right_type, t_string()) {
 				t_string()
+			} else if types_equal(left_type, t_string()) || types_equal(right_type, t_string()) {
+				c.error_at_span("Cannot concatenate '${type_to_string(left_type)}' with '${type_to_string(right_type)}': use string interpolation instead",
+					expr.span)
+				t_string()
 			} else if !is_numeric(left_type) {
-				c.error_at_span("Left operand of '${op_str}' must be numeric or string, got '${type_to_string(left_type)}'",
+				c.error_at_span("Left operand of '${op_str}' must be numeric, got '${type_to_string(left_type)}'",
 					expr.span)
 				t_int()
 			} else if !is_numeric(right_type) {
-				c.error_at_span("Right operand of '${op_str}' must be numeric or string, got '${type_to_string(right_type)}'",
+				c.error_at_span("Right operand of '${op_str}' must be numeric, got '${type_to_string(right_type)}'",
 					expr.span)
 				t_int()
 			} else {
