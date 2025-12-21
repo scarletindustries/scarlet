@@ -113,12 +113,25 @@ fn is_definition_expr(expr ast.Expression) bool {
 	}
 }
 
+fn has_eof_error(diagnostics []diagnostic.Diagnostic) bool {
+	for d in diagnostics {
+		if d.message.contains('EOF') {
+			return true
+		}
+	}
+	return false
+}
+
 fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
 	mut input_scanner := scanner.new_scanner(input)
 	mut input_parser := parser.new_parser(mut input_scanner)
 	input_parse_result := input_parser.parse_program()
 
 	if diagnostic.has_errors(input_parse_result.diagnostics) {
+		if has_eof_error(input_parse_result.diagnostics) {
+			println('')
+			return []
+		}
 		diagnostic.print_diagnostics(input_parse_result.diagnostics, input, '<repl>')
 		return []
 	}
