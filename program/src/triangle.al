@@ -16,9 +16,7 @@ fn classify_triangle(a Int, b Int, c Int) String {
 	}
 }
 
-fn perimeter(a Int, b Int, c Int) Int {
-	a + b + c
-}
+fn perimeter(a Int, b Int, c Int) Int { a + b + c }
 
 struct TriangleInfo {
 	sides String,

@@ -20,9 +20,7 @@ fn grade_points(score Int) Int {
 	}
 }
 
-fn is_passing(score Int) Bool {
-	score >= 60
-}
+fn is_passing(score Int) Bool { score >= 60 }
 
 struct StudentReport {
 	name String,

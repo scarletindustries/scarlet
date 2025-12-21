@@ -1,8 +1,6 @@
 // Prime number checker
 
-fn is_divisible(n Int, d Int) Bool {
-	n % d == 0
-}
+fn is_divisible(n Int, d Int) Bool { n % d == 0 }
 
 fn check_divisors(n Int, d Int) Bool {
 	match true {

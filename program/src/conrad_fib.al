@@ -1,8 +1,6 @@
 fn fib(x Int) String {
 	println('fib ${x}')
-	if x < 1 {
-		'()'
-	} else {
+	if x < 1 { '()' } else {
 		'(${fib(x - 1)})'
 	}
 }

@@ -1,29 +1,17 @@
 // Shape calculations
 
 // Approximate pi as 314/100 for integer math
-fn circle_area(radius Int) Int {
-	314 * radius * radius / 100
-}
+fn circle_area(radius Int) Int { 314 * radius * radius / 100 }
 
-fn circle_circumference(radius Int) Int {
-	2 * 314 * radius / 100
-}
+fn circle_circumference(radius Int) Int { 2 * 314 * radius / 100 }
 
-fn rectangle_area(width Int, height Int) Int {
-	width * height
-}
+fn rectangle_area(width Int, height Int) Int { width * height }
 
-fn rectangle_perimeter(width Int, height Int) Int {
-	2 * width + height
-}
+fn rectangle_perimeter(width Int, height Int) Int { 2 * width + height }
 
-fn square_area(side Int) Int {
-	side * side
-}
+fn square_area(side Int) Int { side * side }
 
-fn square_perimeter(side Int) Int {
-	4 * side
-}
+fn square_perimeter(side Int) Int { 4 * side }
 
 struct ShapeInfo {
 	name String,

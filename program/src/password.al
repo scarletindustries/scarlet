@@ -9,9 +9,7 @@ fn check_strength(length Int) String {
 	}
 }
 
-fn is_long_enough(length Int) Bool {
-	length >= 8
-}
+fn is_long_enough(length Int) Bool { length >= 8 }
 
 struct PasswordResult {
 	length Int,

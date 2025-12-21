@@ -44,16 +44,10 @@ x = 10
 x = x + 1
 
 person = Person{ name: 'alistair', age: 18 }
-fn add(a Int, b Int) Int {
-	a + b
-}
-fn greet(name String) {
-	name
-}
+fn add(a Int, b Int) Int { a + b }
+fn greet(name String) { name }
 
-callback = fn(x Int) Int {
-	x * 2
-}
+callback = fn(x Int) Int { x * 2 }
 fn apply(x Int, f fn(Int) Int) Int {
 	f(x)
 }
@@ -61,18 +55,12 @@ fn apply_generic(x a, f fn(a) a) a {
 	f(x)
 }
 
-double = fn(n Int) Int {
-	n * 2
-}
+double = fn(n Int) Int { n * 2 }
 
-triple = fn(n Int) Int {
-	n * 3
-}
+triple = fn(n Int) Int { n * 3 }
 
 fn find_user(id Int) ?User {
-	if id == 0 {
-		none
-	} else {
+	if id == 0 { none } else {
 		User{ id: id, name: 'found' }
 	}
 }
@@ -80,17 +68,13 @@ fn find_user(id Int) ?User {
 fn divide(a Int, b Int) Int!DivisionError {
 	if b == 0 {
 		error DivisionError{ message: 'Cannot divide by zero' }
-	} else {
-		a / b
-	}
+	} else { a / b }
 }
 
 fn validate(x Int)!ValidationError {
 	if x < 0 {
 		error ValidationError{ code: 1 }
-	} else {
-		none
-	}
+	} else { none }
 }
 
 fn check_positive(x Int) Int!Error {
@@ -99,21 +83,11 @@ fn check_positive(x Int) Int!Error {
 }
 
 fn max(a Int, b Int) Int {
-	if a > b {
-		a
-	} else {
-		b
-	}
+	if a > b { a } else { b }
 }
 
 fn classify(n Int) String {
-	if n < 0 {
-		'negative'
-	} else if n == 0 {
-		'zero'
-	} else {
-		'positive'
-	}
+	if n < 0 { 'negative' } else if n == 0 { 'zero' } else { 'positive' }
 }
 
 fn describe(x Int) String {

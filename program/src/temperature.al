@@ -1,20 +1,12 @@
 // Temperature conversion utilities
 
-fn celsius_to_fahrenheit(c Int) Int {
-	c * 9 / 5 + 32
-}
+fn celsius_to_fahrenheit(c Int) Int { c * 9 / 5 + 32 }
 
-fn fahrenheit_to_celsius(f Int) Int {
-	f - 32 * 5 / 9
-}
+fn fahrenheit_to_celsius(f Int) Int { f - 32 * 5 / 9 }
 
-fn celsius_to_kelvin(c Int) Int {
-	c + 273
-}
+fn celsius_to_kelvin(c Int) Int { c + 273 }
 
-fn kelvin_to_celsius(k Int) Int {
-	k - 273
-}
+fn kelvin_to_celsius(k Int) Int { k - 273 }
 
 struct Temperature {
 	celsius Int,
