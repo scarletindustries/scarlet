@@ -137,6 +137,7 @@ pub struct StructValue {
 pub mut:
 	type_name string
 	fields    map[string]Value
+	hash      u64
 }
 
 pub struct ClosureValue {
@@ -166,4 +167,77 @@ pub fn op_arg(o Op, operand int) Instruction {
 		op:      o
 		operand: operand
 	}
+}
+
+// FNV-1a hash for combining values
+fn fnv1a_combine(h u64, val u64) u64 {
+	return (h ^ val) * 0x100000001b3
+}
+
+pub fn hash_value(v Value) u64 {
+	mut h := u64(0xcbf29ce484222325) // FNV offset basis
+	match v {
+		int {
+			h = fnv1a_combine(h, u64(v))
+		}
+		f64 {
+			// reinterpret f64 bits as u64
+			unsafe {
+				bits := *(&u64(&v))
+				h = fnv1a_combine(h, bits)
+			}
+		}
+		bool {
+			h = fnv1a_combine(h, if v { u64(1) } else { u64(0) })
+		}
+		string {
+			for c in v {
+				h = fnv1a_combine(h, u64(c))
+			}
+		}
+		NoneValue {
+			h = fnv1a_combine(h, 0)
+		}
+		EnumValue {
+			for c in v.enum_name {
+				h = fnv1a_combine(h, u64(c))
+			}
+			for c in v.variant_name {
+				h = fnv1a_combine(h, u64(c))
+			}
+			for p in v.payload {
+				h = fnv1a_combine(h, hash_value(p))
+			}
+		}
+		StructValue {
+			h = v.hash
+		}
+		[]Value {
+			for item in v {
+				h = fnv1a_combine(h, hash_value(item))
+			}
+		}
+		else {
+			h = fnv1a_combine(h, 0)
+		}
+	}
+	return h
+}
+
+pub fn compute_struct_hash(type_name string, fields map[string]Value) u64 {
+	mut h := u64(0xcbf29ce484222325)
+	// hash the type name first (nominal typing)
+	for c in type_name {
+		h = fnv1a_combine(h, u64(c))
+	}
+	// hash fields in sorted order for consistency
+	mut keys := fields.keys()
+	keys.sort()
+	for key in keys {
+		for c in key {
+			h = fnv1a_combine(h, u64(c))
+		}
+		h = fnv1a_combine(h, hash_value(fields[key] or { NoneValue{} }))
+	}
+	return h
 }

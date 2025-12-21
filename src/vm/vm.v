@@ -391,6 +391,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				vm.stack << bytecode.StructValue{
 					type_name: type_name
 					fields:    fields
+					hash:      bytecode.compute_struct_hash(type_name, fields)
 				}
 			}
 			.get_field {
@@ -853,6 +854,32 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 				}
 				for i, a_val in a.payload {
 					if !vm.values_equal(a_val, b.payload[i]) {
+						return false
+					}
+				}
+				return true
+			}
+		}
+		bytecode.StructValue {
+			if b is bytecode.StructValue {
+				// fast path: different hashes means definitely not equal
+				if a.hash != b.hash {
+					return false
+				}
+				// nominal check: must be same struct type
+				if a.type_name != b.type_name {
+					return false
+				}
+				// structural check: compare all fields (handles hash collisions)
+				if a.fields.len != b.fields.len {
+					return false
+				}
+				for key, a_val in a.fields {
+					if b_val := b.fields[key] {
+						if !vm.values_equal(a_val, b_val) {
+							return false
+						}
+					} else {
 						return false
 					}
 				}
