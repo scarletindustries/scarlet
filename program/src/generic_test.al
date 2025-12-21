@@ -1,11 +1,10 @@
-fn identity(x a) a {
-	x
+fn identity(x a) a { x }
+
+fn first(arr []a) ?a {
+	match arr {
+		[] -> none,
+		[first, ..] -> first,
+	}
 }
 
-fn first(arr []a) a {
-	arr[0]
-}
-
-{
-	['${identity(5)}', identity('hello'), '${first([1, 2, 3])}', first(['a', 'b'])]
-}
+['${identity(5)}', identity('hello'), '${first([1, 2, 3]) or 0}', first(['a', 'b']) or 'none']
