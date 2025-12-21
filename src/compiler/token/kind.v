@@ -56,7 +56,6 @@ pub enum Kind {
 	punc_exclamation_mark  // !
 	punc_at                // @
 	punc_equals            // =
-	punc_declaration       // :=
 	punc_equals_comparator // ==
 	punc_not_equal         // !=
 	punc_gt                // >
@@ -124,7 +123,6 @@ pub fn (kind Kind) str() string {
 		.punc_exclamation_mark { '!' }
 		.punc_at { '@' }
 		.punc_equals { '=' }
-		.punc_declaration { ':=' }
 		.punc_equals_comparator { '==' }
 		.punc_not_equal { '!=' }
 		.punc_gt { '>' }

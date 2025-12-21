@@ -274,7 +274,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				s.incr_pos()
 				return s.new_token(.punc_plusplus, none)
 			}
-
 			return s.new_token(.punc_plus, none)
 		}
 		`-` {
@@ -282,7 +281,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				s.incr_pos()
 				return s.new_token(.punc_minusminus, none)
 			}
-
 			return s.new_token(.punc_minus, none)
 		}
 		`*` {
@@ -302,13 +300,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			s.new_token(.punc_question_mark, none)
 		}
 		`:` {
-			next := s.peek_char()
-			s.incr_pos()
-
-			if next == `=` {
-				return s.new_token(.punc_declaration, none)
-			}
-
 			return s.new_token(.punc_colon, none)
 		}
 		`>` {
