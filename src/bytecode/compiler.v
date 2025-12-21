@@ -1,8 +1,8 @@
 module bytecode
 
-import compiler.typed_ast
-import compiler.type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
-import compiler.types { TypeEnv }
+import typed_ast
+import type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
+import types { TypeEnv }
 
 fn (c Compiler) find_enum_for_variant(variant_name string) ?string {
 	if enum_type := c.type_env.lookup_enum_by_variant(variant_name) {

@@ -1,10 +1,10 @@
 module main
 
-import compiler.scanner
-import compiler.parser
-import compiler.bytecode
-import compiler.vm
-import compiler.types
+import scanner
+import parser
+import bytecode
+import vm
+import types
 
 fn run(code string) !string {
 	mut s := scanner.new_scanner(code)

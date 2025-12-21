@@ -1,6 +1,7 @@
-module ast
+module typed_ast
 
-import compiler.token
+import token
+import type_def { Type }
 
 pub struct Span {
 pub:
@@ -126,9 +127,10 @@ pub:
 
 pub struct OrExpression {
 pub:
-	expression Expression
-	receiver   ?Identifier
-	body       Expression
+	expression    Expression
+	receiver      ?Identifier
+	body          Expression
+	resolved_type Type
 }
 
 pub struct ErrorExpression {
@@ -138,7 +140,8 @@ pub:
 
 pub struct PropagateNoneExpression {
 pub:
-	expression Expression
+	expression    Expression
+	resolved_type Type
 }
 
 pub struct BinaryExpression {
@@ -290,33 +293,3 @@ pub type Expression = ArrayExpression
 	| UnaryExpression
 	| VariableBinding
 	| WildcardPattern
-
-pub fn get_span(expr Expression) Span {
-	return match expr {
-		NumberLiteral, StringLiteral, BooleanLiteral, NoneExpression, ErrorNode, Identifier,
-		VariableBinding, ConstBinding, BinaryExpression, FunctionCallExpression, ArrayExpression,
-		ArrayIndexExpression, IfExpression, WildcardPattern, InterpolatedString, BlockExpression,
-		ImportDeclaration, AssertExpression, MatchExpression {
-			expr.span
-		}
-		TypeIdentifier, StructInitExpression, StructExpression, EnumExpression {
-			expr.identifier.span
-		}
-		FunctionExpression {
-			if id := expr.identifier {
-				id.span
-			} else {
-				get_span(expr.body)
-			}
-		}
-		OrExpression, ErrorExpression, PropagateNoneExpression, UnaryExpression, ExportExpression {
-			get_span(expr.expression)
-		}
-		PropertyAccessExpression {
-			get_span(expr.left)
-		}
-		RangeExpression {
-			get_span(expr.start)
-		}
-	}
-}
