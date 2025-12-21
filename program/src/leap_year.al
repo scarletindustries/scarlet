@@ -10,10 +10,7 @@ fn is_leap_year(year Int) Bool {
 }
 
 fn days_in_year(year Int) Int {
-	match is_leap_year(year) {
-		true -> 366,
-		false -> 365,
-	}
+	if is_leap_year(year) 366 else 365
 }
 
 fn days_in_february(year Int) Int {

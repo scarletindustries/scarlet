@@ -14,9 +14,8 @@ fn check_divisors(n Int, d Int) Bool {
 
 fn is_prime(n Int) Bool {
 	match true {
-		n < 2 -> false,
 		n == 2 -> true,
-		is_divisible(n, 2) -> false,
+		n < 2 | is_divisible(n, 2) -> false,
 		else -> check_divisors(n, 3),
 	}
 }

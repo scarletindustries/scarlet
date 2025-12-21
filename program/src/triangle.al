@@ -2,9 +2,7 @@
 
 fn is_valid_triangle(a Int, b Int, c Int) Bool {
 	match true {
-		a + b <= c -> false,
-		b + c <= a -> false,
-		a + c <= b -> false,
+		a + b <= c | b + c <= a | a + c <= b -> false,
 		else -> true,
 	}
 }
