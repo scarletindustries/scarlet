@@ -173,12 +173,14 @@ const cliOutput = `   ▄▀█ █░░
 
    Usage:
      al run <file.al>      Run a program
+     al repl               Start interactive REPL
      al check <file.al>    Type-check without running
+     al fmt [path]         Format source files
      al --help             Show all commands
 
    Example:
      al run hello.al
-     al check my_app.al`;
+     al repl`;
 
 export function App({ examples }: { examples: RenderedExample[] }) {
   return (
@@ -209,7 +211,13 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
           The compiler is written in V, producing a single native binary with no
           dependencies. It compiles to bytecode and runs on a stack-based
-          virtual machine.
+          virtual machine. Includes an{" "}
+          <strong className="text-black dark:text-white">
+            interactive REPL
+          </strong>{" "}
+          for exploration and a{" "}
+          <strong className="text-black dark:text-white">code formatter</strong>{" "}
+          for consistent style.
         </p>
         <p className="text-sm text-neutral-600 dark:text-neutral-400">
           AL supports{" "}

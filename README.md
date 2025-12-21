@@ -12,7 +12,9 @@ curl -fsSL al.alistair.sh/install.sh | bash
 
 ```
 al run <file.al>      Run a program
+al repl               Start interactive REPL
 al check <file.al>    Type-check without running
+al fmt [path]         Format source files
 al build <file.al>    Print the AST
 ```
 
@@ -62,6 +64,37 @@ error: Unknown variable: 'undefined_var'
    |     ^^^^^^^^^^^^^
 
 Found 2 errors
+```
+
+### Interactive REPL
+
+Explore the language interactively. Definitions persist across entries:
+
+```
+$ al repl
+al 0.0.1 REPL
+Type expressions to evaluate. Use 'exit' or Ctrl+D to quit.
+
+>>> fn square(n Int) Int { n * n }
+none
+>>> square(5)
+25
+>>> x = 10
+none
+>>> x + square(3)
+19
+```
+
+### Code formatter
+
+Format your code with `al fmt`:
+
+```bash
+al fmt .              # Format all .al files in current directory
+al fmt src/           # Format all .al files in src/
+al fmt file.al        # Format a single file
+al fmt --check .      # Check formatting without modifying
+al fmt --stdin        # Format from stdin
 ```
 
 ## Language
