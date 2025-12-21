@@ -148,13 +148,13 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 						variant_idx := c.add_constant(call.identifier.name)
 						c.emit_arg(.push_const, variant_idx)
 
-						if call.arguments.len == 1 {
-							c.compile_expr(call.arguments[0])!
-							c.emit(.make_enum_payload)
-						} else if call.arguments.len == 0 {
-							c.emit(.make_enum)
+						if call.arguments.len >= 1 {
+							for arg in call.arguments {
+								c.compile_expr(arg)!
+							}
+							c.emit_arg(.make_enum_payload, call.arguments.len)
 						} else {
-							return error('Enum variant takes 0 or 1 argument')
+							c.emit(.make_enum)
 						}
 						return
 					}
@@ -853,9 +853,11 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 
 		if ename := enum_name {
 			if vname := variant_name {
-				if type_id := enum_type_id {
-					c.emit_arg(.push_const, c.add_constant(type_id))
+				type_id := enum_type_id or {
+					return error('Internal error: enum_type_id not set for ${ename}.${vname}')
 				}
+
+				c.emit_arg(.push_const, c.add_constant(type_id))
 				enum_idx := c.add_constant(ename)
 				c.emit_arg(.push_const, enum_idx)
 				variant_idx := c.add_constant(vname)
