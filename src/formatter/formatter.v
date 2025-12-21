@@ -495,8 +495,8 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 	has_close_comment := f.has_comment_trivia_at_span(block.close_span)
 	if block.body.len == 0 && !has_close_comment {
 		f.emit('{}')
-	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_comment_trivia(block.body[0])
-		&& !has_close_comment {
+	} else if block.body.len == 1 && f.is_simple_expr(block.body[0])
+		&& !f.has_comment_trivia(block.body[0]) && !has_close_comment {
 		f.emit('{ ')
 		f.format_expr(block.body[0])
 		f.emit(' }')
