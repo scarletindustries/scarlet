@@ -41,12 +41,14 @@ pub:
 
 pub struct TypeStruct {
 pub:
+	id     int
 	name   string
 	fields map[string]Type
 }
 
 pub struct TypeEnum {
 pub:
+	id       int
 	name     string
 	variants map[string][]Type
 }
@@ -154,13 +156,13 @@ pub fn types_equal(a Type, b Type) bool {
 		}
 		TypeStruct {
 			if b is TypeStruct {
-				return a.name == b.name
+				return a.id == b.id
 			}
 			return false
 		}
 		TypeEnum {
 			if b is TypeEnum {
-				return a.name == b.name
+				return a.id == b.id
 			}
 			return false
 		}

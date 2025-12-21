@@ -128,7 +128,8 @@ pub:
 
 pub struct EnumValue {
 pub:
-	enum_name    string  // e.g., "MyEnum"
+	type_id      int
+	enum_name    string  // e.g., "MyEnum" (for display only)
 	variant_name string  // e.g., "C"
 	payload      []Value // payload values (empty if no payload)
 	hash         u64
@@ -136,7 +137,8 @@ pub:
 
 pub struct StructValue {
 pub mut:
-	type_name string
+	type_id   int
+	type_name string // for display only
 	fields    map[string]Value
 	hash      u64
 }

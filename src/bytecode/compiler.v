@@ -149,6 +149,7 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 				if expr is typed_ast.FunctionCallExpression {
 					call := expr as typed_ast.FunctionCallExpression
 					if call.identifier.name in enum_type.variants {
+						c.emit_arg(.push_const, c.add_constant(enum_type.id))
 						enum_idx := c.add_constant(expected_type)
 						c.emit_arg(.push_const, enum_idx)
 						variant_idx := c.add_constant(call.identifier.name)
@@ -169,6 +170,7 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 				if expr is typed_ast.Identifier {
 					ident := expr as typed_ast.Identifier
 					if ident.name in enum_type.variants {
+						c.emit_arg(.push_const, c.add_constant(enum_type.id))
 						enum_idx := c.add_constant(expected_type)
 						c.emit_arg(.push_const, enum_idx)
 						variant_idx := c.add_constant(ident.name)
@@ -512,6 +514,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 									return error('Variant "${variant_name}" expects ${payload_types.len} payload argument(s)')
 								}
 
+								c.emit_arg(.push_const, c.add_constant(enum_type.id))
 								enum_idx := c.add_constant(enum_name)
 								c.emit_arg(.push_const, enum_idx)
 								variant_idx := c.add_constant(variant_name)
@@ -539,6 +542,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 								return error('Variant "${variant_name}" requires payload(s) of type (${type_strs.join(', ')})')
 							}
 
+							c.emit_arg(.push_const, c.add_constant(enum_type.id))
 							enum_idx := c.add_constant(enum_name)
 							c.emit_arg(.push_const, enum_idx)
 							variant_idx := c.add_constant(variant_name)
@@ -603,6 +607,8 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.emit_arg(.push_const, name_idx)
 				c.compile_expr(field.init)!
 			}
+			// push type_id first, then type_name
+			c.emit_arg(.push_const, c.add_constant(struct_type.id))
 			type_idx := c.add_constant(expr.identifier.name)
 			c.emit_arg(.push_const, type_idx)
 			c.emit_arg(.make_struct, expr.fields.len)

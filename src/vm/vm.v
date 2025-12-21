@@ -377,6 +377,13 @@ fn (mut vm VM) execute() !bytecode.Value {
 					return error('Struct type name must be string')
 				}
 
+				type_id_val := vm.pop()!
+				type_id := if type_id_val is int {
+					type_id_val
+				} else {
+					return error('Struct type id must be int')
+				}
+
 				mut fields := map[string]bytecode.Value{}
 				for _ in 0 .. field_count {
 					val := vm.pop()!
@@ -389,6 +396,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 					fields[name] = val
 				}
 				vm.stack << bytecode.StructValue{
+					type_id:   type_id
 					type_name: type_name
 					fields:    fields
 					hash:      bytecode.compute_struct_hash(type_name, fields)
@@ -459,6 +467,13 @@ fn (mut vm VM) execute() !bytecode.Value {
 			.make_enum {
 				variant_name_val := vm.pop()!
 				enum_name_val := vm.pop()!
+				type_id_val := vm.pop()!
+
+				type_id := if type_id_val is int {
+					type_id_val
+				} else {
+					return error('Enum type id must be int')
+				}
 
 				enum_name := if enum_name_val is string {
 					enum_name_val
@@ -473,6 +488,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 
 				vm.stack << bytecode.EnumValue{
+					type_id:      type_id
 					enum_name:    enum_name
 					variant_name: variant_name
 					payload:      []
@@ -493,6 +509,13 @@ fn (mut vm VM) execute() !bytecode.Value {
 
 				variant_name_val := vm.pop()!
 				enum_name_val := vm.pop()!
+				type_id_val := vm.pop()!
+
+				type_id := if type_id_val is int {
+					type_id_val
+				} else {
+					return error('Enum type id must be int')
+				}
 
 				enum_name := if enum_name_val is string {
 					enum_name_val
@@ -506,6 +529,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 
 				vm.stack << bytecode.EnumValue{
+					type_id:      type_id
 					enum_name:    enum_name
 					variant_name: variant_name
 					payload:      payloads
@@ -853,7 +877,11 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 				if a.hash != b.hash {
 					return false
 				}
-				if a.enum_name != b.enum_name || a.variant_name != b.variant_name {
+				// nominal check: must be same enum type
+				if a.type_id != b.type_id {
+					return false
+				}
+				if a.variant_name != b.variant_name {
 					return false
 				}
 				// fast path: both empty payloads
@@ -878,7 +906,7 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 					return false
 				}
 				// nominal check: must be same struct type
-				if a.type_name != b.type_name {
+				if a.type_id != b.type_id {
 					return false
 				}
 				// fast path: both empty structs

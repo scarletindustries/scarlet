@@ -4,18 +4,20 @@ import type_def { Type, TypeEnum, TypeFunction, TypeStruct, t_bool, t_float, t_i
 
 pub struct TypeEnv {
 mut:
-	scopes    []map[string]Type
-	functions map[string]TypeFunction
-	structs   map[string]TypeStruct
-	enums     map[string]TypeEnum
+	scopes       []map[string]Type
+	functions    map[string]TypeFunction
+	structs      map[string]TypeStruct
+	enums        map[string]TypeEnum
+	next_type_id int
 }
 
 pub fn new_env() TypeEnv {
 	return TypeEnv{
-		scopes:    [map[string]Type{}]
-		functions: map[string]TypeFunction{}
-		structs:   map[string]TypeStruct{}
-		enums:     map[string]TypeEnum{}
+		scopes:       [map[string]Type{}]
+		functions:    map[string]TypeFunction{}
+		structs:      map[string]TypeStruct{}
+		enums:        map[string]TypeEnum{}
+		next_type_id: 1
 	}
 }
 
@@ -44,16 +46,28 @@ pub fn (e TypeEnv) lookup(name string) ?Type {
 	return none
 }
 
-pub fn (mut e TypeEnv) register_struct(s TypeStruct) {
-	e.structs[s.name] = s
+pub fn (mut e TypeEnv) register_struct(s TypeStruct) TypeStruct {
+	registered := TypeStruct{
+		...s
+		id: e.next_type_id
+	}
+	e.next_type_id++
+	e.structs[s.name] = registered
+	return registered
 }
 
 pub fn (e TypeEnv) lookup_struct(name string) ?TypeStruct {
 	return e.structs[name] or { return none }
 }
 
-pub fn (mut e TypeEnv) register_enum(en TypeEnum) {
-	e.enums[en.name] = en
+pub fn (mut e TypeEnv) register_enum(en TypeEnum) TypeEnum {
+	registered := TypeEnum{
+		...en
+		id: e.next_type_id
+	}
+	e.next_type_id++
+	e.enums[en.name] = registered
+	return registered
 }
 
 pub fn (mut e TypeEnv) register_function(name string, f TypeFunction) {
