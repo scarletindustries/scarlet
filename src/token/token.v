@@ -1,15 +1,13 @@
-module tokens
-
-import token
+module token
 
 @[inline; minify]
 pub struct Token {
 pub:
-	kind           token.Kind     // The token number/enum; for quick comparisons
-	literal        ?string        // Literal representation of the token
-	line           int            // The line number in the source where the token occurred
-	column         int            // The column number in the source where the token occurred
-	leading_trivia []token.Trivia // Whitespace/comments before this token
+	kind           Kind     // The token number/enum; for quick comparisons
+	literal        ?string  // Literal representation of the token
+	line           int      // The line number in the source where the token occurred
+	column         int      // The column number in the source where the token occurred
+	leading_trivia []Trivia // Whitespace/comments before this token
 }
 
 pub fn (t &Token) str() string {
@@ -22,7 +20,7 @@ pub fn (t &Token) str() string {
 	return t.literal or { t.kind.str() }
 }
 
-pub const total_known_tokens = int(token.Kind._end_)
+pub const total_known_tokens = int(Kind._end_)
 
 // AtKind is used to inject information into the token stream
 // when the @ token is encountered. This is used to get information

@@ -3,7 +3,6 @@ module parser
 import scanner
 import token
 import ast
-import tokens
 import diagnostic
 
 pub enum ParseContext {
@@ -24,10 +23,10 @@ pub:
 }
 
 pub struct Parser {
-	tokens []tokens.Token
+	tokens []token.Token
 mut:
 	index         int
-	current_token tokens.Token
+	current_token token.Token
 	diagnostics   []diagnostic.Diagnostic
 	context_stack []ParseContext
 }
@@ -183,7 +182,7 @@ fn (mut p Parser) advance() {
 	}
 }
 
-fn (mut p Parser) eat(kind token.Kind) !tokens.Token {
+fn (mut p Parser) eat(kind token.Kind) !token.Token {
 	if p.current_token.kind == kind {
 		old := p.current_token
 
@@ -196,7 +195,7 @@ fn (mut p Parser) eat(kind token.Kind) !tokens.Token {
 	return error("Expected '${kind}', got '${p.current_token}'")
 }
 
-fn (mut p Parser) eat_msg(kind token.Kind, message string) !tokens.Token {
+fn (mut p Parser) eat_msg(kind token.Kind, message string) !token.Token {
 	return p.eat(kind) or { return error("${message}, got '${p.current_token}'") }
 }
 
@@ -240,7 +239,7 @@ pub fn (mut p Parser) parse_program() ParseResult {
 	}
 }
 
-fn (mut p Parser) peek_next() ?tokens.Token {
+fn (mut p Parser) peek_next() ?token.Token {
 	if p.index + 1 < p.tokens.len {
 		return p.tokens[p.index + 1]
 	}
@@ -248,7 +247,7 @@ fn (mut p Parser) peek_next() ?tokens.Token {
 	return none
 }
 
-fn (mut p Parser) peek_ahead(distance int) ?tokens.Token {
+fn (mut p Parser) peek_ahead(distance int) ?token.Token {
 	if p.index + distance < p.tokens.len {
 		return p.tokens[p.index + distance]
 	}

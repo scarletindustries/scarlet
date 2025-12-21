@@ -1,6 +1,5 @@
 module scanner
 
-import tokens
 import token
 import scanner.state
 import diagnostic
@@ -82,7 +81,7 @@ fn (mut s Scanner) collect_trivia() {
 	}
 }
 
-pub fn (mut s Scanner) scan_next() tokens.Token {
+pub fn (mut s Scanner) scan_next() token.Token {
 	// First, collect any leading trivia (whitespace, newlines, comments)
 	s.collect_trivia()
 
@@ -358,8 +357,8 @@ pub fn (mut s Scanner) scan_next() tokens.Token {
 	}
 }
 
-pub fn (mut s Scanner) scan_all() []tokens.Token {
-	mut result := []tokens.Token{}
+pub fn (mut s Scanner) scan_all() []token.Token {
+	mut result := []token.Token{}
 
 	for {
 		t := s.scan_next()
@@ -373,12 +372,12 @@ pub fn (mut s Scanner) scan_all() []tokens.Token {
 	return result
 }
 
-fn (mut s Scanner) new_token(kind token.Kind, literal ?string) tokens.Token {
+fn (mut s Scanner) new_token(kind token.Kind, literal ?string) token.Token {
 	return s.new_token_with_trivia(kind, literal, s.take_trivia())
 }
 
-fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivia []token.Trivia) tokens.Token {
-	return tokens.Token{
+fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivia []token.Trivia) token.Token {
+	return token.Token{
 		kind:           kind
 		literal:        literal
 		line:           s.state.get_line()
@@ -394,7 +393,7 @@ fn (mut s Scanner) take_trivia() []token.Trivia {
 }
 
 // scan_identifier scans until the next non-alphanumeric character
-fn (mut s Scanner) scan_identifier(from u8) tokens.Token {
+fn (mut s Scanner) scan_identifier(from u8) token.Token {
 	mut result := from.ascii_str()
 
 	for {
@@ -414,7 +413,7 @@ fn (mut s Scanner) scan_identifier(from u8) tokens.Token {
 // Not a big fan of how this is implemented right now, it's
 // too greedy and requires backtracking to figure out
 // if the dots represent other tokens, or just a dotdot
-fn (mut s Scanner) scan_number(from u8) tokens.Token {
+fn (mut s Scanner) scan_number(from u8) token.Token {
 	mut result := from.ascii_str()
 
 	mut has_dot := false

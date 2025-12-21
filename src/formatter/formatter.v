@@ -1,6 +1,5 @@
 module formatter
 
-import tokens
 import ast
 import token
 import scanner
@@ -73,7 +72,7 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 }
 
 struct Formatter {
-	tokens     []tokens.Token
+	tokens     []token.Token
 	trivia_map map[string][]token.Trivia
 mut:
 	output        strings.Builder
