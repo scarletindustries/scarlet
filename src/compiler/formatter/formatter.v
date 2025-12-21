@@ -650,11 +650,17 @@ fn get_span(expr ast.Expression) ast.Span {
 		ast.PropagateNoneExpression {
 			get_span(expr.expression)
 		}
-		else {
-			ast.Span{
-				line:   0
-				column: 0
-			}
+		ast.PropertyAccessExpression {
+			get_span(expr.left)
+		}
+		ast.RangeExpression {
+			get_span(expr.start)
+		}
+		ast.StructInitExpression {
+			expr.identifier.span
+		}
+		ast.TypeIdentifier {
+			expr.identifier.span
 		}
 	}
 }
