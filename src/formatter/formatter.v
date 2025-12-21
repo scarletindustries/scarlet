@@ -492,11 +492,11 @@ fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
 }
 
 fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
-	has_close_trivia := f.has_trivia_at_span(block.close_span)
-	if block.body.len == 0 && !has_close_trivia {
+	has_close_comment := f.has_comment_trivia_at_span(block.close_span)
+	if block.body.len == 0 && !has_close_comment {
 		f.emit('{}')
-	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_trivia(block.body[0])
-		&& !has_close_trivia {
+	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_comment_trivia(block.body[0])
+		&& !has_close_comment {
 		f.emit('{ ')
 		f.format_expr(block.body[0])
 		f.emit(' }')
@@ -558,11 +558,30 @@ fn (f Formatter) has_trivia(expr ast.Expression) bool {
 	return f.has_trivia_at_span(span)
 }
 
+fn (f Formatter) has_comment_trivia(expr ast.Expression) bool {
+	span := ast.get_span(expr)
+	return f.has_comment_trivia_at_span(span)
+}
+
 fn (f Formatter) has_trivia_at_span(span ast.Span) bool {
 	if span.line > 0 {
 		key := '${span.line}:${span.column}'
 		if _ := f.trivia_map[key] {
 			return true
+		}
+	}
+	return false
+}
+
+fn (f Formatter) has_comment_trivia_at_span(span ast.Span) bool {
+	if span.line > 0 {
+		key := '${span.line}:${span.column}'
+		if trivia := f.trivia_map[key] {
+			for t in trivia {
+				if t.kind == .line_comment {
+					return true
+				}
+			}
 		}
 	}
 	return false
