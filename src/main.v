@@ -2,6 +2,7 @@ module main
 
 import os
 import cli
+import net.http
 import compiler.scanner
 import compiler.parser
 import compiler.printer
@@ -11,6 +12,48 @@ import compiler.diagnostic
 import compiler.types
 
 const version = $embed_file('../VERSION').to_string().trim_space()
+
+struct ProgressDownloader {
+mut:
+	path string
+	f    os.File
+}
+
+fn (mut d ProgressDownloader) on_start(mut request http.Request, path string) ! {
+	d.path = path
+	d.f = os.create(path)!
+}
+
+fn (mut d ProgressDownloader) on_chunk(request &http.Request, chunk []u8, received u64, expected u64) ! {
+	d.f.write(chunk)!
+
+	bar_width := u64(30)
+	if expected > 0 {
+		pct := received * 100 / expected
+		filled := int(received * bar_width / expected)
+		bar := '█'.repeat(filled) + '░'.repeat(int(bar_width) - filled)
+		print('\r\x1b[K[${bar}] ${pct}% ${format_bytes(received)}/${format_bytes(expected)}')
+		os.flush()
+	} else {
+		print('\r\x1b[K${format_bytes(received)} downloaded')
+		os.flush()
+	}
+}
+
+fn (mut d ProgressDownloader) on_finish(request &http.Request, response &http.Response) ! {
+	d.f.close()
+	println('')
+}
+
+fn format_bytes(bytes u64) string {
+	if bytes < 1024 {
+		return '${bytes}B'
+	} else if bytes < 1024 * 1024 {
+		return '${f64(bytes) / 1024:.1}KB'
+	} else {
+		return '${f64(bytes) / (1024 * 1024):.1}MB'
+	}
+}
 
 fn main() {
 	mut app := cli.Command{
@@ -130,9 +173,10 @@ fn main() {
 
 					println('Downloading ${tag}...')
 
-					result := os.execute('curl -fsSL "${download_url}" -o "${tmp_path}"')
-					if result.exit_code != 0 {
-						return error('Failed to download: ${result.output}')
+					mut downloader := ProgressDownloader{}
+					http.download_file_with_progress(download_url, tmp_path,
+						downloader: &downloader) or {
+						return error('Failed to download: ${err}')
 					}
 
 					os.chmod(tmp_path, 0o755)!
