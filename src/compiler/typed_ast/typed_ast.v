@@ -245,6 +245,7 @@ pub struct ImportDeclaration {
 pub:
 	path       string
 	specifiers []ImportSpecifier
+	span       Span @[required]
 }
 
 pub struct ExportExpression {

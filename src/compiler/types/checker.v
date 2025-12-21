@@ -123,11 +123,7 @@ fn get_ast_span(expr ast.Expression) ast.Span {
 			expr.identifier.span
 		}
 		ast.InterpolatedString {
-			if expr.parts.len > 0 {
-				get_ast_span(expr.parts[0])
-			} else {
-				ast.Span{}
-			}
+			expr.span
 		}
 		ast.FunctionExpression {
 			if id := expr.identifier {
@@ -137,11 +133,7 @@ fn get_ast_span(expr ast.Expression) ast.Span {
 			}
 		}
 		ast.BlockExpression {
-			if expr.body.len > 0 {
-				get_ast_span(expr.body[0])
-			} else {
-				ast.Span{}
-			}
+			expr.span
 		}
 		ast.MatchExpression {
 			get_ast_span(expr.subject)
@@ -171,7 +163,7 @@ fn get_ast_span(expr ast.Expression) ast.Span {
 			get_ast_span(expr.expression)
 		}
 		ast.ImportDeclaration {
-			ast.Span{}
+			expr.span
 		}
 	}
 }
@@ -212,11 +204,7 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 			expr.span
 		}
 		typed_ast.BlockExpression {
-			if expr.body.len > 0 {
-				get_typed_span(expr.body[0])
-			} else {
-				panic('BlockExpression with empty body has no span')
-			}
+			expr.span
 		}
 		typed_ast.FunctionExpression {
 			if id := expr.identifier {
@@ -262,11 +250,7 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 			get_typed_span(expr.expression)
 		}
 		typed_ast.InterpolatedString {
-			if expr.parts.len > 0 {
-				get_typed_span(expr.parts[0])
-			} else {
-				panic('InterpolatedString with empty parts has no span')
-			}
+			expr.span
 		}
 		typed_ast.TypeIdentifier {
 			expr.identifier.span
@@ -281,7 +265,7 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 			expr.span
 		}
 		typed_ast.ImportDeclaration {
-			panic('ImportDeclaration has no span')
+			expr.span
 		}
 	}
 }
@@ -427,6 +411,10 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 
 	return typed_ast.BlockExpression{
 		body: typed_body
+		span: typed_ast.Span{
+			line:   block.span.line
+			column: block.span.column
+		}
 	}, last_type
 }
 
@@ -459,6 +447,10 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			}
 			return typed_ast.InterpolatedString{
 				parts: typed_parts
+				span:  typed_ast.Span{
+					line:   expr.span.line
+					column: expr.span.column
+				}
 			}, t_string()
 		}
 		ast.BooleanLiteral {
@@ -570,6 +562,10 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 						}
 					}
 				})
+				span: typed_ast.Span{
+					line:   expr.span.line
+					column: expr.span.column
+				}
 			}, t_none()
 		}
 		ast.ExportExpression {

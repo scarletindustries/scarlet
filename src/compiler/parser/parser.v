@@ -211,6 +211,7 @@ fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
 }
 
 pub fn (mut p Parser) parse_program() ParseResult {
+	program_span := p.current_span()
 	mut body := []ast.Expression{}
 
 	for p.current_token.kind != .eof {
@@ -232,6 +233,7 @@ pub fn (mut p Parser) parse_program() ParseResult {
 	return ParseResult{
 		ast:         ast.BlockExpression{
 			body: body
+			span: program_span
 		}
 		diagnostics: p.diagnostics
 	}
@@ -643,6 +645,7 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 }
 
 fn (mut p Parser) parse_block_expression() !ast.Expression {
+	block_span := p.current_span()
 	p.eat(.punc_open_brace)!
 	p.push_context(.block)
 
@@ -667,6 +670,7 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 
 	return ast.BlockExpression{
 		body: body
+		span: block_span
 	}
 }
 
@@ -1184,6 +1188,7 @@ fn (mut p Parser) parse_export_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_import_declaration() !ast.Expression {
+	import_span := p.current_span()
 	p.eat(.kw_from)!
 
 	path_token := p.eat(.literal_string)!
@@ -1197,6 +1202,7 @@ fn (mut p Parser) parse_import_declaration() !ast.Expression {
 	return ast.ImportDeclaration{
 		path:       path
 		specifiers: specifiers
+		span:       import_span
 	}
 }
 
@@ -1378,6 +1384,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 
 	return ast.InterpolatedString{
 		parts: parts
+		span:  span
 	}
 }
 

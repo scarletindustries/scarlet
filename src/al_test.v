@@ -4,12 +4,20 @@ import compiler.scanner
 import compiler.parser
 import compiler.bytecode
 import compiler.vm
+import compiler.types
 
 fn run(code string) !string {
 	mut s := scanner.new_scanner(code)
 	mut p := parser.new_parser(mut s)
-	ast := p.parse_program()!
-	program := bytecode.compile(ast)!
+	parsed := p.parse_program()
+	if parsed.diagnostics.len > 0 {
+		return error('Parse error')
+	}
+	checked := types.check(parsed.ast)
+	if !checked.success {
+		return error('Type error')
+	}
+	program := bytecode.compile(checked.typed_ast, checked.env)!
 	mut v := vm.new_vm(program)
 	result := v.run()!
 	return vm.inspect(result)
