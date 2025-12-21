@@ -650,7 +650,7 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 		func_expr := expr.init as ast.FunctionExpression
 
 		if func_id := func_expr.identifier {
-			c.error_at_span("Named functions cannot be assigned to variables. Use 'fn ${expr.identifier.name}() {{ ... }}' for a named function, or 'fn() {{ ... }}' for an anonymous function",
+			c.error_at_span("Named functions cannot be assigned to variables. Use 'fn ${expr.identifier.name}()' for a named function, or remove the name for an anonymous function",
 				func_id.span)
 		}
 
