@@ -52,13 +52,14 @@ pub:
 
 pub struct TypeIdentifier {
 pub:
-	is_array    bool
-	is_option   bool
-	is_function bool
-	identifier  Identifier
-	param_types []TypeIdentifier
-	return_type ?&TypeIdentifier
-	error_type  ?&TypeIdentifier
+	is_array     bool
+	is_option    bool
+	is_function  bool
+	identifier   Identifier
+	element_type ?&TypeIdentifier // for array types: []T has element_type = T
+	param_types  []TypeIdentifier
+	return_type  ?&TypeIdentifier
+	error_type   ?&TypeIdentifier
 }
 
 pub struct Operator {

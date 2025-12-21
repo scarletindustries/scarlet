@@ -99,6 +99,13 @@ fn (mut vm VM) execute() !bytecode.Value {
 			.dup {
 				vm.stack << vm.peek()!
 			}
+			.swap {
+				if vm.stack.len < 2 {
+					return error('Stack underflow on swap')
+				}
+				top := vm.stack.len - 1
+				vm.stack[top], vm.stack[top - 1] = vm.stack[top - 1], vm.stack[top]
+			}
 			.add {
 				b := vm.pop()!
 				a := vm.pop()!

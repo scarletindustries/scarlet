@@ -203,12 +203,20 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 		}
 		ast.VariableBinding {
 			f.emit(expr.identifier.name)
+			if typ := expr.typ {
+				f.emit(' ')
+				f.format_type(typ)
+			}
 			f.emit(' = ')
 			f.format_expr(expr.init)
 		}
 		ast.ConstBinding {
 			f.emit('const ')
 			f.emit(expr.identifier.name)
+			if typ := expr.typ {
+				f.emit(' ')
+				f.format_type(typ)
+			}
 			f.emit(' = ')
 			f.format_expr(expr.init)
 		}
@@ -477,6 +485,10 @@ fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
 	}
 	if typ.is_array {
 		f.emit('[]')
+		if elem := typ.element_type {
+			f.format_type(*elem)
+			return
+		}
 	}
 	if typ.is_function {
 		f.emit('fn(')

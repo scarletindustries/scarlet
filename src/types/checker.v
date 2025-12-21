@@ -337,6 +337,16 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 		return base_type
 	}
 
+	if t.is_array {
+		elem := t.element_type or { return none }
+		elem_type := c.resolve_type_identifier(*elem) or { return none }
+		mut base_type := t_array(elem_type)
+		if t.is_option {
+			base_type = t_option(base_type)
+		}
+		return base_type
+	}
+
 	name := t.identifier.name
 
 	is_type_var := name.len > 0 && name[0] >= `a` && name[0] <= `z`
@@ -345,10 +355,6 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 		t_var(name)
 	} else {
 		c.env.lookup_type(name) or { return none }
-	}
-
-	if t.is_array {
-		base_type = t_array(base_type)
 	}
 
 	if t.is_option {
@@ -584,21 +590,22 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 
 fn convert_type_identifier(t ast.TypeIdentifier) typed_ast.TypeIdentifier {
 	return typed_ast.TypeIdentifier{
-		is_array:    t.is_array
-		is_option:   t.is_option
-		is_function: t.is_function
-		identifier:  typed_ast.Identifier{
+		is_array:     t.is_array
+		is_option:    t.is_option
+		is_function:  t.is_function
+		identifier:   typed_ast.Identifier{
 			name: t.identifier.name
 			span: typed_ast.Span{
 				line:   t.identifier.span.line
 				column: t.identifier.span.column
 			}
 		}
-		param_types: t.param_types.map(fn (pt ast.TypeIdentifier) typed_ast.TypeIdentifier {
+		element_type: convert_optional_type_identifier(t.element_type)
+		param_types:  t.param_types.map(fn (pt ast.TypeIdentifier) typed_ast.TypeIdentifier {
 			return convert_type_identifier(pt)
 		})
-		return_type: convert_optional_type_identifier(t.return_type)
-		error_type:  convert_optional_type_identifier(t.error_type)
+		return_type:  convert_optional_type_identifier(t.return_type)
+		error_type:   convert_optional_type_identifier(t.error_type)
 	}
 }
 
@@ -704,7 +711,36 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 		c.env.define(expr.identifier.name, preliminary_func_type)
 	}
 
-	typed_init, init_type := c.check_expr(expr.init)
+	// if we have an annotation and init is empty/not inferrable, we should use the annotation
+	mut typed_init := typed_ast.Expression(typed_ast.NoneExpression{
+		span: convert_span(expr.span)
+	})
+	mut init_type := t_none()
+
+	if annotated := expr.typ {
+		if expected_type := c.resolve_type_identifier(annotated) {
+			if expr.init is ast.ArrayExpression {
+				arr := expr.init as ast.ArrayExpression
+				if arr.elements.len == 0 {
+					// empy array with type annotation so we use the annotated type
+					typed_init = typed_ast.ArrayExpression{
+						elements: []
+						span:     convert_span(arr.span)
+					}
+					init_type = expected_type
+				} else {
+					typed_init, init_type = c.check_expr(expr.init)
+				}
+			} else {
+				typed_init, init_type = c.check_expr(expr.init)
+			}
+		} else {
+			typed_init, init_type = c.check_expr(expr.init)
+		}
+	} else {
+		typed_init, init_type = c.check_expr(expr.init)
+	}
+
 	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type,
 		'in variable binding')
 
@@ -1684,7 +1720,6 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 		}
 	}
 
-	// Handle array patterns like [], [x], [first, ..rest], [..init, last]
 	if pattern is ast.ArrayExpression {
 		element_type := if subject_type is TypeArray {
 			subject_type.element
@@ -1692,6 +1727,14 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			c.error_at_span('Cannot match array pattern against non-array type ${type_to_string(subject_type)}',
 				pattern.span)
 			t_none()
+		}
+
+		// spread can only be at the end
+		for i, elem in pattern.elements {
+			if elem is ast.SpreadExpression && i != pattern.elements.len - 1 {
+				c.error_at_span('Spread pattern must be at the end of the array pattern',
+					elem.span)
+			}
 		}
 
 		mut typed_elements := []typed_ast.Expression{}
@@ -1708,7 +1751,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 							name: binding.name
 							span: convert_span(binding.span)
 						}
-						span: convert_span(elem.span)
+						span:       convert_span(elem.span)
 					}
 				} else if elem.expression is ast.WildcardPattern {
 					// Anonymous spread (..): just match, don't bind
@@ -1716,7 +1759,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 						expression: typed_ast.WildcardPattern{
 							span: convert_span(elem.span)
 						}
-						span: convert_span(elem.span)
+						span:       convert_span(elem.span)
 					}
 				} else {
 					// Other expression (shouldn't happen in patterns)

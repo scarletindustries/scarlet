@@ -10,6 +10,7 @@ pub enum Op {
 	push_false  // push false
 	pop         // discard top of stack
 	dup         // duplicate top of stack
+	swap        // swap top two stack elements
 
 	// Arithmetic
 	add

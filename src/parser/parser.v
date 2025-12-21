@@ -699,10 +699,11 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 
 			// anonymous spread (.. followed by ] or ,)
 			// this is in the case like `match arr { [first, ..] -> { ... } }`
-			if p.current_token.kind == .punc_close_bracket
-				|| p.current_token.kind == .punc_comma {
+			if p.current_token.kind == .punc_close_bracket || p.current_token.kind == .punc_comma {
 				elements << ast.SpreadExpression{
-					expression: ast.WildcardPattern{ span: spread_span }
+					expression: ast.WildcardPattern{
+						span: spread_span
+					}
 					span:       spread_span
 				}
 			} else {
@@ -997,17 +998,26 @@ fn (mut p Parser) is_type_start() bool {
 
 fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 	mut is_option := false
-	mut is_array := false
 
 	if p.current_token.kind == .punc_question_mark {
 		is_option = true
 		p.eat(.punc_question_mark)!
 	}
 
+	// Array type: []T where T can itself be an array type
 	if p.current_token.kind == .punc_open_bracket {
-		is_array = true
+		span := p.current_span()
 		p.eat(.punc_open_bracket)!
 		p.eat(.punc_close_bracket)!
+		inner := p.parse_type_identifier()!
+		return ast.TypeIdentifier{
+			is_option:    is_option
+			is_array:     true
+			element_type: &inner
+			identifier:   ast.Identifier{
+				span: span
+			} // empty, element_type holds the real type
+		}
 	}
 
 	if p.current_token.kind == .kw_function {
@@ -1019,7 +1029,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 
 	return ast.TypeIdentifier{
 		is_option:  is_option
-		is_array:   is_array
+		is_array:   false
 		identifier: ast.Identifier{
 			name: name
 			span: span

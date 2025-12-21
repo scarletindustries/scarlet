@@ -903,26 +903,16 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 		if arm.pattern is typed_ast.ArrayExpression {
 			arr := arm.pattern as typed_ast.ArrayExpression
 
-			// Find spread position (-1 if none)
-			mut spread_idx := -1
-			for i, elem in arr.elements {
-				if elem is typed_ast.SpreadExpression {
-					spread_idx = i
-					break
-				}
-			}
-			has_spread := spread_idx >= 0
-
-			pre_count := if has_spread { spread_idx } else { arr.elements.len }
-			post_count := if has_spread { arr.elements.len - spread_idx - 1 } else { 0 }
-			min_len := pre_count + post_count
+			// Check if last element is a spread (e.g., [a, b, ..rest])
+			has_spread := arr.elements.len > 0 && arr.elements.last() is typed_ast.SpreadExpression
+			pre_count := if has_spread { arr.elements.len - 1 } else { arr.elements.len }
 
 			// Check length constraint
 			c.emit(.dup)
 			c.emit(.array_len)
-			c.emit_arg(.push_const, c.add_constant(min_len))
+			c.emit_arg(.push_const, c.add_constant(pre_count))
 			if has_spread {
-				c.emit(.gte) // length >= min_len
+				c.emit(.gte) // length >= pre_count
 			} else {
 				c.emit(.eq) // length == exactly this many
 			}
@@ -942,38 +932,20 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				}
 			}
 
-			// Bind spread (rest)
 			if has_spread {
-				spread_elem := arr.elements[spread_idx]
+				spread_elem := arr.elements.last()
 				if spread_elem is typed_ast.SpreadExpression {
 					if spread_elem.expression is typed_ast.Identifier {
 						binding := spread_elem.expression as typed_ast.Identifier
-						// slice from pre_count to (len - post_count)
+						// Slice from pre_count to end
 						c.emit(.dup)
-						c.emit_arg(.push_const, c.add_constant(pre_count))
-						c.emit(.dup) // dup the array again
 						c.emit(.array_len)
-						c.emit_arg(.push_const, c.add_constant(post_count))
-						c.emit(.sub)
+						c.emit_arg(.push_const, c.add_constant(pre_count))
+						c.emit(.swap)
 						c.emit(.array_slice)
 						local_idx := c.get_or_create_local(binding.name)
 						c.emit_arg(.store_local, local_idx)
 					}
-					// If WildcardPattern, don't bind anything
-				}
-			}
-
-			// Bind post-spread elements (index from end)
-			for i in 0 .. post_count {
-				elem := arr.elements[spread_idx + 1 + i]
-				if elem is typed_ast.Identifier {
-					c.emit(.dup)
-					c.emit(.array_len)
-					c.emit_arg(.push_const, c.add_constant(post_count - i))
-					c.emit(.sub)
-					c.emit(.index)
-					local_idx := c.get_or_create_local(elem.name)
-					c.emit_arg(.store_local, local_idx)
 				}
 			}
 
