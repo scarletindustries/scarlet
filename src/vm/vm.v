@@ -424,11 +424,20 @@ fn (mut vm VM) execute() !bytecode.Value {
 				vm.stack << bytecode.EnumValue{
 					enum_name:    enum_name
 					variant_name: variant_name
-					payload:      none
+					payload:      []
 				}
 			}
 			.make_enum_payload {
-				payload := vm.pop()!
+				payload_count := instr.operand
+
+				mut payloads := []bytecode.Value{}
+				for _ in 0 .. payload_count {
+					payloads << vm.pop()!
+				}
+
+				// Reverse since we popped in reverse order
+				payloads.reverse_in_place()
+
 				variant_name_val := vm.pop()!
 				enum_name_val := vm.pop()!
 
@@ -446,7 +455,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				vm.stack << bytecode.EnumValue{
 					enum_name:    enum_name
 					variant_name: variant_name
-					payload:      payload
+					payload:      payloads
 				}
 			}
 			.match_enum {
@@ -469,8 +478,10 @@ fn (mut vm VM) execute() !bytecode.Value {
 			.unwrap_enum {
 				enum_val := vm.pop()!
 				if enum_val is bytecode.EnumValue {
-					if p := enum_val.payload {
-						vm.stack << p
+					if enum_val.payload.len > 0 {
+						for p in enum_val.payload {
+							vm.stack << p
+						}
 					} else {
 						vm.stack << bytecode.NoneValue{}
 					}
@@ -786,16 +797,16 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 				if a.enum_name != b.enum_name || a.variant_name != b.variant_name {
 					return false
 				}
-				// Compare payloads
-				a_payload := a.payload
-				b_payload := b.payload
-				if a_payload == none && b_payload == none {
-					return true
-				}
-				if a_payload == none || b_payload == none {
+
+				if a.payload.len != b.payload.len {
 					return false
 				}
-				return vm.values_equal(a_payload or { return false }, b_payload or { return false })
+				for i, a_val in a.payload {
+					if !vm.values_equal(a_val, b.payload[i]) {
+						return false
+					}
+				}
+				return true
 			}
 		}
 		else {}
@@ -896,8 +907,9 @@ pub fn inspect(v bytecode.Value) string {
 			return '<fn#${v.name}>'
 		}
 		bytecode.EnumValue {
-			if p := v.payload {
-				return '${v.enum_name}.${v.variant_name}(${inspect(p)})'
+			if v.payload.len > 0 {
+				parts := v.payload.map(inspect(it))
+				return '${v.enum_name}.${v.variant_name}(${parts.join(', ')})'
 			} else {
 				return '${v.enum_name}.${v.variant_name}'
 			}

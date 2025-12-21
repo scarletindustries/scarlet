@@ -201,7 +201,7 @@ pub:
 pub struct EnumVariant {
 pub:
 	identifier Identifier
-	payload    ?TypeIdentifier
+	payload    []TypeIdentifier
 }
 
 pub struct EnumExpression {

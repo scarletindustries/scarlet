@@ -48,7 +48,7 @@ pub:
 pub struct TypeEnum {
 pub:
 	name     string
-	variants map[string]?Type
+	variants map[string][]Type
 }
 
 pub struct TypeNone {}

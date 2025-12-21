@@ -380,9 +380,14 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 			for variant in expr.variants {
 				f.emit_indent()
 				f.emit(variant.identifier.name)
-				if payload := variant.payload {
+				if variant.payload.len > 0 {
 					f.emit('(')
-					f.format_type(payload)
+					for i, payload in variant.payload {
+						if i > 0 {
+							f.emit(', ')
+						}
+						f.format_type(payload)
+					}
 					f.emit(')')
 				}
 				f.emit('\n')

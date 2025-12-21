@@ -966,17 +966,21 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 
 	if enum_type := c.env.lookup_enum_by_variant(expr.identifier.name) {
 		variant_name := expr.identifier.name
+		payload_types := enum_type.variants[variant_name] or { []Type{} }
 
 		mut typed_args := []typed_ast.Expression{}
-		if payload_type := enum_type.variants[variant_name] {
-			if expr.arguments.len != 1 {
-				c.error_at_span("Enum variant '${variant_name}' expects 1 argument, got ${expr.arguments.len}",
+		if payload_types.len > 0 {
+			if expr.arguments.len != payload_types.len {
+				c.error_at_span("Enum variant '${variant_name}' expects ${payload_types.len} argument(s), got ${expr.arguments.len}",
 					expr.span)
-			} else {
-				typed_arg, arg_type := c.check_expr(expr.arguments[0])
+			}
+			for i, arg in expr.arguments {
+				typed_arg, arg_type := c.check_expr(arg)
 				typed_args << typed_arg
-				arg_span := get_typed_span(typed_arg)
-				c.expect_type(arg_type, payload_type, arg_span, "in enum variant '${variant_name}'")
+				if i < payload_types.len {
+					arg_span := get_typed_span(typed_arg)
+					c.expect_type(arg_type, payload_types[i], arg_span, "in enum variant '${variant_name}'")
+				}
 			}
 		} else {
 			if expr.arguments.len != 0 {
@@ -1291,7 +1295,7 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 		c.error_at_span('Enum definitions are only allowed at the top level', expr.span)
 	}
 
-	mut variants := map[string]?Type{}
+	mut variants := map[string][]Type{}
 
 	for variant in expr.variants {
 		if variant.identifier.name in variants {
@@ -1299,17 +1303,17 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 				variant.identifier.span)
 			continue
 		}
-		if payload := variant.payload {
+
+		mut payload_types := []Type{}
+		for payload in variant.payload {
 			if resolved := c.resolve_type_identifier(payload) {
-				variants[variant.identifier.name] = resolved
+				payload_types << resolved
 			} else {
 				c.error_at_span("Unknown type '${payload.identifier.name}' in variant '${variant.identifier.name}'",
 					variant.identifier.span)
-				variants[variant.identifier.name] = none
 			}
-		} else {
-			variants[variant.identifier.name] = none
 		}
+		variants[variant.identifier.name] = payload_types
 	}
 
 	enum_type := TypeEnum{
@@ -1322,11 +1326,7 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 	typed_variants := expr.variants.map(fn (v ast.EnumVariant) typed_ast.EnumVariant {
 		return typed_ast.EnumVariant{
 			identifier: convert_identifier(v.identifier)
-			payload:    if p := v.payload {
-				?typed_ast.TypeIdentifier(convert_type_identifier(p))
-			} else {
-				none
-			}
+			payload:    v.payload.map(convert_type_identifier)
 		}
 	})
 
@@ -1339,6 +1339,82 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 }
 
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
+	// Check for qualified enum access like MyEnum.Variant or MyEnum.Variant(payload)
+	if expr.left is ast.Identifier {
+		left_id := expr.left as ast.Identifier
+		if looked_up := c.env.lookup_type(left_id.name) {
+			if looked_up is TypeEnum {
+				enum_type := looked_up
+				typed_left := typed_ast.Identifier{
+					name: left_id.name
+					span: convert_span(left_id.span)
+				}
+
+				variant_name, args, span := if expr.right is ast.FunctionCallExpression {
+					call := expr.right as ast.FunctionCallExpression
+					call.identifier.name, call.arguments, call.span
+				} else if expr.right is ast.Identifier {
+					r := expr.right as ast.Identifier
+					r.name, []ast.Expression{}, r.span
+				} else {
+					return c.check_expr(expr.left)
+				}
+
+				if variant_name !in enum_type.variants {
+					c.error_at_span("Enum '${left_id.name}' has no variant '${variant_name}'",
+						span)
+					return typed_ast.PropertyAccessExpression{
+						left:  typed_left
+						right: typed_ast.ErrorNode{
+							message: 'Unknown variant'
+							span:    convert_span(span)
+						}
+					}, t_none()
+				}
+
+				payload_types := enum_type.variants[variant_name] or { []Type{} }
+				mut typed_args := []typed_ast.Expression{}
+
+				if payload_types.len > 0 {
+					if args.len != payload_types.len {
+						c.error_at_span("Enum variant '${variant_name}' expects ${payload_types.len} argument(s), got ${args.len}",
+							span)
+					}
+					for i, arg in args {
+						typed_arg, arg_type := c.check_expr(arg)
+						typed_args << typed_arg
+						if i < payload_types.len {
+							c.expect_type(arg_type, payload_types[i], convert_span(span), "in enum variant '${variant_name}'")
+						}
+					}
+				} else if args.len > 0 {
+					c.error_at_span("Enum variant '${variant_name}' takes no arguments", span)
+				}
+
+				typed_right := if args.len > 0 || payload_types.len > 0 {
+					typed_ast.Expression(typed_ast.FunctionCallExpression{
+						identifier: typed_ast.Identifier{
+							name: variant_name
+							span: convert_span(span)
+						}
+						arguments:  typed_args
+						span:       convert_span(span)
+					})
+				} else {
+					typed_ast.Expression(typed_ast.Identifier{
+						name: variant_name
+						span: convert_span(span)
+					})
+				}
+
+				return typed_ast.PropertyAccessExpression{
+					left:  typed_left
+					right: typed_right
+				}, Type(enum_type)
+			}
+		}
+	}
+
 	typed_left, left_type := c.check_expr(expr.left)
 
 	if expr.right is ast.FunctionCallExpression {
@@ -1417,7 +1493,20 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 					covered_variants[p.identifier.name] = true
 				} else if p is ast.Identifier {
 					covered_variants[p.name] = true
+				} else if p is ast.PropertyAccessExpression {
+					if p.right is ast.Identifier {
+						covered_variants[p.right.name] = true
+					} else if p.right is ast.FunctionCallExpression {
+						covered_variants[p.right.identifier.name] = true
+					}
 				}
+			}
+		} else if arm.pattern is ast.PropertyAccessExpression {
+			if arm.pattern.right is ast.Identifier {
+				covered_variants[arm.pattern.right.name] = true
+			} else if arm.pattern.right is ast.FunctionCallExpression {
+				call := arm.pattern.right as ast.FunctionCallExpression
+				covered_variants[call.identifier.name] = true
 			}
 		} else if arm.pattern is ast.FunctionCallExpression {
 			covered_variants[arm.pattern.identifier.name] = true
@@ -1484,15 +1573,79 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 		}, subject_type
 	}
 
+	// Handle qualified enum patterns like MyEnum.Variant or MyEnum.Variant(binding)
+	if pattern is ast.PropertyAccessExpression {
+		if pattern.left is ast.Identifier {
+			left_id := pattern.left as ast.Identifier
+			if looked_up := c.env.lookup_type(left_id.name) {
+				if looked_up is TypeEnum {
+					enum_type := looked_up
+					typed_left := typed_ast.Identifier{
+						name: left_id.name
+						span: convert_span(left_id.span)
+					}
+
+					variant_name, args, span := if pattern.right is ast.FunctionCallExpression {
+						call := pattern.right as ast.FunctionCallExpression
+						call.identifier.name, call.arguments, call.span
+					} else if pattern.right is ast.Identifier {
+						r := pattern.right as ast.Identifier
+						r.name, []ast.Expression{}, r.span
+					} else {
+						// Not a valid pattern form, fall through to normal check_expr
+						return c.check_expr(pattern)
+					}
+
+					if variant_name in enum_type.variants {
+						payload_types := enum_type.variants[variant_name] or { []Type{} }
+
+						// Bind pattern variables to their corresponding payload types
+						for i, arg in args {
+							if arg is ast.Identifier && i < payload_types.len {
+								c.env.define(arg.name, payload_types[i])
+							}
+						}
+
+						mut typed_args := []typed_ast.Expression{}
+						for arg in args {
+							typed_arg, _ := c.check_expr(arg)
+							typed_args << typed_arg
+						}
+
+						typed_right := if args.len > 0 || payload_types.len > 0 {
+							typed_ast.Expression(typed_ast.FunctionCallExpression{
+								identifier: typed_ast.Identifier{
+									name: variant_name
+									span: convert_span(span)
+								}
+								arguments:  typed_args
+								span:       convert_span(span)
+							})
+						} else {
+							typed_ast.Expression(typed_ast.Identifier{
+								name: variant_name
+								span: convert_span(span)
+							})
+						}
+
+						return typed_ast.PropertyAccessExpression{
+							left:  typed_left
+							right: typed_right
+						}, subject_type
+					}
+				}
+			}
+		}
+	}
+
 	if pattern is ast.FunctionCallExpression {
 		variant_name := pattern.identifier.name
 
 		if subject_type is TypeEnum {
-			if payload_type := subject_type.variants[variant_name] {
-				for arg in pattern.arguments {
-					if arg is ast.Identifier {
-						c.env.define(arg.name, payload_type)
-					}
+			payload_types := subject_type.variants[variant_name] or { []Type{} }
+			for i, arg in pattern.arguments {
+				if arg is ast.Identifier && i < payload_types.len {
+					c.env.define(arg.name, payload_types[i])
 				}
 			}
 		}

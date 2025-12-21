@@ -124,9 +124,9 @@ pub:
 
 pub struct EnumValue {
 pub:
-	enum_name    string // e.g., "MyEnum"
-	variant_name string // e.g., "C"
-	payload      ?Value // optional payload
+	enum_name    string  // e.g., "MyEnum"
+	variant_name string  // e.g., "C"
+	payload      []Value // payload values (empty if no payload)
 }
 
 pub struct StructValue {

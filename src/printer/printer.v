@@ -218,8 +218,15 @@ fn print_expression(expr ast.Expression, level int) string {
 			mut s := 'enum ${expr.identifier.name} {\n'
 			for variant in expr.variants {
 				s += '${indent(level + 1)}${variant.identifier.name}'
-				if payload := variant.payload {
-					s += '(${print_expression(payload, level + 1)})'
+				if variant.payload.len > 0 {
+					s += '('
+					for i, payload in variant.payload {
+						if i > 0 {
+							s += ', '
+						}
+						s += print_expression(payload, level + 1)
+					}
+					s += ')'
 				}
 				s += ',\n'
 			}

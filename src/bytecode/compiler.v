@@ -450,17 +450,22 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
 							}
 
-							if _ := enum_type.variants[variant_name] {
-								if call.arguments.len != 1 {
-									return error('Variant "${variant_name}" expects exactly 1 payload argument')
+							payload_types := enum_type.variants[variant_name] or {
+								[]type_def.Type{}
+							}
+							if payload_types.len > 0 {
+								if call.arguments.len != payload_types.len {
+									return error('Variant "${variant_name}" expects ${payload_types.len} payload argument(s)')
 								}
 
 								enum_idx := c.add_constant(enum_name)
 								c.emit_arg(.push_const, enum_idx)
 								variant_idx := c.add_constant(variant_name)
 								c.emit_arg(.push_const, variant_idx)
-								c.compile_expr(call.arguments[0])!
-								c.emit(.make_enum_payload)
+								for arg in call.arguments {
+									c.compile_expr(arg)!
+								}
+								c.emit_arg(.make_enum_payload, call.arguments.len)
 							} else {
 								return error('Variant "${variant_name}" does not take a payload')
 							}
@@ -472,8 +477,12 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 								return error('Unknown variant "${variant_name}" in enum ${enum_name}')
 							}
 
-							if payload_type := enum_type.variants[variant_name] {
-								return error('Variant "${variant_name}" requires a payload of type ${type_to_string(payload_type)}')
+							payload_types := enum_type.variants[variant_name] or {
+								[]type_def.Type{}
+							}
+							if payload_types.len > 0 {
+								type_strs := payload_types.map(type_to_string)
+								return error('Variant "${variant_name}" requires payload(s) of type (${type_strs.join(', ')})')
 							}
 
 							enum_idx := c.add_constant(enum_name)
@@ -726,7 +735,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 	for arm in m.arms {
 		c.emit(.dup)
 
-		mut binding_name := ?string(none)
+		mut binding_names := []string{}
 		mut literal_pattern := ?typed_ast.Expression(none)
 		mut enum_name := ?string(none)
 		mut variant_name := ?string(none)
@@ -741,11 +750,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 						if prop.right is typed_ast.FunctionCallExpression {
 							call := prop.right as typed_ast.FunctionCallExpression
 							variant_name = call.identifier.name
-							if call.arguments.len == 1 {
-								arg := call.arguments[0]
+							for arg in call.arguments {
 								if arg is typed_ast.Identifier {
 									binding_id := arg as typed_ast.Identifier
-									binding_name = binding_id.name
+									binding_names << binding_id.name
 								} else if arg is typed_ast.StringLiteral
 									|| arg is typed_ast.NumberLiteral
 									|| arg is typed_ast.BooleanLiteral {
@@ -766,11 +774,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			if inferred_enum := c.find_enum_for_variant(call.identifier.name) {
 				enum_name = inferred_enum
 				variant_name = call.identifier.name
-				if call.arguments.len == 1 {
-					arg := call.arguments[0]
+				for arg in call.arguments {
 					if arg is typed_ast.Identifier {
 						binding_id := arg as typed_ast.Identifier
-						binding_name = binding_id.name
+						binding_names << binding_id.name
 					} else if arg is typed_ast.StringLiteral || arg is typed_ast.NumberLiteral
 						|| arg is typed_ast.BooleanLiteral {
 						literal_pattern = arg
@@ -819,11 +826,14 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 					continue
 				}
 
-				if bname := binding_name {
+				if binding_names.len > 0 {
 					c.emit(.dup)
 					c.emit(.unwrap_enum)
-					local_idx := c.get_or_create_local(bname)
-					c.emit_arg(.store_local, local_idx)
+					// unwrap_enum pushes all payloads in order, so pop in reverse
+					for i := binding_names.len - 1; i >= 0; i-- {
+						local_idx := c.get_or_create_local(binding_names[i])
+						c.emit_arg(.store_local, local_idx)
+					}
 				}
 
 				c.emit(.pop)

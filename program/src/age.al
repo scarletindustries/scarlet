@@ -11,13 +11,9 @@ fn classify_age(age Int) String {
 	}
 }
 
-fn can_vote(age Int) Bool {
-	age >= 18
-}
+fn can_vote(age Int) Bool { age >= 18 }
 
-fn can_drive(age Int) Bool {
-	age >= 16
-}
+fn can_drive(age Int) Bool { age >= 16 }
 
 fn years_until(current Int, target Int) Int {
 	match true {
@@ -51,10 +47,8 @@ fn analyze_person(person Person) AgeReport {
 	}
 }
 
-baby = Person{ name: 'Baby', age: 1 }
-kid = Person{ name: 'Kid', age: 10 }
-teen = Person{ name: 'Teen', age: 16 }
-adult = Person{ name: 'Adult', age: 35 }
-retiree = Person{ name: 'Retiree', age: 70 }
-
-[analyze_person(baby), analyze_person(kid), analyze_person(teen), analyze_person(adult), analyze_person(retiree)]
+println(analyze_person(Person{ name: 'Timmy', age: 1 }))
+println(analyze_person(Person{ name: 'Charlie', age: 10 }))
+println(analyze_person(Person{ name: 'Thomas', age: 16 }))
+println(analyze_person(Person{ name: 'Martin', age: 35 }))
+println(analyze_person(Person{ name: 'Edward', age: 70 }))

@@ -1135,11 +1135,18 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected variant name')!
 
-	mut payload := ?ast.TypeIdentifier(none)
+	mut payload := []ast.TypeIdentifier{}
 
 	if p.current_token.kind == .punc_open_paren {
 		p.eat(.punc_open_paren)!
-		payload = p.parse_type_identifier()!
+		for p.current_token.kind != .punc_close_paren {
+			payload << p.parse_type_identifier()!
+			if p.current_token.kind == .punc_comma {
+				p.eat(.punc_comma)!
+			} else {
+				break
+			}
+		}
 		p.eat(.punc_close_paren)!
 	}
 
