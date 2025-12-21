@@ -131,6 +131,7 @@ pub:
 	enum_name    string  // e.g., "MyEnum"
 	variant_name string  // e.g., "C"
 	payload      []Value // payload values (empty if no payload)
+	hash         u64
 }
 
 pub struct StructValue {
@@ -175,7 +176,7 @@ fn fnv1a_combine(h u64, val u64) u64 {
 }
 
 pub fn hash_value(v Value) u64 {
-	mut h := u64(0xcbf29ce484222325) // FNV offset basis
+	mut h := hash_basis
 	match v {
 		int {
 			h = fnv1a_combine(h, u64(v))
@@ -199,15 +200,7 @@ pub fn hash_value(v Value) u64 {
 			h = fnv1a_combine(h, 0)
 		}
 		EnumValue {
-			for c in v.enum_name {
-				h = fnv1a_combine(h, u64(c))
-			}
-			for c in v.variant_name {
-				h = fnv1a_combine(h, u64(c))
-			}
-			for p in v.payload {
-				h = fnv1a_combine(h, hash_value(p))
-			}
+			h = v.hash
 		}
 		StructValue {
 			h = v.hash
@@ -224,8 +217,11 @@ pub fn hash_value(v Value) u64 {
 	return h
 }
 
+// FNV offset basis
+const hash_basis = u64(0xcbf29ce484222325)
+
 pub fn compute_struct_hash(type_name string, fields map[string]Value) u64 {
-	mut h := u64(0xcbf29ce484222325)
+	mut h := hash_basis
 	// hash the type name first (nominal typing)
 	for c in type_name {
 		h = fnv1a_combine(h, u64(c))
@@ -238,6 +234,20 @@ pub fn compute_struct_hash(type_name string, fields map[string]Value) u64 {
 			h = fnv1a_combine(h, u64(c))
 		}
 		h = fnv1a_combine(h, hash_value(fields[key] or { NoneValue{} }))
+	}
+	return h
+}
+
+pub fn compute_enum_hash(enum_name string, variant_name string, payload []Value) u64 {
+	mut h := hash_basis
+	for c in enum_name {
+		h = fnv1a_combine(h, u64(c))
+	}
+	for c in variant_name {
+		h = fnv1a_combine(h, u64(c))
+	}
+	for p in payload {
+		h = fnv1a_combine(h, hash_value(p))
 	}
 	return h
 }

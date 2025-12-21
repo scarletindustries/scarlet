@@ -476,6 +476,8 @@ fn (mut vm VM) execute() !bytecode.Value {
 					enum_name:    enum_name
 					variant_name: variant_name
 					payload:      []
+					hash:         bytecode.compute_enum_hash(enum_name, variant_name,
+						[])
 				}
 			}
 			.make_enum_payload {
@@ -507,6 +509,8 @@ fn (mut vm VM) execute() !bytecode.Value {
 					enum_name:    enum_name
 					variant_name: variant_name
 					payload:      payloads
+					hash:         bytecode.compute_enum_hash(enum_name, variant_name,
+						payloads)
 				}
 			}
 			.match_enum {
@@ -845,10 +849,17 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 		}
 		bytecode.EnumValue {
 			if b is bytecode.EnumValue {
+				// fast path: different hashes means definitely not equal
+				if a.hash != b.hash {
+					return false
+				}
 				if a.enum_name != b.enum_name || a.variant_name != b.variant_name {
 					return false
 				}
-
+				// fast path: both empty payloads
+				if a.payload.len == 0 && b.payload.len == 0 {
+					return true
+				}
 				if a.payload.len != b.payload.len {
 					return false
 				}
@@ -870,6 +881,10 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 				if a.type_name != b.type_name {
 					return false
 				}
+				// fast path: both empty structs
+				if a.fields.len == 0 && b.fields.len == 0 {
+					return true
+				}
 				// structural check: compare all fields (handles hash collisions)
 				if a.fields.len != b.fields.len {
 					return false
@@ -886,7 +901,24 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 				return true
 			}
 		}
-		else {}
+		[]bytecode.Value {
+			if b is []bytecode.Value {
+				// fast path: different lengths means definitely not equal
+				if a.len != b.len {
+					return false
+				}
+				// fast path: both empty arrays
+				if a.len == 0 {
+					return true
+				}
+				for i, a_val in a {
+					if !vm.values_equal(a_val, b[i]) {
+						return false
+					}
+				}
+				return true
+			}
+		}
 	}
 	return false
 }
