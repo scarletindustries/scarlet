@@ -23,6 +23,12 @@ pub fn run(version string) {
 		prompt := if continuation { '... ' } else { '>>> ' }
 
 		line := rl.read_line(prompt) or {
+			if continuation {
+				println('')
+				input_buffer = ''
+				continuation = false
+				continue
+			}
 			println('')
 			break
 		}
