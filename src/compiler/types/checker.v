@@ -410,8 +410,8 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 	}
 
 	return typed_ast.BlockExpression{
-		body: typed_body
-		span: typed_ast.Span{
+		body:       typed_body
+		span:       typed_ast.Span{
 			line:   block.span.line
 			column: block.span.column
 		}

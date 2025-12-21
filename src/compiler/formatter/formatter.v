@@ -476,7 +476,8 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 	has_close_trivia := f.has_trivia_at_span(block.close_span)
 	if block.body.len == 0 && !has_close_trivia {
 		f.emit('{}')
-	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_trivia(block.body[0]) && !has_close_trivia {
+	} else if block.body.len == 1 && f.is_simple_expr(block.body[0]) && !f.has_trivia(block.body[0])
+		&& !has_close_trivia {
 		f.emit('{ ')
 		f.format_expr(block.body[0])
 		f.emit(' }')
