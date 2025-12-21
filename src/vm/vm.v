@@ -812,7 +812,7 @@ fn (vm VM) binary_op(a bytecode.Value, b bytecode.Value, op bytecode.Op) !byteco
 		return a + b
 	}
 
-	return error('Cannot perform arithmetic on these types. This is likely a compiler bug.')
+	return error("Cannot perform arithmetic on '${value_type_name(a)}' and '${value_type_name(b)}'. This is likely a compiler bug.")
 }
 
 fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
@@ -874,6 +874,7 @@ fn (vm VM) compare(a bytecode.Value, b bytecode.Value, op bytecode.Op) !bool {
 			else { return error('Unknown compare op. This is likely a compiler bug.') }
 		}
 	}
+
 	if a is f64 && b is f64 {
 		return match op {
 			.lt { a < b }
@@ -884,7 +885,7 @@ fn (vm VM) compare(a bytecode.Value, b bytecode.Value, op bytecode.Op) !bool {
 		}
 	}
 
-	return error('Cannot compare these types. This is likely a compiler bug.')
+	return error("Cannot compare '${value_type_name(a)}' with '${value_type_name(b)}'. This is likely a compiler bug.")
 }
 
 fn (vm VM) is_truthy(v bytecode.Value) bool {
