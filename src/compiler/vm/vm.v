@@ -373,6 +373,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				vm.stack << bytecode.ClosureValue{
 					func_idx: func_idx
 					captures: captures
+					name:     func.name
 				}
 			}
 			.push_capture {
@@ -393,6 +394,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 					vm.stack << bytecode.ClosureValue{
 						func_idx: current_frame.func_idx
 						captures: current_frame.captures
+						name:     current_frame.func.name
 					}
 				}
 			}
@@ -875,7 +877,7 @@ pub fn inspect(v bytecode.Value) string {
 			return s
 		}
 		bytecode.ClosureValue {
-			return '<fn#${v.func_idx}>'
+			return '<fn#${v.name}>'
 		}
 		bytecode.EnumValue {
 			if p := v.payload {

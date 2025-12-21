@@ -139,6 +139,7 @@ pub struct ClosureValue {
 pub:
 	func_idx int
 	captures []Value
+	name     string
 }
 
 pub struct Program {
