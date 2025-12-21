@@ -13,6 +13,7 @@ import bytecode
 import vm
 import diagnostic
 import types
+import repl
 
 const version = $embed_file('../VERSION').to_string().trim_space()
 
@@ -117,6 +118,7 @@ fn main() {
 
    Usage:
      al run <file.al>      Run a program
+     al repl               Start interactive REPL
      al --help             Show all commands
 
    Example:
@@ -127,6 +129,13 @@ fn main() {
 ')
 		}
 		commands:    [
+			cli.Command{
+				name:        'repl'
+				description: 'Start an interactive REPL session'
+				execute:     fn (cmd cli.Command) ! {
+					repl.run(version)
+				}
+			},
 			cli.Command{
 				name:          'check'
 				required_args: 1
