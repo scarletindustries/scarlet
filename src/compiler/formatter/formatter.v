@@ -347,7 +347,7 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 					f.format_type(payload)
 					f.emit(')')
 				}
-				f.emit(',\n')
+				f.emit('\n')
 			}
 			f.indent--
 			f.emit_indent()
@@ -579,6 +579,18 @@ fn get_span(expr ast.Expression) ast.Span {
 			expr.span
 		}
 		ast.ErrorNode {
+			expr.span
+		}
+		ast.FunctionExpression {
+			expr.span
+		}
+		ast.StructExpression {
+			expr.span
+		}
+		ast.EnumExpression {
+			expr.span
+		}
+		ast.MatchExpression {
 			expr.span
 		}
 		ast.ExportExpression {

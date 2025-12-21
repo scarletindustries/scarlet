@@ -963,6 +963,7 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 		error_type:  convert_optional_type_id(expr.error_type)
 		params:      typed_params
 		body:        typed_body
+		span:        convert_span(expr.span)
 	}, final_func_type
 }
 
@@ -1233,6 +1234,7 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Ex
 	return typed_ast.StructExpression{
 		identifier: convert_identifier(expr.identifier)
 		fields:     typed_fields
+		span:       convert_span(expr.span)
 	}, struct_type
 }
 
@@ -1332,6 +1334,7 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 	return typed_ast.EnumExpression{
 		identifier: convert_identifier(expr.identifier)
 		variants:   typed_variants
+		span:       convert_span(expr.span)
 	}, enum_type
 }
 
@@ -1393,6 +1396,7 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 		return typed_ast.MatchExpression{
 			subject: typed_subject
 			arms:    []
+			span:    convert_span(expr.span)
 		}, t_none()
 	}
 
@@ -1447,6 +1451,7 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 	return typed_ast.MatchExpression{
 		subject: typed_subject
 		arms:    typed_arms
+		span:    convert_span(expr.span)
 	}, first_type
 }
 
