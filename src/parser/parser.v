@@ -774,7 +774,7 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 			}
 		}
 
- 		pattern := if p.current_token.kind == .bitwise_or {
+		pattern := if p.current_token.kind == .bitwise_or {
 			mut patterns := [first_pattern]
 			for p.current_token.kind == .bitwise_or {
 				p.eat(.bitwise_or)!

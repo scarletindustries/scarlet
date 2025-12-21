@@ -1455,6 +1455,12 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 			c.error_at_span('Match is not exhaustive, missing variants: ${missing.join(', ')}',
 				ast.Span{ line: subject_span.line, column: subject_span.column })
 		}
+	} else if subject_type !is TypeEnum && !has_wildcard {
+		subject_span := get_typed_span(typed_subject)
+		c.error_at_span('Match on non-enum type requires an else branch', ast.Span{
+			line:   subject_span.line
+			column: subject_span.column
+		})
 	}
 
 	return typed_ast.MatchExpression{

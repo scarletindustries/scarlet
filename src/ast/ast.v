@@ -303,9 +303,9 @@ pub fn get_span(expr Expression) Span {
 	return match expr {
 		NumberLiteral, StringLiteral, BooleanLiteral, NoneExpression, ErrorNode, Identifier,
 		VariableBinding, ConstBinding, BinaryExpression, FunctionCallExpression, ArrayExpression,
-		ArrayIndexExpression, IfExpression, WildcardPattern, OrPattern, InterpolatedString, BlockExpression,
-		ImportDeclaration, AssertExpression, MatchExpression, StructExpression, EnumExpression,
-		FunctionExpression, ExportExpression {
+		ArrayIndexExpression, IfExpression, WildcardPattern, OrPattern, InterpolatedString,
+		BlockExpression, ImportDeclaration, AssertExpression, MatchExpression, StructExpression,
+		EnumExpression, FunctionExpression, ExportExpression {
 			expr.span
 		}
 		TypeIdentifier, StructInitExpression {
