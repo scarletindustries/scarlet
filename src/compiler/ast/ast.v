@@ -4,8 +4,8 @@ import compiler.token
 
 pub struct Span {
 pub:
-	line   int
-	column int
+	line   int @[required]
+	column int @[required]
 }
 
 pub struct StringLiteral {
@@ -17,6 +17,7 @@ pub:
 pub struct InterpolatedString {
 pub:
 	parts []Expression
+	span  Span @[required]
 }
 
 pub struct NumberLiteral {
@@ -223,6 +224,7 @@ pub:
 pub struct BlockExpression {
 pub:
 	body []Expression
+	span Span @[required]
 }
 
 pub struct AssertExpression {
@@ -240,6 +242,7 @@ pub struct ImportDeclaration {
 pub:
 	path       string
 	specifiers []ImportSpecifier
+	span       Span @[required]
 }
 
 pub struct ExportExpression {
