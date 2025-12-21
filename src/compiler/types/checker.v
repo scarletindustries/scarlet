@@ -28,9 +28,10 @@ import compiler.type_def {
 
 pub struct TypeChecker {
 mut:
-	env         TypeEnv
-	diagnostics []diagnostic.Diagnostic
-	in_function bool
+	env                    TypeEnv
+	diagnostics            []diagnostic.Diagnostic
+	in_function            bool
+	current_fn_return_type ?Type
 }
 
 pub struct CheckResult {
@@ -351,6 +352,9 @@ fn (mut c TypeChecker) expect_type(actual Type, expected Type, span typed_ast.Sp
 	}
 	if expected is TypeOption {
 		if types_equal(actual, expected.inner) {
+			return true
+		}
+		if types_equal(actual, t_none()) {
 			return true
 		}
 	}
@@ -903,10 +907,24 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 	}
 
 	prev_in_function := c.in_function
+	prev_fn_return_type := c.current_fn_return_type
 	c.in_function = true
+	c.current_fn_return_type = if expr.return_type != none {
+		if et := err_type {
+			Type(TypeResult{
+				success: ret_type
+				error:   et
+			})
+		} else {
+			ret_type
+		}
+	} else {
+		none
+	}
 	errors_before := c.diagnostics.len
 	typed_body, body_type := c.check_expr(expr.body)
 	c.in_function = prev_in_function
+	c.current_fn_return_type = prev_fn_return_type
 	c.env.pop_scope()
 
 	if expr.return_type != none && c.diagnostics.len == errors_before {
@@ -1548,12 +1566,17 @@ fn (mut c TypeChecker) check_propagate_none(expr ast.PropagateNoneExpression) (t
 			line:   inner_span.line
 			column: inner_span.column
 		})
+	} else if fn_ret := c.current_fn_return_type {
+		if fn_ret !is TypeOption {
+			c.error_at_span("'?' can only be used in a function that returns an Option type, but this function returns '${type_to_string(fn_ret)}'",
+				ast.Span{ line: inner_span.line, column: inner_span.column })
+		}
 	}
 
 	result_type := if inner_type is TypeOption {
 		inner_type.inner
 	} else {
-		c.error_at_span("'?' can only be used on Option types, got '${type_to_string(inner_type)}'. Use '!' to propagate errors from Result types.",
+		c.error_at_span("'?' can only be used on Option types, got '${type_to_string(inner_type)}'",
 			ast.Span{ line: inner_span.line, column: inner_span.column })
 		inner_type
 	}
