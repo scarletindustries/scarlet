@@ -1571,6 +1571,9 @@ fn (mut c TypeChecker) check_propagate_none(expr ast.PropagateNoneExpression) (t
 			c.error_at_span("'?' can only be used in a function that returns an Option type, but this function returns '${type_to_string(fn_ret)}'",
 				ast.Span{ line: inner_span.line, column: inner_span.column })
 		}
+	} else {
+		c.error_at_span("'?' can only be used in a function that declares an Option return type",
+			ast.Span{ line: inner_span.line, column: inner_span.column })
 	}
 
 	result_type := if inner_type is TypeOption {
