@@ -76,6 +76,7 @@ fn find_user(id Int) ?User {
 		User{ id: id, name: 'found' }
 	}
 }
+
 fn divide(a Int, b Int) Int!DivisionError {
 	if b == 0 {
 		error DivisionError{ message: 'Cannot divide by zero' }
@@ -83,6 +84,7 @@ fn divide(a Int, b Int) Int!DivisionError {
 		a / b
 	}
 }
+
 fn validate(x Int)!ValidationError {
 	if x < 0 {
 		error ValidationError{ code: 1 }
@@ -90,10 +92,12 @@ fn validate(x Int)!ValidationError {
 		none
 	}
 }
+
 fn check_positive(x Int) Int!Error {
 	assert x > 0, Error{ message: 'must be positive' }
 	x * 2
 }
+
 fn max(a Int, b Int) Int {
 	if a > b {
 		a
@@ -101,6 +105,7 @@ fn max(a Int, b Int) Int {
 		b
 	}
 }
+
 fn classify(n Int) String {
 	if n < 0 {
 		'negative'
@@ -110,6 +115,7 @@ fn classify(n Int) String {
 		'positive'
 	}
 }
+
 fn describe(x Int) String {
 	match x {
 		0 -> 'zero',
@@ -117,12 +123,14 @@ fn describe(x Int) String {
 		else -> 'many',
 	}
 }
+
 fn handle_result(r Result) String {
 	match r {
 		Ok(value) -> 'Got: ${value}',
 		Err(e) -> 'Error: ${e}',
 	}
 }
+
 fn match_literal(r Result) String {
 	match r {
 		Ok('special') -> 'matched special',
@@ -130,6 +138,7 @@ fn match_literal(r Result) String {
 		Err(e) -> 'error: ${e}',
 	}
 }
+
 fn example() Int {
 	result = {
 		a = 10
