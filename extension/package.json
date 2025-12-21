@@ -1,14 +1,17 @@
 {
   "name": "al-lang",
   "displayName": "AL Language Support",
-  "description": "Syntax highlighting for AL language files",
+  "description": "Syntax highlighting and formatting for AL language files",
   "version": "0.0.1",
+  "publisher": "alistaiir",
   "engines": {
-    "vscode": "^1.84.0"
+    "vscode": "^1.107.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Formatters"
   ],
+  "main": "./out/extension.js",
   "contributes": {
     "languages": [
       {
@@ -29,6 +32,26 @@
         "scopeName": "source.al",
         "path": "./syntaxes/al.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AL",
+      "properties": {
+        "al.binaryPath": {
+          "type": "string",
+          "default": "al",
+          "description": "Path to the AL binary"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "bun run build",
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "@types/vscode": "^1.107.0",
+    "typescript": "^5.9.3"
   }
 }

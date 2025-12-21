@@ -4,6 +4,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
+    { "include": "#characters" },
     { "include": "#numbers" },
     { "include": "#keywords" },
     { "include": "#constants" },
@@ -27,7 +28,7 @@
         {
           "name": "string.quoted.single.al",
           "begin": "'",
-          "end": "'",
+          "end": "'|$",
           "patterns": [
             {
               "name": "constant.character.escape.al",
@@ -55,6 +56,14 @@
         }
       ]
     },
+    "characters": {
+      "patterns": [
+        {
+          "name": "string.quoted.other.al",
+          "match": "`[^`]`"
+        }
+      ]
+    },
     "keywords": {
       "patterns": [
         {
@@ -63,7 +72,7 @@
         },
         {
           "name": "keyword.other.al",
-          "match": "\\b(fn|struct|enum|const|import|from|export|comptime)\\b"
+          "match": "\\b(fn|struct|enum|const|import|from|export)\\b"
         }
       ]
     },
@@ -110,7 +119,7 @@
         },
         {
           "name": "keyword.operator.range.al",
-          "match": "\\.\\.\\.?"
+          "match": "\\.\\."
         },
         {
           "name": "keyword.operator.comparison.al",
@@ -118,7 +127,11 @@
         },
         {
           "name": "keyword.operator.logical.al",
-          "match": "(&&|\\|\\||!)"
+          "match": "(&&|\\|\\|)"
+        },
+        {
+          "name": "keyword.operator.bitwise.al",
+          "match": "(&|\\||\\^|~)"
         },
         {
           "name": "keyword.operator.arithmetic.al",
@@ -135,6 +148,10 @@
         {
           "name": "keyword.operator.error.al",
           "match": "!"
+        },
+        {
+          "name": "keyword.operator.attribute.al",
+          "match": "@"
         }
       ]
     },

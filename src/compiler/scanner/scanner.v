@@ -9,8 +9,9 @@ import compiler.diagnostic
 pub struct Scanner {
 	input string
 mut:
-	state       &state.ScannerState
-	diagnostics []diagnostic.Diagnostic
+	state          &state.ScannerState
+	diagnostics    []diagnostic.Diagnostic
+	pending_trivia []token.Trivia
 }
 
 @[inline]
@@ -30,7 +31,61 @@ pub fn (s Scanner) get_diagnostics() []diagnostic.Diagnostic {
 	return s.diagnostics
 }
 
+fn (mut s Scanner) collect_trivia() {
+	for s.state.get_pos() < s.input.len {
+		ch := s.peek_char()
+
+		// Collect whitespace (spaces, tabs)
+		if ch == ` ` || ch == `\t` {
+			start := s.state.get_pos()
+			for s.state.get_pos() < s.input.len {
+				c := s.peek_char()
+				if c != ` ` && c != `\t` {
+					break
+				}
+				s.incr_pos()
+			}
+			text := s.input[start..s.state.get_pos()]
+			s.pending_trivia << token.Trivia{
+				kind: .whitespace
+				text: text
+			}
+			continue
+		}
+
+		// Collect newlines
+		if ch == `\n` {
+			s.incr_pos()
+			s.pending_trivia << token.Trivia{
+				kind: .newline
+				text: '\n'
+			}
+			continue
+		}
+
+		// Collect line comments
+		if ch == `/` && s.state.get_pos() + 1 < s.input.len && s.input[s.state.get_pos() + 1] == `/` {
+			start := s.state.get_pos()
+			for s.state.get_pos() < s.input.len && s.peek_char() != `\n` {
+				s.incr_pos()
+			}
+			text := s.input[start..s.state.get_pos()]
+			s.pending_trivia << token.Trivia{
+				kind: .line_comment
+				text: text
+			}
+			continue
+		}
+
+		// Not trivia, stop collecting
+		break
+	}
+}
+
 pub fn (mut s Scanner) scan_next() compiler.Token {
+	// First, collect any leading trivia (whitespace, newlines, comments)
+	s.collect_trivia()
+
 	if s.state.get_pos() == s.input.len {
 		return s.new_token(.eof, none)
 	}
@@ -39,17 +94,13 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 	ch := s.peek_char()
 	s.incr_pos()
 
-	// Skip whitespace
-	if ch.is_space() {
-		return s.scan_next()
-	}
-
 	if token.is_valid_identifier(ch.ascii_str(), false) {
 		identifier := s.scan_identifier(ch)
 
 		if unwrapped := identifier.literal {
 			if keyword_kind := token.match_keyword(unwrapped) {
-				return s.new_token(keyword_kind, none)
+				// Return a keyword token with the same trivia as the identifier
+				return s.new_token_with_trivia(keyword_kind, none, identifier.leading_trivia)
 			}
 		}
 
@@ -223,7 +274,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				s.incr_pos()
 				return s.new_token(.punc_plusplus, none)
 			}
-
 			return s.new_token(.punc_plus, none)
 		}
 		`-` {
@@ -231,7 +281,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 				s.incr_pos()
 				return s.new_token(.punc_minusminus, none)
 			}
-
 			return s.new_token(.punc_minus, none)
 		}
 		`*` {
@@ -251,13 +300,6 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			s.new_token(.punc_question_mark, none)
 		}
 		`:` {
-			next := s.peek_char()
-			s.incr_pos()
-
-			if next == `=` {
-				return s.new_token(.punc_declaration, none)
-			}
-
 			return s.new_token(.punc_colon, none)
 		}
 		`>` {
@@ -281,27 +323,7 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 			return s.new_token(.punc_lt, none)
 		}
 		`/` {
-			next := s.peek_char()
-
-			// Handling a comment, we should skip until the end of the line
-			// In the future, we should make comments an AST node
-			if next == `/` {
-				mut end_of_line := s.state.get_pos()
-
-				for {
-					if s.input[end_of_line] == `\n` {
-						break
-					}
-
-					end_of_line++
-				}
-
-				s.state.set_pos(end_of_line)
-
-				return s.scan_next()
-			}
-
-			return s.new_token(.punc_div, none)
+			s.new_token(.punc_div, none)
 		}
 		`=` {
 			next := s.peek_char()
@@ -351,13 +373,24 @@ pub fn (mut s Scanner) scan_all() []compiler.Token {
 	return tokens
 }
 
-fn (s Scanner) new_token(kind token.Kind, literal ?string) compiler.Token {
+fn (mut s Scanner) new_token(kind token.Kind, literal ?string) compiler.Token {
+	return s.new_token_with_trivia(kind, literal, s.take_trivia())
+}
+
+fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivia []token.Trivia) compiler.Token {
 	return compiler.Token{
-		kind:    kind
-		literal: literal
-		line:    s.state.get_line()
-		column:  s.state.get_column()
+		kind:           kind
+		literal:        literal
+		line:           s.state.get_line()
+		column:         s.state.get_column()
+		leading_trivia: trivia
 	}
+}
+
+fn (mut s Scanner) take_trivia() []token.Trivia {
+	trivia := s.pending_trivia.clone()
+	s.pending_trivia.clear()
+	return trivia
 }
 
 // scan_identifier scans until the next non-alphanumeric character

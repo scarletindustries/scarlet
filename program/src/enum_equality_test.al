@@ -1,6 +1,6 @@
 enum Result {
-    Ok(String),
-    Err(String),
+	Ok(String)
+	Err(String)
 }
 
 a = Result.Ok('hello')

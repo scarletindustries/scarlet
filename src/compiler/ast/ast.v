@@ -94,6 +94,7 @@ pub:
 	error_type  ?TypeIdentifier
 	params      []FunctionParameter
 	body        Expression
+	span        Span @[required]
 }
 
 pub struct IfExpression {
@@ -117,8 +118,10 @@ pub:
 
 pub struct MatchExpression {
 pub:
-	subject Expression
-	arms    []MatchArm
+	subject    Expression
+	arms       []MatchArm
+	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct OrExpression {
@@ -182,6 +185,8 @@ pub struct StructExpression {
 pub:
 	identifier Identifier
 	fields     []StructField
+	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct EnumVariant {
@@ -194,6 +199,8 @@ pub struct EnumExpression {
 pub:
 	identifier Identifier
 	variants   []EnumVariant
+	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct StructInitField {
@@ -223,14 +230,16 @@ pub:
 
 pub struct BlockExpression {
 pub:
-	body []Expression
-	span Span @[required]
+	body       []Expression
+	span       Span @[required]
+	close_span Span @[required]
 }
 
 pub struct AssertExpression {
 pub:
 	expression Expression
 	message    Expression
+	span       Span @[required]
 }
 
 pub struct ImportSpecifier {

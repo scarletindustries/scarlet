@@ -1,41 +1,41 @@
 struct User {
-    id Int,
-    name String,
+	id Int,
+	name String,
 }
 
 struct DivisionError {
-    message String,
+	message String,
 }
 
 struct Error {
-    message String,
+	message String,
 }
 
 struct ValidationError {
-    code Int,
+	code Int,
 }
 
 struct NetworkError {
-    status Int,
+	status Int,
 }
 
 struct Person {
-    name String,
-    age Int,
+	name String,
+	age Int,
 }
 
 struct Config {
-    debug Bool,
+	debug Bool,
 }
 
 enum Result {
-    Ok(String),
-    Err(String),
+	Ok(String)
+	Err(String)
 }
 
 enum Option {
-    Some(Int),
-    None,
+	Some(Int)
+	None
 }
 
 const app_name = 'my app'
@@ -43,113 +43,100 @@ const app_name = 'my app'
 x = 10
 x = x + 1
 
-person = Person{
-    name: 'alistair',
-    age: 18,
-}
-
+person = Person{ name: 'alistair', age: 18 }
 fn add(a Int, b Int) Int {
-    a + b
+	a + b
 }
-
 fn greet(name String) {
-    name
+	name
 }
 
 callback = fn(x Int) Int {
-    x * 2
+	x * 2
 }
-
-// Function type annotations: fn(ParamTypes...) ReturnType
 fn apply(x Int, f fn(Int) Int) Int {
-    f(x)
+	f(x)
 }
-
-// Generic function type annotations
 fn apply_generic(x a, f fn(a) a) a {
-    f(x)
+	f(x)
 }
 
-double = fn(n Int) Int { n * 2 }
-triple = fn(n Int) Int { n * 3 }
+double = fn(n Int) Int {
+	n * 2
+}
+
+triple = fn(n Int) Int {
+	n * 3
+}
 
 fn find_user(id Int) ?User {
-    if id == 0 {
-        none
-    } else {
-        User{ id: id, name: 'found' }
-    }
+	if id == 0 {
+		none
+	} else {
+		User{ id: id, name: 'found' }
+	}
 }
-
 fn divide(a Int, b Int) Int!DivisionError {
-    if b == 0 {
-        error DivisionError{ message: 'Cannot divide by zero' }
-    } else {
-        a / b
-    }
+	if b == 0 {
+		error DivisionError{ message: 'Cannot divide by zero' }
+	} else {
+		a / b
+	}
 }
-
-fn validate(x Int) !ValidationError {
-    if x < 0 {
-        error ValidationError{ code: 1 }
-    } else {
-        none
-    }
+fn validate(x Int)!ValidationError {
+	if x < 0 {
+		error ValidationError{ code: 1 }
+	} else {
+		none
+	}
 }
-
 fn check_positive(x Int) Int!Error {
-    assert x > 0, Error{ message: 'must be positive' }
-    x * 2
+	assert x > 0, Error{ message: 'must be positive' }
+	x * 2
 }
-
 fn max(a Int, b Int) Int {
-    if a > b {
-        a
-    } else {
-        b
-    }
+	if a > b {
+		a
+	} else {
+		b
+	}
 }
-
 fn classify(n Int) String {
-    if n < 0 {
-        'negative'
-    } else if n == 0 {
-        'zero'
-    } else {
-        'positive'
-    }
+	if n < 0 {
+		'negative'
+	} else if n == 0 {
+		'zero'
+	} else {
+		'positive'
+	}
 }
-
 fn describe(x Int) String {
-    match x {
-        0 -> 'zero',
-        1 -> 'one',
-        else -> 'many',
-    }
+	match x {
+		0 -> 'zero',
+		1 -> 'one',
+		else -> 'many',
+	}
 }
-
 fn handle_result(r Result) String {
-    match r {
-        Ok(value) -> 'Got: $value',
-        Err(e) -> 'Error: $e',
-    }
+	match r {
+		Ok(value) -> 'Got: ${value}',
+		Err(e) -> 'Error: ${e}',
+	}
 }
-
 fn match_literal(r Result) String {
-    match r {
-        Ok('special') -> 'matched special',
-        Ok(other) -> 'other: $other',
-        Err(e) -> 'error: $e',
-    }
+	match r {
+		Ok('special') -> 'matched special',
+		Ok(other) -> 'other: ${other}',
+		Err(e) -> 'error: ${e}',
+	}
 }
-
 fn example() Int {
-    result = {
-        a = 10
-        b = 20
-        a + b
-    }
-    result * 2
+	result = {
+		a = 10
+		b = 20
+		a + b
+	}
+	result * 2
 }
 
 numbers = [1, 2, 3, 4, 5]
@@ -167,7 +154,7 @@ no = false
 
 nothing = none
 
-greeting = 'Hello, $app_name!'
+greeting = 'Hello, ${app_name}!'
 complex = 'Result: ${1 + 2}'
 
 sum = 1 + 2
@@ -209,8 +196,8 @@ literal_match2 = match_literal(Err('danger'))
 literal_match3 = match_literal(Ok('something else'))
 
 x = enum G {
-    Test
-    BottledIt
+	Test
+	BottledIt
 }
 println('x is:')
 println(x)

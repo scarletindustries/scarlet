@@ -410,10 +410,14 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 	}
 
 	return typed_ast.BlockExpression{
-		body: typed_body
-		span: typed_ast.Span{
+		body:       typed_body
+		span:       typed_ast.Span{
 			line:   block.span.line
 			column: block.span.column
+		}
+		close_span: typed_ast.Span{
+			line:   block.close_span.line
+			column: block.close_span.column
 		}
 	}, last_type
 }
@@ -562,7 +566,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 						}
 					}
 				})
-				span: typed_ast.Span{
+				span:       typed_ast.Span{
 					line:   expr.span.line
 					column: expr.span.column
 				}
@@ -963,6 +967,7 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 		error_type:  convert_optional_type_id(expr.error_type)
 		params:      typed_params
 		body:        typed_body
+		span:        convert_span(expr.span)
 	}, final_func_type
 }
 
@@ -1233,6 +1238,8 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Ex
 	return typed_ast.StructExpression{
 		identifier: convert_identifier(expr.identifier)
 		fields:     typed_fields
+		span:       convert_span(expr.span)
+		close_span: convert_span(expr.close_span)
 	}, struct_type
 }
 
@@ -1332,6 +1339,8 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 	return typed_ast.EnumExpression{
 		identifier: convert_identifier(expr.identifier)
 		variants:   typed_variants
+		span:       convert_span(expr.span)
+		close_span: convert_span(expr.close_span)
 	}, enum_type
 }
 
@@ -1391,8 +1400,10 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	if expr.arms.len == 0 {
 		return typed_ast.MatchExpression{
-			subject: typed_subject
-			arms:    []
+			subject:    typed_subject
+			arms:       []
+			span:       convert_span(expr.span)
+			close_span: convert_span(expr.close_span)
 		}, t_none()
 	}
 
@@ -1445,8 +1456,10 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 	}
 
 	return typed_ast.MatchExpression{
-		subject: typed_subject
-		arms:    typed_arms
+		subject:    typed_subject
+		arms:       typed_arms
+		span:       convert_span(expr.span)
+		close_span: convert_span(expr.close_span)
 	}, first_type
 }
 
@@ -1550,6 +1563,7 @@ fn (mut c TypeChecker) check_assert(expr ast.AssertExpression) (typed_ast.Expres
 	return typed_ast.AssertExpression{
 		expression: typed_cond
 		message:    typed_msg
+		span:       convert_span(expr.span)
 	}, t_none()
 }
 

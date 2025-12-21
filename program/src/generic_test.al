@@ -1,14 +1,11 @@
 fn identity(x a) a {
-    x
+	x
 }
 
 fn first(arr []a) a {
-    arr[0]
+	arr[0]
 }
 
-{[
-    '${identity(5)}',
-    identity('hello'),
-    '${first([1, 2, 3])}',
-    first(['a', 'b']),
-]}
+{
+	['${identity(5)}', identity('hello'), '${first([1, 2, 3])}', first(['a', 'b'])]
+}

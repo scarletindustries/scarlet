@@ -232,8 +232,9 @@ pub fn (mut p Parser) parse_program() ParseResult {
 
 	return ParseResult{
 		ast:         ast.BlockExpression{
-			body: body
-			span: program_span
+			body:       body
+			span:       program_span
+			close_span: p.current_span()
 		}
 		diagnostics: p.diagnostics
 	}
@@ -666,11 +667,13 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.BlockExpression{
-		body: body
-		span: block_span
+		body:       body
+		span:       block_span
+		close_span: close_span
 	}
 }
 
@@ -736,6 +739,7 @@ fn (mut p Parser) parse_if_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_match_expression() !ast.Expression {
+	match_span := p.current_span()
 	p.eat(.kw_match)!
 
 	subject := p.parse_expression()!
@@ -796,24 +800,28 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.MatchExpression{
-		subject: subject
-		arms:    arms
+		subject:    subject
+		arms:       arms
+		span:       match_span
+		close_span: close_span
 	}
 }
 
 fn (mut p Parser) parse_function_expression() !ast.Expression {
+	fn_span := p.current_span()
 	p.eat(.kw_function)!
 
 	mut identifier := ?ast.Identifier(none)
 	if p.current_token.kind == .identifier {
-		span := p.current_span()
+		id_span := p.current_span()
 		name := p.eat_token_literal(.identifier, 'Expected function name')!
 		identifier = ast.Identifier{
 			name: name
-			span: span
+			span: id_span
 		}
 	}
 
@@ -862,6 +870,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 		return_type: return_type
 		error_type:  error_type
 		body:        body
+		span:        fn_span
 	}
 }
 
@@ -1006,9 +1015,10 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 }
 
 fn (mut p Parser) parse_struct_expression() !ast.Expression {
+	struct_span := p.current_span()
 	p.eat(.kw_struct)!
 
-	span := p.current_span()
+	id_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected struct name')!
 
 	p.eat(.punc_open_brace)!
@@ -1022,14 +1032,17 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.StructExpression{
 		identifier: ast.Identifier{
 			name: name
-			span: span
+			span: id_span
 		}
 		fields:     fields
+		span:       struct_span
+		close_span: close_span
 	}
 }
 
@@ -1061,9 +1074,10 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 }
 
 fn (mut p Parser) parse_enum_expression() !ast.Expression {
+	enum_span := p.current_span()
 	p.eat(.kw_enum)!
 
-	span := p.current_span()
+	id_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected enum name')!
 
 	p.eat(.punc_open_brace)!
@@ -1077,14 +1091,17 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	}
 
 	p.pop_context()
+	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumExpression{
 		identifier: ast.Identifier{
 			name: name
-			span: span
+			span: id_span
 		}
 		variants:   variants
+		span:       enum_span
+		close_span: close_span
 	}
 }
 
@@ -1101,6 +1118,7 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	}
 
 	if p.current_token.kind == .punc_comma {
+		p.add_warning('Trailing comma after enum variant is deprecated')
 		p.eat(.punc_comma)!
 	}
 
@@ -1224,6 +1242,7 @@ fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) 
 }
 
 fn (mut p Parser) parse_assert_expression() !ast.Expression {
+	assert_span := p.current_span()
 	p.eat(.kw_assert)!
 
 	expr := p.parse_expression()!
@@ -1235,6 +1254,7 @@ fn (mut p Parser) parse_assert_expression() !ast.Expression {
 	return ast.AssertExpression{
 		expression: expr
 		message:    message
+		span:       assert_span
 	}
 }
 
