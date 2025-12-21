@@ -383,10 +383,57 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.compile_match(expr, is_tail)!
 		}
 		typed_ast.ArrayExpression {
-			for elem in expr.elements {
-				c.compile_expr(elem)!
+			// Check if there are any spread expressions
+			has_spread := expr.elements.any(it is typed_ast.SpreadExpression)
+
+			if !has_spread {
+				// Simple case: no spreads, just compile each element
+				for elem in expr.elements {
+					c.compile_expr(elem)!
+				}
+				c.emit_arg(.make_array, expr.elements.len)
+			} else {
+				// Complex case: handle spreads by building array incrementally
+				mut have_result := false
+
+				mut i := 0
+				for i < expr.elements.len {
+					elem := expr.elements[i]
+
+					if elem is typed_ast.SpreadExpression {
+						// Spread: compile inner array and concat
+						c.compile_expr(elem.expression)!
+						if have_result {
+							c.emit(.array_concat)
+						} else {
+							have_result = true
+						}
+						i++
+					} else {
+						// Group consecutive non-spread elements
+						mut group_count := 0
+						for j := i; j < expr.elements.len; j++ {
+							if expr.elements[j] is typed_ast.SpreadExpression {
+								break
+							}
+							c.compile_expr(expr.elements[j])!
+							group_count++
+						}
+						c.emit_arg(.make_array, group_count)
+						if have_result {
+							c.emit(.array_concat)
+						} else {
+							have_result = true
+						}
+						i += group_count
+					}
+				}
+
+				// Handle empty array case (no elements at all)
+				if !have_result {
+					c.emit_arg(.make_array, 0)
+				}
 			}
-			c.emit_arg(.make_array, expr.elements.len)
 		}
 		typed_ast.ArrayIndexExpression {
 			c.compile_expr(expr.expression)!
@@ -397,6 +444,9 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.compile_expr(expr.start)!
 			c.compile_expr(expr.end)!
 			c.emit(.make_range)
+		}
+		typed_ast.SpreadExpression {
+			return error('SpreadExpression should only appear inside ArrayExpression')
 		}
 		typed_ast.FunctionExpression {
 			c.compile_function(expr)!
@@ -847,6 +897,96 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
 				continue
 			}
+		}
+
+		// Handle array patterns like [], [x], [first, ..rest]
+		if arm.pattern is typed_ast.ArrayExpression {
+			arr := arm.pattern as typed_ast.ArrayExpression
+
+			// Find spread position (-1 if none)
+			mut spread_idx := -1
+			for i, elem in arr.elements {
+				if elem is typed_ast.SpreadExpression {
+					spread_idx = i
+					break
+				}
+			}
+			has_spread := spread_idx >= 0
+
+			pre_count := if has_spread { spread_idx } else { arr.elements.len }
+			post_count := if has_spread { arr.elements.len - spread_idx - 1 } else { 0 }
+			min_len := pre_count + post_count
+
+			// Check length constraint
+			c.emit(.dup)
+			c.emit(.array_len)
+			c.emit_arg(.push_const, c.add_constant(min_len))
+			if has_spread {
+				c.emit(.gte) // length >= min_len
+			} else {
+				c.emit(.eq) // length == exactly this many
+			}
+
+			next_arm := c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			// Bind pre-spread elements
+			for i in 0 .. pre_count {
+				elem := arr.elements[i]
+				if elem is typed_ast.Identifier {
+					c.emit(.dup)
+					c.emit_arg(.push_const, c.add_constant(i))
+					c.emit(.index)
+					local_idx := c.get_or_create_local(elem.name)
+					c.emit_arg(.store_local, local_idx)
+				}
+			}
+
+			// Bind spread (rest)
+			if has_spread {
+				spread_elem := arr.elements[spread_idx]
+				if spread_elem is typed_ast.SpreadExpression {
+					if spread_elem.expression is typed_ast.Identifier {
+						binding := spread_elem.expression as typed_ast.Identifier
+						// slice from pre_count to (len - post_count)
+						c.emit(.dup)
+						c.emit_arg(.push_const, c.add_constant(pre_count))
+						c.emit(.dup) // dup the array again
+						c.emit(.array_len)
+						c.emit_arg(.push_const, c.add_constant(post_count))
+						c.emit(.sub)
+						c.emit(.array_slice)
+						local_idx := c.get_or_create_local(binding.name)
+						c.emit_arg(.store_local, local_idx)
+					}
+					// If WildcardPattern, don't bind anything
+				}
+			}
+
+			// Bind post-spread elements (index from end)
+			for i in 0 .. post_count {
+				elem := arr.elements[spread_idx + 1 + i]
+				if elem is typed_ast.Identifier {
+					c.emit(.dup)
+					c.emit(.array_len)
+					c.emit_arg(.push_const, c.add_constant(post_count - i))
+					c.emit(.sub)
+					c.emit(.index)
+					local_idx := c.get_or_create_local(elem.name)
+					c.emit_arg(.store_local, local_idx)
+				}
+			}
+
+			c.emit(.pop)
+			c.in_tail_position = is_tail
+			c.compile_expr(arm.body)!
+			c.in_tail_position = false
+
+			end_jumps << c.current_addr()
+			c.emit_arg(.jump, 0)
+
+			c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
+			continue
 		}
 
 		if arm.pattern is typed_ast.WildcardPattern {

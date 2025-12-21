@@ -692,19 +692,52 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 
 	for p.current_token.kind != .punc_close_bracket && p.current_token.kind != .eof {
 		elem_span := p.current_span()
-		expr := p.parse_expression() or {
-			p.add_error(err.msg())
-			p.synchronize()
-			if p.current_token.kind == .punc_close_bracket {
-				break
+
+		if p.current_token.kind == .punc_dotdot {
+			spread_span := p.current_span()
+			p.eat(.punc_dotdot)!
+
+			// anonymous spread (.. followed by ] or ,)
+			// this is in the case like `match arr { [first, ..] -> { ... } }`
+			if p.current_token.kind == .punc_close_bracket
+				|| p.current_token.kind == .punc_comma {
+				elements << ast.SpreadExpression{
+					expression: ast.WildcardPattern{ span: spread_span }
+					span:       spread_span
+				}
+			} else {
+				inner := p.parse_expression() or {
+					p.add_error(err.msg())
+					p.synchronize()
+					if p.current_token.kind == .punc_close_bracket {
+						break
+					}
+					elements << ast.ErrorNode{
+						message: err.msg()
+						span:    elem_span
+					}
+					continue
+				}
+				elements << ast.SpreadExpression{
+					expression: inner
+					span:       spread_span
+				}
 			}
-			elements << ast.ErrorNode{
-				message: err.msg()
-				span:    elem_span
+		} else {
+			expr := p.parse_expression() or {
+				p.add_error(err.msg())
+				p.synchronize()
+				if p.current_token.kind == .punc_close_bracket {
+					break
+				}
+				elements << ast.ErrorNode{
+					message: err.msg()
+					span:    elem_span
+				}
+				continue
 			}
-			continue
+			elements << expr
 		}
-		elements << expr
 
 		if p.current_token.kind == .punc_comma {
 			p.eat(.punc_comma)!

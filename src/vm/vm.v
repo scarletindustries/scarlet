@@ -317,6 +317,46 @@ fn (mut vm VM) execute() !bytecode.Value {
 					return error("Cannot index type '${value_type_name(arr_val)}' - only arrays can be indexed")
 				}
 			}
+			.array_len {
+				arr_val := vm.pop()!
+				if arr_val is []bytecode.Value {
+					vm.stack << arr_val.len
+				} else {
+					return error("Cannot get length of non-array type '${value_type_name(arr_val)}'")
+				}
+			}
+			.array_slice {
+				end_val := vm.pop()!
+				start_val := vm.pop()!
+				arr_val := vm.pop()!
+
+				if arr_val is []bytecode.Value {
+					if start_val is int && end_val is int {
+						if start_val >= 0 && end_val <= arr_val.len && start_val <= end_val {
+							sliced := arr_val[start_val..end_val]
+							vm.stack << bytecode.Value(sliced)
+						} else {
+							return error('Slice indices out of bounds: [${start_val}..${end_val}] (array length is ${arr_val.len})')
+						}
+					} else {
+						return error('Slice indices must be integers')
+					}
+				} else {
+					return error("Cannot slice non-array type '${value_type_name(arr_val)}'")
+				}
+			}
+			.array_concat {
+				arr2_val := vm.pop()!
+				arr1_val := vm.pop()!
+
+				if arr1_val is []bytecode.Value && arr2_val is []bytecode.Value {
+					mut result := arr1_val.clone()
+					result << arr2_val
+					vm.stack << bytecode.Value(result)
+				} else {
+					return error('Cannot concatenate non-array types')
+				}
+			}
 			.make_struct {
 				field_count := instr.operand
 

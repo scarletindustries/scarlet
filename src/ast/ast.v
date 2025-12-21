@@ -266,6 +266,12 @@ pub:
 	span       Span @[required]
 }
 
+pub struct SpreadExpression {
+pub:
+	expression Expression
+	span       Span @[required]
+}
+
 pub type Expression = ArrayExpression
 	| ArrayIndexExpression
 	| AssertExpression
@@ -291,6 +297,7 @@ pub type Expression = ArrayExpression
 	| PropertyAccessExpression
 	| PropagateNoneExpression
 	| RangeExpression
+	| SpreadExpression
 	| StringLiteral
 	| StructExpression
 	| StructInitExpression
@@ -305,7 +312,7 @@ pub fn get_span(expr Expression) Span {
 		VariableBinding, ConstBinding, BinaryExpression, FunctionCallExpression, ArrayExpression,
 		ArrayIndexExpression, IfExpression, WildcardPattern, OrPattern, InterpolatedString,
 		BlockExpression, ImportDeclaration, AssertExpression, MatchExpression, StructExpression,
-		EnumExpression, FunctionExpression, ExportExpression {
+		EnumExpression, FunctionExpression, ExportExpression, SpreadExpression {
 			expr.span
 		}
 		TypeIdentifier, StructInitExpression {

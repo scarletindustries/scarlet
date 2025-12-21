@@ -39,11 +39,14 @@ pub enum Op {
 	ret           // return top of stack
 
 	// Data structures
-	make_array  // pop N items, push array: make_array <len>
-	make_range  // pop end, pop start, push array [start..end)
-	index       // pop index, pop array, push element
-	make_struct // create struct: pop type_name, pop N (field_name, value) pairs: make_struct <field_count>
-	get_field   // get struct field: get_field <field_name_idx> (field name in constant pool)
+	make_array   // pop N items, push array: make_array <len>
+	make_range   // pop end, pop start, push array [start..end)
+	index        // pop index, pop array, push element
+	array_len    // pop array, push int (length)
+	array_slice  // pop end, pop start, pop array, push slice [start..end)
+	array_concat // pop arr2, pop arr1, push concatenated array
+	make_struct  // create struct: pop type_name, pop N (field_name, value) pairs: make_struct <field_count>
+	get_field    // get struct field: get_field <field_name_idx> (field name in constant pool)
 
 	// Enums
 	make_enum         // create enum: pop variant_name, pop enum_name, push EnumValue (no payload)

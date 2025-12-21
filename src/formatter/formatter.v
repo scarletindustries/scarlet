@@ -319,6 +319,10 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 			f.emit('..')
 			f.format_expr(expr.end)
 		}
+		ast.SpreadExpression {
+			f.emit('..')
+			f.format_expr(expr.expression)
+		}
 		ast.StructExpression {
 			f.emit('struct ')
 			f.emit(expr.identifier.name)

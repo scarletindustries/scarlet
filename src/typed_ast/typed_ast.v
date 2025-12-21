@@ -269,6 +269,12 @@ pub:
 	span       Span @[required]
 }
 
+pub struct SpreadExpression {
+pub:
+	expression Expression
+	span       Span @[required]
+}
+
 pub type Expression = ArrayExpression
 	| ArrayIndexExpression
 	| AssertExpression
@@ -294,6 +300,7 @@ pub type Expression = ArrayExpression
 	| PropertyAccessExpression
 	| PropagateNoneExpression
 	| RangeExpression
+	| SpreadExpression
 	| StringLiteral
 	| StructExpression
 	| StructInitExpression
