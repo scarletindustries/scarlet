@@ -541,14 +541,18 @@ fn (mut vm VM) execute() !bytecode.Value {
 				// Match variant only, ignore payload
 				variant_name := vm.pop()!
 				enum_name := vm.pop()!
+				type_id_val := vm.pop()!
 				val := vm.pop()!
 
 				if variant_name !is string || enum_name !is string {
 					return error('Enum/variant names must be strings')
 				}
+				if type_id_val !is int {
+					return error('Enum type id must be int')
+				}
 
 				if val is bytecode.EnumValue {
-					vm.stack << (val.enum_name == (enum_name as string)
+					vm.stack << (val.type_id == (type_id_val as int)
 						&& val.variant_name == (variant_name as string))
 				} else {
 					vm.stack << false

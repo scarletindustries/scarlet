@@ -798,6 +798,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 		mut binding_names := []string{}
 		mut literal_pattern := ?typed_ast.Expression(none)
 		mut enum_name := ?string(none)
+		mut enum_type_id := ?int(none)
 		mut variant_name := ?string(none)
 
 		if arm.pattern is typed_ast.PropertyAccessExpression {
@@ -807,6 +808,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						enum_name = left_id.name
+						enum_type_id = enum_type.id
 						if prop.right is typed_ast.FunctionCallExpression {
 							call := prop.right as typed_ast.FunctionCallExpression
 							variant_name = call.identifier.name
@@ -831,8 +833,9 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 
 		if arm.pattern is typed_ast.FunctionCallExpression {
 			call := arm.pattern as typed_ast.FunctionCallExpression
-			if inferred_enum := c.find_enum_for_variant(call.identifier.name) {
-				enum_name = inferred_enum
+			if enum_type := c.type_env.lookup_enum_by_variant(call.identifier.name) {
+				enum_name = enum_type.name
+				enum_type_id = enum_type.id
 				variant_name = call.identifier.name
 				for arg in call.arguments {
 					if arg is typed_ast.Identifier {
@@ -848,14 +851,18 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 
 		if arm.pattern is typed_ast.Identifier {
 			ident := arm.pattern as typed_ast.Identifier
-			if inferred_enum := c.find_enum_for_variant(ident.name) {
-				enum_name = inferred_enum
+			if enum_type := c.type_env.lookup_enum_by_variant(ident.name) {
+				enum_name = enum_type.name
+				enum_type_id = enum_type.id
 				variant_name = ident.name
 			}
 		}
 
 		if ename := enum_name {
 			if vname := variant_name {
+				if type_id := enum_type_id {
+					c.emit_arg(.push_const, c.add_constant(type_id))
+				}
 				enum_idx := c.add_constant(ename)
 				c.emit_arg(.push_const, enum_idx)
 				variant_idx := c.add_constant(vname)
