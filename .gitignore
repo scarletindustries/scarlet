@@ -14,3 +14,4 @@ bin/
 *.db
 node_modules
 dist
+extension/out
