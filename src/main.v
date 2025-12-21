@@ -2,6 +2,7 @@ module main
 
 import os
 import cli
+import readline
 import net.http
 import downloader
 import ast
@@ -104,6 +105,176 @@ fn format_file(path string, debug bool) !FormatFileResult {
 	}
 }
 
+fn is_input_complete(input string) bool {
+	mut parens := 0
+	mut brackets := 0
+	mut braces := 0
+	mut in_string := false
+	mut prev_char := u8(0)
+
+	for c in input.bytes() {
+		if c == `'` && prev_char != `\\` {
+			in_string = !in_string
+		}
+		if !in_string {
+			match c {
+				`(` { parens += 1 }
+				`)` { parens -= 1 }
+				`[` { brackets += 1 }
+				`]` { brackets -= 1 }
+				`{` { braces += 1 }
+				`}` { braces -= 1 }
+				else {}
+			}
+		}
+		prev_char = c
+	}
+
+	return parens <= 0 && brackets <= 0 && braces <= 0
+}
+
+fn run_repl() {
+	println('al ${version} REPL')
+	println("Type expressions to evaluate. Use 'exit' or Ctrl+D to quit.")
+	println('')
+
+	mut input_buffer := ''
+	mut continuation := false
+	mut history := []string{}
+	mut rl := readline.Readline{}
+
+	for {
+		prompt := if continuation { '... ' } else { '>>> ' }
+
+		line := rl.read_line(prompt) or {
+			// ctrl+d is EOF
+			println('')
+			break
+		}
+
+		line_trimmed := line.trim_right('\r\n')
+
+		if !continuation && (line_trimmed == 'exit') {
+			break
+		}
+
+		if line_trimmed.len == 0 {
+			if continuation {
+				if !is_input_complete(input_buffer) {
+					input_buffer += '\n'
+					continue
+				}
+				if input_buffer.trim_space().len > 0 {
+					if eval_repl_input(input_buffer, history) {
+						history << input_buffer
+					}
+				}
+				input_buffer = ''
+				continuation = false
+			}
+			continue
+		}
+
+		if continuation {
+			input_buffer += '\n' + line_trimmed
+		} else {
+			input_buffer = line_trimmed
+		}
+
+		if is_input_complete(input_buffer) {
+			if input_buffer.trim_space().len > 0 {
+				if eval_repl_input(input_buffer, history) {
+					history << input_buffer
+				}
+			}
+			input_buffer = ''
+			continuation = false
+		} else {
+			continuation = true
+		}
+	}
+}
+
+fn eval_repl_input(input string, history []string) bool {
+	mut full_input := ''
+	if history.len > 0 {
+		full_input = history.join('\n') + '\n' + input
+	} else {
+		full_input = input
+	}
+
+	mut s := scanner.new_scanner(full_input)
+	mut p := parser.new_parser(mut s)
+	parse_result := p.parse_program()
+
+	if parse_result.diagnostics.len > 0 {
+		current_start_line := history.len + 1
+		mut current_diagnostics := []diagnostic.Diagnostic{}
+		for d in parse_result.diagnostics {
+			if d.span.start_line >= current_start_line {
+				current_diagnostics << diagnostic.Diagnostic{
+					span:     diagnostic.Span{
+						start_line:   d.span.start_line - history.len
+						start_column: d.span.start_column
+						end_line:     d.span.end_line - history.len
+						end_column:   d.span.end_column
+					}
+					severity: d.severity
+					message:  d.message
+				}
+			}
+		}
+		if current_diagnostics.len > 0 {
+			diagnostic.print_diagnostics(current_diagnostics, input, '<repl>')
+		}
+		if diagnostic.has_errors(parse_result.diagnostics) {
+			return false
+		}
+	}
+
+	check_result := types.check(parse_result.ast)
+
+	if check_result.diagnostics.len > 0 {
+		current_start_line := history.len + 1
+		mut current_diagnostics := []diagnostic.Diagnostic{}
+		for d in check_result.diagnostics {
+			if d.span.start_line >= current_start_line {
+				current_diagnostics << diagnostic.Diagnostic{
+					span:     diagnostic.Span{
+						start_line:   d.span.start_line - history.len
+						start_column: d.span.start_column
+						end_line:     d.span.end_line - history.len
+						end_column:   d.span.end_column
+					}
+					severity: d.severity
+					message:  d.message
+				}
+			}
+		}
+		if current_diagnostics.len > 0 {
+			diagnostic.print_diagnostics(current_diagnostics, input, '<repl>')
+		}
+		if !check_result.success {
+			return false
+		}
+	}
+
+	program := bytecode.compile(check_result.typed_ast, check_result.env) or {
+		eprintln('Compile error: ${err}')
+		return false
+	}
+
+	mut v := vm.new_vm(program)
+	run_result := v.run() or {
+		eprintln('Runtime error: ${err}')
+		return false
+	}
+
+	println(vm.inspect(run_result))
+
+	return true
+}
+
 fn main() {
 	mut app := cli.Command{
 		name:        'al'
@@ -117,6 +288,7 @@ fn main() {
 
    Usage:
      al run <file.al>      Run a program
+     al repl               Start interactive REPL
      al --help             Show all commands
 
    Example:
@@ -127,6 +299,13 @@ fn main() {
 ')
 		}
 		commands:    [
+			cli.Command{
+				name:        'repl'
+				description: 'Start an interactive REPL session'
+				execute:     fn (cmd cli.Command) ! {
+					run_repl()
+				}
+			},
 			cli.Command{
 				name:          'check'
 				required_args: 1
