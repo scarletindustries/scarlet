@@ -456,6 +456,11 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				expr = p.parse_dot_expression(expr)!
 			}
 			.punc_open_bracket {
+				// only treat as array index if there's no whitespace before the bracket
+				// this allows `arr[0]` but not `arr [0]` or `x = 1\n[1, 2]`
+				if p.current_token.leading_trivia.len > 0 {
+					break
+				}
 				span := p.current_span()
 				p.eat(.punc_open_bracket)!
 				index := p.parse_expression()!
