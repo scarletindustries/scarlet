@@ -22,22 +22,19 @@ mut:
 fn (mut d ProgressDownloader) on_start(mut request http.Request, path string) ! {
 	d.path = path
 	d.f = os.create(path)!
+	print('[${' '.repeat(30)}] 0% connecting...')
+	os.flush()
 }
 
 fn (mut d ProgressDownloader) on_chunk(request &http.Request, chunk []u8, received u64, expected u64) ! {
 	d.f.write(chunk)!
 
-	bar_width := u64(30)
-	if expected > 0 {
-		pct := received * 100 / expected
-		filled := int(received * bar_width / expected)
-		bar := '█'.repeat(filled) + '░'.repeat(int(bar_width) - filled)
-		print('\r\x1b[K[${bar}] ${pct}% ${format_bytes(received)}/${format_bytes(expected)}')
-		os.flush()
-	} else {
-		print('\r\x1b[K${format_bytes(received)} downloaded')
-		os.flush()
-	}
+	bar_width := 30
+	pct := if expected > 0 { received * 100 / expected } else { u64(0) }
+	filled := if expected > 0 { int(received * u64(bar_width) / expected) } else { 0 }
+	bar := '█'.repeat(filled) + '░'.repeat(bar_width - filled)
+	print('\r\x1b[K[${bar}] ${pct}% ${format_bytes(received)}/${format_bytes(expected)}')
+	os.flush()
 }
 
 fn (mut d ProgressDownloader) on_finish(request &http.Request, response &http.Response) ! {
