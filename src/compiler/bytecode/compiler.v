@@ -639,8 +639,12 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 	old_captures := c.captures.clone()
 	old_capture_names := c.capture_names.clone()
 
+	mut scope_locals := old_locals.clone()
+	if id := func.identifier {
+		scope_locals[id.name] = c.local_count
+	}
 	c.outer_scopes << Scope{
-		locals: old_locals.clone()
+		locals: scope_locals
 	}
 
 	jump_over := c.current_addr()
@@ -657,10 +661,16 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 
 	func_start := c.current_addr()
 
+	old_binding := c.current_binding
+	if id := func.identifier {
+		c.current_binding = id.name
+	}
+
 	old_tail := c.in_tail_position
 	c.in_tail_position = true
 	c.compile_expr(func.body)!
 	c.in_tail_position = old_tail
+	c.current_binding = old_binding
 	c.emit(.ret)
 
 	c.program.code[jump_over] = op_arg(.jump, c.current_addr())
