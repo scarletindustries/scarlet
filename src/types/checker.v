@@ -1279,7 +1279,7 @@ fn (mut c TypeChecker) check_array_index(expr ast.ArrayIndexExpression) (typed_a
 		expression: typed_arr
 		index:      typed_idx
 		span:       convert_span(expr.span)
-	}, element_type
+	}, t_option(element_type)
 }
 
 fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Expression, Type) {

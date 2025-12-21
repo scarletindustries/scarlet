@@ -101,7 +101,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 			}
 			.swap {
 				if vm.stack.len < 2 {
-					return error('Stack underflow on swap')
+					return error('Stack underflow on swap. This is likely a compiler bug.')
 				}
 				top := vm.stack.len - 1
 				vm.stack[top], vm.stack[top - 1] = vm.stack[top - 1], vm.stack[top]
@@ -315,13 +315,16 @@ fn (mut vm VM) execute() !bytecode.Value {
 						if idx_val >= 0 && idx_val < arr_val.len {
 							vm.stack << arr_val[idx_val]
 						} else {
-							return error('Index out of bounds: ${idx_val} (array length is ${arr_val.len})')
+							// Out of bounds returns none (array indexing is optional)
+							vm.stack << bytecode.Value(bytecode.NoneValue{})
 						}
 					} else {
-						return error("Array index must be an integer, got '${value_type_name(idx_val)}'")
+						// Invalid index type returns none (type checker should catch this)
+						vm.stack << bytecode.Value(bytecode.NoneValue{})
 					}
 				} else {
-					return error("Cannot index type '${value_type_name(arr_val)}' - only arrays can be indexed")
+					// Non-array returns none (type checker should catch this)
+					vm.stack << bytecode.Value(bytecode.NoneValue{})
 				}
 			}
 			.array_len {
@@ -769,7 +772,7 @@ fn (vm VM) binary_op(a bytecode.Value, b bytecode.Value, op bytecode.Op) !byteco
 			.mul { a * b }
 			.div { a / b }
 			.mod { a % b }
-			else { error('Unknown binary op') }
+			else { return error('Unknown binary op. This is likely a compiler bug.') }
 		}
 	}
 
@@ -779,7 +782,7 @@ fn (vm VM) binary_op(a bytecode.Value, b bytecode.Value, op bytecode.Op) !byteco
 			.sub { a - b }
 			.mul { a * b }
 			.div { a / b }
-			else { error('Unknown binary op for floats') }
+			else { return error('Unknown binary op. This is likely a compiler bug.') }
 		}
 	}
 
@@ -790,7 +793,7 @@ fn (vm VM) binary_op(a bytecode.Value, b bytecode.Value, op bytecode.Op) !byteco
 			.sub { af - b }
 			.mul { af * b }
 			.div { af / b }
-			else { error('Unknown binary op') }
+			else { return error('Unknown binary op. This is likely a compiler bug.') }
 		}
 	}
 
@@ -801,7 +804,7 @@ fn (vm VM) binary_op(a bytecode.Value, b bytecode.Value, op bytecode.Op) !byteco
 			.sub { a - bf }
 			.mul { a * bf }
 			.div { a / bf }
-			else { error('Unknown binary op') }
+			else { return error('Unknown binary op. This is likely a compiler bug.') }
 		}
 	}
 
@@ -809,7 +812,7 @@ fn (vm VM) binary_op(a bytecode.Value, b bytecode.Value, op bytecode.Op) !byteco
 		return a + b
 	}
 
-	return error('Cannot perform arithmetic on these types')
+	return error('Cannot perform arithmetic on these types. This is likely a compiler bug.')
 }
 
 fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
@@ -868,7 +871,7 @@ fn (vm VM) compare(a bytecode.Value, b bytecode.Value, op bytecode.Op) !bool {
 			.gt { a > b }
 			.lte { a <= b }
 			.gte { a >= b }
-			else { false }
+			else { return error('Unknown compare op. This is likely a compiler bug.') }
 		}
 	}
 	if a is f64 && b is f64 {
@@ -877,10 +880,11 @@ fn (vm VM) compare(a bytecode.Value, b bytecode.Value, op bytecode.Op) !bool {
 			.gt { a > b }
 			.lte { a <= b }
 			.gte { a >= b }
-			else { false }
+			else { return error('Unknown compare op. This is likely a compiler bug.') }
 		}
 	}
-	return error('Cannot compare these types')
+
+	return error('Cannot compare these types. This is likely a compiler bug.')
 }
 
 fn (vm VM) is_truthy(v bytecode.Value) bool {
