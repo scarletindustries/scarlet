@@ -296,18 +296,12 @@ pub fn get_span(expr Expression) Span {
 		NumberLiteral, StringLiteral, BooleanLiteral, NoneExpression, ErrorNode, Identifier,
 		VariableBinding, ConstBinding, BinaryExpression, FunctionCallExpression, ArrayExpression,
 		ArrayIndexExpression, IfExpression, WildcardPattern, InterpolatedString, BlockExpression,
-		ImportDeclaration, AssertExpression, MatchExpression {
+		ImportDeclaration, AssertExpression, MatchExpression, StructExpression, EnumExpression,
+		FunctionExpression {
 			expr.span
 		}
-		TypeIdentifier, StructInitExpression, StructExpression, EnumExpression {
+		TypeIdentifier, StructInitExpression {
 			expr.identifier.span
-		}
-		FunctionExpression {
-			if id := expr.identifier {
-				id.span
-			} else {
-				get_span(expr.body)
-			}
 		}
 		OrExpression, ErrorExpression, PropagateNoneExpression, UnaryExpression, ExportExpression {
 			get_span(expr.expression)
