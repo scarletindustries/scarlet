@@ -4,6 +4,7 @@ import os
 import cli
 import net.http
 import downloader
+import compiler.ast
 import compiler.scanner
 import compiler.parser
 import compiler.printer
@@ -15,7 +16,7 @@ import compiler.types
 const version = $embed_file('../VERSION').to_string().trim_space()
 
 struct ParsedSource {
-	ast         parser.Expr
+	ast         ast.BlockExpression
 	diagnostics []diagnostic.Diagnostic
 }
 
@@ -37,8 +38,8 @@ fn parse_source(file string, entrypoint string) !ParsedSource {
 	}
 }
 
-fn check_source(ast parser.Expr, file string, entrypoint string) !types.CheckResult {
-	result := types.check(ast)
+fn check_source(program ast.BlockExpression, file string, entrypoint string) !types.CheckResult {
+	result := types.check(program)
 
 	if result.diagnostics.len > 0 {
 		diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
