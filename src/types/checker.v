@@ -534,6 +534,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			typed_inner, typ := c.check_expr(expr.expression)
 			return typed_ast.ExportExpression{
 				expression: typed_inner
+				span:       convert_span(expr.span)
 			}, typ
 		}
 		ast.WildcardPattern {

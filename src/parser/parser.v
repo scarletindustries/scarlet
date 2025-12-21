@@ -1196,12 +1196,14 @@ fn (mut p Parser) parse_const_binding() !ast.Expression {
 }
 
 fn (mut p Parser) parse_export_expression() !ast.Expression {
+	span := p.current_span()
 	p.eat(.kw_export)!
 
 	expr := p.parse_expression()!
 
 	return ast.ExportExpression{
 		expression: expr
+		span:       span
 	}
 }
 

@@ -36,6 +36,7 @@ fn parse(tokens []Token) Node {
 fn generate(node Node) string {
 	// Implement code generation logic here
 }
+
 export fn compile(input string) string {
 	tokens = lex(input)
 	ast = parse(tokens)
