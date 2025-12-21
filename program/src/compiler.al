@@ -1,49 +1,60 @@
 const source = 'println(\'hello\')'
 
 struct Token {
-	type string,
-	value string,
+  type string,
+  value string,
 }
 
-/* error: Expected field name, got 'fn' */
+struct AL_Array {
+    data []any = []
 
-fn copy() AL_Array {
-	copy = AL_Array{
-		data: [].concat(this.data),
-	}
+    fn push(value any) {
+        this.data.push(value)
+    }
 
-	return
-	copy
+    fn copy() AL_Array {
+        copy = AL_Array{
+            data: [].concat(this.data),
+        }
+
+        return copy
+    }
 }
-/* error: Unexpected '}' */
 
 fn isLetter(c string) boolean {
-	isLetterLower = c >= 'a' && c <= 'z'
-	isLetterUpper = c >= 'A' && c <= 'Z'
+  isLetterLower = (c >= 'a') && (c <= 'z')
+  isLetterUpper = (c >= 'A') && (c <= 'Z')
 
-	return
-	isLetterLower || isLetterUpper
+  return isLetterLower || isLetterUpper
 }
 
 fn isDigit(c string) boolean {
-	return(c >= '0') && c <= '9'
+  return (c >= '0') && (c <= '9')
 }
 
-fn lex(input string) []Token {}
+fn lex(input string) []Token {
+  // Implement lexer logic here
+}
 
 struct Node {
+  // Define AST nodes structure here
 }
 
-fn parse(tokens []Token) Node {}
+fn parse(tokens []Token) Node {
+  // Implement parser logic here
+}
 
-fn generate(node Node) string {}
+fn generate(node Node) string {
+  // Implement code generation logic here
+}
+
 export fn compile(input string) string {
-	tokens = lex(input)
-	ast = parse(tokens)
-	return
-	generate(ast)
+  tokens = lex(input)
+  ast = parse(tokens)
+  return generate(ast)
 }
 
 fn main() {
-	result = compile(source)
+  result = compile(source)
+  // Handle the result, such as saving to a file or executing
 }
