@@ -14,6 +14,42 @@ import compiler.types
 
 const version = $embed_file('../VERSION').to_string().trim_space()
 
+struct ParsedSource {
+	ast         parser.Expr
+	diagnostics []diagnostic.Diagnostic
+}
+
+fn parse_source(file string, entrypoint string) !ParsedSource {
+	mut s := scanner.new_scanner(file)
+	mut p := parser.new_parser(mut s)
+	result := p.parse_program()
+
+	if result.diagnostics.len > 0 {
+		diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+		if diagnostic.has_errors(result.diagnostics) {
+			exit(1)
+		}
+	}
+
+	return ParsedSource{
+		ast:         result.ast
+		diagnostics: result.diagnostics
+	}
+}
+
+fn check_source(ast parser.Expr, file string, entrypoint string) !types.CheckResult {
+	result := types.check(ast)
+
+	if result.diagnostics.len > 0 {
+		diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+		if !result.success {
+			exit(1)
+		}
+	}
+
+	return result
+}
+
 fn main() {
 	mut app := cli.Command{
 		name:        'al'
@@ -45,26 +81,8 @@ fn main() {
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					file := os.read_file(entrypoint)!
-
-					mut s := scanner.new_scanner(file)
-					mut p := parser.new_parser(mut s)
-
-					mut result := p.parse_program()
-
-					if result.diagnostics.len > 0 {
-						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
-						if diagnostic.has_errors(result.diagnostics) {
-							exit(1)
-						}
-					}
-
-					check_result := types.check(result.ast)
-					if check_result.diagnostics.len > 0 {
-						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
-						if !check_result.success {
-							exit(1)
-						}
-					}
+					parsed := parse_source(file, entrypoint)!
+					check_source(parsed.ast, file, entrypoint)!
 				}
 			},
 			cli.Command{
@@ -75,20 +93,8 @@ fn main() {
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					file := os.read_file(entrypoint)!
-
-					mut s := scanner.new_scanner(file)
-					mut p := parser.new_parser(mut s)
-
-					mut result := p.parse_program()
-
-					if result.diagnostics.len > 0 {
-						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
-						if diagnostic.has_errors(result.diagnostics) {
-							exit(1)
-						}
-					}
-
-					println(printer.print_expr(result.ast))
+					parsed := parse_source(file, entrypoint)!
+					println(printer.print_expr(parsed.ast))
 				}
 			},
 			cli.Command{
@@ -179,36 +185,18 @@ fn main() {
 					io_enabled := cmd.flags.get_bool('experimental-shitty-io')!
 
 					file := os.read_file(entrypoint)!
-
-					mut s := scanner.new_scanner(file)
-					mut p := parser.new_parser(mut s)
-
-					mut result := p.parse_program()
-
-					if result.diagnostics.len > 0 {
-						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
-						if diagnostic.has_errors(result.diagnostics) {
-							exit(1)
-						}
-					}
-
-					check_result := types.check(result.ast)
-					if check_result.diagnostics.len > 0 {
-						diagnostic.print_diagnostics(check_result.diagnostics, file, entrypoint)
-						if !check_result.success {
-							exit(1)
-						}
-					}
+					parsed := parse_source(file, entrypoint)!
+					checked := check_source(parsed.ast, file, entrypoint)!
 
 					if debug_printer {
 						println('')
 						println('================DEBUG: Printed parsed source code================')
-						println(printer.print_expr(result.ast))
+						println(printer.print_expr(parsed.ast))
 						println('=================================================================')
 						println('')
 					}
 
-					program := bytecode.compile(check_result.typed_ast, check_result.env,
+					program := bytecode.compile(checked.typed_ast, checked.env,
 						expose_debug_builtins: expose_debug_builtins
 					)!
 
