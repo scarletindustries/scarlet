@@ -28,17 +28,14 @@ fn severity_label(severity Severity) string {
 	}
 }
 
-fn get_source_line(source string, line_number int) string {
-	// TODO(@alii): we don't need to split every time
-	// format_diagnostic is called
-	lines := source.split_into_lines()
+fn get_source_line(lines []string, line_number int) string {
 	if line_number < 1 || line_number > lines.len {
 		return ''
 	}
 	return lines[line_number - 1]
 }
 
-pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
+fn format_diagnostic_with_lines(d Diagnostic, lines []string, file_path string) string {
 	mut result := ''
 
 	color := severity_color(d.severity)
@@ -54,7 +51,7 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 	line_num_width := '${d.span.start_line}'.len
 	padding := ' '.repeat(line_num_width)
 
-	source_line := get_source_line(source, d.span.start_line)
+	source_line := get_source_line(lines, d.span.start_line)
 	result += '${color_blue}${d.span.start_line}  |${color_reset} ${source_line}\n'
 
 	mut caret_padding := ''
@@ -72,8 +69,11 @@ pub fn format_diagnostic(d Diagnostic, source string, file_path string) string {
 }
 
 pub fn print_diagnostics(diagnostics []Diagnostic, source string, file_path string) {
+	lines := source.split_into_lines()
+
+	mut output := []string{}
 	for d in diagnostics {
-		println(format_diagnostic(d, source, file_path))
+		output << format_diagnostic_with_lines(d, lines, file_path)
 	}
 
 	error_count := count_errors(diagnostics)
@@ -92,6 +92,10 @@ pub fn print_diagnostics(diagnostics []Diagnostic, source string, file_path stri
 			parts << '${color_bold}${color_yellow}${warning_count} ${noun}${color_reset}'
 		}
 
-		println('Found ${parts.join(' and ')}')
+		output << 'Found ${parts.join(' and ')}'
+	}
+
+	if output.len > 0 {
+		println(output.join('\n'))
 	}
 }
