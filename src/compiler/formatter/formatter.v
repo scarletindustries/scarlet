@@ -323,7 +323,7 @@ fn escape_string(s string) string {
 			`\r` { result.write_string('\\r') }
 			`\t` { result.write_string('\\t') }
 			`\\` { result.write_string('\\\\') }
-			`\'` { result.write_string("\\'") }
+			`'` { result.write_string("\\'") }
 			0 { result.write_string('\\0') }
 			else { result.write_u8(c) }
 		}
