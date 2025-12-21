@@ -1,5 +1,3 @@
-// Classic FizzBuzz
-
 fn fizzbuzz(n Int) String {
 	match true {
 		n % 15 == 0 -> 'FizzBuzz',

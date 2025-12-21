@@ -21,6 +21,7 @@ pub fn format(input string) FormatResult {
 pub fn format_with_debug(input string, debug bool) FormatResult {
 	mut s := scanner.new_scanner(input)
 	scanned_tokens := s.scan_all()
+	scanner_diagnostics := s.get_diagnostics()
 
 	if debug {
 		for tok in scanned_tokens {
@@ -32,10 +33,16 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 	}
 
 	mut trivia_map := map[string][]token.Trivia{}
+	mut eof_trivia := []token.Trivia{}
+
 	for tok in scanned_tokens {
 		if tok.leading_trivia.len > 0 {
 			key := '${tok.line}:${tok.column}'
 			trivia_map[key] = tok.leading_trivia
+		}
+
+		if tok.kind == .eof {
+			eof_trivia = tok.leading_trivia.clone()
 		}
 	}
 
@@ -46,11 +53,11 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 		indent:     0
 	}
 
-	mut scanner2 := scanner.new_scanner(input)
-	mut p := parser.new_parser(mut scanner2)
+	mut p := parser.new_parser_from_tokens(scanned_tokens, scanner_diagnostics)
 	result := p.parse_program()
 
 	errors := result.diagnostics.filter(it.severity == .error)
+
 	if errors.len > 0 {
 		return FormatResult{
 			output:      input
@@ -60,6 +67,7 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 	}
 
 	f.format_block(result.ast, true)
+	f.emit_trivia(eof_trivia)
 
 	mut final := f.output.str()
 
@@ -97,36 +105,40 @@ fn (mut f Formatter) emit_indent() {
 fn (mut f Formatter) emit_trivia_for_span(span ast.Span) {
 	key := '${span.line}:${span.column}'
 	if trivia := f.trivia_map[key] {
-		mut consecutive_newlines := 0
+		f.emit_trivia(trivia)
+	}
+}
 
-		for t in trivia {
-			match t.kind {
-				.newline {
-					consecutive_newlines++
-				}
-				.line_comment {
-					if consecutive_newlines > 1 {
-						for _ in 0 .. consecutive_newlines - 1 {
-							f.emit('\n')
-						}
-					}
+fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
+	mut consecutive_newlines := 0
 
-					if !f.at_line_start {
+	for t in trivia {
+		match t.kind {
+			.newline {
+				consecutive_newlines++
+			}
+			.line_comment {
+				if consecutive_newlines > 1 {
+					for _ in 0 .. consecutive_newlines - 1 {
 						f.emit('\n')
 					}
-					f.emit_indent()
-					f.emit(t.text)
-					f.emit('\n')
-					consecutive_newlines = 0
 				}
-				.whitespace {}
-			}
-		}
 
-		if consecutive_newlines > 1 {
-			for _ in 0 .. consecutive_newlines - 1 {
+				if !f.at_line_start {
+					f.emit('\n')
+				}
+				f.emit_indent()
+				f.emit(t.text)
 				f.emit('\n')
+				consecutive_newlines = 0
 			}
+			.whitespace {}
+		}
+	}
+
+	if consecutive_newlines > 1 {
+		for _ in 0 .. consecutive_newlines - 1 {
+			f.emit('\n')
 		}
 	}
 }

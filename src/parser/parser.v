@@ -32,13 +32,15 @@ mut:
 }
 
 pub fn new_parser(mut s scanner.Scanner) Parser {
-	scanned_tokens := s.scan_all()
+	return new_parser_from_tokens(s.scan_all(), s.get_diagnostics())
+}
 
+pub fn new_parser_from_tokens(tokens []token.Token, scanner_diagnostics []diagnostic.Diagnostic) Parser {
 	return Parser{
-		tokens:        scanned_tokens
+		tokens:        tokens
 		index:         0
-		current_token: scanned_tokens[0]
-		diagnostics:   s.get_diagnostics()
+		current_token: tokens[0]
+		diagnostics:   scanner_diagnostics
 		context_stack: [ParseContext.top_level]
 	}
 }
