@@ -238,6 +238,7 @@ pub struct AssertExpression {
 pub:
 	expression Expression
 	message    Expression
+	span       Span @[required]
 }
 
 pub struct ImportSpecifier {

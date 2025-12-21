@@ -1555,6 +1555,7 @@ fn (mut c TypeChecker) check_assert(expr ast.AssertExpression) (typed_ast.Expres
 	return typed_ast.AssertExpression{
 		expression: typed_cond
 		message:    typed_msg
+		span:       convert_span(expr.span)
 	}, t_none()
 }
 

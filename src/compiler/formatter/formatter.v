@@ -593,6 +593,9 @@ fn get_span(expr ast.Expression) ast.Span {
 		ast.MatchExpression {
 			expr.span
 		}
+		ast.AssertExpression {
+			expr.span
+		}
 		ast.ExportExpression {
 			get_span(expr.expression)
 		}

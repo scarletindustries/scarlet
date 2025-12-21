@@ -1233,6 +1233,7 @@ fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) 
 }
 
 fn (mut p Parser) parse_assert_expression() !ast.Expression {
+	assert_span := p.current_span()
 	p.eat(.kw_assert)!
 
 	expr := p.parse_expression()!
@@ -1244,6 +1245,7 @@ fn (mut p Parser) parse_assert_expression() !ast.Expression {
 	return ast.AssertExpression{
 		expression: expr
 		message:    message
+		span:       assert_span
 	}
 }
 
