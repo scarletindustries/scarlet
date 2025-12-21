@@ -4,15 +4,15 @@ import os
 import cli
 import net.http
 import downloader
-import compiler.ast
-import compiler.scanner
-import compiler.parser
-import compiler.printer
-import compiler.formatter
-import compiler.bytecode
-import compiler.vm
-import compiler.diagnostic
-import compiler.types
+import ast
+import scanner
+import parser
+import printer
+import formatter
+import bytecode
+import vm
+import diagnostic
+import types
 
 const version = $embed_file('../VERSION').to_string().trim_space()
 

@@ -1,6 +1,6 @@
 module vm
 
-import compiler.bytecode
+import bytecode
 import net
 import os
 

@@ -1,6 +1,6 @@
 module printer
 
-import compiler.ast
+import ast
 import strings
 
 pub fn print_expr(expr ast.Expression) string {

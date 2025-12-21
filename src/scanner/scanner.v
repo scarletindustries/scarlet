@@ -1,9 +1,9 @@
 module scanner
 
-import compiler
-import compiler.token
-import compiler.scanner.state
-import compiler.diagnostic
+import tokens
+import token
+import scanner.state
+import diagnostic
 
 @[heap]
 pub struct Scanner {
@@ -82,7 +82,7 @@ fn (mut s Scanner) collect_trivia() {
 	}
 }
 
-pub fn (mut s Scanner) scan_next() compiler.Token {
+pub fn (mut s Scanner) scan_next() tokens.Token {
 	// First, collect any leading trivia (whitespace, newlines, comments)
 	s.collect_trivia()
 
@@ -358,27 +358,27 @@ pub fn (mut s Scanner) scan_next() compiler.Token {
 	}
 }
 
-pub fn (mut s Scanner) scan_all() []compiler.Token {
-	mut tokens := []compiler.Token{}
+pub fn (mut s Scanner) scan_all() []tokens.Token {
+	mut result := []tokens.Token{}
 
 	for {
 		t := s.scan_next()
-		tokens << t
+		result << t
 
 		if t.kind == .eof {
 			break
 		}
 	}
 
-	return tokens
+	return result
 }
 
-fn (mut s Scanner) new_token(kind token.Kind, literal ?string) compiler.Token {
+fn (mut s Scanner) new_token(kind token.Kind, literal ?string) tokens.Token {
 	return s.new_token_with_trivia(kind, literal, s.take_trivia())
 }
 
-fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivia []token.Trivia) compiler.Token {
-	return compiler.Token{
+fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivia []token.Trivia) tokens.Token {
+	return tokens.Token{
 		kind:           kind
 		literal:        literal
 		line:           s.state.get_line()
@@ -394,7 +394,7 @@ fn (mut s Scanner) take_trivia() []token.Trivia {
 }
 
 // scan_identifier scans until the next non-alphanumeric character
-fn (mut s Scanner) scan_identifier(from u8) compiler.Token {
+fn (mut s Scanner) scan_identifier(from u8) tokens.Token {
 	mut result := from.ascii_str()
 
 	for {
@@ -414,7 +414,7 @@ fn (mut s Scanner) scan_identifier(from u8) compiler.Token {
 // Not a big fan of how this is implemented right now, it's
 // too greedy and requires backtracking to figure out
 // if the dots represent other tokens, or just a dotdot
-fn (mut s Scanner) scan_number(from u8) compiler.Token {
+fn (mut s Scanner) scan_number(from u8) tokens.Token {
 	mut result := from.ascii_str()
 
 	mut has_dot := false

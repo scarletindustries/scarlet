@@ -1,9 +1,9 @@
 module types
 
-import compiler.ast
-import compiler.typed_ast
-import compiler.diagnostic
-import compiler.type_def {
+import ast
+import typed_ast
+import diagnostic
+import type_def {
 	Type,
 	TypeArray,
 	TypeEnum,

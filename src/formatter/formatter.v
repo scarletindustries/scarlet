@@ -1,11 +1,11 @@
 module formatter
 
-import compiler
-import compiler.ast
-import compiler.token
-import compiler.scanner
-import compiler.parser
-import compiler.diagnostic
+import tokens
+import ast
+import token
+import scanner
+import parser
+import diagnostic
 import strings
 
 pub struct FormatResult {
@@ -21,10 +21,10 @@ pub fn format(input string) FormatResult {
 
 pub fn format_with_debug(input string, debug bool) FormatResult {
 	mut s := scanner.new_scanner(input)
-	tokens := s.scan_all()
+	scanned_tokens := s.scan_all()
 
 	if debug {
-		for tok in tokens {
+		for tok in scanned_tokens {
 			eprintln('Token: ${tok.kind} "${tok.literal or { '' }}" trivia: ${tok.leading_trivia.len}')
 			for t in tok.leading_trivia {
 				eprintln('  Trivia: ${t.kind} "${t.text.replace('\n', '\\n')}"')
@@ -33,7 +33,7 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 	}
 
 	mut trivia_map := map[string][]token.Trivia{}
-	for tok in tokens {
+	for tok in scanned_tokens {
 		if tok.leading_trivia.len > 0 {
 			key := '${tok.line}:${tok.column}'
 			trivia_map[key] = tok.leading_trivia
@@ -41,7 +41,7 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 	}
 
 	mut f := Formatter{
-		tokens:     tokens
+		tokens:     scanned_tokens
 		trivia_map: trivia_map
 		output:     strings.new_builder(input.len)
 		indent:     0
@@ -73,7 +73,7 @@ pub fn format_with_debug(input string, debug bool) FormatResult {
 }
 
 struct Formatter {
-	tokens     []compiler.Token
+	tokens     []tokens.Token
 	trivia_map map[string][]token.Trivia
 mut:
 	output        strings.Builder
