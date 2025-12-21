@@ -247,7 +247,11 @@ fn print_expression(expr ast.Expression, level int) string {
 			'export ${print_expression(expr.expression, level)}'
 		}
 		ast.SpreadExpression {
-			'..${print_expression(expr.expression, level)}'
+			if inner := expr.expression {
+				'..${print_expression(inner, level)}'
+			} else {
+				'..'
+			}
 		}
 		ast.AssertExpression {
 			'assert ${print_expression(expr.expression, level)}, ${print_expression(expr.message,

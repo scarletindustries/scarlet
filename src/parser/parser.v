@@ -697,13 +697,13 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 			spread_span := p.current_span()
 			p.eat(.punc_dotdot)!
 
-			// anonymous spread (.. followed by ] or ,)
-			// this is in the case like `match arr { [first, ..] -> { ... } }`
-			if p.current_token.kind == .punc_close_bracket || p.current_token.kind == .punc_comma {
+			// anonymous spread (.. followed by ] or , or else)
+			if p.current_token.kind in [.punc_close_bracket, .punc_comma, .kw_else] {
+				if p.current_token.kind == .kw_else {
+					p.advance() // skip the erroneous 'else' token
+				}
 				elements << ast.SpreadExpression{
-					expression: ast.WildcardPattern{
-						span: spread_span
-					}
+					expression: none
 					span:       spread_span
 				}
 			} else {

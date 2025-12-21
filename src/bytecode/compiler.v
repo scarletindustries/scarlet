@@ -402,7 +402,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 
 					if elem is typed_ast.SpreadExpression {
 						// Spread: compile inner array and concat
-						c.compile_expr(elem.expression)!
+						inner := elem.expression or {
+							return error('Spread in array literal missing expression')
+						}
+
+						c.compile_expr(inner)!
 						if have_result {
 							c.emit(.array_concat)
 						} else {
@@ -935,17 +939,19 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			if has_spread {
 				spread_elem := arr.elements.last()
 				if spread_elem is typed_ast.SpreadExpression {
-					if spread_elem.expression is typed_ast.Identifier {
-						binding := spread_elem.expression as typed_ast.Identifier
-						// Slice from pre_count to end
-						c.emit(.dup)
-						c.emit(.array_len)
-						c.emit_arg(.push_const, c.add_constant(pre_count))
-						c.emit(.swap)
-						c.emit(.array_slice)
-						local_idx := c.get_or_create_local(binding.name)
-						c.emit_arg(.store_local, local_idx)
+					if inner := spread_elem.expression {
+						if inner is typed_ast.Identifier {
+							// Slice from pre_count to end
+							c.emit(.dup)
+							c.emit(.array_len)
+							c.emit_arg(.push_const, c.add_constant(pre_count))
+							c.emit(.swap)
+							c.emit(.array_slice)
+							local_idx := c.get_or_create_local(inner.name)
+							c.emit_arg(.store_local, local_idx)
+						}
 					}
+					// else: anonymous spread, nothing to bind
 				}
 			}
 

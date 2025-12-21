@@ -329,7 +329,9 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 		}
 		ast.SpreadExpression {
 			f.emit('..')
-			f.format_expr(expr.expression)
+			if inner := expr.expression {
+				f.format_expr(inner)
+			}
 		}
 		ast.StructExpression {
 			f.emit('struct ')

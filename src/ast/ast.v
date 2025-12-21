@@ -269,7 +269,7 @@ pub:
 
 pub struct SpreadExpression {
 pub:
-	expression Expression
+	expression ?Expression
 	span       Span @[required]
 }
 
