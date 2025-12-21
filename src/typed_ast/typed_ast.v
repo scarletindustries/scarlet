@@ -260,6 +260,7 @@ pub:
 pub struct ExportExpression {
 pub:
 	expression Expression
+	span       Span @[required]
 }
 
 pub type Expression = ArrayExpression
