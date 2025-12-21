@@ -889,12 +889,14 @@ fn (vm VM) compare(a bytecode.Value, b bytecode.Value, op bytecode.Op) !bool {
 }
 
 fn (vm VM) is_truthy(v bytecode.Value) bool {
-	match v {
-		bool { return v }
-		bytecode.NoneValue { return false }
-		int { return v != 0 }
-		string { return v.len > 0 }
-		else { return true }
+	return match v {
+		bool {
+			v
+		}
+		bytecode.NoneValue, int, f64, string, []bytecode.Value, bytecode.StructValue,
+		bytecode.ClosureValue, bytecode.EnumValue, bytecode.ErrorValue, bytecode.SocketValue {
+			false
+		}
 	}
 }
 
