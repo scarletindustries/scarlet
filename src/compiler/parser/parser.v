@@ -1034,8 +1034,8 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 			name: name
 			span: id_span
 		}
-		fields: fields
-		span:   struct_span
+		fields:     fields
+		span:       struct_span
 	}
 }
 
@@ -1091,8 +1091,8 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 			name: name
 			span: id_span
 		}
-		variants: variants
-		span:     enum_span
+		variants:   variants
+		span:       enum_span
 	}
 }
 
