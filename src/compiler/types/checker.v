@@ -562,7 +562,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 						}
 					}
 				})
-				span: typed_ast.Span{
+				span:       typed_ast.Span{
 					line:   expr.span.line
 					column: expr.span.column
 				}

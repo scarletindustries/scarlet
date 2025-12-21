@@ -5,10 +5,11 @@ import compiler.token
 @[inline; minify]
 pub struct Token {
 pub:
-	kind    token.Kind // The token number/enum; for quick comparisons
-	literal ?string    // Literal representation of the token
-	line    int        // The line number in the source where the token occurred
-	column  int        // The column number in the source where the token occurred
+	kind           token.Kind     // The token number/enum; for quick comparisons
+	literal        ?string        // Literal representation of the token
+	line           int            // The line number in the source where the token occurred
+	column         int            // The column number in the source where the token occurred
+	leading_trivia []token.Trivia // Whitespace/comments before this token
 }
 
 pub fn (t &Token) str() string {

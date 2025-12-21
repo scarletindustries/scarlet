@@ -8,6 +8,7 @@ import compiler.ast
 import compiler.scanner
 import compiler.parser
 import compiler.printer
+import compiler.formatter
 import compiler.bytecode
 import compiler.vm
 import compiler.diagnostic
@@ -49,6 +50,40 @@ fn check_source(program ast.BlockExpression, file string, entrypoint string) !ty
 	}
 
 	return result
+}
+
+fn find_al_files(path string) ![]string {
+	if os.is_file(path) {
+		if path.ends_with('.al') {
+			return [path]
+		}
+		return []
+	}
+
+	if !os.is_dir(path) {
+		return error('Path does not exist: ${path}')
+	}
+
+	mut files := []string{}
+	entries := os.walk_ext(path, '.al')
+	for entry in entries {
+		files << entry
+	}
+	return files
+}
+
+struct FormatResult {
+	changed bool
+	output  string
+}
+
+fn format_file(path string, debug bool) !FormatResult {
+	content := os.read_file(path)!
+	formatted := formatter.format_with_debug(content, debug)
+	return FormatResult{
+		changed: formatted != content
+		output:  formatted
+	}
 }
 
 fn main() {
@@ -99,6 +134,68 @@ fn main() {
 				}
 			},
 			cli.Command{
+				name:        'fmt'
+				usage:       '[path]'
+				description: 'Format AL source files'
+				flags:       [
+					cli.Flag{
+						flag:        .bool
+						name:        'stdout'
+						description: 'Print formatted output instead of writing to files'
+					},
+					cli.Flag{
+						flag:        .bool
+						name:        'check'
+						description: 'Check if files are formatted (exit 1 if not)'
+					},
+					cli.Flag{
+						flag:        .bool
+						name:        'debug'
+						description: 'Print debug information about tokens'
+					},
+				]
+				execute:     fn (cmd cli.Command) ! {
+					path := if cmd.args.len > 0 { cmd.args[0] } else { '.' }
+					to_stdout := cmd.flags.get_bool('stdout')!
+					check_only := cmd.flags.get_bool('check')!
+					debug := cmd.flags.get_bool('debug')!
+
+					files := find_al_files(path)!
+
+					if files.len == 0 {
+						println('No .al files found')
+						return
+					}
+
+					mut needs_formatting := false
+
+					for file in files {
+						result := format_file(file, debug) or {
+							eprintln('Error formatting ${file}: ${err}')
+							continue
+						}
+
+						if check_only {
+							if result.changed {
+								println('${file} needs formatting')
+								needs_formatting = true
+							}
+						} else if to_stdout {
+							println(result.output)
+						} else {
+							if result.changed {
+								os.write_file(file, result.output)!
+								println('Formatted ${file}')
+							}
+						}
+					}
+
+					if check_only && needs_formatting {
+						exit(1)
+					}
+				}
+			},
+			cli.Command{
 				name:        'upgrade'
 				usage:       '[version]'
 				description: 'Upgrade to a specific version (default: canary)'
@@ -140,8 +237,7 @@ fn main() {
 					println('Downloading ${tag}...')
 
 					mut dl := downloader.ProgressDownloader{}
-					http.download_file_with_progress(download_url, tmp_path,
-						downloader: &dl) or {
+					http.download_file_with_progress(download_url, tmp_path, downloader: &dl) or {
 						return error('Failed to download: ${err}')
 					}
 
