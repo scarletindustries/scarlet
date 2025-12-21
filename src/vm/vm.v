@@ -919,6 +919,19 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 				return true
 			}
 		}
+		bytecode.ClosureValue {
+			false
+		}
+		bytecode.ErrorValue {
+			if b is bytecode.ErrorValue {
+				return vm.values_equal(a.payload, b.payload)
+			}
+		}
+		bytecode.SocketValue {
+			if b is bytecode.SocketValue {
+				return a.id == b.id && a.is_listener == b.is_listener
+			}
+		}
 	}
 	return false
 }
