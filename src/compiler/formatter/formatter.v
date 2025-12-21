@@ -271,7 +271,7 @@ fn (mut f Formatter) process_token() {
 			} else if f.needs_space_before(.literal_string) {
 				f.emit(' ')
 			}
-			f.emit("'${tok.literal or { '' }}'")
+			f.emit("'${escape_string(tok.literal or { '' })}'")
 		}
 		.literal_string_interpolation {
 			if f.at_line_start {
@@ -279,7 +279,7 @@ fn (mut f Formatter) process_token() {
 			} else if f.needs_space_before(.literal_string_interpolation) {
 				f.emit(' ')
 			}
-			f.emit("'${tok.literal or { '' }}'")
+			f.emit("'${escape_string(tok.literal or { '' })}'")
 		}
 		.literal_char {
 			if f.at_line_start {
@@ -313,6 +313,22 @@ fn (mut f Formatter) process_token() {
 	}
 
 	f.last_kind = tok.kind
+}
+
+fn escape_string(s string) string {
+	mut result := strings.new_builder(s.len)
+	for c in s {
+		match c {
+			`\n` { result.write_string('\\n') }
+			`\r` { result.write_string('\\r') }
+			`\t` { result.write_string('\\t') }
+			`\\` { result.write_string('\\\\') }
+			`\'` { result.write_string("\\'") }
+			0 { result.write_string('\\0') }
+			else { result.write_u8(c) }
+		}
+	}
+	return result.str()
 }
 
 fn is_word_like(k token.Kind) bool {
