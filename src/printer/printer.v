@@ -246,6 +246,16 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.WildcardPattern {
 			'else'
 		}
+		ast.OrPattern {
+			mut s := ''
+			for i, pattern in expr.patterns {
+				if i > 0 {
+					s += ' | '
+				}
+				s += print_expression(pattern, level)
+			}
+			s
+		}
 		ast.ErrorNode {
 			'/* could not parse: ${expr.message} */'
 		}

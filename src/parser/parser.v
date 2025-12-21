@@ -756,7 +756,8 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	mut arms := []ast.MatchArm{}
 
 	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
-		pattern := if p.current_token.kind == .kw_else {
+		first_span := p.current_span()
+		first_pattern := if p.current_token.kind == .kw_else {
 			span := p.current_span()
 			p.eat(.kw_else)!
 			ast.Expression(ast.WildcardPattern{
@@ -771,6 +772,25 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 				}
 				continue
 			}
+		}
+
+ 		pattern := if p.current_token.kind == .bitwise_or {
+			mut patterns := [first_pattern]
+			for p.current_token.kind == .bitwise_or {
+				p.eat(.bitwise_or)!
+				next_pattern := p.parse_expression() or {
+					p.add_error(err.msg())
+					p.synchronize()
+					break
+				}
+				patterns << next_pattern
+			}
+			ast.Expression(ast.OrPattern{
+				patterns: patterns
+				span:     first_span
+			})
+		} else {
+			first_pattern
 		}
 
 		p.eat(.punc_arrow) or {

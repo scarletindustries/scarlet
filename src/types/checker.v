@@ -217,6 +217,9 @@ fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 		typed_ast.WildcardPattern {
 			expr.span
 		}
+		typed_ast.OrPattern {
+			expr.span
+		}
 		typed_ast.ImportDeclaration {
 			expr.span
 		}
@@ -542,6 +545,17 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 				span: convert_span(expr.span)
 			}, t_none()
 		}
+		ast.OrPattern {
+			mut typed_patterns := []typed_ast.Expression{}
+			for pattern in expr.patterns {
+				typed_pattern, _ := c.check_expr(pattern)
+				typed_patterns << typed_pattern
+			}
+			return typed_ast.OrPattern{
+				patterns: typed_patterns
+				span:     convert_span(expr.span)
+			}, t_none()
+		}
 		ast.ErrorNode {
 			return typed_ast.ErrorNode{
 				message: expr.message
@@ -634,6 +648,11 @@ fn (mut c TypeChecker) check_binding_type(name string, annotation ?ast.TypeIdent
 fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_ast.Expression, Type) {
 	if expr.init is ast.FunctionExpression {
 		func_expr := expr.init as ast.FunctionExpression
+
+		if func_id := func_expr.identifier {
+			c.error_at_span("Named functions cannot be assigned to variables. Use 'fn ${expr.identifier.name}() {{ ... }}' for a named function, or 'fn() {{ ... }}' for an anonymous function",
+				func_id.span)
+		}
 
 		mut param_types := []Type{}
 		for param in func_expr.params {
@@ -1165,6 +1184,10 @@ fn (mut c TypeChecker) check_array_index(expr ast.ArrayIndexExpression) (typed_a
 }
 
 fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Expression, Type) {
+	if c.in_function {
+		c.error_at_span('Struct definitions are only allowed at the top level', expr.span)
+	}
+
 	mut fields := map[string]Type{}
 
 	for field in expr.fields {
@@ -1264,6 +1287,10 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 }
 
 fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expression, Type) {
+	if c.in_function {
+		c.error_at_span('Enum definitions are only allowed at the top level', expr.span)
+	}
+
 	mut variants := map[string]?Type{}
 
 	for variant in expr.variants {
@@ -1384,6 +1411,14 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 		if arm.pattern is ast.WildcardPattern {
 			has_wildcard = true
+		} else if arm.pattern is ast.OrPattern {
+			for p in arm.pattern.patterns {
+				if p is ast.FunctionCallExpression {
+					covered_variants[p.identifier.name] = true
+				} else if p is ast.Identifier {
+					covered_variants[p.name] = true
+				}
+			}
 		} else if arm.pattern is ast.FunctionCallExpression {
 			covered_variants[arm.pattern.identifier.name] = true
 		} else if arm.pattern is ast.Identifier {
@@ -1431,6 +1466,18 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 }
 
 fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) (typed_ast.Expression, Type) {
+	if pattern is ast.OrPattern {
+		mut typed_patterns := []typed_ast.Expression{}
+		for p in pattern.patterns {
+			typed_p, _ := c.check_pattern(p, subject_type)
+			typed_patterns << typed_p
+		}
+		return typed_ast.OrPattern{
+			patterns: typed_patterns
+			span:     convert_span(pattern.span)
+		}, subject_type
+	}
+
 	if pattern is ast.FunctionCallExpression {
 		variant_name := pattern.identifier.name
 

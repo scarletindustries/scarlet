@@ -324,6 +324,13 @@ pub fn (mut s Scanner) scan_next() token.Token {
 		`/` {
 			s.new_token(.punc_div, none)
 		}
+		`|` {
+			if s.peek_char() == `|` {
+				s.incr_pos()
+				return s.new_token(.logical_or, none)
+			}
+			s.new_token(.bitwise_or, none)
+		}
 		`=` {
 			next := s.peek_char()
 

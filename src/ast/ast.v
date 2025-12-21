@@ -116,6 +116,12 @@ pub:
 	span Span @[required]
 }
 
+pub struct OrPattern {
+pub:
+	patterns []Expression
+	span     Span @[required]
+}
+
 pub struct MatchExpression {
 pub:
 	subject    Expression
@@ -281,6 +287,7 @@ pub type Expression = ArrayExpression
 	| NoneExpression
 	| NumberLiteral
 	| OrExpression
+	| OrPattern
 	| PropertyAccessExpression
 	| PropagateNoneExpression
 	| RangeExpression
@@ -296,7 +303,7 @@ pub fn get_span(expr Expression) Span {
 	return match expr {
 		NumberLiteral, StringLiteral, BooleanLiteral, NoneExpression, ErrorNode, Identifier,
 		VariableBinding, ConstBinding, BinaryExpression, FunctionCallExpression, ArrayExpression,
-		ArrayIndexExpression, IfExpression, WildcardPattern, InterpolatedString, BlockExpression,
+		ArrayIndexExpression, IfExpression, WildcardPattern, OrPattern, InterpolatedString, BlockExpression,
 		ImportDeclaration, AssertExpression, MatchExpression, StructExpression, EnumExpression,
 		FunctionExpression, ExportExpression {
 			expr.span

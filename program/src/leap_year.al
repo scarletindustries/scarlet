@@ -17,10 +17,7 @@ fn days_in_year(year Int) Int {
 }
 
 fn days_in_february(year Int) Int {
-	match is_leap_year(year) {
-		true -> 29,
-		false -> 28,
-	}
+	if is_leap_year(year) 29 else 28
 }
 
 struct YearInfo {

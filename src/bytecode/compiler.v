@@ -851,6 +851,48 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			continue
 		}
 
+		if arm.pattern is typed_ast.OrPattern {
+			// For or-patterns, check each pattern in sequence
+			// If any matches, jump to body; otherwise fall through to next arm
+			mut body_jumps := []int{}
+
+			for i, pattern in arm.pattern.patterns {
+				if i > 0 {
+					// Need to dup the subject again for subsequent patterns
+					c.emit(.dup)
+				}
+				c.compile_expr(pattern)!
+				c.emit(.eq)
+
+				if i < arm.pattern.patterns.len - 1 {
+					// Not the last pattern: if match, jump to body
+					body_jumps << c.current_addr()
+					c.emit_arg(.jump_if_true, 0)
+				}
+			}
+
+			// Last pattern: if no match, jump to next arm
+			next_arm := c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			// Patch body jumps to here
+			body_addr := c.current_addr()
+			for jump_addr in body_jumps {
+				c.program.code[jump_addr] = op_arg(.jump_if_true, body_addr)
+			}
+
+			c.emit(.pop)
+			c.in_tail_position = is_tail
+			c.compile_expr(arm.body)!
+			c.in_tail_position = false
+
+			end_jumps << c.current_addr()
+			c.emit_arg(.jump, 0)
+
+			c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
+			continue
+		}
+
 		c.compile_expr(arm.pattern)!
 		c.emit(.eq)
 

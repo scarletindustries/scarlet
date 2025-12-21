@@ -418,6 +418,14 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 		ast.WildcardPattern {
 			f.emit('else')
 		}
+		ast.OrPattern {
+			for i, pattern in expr.patterns {
+				if i > 0 {
+					f.emit(' | ')
+				}
+				f.format_expr(pattern)
+			}
+		}
 		ast.ErrorNode {
 			f.emit('/* error: ${expr.message} */')
 		}
@@ -518,6 +526,8 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 fn (mut f Formatter) format_block_inline(expr ast.Expression) {
 	if expr is ast.BlockExpression {
 		f.format_block_expr(expr)
+	} else if f.is_simple_expr(expr) {
+		f.format_expr(expr)
 	} else {
 		f.emit('{ ')
 		f.format_expr(expr)

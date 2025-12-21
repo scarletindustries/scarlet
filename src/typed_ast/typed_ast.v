@@ -117,6 +117,12 @@ pub:
 	span Span @[required]
 }
 
+pub struct OrPattern {
+pub:
+	patterns []Expression
+	span     Span @[required]
+}
+
 pub struct MatchExpression {
 pub:
 	subject    Expression
@@ -284,6 +290,7 @@ pub type Expression = ArrayExpression
 	| NoneExpression
 	| NumberLiteral
 	| OrExpression
+	| OrPattern
 	| PropertyAccessExpression
 	| PropagateNoneExpression
 	| RangeExpression
