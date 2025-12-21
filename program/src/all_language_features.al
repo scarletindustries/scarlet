@@ -2,29 +2,37 @@ struct User {
 	id Int,
 	name String,
 }
+
 struct DivisionError {
 	message String,
 }
+
 struct Error {
 	message String,
 }
+
 struct ValidationError {
 	code Int,
 }
+
 struct NetworkError {
 	status Int,
 }
+
 struct Person {
 	name String,
 	age Int,
 }
+
 struct Config {
 	debug Bool,
 }
+
 enum Result {
 	Ok(String)
 	Err(String)
 }
+
 enum Option {
 	Some(Int)
 	None
