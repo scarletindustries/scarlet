@@ -66,6 +66,61 @@ fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
 	c.diagnostics << diagnostic.error_at(span.line, span.column, message)
 }
 
+fn (c TypeChecker) find_similar_name(name string) ?string {
+	all_names := c.env.all_names()
+	mut best_match := ''
+	mut best_distance := 3 // max distance threshold
+
+	for candidate in all_names {
+		dist := levenshtein_distance(name, candidate)
+		if dist < best_distance {
+			best_distance = dist
+			best_match = candidate
+		}
+	}
+
+	if best_match.len > 0 {
+		return best_match
+	}
+	return none
+}
+
+fn levenshtein_distance(a string, b string) int {
+	if a.len == 0 {
+		return b.len
+	}
+	if b.len == 0 {
+		return a.len
+	}
+
+	mut prev := []int{len: b.len + 1, init: index}
+	mut curr := []int{len: b.len + 1}
+
+	for i := 1; i <= a.len; i++ {
+		curr[0] = i
+		for j := 1; j <= b.len; j++ {
+			cost := if a[i - 1] == b[j - 1] { 0 } else { 1 }
+			deletion := prev[j] + 1
+			insertion := curr[j - 1] + 1
+			substitution := prev[j - 1] + cost
+
+			mut min_val := deletion
+			if insertion < min_val {
+				min_val = insertion
+			}
+			if substitution < min_val {
+				min_val = substitution
+			}
+			curr[j] = min_val
+		}
+
+		prev = curr.clone()
+		curr = []int{len: b.len + 1}
+	}
+
+	return prev[b.len]
+}
+
 fn get_typed_span(expr typed_ast.Expression) typed_ast.Span {
 	return match expr {
 		typed_ast.NumberLiteral {
@@ -373,7 +428,12 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			typ := if t := c.env.lookup(expr.name) {
 				t
 			} else {
-				c.error_at_span("Unknown identifier '${expr.name}'", expr.span)
+				if suggestion := c.find_similar_name(expr.name) {
+					c.error_at_span("Unknown identifier '${expr.name}'. Did you mean '${suggestion}'?",
+						expr.span)
+				} else {
+					c.error_at_span("Unknown identifier '${expr.name}'", expr.span)
+				}
 				t_none()
 			}
 			return typed_ast.Identifier{
@@ -912,8 +972,12 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 		}, enum_type
 	}
 
-	c.error_at_span("'${expr.identifier.name}' is not defined. Did you mean to define it as a function?",
-		expr.span)
+	if suggestion := c.find_similar_name(expr.identifier.name) {
+		c.error_at_span("'${expr.identifier.name}' is not defined. Did you mean '${suggestion}'?",
+			expr.span)
+	} else {
+		c.error_at_span("'${expr.identifier.name}' is not defined", expr.span)
+	}
 
 	mut typed_args := []typed_ast.Expression{}
 	for arg in expr.arguments {

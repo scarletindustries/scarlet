@@ -496,7 +496,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 					c.compile_expr(arg)!
 				}
 
-				return error('Method calls not yet implemented')
+				return error("Cannot call '${call.identifier.name}' as a method. AL does not have methods - use '${call.identifier.name}(...)' as a regular function call instead.")
 			} else if expr.right is typed_ast.Identifier {
 				id := expr.right as typed_ast.Identifier
 
@@ -628,7 +628,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			}
 		}
 		else {
-			return error('Cannot compile expression type: ${expr.type_name()}')
+			return error("Internal error: unhandled expression type '${expr.type_name()}'. This is a compiler bug.")
 		}
 	}
 }

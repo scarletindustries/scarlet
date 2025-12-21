@@ -136,7 +136,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 						vm.stack << neg
 					}
 					else {
-						return error('Cannot negate non-number')
+						return error("Cannot negate non-numeric value '${value_type_name(a)}'")
 					}
 				}
 			}
@@ -296,7 +296,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 					}
 					vm.stack << bytecode.Value(arr)
 				} else {
-					return error('Range bounds must be integers')
+					return error("Range bounds must be integers, got '${value_type_name(start_val)}' and '${value_type_name(end_val)}'")
 				}
 			}
 			.index {
@@ -308,13 +308,13 @@ fn (mut vm VM) execute() !bytecode.Value {
 						if idx_val >= 0 && idx_val < arr_val.len {
 							vm.stack << arr_val[idx_val]
 						} else {
-							return error('Index out of bounds: ${idx_val}')
+							return error('Index out of bounds: ${idx_val} (array length is ${arr_val.len})')
 						}
 					} else {
-						return error('Array index must be integer')
+						return error("Array index must be an integer, got '${value_type_name(idx_val)}'")
 					}
 				} else {
-					return error('Cannot index non-array')
+					return error("Cannot index type '${value_type_name(arr_val)}' - only arrays can be indexed")
 				}
 			}
 			.make_struct {
@@ -691,14 +691,14 @@ fn (mut vm VM) execute() !bytecode.Value {
 
 fn (mut vm VM) pop() !bytecode.Value {
 	if vm.stack.len == 0 {
-		return error('Stack underflow')
+		return error('Stack underflow. This is likely a compiler bug.')
 	}
 	return vm.stack.pop()
 }
 
 fn (vm VM) peek() !bytecode.Value {
 	if vm.stack.len == 0 {
-		return error('Stack underflow')
+		return error('Stack underflow. This is likely a compiler bug.')
 	}
 	return vm.stack[vm.stack.len - 1]
 }
@@ -832,6 +832,22 @@ fn (vm VM) is_truthy(v bytecode.Value) bool {
 		int { return v != 0 }
 		string { return v.len > 0 }
 		else { return true }
+	}
+}
+
+fn value_type_name(v bytecode.Value) string {
+	return match v {
+		int { 'Int' }
+		f64 { 'Float' }
+		bool { 'Bool' }
+		string { 'String' }
+		bytecode.NoneValue { 'None' }
+		[]bytecode.Value { 'Array' }
+		bytecode.StructValue { v.type_name }
+		bytecode.ClosureValue { 'Function' }
+		bytecode.EnumValue { v.enum_name }
+		bytecode.ErrorValue { 'Error' }
+		bytecode.SocketValue { 'Socket' }
 	}
 }
 

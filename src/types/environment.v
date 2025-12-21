@@ -93,3 +93,20 @@ pub fn (e TypeEnv) lookup_enum_by_variant(variant_name string) ?TypeEnum {
 	}
 	return none
 }
+
+pub fn (e TypeEnv) all_names() []string {
+	mut names := []string{}
+	for scope in e.scopes {
+		for name, _ in scope {
+			if name !in names {
+				names << name
+			}
+		}
+	}
+	for name, _ in e.functions {
+		if name !in names {
+			names << name
+		}
+	}
+	return names
+}
