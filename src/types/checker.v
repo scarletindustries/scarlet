@@ -32,6 +32,7 @@ mut:
 	diagnostics            []diagnostic.Diagnostic
 	in_function            bool
 	current_fn_return_type ?Type
+	param_subs             map[string]Type // tracks inferred parameter types
 }
 
 pub struct CheckResult {
@@ -64,6 +65,19 @@ pub fn check(program ast.BlockExpression) CheckResult {
 
 fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
 	c.diagnostics << diagnostic.error_at(span.line, span.column, message)
+}
+
+fn type_var_name_from_index(id int) string {
+	mut result := ''
+	mut n := id
+	for {
+		result = [u8(`a` + n % 26)].bytestr() + result
+		n = n / 26 - 1
+		if n < 0 {
+			break
+		}
+	}
+	return result
 }
 
 fn (c TypeChecker) find_similar_name(name string) ?string {
@@ -682,6 +696,7 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 		}
 
 		mut param_types := []Type{}
+		mut type_var_index := 0
 		for param in func_expr.params {
 			if pt := param.typ {
 				if resolved := c.resolve_type_identifier(pt) {
@@ -690,7 +705,8 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 					param_types << t_none()
 				}
 			} else {
-				param_types << t_none()
+				param_types << t_var(type_var_name_from_index(type_var_index))
+				type_var_index++
 			}
 		}
 
@@ -786,9 +802,18 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 			if types_equal(left_type, t_string()) && types_equal(right_type, t_string()) {
 				t_string()
 			} else if types_equal(left_type, t_string()) || types_equal(right_type, t_string()) {
-				c.error_at_span("Cannot concatenate '${type_to_string(left_type)}' with '${type_to_string(right_type)}': use string interpolation instead",
-					expr.span)
-				t_string()
+				// handle TypeVar + String -> infer TypeVar as String
+				if left_type is TypeVar {
+					c.unify(left_type, t_string(), mut c.param_subs)
+					t_string()
+				} else if right_type is TypeVar {
+					c.unify(right_type, t_string(), mut c.param_subs)
+					t_string()
+				} else {
+					c.error_at_span("Cannot concatenate '${type_to_string(left_type)}' with '${type_to_string(right_type)}': use string interpolation instead",
+						expr.span)
+					t_string()
+				}
 			} else if !is_numeric(left_type) {
 				c.error_at_span("Left operand of '${op_str}' must be numeric, got '${type_to_string(left_type)}'",
 					expr.span)
@@ -798,11 +823,13 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 					expr.span)
 				t_int()
 			} else {
-				if !types_equal(left_type, right_type) {
+				// both are numeric (or TypeVars) - unify TypeVars with concrete types
+				c.unify_binary_operands(left_type, right_type)
+				if !c.check_binary_operand_types(left_type, right_type) {
 					c.error_at_span("Cannot apply '${op_str}' to '${type_to_string(left_type)}' and '${type_to_string(right_type)}': operands must have the same type",
 						expr.span)
 				}
-				left_type
+				c.infer_binary_result_type(left_type, right_type)
 			}
 		}
 		.punc_minus, .punc_mul, .punc_div, .punc_mod {
@@ -815,22 +842,29 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 					expr.span)
 				t_int()
 			} else {
-				if !types_equal(left_type, right_type) {
+				// Both are numeric (or TypeVars) - unify TypeVars with concrete types
+				c.unify_binary_operands(left_type, right_type)
+				if !c.check_binary_operand_types(left_type, right_type) {
 					c.error_at_span("Cannot apply '${op_str}' to '${type_to_string(left_type)}' and '${type_to_string(right_type)}': operands must have the same type",
 						expr.span)
 				}
-				left_type
+				c.infer_binary_result_type(left_type, right_type)
 			}
 		}
 		.punc_lt, .punc_gt, .punc_lte, .punc_gte {
 			if !is_numeric(left_type) || !is_numeric(right_type) {
 				c.error_at_span("Cannot compare '${type_to_string(left_type)}' with '${type_to_string(right_type)}': operator '${op_str}' requires numeric operands",
 					expr.span)
+			} else {
+				// unify TypeVars with numeric types
+				c.unify_binary_operands(left_type, right_type)
 			}
 			t_bool()
 		}
 		.punc_equals_comparator, .punc_not_equal {
-			if !types_equal(left_type, right_type) {
+			// unify TypeVars for equality comparison
+			c.unify_binary_operands(left_type, right_type)
+			if !c.check_binary_operand_types(left_type, right_type) {
 				c.error_at_span('Cannot compare ${type_to_string(left_type)} with ${type_to_string(right_type)}',
 					expr.span)
 			}
@@ -854,6 +888,34 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 		}
 		span:  convert_span(expr.span)
 	}, result_type
+}
+
+fn (mut c TypeChecker) unify_binary_operands(left Type, right Type) {
+	if left is TypeVar && !(right is TypeVar) {
+		c.unify(left, right, mut c.param_subs)
+	} else if right is TypeVar && !(left is TypeVar) {
+		c.unify(right, left, mut c.param_subs)
+	} else if left is TypeVar && right is TypeVar {
+		// both are TypeVars - unify them with each other
+		c.unify(left, right, mut c.param_subs)
+	}
+}
+
+// Check if two types are compatible for binary operations, considering TypeVars
+fn (c TypeChecker) check_binary_operand_types(left Type, right Type) bool {
+	// if either is a TypeVar, they're compatible (TypeVar will be resolved later)
+	if left is TypeVar || right is TypeVar {
+		return true
+	}
+	return types_equal(left, right)
+}
+
+fn (c TypeChecker) infer_binary_result_type(left Type, right Type) Type {
+	// Prefer concrete type over TypeVar
+	if left is TypeVar {
+		return right
+	}
+	return left
 }
 
 fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) (typed_ast.Expression, Type) {
@@ -908,6 +970,7 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 		}
 	}
 
+	mut type_var_index := 0
 	for param in expr.params {
 		if param.identifier.name in seen_params {
 			c.error_at_span("Duplicate parameter '${param.identifier.name}'", param.identifier.span)
@@ -922,9 +985,8 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 				param_types << t_none()
 			}
 		} else {
-			c.error_at_span("Parameter '${param.identifier.name}' requires a type annotation",
-				param.identifier.span)
-			param_types << t_none()
+			param_types << t_var(type_var_name_from_index(type_var_index))
+			type_var_index++
 		}
 	}
 
@@ -946,6 +1008,7 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 
 	prev_in_function := c.in_function
 	prev_fn_return_type := c.current_fn_return_type
+	prev_param_subs := c.param_subs.clone()
 	c.in_function = true
 	c.current_fn_return_type = if expr.return_type != none {
 		if et := err_type {
@@ -959,10 +1022,20 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 	} else {
 		none
 	}
+
+	c.param_subs = map[string]Type{}
 	errors_before := c.diagnostics.len
 	typed_body, body_type := c.check_expr(expr.body)
+
+	for i, pt in param_types {
+		param_types[i] = substitute(pt, c.param_subs)
+	}
+
+	ret_type = substitute(body_type, c.param_subs)
+
 	c.in_function = prev_in_function
 	c.current_fn_return_type = prev_fn_return_type
+	c.param_subs = prev_param_subs.clone()
 	c.env.pop_scope()
 
 	if expr.return_type != none && c.diagnostics.len == errors_before {
@@ -976,8 +1049,6 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 			ret_type
 		}
 		c.expect_type(body_type, expected_ret, body_span, 'in function return')
-	} else {
-		ret_type = body_type
 	}
 
 	final_func_type := TypeFunction{
@@ -1017,6 +1088,29 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 	if var_type := c.env.lookup(expr.identifier.name) {
 		if var_type is TypeFunction {
 			return c.check_call_with_type(expr, var_type)
+		}
+		if var_type is TypeVar {
+			// TypeVar is being called - infer it as a function type
+			mut param_types := []Type{}
+			mut typed_args := []typed_ast.Expression{}
+			for arg in expr.arguments {
+				typed_arg, arg_type := c.check_expr(arg)
+				typed_args << typed_arg
+				param_types << arg_type
+			}
+
+			ret_type := t_var(type_var_name_from_index(expr.arguments.len))
+			inferred_func_type := TypeFunction{
+				params: param_types
+				ret:    ret_type
+			}
+
+			c.unify(var_type, inferred_func_type, mut c.param_subs)
+			return typed_ast.FunctionCallExpression{
+				identifier: convert_identifier(expr.identifier)
+				arguments:  typed_args
+				span:       convert_span(expr.span)
+			}, ret_type
 		}
 	}
 
@@ -1131,6 +1225,14 @@ fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Typ
 		return true
 	}
 
+	if actual is TypeVar {
+		if existing := subs[actual.name] {
+			return types_equal(existing, expected)
+		}
+		subs[actual.name] = expected
+		return true
+	}
+
 	if actual is TypeArray && expected is TypeArray {
 		return c.unify(actual.element, expected.element, mut subs)
 	}
@@ -1142,6 +1244,18 @@ fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Typ
 	if actual is TypeResult && expected is TypeResult {
 		return c.unify(actual.success, expected.success, mut subs)
 			&& c.unify(actual.error, expected.error, mut subs)
+	}
+
+	if actual is TypeFunction && expected is TypeFunction {
+		if actual.params.len != expected.params.len {
+			return false
+		}
+		for i, actual_param in actual.params {
+			if !c.unify(actual_param, expected.params[i], mut subs) {
+				return false
+			}
+		}
+		return c.unify(actual.ret, expected.ret, mut subs)
 	}
 
 	return types_equal(actual, expected)

@@ -230,6 +230,9 @@ pub fn type_to_string(t Type) string {
 }
 
 pub fn is_numeric(t Type) bool {
+	if t is TypeVar {
+		return true // TypeVar might be numeric, will be constrained later
+	}
 	if t is TypePrimitive {
 		return t.kind == .t_int || t.kind == .t_float
 	}

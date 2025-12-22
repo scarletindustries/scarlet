@@ -200,8 +200,39 @@ println(literal_match1)
 println(literal_match2)
 println(literal_match3)
 
-// Function type annotation tests
 apply_result = apply(5, double)
 apply_generic_result = apply_generic(5, triple)
 println(apply_result)
 println(apply_generic_result)
+
+fn inferred_double(x) { x * 2 }
+fn inferred_add(a, b) { a + b }
+fn inferred_greet(name) { 'Hello, ' + name }
+fn inferred_is_positive(n) { n > 0 }
+fn inferred_identity(x) { x }
+
+println(inferred_double(21))
+println(inferred_add(10, 5))
+println(inferred_greet('World'))
+println(inferred_is_positive(42))
+println(inferred_identity('polymorphic'))
+
+countdown = fn(n) {
+	if n > 0 {
+		println(n)
+		countdown(n - 1)
+	}
+}
+countdown(3)
+
+fn format_person(name, age) {
+	'${name} is ${age} years old'
+}
+println(format_person('Alice', 30))
+
+println(inferred_double(inferred_double(3)))
+
+fn apply_twice(x, f) {
+	f(f(x))
+}
+println(apply_twice(5, fn(n) { n + 1 }))
