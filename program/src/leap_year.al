@@ -3,7 +3,6 @@
 fn is_leap_year(year Int) Bool {
 	match true {
 		year % 400 == 0 | year % 4 == 0 -> true,
-		year % 100 == 0 -> false,
 		else -> false,
 	}
 }
