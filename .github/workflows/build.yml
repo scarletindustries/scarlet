@@ -1,16 +1,19 @@
 name: Release
 
+env:
+  COMPILER_PATHS: src/ VERSION
+
 on:
   push:
     branches: [master]
   schedule:
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       release_type:
-        description: 'Release type'
+        description: "Release type"
         required: true
-        default: 'canary'
+        default: "canary"
         type: choice
         options:
           - canary
@@ -48,6 +51,16 @@ jobs:
               echo "No changes since last canary build"
               echo "should_build=false" >> $GITHUB_OUTPUT
               exit 0
+            fi
+
+            # For scheduled runs, only build if compiler source files changed
+            if [ "${{ github.event_name }}" = "schedule" ]; then
+              COMPILER_CHANGES=$(git diff --name-only "$LAST_CANARY" "$CURRENT" -- ${{ env.COMPILER_PATHS }} | wc -l)
+              if [ "$COMPILER_CHANGES" -eq 0 ]; then
+                echo "Scheduled run: no compiler changes since last canary"
+                echo "should_build=false" >> $GITHUB_OUTPUT
+                exit 0
+              fi
             fi
           fi
 
