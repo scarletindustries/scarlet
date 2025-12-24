@@ -1,12 +1,7 @@
 module ast
 
 import token
-
-pub struct Span {
-pub:
-	line   int @[required]
-	column int @[required]
-}
+import span { Span }
 
 pub struct StringLiteral {
 pub:
@@ -136,6 +131,7 @@ pub:
 	expression Expression
 	receiver   ?Identifier
 	body       Expression
+	span       Span @[required]
 }
 
 pub struct ErrorExpression {

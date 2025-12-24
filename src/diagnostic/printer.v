@@ -63,7 +63,13 @@ fn format_diagnostic_with_lines(d Diagnostic, lines []string, file_path string) 
 		}
 	}
 
-	result += '${padding}    ${caret_padding}${color}^${color_reset}'
+	caret_len := if d.span.end_column > d.span.start_column {
+		d.span.end_column - d.span.start_column
+	} else {
+		1
+	}
+	carets := '^'.repeat(caret_len)
+	result += '${padding}    ${caret_padding}${color}${carets}${color_reset}'
 
 	return result
 }

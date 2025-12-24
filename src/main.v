@@ -14,6 +14,7 @@ import vm
 import diagnostic
 import types
 import repl
+import lsp
 
 const version = $embed_file('../VERSION').to_string().trim_space()
 
@@ -134,6 +135,14 @@ fn main() {
 				description: 'Start an interactive REPL session'
 				execute:     fn (cmd cli.Command) ! {
 					repl.run(version)
+				}
+			},
+			cli.Command{
+				name:        'lsp'
+				description: 'Start the Language Server Protocol server'
+				execute:     fn (cmd cli.Command) ! {
+					mut server := lsp.new_server()
+					server.run()
 				}
 			},
 			cli.Command{
