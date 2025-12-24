@@ -228,7 +228,8 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.compile_node(node)!
 				c.in_tail_position = false
 				// only pop after expressions, not statements (statements don't push)
-				if !is_last && node is typed_ast.Expression {
+				is_expr := node is typed_ast.Expression
+				if !is_last && is_expr {
 					c.emit(.pop)
 				}
 			}
@@ -236,8 +237,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			// push none if block was empty or last item was a statement
 			if expr.body.len == 0 {
 				c.emit(.push_none)
-			} else if expr.body[expr.body.len - 1] is typed_ast.Statement {
-				c.emit(.push_none)
+			} else {
+				last := expr.body[expr.body.len - 1]
+				if last is typed_ast.Statement {
+					c.emit(.push_none)
+				}
 			}
 		}
 		typed_ast.NumberLiteral {
