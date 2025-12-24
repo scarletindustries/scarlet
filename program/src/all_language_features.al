@@ -182,7 +182,7 @@ literal_match1 = match_literal(Ok('special'))
 literal_match2 = match_literal(Err('danger'))
 literal_match3 = match_literal(Ok('something else'))
 
-x = enum G {
+enum G {
 	Test
 	BottledIt
 }

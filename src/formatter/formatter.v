@@ -249,7 +249,7 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 					}
 					f.emit(')')
 				}
-				f.emit(',\n')
+				f.emit('\n')
 			}
 			f.indent--
 			f.emit_indent()
