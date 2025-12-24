@@ -184,7 +184,7 @@ fn levenshtein_distance(a string, b string) int {
 	return prev[b.len]
 }
 
-fn get_typed_span(expr typed_ast.Expression) span.Span {
+fn get_typed_span(expr typed_ast.Expression) Span {
 	return match expr {
 		typed_ast.NumberLiteral {
 			expr.span

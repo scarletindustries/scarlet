@@ -1,6 +1,6 @@
 module diagnostic
 
-import span { Span, point_span, range_span }
+import span { Span, point_span }
 
 pub enum Severity {
 	error
