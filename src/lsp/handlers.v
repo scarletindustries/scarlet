@@ -70,7 +70,7 @@ fn (mut s LspServer) handle_hover(id json2.Any, params json2.Any) {
 
 	if types := s.type_info[uri] {
 		for t in types {
-			if t.line == line && col >= t.col_start && col <= t.col_end {
+			if t.line == line && col >= t.col_start && col < t.col_end {
 				value := '${t.name}: ${t.type_str}'.replace('\\', '\\\\').replace('"',
 					'\\"').replace('\n', '\\n')
 				hover := '{"contents":{"kind":"markdown","value":"```al\\n${value}\\n```"}}'
@@ -113,7 +113,7 @@ fn (mut s LspServer) handle_definition(id json2.Any, params json2.Any) {
 
 	if types := s.type_info[uri] {
 		for t in types {
-			if t.line == line && col >= t.col_start && col <= t.col_end {
+			if t.line == line && col >= t.col_start && col < t.col_end {
 				if t.def_line >= 0 && t.def_col >= 0 {
 					location := '{"uri":"${uri}","range":{"start":{"line":${t.def_line},"character":${t.def_col}},"end":{"line":${t.def_line},"character":${t.def_end}}}}'
 					s.send_response(id, location)

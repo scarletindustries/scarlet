@@ -8,9 +8,11 @@ import diagnostic
 pub struct Scanner {
 	input string
 mut:
-	state          &state.ScannerState
-	diagnostics    []diagnostic.Diagnostic
-	pending_trivia []token.Trivia
+	state              &state.ScannerState
+	diagnostics        []diagnostic.Diagnostic
+	pending_trivia     []token.Trivia
+	token_start_column int
+	token_start_line   int
 }
 
 @[inline]
@@ -84,6 +86,12 @@ fn (mut s Scanner) collect_trivia() {
 pub fn (mut s Scanner) scan_next() token.Token {
 	// First, collect any leading trivia (whitespace, newlines, comments)
 	s.collect_trivia()
+
+	// Save the starting position BEFORE reading any characters
+	// Column is 0-based (counts chars read), but we want 1-indexed output
+	// So add 1 to convert to 1-indexed position
+	s.token_start_column = s.state.get_column() + 1
+	s.token_start_line = s.state.get_line()
 
 	if s.state.get_pos() == s.input.len {
 		return s.new_token(.eof, none)
@@ -387,8 +395,8 @@ fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivi
 	return token.Token{
 		kind:           kind
 		literal:        literal
-		line:           s.state.get_line()
-		column:         s.state.get_column()
+		line:           s.token_start_line
+		column:         s.token_start_column
 		leading_trivia: trivia
 	}
 }
