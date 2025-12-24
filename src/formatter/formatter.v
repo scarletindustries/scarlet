@@ -110,6 +110,13 @@ fn (mut f Formatter) emit_trivia_for_span(s Span) {
 	}
 }
 
+fn (mut f Formatter) emit_trivia_at_span_end(s Span) {
+	key := '${s.end_line}:${s.end_column - 1}'
+	if trivia := f.trivia_map[key] {
+		f.emit_trivia(trivia)
+	}
+}
+
 fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
 	mut consecutive_newlines := 0
 
@@ -268,8 +275,8 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.format_expr(arm.body)
 				f.emit(',\n')
 			}
-			if expr.close_span.start_line > 0 {
-				f.emit_trivia_for_span(expr.close_span)
+			if expr.span.end_line > 0 {
+				f.emit_trivia_at_span_end(expr.span)
 			}
 			f.indent--
 			f.emit_indent()
@@ -350,8 +357,8 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.emit(',\n')
 			}
-			if expr.close_span.start_line > 0 {
-				f.emit_trivia_for_span(expr.close_span)
+			if expr.span.end_line > 0 {
+				f.emit_trivia_at_span_end(expr.span)
 			}
 			f.indent--
 			f.emit_indent()
@@ -407,8 +414,8 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.emit('\n')
 			}
-			if expr.close_span.start_line > 0 {
-				f.emit_trivia_for_span(expr.close_span)
+			if expr.span.end_line > 0 {
+				f.emit_trivia_at_span_end(expr.span)
 			}
 			f.indent--
 			f.emit_indent()
@@ -516,7 +523,7 @@ fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
 }
 
 fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
-	has_close_comment := f.has_comment_trivia_at_span(block.close_span)
+	has_close_comment := f.has_comment_trivia_at_span_end(block.span)
 	if block.body.len == 0 && !has_close_comment {
 		f.emit('{}')
 	} else if block.body.len == 1 && f.is_simple_expr(block.body[0])
@@ -538,8 +545,8 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 			f.format_expr(expr)
 			f.emit('\n')
 		}
-		if block.close_span.start_line > 0 {
-			f.emit_trivia_for_span(block.close_span)
+		if block.span.end_line > 0 {
+			f.emit_trivia_at_span_end(block.span)
 		}
 		f.indent--
 		f.emit_indent()
@@ -600,6 +607,20 @@ fn (f Formatter) has_trivia_at_span(s Span) bool {
 fn (f Formatter) has_comment_trivia_at_span(s Span) bool {
 	if s.start_line > 0 {
 		key := '${s.start_line}:${s.start_column}'
+		if trivia := f.trivia_map[key] {
+			for t in trivia {
+				if t.kind == .line_comment {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+fn (f Formatter) has_comment_trivia_at_span_end(s Span) bool {
+	if s.end_line > 0 {
+		key := '${s.end_line}:${s.end_column - 1}'
 		if trivia := f.trivia_map[key] {
 			for t in trivia {
 				if t.kind == .line_comment {

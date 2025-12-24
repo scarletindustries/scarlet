@@ -143,9 +143,8 @@ fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
 	combined_body << input_parse_result.ast.body
 
 	combined_ast := ast.BlockExpression{
-		body:       combined_body
-		span:       point_span(1, 1)
-		close_span: point_span(1, 1)
+		body: combined_body
+		span: point_span(1, 1)
 	}
 
 	check_result := types.check(combined_ast)

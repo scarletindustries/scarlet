@@ -78,18 +78,13 @@ fn (mut s Scanner) collect_trivia() {
 			continue
 		}
 
-		// Not trivia, stop collecting
 		break
 	}
 }
 
 pub fn (mut s Scanner) scan_next() token.Token {
-	// First, collect any leading trivia (whitespace, newlines, comments)
 	s.collect_trivia()
 
-	// Save the starting position BEFORE reading any characters
-	// Column is 0-based (counts chars read), but we want 1-indexed output
-	// So add 1 to convert to 1-indexed position
 	s.token_start_column = s.state.get_column() + 1
 	s.token_start_line = s.state.get_line()
 
@@ -97,7 +92,6 @@ pub fn (mut s Scanner) scan_next() token.Token {
 		return s.new_token(.eof, none)
 	}
 
-	// Read next character from input
 	ch := s.peek_char()
 	s.incr_pos()
 
@@ -106,7 +100,6 @@ pub fn (mut s Scanner) scan_next() token.Token {
 
 		if unwrapped := identifier.literal {
 			if keyword_kind := token.match_keyword(unwrapped) {
-				// Return a keyword token with the same trivia as the identifier
 				return s.new_token_with_trivia(keyword_kind, none, identifier.leading_trivia)
 			}
 		}

@@ -120,10 +120,9 @@ pub:
 
 pub struct MatchExpression {
 pub:
-	subject    Expression
-	arms       []MatchArm
-	span       Span @[required]
-	close_span Span @[required]
+	subject Expression
+	arms    []MatchArm
+	span    Span @[required]
 }
 
 pub struct OrExpression {
@@ -137,11 +136,13 @@ pub:
 pub struct ErrorExpression {
 pub:
 	expression Expression
+	span       Span @[required]
 }
 
 pub struct PropagateNoneExpression {
 pub:
 	expression Expression
+	span       Span @[required]
 }
 
 pub struct BinaryExpression {
@@ -156,6 +157,7 @@ pub struct UnaryExpression {
 pub:
 	expression Expression
 	op         Operator
+	span       Span @[required]
 }
 
 pub struct ArrayExpression {
@@ -175,6 +177,7 @@ pub struct RangeExpression {
 pub:
 	start Expression
 	end   Expression
+	span  Span @[required]
 }
 
 pub struct StructField {
@@ -189,7 +192,6 @@ pub:
 	identifier Identifier
 	fields     []StructField
 	span       Span @[required]
-	close_span Span @[required]
 }
 
 pub struct EnumVariant {
@@ -203,7 +205,6 @@ pub:
 	identifier Identifier
 	variants   []EnumVariant
 	span       Span @[required]
-	close_span Span @[required]
 }
 
 pub struct StructInitField {
@@ -216,12 +217,14 @@ pub struct StructInitExpression {
 pub:
 	identifier Identifier
 	fields     []StructInitField
+	span       Span @[required]
 }
 
 pub struct PropertyAccessExpression {
 pub:
 	left  Expression
 	right Expression
+	span  Span @[required]
 }
 
 pub struct FunctionCallExpression {
@@ -233,9 +236,8 @@ pub:
 
 pub struct BlockExpression {
 pub:
-	body       []Expression
-	span       Span @[required]
-	close_span Span @[required]
+	body []Expression
+	span Span @[required]
 }
 
 pub struct AssertExpression {
@@ -309,20 +311,13 @@ pub fn get_span(expr Expression) Span {
 		VariableBinding, ConstBinding, BinaryExpression, FunctionCallExpression, ArrayExpression,
 		ArrayIndexExpression, IfExpression, WildcardPattern, OrPattern, InterpolatedString,
 		BlockExpression, ImportDeclaration, AssertExpression, MatchExpression, StructExpression,
-		EnumExpression, FunctionExpression, ExportExpression, SpreadExpression {
+		EnumExpression, FunctionExpression, ExportExpression, SpreadExpression, OrExpression,
+		ErrorExpression, PropagateNoneExpression, UnaryExpression, PropertyAccessExpression,
+		RangeExpression, StructInitExpression {
 			expr.span
 		}
-		TypeIdentifier, StructInitExpression {
+		TypeIdentifier {
 			expr.identifier.span
-		}
-		OrExpression, ErrorExpression, PropagateNoneExpression, UnaryExpression {
-			get_span(expr.expression)
-		}
-		PropertyAccessExpression {
-			get_span(expr.left)
-		}
-		RangeExpression {
-			get_span(expr.start)
 		}
 	}
 }

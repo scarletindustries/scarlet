@@ -443,9 +443,8 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 	}
 
 	return typed_ast.BlockExpression{
-		body:       typed_body
-		span:       block.span
-		close_span: block.close_span
+		body: typed_body
+		span: block.span
 	}, last_type
 }
 
@@ -559,6 +558,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			typed_inner, typ := c.check_expr(expr.expression)
 			return typed_ast.ErrorExpression{
 				expression: typed_inner
+				span:       expr.span
 			}, typ
 		}
 		ast.RangeExpression {
@@ -977,6 +977,7 @@ fn (mut c TypeChecker) check_unary(expr ast.UnaryExpression) (typed_ast.Expressi
 		op:         typed_ast.Operator{
 			kind: expr.op.kind
 		}
+		span:       expr.span
 	}, result_type
 }
 
@@ -1496,7 +1497,6 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Ex
 		identifier: convert_identifier(expr.identifier)
 		fields:     typed_fields
 		span:       convert_span(expr.span)
-		close_span: convert_span(expr.close_span)
 	}, struct_type
 }
 
@@ -1550,6 +1550,7 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 	return typed_ast.StructInitExpression{
 		identifier: convert_identifier(expr.identifier)
 		fields:     typed_fields
+		span:       convert_span(expr.span)
 	}, struct_type
 }
 
@@ -1598,7 +1599,6 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 		identifier: convert_identifier(expr.identifier)
 		variants:   typed_variants
 		span:       convert_span(expr.span)
-		close_span: convert_span(expr.close_span)
 	}, enum_type
 }
 
@@ -1633,6 +1633,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 							message: 'Unknown variant'
 							span:    convert_span(variant_span)
 						}
+						span:  convert_span(expr.span)
 					}, t_none()
 				}
 
@@ -1676,6 +1677,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 				return typed_ast.PropertyAccessExpression{
 					left:  typed_left
 					right: typed_right
+					span:  convert_span(expr.span)
 				}, Type(enum_type)
 			}
 		}
@@ -1688,6 +1690,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		return typed_ast.PropertyAccessExpression{
 			left:  typed_left
 			right: typed_right
+			span:  convert_span(expr.span)
 		}, right_type
 	}
 
@@ -1700,6 +1703,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 				message: 'Expected identifier'
 				span:    convert_span(err_span)
 			}
+			span:  convert_span(expr.span)
 		}, t_none()
 	}
 
@@ -1728,6 +1732,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 	return typed_ast.PropertyAccessExpression{
 		left:  typed_left
 		right: typed_right
+		span:  convert_span(expr.span)
 	}, result_type
 }
 
@@ -1736,10 +1741,9 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	if expr.arms.len == 0 {
 		return typed_ast.MatchExpression{
-			subject:    typed_subject
-			arms:       []
-			span:       convert_span(expr.span)
-			close_span: convert_span(expr.close_span)
+			subject: typed_subject
+			arms:    []
+			span:    convert_span(expr.span)
 		}, t_none()
 	}
 
@@ -1839,10 +1843,9 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 	}
 
 	return typed_ast.MatchExpression{
-		subject:    typed_subject
-		arms:       typed_arms
-		span:       convert_span(expr.span)
-		close_span: convert_span(expr.close_span)
+		subject: typed_subject
+		arms:    typed_arms
+		span:    convert_span(expr.span)
 	}, first_type
 }
 
@@ -1918,6 +1921,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 						return typed_ast.PropertyAccessExpression{
 							left:  typed_left
 							right: typed_right
+							span:  convert_span(pattern.span)
 						}, subject_type
 					}
 				}
@@ -2059,6 +2063,7 @@ fn (mut c TypeChecker) check_or(expr ast.OrExpression) (typed_ast.Expression, Ty
 		receiver:      convert_optional_identifier(expr.receiver)
 		body:          typed_body
 		resolved_type: inner_type
+		span:          convert_span(expr.span)
 	}, success_type
 }
 
@@ -2080,6 +2085,7 @@ fn (mut c TypeChecker) check_range(expr ast.RangeExpression) (typed_ast.Expressi
 	return typed_ast.RangeExpression{
 		start: typed_start
 		end:   typed_end
+		span:  convert_span(expr.span)
 	}, t_array(t_int())
 }
 
@@ -2127,5 +2133,6 @@ fn (mut c TypeChecker) check_propagate_none(expr ast.PropagateNoneExpression) (t
 	return typed_ast.PropagateNoneExpression{
 		expression:    typed_inner
 		resolved_type: inner_type
+		span:          convert_span(expr.span)
 	}, result_type
 }

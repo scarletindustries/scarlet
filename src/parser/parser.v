@@ -26,10 +26,12 @@ pub:
 pub struct Parser {
 	tokens []token.Token
 mut:
-	index         int
-	current_token token.Token
-	diagnostics   []diagnostic.Diagnostic
-	context_stack []ParseContext
+	index                 int
+	current_token         token.Token
+	diagnostics           []diagnostic.Diagnostic
+	context_stack         []ParseContext
+	prev_token_end_line   int = 1
+	prev_token_end_column int = 1
 }
 
 pub fn new_parser(mut s scanner.Scanner) Parser {
@@ -85,6 +87,25 @@ fn (p Parser) current_span() sp.Span {
 		end_line:     p.current_token.line
 		end_column:   p.current_token.column + token_len
 	}
+}
+
+fn (p Parser) span_from(start sp.Span) sp.Span {
+	return sp.Span{
+		start_line:   start.start_line
+		start_column: start.start_column
+		end_line:     p.prev_token_end_line
+		end_column:   p.prev_token_end_column
+	}
+}
+
+fn (mut p Parser) save_token_end() {
+	token_len := if lit := p.current_token.literal {
+		lit.len
+	} else {
+		p.current_token.kind.str().len
+	}
+	p.prev_token_end_line = p.current_token.line
+	p.prev_token_end_column = p.current_token.column + token_len
 }
 
 fn (mut p Parser) synchronize() {
@@ -187,6 +208,7 @@ fn (mut p Parser) synchronize() {
 
 fn (mut p Parser) advance() {
 	if p.index + 1 < p.tokens.len {
+		p.save_token_end()
 		p.index++
 		p.current_token = p.tokens[p.index]
 	}
@@ -195,6 +217,7 @@ fn (mut p Parser) advance() {
 fn (mut p Parser) eat(kind token.Kind) !token.Token {
 	if p.current_token.kind == kind {
 		old := p.current_token
+		p.save_token_end()
 
 		p.index = p.index + 1
 		p.current_token = p.tokens[p.index]
@@ -241,9 +264,8 @@ pub fn (mut p Parser) parse_program() ParseResult {
 
 	return ParseResult{
 		ast:         ast.BlockExpression{
-			body:       body
-			span:       program_span
-			close_span: p.current_span()
+			body: body
+			span: p.span_from(program_span)
 		}
 		diagnostics: p.diagnostics
 	}
@@ -435,24 +457,30 @@ fn (mut p Parser) parse_multiplicative() !ast.Expression {
 
 fn (mut p Parser) parse_unary_expression() !ast.Expression {
 	if p.current_token.kind == .punc_exclamation_mark {
+		start := p.current_span()
 		p.eat(.punc_exclamation_mark)!
+		inner := p.parse_unary_expression()!
 
 		return ast.UnaryExpression{
-			expression: p.parse_unary_expression()!
+			expression: inner
 			op:         ast.Operator{
 				kind: .punc_exclamation_mark
 			}
+			span:       p.span_from(start)
 		}
 	}
 
 	if p.current_token.kind == .punc_minus {
+		start := p.current_span()
 		p.eat(.punc_minus)!
+		inner := p.parse_unary_expression()!
 
 		return ast.UnaryExpression{
-			expression: p.parse_unary_expression()!
+			expression: inner
 			op:         ast.Operator{
 				kind: .punc_minus
 			}
+			span:       p.span_from(start)
 		}
 	}
 
@@ -473,28 +501,32 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				if p.current_token.leading_trivia.len > 0 {
 					break
 				}
-				span := p.current_span()
+				start := ast.get_span(expr)
 				p.eat(.punc_open_bracket)!
 				index := p.parse_expression()!
 				p.eat(.punc_close_bracket)!
 				expr = ast.ArrayIndexExpression{
 					expression: expr
 					index:      index
-					span:       span
+					span:       p.span_from(start)
 				}
 			}
 			.punc_question_mark {
+				start := ast.get_span(expr)
 				p.eat(.punc_question_mark)!
 				expr = ast.PropagateNoneExpression{
 					expression: expr
+					span:       p.span_from(start)
 				}
 			}
 			.punc_dotdot {
+				start := ast.get_span(expr)
 				p.eat(.punc_dotdot)!
 				end := p.parse_expression()!
 				expr = ast.RangeExpression{
 					start: expr
 					end:   end
+					span:  p.span_from(start)
 				}
 			}
 			.punc_plusplus {
@@ -683,13 +715,11 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 	}
 
 	p.pop_context()
-	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.BlockExpression{
-		body:       body
-		span:       block_span
-		close_span: close_span
+		body: body
+		span: p.span_from(block_span)
 	}
 }
 
@@ -870,14 +900,12 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 
 	p.pop_context()
-	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.MatchExpression{
-		subject:    subject
-		arms:       arms
-		span:       match_span
-		close_span: close_span
+		subject: subject
+		arms:    arms
+		span:    p.span_from(match_span)
 	}
 }
 
@@ -1111,7 +1139,6 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	}
 
 	p.pop_context()
-	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.StructExpression{
@@ -1120,8 +1147,7 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 			span: id_span
 		}
 		fields:     fields
-		span:       struct_span
-		close_span: close_span
+		span:       p.span_from(struct_span)
 	}
 }
 
@@ -1170,7 +1196,6 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	}
 
 	p.pop_context()
-	close_span := p.current_span()
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumExpression{
@@ -1179,8 +1204,7 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 			span: id_span
 		}
 		variants:   variants
-		span:       enum_span
-		close_span: close_span
+		span:       p.span_from(enum_span)
 	}
 }
 
@@ -1251,6 +1275,7 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 			span: name_span
 		}
 		fields:     fields
+		span:       p.span_from(name_span)
 	}
 }
 
@@ -1347,16 +1372,19 @@ fn (mut p Parser) parse_assert_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_error_expression() !ast.Expression {
+	start := p.current_span()
 	p.eat(.kw_error)!
 
 	expr := p.parse_unary_expression()!
 
 	return ast.ErrorExpression{
 		expression: expr
+		span:       p.span_from(start)
 	}
 }
 
 fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
+	start := ast.get_span(left)
 	p.eat(.punc_dot)!
 
 	span := p.current_span()
@@ -1367,6 +1395,7 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 		return ast.PropertyAccessExpression{
 			left:  left
 			right: call
+			span:  p.span_from(start)
 		}
 	}
 
@@ -1376,6 +1405,7 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 			name: property
 			span: span
 		}
+		span:  p.span_from(start)
 	}
 }
 
@@ -1400,7 +1430,7 @@ fn (mut p Parser) parse_function_call_expression(name string, name_span sp.Span)
 			span: name_span
 		}
 		arguments:  arguments
-		span:       name_span
+		span:       p.span_from(name_span)
 	}
 }
 
