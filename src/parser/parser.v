@@ -4,6 +4,7 @@ import scanner
 import token
 import ast
 import diagnostic
+import span as sp
 
 pub enum ParseContext {
 	top_level
@@ -72,14 +73,8 @@ fn (mut p Parser) add_warning(message string) {
 		message)
 }
 
-fn (p Parser) current_span() ast.Span {
-	tok_len := if lit := p.current_token.literal { lit.len } else { 1 }
-	return ast.Span{
-		start_line:   p.current_token.line
-		start_column: p.current_token.column
-		end_line:     p.current_token.line
-		end_column:   p.current_token.column + tok_len
-	}
+fn (p Parser) current_span() sp.Span {
+	return sp.point_span(p.current_token.line, p.current_token.column)
 }
 
 fn (mut p Parser) synchronize() {
@@ -1212,7 +1207,7 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	}
 }
 
-fn (mut p Parser) parse_struct_init_expression(name string, name_span ast.Span) !ast.Expression {
+fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !ast.Expression {
 	p.eat(.punc_open_brace)!
 	p.push_context(.struct_init)
 
@@ -1374,7 +1369,7 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 	}
 }
 
-fn (mut p Parser) parse_function_call_expression(name string, span ast.Span) !ast.Expression {
+fn (mut p Parser) parse_function_call_expression(name string, name_span sp.Span) !ast.Expression {
 	p.eat(.punc_open_paren)!
 
 	mut arguments := []ast.Expression{}
@@ -1392,10 +1387,10 @@ fn (mut p Parser) parse_function_call_expression(name string, span ast.Span) !as
 	return ast.FunctionCallExpression{
 		identifier: ast.Identifier{
 			name: name
-			span: span
+			span: name_span
 		}
 		arguments:  arguments
-		span:       span
+		span:       name_span
 	}
 }
 

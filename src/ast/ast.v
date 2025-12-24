@@ -1,14 +1,7 @@
 module ast
 
 import token
-
-pub struct Span {
-pub:
-	start_line   int @[required]
-	start_column int @[required]
-	end_line     int @[required]
-	end_column   int @[required]
-}
+import span { Span }
 
 pub struct StringLiteral {
 pub:

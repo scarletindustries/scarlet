@@ -8,6 +8,7 @@ import bytecode
 import vm
 import diagnostic
 import types
+import span { point_span }
 
 pub fn run(version string) {
 	println('al ${version} REPL')
@@ -142,14 +143,8 @@ fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
 
 	combined_ast := ast.BlockExpression{
 		body:       combined_body
-		span:       ast.Span{
-			line:   1
-			column: 1
-		}
-		close_span: ast.Span{
-			line:   1
-			column: 1
-		}
+		span:       point_span(1, 1)
+		close_span: point_span(1, 1)
 	}
 
 	check_result := types.check(combined_ast)
