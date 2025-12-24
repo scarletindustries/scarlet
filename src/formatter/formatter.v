@@ -153,7 +153,7 @@ fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
 
 fn (mut f Formatter) format_block(block ast.BlockExpression, is_top_level bool) {
 	for i, expr in block.body {
-		expr_span := ast.get_span(expr)
+		expr_span := expr.span
 		if expr_span.start_line > 0 {
 			f.emit_trivia_for_span(expr_span)
 		}
@@ -295,8 +295,16 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 			f.emit('error ')
 			f.format_expr(expr.expression)
 		}
+		ast.FunctionDeclaration {
+			f.format_function_declaration(expr)
+		}
 		ast.FunctionExpression {
-			f.format_function(expr)
+			f.format_function_expression(expr)
+		}
+		ast.TypePatternBinding {
+			f.format_type(expr.typ)
+			f.emit(' = ')
+			f.format_expr(expr.init)
 		}
 		ast.FunctionCallExpression {
 			f.emit(expr.identifier.name)
@@ -459,13 +467,35 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 	}
 }
 
-fn (mut f Formatter) format_function(func ast.FunctionExpression) {
-	f.emit('fn')
-	if id := func.identifier {
-		f.emit(' ')
-		f.emit(id.name)
-	}
+fn (mut f Formatter) format_function_declaration(func ast.FunctionDeclaration) {
+	f.emit('fn ')
+	f.emit(func.identifier.name)
 	f.emit('(')
+	for i, param in func.params {
+		if i > 0 {
+			f.emit(', ')
+		}
+		f.emit(param.identifier.name)
+		if typ := param.typ {
+			f.emit(' ')
+			f.format_type(typ)
+		}
+	}
+	f.emit(')')
+	if ret := func.return_type {
+		f.emit(' ')
+		f.format_type(ret)
+	}
+	if err := func.error_type {
+		f.emit('!')
+		f.format_type(err)
+	}
+	f.emit(' ')
+	f.format_block_inline(func.body)
+}
+
+fn (mut f Formatter) format_function_expression(func ast.FunctionExpression) {
+	f.emit('fn(')
 	for i, param in func.params {
 		if i > 0 {
 			f.emit(', ')
@@ -535,7 +565,7 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 		f.emit('{\n')
 		f.indent++
 		for expr in block.body {
-			expr_span := ast.get_span(expr)
+			expr_span := expr.span
 			if expr_span.start_line > 0 {
 				f.emit_trivia_for_span(expr_span)
 			}
@@ -585,12 +615,12 @@ fn (f Formatter) is_simple_expr(expr ast.Expression) bool {
 }
 
 fn (f Formatter) has_trivia(expr ast.Expression) bool {
-	expr_span := ast.get_span(expr)
+	expr_span := expr.span
 	return f.has_trivia_at_span(expr_span)
 }
 
 fn (f Formatter) has_comment_trivia(expr ast.Expression) bool {
-	expr_span := ast.get_span(expr)
+	expr_span := expr.span
 	return f.has_comment_trivia_at_span(expr_span)
 }
 

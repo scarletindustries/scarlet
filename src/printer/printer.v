@@ -90,6 +90,9 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.ConstBinding {
 			'const ${expr.identifier.name} = ${print_expression(expr.init, level)}'
 		}
+		ast.TypePatternBinding {
+			'${print_expression(expr.typ, level)} = ${print_expression(expr.init, level)}'
+		}
 		ast.BinaryExpression {
 			op := match expr.op.kind {
 				.punc_plus { '+' }

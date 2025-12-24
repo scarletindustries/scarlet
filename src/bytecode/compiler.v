@@ -263,6 +263,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.emit_arg(.store_local, idx)
 			c.emit(.push_none)
 		}
+		typed_ast.TypePatternBinding {
+			c.compile_expr(expr.init)!
+			c.emit(.pop)
+			c.emit(.push_none)
+		}
 		typed_ast.BinaryExpression {
 			if expr.op.kind == .logical_and {
 				c.compile_expr(expr.left)!
@@ -442,8 +447,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 		typed_ast.SpreadExpression {
 			return error('SpreadExpression should only appear inside ArrayExpression')
 		}
+		typed_ast.FunctionDeclaration {
+			c.compile_function_declaration(expr)!
+		}
 		typed_ast.FunctionExpression {
-			c.compile_function(expr)!
+			c.compile_function_expression(expr)!
 		}
 		typed_ast.FunctionCallExpression {
 			func_type := c.type_env.lookup_function(expr.identifier.name)
@@ -690,16 +698,30 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 	}
 }
 
-fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
+fn (mut c Compiler) compile_function_declaration(func typed_ast.FunctionDeclaration) ! {
+	c.compile_function_common(func.identifier.name, func.params, func.body)!
+
+	// Store the function in a local variable
+	idx := c.get_or_create_local(func.identifier.name)
+	c.emit_arg(.store_local, idx)
+	c.emit(.push_none)
+}
+
+fn (mut c Compiler) compile_function_expression(func typed_ast.FunctionExpression) ! {
+	c.compile_function_common(none, func.params, func.body)!
+}
+
+fn (mut c Compiler) compile_function_common(name ?string, params []typed_ast.FunctionParameter, body typed_ast.Expression) ! {
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
 	old_captures := c.captures.clone()
 	old_capture_names := c.capture_names.clone()
 
 	mut scope_locals := old_locals.clone()
-	if id := func.identifier {
-		scope_locals[id.name] = c.local_count
+	if n := name {
+		scope_locals[n] = c.local_count
 	}
+
 	c.outer_scopes << Scope{
 		locals: scope_locals
 	}
@@ -712,20 +734,20 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 	c.captures = {}
 	c.capture_names = []
 
-	for param in func.params {
+	for param in params {
 		c.get_or_create_local(param.identifier.name)
 	}
 
 	func_start := c.current_addr()
 
 	old_binding := c.current_binding
-	if id := func.identifier {
-		c.current_binding = id.name
+	if n := name {
+		c.current_binding = n
 	}
 
 	old_tail := c.in_tail_position
 	c.in_tail_position = true
-	c.compile_expr(func.body)!
+	c.compile_expr(body)!
 	c.in_tail_position = old_tail
 	c.current_binding = old_binding
 	c.emit(.ret)
@@ -736,13 +758,9 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 	capture_count := captured_names.len
 
 	func_idx := c.program.functions.len
-	mut name := '__anon__'
-	if id := func.identifier {
-		name = id.name
-	}
 	c.program.functions << Function{
-		name:          name
-		arity:         func.params.len
+		name:          name or { '__anon__' }
+		arity:         params.len
 		locals:        c.local_count
 		capture_count: capture_count
 		code_start:    func_start
@@ -767,12 +785,6 @@ fn (mut c Compiler) compile_function(func typed_ast.FunctionExpression) ! {
 	}
 
 	c.emit_arg(.make_closure, func_idx)
-
-	if id := func.identifier {
-		idx := c.get_or_create_local(id.name)
-		c.emit_arg(.store_local, idx)
-		c.emit(.push_none)
-	}
 }
 
 fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {

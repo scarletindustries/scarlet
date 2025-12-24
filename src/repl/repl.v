@@ -106,12 +106,13 @@ fn is_input_complete(input string) bool {
 
 fn is_definition_expr(expr ast.Expression) bool {
 	return match expr {
-		ast.FunctionExpression { expr.identifier != none }
-		ast.StructExpression { true }
-		ast.EnumExpression { true }
-		ast.VariableBinding { true }
-		ast.ConstBinding { true }
-		else { false }
+		ast.FunctionDeclaration, ast.StructExpression, ast.EnumExpression, ast.VariableBinding,
+		ast.ConstBinding {
+			true
+		}
+		else {
+			false
+		}
 	}
 }
 

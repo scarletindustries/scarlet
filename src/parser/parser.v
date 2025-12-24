@@ -501,7 +501,7 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				if p.current_token.leading_trivia.len > 0 {
 					break
 				}
-				start := ast.get_span(expr)
+				start := expr.span
 				p.eat(.punc_open_bracket)!
 				index := p.parse_expression()!
 				p.eat(.punc_close_bracket)!
@@ -512,7 +512,7 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				}
 			}
 			.punc_question_mark {
-				start := ast.get_span(expr)
+				start := expr.span
 				p.eat(.punc_question_mark)!
 				expr = ast.PropagateNoneExpression{
 					expression: expr
@@ -520,7 +520,7 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 				}
 			}
 			.punc_dotdot {
-				start := ast.get_span(expr)
+				start := expr.span
 				p.eat(.punc_dotdot)!
 				end := p.parse_expression()!
 				expr = ast.RangeExpression{
@@ -646,6 +646,22 @@ fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
 	if p.current_token.kind == .punc_equals {
 		p.eat(.punc_equals)!
 		init := p.parse_expression()!
+
+		// Uppercase name followed by = is a type pattern binding
+		if name.len > 0 && name[0] >= `A` && name[0] <= `Z` {
+			return ast.TypePatternBinding{
+				typ:  ast.TypeIdentifier{
+					identifier: ast.Identifier{
+						name: name
+						span: span
+					}
+					span:       span
+				}
+				init: init
+				span: p.span_from(span)
+			}
+		}
+
 		return ast.VariableBinding{
 			identifier: ast.Identifier{
 				name: name
@@ -938,6 +954,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 					name: 'None'
 					span: span
 				}
+				span:       span
 			}
 		} else {
 			inner := p.parse_type_identifier()!
@@ -949,6 +966,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 				param_types: inner.param_types
 				return_type: inner.return_type
 				error_type:  inner.error_type
+				span:        inner.span
 			}
 		}
 	} else if p.current_token.kind == .identifier || p.current_token.kind == .punc_open_bracket {
@@ -962,8 +980,19 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 
 	body := p.parse_block_expression()!
 
+	// Named function = declaration, anonymous = expression
+	if id := identifier {
+		return ast.FunctionDeclaration{
+			identifier:  id
+			params:      params
+			return_type: return_type
+			error_type:  error_type
+			body:        body
+			span:        fn_span
+		}
+	}
+
 	return ast.FunctionExpression{
-		identifier:  identifier
 		params:      params
 		return_type: return_type
 		error_type:  error_type
@@ -1044,7 +1073,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 
 	// Array type: []T where T can itself be an array type
 	if p.current_token.kind == .punc_open_bracket {
-		span := p.current_span()
+		start_span := p.current_span()
 		p.eat(.punc_open_bracket)!
 		p.eat(.punc_close_bracket)!
 		inner := p.parse_type_identifier()!
@@ -1053,8 +1082,9 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 			is_array:     true
 			element_type: &inner
 			identifier:   ast.Identifier{
-				span: span
-			} // empty, element_type holds the real type
+				span: start_span
+			}
+			span:         p.span_from(start_span)
 		}
 	}
 
@@ -1072,6 +1102,7 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 			name: name
 			span: span
 		}
+		span:       span
 	}
 }
 
@@ -1118,6 +1149,7 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 		param_types: param_types
 		return_type: return_type
 		error_type:  error_type
+		span:        p.span_from(span)
 	}
 }
 
@@ -1384,7 +1416,7 @@ fn (mut p Parser) parse_error_expression() !ast.Expression {
 }
 
 fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
-	start := ast.get_span(left)
+	start := left.span
 	p.eat(.punc_dot)!
 
 	span := p.current_span()

@@ -55,6 +55,7 @@ pub:
 	param_types  []TypeIdentifier
 	return_type  ?&TypeIdentifier
 	error_type   ?&TypeIdentifier
+	span         Span @[required]
 }
 
 pub struct Operator {
@@ -78,15 +79,31 @@ pub:
 	span       Span @[required]
 }
 
+pub struct TypePatternBinding {
+pub:
+	typ  TypeIdentifier
+	init Expression
+	span Span @[required]
+}
+
 pub struct FunctionParameter {
 pub:
 	identifier Identifier
 	typ        ?TypeIdentifier
 }
 
+pub struct FunctionDeclaration {
+pub:
+	identifier  Identifier
+	return_type ?TypeIdentifier
+	error_type  ?TypeIdentifier
+	params      []FunctionParameter
+	body        Expression
+	span        Span @[required]
+}
+
 pub struct FunctionExpression {
 pub:
-	identifier  ?Identifier
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
 	params      []FunctionParameter
@@ -286,6 +303,7 @@ pub type Expression = ArrayExpression
 	| ErrorNode
 	| ExportExpression
 	| FunctionCallExpression
+	| FunctionDeclaration
 	| FunctionExpression
 	| Identifier
 	| IfExpression
@@ -304,6 +322,7 @@ pub type Expression = ArrayExpression
 	| StructExpression
 	| StructInitExpression
 	| TypeIdentifier
+	| TypePatternBinding
 	| UnaryExpression
 	| VariableBinding
 	| WildcardPattern
