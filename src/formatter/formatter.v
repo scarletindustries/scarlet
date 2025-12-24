@@ -6,6 +6,7 @@ import scanner
 import parser
 import diagnostic
 import strings
+import span { Span }
 
 pub struct FormatResult {
 pub:
@@ -102,8 +103,8 @@ fn (mut f Formatter) emit_indent() {
 	f.at_line_start = false
 }
 
-fn (mut f Formatter) emit_trivia_for_span(span ast.Span) {
-	key := '${span.line}:${span.column}'
+fn (mut f Formatter) emit_trivia_for_span(s Span) {
+	key := '${s.start_line}:${s.start_column}'
 	if trivia := f.trivia_map[key] {
 		f.emit_trivia(trivia)
 	}
@@ -145,9 +146,9 @@ fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
 
 fn (mut f Formatter) format_block(block ast.BlockExpression, is_top_level bool) {
 	for i, expr in block.body {
-		span := ast.get_span(expr)
-		if span.line > 0 {
-			f.emit_trivia_for_span(span)
+		expr_span := ast.get_span(expr)
+		if expr_span.start_line > 0 {
+			f.emit_trivia_for_span(expr_span)
 		}
 
 		if !f.at_line_start && i > 0 {
@@ -267,7 +268,7 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.format_expr(arm.body)
 				f.emit(',\n')
 			}
-			if expr.close_span.line > 0 {
+			if expr.close_span.start_line > 0 {
 				f.emit_trivia_for_span(expr.close_span)
 			}
 			f.indent--
@@ -349,7 +350,7 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.emit(',\n')
 			}
-			if expr.close_span.line > 0 {
+			if expr.close_span.start_line > 0 {
 				f.emit_trivia_for_span(expr.close_span)
 			}
 			f.indent--
@@ -406,7 +407,7 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				}
 				f.emit('\n')
 			}
-			if expr.close_span.line > 0 {
+			if expr.close_span.start_line > 0 {
 				f.emit_trivia_for_span(expr.close_span)
 			}
 			f.indent--
@@ -527,9 +528,9 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 		f.emit('{\n')
 		f.indent++
 		for expr in block.body {
-			span := ast.get_span(expr)
-			if span.line > 0 {
-				f.emit_trivia_for_span(span)
+			expr_span := ast.get_span(expr)
+			if expr_span.start_line > 0 {
+				f.emit_trivia_for_span(expr_span)
 			}
 			if f.at_line_start {
 				f.emit_indent()
@@ -537,7 +538,7 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 			f.format_expr(expr)
 			f.emit('\n')
 		}
-		if block.close_span.line > 0 {
+		if block.close_span.start_line > 0 {
 			f.emit_trivia_for_span(block.close_span)
 		}
 		f.indent--
@@ -577,18 +578,18 @@ fn (f Formatter) is_simple_expr(expr ast.Expression) bool {
 }
 
 fn (f Formatter) has_trivia(expr ast.Expression) bool {
-	span := ast.get_span(expr)
-	return f.has_trivia_at_span(span)
+	expr_span := ast.get_span(expr)
+	return f.has_trivia_at_span(expr_span)
 }
 
 fn (f Formatter) has_comment_trivia(expr ast.Expression) bool {
-	span := ast.get_span(expr)
-	return f.has_comment_trivia_at_span(span)
+	expr_span := ast.get_span(expr)
+	return f.has_comment_trivia_at_span(expr_span)
 }
 
-fn (f Formatter) has_trivia_at_span(span ast.Span) bool {
-	if span.line > 0 {
-		key := '${span.line}:${span.column}'
+fn (f Formatter) has_trivia_at_span(s Span) bool {
+	if s.start_line > 0 {
+		key := '${s.start_line}:${s.start_column}'
 		if _ := f.trivia_map[key] {
 			return true
 		}
@@ -596,9 +597,9 @@ fn (f Formatter) has_trivia_at_span(span ast.Span) bool {
 	return false
 }
 
-fn (f Formatter) has_comment_trivia_at_span(span ast.Span) bool {
-	if span.line > 0 {
-		key := '${span.line}:${span.column}'
+fn (f Formatter) has_comment_trivia_at_span(s Span) bool {
+	if s.start_line > 0 {
+		key := '${s.start_line}:${s.start_column}'
 		if trivia := f.trivia_map[key] {
 			for t in trivia {
 				if t.kind == .line_comment {

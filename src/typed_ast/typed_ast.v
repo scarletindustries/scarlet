@@ -2,12 +2,7 @@ module typed_ast
 
 import token
 import type_def { Type }
-
-pub struct Span {
-pub:
-	line   int @[required]
-	column int @[required]
-}
+import span { Span }
 
 pub struct StringLiteral {
 pub:

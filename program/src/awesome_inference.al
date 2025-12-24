@@ -18,6 +18,7 @@ countdown = fn(n) {
 		countdown(n - 1)
 	}
 }
+
 countdown(3)
 
 fn countdown2(n) {
