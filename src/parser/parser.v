@@ -244,22 +244,23 @@ fn (mut p Parser) eat_token_literal(kind token.Kind, message string) !string {
 
 pub fn (mut p Parser) parse_program() ParseResult {
 	program_span := p.current_span()
-	mut body := []ast.Expression{}
+	mut body := []ast.Node{}
 
 	for p.current_token.kind != .eof {
 		span := p.current_span()
-		expr := p.parse_expression() or {
+		node := p.parse_node() or {
 			p.add_error(err.msg())
 			p.synchronize()
 
-			body << ast.ErrorNode{
+			err_expr := ast.Expression(ast.ErrorNode{
 				message: err.msg()
 				span:    span
-			}
+			})
+			body << ast.Node(err_expr)
 			continue
 		}
 
-		body << expr
+		body << node
 	}
 
 	return ParseResult{
@@ -269,6 +270,45 @@ pub fn (mut p Parser) parse_program() ParseResult {
 		}
 		diagnostics: p.diagnostics
 	}
+}
+
+fn (mut p Parser) parse_node() !ast.Node {
+	// Try to parse as a statement first (keywords)
+	match p.current_token.kind {
+		.kw_const {
+			return ast.Node(p.parse_const_binding()!)
+		}
+		.kw_function {
+			return p.parse_function()!
+		}
+		.kw_struct {
+			return ast.Node(p.parse_struct_declaration()!)
+		}
+		.kw_enum {
+			return ast.Node(p.parse_enum_declaration()!)
+		}
+		.kw_import {
+			return ast.Node(p.parse_import_declaration()!)
+		}
+		.kw_export {
+			return ast.Node(p.parse_export_declaration()!)
+		}
+		.identifier {
+			// Check for binding patterns: identifier = or identifier Type =
+			if next := p.peek_next() {
+				if next.kind == .punc_equals {
+					return ast.Node(p.parse_binding()!)
+				}
+				// Check if it's an identifier followed by a type annotation
+				if p.is_type_start_at_next() {
+					return ast.Node(p.parse_binding()!)
+				}
+			}
+		}
+		else {}
+	}
+	// Otherwise parse as expression
+	return ast.Node(p.parse_expression()!)
 }
 
 fn (mut p Parser) peek_next() ?token.Token {
@@ -556,7 +596,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			p.parse_number_expression()!
 		}
 		.identifier {
-			p.parse_identifier_or_binding()!
+			p.parse_identifier_or_call()!
 		}
 		.punc_open_paren {
 			p.eat(.punc_open_paren)!
@@ -602,21 +642,6 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		.kw_function {
 			p.parse_function_expression()!
 		}
-		.kw_struct {
-			p.parse_struct_expression()!
-		}
-		.kw_enum {
-			p.parse_enum_expression()!
-		}
-		.kw_const {
-			p.parse_const_binding()!
-		}
-		.kw_export {
-			p.parse_export_expression()!
-		}
-		.kw_from {
-			p.parse_import_declaration()!
-		}
 		.kw_assert {
 			p.parse_assert_expression()!
 		}
@@ -639,53 +664,9 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 	return expr
 }
 
-fn (mut p Parser) parse_identifier_or_binding() !ast.Expression {
+fn (mut p Parser) parse_identifier_or_call() !ast.Expression {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
-
-	if p.current_token.kind == .punc_equals {
-		p.eat(.punc_equals)!
-		init := p.parse_expression()!
-
-		// Uppercase name followed by = is a type pattern binding
-		if name.len > 0 && name[0] >= `A` && name[0] <= `Z` {
-			return ast.TypePatternBinding{
-				typ:  ast.TypeIdentifier{
-					identifier: ast.Identifier{
-						name: name
-						span: span
-					}
-					span:       span
-				}
-				init: init
-				span: p.span_from(span)
-			}
-		}
-
-		return ast.VariableBinding{
-			identifier: ast.Identifier{
-				name: name
-				span: span
-			}
-			init:       init
-			span:       span
-		}
-	}
-
-	if p.is_type_start() {
-		typ := p.parse_type_identifier()!
-		p.eat(.punc_equals)!
-		init := p.parse_expression()!
-		return ast.VariableBinding{
-			identifier: ast.Identifier{
-				name: name
-				span: span
-			}
-			typ:        typ
-			init:       init
-			span:       span
-		}
-	}
 
 	if p.current_token.kind == .punc_open_paren {
 		return p.parse_function_call_expression(name, span)!
@@ -714,20 +695,21 @@ fn (mut p Parser) parse_block_expression() !ast.Expression {
 	p.eat(.punc_open_brace)!
 	p.push_context(.block)
 
-	mut body := []ast.Expression{}
+	mut body := []ast.Node{}
 
 	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
 		span := p.current_span()
-		expr := p.parse_expression() or {
+		node := p.parse_node() or {
 			p.add_error(err.msg())
 			p.synchronize()
-			body << ast.ErrorNode{
+			err_expr := ast.Expression(ast.ErrorNode{
 				message: err.msg()
 				span:    span
-			}
+			})
+			body << ast.Node(err_expr)
 			continue
 		}
-		body << expr
+		body << node
 	}
 
 	p.pop_context()
@@ -925,22 +907,58 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 }
 
+fn (mut p Parser) parse_function() !ast.Node {
+	// Check if next token is identifier (declaration) or paren (expression)
+	if next := p.peek_next() {
+		if next.kind == .identifier {
+			return ast.Node(p.parse_function_declaration()!)
+		}
+	}
+	return ast.Node(p.parse_function_expression()!)
+}
+
+fn (mut p Parser) parse_function_declaration() !ast.Statement {
+	fn_span := p.current_span()
+	p.eat(.kw_function)!
+
+	id_span := p.current_span()
+	name := p.eat_token_literal(.identifier, 'Expected function name')!
+
+	params := p.parse_parameters()!
+	return_type, error_type := p.parse_function_return_types()!
+	body := p.parse_block_expression()!
+
+	return ast.FunctionDeclaration{
+		identifier:  ast.Identifier{
+			name: name
+			span: id_span
+		}
+		params:      params
+		return_type: return_type
+		error_type:  error_type
+		body:        body
+		span:        fn_span
+	}
+}
+
 fn (mut p Parser) parse_function_expression() !ast.Expression {
 	fn_span := p.current_span()
 	p.eat(.kw_function)!
 
-	mut identifier := ?ast.Identifier(none)
-	if p.current_token.kind == .identifier {
-		id_span := p.current_span()
-		name := p.eat_token_literal(.identifier, 'Expected function name')!
-		identifier = ast.Identifier{
-			name: name
-			span: id_span
-		}
-	}
-
 	params := p.parse_parameters()!
+	return_type, error_type := p.parse_function_return_types()!
+	body := p.parse_block_expression()!
 
+	return ast.FunctionExpression{
+		params:      params
+		return_type: return_type
+		error_type:  error_type
+		body:        body
+		span:        fn_span
+	}
+}
+
+fn (mut p Parser) parse_function_return_types() !(?ast.TypeIdentifier, ?ast.TypeIdentifier) {
 	mut return_type := ?ast.TypeIdentifier(none)
 	mut error_type := ?ast.TypeIdentifier(none)
 
@@ -978,27 +996,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 		error_type = p.parse_type_identifier()!
 	}
 
-	body := p.parse_block_expression()!
-
-	// Named function = declaration, anonymous = expression
-	if id := identifier {
-		return ast.FunctionDeclaration{
-			identifier:  id
-			params:      params
-			return_type: return_type
-			error_type:  error_type
-			body:        body
-			span:        fn_span
-		}
-	}
-
-	return ast.FunctionExpression{
-		params:      params
-		return_type: return_type
-		error_type:  error_type
-		body:        body
-		span:        fn_span
-	}
+	return return_type, error_type
 }
 
 fn (mut p Parser) parse_parameters() ![]ast.FunctionParameter {
@@ -1056,6 +1054,26 @@ fn (mut p Parser) is_type_start() bool {
 
 	if p.current_token.kind == .identifier {
 		if name := p.current_token.literal {
+			return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
+		}
+	}
+
+	return false
+}
+
+fn (mut p Parser) is_type_start_at_next() bool {
+	next := p.peek_next() or { return false }
+
+	if next.kind == .punc_question_mark {
+		return true
+	}
+
+	if next.kind == .punc_open_bracket {
+		return true
+	}
+
+	if next.kind == .identifier {
+		if name := next.literal {
 			return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
 		}
 	}
@@ -1153,7 +1171,7 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 	}
 }
 
-fn (mut p Parser) parse_struct_expression() !ast.Expression {
+fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 	struct_span := p.current_span()
 	p.eat(.kw_struct)!
 
@@ -1173,7 +1191,7 @@ fn (mut p Parser) parse_struct_expression() !ast.Expression {
 	p.pop_context()
 	p.eat(.punc_close_brace)!
 
-	return ast.StructExpression{
+	return ast.StructDeclaration{
 		identifier: ast.Identifier{
 			name: name
 			span: id_span
@@ -1210,7 +1228,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 	}
 }
 
-fn (mut p Parser) parse_enum_expression() !ast.Expression {
+fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 	enum_span := p.current_span()
 	p.eat(.kw_enum)!
 
@@ -1230,7 +1248,7 @@ fn (mut p Parser) parse_enum_expression() !ast.Expression {
 	p.pop_context()
 	p.eat(.punc_close_brace)!
 
-	return ast.EnumExpression{
+	return ast.EnumDeclaration{
 		identifier: ast.Identifier{
 			name: name
 			span: id_span
@@ -1311,7 +1329,7 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 	}
 }
 
-fn (mut p Parser) parse_const_binding() !ast.Expression {
+fn (mut p Parser) parse_const_binding() !ast.Statement {
 	span := p.current_span()
 	p.eat(.kw_const)!
 
@@ -1338,19 +1356,66 @@ fn (mut p Parser) parse_const_binding() !ast.Expression {
 	}
 }
 
-fn (mut p Parser) parse_export_expression() !ast.Expression {
+fn (mut p Parser) parse_binding() !ast.Statement {
 	span := p.current_span()
-	p.eat(.kw_export)!
+	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-	expr := p.parse_expression()!
+	// Check for type annotation
+	mut typ := ?ast.TypeIdentifier(none)
+	if p.is_type_start() {
+		typ = p.parse_type_identifier()!
+	}
 
-	return ast.ExportExpression{
-		expression: expr
-		span:       span
+	p.eat(.punc_equals)!
+	init := p.parse_expression()!
+
+	// Uppercase name followed by = is a type pattern binding
+	if name.len > 0 && name[0] >= `A` && name[0] <= `Z` && typ == none {
+		return ast.TypePatternBinding{
+			typ:  ast.TypeIdentifier{
+				identifier: ast.Identifier{
+					name: name
+					span: span
+				}
+				span:       span
+			}
+			init: init
+			span: p.span_from(span)
+		}
+	}
+
+	return ast.VariableBinding{
+		identifier: ast.Identifier{
+			name: name
+			span: span
+		}
+		typ:        typ
+		init:       init
+		span:       p.span_from(span)
 	}
 }
 
-fn (mut p Parser) parse_import_declaration() !ast.Expression {
+fn (mut p Parser) parse_export_declaration() !ast.Statement {
+	span := p.current_span()
+	p.eat(.kw_export)!
+
+	// Export must be followed by a statement (function, struct, enum, const, or binding)
+	decl := match p.current_token.kind {
+		.kw_function { p.parse_function_declaration()! }
+		.kw_struct { p.parse_struct_declaration()! }
+		.kw_enum { p.parse_enum_declaration()! }
+		.kw_const { p.parse_const_binding()! }
+		.identifier { p.parse_binding()! }
+		else { return error('Expected declaration after export') }
+	}
+
+	return ast.ExportDeclaration{
+		declaration: decl
+		span:        span
+	}
+}
+
+fn (mut p Parser) parse_import_declaration() !ast.Statement {
 	import_span := p.current_span()
 	p.eat(.kw_from)!
 

@@ -3,6 +3,10 @@ module printer
 import ast
 import strings
 
+pub fn print_node(node ast.Node) string {
+	return print_node_at_level(node, 0)
+}
+
 pub fn print_expr(expr ast.Expression) string {
 	return print_expression(expr, 0)
 }
@@ -11,13 +15,78 @@ fn indent(level int) string {
 	return strings.repeat(`\t`, level)
 }
 
-fn print_function_expression_or_declaration(level int, identifier ?ast.Identifier, params []ast.FunctionParameter, body ast.Expression, return_type ?ast.TypeIdentifier,
-	error_type ?ast.TypeIdentifier) string {
-	mut s := 'fn '
-	if id := identifier {
-		s += id.name
+fn print_node_at_level(node ast.Node, level int) string {
+	return match node {
+		ast.Statement { print_statement(node, level) }
+		ast.Expression { print_expression(node, level) }
 	}
-	s += '('
+}
+
+fn print_statement(stmt ast.Statement, level int) string {
+	return match stmt {
+		ast.VariableBinding {
+			'${stmt.identifier.name} = ${print_expression(stmt.init, level)}'
+		}
+		ast.ConstBinding {
+			'const ${stmt.identifier.name} = ${print_expression(stmt.init, level)}'
+		}
+		ast.TypePatternBinding {
+			'${print_expression(stmt.typ, level)} = ${print_expression(stmt.init, level)}'
+		}
+		ast.FunctionDeclaration {
+			print_function(level, stmt.identifier, stmt.params, stmt.body, stmt.return_type,
+				stmt.error_type)
+		}
+		ast.StructDeclaration {
+			mut s := 'struct ${stmt.identifier.name} {\n'
+			for field in stmt.fields {
+				s += '${indent(level + 1)}${field.identifier.name} ${print_expression(field.typ,
+					level + 1)}'
+				if init := field.init {
+					s += ' = ${print_expression(init, level + 1)}'
+				}
+				s += ',\n'
+			}
+			s += '${indent(level)}}'
+			s
+		}
+		ast.EnumDeclaration {
+			mut s := 'enum ${stmt.identifier.name} {\n'
+			for variant in stmt.variants {
+				s += '${indent(level + 1)}${variant.identifier.name}'
+				if variant.payload.len > 0 {
+					s += '('
+					for i, payload in variant.payload {
+						if i > 0 {
+							s += ', '
+						}
+						s += print_expression(payload, level + 1)
+					}
+					s += ')'
+				}
+				s += ',\n'
+			}
+			s += '${indent(level)}}'
+			s
+		}
+		ast.ImportDeclaration {
+			mut s := "from '${stmt.path}' import "
+			for i, spec in stmt.specifiers {
+				if i > 0 {
+					s += ', '
+				}
+				s += spec.identifier.name
+			}
+			s
+		}
+		ast.ExportDeclaration {
+			'export ${print_statement(stmt.declaration, level)}'
+		}
+	}
+}
+
+fn print_function(level int, identifier ast.Identifier, params []ast.FunctionParameter, body ast.Expression, return_type ?ast.TypeIdentifier, error_type ?ast.TypeIdentifier) string {
+	mut s := 'fn ${identifier.name}('
 	for i, param in params {
 		if i > 0 {
 			s += ', '
@@ -84,15 +153,6 @@ fn print_expression(expr ast.Expression, level int) string {
 			s += expr.identifier.name
 			s
 		}
-		ast.VariableBinding {
-			'${expr.identifier.name} = ${print_expression(expr.init, level)}'
-		}
-		ast.ConstBinding {
-			'const ${expr.identifier.name} = ${print_expression(expr.init, level)}'
-		}
-		ast.TypePatternBinding {
-			'${print_expression(expr.typ, level)} = ${print_expression(expr.init, level)}'
-		}
 		ast.BinaryExpression {
 			op := match expr.op.kind {
 				.punc_plus { '+' }
@@ -127,11 +187,11 @@ fn print_expression(expr ast.Expression, level int) string {
 			if expr.body.len == 0 {
 				'{}'
 			} else if expr.body.len == 1 {
-				'{ ${print_expression(expr.body[0], level)} }'
+				'{ ${print_node_at_level(expr.body[0], level)} }'
 			} else {
 				mut s := '{\n'
 				for e in expr.body {
-					s += '${indent(level + 1)}${print_expression(e, level + 1)}\n'
+					s += '${indent(level + 1)}${print_node_at_level(e, level + 1)}\n'
 				}
 				s += '${indent(level)}}'
 				s
@@ -148,7 +208,7 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.MatchExpression {
 			mut s := 'match ${print_expression(expr.subject, level)} {\n'
 			for arm in expr.arms {
-				s += '${indent(level + 1)}${print_expression(arm.pattern, level + 1)} => ${print_expression(arm.body,
+				s += '${indent(level + 1)}${print_expression(arm.pattern, level + 1)} -> ${print_expression(arm.body,
 					level + 1)},\n'
 			}
 			s += '${indent(level)}}'
@@ -157,7 +217,7 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.OrExpression {
 			mut s := '${print_expression(expr.expression, level)} or '
 			if receiver := expr.receiver {
-				s += '${receiver.name} => '
+				s += '${receiver.name} -> '
 			}
 			s += print_expression(expr.body, level)
 			s
@@ -166,12 +226,25 @@ fn print_expression(expr ast.Expression, level int) string {
 			'error ${print_expression(expr.expression, level)}'
 		}
 		ast.FunctionExpression {
-			print_function_expression_or_declaration(level, none, expr.params, expr.body,
-				expr.return_type, expr.error_type)
-		}
-		ast.FunctionDeclaration {
-			print_function_expression_or_declaration(level, expr.identifier, expr.params,
-				expr.body, expr.return_type, expr.error_type)
+			mut s := 'fn('
+			for i, param in expr.params {
+				if i > 0 {
+					s += ', '
+				}
+				s += param.identifier.name
+				if typ := param.typ {
+					s += ' ${print_expression(typ, level)}'
+				}
+			}
+			s += ')'
+			if ret := expr.return_type {
+				s += ' ${print_expression(ret, level)}'
+			}
+			if err := expr.error_type {
+				s += '!${print_expression(err, level)}'
+			}
+			s += ' ${print_expression(expr.body, level)}'
+			s
 		}
 		ast.FunctionCallExpression {
 			mut s := '${expr.identifier.name}('
@@ -205,19 +278,6 @@ fn print_expression(expr ast.Expression, level int) string {
 		ast.RangeExpression {
 			'${print_expression(expr.start, level)}..${print_expression(expr.end, level)}'
 		}
-		ast.StructExpression {
-			mut s := 'struct ${expr.identifier.name} {\n'
-			for field in expr.fields {
-				s += '${indent(level + 1)}${field.identifier.name} ${print_expression(field.typ,
-					level + 1)}'
-				if init := field.init {
-					s += ' = ${print_expression(init, level + 1)}'
-				}
-				s += ',\n'
-			}
-			s += '${indent(level)}}'
-			s
-		}
 		ast.StructInitExpression {
 			mut s := '${expr.identifier.name}{\n'
 			for field in expr.fields {
@@ -226,38 +286,6 @@ fn print_expression(expr ast.Expression, level int) string {
 			}
 			s += '${indent(level)}}'
 			s
-		}
-		ast.EnumExpression {
-			mut s := 'enum ${expr.identifier.name} {\n'
-			for variant in expr.variants {
-				s += '${indent(level + 1)}${variant.identifier.name}'
-				if variant.payload.len > 0 {
-					s += '('
-					for i, payload in variant.payload {
-						if i > 0 {
-							s += ', '
-						}
-						s += print_expression(payload, level + 1)
-					}
-					s += ')'
-				}
-				s += ',\n'
-			}
-			s += '${indent(level)}}'
-			s
-		}
-		ast.ImportDeclaration {
-			mut s := "from '${expr.path}' import "
-			for i, spec in expr.specifiers {
-				if i > 0 {
-					s += ', '
-				}
-				s += spec.identifier.name
-			}
-			s
-		}
-		ast.ExportExpression {
-			'export ${print_expression(expr.expression, level)}'
 		}
 		ast.SpreadExpression {
 			if inner := expr.expression {

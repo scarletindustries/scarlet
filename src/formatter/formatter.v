@@ -152,10 +152,10 @@ fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
 }
 
 fn (mut f Formatter) format_block(block ast.BlockExpression, is_top_level bool) {
-	for i, expr in block.body {
-		expr_span := expr.span
-		if expr_span.start_line > 0 {
-			f.emit_trivia_for_span(expr_span)
+	for i, node in block.body {
+		node_span := ast.node_span(node)
+		if node_span.start_line > 0 {
+			f.emit_trivia_for_span(node_span)
 		}
 
 		if !f.at_line_start && i > 0 {
@@ -167,10 +167,108 @@ fn (mut f Formatter) format_block(block ast.BlockExpression, is_top_level bool) 
 		} else if f.at_line_start && is_top_level && i > 0 {
 		}
 
-		f.format_expr(expr)
+		f.format_node(node)
 
 		if !f.at_line_start {
 			f.emit('\n')
+		}
+	}
+}
+
+fn (mut f Formatter) format_node(node ast.Node) {
+	match node {
+		ast.Statement { f.format_statement(node) }
+		ast.Expression { f.format_expr(node) }
+	}
+}
+
+fn (mut f Formatter) format_statement(stmt ast.Statement) {
+	match stmt {
+		ast.VariableBinding {
+			f.emit(stmt.identifier.name)
+			if typ := stmt.typ {
+				f.emit(' ')
+				f.format_type(typ)
+			}
+			f.emit(' = ')
+			f.format_expr(stmt.init)
+		}
+		ast.ConstBinding {
+			f.emit('const ')
+			f.emit(stmt.identifier.name)
+			if typ := stmt.typ {
+				f.emit(' ')
+				f.format_type(typ)
+			}
+			f.emit(' = ')
+			f.format_expr(stmt.init)
+		}
+		ast.TypePatternBinding {
+			f.format_type(stmt.typ)
+			f.emit(' = ')
+			f.format_expr(stmt.init)
+		}
+		ast.FunctionDeclaration {
+			f.format_function_declaration(stmt)
+		}
+		ast.StructDeclaration {
+			f.emit('struct ')
+			f.emit(stmt.identifier.name)
+			f.emit(' {\n')
+			f.indent++
+			for field in stmt.fields {
+				f.emit_indent()
+				f.emit(field.identifier.name)
+				f.emit(' ')
+				f.format_type(field.typ)
+				if init := field.init {
+					f.emit(' = ')
+					f.format_expr(init)
+				}
+				f.emit(',\n')
+			}
+			f.indent--
+			f.emit_indent()
+			f.emit('}')
+		}
+		ast.EnumDeclaration {
+			f.emit('enum ')
+			f.emit(stmt.identifier.name)
+			f.emit(' {\n')
+			f.indent++
+			for variant in stmt.variants {
+				f.emit_indent()
+				f.emit(variant.identifier.name)
+				if variant.payload.len > 0 {
+					f.emit('(')
+					for i, p in variant.payload {
+						if i > 0 {
+							f.emit(', ')
+						}
+						f.format_type(p)
+					}
+					f.emit(')')
+				}
+				f.emit(',\n')
+			}
+			f.indent--
+			f.emit_indent()
+			f.emit('}')
+		}
+		ast.ImportDeclaration {
+			f.emit("from '")
+			f.emit(stmt.path)
+			f.emit("' import ")
+			for i, spec in stmt.specifiers {
+				if i > 0 {
+					f.emit(', ')
+				}
+				f.emit(spec.identifier.name)
+			}
+		}
+		ast.ExportDeclaration {
+			f.emit('export ')
+			f.format_statement(stmt.declaration)
 		}
 	}
 }
@@ -208,25 +306,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 		}
 		ast.TypeIdentifier {
 			f.format_type(expr)
-		}
-		ast.VariableBinding {
-			f.emit(expr.identifier.name)
-			if typ := expr.typ {
-				f.emit(' ')
-				f.format_type(typ)
-			}
-			f.emit(' = ')
-			f.format_expr(expr.init)
-		}
-		ast.ConstBinding {
-			f.emit('const ')
-			f.emit(expr.identifier.name)
-			if typ := expr.typ {
-				f.emit(' ')
-				f.format_type(typ)
-			}
-			f.emit(' = ')
-			f.format_expr(expr.init)
 		}
 		ast.BinaryExpression {
 			f.format_expr(expr.left)
@@ -295,16 +374,8 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 			f.emit('error ')
 			f.format_expr(expr.expression)
 		}
-		ast.FunctionDeclaration {
-			f.format_function_declaration(expr)
-		}
 		ast.FunctionExpression {
 			f.format_function_expression(expr)
-		}
-		ast.TypePatternBinding {
-			f.format_type(expr.typ)
-			f.emit(' = ')
-			f.format_expr(expr.init)
 		}
 		ast.FunctionCallExpression {
 			f.emit(expr.identifier.name)
@@ -349,29 +420,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.format_expr(inner)
 			}
 		}
-		ast.StructExpression {
-			f.emit('struct ')
-			f.emit(expr.identifier.name)
-			f.emit(' {\n')
-			f.indent++
-			for field in expr.fields {
-				f.emit_indent()
-				f.emit(field.identifier.name)
-				f.emit(' ')
-				f.format_type(field.typ)
-				if init := field.init {
-					f.emit(' = ')
-					f.format_expr(init)
-				}
-				f.emit(',\n')
-			}
-			if expr.span.end_line > 0 {
-				f.emit_trivia_at_span_end(expr.span)
-			}
-			f.indent--
-			f.emit_indent()
-			f.emit('}')
-		}
 		ast.StructInitExpression {
 			f.emit(expr.identifier.name)
 			f.emit('{')
@@ -401,48 +449,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.emit_indent()
 				f.emit('}')
 			}
-		}
-		ast.EnumExpression {
-			f.emit('enum ')
-			f.emit(expr.identifier.name)
-			f.emit(' {\n')
-			f.indent++
-			for variant in expr.variants {
-				f.emit_indent()
-				f.emit(variant.identifier.name)
-				if variant.payload.len > 0 {
-					f.emit('(')
-					for i, payload in variant.payload {
-						if i > 0 {
-							f.emit(', ')
-						}
-						f.format_type(payload)
-					}
-					f.emit(')')
-				}
-				f.emit('\n')
-			}
-			if expr.span.end_line > 0 {
-				f.emit_trivia_at_span_end(expr.span)
-			}
-			f.indent--
-			f.emit_indent()
-			f.emit('}')
-		}
-		ast.ImportDeclaration {
-			f.emit("from '")
-			f.emit(expr.path)
-			f.emit("' import ")
-			for i, spec in expr.specifiers {
-				if i > 0 {
-					f.emit(', ')
-				}
-				f.emit(spec.identifier.name)
-			}
-		}
-		ast.ExportExpression {
-			f.emit('export ')
-			f.format_expr(expr.expression)
 		}
 		ast.AssertExpression {
 			f.emit('assert ')
@@ -556,23 +562,23 @@ fn (mut f Formatter) format_block_expr(block ast.BlockExpression) {
 	has_close_comment := f.has_comment_trivia_at_span_end(block.span)
 	if block.body.len == 0 && !has_close_comment {
 		f.emit('{}')
-	} else if block.body.len == 1 && f.is_simple_expr(block.body[0])
-		&& !f.has_comment_trivia(block.body[0]) && !has_close_comment {
+	} else if block.body.len == 1 && f.is_simple_node(block.body[0])
+		&& !f.has_comment_trivia_node(block.body[0]) && !has_close_comment {
 		f.emit('{ ')
-		f.format_expr(block.body[0])
+		f.format_node(block.body[0])
 		f.emit(' }')
 	} else {
 		f.emit('{\n')
 		f.indent++
-		for expr in block.body {
-			expr_span := expr.span
-			if expr_span.start_line > 0 {
-				f.emit_trivia_for_span(expr_span)
+		for node in block.body {
+			node_span := ast.node_span(node)
+			if node_span.start_line > 0 {
+				f.emit_trivia_for_span(node_span)
 			}
 			if f.at_line_start {
 				f.emit_indent()
 			}
-			f.format_expr(expr)
+			f.format_node(node)
 			f.emit('\n')
 		}
 		if block.span.end_line > 0 {
@@ -614,6 +620,13 @@ fn (f Formatter) is_simple_expr(expr ast.Expression) bool {
 	}
 }
 
+fn (f Formatter) is_simple_node(node ast.Node) bool {
+	return match node {
+		ast.Statement { false }
+		ast.Expression { f.is_simple_expr(node) }
+	}
+}
+
 fn (f Formatter) has_trivia(expr ast.Expression) bool {
 	expr_span := expr.span
 	return f.has_trivia_at_span(expr_span)
@@ -622,6 +635,11 @@ fn (f Formatter) has_trivia(expr ast.Expression) bool {
 fn (f Formatter) has_comment_trivia(expr ast.Expression) bool {
 	expr_span := expr.span
 	return f.has_comment_trivia_at_span(expr_span)
+}
+
+fn (f Formatter) has_comment_trivia_node(node ast.Node) bool {
+	node_span := ast.node_span(node)
+	return f.has_comment_trivia_at_span(node_span)
 }
 
 fn (f Formatter) has_trivia_at_span(s Span) bool {

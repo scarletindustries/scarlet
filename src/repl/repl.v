@@ -18,7 +18,7 @@ pub fn run(version string) {
 
 	mut input_buffer := ''
 	mut continuation := false
-	mut definitions := []ast.Expression{}
+	mut definitions := []ast.Node{}
 	mut rl := readline.Readline{}
 
 	for {
@@ -104,13 +104,13 @@ fn is_input_complete(input string) bool {
 	return parens <= 0 && brackets <= 0 && braces <= 0
 }
 
-fn is_definition_expr(expr ast.Expression) bool {
-	return match expr {
-		ast.FunctionDeclaration, ast.StructExpression, ast.EnumExpression, ast.VariableBinding,
-		ast.ConstBinding {
+fn is_definition_node(node ast.Node) bool {
+	return match node {
+		ast.Statement {
+			// All statements are definitions (function, struct, enum, variable, const, etc.)
 			true
 		}
-		else {
+		ast.Expression {
 			false
 		}
 	}
@@ -125,7 +125,7 @@ fn has_eof_error(diagnostics []diagnostic.Diagnostic) bool {
 	return false
 }
 
-fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
+fn eval_input(input string, definitions []ast.Node) []ast.Node {
 	mut input_scanner := scanner.new_scanner(input)
 	mut input_parser := parser.new_parser(mut input_scanner)
 	input_parse_result := input_parser.parse_program()
@@ -139,7 +139,7 @@ fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
 		return []
 	}
 
-	mut combined_body := []ast.Expression{}
+	mut combined_body := []ast.Node{}
 	combined_body << definitions
 	combined_body << input_parse_result.ast.body
 
@@ -170,10 +170,10 @@ fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
 
 	println(vm.inspect(run_result))
 
-	mut new_definitions := []ast.Expression{}
-	for expr in input_parse_result.ast.body {
-		if is_definition_expr(expr) {
-			new_definitions << expr
+	mut new_definitions := []ast.Node{}
+	for node in input_parse_result.ast.body {
+		if is_definition_node(node) {
+			new_definitions << node
 		}
 	}
 
