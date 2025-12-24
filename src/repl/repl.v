@@ -5,6 +5,7 @@ import ast
 import scanner
 import parser
 import bytecode
+import flags { Flags }
 import vm
 import diagnostic
 import types
@@ -156,12 +157,12 @@ fn eval_input(input string, definitions []ast.Expression) []ast.Expression {
 		}
 	}
 
-	program := bytecode.compile(check_result.typed_ast, check_result.env) or {
+	program := bytecode.compile(check_result.typed_ast, check_result.env, Flags{}) or {
 		eprintln('Compile error: ${err}')
 		return []
 	}
 
-	mut v := vm.new_vm(program)
+	mut v := vm.new_vm(program, Flags{})
 	run_result := v.run() or {
 		eprintln('Runtime error: ${err}')
 		return []

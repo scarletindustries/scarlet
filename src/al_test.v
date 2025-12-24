@@ -3,6 +3,7 @@ module main
 import scanner
 import parser
 import bytecode
+import flags { Flags }
 import vm
 import types
 
@@ -17,8 +18,8 @@ fn run(code string) !string {
 	if !checked.success {
 		return error('Type error')
 	}
-	program := bytecode.compile(checked.typed_ast, checked.env)!
-	mut v := vm.new_vm(program)
+	program := bytecode.compile(checked.typed_ast, checked.env, Flags{})!
+	mut v := vm.new_vm(program, Flags{})
 	result := v.run()!
 	return vm.inspect(result)
 }

@@ -1,6 +1,7 @@
 module vm
 
 import bytecode
+import flags { Flags }
 import net
 import os
 
@@ -13,15 +14,8 @@ mut:
 	captures  []bytecode.Value
 }
 
-@[params]
-pub struct VMOptions {
-pub:
-	io_enabled      bool
-	std_lib_enabled bool
-}
-
 pub struct VM {
-	options VMOptions
+	flags Flags
 mut:
 	program         bytecode.Program
 	stack           []bytecode.Value
@@ -31,9 +25,9 @@ mut:
 	tcp_connections map[int]&net.TcpConn
 }
 
-pub fn new_vm(program bytecode.Program, options VMOptions) VM {
+pub fn new_vm(program bytecode.Program, fl Flags) VM {
 	return VM{
-		options:         options
+		flags:           fl
 		program:         program
 		stack:           []
 		frames:          []
@@ -612,7 +606,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				break
 			}
 			.file_read {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				path_val := vm.pop()!
@@ -629,7 +623,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.file_write {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				content := vm.pop()!
@@ -647,7 +641,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.tcp_listen {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				port_val := vm.pop()!
@@ -670,7 +664,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.tcp_accept {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				socket_val := vm.pop()!
@@ -700,7 +694,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.tcp_read {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				socket_val := vm.pop()!
@@ -729,7 +723,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.tcp_write {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				data := vm.pop()!
@@ -754,7 +748,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.tcp_close {
-				if !vm.options.io_enabled {
+				if !vm.flags.io_enabled {
 					return error('I/O operations require --experimental-shitty-io flag')
 				}
 				socket_val := vm.pop()!
@@ -776,7 +770,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.str_split {
-				if !vm.options.std_lib_enabled {
+				if !vm.flags.std_lib_enabled {
 					return error('std lib operations require --experimental-std-lib flag')
 				}
 				delimiter := vm.pop()!

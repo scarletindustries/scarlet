@@ -69,7 +69,7 @@ pub enum Op {
 	// String operations
 	to_string  // pop value, push string representation
 	str_concat // pop two strings, push concatenated result
-	str_split // pop string, pop separator, push array of strings
+	str_split  // pop string, pop separator, push array of strings
 
 	// Misc
 	print       // print top of stack (temporary, for debugging)

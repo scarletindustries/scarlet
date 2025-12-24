@@ -10,6 +10,7 @@ import parser
 import printer
 import formatter
 import bytecode
+import flags { Flags }
 import vm
 import diagnostic
 import types
@@ -360,9 +361,12 @@ fn main() {
 				execute:       fn (cmd cli.Command) ! {
 					entrypoint := cmd.args[0]
 					debug_printer := cmd.flags.get_bool('debug-printer')!
-					expose_debug_builtins := cmd.flags.get_bool('expose-debug-builtins')!
-					io_enabled := cmd.flags.get_bool('experimental-shitty-io')!
-					std_lib_enabled := cmd.flags.get_bool('experimental-std-lib')!
+
+					fl := Flags{
+						expose_debug_builtins: cmd.flags.get_bool('expose-debug-builtins')!
+						io_enabled:            cmd.flags.get_bool('experimental-shitty-io')!
+						std_lib_enabled:       cmd.flags.get_bool('experimental-std-lib')!
+					}
 
 					file := os.read_file(entrypoint)!
 					parsed := parse_source(file, entrypoint)!
@@ -376,11 +380,9 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(checked.typed_ast, checked.env,
-						expose_debug_builtins: expose_debug_builtins
-					)!
+					program := bytecode.compile(checked.typed_ast, checked.env, fl)!
 
-					mut v := vm.new_vm(program, io_enabled: io_enabled, std_lib_enabled: std_lib_enabled)
+					mut v := vm.new_vm(program, fl)
 					run_result := v.run()!
 
 					if run_result !is bytecode.NoneValue {

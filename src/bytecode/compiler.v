@@ -1,5 +1,6 @@
 module bytecode
 
+import flags { Flags }
 import typed_ast
 import type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
 import types { TypeEnv }
@@ -8,14 +9,8 @@ struct Scope {
 	locals map[string]int
 }
 
-@[params]
-pub struct CompileOptions {
-pub:
-	expose_debug_builtins bool
-}
-
 struct Compiler {
-	options  CompileOptions
+	flags    Flags
 	type_env TypeEnv
 mut:
 	program          Program
@@ -29,9 +24,9 @@ mut:
 	in_tail_position bool
 }
 
-pub fn compile(expr typed_ast.Expression, type_env TypeEnv, options CompileOptions) !Program {
+pub fn compile(expr typed_ast.Expression, type_env TypeEnv, fl Flags) !Program {
 	mut c := Compiler{
-		options:          options
+		flags:            fl
 		type_env:         type_env
 		program:          Program{
 			constants: []
@@ -1073,7 +1068,7 @@ fn (mut c Compiler) compile_builtin_call(call typed_ast.FunctionCallExpression) 
 			c.emit(.to_string)
 		}
 		'__stack_depth__' {
-			if !c.options.expose_debug_builtins {
+			if !c.flags.expose_debug_builtins {
 				return error('Unknown function: ${call.identifier.name}')
 			}
 			if call.arguments.len != 0 {
