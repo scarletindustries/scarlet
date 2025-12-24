@@ -3,10 +3,6 @@ module printer
 import ast
 import strings
 
-pub fn print_node(node ast.Node) string {
-	return print_node_at_level(node, 0)
-}
-
 pub fn print_expr(expr ast.Expression) string {
 	return print_expression(expr, 0)
 }
