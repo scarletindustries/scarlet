@@ -47,6 +47,10 @@ person = Person{ name: 'alistair', age: 18 }
 fn add(a Int, b Int) Int { a + b }
 fn greet(name String) { name }
 
+fn add_generic(a, b) { a + b }
+added_int = add(5, 3)
+added_str = add_generic('Hello, ', 'world!')
+
 callback = fn(x Int) Int { x * 2 }
 fn apply(x Int, f fn(Int) Int) Int {
 	f(x)
