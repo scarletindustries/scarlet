@@ -104,18 +104,6 @@ fn is_input_complete(input string) bool {
 	return parens <= 0 && brackets <= 0 && braces <= 0
 }
 
-fn is_definition_node(node ast.Node) bool {
-	return match node {
-		ast.Statement {
-			// All statements are definitions (function, struct, enum, variable, const, etc.)
-			true
-		}
-		ast.Expression {
-			false
-		}
-	}
-}
-
 fn has_eof_error(diagnostics []diagnostic.Diagnostic) bool {
 	for d in diagnostics {
 		if d.message.contains('EOF') {
@@ -172,7 +160,7 @@ fn eval_input(input string, definitions []ast.Node) []ast.Node {
 
 	mut new_definitions := []ast.Node{}
 	for node in input_parse_result.ast.body {
-		if is_definition_node(node) {
+		if node is ast.Statement {
 			new_definitions << node
 		}
 	}

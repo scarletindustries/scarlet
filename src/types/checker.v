@@ -725,7 +725,8 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 		init:       typed_init
 		span:       convert_span(expr.span)
 	})
-	return typed_ast.Node(stmt), final_type
+
+	return typed_ast.Node(stmt), t_none()
 }
 
 fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Node, Type) {
@@ -746,7 +747,8 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Nod
 		init:       typed_init
 		span:       convert_span(expr.span)
 	})
-	return typed_ast.Node(stmt), final_type
+
+	return typed_ast.Node(stmt), t_none()
 }
 
 fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expression, Type) {
@@ -1052,7 +1054,8 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 		body:        typed_body
 		span:        convert_span(expr.span)
 	})
-	return typed_ast.Node(stmt), final_func_type
+
+	return typed_ast.Node(stmt), t_none()
 }
 
 fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (typed_ast.Expression, Type) {
@@ -1568,7 +1571,8 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 		fields:     typed_fields
 		span:       convert_span(stmt.span)
 	})
-	return typed_ast.Node(s), struct_type
+
+	return typed_ast.Node(s), t_none()
 }
 
 fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_ast.Expression, Type) {
@@ -1671,7 +1675,8 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 		variants:   typed_variants
 		span:       convert_span(stmt.span)
 	})
-	return typed_ast.Node(s), enum_type
+
+	return typed_ast.Node(s), t_none()
 }
 
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {

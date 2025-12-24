@@ -3,7 +3,7 @@
 server = tcp_listen(8080)
 println('Listening on http://localhost:8080')
 
-loop = fn() {
+fn loop() {
 	conn = tcp_accept(server)
 	// request = tcp_read(conn)
 

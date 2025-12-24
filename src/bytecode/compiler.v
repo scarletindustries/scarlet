@@ -148,34 +148,24 @@ fn (mut c Compiler) compile_statement(stmt typed_ast.Statement) ! {
 			c.current_binding = old_binding
 
 			c.emit_arg(.store_local, idx)
-			c.emit(.push_none)
 		}
 		typed_ast.ConstBinding {
 			c.compile_expr(stmt.init)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
-			c.emit(.push_none)
 		}
 		typed_ast.TypePatternBinding {
 			c.compile_expr(stmt.init)!
 			c.emit(.pop)
-			c.emit(.push_none)
 		}
 		typed_ast.FunctionDeclaration {
 			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
-			c.emit(.push_none)
 		}
-		typed_ast.StructDeclaration {
-			c.emit(.push_none)
-		}
-		typed_ast.EnumDeclaration {
-			c.emit(.push_none)
-		}
-		typed_ast.ImportDeclaration {
-			c.emit(.push_none)
-		}
+		typed_ast.StructDeclaration {}
+		typed_ast.EnumDeclaration {}
+		typed_ast.ImportDeclaration {}
 		typed_ast.ExportDeclaration {
 			c.compile_statement(stmt.declaration)!
 		}
@@ -233,15 +223,20 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 	match expr {
 		typed_ast.BlockExpression {
 			for i, node in expr.body {
-				c.in_tail_position = is_tail && i == expr.body.len - 1
+				is_last := i == expr.body.len - 1
+				c.in_tail_position = is_tail && is_last
 				c.compile_node(node)!
 				c.in_tail_position = false
-				if i < expr.body.len - 1 {
+				// only pop after expressions, not statements (statements don't push)
+				if !is_last && node is typed_ast.Expression {
 					c.emit(.pop)
 				}
 			}
 
+			// push none if block was empty or last item was a statement
 			if expr.body.len == 0 {
+				c.emit(.push_none)
+			} else if expr.body[expr.body.len - 1] is typed_ast.Statement {
 				c.emit(.push_none)
 			}
 		}
@@ -711,15 +706,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			return error("Internal error: unhandled expression type '${expr.type_name()}'. This is a compiler bug.")
 		}
 	}
-}
-
-fn (mut c Compiler) compile_function_declaration(func typed_ast.FunctionDeclaration) ! {
-	c.compile_function_common(func.identifier.name, func.params, func.body)!
-
-	// Store the function in a local variable
-	idx := c.get_or_create_local(func.identifier.name)
-	c.emit_arg(.store_local, idx)
-	c.emit(.push_none)
 }
 
 fn (mut c Compiler) compile_function_expression(func typed_ast.FunctionExpression) ! {
