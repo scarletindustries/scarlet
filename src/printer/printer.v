@@ -11,6 +11,33 @@ fn indent(level int) string {
 	return strings.repeat(`\t`, level)
 }
 
+fn print_function_expression_or_declaration(level int, identifier ?ast.Identifier, params []ast.FunctionParameter, body ast.Expression, return_type ?ast.TypeIdentifier,
+	error_type ?ast.TypeIdentifier) string {
+	mut s := 'fn '
+	if id := identifier {
+		s += id.name
+	}
+	s += '('
+	for i, param in params {
+		if i > 0 {
+			s += ', '
+		}
+		s += param.identifier.name
+		if typ := param.typ {
+			s += ' ${print_expression(typ, level)}'
+		}
+	}
+	s += ')'
+	if ret := return_type {
+		s += ' ${print_expression(ret, level)}'
+	}
+	if err := error_type {
+		s += '!${print_expression(err, level)}'
+	}
+	s += ' ${print_expression(body, level)}'
+	return s
+}
+
 fn print_expression(expr ast.Expression, level int) string {
 	return match expr {
 		ast.StringLiteral {
@@ -136,29 +163,12 @@ fn print_expression(expr ast.Expression, level int) string {
 			'error ${print_expression(expr.expression, level)}'
 		}
 		ast.FunctionExpression {
-			mut s := 'fn '
-			if id := expr.identifier {
-				s += id.name
-			}
-			s += '('
-			for i, param in expr.params {
-				if i > 0 {
-					s += ', '
-				}
-				s += param.identifier.name
-				if typ := param.typ {
-					s += ' ${print_expression(typ, level)}'
-				}
-			}
-			s += ')'
-			if ret := expr.return_type {
-				s += ' ${print_expression(ret, level)}'
-			}
-			if err := expr.error_type {
-				s += '!${print_expression(err, level)}'
-			}
-			s += ' ${print_expression(expr.body, level)}'
-			s
+			print_function_expression_or_declaration(level, none, expr.params, expr.body,
+				expr.return_type, expr.error_type)
+		}
+		ast.FunctionDeclaration {
+			print_function_expression_or_declaration(level, expr.identifier, expr.params,
+				expr.body, expr.return_type, expr.error_type)
 		}
 		ast.FunctionCallExpression {
 			mut s := '${expr.identifier.name}('
