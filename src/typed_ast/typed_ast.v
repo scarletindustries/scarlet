@@ -5,8 +5,10 @@ import type_def { Type }
 
 pub struct Span {
 pub:
-	line   int @[required]
-	column int @[required]
+	start_line   int @[required]
+	start_column int @[required]
+	end_line     int @[required]
+	end_column   int @[required]
 }
 
 pub struct StringLiteral {

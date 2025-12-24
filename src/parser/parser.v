@@ -73,9 +73,12 @@ fn (mut p Parser) add_warning(message string) {
 }
 
 fn (p Parser) current_span() ast.Span {
+	tok_len := if lit := p.current_token.literal { lit.len } else { 1 }
 	return ast.Span{
-		line:   p.current_token.line
-		column: p.current_token.column
+		start_line:   p.current_token.line
+		start_column: p.current_token.column
+		end_line:     p.current_token.line
+		end_column:   p.current_token.column + tok_len
 	}
 }
 

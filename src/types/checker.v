@@ -80,25 +80,19 @@ pub fn check(program ast.BlockExpression) CheckResult {
 }
 
 fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
-	c.diagnostics << diagnostic.error_at(span.line, span.column, message)
+	c.diagnostics << diagnostic.error_at(span.start_line, span.start_column, message)
 }
 
 // error_at_token creates an error with a proper range for a token
-// span.column points ONE PAST the end of the token, so we calculate the start from length
 fn (mut c TypeChecker) error_at_token(message string, span ast.Span, token_len int) {
-	start_col := span.column - token_len
-	end_col := span.column // already exclusive (one past end)
 	c.diagnostics << diagnostic.Diagnostic{
-		span:     diagnostic.range_span(span.line, start_col, end_col)
+		span:     diagnostic.range_span(span.start_line, span.start_column, span.end_column)
 		severity: .error
 		message:  message
 	}
 }
 
 fn (mut c TypeChecker) record_type(name string, typ Type, span ast.Span) {
-	// span.column points to the END of the identifier, so we calculate the start
-	start_col := span.column - name.len + 1
-
 	// Look up definition location
 	mut def_line := 0
 	mut def_col := 0
@@ -110,9 +104,9 @@ fn (mut c TypeChecker) record_type(name string, typ Type, span ast.Span) {
 	}
 
 	c.type_positions << TypePosition{
-		line:      span.line
-		column:    start_col
-		end_col:   span.column + 1
+		line:      span.start_line
+		column:    span.start_column
+		end_col:   span.end_column
 		name:      name
 		type_info: typ
 		def_line:  def_line
