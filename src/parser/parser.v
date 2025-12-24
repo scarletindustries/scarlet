@@ -30,8 +30,8 @@ mut:
 	current_token         token.Token
 	diagnostics           []diagnostic.Diagnostic
 	context_stack         []ParseContext
-	prev_token_end_line   int = 1
-	prev_token_end_column int = 1
+	prev_token_end_line   int
+	prev_token_end_column int
 }
 
 pub fn new_parser(mut s scanner.Scanner) Parser {

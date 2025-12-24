@@ -212,7 +212,7 @@ fn main() {
 						result := formatter.format_with_debug(content, debug)
 						if result.has_errors {
 							for d in result.diagnostics {
-								eprintln('stdin:${d.span.start_line}:${d.span.start_column}: ${d.message}')
+								eprintln('stdin:${d.span.start_line + 1}:${d.span.start_column + 1}: ${d.message}')
 							}
 							exit(1)
 						}

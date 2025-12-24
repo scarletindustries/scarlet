@@ -85,7 +85,7 @@ fn (mut s Scanner) collect_trivia() {
 pub fn (mut s Scanner) scan_next() token.Token {
 	s.collect_trivia()
 
-	s.token_start_column = s.state.get_column() + 1
+	s.token_start_column = s.state.get_column()
 	s.token_start_line = s.state.get_line()
 
 	if s.state.get_pos() == s.input.len {

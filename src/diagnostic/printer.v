@@ -42,20 +42,22 @@ fn format_diagnostic_with_lines(d Diagnostic, lines []string, file_path string) 
 	label := severity_label(d.severity)
 
 	abs_path := os.real_path(file_path)
-	location := '${file_path}:${d.span.start_line}:${d.span.start_column}'
+	display_line := d.span.start_line + 1
+	display_col := d.span.start_column + 1
+	location := '${file_path}:${display_line}:${display_col}'
 	editor := detect_editor()
-	link_url := build_editor_url(editor, abs_path, d.span.start_line, d.span.start_column)
+	link_url := build_editor_url(editor, abs_path, display_line, display_col)
 
 	result += '${color_bold}${color}${label}${color_reset}: ${d.message} ${color_dim}at ${link_start}${link_url}${link_end}${location}${link_start}${link_end}${color_reset}\n'
 
-	line_num_width := '${d.span.start_line}'.len
+	line_num_width := '${display_line}'.len
 	padding := ' '.repeat(line_num_width)
 
-	source_line := get_source_line(lines, d.span.start_line)
-	result += '${color_blue}${d.span.start_line}  |${color_reset} ${source_line}\n'
+	source_line := get_source_line(lines, display_line)
+	result += '${color_blue}${display_line}  |${color_reset} ${source_line}\n'
 
 	mut caret_padding := ''
-	for i := 1; i < d.span.start_column; i++ {
+	for i := 0; i < d.span.start_column; i++ {
 		if i < source_line.len && source_line[i] == `\t` {
 			caret_padding += '\t'
 		} else {

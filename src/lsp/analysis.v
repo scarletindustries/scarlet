@@ -20,12 +20,12 @@ fn (mut s LspServer) analyze_document(uri string, text string) {
 		lsp_diagnostics << Diagnostic{
 			range:    Range{
 				start: Position{
-					line:      diag.span.start_line - 1
-					character: diag.span.start_column - 1
+					line:      diag.span.start_line
+					character: diag.span.start_column
 				}
 				end:   Position{
-					line:      diag.span.end_line - 1
-					character: diag.span.end_column - 1
+					line:      diag.span.end_line
+					character: diag.span.end_column
 				}
 			}
 			severity: if diag.severity == .error { 1 } else { 2 }
@@ -41,11 +41,11 @@ fn (mut s LspServer) analyze_document(uri string, text string) {
 			lsp_diagnostics << Diagnostic{
 				range:    Range{
 					start: Position{
-						line:      diag.span.start_line - 1
-						character: diag.span.start_column - 1
+						line:      diag.span.start_line
+						character: diag.span.start_column
 					}
 					end:   Position{
-						line:      diag.span.end_line - 1
+						line:      diag.span.end_line
 						character: diag.span.end_column
 					}
 				}
@@ -67,14 +67,14 @@ fn extract_types(check_result types.CheckResult) []TypeAtPosition {
 
 	for tp in check_result.type_positions {
 		result << TypeAtPosition{
-			line:      tp.line - 1
-			col_start: tp.column - 1
-			col_end:   tp.end_col - 1
+			line:      tp.line
+			col_start: tp.column
+			col_end:   tp.end_col
 			name:      tp.name
 			type_str:  type_def.type_to_string(tp.type_info)
-			def_line:  tp.def_line - 1
-			def_col:   tp.def_col - 1
-			def_end:   tp.def_end - 1
+			def_line:  tp.def_line
+			def_col:   tp.def_col
+			def_end:   tp.def_end
 		}
 	}
 
