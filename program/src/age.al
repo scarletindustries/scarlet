@@ -1,6 +1,6 @@
 // Age calculator and life stage classifier
 
-fn classify_age(age Int) String {
+fn classify_age(age) {
 	match true {
 		age < 2 -> 'Infant',
 		age < 13 -> 'Child',
