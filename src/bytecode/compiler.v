@@ -1132,6 +1132,14 @@ fn (mut c Compiler) compile_builtin_call(call typed_ast.FunctionCallExpression) 
 			c.compile_expr(call.arguments[0])!
 			c.emit(.tcp_close)
 		}
+		'str_split' {
+			if call.arguments.len != 2 {
+				return error('str_split expects 2 arguments (string, delimiter)')
+			}
+			c.compile_expr(call.arguments[0])!
+			c.compile_expr(call.arguments[1])!
+			c.emit(.str_split)
+		}
 		else {
 			return error('Unknown function: ${call.identifier.name}')
 		}
