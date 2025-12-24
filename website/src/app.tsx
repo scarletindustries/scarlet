@@ -2,37 +2,145 @@ import "./globals.css";
 
 export const examples: { title: string; description: string; code: string }[] =
   [
+    // === BASICS ===
     {
-      title: "Static typing with inference",
+      title: "Variables and types",
       description:
-        "Every expression has a type known at compile time. Types are inferred—annotate function signatures, skip the rest.",
+        "Variables are declared with assignment. Types are inferred from values. Reassignment shadows the previous binding.",
       code: `// Types inferred from values
 count = 42           // Int
 name = 'alice'       // String
-numbers = [1, 2, 3]  // []Int
+active = true        // Bool
+nothing = none       // None
 
-// Function signatures are explicit
-fn add(a Int, b Int) Int {
-    a + b
-}`,
+// Reassignment shadows the previous binding
+x = 10
+x = x + 1  // x is now 11
+
+// Arrays
+numbers = [1, 2, 3, 4, 5]
+first = numbers[0]`,
+    },
+    {
+      title: "Constants",
+      description:
+        "Top-level constants are declared with 'const'. They cannot be reassigned.",
+      code: `const pi = 314
+const app_name = 'my app'
+const max_retries = 3
+
+greeting = 'Welcome to \${app_name}!'`,
+    },
+    {
+      title: "Basic operators",
+      description: "Standard arithmetic, comparison, and logical operators.",
+      code: `// Arithmetic
+sum = 1 + 2
+diff = 5 - 3
+prod = 4 * 2
+quot = 10 / 3
+rem = 10 % 3
+
+// Comparison
+eq = a == b
+neq = a != b
+lt = a < b
+lte = a <= b
+
+// Logical
+and_result = true && false
+or_result = true || false
+not_result = !true`,
+    },
+
+    // === FUNCTIONS ===
+    {
+      title: "Functions with type inference",
+      description:
+        "Function parameter and return types are inferred from usage. Add explicit types when needed for clarity or error types.",
+      code: `// Types fully inferred
+fn double(x) { x * 2 }
+fn add(a, b) { a + b }
+fn greet(name) { 'Hello, ' + name }
+
+// Explicit types when needed
+fn divide(a Int, b Int) Int!Error {
+    if b == 0 { error Error{ message: 'divide by zero' } }
+    else { a / b }
+}
+
+// Call functions
+println(double(21))      // 42
+println(add(10, 5))      // 15
+println(greet('world'))  // Hello, world`,
     },
     {
       title: "Generics",
       description:
         "Use lowercase type variables for polymorphic functions. The type checker infers concrete types at each call site.",
-      code: `fn identity(x a) a {
-    x
+      code: `fn identity(x a) a { x }
+
+fn first(arr []a) ?a {
+    match arr {
+        [] -> none,
+        [head, ..] -> head,
+    }
 }
 
-fn first(arr []a) a {
-    arr[0]
+fn map_array(arr []a, f fn(a) b) []b {
+    match arr {
+        [] -> [],
+        [head, ..rest] -> [f(head)] + map_array(rest, f),
+    }
 }
 
 // Works with any type
-n = identity(42)       // Int
-s = identity('hello')  // String
-head = first([1, 2, 3])`,
+n = identity(42)        // Int
+s = identity('hello')   // String
+head = first([1, 2, 3]) or 0`,
     },
+    {
+      title: "First-class functions",
+      description:
+        "Functions are values. Pass them around, store them in variables, return them from functions.",
+      code: `fn apply(x, f) { f(x) }
+fn compose(f, g) { fn(x) { f(g(x)) } }
+
+double = fn(n) { n * 2 }
+add_one = fn(n) { n + 1 }
+
+result = apply(5, double)  // 10
+
+// Compose functions
+double_then_add = compose(add_one, double)
+double_then_add(5)  // 11
+
+// Higher-order patterns
+fn twice(x, f) { f(f(x)) }
+twice(3, fn(n) { n + 1 })  // 5`,
+    },
+    {
+      title: "Recursion",
+      description:
+        "Functions can call themselves. AL optimizes tail recursion.",
+      code: `fn factorial(n Int) Int {
+    if n <= 1 { 1 }
+    else { n * factorial(n - 1) }
+}
+
+fn fibonacci(n Int) Int {
+    match n {
+        0 -> 0,
+        1 -> 1,
+        else -> fibonacci(n - 1) + fibonacci(n - 2),
+    }
+}
+
+println(factorial(5))   // 120
+println(fibonacci(10))  // 55`,
+    },
+
+    // === CONTROL FLOW ===
     {
       title: "Everything is an expression",
       description:
@@ -43,45 +151,50 @@ head = first([1, 2, 3])`,
     'non-positive'
 }
 
-grade = match score {
-    90..100 -> 'A',
-    80..90 -> 'B',
-    else -> 'C',
+// Blocks are expressions
+total = {
+    a = 10
+    b = 20
+    a + b
+}
+
+// Use in function bodies
+fn abs(n Int) Int {
+    if n < 0 { -n } else { n }
 }`,
-    },
-    {
-      title: "Optional values with ?",
-      description:
-        "Functions that might not return a value use ? in their return type. Use 'or' to provide defaults.",
-      code: `fn find_user(id Int) ?User {
-    if id == 0 {
-        none
-    } else {
-        User{ id: id, name: 'found' }
-    }
-}
-
-user = find_user(0) or User{ id: 0, name: 'guest' }`,
-    },
-    {
-      title: "Error handling with !",
-      description:
-        "Functions that can fail use ! with an error type. Handle errors with 'or'.",
-      code: `fn divide(a Int, b Int) Int!DivisionError {
-    if b == 0 {
-        error DivisionError{ message: 'divide by zero' }
-    } else {
-        a / b
-    }
-}
-
-safe = divide(10, 0) or 0
-safe_with_err = divide(10, 0) or err -> -1`,
     },
     {
       title: "Pattern matching",
       description:
-        "Match on values, enums, and even literal payloads. Exhaustive checking ensures you handle all cases.",
+        "Match on values, or-patterns, enums, literal payloads, and arrays. Exhaustive checking ensures you handle all cases.",
+      code: `fn describe(x Int) String {
+    match x {
+        0 -> 'zero',
+        1 | 2 | 3 -> 'small',
+        else -> 'other',
+    }
+}
+
+// Match on arrays
+fn sum(arr []Int) Int {
+    match arr {
+        [] -> 0,
+        [head, ..tail] -> head + sum(tail),
+    }
+}
+
+// Wildcard pattern
+fn ignore_second(pair) {
+    match pair {
+        [a, _] -> a,
+        else -> none,
+    }
+}`,
+    },
+    {
+      title: "Enum pattern matching",
+      description:
+        "Match on enum variants and bind payload values. Match literal payloads for specific cases.",
       code: `enum Result {
     Ok(String),
     Err(String),
@@ -90,59 +203,211 @@ safe_with_err = divide(10, 0) or err -> -1`,
 fn handle(r Result) String {
     match r {
         Ok('special') -> 'matched literal!',
-        Ok(value) -> 'got: $value',
-        Err(e) -> 'error: $e',
+        Ok(value) -> 'got: \$value',
+        Err(e) -> 'error: \$e',
     }
-}`,
+}
+
+// Use it
+handle(Ok('special'))  // 'matched literal!'
+handle(Ok('hello'))    // 'got: hello'
+handle(Err('oops'))    // 'error: oops'`,
     },
+
+    // === DATA TYPES ===
     {
-      title: "Structs and enums",
+      title: "Structs",
       description:
-        "Define data with structs. Model variants with enums that can carry payloads.",
+        "Define data structures with named fields. Access fields with dot notation.",
       code: `struct Person {
     name String,
     age Int,
 }
 
-enum Status {
+struct Point {
+    x Int,
+    y Int,
+}
+
+// Create instances
+person = Person{ name: 'alice', age: 30 }
+origin = Point{ x: 0, y: 0 }
+
+// Access fields
+println(person.name)  // alice
+println(person.age)   // 30`,
+    },
+    {
+      title: "Enums",
+      description:
+        "Model variants with enums. Variants can carry payloads of any type.",
+      code: `enum Status {
     Active,
     Inactive,
     Banned(String),
 }
 
-person = Person{ name: 'alice', age: 30 }
-status = Status.Banned('spam')`,
-    },
-    {
-      title: "String interpolation",
-      description:
-        "Embed expressions directly in strings with $ for simple variables or ${} for expressions.",
-      code: `name = 'world'
-greeting = 'Hello, $name!'
-math = 'Result: ${1 + 2 * 3}'`,
-    },
-    {
-      title: "First-class functions",
-      description:
-        "Functions are values. Pass them around, store them, return them.",
-      code: `fn apply(x Int, f fn(Int) Int) Int {
-    f(x)
+enum Option {
+    Some(Int),
+    None,
 }
 
-double = fn(n Int) Int { n * 2 }
-result = apply(5, double)  // 10`,
+enum Result {
+    Ok(String),
+    Err(String),
+}
+
+// Create enum values
+status = Status.Active
+banned = Status.Banned('spam')
+some_value = Option.Some(42)`,
+    },
+    {
+      title: "Arrays",
+      description:
+        "Ordered collections of values. Access by index, concatenate with +.",
+      code: `numbers = [1, 2, 3, 4, 5]
+names = ['alice', 'bob', 'charlie']
+
+// Access by index
+first = numbers[0]  // 1
+second = names[1]   // 'bob'
+
+// Concatenate
+combined = [1, 2] + [3, 4]  // [1, 2, 3, 4]
+
+// Nested arrays
+matrix = [[1, 2], [3, 4]]`,
+    },
+    {
+      title: "Ranges",
+      description:
+        "Create ranges with the '..' operator. Useful for iteration patterns.",
+      code: `// Create a range
+r = 0..10
+
+// Ranges in expressions
+fn in_range(n Int, start Int, end Int) Bool {
+    n >= start && n < end
+}`,
+    },
+
+    // === STRINGS ===
+    {
+      title: "Strings and interpolation",
+      description:
+        "Strings use single quotes. Embed expressions with $ for variables or ${} for complex expressions.",
+      code: `name = 'world'
+greeting = 'Hello, \$name!'
+math = 'Result: \${1 + 2 * 3}'
+
+// Multi-part interpolation
+person = Person{ name: 'Alice', age: 30 }
+bio = '\${person.name} is \${person.age} years old'
+
+// Escape sequences
+quote = 'She said \\'hello\\''`,
+    },
+
+    // === ERROR HANDLING ===
+    {
+      title: "Optional values",
+      description:
+        "Functions that might not return a value use ? in their return type. Handle with 'or' or propagate with '?'.",
+      code: `fn find_user(id Int) ?User {
+    if id == 0 { none }
+    else { User{ id: id, name: 'found' } }
+}
+
+// Provide a default with 'or'
+user = find_user(0) or User{ id: 0, name: 'guest' }
+
+// Propagate none to caller with '?'
+fn get_name(id Int) ?String {
+    user = find_user(id)?
+    user.name
+}
+
+// Handle with receiver
+result = find_user(0) or missing -> {
+    println('User not found')
+    User{ id: -1, name: 'default' }
+}`,
+    },
+    {
+      title: "Error handling",
+      description:
+        "Functions that can fail use ! with an error type. Handle errors with 'or', optionally binding the error.",
+      code: `struct DivisionError {
+    message String,
+}
+
+fn divide(a Int, b Int) Int!DivisionError {
+    if b == 0 {
+        error DivisionError{ message: 'divide by zero' }
+    } else {
+        a / b
+    }
+}
+
+// Provide default on error
+safe = divide(10, 0) or 0
+
+// Handle error with receiver
+result = divide(10, 0) or err -> {
+    println('Error: \${err.message}')
+    -1
+}`,
     },
     {
       title: "Assertions",
       description:
         "Assert conditions that must be true. If they fail, the function returns an error.",
-      code: `fn process(x Int) Int!Error {
+      code: `struct Error {
+    message String,
+}
+
+fn process(x Int) Int!Error {
     assert x > 0, Error{ message: 'must be positive' }
     x * 2
 }
 
-a = process(5)!   // 10
-b = process(-1) or err -> 0  // 0`,
+// Use it
+a = process(5) or 0   // 10
+b = process(-1) or 0  // 0 (assertion failed)`,
+    },
+
+    // === BUILTINS ===
+    {
+      title: "Built-in functions",
+      description: "Core functions available without imports.",
+      code: `// Print any value
+println(42)
+println('hello')
+println([1, 2, 3])
+
+// Convert to string representation
+s = inspect(Person{ name: 'alice', age: 30 })
+
+// Split strings
+parts = str_split('a,b,c', ',')  // ['a', 'b', 'c']`,
+    },
+    {
+      title: "I/O operations (experimental)",
+      description:
+        "File and network I/O requires the --experimental-shitty-io flag.",
+      code: `// Run with: al run --experimental-shitty-io file.al
+
+// File operations
+content = read_file('data.txt')
+write_file('output.txt', 'hello world')
+
+// TCP networking
+listener = tcp_listen(8080)
+client = tcp_accept(listener)
+data = tcp_read(client)
+tcp_write(client, 'HTTP/1.1 200 OK\\r\\n\\r\\nHello')
+tcp_close(client)`,
     },
   ];
 
@@ -206,7 +471,8 @@ export function App({ examples }: { examples: RenderedExample[] }) {
           </strong>
           . Every expression has a type known at compile time. The type checker
           catches errors before your code runs, while inference keeps the syntax
-          clean—no type annotations needed for local variables.
+          clean—no type annotations needed for local variables or even function
+          parameters.
         </p>
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
           The compiler is written in V, producing a single native binary with no
@@ -229,8 +495,33 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         </p>
       </section>
 
+      <section className="mb-16">
+        <h2 className="text-lg font-bold mb-4">Quick start</h2>
+        <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4">
+          Create a file called{" "}
+          <code className="text-black dark:text-white">hello.al</code>:
+        </p>
+        <pre className="text-sm p-4 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 mb-4 overflow-auto">
+          {`struct Person {
+    name String,
+    age Int,
+}
+
+fn greet(p Person) String {
+    'Hello, \${p.name}! You are \${p.age} years old.'
+}
+
+person = Person{ name: 'Alice', age: 30 }
+println(greet(person))`}
+        </pre>
+        <p className="text-sm text-neutral-600 dark:text-neutral-400">
+          Run with{" "}
+          <code className="text-black dark:text-white">al run hello.al</code>
+        </p>
+      </section>
+
       <main>
-        <h2 className="text-lg font-bold mb-8">Language features</h2>
+        <h2 className="text-lg font-bold mb-8">Language reference</h2>
         {examples.map((example, i) => (
           <section key={i} className="mb-12">
             <h3 className="font-bold mb-2">{example.title}</h3>
@@ -241,6 +532,52 @@ export function App({ examples }: { examples: RenderedExample[] }) {
           </section>
         ))}
       </main>
+
+      <section className="mt-16 mb-16">
+        <h2 className="text-lg font-bold mb-4">Command reference</h2>
+        <div className="text-sm space-y-4">
+          <div>
+            <code className="text-black dark:text-white font-bold">
+              al run &lt;file.al&gt;
+            </code>
+            <p className="text-neutral-600 dark:text-neutral-400 mt-1">
+              Type-check, compile, and run a program. Add{" "}
+              <code>--experimental-shitty-io</code> for file/network I/O.
+            </p>
+          </div>
+          <div>
+            <code className="text-black dark:text-white font-bold">
+              al check &lt;file.al&gt;
+            </code>
+            <p className="text-neutral-600 dark:text-neutral-400 mt-1">
+              Type-check without running. Useful for IDE integration.
+            </p>
+          </div>
+          <div>
+            <code className="text-black dark:text-white font-bold">
+              al fmt [path]
+            </code>
+            <p className="text-neutral-600 dark:text-neutral-400 mt-1">
+              Format source files. Use <code>--check</code> to verify without
+              modifying, <code>--stdin</code> to read from stdin.
+            </p>
+          </div>
+          <div>
+            <code className="text-black dark:text-white font-bold">
+              al repl
+            </code>
+            <p className="text-neutral-600 dark:text-neutral-400 mt-1">
+              Start an interactive session. Definitions persist across entries.
+            </p>
+          </div>
+          <div>
+            <code className="text-black dark:text-white font-bold">al lsp</code>
+            <p className="text-neutral-600 dark:text-neutral-400 mt-1">
+              Start the Language Server Protocol server for IDE integration.
+            </p>
+          </div>
+        </div>
+      </section>
 
       <footer className="mt-16 pt-6 border-t border-neutral-200 dark:border-neutral-800">
         <p className="text-xs text-neutral-500">

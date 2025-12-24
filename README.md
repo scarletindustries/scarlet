@@ -115,14 +115,21 @@ grade = match score {
 
 ### Optional values
 
-Functions that might not return a value use `?` in their return type. Handle with `or`.
+Functions that might not return a value use `?` in their return type. Handle with `or`, or propagate with `?`.
 
 ```
 fn find_user(id Int) ?User {
     if id == 0 { none } else { User{ id: id, name: 'found' } }
 }
 
+// Provide a default with 'or'
 user = find_user(0) or User{ id: 0, name: 'guest' }
+
+// Propagate none to caller with '?'
+fn get_user_name(id Int) ?String {
+    user = find_user(id)?
+    user.name
+}
 ```
 
 ### Error handling
@@ -147,19 +154,34 @@ result = divide(10, 2) or err -> {
 
 ### Pattern matching
 
-Match on values, enums, and literal payloads.
+Match on values, ranges, enums, literal payloads, and arrays.
 
 ```
-enum Result {
-    Ok(String),
-    Err(String),
+// Match on values with or-patterns
+fn describe(x Int) String {
+    match x {
+        0 -> 'zero',
+        1 | 2 | 3 -> 'small',
+        else -> 'other',
+    }
 }
+
+// Match on enum payloads
+enum Result { Ok(String), Err(String) }
 
 fn handle(r Result) String {
     match r {
         Ok('special') -> 'matched literal',
         Ok(value) -> 'got: $value',
         Err(e) -> 'error: $e',
+    }
+}
+
+// Match on arrays
+fn first(arr []a) ?a {
+    match arr {
+        [] -> none,
+        [head, ..] -> head,
     }
 }
 ```
@@ -203,17 +225,23 @@ math = 'Result: ${1 + 2 * 3}'
 
 ### Static typing with inference
 
-Types are inferred from context. Annotate when needed, skip when obvious.
+Types are inferred from context—including function parameters and return types.
 
 ```
-// Types inferred
+// Variable types inferred
 count = 42
 name = 'alice'
 numbers = [1, 2, 3]
 
-// Explicit annotations
-fn add(a Int, b Int) Int {
-    a + b
+// Function parameter and return types inferred
+fn double(x) { x * 2 }
+fn add(a, b) { a + b }
+fn greet(name) { 'Hello, ' + name }
+
+// Explicit annotations when needed
+fn divide(a Int, b Int) Int!DivisionError {
+    if b == 0 { error DivisionError{ message: 'divide by zero' } }
+    else { a / b }
 }
 ```
 
@@ -226,22 +254,75 @@ fn identity(x a) a {
     x
 }
 
-fn first(arr []a) a {
-    arr[0]
-}
-
-fn map(arr []a, f fn(a) b) []b {
-    result = []
-    for item in arr {
-        result = result + [f(item)]
+fn first(arr []a) ?a {
+    match arr {
+        [] -> none,
+        [head, ..] -> head,
     }
-    result
 }
 
 // Works with any type
 x = identity(42)
 y = identity('hello')
-head = first([1, 2, 3])
+head = first([1, 2, 3]) or 0
+```
+
+### Constants
+
+Top-level constants are declared with `const`.
+
+```
+const pi = 314
+const app_name = 'my app'
+const max_retries = 3
+```
+
+### Assertions
+
+Assert conditions that must be true. Failures return an error.
+
+```
+fn process(x Int) Int!Error {
+    assert x > 0, Error{ message: 'must be positive' }
+    x * 2
+}
+
+result = process(5) or 0
+```
+
+## Experimental features
+
+Some features require explicit opt-in flags:
+
+```bash
+# File and network I/O
+al run --experimental-shitty-io server.al
+
+# Standard library functions
+al run --experimental-std-lib program.al
+```
+
+### I/O builtins (requires `--experimental-shitty-io`)
+
+```
+content = read_file('data.txt')
+write_file('output.txt', content)
+
+listener = tcp_listen(8080)
+client = tcp_accept(listener)
+data = tcp_read(client)
+tcp_write(client, 'HTTP/1.1 200 OK\r\n\r\nHello')
+tcp_close(client)
+```
+
+### Other builtins
+
+```
+// Convert any value to its string representation
+s = inspect(some_value)
+
+// Split strings
+parts = str_split('a,b,c', ',')
 ```
 
 ## License
