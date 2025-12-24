@@ -207,7 +207,7 @@ pub fn type_to_string(t Type) string {
 			}
 			mut result := 'fn(${params.join(', ')}) ${type_to_string(t.ret)}'
 			if err := t.error_type {
-				result += ' !${type_to_string(err)}'
+				result += '!${type_to_string(err)}'
 			}
 			return result
 		}

@@ -49,6 +49,9 @@
     "build": "tsc -p ./",
     "watch": "tsc -watch -p ./"
   },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
   "devDependencies": {
     "@types/node": "^25.0.3",
     "@types/vscode": "^1.107.0",

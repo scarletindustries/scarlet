@@ -265,6 +265,7 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 	mut left := p.parse_binary_expression()!
 
 	if p.current_token.kind == .kw_or {
+		or_span := p.current_span()
 		p.eat(.kw_or)!
 
 		mut receiver := ?ast.Identifier(none)
@@ -289,6 +290,7 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 			expression: left
 			receiver:   receiver
 			body:       body
+			span:       or_span
 		}
 	}
 

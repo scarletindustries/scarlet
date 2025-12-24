@@ -26,22 +26,37 @@ import type_def {
 	types_equal,
 }
 
+pub struct TypePosition {
+pub:
+	line      int
+	column    int
+	end_col   int
+	name      string
+	type_info Type
+	def_line  int // definition location (0 if unknown)
+	def_col   int
+	def_end   int
+}
+
 pub struct TypeChecker {
 mut:
 	env                    TypeEnv
 	diagnostics            []diagnostic.Diagnostic
 	in_function            bool
 	current_fn_return_type ?Type
+	current_fn_has_assert  bool            // tracks if current function has assert statements
 	param_subs             map[string]Type // tracks inferred parameter types
+	type_positions         []TypePosition
 }
 
 pub struct CheckResult {
 pub:
-	diagnostics  []diagnostic.Diagnostic
-	success      bool
-	env          TypeEnv
-	typed_ast    typed_ast.BlockExpression
-	program_type Type
+	diagnostics    []diagnostic.Diagnostic
+	success        bool
+	env            TypeEnv
+	typed_ast      typed_ast.BlockExpression
+	program_type   Type
+	type_positions []TypePosition
 }
 
 pub fn check(program ast.BlockExpression) CheckResult {
@@ -55,16 +70,55 @@ pub fn check(program ast.BlockExpression) CheckResult {
 	typed_block, program_type := checker.check_block(program)
 
 	return CheckResult{
-		diagnostics:  checker.diagnostics
-		success:      checker.diagnostics.len == 0
-		env:          checker.env
-		typed_ast:    typed_block
-		program_type: program_type
+		diagnostics:    checker.diagnostics
+		success:        checker.diagnostics.len == 0
+		env:            checker.env
+		typed_ast:      typed_block
+		program_type:   program_type
+		type_positions: checker.type_positions
 	}
 }
 
 fn (mut c TypeChecker) error_at_span(message string, span ast.Span) {
 	c.diagnostics << diagnostic.error_at(span.line, span.column, message)
+}
+
+// error_at_token creates an error with a proper range for a token
+// span.column points ONE PAST the end of the token, so we calculate the start from length
+fn (mut c TypeChecker) error_at_token(message string, span ast.Span, token_len int) {
+	start_col := span.column - token_len
+	end_col := span.column // already exclusive (one past end)
+	c.diagnostics << diagnostic.Diagnostic{
+		span:     diagnostic.range_span(span.line, start_col, end_col)
+		severity: .error
+		message:  message
+	}
+}
+
+fn (mut c TypeChecker) record_type(name string, typ Type, span ast.Span) {
+	// span.column points to the END of the identifier, so we calculate the start
+	start_col := span.column - name.len + 1
+
+	// Look up definition location
+	mut def_line := 0
+	mut def_col := 0
+	mut def_end := 0
+	if def_loc := c.env.lookup_definition(name) {
+		def_line = def_loc.line
+		def_col = def_loc.column
+		def_end = def_loc.end_col
+	}
+
+	c.type_positions << TypePosition{
+		line:      span.line
+		column:    start_col
+		end_col:   span.column + 1
+		name:      name
+		type_info: typ
+		def_line:  def_line
+		def_col:   def_col
+		def_end:   def_end
+	}
 }
 
 fn type_var_name_from_index(id int) string {
@@ -462,6 +516,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 				}
 				t_none()
 			}
+			c.record_type(expr.name, typ, expr.span)
 			return typed_ast.Identifier{
 				name: expr.name
 				span: typed_ast.Span{
@@ -668,20 +723,30 @@ fn convert_span(s ast.Span) typed_ast.Span {
 	}
 }
 
-fn (mut c TypeChecker) check_binding_type(name string, annotation ?ast.TypeIdentifier, typed_init typed_ast.Expression, init_type Type, context string) Type {
+fn (c TypeChecker) def_loc_from_span(name string, span ast.Span) DefinitionLocation {
+	start_col := span.column - name.len + 1
+	return DefinitionLocation{
+		line:    span.line
+		column:  start_col
+		end_col: span.column + 1
+	}
+}
+
+fn (mut c TypeChecker) check_binding_type(name string, name_span ast.Span, annotation ?ast.TypeIdentifier, typed_init typed_ast.Expression, init_type Type, context string) Type {
+	loc := c.def_loc_from_span(name, name_span)
 	if annot := annotation {
 		if expected := c.resolve_type_identifier(annot) {
 			init_span := get_typed_span(typed_init)
 			c.expect_type(init_type, expected, init_span, context)
-			c.env.define(name, expected)
+			c.env.define_at(name, expected, loc)
 			return expected
 		} else {
 			c.error_at_span("Unknown type '${annot.identifier.name}'", annot.identifier.span)
-			c.env.define(name, init_type)
+			c.env.define_at(name, init_type, loc)
 			return init_type
 		}
 	} else {
-		c.env.define(name, init_type)
+		c.env.define_at(name, init_type, loc)
 		return init_type
 	}
 }
@@ -763,8 +828,10 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 		typed_init, init_type = c.check_expr(expr.init)
 	}
 
-	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type,
-		'in variable binding')
+	final_type := c.check_binding_type(expr.identifier.name, expr.identifier.span, expr.typ,
+		typed_init, init_type, 'in variable binding')
+
+	c.record_type(expr.identifier.name, final_type, expr.identifier.span)
 
 	return typed_ast.VariableBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -781,8 +848,10 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Exp
 	}
 
 	typed_init, init_type := c.check_expr(expr.init)
-	final_type := c.check_binding_type(expr.identifier.name, expr.typ, typed_init, init_type,
-		'in const binding')
+	final_type := c.check_binding_type(expr.identifier.name, expr.identifier.span, expr.typ,
+		typed_init, init_type, 'in const binding')
+
+	c.record_type(expr.identifier.name, final_type, expr.identifier.span)
 
 	return typed_ast.ConstBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -891,9 +960,9 @@ fn (mut c TypeChecker) check_binary(expr ast.BinaryExpression) (typed_ast.Expres
 }
 
 fn (mut c TypeChecker) unify_binary_operands(left Type, right Type) {
-	if left is TypeVar && !(right is TypeVar) {
+	if left is TypeVar && right !is TypeVar {
 		c.unify(left, right, mut c.param_subs)
-	} else if right is TypeVar && !(left is TypeVar) {
+	} else if right is TypeVar && left !is TypeVar {
 		c.unify(right, left, mut c.param_subs)
 	} else if left is TypeVar && right is TypeVar {
 		// both are TypeVars - unify them with each other
@@ -997,19 +1066,23 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 	}
 
 	if id := expr.identifier {
-		c.env.register_function(id.name, func_type)
-		c.env.define(id.name, func_type)
+		loc := c.def_loc_from_span(id.name, id.span)
+		c.env.register_function_at(id.name, func_type, loc)
+		c.env.define_at(id.name, func_type, loc)
 	}
 
 	c.env.push_scope()
 	for i, param in expr.params {
-		c.env.define(param.identifier.name, param_types[i])
+		loc := c.def_loc_from_span(param.identifier.name, param.identifier.span)
+		c.env.define_at(param.identifier.name, param_types[i], loc)
 	}
 
 	prev_in_function := c.in_function
 	prev_fn_return_type := c.current_fn_return_type
+	prev_fn_has_assert := c.current_fn_has_assert
 	prev_param_subs := c.param_subs.clone()
 	c.in_function = true
+	c.current_fn_has_assert = false
 	c.current_fn_return_type = if expr.return_type != none {
 		if et := err_type {
 			Type(TypeResult{
@@ -1026,15 +1099,27 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 	c.param_subs = map[string]Type{}
 	errors_before := c.diagnostics.len
 	typed_body, body_type := c.check_expr(expr.body)
+	has_assert := c.current_fn_has_assert
 
 	for i, pt in param_types {
 		param_types[i] = substitute(pt, c.param_subs)
 	}
 
+	// Record parameter types for LSP hover
+	for i, param in expr.params {
+		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
+	}
+
 	ret_type = substitute(body_type, c.param_subs)
+
+	// If function has assert and no explicit error type, the function can fail with String
+	if has_assert && err_type == none {
+		err_type = t_string()
+	}
 
 	c.in_function = prev_in_function
 	c.current_fn_return_type = prev_fn_return_type
+	c.current_fn_has_assert = prev_fn_has_assert
 	c.param_subs = prev_param_subs.clone()
 	c.env.pop_scope()
 
@@ -1058,8 +1143,10 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 	}
 
 	if id := expr.identifier {
-		c.env.register_function(id.name, final_func_type)
-		c.env.define(id.name, final_func_type)
+		loc := c.def_loc_from_span(id.name, id.span)
+		c.env.register_function_at(id.name, final_func_type, loc)
+		c.env.define_at(id.name, final_func_type, loc)
+		c.record_type(id.name, final_func_type, id.span)
 	}
 
 	mut typed_params := []typed_ast.FunctionParameter{}
@@ -1082,11 +1169,13 @@ fn (mut c TypeChecker) check_function(expr ast.FunctionExpression) (typed_ast.Ex
 
 fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Expression, Type) {
 	if func_type := c.env.lookup_function(expr.identifier.name) {
+		c.record_type(expr.identifier.name, func_type, expr.identifier.span)
 		return c.check_call_with_type(expr, func_type)
 	}
 
 	if var_type := c.env.lookup(expr.identifier.name) {
 		if var_type is TypeFunction {
+			c.record_type(expr.identifier.name, var_type, expr.identifier.span)
 			return c.check_call_with_type(expr, var_type)
 		}
 		if var_type is TypeVar {
@@ -1106,6 +1195,7 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 			}
 
 			c.unify(var_type, inferred_func_type, mut c.param_subs)
+			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span)
 			return typed_ast.FunctionCallExpression{
 				identifier: convert_identifier(expr.identifier)
 				arguments:  typed_args
@@ -1422,7 +1512,8 @@ fn (mut c TypeChecker) check_struct_def(expr ast.StructExpression) (typed_ast.Ex
 		fields: fields
 	}
 
-	c.env.register_struct(struct_type)
+	loc := c.def_loc_from_span(expr.identifier.name, expr.identifier.span)
+	c.env.register_struct_at(struct_type, loc)
 
 	mut typed_fields := []typed_ast.StructField{}
 	for f in expr.fields {
@@ -1530,7 +1621,8 @@ fn (mut c TypeChecker) check_enum_def(expr ast.EnumExpression) (typed_ast.Expres
 		variants: variants
 	}
 
-	c.env.register_enum(enum_type)
+	loc := c.def_loc_from_span(expr.identifier.name, expr.identifier.span)
+	c.env.register_enum_at(enum_type, loc)
 
 	typed_variants := expr.variants.map(fn (v ast.EnumVariant) typed_ast.EnumVariant {
 		return typed_ast.EnumVariant{
@@ -1837,6 +1929,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 						for i, arg in args {
 							if arg is ast.Identifier && i < payload_types.len {
 								c.env.define(arg.name, payload_types[i])
+								c.record_type(arg.name, payload_types[i], arg.span)
 							}
 						}
 
@@ -1898,6 +1991,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 					if inner is ast.Identifier {
 						// Named spread: bind to array type
 						c.env.define(inner.name, subject_type)
+						c.record_type(inner.name, subject_type, inner.span)
 						typed_elements << typed_ast.SpreadExpression{
 							expression: typed_ast.Identifier{
 								name: inner.name
@@ -1923,6 +2017,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			} else if elem is ast.Identifier {
 				// Named binding: bind to element type
 				c.env.define(elem.name, element_type)
+				c.record_type(elem.name, element_type, elem.span)
 				typed_elements << typed_ast.Identifier{
 					name: elem.name
 					span: convert_span(elem.span)
@@ -1980,6 +2075,9 @@ fn (mut c TypeChecker) check_or(expr ast.OrExpression) (typed_ast.Expression, Ty
 	} else if inner_type is TypeResult {
 		success_type = inner_type.success
 		error_type = inner_type.error
+	} else {
+		c.error_at_token("'or' can only be used on Result or Option types, got '${type_to_string(inner_type)}'",
+			expr.span, 2)
 	}
 
 	if receiver := expr.receiver {
@@ -2034,6 +2132,9 @@ fn (mut c TypeChecker) check_assert(expr ast.AssertExpression) (typed_ast.Expres
 	c.expect_type(cond_type, t_bool(), cond_span, 'in assert condition')
 
 	typed_msg, _ := c.check_expr(expr.message)
+
+	// Mark that this function has an assert (can fail with String error)
+	c.current_fn_has_assert = true
 
 	return typed_ast.AssertExpression{
 		expression: typed_cond

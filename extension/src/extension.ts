@@ -1,16 +1,41 @@
 import { spawn } from "node:child_process";
 import * as vscode from "vscode";
+import {
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+} from "vscode-languageclient/node";
+
+let client: LanguageClient | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-  const formatter = vscode.languages.registerDocumentFormattingEditProvider(
+  const config = vscode.workspace.getConfiguration("al");
+  const binaryPath = config.get("binaryPath", "al");
+
+   const serverOptions: ServerOptions = {
+    command: binaryPath,
+    args: ["lsp"],
+  };
+
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: [{ scheme: "file", language: "al" }],
+  };
+
+  client = new LanguageClient(
+    "al-lsp",
+    "AL Language Server",
+    serverOptions,
+    clientOptions
+  );
+
+  client.start();
+
+   const formatter = vscode.languages.registerDocumentFormattingEditProvider(
     "al",
     {
       async provideDocumentFormattingEdits(
         document: vscode.TextDocument
       ): Promise<vscode.TextEdit[]> {
-        const config = vscode.workspace.getConfiguration("al");
-        const binaryPath = config.get("binaryPath", "al");
-
         try {
           const formatted = await formatWithStdin(
             binaryPath,
@@ -68,4 +93,8 @@ function formatWithStdin(binaryPath: string, content: string): Promise<string> {
   });
 }
 
-export function deactivate() {}
+export async function deactivate() {
+  if (client) {
+    await client.stop();
+  }
+}

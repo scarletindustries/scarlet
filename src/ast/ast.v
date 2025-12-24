@@ -136,6 +136,7 @@ pub:
 	expression Expression
 	receiver   ?Identifier
 	body       Expression
+	span       Span @[required] // span of the 'or' keyword
 }
 
 pub struct ErrorExpression {

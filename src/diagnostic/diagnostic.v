@@ -17,6 +17,15 @@ pub fn point_span(line int, column int) Span {
 	}
 }
 
+pub fn range_span(line int, start_column int, end_column int) Span {
+	return Span{
+		start_line:   line
+		start_column: start_column
+		end_line:     line
+		end_column:   end_column
+	}
+}
+
 pub enum Severity {
 	error
 	warning
