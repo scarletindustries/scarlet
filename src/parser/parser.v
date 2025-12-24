@@ -907,6 +907,16 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 }
 
+fn (p Parser) extract_doc_comment() ?string {
+	for trivia in p.current_token.leading_trivia {
+		if trivia.kind == .doc_comment {
+			return trivia.text
+		}
+	}
+
+	return none
+}
+
 fn (mut p Parser) parse_function() !ast.Node {
 	// Check if next token is identifier (declaration) or paren (expression)
 	if next := p.peek_next() {
@@ -918,12 +928,15 @@ fn (mut p Parser) parse_function() !ast.Node {
 }
 
 fn (mut p Parser) parse_function_declaration() !ast.Statement {
+	doc := p.extract_doc_comment()
+
 	fn_span := p.current_span()
 	p.eat(.kw_function)!
 
 	id_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected function name')!
 
+	println('Doc for function ${name}: ${doc}')
 	params := p.parse_parameters()!
 	return_type, error_type := p.parse_function_return_types()!
 	body := p.parse_block_expression()!

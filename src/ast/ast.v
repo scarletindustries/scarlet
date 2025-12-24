@@ -101,6 +101,7 @@ pub:
 
 pub struct FunctionDeclaration {
 pub:
+	doc         ?string
 	identifier  Identifier
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier

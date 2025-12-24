@@ -125,7 +125,7 @@ fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
 			.newline {
 				consecutive_newlines++
 			}
-			.line_comment {
+			.line_comment, .block_comment, .doc_comment {
 				if consecutive_newlines > 1 {
 					for _ in 0 .. consecutive_newlines - 1 {
 						f.emit('\n')

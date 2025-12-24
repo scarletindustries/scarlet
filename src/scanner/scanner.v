@@ -78,6 +78,33 @@ fn (mut s Scanner) collect_trivia() {
 			continue
 		}
 
+		// Collect block comments /* */ and doc comments /** */
+		if ch == `/` && s.state.get_pos() + 1 < s.input.len && s.input[s.state.get_pos() + 1] == `*` {
+			start := s.state.get_pos()
+			// this is hard to quickly parse this should be cleaner
+			is_doc := s.state.get_pos() + 2 < s.input.len && s.input[s.state.get_pos() + 2] == `*` && (s.state.get_pos() + 3 >= s.input.len || s.input[s.state.get_pos() + 3] != `/`)
+
+			s.incr_pos() // skip /
+			s.incr_pos() // skip *
+
+			// Consume until */
+			for s.state.get_pos() + 1 < s.input.len {
+				if s.peek_char() == `*` && s.input[s.state.get_pos() + 1] == `/` {
+					s.incr_pos() // skip *
+					s.incr_pos() // skip /
+					break
+				}
+				s.incr_pos()
+			}
+
+			text := s.input[start..s.state.get_pos()]
+			s.pending_trivia << token.Trivia{
+				kind: if is_doc { .doc_comment } else { .block_comment }
+				text: text
+			}
+			continue
+		}
+
 		break
 	}
 }
