@@ -1035,65 +1035,137 @@ fn value_type_name(v bytecode.Value) string {
 }
 
 pub fn inspect(v bytecode.Value) string {
+	return inspect_pretty(v, 0)
+}
+
+fn is_simple_value(v bytecode.Value) bool {
+	return match v {
+		int, f64, bool, bytecode.NoneValue, bytecode.ClosureValue { true }
+		string { v.len < 20 }
+		bytecode.EnumValue { v.payload.len == 0 }
+		else { false }
+	}
+}
+
+fn inspect_inline(v bytecode.Value) string {
 	match v {
-		int {
-			return v.str()
+		int { return v.str() }
+		f64 { return v.str() }
+		bool { return if v { 'true' } else { 'false' } }
+		string { return v }
+		bytecode.NoneValue { return 'none' }
+		bytecode.ClosureValue { return '<fn#${v.name}>' }
+		bytecode.EnumValue {
+			if v.payload.len > 0 {
+				parts := v.payload.map(inspect_inline(it))
+				return '${v.enum_name}.${v.variant_name}(${parts.join(', ')})'
+			}
+			return '${v.enum_name}.${v.variant_name}'
 		}
-		f64 {
-			return v.str()
-		}
-		bool {
-			return if v { 'true' } else { 'false' }
-		}
-		string {
-			return v
-		}
-		bytecode.NoneValue {
-			return 'none'
+		bytecode.ErrorValue { return 'error(${inspect_inline(v.payload)})' }
+		bytecode.SocketValue {
+			return if v.is_listener { '<listener#${v.id}>' } else { '<socket#${v.id}>' }
 		}
 		[]bytecode.Value {
 			mut s := '['
 			for i, elem in v {
-				if i > 0 {
-					s += ', '
-				}
-				s += inspect(elem)
+				if i > 0 { s += ', ' }
+				s += inspect_inline(elem)
 			}
-			s += ']'
-			return s
+			return s + ']'
 		}
 		bytecode.StructValue {
 			mut s := '${v.type_name}{ '
 			mut first := true
 			for name, val in v.fields {
-				if !first {
-					s += ', '
-				}
-				s += '${name}: ${inspect(val)}'
+				if !first { s += ', ' }
+				s += '${name}: ${inspect_inline(val)}'
 				first = false
 			}
-			s += ' }'
-			return s
+			return s + ' }'
 		}
-		bytecode.ClosureValue {
-			return '<fn#${v.name}>'
+	}
+}
+
+fn inspect_pretty(v bytecode.Value, indent int) string {
+	tab := '  '
+	pad := tab.repeat(indent)
+	pad_inner := tab.repeat(indent + 1)
+
+	match v {
+		int { return v.str() }
+		f64 { return v.str() }
+		bool { return if v { 'true' } else { 'false' } }
+		string { return v }
+		bytecode.NoneValue { return 'none' }
+		bytecode.ClosureValue { return '<fn#${v.name}>' }
+		bytecode.SocketValue {
+			return if v.is_listener { '<listener#${v.id}>' } else { '<socket#${v.id}>' }
 		}
+		bytecode.ErrorValue { return 'error(${inspect_pretty(v.payload, indent)})' }
 		bytecode.EnumValue {
 			if v.payload.len > 0 {
-				parts := v.payload.map(inspect(it))
-				return '${v.enum_name}.${v.variant_name}(${parts.join(', ')})'
-			} else {
-				return '${v.enum_name}.${v.variant_name}'
+				all_simple := v.payload.all(is_simple_value(it))
+				if all_simple {
+					parts := v.payload.map(inspect_inline(it))
+					return '${v.enum_name}.${v.variant_name}(${parts.join(', ')})'
+				}
+				mut s := '${v.enum_name}.${v.variant_name}(\n'
+				for i, p in v.payload {
+					s += '${pad_inner}${inspect_pretty(p, indent + 1)}'
+					if i < v.payload.len - 1 { s += ',' }
+					s += '\n'
+				}
+				return s + '${pad})'
 			}
+			return '${v.enum_name}.${v.variant_name}'
 		}
-		bytecode.ErrorValue {
-			return 'error(${inspect(v.payload)})'
-		}
-		bytecode.SocketValue {
-			if v.is_listener {
-				return '<listener#${v.id}>'
+		[]bytecode.Value {
+			if v.len == 0 { return '[]' }
+			all_simple := v.all(is_simple_value(it))
+			if all_simple {
+				inline := inspect_inline(v)
+				if inline.len <= 80 { return inline }
+				mut s := '[\n'
+				mut line := pad_inner
+				items_per_line := 6
+				for i, elem in v {
+					item := inspect_inline(elem)
+					line += item
+					is_last := i == v.len - 1
+					if !is_last { line += ', ' }
+					if (i + 1) % items_per_line == 0 && !is_last {
+						s += line + '\n'
+						line = pad_inner
+					}
+				}
+				if line != pad_inner { s += line + '\n' }
+				return s + '${pad}]'
 			}
-			return '<socket#${v.id}>'
+			mut s := '[\n'
+			for i, elem in v {
+				s += '${pad_inner}${inspect_pretty(elem, indent + 1)}'
+				if i < v.len - 1 { s += ',' }
+				s += '\n'
+			}
+			return s + '${pad}]'
+		}
+		bytecode.StructValue {
+			if v.fields.len == 0 { return '${v.type_name}{}' }
+			all_simple := v.fields.values().all(is_simple_value(it))
+			if all_simple && v.fields.len <= 3 {
+				inline := inspect_inline(v)
+				if inline.len <= 60 { return inline }
+			}
+			mut s := '${v.type_name} {\n'
+			mut i := 0
+			for name, val in v.fields {
+				s += '${pad_inner}${name}: ${inspect_pretty(val, indent + 1)}'
+				if i < v.fields.len - 1 { s += ',' }
+				s += '\n'
+				i++
+			}
+			return s + '${pad}}'
 		}
 	}
 }
