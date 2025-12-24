@@ -296,6 +296,11 @@ fn (mut c TypeChecker) register_builtins() {
 		params: [socket]
 		ret:    t_none()
 	})
+
+	c.env.register_function('str_split', TypeFunction{
+		params: [t_string(), t_string()]
+		ret:    t_array(t_string())
+	})
 }
 
 fn (mut c TypeChecker) expect_type(actual Type, expected Type, span typed_ast.Span, context string) bool {

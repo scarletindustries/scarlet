@@ -16,7 +16,8 @@ mut:
 @[params]
 pub struct VMOptions {
 pub:
-	io_enabled bool
+	io_enabled      bool
+	std_lib_enabled bool
 }
 
 pub struct VM {
@@ -772,6 +773,25 @@ fn (mut vm VM) execute() !bytecode.Value {
 					vm.stack << bytecode.NoneValue{}
 				} else {
 					return error('tcp_close requires socket')
+				}
+			}
+			.str_split {
+				if !vm.options.std_lib_enabled {
+					return error('std lib operations require --experimental-std-lib flag')
+				}
+				delimiter := vm.pop()!
+				string_val := vm.pop()!
+
+				if string_val is string && delimiter is string {
+					parts := string_val.split(delimiter)
+					mut result := []bytecode.Value{cap: parts.len}
+					for part in parts {
+						result << part
+					}
+
+					vm.stack << bytecode.Value(result)
+				} else {
+					return error('str_split requires string and delimiter')
 				}
 			}
 		}
