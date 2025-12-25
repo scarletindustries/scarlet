@@ -936,12 +936,12 @@ fn (mut p Parser) parse_function_declaration() !ast.Statement {
 	id_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected function name')!
 
-	println('Doc for function ${name}: ${doc}')
 	params := p.parse_parameters()!
 	return_type, error_type := p.parse_function_return_types()!
 	body := p.parse_block_expression()!
 
 	return ast.FunctionDeclaration{
+		doc:         doc
 		identifier:  ast.Identifier{
 			name: name
 			span: id_span
@@ -1343,6 +1343,8 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 }
 
 fn (mut p Parser) parse_const_binding() !ast.Statement {
+	doc := p.extract_doc_comment();
+
 	span := p.current_span()
 	p.eat(.kw_const)!
 
@@ -1359,6 +1361,7 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 	init := p.parse_expression()!
 
 	return ast.ConstBinding{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: name_span
@@ -1370,6 +1373,8 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 }
 
 fn (mut p Parser) parse_binding() !ast.Statement {
+	doc := p.extract_doc_comment();
+
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
@@ -1398,6 +1403,7 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	}
 
 	return ast.VariableBinding{
+		doc: doc
 		identifier: ast.Identifier{
 			name: name
 			span: span

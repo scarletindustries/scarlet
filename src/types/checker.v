@@ -37,6 +37,7 @@ pub:
 	def_line  int // definition location (0 if unknown)
 	def_col   int
 	def_end   int
+	doc       ?string
 }
 
 pub struct TypeChecker {
@@ -93,7 +94,7 @@ fn (mut c TypeChecker) error_at_token(message string, s Span, token_len int) {
 	}
 }
 
-fn (mut c TypeChecker) record_type(name string, typ Type, s Span) {
+fn (mut c TypeChecker) record_type(name string, typ Type, s Span, doc ?string) {
 	// Look up definition location
 	mut def_line := 0
 	mut def_col := 0
@@ -113,6 +114,7 @@ fn (mut c TypeChecker) record_type(name string, typ Type, s Span) {
 		def_line:  def_line
 		def_col:   def_col
 		def_end:   def_end
+		doc:       doc
 	}
 }
 
@@ -457,7 +459,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 				}
 				t_none()
 			}
-			c.record_type(expr.name, typ, expr.span)
+			c.record_type(expr.name, typ, expr.span, c.env.lookup_doc(expr.name))
 			return typed_ast.Identifier{
 				name: expr.name
 				span: expr.span
@@ -717,7 +719,10 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 	final_type := c.check_binding_type(expr.identifier.name, expr.identifier.span, expr.typ,
 		typed_init, init_type, 'in variable binding')
 
-	c.record_type(expr.identifier.name, final_type, expr.identifier.span)
+	if doc := expr.doc {
+		c.env.store_doc(expr.identifier.name, doc)
+	}
+	c.record_type(expr.identifier.name, final_type, expr.identifier.span, expr.doc)
 
 	stmt := typed_ast.Statement(typed_ast.VariableBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -739,7 +744,10 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Nod
 	final_type := c.check_binding_type(expr.identifier.name, expr.identifier.span, expr.typ,
 		typed_init, init_type, 'in const binding')
 
-	c.record_type(expr.identifier.name, final_type, expr.identifier.span)
+	if doc := expr.doc {
+		c.env.store_doc(expr.identifier.name, doc)
+	}
+	c.record_type(expr.identifier.name, final_type, expr.identifier.span, expr.doc)
 
 	stmt := typed_ast.Statement(typed_ast.ConstBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -1000,7 +1008,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	}
 
 	for i, param in expr.params {
-		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
+		c.record_type(param.identifier.name, param_types[i], param.identifier.span, none)
 	}
 
 	ret_type = substitute(body_type, c.param_subs)
@@ -1036,7 +1044,10 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 
 	c.env.register_function_at(expr.identifier.name, final_func_type, loc)
 	c.env.define_at(expr.identifier.name, final_func_type, loc)
-	c.record_type(expr.identifier.name, final_func_type, expr.identifier.span)
+	if doc := expr.doc {
+		c.env.store_doc(expr.identifier.name, doc)
+	}
+	c.record_type(expr.identifier.name, final_func_type, expr.identifier.span, expr.doc)
 
 	mut typed_params := []typed_ast.FunctionParameter{}
 	for p in expr.params {
@@ -1135,7 +1146,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	}
 
 	for i, param in expr.params {
-		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
+		c.record_type(param.identifier.name, param_types[i], param.identifier.span, none)
 	}
 
 	ret_type = substitute(body_type, c.param_subs)
@@ -1205,14 +1216,15 @@ fn (mut c TypeChecker) check_type_pattern_binding(expr ast.TypePatternBinding) (
 }
 
 fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Expression, Type) {
+	doc := c.env.lookup_doc(expr.identifier.name)
 	if func_type := c.env.lookup_function(expr.identifier.name) {
-		c.record_type(expr.identifier.name, func_type, expr.identifier.span)
+		c.record_type(expr.identifier.name, func_type, expr.identifier.span, doc)
 		return c.check_call_with_type(expr, func_type)
 	}
 
 	if var_type := c.env.lookup(expr.identifier.name) {
 		if var_type is TypeFunction {
-			c.record_type(expr.identifier.name, var_type, expr.identifier.span)
+			c.record_type(expr.identifier.name, var_type, expr.identifier.span, doc)
 			return c.check_call_with_type(expr, var_type)
 		}
 		if var_type is TypeVar {
@@ -1232,7 +1244,7 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 			}
 
 			c.unify(var_type, inferred_func_type, mut c.param_subs)
-			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span)
+			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span, doc)
 			return typed_ast.FunctionCallExpression{
 				identifier: convert_identifier(expr.identifier)
 				arguments:  typed_args
@@ -1969,7 +1981,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 						for i, arg in args {
 							if arg is ast.Identifier && i < payload_types.len {
 								c.env.define(arg.name, payload_types[i])
-								c.record_type(arg.name, payload_types[i], arg.span)
+								c.record_type(arg.name, payload_types[i], arg.span, none)
 							}
 						}
 
@@ -2032,7 +2044,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 					if inner is ast.Identifier {
 						// Named spread: bind to array type
 						c.env.define(inner.name, subject_type)
-						c.record_type(inner.name, subject_type, inner.span)
+						c.record_type(inner.name, subject_type, inner.span, none)
 						typed_elements << typed_ast.SpreadExpression{
 							expression: typed_ast.Identifier{
 								name: inner.name
@@ -2058,7 +2070,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			} else if elem is ast.Identifier {
 				// Named binding: bind to element type
 				c.env.define(elem.name, element_type)
-				c.record_type(elem.name, element_type, elem.span)
+				c.record_type(elem.name, element_type, elem.span, none)
 				typed_elements << typed_ast.Identifier{
 					name: elem.name
 					span: convert_span(elem.span)

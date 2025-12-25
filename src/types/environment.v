@@ -13,6 +13,7 @@ pub struct TypeEnv {
 mut:
 	scopes       []map[string]Type
 	definitions  map[string]DefinitionLocation
+	docs         map[string]string
 	functions    map[string]TypeFunction
 	structs      map[string]TypeStruct
 	enums        map[string]TypeEnum
@@ -23,6 +24,7 @@ pub fn new_env() TypeEnv {
 	return TypeEnv{
 		scopes:       [map[string]Type{}]
 		definitions:  map[string]DefinitionLocation{}
+		docs:         map[string]string{}
 		functions:    map[string]TypeFunction{}
 		structs:      map[string]TypeStruct{}
 		enums:        map[string]TypeEnum{}
@@ -55,6 +57,14 @@ pub fn (mut e TypeEnv) define_at(name string, t Type, loc DefinitionLocation) {
 
 pub fn (e TypeEnv) lookup_definition(name string) ?DefinitionLocation {
 	return e.definitions[name] or { return none }
+}
+
+pub fn (mut e TypeEnv) store_doc(name string, doc string) {
+	e.docs[name] = doc
+}
+
+pub fn (e TypeEnv) lookup_doc(name string) ?string {
+	return e.docs[name] or { return none }
 }
 
 pub fn (e TypeEnv) lookup(name string) ?Type {

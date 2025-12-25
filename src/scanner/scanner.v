@@ -81,13 +81,13 @@ fn (mut s Scanner) collect_trivia() {
 		// Collect block comments /* */ and doc comments /** */
 		if ch == `/` && s.state.get_pos() + 1 < s.input.len && s.input[s.state.get_pos() + 1] == `*` {
 			start := s.state.get_pos()
-			// this is hard to quickly parse this should be cleaner
-			is_doc := s.state.get_pos() + 2 < s.input.len && s.input[s.state.get_pos() + 2] == `*` && (s.state.get_pos() + 3 >= s.input.len || s.input[s.state.get_pos() + 3] != `/`)
-
 			s.incr_pos() // skip /
 			s.incr_pos() // skip *
 
-			// Consume until */
+			// Doc comment if next char is * but NOT followed by /
+			// i.e., /** but not /**/ or /***/
+			is_doc := s.state.get_pos() < s.input.len && s.peek_char() == `*` && (s.state.get_pos() + 1 >= s.input.len || s.input[s.state.get_pos() + 1] != `/`)
+
 			for s.state.get_pos() + 1 < s.input.len {
 				if s.peek_char() == `*` && s.input[s.state.get_pos() + 1] == `/` {
 					s.incr_pos() // skip *

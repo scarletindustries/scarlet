@@ -657,7 +657,7 @@ fn (f Formatter) has_comment_trivia_at_span(s Span) bool {
 		key := '${s.start_line}:${s.start_column}'
 		if trivia := f.trivia_map[key] {
 			for t in trivia {
-				if t.kind == .line_comment {
+				if t.kind in [.line_comment, .block_comment, .doc_comment] {
 					return true
 				}
 			}
@@ -671,7 +671,7 @@ fn (f Formatter) has_comment_trivia_at_span_end(s Span) bool {
 		key := '${s.end_line}:${s.end_column - 1}'
 		if trivia := f.trivia_map[key] {
 			for t in trivia {
-				if t.kind == .line_comment {
+				if t.kind in [.line_comment, .block_comment, .doc_comment] {
 					return true
 				}
 			}

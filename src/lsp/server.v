@@ -20,6 +20,7 @@ pub:
 	def_line  int // definition location (0 if unknown)
 	def_col   int
 	def_end   int
+	doc       ?string
 }
 
 pub struct Position {

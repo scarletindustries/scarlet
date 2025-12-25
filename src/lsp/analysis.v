@@ -75,6 +75,7 @@ fn extract_types(check_result types.CheckResult) []TypeAtPosition {
 			def_line:  tp.def_line
 			def_col:   tp.def_col
 			def_end:   tp.def_end
+			doc:       tp.doc
 		}
 	}
 

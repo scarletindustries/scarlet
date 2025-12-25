@@ -72,6 +72,7 @@ pub:
 
 pub struct VariableBinding {
 pub:
+	doc        ?string
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
@@ -80,6 +81,7 @@ pub:
 
 pub struct ConstBinding {
 pub:
+	doc        ?string
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
