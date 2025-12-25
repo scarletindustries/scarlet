@@ -104,11 +104,11 @@ fn describe(x Int) String {
 
 fn grade(score Int) String!Error {
 	match score {
-		0..59 -> 'F',
-		60..69 -> 'D',
-		70..79 -> 'C',
-		80..89 -> 'B',
-		90..100 -> 'A',
+		0..60 -> 'F',
+		60..70 -> 'D',
+		70..80 -> 'C',
+		80..90 -> 'B',
+		90..101 -> 'A',
 		else -> error Error{ message: 'score must be 0-100' },
 	}
 }

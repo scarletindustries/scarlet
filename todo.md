@@ -1,39 +1,6 @@
 # AL Language TODO
 
-## 1. Range Pattern Matching
-
-Add support for `4..10 -> ...` syntax in match expressions.
-
-**Current state:** `RangeExpression` already exists in both ASTs (parser and typed). It's used for array slicing (`arr[1..5]`). We can reuse it as a pattern.
-
-**Files to modify:**
-
-- `src/parser/parser.v` - In `parse_match_arm()` or pattern parsing, check for `number..number` and parse as RangeExpression
-- `src/type_checker/type_checker.v` - In match pattern type checking, handle RangeExpression: verify both bounds are Int, verify subject is Int
-- `src/compiler/compiler.v` - In match compilation, emit range check: `subject >= start && subject < end`
-- `src/vm/vm.v` - No changes needed if compiler emits comparison ops
-
-**Example syntax:**
-
-```
-match score {
-    0..60 -> 'F',
-    60..70 -> 'D',
-    70..80 -> 'C',
-    80..90 -> 'B',
-    90..101 -> 'A',
-}
-```
-
-**Edge cases:**
-
-- Range is exclusive on end (consistent with array slicing)
-- Both bounds must be compile-time constants (for now)
-- Can combine with or-patterns: `1 | 2 | 10..20 -> ...`
-
----
-
-## 2. Receiver Pattern for Struct Methods
+## 1. Receiver Pattern for Struct Methods
 
 Add method syntax: `fn (self Point) distance() Float { ... }` called as `point.distance()`.
 
@@ -73,7 +40,7 @@ d = p.distance()
 
 ---
 
-## 3. Tuple Types
+## 2. Tuple Types
 
 Add tuple types with `()` syntax: `(Int, String)`, created as `(1, 'hello')`.
 
@@ -117,7 +84,7 @@ fn divide(a Int, b Int) (Int, Int) {
 
 ---
 
-## 4. Import/Export Module System
+## 3. Import/Export Module System
 
 Add `import` and `export` for sharing code between files.
 
@@ -160,7 +127,7 @@ result = add(1, 2)
 
 ---
 
-## 5. Multi-File Project Support
+## 4. Multi-File Project Support
 
 Build system for compiling multiple files together.
 
@@ -201,7 +168,7 @@ myproject/
 
 ---
 
-## 6. builtins.al for Global Stdlib
+## 5. builtins.al for Global Stdlib
 
 Create a prelude file that's automatically imported.
 
@@ -248,7 +215,7 @@ export fn max(a Int, b Int) Int { ... }
 
 ---
 
-## 7. Collection Functions
+## 6. Collection Functions
 
 Add `map`, `filter`, `reduce`, `find`, `len`, `concat`, `reverse`, etc.
 
@@ -292,7 +259,7 @@ fn enumerate(arr []a) [](Int, a)  // needs tuples
 
 ---
 
-## 8. String Functions
+## 7. String Functions
 
 Add string manipulation functions.
 
@@ -324,7 +291,7 @@ fn pad_right(s String, length Int, char String) String
 
 ---
 
-## 9. Math Functions
+## 8. Math Functions
 
 Add math utilities.
 
@@ -359,7 +326,7 @@ const min_int = -9223372036854775808
 
 ---
 
-## 10. Remove Assert
+## 9. Remove Assert
 
 Remove `assert` because early return from functions doesn't work properly.
 
@@ -398,15 +365,14 @@ fn process(x Int) Int!Error {
 Suggested order based on dependencies and complexity:
 
 1. **Remove assert** - Quick cleanup, no dependencies
-2. **Range pattern matching** - Self-contained, builds on existing RangeExpression
-3. **String functions** - Easy wins, no language changes needed
-4. **Math functions** - Same as above
-5. **Collection functions** - Slightly more complex (generics), but no syntax changes
-6. **Tuple types** - New syntax, needed for some stdlib functions
-7. **Receiver pattern** - New syntax, but self-contained
-8. **Import/export** - Complex, touches many files
-9. **Multi-file support** - Depends on import/export
-10. **builtins.al** - Depends on import/export and stdlib functions
+2. **String functions** - Easy wins, no language changes needed
+3. **Math functions** - Same as above
+4. **Collection functions** - Slightly more complex (generics), but no syntax changes
+5. **Tuple types** - New syntax, needed for some stdlib functions
+6. **Receiver pattern** - New syntax, but self-contained
+7. **Import/export** - Complex, touches many files
+8. **Multi-file support** - Depends on import/export
+9. **builtins.al** - Depends on import/export and stdlib functions
 
 ---
 

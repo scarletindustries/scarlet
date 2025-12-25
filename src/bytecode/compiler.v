@@ -1025,10 +1025,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 					first_check := c.current_addr()
 					c.emit_arg(.jump_if_false, 0)
 
-					// subject <= end
+					// subject < end
 					c.emit(.dup)
 					c.compile_expr(range_expr.end)!
-					c.emit(.lte)
+					c.emit(.lt)
 
 					if i < arm.pattern.patterns.len - 1 {
 						body_jumps << c.current_addr()
@@ -1073,7 +1073,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			continue
 		}
 
-		// Range patterns: 0..10 matches [0, 10]
+		// Range patterns: 0..10 matches [0, 9]
 		if arm.pattern is typed_ast.RangeExpression {
 			range_expr := arm.pattern as typed_ast.RangeExpression
 
@@ -1085,10 +1085,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			first_check := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
-			// subject <= end
+			// subject < end
 			c.emit(.dup)
 			c.compile_expr(range_expr.end)!
-			c.emit(.lte)
+			c.emit(.lt)
 
 			second_check := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
