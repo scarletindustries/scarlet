@@ -130,12 +130,14 @@ pub:
 
 pub struct EnumVariant {
 pub:
+	doc        ?string
 	identifier Identifier
 	payload    []TypeIdentifier
 }
 
 pub struct EnumDeclaration {
 pub:
+	doc        ?string
 	identifier Identifier
 	variants   []EnumVariant
 	span       Span @[required]

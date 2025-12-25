@@ -1677,6 +1677,11 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 					variant.identifier.span)
 			}
 		}
+
+		if doc := variant.doc {
+			c.env.store_doc('${stmt.identifier.name}.${variant.identifier.name}', doc)
+		}
+
 		variants[variant.identifier.name] = payload_types
 	}
 
@@ -1686,7 +1691,17 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 	}
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
-	c.env.register_enum_at(enum_type, loc)
+	registered_enum := c.env.register_enum_at(enum_type, loc)
+
+	if doc := stmt.doc {
+		c.env.store_doc(stmt.identifier.name, doc)
+	}
+
+	c.record_type(stmt.identifier.name, Type(registered_enum), stmt.identifier.span, stmt.doc)
+
+	for variant in stmt.variants {
+		c.record_type(variant.identifier.name, Type(registered_enum), variant.identifier.span, variant.doc)
+	}
 
 	typed_variants := stmt.variants.map(fn (v ast.EnumVariant) typed_ast.EnumVariant {
 		return typed_ast.EnumVariant{
@@ -1711,6 +1726,10 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		if looked_up := c.env.lookup_type(left_id.name) {
 			if looked_up is TypeEnum {
 				enum_type := looked_up
+
+				enum_doc := c.env.lookup_doc(left_id.name)
+				c.record_type(left_id.name, Type(enum_type), left_id.span, enum_doc)
+
 				typed_left := typed_ast.Identifier{
 					name: left_id.name
 					span: convert_span(left_id.span)
@@ -1738,6 +1757,9 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 						span:  convert_span(expr.span)
 					}, t_none()
 				}
+
+				variant_doc := c.env.lookup_doc('${left_id.name}.${variant_name}')
+				c.record_type(variant_name, Type(enum_type), variant_span, variant_doc)
 
 				payload_types := enum_type.variants[variant_name] or { []Type{} }
 				mut typed_args := []typed_ast.Expression{}

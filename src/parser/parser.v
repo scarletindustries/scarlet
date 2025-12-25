@@ -1248,6 +1248,8 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 }
 
 fn (mut p Parser) parse_enum_declaration() !ast.Statement {
+	doc := p.extract_doc_comment()
+
 	enum_span := p.current_span()
 	p.eat(.kw_enum)!
 
@@ -1268,6 +1270,7 @@ fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumDeclaration{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: id_span
@@ -1278,6 +1281,8 @@ fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 }
 
 fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
+	doc := p.extract_doc_comment()
+
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected variant name')!
 
@@ -1302,6 +1307,7 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	}
 
 	return ast.EnumVariant{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: span

@@ -25,4 +25,16 @@ struct User {
 
 user = User { name: 'Alice', age: 30 }
 
-user.name
+name = user.name
+
+/** Represents the status of an operation */
+enum Status {
+    /** Operation completed successfully */
+    Success
+    /** Operation is still in progress */
+    Pending
+    /** Operation failed with an error */
+    Failed
+}
+
+status = Status.Success
