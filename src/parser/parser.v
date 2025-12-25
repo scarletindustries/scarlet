@@ -293,6 +293,12 @@ fn (mut p Parser) parse_node() !ast.Node {
 		.kw_export {
 			return ast.Node(p.parse_export_declaration()!)
 		}
+		.punc_open_paren {
+			// Could be tuple destructuring: (a, b) = expr
+			if p.is_tuple_destructuring() {
+				return ast.Node(p.parse_tuple_destructuring()!)
+			}
+		}
 		.identifier {
 			// Check for binding patterns: identifier = or identifier Type =
 			if next := p.peek_next() {
@@ -591,10 +597,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 			p.parse_identifier_or_call()!
 		}
 		.punc_open_paren {
-			p.eat(.punc_open_paren)!
-			inner := p.parse_expression()!
-			p.eat(.punc_close_paren)!
-			inner
+			p.parse_tuple()!
 		}
 		.kw_none {
 			span := p.current_span()
@@ -780,6 +783,32 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 	return ast.ArrayExpression{
 		elements: elements
 		span:     span
+	}
+}
+
+fn (mut p Parser) parse_tuple() !ast.Expression {
+	start := p.current_span()
+	p.eat(.punc_open_paren)!
+
+	if p.current_token.kind == .punc_close_paren {
+		return error('Empty tuple () is not allowed. Use `none` instead.')
+	}
+
+	mut elements := []ast.Expression{}
+	elements << p.parse_expression()!
+
+	for p.current_token.kind == .punc_comma {
+		p.eat(.punc_comma)!
+		if p.current_token.kind == .punc_close_paren {
+			break
+		}
+		elements << p.parse_expression()!
+	}
+
+	p.eat(.punc_close_paren)!
+	return ast.TupleExpression{
+		elements: elements
+		span:     p.span_from(start)
 	}
 }
 
@@ -1345,6 +1374,78 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 	}
 }
 
+fn (p Parser) is_tuple_destructuring() bool {
+	mut depth := 0
+	mut i := p.index
+
+	for i < p.tokens.len {
+		tok := p.tokens[i]
+		if tok.kind == .punc_open_paren {
+			depth++
+		} else if tok.kind == .punc_close_paren {
+			depth--
+			if depth == 0 {
+				if i + 1 < p.tokens.len && p.tokens[i + 1].kind == .punc_equals {
+					return true
+				}
+				return false
+			}
+		} else if tok.kind == .eof {
+			return false
+		}
+		i++
+	}
+	return false
+}
+
+fn (mut p Parser) parse_tuple_destructuring() !ast.Statement {
+	span := p.current_span()
+	p.eat(.punc_open_paren)!
+
+	mut patterns := []ast.Expression{}
+
+	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
+		pattern_span := p.current_span()
+
+		if p.current_token.kind == .identifier {
+			name := p.eat_token_literal(.identifier, 'Expected identifier')!
+
+			if name.len > 0 && name[0] >= `A` && name[0] <= `Z` {
+				patterns << ast.TypeIdentifier{
+					identifier: ast.Identifier{
+						name: name
+						span: pattern_span
+					}
+					span:       pattern_span
+				}
+			} else {
+				patterns << ast.Identifier{
+					name: name
+					span: pattern_span
+				}
+			}
+		} else {
+			return error('Expected identifier in tuple destructuring pattern')
+		}
+
+		if p.current_token.kind == .punc_comma {
+			p.eat(.punc_comma)!
+		} else {
+			break
+		}
+	}
+
+	p.eat(.punc_close_paren)!
+	p.eat(.punc_equals)!
+	init := p.parse_expression()!
+
+	return ast.TupleDestructuringBinding{
+		patterns: patterns
+		init:     init
+		span:     p.span_from(span)
+	}
+}
+
 fn (mut p Parser) parse_binding() !ast.Statement {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
@@ -1457,6 +1558,43 @@ fn (mut p Parser) parse_dot_expression(left ast.Expression) !ast.Expression {
 	p.eat(.punc_dot)!
 
 	span := p.current_span()
+
+	if p.current_token.kind == .literal_number {
+		num_str := p.eat_token_literal(.literal_number, 'Expected tuple index')!
+
+		if num_str.contains('.') {
+			parts := num_str.split('.')
+			mut result := ast.Expression(ast.PropertyAccessExpression{
+				left:  left
+				right: ast.NumberLiteral{
+					value: parts[0]
+					span:  span
+				}
+				span:  p.span_from(start)
+			})
+			for i := 1; i < parts.len; i++ {
+				result = ast.PropertyAccessExpression{
+					left:  result
+					right: ast.NumberLiteral{
+						value: parts[i]
+						span:  span
+					}
+					span:  p.span_from(start)
+				}
+			}
+			return result
+		}
+
+		return ast.PropertyAccessExpression{
+			left:  left
+			right: ast.NumberLiteral{
+				value: num_str
+				span:  span
+			}
+			span:  p.span_from(start)
+		}
+	}
+
 	property := p.eat_token_literal(.identifier, 'Expected property name')!
 
 	if p.current_token.kind == .punc_open_paren {

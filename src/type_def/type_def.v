@@ -9,6 +9,7 @@ pub type Type = TypePrimitive
 	| TypeNone
 	| TypeVar
 	| TypeResult
+	| TypeTuple
 
 pub enum PrimitiveKind {
 	t_int
@@ -66,6 +67,11 @@ pub:
 	error   Type // The E in T!E
 }
 
+pub struct TypeTuple {
+pub:
+	elements []Type
+}
+
 pub fn t_int() Type {
 	return TypePrimitive{
 		kind: .t_int
@@ -109,6 +115,12 @@ pub fn t_array(element Type) Type {
 pub fn t_option(inner Type) Type {
 	return TypeOption{
 		inner: inner
+	}
+}
+
+pub fn t_tuple(elements []Type) Type {
+	return TypeTuple{
+		elements: elements
 	}
 }
 
@@ -181,6 +193,20 @@ pub fn types_equal(a Type, b Type) bool {
 			}
 			return false
 		}
+		TypeTuple {
+			if b is TypeTuple {
+				if a.elements.len != b.elements.len {
+					return false
+				}
+				for i, elem in a.elements {
+					if !types_equal(elem, b.elements[i]) {
+						return false
+					}
+				}
+				return true
+			}
+			return false
+		}
 	}
 }
 
@@ -226,6 +252,13 @@ pub fn type_to_string(t Type) string {
 		TypeResult {
 			return '${type_to_string(t.success)}!${type_to_string(t.error)}'
 		}
+		TypeTuple {
+			mut elems := []string{}
+			for elem in t.elements {
+				elems << type_to_string(elem)
+			}
+			return '(${elems.join(', ')})'
+		}
 	}
 }
 
@@ -268,6 +301,13 @@ pub fn substitute(t Type, subs map[string]Type) Type {
 				success: substitute(t.success, subs)
 				error:   substitute(t.error, subs)
 			}
+		}
+		TypeTuple {
+			mut new_elements := []Type{}
+			for elem in t.elements {
+				new_elements << substitute(elem, subs)
+			}
+			return t_tuple(new_elements)
 		}
 		else {
 			return t

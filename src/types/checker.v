@@ -12,6 +12,7 @@ import type_def {
 	TypeOption,
 	TypeResult,
 	TypeStruct,
+	TypeTuple,
 	TypeVar,
 	is_numeric,
 	substitute,
@@ -22,6 +23,7 @@ import type_def {
 	t_none,
 	t_option,
 	t_string,
+	t_tuple,
 	t_var,
 	type_to_string,
 	types_equal,
@@ -425,6 +427,9 @@ fn (mut c TypeChecker) check_statement(stmt ast.Statement) (typed_ast.Node, Type
 		ast.TypePatternBinding {
 			return c.check_type_pattern_binding(stmt)
 		}
+		ast.TupleDestructuringBinding {
+			return c.check_tuple_destructuring(stmt)
+		}
 		ast.FunctionDeclaration {
 			return c.check_function_declaration(stmt)
 		}
@@ -539,6 +544,9 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 		}
 		ast.ArrayExpression {
 			return c.check_array(expr)
+		}
+		ast.TupleExpression {
+			return c.check_tuple(expr)
 		}
 		ast.ArrayIndexExpression {
 			return c.check_array_index(expr)
@@ -1251,6 +1259,72 @@ fn (mut c TypeChecker) check_type_pattern_binding(expr ast.TypePatternBinding) (
 	return typed_ast.Node(stmt), t_none()
 }
 
+fn (mut c TypeChecker) check_tuple_destructuring(expr ast.TupleDestructuringBinding) (typed_ast.Node, Type) {
+	typed_init, init_type := c.check_expr(expr.init)
+
+	if init_type !is TypeTuple {
+		c.error_at_span('Tuple destructuring requires a tuple type, got ${type_to_string(init_type)}',
+			expr.span)
+		mut typed_patterns := []typed_ast.Expression{}
+		for pattern in expr.patterns {
+			typed_p, _ := c.check_expr(pattern)
+			typed_patterns << typed_p
+		}
+		stmt := typed_ast.Statement(typed_ast.TupleDestructuringBinding{
+			patterns: typed_patterns
+			init:     typed_init
+			span:     convert_span(expr.span)
+		})
+		return typed_ast.Node(stmt), t_none()
+	}
+
+	tuple_type := init_type as TypeTuple
+
+	if expr.patterns.len != tuple_type.elements.len {
+		c.error_at_span('Tuple destructuring pattern has ${expr.patterns.len} elements, but tuple has ${tuple_type.elements.len}',
+			expr.span)
+	}
+
+	mut typed_patterns := []typed_ast.Expression{}
+	for i, pattern in expr.patterns {
+		elem_type := if i < tuple_type.elements.len {
+			tuple_type.elements[i]
+		} else {
+			t_none()
+		}
+
+		if pattern is ast.Identifier {
+			loc := c.def_loc_from_span(pattern.name, pattern.span)
+			c.env.define_at(pattern.name, elem_type, loc)
+			c.record_type(pattern.name, elem_type, pattern.span)
+			typed_patterns << typed_ast.Identifier{
+				name: pattern.name
+				span: convert_span(pattern.span)
+			}
+		} else if pattern is ast.TypeIdentifier {
+			if expected := c.resolve_type_identifier(pattern) {
+				if !types_equal(elem_type, expected) {
+					c.error_at_span("Type mismatch in destructuring: expected '${type_to_string(expected)}', got '${type_to_string(elem_type)}'",
+						pattern.span)
+				}
+			} else {
+				c.error_at_span("Unknown type '${pattern.identifier.name}'", pattern.identifier.span)
+			}
+			typed_patterns << convert_type_identifier(pattern)
+		} else {
+			typed_p, _ := c.check_expr(pattern)
+			typed_patterns << typed_p
+		}
+	}
+
+	stmt := typed_ast.Statement(typed_ast.TupleDestructuringBinding{
+		patterns: typed_patterns
+		init:     typed_init
+		span:     convert_span(expr.span)
+	})
+	return typed_ast.Node(stmt), t_none()
+}
+
 fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Expression, Type) {
 	if func_type := c.env.lookup_function(expr.identifier.name) {
 		c.record_type(expr.identifier.name, func_type, expr.identifier.span)
@@ -1526,6 +1600,22 @@ fn (mut c TypeChecker) check_array(expr ast.ArrayExpression) (typed_ast.Expressi
 		elements: typed_elements
 		span:     convert_span(expr.span)
 	}, t_array(first_type)
+}
+
+fn (mut c TypeChecker) check_tuple(expr ast.TupleExpression) (typed_ast.Expression, Type) {
+	mut typed_elements := []typed_ast.Expression{}
+	mut element_types := []Type{}
+
+	for elem in expr.elements {
+		typed_elem, elem_type := c.check_expr(elem)
+		typed_elements << typed_elem
+		element_types << elem_type
+	}
+
+	return typed_ast.TupleExpression{
+		elements: typed_elements
+		span:     convert_span(expr.span)
+	}, t_tuple(element_types)
 }
 
 fn (mut c TypeChecker) check_array_index(expr ast.ArrayIndexExpression) (typed_ast.Expression, Type) {
@@ -1822,6 +1912,40 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		}, right_type
 	}
 
+	if expr.right is ast.NumberLiteral {
+		num_lit := expr.right as ast.NumberLiteral
+		typed_right := typed_ast.NumberLiteral{
+			value: num_lit.value
+			span:  convert_span(num_lit.span)
+		}
+
+		if left_type is TypeTuple {
+			index := num_lit.value.int()
+			if index < 0 || index >= left_type.elements.len {
+				c.error_at_span('Tuple index ${index} out of bounds. Tuple has ${left_type.elements.len} elements.',
+					num_lit.span)
+				return typed_ast.PropertyAccessExpression{
+					left:  typed_left
+					right: typed_right
+					span:  convert_span(expr.span)
+				}, t_none()
+			}
+			return typed_ast.PropertyAccessExpression{
+				left:  typed_left
+				right: typed_right
+				span:  convert_span(expr.span)
+			}, left_type.elements[index]
+		} else {
+			c.error_at_span('Cannot use numeric index on type ${type_to_string(left_type)}. Only tuples support .0 .1 etc.',
+				num_lit.span)
+			return typed_ast.PropertyAccessExpression{
+				left:  typed_left
+				right: typed_right
+				span:  convert_span(expr.span)
+			}, t_none()
+		}
+	}
+
 	if expr.right !is ast.Identifier {
 		err_span := expr.right.span
 		c.error_at_span('Expected identifier in property access', err_span)
@@ -2114,6 +2238,50 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 		}
 
 		return typed_ast.ArrayExpression{
+			elements: typed_elements
+			span:     convert_span(pattern.span)
+		}, subject_type
+	}
+
+	if pattern is ast.TupleExpression {
+		tuple_type := if subject_type is TypeTuple {
+			subject_type
+		} else {
+			c.error_at_span('Cannot match tuple pattern against non-tuple type ${type_to_string(subject_type)}',
+				pattern.span)
+			TypeTuple{
+				elements: []
+			}
+		}
+
+		if pattern.elements.len != tuple_type.elements.len && tuple_type.elements.len > 0 {
+			c.error_at_span('Tuple pattern has ${pattern.elements.len} elements, but tuple has ${tuple_type.elements.len}',
+				pattern.span)
+		}
+
+		mut typed_elements := []typed_ast.Expression{}
+
+		for i, elem in pattern.elements {
+			elem_type := if i < tuple_type.elements.len {
+				tuple_type.elements[i]
+			} else {
+				t_none()
+			}
+
+			if elem is ast.Identifier {
+				c.env.define(elem.name, elem_type)
+				c.record_type(elem.name, elem_type, elem.span)
+				typed_elements << typed_ast.Identifier{
+					name: elem.name
+					span: convert_span(elem.span)
+				}
+			} else {
+				typed_elem, _ := c.check_pattern(elem, elem_type)
+				typed_elements << typed_elem
+			}
+		}
+
+		return typed_ast.TupleExpression{
 			elements: typed_elements
 			span:     convert_span(pattern.span)
 		}, subject_type

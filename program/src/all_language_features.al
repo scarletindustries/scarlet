@@ -256,3 +256,42 @@ fn apply_twice(x, f) {
 	f(f(x))
 }
 println(apply_twice(5, fn(n) { n + 1 }))
+
+// ============================================================================
+// Tuples
+// ============================================================================
+
+// Tuple literals
+pair = (42, 'hello')
+triple = (true, 100, 'world')
+single = (42)
+
+// Tuple access
+println(pair.0)
+println(pair.1)
+println(triple.2)
+
+// Nested tuple access
+nested = ((1, 2), 'outer')
+println(nested.0.0)
+println(nested.0.1)
+
+// Tuple destructuring with variable binding
+(a, b) = pair
+println('a=${a} b=${b}')
+
+// Type consumption (discard value, verify type)
+(Bool, Int, name) = triple
+println('name=${name}')
+
+// All consumption (verify types, discard all)
+(Bool, Int, String) = triple
+
+// Tuple pattern matching
+test_pair = (1, 'hello')
+result = match test_pair {
+	(0, msg) -> 'zero: ${msg}',
+	(1, msg) -> 'one: ${msg}',
+	else -> 'other',
+}
+println(result)

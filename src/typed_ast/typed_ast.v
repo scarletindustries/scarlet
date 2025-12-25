@@ -94,6 +94,13 @@ pub:
 	span Span @[required]
 }
 
+pub struct TupleDestructuringBinding {
+pub:
+	patterns []Expression
+	init     Expression
+	span     Span @[required]
+}
+
 pub struct FunctionParameter {
 pub:
 	identifier Identifier
@@ -161,6 +168,7 @@ pub type Statement = ConstBinding
 	| FunctionDeclaration
 	| ImportDeclaration
 	| StructDeclaration
+	| TupleDestructuringBinding
 	| TypePatternBinding
 	| VariableBinding
 
@@ -229,6 +237,12 @@ pub:
 }
 
 pub struct ArrayExpression {
+pub:
+	elements []Expression
+	span     Span @[required]
+}
+
+pub struct TupleExpression {
 pub:
 	elements []Expression
 	span     Span @[required]
@@ -328,6 +342,7 @@ pub type Expression = ArrayExpression
 	| SpreadExpression
 	| StringLiteral
 	| StructInitExpression
+	| TupleExpression
 	| TypeIdentifier
 	| UnaryExpression
 	| WildcardPattern

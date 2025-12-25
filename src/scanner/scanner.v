@@ -418,30 +418,29 @@ fn (mut s Scanner) scan_identifier(from u8) token.Token {
 	return s.new_token(.identifier, result)
 }
 
-// Not a big fan of how this is implemented right now, it's
-// too greedy and requires backtracking to figure out
-// if the dots represent other tokens, or just a dotdot
 fn (mut s Scanner) scan_number(from u8) token.Token {
 	mut result := from.ascii_str()
-
 	mut has_dot := false
+	mut chars_after_dot := 0
 
 	for {
 		next := s.peek_char()
 
 		if next == `.` && has_dot {
-			result = result[..result.len - 1]
-			s.decr_pos()
+			for _ in 0 .. chars_after_dot + 1 {
+				result = result[..result.len - 1]
+				s.decr_pos()
+			}
 			break
 		}
 
 		if next.is_digit() {
 			s.incr_pos()
 			result += next.ascii_str()
+			if has_dot {
+				chars_after_dot++
+			}
 		} else if next == `.` && !has_dot {
-			// Only works if the chars after the dot
-			// are also numerical
-
 			has_dot = true
 			s.incr_pos()
 			result += next.ascii_str()

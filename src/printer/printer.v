@@ -29,6 +29,17 @@ fn print_statement(stmt ast.Statement, level int) string {
 		ast.TypePatternBinding {
 			'${print_expression(stmt.typ, level)} = ${print_expression(stmt.init, level)}'
 		}
+		ast.TupleDestructuringBinding {
+			mut s := '('
+			for i, pattern in stmt.patterns {
+				if i > 0 {
+					s += ', '
+				}
+				s += print_expression(pattern, level)
+			}
+			s += ') = ${print_expression(stmt.init, level)}'
+			s
+		}
 		ast.FunctionDeclaration {
 			print_function(level, stmt.identifier, stmt.params, stmt.body, stmt.return_type,
 				stmt.error_type)
@@ -262,6 +273,20 @@ fn print_expression(expr ast.Expression, level int) string {
 				s += print_expression(elem, level)
 			}
 			s += ']'
+			s
+		}
+		ast.TupleExpression {
+			mut s := '('
+			for i, elem in expr.elements {
+				if i > 0 {
+					s += ', '
+				}
+				s += print_expression(elem, level)
+			}
+			if expr.elements.len == 1 {
+				s += ','
+			}
+			s += ')'
 			s
 		}
 		ast.ArrayIndexExpression {

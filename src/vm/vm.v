@@ -287,6 +287,27 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 				vm.stack << bytecode.Value(arr)
 			}
+			.make_tuple {
+				len := instr.operand
+				mut arr := unsafe { []bytecode.Value{len: len} }
+				for i := len - 1; i >= 0; i-- {
+					arr[i] = vm.pop()!
+				}
+				vm.stack << bytecode.Value(arr)
+			}
+			.tuple_index {
+				tuple_val := vm.pop()!
+				if tuple_val is []bytecode.Value {
+					idx := instr.operand
+					if idx >= 0 && idx < tuple_val.len {
+						vm.stack << tuple_val[idx]
+					} else {
+						return error('Tuple index ${idx} out of bounds (len: ${tuple_val.len})')
+					}
+				} else {
+					return error("Expected tuple, got '${value_type_name(tuple_val)}'")
+				}
+			}
 			.make_range {
 				end_val := vm.pop()!
 				start_val := vm.pop()!

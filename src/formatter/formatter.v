@@ -208,6 +208,17 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 			f.emit(' = ')
 			f.format_expr(stmt.init)
 		}
+		ast.TupleDestructuringBinding {
+			f.emit('(')
+			for i, pattern in stmt.patterns {
+				if i > 0 {
+					f.emit(', ')
+				}
+				f.format_expr(pattern)
+			}
+			f.emit(') = ')
+			f.format_expr(stmt.init)
+		}
 		ast.FunctionDeclaration {
 			f.format_function_declaration(stmt)
 		}
@@ -398,6 +409,16 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.format_expr(elem)
 			}
 			f.emit(']')
+		}
+		ast.TupleExpression {
+			f.emit('(')
+			for i, elem in expr.elements {
+				if i > 0 {
+					f.emit(', ')
+				}
+				f.format_expr(elem)
+			}
+			f.emit(')')
 		}
 		ast.ArrayIndexExpression {
 			f.format_expr(expr.expression)
