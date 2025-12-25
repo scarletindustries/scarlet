@@ -1,11 +1,11 @@
 module token
 
 pub enum TriviaKind {
-	whitespace     // spaces, tabs
-	newline        // \n
-	line_comment   // // comment
-	block_comment  // /* */ comment
-	doc_comment    // /** */ comment
+	whitespace    // spaces, tabs
+	newline       // \n
+	line_comment  // // comment
+	block_comment // /* */ comment
+	doc_comment   // /** */ comment
 }
 
 pub struct Trivia {

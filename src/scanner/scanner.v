@@ -86,7 +86,8 @@ fn (mut s Scanner) collect_trivia() {
 
 			// Doc comment if next char is * but NOT followed by /
 			// i.e., /** but not /**/ or /***/
-			is_doc := s.state.get_pos() < s.input.len && s.peek_char() == `*` && (s.state.get_pos() + 1 >= s.input.len || s.input[s.state.get_pos() + 1] != `/`)
+			is_doc := s.state.get_pos() < s.input.len && s.peek_char() == `*`
+				&& (s.state.get_pos() + 1 >= s.input.len || s.input[s.state.get_pos() + 1] != `/`)
 
 			for s.state.get_pos() + 1 < s.input.len {
 				if s.peek_char() == `*` && s.input[s.state.get_pos() + 1] == `/` {

@@ -1355,8 +1355,7 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 }
 
 fn (mut p Parser) parse_const_binding() !ast.Statement {
-	doc := p.extract_doc_comment();
-
+	doc := p.extract_doc_comment()
 	span := p.current_span()
 	p.eat(.kw_const)!
 
@@ -1385,8 +1384,7 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 }
 
 fn (mut p Parser) parse_binding() !ast.Statement {
-	doc := p.extract_doc_comment();
-
+	doc := p.extract_doc_comment()
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
@@ -1415,7 +1413,7 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	}
 
 	return ast.VariableBinding{
-		doc: doc
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: span

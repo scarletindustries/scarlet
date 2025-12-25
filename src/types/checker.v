@@ -1244,7 +1244,8 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 			}
 
 			c.unify(var_type, inferred_func_type, mut c.param_subs)
-			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span, doc)
+			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span,
+				doc)
 			return typed_ast.FunctionCallExpression{
 				identifier: convert_identifier(expr.identifier)
 				arguments:  typed_args
@@ -1550,10 +1551,15 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 		}
 		if resolved := c.resolve_type_identifier(field.typ) {
 			fields[field.identifier.name] = resolved
-			c.record_type(field.identifier.name, resolved, field.identifier.span, field.doc)
+
+			qualified_name := '${stmt.identifier.name}.${field.identifier.name}'
+			loc := c.def_loc_from_span(qualified_name, field.identifier.span)
+			c.env.definitions[qualified_name] = loc
+
+			c.record_type(qualified_name, resolved, field.identifier.span, field.doc)
 
 			if doc := field.doc {
-				c.env.store_doc('${stmt.identifier.name}.${field.identifier.name}', doc)
+				c.env.store_doc(qualified_name, doc)
 			}
 		} else {
 			c.error_at_span("Unknown type '${field.typ.identifier.name}' for field '${field.identifier.name}'",
@@ -1568,11 +1574,13 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
 	registered_struct := c.env.register_struct_at(struct_type, loc)
+
 	if doc := stmt.doc {
 		c.env.store_doc(stmt.identifier.name, doc)
 	}
 
-	c.record_type(stmt.identifier.name, Type(registered_struct), stmt.identifier.span, stmt.doc)
+	c.record_type(stmt.identifier.name, Type(registered_struct), stmt.identifier.span,
+		stmt.doc)
 
 	mut typed_fields := []typed_ast.StructField{}
 	for f in stmt.fields {
@@ -1700,7 +1708,12 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 	c.record_type(stmt.identifier.name, Type(registered_enum), stmt.identifier.span, stmt.doc)
 
 	for variant in stmt.variants {
-		c.record_type(variant.identifier.name, Type(registered_enum), variant.identifier.span, variant.doc)
+		qualified_name := '${stmt.identifier.name}.${variant.identifier.name}'
+		variant_loc := c.def_loc_from_span(qualified_name, variant.identifier.span)
+		c.env.definitions[qualified_name] = variant_loc
+
+		c.record_type(qualified_name, Type(registered_enum), variant.identifier.span,
+			variant.doc)
 	}
 
 	typed_variants := stmt.variants.map(fn (v ast.EnumVariant) typed_ast.EnumVariant {
@@ -1759,7 +1772,8 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 				}
 
 				variant_doc := c.env.lookup_doc('${left_id.name}.${variant_name}')
-				c.record_type(variant_name, Type(enum_type), variant_span, variant_doc)
+				c.record_type('${left_id.name}.${variant_name}', Type(enum_type), variant_span,
+					variant_doc)
 
 				payload_types := enum_type.variants[variant_name] or { []Type{} }
 				mut typed_args := []typed_ast.Expression{}
@@ -1840,8 +1854,9 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 
 	result_type := if left_type is TypeStruct {
 		if field_type := left_type.fields[right.name] {
-			field_doc := c.env.lookup_doc('${left_type.name}.${right.name}')
-			c.record_type(right.name, field_type, right.span, field_doc)
+			qualified_name := '${left_type.name}.${right.name}'
+			field_doc := c.env.lookup_doc(qualified_name)
+			c.record_type(qualified_name, field_type, right.span, field_doc)
 			field_type
 		} else {
 			available := left_type.fields.keys().join(', ')
