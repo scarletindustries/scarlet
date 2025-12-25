@@ -293,7 +293,7 @@ fn (mut vm VM) execute() !bytecode.Value {
 
 				if start_val is int && end_val is int {
 					mut arr := []bytecode.Value{}
-					for i in start_val .. end_val {
+					for i in start_val .. end_val + 1 {
 						arr << bytecode.Value(i)
 					}
 					vm.stack << bytecode.Value(arr)
@@ -337,8 +337,8 @@ fn (mut vm VM) execute() !bytecode.Value {
 
 				if arr_val is []bytecode.Value {
 					if start_val is int && end_val is int {
-						if start_val >= 0 && end_val <= arr_val.len && start_val <= end_val {
-							sliced := arr_val[start_val..end_val]
+						if start_val >= 0 && end_val < arr_val.len && start_val <= end_val {
+							sliced := arr_val[start_val..end_val + 1]
 							vm.stack << bytecode.Value(sliced)
 						} else {
 							return error('Slice indices out of bounds: [${start_val}..${end_val}] (array length is ${arr_val.len})')

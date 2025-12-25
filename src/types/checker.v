@@ -266,6 +266,60 @@ fn (mut c TypeChecker) expect_type(actual Type, expected Type, s Span, context s
 	return false
 }
 
+fn (mut c TypeChecker) unify_arm_types(a Type, b Type, s Span) Type {
+	if types_equal(a, b) {
+		return a
+	}
+
+	// None!E + T → T!E
+	if a is TypeResult && types_equal(a.success, t_none()) {
+		if b is TypeResult {
+			c.expect_type(b.error, a.error, s, 'in match arm')
+			if types_equal(b.success, t_none()) {
+				return a
+			}
+			return Type(TypeResult{
+				success: b.success
+				error:   a.error
+			})
+		}
+		return Type(TypeResult{
+			success: b
+			error:   a.error
+		})
+	}
+
+	// T + None!E → T!E
+	if b is TypeResult && types_equal(b.success, t_none()) {
+		if a is TypeResult {
+			c.expect_type(b.error, a.error, s, 'in match arm')
+			return a
+		}
+		return Type(TypeResult{
+			success: a
+			error:   b.error
+		})
+	}
+
+	// T!E + T!E → verify same
+	if a is TypeResult && b is TypeResult {
+		c.expect_type(b.success, a.success, s, 'in match arm')
+		c.expect_type(b.error, a.error, s, 'in match arm')
+		return a
+	}
+
+	// None + T → ?T
+	if types_equal(a, t_none()) && !types_equal(b, t_none()) {
+		return t_option(b)
+	}
+	if types_equal(b, t_none()) && !types_equal(a, t_none()) {
+		return t_option(a)
+	}
+
+	c.expect_type(b, a, s, 'in match arm')
+	return a
+}
+
 fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 	if t.is_function {
 		mut param_types := []Type{}
@@ -507,7 +561,10 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			return typed_ast.ErrorExpression{
 				expression: typed_inner
 				span:       expr.span
-			}, typ
+			}, Type(TypeResult{
+				success: t_none()
+				error:   typ
+			})
 		}
 		ast.RangeExpression {
 			return c.check_range(expr)
@@ -1395,34 +1452,13 @@ fn (mut c TypeChecker) check_if(expr ast.IfExpression) (typed_ast.Expression, Ty
 
 	typed_body, then_type := c.check_expr(expr.body)
 
-	typed_else, result_type := if else_body := expr.else_body {
+	mut typed_else := ?typed_ast.Expression(none)
+	mut result_type := then_type
+
+	if else_body := expr.else_body {
 		typed_else_body, else_type := c.check_expr(else_body)
-		final_type := if !types_equal(then_type, else_type) {
-			if types_equal(then_type, t_none()) {
-				t_option(else_type)
-			} else if types_equal(else_type, t_none()) {
-				t_option(then_type)
-			} else if then_type is TypeStruct {
-				Type(TypeResult{
-					success: else_type
-					error:   then_type
-				})
-			} else if else_type is TypeStruct {
-				Type(TypeResult{
-					success: then_type
-					error:   else_type
-				})
-			} else {
-				c.error_at_span("'if' branch returns '${type_to_string(then_type)}' but 'else' branch returns '${type_to_string(else_type)}'",
-					expr.span)
-				then_type
-			}
-		} else {
-			then_type
-		}
-		?typed_ast.Expression(typed_else_body), final_type
-	} else {
-		?typed_ast.Expression(none), then_type
+		result_type = c.unify_arm_types(then_type, else_type, convert_span(expr.span))
+		typed_else = typed_else_body
 	}
 
 	return typed_ast.IfExpression{
@@ -1504,6 +1540,31 @@ fn (mut c TypeChecker) check_array(expr ast.ArrayExpression) (typed_ast.Expressi
 
 fn (mut c TypeChecker) check_array_index(expr ast.ArrayIndexExpression) (typed_ast.Expression, Type) {
 	typed_arr, arr_type := c.check_expr(expr.expression)
+
+	if expr.index is ast.RangeExpression {
+		range_expr := expr.index as ast.RangeExpression
+		typed_start, start_type := c.check_expr(range_expr.start)
+		typed_end, end_type := c.check_expr(range_expr.end)
+
+		c.expect_type(start_type, t_int(), range_expr.start.span, 'as slice start')
+		c.expect_type(end_type, t_int(), range_expr.end.span, 'as slice end')
+
+		if arr_type !is TypeArray {
+			c.error_at_span('Cannot slice non-array type ${type_to_string(arr_type)}',
+				expr.span)
+		}
+
+		return typed_ast.ArrayIndexExpression{
+			expression: typed_arr
+			index:      typed_ast.RangeExpression{
+				start: typed_start
+				end:   typed_end
+				span:  convert_span(range_expr.span)
+			}
+			span:       convert_span(expr.span)
+		}, arr_type
+	}
+
 	typed_idx, idx_type := c.check_expr(expr.index)
 	idx_span := typed_idx.span
 
@@ -1886,15 +1947,7 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 		if i == 0 {
 			first_type = arm_type
 		} else {
-			// Unify arm types: None + T = ?T, T + None = ?T
-			if types_equal(first_type, t_none()) && !types_equal(arm_type, t_none()) {
-				first_type = t_option(arm_type)
-			} else if types_equal(arm_type, t_none()) && !types_equal(first_type, t_none()) {
-				first_type = t_option(first_type)
-			} else {
-				arm_span := typed_body.span
-				c.expect_type(arm_type, first_type, arm_span, 'in match arm')
-			}
+			first_type = c.unify_arm_types(first_type, arm_type, typed_body.span)
 		}
 	}
 
@@ -2098,6 +2151,30 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			identifier: convert_identifier(pattern.identifier)
 			arguments:  typed_args
 			span:       convert_span(pattern.span)
+		}, subject_type
+	}
+
+	if pattern is ast.RangeExpression {
+		typed_start, start_type := c.check_expr(pattern.start)
+		typed_end, end_type := c.check_expr(pattern.end)
+
+		if !types_equal(start_type, t_int()) {
+			c.error_at_span('Range pattern start must be Int, got ${type_to_string(start_type)}',
+				pattern.start.span)
+		}
+		if !types_equal(end_type, t_int()) {
+			c.error_at_span('Range pattern end must be Int, got ${type_to_string(end_type)}',
+				pattern.end.span)
+		}
+		if !types_equal(subject_type, t_int()) {
+			c.error_at_span('Range pattern can only match Int, got ${type_to_string(subject_type)}',
+				pattern.span)
+		}
+
+		return typed_ast.RangeExpression{
+			start: typed_start
+			end:   typed_end
+			span:  convert_span(pattern.span)
 		}, subject_type
 	}
 

@@ -102,6 +102,17 @@ fn describe(x Int) String {
 	}
 }
 
+fn grade(score Int) String!Error {
+	match score {
+		0..59 -> 'F',
+		60..69 -> 'D',
+		70..79 -> 'C',
+		80..89 -> 'B',
+		90..100 -> 'A',
+		else -> error Error{ message: 'score must be 0-100' },
+	}
+}
+
 fn handle_result(r Result) String {
 	match r {
 		Ok(value) -> 'Got: ${value}',
@@ -167,6 +178,7 @@ add_result = add(5, 3)
 max_result = max(10, 20)
 classify_result = classify(5)
 describe_result = describe(1)
+grade_result = grade(85) or 'error'
 example_result = example()
 enum_result = handle_result(Ok('success'))
 
@@ -194,6 +206,7 @@ println(add_result)
 println(max_result)
 println(classify_result)
 println(describe_result)
+println(grade_result)
 println(example_result)
 println(enum_result)
 println(error_result)

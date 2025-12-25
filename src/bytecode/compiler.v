@@ -461,8 +461,15 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 		}
 		typed_ast.ArrayIndexExpression {
 			c.compile_expr(expr.expression)!
-			c.compile_expr(expr.index)!
-			c.emit(.index)
+			if expr.index is typed_ast.RangeExpression {
+				range_idx := expr.index as typed_ast.RangeExpression
+				c.compile_expr(range_idx.start)!
+				c.compile_expr(range_idx.end)!
+				c.emit(.array_slice)
+			} else {
+				c.compile_expr(expr.index)!
+				c.emit(.index)
+			}
 		}
 		typed_ast.RangeExpression {
 			c.compile_expr(expr.start)!
@@ -999,27 +1006,53 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			// For or-patterns, check each pattern in sequence
 			// If any matches, jump to body; otherwise fall through to next arm
 			mut body_jumps := []int{}
+			mut fail_jumps := []int{}
 
 			for i, pattern in arm.pattern.patterns {
 				if i > 0 {
 					// Need to dup the subject again for subsequent patterns
 					c.emit(.dup)
 				}
-				c.compile_expr(pattern)!
-				c.emit(.eq)
 
-				if i < arm.pattern.patterns.len - 1 {
-					// Not the last pattern: if match, jump to body
-					body_jumps << c.current_addr()
-					c.emit_arg(.jump_if_true, 0)
+				if pattern is typed_ast.RangeExpression {
+					range_expr := pattern as typed_ast.RangeExpression
+
+					// subject >= start
+					c.emit(.dup)
+					c.compile_expr(range_expr.start)!
+					c.emit(.gte)
+
+					first_check := c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
+
+					// subject <= end
+					c.emit(.dup)
+					c.compile_expr(range_expr.end)!
+					c.emit(.lte)
+
+					if i < arm.pattern.patterns.len - 1 {
+						body_jumps << c.current_addr()
+						c.emit_arg(.jump_if_true, 0)
+						c.program.code[first_check] = op_arg(.jump_if_false, c.current_addr())
+					} else {
+						fail_jumps << c.current_addr()
+						c.emit_arg(.jump_if_false, 0)
+						fail_jumps << first_check
+					}
+				} else {
+					c.compile_expr(pattern)!
+					c.emit(.eq)
+
+					if i < arm.pattern.patterns.len - 1 {
+						body_jumps << c.current_addr()
+						c.emit_arg(.jump_if_true, 0)
+					} else {
+						fail_jumps << c.current_addr()
+						c.emit_arg(.jump_if_false, 0)
+					}
 				}
 			}
 
-			// Last pattern: if no match, jump to next arm
-			next_arm := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
-
-			// Patch body jumps to here
 			body_addr := c.current_addr()
 			for jump_addr in body_jumps {
 				c.program.code[jump_addr] = op_arg(.jump_if_true, body_addr)
@@ -1033,7 +1066,43 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			end_jumps << c.current_addr()
 			c.emit_arg(.jump, 0)
 
-			c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
+			next_arm_addr := c.current_addr()
+			for jump_addr in fail_jumps {
+				c.program.code[jump_addr] = op_arg(.jump_if_false, next_arm_addr)
+			}
+			continue
+		}
+
+		// Range patterns: 0..10 matches [0, 10]
+		if arm.pattern is typed_ast.RangeExpression {
+			range_expr := arm.pattern as typed_ast.RangeExpression
+
+			// subject >= start
+			c.emit(.dup)
+			c.compile_expr(range_expr.start)!
+			c.emit(.gte)
+
+			first_check := c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			// subject <= end
+			c.emit(.dup)
+			c.compile_expr(range_expr.end)!
+			c.emit(.lte)
+
+			second_check := c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			c.emit(.pop)
+			c.in_tail_position = is_tail
+			c.compile_expr(arm.body)!
+			c.in_tail_position = false
+
+			end_jumps << c.current_addr()
+			c.emit_arg(.jump, 0)
+			next_arm_addr := c.current_addr()
+			c.program.code[first_check] = op_arg(.jump_if_false, next_arm_addr)
+			c.program.code[second_check] = op_arg(.jump_if_false, next_arm_addr)
 			continue
 		}
 
