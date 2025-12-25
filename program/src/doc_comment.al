@@ -1,10 +1,7 @@
 /** This is a doc comment */
 fn documented() { 42 }
 
-
-
 result = documented()
-
 
 /* This is a regular block comment */
 fn undocumented() { 0 }
@@ -18,3 +15,14 @@ const ANSWER = 42
 /** A random number */
 random = 50
 
+/** A user in the system */
+struct User {
+    /** The user's display name */
+    name String,
+    /** Age in years */
+    age Int,
+}
+
+user = User { name: 'Alice', age: 30 }
+
+user.name

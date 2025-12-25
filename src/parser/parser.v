@@ -1185,6 +1185,8 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 }
 
 fn (mut p Parser) parse_struct_declaration() !ast.Statement {
+	doc := p.extract_doc_comment()
+
 	struct_span := p.current_span()
 	p.eat(.kw_struct)!
 
@@ -1205,6 +1207,7 @@ fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 	p.eat(.punc_close_brace)!
 
 	return ast.StructDeclaration{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: id_span
@@ -1215,6 +1218,8 @@ fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 }
 
 fn (mut p Parser) parse_struct_field() !ast.StructField {
+	doc := p.extract_doc_comment()
+
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected field name')!
 
@@ -1232,6 +1237,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 	}
 
 	return ast.StructField{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: span

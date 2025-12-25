@@ -114,6 +114,7 @@ pub:
 
 pub struct StructField {
 pub:
+	doc        ?string
 	identifier Identifier
 	typ        TypeIdentifier
 	init       ?Expression
@@ -121,6 +122,7 @@ pub:
 
 pub struct StructDeclaration {
 pub:
+	doc        ?string
 	identifier Identifier
 	fields     []StructField
 	span       Span @[required]

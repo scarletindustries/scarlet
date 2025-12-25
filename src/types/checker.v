@@ -1550,6 +1550,11 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 		}
 		if resolved := c.resolve_type_identifier(field.typ) {
 			fields[field.identifier.name] = resolved
+			c.record_type(field.identifier.name, resolved, field.identifier.span, field.doc)
+
+			if doc := field.doc {
+				c.env.store_doc('${stmt.identifier.name}.${field.identifier.name}', doc)
+			}
 		} else {
 			c.error_at_span("Unknown type '${field.typ.identifier.name}' for field '${field.identifier.name}'",
 				field.identifier.span)
@@ -1562,7 +1567,12 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 	}
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
-	c.env.register_struct_at(struct_type, loc)
+	registered_struct := c.env.register_struct_at(struct_type, loc)
+	if doc := stmt.doc {
+		c.env.store_doc(stmt.identifier.name, doc)
+	}
+
+	c.record_type(stmt.identifier.name, Type(registered_struct), stmt.identifier.span, stmt.doc)
 
 	mut typed_fields := []typed_ast.StructField{}
 	for f in stmt.fields {
@@ -1589,6 +1599,9 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 
 fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_ast.Expression, Type) {
 	struct_type := if struct_def := c.env.lookup_struct(expr.identifier.name) {
+		// Record type for struct name hover
+		doc := c.env.lookup_doc(expr.identifier.name)
+		c.record_type(expr.identifier.name, Type(struct_def), expr.identifier.span, doc)
 		struct_def
 	} else {
 		c.error_at_span("Unknown struct '${expr.identifier.name}'", expr.identifier.span)
@@ -1805,6 +1818,8 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 
 	result_type := if left_type is TypeStruct {
 		if field_type := left_type.fields[right.name] {
+			field_doc := c.env.lookup_doc('${left_type.name}.${right.name}')
+			c.record_type(right.name, field_type, right.span, field_doc)
 			field_type
 		} else {
 			available := left_type.fields.keys().join(', ')
