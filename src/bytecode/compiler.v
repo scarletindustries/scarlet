@@ -940,7 +940,21 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			next_arm := c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 
-			// Bind pre-spread elements
+			mut literal_checks := []int{}
+			for i in 0 .. pre_count {
+				elem := arr.elements[i]
+				if elem is typed_ast.NumberLiteral || elem is typed_ast.StringLiteral
+					|| elem is typed_ast.BooleanLiteral {
+					c.emit(.dup)
+					c.emit_arg(.push_const, c.add_constant(i))
+					c.emit(.index)
+					c.compile_expr(elem)!
+					c.emit(.eq)
+					literal_checks << c.current_addr()
+					c.emit_arg(.jump_if_false, 0)
+				}
+			}
+
 			for i in 0 .. pre_count {
 				elem := arr.elements[i]
 				if elem is typed_ast.Identifier {
@@ -979,7 +993,11 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			end_jumps << c.current_addr()
 			c.emit_arg(.jump, 0)
 
-			c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
+			next_arm_addr := c.current_addr()
+			c.program.code[next_arm] = op_arg(.jump_if_false, next_arm_addr)
+			for check_addr in literal_checks {
+				c.program.code[check_addr] = op_arg(.jump_if_false, next_arm_addr)
+			}
 			continue
 		}
 
