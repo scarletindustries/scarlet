@@ -974,19 +974,19 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	mut param_types := []Type{}
 	mut seen_params := map[string]bool{}
 
-	mut ret_type := t_none()
+	mut declared_ret_type := ?Type(none)
 	if rt := expr.return_type {
 		if resolved := c.resolve_type_identifier(rt) {
-			ret_type = resolved
+			declared_ret_type = resolved
 		} else {
 			c.error_at_span("Unknown return type '${rt.identifier.name}'", rt.identifier.span)
 		}
 	}
 
-	mut err_type := ?Type(none)
+	mut declared_err_type := ?Type(none)
 	if et := expr.error_type {
 		if resolved := c.resolve_type_identifier(et) {
-			err_type = resolved
+			declared_err_type = resolved
 		} else {
 			c.error_at_span("Unknown error type '${et.identifier.name}'", et.identifier.span)
 		}
@@ -1012,10 +1012,11 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 		}
 	}
 
+	preliminary_ret := declared_ret_type or { t_none() }
 	func_type := TypeFunction{
 		params:     param_types
-		ret:        ret_type
-		error_type: err_type
+		ret:        preliminary_ret
+		error_type: declared_err_type
 	}
 
 	loc := c.def_loc_from_span(expr.identifier.name, expr.identifier.span)
@@ -1034,14 +1035,14 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	prev_param_subs := c.param_subs.clone()
 	c.in_function = true
 	c.current_fn_has_assert = false
-	c.current_fn_return_type = if expr.return_type != none {
-		if et := err_type {
+	c.current_fn_return_type = if drt := declared_ret_type {
+		if et := declared_err_type {
 			Type(TypeResult{
-				success: ret_type
+				success: drt
 				error:   et
 			})
 		} else {
-			ret_type
+			drt
 		}
 	} else {
 		none
@@ -1060,10 +1061,15 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
 	}
 
-	ret_type = substitute(body_type, c.param_subs)
+	mut final_ret_type := if drt := declared_ret_type {
+		drt
+	} else {
+		substitute(body_type, c.param_subs)
+	}
 
-	if has_assert && err_type == none {
-		err_type = t_string()
+	mut final_err_type := declared_err_type
+	if has_assert && final_err_type == none {
+		final_err_type = t_string()
 	}
 
 	c.in_function = prev_in_function
@@ -1072,23 +1078,23 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	c.param_subs = prev_param_subs.clone()
 	c.env.pop_scope()
 
-	if expr.return_type != none && c.diagnostics.len == errors_before {
+	if declared_ret_type != none && c.diagnostics.len == errors_before {
 		body_span := typed_body.span
-		expected_ret := if et := err_type {
+		expected_ret := if et := declared_err_type {
 			Type(TypeResult{
-				success: ret_type
+				success: final_ret_type
 				error:   et
 			})
 		} else {
-			ret_type
+			final_ret_type
 		}
 		c.expect_type(body_type, expected_ret, body_span, 'in function return')
 	}
 
 	final_func_type := TypeFunction{
 		params:     param_types
-		ret:        ret_type
-		error_type: err_type
+		ret:        final_ret_type
+		error_type: final_err_type
 	}
 
 	c.env.register_function_at(expr.identifier.name, final_func_type, loc)
@@ -1119,19 +1125,19 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	mut param_types := []Type{}
 	mut seen_params := map[string]bool{}
 
-	mut ret_type := t_none()
+	mut declared_ret_type := ?Type(none)
 	if rt := expr.return_type {
 		if resolved := c.resolve_type_identifier(rt) {
-			ret_type = resolved
+			declared_ret_type = resolved
 		} else {
 			c.error_at_span("Unknown return type '${rt.identifier.name}'", rt.identifier.span)
 		}
 	}
 
-	mut err_type := ?Type(none)
+	mut declared_err_type := ?Type(none)
 	if et := expr.error_type {
 		if resolved := c.resolve_type_identifier(et) {
-			err_type = resolved
+			declared_err_type = resolved
 		} else {
 			c.error_at_span("Unknown error type '${et.identifier.name}'", et.identifier.span)
 		}
@@ -1169,14 +1175,14 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	prev_param_subs := c.param_subs.clone()
 	c.in_function = true
 	c.current_fn_has_assert = false
-	c.current_fn_return_type = if expr.return_type != none {
-		if et := err_type {
+	c.current_fn_return_type = if drt := declared_ret_type {
+		if et := declared_err_type {
 			Type(TypeResult{
-				success: ret_type
+				success: drt
 				error:   et
 			})
 		} else {
-			ret_type
+			drt
 		}
 	} else {
 		none
@@ -1195,10 +1201,15 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
 	}
 
-	ret_type = substitute(body_type, c.param_subs)
+	mut final_ret_type := if drt := declared_ret_type {
+		drt
+	} else {
+		substitute(body_type, c.param_subs)
+	}
 
-	if has_assert && err_type == none {
-		err_type = t_string()
+	mut final_err_type := declared_err_type
+	if has_assert && final_err_type == none {
+		final_err_type = t_string()
 	}
 
 	c.in_function = prev_in_function
@@ -1207,23 +1218,23 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	c.param_subs = prev_param_subs.clone()
 	c.env.pop_scope()
 
-	if expr.return_type != none && c.diagnostics.len == errors_before {
+	if declared_ret_type != none && c.diagnostics.len == errors_before {
 		body_span := typed_body.span
-		expected_ret := if et := err_type {
+		expected_ret := if et := declared_err_type {
 			Type(TypeResult{
-				success: ret_type
+				success: final_ret_type
 				error:   et
 			})
 		} else {
-			ret_type
+			final_ret_type
 		}
 		c.expect_type(body_type, expected_ret, body_span, 'in function return')
 	}
 
 	final_func_type := TypeFunction{
 		params:     param_types
-		ret:        ret_type
-		error_type: err_type
+		ret:        final_ret_type
+		error_type: final_err_type
 	}
 
 	mut typed_params := []typed_ast.FunctionParameter{}
