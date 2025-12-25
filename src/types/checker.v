@@ -73,7 +73,7 @@ pub fn check(program ast.BlockExpression) CheckResult {
 
 	return CheckResult{
 		diagnostics:    checker.diagnostics
-		success:        checker.diagnostics.len == 0
+		success:        !diagnostic.has_errors(checker.diagnostics)
 		env:            checker.env
 		typed_ast:      typed_block
 		program_type:   program_type
@@ -83,6 +83,10 @@ pub fn check(program ast.BlockExpression) CheckResult {
 
 fn (mut c TypeChecker) error_at_span(message string, s Span) {
 	c.diagnostics << diagnostic.error_at(s.start_line, s.start_column, message)
+}
+
+fn (mut c TypeChecker) warning_at_span(message string, s Span) {
+	c.diagnostics << diagnostic.warning_at(s.start_line, s.start_column, message)
 }
 
 // error_at_token creates an error with a proper range for a token
@@ -1535,7 +1539,7 @@ fn (mut c TypeChecker) check_if(expr ast.IfExpression) (typed_ast.Expression, Ty
 
 fn (mut c TypeChecker) check_array(expr ast.ArrayExpression) (typed_ast.Expression, Type) {
 	if expr.elements.len == 0 {
-		c.error_at_span("Cannot infer type of empty array. Provide a type annotation, e.g.: 'items: []Int = []'",
+		c.error_at_span("Cannot infer type of empty array. Provide a type annotation, e.g.: 'items []Int = []'",
 			expr.span)
 		return typed_ast.ArrayExpression{
 			elements: []
@@ -2001,54 +2005,23 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	mut first_type := t_none()
 	mut typed_arms := []typed_ast.MatchArm{}
-	mut covered_variants := map[string]bool{}
-	mut has_wildcard := false
-	mut has_empty_array := false
-	mut has_nonempty_array := false
+	mut pats := []Pat{}
 
 	for i, arm in expr.arms {
 		c.env.push_scope()
 
-		if arm.pattern is ast.WildcardPattern {
-			has_wildcard = true
-		} else if arm.pattern is ast.ArrayExpression {
-			if arm.pattern.elements.len == 0 {
-				has_empty_array = true
-			} else {
-				// Check if last element is a spread (covers all non-empty arrays of this min length+)
-				last := arm.pattern.elements.last()
-				if last is ast.SpreadExpression {
-					has_nonempty_array = true
-				}
-			}
-		} else if arm.pattern is ast.OrPattern {
-			for p in arm.pattern.patterns {
-				if p is ast.FunctionCallExpression {
-					covered_variants[p.identifier.name] = true
-				} else if p is ast.Identifier {
-					covered_variants[p.name] = true
-				} else if p is ast.PropertyAccessExpression {
-					if p.right is ast.Identifier {
-						covered_variants[p.right.name] = true
-					} else if p.right is ast.FunctionCallExpression {
-						covered_variants[p.right.identifier.name] = true
-					}
-				}
-			}
-		} else if arm.pattern is ast.PropertyAccessExpression {
-			if arm.pattern.right is ast.Identifier {
-				covered_variants[arm.pattern.right.name] = true
-			} else if arm.pattern.right is ast.FunctionCallExpression {
-				call := arm.pattern.right as ast.FunctionCallExpression
-				covered_variants[call.identifier.name] = true
-			}
-		} else if arm.pattern is ast.FunctionCallExpression {
-			covered_variants[arm.pattern.identifier.name] = true
-		} else if arm.pattern is ast.Identifier {
-			covered_variants[arm.pattern.name] = true
-		}
-
 		typed_pattern, _ := c.check_pattern(arm.pattern, subject_type)
+
+		pat := ast_pattern_to_pat(typed_pattern, subject_type)
+		if !check_pattern_useful(pats, pat, subject_type) {
+			if arm.pattern is ast.WildcardPattern {
+				c.warning_at_span('Previous arms already match all cases, else branch is unreachable',
+					arm.pattern.span)
+			} else {
+				c.warning_at_span('Unreachable pattern', arm.pattern.span)
+			}
+		}
+		pats << pat
 
 		typed_body, arm_type := c.check_expr(arm.body)
 		c.env.pop_scope()
@@ -2065,25 +2038,9 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 		}
 	}
 
-	if subject_type is TypeEnum && !has_wildcard {
-		mut missing := []string{}
-		for variant_name, _ in subject_type.variants {
-			if variant_name !in covered_variants {
-				missing << variant_name
-			}
-		}
-		if missing.len > 0 {
-			subject_span := typed_subject.span
-			c.error_at_span('Match is not exhaustive, missing variants: ${missing.join(', ')}',
-				subject_span)
-		}
-	} else if subject_type !is TypeEnum && !has_wildcard {
-		// Check array exhaustiveness: [] + [x, ..] covers all arrays
-		is_array_exhaustive := subject_type is TypeArray && has_empty_array && has_nonempty_array
-		if !is_array_exhaustive {
-			subject_span := typed_subject.span
-			c.error_at_span('Match on non-enum type requires an else branch', subject_span)
-		}
+	if missing := check_exhaustiveness(pats, subject_type) {
+		subject_span := typed_subject.span
+		c.error_at_span('Match is not exhaustive, missing: ${missing}', subject_span)
 	}
 
 	return typed_ast.MatchExpression{

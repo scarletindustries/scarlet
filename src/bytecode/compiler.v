@@ -239,13 +239,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.in_tail_position = is_tail && is_last
 				c.compile_node(node)!
 				c.in_tail_position = false
-				// only pop after expressions, not statements (statements don't push)
 				if !is_last && node is typed_ast.Expression {
 					c.emit(.pop)
 				}
 			}
 
-			// push none if block was empty or last item was a statement
 			if expr.body.len == 0 {
 				c.emit(.push_none)
 			} else if expr.body[expr.body.len - 1] is typed_ast.Statement {
@@ -415,17 +413,14 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.compile_match(expr, is_tail)!
 		}
 		typed_ast.ArrayExpression {
-			// Check if there are any spread expressions
 			has_spread := expr.elements.any(it is typed_ast.SpreadExpression)
 
 			if !has_spread {
-				// Simple case: no spreads, just compile each element
 				for elem in expr.elements {
 					c.compile_expr(elem)!
 				}
 				c.emit_arg(.make_array, expr.elements.len)
 			} else {
-				// Complex case: handle spreads by building array incrementally
 				mut have_result := false
 
 				mut i := 0
@@ -433,7 +428,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 					elem := expr.elements[i]
 
 					if elem is typed_ast.SpreadExpression {
-						// Spread: compile inner array and concat
 						inner := elem.expression or {
 							return error('Spread in array literal missing expression')
 						}
@@ -446,7 +440,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 						}
 						i++
 					} else {
-						// Group consecutive non-spread elements
 						mut group_count := 0
 						for j := i; j < expr.elements.len; j++ {
 							if expr.elements[j] is typed_ast.SpreadExpression {
@@ -465,7 +458,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 					}
 				}
 
-				// Handle empty array case (no elements at all)
 				if !have_result {
 					c.emit_arg(.make_array, 0)
 				}
@@ -648,7 +640,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.emit_arg(.push_const, name_idx)
 				c.compile_expr(field.init)!
 			}
-			// push type_id first, then type_name
 			c.emit_arg(.push_const, c.add_constant(struct_type.id))
 			type_idx := c.add_constant(expr.identifier.name)
 			c.emit_arg(.push_const, type_idx)
@@ -788,6 +779,203 @@ fn (mut c Compiler) compile_function_common(name ?string, params []typed_ast.Fun
 	c.emit_arg(.make_closure, func_idx)
 }
 
+fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fail_jumps []int) ! {
+	match pattern {
+		typed_ast.NumberLiteral, typed_ast.StringLiteral, typed_ast.BooleanLiteral {
+			c.compile_expr(pattern)!
+			c.emit(.eq)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+		}
+		typed_ast.Identifier {
+			local_idx := c.get_or_create_local(pattern.name)
+			c.emit_arg(.store_local, local_idx)
+		}
+		typed_ast.WildcardPattern {
+			c.emit(.pop)
+		}
+		typed_ast.RangeExpression {
+			temp_idx := c.local_count
+			c.local_count++
+			c.emit(.dup)
+			c.emit_arg(.store_local, temp_idx)
+
+			c.compile_expr(pattern.start)!
+			c.emit(.gte)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			c.emit_arg(.push_local, temp_idx)
+			c.compile_expr(pattern.end)!
+			c.emit(.lt)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+		}
+		typed_ast.TupleExpression {
+			temp_idx := c.local_count
+			c.local_count++
+			c.emit_arg(.store_local, temp_idx)
+
+			c.emit_arg(.push_local, temp_idx)
+			c.emit(.array_len)
+			c.emit_arg(.push_const, c.add_constant(pattern.elements.len))
+			c.emit(.eq)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			for i, elem in pattern.elements {
+				c.emit_arg(.push_local, temp_idx)
+				c.emit_arg(.tuple_index, i)
+				c.compile_pattern_element(elem, mut fail_jumps)!
+			}
+		}
+		typed_ast.ArrayExpression {
+			has_spread := pattern.elements.len > 0
+				&& pattern.elements.last() is typed_ast.SpreadExpression
+			pre_count := if has_spread { pattern.elements.len - 1 } else { pattern.elements.len }
+
+			temp_idx := c.local_count
+			c.local_count++
+			c.emit_arg(.store_local, temp_idx)
+
+			c.emit_arg(.push_local, temp_idx)
+			c.emit(.array_len)
+			c.emit_arg(.push_const, c.add_constant(pre_count))
+			if has_spread {
+				c.emit(.gte)
+			} else {
+				c.emit(.eq)
+			}
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			for i in 0 .. pre_count {
+				elem := pattern.elements[i]
+				c.emit_arg(.push_local, temp_idx)
+				c.emit_arg(.push_const, c.add_constant(i))
+				c.emit(.index)
+				c.compile_pattern_element(elem, mut fail_jumps)!
+			}
+
+			if has_spread {
+				spread_elem := pattern.elements.last()
+				if spread_elem is typed_ast.SpreadExpression {
+					if inner := spread_elem.expression {
+						if inner is typed_ast.Identifier {
+							c.emit_arg(.push_local, temp_idx)
+							c.emit_arg(.push_const, c.add_constant(pre_count))
+							c.emit_arg(.push_local, temp_idx)
+							c.emit(.array_len)
+							c.emit(.array_slice)
+							local_idx := c.get_or_create_local(inner.name)
+							c.emit_arg(.store_local, local_idx)
+						}
+					}
+				}
+			}
+		}
+		else {
+			c.compile_expr(pattern)!
+			c.emit(.eq)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+		}
+	}
+}
+
+fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps []int) ! {
+	match pattern {
+		typed_ast.NumberLiteral, typed_ast.StringLiteral, typed_ast.BooleanLiteral {
+			c.emit(.dup)
+			c.compile_expr(pattern)!
+			c.emit(.eq)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+		}
+		typed_ast.Identifier {
+			c.emit(.dup)
+			local_idx := c.get_or_create_local(pattern.name)
+			c.emit_arg(.store_local, local_idx)
+		}
+		typed_ast.WildcardPattern {}
+		typed_ast.RangeExpression {
+			c.emit(.dup)
+			c.compile_expr(pattern.start)!
+			c.emit(.gte)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			c.emit(.dup)
+			c.compile_expr(pattern.end)!
+			c.emit(.lt)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+		}
+		typed_ast.TupleExpression {
+			c.emit(.dup)
+			c.emit(.array_len)
+			c.emit_arg(.push_const, c.add_constant(pattern.elements.len))
+			c.emit(.eq)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			for i, elem in pattern.elements {
+				c.emit(.dup)
+				c.emit_arg(.tuple_index, i)
+				c.compile_pattern_element(elem, mut fail_jumps)!
+			}
+		}
+		typed_ast.ArrayExpression {
+			has_spread := pattern.elements.len > 0
+				&& pattern.elements.last() is typed_ast.SpreadExpression
+			pre_count := if has_spread { pattern.elements.len - 1 } else { pattern.elements.len }
+
+			c.emit(.dup)
+			c.emit(.array_len)
+			c.emit_arg(.push_const, c.add_constant(pre_count))
+			if has_spread {
+				c.emit(.gte)
+			} else {
+				c.emit(.eq)
+			}
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+
+			for i in 0 .. pre_count {
+				elem := pattern.elements[i]
+				c.emit(.dup)
+				c.emit_arg(.push_const, c.add_constant(i))
+				c.emit(.index)
+				c.compile_pattern_element(elem, mut fail_jumps)!
+			}
+
+			if has_spread {
+				spread_elem := pattern.elements.last()
+				if spread_elem is typed_ast.SpreadExpression {
+					if inner := spread_elem.expression {
+						if inner is typed_ast.Identifier {
+							c.emit(.dup)
+							c.emit(.array_len)
+							c.emit_arg(.push_const, c.add_constant(pre_count))
+							c.emit(.swap)
+							c.emit(.array_slice)
+							local_idx := c.get_or_create_local(inner.name)
+							c.emit_arg(.store_local, local_idx)
+						}
+					}
+				}
+			}
+		}
+		else {
+			c.emit(.dup)
+			c.compile_expr(pattern)!
+			c.emit(.eq)
+			fail_jumps << c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
+		}
+	}
+}
+
 fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 	c.compile_expr(m.subject)!
 
@@ -795,9 +983,11 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 
 	for arm in m.arms {
 		c.emit(.dup)
+		mut fail_jumps := []int{}
 
+		mut is_enum_pattern := false
 		mut binding_names := []string{}
-		mut literal_pattern := ?typed_ast.Expression(none)
+		mut enum_payload_patterns := []typed_ast.Expression{}
 		mut enum_name := ?string(none)
 		mut enum_type_id := ?int(none)
 		mut variant_name := ?string(none)
@@ -808,6 +998,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 				left_id := prop.left as typed_ast.Identifier
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
+						is_enum_pattern = true
 						enum_name = left_id.name
 						enum_type_id = enum_type.id
 						if prop.right is typed_ast.FunctionCallExpression {
@@ -815,12 +1006,9 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 							variant_name = call.identifier.name
 							for arg in call.arguments {
 								if arg is typed_ast.Identifier {
-									binding_id := arg as typed_ast.Identifier
-									binding_names << binding_id.name
-								} else if arg is typed_ast.StringLiteral
-									|| arg is typed_ast.NumberLiteral
-									|| arg is typed_ast.BooleanLiteral {
-									literal_pattern = arg
+									binding_names << arg.name
+								} else {
+									enum_payload_patterns << arg
 								}
 							}
 						} else if prop.right is typed_ast.Identifier {
@@ -835,16 +1023,15 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 		if arm.pattern is typed_ast.FunctionCallExpression {
 			call := arm.pattern as typed_ast.FunctionCallExpression
 			if enum_type := c.type_env.lookup_enum_by_variant(call.identifier.name) {
+				is_enum_pattern = true
 				enum_name = enum_type.name
 				enum_type_id = enum_type.id
 				variant_name = call.identifier.name
 				for arg in call.arguments {
 					if arg is typed_ast.Identifier {
-						binding_id := arg as typed_ast.Identifier
-						binding_names << binding_id.name
-					} else if arg is typed_ast.StringLiteral || arg is typed_ast.NumberLiteral
-						|| arg is typed_ast.BooleanLiteral {
-						literal_pattern = arg
+						binding_names << arg.name
+					} else {
+						enum_payload_patterns << arg
 					}
 				}
 			}
@@ -853,35 +1040,42 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 		if arm.pattern is typed_ast.Identifier {
 			ident := arm.pattern as typed_ast.Identifier
 			if enum_type := c.type_env.lookup_enum_by_variant(ident.name) {
+				is_enum_pattern = true
 				enum_name = enum_type.name
 				enum_type_id = enum_type.id
 				variant_name = ident.name
 			}
 		}
 
-		if ename := enum_name {
-			if vname := variant_name {
-				type_id := enum_type_id or {
-					return error('Internal error: enum_type_id not set for ${ename}.${vname}')
-				}
+		if is_enum_pattern {
+			if ename := enum_name {
+				if vname := variant_name {
+					type_id := enum_type_id or {
+						return error('Internal error: enum_type_id not set for ${ename}.${vname}')
+					}
 
-				c.emit_arg(.push_const, c.add_constant(type_id))
-				enum_idx := c.add_constant(ename)
-				c.emit_arg(.push_const, enum_idx)
-				variant_idx := c.add_constant(vname)
-				c.emit_arg(.push_const, variant_idx)
-				c.emit(.match_enum)
-
-				next_arm := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
-
-				if lit := literal_pattern {
-					c.emit(.dup)
-					c.emit(.unwrap_enum)
-					c.compile_expr(lit)!
-					c.emit(.eq)
-					payload_match := c.current_addr()
+					c.emit_arg(.push_const, c.add_constant(type_id))
+					c.emit_arg(.push_const, c.add_constant(ename))
+					c.emit_arg(.push_const, c.add_constant(vname))
+					c.emit(.match_enum)
+					fail_jumps << c.current_addr()
 					c.emit_arg(.jump_if_false, 0)
+
+					if enum_payload_patterns.len > 0 {
+						c.emit(.dup)
+						c.emit(.unwrap_enum)
+						for pat in enum_payload_patterns {
+							c.compile_pattern(pat, mut fail_jumps)!
+						}
+						c.emit(.pop)
+					} else if binding_names.len > 0 {
+						c.emit(.dup)
+						c.emit(.unwrap_enum)
+						for i := binding_names.len - 1; i >= 0; i-- {
+							local_idx := c.get_or_create_local(binding_names[i])
+							c.emit_arg(.store_local, local_idx)
+						}
+					}
 
 					c.emit(.pop)
 					c.in_tail_position = is_tail
@@ -891,231 +1085,39 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 					end_jumps << c.current_addr()
 					c.emit_arg(.jump, 0)
 
-					c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
-					c.program.code[payload_match] = op_arg(.jump_if_false, c.current_addr())
+					next_arm_addr := c.current_addr()
+					for jump_addr in fail_jumps {
+						c.program.code[jump_addr] = op_arg(.jump_if_false, next_arm_addr)
+					}
 					continue
 				}
-
-				if binding_names.len > 0 {
-					c.emit(.dup)
-					c.emit(.unwrap_enum)
-					// unwrap_enum pushes all payloads in order, so pop in reverse
-					for i := binding_names.len - 1; i >= 0; i-- {
-						local_idx := c.get_or_create_local(binding_names[i])
-						c.emit_arg(.store_local, local_idx)
-					}
-				}
-
-				c.emit(.pop)
-				c.in_tail_position = is_tail
-				c.compile_expr(arm.body)!
-				c.in_tail_position = false
-
-				end_jumps << c.current_addr()
-				c.emit_arg(.jump, 0)
-
-				c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
-				continue
 			}
-		}
-
-		// Handle array patterns like [], [x], [first, ..rest]
-		if arm.pattern is typed_ast.ArrayExpression {
-			arr := arm.pattern as typed_ast.ArrayExpression
-
-			// Check if last element is a spread (e.g., [a, b, ..rest])
-			has_spread := arr.elements.len > 0 && arr.elements.last() is typed_ast.SpreadExpression
-			pre_count := if has_spread { arr.elements.len - 1 } else { arr.elements.len }
-
-			// Check length constraint
-			c.emit(.dup)
-			c.emit(.array_len)
-			c.emit_arg(.push_const, c.add_constant(pre_count))
-			if has_spread {
-				c.emit(.gte) // length >= pre_count
-			} else {
-				c.emit(.eq) // length == exactly this many
-			}
-
-			next_arm := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
-
-			mut literal_checks := []int{}
-			for i in 0 .. pre_count {
-				elem := arr.elements[i]
-				if elem is typed_ast.NumberLiteral || elem is typed_ast.StringLiteral
-					|| elem is typed_ast.BooleanLiteral {
-					c.emit(.dup)
-					c.emit_arg(.push_const, c.add_constant(i))
-					c.emit(.index)
-					c.compile_expr(elem)!
-					c.emit(.eq)
-					literal_checks << c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
-				}
-			}
-
-			for i in 0 .. pre_count {
-				elem := arr.elements[i]
-				if elem is typed_ast.Identifier {
-					c.emit(.dup)
-					c.emit_arg(.push_const, c.add_constant(i))
-					c.emit(.index)
-					local_idx := c.get_or_create_local(elem.name)
-					c.emit_arg(.store_local, local_idx)
-				}
-			}
-
-			if has_spread {
-				spread_elem := arr.elements.last()
-				if spread_elem is typed_ast.SpreadExpression {
-					if inner := spread_elem.expression {
-						if inner is typed_ast.Identifier {
-							// Slice from pre_count to end
-							c.emit(.dup)
-							c.emit(.array_len)
-							c.emit_arg(.push_const, c.add_constant(pre_count))
-							c.emit(.swap)
-							c.emit(.array_slice)
-							local_idx := c.get_or_create_local(inner.name)
-							c.emit_arg(.store_local, local_idx)
-						}
-					}
-					// else: anonymous spread, nothing to bind
-				}
-			}
-
-			c.emit(.pop)
-			c.in_tail_position = is_tail
-			c.compile_expr(arm.body)!
-			c.in_tail_position = false
-
-			end_jumps << c.current_addr()
-			c.emit_arg(.jump, 0)
-
-			next_arm_addr := c.current_addr()
-			c.program.code[next_arm] = op_arg(.jump_if_false, next_arm_addr)
-			for check_addr in literal_checks {
-				c.program.code[check_addr] = op_arg(.jump_if_false, next_arm_addr)
-			}
-			continue
-		}
-
-		if arm.pattern is typed_ast.TupleExpression {
-			tup := arm.pattern as typed_ast.TupleExpression
-
-			c.emit(.dup)
-			c.emit(.array_len)
-			c.emit_arg(.push_const, c.add_constant(tup.elements.len))
-			c.emit(.eq)
-
-			next_arm := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
-
-			mut literal_checks := []int{}
-			for i, elem in tup.elements {
-				if elem is typed_ast.NumberLiteral || elem is typed_ast.StringLiteral
-					|| elem is typed_ast.BooleanLiteral {
-					c.emit(.dup)
-					c.emit_arg(.tuple_index, i)
-					c.compile_expr(elem)!
-					c.emit(.eq)
-					literal_checks << c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
-				}
-			}
-
-			for i, elem in tup.elements {
-				if elem is typed_ast.Identifier {
-					c.emit(.dup)
-					c.emit_arg(.tuple_index, i)
-					local_idx := c.get_or_create_local(elem.name)
-					c.emit_arg(.store_local, local_idx)
-				}
-			}
-
-			c.emit(.pop)
-			c.in_tail_position = is_tail
-			c.compile_expr(arm.body)!
-			c.in_tail_position = false
-
-			end_jumps << c.current_addr()
-			c.emit_arg(.jump, 0)
-
-			next_arm_addr := c.current_addr()
-			c.program.code[next_arm] = op_arg(.jump_if_false, next_arm_addr)
-			for check_addr in literal_checks {
-				c.program.code[check_addr] = op_arg(.jump_if_false, next_arm_addr)
-			}
-			continue
-		}
-
-		if arm.pattern is typed_ast.WildcardPattern {
-			c.emit(.pop)
-			c.emit(.pop)
-			c.in_tail_position = is_tail
-			c.compile_expr(arm.body)!
-			c.in_tail_position = false
-
-			end_jumps << c.current_addr()
-			c.emit_arg(.jump, 0)
-			continue
 		}
 
 		if arm.pattern is typed_ast.OrPattern {
-			// For or-patterns, check each pattern in sequence
-			// If any matches, jump to body; otherwise fall through to next arm
 			mut body_jumps := []int{}
-			mut fail_jumps := []int{}
 
 			for i, pattern in arm.pattern.patterns {
 				if i > 0 {
-					// Need to dup the subject again for subsequent patterns
 					c.emit(.dup)
 				}
+				mut pattern_fail_jumps := []int{}
+				c.compile_pattern(pattern, mut pattern_fail_jumps)!
 
-				if pattern is typed_ast.RangeExpression {
-					range_expr := pattern as typed_ast.RangeExpression
-
-					// subject >= start
-					c.emit(.dup)
-					c.compile_expr(range_expr.start)!
-					c.emit(.gte)
-
-					first_check := c.current_addr()
-					c.emit_arg(.jump_if_false, 0)
-
-					// subject < end
-					c.emit(.dup)
-					c.compile_expr(range_expr.end)!
-					c.emit(.lt)
-
-					if i < arm.pattern.patterns.len - 1 {
-						body_jumps << c.current_addr()
-						c.emit_arg(.jump_if_true, 0)
-						c.program.code[first_check] = op_arg(.jump_if_false, c.current_addr())
-					} else {
-						fail_jumps << c.current_addr()
-						c.emit_arg(.jump_if_false, 0)
-						fail_jumps << first_check
+				if i < arm.pattern.patterns.len - 1 {
+					body_jumps << c.current_addr()
+					c.emit_arg(.jump, 0)
+					for jump_addr in pattern_fail_jumps {
+						c.program.code[jump_addr] = op_arg(.jump_if_false, c.current_addr())
 					}
 				} else {
-					c.compile_expr(pattern)!
-					c.emit(.eq)
-
-					if i < arm.pattern.patterns.len - 1 {
-						body_jumps << c.current_addr()
-						c.emit_arg(.jump_if_true, 0)
-					} else {
-						fail_jumps << c.current_addr()
-						c.emit_arg(.jump_if_false, 0)
-					}
+					fail_jumps << pattern_fail_jumps
 				}
 			}
 
 			body_addr := c.current_addr()
 			for jump_addr in body_jumps {
-				c.program.code[jump_addr] = op_arg(.jump_if_true, body_addr)
+				c.program.code[jump_addr] = op_arg(.jump, body_addr)
 			}
 
 			c.emit(.pop)
@@ -1133,44 +1135,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			continue
 		}
 
-		// Range patterns: 0..10 matches [0, 9]
-		if arm.pattern is typed_ast.RangeExpression {
-			range_expr := arm.pattern as typed_ast.RangeExpression
-
-			// subject >= start
-			c.emit(.dup)
-			c.compile_expr(range_expr.start)!
-			c.emit(.gte)
-
-			first_check := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
-
-			// subject < end
-			c.emit(.dup)
-			c.compile_expr(range_expr.end)!
-			c.emit(.lt)
-
-			second_check := c.current_addr()
-			c.emit_arg(.jump_if_false, 0)
-
-			c.emit(.pop)
-			c.in_tail_position = is_tail
-			c.compile_expr(arm.body)!
-			c.in_tail_position = false
-
-			end_jumps << c.current_addr()
-			c.emit_arg(.jump, 0)
-			next_arm_addr := c.current_addr()
-			c.program.code[first_check] = op_arg(.jump_if_false, next_arm_addr)
-			c.program.code[second_check] = op_arg(.jump_if_false, next_arm_addr)
-			continue
-		}
-
-		c.compile_expr(arm.pattern)!
-		c.emit(.eq)
-
-		next_arm := c.current_addr()
-		c.emit_arg(.jump_if_false, 0)
+		c.compile_pattern(arm.pattern, mut fail_jumps)!
 
 		c.emit(.pop)
 		c.in_tail_position = is_tail
@@ -1180,7 +1145,10 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 		end_jumps << c.current_addr()
 		c.emit_arg(.jump, 0)
 
-		c.program.code[next_arm] = op_arg(.jump_if_false, c.current_addr())
+		next_arm_addr := c.current_addr()
+		for jump_addr in fail_jumps {
+			c.program.code[jump_addr] = op_arg(.jump_if_false, next_arm_addr)
+		}
 	}
 
 	c.emit(.pop)
