@@ -551,14 +551,6 @@ fn (mut p Parser) parse_postfix_expression() !ast.Expression {
 					span:       p.span_from(start)
 				}
 			}
-			.punc_question_mark {
-				start := expr.span
-				p.eat(.punc_question_mark)!
-				expr = ast.PropagateNoneExpression{
-					expression: expr
-					span:       p.span_from(start)
-				}
-			}
 			.punc_dotdot {
 				start := expr.span
 				p.eat(.punc_dotdot)!
@@ -641,9 +633,6 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		}
 		.kw_function {
 			p.parse_function_expression()!
-		}
-		.kw_assert {
-			p.parse_assert_expression()!
 		}
 		.kw_error {
 			p.parse_error_expression()!
@@ -1448,23 +1437,6 @@ fn (mut p Parser) parse_import_specifiers(mut specifiers []ast.ImportSpecifier) 
 	if p.current_token.kind == .punc_comma {
 		p.eat(.punc_comma)!
 		p.parse_import_specifiers(mut specifiers)!
-	}
-}
-
-fn (mut p Parser) parse_assert_expression() !ast.Expression {
-	assert_span := p.current_span()
-	p.eat(.kw_assert)!
-
-	expr := p.parse_expression()!
-
-	p.eat(.punc_comma)!
-
-	message := p.parse_expression()!
-
-	return ast.AssertExpression{
-		expression: expr
-		message:    message
-		span:       assert_span
 	}
 }
 

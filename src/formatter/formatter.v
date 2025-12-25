@@ -321,10 +321,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 			f.emit(op)
 			f.format_expr(expr.expression)
 		}
-		ast.PropagateNoneExpression {
-			f.format_expr(expr.expression)
-			f.emit('?')
-		}
 		ast.BlockExpression {
 			f.format_block_expr(expr)
 		}
@@ -449,12 +445,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				f.emit_indent()
 				f.emit('}')
 			}
-		}
-		ast.AssertExpression {
-			f.emit('assert ')
-			f.format_expr(expr.expression)
-			f.emit(', ')
-			f.format_expr(expr.message)
 		}
 		ast.WildcardPattern {
 			f.emit('else')

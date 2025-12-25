@@ -632,19 +632,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.emit_arg(.push_const, type_idx)
 			c.emit_arg(.make_struct, expr.fields.len)
 		}
-		typed_ast.AssertExpression {
-			c.compile_expr(expr.expression)!
-
-			ok_jump := c.current_addr()
-			c.emit_arg(.jump_if_true, 0)
-
-			c.compile_expr(expr.message)!
-			c.emit(.make_error)
-			c.emit(.ret)
-
-			c.program.code[ok_jump] = op_arg(.jump_if_true, c.current_addr())
-			c.emit(.push_none)
-		}
 		typed_ast.ErrorExpression {
 			c.compile_expr(expr.expression)!
 			c.emit(.make_error)
@@ -691,22 +678,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 
 				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
 				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
-			}
-		}
-		typed_ast.PropagateNoneExpression {
-			c.compile_expr(expr.expression)!
-
-			resolved := expr.resolved_type
-			if resolved is TypeOption {
-				c.emit(.dup)
-				c.emit(.is_none)
-
-				not_none_jump := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
-
-				c.emit(.ret)
-
-				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
 			}
 		}
 		else {

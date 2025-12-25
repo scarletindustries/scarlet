@@ -176,9 +176,6 @@ fn print_expression(expr ast.Expression, level int) string {
 			}
 			'${op}${print_expression(expr.expression, level)}'
 		}
-		ast.PropagateNoneExpression {
-			'${print_expression(expr.expression, level)}?'
-		}
 		ast.BlockExpression {
 			if expr.body.len == 0 {
 				'{}'
@@ -289,10 +286,6 @@ fn print_expression(expr ast.Expression, level int) string {
 			} else {
 				'..'
 			}
-		}
-		ast.AssertExpression {
-			'assert ${print_expression(expr.expression, level)}, ${print_expression(expr.message,
-				level)}'
 		}
 		ast.WildcardPattern {
 			'else'

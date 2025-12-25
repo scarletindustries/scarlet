@@ -82,8 +82,9 @@ fn validate(x Int)!ValidationError {
 }
 
 fn check_positive(x Int) Int!Error {
-	assert x > 0, Error{ message: 'must be positive' }
-	x * 2
+	if x <= 0 {
+		error Error{ message: 'must be positive' }
+	} else { x * 2 }
 }
 
 fn max(a Int, b Int) Int {
@@ -93,6 +94,10 @@ fn max(a Int, b Int) Int {
 fn classify(n Int) String {
 	if n < 0 { 'negative' } else if n == 0 { 'zero' } else { 'positive' }
 }
+
+fn g() { 'Hello!' }
+
+String = g()
 
 fn describe(x Int) String {
 	match x {
@@ -145,8 +150,6 @@ range = 0..10
 person_name = person.name
 person_age = person.age
 
-assert x > 0, 'x must be positive'
-
 yes = true
 no = false
 
@@ -187,8 +190,8 @@ error_with_receiver = divide(10, 0) or err -> 0
 
 option_result = find_user(0) or User{ id: 0, name: 'default' }
 
-assert_pass = check_positive(5)
-assert_fail = check_positive(-1) or err -> -1
+positive_pass = check_positive(5)
+positive_fail = check_positive(-1) or err -> -1
 
 literal_match1 = match_literal(Ok('special'))
 literal_match2 = match_literal(Err('danger'))
@@ -211,8 +214,8 @@ println(example_result)
 println(enum_result)
 println(error_result)
 println(option_result)
-println(assert_pass)
-println(assert_fail)
+println(positive_pass)
+println(positive_fail)
 println(literal_match1)
 println(literal_match2)
 println(literal_match3)

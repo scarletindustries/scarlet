@@ -313,7 +313,7 @@ quote = 'She said \\'hello\\''`,
     {
       title: "Optional values",
       description:
-        "Functions that might not return a value use ? in their return type. Handle with 'or' or propagate with '?'.",
+        "Functions that might not return a value use ? in their return type. Handle missing values with 'or'.",
       code: `fn find_user(id Int) ?User {
     if id == 0 { none }
     else { User{ id: id, name: 'found' } }
@@ -321,12 +321,6 @@ quote = 'She said \\'hello\\''`,
 
 // Provide a default with 'or'
 user = find_user(0) or User{ id: 0, name: 'guest' }
-
-// Propagate none to caller with '?'
-fn get_name(id Int) ?String {
-    user = find_user(id)?
-    user.name
-}
 
 // Handle with receiver
 result = find_user(0) or missing -> {
@@ -359,24 +353,6 @@ result = divide(10, 0) or err -> {
     -1
 }`,
     },
-    {
-      title: "Assertions",
-      description:
-        "Assert conditions that must be true. If they fail, the function returns an error.",
-      code: `struct Error {
-    message String,
-}
-
-fn process(x Int) Int!Error {
-    assert x > 0, Error{ message: 'must be positive' }
-    x * 2
-}
-
-// Use it
-a = process(5) or 0   // 10
-b = process(-1) or 0  // 0 (assertion failed)`,
-    },
-
     // === BUILTINS ===
     {
       title: "Built-in functions",

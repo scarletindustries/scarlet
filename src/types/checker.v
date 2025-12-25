@@ -45,7 +45,6 @@ mut:
 	diagnostics            []diagnostic.Diagnostic
 	in_function            bool
 	current_fn_return_type ?Type
-	current_fn_has_assert  bool            // tracks if current function has assert statements
 	param_subs             map[string]Type // tracks inferred parameter types
 	type_positions         []TypePosition
 }
@@ -586,12 +585,6 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 				span:       convert_span(expr.span)
 			}, t_none()
 		}
-		ast.AssertExpression {
-			return c.check_assert(expr)
-		}
-		ast.PropagateNoneExpression {
-			return c.check_propagate_none(expr)
-		}
 		ast.WildcardPattern {
 			return typed_ast.WildcardPattern{
 				span: convert_span(expr.span)
@@ -1031,10 +1024,8 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 
 	prev_in_function := c.in_function
 	prev_fn_return_type := c.current_fn_return_type
-	prev_fn_has_assert := c.current_fn_has_assert
 	prev_param_subs := c.param_subs.clone()
 	c.in_function = true
-	c.current_fn_has_assert = false
 	c.current_fn_return_type = if drt := declared_ret_type {
 		if et := declared_err_type {
 			Type(TypeResult{
@@ -1051,7 +1042,6 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	c.param_subs = map[string]Type{}
 	errors_before := c.diagnostics.len
 	typed_body, body_type := c.check_expr(expr.body)
-	has_assert := c.current_fn_has_assert
 
 	for i, pt in param_types {
 		param_types[i] = substitute(pt, c.param_subs)
@@ -1067,14 +1057,10 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 		substitute(body_type, c.param_subs)
 	}
 
-	mut final_err_type := declared_err_type
-	if has_assert && final_err_type == none {
-		final_err_type = t_string()
-	}
+	final_err_type := declared_err_type
 
 	c.in_function = prev_in_function
 	c.current_fn_return_type = prev_fn_return_type
-	c.current_fn_has_assert = prev_fn_has_assert
 	c.param_subs = prev_param_subs.clone()
 	c.env.pop_scope()
 
@@ -1171,10 +1157,8 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 
 	prev_in_function := c.in_function
 	prev_fn_return_type := c.current_fn_return_type
-	prev_fn_has_assert := c.current_fn_has_assert
 	prev_param_subs := c.param_subs.clone()
 	c.in_function = true
-	c.current_fn_has_assert = false
 	c.current_fn_return_type = if drt := declared_ret_type {
 		if et := declared_err_type {
 			Type(TypeResult{
@@ -1191,7 +1175,6 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	c.param_subs = map[string]Type{}
 	errors_before := c.diagnostics.len
 	typed_body, body_type := c.check_expr(expr.body)
-	has_assert := c.current_fn_has_assert
 
 	for i, pt in param_types {
 		param_types[i] = substitute(pt, c.param_subs)
@@ -1207,14 +1190,10 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 		substitute(body_type, c.param_subs)
 	}
 
-	mut final_err_type := declared_err_type
-	if has_assert && final_err_type == none {
-		final_err_type = t_string()
-	}
+	final_err_type := declared_err_type
 
 	c.in_function = prev_in_function
 	c.current_fn_return_type = prev_fn_return_type
-	c.current_fn_has_assert = prev_fn_has_assert
 	c.param_subs = prev_param_subs.clone()
 	c.env.pop_scope()
 
@@ -2252,52 +2231,4 @@ fn (mut c TypeChecker) check_range(expr ast.RangeExpression) (typed_ast.Expressi
 		end:   typed_end
 		span:  convert_span(expr.span)
 	}, t_array(t_int())
-}
-
-fn (mut c TypeChecker) check_assert(expr ast.AssertExpression) (typed_ast.Expression, Type) {
-	typed_cond, cond_type := c.check_expr(expr.expression)
-	cond_span := typed_cond.span
-	c.expect_type(cond_type, t_bool(), cond_span, 'in assert condition')
-
-	typed_msg, _ := c.check_expr(expr.message)
-
-	// Mark that this function has an assert (can fail with String error)
-	c.current_fn_has_assert = true
-
-	return typed_ast.AssertExpression{
-		expression: typed_cond
-		message:    typed_msg
-		span:       convert_span(expr.span)
-	}, t_none()
-}
-
-fn (mut c TypeChecker) check_propagate_none(expr ast.PropagateNoneExpression) (typed_ast.Expression, Type) {
-	typed_inner, inner_type := c.check_expr(expr.expression)
-	inner_span := typed_inner.span
-
-	if !c.in_function {
-		c.error_at_span("'?' can only be used inside a function", inner_span)
-	} else if fn_ret := c.current_fn_return_type {
-		if fn_ret !is TypeOption {
-			c.error_at_span("'?' can only be used in a function that returns an Option type, but this function returns '${type_to_string(fn_ret)}'",
-				inner_span)
-		}
-	} else {
-		c.error_at_span("'?' can only be used in a function that declares an Option return type",
-			inner_span)
-	}
-
-	result_type := if inner_type is TypeOption {
-		inner_type.inner
-	} else {
-		c.error_at_span("'?' can only be used on Option types, got '${type_to_string(inner_type)}'",
-			inner_span)
-		inner_type
-	}
-
-	return typed_ast.PropagateNoneExpression{
-		expression:    typed_inner
-		resolved_type: inner_type
-		span:          convert_span(expr.span)
-	}, result_type
 }

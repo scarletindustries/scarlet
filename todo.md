@@ -326,53 +326,18 @@ const min_int = -9223372036854775808
 
 ---
 
-## 9. Remove Assert
-
-Remove `assert` because early return from functions doesn't work properly.
-
-**Current behavior:** `assert condition, Error{ ... }` is supposed to return error if condition is false. But early return semantics are broken.
-
-**Files to modify:**
-
-- `src/ast/ast.v` - Remove `AssertExpression`
-- `src/typed_ast/typed_ast.v` - Remove `AssertExpression`
-- `src/parser/parser.v` - Remove assert parsing
-- `src/type_checker/type_checker.v` - Remove assert type checking
-- `src/compiler/compiler.v` - Remove assert compilation
-- `README.md` - Remove assert documentation
-- `website/src/app.tsx` - Remove assert examples
-
-**Migration:** Users should use explicit if/else with error:
-
-```
-// Before
-fn process(x Int) Int!Error {
-    assert x > 0, Error{ message: 'must be positive' }
-    x * 2
-}
-
-// After
-fn process(x Int) Int!Error {
-    if x <= 0 { error Error{ message: 'must be positive' } }
-    else { x * 2 }
-}
-```
-
----
-
 ## Implementation Order
 
 Suggested order based on dependencies and complexity:
 
-1. **Remove assert** - Quick cleanup, no dependencies
-2. **String functions** - Easy wins, no language changes needed
-3. **Math functions** - Same as above
-4. **Collection functions** - Slightly more complex (generics), but no syntax changes
-5. **Tuple types** - New syntax, needed for some stdlib functions
-6. **Receiver pattern** - New syntax, but self-contained
-7. **Import/export** - Complex, touches many files
-8. **Multi-file support** - Depends on import/export
-9. **builtins.al** - Depends on import/export and stdlib functions
+1. **String functions** - Easy wins, no language changes needed
+2. **Math functions** - Same as above
+3. **Collection functions** - Slightly more complex (generics), but no syntax changes
+4. **Tuple types** - New syntax, needed for some stdlib functions
+5. **Receiver pattern** - New syntax, but self-contained
+6. **Import/export** - Complex, touches many files
+7. **Multi-file support** - Depends on import/export
+8. **builtins.al** - Depends on import/export and stdlib functions
 
 ---
 

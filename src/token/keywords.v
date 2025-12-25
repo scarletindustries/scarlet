@@ -6,7 +6,6 @@ pub const keyword_map = {
 	'from':   Kind.kw_from
 	'true':   Kind.kw_true
 	'false':  Kind.kw_false
-	'assert': Kind.kw_assert
 	'enum':   Kind.kw_enum
 	'export': Kind.kw_export
 	'struct': Kind.kw_struct

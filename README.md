@@ -115,7 +115,7 @@ grade = match score {
 
 ### Optional values
 
-Functions that might not return a value use `?` in their return type. Handle with `or`, or propagate with `?`.
+Functions that might not return a value use `?` in their return type. Handle missing values with `or`.
 
 ```
 fn find_user(id Int) ?User {
@@ -124,12 +124,6 @@ fn find_user(id Int) ?User {
 
 // Provide a default with 'or'
 user = find_user(0) or User{ id: 0, name: 'guest' }
-
-// Propagate none to caller with '?'
-fn get_user_name(id Int) ?String {
-    user = find_user(id)?
-    user.name
-}
 ```
 
 ### Error handling
@@ -275,19 +269,6 @@ Top-level constants are declared with `const`.
 const pi = 314
 const app_name = 'my app'
 const max_retries = 3
-```
-
-### Assertions
-
-Assert conditions that must be true. Failures return an error.
-
-```
-fn process(x Int) Int!Error {
-    assert x > 0, Error{ message: 'must be positive' }
-    x * 2
-}
-
-result = process(5) or 0
 ```
 
 ## Experimental features

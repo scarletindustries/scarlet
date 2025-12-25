@@ -213,13 +213,6 @@ pub:
 	span       Span @[required]
 }
 
-pub struct PropagateNoneExpression {
-pub:
-	expression    Expression
-	resolved_type Type
-	span          Span @[required]
-}
-
 pub struct BinaryExpression {
 pub:
 	left  Expression
@@ -288,13 +281,6 @@ pub:
 	span Span @[required]
 }
 
-pub struct AssertExpression {
-pub:
-	expression Expression
-	message    Expression
-	span       Span @[required]
-}
-
 // ============================================================================
 // Patterns (used in match arms)
 // ============================================================================
@@ -322,7 +308,6 @@ pub:
 
 pub type Expression = ArrayExpression
 	| ArrayIndexExpression
-	| AssertExpression
 	| BinaryExpression
 	| BlockExpression
 	| BooleanLiteral
@@ -339,7 +324,6 @@ pub type Expression = ArrayExpression
 	| OrExpression
 	| OrPattern
 	| PropertyAccessExpression
-	| PropagateNoneExpression
 	| RangeExpression
 	| SpreadExpression
 	| StringLiteral
