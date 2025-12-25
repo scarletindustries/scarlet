@@ -110,6 +110,7 @@ pub type Value = int
 	| string
 	| NoneValue
 	| []Value
+	| TupleValue
 	| StructValue
 	| ClosureValue
 	| EnumValue
@@ -117,6 +118,11 @@ pub type Value = int
 	| SocketValue
 
 pub struct NoneValue {}
+
+pub struct TupleValue {
+pub:
+	elements []Value
+}
 
 pub struct ErrorValue {
 pub:

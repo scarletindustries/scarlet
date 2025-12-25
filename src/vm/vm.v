@@ -293,16 +293,18 @@ fn (mut vm VM) execute() !bytecode.Value {
 				for i := len - 1; i >= 0; i-- {
 					arr[i] = vm.pop()!
 				}
-				vm.stack << bytecode.Value(arr)
+				vm.stack << bytecode.Value(bytecode.TupleValue{
+					elements: arr
+				})
 			}
 			.tuple_index {
 				tuple_val := vm.pop()!
-				if tuple_val is []bytecode.Value {
+				if tuple_val is bytecode.TupleValue {
 					idx := instr.operand
-					if idx >= 0 && idx < tuple_val.len {
-						vm.stack << tuple_val[idx]
+					if idx >= 0 && idx < tuple_val.elements.len {
+						vm.stack << tuple_val.elements[idx]
 					} else {
-						return error('Tuple index ${idx} out of bounds (len: ${tuple_val.len})')
+						return error('Tuple index ${idx} out of bounds (len: ${tuple_val.elements.len})')
 					}
 				} else {
 					return error("Expected tuple, got '${value_type_name(tuple_val)}'")
@@ -347,6 +349,8 @@ fn (mut vm VM) execute() !bytecode.Value {
 				arr_val := vm.pop()!
 				if arr_val is []bytecode.Value {
 					vm.stack << arr_val.len
+				} else if arr_val is bytecode.TupleValue {
+					vm.stack << arr_val.elements.len
 				} else {
 					return error("Cannot get length of non-array type '${value_type_name(arr_val)}'")
 				}
@@ -970,16 +974,27 @@ fn (vm VM) values_equal(a bytecode.Value, b bytecode.Value) bool {
 		}
 		[]bytecode.Value {
 			if b is []bytecode.Value {
-				// fast path: different lengths means definitely not equal
 				if a.len != b.len {
 					return false
 				}
-				// fast path: both empty arrays
 				if a.len == 0 {
 					return true
 				}
 				for i, a_val in a {
 					if !vm.values_equal(a_val, b[i]) {
+						return false
+					}
+				}
+				return true
+			}
+		}
+		bytecode.TupleValue {
+			if b is bytecode.TupleValue {
+				if a.elements.len != b.elements.len {
+					return false
+				}
+				for i, a_val in a.elements {
+					if !vm.values_equal(a_val, b.elements[i]) {
 						return false
 					}
 				}
@@ -1032,8 +1047,9 @@ fn (vm VM) is_truthy(v bytecode.Value) bool {
 		bool {
 			v
 		}
-		bytecode.NoneValue, int, f64, string, []bytecode.Value, bytecode.StructValue,
-		bytecode.ClosureValue, bytecode.EnumValue, bytecode.ErrorValue, bytecode.SocketValue {
+		bytecode.NoneValue, int, f64, string, []bytecode.Value, bytecode.TupleValue,
+		bytecode.StructValue, bytecode.ClosureValue, bytecode.EnumValue, bytecode.ErrorValue,
+		bytecode.SocketValue {
 			false
 		}
 	}
@@ -1047,6 +1063,7 @@ fn value_type_name(v bytecode.Value) string {
 		string { 'String' }
 		bytecode.NoneValue { 'None' }
 		[]bytecode.Value { 'Array' }
+		bytecode.TupleValue { 'Tuple' }
 		bytecode.StructValue { v.type_name }
 		bytecode.ClosureValue { 'Function' }
 		bytecode.EnumValue { v.enum_name }
@@ -1110,6 +1127,16 @@ fn inspect_inline(v bytecode.Value) string {
 				s += inspect_inline(elem)
 			}
 			return s + ']'
+		}
+		bytecode.TupleValue {
+			mut s := '('
+			for i, elem in v.elements {
+				if i > 0 {
+					s += ', '
+				}
+				s += inspect_inline(elem)
+			}
+			return s + ')'
 		}
 		bytecode.StructValue {
 			mut s := '${v.type_name}{ '
@@ -1214,6 +1241,27 @@ fn inspect_pretty(v bytecode.Value, indent int) string {
 				s += '\n'
 			}
 			return s + '${pad}]'
+		}
+		bytecode.TupleValue {
+			if v.elements.len == 0 {
+				return '()'
+			}
+			all_simple := v.elements.all(is_simple_value(it))
+			if all_simple {
+				inline := inspect_inline(v)
+				if inline.len <= 80 {
+					return inline
+				}
+			}
+			mut s := '(\n'
+			for i, elem in v.elements {
+				s += '${pad_inner}${inspect_pretty(elem, indent + 1)}'
+				if i < v.elements.len - 1 {
+					s += ','
+				}
+				s += '\n'
+			}
+			return s + '${pad})'
 		}
 		bytecode.StructValue {
 			if v.fields.len == 0 {
