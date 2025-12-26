@@ -1101,6 +1101,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	if rt := expr.return_type {
 		if resolved := c.resolve_type_identifier(rt) {
 			declared_ret_type = resolved
+			c.record_type_annotation(rt, resolved)
 		} else {
 			c.error_at_span("Unknown return type '${rt.identifier.name}'", rt.identifier.span)
 		}
@@ -1110,6 +1111,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	if et := expr.error_type {
 		if resolved := c.resolve_type_identifier(et) {
 			declared_err_type = resolved
+			c.record_type_annotation(et, resolved)
 		} else {
 			c.error_at_span("Unknown error type '${et.identifier.name}'", et.identifier.span)
 		}
@@ -1125,6 +1127,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 		if pt := param.typ {
 			if resolved := c.resolve_type_identifier(pt) {
 				param_types << resolved
+				c.record_type_annotation(pt, resolved)
 			} else {
 				c.error_at_span("Unknown type '${pt.identifier.name}'", pt.identifier.span)
 				param_types << t_none()
@@ -1248,6 +1251,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	if rt := expr.return_type {
 		if resolved := c.resolve_type_identifier(rt) {
 			declared_ret_type = resolved
+			c.record_type_annotation(rt, resolved)
 		} else {
 			c.error_at_span("Unknown return type '${rt.identifier.name}'", rt.identifier.span)
 		}
@@ -1257,6 +1261,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	if et := expr.error_type {
 		if resolved := c.resolve_type_identifier(et) {
 			declared_err_type = resolved
+			c.record_type_annotation(et, resolved)
 		} else {
 			c.error_at_span("Unknown error type '${et.identifier.name}'", et.identifier.span)
 		}
@@ -1272,6 +1277,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 		if pt := param.typ {
 			if resolved := c.resolve_type_identifier(pt) {
 				param_types << resolved
+				c.record_type_annotation(pt, resolved)
 			} else {
 				c.error_at_span("Unknown type '${pt.identifier.name}'", pt.identifier.span)
 				param_types << t_none()
