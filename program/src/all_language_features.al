@@ -177,7 +177,6 @@ yes = true
 no = false
 
 nothing = none
-
 greeting = 'Hello, ${app_name}!'
 complex = 'Result: ${1 + 2}'
 
@@ -352,15 +351,17 @@ println('10/2 = ${unwrap_generic_result(div_ok, -1)}')
 println('10/0 = ${unwrap_generic_result(div_err, -1)}')
 
 // Generic box
-boxed_int = Box(Int){ value: 42 }
+boxed_int = Box{ value: 42 }
 boxed_str = Box(String){ value: 'hello' }
 println('boxed int: ${boxed_int.value}')
 println('boxed str: ${boxed_str.value}')
 
 // Function returning generic struct
-fn make_int_str_pair(x Int, y String) Pair(Int, String) {
-	Pair(Int, String){ first: x, second: y }
+fn make_pair(a a, b b) Pair(a, b) {
+	Pair{ first: a, second: b }
 }
 
-auto_pair = make_int_str_pair(100, 'hundred')
+auto_pair = make_pair(100, 'hundred')
 println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')
+
+x Option = Option.Some('')

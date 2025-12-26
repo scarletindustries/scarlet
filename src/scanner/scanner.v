@@ -8,11 +8,12 @@ import diagnostic
 pub struct Scanner {
 	input string
 mut:
-	state              &state.ScannerState
-	diagnostics        []diagnostic.Diagnostic
-	pending_trivia     []token.Trivia
-	token_start_column int
-	token_start_line   int
+	state               &state.ScannerState
+	diagnostics         []diagnostic.Diagnostic
+	pending_trivia      []token.Trivia
+	token_start_column  int
+	token_start_line    int
+	interp_brace_depths []int
 }
 
 @[inline]
@@ -24,24 +25,51 @@ pub fn new_scanner(input string) &Scanner {
 	}
 }
 
-@[inline]
-pub fn new_scanner_at(input string, line int, column int) &Scanner {
-	mut s := &Scanner{
-		input:       input
-		state:       &state.ScannerState{}
-		diagnostics: []diagnostic.Diagnostic{}
-	}
-	s.state.set_line(line)
-	s.state.set_column(column)
-	return s
-}
-
 fn (mut s Scanner) add_error(message string) {
 	s.diagnostics << diagnostic.error_at(s.state.get_line(), s.state.get_column(), message)
 }
 
 pub fn (s Scanner) get_diagnostics() []diagnostic.Diagnostic {
 	return s.diagnostics
+}
+
+fn (s &Scanner) in_interp_string() bool {
+	return s.interp_brace_depths.len > 0
+}
+
+fn (s &Scanner) interp_brace_depth() int {
+	if s.interp_brace_depths.len == 0 {
+		return 0
+	}
+	return s.interp_brace_depths.last()
+}
+
+fn (mut s Scanner) enter_interp_string() {
+	s.interp_brace_depths << 0
+}
+
+fn (mut s Scanner) exit_interp_string() {
+	if s.interp_brace_depths.len > 0 {
+		s.interp_brace_depths.pop()
+	}
+}
+
+fn (mut s Scanner) incr_interp_brace_depth() {
+	if s.interp_brace_depths.len > 0 {
+		s.interp_brace_depths[s.interp_brace_depths.len - 1]++
+	}
+}
+
+fn (mut s Scanner) decr_interp_brace_depth() {
+	if s.interp_brace_depths.len > 0 {
+		s.interp_brace_depths[s.interp_brace_depths.len - 1]--
+	}
+}
+
+fn (mut s Scanner) set_interp_brace_depth(depth int) {
+	if s.interp_brace_depths.len > 0 {
+		s.interp_brace_depths[s.interp_brace_depths.len - 1] = depth
+	}
 }
 
 fn (mut s Scanner) collect_trivia() {
@@ -123,6 +151,10 @@ fn (mut s Scanner) collect_trivia() {
 }
 
 pub fn (mut s Scanner) scan_next() token.Token {
+	if s.in_interp_string() && s.interp_brace_depth() == 0 {
+		return s.scan_interp_string_content()
+	}
+
 	s.collect_trivia()
 
 	s.token_start_column = s.state.get_column()
@@ -134,6 +166,17 @@ pub fn (mut s Scanner) scan_next() token.Token {
 
 	ch := s.peek_char()
 	s.incr_pos()
+
+	if s.in_interp_string() {
+		if ch == `{` {
+			s.incr_interp_brace_depth()
+			return s.new_token(.punc_open_brace, none)
+		}
+		if ch == `}` {
+			s.decr_interp_brace_depth()
+			return s.new_token(.punc_close_brace, none)
+		}
+	}
 
 	if token.is_valid_identifier(ch.ascii_str(), false) {
 		identifier := s.scan_identifier(ch)
@@ -200,18 +243,18 @@ pub fn (mut s Scanner) scan_next() token.Token {
 			return s.new_token(.literal_char, next.ascii_str())
 		}
 
-		mut result := ''
-		mut has_interpolation := false
-		mut has_error := false
+		if s.has_interpolation() {
+			s.enter_interp_string()
+			return s.new_token(.interp_string_start, none)
+		}
 
+		mut result := ''
 		for {
 			next := s.peek_char()
 
-			// check for unterminated string
 			if next == 0 || next == `\n` {
 				s.add_error('Unterminated string literal')
-				has_error = true
-				break
+				return s.new_token(.error, result)
 			}
 
 			s.incr_pos()
@@ -220,49 +263,11 @@ pub fn (mut s Scanner) scan_next() token.Token {
 				break
 			}
 
-			mut next_char := next.ascii_str()
-
-			if next == `$` {
-				has_interpolation = true
-			}
-
 			if next == `\\` {
-				peeked := s.peek_char()
-				s.incr_pos()
-
-				if peeked == `n` {
-					next_char = '\n'
-				} else if peeked == `t` {
-					next_char = '\t'
-				} else if peeked == `r` {
-					next_char = '\r'
-				} else if peeked == `0` {
-					next_char = '\0'
-				} else if peeked == `"` {
-					next_char = '"'
-				} else if peeked == `'` {
-					next_char = "'"
-				} else if peeked == `\\` {
-					next_char = '\\'
-				} else if peeked == `$` {
-					// Escaped $, don't mark as interpolation
-					next_char = '$'
-				} else {
-					s.add_error("Unknown escape sequence '\\${peeked.ascii_str()}'")
-					// Continue scanning to recover
-					next_char = peeked.ascii_str()
-				}
+				result += s.scan_escape_sequence()
+			} else {
+				result += next.ascii_str()
 			}
-
-			result += next_char
-		}
-
-		if has_error {
-			return s.new_token(.error, result)
-		}
-
-		if has_interpolation {
-			return s.new_token(.literal_string_interpolation, result)
 		}
 		return s.new_token(.literal_string, result)
 	}
@@ -521,4 +526,122 @@ fn (mut s Scanner) decr_pos() {
 
 pub fn (s Scanner) get_state() &state.ScannerState {
 	return s.state
+}
+
+fn (s &Scanner) has_interpolation() bool {
+	mut pos := s.state.get_pos()
+	for pos < s.input.len {
+		ch := s.input[pos]
+		if ch == `'` {
+			return false
+		}
+		if ch == `\n` {
+			return false
+		}
+		if ch == `\\` && pos + 1 < s.input.len {
+			pos += 2
+			continue
+		}
+		if ch == `$` {
+			return true
+		}
+		pos++
+	}
+	return false
+}
+
+fn (mut s Scanner) scan_escape_sequence() string {
+	peeked := s.peek_char()
+	s.incr_pos()
+
+	return match peeked {
+		`n` {
+			'\n'
+		}
+		`t` {
+			'\t'
+		}
+		`r` {
+			'\r'
+		}
+		`0` {
+			'\0'
+		}
+		`"` {
+			'"'
+		}
+		`'` {
+			"'"
+		}
+		`\\` {
+			'\\'
+		}
+		`$` {
+			'$'
+		}
+		else {
+			s.add_error("Unknown escape sequence '\\${peeked.ascii_str()}'")
+			peeked.ascii_str()
+		}
+	}
+}
+
+// Scan content when inside an interpolated string
+fn (mut s Scanner) scan_interp_string_content() token.Token {
+	s.token_start_column = s.state.get_column()
+	s.token_start_line = s.state.get_line()
+
+	mut result := ''
+
+	for {
+		ch := s.peek_char()
+
+		if ch == 0 || ch == `\n` {
+			s.add_error('Unterminated string literal')
+			s.exit_interp_string()
+			return s.new_token(.error, result)
+		}
+
+		if ch == `'` {
+			s.incr_pos()
+			s.exit_interp_string()
+			if result.len > 0 {
+				s.decr_pos()
+				s.enter_interp_string()
+				return s.new_token(.interp_string_part, result)
+			}
+			return s.new_token(.interp_string_end, none)
+		}
+
+		if ch == `$` {
+			if result.len > 0 {
+				return s.new_token(.interp_string_part, result)
+			}
+
+			s.incr_pos()
+			next := s.peek_char()
+
+			if next == `{` {
+				s.incr_pos()
+				s.set_interp_brace_depth(1)
+				return s.new_token(.punc_open_brace, none)
+			} else if next.is_letter() || next == `_` {
+				s.incr_pos()
+				return s.scan_identifier(next)
+			} else {
+				result += '$'
+				continue
+			}
+		}
+
+		s.incr_pos()
+
+		if ch == `\\` {
+			result += s.scan_escape_sequence()
+		} else {
+			result += ch.ascii_str()
+		}
+	}
+
+	return s.new_token(.interp_string_part, result)
 }

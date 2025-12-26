@@ -10,7 +10,7 @@ mut:
 }
 
 @[inline]
-pub fn (mut s ScannerState) get_pos() int {
+pub fn (s ScannerState) get_pos() int {
 	return s.pos
 }
 

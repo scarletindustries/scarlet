@@ -587,7 +587,7 @@ fn (mut p Parser) parse_primary_expression() !ast.Expression {
 		.literal_string {
 			p.parse_string_expression()!
 		}
-		.literal_string_interpolation {
+		.interp_string_start {
 			p.parse_interpolated_string()!
 		}
 		.literal_number {
@@ -1806,87 +1806,43 @@ fn (mut p Parser) parse_string_expression() !ast.Expression {
 
 fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 	span := p.current_span()
-	raw := p.eat_token_literal(.literal_string_interpolation, 'Expected interpolated string')!
+	p.eat(.interp_string_start)!
 
 	mut parts := []ast.Expression{}
-	mut current := ''
-	mut i := 0
 
-	for i < raw.len {
-		ch := raw[i]
-
-		if ch == `$` {
-			if current.len > 0 {
+	for {
+		match p.current_token.kind {
+			.interp_string_part {
+				part_span := p.current_span()
+				value := p.current_token.literal or { '' }
+				p.eat(.interp_string_part)!
 				parts << ast.StringLiteral{
-					value: current
-					span:  span
+					value: value
+					span:  part_span
 				}
-				current = ''
 			}
-
-			i++
-			if i >= raw.len {
-				return error('Unexpected end of interpolated string after $')
+			.interp_string_end {
+				p.eat(.interp_string_end)!
+				break
 			}
-
-			if raw[i] == `{` {
-				i++
-				expr_start_col := span.start_column + 1 + i // +1 for opening quote
-				mut expr_str := ''
-				mut brace_depth := 1
-				for i < raw.len && brace_depth > 0 {
-					if raw[i] == `{` {
-						brace_depth++
-					} else if raw[i] == `}` {
-						brace_depth--
-						if brace_depth == 0 {
-							break
-						}
-					}
-					expr_str += raw[i].ascii_str()
-					i++
-				}
-				if brace_depth != 0 {
-					return error('Unclosed { in interpolated string')
-				}
-				i++
-
-				mut s := scanner.new_scanner_at(expr_str, span.start_line, expr_start_col)
-				mut expr_parser := new_parser(mut s)
-				expr := expr_parser.parse_expression()!
+			.punc_open_brace {
+				p.eat(.punc_open_brace)!
+				expr := p.parse_expression()!
 				parts << expr
-			} else {
-				ident_start_col := span.start_column + 1 + i // +1 for opening quote
-				mut ident := ''
-				for i < raw.len
-					&& (raw[i].is_letter() || raw[i] == `_` || (ident.len > 0 && raw[i].is_digit())) {
-					ident += raw[i].ascii_str()
-					i++
-				}
-				if ident.len == 0 {
-					return error('Expected identifier after $ in interpolated string')
-				}
-				ident_span := sp.Span{
-					start_line:   span.start_line
-					start_column: ident_start_col
-					end_line:     span.start_line
-					end_column:   ident_start_col + ident.len
-				}
+				p.eat(.punc_close_brace)!
+			}
+			.identifier {
+				ident_span := p.current_span()
+				name := p.current_token.literal or { '' }
+				p.eat(.identifier)!
 				parts << ast.Identifier{
-					name: ident
+					name: name
 					span: ident_span
 				}
 			}
-		} else {
-			current += ch.ascii_str()
-			i++
-		}
-	}
-
-	if current.len > 0 {
-		parts << ast.StringLiteral{
-			value: current
-			span:  span
+			else {
+				return error('Unexpected token in interpolated string: ${p.current_token.kind}')
+			}
 		}
 	}
 

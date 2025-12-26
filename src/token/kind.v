@@ -7,10 +7,13 @@ pub enum Kind {
 	error
 	identifier // Any identifier that is not a keyword
 	// Literals
-	literal_number               // Any number
-	literal_string               // Any string ('Hello, world')
-	literal_string_interpolation // Any string interpolation (e.g. 'Hello, $name or ${name}')
-	literal_char                 // Any character (`a`)
+	literal_number // Any number
+	literal_string // Any string ('Hello, world')
+	literal_char   // Any character (`a`)
+	// Interpolated string tokens
+	interp_string_start // Opening " of interpolated string
+	interp_string_part  // Literal text between interpolations
+	interp_string_end   // Closing " of interpolated string
 	// Logical
 	logical_and // &&
 	logical_or  // ||
@@ -79,8 +82,10 @@ pub fn (kind Kind) str() string {
 		.identifier { 'identifier' }
 		.literal_number { 'number' }
 		.literal_string { 'string' }
-		.literal_string_interpolation { 'interpolated string' }
 		.literal_char { 'char' }
+		.interp_string_start { 'interpolated string start' }
+		.interp_string_part { 'interpolated string part' }
+		.interp_string_end { 'interpolated string end' }
 		.logical_and { '&&' }
 		.logical_or { '||' }
 		.bitwise_and { '&' }
