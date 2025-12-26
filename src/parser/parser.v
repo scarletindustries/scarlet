@@ -32,6 +32,7 @@ mut:
 	context_stack         []ParseContext
 	prev_token_end_line   int
 	prev_token_end_column int
+	sync_iterations       int
 }
 
 pub fn new_parser(mut s scanner.Scanner) Parser {
@@ -110,13 +111,11 @@ fn (mut p Parser) save_token_end() {
 
 fn (mut p Parser) synchronize() {
 	ctx := p.current_context()
-	mut iterations := 0
 
 	for p.current_token.kind != .eof {
-		iterations++
-		if iterations > 1000 {
-			p.add_error('Parser recovery failed: likely infinite loop detected. This is a bug in the parser.')
-
+		p.sync_iterations++
+		if p.sync_iterations > 1000 {
+			p.add_error('Parser recovery failed: too many recovery attempts. This is a bug in the parser.')
 			for p.current_token.kind != .eof {
 				p.advance()
 			}
