@@ -801,10 +801,10 @@ fn (mut c TypeChecker) check_binding_type(name string, name_span Span, annotatio
 	if annot := annotation {
 		if expected := c.resolve_type_identifier(annot) {
 			init_span := typed_init.span
-			c.expect_type(init_type, expected, init_span, context)
 			mut subs := map[string]Type{}
 			c.unify(init_type, expected, mut subs)
 			final_type := substitute(expected, subs)
+			c.expect_type(init_type, final_type, init_span, context)
 			c.env.define_at(name, final_type, loc)
 			c.record_type_annotation(annot, final_type)
 			return final_type
