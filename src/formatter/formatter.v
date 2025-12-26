@@ -544,6 +544,9 @@ fn (mut f Formatter) format_function_declaration(func ast.FunctionDeclaration) {
 		f.format_type(ret)
 	}
 	if err := func.error_type {
+		if func.return_type == none {
+			f.emit(' ')
+		}
 		f.emit('!')
 		f.format_type(err)
 	}

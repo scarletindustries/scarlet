@@ -98,7 +98,7 @@ fn divide(a Int, b Int) Int!DivisionError {
 	} else { a / b }
 }
 
-fn validate(x Int)!ValidationError {
+fn validate(x Int) !ValidationError {
 	if x < 0 {
 		error ValidationError{ code: 1 }
 	} else { none }
