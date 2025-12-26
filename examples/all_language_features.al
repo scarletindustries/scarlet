@@ -42,23 +42,23 @@ enum Option {
 // Generic Structs and Enums
 // ============================================================================
 
-enum GenericResult(t, e) {
-	Success(t)
-	Failure(e)
+enum GenericResult(T, E) {
+	Success(T)
+	Failure(E)
 }
 
-enum Maybe(t) {
-	Just(t)
+enum Maybe(T) {
+	Just(T)
 	Nothing
 }
 
-struct Pair(a, b) {
-	first a
-	second b
+struct Pair(A, B) {
+	first A
+	second B
 }
 
-struct Box(t) {
-	value t
+struct Box(T) {
+	value T
 }
 
 const app_name = 'my app'
@@ -78,7 +78,7 @@ callback = fn(x Int) Int { x * 2 }
 fn apply(x Int, f fn(Int) Int) Int {
 	f(x)
 }
-fn apply_generic(x a, f fn(a) a) a {
+fn apply_generic(x A, f fn(A) A) A {
 	f(x)
 }
 
@@ -322,8 +322,9 @@ println(result)
 // Generic Types Usage
 // ============================================================================
 
-// Generic struct with explicit type args
-int_pair = Pair(Int, Int){ first: 1, second: 2 }
+// inferred
+int_pair = Pair{ first: 1, second: 2 }
+// explicit
 mixed_pair = Pair(String, Int){ first: 'age', second: 30 }
 
 println('int_pair.first: ${int_pair.first}')
@@ -333,7 +334,6 @@ fn safe_divide(a, b) GenericResult(Int, String) {
 	if b == 0 {
 		Failure('division by zero')
 	} else {
-		Bool = a == 0
 		Success(a / b)
 	}
 }
@@ -350,14 +350,12 @@ div_err = safe_divide(10, 0)
 println('10/2 = ${unwrap_generic_result(div_ok, -1)}')
 println('10/0 = ${unwrap_generic_result(div_err, -1)}')
 
-// Generic box
 boxed_int = Box{ value: 42 }
 boxed_str = Box(String){ value: 'hello' }
 println('boxed int: ${boxed_int.value}')
 println('boxed str: ${boxed_str.value}')
 
-// Function returning generic struct
-fn make_pair(a a, b b) Pair(a, b) {
+fn make_pair(a A, b B) Pair(A, B) {
 	Pair{ first: a, second: b }
 }
 
@@ -365,3 +363,5 @@ auto_pair = make_pair(100, 'hundred')
 println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')
 
 x Option = Option.Some('')
+
+x

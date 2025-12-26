@@ -70,7 +70,7 @@ pub fn check(program ast.BlockExpression) CheckResult {
 
 	checker.register_builtins()
 
-	typed_block, program_type := checker.check_block(program)
+	typed_block, program_type := checker.check_block(program, none)
 
 	return CheckResult{
 		diagnostics:    checker.diagnostics
@@ -214,6 +214,12 @@ fn (mut c TypeChecker) register_builtins() {
 	c.env.register_function('println', TypeFunction{
 		params: [a]
 		ret:    t_none()
+	})
+
+	// __stack__depth__ only works with --expose-debug-builtins
+	c.env.register_function('__stack_depth__', TypeFunction{
+		params: []
+		ret:    t_int()
 	})
 
 	c.env.register_function('inspect', TypeFunction{
@@ -456,18 +462,22 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 	return base_type
 }
 
-fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockExpression, Type) {
+fn (mut c TypeChecker) check_block(block ast.BlockExpression, expected ?Type) (typed_ast.BlockExpression, Type) {
 	mut typed_body := []typed_ast.Node{}
 	mut last_type := t_none()
 
 	for i, node in block.body {
-		typed_node, typ := c.check_node(node)
+		is_last := i == block.body.len - 1
+		typed_node, typ := if is_last {
+			c.check_node_with_hint(node, expected)
+		} else {
+			c.check_node(node)
+		}
 		typed_body << typed_node
 		last_type = typ
 
 		// For all expressions except the last one (which is the return value),
 		// check that non-None values are consumed (statements always return None)
-		is_last := i == block.body.len - 1
 		if !is_last && node is ast.Expression && !types_equal(typ, t_none()) {
 			node_span := ast.node_span(node)
 			c.error_at_span("Expression of type '${type_to_string(typ)}' must be consumed. Assign it to a variable or use '${type_to_string(typ)} =' to discard",
@@ -482,12 +492,16 @@ fn (mut c TypeChecker) check_block(block ast.BlockExpression) (typed_ast.BlockEx
 }
 
 fn (mut c TypeChecker) check_node(node ast.Node) (typed_ast.Node, Type) {
+	return c.check_node_with_hint(node, none)
+}
+
+fn (mut c TypeChecker) check_node_with_hint(node ast.Node, expected ?Type) (typed_ast.Node, Type) {
 	match node {
 		ast.Statement {
 			return c.check_statement(node)
 		}
 		ast.Expression {
-			expr, typ := c.check_expr(node)
+			expr, typ := c.check_expr_with_hint(node, expected)
 			return typed_ast.Node(expr), typ
 		}
 	}
@@ -616,12 +630,12 @@ fn (mut c TypeChecker) check_expr_with_hint(expr ast.Expression, expected ?Type)
 		}
 		ast.BlockExpression {
 			c.env.push_scope()
-			typed_block, last_type := c.check_block(expr)
+			typed_block, last_type := c.check_block(expr, expected)
 			c.env.pop_scope()
 			return typed_block, last_type
 		}
 		ast.IfExpression {
-			return c.check_if(expr)
+			return c.check_if(expr, expected)
 		}
 		ast.ArrayExpression {
 			return c.check_array(expr)
@@ -636,7 +650,7 @@ fn (mut c TypeChecker) check_expr_with_hint(expr ast.Expression, expected ?Type)
 			return c.check_struct_init(expr)
 		}
 		ast.PropertyAccessExpression {
-			return c.check_property_access(expr)
+			return c.check_property_access(expr, expected)
 		}
 		ast.MatchExpression {
 			return c.check_match(expr)
@@ -1180,7 +1194,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 
 	c.param_subs = map[string]Type{}
 	errors_before := c.diagnostics.len
-	typed_body, body_type := c.check_expr(expr.body)
+	typed_body, body_type := c.check_expr_with_hint(expr.body, declared_ret_type)
 
 	for i, pt in param_types {
 		param_types[i] = substitute(pt, c.param_subs)
@@ -1319,7 +1333,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 
 	c.param_subs = map[string]Type{}
 	errors_before := c.diagnostics.len
-	typed_body, body_type := c.check_expr(expr.body)
+	typed_body, body_type := c.check_expr_with_hint(expr.body, declared_ret_type)
 
 	for i, pt in param_types {
 		param_types[i] = substitute(pt, c.param_subs)
@@ -1561,7 +1575,7 @@ fn (mut c TypeChecker) check_enum_variant_call(expr ast.FunctionCallExpression, 
 	}
 
 	mut result_enum := enum_type
-	if enum_type.type_params.len > 0 {
+	if enum_type.type_params.len > 0 && enum_type.type_args.len == 0 {
 		mut resolved_args := []Type{}
 		for param in enum_type.type_params {
 			if arg := subs[param] {
@@ -1637,9 +1651,9 @@ fn (mut c TypeChecker) check_call_with_type(expr ast.FunctionCallExpression, fun
 	mut typed_args := []typed_ast.Expression{}
 
 	for i, arg in expr.arguments {
-		typed_arg, arg_type := c.check_expr(arg)
-		typed_args << typed_arg
 		param_type := func_type.params[i]
+		typed_arg, arg_type := c.check_expr_with_hint(arg, param_type)
+		typed_args << typed_arg
 		arg_span := typed_arg.span
 
 		if !c.unify(arg_type, param_type, mut subs) {
@@ -1752,18 +1766,18 @@ fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Typ
 	return types_equal(actual, expected)
 }
 
-fn (mut c TypeChecker) check_if(expr ast.IfExpression) (typed_ast.Expression, Type) {
+fn (mut c TypeChecker) check_if(expr ast.IfExpression, expected ?Type) (typed_ast.Expression, Type) {
 	typed_cond, cond_type := c.check_expr(expr.condition)
 	cond_span := typed_cond.span
 	c.expect_type(cond_type, t_bool(), cond_span, 'in if condition')
 
-	typed_body, then_type := c.check_expr(expr.body)
+	typed_body, then_type := c.check_expr_with_hint(expr.body, expected)
 
 	mut typed_else := ?typed_ast.Expression(none)
 	mut result_type := then_type
 
 	if else_body := expr.else_body {
-		typed_else_body, else_type := c.check_expr(else_body)
+		typed_else_body, else_type := c.check_expr_with_hint(else_body, expected)
 		result_type = c.unify_arm_types(then_type, else_type, convert_span(expr.span))
 		typed_else = typed_else_body
 	}
@@ -2192,7 +2206,7 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 	return typed_ast.Node(s), t_none()
 }
 
-fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
+fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression, expected ?Type) (typed_ast.Expression, Type) {
 	if expr.left is ast.Identifier {
 		left_id := expr.left as ast.Identifier
 		if looked_up := c.env.lookup_type(left_id.name) {
@@ -2257,10 +2271,22 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 
 				mut result_enum := enum_type
 				if enum_type.type_params.len > 0 {
+					expected_type_args := if exp := expected {
+						if exp is TypeEnum && exp.name == enum_type.name {
+							exp.type_args
+						} else {
+							[]Type{}
+						}
+					} else {
+						[]Type{}
+					}
+
 					mut resolved_args := []Type{}
-					for param in enum_type.type_params {
+					for i, param in enum_type.type_params {
 						if arg := subs[param] {
 							resolved_args << arg
+						} else if i < expected_type_args.len {
+							resolved_args << expected_type_args[i]
 						} else {
 							resolved_args << t_var(param)
 						}
@@ -2743,20 +2769,12 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			}, subject_type
 		}
 
-		// Not matching against an enum - error
-		c.error_at_span("Cannot use variant pattern '${variant_name}' when matching against non-enum type '${type_to_string(subject_type)}'",
-			pattern.identifier.span)
-		mut typed_args := []typed_ast.Expression{}
-		for arg in pattern.arguments {
-			typed_arg, _ := c.check_expr(arg)
-			typed_args << typed_arg
+		typed_expr, expr_type := c.check_expr(pattern)
+		if !types_equal(expr_type, subject_type) {
+			c.error_at_span("Pattern type '${type_to_string(expr_type)}' does not match subject type '${type_to_string(subject_type)}'",
+				pattern.span)
 		}
-
-		return typed_ast.FunctionCallExpression{
-			identifier: convert_identifier(pattern.identifier)
-			arguments:  typed_args
-			span:       convert_span(pattern.span)
-		}, subject_type
+		return typed_expr, subject_type
 	}
 
 	if pattern is ast.Identifier {

@@ -1,6 +1,6 @@
-fn identity(x a) a { x }
+fn identity(x A) A { x }
 
-fn first(arr []a) ?a {
+fn first(arr []A) ?A {
 	match arr {
 		[] -> none,
 		[first, ..] -> first,

@@ -2,7 +2,7 @@
 // Match Pattern Tests
 // ============================================================================
 
-fn test(name a, expected a, actual a) {
+fn test(name String, expected A, actual A) {
 	if expected == actual {
 		println('PASS: ${name}')
 	} else {
