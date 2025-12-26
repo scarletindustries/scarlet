@@ -682,13 +682,11 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 			}
 			return PatWildcard{}
 		}
-		typed_ast.SpreadExpression {
-			return PatWildcard{}
-		}
 		typed_ast.ArrayIndexExpression, typed_ast.BinaryExpression, typed_ast.BlockExpression,
 		typed_ast.ErrorExpression, typed_ast.ErrorNode, typed_ast.FunctionExpression,
 		typed_ast.IfExpression, typed_ast.InterpolatedString, typed_ast.MatchExpression,
-		typed_ast.OrExpression, typed_ast.StructInitExpression, typed_ast.TypeIdentifier {
+		typed_ast.OrExpression, typed_ast.StructInitExpression, typed_ast.SpreadExpression,
+		typed_ast.TypeIdentifier {
 			return PatWildcard{}
 		}
 	}
