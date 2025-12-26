@@ -121,7 +121,7 @@ jobs:
           fi
 
       - name: Run Tests
-        run: ./al run program/src/all_language_features.al
+        run: ./al run examples/all_language_features.al
 
       - name: Import Code Signing Certificate
         if: matrix.platform == 'macos'
