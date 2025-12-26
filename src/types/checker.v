@@ -100,7 +100,6 @@ fn (mut c TypeChecker) error_at_token(message string, s Span, token_len int) {
 }
 
 fn (mut c TypeChecker) record_type(name string, typ Type, s Span, doc ?string) {
-	// Look up definition location
 	mut def_line := 0
 	mut def_col := 0
 	mut def_end := 0
@@ -1995,6 +1994,11 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 
 		typed_init, actual_type := c.check_expr(field.init)
 		if expected_type := struct_type.fields[field.identifier.name] {
+			// Record type for field name hover in struct literals
+			qualified_name := '${expr.identifier.name}.${field.identifier.name}'
+			field_doc := c.env.lookup_doc(qualified_name)
+			c.record_type(qualified_name, expected_type, field.identifier.span, field_doc)
+
 			init_span := typed_init.span
 			c.expect_type(actual_type, expected_type, init_span, "in field '${field.identifier.name}'")
 		} else {
