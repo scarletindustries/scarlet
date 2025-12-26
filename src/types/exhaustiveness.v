@@ -690,12 +690,27 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 					args: []
 				}
 			}
-			return PatWildcard{}
+			// Boolean expressions as patterns (match true { !cond -> ... })
+			// Cannot statically determine coverage, so treat each as unique/non-overlapping.
+			// This means: no "unreachable pattern" warnings, and `else` is always required.
+			return PatCtor{
+				name: 'cond:${pattern.span.start_line}:${pattern.span.start_column}'
+				args: []
+			}
 		}
-		typed_ast.ArrayIndexExpression, typed_ast.BinaryExpression, typed_ast.BlockExpression,
-		typed_ast.ErrorExpression, typed_ast.ErrorNode, typed_ast.FunctionExpression,
-		typed_ast.IfExpression, typed_ast.InterpolatedString, typed_ast.MatchExpression,
-		typed_ast.OrExpression, typed_ast.StructInitExpression, typed_ast.TypeIdentifier {
+		typed_ast.BinaryExpression {
+			// Boolean expressions as patterns (match true { cond -> ... })
+			// Cannot statically determine coverage, so treat each as unique/non-overlapping.
+			// This means: no "unreachable pattern" warnings, and `else` is always required.
+			return PatCtor{
+				name: 'cond:${pattern.span.start_line}:${pattern.span.start_column}'
+				args: []
+			}
+		}
+		typed_ast.ArrayIndexExpression, typed_ast.BlockExpression, typed_ast.ErrorExpression,
+		typed_ast.ErrorNode, typed_ast.FunctionExpression, typed_ast.IfExpression,
+		typed_ast.InterpolatedString, typed_ast.MatchExpression, typed_ast.OrExpression,
+		typed_ast.StructInitExpression, typed_ast.TypeIdentifier {
 			return PatWildcard{}
 		}
 	}

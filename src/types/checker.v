@@ -2647,10 +2647,18 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 	}
 
 	// UnaryExpression is valid for negative number literals like -5
+	// and for boolean negation like !cond when matching Bool
 	if pattern is ast.UnaryExpression {
 		if pattern.op.kind == .punc_minus {
 			if pattern.expression is ast.NumberLiteral {
 				return c.check_expr(pattern)
+			}
+		}
+		// Allow !expr when matching against Bool (e.g., match true { !cond -> ... })
+		if pattern.op.kind == .punc_exclamation_mark && types_equal(subject_type, t_bool()) {
+			typed_expr, expr_type := c.check_expr(pattern)
+			if types_equal(expr_type, t_bool()) {
+				return typed_expr, expr_type
 			}
 		}
 		c.error_at_span('Invalid pattern: unary expressions are only allowed for negative number literals',
@@ -2665,6 +2673,14 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			return c.check_expr(pattern)
 		}
 		else {
+			// Allow any boolean expression as a pattern when matching against Bool
+			// This enables the "match true { cond -> result }" idiom
+			if types_equal(subject_type, t_bool()) {
+				typed_expr, expr_type := c.check_expr(pattern)
+				if types_equal(expr_type, t_bool()) {
+					return typed_expr, expr_type
+				}
+			}
 			c.error_at_span('Invalid pattern: only literals, identifiers, arrays, tuples, enum variants, ranges, and or-patterns are allowed',
 				pattern.span)
 			return c.check_expr(pattern)

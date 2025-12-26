@@ -3,9 +3,9 @@ enum Result {
 	Err(String)
 }
 
-a = Result.Ok('hello')
-b = Result.Ok('world')
-c = Result.Ok('hello')
+a Result = Ok('hello')
+b Result = Ok('world')
+c Result = Ok('hello')
 
 println('a = Ok("hello")')
 println('b = Ok("world")')
