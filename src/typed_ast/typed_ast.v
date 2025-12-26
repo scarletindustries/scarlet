@@ -94,6 +94,13 @@ pub:
 	span Span @[required]
 }
 
+pub struct TupleDestructuringBinding {
+pub:
+	patterns []Expression
+	init     Expression
+	span     Span @[required]
+}
+
 pub struct FunctionParameter {
 pub:
 	identifier Identifier
@@ -161,6 +168,7 @@ pub type Statement = ConstBinding
 	| FunctionDeclaration
 	| ImportDeclaration
 	| StructDeclaration
+	| TupleDestructuringBinding
 	| TypePatternBinding
 	| VariableBinding
 
@@ -213,13 +221,6 @@ pub:
 	span       Span @[required]
 }
 
-pub struct PropagateNoneExpression {
-pub:
-	expression    Expression
-	resolved_type Type
-	span          Span @[required]
-}
-
 pub struct BinaryExpression {
 pub:
 	left  Expression
@@ -236,6 +237,12 @@ pub:
 }
 
 pub struct ArrayExpression {
+pub:
+	elements []Expression
+	span     Span @[required]
+}
+
+pub struct TupleExpression {
 pub:
 	elements []Expression
 	span     Span @[required]
@@ -288,13 +295,6 @@ pub:
 	span Span @[required]
 }
 
-pub struct AssertExpression {
-pub:
-	expression Expression
-	message    Expression
-	span       Span @[required]
-}
-
 // ============================================================================
 // Patterns (used in match arms)
 // ============================================================================
@@ -322,7 +322,6 @@ pub:
 
 pub type Expression = ArrayExpression
 	| ArrayIndexExpression
-	| AssertExpression
 	| BinaryExpression
 	| BlockExpression
 	| BooleanLiteral
@@ -339,11 +338,11 @@ pub type Expression = ArrayExpression
 	| OrExpression
 	| OrPattern
 	| PropertyAccessExpression
-	| PropagateNoneExpression
 	| RangeExpression
 	| SpreadExpression
 	| StringLiteral
 	| StructInitExpression
+	| TupleExpression
 	| TypeIdentifier
 	| UnaryExpression
 	| WildcardPattern

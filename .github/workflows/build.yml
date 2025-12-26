@@ -112,7 +112,13 @@ jobs:
         run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
 
       - name: Build (Production)
-        run: v -prod -o al .
+        run: |
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            # Use -O2 on Linux due to GCC -O3 bug: https://github.com/vlang/v/issues/26121
+            v -cc gcc -cflags "-O2" -o al .
+          else
+            v -prod -o al .
+          fi
 
       - name: Run Tests
         run: ./al run program/src/all_language_features.al

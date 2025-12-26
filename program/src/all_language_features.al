@@ -82,8 +82,9 @@ fn validate(x Int)!ValidationError {
 }
 
 fn check_positive(x Int) Int!Error {
-	assert x > 0, Error{ message: 'must be positive' }
-	x * 2
+	if x <= 0 {
+		error Error{ message: 'must be positive' }
+	} else { x * 2 }
 }
 
 fn max(a Int, b Int) Int {
@@ -94,11 +95,26 @@ fn classify(n Int) String {
 	if n < 0 { 'negative' } else if n == 0 { 'zero' } else { 'positive' }
 }
 
+fn g() { 'Hello!' }
+
+String = g()
+
 fn describe(x Int) String {
 	match x {
 		0 -> 'zero',
 		1 -> 'one',
 		else -> 'many',
+	}
+}
+
+fn grade(score Int) String!Error {
+	match score {
+		0..60 -> 'F',
+		60..70 -> 'D',
+		70..80 -> 'C',
+		80..90 -> 'B',
+		90..101 -> 'A',
+		else -> error Error{ message: 'score must be 0-100' },
 	}
 }
 
@@ -134,8 +150,6 @@ range = 0..10
 person_name = person.name
 person_age = person.age
 
-assert x > 0, 'x must be positive'
-
 yes = true
 no = false
 
@@ -167,6 +181,7 @@ add_result = add(5, 3)
 max_result = max(10, 20)
 classify_result = classify(5)
 describe_result = describe(1)
+grade_result = grade(85) or 'error'
 example_result = example()
 enum_result = handle_result(Ok('success'))
 
@@ -175,8 +190,8 @@ error_with_receiver = divide(10, 0) or err -> 0
 
 option_result = find_user(0) or User{ id: 0, name: 'default' }
 
-assert_pass = check_positive(5)
-assert_fail = check_positive(-1) or err -> -1
+positive_pass = check_positive(5)
+positive_fail = check_positive(-1) or err -> -1
 
 literal_match1 = match_literal(Ok('special'))
 literal_match2 = match_literal(Err('danger'))
@@ -194,12 +209,13 @@ println(add_result)
 println(max_result)
 println(classify_result)
 println(describe_result)
+println(grade_result)
 println(example_result)
 println(enum_result)
 println(error_result)
 println(option_result)
-println(assert_pass)
-println(assert_fail)
+println(positive_pass)
+println(positive_fail)
 println(literal_match1)
 println(literal_match2)
 println(literal_match3)
@@ -240,3 +256,42 @@ fn apply_twice(x, f) {
 	f(f(x))
 }
 println(apply_twice(5, fn(n) { n + 1 }))
+
+// ============================================================================
+// Tuples
+// ============================================================================
+
+// Tuple literals
+pair = (42, 'hello')
+triple = (true, 100, 'world')
+single = (42)
+
+// Tuple access
+println(pair.0)
+println(pair.1)
+println(triple.2)
+
+// Nested tuple access
+nested = ((1, 2), 'outer')
+println(nested.0.0)
+println(nested.0.1)
+
+// Tuple destructuring with variable binding
+(a, b) = pair
+println('a=${a} b=${b}')
+
+// Type consumption (discard value, verify type)
+(Bool, Int, name) = triple
+println('name=${name}')
+
+// All consumption (verify types, discard all)
+(Bool, Int, String) = triple
+
+// Tuple pattern matching
+test_pair = (1, 'hello')
+result = match test_pair {
+	(0, msg) -> 'zero: ${msg}',
+	(1, msg) -> 'one: ${msg}',
+	else -> 'other',
+}
+println(result)

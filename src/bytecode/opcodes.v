@@ -41,6 +41,8 @@ pub enum Op {
 
 	// Data structures
 	make_array   // pop N items, push array: make_array <len>
+	make_tuple   // pop N items, push tuple (array at runtime): make_tuple <len>
+	tuple_index  // pop tuple, push element at operand index: tuple_index <idx>
 	make_range   // pop end, pop start, push array [start..end)
 	index        // pop index, pop array, push element
 	array_len    // pop array, push int (length)
@@ -108,6 +110,7 @@ pub type Value = int
 	| string
 	| NoneValue
 	| []Value
+	| TupleValue
 	| StructValue
 	| ClosureValue
 	| EnumValue
@@ -115,6 +118,11 @@ pub type Value = int
 	| SocketValue
 
 pub struct NoneValue {}
+
+pub struct TupleValue {
+pub:
+	elements []Value
+}
 
 pub struct ErrorValue {
 pub:

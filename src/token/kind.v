@@ -31,7 +31,6 @@ pub enum Kind {
 	kw_from     // from
 	kw_true     // true
 	kw_false    // false
-	kw_assert   // assert
 	kw_export   // export
 	kw_struct   // struct
 	kw_in       // in
@@ -99,7 +98,6 @@ pub fn (kind Kind) str() string {
 		.kw_from { 'from' }
 		.kw_true { 'true' }
 		.kw_false { 'false' }
-		.kw_assert { 'assert' }
 		.kw_export { 'export' }
 		.kw_struct { 'struct' }
 		.kw_in { 'in' }
