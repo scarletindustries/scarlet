@@ -24,6 +24,18 @@ pub fn new_scanner(input string) &Scanner {
 	}
 }
 
+@[inline]
+pub fn new_scanner_at(input string, line int, column int) &Scanner {
+	mut s := &Scanner{
+		input:       input
+		state:       &state.ScannerState{}
+		diagnostics: []diagnostic.Diagnostic{}
+	}
+	s.state.set_line(line)
+	s.state.set_column(column)
+	return s
+}
+
 fn (mut s Scanner) add_error(message string) {
 	s.diagnostics << diagnostic.error_at(s.state.get_line(), s.state.get_column(), message)
 }

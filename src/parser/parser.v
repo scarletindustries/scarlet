@@ -1831,6 +1831,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 
 			if raw[i] == `{` {
 				i++
+				expr_start_col := span.start_column + 1 + i // +1 for opening quote
 				mut expr_str := ''
 				mut brace_depth := 1
 				for i < raw.len && brace_depth > 0 {
@@ -1850,11 +1851,12 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 				}
 				i++
 
-				mut s := scanner.new_scanner(expr_str)
+				mut s := scanner.new_scanner_at(expr_str, span.start_line, expr_start_col)
 				mut expr_parser := new_parser(mut s)
 				expr := expr_parser.parse_expression()!
 				parts << expr
 			} else {
+				ident_start_col := span.start_column + 1 + i // +1 for opening quote
 				mut ident := ''
 				for i < raw.len
 					&& (raw[i].is_letter() || raw[i] == `_` || (ident.len > 0 && raw[i].is_digit())) {
@@ -1864,9 +1866,15 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 				if ident.len == 0 {
 					return error('Expected identifier after $ in interpolated string')
 				}
+				ident_span := sp.Span{
+					start_line:   span.start_line
+					start_column: ident_start_col
+					end_line:     span.start_line
+					end_column:   ident_start_col + ident.len
+				}
 				parts << ast.Identifier{
 					name: ident
-					span: span
+					span: ident_span
 				}
 			}
 		} else {
