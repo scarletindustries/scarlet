@@ -217,6 +217,7 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 			f.emit(' {\n')
 			f.indent++
 			for field in stmt.fields {
+				f.emit_trivia_for_span(field.identifier.span)
 				f.emit_indent()
 				f.emit(field.identifier.name)
 				f.emit(' ')
@@ -237,6 +238,7 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 			f.emit(' {\n')
 			f.indent++
 			for variant in stmt.variants {
+				f.emit_trivia_for_span(variant.identifier.span)
 				f.emit_indent()
 				f.emit(variant.identifier.name)
 				if variant.payload.len > 0 {

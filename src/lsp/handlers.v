@@ -1,6 +1,16 @@
 module lsp
 
 import x.json2
+import json
+
+struct MarkupContent {
+	kind  string
+	value string
+}
+
+struct HoverResult {
+	contents MarkupContent
+}
 
 fn (mut s LspServer) handle_initialize(id json2.Any) {
 	result := '{"capabilities":{"textDocumentSync":1,"hoverProvider":true,"definitionProvider":true}}'
@@ -72,13 +82,17 @@ fn (mut s LspServer) handle_hover(id json2.Any, params json2.Any) {
 		for t in types {
 			if t.line == line && col >= t.col_start && col < t.col_end {
 				type_sig := '${t.name}: ${t.type_str}'
-				mut value := '```al\\n${type_sig}\\n```'
+				mut value := '```al\n${type_sig}\n```'
 				if doc := t.doc {
 					clean_doc := doc.trim_space().trim_left('/*').trim_right('*/').trim_space()
-					escaped_doc := clean_doc.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-					value = '${escaped_doc}\\n\\n${value}'
+					value = clean_doc + '\n\n' + value
 				}
-				hover := '{"contents":{"kind":"markdown","value":"${value}"}}'
+				hover := json.encode(HoverResult{
+					contents: MarkupContent{
+						kind:  'markdown'
+						value: value
+					}
+				})
 				s.send_response(id, hover)
 				return
 			}
