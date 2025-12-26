@@ -755,8 +755,12 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 				inner := p.parse_expression() or {
 					p.add_error(err.msg())
 					p.synchronize()
-					if p.current_token.kind == .punc_close_bracket {
-						break
+					if p.current_context() != .array {
+						// synchronize consumed the ] and popped context
+						return ast.ArrayExpression{
+							elements: elements
+							span:     span
+						}
 					}
 					elements << ast.Expression(ast.ErrorNode{
 						message: err.msg()
@@ -773,8 +777,12 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 			expr := p.parse_expression() or {
 				p.add_error(err.msg())
 				p.synchronize()
-				if p.current_token.kind == .punc_close_bracket {
-					break
+				if p.current_context() != .array {
+					// synchronize consumed the ] and popped context
+					return ast.ArrayExpression{
+						elements: elements
+						span:     span
+					}
 				}
 				elements << ast.Expression(ast.ErrorNode{
 					message: err.msg()
