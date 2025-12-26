@@ -16,6 +16,26 @@ struct HoverResult {
 	contents MarkupContent
 }
 
+fn clean_doc_comment(doc string) string {
+	content := doc.trim_space().trim_left('/*').trim_right('*/').trim_space()
+	
+	lines := content.split('\n')
+	mut cleaned := []string{}
+	
+	for line in lines {
+		trimmed := line.trim_left(' \t')
+		if trimmed.starts_with('* ') {
+			cleaned << trimmed[2..]
+		} else if trimmed.starts_with('*') {
+			cleaned << trimmed[1..].trim_left(' ')
+		} else {
+			cleaned << trimmed
+		}
+	}
+	
+	return cleaned.join('\n\n')
+}
+
 fn (mut s LspServer) handle_initialize(id json2.Any) {
 	s.send_response(id, InitializeResult{})
 }
@@ -87,8 +107,8 @@ fn (mut s LspServer) handle_hover(id json2.Any, params json2.Any) {
 				type_sig := '${t.name}: ${t.type_str}'
 				mut value := '```al\n${type_sig}\n```'
 				if doc := t.doc {
-					clean_doc := doc.trim_space().trim_left('/*').trim_right('*/').trim_space()
-					value = clean_doc + '\n\n' + value
+					clean_doc := clean_doc_comment(doc)
+					value = value + '\n\n---\n\n' + clean_doc
 				}
 				s.send_response(id, HoverResult{
 					contents: MarkupContent{
