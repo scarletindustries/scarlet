@@ -2272,7 +2272,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression, 
 				mut result_enum := enum_type
 				if enum_type.type_params.len > 0 {
 					expected_type_args := if exp := expected {
-						if exp is TypeEnum && exp.name == enum_type.name {
+						if exp is TypeEnum && exp.id == enum_type.id {
 							exp.type_args
 						} else {
 							[]Type{}
