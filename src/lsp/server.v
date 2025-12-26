@@ -55,7 +55,6 @@ pub:
 	value string
 }
 
-
 pub fn new_server() &LspServer {
 	return &LspServer{
 		running:   true
@@ -174,7 +173,7 @@ struct JsonRpcResponse[T] {
 }
 
 struct JsonRpcNullResponse {
-	jsonrpc string     = '2.0'
+	jsonrpc string = '2.0'
 	id      int
 	result  json2.Null
 }

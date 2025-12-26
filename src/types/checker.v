@@ -1311,7 +1311,7 @@ fn (mut c TypeChecker) check_tuple_destructuring(expr ast.TupleDestructuringBind
 		if pattern is ast.Identifier {
 			loc := c.def_loc_from_span(pattern.name, pattern.span)
 			c.env.define_at(pattern.name, elem_type, loc)
-			c.record_type(pattern.name, elem_type, pattern.span)
+			c.record_type(pattern.name, elem_type, pattern.span, none)
 			typed_patterns << typed_ast.Identifier{
 				name: pattern.name
 				span: convert_span(pattern.span)
@@ -2291,7 +2291,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 
 			if elem is ast.Identifier {
 				c.env.define(elem.name, elem_type)
-				c.record_type(elem.name, elem_type, elem.span)
+				c.record_type(elem.name, elem_type, elem.span, none)
 				typed_elements << typed_ast.Identifier{
 					name: elem.name
 					span: convert_span(elem.span)

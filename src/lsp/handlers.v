@@ -7,9 +7,9 @@ struct InitializeResult {
 }
 
 struct ServerCapabilities {
-	text_document_sync   int  = 1    @[json: 'textDocumentSync']
-	hover_provider       bool = true @[json: 'hoverProvider']
-	definition_provider  bool = true @[json: 'definitionProvider']
+	text_document_sync  int  = 1  @[json: 'textDocumentSync']
+	hover_provider      bool = true @[json: 'hoverProvider']
+	definition_provider bool = true @[json: 'definitionProvider']
 }
 
 struct HoverResult {
@@ -18,10 +18,10 @@ struct HoverResult {
 
 fn clean_doc_comment(doc string) string {
 	content := doc.trim_space().trim_left('/*').trim_right('*/').trim_space()
-	
+
 	lines := content.split('\n')
 	mut cleaned := []string{}
-	
+
 	for line in lines {
 		trimmed := line.trim_left(' \t')
 		if trimmed.starts_with('* ') {
@@ -32,7 +32,7 @@ fn clean_doc_comment(doc string) string {
 			cleaned << trimmed
 		}
 	}
-	
+
 	return cleaned.join('\n\n')
 }
 
@@ -159,8 +159,14 @@ fn (mut s LspServer) handle_definition(id json2.Any, params json2.Any) {
 					s.send_response(id, Location{
 						uri:   uri
 						range: Range{
-							start: Position{line: t.def_line, character: t.def_col}
-							end:   Position{line: t.def_line, character: t.def_end}
+							start: Position{
+								line:      t.def_line
+								character: t.def_col
+							}
+							end:   Position{
+								line:      t.def_line
+								character: t.def_end
+							}
 						}
 					})
 					return
