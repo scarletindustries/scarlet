@@ -5,20 +5,12 @@ struct Box(D) {
 	data D
 }
 
+/**
+ * A generic enum representing an optional value.
+ */
 enum Option(T) {
-	/**
-     * A generic enum representing an optional value.
-     */
 	Some(T)
 	None
-}
-
-enum Option2(T) {
-	/**
-	 * Another generic enum representing an optional value.
-	 */
-	Some2(T)
-	None2
 }
 
 user Option = Some('hi')
