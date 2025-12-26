@@ -172,13 +172,43 @@ pub fn types_equal(a Type, b Type) bool {
 		}
 		TypeStruct {
 			if b is TypeStruct {
-				return a.id == b.id
+				if a.id != b.id {
+					return false
+				}
+				// If either side has no type_args, it's uninstantiated - allow unification to handle it
+				if a.type_args.len == 0 || b.type_args.len == 0 {
+					return true
+				}
+				if a.type_args.len != b.type_args.len {
+					return false
+				}
+				for i, arg in a.type_args {
+					if !types_equal(arg, b.type_args[i]) {
+						return false
+					}
+				}
+				return true
 			}
 			return false
 		}
 		TypeEnum {
 			if b is TypeEnum {
-				return a.id == b.id
+				if a.id != b.id {
+					return false
+				}
+				// If either side has no type_args, it's uninstantiated - allow unification to handle it
+				if a.type_args.len == 0 || b.type_args.len == 0 {
+					return true
+				}
+				if a.type_args.len != b.type_args.len {
+					return false
+				}
+				for i, arg in a.type_args {
+					if !types_equal(arg, b.type_args[i]) {
+						return false
+					}
+				}
+				return true
 			}
 			return false
 		}

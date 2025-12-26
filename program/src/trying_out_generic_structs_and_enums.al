@@ -13,10 +13,10 @@ enum Option(t) {
 	None
 }
 
-user Option = Some('Alice')
+user Option = Some('hi')
 
 result = match user {
-	Some(name) -> 'Hello, ' + name,
+	Some(name) -> 'Hello, ${name}',
 	None -> 'No user found',
 }
 

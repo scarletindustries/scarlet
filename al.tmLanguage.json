@@ -68,7 +68,7 @@
               "endCaptures": {
                 "0": { "name": "punctuation.section.interpolation.end.al" }
               },
-              "patterns": [{ "include": "$self" }]
+              "patterns": [{ "include": "#interpolation-expression" }]
             },
             {
               "name": "variable.other.interpolation.al",
@@ -88,6 +88,22 @@
           "name": "constant.numeric.integer.al",
           "match": "\\b\\d+\\b"
         }
+      ]
+    },
+    "interpolation-expression": {
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#constants" },
+        { "include": "#enum-qualified-access" },
+        { "include": "#function-call" },
+        { "include": "#types" },
+        { "include": "#operators" },
+        {
+          "name": "variable.other.al",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        },
+        { "include": "#punctuation" }
       ]
     },
     "characters": {
