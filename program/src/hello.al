@@ -1,6 +1,5 @@
 struct Person {
 	name String
-	/** The age of the person */
 	age Int
 }
 
