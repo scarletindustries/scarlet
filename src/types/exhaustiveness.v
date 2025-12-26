@@ -562,7 +562,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				}
 			}
 			last := pattern.elements.last()
-			if last is typed_ast.SpreadExpression {
+			if last is typed_ast.SpreadElement {
 				elem_type := if t is TypeArray { t.element } else { type_def.t_none() }
 				if pattern.elements.len == 1 {
 					return PatCtor{
@@ -570,14 +570,24 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 						args: [PatWildcard{}, PatWildcard{}]
 					}
 				}
-				first_pat := ast_pattern_to_pat(pattern.elements[0], elem_type)
+				first_elem := pattern.elements[0]
+				first_pat := if first_elem is typed_ast.Expression {
+					ast_pattern_to_pat(first_elem, elem_type)
+				} else {
+					PatWildcard{}
+				}
 				return PatCtor{
 					name: '[..]'
 					args: [first_pat, PatWildcard{}]
 				}
 			}
 			elem_type := if t is TypeArray { t.element } else { type_def.t_none() }
-			first_pat := ast_pattern_to_pat(pattern.elements[0], elem_type)
+			first_elem := pattern.elements[0]
+			first_pat := if first_elem is typed_ast.Expression {
+				ast_pattern_to_pat(first_elem, elem_type)
+			} else {
+				PatWildcard{}
+			}
 			if pattern.elements.len == 1 {
 				return PatCtor{
 					name: '[..]'
@@ -685,8 +695,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 		typed_ast.ArrayIndexExpression, typed_ast.BinaryExpression, typed_ast.BlockExpression,
 		typed_ast.ErrorExpression, typed_ast.ErrorNode, typed_ast.FunctionExpression,
 		typed_ast.IfExpression, typed_ast.InterpolatedString, typed_ast.MatchExpression,
-		typed_ast.OrExpression, typed_ast.StructInitExpression, typed_ast.SpreadExpression,
-		typed_ast.TypeIdentifier {
+		typed_ast.OrExpression, typed_ast.StructInitExpression, typed_ast.TypeIdentifier {
 			return PatWildcard{}
 		}
 	}

@@ -733,7 +733,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 	p.eat(.punc_open_bracket)!
 	p.push_context(.array)
 
-	mut elements := []ast.Expression{}
+	mut elements := []ast.ArrayElement{}
 
 	for p.current_token.kind != .punc_close_bracket && p.current_token.kind != .eof {
 		elem_span := p.current_span()
@@ -747,7 +747,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 				if p.current_token.kind == .kw_else {
 					p.advance() // skip the erroneous 'else' token
 				}
-				elements << ast.SpreadExpression{
+				elements << ast.SpreadElement{
 					expression: none
 					span:       spread_span
 				}
@@ -758,13 +758,13 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 					if p.current_token.kind == .punc_close_bracket {
 						break
 					}
-					elements << ast.ErrorNode{
+					elements << ast.Expression(ast.ErrorNode{
 						message: err.msg()
 						span:    elem_span
-					}
+					})
 					continue
 				}
-				elements << ast.SpreadExpression{
+				elements << ast.SpreadElement{
 					expression: inner
 					span:       spread_span
 				}
@@ -776,10 +776,10 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 				if p.current_token.kind == .punc_close_bracket {
 					break
 				}
-				elements << ast.ErrorNode{
+				elements << ast.Expression(ast.ErrorNode{
 					message: err.msg()
 					span:    elem_span
-				}
+				})
 				continue
 			}
 			elements << expr

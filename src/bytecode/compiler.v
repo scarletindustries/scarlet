@@ -413,11 +413,13 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.compile_match(expr, is_tail)!
 		}
 		typed_ast.ArrayExpression {
-			has_spread := expr.elements.any(it is typed_ast.SpreadExpression)
+			has_spread := expr.elements.any(it is typed_ast.SpreadElement)
 
 			if !has_spread {
 				for elem in expr.elements {
-					c.compile_expr(elem)!
+					if elem is typed_ast.Expression {
+						c.compile_expr(elem)!
+					}
 				}
 				c.emit_arg(.make_array, expr.elements.len)
 			} else {
@@ -427,7 +429,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				for i < expr.elements.len {
 					elem := expr.elements[i]
 
-					if elem is typed_ast.SpreadExpression {
+					if elem is typed_ast.SpreadElement {
 						inner := elem.expression or {
 							return error('Spread in array literal missing expression')
 						}
@@ -442,10 +444,13 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 					} else {
 						mut group_count := 0
 						for j := i; j < expr.elements.len; j++ {
-							if expr.elements[j] is typed_ast.SpreadExpression {
+							if expr.elements[j] is typed_ast.SpreadElement {
 								break
 							}
-							c.compile_expr(expr.elements[j])!
+							arr_elem := expr.elements[j]
+							if arr_elem is typed_ast.Expression {
+								c.compile_expr(arr_elem)!
+							}
 							group_count++
 						}
 						c.emit_arg(.make_array, group_count)
@@ -485,9 +490,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.compile_expr(expr.start)!
 			c.compile_expr(expr.end)!
 			c.emit(.make_range)
-		}
-		typed_ast.SpreadExpression {
-			return error('SpreadExpression should only appear inside ArrayExpression')
 		}
 		typed_ast.FunctionExpression {
 			c.compile_function_expression(expr)!
@@ -849,7 +851,7 @@ fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fa
 		}
 		typed_ast.ArrayExpression {
 			has_spread := pattern.elements.len > 0
-				&& pattern.elements.last() is typed_ast.SpreadExpression
+				&& pattern.elements.last() is typed_ast.SpreadElement
 			pre_count := if has_spread { pattern.elements.len - 1 } else { pattern.elements.len }
 
 			temp_idx := c.local_count
@@ -872,12 +874,14 @@ fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fa
 				c.emit_arg(.push_local, temp_idx)
 				c.emit_arg(.push_const, c.add_constant(i))
 				c.emit(.index)
-				c.compile_pattern_element(elem, mut fail_jumps)!
+				if elem is typed_ast.Expression {
+					c.compile_pattern_element(elem, mut fail_jumps)!
+				}
 			}
 
 			if has_spread {
 				spread_elem := pattern.elements.last()
-				if spread_elem is typed_ast.SpreadExpression {
+				if spread_elem is typed_ast.SpreadElement {
 					if inner := spread_elem.expression {
 						if inner is typed_ast.Identifier {
 							c.emit_arg(.push_local, temp_idx)
@@ -945,7 +949,7 @@ fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps
 		}
 		typed_ast.ArrayExpression {
 			has_spread := pattern.elements.len > 0
-				&& pattern.elements.last() is typed_ast.SpreadExpression
+				&& pattern.elements.last() is typed_ast.SpreadElement
 			pre_count := if has_spread { pattern.elements.len - 1 } else { pattern.elements.len }
 
 			c.emit(.dup)
@@ -964,12 +968,14 @@ fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps
 				c.emit(.dup)
 				c.emit_arg(.push_const, c.add_constant(i))
 				c.emit(.index)
-				c.compile_pattern_element(elem, mut fail_jumps)!
+				if elem is typed_ast.Expression {
+					c.compile_pattern_element(elem, mut fail_jumps)!
+				}
 			}
 
 			if has_spread {
 				spread_elem := pattern.elements.last()
-				if spread_elem is typed_ast.SpreadExpression {
+				if spread_elem is typed_ast.SpreadElement {
 					if inner := spread_elem.expression {
 						if inner is typed_ast.Identifier {
 							c.emit(.dup)

@@ -241,7 +241,7 @@ pub:
 
 pub struct ArrayExpression {
 pub:
-	elements []Expression
+	elements []ArrayElement
 	span     Span @[required]
 }
 
@@ -314,11 +314,13 @@ pub:
 	span     Span @[required]
 }
 
-pub struct SpreadExpression {
+pub struct SpreadElement {
 pub:
 	expression ?Expression
 	span       Span @[required]
 }
+
+pub type ArrayElement = Expression | SpreadElement
 
 // ============================================================================
 // Sum Types
@@ -343,7 +345,6 @@ pub type Expression = ArrayExpression
 	| OrPattern
 	| PropertyAccessExpression
 	| RangeExpression
-	| SpreadExpression
 	| StringLiteral
 	| StructInitExpression
 	| TupleExpression

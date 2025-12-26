@@ -654,23 +654,6 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 		ast.RangeExpression {
 			return c.check_range(expr)
 		}
-		ast.SpreadExpression {
-			// SpreadExpression is handled specially inside array expressions
-			// If we get here, it means spread was used outside an array context
-			c.error_at_span('Spread operator can only be used inside array literals or patterns',
-				expr.span)
-			if inner := expr.expression {
-				typed_inner, inner_type := c.check_expr(inner)
-				return typed_ast.SpreadExpression{
-					expression: typed_inner
-					span:       convert_span(expr.span)
-				}, inner_type
-			}
-			return typed_ast.SpreadExpression{
-				expression: none
-				span:       convert_span(expr.span)
-			}, t_none()
-		}
 		ast.WildcardPattern {
 			return typed_ast.WildcardPattern{
 				span: convert_span(expr.span)
@@ -1721,55 +1704,59 @@ fn (mut c TypeChecker) check_array(expr ast.ArrayExpression) (typed_ast.Expressi
 		}, t_array(t_none())
 	}
 
-	mut typed_elements := []typed_ast.Expression{}
+	mut typed_elements := []typed_ast.ArrayElement{}
 	mut first_type := t_none()
 	mut first_type_set := false
 
 	for elem in expr.elements {
-		if elem is ast.SpreadExpression {
-			// Spread expression: ..arr - inner must be an array
-			inner := elem.expression or {
-				c.error_at_span('Spread in array literal requires an expression', elem.span)
-				typed_elements << typed_ast.SpreadExpression{
-					expression: none
+		match elem {
+			ast.SpreadElement {
+				// Spread element: ..arr - inner must be an array
+				inner := elem.expression or {
+					c.error_at_span('Spread in array literal requires an expression',
+						elem.span)
+					typed_elements << typed_ast.SpreadElement{
+						expression: none
+						span:       convert_span(elem.span)
+					}
+					continue
+				}
+
+				typed_inner, inner_type := c.check_expr(inner)
+
+				element_type := if inner_type is TypeArray {
+					inner_type.element
+				} else {
+					c.error_at_span('Spread operator requires an array, got ${type_to_string(inner_type)}',
+						elem.span)
+					t_none()
+				}
+
+				typed_spread := typed_ast.SpreadElement{
+					expression: typed_inner
 					span:       convert_span(elem.span)
 				}
-				continue
+				typed_elements << typed_spread
+
+				if !first_type_set {
+					first_type = element_type
+					first_type_set = true
+				} else {
+					c.expect_type(element_type, first_type, convert_span(elem.span), 'in spread element')
+				}
 			}
+			ast.Expression {
+				// Regular element
+				typed_elem, elem_type := c.check_expr(elem)
+				typed_elements << typed_elem
 
-			typed_inner, inner_type := c.check_expr(inner)
-
-			element_type := if inner_type is TypeArray {
-				inner_type.element
-			} else {
-				c.error_at_span('Spread operator requires an array, got ${type_to_string(inner_type)}',
-					elem.span)
-				t_none()
-			}
-
-			typed_spread := typed_ast.SpreadExpression{
-				expression: typed_inner
-				span:       convert_span(elem.span)
-			}
-			typed_elements << typed_spread
-
-			if !first_type_set {
-				first_type = element_type
-				first_type_set = true
-			} else {
-				c.expect_type(element_type, first_type, convert_span(elem.span), 'in spread element')
-			}
-		} else {
-			// Regular element
-			typed_elem, elem_type := c.check_expr(elem)
-			typed_elements << typed_elem
-
-			if !first_type_set {
-				first_type = elem_type
-				first_type_set = true
-			} else {
-				elem_span := typed_elem.span
-				c.expect_type(elem_type, first_type, elem_span, 'in array element')
+				if !first_type_set {
+					first_type = elem_type
+					first_type_set = true
+				} else {
+					elem_span := typed_elem.span
+					c.expect_type(elem_type, first_type, elem_span, 'in array element')
+				}
 			}
 		}
 	}
@@ -2473,56 +2460,61 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 
 		// spread can only be at the end
 		for i, elem in pattern.elements {
-			if elem is ast.SpreadExpression && i != pattern.elements.len - 1 {
+			if elem is ast.SpreadElement && i != pattern.elements.len - 1 {
 				c.error_at_span('Spread pattern must be at the end of the array pattern',
 					elem.span)
 			}
 		}
 
-		mut typed_elements := []typed_ast.Expression{}
+		mut typed_elements := []typed_ast.ArrayElement{}
 
 		for elem in pattern.elements {
-			if elem is ast.SpreadExpression {
-				// Spread pattern: ..rest or just ..
-				if inner := elem.expression {
-					if inner is ast.Identifier {
-						// Named spread: bind to array type
-						c.env.define(inner.name, subject_type)
-						c.record_type(inner.name, subject_type, inner.span, none)
-						typed_elements << typed_ast.SpreadExpression{
-							expression: typed_ast.Identifier{
-								name: inner.name
-								span: convert_span(inner.span)
+			match elem {
+				ast.SpreadElement {
+					// Spread pattern: ..rest or just ..
+					if inner := elem.expression {
+						if inner is ast.Identifier {
+							// Named spread: bind to array type
+							c.env.define(inner.name, subject_type)
+							c.record_type(inner.name, subject_type, inner.span, none)
+							typed_elements << typed_ast.SpreadElement{
+								expression: typed_ast.Identifier{
+									name: inner.name
+									span: convert_span(inner.span)
+								}
+								span:       convert_span(elem.span)
 							}
-							span:       convert_span(elem.span)
+						} else {
+							// Other expression (shouldn't happen in patterns)
+							typed_inner, _ := c.check_expr(inner)
+							typed_elements << typed_ast.SpreadElement{
+								expression: typed_inner
+								span:       convert_span(elem.span)
+							}
 						}
 					} else {
-						// Other expression (shouldn't happen in patterns)
-						typed_inner, _ := c.check_expr(inner)
-						typed_elements << typed_ast.SpreadExpression{
-							expression: typed_inner
+						// Anonymous spread (..): just match, don't bind
+						typed_elements << typed_ast.SpreadElement{
+							expression: none
 							span:       convert_span(elem.span)
 						}
 					}
-				} else {
-					// Anonymous spread (..): just match, don't bind
-					typed_elements << typed_ast.SpreadExpression{
-						expression: none
-						span:       convert_span(elem.span)
+				}
+				ast.Expression {
+					if elem is ast.Identifier {
+						// Named binding: bind to element type
+						c.env.define(elem.name, element_type)
+						c.record_type(elem.name, element_type, elem.span, none)
+						typed_elements << typed_ast.Expression(typed_ast.Identifier{
+							name: elem.name
+							span: convert_span(elem.span)
+						})
+					} else {
+						// Other patterns (literals, nested patterns)
+						typed_elem, _ := c.check_pattern(elem, element_type)
+						typed_elements << typed_elem
 					}
 				}
-			} else if elem is ast.Identifier {
-				// Named binding: bind to element type
-				c.env.define(elem.name, element_type)
-				c.record_type(elem.name, element_type, elem.span, none)
-				typed_elements << typed_ast.Identifier{
-					name: elem.name
-					span: convert_span(elem.span)
-				}
-			} else {
-				// Other patterns (literals, nested patterns)
-				typed_elem, _ := c.check_pattern(elem, element_type)
-				typed_elements << typed_elem
 			}
 		}
 

@@ -136,6 +136,21 @@ fn print_function(level int, identifier ast.Identifier, params []ast.FunctionPar
 	return s
 }
 
+fn print_array_element(elem ast.ArrayElement, level int) string {
+	return match elem {
+		ast.SpreadElement {
+			if inner := elem.expression {
+				'..${print_expression(inner, level)}'
+			} else {
+				'..'
+			}
+		}
+		ast.Expression {
+			print_expression(elem, level)
+		}
+	}
+}
+
 fn print_expression(expr ast.Expression, level int) string {
 	return match expr {
 		ast.StringLiteral {
@@ -286,7 +301,7 @@ fn print_expression(expr ast.Expression, level int) string {
 				if i > 0 {
 					s += ', '
 				}
-				s += print_expression(elem, level)
+				s += print_array_element(elem, level)
 			}
 			s += ']'
 			s
@@ -331,13 +346,6 @@ fn print_expression(expr ast.Expression, level int) string {
 			}
 			s += '${indent(level)}}'
 			s
-		}
-		ast.SpreadExpression {
-			if inner := expr.expression {
-				'..${print_expression(inner, level)}'
-			} else {
-				'..'
-			}
 		}
 		ast.WildcardPattern {
 			'else'

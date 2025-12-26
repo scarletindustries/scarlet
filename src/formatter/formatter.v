@@ -306,6 +306,20 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 	}
 }
 
+fn (mut f Formatter) format_array_element(elem ast.ArrayElement) {
+	match elem {
+		ast.SpreadElement {
+			f.emit('..')
+			if inner := elem.expression {
+				f.format_expr(inner)
+			}
+		}
+		ast.Expression {
+			f.format_expr(elem)
+		}
+	}
+}
+
 fn (mut f Formatter) format_expr(expr ast.Expression) {
 	match expr {
 		ast.StringLiteral {
@@ -428,7 +442,7 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 				if i > 0 {
 					f.emit(', ')
 				}
-				f.format_expr(elem)
+				f.format_array_element(elem)
 			}
 			f.emit(']')
 		}
@@ -452,12 +466,6 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 			f.format_expr(expr.start)
 			f.emit('..')
 			f.format_expr(expr.end)
-		}
-		ast.SpreadExpression {
-			f.emit('..')
-			if inner := expr.expression {
-				f.format_expr(inner)
-			}
 		}
 		ast.StructInitExpression {
 			f.emit(expr.identifier.name)
