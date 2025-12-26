@@ -524,24 +524,6 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				} else {
 					c.emit_arg(.call, expr.arguments.len)
 				}
-			} else if enum_type := c.type_env.lookup_enum_by_variant(expr.identifier.name) {
-				// Unqualified enum variant constructor: Ok(x), Err(e), Some(v), etc.
-				variant_name := expr.identifier.name
-				payload_types := enum_type.variants[variant_name] or { []type_def.Type{} }
-
-				c.emit_arg(.push_const, c.add_constant(enum_type.id))
-				c.emit_arg(.push_const, c.add_constant(enum_type.name))
-				c.emit_arg(.push_const, c.add_constant(variant_name))
-
-				for arg in expr.arguments {
-					c.compile_expr(arg)!
-				}
-
-				if payload_types.len > 0 {
-					c.emit_arg(.make_enum_payload, payload_types.len)
-				} else {
-					c.emit(.make_enum)
-				}
 			} else {
 				c.compile_builtin_call(expr)!
 			}
@@ -1041,33 +1023,6 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 						}
 					}
 				}
-			}
-		}
-
-		if arm.pattern is typed_ast.FunctionCallExpression {
-			call := arm.pattern as typed_ast.FunctionCallExpression
-			if enum_type := c.type_env.lookup_enum_by_variant(call.identifier.name) {
-				is_enum_pattern = true
-				enum_name = enum_type.name
-				enum_type_id = enum_type.id
-				variant_name = call.identifier.name
-				for arg in call.arguments {
-					if arg is typed_ast.Identifier {
-						binding_names << arg.name
-					} else {
-						enum_payload_patterns << arg
-					}
-				}
-			}
-		}
-
-		if arm.pattern is typed_ast.Identifier {
-			ident := arm.pattern as typed_ast.Identifier
-			if enum_type := c.type_env.lookup_enum_by_variant(ident.name) {
-				is_enum_pattern = true
-				enum_name = enum_type.name
-				enum_type_id = enum_type.id
-				variant_name = ident.name
 			}
 		}
 

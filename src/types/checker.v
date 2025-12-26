@@ -431,7 +431,7 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 
 	name := t.identifier.name
 
-	is_type_var := name.len > 0 && name[0] >= `a` && name[0] <= `z`
+	is_type_var := name.len > 0 && name[0] >= `A` && name[0] <= `Z`
 
 	mut base_type := if is_type_var {
 		t_var(name)
@@ -1588,10 +1588,30 @@ fn (mut c TypeChecker) check_enum_variant_call(expr ast.FunctionCallExpression, 
 		}
 	}
 
-	return typed_ast.FunctionCallExpression{
-		identifier: convert_identifier(expr.identifier)
-		arguments:  typed_args
-		span:       convert_span(expr.span)
+	typed_left := typed_ast.Identifier{
+		name: enum_type.name
+		span: convert_span(expr.identifier.span)
+	}
+
+	typed_right := if typed_args.len > 0 || payload_types.len > 0 {
+		typed_ast.Expression(typed_ast.FunctionCallExpression{
+			identifier: typed_ast.Identifier{
+				name: variant_name
+				span: convert_span(expr.identifier.span)
+			}
+			arguments:  typed_args
+			span:       convert_span(expr.span)
+		})
+	} else {
+		typed_ast.Expression(typed_ast.Identifier{
+			name: variant_name
+			span: convert_span(expr.identifier.span)
+		})
+	}
+	return typed_ast.PropertyAccessExpression{
+		left:  typed_left
+		right: typed_right
+		span:  convert_span(expr.span)
 	}, result_enum
 }
 
@@ -2383,10 +2403,9 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	if expr.arms.len == 0 {
 		return typed_ast.MatchExpression{
-			subject:      typed_subject
-			subject_type: subject_type
-			arms:         []
-			span:         convert_span(expr.span)
+			subject: typed_subject
+			arms:    []
+			span:    convert_span(expr.span)
 		}, t_none()
 	}
 
@@ -2431,10 +2450,9 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 	}
 
 	return typed_ast.MatchExpression{
-		subject:      typed_subject
-		subject_type: subject_type
-		arms:         typed_arms
-		span:         convert_span(expr.span)
+		subject: typed_subject
+		arms:    typed_arms
+		span:    convert_span(expr.span)
 	}, first_type
 }
 
@@ -2698,10 +2716,30 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 				typed_args << typed_arg
 			}
 
-			return typed_ast.FunctionCallExpression{
-				identifier: convert_identifier(pattern.identifier)
-				arguments:  typed_args
-				span:       convert_span(pattern.span)
+			// Return qualified form: EnumName.VariantName(args)
+			typed_left := typed_ast.Identifier{
+				name: subject_type.name
+				span: convert_span(pattern.identifier.span)
+			}
+			typed_right := if typed_args.len > 0 || payload_types.len > 0 {
+				typed_ast.Expression(typed_ast.FunctionCallExpression{
+					identifier: typed_ast.Identifier{
+						name: variant_name
+						span: convert_span(pattern.identifier.span)
+					}
+					arguments:  typed_args
+					span:       convert_span(pattern.span)
+				})
+			} else {
+				typed_ast.Expression(typed_ast.Identifier{
+					name: variant_name
+					span: convert_span(pattern.identifier.span)
+				})
+			}
+			return typed_ast.PropertyAccessExpression{
+				left:  typed_left
+				right: typed_right
+				span:  convert_span(pattern.span)
 			}, subject_type
 		}
 
@@ -2727,9 +2765,16 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 				qualified_name := '${subject_type.name}.${pattern.name}'
 				doc := c.env.lookup_doc(qualified_name)
 				c.record_type(qualified_name, subject_type, pattern.span, doc)
-				return typed_ast.Identifier{
-					name: pattern.name
-					span: convert_span(pattern.span)
+				return typed_ast.PropertyAccessExpression{
+					left:  typed_ast.Identifier{
+						name: subject_type.name
+						span: convert_span(pattern.span)
+					}
+					right: typed_ast.Identifier{
+						name: pattern.name
+						span: convert_span(pattern.span)
+					}
+					span:  convert_span(pattern.span)
 				}, subject_type
 			}
 		}

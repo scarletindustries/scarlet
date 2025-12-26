@@ -9,3 +9,5 @@ When working with AST, be sure to mirror any changges in both the parser AST and
 For the VSCode extension in `extension/`, use Bun for package management and running scripts (e.g., `bun install`, `bun run compile`).
 
 I have aliased cat to be `bat`, which when piping with STDIN will add a "STDIN" string on the first line. For this reason, use `/bin/cat` explicitly for catting when piping
+
+When deciding between n+1 implementations of a feature or fix, prefer the one that is more idiomatic and correct. Working on a programming language is something that has a lot of prior art. Generally consider what is more idiomatic and correct over what is more clever, "fun", or "efficient" unless efficiency is the main concern of the code path. As a rule of thumb, "effort" to achieve an implementation is not a worry here. Do not worry about things "getting complicated" or "big" - if you find yourself adding TODO comments, consider removing them and continuing with the full, correct implementation.
