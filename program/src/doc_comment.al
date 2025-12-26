@@ -18,9 +18,9 @@ random = 50
 /** A user in the system */
 struct User {
 	/** The user's display name */
-	name String,
+	name String
 	/** Age in years */
-	age Int,
+	age Int
 }
 
 user = User{ name: 'Alice', age: 30 }
@@ -61,15 +61,15 @@ fn plain_block_multi_line() { 5 }
 /** A struct with long field comments */
 struct Config {
 	/** The hostname or IP address of the server to connect to - this should be a valid DNS name or IPv4/IPv6 address */
-	host String,
+	host String
 	/** The port number to use for the connection, must be between 1 and 65535, defaults to 8080 if not specified */
-	port Int,
+	port Int
 	/**
 	 * Whether to use TLS/SSL for the connection.
 	 * If true, the connection will be encrypted.
 	 * If false, data will be sent in plaintext.
 	 */
-	secure Bool,
+	secure Bool
 }
 
 /** An enum with various comment styles on variants */

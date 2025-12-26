@@ -1233,6 +1233,7 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 	}
 
 	if p.current_token.kind == .punc_comma {
+		p.add_warning('Trailing comma after struct field is deprecated')
 		p.eat(.punc_comma)!
 	}
 
