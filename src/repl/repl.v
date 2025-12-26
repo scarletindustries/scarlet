@@ -145,7 +145,7 @@ fn eval_input(input string, definitions []ast.Node) []ast.Node {
 		}
 	}
 
-	program := bytecode.compile(check_result.typed_ast, check_result.env, Flags{}) or {
+	program := bytecode.compile(combined_ast, check_result.env, Flags{}) or {
 		eprintln('Compile error: ${err}')
 		return []
 	}

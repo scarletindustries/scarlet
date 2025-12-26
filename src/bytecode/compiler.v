@@ -1,8 +1,8 @@
 module bytecode
 
 import flags { Flags }
-import typed_ast
-import type_def { TypeEnum, TypeOption, TypeResult, type_to_string }
+import ast
+import type_def { TypeEnum, type_to_string }
 import types { TypeEnv }
 
 struct Scope {
@@ -24,7 +24,7 @@ mut:
 	in_tail_position bool
 }
 
-pub fn compile(expr typed_ast.Expression, type_env TypeEnv, fl Flags) !Program {
+pub fn compile(expr ast.Expression, type_env TypeEnv, fl Flags) !Program {
 	mut c := Compiler{
 		flags:            fl
 		type_env:         type_env
@@ -130,16 +130,16 @@ fn (mut c Compiler) resolve_variable(name string) ?VarAccess {
 	return none
 }
 
-fn (mut c Compiler) compile_node(node typed_ast.Node) ! {
+fn (mut c Compiler) compile_node(node ast.Node) ! {
 	match node {
-		typed_ast.Statement { c.compile_statement(node)! }
-		typed_ast.Expression { c.compile_expr(node)! }
+		ast.Statement { c.compile_statement(node)! }
+		ast.Expression { c.compile_expr(node)! }
 	}
 }
 
-fn (mut c Compiler) compile_statement(stmt typed_ast.Statement) ! {
+fn (mut c Compiler) compile_statement(stmt ast.Statement) ! {
 	match stmt {
-		typed_ast.VariableBinding {
+		ast.VariableBinding {
 			idx := c.get_or_create_local(stmt.identifier.name)
 
 			old_binding := c.current_binding
@@ -149,19 +149,19 @@ fn (mut c Compiler) compile_statement(stmt typed_ast.Statement) ! {
 
 			c.emit_arg(.store_local, idx)
 		}
-		typed_ast.ConstBinding {
+		ast.ConstBinding {
 			c.compile_expr(stmt.init)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
 		}
-		typed_ast.TypePatternBinding {
+		ast.TypePatternBinding {
 			c.compile_expr(stmt.init)!
 			c.emit(.pop)
 		}
-		typed_ast.TupleDestructuringBinding {
+		ast.TupleDestructuringBinding {
 			c.compile_expr(stmt.init)!
 			for i, pattern in stmt.patterns {
-				if pattern is typed_ast.Identifier {
+				if pattern is ast.Identifier {
 					c.emit(.dup)
 					c.emit_arg(.tuple_index, i)
 					idx := c.get_or_create_local(pattern.name)
@@ -170,26 +170,26 @@ fn (mut c Compiler) compile_statement(stmt typed_ast.Statement) ! {
 			}
 			c.emit(.pop)
 		}
-		typed_ast.FunctionDeclaration {
+		ast.FunctionDeclaration {
 			c.compile_function_common(stmt.identifier.name, stmt.params, stmt.body)!
 			idx := c.get_or_create_local(stmt.identifier.name)
 			c.emit_arg(.store_local, idx)
 		}
-		typed_ast.StructDeclaration {}
-		typed_ast.EnumDeclaration {}
-		typed_ast.ImportDeclaration {}
-		typed_ast.ExportDeclaration {
+		ast.StructDeclaration {}
+		ast.EnumDeclaration {}
+		ast.ImportDeclaration {}
+		ast.ExportDeclaration {
 			c.compile_statement(stmt.declaration)!
 		}
 	}
 }
 
-fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_type string) ! {
+fn (mut c Compiler) compile_expr_with_hint(expr ast.Expression, expected_type string) ! {
 	if expected_type != '' {
 		if enum_type := c.type_env.lookup_type(expected_type) {
 			if enum_type is TypeEnum {
-				if expr is typed_ast.FunctionCallExpression {
-					call := expr as typed_ast.FunctionCallExpression
+				if expr is ast.FunctionCallExpression {
+					call := expr as ast.FunctionCallExpression
 					if call.identifier.name in enum_type.variants {
 						c.emit_arg(.push_const, c.add_constant(enum_type.id))
 						enum_idx := c.add_constant(expected_type)
@@ -209,8 +209,8 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 					}
 				}
 
-				if expr is typed_ast.Identifier {
-					ident := expr as typed_ast.Identifier
+				if expr is ast.Identifier {
+					ident := expr as ast.Identifier
 					if ident.name in enum_type.variants {
 						c.emit_arg(.push_const, c.add_constant(enum_type.id))
 						enum_idx := c.add_constant(expected_type)
@@ -228,29 +228,29 @@ fn (mut c Compiler) compile_expr_with_hint(expr typed_ast.Expression, expected_t
 	c.compile_expr(expr)!
 }
 
-fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
+fn (mut c Compiler) compile_expr(expr ast.Expression) ! {
 	is_tail := c.in_tail_position
 	c.in_tail_position = false
 
 	match expr {
-		typed_ast.BlockExpression {
+		ast.BlockExpression {
 			for i, node in expr.body {
 				is_last := i == expr.body.len - 1
 				c.in_tail_position = is_tail && is_last
 				c.compile_node(node)!
 				c.in_tail_position = false
-				if !is_last && node is typed_ast.Expression {
+				if !is_last && node is ast.Expression {
 					c.emit(.pop)
 				}
 			}
 
 			if expr.body.len == 0 {
 				c.emit(.push_none)
-			} else if expr.body[expr.body.len - 1] is typed_ast.Statement {
+			} else if expr.body[expr.body.len - 1] is ast.Statement {
 				c.emit(.push_none)
 			}
 		}
-		typed_ast.NumberLiteral {
+		ast.NumberLiteral {
 			if expr.value.contains('.') {
 				val := expr.value.f64()
 				idx := c.add_constant(val)
@@ -261,11 +261,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.emit_arg(.push_const, idx)
 			}
 		}
-		typed_ast.StringLiteral {
+		ast.StringLiteral {
 			idx := c.add_constant(expr.value)
 			c.emit_arg(.push_const, idx)
 		}
-		typed_ast.InterpolatedString {
+		ast.InterpolatedString {
 			if expr.parts.len == 0 {
 				idx := c.add_constant('')
 				c.emit_arg(.push_const, idx)
@@ -280,17 +280,17 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				}
 			}
 		}
-		typed_ast.BooleanLiteral {
+		ast.BooleanLiteral {
 			if expr.value {
 				c.emit(.push_true)
 			} else {
 				c.emit(.push_false)
 			}
 		}
-		typed_ast.NoneExpression {
+		ast.NoneExpression {
 			c.emit(.push_none)
 		}
-		typed_ast.Identifier {
+		ast.Identifier {
 			if access := c.resolve_variable(expr.name) {
 				if access.is_local {
 					c.emit_arg(.push_local, access.index)
@@ -303,7 +303,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				return error('Undefined variable: ${expr.name}')
 			}
 		}
-		typed_ast.BinaryExpression {
+		ast.BinaryExpression {
 			if expr.op.kind == .logical_and {
 				c.compile_expr(expr.left)!
 				c.emit(.dup)
@@ -368,7 +368,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				}
 			}
 		}
-		typed_ast.UnaryExpression {
+		ast.UnaryExpression {
 			c.compile_expr(expr.expression)!
 			match expr.op.kind {
 				.punc_exclamation_mark {
@@ -382,7 +382,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				}
 			}
 		}
-		typed_ast.IfExpression {
+		ast.IfExpression {
 			c.compile_expr(expr.condition)!
 
 			else_jump := c.current_addr()
@@ -409,15 +409,15 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			end_addr := c.current_addr()
 			c.program.code[end_jump] = op_arg(.jump, end_addr)
 		}
-		typed_ast.MatchExpression {
+		ast.MatchExpression {
 			c.compile_match(expr, is_tail)!
 		}
-		typed_ast.ArrayExpression {
-			has_spread := expr.elements.any(it is typed_ast.SpreadElement)
+		ast.ArrayExpression {
+			has_spread := expr.elements.any(it is ast.SpreadElement)
 
 			if !has_spread {
 				for elem in expr.elements {
-					if elem is typed_ast.Expression {
+					if elem is ast.Expression {
 						c.compile_expr(elem)!
 					}
 				}
@@ -429,7 +429,7 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				for i < expr.elements.len {
 					elem := expr.elements[i]
 
-					if elem is typed_ast.SpreadElement {
+					if elem is ast.SpreadElement {
 						inner := elem.expression or {
 							return error('Spread in array literal missing expression')
 						}
@@ -444,11 +444,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 					} else {
 						mut group_count := 0
 						for j := i; j < expr.elements.len; j++ {
-							if expr.elements[j] is typed_ast.SpreadElement {
+							if expr.elements[j] is ast.SpreadElement {
 								break
 							}
 							arr_elem := expr.elements[j]
-							if arr_elem is typed_ast.Expression {
+							if arr_elem is ast.Expression {
 								c.compile_expr(arr_elem)!
 							}
 							group_count++
@@ -468,16 +468,16 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				}
 			}
 		}
-		typed_ast.TupleExpression {
+		ast.TupleExpression {
 			for elem in expr.elements {
 				c.compile_expr(elem)!
 			}
 			c.emit_arg(.make_tuple, expr.elements.len)
 		}
-		typed_ast.ArrayIndexExpression {
+		ast.ArrayIndexExpression {
 			c.compile_expr(expr.expression)!
-			if expr.index is typed_ast.RangeExpression {
-				range_idx := expr.index as typed_ast.RangeExpression
+			if expr.index is ast.RangeExpression {
+				range_idx := expr.index as ast.RangeExpression
 				c.compile_expr(range_idx.start)!
 				c.compile_expr(range_idx.end)!
 				c.emit(.array_slice)
@@ -486,15 +486,15 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.emit(.index)
 			}
 		}
-		typed_ast.RangeExpression {
+		ast.RangeExpression {
 			c.compile_expr(expr.start)!
 			c.compile_expr(expr.end)!
 			c.emit(.make_range)
 		}
-		typed_ast.FunctionExpression {
+		ast.FunctionExpression {
 			c.compile_function_expression(expr)!
 		}
-		typed_ast.FunctionCallExpression {
+		ast.FunctionCallExpression {
 			func_type := c.type_env.lookup_function(expr.identifier.name)
 
 			for i, arg in expr.arguments {
@@ -528,15 +528,15 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				c.compile_builtin_call(expr)!
 			}
 		}
-		typed_ast.PropertyAccessExpression {
-			if expr.left is typed_ast.Identifier {
-				left_id := expr.left as typed_ast.Identifier
+		ast.PropertyAccessExpression {
+			if expr.left is ast.Identifier {
+				left_id := expr.left as ast.Identifier
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						enum_name := left_id.name
 
-						if expr.right is typed_ast.FunctionCallExpression {
-							call := expr.right as typed_ast.FunctionCallExpression
+						if expr.right is ast.FunctionCallExpression {
+							call := expr.right as ast.FunctionCallExpression
 							variant_name := call.identifier.name
 
 							if variant_name !in enum_type.variants {
@@ -563,8 +563,8 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 							} else {
 								return error('Variant "${variant_name}" does not take a payload')
 							}
-						} else if expr.right is typed_ast.Identifier {
-							variant_id := expr.right as typed_ast.Identifier
+						} else if expr.right is ast.Identifier {
+							variant_id := expr.right as ast.Identifier
 							variant_name := variant_id.name
 
 							if variant_name !in enum_type.variants {
@@ -593,26 +593,26 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 
 			c.compile_expr(expr.left)!
 
-			if expr.right is typed_ast.FunctionCallExpression {
-				call := expr.right as typed_ast.FunctionCallExpression
+			if expr.right is ast.FunctionCallExpression {
+				call := expr.right as ast.FunctionCallExpression
 
 				for arg in call.arguments {
 					c.compile_expr(arg)!
 				}
 
 				return error("Cannot call '${call.identifier.name}' as a method. AL does not have methods - use '${call.identifier.name}(...)' as a regular function call instead.")
-			} else if expr.right is typed_ast.NumberLiteral {
-				num := expr.right as typed_ast.NumberLiteral
+			} else if expr.right is ast.NumberLiteral {
+				num := expr.right as ast.NumberLiteral
 				index := num.value.int()
 				c.emit_arg(.tuple_index, index)
-			} else if expr.right is typed_ast.Identifier {
-				id := expr.right as typed_ast.Identifier
+			} else if expr.right is ast.Identifier {
+				id := expr.right as ast.Identifier
 
 				idx := c.add_constant(id.name)
 				c.emit_arg(.get_field, idx)
 			}
 		}
-		typed_ast.StructInitExpression {
+		ast.StructInitExpression {
 			struct_name := expr.identifier.name
 
 			struct_type := c.type_env.lookup_struct(struct_name) or {
@@ -647,53 +647,33 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 			c.emit_arg(.push_const, type_idx)
 			c.emit_arg(.make_struct, expr.fields.len)
 		}
-		typed_ast.ErrorExpression {
+		ast.ErrorExpression {
 			c.compile_expr(expr.expression)!
 			c.emit(.make_error)
 		}
-		typed_ast.OrExpression {
+		ast.OrExpression {
 			c.compile_expr(expr.expression)!
+			c.emit(.dup)
+			c.emit(.is_failure)
 
-			resolved := expr.resolved_type
-			if resolved is TypeResult {
-				c.emit(.dup)
-				c.emit(.is_error)
+			not_failure_jump := c.current_addr()
+			c.emit_arg(.jump_if_false, 0)
 
-				not_error_jump := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
-
-				c.emit(.unwrap_error)
-				if receiver := expr.receiver {
-					idx := c.get_or_create_local(receiver.name)
-					c.emit_arg(.store_local, idx)
-				} else {
-					c.emit(.pop)
-				}
-
-				c.compile_expr(expr.body)!
-
-				end_jump := c.current_addr()
-				c.emit_arg(.jump, 0)
-
-				c.program.code[not_error_jump] = op_arg(.jump_if_false, c.current_addr())
-				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
-			} else if resolved is TypeOption {
-				c.emit(.dup)
-				c.emit(.is_none)
-
-				not_none_jump := c.current_addr()
-				c.emit_arg(.jump_if_false, 0)
-
+			c.emit(.unwrap_failure)
+			if receiver := expr.receiver {
+				idx := c.get_or_create_local(receiver.name)
+				c.emit_arg(.store_local, idx)
+			} else {
 				c.emit(.pop)
-
-				c.compile_expr(expr.body)!
-
-				end_jump := c.current_addr()
-				c.emit_arg(.jump, 0)
-
-				c.program.code[not_none_jump] = op_arg(.jump_if_false, c.current_addr())
-				c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 			}
+
+			c.compile_expr(expr.body)!
+
+			end_jump := c.current_addr()
+			c.emit_arg(.jump, 0)
+
+			c.program.code[not_failure_jump] = op_arg(.jump_if_false, c.current_addr())
+			c.program.code[end_jump] = op_arg(.jump, c.current_addr())
 		}
 		else {
 			return error("Internal error: unhandled expression type '${expr.type_name()}'. This is a compiler bug.")
@@ -701,11 +681,11 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 	}
 }
 
-fn (mut c Compiler) compile_function_expression(func typed_ast.FunctionExpression) ! {
+fn (mut c Compiler) compile_function_expression(func ast.FunctionExpression) ! {
 	c.compile_function_common(none, func.params, func.body)!
 }
 
-fn (mut c Compiler) compile_function_common(name ?string, params []typed_ast.FunctionParameter, body typed_ast.Expression) ! {
+fn (mut c Compiler) compile_function_common(name ?string, params []ast.FunctionParameter, body ast.Expression) ! {
 	old_locals := c.locals.clone()
 	old_local_count := c.local_count
 	old_captures := c.captures.clone()
@@ -781,22 +761,22 @@ fn (mut c Compiler) compile_function_common(name ?string, params []typed_ast.Fun
 	c.emit_arg(.make_closure, func_idx)
 }
 
-fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fail_jumps []int) ! {
+fn (mut c Compiler) compile_pattern_element(pattern ast.Expression, mut fail_jumps []int) ! {
 	match pattern {
-		typed_ast.NumberLiteral, typed_ast.StringLiteral, typed_ast.BooleanLiteral {
+		ast.NumberLiteral, ast.StringLiteral, ast.BooleanLiteral {
 			c.compile_expr(pattern)!
 			c.emit(.eq)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 		}
-		typed_ast.Identifier {
+		ast.Identifier {
 			local_idx := c.get_or_create_local(pattern.name)
 			c.emit_arg(.store_local, local_idx)
 		}
-		typed_ast.WildcardPattern {
+		ast.WildcardPattern {
 			c.emit(.pop)
 		}
-		typed_ast.RangeExpression {
+		ast.RangeExpression {
 			temp_idx := c.local_count
 			c.local_count++
 			c.emit(.dup)
@@ -813,7 +793,7 @@ fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fa
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 		}
-		typed_ast.TupleExpression {
+		ast.TupleExpression {
 			temp_idx := c.local_count
 			c.local_count++
 			c.emit_arg(.store_local, temp_idx)
@@ -831,9 +811,8 @@ fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fa
 				c.compile_pattern_element(elem, mut fail_jumps)!
 			}
 		}
-		typed_ast.ArrayExpression {
-			has_spread := pattern.elements.len > 0
-				&& pattern.elements.last() is typed_ast.SpreadElement
+		ast.ArrayExpression {
+			has_spread := pattern.elements.len > 0 && pattern.elements.last() is ast.SpreadElement
 			pre_count := if has_spread { pattern.elements.len - 1 } else { pattern.elements.len }
 
 			temp_idx := c.local_count
@@ -856,16 +835,16 @@ fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fa
 				c.emit_arg(.push_local, temp_idx)
 				c.emit_arg(.push_const, c.add_constant(i))
 				c.emit(.index)
-				if elem is typed_ast.Expression {
+				if elem is ast.Expression {
 					c.compile_pattern_element(elem, mut fail_jumps)!
 				}
 			}
 
 			if has_spread {
 				spread_elem := pattern.elements.last()
-				if spread_elem is typed_ast.SpreadElement {
+				if spread_elem is ast.SpreadElement {
 					if inner := spread_elem.expression {
-						if inner is typed_ast.Identifier {
+						if inner is ast.Identifier {
 							c.emit_arg(.push_local, temp_idx)
 							c.emit_arg(.push_const, c.add_constant(pre_count))
 							c.emit_arg(.push_local, temp_idx)
@@ -887,22 +866,22 @@ fn (mut c Compiler) compile_pattern_element(pattern typed_ast.Expression, mut fa
 	}
 }
 
-fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps []int) ! {
+fn (mut c Compiler) compile_pattern(pattern ast.Expression, mut fail_jumps []int) ! {
 	match pattern {
-		typed_ast.NumberLiteral, typed_ast.StringLiteral, typed_ast.BooleanLiteral {
+		ast.NumberLiteral, ast.StringLiteral, ast.BooleanLiteral {
 			c.emit(.dup)
 			c.compile_expr(pattern)!
 			c.emit(.eq)
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 		}
-		typed_ast.Identifier {
+		ast.Identifier {
 			c.emit(.dup)
 			local_idx := c.get_or_create_local(pattern.name)
 			c.emit_arg(.store_local, local_idx)
 		}
-		typed_ast.WildcardPattern {}
-		typed_ast.RangeExpression {
+		ast.WildcardPattern {}
+		ast.RangeExpression {
 			c.emit(.dup)
 			c.compile_expr(pattern.start)!
 			c.emit(.gte)
@@ -915,7 +894,7 @@ fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps
 			fail_jumps << c.current_addr()
 			c.emit_arg(.jump_if_false, 0)
 		}
-		typed_ast.TupleExpression {
+		ast.TupleExpression {
 			c.emit(.dup)
 			c.emit(.array_len)
 			c.emit_arg(.push_const, c.add_constant(pattern.elements.len))
@@ -929,9 +908,8 @@ fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps
 				c.compile_pattern_element(elem, mut fail_jumps)!
 			}
 		}
-		typed_ast.ArrayExpression {
-			has_spread := pattern.elements.len > 0
-				&& pattern.elements.last() is typed_ast.SpreadElement
+		ast.ArrayExpression {
+			has_spread := pattern.elements.len > 0 && pattern.elements.last() is ast.SpreadElement
 			pre_count := if has_spread { pattern.elements.len - 1 } else { pattern.elements.len }
 
 			c.emit(.dup)
@@ -950,16 +928,16 @@ fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps
 				c.emit(.dup)
 				c.emit_arg(.push_const, c.add_constant(i))
 				c.emit(.index)
-				if elem is typed_ast.Expression {
+				if elem is ast.Expression {
 					c.compile_pattern_element(elem, mut fail_jumps)!
 				}
 			}
 
 			if has_spread {
 				spread_elem := pattern.elements.last()
-				if spread_elem is typed_ast.SpreadElement {
+				if spread_elem is ast.SpreadElement {
 					if inner := spread_elem.expression {
-						if inner is typed_ast.Identifier {
+						if inner is ast.Identifier {
 							c.emit(.dup)
 							c.emit(.array_len)
 							c.emit_arg(.push_const, c.add_constant(pre_count))
@@ -982,7 +960,7 @@ fn (mut c Compiler) compile_pattern(pattern typed_ast.Expression, mut fail_jumps
 	}
 }
 
-fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
+fn (mut c Compiler) compile_match(m ast.MatchExpression, is_tail bool) ! {
 	c.compile_expr(m.subject)!
 
 	mut end_jumps := []int{}
@@ -993,32 +971,32 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 
 		mut is_enum_pattern := false
 		mut binding_names := []string{}
-		mut enum_payload_patterns := []typed_ast.Expression{}
+		mut enum_payload_patterns := []ast.Expression{}
 		mut enum_name := ?string(none)
 		mut enum_type_id := ?int(none)
 		mut variant_name := ?string(none)
 
-		if arm.pattern is typed_ast.PropertyAccessExpression {
-			prop := arm.pattern as typed_ast.PropertyAccessExpression
-			if prop.left is typed_ast.Identifier {
-				left_id := prop.left as typed_ast.Identifier
+		if arm.pattern is ast.PropertyAccessExpression {
+			prop := arm.pattern as ast.PropertyAccessExpression
+			if prop.left is ast.Identifier {
+				left_id := prop.left as ast.Identifier
 				if enum_type := c.type_env.lookup_type(left_id.name) {
 					if enum_type is TypeEnum {
 						is_enum_pattern = true
 						enum_name = left_id.name
 						enum_type_id = enum_type.id
-						if prop.right is typed_ast.FunctionCallExpression {
-							call := prop.right as typed_ast.FunctionCallExpression
+						if prop.right is ast.FunctionCallExpression {
+							call := prop.right as ast.FunctionCallExpression
 							variant_name = call.identifier.name
 							for arg in call.arguments {
-								if arg is typed_ast.Identifier {
+								if arg is ast.Identifier {
 									binding_names << arg.name
 								} else {
 									enum_payload_patterns << arg
 								}
 							}
-						} else if prop.right is typed_ast.Identifier {
-							right_id := prop.right as typed_ast.Identifier
+						} else if prop.right is ast.Identifier {
+							right_id := prop.right as ast.Identifier
 							variant_name = right_id.name
 						}
 					}
@@ -1073,7 +1051,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 			}
 		}
 
-		if arm.pattern is typed_ast.OrPattern {
+		if arm.pattern is ast.OrPattern {
 			mut body_jumps := []int{}
 
 			for i, pattern in arm.pattern.patterns {
@@ -1139,7 +1117,7 @@ fn (mut c Compiler) compile_match(m typed_ast.MatchExpression, is_tail bool) ! {
 	}
 }
 
-fn (mut c Compiler) compile_builtin_call(call typed_ast.FunctionCallExpression) ! {
+fn (mut c Compiler) compile_builtin_call(call ast.FunctionCallExpression) ! {
 	match call.identifier.name {
 		'println' {
 			if call.arguments.len != 1 {

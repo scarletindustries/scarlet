@@ -1,6 +1,6 @@
 module types
 
-import typed_ast
+import ast
 import type_def { Type, TypeArray, TypeEnum, TypeNone, TypeOption, TypePrimitive, TypeResult, TypeStruct, TypeTuple }
 
 type Pat = PatWildcard | PatCtor | PatOr
@@ -514,39 +514,39 @@ fn pat_to_string(p Pat, t Type) string {
 	}
 }
 
-pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
+pub fn ast_pattern_to_pat(pattern ast.Expression, t Type) Pat {
 	match pattern {
-		typed_ast.WildcardPattern {
+		ast.WildcardPattern {
 			return PatWildcard{}
 		}
-		typed_ast.Identifier {
+		ast.Identifier {
 			return PatWildcard{}
 		}
-		typed_ast.BooleanLiteral {
+		ast.BooleanLiteral {
 			return PatCtor{
 				name: if pattern.value { 'true' } else { 'false' }
 				args: []
 			}
 		}
-		typed_ast.NumberLiteral {
+		ast.NumberLiteral {
 			return PatCtor{
 				name: 'lit:${pattern.value}'
 				args: []
 			}
 		}
-		typed_ast.StringLiteral {
+		ast.StringLiteral {
 			return PatCtor{
 				name: "lit:'${pattern.value}'"
 				args: []
 			}
 		}
-		typed_ast.NoneExpression {
+		ast.NoneExpression {
 			return PatCtor{
 				name: 'none'
 				args: []
 			}
 		}
-		typed_ast.TupleExpression {
+		ast.TupleExpression {
 			mut args := []Pat{}
 			element_types := if t is TypeTuple { t.elements } else { []Type{} }
 			for i, elem in pattern.elements {
@@ -558,7 +558,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				args: args
 			}
 		}
-		typed_ast.ArrayExpression {
+		ast.ArrayExpression {
 			if pattern.elements.len == 0 {
 				return PatCtor{
 					name: '[]'
@@ -566,7 +566,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				}
 			}
 			last := pattern.elements.last()
-			if last is typed_ast.SpreadElement {
+			if last is ast.SpreadElement {
 				elem_type := if t is TypeArray { t.element } else { type_def.t_none() }
 				if pattern.elements.len == 1 {
 					return PatCtor{
@@ -575,7 +575,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 					}
 				}
 				first_elem := pattern.elements[0]
-				first_pat := if first_elem is typed_ast.Expression {
+				first_pat := if first_elem is ast.Expression {
 					ast_pattern_to_pat(first_elem, elem_type)
 				} else {
 					PatWildcard{}
@@ -587,7 +587,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 			}
 			elem_type := if t is TypeArray { t.element } else { type_def.t_none() }
 			first_elem := pattern.elements[0]
-			first_pat := if first_elem is typed_ast.Expression {
+			first_pat := if first_elem is ast.Expression {
 				ast_pattern_to_pat(first_elem, elem_type)
 			} else {
 				PatWildcard{}
@@ -601,17 +601,18 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 					}]
 				}
 			}
-			rest_expr := typed_ast.ArrayExpression{
+			rest_expr := ast.ArrayExpression{
 				elements: pattern.elements[1..]
 				span:     pattern.span
 			}
+
 			rest_pat := ast_pattern_to_pat(rest_expr, t)
 			return PatCtor{
 				name: '[..]'
 				args: [first_pat, rest_pat]
 			}
 		}
-		typed_ast.OrPattern {
+		ast.OrPattern {
 			mut pats := []Pat{}
 			for p in pattern.patterns {
 				pats << ast_pattern_to_pat(p, t)
@@ -620,13 +621,13 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				patterns: pats
 			}
 		}
-		typed_ast.RangeExpression {
+		ast.RangeExpression {
 			mut start_str := '_'
 			mut end_str := '_'
-			if pattern.start is typed_ast.NumberLiteral {
+			if pattern.start is ast.NumberLiteral {
 				start_str = pattern.start.value
 			}
-			if pattern.end is typed_ast.NumberLiteral {
+			if pattern.end is ast.NumberLiteral {
 				end_str = pattern.end.value
 			}
 			return PatCtor{
@@ -634,7 +635,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				args: []
 			}
 		}
-		typed_ast.FunctionCallExpression {
+		ast.FunctionCallExpression {
 			name := pattern.identifier.name
 			mut args := []Pat{}
 			type_ctors := get_type_ctors(t)
@@ -655,14 +656,14 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				args: args
 			}
 		}
-		typed_ast.PropertyAccessExpression {
-			if pattern.right is typed_ast.Identifier {
+		ast.PropertyAccessExpression {
+			if pattern.right is ast.Identifier {
 				return PatCtor{
 					name: pattern.right.name
 					args: []
 				}
-			} else if pattern.right is typed_ast.FunctionCallExpression {
-				call := pattern.right as typed_ast.FunctionCallExpression
+			} else if pattern.right is ast.FunctionCallExpression {
+				call := pattern.right as ast.FunctionCallExpression
 				name := call.identifier.name
 				mut args := []Pat{}
 
@@ -686,9 +687,9 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 			}
 			return PatWildcard{}
 		}
-		typed_ast.UnaryExpression {
-			if pattern.expression is typed_ast.NumberLiteral {
-				num := pattern.expression as typed_ast.NumberLiteral
+		ast.UnaryExpression {
+			if pattern.expression is ast.NumberLiteral {
+				num := pattern.expression as ast.NumberLiteral
 				return PatCtor{
 					name: 'lit:-${num.value}'
 					args: []
@@ -702,7 +703,7 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				args: []
 			}
 		}
-		typed_ast.BinaryExpression {
+		ast.BinaryExpression {
 			// Boolean expressions as patterns (match true { cond -> ... })
 			// Cannot statically determine coverage, so treat each as unique/non-overlapping.
 			// This means: no "unreachable pattern" warnings, and `else` is always required.
@@ -711,10 +712,9 @@ pub fn ast_pattern_to_pat(pattern typed_ast.Expression, t Type) Pat {
 				args: []
 			}
 		}
-		typed_ast.ArrayIndexExpression, typed_ast.BlockExpression, typed_ast.ErrorExpression,
-		typed_ast.ErrorNode, typed_ast.FunctionExpression, typed_ast.IfExpression,
-		typed_ast.InterpolatedString, typed_ast.MatchExpression, typed_ast.OrExpression,
-		typed_ast.StructInitExpression, typed_ast.TypeIdentifier {
+		ast.ArrayIndexExpression, ast.BlockExpression, ast.ErrorExpression, ast.ErrorNode,
+		ast.FunctionExpression, ast.IfExpression, ast.InterpolatedString, ast.MatchExpression,
+		ast.OrExpression, ast.StructInitExpression, ast.TypeIdentifier {
 			return PatWildcard{}
 		}
 	}

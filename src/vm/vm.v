@@ -614,6 +614,18 @@ fn (mut vm VM) execute() !bytecode.Value {
 					return error('Expected error value')
 				}
 			}
+			.is_failure {
+				val := vm.pop()!
+				vm.stack << (val is bytecode.ErrorValue || val is bytecode.NoneValue)
+			}
+			.unwrap_failure {
+				val := vm.pop()!
+				if val is bytecode.ErrorValue {
+					vm.stack << val.payload
+				} else {
+					vm.stack << bytecode.NoneValue{}
+				}
+			}
 			.to_string {
 				val := vm.pop()!
 				vm.stack << inspect(val)
