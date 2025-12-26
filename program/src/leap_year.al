@@ -1,10 +1,7 @@
 // Leap year checker
 
 fn is_leap_year(year Int) Bool {
-	match true {
-		year % 400 == 0 | year % 4 == 0 -> true,
-		else -> false,
-	}
+	year % 400 == 0 || { year % 4 == 0 && year % 100 != 0 }
 }
 
 fn days_in_year(year Int) Int {
