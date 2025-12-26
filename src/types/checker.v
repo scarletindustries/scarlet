@@ -431,7 +431,7 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 
 	name := t.identifier.name
 
-	is_type_var := name.len > 0 && name[0] >= `A` && name[0] <= `Z`
+	is_type_var := name.len == 1 && name[0] >= `A` && name[0] <= `Z`
 
 	mut base_type := if is_type_var {
 		t_var(name)

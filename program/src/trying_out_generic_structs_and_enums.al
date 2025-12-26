@@ -1,23 +1,23 @@
-struct Box(d) {
+struct Box(D) {
 	/**
      * A generic struct holding data of any type.
      */
-	data d
+	data D
 }
 
-enum Option(t) {
+enum Option(T) {
 	/**
      * A generic enum representing an optional value.
      */
-	Some(t)
+	Some(T)
 	None
 }
 
-enum Option2(t) {
+enum Option2(T) {
 	/**
 	 * Another generic enum representing an optional value.
 	 */
-	Some2(t)
+	Some2(T)
 	None2
 }
 
