@@ -802,9 +802,28 @@ fn (mut c TypeChecker) check_binding_type(name string, name_span Span, annotatio
 		if expected := c.resolve_type_identifier(annot) {
 			init_span := typed_init.span
 			c.expect_type(init_type, expected, init_span, context)
-			c.env.define_at(name, expected, loc)
-			c.record_type_annotation(annot, expected)
-			return expected
+			// If annotation is a generic type without explicit type args but init_type
+			// has concrete type args, use the more specific init_type
+			final_type := if expected is TypeEnum && init_type is TypeEnum {
+				if expected.name == init_type.name && expected.type_args.len == 0
+					&& init_type.type_args.len > 0 {
+					Type(init_type)
+				} else {
+					Type(expected)
+				}
+			} else if expected is TypeStruct && init_type is TypeStruct {
+				if expected.name == init_type.name && expected.type_args.len == 0
+					&& init_type.type_args.len > 0 {
+					Type(init_type)
+				} else {
+					Type(expected)
+				}
+			} else {
+				expected
+			}
+			c.env.define_at(name, final_type, loc)
+			c.record_type_annotation(annot, final_type)
+			return final_type
 		} else {
 			c.error_at_span("Unknown type '${annot.identifier.name}'", annot.identifier.span)
 			c.env.define_at(name, init_type, loc)
@@ -2416,7 +2435,20 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 					}
 
 					if variant_name in enum_type.variants {
-						payload_types := enum_type.variants[variant_name] or { []Type{} }
+						raw_payload_types := enum_type.variants[variant_name] or { []Type{} }
+						// Substitute type parameters with concrete type arguments from subject_type
+						mut subs := map[string]Type{}
+						if subject_type is TypeEnum {
+							for i, param in subject_type.type_params {
+								if i < subject_type.type_args.len {
+									subs[param] = subject_type.type_args[i]
+								}
+							}
+						}
+						mut payload_types := []Type{}
+						for pt in raw_payload_types {
+							payload_types << substitute(pt, subs)
+						}
 
 						// Bind pattern variables to their corresponding payload types
 						for i, arg in args {
@@ -2582,7 +2614,18 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 		variant_name := pattern.identifier.name
 
 		if subject_type is TypeEnum {
-			payload_types := subject_type.variants[variant_name] or { []Type{} }
+			raw_payload_types := subject_type.variants[variant_name] or { []Type{} }
+			// Substitute type parameters with concrete type arguments
+			mut subs := map[string]Type{}
+			for i, param in subject_type.type_params {
+				if i < subject_type.type_args.len {
+					subs[param] = subject_type.type_args[i]
+				}
+			}
+			mut payload_types := []Type{}
+			for pt in raw_payload_types {
+				payload_types << substitute(pt, subs)
+			}
 			for i, arg in pattern.arguments {
 				if arg is ast.Identifier && i < payload_types.len {
 					c.env.define(arg.name, payload_types[i])
