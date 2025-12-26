@@ -544,6 +544,10 @@ fn (mut c TypeChecker) check_statement(stmt ast.Statement) (typed_ast.Node, Type
 }
 
 fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Type) {
+	return c.check_expr_with_hint(expr, none)
+}
+
+fn (mut c TypeChecker) check_expr_with_hint(expr ast.Expression, expected ?Type) (typed_ast.Expression, Type) {
 	match expr {
 		ast.NumberLiteral {
 			typ := if expr.value.contains('.') { t_float() } else { t_int() }
@@ -608,7 +612,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 			return c.check_function_expression(expr)
 		}
 		ast.FunctionCallExpression {
-			return c.check_call(expr)
+			return c.check_call(expr, expected)
 		}
 		ast.BlockExpression {
 			c.env.push_scope()
@@ -872,17 +876,16 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 			if expr.init is ast.ArrayExpression {
 				arr := expr.init as ast.ArrayExpression
 				if arr.elements.len == 0 {
-					// empy array with type annotation so we use the annotated type
 					typed_init = typed_ast.ArrayExpression{
 						elements: []
 						span:     convert_span(arr.span)
 					}
 					init_type = expected_type
 				} else {
-					typed_init, init_type = c.check_expr(expr.init)
+					typed_init, init_type = c.check_expr_with_hint(expr.init, expected_type)
 				}
 			} else {
-				typed_init, init_type = c.check_expr(expr.init)
+				typed_init, init_type = c.check_expr_with_hint(expr.init, expected_type)
 			}
 		} else {
 			typed_init, init_type = c.check_expr(expr.init)
@@ -1459,7 +1462,7 @@ fn (mut c TypeChecker) check_tuple_destructuring(expr ast.TupleDestructuringBind
 	return typed_ast.Node(stmt), t_none()
 }
 
-fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Expression, Type) {
+fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression, expected ?Type) (typed_ast.Expression, Type) {
 	doc := c.env.lookup_doc(expr.identifier.name)
 	if func_type := c.env.lookup_function(expr.identifier.name) {
 		c.record_type(expr.identifier.name, func_type, expr.identifier.span, doc)
@@ -1498,69 +1501,14 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 		}
 	}
 
-	if enum_type := c.env.lookup_enum_by_variant(expr.identifier.name) {
-		variant_name := expr.identifier.name
-		payload_types := enum_type.variants[variant_name] or { []Type{} }
-
-		qualified_name := '${enum_type.name}.${variant_name}'
-		variant_doc := c.env.lookup_doc(qualified_name)
-		c.record_type(qualified_name, enum_type, expr.identifier.span, variant_doc)
-
-		mut typed_args := []typed_ast.Expression{}
-		mut subs := map[string]Type{}
-
-		if payload_types.len > 0 {
-			if expr.arguments.len != payload_types.len {
-				c.error_at_span("Enum variant '${variant_name}' expects ${payload_types.len} argument(s), got ${expr.arguments.len}",
-					expr.span)
-			}
-			for i, arg in expr.arguments {
-				typed_arg, arg_type := c.check_expr(arg)
-				typed_args << typed_arg
-				if i < payload_types.len {
-					c.unify(arg_type, payload_types[i], mut subs)
-				}
-			}
-		} else {
-			if expr.arguments.len != 0 {
-				c.error_at_span("Enum variant '${variant_name}' expects no arguments, got ${expr.arguments.len}",
-					expr.span)
+	// Check if expected type is an enum and this is a variant name
+	if exp := expected {
+		if exp is TypeEnum {
+			variant_name := expr.identifier.name
+			if variant_name in exp.variants {
+				return c.check_enum_variant_call(expr, exp, variant_name)
 			}
 		}
-
-		mut result_enum := enum_type
-		if enum_type.type_params.len > 0 {
-			mut resolved_args := []Type{}
-			for param in enum_type.type_params {
-				if arg := subs[param] {
-					resolved_args << arg
-				} else {
-					resolved_args << t_var(param)
-				}
-			}
-
-			mut new_variants := map[string][]Type{}
-			for vname, vtypes in enum_type.variants {
-				mut new_payloads := []Type{}
-				for vt in vtypes {
-					new_payloads << substitute(vt, subs)
-				}
-				new_variants[vname] = new_payloads
-			}
-			result_enum = TypeEnum{
-				id:          enum_type.id
-				name:        enum_type.name
-				type_params: enum_type.type_params
-				type_args:   resolved_args
-				variants:    new_variants
-			}
-		}
-
-		return typed_ast.FunctionCallExpression{
-			identifier: convert_identifier(expr.identifier)
-			arguments:  typed_args
-			span:       convert_span(expr.span)
-		}, result_enum
 	}
 
 	if suggestion := c.find_similar_name(expr.identifier.name) {
@@ -1581,6 +1529,70 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 		arguments:  typed_args
 		span:       convert_span(expr.span)
 	}, t_none()
+}
+
+fn (mut c TypeChecker) check_enum_variant_call(expr ast.FunctionCallExpression, enum_type TypeEnum, variant_name string) (typed_ast.Expression, Type) {
+	payload_types := enum_type.variants[variant_name] or { []Type{} }
+
+	qualified_name := '${enum_type.name}.${variant_name}'
+	variant_doc := c.env.lookup_doc(qualified_name)
+	c.record_type(qualified_name, enum_type, expr.identifier.span, variant_doc)
+
+	mut typed_args := []typed_ast.Expression{}
+	mut subs := map[string]Type{}
+
+	if payload_types.len > 0 {
+		if expr.arguments.len != payload_types.len {
+			c.error_at_span("Enum variant '${variant_name}' expects ${payload_types.len} argument(s), got ${expr.arguments.len}",
+				expr.span)
+		}
+		for i, arg in expr.arguments {
+			typed_arg, arg_type := c.check_expr(arg)
+			typed_args << typed_arg
+			if i < payload_types.len {
+				c.unify(arg_type, payload_types[i], mut subs)
+			}
+		}
+	} else {
+		if expr.arguments.len != 0 {
+			c.error_at_span("Enum variant '${variant_name}' expects no arguments, got ${expr.arguments.len}",
+				expr.span)
+		}
+	}
+
+	mut result_enum := enum_type
+	if enum_type.type_params.len > 0 {
+		mut resolved_args := []Type{}
+		for param in enum_type.type_params {
+			if arg := subs[param] {
+				resolved_args << arg
+			} else {
+				resolved_args << t_var(param)
+			}
+		}
+
+		mut new_variants := map[string][]Type{}
+		for vname, vtypes in enum_type.variants {
+			mut new_payloads := []Type{}
+			for vt in vtypes {
+				new_payloads << substitute(vt, subs)
+			}
+			new_variants[vname] = new_payloads
+		}
+		result_enum = TypeEnum{
+			id:          enum_type.id
+			name:        enum_type.name
+			type_params: enum_type.type_params
+			type_args:   resolved_args
+			variants:    new_variants
+		}
+	}
+
+	return typed_ast.FunctionCallExpression{
+		identifier: convert_identifier(expr.identifier)
+		arguments:  typed_args
+		span:       convert_span(expr.span)
+	}, result_enum
 }
 
 fn (mut c TypeChecker) check_call_with_type(expr ast.FunctionCallExpression, func_type TypeFunction) (typed_ast.Expression, Type) {
@@ -2371,9 +2383,10 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 
 	if expr.arms.len == 0 {
 		return typed_ast.MatchExpression{
-			subject: typed_subject
-			arms:    []
-			span:    convert_span(expr.span)
+			subject:      typed_subject
+			subject_type: subject_type
+			arms:         []
+			span:         convert_span(expr.span)
 		}, t_none()
 	}
 
@@ -2418,9 +2431,10 @@ fn (mut c TypeChecker) check_match(expr ast.MatchExpression) (typed_ast.Expressi
 	}
 
 	return typed_ast.MatchExpression{
-		subject: typed_subject
-		arms:    typed_arms
-		span:    convert_span(expr.span)
+		subject:      typed_subject
+		subject_type: subject_type
+		arms:         typed_arms
+		span:         convert_span(expr.span)
 	}, first_type
 }
 
@@ -2640,6 +2654,21 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 		variant_name := pattern.identifier.name
 
 		if subject_type is TypeEnum {
+			if variant_name !in subject_type.variants {
+				c.error_at_span("Enum '${subject_type.name}' has no variant '${variant_name}'",
+					pattern.identifier.span)
+				mut typed_args := []typed_ast.Expression{}
+				for arg in pattern.arguments {
+					typed_arg, _ := c.check_expr(arg)
+					typed_args << typed_arg
+				}
+				return typed_ast.FunctionCallExpression{
+					identifier: convert_identifier(pattern.identifier)
+					arguments:  typed_args
+					span:       convert_span(pattern.span)
+				}, subject_type
+			}
+
 			raw_payload_types := subject_type.variants[variant_name] or { []Type{} }
 			// Substitute type parameters with concrete type arguments
 			mut subs := map[string]Type{}
@@ -2662,8 +2691,23 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			qualified_name := '${subject_type.name}.${variant_name}'
 			doc := c.env.lookup_doc(qualified_name)
 			c.record_type(qualified_name, subject_type, pattern.identifier.span, doc)
+
+			mut typed_args := []typed_ast.Expression{}
+			for arg in pattern.arguments {
+				typed_arg, _ := c.check_expr(arg)
+				typed_args << typed_arg
+			}
+
+			return typed_ast.FunctionCallExpression{
+				identifier: convert_identifier(pattern.identifier)
+				arguments:  typed_args
+				span:       convert_span(pattern.span)
+			}, subject_type
 		}
 
+		// Not matching against an enum - error
+		c.error_at_span("Cannot use variant pattern '${variant_name}' when matching against non-enum type '${type_to_string(subject_type)}'",
+			pattern.identifier.span)
 		mut typed_args := []typed_ast.Expression{}
 		for arg in pattern.arguments {
 			typed_arg, _ := c.check_expr(arg)

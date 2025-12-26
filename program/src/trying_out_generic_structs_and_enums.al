@@ -13,6 +13,14 @@ enum Option(t) {
 	None
 }
 
+enum Option2(t) {
+	/**
+	 * Another generic enum representing an optional value.
+	 */
+	Some2(t)
+	None2
+}
+
 user Option = Some('hi')
 
 result = match user {
