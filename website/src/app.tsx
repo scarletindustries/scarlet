@@ -196,8 +196,8 @@ fn ignore_second(pair) {
       description:
         "Match on enum variants and bind payload values. Match literal payloads for specific cases.",
       code: `enum Result {
-    Ok(String),
-    Err(String),
+    Ok(String)
+    Err(String)
 }
 
 fn handle(r Result) String {
@@ -220,13 +220,13 @@ handle(Err('oops'))    // 'error: oops'`,
       description:
         "Define data structures with named fields. Access fields with dot notation.",
       code: `struct Person {
-    name String,
-    age Int,
+    name String
+    age Int
 }
 
 struct Point {
-    x Int,
-    y Int,
+    x Int
+    y Int
 }
 
 // Create instances
@@ -238,29 +238,83 @@ println(person.name)  // alice
 println(person.age)   // 30`,
     },
     {
+      title: "Generic structs",
+      description:
+        "Structs can have type parameters. Type arguments are inferred from field values.",
+      code: `struct Box(t) {
+    value t
+}
+
+struct Pair(a, b) {
+    first a
+    second b
+}
+
+// Type args inferred from values
+int_box = Box{ value: 42 }
+pair = Pair{ first: 'hello', second: 123 }
+
+// Or specify explicitly
+Box(String){ value: 'world' }`,
+    },
+    {
       title: "Enums",
       description:
         "Model variants with enums. Variants can carry payloads of any type.",
       code: `enum Status {
-    Active,
-    Inactive,
-    Banned(String),
+    Active
+    Inactive
+    Banned(String)
 }
 
 enum Option {
-    Some(Int),
-    None,
-}
-
-enum Result {
-    Ok(String),
-    Err(String),
+    Some(Int)
+    Empty
 }
 
 // Create enum values
 status = Status.Active
 banned = Status.Banned('spam')
-some_value = Option.Some(42)`,
+some_value = Some(42)  // Short form`,
+    },
+    {
+      title: "Generic enums",
+      description:
+        "Enums can have type parameters for flexible data modeling.",
+      code: `enum Maybe(t) {
+    Just(t)
+    Nothing
+}
+
+enum Result(ok, err) {
+    Ok(ok)
+    Err(err)
+}
+
+// Type inferred from usage
+x Maybe = Just(42)
+y Maybe = Nothing
+
+result Result = Ok('success')`,
+    },
+    {
+      title: "Tuples",
+      description:
+        "Fixed-size collections of mixed types. Access elements by index.",
+      code: `// Create tuples
+pair = (1, 'hello')
+triple = (true, 42, 'world')
+
+// Access by index
+first = pair.0   // 1
+second = pair.1  // 'hello'
+
+// In function returns
+fn divide(a Int, b Int) (Int, Int) {
+    (a / b, a % b)
+}
+
+quotient, remainder = divide(10, 3)`,
     },
     {
       title: "Arrays",
@@ -333,7 +387,7 @@ result = find_user(0) or missing -> {
       description:
         "Functions that can fail use ! with an error type. Handle errors with 'or', optionally binding the error.",
       code: `struct DivisionError {
-    message String,
+    message String
 }
 
 fn divide(a Int, b Int) Int!DivisionError {
@@ -479,8 +533,8 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         </p>
         <pre className="text-sm p-4 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 mb-4 overflow-auto">
           {`struct Person {
-    name String,
-    age Int,
+    name String
+    age Int
 }
 
 fn greet(p Person) String {
