@@ -136,8 +136,8 @@ fn (mut s LspServer) handle_message(content string) {
 		'initialize' {
 			s.handle_initialize(id)
 		}
-		'initialized' {
-			// Notification, no response needed
+		'initialized', '$/setTrace', '$/cancelRequest' {
+			// Notifications, no response needed
 		}
 		'shutdown' {
 			s.handle_shutdown(id)

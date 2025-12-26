@@ -54,6 +54,7 @@ pub:
 	is_option    bool
 	is_function  bool
 	identifier   Identifier
+	type_args    []TypeIdentifier
 	element_type ?&TypeIdentifier
 	param_types  []TypeIdentifier
 	return_type  ?&TypeIdentifier
@@ -129,10 +130,11 @@ pub:
 
 pub struct StructDeclaration {
 pub:
-	doc        ?string
-	identifier Identifier
-	fields     []StructField
-	span       Span @[required]
+	doc         ?string
+	identifier  Identifier
+	type_params []Identifier
+	fields      []StructField
+	span        Span @[required]
 }
 
 pub struct EnumVariant {
@@ -144,10 +146,11 @@ pub:
 
 pub struct EnumDeclaration {
 pub:
-	doc        ?string
-	identifier Identifier
-	variants   []EnumVariant
-	span       Span @[required]
+	doc         ?string
+	identifier  Identifier
+	type_params []Identifier
+	variants    []EnumVariant
+	span        Span @[required]
 }
 
 pub struct ImportSpecifier {
@@ -270,6 +273,7 @@ pub:
 pub struct StructInitExpression {
 pub:
 	identifier Identifier
+	type_args  []TypeIdentifier
 	fields     []StructInitField
 	span       Span @[required]
 }

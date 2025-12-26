@@ -225,6 +225,16 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 		ast.StructDeclaration {
 			f.emit('struct ')
 			f.emit(stmt.identifier.name)
+			if stmt.type_params.len > 0 {
+				f.emit('(')
+				for i, tp in stmt.type_params {
+					if i > 0 {
+						f.emit(', ')
+					}
+					f.emit(tp.name)
+				}
+				f.emit(')')
+			}
 			f.emit(' {\n')
 			f.indent++
 			for field in stmt.fields {
@@ -246,6 +256,16 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 		ast.EnumDeclaration {
 			f.emit('enum ')
 			f.emit(stmt.identifier.name)
+			if stmt.type_params.len > 0 {
+				f.emit('(')
+				for i, tp in stmt.type_params {
+					if i > 0 {
+						f.emit(', ')
+					}
+					f.emit(tp.name)
+				}
+				f.emit(')')
+			}
 			f.emit(' {\n')
 			f.indent++
 			for variant in stmt.variants {
@@ -322,7 +342,7 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 		}
 		ast.BinaryExpression {
 			f.format_expr(expr.left)
-			f.emit(' ${op_to_string(expr.op.kind)} ')
+			f.emit(' ${expr.op.kind.str()} ')
 			f.format_expr(expr.right)
 		}
 		ast.UnaryExpression {
@@ -441,6 +461,16 @@ fn (mut f Formatter) format_expr(expr ast.Expression) {
 		}
 		ast.StructInitExpression {
 			f.emit(expr.identifier.name)
+			if expr.type_args.len > 0 {
+				f.emit('(')
+				for i, ta in expr.type_args {
+					if i > 0 {
+						f.emit(', ')
+					}
+					f.format_type(ta)
+				}
+				f.emit(')')
+			}
 			f.emit('{')
 
 			if expr.fields.len <= 2 && f.is_short_struct_init(expr) {
@@ -564,6 +594,16 @@ fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
 		}
 	} else {
 		f.emit(typ.identifier.name)
+		if typ.type_args.len > 0 {
+			f.emit('(')
+			for i, ta in typ.type_args {
+				if i > 0 {
+					f.emit(', ')
+				}
+				f.format_type(ta)
+			}
+			f.emit(')')
+		}
 	}
 	if err := typ.error_type {
 		f.emit('!')
@@ -711,25 +751,6 @@ fn (f Formatter) format_expr_to_string(expr ast.Expression) string {
 	}
 	temp.format_expr(expr)
 	return temp.output.str()
-}
-
-fn op_to_string(kind token.Kind) string {
-	return match kind {
-		.punc_plus { '+' }
-		.punc_minus { '-' }
-		.punc_mul { '*' }
-		.punc_div { '/' }
-		.punc_mod { '%' }
-		.punc_equals_comparator { '==' }
-		.punc_not_equal { '!=' }
-		.punc_gt { '>' }
-		.punc_lt { '<' }
-		.punc_gte { '>=' }
-		.punc_lte { '<=' }
-		.logical_and { '&&' }
-		.logical_or { '||' }
-		else { '?' }
-	}
 }
 
 fn escape_string(s string) string {

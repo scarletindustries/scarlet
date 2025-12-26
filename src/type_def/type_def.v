@@ -42,16 +42,20 @@ pub:
 
 pub struct TypeStruct {
 pub:
-	id     int
-	name   string
-	fields map[string]Type
+	id          int
+	name        string
+	type_params []string
+	type_args   []Type
+	fields      map[string]Type
 }
 
 pub struct TypeEnum {
 pub:
-	id       int
-	name     string
-	variants map[string][]Type
+	id          int
+	name        string
+	type_params []string
+	type_args   []Type
+	variants    map[string][]Type
 }
 
 pub struct TypeNone {}
@@ -238,9 +242,23 @@ pub fn type_to_string(t Type) string {
 			return result
 		}
 		TypeStruct {
+			if t.type_args.len > 0 {
+				mut args := []string{}
+				for arg in t.type_args {
+					args << type_to_string(arg)
+				}
+				return '${t.name}(${args.join(', ')})'
+			}
 			return t.name
 		}
 		TypeEnum {
+			if t.type_args.len > 0 {
+				mut args := []string{}
+				for arg in t.type_args {
+					args << type_to_string(arg)
+				}
+				return '${t.name}(${args.join(', ')})'
+			}
 			return t.name
 		}
 		TypeNone {
@@ -308,6 +326,44 @@ pub fn substitute(t Type, subs map[string]Type) Type {
 				new_elements << substitute(elem, subs)
 			}
 			return t_tuple(new_elements)
+		}
+		TypeStruct {
+			mut new_fields := map[string]Type{}
+			for name, field_type in t.fields {
+				new_fields[name] = substitute(field_type, subs)
+			}
+			mut new_type_args := []Type{}
+			for arg in t.type_args {
+				new_type_args << substitute(arg, subs)
+			}
+			return TypeStruct{
+				id:          t.id
+				name:        t.name
+				type_params: t.type_params
+				type_args:   new_type_args
+				fields:      new_fields
+			}
+		}
+		TypeEnum {
+			mut new_variants := map[string][]Type{}
+			for name, variant_types in t.variants {
+				mut new_types := []Type{}
+				for vt in variant_types {
+					new_types << substitute(vt, subs)
+				}
+				new_variants[name] = new_types
+			}
+			mut new_type_args := []Type{}
+			for arg in t.type_args {
+				new_type_args << substitute(arg, subs)
+			}
+			return TypeEnum{
+				id:          t.id
+				name:        t.name
+				type_params: t.type_params
+				type_args:   new_type_args
+				variants:    new_variants
+			}
 		}
 		else {
 			return t

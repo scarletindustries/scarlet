@@ -123,6 +123,18 @@ fn (mut c TypeChecker) record_type(name string, typ Type, s Span, doc ?string) {
 	}
 }
 
+fn (mut c TypeChecker) record_type_annotation(annot ast.TypeIdentifier, typ Type) {
+	type_name := annot.identifier.name
+	doc := c.env.lookup_doc(type_name)
+	c.record_type(type_name, typ, annot.identifier.span, doc)
+
+	for ta in annot.type_args {
+		if resolved := c.resolve_type_identifier(ta) {
+			c.record_type_annotation(ta, resolved)
+		}
+	}
+}
+
 fn type_var_name_from_index(id int) string {
 	mut result := ''
 	mut n := id
@@ -327,6 +339,56 @@ fn (mut c TypeChecker) unify_arm_types(a Type, b Type, s Span) Type {
 	return a
 }
 
+fn (mut c TypeChecker) infer_type_args(expected Type, actual Type, mut subs map[string]Type, s Span) {
+	match expected {
+		TypeVar {
+			if existing := subs[expected.name] {
+				if !types_equal(existing, actual) {
+					c.error_at_span("Conflicting types for type parameter '${expected.name}': expected '${type_to_string(existing)}', got '${type_to_string(actual)}'",
+						s)
+				}
+			} else {
+				subs[expected.name] = actual
+			}
+		}
+		TypeArray {
+			if actual is TypeArray {
+				c.infer_type_args(expected.element, actual.element, mut subs, s)
+			}
+		}
+		TypeOption {
+			if actual is TypeOption {
+				c.infer_type_args(expected.inner, actual.inner, mut subs, s)
+			}
+		}
+		TypeTuple {
+			if actual is TypeTuple {
+				if expected.elements.len == actual.elements.len {
+					for i, exp_elem in expected.elements {
+						c.infer_type_args(exp_elem, actual.elements[i], mut subs, s)
+					}
+				}
+			}
+		}
+		TypeResult {
+			if actual is TypeResult {
+				c.infer_type_args(expected.success, actual.success, mut subs, s)
+				c.infer_type_args(expected.error, actual.error, mut subs, s)
+			}
+		}
+		TypeStruct {
+			if actual is TypeStruct {
+				for field_name, field_type in expected.fields {
+					if actual_field := actual.fields[field_name] {
+						c.infer_type_args(field_type, actual_field, mut subs, s)
+					}
+				}
+			}
+		}
+		else {}
+	}
+}
+
 fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 	if t.is_function {
 		mut param_types := []Type{}
@@ -376,6 +438,16 @@ fn (c TypeChecker) resolve_type_identifier(t ast.TypeIdentifier) ?Type {
 		t_var(name)
 	} else {
 		c.env.lookup_type(name) or { return none }
+	}
+
+	if t.type_args.len > 0 {
+		mut resolved_args := []Type{}
+		for arg in t.type_args {
+			resolved_arg := c.resolve_type_identifier(arg) or { return none }
+			resolved_args << resolved_arg
+		}
+
+		base_type = instantiate_generic_type(base_type, resolved_args) or { return none }
 	}
 
 	if t.is_option {
@@ -636,6 +708,9 @@ fn convert_type_identifier(t ast.TypeIdentifier) typed_ast.TypeIdentifier {
 			name: t.identifier.name
 			span: t.identifier.span
 		}
+		type_args:    t.type_args.map(fn (ta ast.TypeIdentifier) typed_ast.TypeIdentifier {
+			return convert_type_identifier(ta)
+		})
 		element_type: convert_optional_type_identifier(t.element_type)
 		param_types:  t.param_types.map(fn (pt ast.TypeIdentifier) typed_ast.TypeIdentifier {
 			return convert_type_identifier(pt)
@@ -679,6 +754,58 @@ fn convert_span(s Span) Span {
 	return s
 }
 
+fn instantiate_generic_type(base_type Type, resolved_args []Type) ?Type {
+	match base_type {
+		TypeStruct {
+			if base_type.type_params.len != resolved_args.len {
+				return none // arity mismatch
+			}
+			mut subs := map[string]Type{}
+			for i, param in base_type.type_params {
+				subs[param] = resolved_args[i]
+			}
+			mut new_fields := map[string]Type{}
+			for field_name, field_type in base_type.fields {
+				new_fields[field_name] = substitute(field_type, subs)
+			}
+			return TypeStruct{
+				id:          base_type.id
+				name:        base_type.name
+				type_params: base_type.type_params
+				type_args:   resolved_args
+				fields:      new_fields
+			}
+		}
+		TypeEnum {
+			if base_type.type_params.len != resolved_args.len {
+				return none // arity mismatch
+			}
+			mut subs := map[string]Type{}
+			for i, param in base_type.type_params {
+				subs[param] = resolved_args[i]
+			}
+			mut new_variants := map[string][]Type{}
+			for variant_name, payload_types in base_type.variants {
+				mut new_payloads := []Type{}
+				for pt in payload_types {
+					new_payloads << substitute(pt, subs)
+				}
+				new_variants[variant_name] = new_payloads
+			}
+			return TypeEnum{
+				id:          base_type.id
+				name:        base_type.name
+				type_params: base_type.type_params
+				type_args:   resolved_args
+				variants:    new_variants
+			}
+		}
+		else {
+			return none // not a generic type
+		}
+	}
+}
+
 fn (c TypeChecker) def_loc_from_span(name string, s Span) DefinitionLocation {
 	return DefinitionLocation{
 		line:    s.start_line
@@ -694,6 +821,7 @@ fn (mut c TypeChecker) check_binding_type(name string, name_span Span, annotatio
 			init_span := typed_init.span
 			c.expect_type(init_type, expected, init_span, context)
 			c.env.define_at(name, expected, loc)
+			c.record_type_annotation(annot, expected)
 			return expected
 		} else {
 			c.error_at_span("Unknown type '${annot.identifier.name}'", annot.identifier.span)
@@ -1383,7 +1511,13 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 		variant_name := expr.identifier.name
 		payload_types := enum_type.variants[variant_name] or { []Type{} }
 
+		qualified_name := '${enum_type.name}.${variant_name}'
+		variant_doc := c.env.lookup_doc(qualified_name)
+		c.record_type(qualified_name, enum_type, expr.identifier.span, variant_doc)
+
 		mut typed_args := []typed_ast.Expression{}
+		mut subs := map[string]Type{}
+
 		if payload_types.len > 0 {
 			if expr.arguments.len != payload_types.len {
 				c.error_at_span("Enum variant '${variant_name}' expects ${payload_types.len} argument(s), got ${expr.arguments.len}",
@@ -1393,8 +1527,7 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 				typed_arg, arg_type := c.check_expr(arg)
 				typed_args << typed_arg
 				if i < payload_types.len {
-					arg_span := typed_arg.span
-					c.expect_type(arg_type, payload_types[i], arg_span, "in enum variant '${variant_name}'")
+					c.unify(arg_type, payload_types[i], mut subs)
 				}
 			}
 		} else {
@@ -1404,11 +1537,39 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 			}
 		}
 
+		mut result_enum := enum_type
+		if enum_type.type_params.len > 0 {
+			mut resolved_args := []Type{}
+			for param in enum_type.type_params {
+				if arg := subs[param] {
+					resolved_args << arg
+				} else {
+					resolved_args << t_var(param)
+				}
+			}
+
+			mut new_variants := map[string][]Type{}
+			for vname, vtypes in enum_type.variants {
+				mut new_payloads := []Type{}
+				for vt in vtypes {
+					new_payloads << substitute(vt, subs)
+				}
+				new_variants[vname] = new_payloads
+			}
+			result_enum = TypeEnum{
+				id:          enum_type.id
+				name:        enum_type.name
+				type_params: enum_type.type_params
+				type_args:   resolved_args
+				variants:    new_variants
+			}
+		}
+
 		return typed_ast.FunctionCallExpression{
 			identifier: convert_identifier(expr.identifier)
 			arguments:  typed_args
 			span:       convert_span(expr.span)
-		}, enum_type
+		}, result_enum
 	}
 
 	if suggestion := c.find_similar_name(expr.identifier.name) {
@@ -1686,6 +1847,11 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 		c.error_at_span('Struct definitions are only allowed at the top level', stmt.span)
 	}
 
+	mut type_params := []string{}
+	for tp in stmt.type_params {
+		type_params << tp.name
+	}
+
 	mut fields := map[string]Type{}
 
 	for field in stmt.fields {
@@ -1713,8 +1879,9 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 	}
 
 	struct_type := TypeStruct{
-		name:   stmt.identifier.name
-		fields: fields
+		name:        stmt.identifier.name
+		type_params: type_params
+		fields:      fields
 	}
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
@@ -1751,7 +1918,7 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 }
 
 fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_ast.Expression, Type) {
-	struct_type := if struct_def := c.env.lookup_struct(expr.identifier.name) {
+	mut struct_type := if struct_def := c.env.lookup_struct(expr.identifier.name) {
 		// Record type for struct name hover
 		doc := c.env.lookup_doc(expr.identifier.name)
 		c.record_type(expr.identifier.name, Type(struct_def), expr.identifier.span, doc)
@@ -1761,6 +1928,71 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 		TypeStruct{
 			name:   expr.identifier.name
 			fields: map[string]Type{}
+		}
+	}
+
+	if expr.type_args.len > 0 {
+		if struct_type.type_params.len != expr.type_args.len {
+			c.error_at_span("Struct '${expr.identifier.name}' expects ${struct_type.type_params.len} type argument(s), got ${expr.type_args.len}",
+				expr.identifier.span)
+		} else {
+			mut resolved_args := []Type{}
+			for arg in expr.type_args {
+				if resolved := c.resolve_type_identifier(arg) {
+					resolved_args << resolved
+				} else {
+					c.error_at_span("Unknown type '${arg.identifier.name}'", arg.identifier.span)
+					resolved_args << t_none()
+				}
+			}
+
+			mut subs := map[string]Type{}
+			for i, param in struct_type.type_params {
+				subs[param] = resolved_args[i]
+			}
+			mut new_fields := map[string]Type{}
+			for field_name, field_type in struct_type.fields {
+				new_fields[field_name] = substitute(field_type, subs)
+			}
+			struct_type = TypeStruct{
+				id:          struct_type.id
+				name:        struct_type.name
+				type_params: struct_type.type_params
+				type_args:   resolved_args
+				fields:      new_fields
+			}
+		}
+	} else if struct_type.type_params.len > 0 {
+		mut subs := map[string]Type{}
+
+		for field in expr.fields {
+			if expected_type := struct_type.fields[field.identifier.name] {
+				typed_init, actual_type := c.check_expr(field.init)
+				c.infer_type_args(expected_type, actual_type, mut subs, typed_init.span)
+			}
+		}
+
+		mut resolved_args := []Type{}
+		for param in struct_type.type_params {
+			if inferred := subs[param] {
+				resolved_args << inferred
+			} else {
+				c.error_at_span("Could not infer type parameter '${param}' for struct '${expr.identifier.name}'",
+					expr.identifier.span)
+				resolved_args << t_none()
+			}
+		}
+
+		mut new_fields := map[string]Type{}
+		for field_name, field_type in struct_type.fields {
+			new_fields[field_name] = substitute(field_type, subs)
+		}
+		struct_type = TypeStruct{
+			id:          struct_type.id
+			name:        struct_type.name
+			type_params: struct_type.type_params
+			type_args:   resolved_args
+			fields:      new_fields
 		}
 	}
 
@@ -1802,6 +2034,9 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 
 	return typed_ast.StructInitExpression{
 		identifier: convert_identifier(expr.identifier)
+		type_args:  expr.type_args.map(fn (ta ast.TypeIdentifier) typed_ast.TypeIdentifier {
+			return convert_type_identifier(ta)
+		})
 		fields:     typed_fields
 		span:       convert_span(expr.span)
 	}, struct_type
@@ -1810,6 +2045,11 @@ fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_a
 fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node, Type) {
 	if c.in_function {
 		c.error_at_span('Enum definitions are only allowed at the top level', stmt.span)
+	}
+
+	mut type_params := []string{}
+	for tp in stmt.type_params {
+		type_params << tp.name
 	}
 
 	mut variants := map[string][]Type{}
@@ -1839,8 +2079,9 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 	}
 
 	enum_type := TypeEnum{
-		name:     stmt.identifier.name
-		variants: variants
+		name:        stmt.identifier.name
+		type_params: type_params
+		variants:    variants
 	}
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
@@ -1878,7 +2119,6 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 }
 
 fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) (typed_ast.Expression, Type) {
-	// Check for qualified enum access like MyEnum.Variant or MyEnum.Variant(payload)
 	if expr.left is ast.Identifier {
 		left_id := expr.left as ast.Identifier
 		if looked_up := c.env.lookup_type(left_id.name) {
@@ -1922,6 +2162,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 
 				payload_types := enum_type.variants[variant_name] or { []Type{} }
 				mut typed_args := []typed_ast.Expression{}
+				mut subs := map[string]Type{}
 
 				if payload_types.len > 0 {
 					if args.len != payload_types.len {
@@ -1932,13 +2173,40 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 						typed_arg, arg_type := c.check_expr(arg)
 						typed_args << typed_arg
 						if i < payload_types.len {
-							c.expect_type(arg_type, payload_types[i], convert_span(variant_span),
-								"in enum variant '${variant_name}'")
+							c.unify(arg_type, payload_types[i], mut subs)
 						}
 					}
 				} else if args.len > 0 {
 					c.error_at_span("Enum variant '${variant_name}' takes no arguments",
 						variant_span)
+				}
+
+				mut result_enum := enum_type
+				if enum_type.type_params.len > 0 {
+					mut resolved_args := []Type{}
+					for param in enum_type.type_params {
+						if arg := subs[param] {
+							resolved_args << arg
+						} else {
+							resolved_args << t_var(param)
+						}
+					}
+
+					mut new_variants := map[string][]Type{}
+					for vname, vtypes in enum_type.variants {
+						mut new_payloads := []Type{}
+						for vt in vtypes {
+							new_payloads << substitute(vt, subs)
+						}
+						new_variants[vname] = new_payloads
+					}
+					result_enum = TypeEnum{
+						id:          enum_type.id
+						name:        enum_type.name
+						type_params: enum_type.type_params
+						type_args:   resolved_args
+						variants:    new_variants
+					}
 				}
 
 				typed_right := if args.len > 0 || payload_types.len > 0 {
@@ -1961,7 +2229,7 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 					left:  typed_left
 					right: typed_right
 					span:  convert_span(expr.span)
-				}, Type(enum_type)
+				}, Type(result_enum)
 			}
 		}
 	}
@@ -2316,8 +2584,13 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			for i, arg in pattern.arguments {
 				if arg is ast.Identifier && i < payload_types.len {
 					c.env.define(arg.name, payload_types[i])
+					c.record_type(arg.name, payload_types[i], arg.span, none)
 				}
 			}
+			// Record variant for go-to-definition and hover using qualified name
+			qualified_name := '${subject_type.name}.${variant_name}'
+			doc := c.env.lookup_doc(qualified_name)
+			c.record_type(qualified_name, subject_type, pattern.identifier.span, doc)
 		}
 
 		mut typed_args := []typed_ast.Expression{}
@@ -2331,6 +2604,20 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			arguments:  typed_args
 			span:       convert_span(pattern.span)
 		}, subject_type
+	}
+
+	if pattern is ast.Identifier {
+		if subject_type is TypeEnum {
+			if pattern.name in subject_type.variants {
+				qualified_name := '${subject_type.name}.${pattern.name}'
+				doc := c.env.lookup_doc(qualified_name)
+				c.record_type(qualified_name, subject_type, pattern.span, doc)
+				return typed_ast.Identifier{
+					name: pattern.name
+					span: convert_span(pattern.span)
+				}, subject_type
+			}
+		}
 	}
 
 	if pattern is ast.RangeExpression {

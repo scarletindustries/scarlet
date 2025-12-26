@@ -9,8 +9,8 @@ fn fib(n Int) Int {
 }
 
 struct FibResult {
-	n Int,
-	fib Int,
+	n Int
+	fib Int
 }
 
 // Get some fibonacci numbers

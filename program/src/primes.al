@@ -19,8 +19,8 @@ fn is_prime(n Int) Bool {
 }
 
 struct PrimeCheck {
-	n Int,
-	is_prime Bool,
+	n Int
+	is_prime Bool
 }
 
 // Check some numbers

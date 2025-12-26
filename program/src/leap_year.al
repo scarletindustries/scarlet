@@ -16,10 +16,10 @@ fn days_in_february(year Int) Int {
 }
 
 struct YearInfo {
-	year Int,
-	is_leap Bool,
-	days Int,
-	feb_days Int,
+	year Int
+	is_leap Bool
+	days Int
+	feb_days Int
 }
 
 fn analyze_year(year Int) YearInfo {

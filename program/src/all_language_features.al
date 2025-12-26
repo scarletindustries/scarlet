@@ -1,31 +1,31 @@
 struct User {
-	id Int,
-	name String,
+	id Int
+	name String
 }
 
 struct DivisionError {
-	message String,
+	message String
 }
 
 struct Error {
-	message String,
+	message String
 }
 
 struct ValidationError {
-	code Int,
+	code Int
 }
 
 struct NetworkError {
-	status Int,
+	status Int
 }
 
 struct Person {
-	name String,
-	age Int,
+	name String
+	age Int
 }
 
 struct Config {
-	debug Bool,
+	debug Bool
 }
 
 enum Result {
@@ -36,6 +36,29 @@ enum Result {
 enum Option {
 	Some(Int)
 	None
+}
+
+// ============================================================================
+// Generic Structs and Enums
+// ============================================================================
+
+enum GenericResult(t, e) {
+	Success(t)
+	Failure(e)
+}
+
+enum Maybe(t) {
+	Just(t)
+	Nothing
+}
+
+struct Pair(a, b) {
+	first a
+	second b
+}
+
+struct Box(t) {
+	value t
 }
 
 const app_name = 'my app'
@@ -295,3 +318,49 @@ result = match test_pair {
 	else -> 'other',
 }
 println(result)
+
+// ============================================================================
+// Generic Types Usage
+// ============================================================================
+
+// Generic struct with explicit type args
+int_pair = Pair(Int, Int){ first: 1, second: 2 }
+mixed_pair = Pair(String, Int){ first: 'age', second: 30 }
+
+println('int_pair.first: ${int_pair.first}')
+println('mixed_pair: ${mixed_pair.first} = ${mixed_pair.second}')
+
+fn safe_divide(a, b) GenericResult(Int, String) {
+	if b == 0 {
+		Failure('division by zero')
+	} else {
+		Bool = a == 0
+		Success(a / b)
+	}
+}
+
+fn unwrap_generic_result(r GenericResult(Int, String), default Int) Int {
+	match r {
+		Success(v) -> v,
+		Failure(_) -> default,
+	}
+}
+
+div_ok = safe_divide(10, 2)
+div_err = safe_divide(10, 0)
+println('10/2 = ${unwrap_generic_result(div_ok, -1)}')
+println('10/0 = ${unwrap_generic_result(div_err, -1)}')
+
+// Generic box
+boxed_int = Box(Int){ value: 42 }
+boxed_str = Box(String){ value: 'hello' }
+println('boxed int: ${boxed_int.value}')
+println('boxed str: ${boxed_str.value}')
+
+// Function returning generic struct
+fn make_int_str_pair(x Int, y String) Pair(Int, String) {
+	Pair(Int, String){ first: x, second: y }
+}
+
+auto_pair = make_int_str_pair(100, 'hundred')
+println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')

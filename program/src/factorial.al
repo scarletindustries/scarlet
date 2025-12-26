@@ -10,8 +10,8 @@ fn factorial(n Int) Int {
 
 // Calculate some factorials
 struct FactResult {
-	n Int,
-	factorial Int,
+	n Int
+	factorial Int
 }
 
 [FactResult{

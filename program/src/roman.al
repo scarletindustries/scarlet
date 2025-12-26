@@ -27,8 +27,8 @@ fn to_roman(n Int) String {
 }
 
 struct RomanNumber {
-	arabic Int,
-	roman String,
+	arabic Int
+	roman String
 }
 
 fn convert(n Int) RomanNumber {

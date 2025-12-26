@@ -19,10 +19,10 @@ fn classify_triangle(a Int, b Int, c Int) String {
 fn perimeter(a Int, b Int, c Int) Int { a + b + c }
 
 struct TriangleInfo {
-	sides String,
-	triangle_type String,
-	perimeter Int,
-	valid Bool,
+	sides String
+	triangle_type String
+	perimeter Int
+	valid Bool
 }
 
 fn analyze_triangle(a Int, b Int, c Int) TriangleInfo {

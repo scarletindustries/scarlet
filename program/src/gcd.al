@@ -14,10 +14,10 @@ fn lcm(a Int, b Int) Int {
 
 // Test with some numbers
 struct GcdResult {
-	a Int,
-	b Int,
-	gcd Int,
-	lcm Int,
+	a Int
+	b Int
+	gcd Int
+	lcm Int
 }
 
 fn compute(a Int, b Int) GcdResult {

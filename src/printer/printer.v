@@ -45,7 +45,18 @@ fn print_statement(stmt ast.Statement, level int) string {
 				stmt.error_type)
 		}
 		ast.StructDeclaration {
-			mut s := 'struct ${stmt.identifier.name} {\n'
+			mut s := 'struct ${stmt.identifier.name}'
+			if stmt.type_params.len > 0 {
+				s += '('
+				for i, tp in stmt.type_params {
+					if i > 0 {
+						s += ', '
+					}
+					s += tp.name
+				}
+				s += ')'
+			}
+			s += ' {\n'
 			for field in stmt.fields {
 				s += '${indent(level + 1)}${field.identifier.name} ${print_expression(field.typ,
 					level + 1)}'
@@ -58,7 +69,18 @@ fn print_statement(stmt ast.Statement, level int) string {
 			s
 		}
 		ast.EnumDeclaration {
-			mut s := 'enum ${stmt.identifier.name} {\n'
+			mut s := 'enum ${stmt.identifier.name}'
+			if stmt.type_params.len > 0 {
+				s += '('
+				for i, tp in stmt.type_params {
+					if i > 0 {
+						s += ', '
+					}
+					s += tp.name
+				}
+				s += ')'
+			}
+			s += ' {\n'
 			for variant in stmt.variants {
 				s += '${indent(level + 1)}${variant.identifier.name}'
 				if variant.payload.len > 0 {
@@ -158,26 +180,20 @@ fn print_expression(expr ast.Expression, level int) string {
 				s += '[]'
 			}
 			s += expr.identifier.name
+			if expr.type_args.len > 0 {
+				s += '('
+				for i, ta in expr.type_args {
+					if i > 0 {
+						s += ', '
+					}
+					s += print_expression(ta, level)
+				}
+				s += ')'
+			}
 			s
 		}
 		ast.BinaryExpression {
-			op := match expr.op.kind {
-				.punc_plus { '+' }
-				.punc_minus { '-' }
-				.punc_mul { '*' }
-				.punc_div { '/' }
-				.punc_mod { '%' }
-				.punc_equals_comparator { '==' }
-				.punc_not_equal { '!=' }
-				.punc_gt { '>' }
-				.punc_lt { '<' }
-				.punc_gte { '>=' }
-				.punc_lte { '<=' }
-				.logical_and { '&&' }
-				.logical_or { '||' }
-				else { '?' }
-			}
-			'${print_expression(expr.left, level)} ${op} ${print_expression(expr.right,
+			'${print_expression(expr.left, level)} ${expr.op.kind.str()} ${print_expression(expr.right,
 				level)}'
 		}
 		ast.UnaryExpression {
@@ -297,7 +313,18 @@ fn print_expression(expr ast.Expression, level int) string {
 			'${print_expression(expr.start, level)}..${print_expression(expr.end, level)}'
 		}
 		ast.StructInitExpression {
-			mut s := '${expr.identifier.name}{\n'
+			mut s := '${expr.identifier.name}'
+			if expr.type_args.len > 0 {
+				s += '('
+				for i, ta in expr.type_args {
+					if i > 0 {
+						s += ', '
+					}
+					s += print_expression(ta, level)
+				}
+				s += ')'
+			}
+			s += '{\n'
 			for field in expr.fields {
 				s += '${indent(level + 1)}${field.identifier.name}: ${print_expression(field.init,
 					level + 1)},\n'

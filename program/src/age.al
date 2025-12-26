@@ -23,17 +23,17 @@ fn years_until(current Int, target Int) Int {
 }
 
 struct Person {
-	name String,
-	age Int,
+	name String
+	age Int
 }
 
 struct AgeReport {
-	name String,
-	age Int,
-	stage String,
-	can_vote Bool,
-	can_drive Bool,
-	years_to_retire Int,
+	name String
+	age Int
+	stage String
+	can_vote Bool
+	can_drive Bool
+	years_to_retire Int
 }
 
 fn analyze_person(person Person) AgeReport {

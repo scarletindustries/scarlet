@@ -661,6 +661,21 @@ fn (mut p Parser) parse_identifier_or_call() !ast.Expression {
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
 	if p.current_token.kind == .punc_open_paren {
+		// Could be function call or struct init with type args like Box(Int){ ... }
+		// Save position and try to parse as type args first
+		saved_index := p.index
+		saved_token := p.current_token
+
+		if type_args := p.try_parse_type_args() {
+			// If next token is {, it's struct init with type args
+			if p.current_token.kind == .punc_open_brace {
+				return p.parse_struct_init_with_type_args(name, span, type_args)!
+			}
+		}
+
+		// Restore position and parse as function call
+		p.index = saved_index
+		p.current_token = saved_token
 		return p.parse_function_call_expression(name, span)!
 	}
 
@@ -1144,6 +1159,19 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected type name')!
 
+	mut type_args := []ast.TypeIdentifier{}
+	if p.current_token.kind == .punc_open_paren {
+		p.eat(.punc_open_paren)!
+		for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
+			arg := p.parse_type_identifier()!
+			type_args << arg
+			if p.current_token.kind == .punc_comma {
+				p.eat(.punc_comma)!
+			}
+		}
+		p.eat(.punc_close_paren)!
+	}
+
 	return ast.TypeIdentifier{
 		is_option:  is_option
 		is_array:   false
@@ -1151,7 +1179,8 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 			name: name
 			span: span
 		}
-		span:       span
+		type_args:  type_args
+		span:       p.span_from(span)
 	}
 }
 
@@ -1202,6 +1231,34 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 	}
 }
 
+fn (mut p Parser) parse_type_params() ![]ast.Identifier {
+	mut params := []ast.Identifier{}
+
+	if p.current_token.kind != .punc_open_paren {
+		return params
+	}
+
+	p.eat(.punc_open_paren)!
+
+	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
+		param_span := p.current_span()
+		param_name := p.eat_token_literal(.identifier, 'Expected type parameter name')!
+
+		params << ast.Identifier{
+			name: param_name
+			span: param_span
+		}
+
+		if p.current_token.kind == .punc_comma {
+			p.eat(.punc_comma)!
+		}
+	}
+
+	p.eat(.punc_close_paren)!
+
+	return params
+}
+
 fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 	doc := p.extract_doc_comment()
 
@@ -1210,6 +1267,8 @@ fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 
 	id_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected struct name')!
+
+	type_params := p.parse_type_params()!
 
 	p.eat(.punc_open_brace)!
 	p.push_context(.struct_def)
@@ -1225,13 +1284,14 @@ fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 	p.eat(.punc_close_brace)!
 
 	return ast.StructDeclaration{
-		doc:        doc
-		identifier: ast.Identifier{
+		doc:         doc
+		identifier:  ast.Identifier{
 			name: name
 			span: id_span
 		}
-		fields:     fields
-		span:       p.span_from(struct_span)
+		type_params: type_params
+		fields:      fields
+		span:        p.span_from(struct_span)
 	}
 }
 
@@ -1275,6 +1335,8 @@ fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 	id_span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected enum name')!
 
+	type_params := p.parse_type_params()!
+
 	p.eat(.punc_open_brace)!
 	p.push_context(.enum_def)
 
@@ -1289,13 +1351,14 @@ fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumDeclaration{
-		doc:        doc
-		identifier: ast.Identifier{
+		doc:         doc
+		identifier:  ast.Identifier{
 			name: name
 			span: id_span
 		}
-		variants:   variants
-		span:       p.span_from(enum_span)
+		type_params: type_params
+		variants:    variants
+		span:        p.span_from(enum_span)
 	}
 }
 
@@ -1368,6 +1431,68 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 			name: name
 			span: name_span
 		}
+		fields:     fields
+		span:       p.span_from(name_span)
+	}
+}
+
+// Try to parse type args like (Int, String). Returns none if not valid type args.
+fn (mut p Parser) try_parse_type_args() ?[]ast.TypeIdentifier {
+	if p.current_token.kind != .punc_open_paren {
+		return none
+	}
+	p.eat(.punc_open_paren) or { return none }
+
+	mut type_args := []ast.TypeIdentifier{}
+	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
+		// Type args should be type identifiers (uppercase or type syntax)
+		if !p.is_type_start() {
+			return none
+		}
+		type_arg := p.parse_type_identifier() or { return none }
+		type_args << type_arg
+		if p.current_token.kind == .punc_comma {
+			p.eat(.punc_comma) or { return none }
+		}
+	}
+	p.eat(.punc_close_paren) or { return none }
+	return type_args
+}
+
+fn (mut p Parser) parse_struct_init_with_type_args(name string, name_span sp.Span, type_args []ast.TypeIdentifier) !ast.Expression {
+	p.eat(.punc_open_brace)!
+	p.push_context(.struct_init)
+
+	mut fields := []ast.StructInitField{}
+
+	for p.current_token.kind != .punc_close_brace && p.current_token.kind != .eof {
+		field_span := p.current_span()
+		field_name := p.eat_token_literal(.identifier, 'Expected field name')!
+		p.eat(.punc_colon)!
+		value := p.parse_expression()!
+
+		fields << ast.StructInitField{
+			identifier: ast.Identifier{
+				name: field_name
+				span: field_span
+			}
+			init:       value
+		}
+
+		if p.current_token.kind == .punc_comma {
+			p.eat(.punc_comma)!
+		}
+	}
+
+	p.pop_context()
+	p.eat(.punc_close_brace)!
+
+	return ast.StructInitExpression{
+		identifier: ast.Identifier{
+			name: name
+			span: name_span
+		}
+		type_args:  type_args
 		fields:     fields
 		span:       p.span_from(name_span)
 	}

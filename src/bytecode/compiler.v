@@ -522,6 +522,24 @@ fn (mut c Compiler) compile_expr(expr typed_ast.Expression) ! {
 				} else {
 					c.emit_arg(.call, expr.arguments.len)
 				}
+			} else if enum_type := c.type_env.lookup_enum_by_variant(expr.identifier.name) {
+				// Unqualified enum variant constructor: Ok(x), Err(e), Some(v), etc.
+				variant_name := expr.identifier.name
+				payload_types := enum_type.variants[variant_name] or { []type_def.Type{} }
+
+				c.emit_arg(.push_const, c.add_constant(enum_type.id))
+				c.emit_arg(.push_const, c.add_constant(enum_type.name))
+				c.emit_arg(.push_const, c.add_constant(variant_name))
+
+				for arg in expr.arguments {
+					c.compile_expr(arg)!
+				}
+
+				if payload_types.len > 0 {
+					c.emit_arg(.make_enum_payload, payload_types.len)
+				} else {
+					c.emit(.make_enum)
+				}
 			} else {
 				c.compile_builtin_call(expr)!
 			}

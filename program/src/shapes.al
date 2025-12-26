@@ -14,9 +14,9 @@ fn square_area(side Int) Int { side * side }
 fn square_perimeter(side Int) Int { 4 * side }
 
 struct ShapeInfo {
-	name String,
-	area Int,
-	perimeter Int,
+	name String
+	area Int
+	perimeter Int
 }
 
 // Compute areas for different shapes

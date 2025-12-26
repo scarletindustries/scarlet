@@ -9,9 +9,9 @@ fn celsius_to_kelvin(c Int) Int { c + 273 }
 fn kelvin_to_celsius(k Int) Int { k - 273 }
 
 struct Temperature {
-	celsius Int,
-	fahrenheit Int,
-	kelvin Int,
+	celsius Int
+	fahrenheit Int
+	kelvin Int
 }
 
 fn from_celsius(c Int) Temperature {

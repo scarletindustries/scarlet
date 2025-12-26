@@ -8,9 +8,9 @@ fn power(base Int, exp Int) Int {
 }
 
 struct PowerResult {
-	base Int,
-	exp Int,
-	result Int,
+	base Int
+	exp Int
+	result Int
 }
 
 // Calculate some powers

@@ -20,8 +20,8 @@ fn collatz_length(n Int) Int {
 }
 
 struct CollatzResult {
-	start Int,
-	steps Int,
+	start Int
+	steps Int
 }
 
 // Famous starting values

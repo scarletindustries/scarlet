@@ -23,11 +23,11 @@ fn grade_points(score Int) Int {
 fn is_passing(score Int) Bool { score >= 60 }
 
 struct StudentReport {
-	name String,
-	score Int,
-	grade String,
-	passing Bool,
-	gpa Int,
+	name String
+	score Int
+	grade String
+	passing Bool
+	gpa Int
 }
 
 fn generate_report(name String, score Int) StudentReport {
