@@ -20,5 +20,7 @@ result = match user {
 	None -> 'No user found',
 }
 
+println(result)
+
 box = Box{ data: 42 }
 box.data

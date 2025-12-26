@@ -295,6 +295,10 @@ fn is_useful(m PatternMatrix, row PatternRow) bool {
 		return m.is_empty()
 	}
 
+	if row.types.len == 0 {
+		return true
+	}
+
 	first_type := row.types[0]
 	type_ctors := get_type_ctors(first_type)
 	seen_ctors := m.first_col_ctors()

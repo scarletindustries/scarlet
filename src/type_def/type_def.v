@@ -262,7 +262,7 @@ pub fn type_to_string(t Type) string {
 			return t.name
 		}
 		TypeNone {
-			return 'None'
+			return 'none'
 		}
 		TypeVar {
 			return t.name
