@@ -20,6 +20,22 @@
         {
           "name": "comment.line.double-slash.al",
           "match": "//.*$"
+        },
+        {
+          "name": "comment.block.documentation.al",
+          "begin": "/\\*\\*",
+          "end": "\\*/",
+          "patterns": [
+            {
+              "name": "keyword.other.documentation.al",
+              "match": "@(param|returns|example|throws|deprecated)\\b"
+            }
+          ]
+        },
+        {
+          "name": "comment.block.al",
+          "begin": "/\\*",
+          "end": "\\*/"
         }
       ]
     },

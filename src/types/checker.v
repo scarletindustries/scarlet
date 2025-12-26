@@ -39,6 +39,7 @@ pub:
 	def_line  int // definition location (0 if unknown)
 	def_col   int
 	def_end   int
+	doc       ?string
 }
 
 pub struct TypeChecker {
@@ -98,7 +99,7 @@ fn (mut c TypeChecker) error_at_token(message string, s Span, token_len int) {
 	}
 }
 
-fn (mut c TypeChecker) record_type(name string, typ Type, s Span) {
+fn (mut c TypeChecker) record_type(name string, typ Type, s Span, doc ?string) {
 	// Look up definition location
 	mut def_line := 0
 	mut def_col := 0
@@ -118,6 +119,7 @@ fn (mut c TypeChecker) record_type(name string, typ Type, s Span) {
 		def_line:  def_line
 		def_col:   def_col
 		def_end:   def_end
+		doc:       doc
 	}
 }
 
@@ -519,7 +521,7 @@ fn (mut c TypeChecker) check_expr(expr ast.Expression) (typed_ast.Expression, Ty
 				}
 				t_none()
 			}
-			c.record_type(expr.name, typ, expr.span)
+			c.record_type(expr.name, typ, expr.span, c.env.lookup_doc(expr.name))
 			return typed_ast.Identifier{
 				name: expr.name
 				span: expr.span
@@ -779,7 +781,10 @@ fn (mut c TypeChecker) check_variable_binding(expr ast.VariableBinding) (typed_a
 	final_type := c.check_binding_type(expr.identifier.name, expr.identifier.span, expr.typ,
 		typed_init, init_type, 'in variable binding')
 
-	c.record_type(expr.identifier.name, final_type, expr.identifier.span)
+	if doc := expr.doc {
+		c.env.store_doc(expr.identifier.name, doc)
+	}
+	c.record_type(expr.identifier.name, final_type, expr.identifier.span, expr.doc)
 
 	stmt := typed_ast.Statement(typed_ast.VariableBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -801,7 +806,10 @@ fn (mut c TypeChecker) check_const_binding(expr ast.ConstBinding) (typed_ast.Nod
 	final_type := c.check_binding_type(expr.identifier.name, expr.identifier.span, expr.typ,
 		typed_init, init_type, 'in const binding')
 
-	c.record_type(expr.identifier.name, final_type, expr.identifier.span)
+	if doc := expr.doc {
+		c.env.store_doc(expr.identifier.name, doc)
+	}
+	c.record_type(expr.identifier.name, final_type, expr.identifier.span, expr.doc)
 
 	stmt := typed_ast.Statement(typed_ast.ConstBinding{
 		identifier: convert_identifier(expr.identifier)
@@ -1060,7 +1068,7 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 	}
 
 	for i, param in expr.params {
-		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
+		c.record_type(param.identifier.name, param_types[i], param.identifier.span, none)
 	}
 
 	mut final_ret_type := if drt := declared_ret_type {
@@ -1097,7 +1105,10 @@ fn (mut c TypeChecker) check_function_declaration(expr ast.FunctionDeclaration) 
 
 	c.env.register_function_at(expr.identifier.name, final_func_type, loc)
 	c.env.define_at(expr.identifier.name, final_func_type, loc)
-	c.record_type(expr.identifier.name, final_func_type, expr.identifier.span)
+	if doc := expr.doc {
+		c.env.store_doc(expr.identifier.name, doc)
+	}
+	c.record_type(expr.identifier.name, final_func_type, expr.identifier.span, expr.doc)
 
 	mut typed_params := []typed_ast.FunctionParameter{}
 	for p in expr.params {
@@ -1193,7 +1204,7 @@ fn (mut c TypeChecker) check_function_expression(expr ast.FunctionExpression) (t
 	}
 
 	for i, param in expr.params {
-		c.record_type(param.identifier.name, param_types[i], param.identifier.span)
+		c.record_type(param.identifier.name, param_types[i], param.identifier.span, none)
 	}
 
 	mut final_ret_type := if drt := declared_ret_type {
@@ -1330,14 +1341,15 @@ fn (mut c TypeChecker) check_tuple_destructuring(expr ast.TupleDestructuringBind
 }
 
 fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Expression, Type) {
+	doc := c.env.lookup_doc(expr.identifier.name)
 	if func_type := c.env.lookup_function(expr.identifier.name) {
-		c.record_type(expr.identifier.name, func_type, expr.identifier.span)
+		c.record_type(expr.identifier.name, func_type, expr.identifier.span, doc)
 		return c.check_call_with_type(expr, func_type)
 	}
 
 	if var_type := c.env.lookup(expr.identifier.name) {
 		if var_type is TypeFunction {
-			c.record_type(expr.identifier.name, var_type, expr.identifier.span)
+			c.record_type(expr.identifier.name, var_type, expr.identifier.span, doc)
 			return c.check_call_with_type(expr, var_type)
 		}
 		if var_type is TypeVar {
@@ -1357,7 +1369,8 @@ fn (mut c TypeChecker) check_call(expr ast.FunctionCallExpression) (typed_ast.Ex
 			}
 
 			c.unify(var_type, inferred_func_type, mut c.param_subs)
-			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span)
+			c.record_type(expr.identifier.name, inferred_func_type, expr.identifier.span,
+				doc)
 			return typed_ast.FunctionCallExpression{
 				identifier: convert_identifier(expr.identifier)
 				arguments:  typed_args
@@ -1683,6 +1696,16 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 		}
 		if resolved := c.resolve_type_identifier(field.typ) {
 			fields[field.identifier.name] = resolved
+
+			qualified_name := '${stmt.identifier.name}.${field.identifier.name}'
+			loc := c.def_loc_from_span(qualified_name, field.identifier.span)
+			c.env.definitions[qualified_name] = loc
+
+			c.record_type(qualified_name, resolved, field.identifier.span, field.doc)
+
+			if doc := field.doc {
+				c.env.store_doc(qualified_name, doc)
+			}
 		} else {
 			c.error_at_span("Unknown type '${field.typ.identifier.name}' for field '${field.identifier.name}'",
 				field.identifier.span)
@@ -1695,7 +1718,14 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 	}
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
-	c.env.register_struct_at(struct_type, loc)
+	registered_struct := c.env.register_struct_at(struct_type, loc)
+
+	if doc := stmt.doc {
+		c.env.store_doc(stmt.identifier.name, doc)
+	}
+
+	c.record_type(stmt.identifier.name, Type(registered_struct), stmt.identifier.span,
+		stmt.doc)
 
 	mut typed_fields := []typed_ast.StructField{}
 	for f in stmt.fields {
@@ -1722,6 +1752,9 @@ fn (mut c TypeChecker) check_struct_decl(stmt ast.StructDeclaration) (typed_ast.
 
 fn (mut c TypeChecker) check_struct_init(expr ast.StructInitExpression) (typed_ast.Expression, Type) {
 	struct_type := if struct_def := c.env.lookup_struct(expr.identifier.name) {
+		// Record type for struct name hover
+		doc := c.env.lookup_doc(expr.identifier.name)
+		c.record_type(expr.identifier.name, Type(struct_def), expr.identifier.span, doc)
 		struct_def
 	} else {
 		c.error_at_span("Unknown struct '${expr.identifier.name}'", expr.identifier.span)
@@ -1797,6 +1830,11 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 					variant.identifier.span)
 			}
 		}
+
+		if doc := variant.doc {
+			c.env.store_doc('${stmt.identifier.name}.${variant.identifier.name}', doc)
+		}
+
 		variants[variant.identifier.name] = payload_types
 	}
 
@@ -1806,7 +1844,22 @@ fn (mut c TypeChecker) check_enum_decl(stmt ast.EnumDeclaration) (typed_ast.Node
 	}
 
 	loc := c.def_loc_from_span(stmt.identifier.name, stmt.identifier.span)
-	c.env.register_enum_at(enum_type, loc)
+	registered_enum := c.env.register_enum_at(enum_type, loc)
+
+	if doc := stmt.doc {
+		c.env.store_doc(stmt.identifier.name, doc)
+	}
+
+	c.record_type(stmt.identifier.name, Type(registered_enum), stmt.identifier.span, stmt.doc)
+
+	for variant in stmt.variants {
+		qualified_name := '${stmt.identifier.name}.${variant.identifier.name}'
+		variant_loc := c.def_loc_from_span(qualified_name, variant.identifier.span)
+		c.env.definitions[qualified_name] = variant_loc
+
+		c.record_type(qualified_name, Type(registered_enum), variant.identifier.span,
+			variant.doc)
+	}
 
 	typed_variants := stmt.variants.map(fn (v ast.EnumVariant) typed_ast.EnumVariant {
 		return typed_ast.EnumVariant{
@@ -1831,6 +1884,10 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 		if looked_up := c.env.lookup_type(left_id.name) {
 			if looked_up is TypeEnum {
 				enum_type := looked_up
+
+				enum_doc := c.env.lookup_doc(left_id.name)
+				c.record_type(left_id.name, Type(enum_type), left_id.span, enum_doc)
+
 				typed_left := typed_ast.Identifier{
 					name: left_id.name
 					span: convert_span(left_id.span)
@@ -1858,6 +1915,10 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 						span:  convert_span(expr.span)
 					}, t_none()
 				}
+
+				variant_doc := c.env.lookup_doc('${left_id.name}.${variant_name}')
+				c.record_type('${left_id.name}.${variant_name}', Type(enum_type), variant_span,
+					variant_doc)
 
 				payload_types := enum_type.variants[variant_name] or { []Type{} }
 				mut typed_args := []typed_ast.Expression{}
@@ -1972,6 +2033,9 @@ fn (mut c TypeChecker) check_property_access(expr ast.PropertyAccessExpression) 
 
 	result_type := if left_type is TypeStruct {
 		if field_type := left_type.fields[right.name] {
+			qualified_name := '${left_type.name}.${right.name}'
+			field_doc := c.env.lookup_doc(qualified_name)
+			c.record_type(qualified_name, field_type, right.span, field_doc)
 			field_type
 		} else {
 			available := left_type.fields.keys().join(', ')
@@ -2093,7 +2157,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 						for i, arg in args {
 							if arg is ast.Identifier && i < payload_types.len {
 								c.env.define(arg.name, payload_types[i])
-								c.record_type(arg.name, payload_types[i], arg.span)
+								c.record_type(arg.name, payload_types[i], arg.span, none)
 							}
 						}
 
@@ -2156,7 +2220,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 					if inner is ast.Identifier {
 						// Named spread: bind to array type
 						c.env.define(inner.name, subject_type)
-						c.record_type(inner.name, subject_type, inner.span)
+						c.record_type(inner.name, subject_type, inner.span, none)
 						typed_elements << typed_ast.SpreadExpression{
 							expression: typed_ast.Identifier{
 								name: inner.name
@@ -2182,7 +2246,7 @@ fn (mut c TypeChecker) check_pattern(pattern ast.Expression, subject_type Type) 
 			} else if elem is ast.Identifier {
 				// Named binding: bind to element type
 				c.env.define(elem.name, element_type)
-				c.record_type(elem.name, element_type, elem.span)
+				c.record_type(elem.name, element_type, elem.span, none)
 				typed_elements << typed_ast.Identifier{
 					name: elem.name
 					span: convert_span(elem.span)

@@ -2,9 +2,42 @@ module lsp
 
 import x.json2
 
+struct InitializeResult {
+	capabilities ServerCapabilities
+}
+
+struct ServerCapabilities {
+	text_document_sync   int  = 1    @[json: 'textDocumentSync']
+	hover_provider       bool = true @[json: 'hoverProvider']
+	definition_provider  bool = true @[json: 'definitionProvider']
+}
+
+struct HoverResult {
+	contents MarkupContent
+}
+
+fn clean_doc_comment(doc string) string {
+	content := doc.trim_space().trim_left('/*').trim_right('*/').trim_space()
+	
+	lines := content.split('\n')
+	mut cleaned := []string{}
+	
+	for line in lines {
+		trimmed := line.trim_left(' \t')
+		if trimmed.starts_with('* ') {
+			cleaned << trimmed[2..]
+		} else if trimmed.starts_with('*') {
+			cleaned << trimmed[1..].trim_left(' ')
+		} else {
+			cleaned << trimmed
+		}
+	}
+	
+	return cleaned.join('\n\n')
+}
+
 fn (mut s LspServer) handle_initialize(id json2.Any) {
-	result := '{"capabilities":{"textDocumentSync":1,"hoverProvider":true,"definitionProvider":true}}'
-	s.send_response(id, result)
+	s.send_response(id, InitializeResult{})
 }
 
 fn (mut s LspServer) handle_shutdown(id json2.Any) {
@@ -71,10 +104,18 @@ fn (mut s LspServer) handle_hover(id json2.Any, params json2.Any) {
 	if types := s.type_info[uri] {
 		for t in types {
 			if t.line == line && col >= t.col_start && col < t.col_end {
-				value := '${t.name}: ${t.type_str}'.replace('\\', '\\\\').replace('"',
-					'\\"').replace('\n', '\\n')
-				hover := '{"contents":{"kind":"markdown","value":"```al\\n${value}\\n```"}}'
-				s.send_response(id, hover)
+				type_sig := '${t.name}: ${t.type_str}'
+				mut value := '```al\n${type_sig}\n```'
+				if doc := t.doc {
+					clean_doc := clean_doc_comment(doc)
+					value = value + '\n\n---\n\n' + clean_doc
+				}
+				s.send_response(id, HoverResult{
+					contents: MarkupContent{
+						kind:  'markdown'
+						value: value
+					}
+				})
 				return
 			}
 		}
@@ -115,8 +156,13 @@ fn (mut s LspServer) handle_definition(id json2.Any, params json2.Any) {
 		for t in types {
 			if t.line == line && col >= t.col_start && col < t.col_end {
 				if t.def_line >= 0 && t.def_col >= 0 {
-					location := '{"uri":"${uri}","range":{"start":{"line":${t.def_line},"character":${t.def_col}},"end":{"line":${t.def_line},"character":${t.def_end}}}}'
-					s.send_response(id, location)
+					s.send_response(id, Location{
+						uri:   uri
+						range: Range{
+							start: Position{line: t.def_line, character: t.def_col}
+							end:   Position{line: t.def_line, character: t.def_end}
+						}
+					})
 					return
 				}
 			}

@@ -72,6 +72,7 @@ pub:
 
 pub struct VariableBinding {
 pub:
+	doc        ?string
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
@@ -80,6 +81,7 @@ pub:
 
 pub struct ConstBinding {
 pub:
+	doc        ?string
 	identifier Identifier
 	typ        ?TypeIdentifier
 	init       Expression
@@ -108,6 +110,7 @@ pub:
 
 pub struct FunctionDeclaration {
 pub:
+	doc         ?string
 	identifier  Identifier
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
@@ -118,6 +121,7 @@ pub:
 
 pub struct StructField {
 pub:
+	doc        ?string
 	identifier Identifier
 	typ        TypeIdentifier
 	init       ?Expression
@@ -125,6 +129,7 @@ pub:
 
 pub struct StructDeclaration {
 pub:
+	doc        ?string
 	identifier Identifier
 	fields     []StructField
 	span       Span @[required]
@@ -132,12 +137,14 @@ pub:
 
 pub struct EnumVariant {
 pub:
+	doc        ?string
 	identifier Identifier
 	payload    []TypeIdentifier
 }
 
 pub struct EnumDeclaration {
 pub:
+	doc        ?string
 	identifier Identifier
 	variants   []EnumVariant
 	span       Span @[required]

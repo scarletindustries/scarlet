@@ -125,7 +125,7 @@ fn (mut f Formatter) emit_trivia(trivia []token.Trivia) {
 			.newline {
 				consecutive_newlines++
 			}
-			.line_comment {
+			.line_comment, .block_comment, .doc_comment {
 				if consecutive_newlines > 1 {
 					for _ in 0 .. consecutive_newlines - 1 {
 						f.emit('\n')
@@ -228,6 +228,7 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 			f.emit(' {\n')
 			f.indent++
 			for field in stmt.fields {
+				f.emit_trivia_for_span(field.identifier.span)
 				f.emit_indent()
 				f.emit(field.identifier.name)
 				f.emit(' ')
@@ -236,7 +237,7 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 					f.emit(' = ')
 					f.format_expr(init)
 				}
-				f.emit(',\n')
+				f.emit('\n')
 			}
 			f.indent--
 			f.emit_indent()
@@ -248,6 +249,7 @@ fn (mut f Formatter) format_statement(stmt ast.Statement) {
 			f.emit(' {\n')
 			f.indent++
 			for variant in stmt.variants {
+				f.emit_trivia_for_span(variant.identifier.span)
 				f.emit_indent()
 				f.emit(variant.identifier.name)
 				if variant.payload.len > 0 {
@@ -668,7 +670,7 @@ fn (f Formatter) has_comment_trivia_at_span(s Span) bool {
 		key := '${s.start_line}:${s.start_column}'
 		if trivia := f.trivia_map[key] {
 			for t in trivia {
-				if t.kind == .line_comment {
+				if t.kind in [.line_comment, .block_comment, .doc_comment] {
 					return true
 				}
 			}
@@ -682,7 +684,7 @@ fn (f Formatter) has_comment_trivia_at_span_end(s Span) bool {
 		key := '${s.end_line}:${s.end_column - 1}'
 		if trivia := f.trivia_map[key] {
 			for t in trivia {
-				if t.kind == .line_comment {
+				if t.kind in [.line_comment, .block_comment, .doc_comment] {
 					return true
 				}
 			}

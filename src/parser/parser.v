@@ -925,6 +925,16 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 	}
 }
 
+fn (p Parser) extract_doc_comment() ?string {
+	for trivia in p.current_token.leading_trivia {
+		if trivia.kind == .doc_comment {
+			return trivia.text
+		}
+	}
+
+	return none
+}
+
 fn (mut p Parser) parse_function() !ast.Node {
 	// Check if next token is identifier (declaration) or paren (expression)
 	if next := p.peek_next() {
@@ -936,6 +946,8 @@ fn (mut p Parser) parse_function() !ast.Node {
 }
 
 fn (mut p Parser) parse_function_declaration() !ast.Statement {
+	doc := p.extract_doc_comment()
+
 	fn_span := p.current_span()
 	p.eat(.kw_function)!
 
@@ -947,6 +959,7 @@ fn (mut p Parser) parse_function_declaration() !ast.Statement {
 	body := p.parse_block_expression()!
 
 	return ast.FunctionDeclaration{
+		doc:         doc
 		identifier:  ast.Identifier{
 			name: name
 			span: id_span
@@ -1190,6 +1203,8 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 }
 
 fn (mut p Parser) parse_struct_declaration() !ast.Statement {
+	doc := p.extract_doc_comment()
+
 	struct_span := p.current_span()
 	p.eat(.kw_struct)!
 
@@ -1210,6 +1225,7 @@ fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 	p.eat(.punc_close_brace)!
 
 	return ast.StructDeclaration{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: id_span
@@ -1220,6 +1236,8 @@ fn (mut p Parser) parse_struct_declaration() !ast.Statement {
 }
 
 fn (mut p Parser) parse_struct_field() !ast.StructField {
+	doc := p.extract_doc_comment()
+
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected field name')!
 
@@ -1233,10 +1251,12 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 	}
 
 	if p.current_token.kind == .punc_comma {
+		p.add_warning('Trailing comma after struct field is deprecated')
 		p.eat(.punc_comma)!
 	}
 
 	return ast.StructField{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: span
@@ -1247,6 +1267,8 @@ fn (mut p Parser) parse_struct_field() !ast.StructField {
 }
 
 fn (mut p Parser) parse_enum_declaration() !ast.Statement {
+	doc := p.extract_doc_comment()
+
 	enum_span := p.current_span()
 	p.eat(.kw_enum)!
 
@@ -1267,6 +1289,7 @@ fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 	p.eat(.punc_close_brace)!
 
 	return ast.EnumDeclaration{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: id_span
@@ -1277,6 +1300,8 @@ fn (mut p Parser) parse_enum_declaration() !ast.Statement {
 }
 
 fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
+	doc := p.extract_doc_comment()
+
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected variant name')!
 
@@ -1301,6 +1326,7 @@ fn (mut p Parser) parse_enum_variant() !ast.EnumVariant {
 	}
 
 	return ast.EnumVariant{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: span
@@ -1348,6 +1374,7 @@ fn (mut p Parser) parse_struct_init_expression(name string, name_span sp.Span) !
 }
 
 fn (mut p Parser) parse_const_binding() !ast.Statement {
+	doc := p.extract_doc_comment()
 	span := p.current_span()
 	p.eat(.kw_const)!
 
@@ -1364,6 +1391,7 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 	init := p.parse_expression()!
 
 	return ast.ConstBinding{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: name_span
@@ -1447,6 +1475,7 @@ fn (mut p Parser) parse_tuple_destructuring() !ast.Statement {
 }
 
 fn (mut p Parser) parse_binding() !ast.Statement {
+	doc := p.extract_doc_comment()
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
@@ -1475,6 +1504,7 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	}
 
 	return ast.VariableBinding{
+		doc:        doc
 		identifier: ast.Identifier{
 			name: name
 			span: span

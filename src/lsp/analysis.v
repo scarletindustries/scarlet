@@ -5,7 +5,11 @@ import parser
 import types
 import type_def
 import diagnostic
-import json
+
+struct PublishDiagnosticsParams {
+	uri         string
+	diagnostics []Diagnostic
+}
 
 fn (mut s LspServer) analyze_document(uri string, text string) {
 	s.log('Analyzing: ${uri}')
@@ -57,9 +61,10 @@ fn (mut s LspServer) analyze_document(uri string, text string) {
 		s.type_info[uri] = extract_types(check_result)
 	}
 
-	diag_json := json.encode(lsp_diagnostics)
-	params := '{"uri":"${uri}","diagnostics":${diag_json}}'
-	s.send_notification('textDocument/publishDiagnostics', params)
+	s.send_notification('textDocument/publishDiagnostics', PublishDiagnosticsParams{
+		uri:         uri
+		diagnostics: lsp_diagnostics
+	})
 }
 
 fn extract_types(check_result types.CheckResult) []TypeAtPosition {
@@ -75,6 +80,7 @@ fn extract_types(check_result types.CheckResult) []TypeAtPosition {
 			def_line:  tp.def_line
 			def_col:   tp.def_col
 			def_end:   tp.def_end
+			doc:       tp.doc
 		}
 	}
 
