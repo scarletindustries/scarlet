@@ -333,8 +333,16 @@ pub fn substitute(t Type, subs map[string]Type) Type {
 				new_fields[name] = substitute(field_type, subs)
 			}
 			mut new_type_args := []Type{}
-			for arg in t.type_args {
-				new_type_args << substitute(arg, subs)
+			if t.type_args.len > 0 {
+				for arg in t.type_args {
+					new_type_args << substitute(arg, subs)
+				}
+			} else {
+				for param in t.type_params {
+					if concrete := subs[param] {
+						new_type_args << concrete
+					}
+				}
 			}
 			return TypeStruct{
 				id:          t.id
@@ -354,8 +362,16 @@ pub fn substitute(t Type, subs map[string]Type) Type {
 				new_variants[name] = new_types
 			}
 			mut new_type_args := []Type{}
-			for arg in t.type_args {
-				new_type_args << substitute(arg, subs)
+			if t.type_args.len > 0 {
+				for arg in t.type_args {
+					new_type_args << substitute(arg, subs)
+				}
+			} else {
+				for param in t.type_params {
+					if concrete := subs[param] {
+						new_type_args << concrete
+					}
+				}
 			}
 			return TypeEnum{
 				id:          t.id

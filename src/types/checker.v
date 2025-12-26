@@ -802,25 +802,9 @@ fn (mut c TypeChecker) check_binding_type(name string, name_span Span, annotatio
 		if expected := c.resolve_type_identifier(annot) {
 			init_span := typed_init.span
 			c.expect_type(init_type, expected, init_span, context)
-			// If annotation is a generic type without explicit type args but init_type
-			// has concrete type args, use the more specific init_type
-			final_type := if expected is TypeEnum && init_type is TypeEnum {
-				if expected.name == init_type.name && expected.type_args.len == 0
-					&& init_type.type_args.len > 0 {
-					Type(init_type)
-				} else {
-					Type(expected)
-				}
-			} else if expected is TypeStruct && init_type is TypeStruct {
-				if expected.name == init_type.name && expected.type_args.len == 0
-					&& init_type.type_args.len > 0 {
-					Type(init_type)
-				} else {
-					Type(expected)
-				}
-			} else {
-				expected
-			}
+			mut subs := map[string]Type{}
+			c.unify(init_type, expected, mut subs)
+			final_type := substitute(expected, subs)
 			c.env.define_at(name, final_type, loc)
 			c.record_type_annotation(annot, final_type)
 			return final_type
@@ -1689,6 +1673,48 @@ fn (mut c TypeChecker) unify(actual Type, expected Type, mut subs map[string]Typ
 			}
 		}
 		return c.unify(actual.ret, expected.ret, mut subs)
+	}
+
+	if actual is TypeEnum && expected is TypeEnum {
+		if actual.id != expected.id {
+			return false
+		}
+
+		for i, actual_arg in actual.type_args {
+			if i < expected.type_args.len {
+				if !c.unify(actual_arg, expected.type_args[i], mut subs) {
+					return false
+				}
+			}
+		}
+
+		for i, param in expected.type_params {
+			if i >= expected.type_args.len && i < actual.type_args.len {
+				subs[param] = actual.type_args[i]
+			}
+		}
+		return true
+	}
+
+	if actual is TypeStruct && expected is TypeStruct {
+		if actual.id != expected.id {
+			return false
+		}
+
+		for i, actual_arg in actual.type_args {
+			if i < expected.type_args.len {
+				if !c.unify(actual_arg, expected.type_args[i], mut subs) {
+					return false
+				}
+			}
+		}
+
+		for i, param in expected.type_params {
+			if i >= expected.type_args.len && i < actual.type_args.len {
+				subs[param] = actual.type_args[i]
+			}
+		}
+		return true
 	}
 
 	return types_equal(actual, expected)
