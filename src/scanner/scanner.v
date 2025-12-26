@@ -515,13 +515,13 @@ pub fn (mut s Scanner) incr_pos() {
 }
 
 fn (mut s Scanner) decr_pos() {
+	s.state.decr_pos()
+
 	if s.input[s.state.get_pos()] == `\n` {
 		s.state.decr_line()
 	} else {
 		s.state.decr_column()
 	}
-
-	s.state.decr_pos()
 }
 
 pub fn (s Scanner) get_state() &state.ScannerState {
