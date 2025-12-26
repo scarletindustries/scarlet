@@ -65,7 +65,7 @@ struct Config {
 	/** The port number to use for the connection, must be between 1 and 65535, defaults to 8080 if not specified */
 	port Int,
 	/**
-	 * Whether to use TLSSSL for the connection.
+	 * Whether to use TLS/SSL for the connection.
 	 * If true, the connection will be encrypted.
 	 * If false, data will be sent in plaintext.
 	 */

@@ -1,11 +1,15 @@
 module lsp
 
 import x.json2
-import json
 
-struct MarkupContent {
-	kind  string
-	value string
+struct InitializeResult {
+	capabilities ServerCapabilities
+}
+
+struct ServerCapabilities {
+	text_document_sync   int  = 1    @[json: 'textDocumentSync']
+	hover_provider       bool = true @[json: 'hoverProvider']
+	definition_provider  bool = true @[json: 'definitionProvider']
 }
 
 struct HoverResult {
@@ -13,8 +17,7 @@ struct HoverResult {
 }
 
 fn (mut s LspServer) handle_initialize(id json2.Any) {
-	result := '{"capabilities":{"textDocumentSync":1,"hoverProvider":true,"definitionProvider":true}}'
-	s.send_response(id, result)
+	s.send_response(id, InitializeResult{})
 }
 
 fn (mut s LspServer) handle_shutdown(id json2.Any) {
@@ -87,13 +90,12 @@ fn (mut s LspServer) handle_hover(id json2.Any, params json2.Any) {
 					clean_doc := doc.trim_space().trim_left('/*').trim_right('*/').trim_space()
 					value = clean_doc + '\n\n' + value
 				}
-				hover := json.encode(HoverResult{
+				s.send_response(id, HoverResult{
 					contents: MarkupContent{
 						kind:  'markdown'
 						value: value
 					}
 				})
-				s.send_response(id, hover)
 				return
 			}
 		}
@@ -134,8 +136,13 @@ fn (mut s LspServer) handle_definition(id json2.Any, params json2.Any) {
 		for t in types {
 			if t.line == line && col >= t.col_start && col < t.col_end {
 				if t.def_line >= 0 && t.def_col >= 0 {
-					location := '{"uri":"${uri}","range":{"start":{"line":${t.def_line},"character":${t.def_col}},"end":{"line":${t.def_line},"character":${t.def_end}}}}'
-					s.send_response(id, location)
+					s.send_response(id, Location{
+						uri:   uri
+						range: Range{
+							start: Position{line: t.def_line, character: t.def_col}
+							end:   Position{line: t.def_line, character: t.def_end}
+						}
+					})
 					return
 				}
 			}

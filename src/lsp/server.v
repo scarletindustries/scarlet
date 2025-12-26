@@ -2,6 +2,7 @@ module lsp
 
 import os
 import x.json2
+import json
 
 pub struct LspServer {
 mut:
@@ -35,12 +36,25 @@ pub:
 	end   Position
 }
 
+pub struct Location {
+pub:
+	uri   string
+	range Range
+}
+
 pub struct Diagnostic {
 pub:
 	range    Range
 	severity int = 1
 	message  string
 }
+
+pub struct MarkupContent {
+pub:
+	kind  string
+	value string
+}
+
 
 pub fn new_server() &LspServer {
 	return &LspServer{
@@ -153,19 +167,45 @@ fn (mut s LspServer) handle_message(content string) {
 	}
 }
 
-fn (mut s LspServer) send_response(id json2.Any, result string) {
-	response := '{"jsonrpc":"2.0","id":${id.json_str()},"result":${result}}'
-	s.send_message(response)
+struct JsonRpcResponse[T] {
+	jsonrpc string = '2.0'
+	id      int
+	result  T
+}
+
+struct JsonRpcNullResponse {
+	jsonrpc string     = '2.0'
+	id      int
+	result  json2.Null
+}
+
+struct JsonRpcNotification[T] {
+	jsonrpc string = '2.0'
+	method  string
+	params  T
+}
+
+fn (mut s LspServer) send_response[T](id json2.Any, result T) {
+	response := JsonRpcResponse[T]{
+		id:     id.int()
+		result: result
+	}
+	s.send_message(json.encode(response))
 }
 
 fn (mut s LspServer) send_null_response(id json2.Any) {
-	response := '{"jsonrpc":"2.0","id":${id.json_str()},"result":null}'
-	s.send_message(response)
+	response := JsonRpcNullResponse{
+		id: id.int()
+	}
+	s.send_message(json.encode(response))
 }
 
-fn (mut s LspServer) send_notification(method string, params string) {
-	notification := '{"jsonrpc":"2.0","method":"${method}","params":${params}}'
-	s.send_message(notification)
+fn (mut s LspServer) send_notification[T](method string, params T) {
+	notification := JsonRpcNotification[T]{
+		method: method
+		params: params
+	}
+	s.send_message(json.encode(notification))
 }
 
 fn (s LspServer) send_message(content string) {
