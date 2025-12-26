@@ -138,7 +138,7 @@ fn type_var_name_from_index(id int) string {
 	mut result := ''
 	mut n := id
 	for {
-		result = [u8(`a` + n % 26)].bytestr() + result
+		result = [u8(`A` + n % 26)].bytestr() + result
 		n = n / 26 - 1
 		if n < 0 {
 			break
