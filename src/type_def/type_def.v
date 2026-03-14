@@ -20,30 +20,30 @@ pub enum PrimitiveKind {
 
 pub struct TypePrimitive {
 pub:
-	kind PrimitiveKind
+	kind PrimitiveKind @[required]
 }
 
 pub struct TypeArray {
 pub:
-	element Type
+	element Type @[required]
 }
 
 pub struct TypeOption {
 pub:
-	inner Type
+	inner Type @[required]
 }
 
 pub struct TypeFunction {
 pub:
 	params     []Type
-	ret        Type
+	ret        Type @[required]
 	error_type ?Type
 }
 
 pub struct TypeStruct {
 pub:
-	id          int
-	name        string
+	id          int    @[required]
+	name        string @[required]
 	type_params []string
 	type_args   []Type
 	fields      map[string]Type
@@ -51,8 +51,8 @@ pub:
 
 pub struct TypeEnum {
 pub:
-	id          int
-	name        string
+	id          int    @[required]
+	name        string @[required]
 	type_params []string
 	type_args   []Type
 	variants    map[string][]Type
@@ -62,18 +62,18 @@ pub struct TypeNone {}
 
 pub struct TypeVar {
 pub:
-	name string
+	name string @[required]
 }
 
 pub struct TypeResult {
 pub:
-	success Type // The T in T!E
-	error   Type // The E in T!E
+	success Type @[required]
+	error   Type @[required]
 }
 
 pub struct TypeTuple {
 pub:
-	elements []Type
+	elements []Type @[required]
 }
 
 pub fn t_int() Type {
@@ -125,108 +125,6 @@ pub fn t_option(inner Type) Type {
 pub fn t_tuple(elements []Type) Type {
 	return TypeTuple{
 		elements: elements
-	}
-}
-
-pub fn types_equal(a Type, b Type) bool {
-	match a {
-		TypePrimitive {
-			if b is TypePrimitive {
-				return a.kind == b.kind
-			}
-			return false
-		}
-		TypeArray {
-			if b is TypeArray {
-				return types_equal(a.element, b.element)
-			}
-			return false
-		}
-		TypeOption {
-			if b is TypeOption {
-				return types_equal(a.inner, b.inner)
-			}
-			return false
-		}
-		TypeFunction {
-			if b is TypeFunction {
-				if a.params.len != b.params.len {
-					return false
-				}
-				for i, param in a.params {
-					if !types_equal(param, b.params[i]) {
-						return false
-					}
-				}
-				if !types_equal(a.ret, b.ret) {
-					return false
-				}
-				a_err := a.error_type
-				b_err := b.error_type
-				if a_err != none && b_err != none {
-					return types_equal(a_err, b_err)
-				}
-				return a_err == none && b_err == none
-			}
-			return false
-		}
-		TypeStruct {
-			if b is TypeStruct {
-				if a.id != b.id || a.type_args.len != b.type_args.len {
-					return false
-				}
-				for i, arg in a.type_args {
-					if !types_equal(arg, b.type_args[i]) {
-						return false
-					}
-				}
-				return true
-			}
-			return false
-		}
-		TypeEnum {
-			if b is TypeEnum {
-				if a.id != b.id || a.type_args.len != b.type_args.len {
-					return false
-				}
-				for i, arg in a.type_args {
-					if !types_equal(arg, b.type_args[i]) {
-						return false
-					}
-				}
-				return true
-			}
-			return false
-		}
-		TypeNone {
-			return b is TypeNone
-		}
-		TypeVar {
-			if b is TypeVar {
-				return a.name == b.name
-			}
-			return false
-		}
-		TypeResult {
-			if b is TypeResult {
-				return types_equal(a.success, b.success) && types_equal(a.error, b.error)
-			}
-			return false
-		}
-		TypeTuple {
-			if b is TypeTuple {
-				if a.elements.len != b.elements.len {
-					return false
-				}
-				for i, elem in a.elements {
-					if !types_equal(elem, b.elements[i]) {
-						return false
-					}
-				}
-				return true
-			}
-			return false
-		}
 	}
 }
 
@@ -292,113 +190,6 @@ pub fn type_to_string(t Type) string {
 				elems << type_to_string(elem)
 			}
 			return '(${elems.join(', ')})'
-		}
-	}
-}
-
-pub fn is_numeric(t Type) bool {
-	if t is TypeVar {
-		return true // TypeVar might be numeric, will be constrained later
-	}
-	if t is TypePrimitive {
-		return t.kind == .t_int || t.kind == .t_float
-	}
-	return false
-}
-
-pub fn substitute(t Type, subs map[string]Type) Type {
-	match t {
-		TypeVar {
-			if concrete := subs[t.name] {
-				return concrete
-			}
-			return t
-		}
-		TypeArray {
-			return t_array(substitute(t.element, subs))
-		}
-		TypeOption {
-			return t_option(substitute(t.inner, subs))
-		}
-		TypeFunction {
-			mut new_params := []Type{}
-			for param in t.params {
-				new_params << substitute(param, subs)
-			}
-			return TypeFunction{
-				params: new_params
-				ret:    substitute(t.ret, subs)
-			}
-		}
-		TypeResult {
-			return TypeResult{
-				success: substitute(t.success, subs)
-				error:   substitute(t.error, subs)
-			}
-		}
-		TypeTuple {
-			mut new_elements := []Type{}
-			for elem in t.elements {
-				new_elements << substitute(elem, subs)
-			}
-			return t_tuple(new_elements)
-		}
-		TypeStruct {
-			mut new_fields := map[string]Type{}
-			for name, field_type in t.fields {
-				new_fields[name] = substitute(field_type, subs)
-			}
-			mut new_type_args := []Type{}
-			if t.type_args.len > 0 {
-				for arg in t.type_args {
-					new_type_args << substitute(arg, subs)
-				}
-			} else {
-				for param in t.type_params {
-					if concrete := subs[param] {
-						new_type_args << concrete
-					}
-				}
-			}
-			return TypeStruct{
-				id:          t.id
-				name:        t.name
-				type_params: t.type_params
-				type_args:   new_type_args
-				fields:      new_fields
-			}
-		}
-		TypeEnum {
-			mut new_variants := map[string][]Type{}
-			for name, variant_types in t.variants {
-				mut new_types := []Type{}
-				for vt in variant_types {
-					new_types << substitute(vt, subs)
-				}
-				new_variants[name] = new_types
-			}
-			mut new_type_args := []Type{}
-			if t.type_args.len > 0 {
-				for arg in t.type_args {
-					new_type_args << substitute(arg, subs)
-				}
-			} else {
-				for param in t.type_params {
-					if concrete := subs[param] {
-						new_type_args << concrete
-					}
-				}
-			}
-			return TypeEnum{
-				id:          t.id
-				name:        t.name
-				type_params: t.type_params
-				type_args:   new_type_args
-				variants:    new_variants
-			}
-		}
-		else {
-			return t
 		}
 	}
 }

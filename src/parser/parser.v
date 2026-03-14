@@ -272,7 +272,6 @@ pub fn (mut p Parser) parse_program() ParseResult {
 }
 
 fn (mut p Parser) parse_node() !ast.Node {
-	// Try to parse as a statement first (keywords)
 	match p.current_token.kind {
 		.kw_const {
 			return ast.Node(p.parse_const_binding()!)
@@ -286,47 +285,37 @@ fn (mut p Parser) parse_node() !ast.Node {
 		.kw_enum {
 			return ast.Node(p.parse_enum_declaration()!)
 		}
-		.kw_import {
+		.kw_from {
 			return ast.Node(p.parse_import_declaration()!)
 		}
 		.kw_export {
 			return ast.Node(p.parse_export_declaration()!)
 		}
 		.punc_open_paren {
-			// Could be tuple destructuring: (a, b) = expr
 			if p.is_tuple_destructuring() {
 				return ast.Node(p.parse_tuple_destructuring()!)
 			}
 		}
 		.identifier {
-			// Check for binding patterns: identifier = or identifier Type =
 			if next := p.peek_next() {
 				if next.kind == .punc_equals {
 					return ast.Node(p.parse_binding()!)
 				}
-				// Check if it's an identifier followed by a type annotation
-				if p.is_type_start_at_next() {
+				// Lenient on `[` (no 2-ahead lookahead) — parse_binding handles
+				// the misparse gracefully if it's an array literal.
+				if is_type_start_token(next, none) {
 					return ast.Node(p.parse_binding()!)
 				}
 			}
 		}
 		else {}
 	}
-	// Otherwise parse as expression
 	return ast.Node(p.parse_expression()!)
 }
 
 fn (mut p Parser) peek_next() ?token.Token {
 	if p.index + 1 < p.tokens.len {
 		return p.tokens[p.index + 1]
-	}
-
-	return none
-}
-
-fn (mut p Parser) peek_ahead(distance int) ?token.Token {
-	if p.index + distance < p.tokens.len {
-		return p.tokens[p.index + distance]
 	}
 
 	return none
@@ -958,7 +947,6 @@ fn (p Parser) extract_doc_comment() ?string {
 }
 
 fn (mut p Parser) parse_function() !ast.Node {
-	// Check if next token is identifier (declaration) or paren (expression)
 	if next := p.peek_next() {
 		if next.kind == .identifier {
 			return ast.Node(p.parse_function_declaration()!)
@@ -978,7 +966,7 @@ fn (mut p Parser) parse_function_declaration() !ast.Statement {
 
 	params := p.parse_parameters()!
 	return_type, error_type := p.parse_function_return_types()!
-	body := p.parse_block_expression()!
+	body := p.parse_function_body()!
 
 	return ast.FunctionDeclaration{
 		doc:         doc
@@ -1000,7 +988,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 
 	params := p.parse_parameters()!
 	return_type, error_type := p.parse_function_return_types()!
-	body := p.parse_block_expression()!
+	body := p.parse_function_body()!
 
 	return ast.FunctionExpression{
 		params:      params
@@ -1011,6 +999,10 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 	}
 }
 
+fn (mut p Parser) parse_function_body() !ast.Expression {
+	return p.parse_expression()!
+}
+
 fn (mut p Parser) parse_function_return_types() !(?ast.TypeIdentifier, ?ast.TypeIdentifier) {
 	mut return_type := ?ast.TypeIdentifier(none)
 	mut error_type := ?ast.TypeIdentifier(none)
@@ -1019,34 +1011,44 @@ fn (mut p Parser) parse_function_return_types() !(?ast.TypeIdentifier, ?ast.Type
 		span := p.current_span()
 		p.eat(.punc_question_mark)!
 		if p.current_token.kind == .punc_open_brace {
-			return_type = ast.TypeIdentifier{
-				is_option:  true
-				identifier: ast.Identifier{
-					name: 'None'
-					span: span
+			// Bare `?` before `{` — optional None (e.g. `fn f() ? { ... }`)
+			inner := ast.TypeIdentifier{
+				kind: ast.NamedType{
+					identifier: ast.Identifier{
+						name: 'None'
+						span: span
+					}
 				}
-				span:       span
+				span: span
+			}
+			return_type = ast.TypeIdentifier{
+				kind: ast.OptionType{
+					inner: &inner
+				}
+				span: span
 			}
 		} else {
 			inner := p.parse_type_identifier()!
 			return_type = ast.TypeIdentifier{
-				is_option:   true
-				is_array:    inner.is_array
-				is_function: inner.is_function
-				identifier:  inner.identifier
-				param_types: inner.param_types
-				return_type: inner.return_type
-				error_type:  inner.error_type
-				span:        inner.span
+				kind: ast.OptionType{
+					inner: &inner
+				}
+				span: p.span_from(span)
 			}
 		}
-	} else if p.current_token.kind == .identifier || p.current_token.kind == .punc_open_bracket {
+	} else if p.is_type_start() {
 		return_type = p.parse_type_identifier()!
 	}
 
 	if p.current_token.kind == .punc_exclamation_mark {
-		p.eat(.punc_exclamation_mark)!
-		error_type = p.parse_type_identifier()!
+		// !Type is an error type; !expr is unary-not body. Disambiguate by
+		// peeking past the ! for a type start.
+		if next := p.peek_next() {
+			if is_type_start_token(next, none) {
+				p.eat(.punc_exclamation_mark)!
+				error_type = p.parse_type_identifier()!
+			}
+		}
 	}
 
 	return return_type, error_type
@@ -1093,74 +1095,70 @@ fn (mut p Parser) parse_parameter() !ast.FunctionParameter {
 	}
 }
 
-fn (mut p Parser) is_type_start() bool {
-	if p.current_token.kind == .punc_question_mark {
-		return true
-	}
-
-	if p.current_token.kind == .punc_open_bracket {
-		if next := p.peek_next() {
-			return next.kind == .punc_close_bracket
-		}
-		return false
-	}
-
-	if p.current_token.kind == .identifier {
-		if name := p.current_token.literal {
-			return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
-		}
-	}
-
-	return false
+fn is_type_name(name string) bool {
+	return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
 }
 
-fn (mut p Parser) is_type_start_at_next() bool {
-	next := p.peek_next() or { return false }
-
-	if next.kind == .punc_question_mark {
-		return true
-	}
-
-	if next.kind == .punc_open_bracket {
-		return true
-	}
-
-	if next.kind == .identifier {
-		if name := next.literal {
-			return name.len > 0 && name[0] >= `A` && name[0] <= `Z`
+// Checks whether a token begins a type identifier. `lookahead` is the token
+// AFTER tok — used to distinguish `[]T` (array type) from `[expr]` (array lit).
+// When lookahead is none, `[` is treated leniently as a possible type start —
+// callers in contexts where array literals are impossible (binding annotations)
+// rely on this.
+fn is_type_start_token(tok token.Token, lookahead ?token.Token) bool {
+	match tok.kind {
+		.punc_question_mark {
+			return true
+		}
+		.punc_open_bracket {
+			if next := lookahead {
+				return next.kind == .punc_close_bracket
+			}
+			return true
+		}
+		.identifier {
+			if name := tok.literal {
+				return is_type_name(name)
+			}
+			return false
+		}
+		else {
+			return false
 		}
 	}
+}
 
-	return false
+fn (mut p Parser) is_type_start() bool {
+	return is_type_start_token(p.current_token, p.peek_next())
 }
 
 fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
-	mut is_option := false
-
 	if p.current_token.kind == .punc_question_mark {
-		is_option = true
+		span := p.current_span()
 		p.eat(.punc_question_mark)!
+		inner := p.parse_type_identifier()!
+		return ast.TypeIdentifier{
+			kind: ast.OptionType{
+				inner: &inner
+			}
+			span: p.span_from(span)
+		}
 	}
 
-	// Array type: []T where T can itself be an array type
 	if p.current_token.kind == .punc_open_bracket {
-		start_span := p.current_span()
+		span := p.current_span()
 		p.eat(.punc_open_bracket)!
 		p.eat(.punc_close_bracket)!
 		inner := p.parse_type_identifier()!
 		return ast.TypeIdentifier{
-			is_option:    is_option
-			is_array:     true
-			element_type: &inner
-			identifier:   ast.Identifier{
-				span: start_span
+			kind: ast.ArrayType{
+				element: &inner
 			}
-			span:         p.span_from(start_span)
+			span: p.span_from(span)
 		}
 	}
 
 	if p.current_token.kind == .kw_function {
-		return p.parse_function_type(is_option)!
+		return p.parse_function_type()!
 	}
 
 	span := p.current_span()
@@ -1180,33 +1178,30 @@ fn (mut p Parser) parse_type_identifier() !ast.TypeIdentifier {
 	}
 
 	return ast.TypeIdentifier{
-		is_option:  is_option
-		is_array:   false
-		identifier: ast.Identifier{
-			name: name
-			span: span
+		kind: ast.NamedType{
+			identifier: ast.Identifier{
+				name: name
+				span: span
+			}
+			type_args:  type_args
 		}
-		type_args:  type_args
-		span:       p.span_from(span)
+		span: p.span_from(span)
 	}
 }
 
-fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
+fn (mut p Parser) parse_function_type() !ast.TypeIdentifier {
 	span := p.current_span()
 	p.eat(.kw_function)!
 	p.eat(.punc_open_paren)!
 
 	mut param_types := []ast.TypeIdentifier{}
-
 	for p.current_token.kind != .punc_close_paren && p.current_token.kind != .eof {
 		param_type := p.parse_type_identifier()!
 		param_types << param_type
-
 		if p.current_token.kind == .punc_comma {
 			p.eat(.punc_comma)!
 		}
 	}
-
 	p.eat(.punc_close_paren)!
 
 	mut return_type := ?&ast.TypeIdentifier(none)
@@ -1225,16 +1220,12 @@ fn (mut p Parser) parse_function_type(is_option bool) !ast.TypeIdentifier {
 	}
 
 	return ast.TypeIdentifier{
-		is_option:   is_option
-		is_function: true
-		identifier:  ast.Identifier{
-			name: 'fn'
-			span: span
+		kind: ast.FunctionType{
+			params:      param_types
+			return_type: return_type
+			error_type:  error_type
 		}
-		param_types: param_types
-		return_type: return_type
-		error_type:  error_type
-		span:        p.span_from(span)
+		span: p.span_from(span)
 	}
 }
 
@@ -1570,13 +1561,15 @@ fn (mut p Parser) parse_tuple_destructuring() !ast.Statement {
 		if p.current_token.kind == .identifier {
 			name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-			if name.len > 0 && name[0] >= `A` && name[0] <= `Z` {
+			if is_type_name(name) {
 				patterns << ast.TypeIdentifier{
-					identifier: ast.Identifier{
-						name: name
-						span: pattern_span
+					kind: ast.NamedType{
+						identifier: ast.Identifier{
+							name: name
+							span: pattern_span
+						}
 					}
-					span:       pattern_span
+					span: pattern_span
 				}
 			} else {
 				patterns << ast.Identifier{
@@ -1611,7 +1604,6 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	span := p.current_span()
 	name := p.eat_token_literal(.identifier, 'Expected identifier')!
 
-	// Check for type annotation
 	mut typ := ?ast.TypeIdentifier(none)
 	if p.is_type_start() {
 		typ = p.parse_type_identifier()!
@@ -1621,14 +1613,16 @@ fn (mut p Parser) parse_binding() !ast.Statement {
 	init := p.parse_expression()!
 
 	// Uppercase name followed by = is a type pattern binding
-	if name.len > 0 && name[0] >= `A` && name[0] <= `Z` && typ == none {
+	if is_type_name(name) && typ == none {
 		return ast.TypePatternBinding{
 			typ:  ast.TypeIdentifier{
-				identifier: ast.Identifier{
-					name: name
-					span: span
+				kind: ast.NamedType{
+					identifier: ast.Identifier{
+						name: name
+						span: span
+					}
 				}
-				span:       span
+				span: span
 			}
 			init: init
 			span: p.span_from(span)

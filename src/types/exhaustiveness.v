@@ -3,11 +3,12 @@ module types
 import ast
 import type_def { Type, TypeArray, TypeEnum, TypeNone, TypeOption, TypePrimitive, TypeResult, TypeStruct, TypeTuple }
 
-type Pat = PatWildcard | PatCtor | PatOr
+pub type Pat = PatWildcard | PatCtor | PatOr
 
-struct PatWildcard {}
+pub struct PatWildcard {}
 
-struct PatCtor {
+pub struct PatCtor {
+pub:
 	name string
 	args []Pat
 }

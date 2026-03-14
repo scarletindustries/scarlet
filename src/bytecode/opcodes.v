@@ -92,18 +92,18 @@ pub enum Op {
 
 pub struct Instruction {
 pub:
-	op      Op
+	op      Op @[required]
 	operand int // optional operand (index, address, count, etc.)
 }
 
 pub struct Function {
 pub:
-	name          string
-	arity         int // number of parameters
-	locals        int // number of local variables (including params)
-	capture_count int // number of captured variables from enclosing scope
-	code_start    int // starting address in bytecode
-	code_len      int // length of function bytecode
+	name          string @[required]
+	arity         int    @[required]
+	locals        int    @[required]
+	capture_count int    @[required]
+	code_start    int    @[required]
+	code_len      int    @[required]
 }
 
 pub type Value = int
@@ -128,20 +128,20 @@ pub:
 
 pub struct ErrorValue {
 pub:
-	payload Value
+	payload Value @[required]
 }
 
 pub struct SocketValue {
 pub:
-	id          int
+	id          int @[required]
 	is_listener bool
 }
 
 pub struct EnumValue {
 pub:
 	type_id      int @[required]
-	enum_name    string  // e.g., "MyEnum" (for display only)
-	variant_name string  // e.g., "C"
+	enum_name    string // e.g., "MyEnum" (for display only)
+	variant_name string @[required]
 	payload      []Value // payload values (empty if no payload)
 	hash         u64
 }
@@ -156,7 +156,7 @@ pub mut:
 
 pub struct ClosureValue {
 pub:
-	func_idx int
+	func_idx int @[required]
 	captures []Value
 	name     string
 }

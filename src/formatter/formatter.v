@@ -15,10 +15,6 @@ pub:
 	diagnostics []diagnostic.Diagnostic
 }
 
-pub fn format(input string) FormatResult {
-	return format_with_debug(input, false)
-}
-
 pub fn format_with_debug(input string, debug bool) FormatResult {
 	mut s := scanner.new_scanner(input)
 	scanned_tokens := s.scan_all()
@@ -550,8 +546,7 @@ fn (mut f Formatter) format_function_declaration(func ast.FunctionDeclaration) {
 		f.emit('!')
 		f.format_type(err)
 	}
-	f.emit(' ')
-	f.format_block_inline(func.body)
+	f.format_function_body(func.body)
 }
 
 fn (mut f Formatter) format_function_expression(func ast.FunctionExpression) {
@@ -575,50 +570,59 @@ fn (mut f Formatter) format_function_expression(func ast.FunctionExpression) {
 		f.emit('!')
 		f.format_type(err)
 	}
+	f.format_function_body(func.body)
+}
+
+fn (mut f Formatter) format_function_body(body ast.Expression) {
 	f.emit(' ')
-	f.format_block_inline(func.body)
+	if body is ast.BlockExpression {
+		f.format_block_inline(body)
+	} else {
+		f.format_expr(body)
+	}
 }
 
 fn (mut f Formatter) format_type(typ ast.TypeIdentifier) {
-	if typ.is_option {
-		f.emit('?')
-	}
-	if typ.is_array {
-		f.emit('[]')
-		if elem := typ.element_type {
-			f.format_type(*elem)
-			return
+	match typ.kind {
+		ast.OptionType {
+			f.emit('?')
+			f.format_type(*typ.kind.inner)
 		}
-	}
-	if typ.is_function {
-		f.emit('fn(')
-		for i, p in typ.param_types {
-			if i > 0 {
-				f.emit(', ')
-			}
-			f.format_type(p)
+		ast.ArrayType {
+			f.emit('[]')
+			f.format_type(*typ.kind.element)
 		}
-		f.emit(')')
-		if ret := typ.return_type {
-			f.emit(' ')
-			f.format_type(*ret)
-		}
-	} else {
-		f.emit(typ.identifier.name)
-		if typ.type_args.len > 0 {
-			f.emit('(')
-			for i, ta in typ.type_args {
+		ast.FunctionType {
+			f.emit('fn(')
+			for i, p in typ.kind.params {
 				if i > 0 {
 					f.emit(', ')
 				}
-				f.format_type(ta)
+				f.format_type(p)
 			}
 			f.emit(')')
+			if ret := typ.kind.return_type {
+				f.emit(' ')
+				f.format_type(*ret)
+			}
+			if err := typ.kind.error_type {
+				f.emit('!')
+				f.format_type(*err)
+			}
 		}
-	}
-	if err := typ.error_type {
-		f.emit('!')
-		f.format_type(*err)
+		ast.NamedType {
+			f.emit(typ.kind.identifier.name)
+			if typ.kind.type_args.len > 0 {
+				f.emit('(')
+				for i, ta in typ.kind.type_args {
+					if i > 0 {
+						f.emit(', ')
+					}
+					f.format_type(ta)
+				}
+				f.emit(')')
+			}
+		}
 	}
 }
 
@@ -691,29 +695,9 @@ fn (f Formatter) is_simple_node(node ast.Node) bool {
 	}
 }
 
-fn (f Formatter) has_trivia(expr ast.Expression) bool {
-	expr_span := expr.span
-	return f.has_trivia_at_span(expr_span)
-}
-
-fn (f Formatter) has_comment_trivia(expr ast.Expression) bool {
-	expr_span := expr.span
-	return f.has_comment_trivia_at_span(expr_span)
-}
-
 fn (f Formatter) has_comment_trivia_node(node ast.Node) bool {
 	node_span := ast.node_span(node)
 	return f.has_comment_trivia_at_span(node_span)
-}
-
-fn (f Formatter) has_trivia_at_span(s Span) bool {
-	if s.start_line > 0 {
-		key := '${s.start_line}:${s.start_column}'
-		if _ := f.trivia_map[key] {
-			return true
-		}
-	}
-	return false
 }
 
 fn (f Formatter) has_comment_trivia_at_span(s Span) bool {

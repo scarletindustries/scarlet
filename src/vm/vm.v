@@ -101,30 +101,10 @@ fn (mut vm VM) execute() !bytecode.Value {
 				top := vm.stack.len - 1
 				vm.stack[top], vm.stack[top - 1] = vm.stack[top - 1], vm.stack[top]
 			}
-			.add {
+			.add, .sub, .mul, .div, .mod {
 				b := vm.pop()!
 				a := vm.pop()!
-				vm.stack << vm.binary_op(a, b, .add)!
-			}
-			.sub {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.binary_op(a, b, .sub)!
-			}
-			.mul {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.binary_op(a, b, .mul)!
-			}
-			.div {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.binary_op(a, b, .div)!
-			}
-			.mod {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.binary_op(a, b, .mod)!
+				vm.stack << vm.binary_op(a, b, instr.op)!
 			}
 			.neg {
 				a := vm.pop()!
@@ -152,25 +132,10 @@ fn (mut vm VM) execute() !bytecode.Value {
 				a := vm.pop()!
 				vm.stack << !vm.values_equal(a, b)
 			}
-			.lt {
+			.lt, .gt, .lte, .gte {
 				b := vm.pop()!
 				a := vm.pop()!
-				vm.stack << vm.compare(a, b, .lt)!
-			}
-			.gt {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.compare(a, b, .gt)!
-			}
-			.lte {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.compare(a, b, .lte)!
-			}
-			.gte {
-				b := vm.pop()!
-				a := vm.pop()!
-				vm.stack << vm.compare(a, b, .gte)!
+				vm.stack << vm.compare(a, b, instr.op)!
 			}
 			.not {
 				a := vm.pop()!
@@ -230,32 +195,26 @@ fn (mut vm VM) execute() !bytecode.Value {
 						return error('Expected ${func.arity} arguments, got ${arity}')
 					}
 
-					// Collect arguments from stack
 					mut args := []bytecode.Value{cap: arity}
 					for _ in 0 .. arity {
 						args << vm.pop()!
 					}
 
-					// Get current frame
 					mut current_frame := &vm.frames[vm.frames.len - 1]
 					base := current_frame.base_slot
 
-					// Clear current frame's stack slots
 					for vm.stack.len > base {
 						vm.stack.pop()
 					}
 
-					// Push arguments back (in reverse since we popped them)
 					for i := arity - 1; i >= 0; i-- {
 						vm.stack << args[i]
 					}
 
-					// Fill remaining locals with none
 					for _ in arity .. func.locals {
 						vm.stack << bytecode.NoneValue{}
 					}
 
-					// Reuse the frame with new function
 					current_frame.func = func
 					current_frame.func_idx = callee.func_idx
 					current_frame.ip = 0
@@ -467,7 +426,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.push_self {
-				// Push the currently-executing closure onto the stack
 				if vm.frames.len > 0 {
 					current_frame := vm.frames[vm.frames.len - 1]
 					vm.stack << bytecode.ClosureValue{
@@ -523,8 +481,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				for _ in 0 .. payload_count {
 					payloads << vm.pop()!
 				}
-
-				// Reverse since we popped in reverse order
 				payloads.reverse_in_place()
 
 				variant_name_val := vm.pop()!
@@ -558,7 +514,6 @@ fn (mut vm VM) execute() !bytecode.Value {
 				}
 			}
 			.match_enum {
-				// Match variant only, ignore payload
 				variant_name := vm.pop()!
 				enum_name := vm.pop()!
 				type_id_val := vm.pop()!

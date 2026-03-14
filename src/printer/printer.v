@@ -136,6 +136,48 @@ fn print_function(level int, identifier ast.Identifier, params []ast.FunctionPar
 	return s
 }
 
+fn print_type(t ast.TypeIdentifier, level int) string {
+	return match t.kind {
+		ast.OptionType {
+			'?${print_type(*t.kind.inner, level)}'
+		}
+		ast.ArrayType {
+			'[]${print_type(*t.kind.element, level)}'
+		}
+		ast.FunctionType {
+			mut s := 'fn('
+			for i, p in t.kind.params {
+				if i > 0 {
+					s += ', '
+				}
+				s += print_type(p, level)
+			}
+			s += ')'
+			if ret := t.kind.return_type {
+				s += ' ${print_type(*ret, level)}'
+			}
+			if err := t.kind.error_type {
+				s += '!${print_type(*err, level)}'
+			}
+			s
+		}
+		ast.NamedType {
+			mut s := t.kind.identifier.name
+			if t.kind.type_args.len > 0 {
+				s += '('
+				for i, ta in t.kind.type_args {
+					if i > 0 {
+						s += ', '
+					}
+					s += print_type(ta, level)
+				}
+				s += ')'
+			}
+			s
+		}
+	}
+}
+
 fn print_array_element(elem ast.ArrayElement, level int) string {
 	return match elem {
 		ast.SpreadElement {
@@ -187,25 +229,7 @@ fn print_expression(expr ast.Expression, level int) string {
 			expr.name
 		}
 		ast.TypeIdentifier {
-			mut s := ''
-			if expr.is_option {
-				s += '?'
-			}
-			if expr.is_array {
-				s += '[]'
-			}
-			s += expr.identifier.name
-			if expr.type_args.len > 0 {
-				s += '('
-				for i, ta in expr.type_args {
-					if i > 0 {
-						s += ', '
-					}
-					s += print_expression(ta, level)
-				}
-				s += ')'
-			}
-			s
+			print_type(expr, level)
 		}
 		ast.BinaryExpression {
 			'${print_expression(expr.left, level)} ${expr.op.kind.str()} ${print_expression(expr.right,
