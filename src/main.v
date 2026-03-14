@@ -13,7 +13,6 @@ import bytecode
 import flags { Flags }
 import vm
 import diagnostic
-import types
 import repl
 import lsp
 
@@ -42,8 +41,8 @@ fn parse_source(file string, entrypoint string) !ParsedSource {
 	}
 }
 
-fn check_source(program ast.BlockExpression, file string, entrypoint string) !types.CheckResult {
-	result := types.check(program)
+fn check_source(program ast.BlockExpression, file string, entrypoint string) !bytecode.CompileResult {
+	result := bytecode.check(program, Flags{})
 
 	if result.diagnostics.len > 0 {
 		diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
@@ -370,7 +369,6 @@ fn main() {
 
 					file := os.read_file(entrypoint)!
 					parsed := parse_source(file, entrypoint)!
-					checked := check_source(parsed.ast, file, entrypoint)!
 
 					if debug_printer {
 						println('')
@@ -380,7 +378,14 @@ fn main() {
 						println('')
 					}
 
-					program := bytecode.compile(parsed.ast, checked.env, fl)!
+					result := bytecode.compile(parsed.ast, fl)
+					if result.diagnostics.len > 0 {
+						diagnostic.print_diagnostics(result.diagnostics, file, entrypoint)
+						if !result.success {
+							exit(1)
+						}
+					}
+					program := result.program
 
 					mut v := vm.new_vm(program, fl)
 					run_result := v.run()!

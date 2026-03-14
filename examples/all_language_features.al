@@ -362,6 +362,6 @@ fn make_pair(a A, b B) Pair(A, B) {
 auto_pair = make_pair(100, 'hundred')
 println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')
 
-x Option = Option.Some('')
+x Option = Option.Some(0)
 
 x

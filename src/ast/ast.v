@@ -21,8 +21,8 @@ pub:
 
 pub struct NumberLiteral {
 pub:
-	value string
-	span  Span @[required]
+	value string @[required]
+	span  Span   @[required]
 }
 
 pub struct BooleanLiteral {
@@ -44,27 +44,44 @@ pub:
 
 pub struct Identifier {
 pub:
-	name string
-	span Span @[required]
+	name string @[required]
+	span Span   @[required]
+}
+
+pub type TypeKind = NamedType | ArrayType | FunctionType | OptionType
+
+pub struct NamedType {
+pub:
+	identifier Identifier @[required]
+	type_args  []TypeIdentifier
+}
+
+pub struct ArrayType {
+pub:
+	element &TypeIdentifier @[required]
+}
+
+pub struct FunctionType {
+pub:
+	params      []TypeIdentifier
+	return_type ?&TypeIdentifier
+	error_type  ?&TypeIdentifier
+}
+
+pub struct OptionType {
+pub:
+	inner &TypeIdentifier @[required]
 }
 
 pub struct TypeIdentifier {
 pub:
-	is_array     bool
-	is_option    bool
-	is_function  bool
-	identifier   Identifier
-	type_args    []TypeIdentifier
-	element_type ?&TypeIdentifier
-	param_types  []TypeIdentifier
-	return_type  ?&TypeIdentifier
-	error_type   ?&TypeIdentifier
-	span         Span @[required]
+	kind TypeKind @[required]
+	span Span     @[required]
 }
 
 pub struct Operator {
 pub:
-	kind token.Kind
+	kind token.Kind @[required]
 }
 
 // ============================================================================
@@ -74,64 +91,64 @@ pub:
 pub struct VariableBinding {
 pub:
 	doc        ?string
-	identifier Identifier
+	identifier Identifier @[required]
 	typ        ?TypeIdentifier
-	init       Expression
-	span       Span @[required]
+	init       Expression @[required]
+	span       Span       @[required]
 }
 
 pub struct ConstBinding {
 pub:
 	doc        ?string
-	identifier Identifier
+	identifier Identifier @[required]
 	typ        ?TypeIdentifier
-	init       Expression
-	span       Span @[required]
+	init       Expression @[required]
+	span       Span       @[required]
 }
 
 pub struct TypePatternBinding {
 pub:
-	typ  TypeIdentifier
-	init Expression
-	span Span @[required]
+	typ  TypeIdentifier @[required]
+	init Expression     @[required]
+	span Span           @[required]
 }
 
 pub struct TupleDestructuringBinding {
 pub:
 	patterns []Expression
-	init     Expression
-	span     Span @[required]
+	init     Expression @[required]
+	span     Span       @[required]
 }
 
 pub struct FunctionParameter {
 pub:
-	identifier Identifier
+	identifier Identifier @[required]
 	typ        ?TypeIdentifier
 }
 
 pub struct FunctionDeclaration {
 pub:
 	doc         ?string
-	identifier  Identifier
+	identifier  Identifier @[required]
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
 	params      []FunctionParameter
-	body        Expression
-	span        Span @[required]
+	body        Expression @[required]
+	span        Span       @[required]
 }
 
 pub struct StructField {
 pub:
 	doc        ?string
-	identifier Identifier
-	typ        TypeIdentifier
+	identifier Identifier     @[required]
+	typ        TypeIdentifier @[required]
 	init       ?Expression
 }
 
 pub struct StructDeclaration {
 pub:
 	doc         ?string
-	identifier  Identifier
+	identifier  Identifier @[required]
 	type_params []Identifier
 	fields      []StructField
 	span        Span @[required]
@@ -140,14 +157,14 @@ pub:
 pub struct EnumVariant {
 pub:
 	doc        ?string
-	identifier Identifier
+	identifier Identifier @[required]
 	payload    []TypeIdentifier
 }
 
 pub struct EnumDeclaration {
 pub:
 	doc         ?string
-	identifier  Identifier
+	identifier  Identifier @[required]
 	type_params []Identifier
 	variants    []EnumVariant
 	span        Span @[required]
@@ -155,20 +172,20 @@ pub:
 
 pub struct ImportSpecifier {
 pub:
-	identifier Identifier
+	identifier Identifier @[required]
 }
 
 pub struct ImportDeclaration {
 pub:
-	path       string
+	path       string @[required]
 	specifiers []ImportSpecifier
 	span       Span @[required]
 }
 
 pub struct ExportDeclaration {
 pub:
-	declaration Statement
-	span        Span @[required]
+	declaration Statement @[required]
+	span        Span      @[required]
 }
 
 pub type Statement = ConstBinding
@@ -190,58 +207,58 @@ pub:
 	return_type ?TypeIdentifier
 	error_type  ?TypeIdentifier
 	params      []FunctionParameter
-	body        Expression
-	span        Span @[required]
+	body        Expression @[required]
+	span        Span       @[required]
 }
 
 pub struct IfExpression {
 pub:
-	condition Expression
-	body      Expression
-	span      Span @[required]
+	condition Expression @[required]
+	body      Expression @[required]
+	span      Span       @[required]
 	else_body ?Expression
 }
 
 pub struct MatchArm {
 pub:
-	pattern Expression
-	body    Expression
+	pattern Expression @[required]
+	body    Expression @[required]
 }
 
 pub struct MatchExpression {
 pub:
-	subject Expression
+	subject Expression @[required]
 	arms    []MatchArm
 	span    Span @[required]
 }
 
 pub struct OrExpression {
 pub:
-	expression Expression
+	expression Expression @[required]
 	receiver   ?Identifier
-	body       Expression
-	span       Span @[required]
+	body       Expression @[required]
+	span       Span       @[required]
 }
 
 pub struct ErrorExpression {
 pub:
-	expression Expression
-	span       Span @[required]
+	expression Expression @[required]
+	span       Span       @[required]
 }
 
 pub struct BinaryExpression {
 pub:
-	left  Expression
-	right Expression
-	op    Operator
-	span  Span @[required]
+	left  Expression @[required]
+	right Expression @[required]
+	op    Operator   @[required]
+	span  Span       @[required]
 }
 
 pub struct UnaryExpression {
 pub:
-	expression Expression
-	op         Operator
-	span       Span @[required]
+	expression Expression @[required]
+	op         Operator   @[required]
+	span       Span       @[required]
 }
 
 pub struct ArrayExpression {
@@ -258,21 +275,21 @@ pub:
 
 pub struct ArrayIndexExpression {
 pub:
-	expression Expression
-	index      Expression
-	span       Span @[required]
+	expression Expression @[required]
+	index      Expression @[required]
+	span       Span       @[required]
 }
 
 pub struct RangeExpression {
 pub:
-	start Expression
-	end   Expression
-	span  Span @[required]
+	start Expression @[required]
+	end   Expression @[required]
+	span  Span       @[required]
 }
 
 pub struct StructInitExpression {
 pub:
-	identifier Identifier
+	identifier Identifier @[required]
 	type_args  []TypeIdentifier
 	fields     []StructInitField
 	span       Span @[required]
@@ -280,20 +297,20 @@ pub:
 
 pub struct StructInitField {
 pub:
-	identifier Identifier
-	init       Expression
+	identifier Identifier @[required]
+	init       Expression @[required]
 }
 
 pub struct PropertyAccessExpression {
 pub:
-	left  Expression
-	right Expression
-	span  Span @[required]
+	left  Expression @[required]
+	right Expression @[required]
+	span  Span       @[required]
 }
 
 pub struct FunctionCallExpression {
 pub:
-	identifier Identifier
+	identifier Identifier @[required]
 	arguments  []Expression
 	span       Span @[required]
 }

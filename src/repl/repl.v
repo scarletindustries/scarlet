@@ -8,7 +8,6 @@ import bytecode
 import flags { Flags }
 import vm
 import diagnostic
-import types
 import span { point_span }
 
 pub fn run(version string) {
@@ -136,19 +135,16 @@ fn eval_input(input string, definitions []ast.Node) []ast.Node {
 		span: point_span(1, 1)
 	}
 
-	check_result := types.check(combined_ast)
+	result := bytecode.compile(combined_ast, Flags{})
 
-	if check_result.diagnostics.len > 0 {
-		diagnostic.print_diagnostics(check_result.diagnostics, input, '<repl>')
-		if !check_result.success {
+	if result.diagnostics.len > 0 {
+		diagnostic.print_diagnostics(result.diagnostics, input, '<repl>')
+		if !result.success {
 			return []
 		}
 	}
 
-	program := bytecode.compile(combined_ast, check_result.env, Flags{}) or {
-		eprintln('Compile error: ${err}')
-		return []
-	}
+	program := result.program
 
 	mut v := vm.new_vm(program, Flags{})
 	run_result := v.run() or {

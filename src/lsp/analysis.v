@@ -2,7 +2,8 @@ module lsp
 
 import scanner
 import parser
-import types
+import bytecode
+import flags { Flags }
 import type_def
 import diagnostic
 
@@ -39,7 +40,7 @@ fn (mut s LspServer) analyze_document(uri string, text string) {
 
 	has_errors := diagnostic.has_errors(parse_result.diagnostics)
 	if !has_errors {
-		check_result := types.check(parse_result.ast)
+		check_result := bytecode.check(parse_result.ast, Flags{})
 
 		for diag in check_result.diagnostics {
 			lsp_diagnostics << Diagnostic{
@@ -67,7 +68,7 @@ fn (mut s LspServer) analyze_document(uri string, text string) {
 	})
 }
 
-fn extract_types(check_result types.CheckResult) []TypeAtPosition {
+fn extract_types(check_result bytecode.CompileResult) []TypeAtPosition {
 	mut result := []TypeAtPosition{}
 
 	for tp in check_result.type_positions {

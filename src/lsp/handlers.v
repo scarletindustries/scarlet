@@ -58,7 +58,7 @@ fn (mut s LspServer) handle_did_change(params json2.Any) {
 	obj := params.as_map()
 	text_doc := obj['textDocument'] or { return }.as_map()
 	uri := text_doc['uri'] or { return }.str()
-	changes := obj['contentChanges'] or { return }.arr()
+	changes := obj['contentChanges'] or { return }.as_array()
 
 	if changes.len > 0 {
 		last_change := changes[changes.len - 1].as_map()
