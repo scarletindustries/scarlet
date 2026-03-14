@@ -57,15 +57,20 @@ not_result = !true`,
     {
       title: "Functions with type inference",
       description:
-        "Function parameter and return types are inferred from usage. Add explicit types when needed for clarity or error types.",
-      code: `// Types fully inferred
-fn double(x) { x * 2 }
-fn add(a, b) { a + b }
-fn greet(name) { 'Hello, ' + name }
+        "Function parameter and return types are inferred from usage. Single-expression bodies don't need braces. Add explicit types when needed.",
+      code: `// Types fully inferred — single-expression body
+fn double(x) x * 2
+fn add(a, b) a + b
+fn greet(name) 'Hello, ' + name
+
+// Block body when you need multiple statements
+fn abs(n) {
+    if n < 0 { -n } else { n }
+}
 
 // Explicit types when needed
-fn divide(a Int, b Int) Int!Error {
-    if b == 0 { error Error{ message: 'divide by zero' } }
+fn divide(a Int, b Int) Int!DivError {
+    if b == 0 { error DivError{ message: 'divide by zero' } }
     else { a / b }
 }
 
@@ -77,37 +82,38 @@ println(greet('world'))  // Hello, world`,
     {
       title: "Generics",
       description:
-        "Use lowercase type variables for polymorphic functions. The type checker infers concrete types at each call site.",
-      code: `fn identity(x a) a { x }
+        "Single uppercase letters are type variables. The type checker infers concrete types at each call site — the same function can be called with different types.",
+      code: `fn identity(x A) A { x }
 
-fn first(arr []a) ?a {
+fn first(arr []A) ?A {
     match arr {
         [] -> none,
         [head, ..] -> head,
     }
 }
 
-fn map_array(arr []a, f fn(a) b) []b {
+fn map_array(arr []A, f fn(A) B) []B {
     match arr {
         [] -> [],
-        [head, ..rest] -> [f(head)] + map_array(rest, f),
+        [head, ..rest] -> [f(head), ..map_array(rest, f)],
     }
 }
 
-// Works with any type
+// Same function, different types
 n = identity(42)        // Int
 s = identity('hello')   // String
-head = first([1, 2, 3]) or 0`,
+head = first([1, 2, 3]) or 0
+doubled = map_array([1, 2, 3], fn(x) x * 2)  // [2, 4, 6]`,
     },
     {
       title: "First-class functions",
       description:
         "Functions are values. Pass them around, store them in variables, return them from functions.",
-      code: `fn apply(x, f) { f(x) }
-fn compose(f, g) { fn(x) { f(g(x)) } }
+      code: `fn apply(x, f) f(x)
+fn compose(f, g) fn(x) f(g(x))
 
-double = fn(n) { n * 2 }
-add_one = fn(n) { n + 1 }
+double = fn(n) n * 2
+add_one = fn(n) n + 1
 
 result = apply(5, double)  // 10
 
@@ -116,28 +122,34 @@ double_then_add = compose(add_one, double)
 double_then_add(5)  // 11
 
 // Higher-order patterns
-fn twice(x, f) { f(f(x)) }
-twice(3, fn(n) { n + 1 })  // 5`,
+fn twice(x, f) f(f(x))
+twice(3, fn(n) n + 1)  // 5`,
     },
     {
       title: "Recursion",
       description:
-        "Functions can call themselves. AL optimizes tail recursion.",
+        "Functions can call themselves. When the recursive call is the last thing a function does, AL reuses the stack frame — no stack overflow on deep recursion.",
       code: `fn factorial(n Int) Int {
     if n <= 1 { 1 }
-    else { n * factorial(n - 1) }
+    else { n * factorial(n - 1) }  // not tail recursive (n * ...)
 }
 
-fn fibonacci(n Int) Int {
-    match n {
-        0 -> 0,
-        1 -> 1,
-        else -> fibonacci(n - 1) + fibonacci(n - 2),
+// Tail-recursive with accumulator — constant stack space
+fn factorial_iter(n Int, acc Int) Int {
+    if n <= 1 { acc }
+    else { factorial_iter(n - 1, n * acc) }  // tail call
+}
+
+fn sum(arr []Int, acc Int) Int {
+    match arr {
+        [] -> acc,
+        [head, ..rest] -> sum(rest, acc + head),  // tail call
     }
 }
 
-println(factorial(5))   // 120
-println(fibonacci(10))  // 55`,
+println(factorial(5))              // 120
+println(factorial_iter(5, 1))      // 120
+println(sum([1, 2, 3, 4, 5], 0))   // 15`,
     },
 
     // === CONTROL FLOW ===
@@ -203,12 +215,12 @@ fn ignore_second(pair) {
 fn handle(r Result) String {
     match r {
         Ok('special') -> 'matched literal!',
-        Ok(value) -> 'got: \$value',
-        Err(e) -> 'error: \$e',
+        Ok(value) -> 'got: \${value}',
+        Err(e) -> 'error: \${e}',
     }
 }
 
-// Use it
+// Variants can be used bare (unqualified) when unambiguous
 handle(Ok('special'))  // 'matched literal!'
 handle(Ok('hello'))    // 'got: hello'
 handle(Err('oops'))    // 'error: oops'`,
@@ -241,13 +253,13 @@ println(person.age)   // 30`,
       title: "Generic structs",
       description:
         "Structs can have type parameters. Type arguments are inferred from field values.",
-      code: `struct Box(t) {
-    value t
+      code: `struct Box(T) {
+    value T
 }
 
-struct Pair(a, b) {
-    first a
-    second b
+struct Pair(A, B) {
+    first A
+    second B
 }
 
 // Type args inferred from values
@@ -273,29 +285,30 @@ enum Option {
 }
 
 // Create enum values
+// Qualified or bare (when unambiguous)
 status = Status.Active
-banned = Status.Banned('spam')
-some_value = Some(42)  // Short form`,
+banned = Banned('spam')
+some_value = Some(42)`,
     },
     {
       title: "Generic enums",
       description:
         "Enums can have type parameters for flexible data modeling.",
-      code: `enum Maybe(t) {
-    Just(t)
+      code: `enum Maybe(T) {
+    Just(T)
     Nothing
 }
 
-enum Result(ok, err) {
-    Ok(ok)
-    Err(err)
+enum Either(L, R) {
+    Left(L)
+    Right(R)
 }
 
 // Type inferred from usage
 x Maybe = Just(42)
 y Maybe = Nothing
 
-result Result = Ok('success')`,
+result Either = Left('error')`,
     },
     {
       title: "Tuples",
@@ -309,17 +322,16 @@ triple = (true, 42, 'world')
 first = pair.0   // 1
 second = pair.1  // 'hello'
 
-// In function returns
-fn divide(a Int, b Int) (Int, Int) {
-    (a / b, a % b)
-}
+// Return from functions (type inferred)
+fn divide(a, b) (a / b, a % b)
 
-quotient, remainder = divide(10, 3)`,
+// Destructure with parentheses
+(quotient, remainder) = divide(10, 3)`,
     },
     {
       title: "Arrays",
       description:
-        "Ordered collections of values. Access by index, concatenate with +.",
+        "Ordered collections of values. Access by index, concatenate with spread.",
       code: `numbers = [1, 2, 3, 4, 5]
 names = ['alice', 'bob', 'charlie']
 
@@ -327,8 +339,9 @@ names = ['alice', 'bob', 'charlie']
 first = numbers[0]  // 1
 second = names[1]   // 'bob'
 
-// Concatenate
-combined = [1, 2] + [3, 4]  // [1, 2, 3, 4]
+// Concatenate with spread
+combined = [..[1, 2], ..[3, 4]]  // [1, 2, 3, 4]
+more = [0, ..numbers, 6]         // [0, 1, 2, 3, 4, 5, 6]
 
 // Nested arrays
 matrix = [[1, 2], [3, 4]]`,
@@ -404,7 +417,7 @@ safe = divide(10, 0) or 0
 // Handle error with receiver
 result = divide(10, 0) or err -> {
     println('Error: \${err.message}')
-    -1
+    0
 }`,
     },
     // === BUILTINS ===
@@ -497,12 +510,14 @@ export function App({ examples }: { examples: RenderedExample[] }) {
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
           AL is{" "}
           <strong className="text-black dark:text-white">
-            statically typed with full type inference
+            statically typed with Hindley-Milner type inference
           </strong>
-          . Every expression has a type known at compile time. The type checker
+          . Every expression has a type known at compile time. The checker
           catches errors before your code runs, while inference keeps the syntax
-          clean—no type annotations needed for local variables or even function
-          parameters.
+          clean—no annotations needed for variables or function parameters.
+          Types are capitalized (<code className="text-black dark:text-white">Int</code>,{" "}
+          <code className="text-black dark:text-white">String</code>), variables
+          are lowercase. Single uppercase letters are type variables.
         </p>
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
           The compiler is written in V, producing a single native binary with no

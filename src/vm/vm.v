@@ -339,8 +339,13 @@ fn (mut vm VM) execute() !bytecode.Value {
 				arr1_val := vm.pop()!
 
 				if arr1_val is []bytecode.Value && arr2_val is []bytecode.Value {
-					mut result := arr1_val.clone()
-					result << arr2_val
+					mut result := []bytecode.Value{cap: arr1_val.len + arr2_val.len}
+					for v in arr1_val {
+						result << v
+					}
+					for v in arr2_val {
+						result << v
+					}
 					vm.stack << bytecode.Value(result)
 				} else {
 					return error('Cannot concatenate non-array types')
