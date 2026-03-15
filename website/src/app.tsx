@@ -34,12 +34,15 @@ greeting = 'Welcome to \${app_name}!'`,
     {
       title: "Basic operators",
       description: "Standard arithmetic, comparison, and logical operators.",
-      code: `// Arithmetic
-sum = 1 + 2
-diff = 5 - 3
-prod = 4 * 2
-quot = 10 / 3
-rem = 10 % 3
+      code: `a = 5
+b = 3
+
+// Arithmetic
+sum = a + b
+diff = a - b
+prod = a * b
+quot = a / b
+rem = a % b
 
 // Comparison
 eq = a == b
@@ -69,6 +72,8 @@ fn abs(n) {
 }
 
 // Explicit types when needed
+struct DivError { message String }
+
 fn divide(a Int, b Int) Int!DivError {
     if b == 0 { error DivError{ message: 'divide by zero' } }
     else { a / b }
@@ -119,11 +124,11 @@ result = apply(5, double)  // 10
 
 // Compose functions
 double_then_add = compose(add_one, double)
-double_then_add(5)  // 11
+println(double_then_add(5))  // 11
 
 // Higher-order patterns
 fn twice(x, f) f(f(x))
-twice(3, fn(n) n + 1)  // 5`,
+println(twice(3, fn(n) n + 1))  // 5`,
     },
     {
       title: "Recursion",
@@ -157,7 +162,9 @@ println(sum([1, 2, 3, 4, 5], 0))   // 15`,
       title: "Everything is an expression",
       description:
         "No statements. If/else, match, and blocks all return values. The last expression in a block is its value.",
-      code: `result = if x > 0 {
+      code: `x = 5
+
+result = if x > 0 {
     'positive'
 } else {
     'non-positive'
@@ -214,16 +221,15 @@ fn ignore_second(pair) {
 
 fn handle(r Result) String {
     match r {
-        Ok('special') -> 'matched literal!',
-        Ok(value) -> 'got: \${value}',
-        Err(e) -> 'error: \${e}',
+        Result.Ok('special') -> 'matched literal!',
+        Result.Ok(value) -> 'got: \${value}',
+        Result.Err(e) -> 'error: \${e}',
     }
 }
 
-// Variants can be used bare (unqualified) when unambiguous
-handle(Ok('special'))  // 'matched literal!'
-handle(Ok('hello'))    // 'got: hello'
-handle(Err('oops'))    // 'error: oops'`,
+println(handle(Result.Ok('special')))  // 'matched literal!'
+println(handle(Result.Ok('hello')))    // 'got: hello'
+println(handle(Result.Err('oops')))    // 'error: oops'`,
     },
 
     // === DATA TYPES ===
@@ -285,10 +291,9 @@ enum Option {
 }
 
 // Create enum values
-// Qualified or bare (when unambiguous)
 status = Status.Active
-banned = Banned('spam')
-some_value = Some(42)`,
+banned = Status.Banned('spam')
+some_value = Option.Some(42)`,
     },
     {
       title: "Generic enums",
@@ -305,10 +310,10 @@ enum Either(L, R) {
 }
 
 // Type inferred from usage
-x Maybe = Just(42)
-y Maybe = Nothing
+x Maybe = Maybe.Just(42)
+y Maybe = Maybe.Nothing
 
-result Either = Left('error')`,
+result Either = Either.Left('error')`,
     },
     {
       title: "Tuples",
@@ -364,7 +369,12 @@ fn in_range(n Int, start Int, end Int) Bool {
       title: "Strings and interpolation",
       description:
         "Strings use single quotes. Embed expressions with $ for variables or ${} for complex expressions.",
-      code: `name = 'world'
+      code: `struct Person {
+    name String
+    age Int
+}
+
+name = 'world'
 greeting = 'Hello, \$name!'
 math = 'Result: \${1 + 2 * 3}'
 
@@ -381,7 +391,12 @@ quote = 'She said \\'hello\\''`,
       title: "Optional values",
       description:
         "Functions that might not return a value use ? in their return type. Handle missing values with 'or'.",
-      code: `fn find_user(id Int) ?User {
+      code: `struct User {
+    id Int
+    name String
+}
+
+fn find_user(id Int) ?User {
     if id == 0 { none }
     else { User{ id: id, name: 'found' } }
 }
@@ -392,7 +407,7 @@ user = find_user(0) or User{ id: 0, name: 'guest' }
 // Handle with receiver
 result = find_user(0) or missing -> {
     println('User not found')
-    User{ id: -1, name: 'default' }
+    User{ id: 0, name: 'default' }
 }`,
     },
     {
@@ -430,7 +445,7 @@ println('hello')
 println([1, 2, 3])
 
 // Convert to string representation
-s = inspect(Person{ name: 'alice', age: 30 })
+s = inspect([1, 2, 3])  // '[1, 2, 3]'
 
 // Split strings
 parts = str_split('a,b,c', ',')  // ['a', 'b', 'c']`,
@@ -441,16 +456,18 @@ parts = str_split('a,b,c', ',')  // ['a', 'b', 'c']`,
         "File and network I/O requires the --experimental-shitty-io flag.",
       code: `// Run with: al run --experimental-shitty-io file.al
 
-// File operations
-content = read_file('data.txt')
-write_file('output.txt', 'hello world')
+// File operations — return Result, handle with 'or'
+content = read_file('data.txt') or ''
+None = write_file('output.txt', 'hello world') or none
 
-// TCP networking
-listener = tcp_listen(8080)
-client = tcp_accept(listener)
-data = tcp_read(client)
-tcp_write(client, 'HTTP/1.1 200 OK\\r\\n\\r\\nHello')
-tcp_close(client)`,
+// TCP networking — wrap in a failable function to propagate errors
+fn serve() None!String {
+    listener = tcp_listen(8080) or err -> { error err }
+    client = tcp_accept(listener) or err -> { error err }
+    data = tcp_read(client) or ''
+    None = tcp_write(client, 'HTTP/1.1 200 OK\\r\\n\\r\\nHello') or none
+    tcp_close(client) or none
+}`,
     },
   ];
 
