@@ -77,16 +77,11 @@ fn (mut p Parser) add_warning(message string) {
 }
 
 fn (p Parser) current_span() sp.Span {
-	token_len := if lit := p.current_token.literal {
-		lit.len
-	} else {
-		p.current_token.kind.str().len
-	}
 	return sp.Span{
 		start_line:   p.current_token.line
 		start_column: p.current_token.column
 		end_line:     p.current_token.line
-		end_column:   p.current_token.column + token_len
+		end_column:   p.current_token.column + p.current_token.length
 	}
 }
 
@@ -100,13 +95,8 @@ fn (p Parser) span_from(start sp.Span) sp.Span {
 }
 
 fn (mut p Parser) save_token_end() {
-	token_len := if lit := p.current_token.literal {
-		lit.len
-	} else {
-		p.current_token.kind.str().len
-	}
 	p.prev_token_end_line = p.current_token.line
-	p.prev_token_end_column = p.current_token.column + token_len
+	p.prev_token_end_column = p.current_token.column + p.current_token.length
 }
 
 fn (mut p Parser) synchronize() {
@@ -329,7 +319,6 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 	mut left := p.parse_binary_expression()!
 
 	if p.current_token.kind == .kw_or {
-		or_span := p.current_span()
 		p.eat(.kw_or)!
 
 		mut receiver := ?ast.Identifier(none)
@@ -354,7 +343,7 @@ fn (mut p Parser) parse_or_expression() !ast.Expression {
 			expression: left
 			receiver:   receiver
 			body:       body
-			span:       or_span
+			span:       p.span_from(left.span)
 		}
 	}
 
@@ -369,7 +358,6 @@ fn (mut p Parser) parse_logical_or() !ast.Expression {
 	mut left := p.parse_logical_and()!
 
 	for p.current_token.kind == .logical_or {
-		span := p.current_span()
 		p.eat(.logical_or)!
 		right := p.parse_logical_and()!
 		left = ast.BinaryExpression{
@@ -378,7 +366,7 @@ fn (mut p Parser) parse_logical_or() !ast.Expression {
 			op:    ast.Operator{
 				kind: .logical_or
 			}
-			span:  span
+			span:  p.span_from(left.span)
 		}
 	}
 
@@ -389,7 +377,6 @@ fn (mut p Parser) parse_logical_and() !ast.Expression {
 	mut left := p.parse_equality()!
 
 	for p.current_token.kind == .logical_and {
-		span := p.current_span()
 		p.eat(.logical_and)!
 		right := p.parse_equality()!
 		left = ast.BinaryExpression{
@@ -398,7 +385,7 @@ fn (mut p Parser) parse_logical_and() !ast.Expression {
 			op:    ast.Operator{
 				kind: .logical_and
 			}
-			span:  span
+			span:  p.span_from(left.span)
 		}
 	}
 
@@ -409,7 +396,6 @@ fn (mut p Parser) parse_equality() !ast.Expression {
 	mut left := p.parse_comparison()!
 
 	for p.current_token.kind in [.punc_equals_comparator, .punc_not_equal] {
-		span := p.current_span()
 		operator := p.current_token.kind
 		p.eat(operator)!
 		right := p.parse_comparison()!
@@ -419,7 +405,7 @@ fn (mut p Parser) parse_equality() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span:  span
+			span:  p.span_from(left.span)
 		}
 	}
 
@@ -430,7 +416,6 @@ fn (mut p Parser) parse_comparison() !ast.Expression {
 	mut left := p.parse_additive()!
 
 	for p.current_token.kind in [.punc_lt, .punc_gt, .punc_lte, .punc_gte] {
-		span := p.current_span()
 		operator := p.current_token.kind
 		p.eat(operator)!
 		right := p.parse_additive()!
@@ -440,7 +425,7 @@ fn (mut p Parser) parse_comparison() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span:  span
+			span:  p.span_from(left.span)
 		}
 	}
 
@@ -451,7 +436,6 @@ fn (mut p Parser) parse_additive() !ast.Expression {
 	mut left := p.parse_multiplicative()!
 
 	for p.current_token.kind in [.punc_plus, .punc_minus] {
-		span := p.current_span()
 		operator := p.current_token.kind
 		p.eat(operator)!
 		right := p.parse_multiplicative()!
@@ -461,7 +445,7 @@ fn (mut p Parser) parse_additive() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span:  span
+			span:  p.span_from(left.span)
 		}
 	}
 
@@ -472,7 +456,6 @@ fn (mut p Parser) parse_multiplicative() !ast.Expression {
 	mut left := p.parse_unary_expression()!
 
 	for p.current_token.kind in [.punc_mul, .punc_div, .punc_mod] {
-		span := p.current_span()
 		operator := p.current_token.kind
 		p.eat(operator)!
 		right := p.parse_unary_expression()!
@@ -482,7 +465,7 @@ fn (mut p Parser) parse_multiplicative() !ast.Expression {
 			op:    ast.Operator{
 				kind: operator
 			}
-			span:  span
+			span:  p.span_from(left.span)
 		}
 	}
 
@@ -747,7 +730,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 						// synchronize consumed the ] and popped context
 						return ast.ArrayExpression{
 							elements: elements
-							span:     span
+							span:     p.span_from(span)
 						}
 					}
 					elements << ast.Expression(ast.ErrorNode{
@@ -758,7 +741,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 				}
 				elements << ast.SpreadElement{
 					expression: inner
-					span:       spread_span
+					span:       p.span_from(spread_span)
 				}
 			}
 		} else {
@@ -769,7 +752,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 					// synchronize consumed the ] and popped context
 					return ast.ArrayExpression{
 						elements: elements
-						span:     span
+						span:     p.span_from(span)
 					}
 				}
 				elements << ast.Expression(ast.ErrorNode{
@@ -793,7 +776,7 @@ fn (mut p Parser) parse_array_expression() !ast.Expression {
 
 	return ast.ArrayExpression{
 		elements: elements
-		span:     span
+		span:     p.span_from(span)
 	}
 }
 
@@ -840,7 +823,7 @@ fn (mut p Parser) parse_if_expression() !ast.Expression {
 	return ast.IfExpression{
 		condition: condition
 		body:      body
-		span:      span
+		span:      p.span_from(span)
 		else_body: else_body
 	}
 }
@@ -888,7 +871,7 @@ fn (mut p Parser) parse_match_expression() !ast.Expression {
 			}
 			ast.Expression(ast.OrPattern{
 				patterns: patterns
-				span:     first_span
+				span:     p.span_from(first_span)
 			})
 		} else {
 			first_pattern
@@ -978,7 +961,7 @@ fn (mut p Parser) parse_function_declaration() !ast.Statement {
 		return_type: return_type
 		error_type:  error_type
 		body:        body
-		span:        fn_span
+		span:        p.span_from(fn_span)
 	}
 }
 
@@ -995,7 +978,7 @@ fn (mut p Parser) parse_function_expression() !ast.Expression {
 		return_type: return_type
 		error_type:  error_type
 		body:        body
-		span:        fn_span
+		span:        p.span_from(fn_span)
 	}
 }
 
@@ -1521,7 +1504,7 @@ fn (mut p Parser) parse_const_binding() !ast.Statement {
 		}
 		typ:        typ
 		init:       init
-		span:       span
+		span:       p.span_from(span)
 	}
 }
 
@@ -1657,7 +1640,7 @@ fn (mut p Parser) parse_export_declaration() !ast.Statement {
 
 	return ast.ExportDeclaration{
 		declaration: decl
-		span:        span
+		span:        p.span_from(span)
 	}
 }
 
@@ -1676,7 +1659,7 @@ fn (mut p Parser) parse_import_declaration() !ast.Statement {
 	return ast.ImportDeclaration{
 		path:       path
 		specifiers: specifiers
-		span:       import_span
+		span:       p.span_from(import_span)
 	}
 }
 
@@ -1849,7 +1832,7 @@ fn (mut p Parser) parse_interpolated_string() !ast.Expression {
 
 	return ast.InterpolatedString{
 		parts: parts
-		span:  span
+		span:  p.span_from(span)
 	}
 }
 

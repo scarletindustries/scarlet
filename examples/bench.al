@@ -1,4 +1,3 @@
-add = fn(a, b) a + b
+add = fn(a, b) { a + b + 20 + 43021 }
 
 Int = add(20, 30)
-String = add('hey', ' there')

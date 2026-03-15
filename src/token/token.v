@@ -7,6 +7,7 @@ pub:
 	literal        ?string  // Literal representation of the token
 	line           int      // The line number in the source where the token occurred
 	column         int      // The column number in the source where the token occurred
+	length         int      // Number of source characters this token spans
 	leading_trivia []Trivia // Whitespace/comments before this token
 }
 

@@ -435,6 +435,7 @@ fn (mut s Scanner) new_token_with_trivia(kind token.Kind, literal ?string, trivi
 		literal:        literal
 		line:           s.token_start_line
 		column:         s.token_start_column
+		length:         s.state.get_column() - s.token_start_column
 		leading_trivia: trivia
 	}
 }
