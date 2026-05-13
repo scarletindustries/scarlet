@@ -1,7 +1,7 @@
 name: Release
 
 env:
-  COMPILER_PATHS: src/ VERSION
+  COMPILER_PATHS: src/ Cargo.toml Cargo.lock VERSION
 
 on:
   push:
@@ -92,36 +92,38 @@ jobs:
         include:
           - os: macos-latest
             platform: macos
-            v_archive: v_macos_arm64.zip
+            target: aarch64-apple-darwin
+            asset: al-macos-arm64
           - os: ubuntu-latest
             platform: linux
-            v_archive: v_linux.zip
+            target: x86_64-unknown-linux-gnu
+            asset: al-linux-x86_64
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download V
-        run: |
-          curl -sL https://github.com/vlang/v/releases/latest/download/${{ matrix.v_archive }} -o /tmp/v.zip
-          unzip -q /tmp/v.zip -d /tmp
-          echo "/tmp/v" >> $GITHUB_PATH
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Update VERSION file
         run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
 
-      - name: Build (Production)
-        run: |
-          if [ "${{ matrix.platform }}" = "linux" ]; then
-            # Use -O2 on Linux due to GCC -O3 bug: https://github.com/vlang/v/issues/26121
-            v -cc gcc -cflags "-O2" -o al .
-          else
-            v -prod -o al .
-          fi
+      - name: Build (Release)
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run Tests
-        run: ./al run examples/all_language_features.al
+        run: cargo test --release --target ${{ matrix.target }}
+
+      - name: Prepare Release Binary
+        run: |
+          cp "target/${{ matrix.target }}/release/al" "./${{ matrix.asset }}"
 
       - name: Import Code Signing Certificate
         if: matrix.platform == 'macos'
@@ -152,9 +154,9 @@ jobs:
             --options runtime \
             --timestamp \
             --force \
-            ./al
+            ./${{ matrix.asset }}
 
-          codesign -vv -d ./al
+          codesign -vv -d ./${{ matrix.asset }}
 
       - name: Notarize Binary
         if: matrix.platform == 'macos'
@@ -163,7 +165,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          zip -r al.zip ./al
+          zip -r al.zip ./${{ matrix.asset }}
 
           xcrun notarytool store-credentials "notary-profile" \
             --apple-id "$APPLE_ID" \
@@ -174,18 +176,11 @@ jobs:
             --keychain-profile "notary-profile" \
             --wait
 
-      - name: Prepare Release Binary
-        run: |
-          ARCH=$(uname -m)
-          BINARY_NAME="al-${{ matrix.platform }}-$ARCH"
-          cp ./al "./$BINARY_NAME"
-          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BINARY_NAME }}
-          path: ./${{ env.BINARY_NAME }}
+          name: ${{ matrix.asset }}
+          path: ./${{ matrix.asset }}
 
       - name: Cleanup Keychain
         if: always() && matrix.platform == 'macos'

@@ -1,0 +1,7 @@
+[
+  PrimeCheck{ is_prime: true, n: 2 },
+  PrimeCheck{ is_prime: true, n: 7 },
+  PrimeCheck{ is_prime: true, n: 13 },
+  PrimeCheck{ is_prime: false, n: 15 },
+  PrimeCheck{ is_prime: true, n: 97 }
+]

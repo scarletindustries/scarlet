@@ -1,0 +1,23 @@
+[
+  StudentReport {
+    gpa: 4,
+    passing: true,
+    grade: A,
+    score: 95,
+    name: Alice
+  },
+  StudentReport {
+    gpa: 2,
+    passing: true,
+    grade: C,
+    score: 72,
+    name: Bob
+  },
+  StudentReport {
+    gpa: 0,
+    passing: false,
+    grade: F,
+    score: 55,
+    name: Charlie
+  }
+]

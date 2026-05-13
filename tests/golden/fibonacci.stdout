@@ -1,0 +1,6 @@
+[
+  FibResult{ fib: 0, n: 0 },
+  FibResult{ fib: 5, n: 5 },
+  FibResult{ fib: 55, n: 10 },
+  FibResult{ fib: 610, n: 15 }
+]

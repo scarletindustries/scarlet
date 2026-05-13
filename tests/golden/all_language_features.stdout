@@ -1,0 +1,46 @@
+x is:
+11
+what
+8
+20
+positive
+one
+B
+60
+Got: success
+0
+User{ name: default, id: 0 }
+10
+-1
+matched special
+error: danger
+other: something else
+10
+15
+42
+15
+Hello, World
+true
+polymorphic
+3
+2
+1
+Alice is 30 years old
+12
+7
+42
+hello
+world
+1
+2
+a=42 b=hello
+name=world
+one: hello
+int_pair.first: 1
+mixed_pair: age = 30
+10/2 = 5
+10/0 = -1
+boxed int: 42
+boxed str: hello
+auto_pair: 100, hundred
+Option.Some(0)

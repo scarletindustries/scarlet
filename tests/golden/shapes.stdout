@@ -1,0 +1,5 @@
+[
+  ShapeInfo{ perimeter: 62, area: 314, name: Circle r=10 },
+  ShapeInfo{ perimeter: 18, area: 40, name: Rectangle 5x8 },
+  ShapeInfo{ perimeter: 28, area: 49, name: Square 7 }
+]

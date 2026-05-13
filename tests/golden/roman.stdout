@@ -1,0 +1,8 @@
+[
+  RomanNumber{ roman: I, arabic: 1 },
+  RomanNumber{ roman: IV, arabic: 4 },
+  RomanNumber{ roman: IX, arabic: 9 },
+  RomanNumber{ roman: XLII, arabic: 42 },
+  RomanNumber{ roman: XCIX, arabic: 99 },
+  RomanNumber{ roman: MMXXIV, arabic: 2024 }
+]

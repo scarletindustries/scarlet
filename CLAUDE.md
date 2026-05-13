@@ -1,10 +1,12 @@
-When building, always use `v .` (make sure you are in the project root before running)
+Build with `cargo build`. Run tests with `cargo test`. Production build with `cargo build --release`.
 
-You can do a production build with `v -prod .`
+Before committing, `cargo fmt` and `cargo clippy --all-targets` should both be clean — CI enforces this.
 
 Be sparse when adding comments in the code. Do not add unnecessary comments. Do add comments when explaining larger, more complicated code paths. Especially in things like the parser and compiler or vm.
 
-When working with AST, be sure to mirror any changges in both the parser AST and the typed AST. The typed AST is in `src/compiler/typed_ast/typed_ast.v`. The parser AST is in `src/compiler/parser/ast/ast.v`.
+The AST is defined in `src/ast/mod.rs`. When changing AST shape, also update `src/parser/mod.rs` (construction), `src/printer/mod.rs` (display), and `src/bytecode/compiler.rs` (typecheck + codegen).
+
+The HM type inferencer lives in `src/types/infer.rs`. Type definitions are in `src/type_def/mod.rs`. Exhaustiveness checking is in `src/types/exhaustiveness.rs`.
 
 For the VSCode extension in `extension/`, use Bun for package management and running scripts (e.g., `bun install`, `bun run compile`).
 

@@ -1,0 +1,26 @@
+[
+  TriangleInfo {
+    valid: true,
+    perimeter: 9,
+    triangle_type: Equilateral,
+    sides: 3, 3, 3
+  },
+  TriangleInfo {
+    valid: true,
+    perimeter: 11,
+    triangle_type: Isosceles,
+    sides: 3, 3, 5
+  },
+  TriangleInfo {
+    valid: true,
+    perimeter: 12,
+    triangle_type: Scalene,
+    sides: 3, 4, 5
+  },
+  TriangleInfo {
+    valid: false,
+    perimeter: 13,
+    triangle_type: Invalid,
+    sides: 1, 2, 10
+  }
+]
