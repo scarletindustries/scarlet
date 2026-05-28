@@ -1,64 +1,59 @@
-struct User {
+type User {
 	id Int
 	name String
 }
 
-struct DivisionError {
+type DivisionError {
 	message String
 }
 
-struct Error {
+type AppError {
 	message String
 }
 
-struct ValidationError {
+type ValidationError {
 	code Int
 }
 
-struct NetworkError {
+type NetworkError {
 	status Int
 }
 
-struct Person {
+type Person {
 	name String
 	age Int
 }
 
-struct Config {
+type Config {
 	debug Bool
 }
 
-enum Result {
-	Ok(String)
-	Err(String)
-}
-
-enum Option {
-	Some(Int)
-	None
+type Outcome {
+	Good(value String)
+	Bad(value String)
 }
 
 // ============================================================================
 // Generic Structs and Enums
 // ============================================================================
 
-enum GenericResult(T, E) {
-	Success(T)
-	Failure(E)
+type GenericResult(t, e) {
+	Success(value t)
+	Failure(error e)
 }
 
-enum Maybe(T) {
-	Just(T)
+type Maybe(t) {
+	Just(value t)
 	Nothing
 }
 
-struct Pair(A, B) {
-	first A
-	second B
+type Pair(a, b) {
+	first a
+	second b
 }
 
-struct Box(T) {
-	value T
+type Box(t) {
+	value t
 }
 
 const app_name = 'my app'
@@ -66,48 +61,62 @@ const app_name = 'my app'
 x = 10
 x = x + 1
 
-person = Person{ name: 'alistair', age: 18 }
-fn add(a Int, b Int) Int { a + b }
-fn greet(name String) { name }
+person = Person(name: 'alistair', age: 18)
+fn add(a Int, b Int) Int {
+	a + b
+}
+fn greet(name String) {
+	name
+}
 
-fn add_generic(a, b) { a + b }
-added_int = add(5, 3)
-added_str = add_generic('Hello, ', 'world!')
+fn add_generic(a, b) {
+	a + b
+}
+_added_int = add(5, 3)
+_added_str = add_generic('Hello, ', 'world!')
 
-callback = fn(x Int) Int { x * 2 }
+_callback = fn(x Int) x * 2
 fn apply(x Int, f fn(Int) Int) Int {
 	f(x)
 }
-fn apply_generic(x A, f fn(A) A) A {
+fn apply_generic(x a, f fn(a) a) a {
 	f(x)
 }
 
-double = fn(n Int) Int { n * 2 }
+double = fn(n Int) n * 2
 
-triple = fn(n Int) Int { n * 3 }
+triple = fn(n Int) n * 3
 
-fn find_user(id Int) ?User {
-	if id == 0 { none } else {
-		User{ id: id, name: 'found' }
+fn find_user(id Int) Option(User) {
+	if id == 0 {
+		None
+	} else {
+		Some(User(id: id, name: 'found'))
 	}
 }
 
-fn divide(a Int, b Int) Int!DivisionError {
+fn divide(a Int, b Int) Result(Int, DivisionError) {
 	if b == 0 {
-		error DivisionError{ message: 'Cannot divide by zero' }
-	} else { a / b }
+		Err(DivisionError(message: 'Cannot divide by zero'))
+	} else {
+		Ok(a / b)
+	}
 }
 
-fn validate(x Int) !ValidationError {
+fn validate(x Int) Result(Nil, ValidationError) {
 	if x < 0 {
-		error ValidationError{ code: 1 }
-	} else { none }
+		Err(ValidationError(code: 1))
+	} else {
+		Ok(Nil)
+	}
 }
 
-fn check_positive(x Int) Int!Error {
+fn check_positive(x Int) Result(Int, AppError) {
 	if x <= 0 {
-		error Error{ message: 'must be positive' }
-	} else { x * 2 }
+		Err(AppError(message: 'must be positive'))
+	} else {
+		Ok(x * 2)
+	}
 }
 
 fn max(a Int, b Int) Int {
@@ -115,44 +124,52 @@ fn max(a Int, b Int) Int {
 }
 
 fn classify(n Int) String {
-	if n < 0 { 'negative' } else if n == 0 { 'zero' } else { 'positive' }
+	if n < 0 {
+		'negative'
+	} else if n == 0 {
+		'zero'
+	} else {
+		'positive'
+	}
 }
 
-fn g() { 'Hello!' }
+fn g() {
+	'Hello!'
+}
 
-String = g()
+_g_result = g()
 
 fn describe(x Int) String {
 	match x {
-		0 -> 'zero',
-		1 -> 'one',
-		else -> 'many',
+		0 -> 'zero'
+		1 -> 'one'
+		else -> 'many'
 	}
 }
 
-fn grade(score Int) String!Error {
+fn grade(score Int) Result(String, AppError) {
 	match score {
-		0..60 -> 'F',
-		60..70 -> 'D',
-		70..80 -> 'C',
-		80..90 -> 'B',
-		90..101 -> 'A',
-		else -> error Error{ message: 'score must be 0-100' },
+		0..60 -> Ok('F')
+		60..70 -> Ok('D')
+		70..80 -> Ok('C')
+		80..90 -> Ok('B')
+		90..101 -> Ok('A')
+		else -> Err(AppError(message: 'score must be 0-100'))
 	}
 }
 
-fn handle_result(r Result) String {
+fn handle_result(r Outcome) String {
 	match r {
-		Ok(value) -> 'Got: ${value}',
-		Err(e) -> 'Error: ${e}',
+		Good(value) -> 'Got: ${value}'
+		Bad(e) -> 'Error: ${e}'
 	}
 }
 
-fn match_literal(r Result) String {
+fn match_literal(r Outcome) String {
 	match r {
-		Ok('special') -> 'matched special',
-		Ok(other) -> 'other: ${other}',
-		Err(e) -> 'error: ${e}',
+		Good('special') -> 'matched special'
+		Good(other) -> 'other: ${other}'
+		Bad(e) -> 'error: ${e}'
 	}
 }
 
@@ -166,38 +183,38 @@ fn example() Int {
 }
 
 numbers = [1, 2, 3, 4, 5]
-first = numbers[0]
+_first_num = numbers[0] or 0
 
-range = 0..10
+_range = 0..10
 
-person_name = person.name
-person_age = person.age
+_person_name = person.name
+_person_age = person.age
 
-yes = true
-no = false
+yes = True
+no = False
 
-nothing = none
-greeting = 'Hello, ${app_name}!'
-complex = 'Result: ${1 + 2}'
+_nothing = None
+_greeting = 'Hello, ${app_name}!'
+_complex = 'Result: ${1 + 2}'
 
-sum = 1 + 2
-diff = 5 - 3
-prod = 4 * 2
-quot = 10 / 2
-rem = 10 % 3
+_sum = 1 + 2
+_diff = 5 - 3
+_prod = 4 * 2
+_quot = 10 / 2
+_rem = 10 % 3
 
 a = 5
 b = 10
-eq = a == b
-neq = a != b
-lt = a < b
-gt = a > b
-lte = a <= b
-gte = a >= b
+_eq = a == b
+_neq = a != b
+_lt = a < b
+_gt = a > b
+_lte = a <= b
+_gte = a >= b
 
-and_result = yes && no
-or_result = yes || no
-not_result = !yes
+_and_result = yes && no
+_or_result = yes || no
+_not_result = !yes
 
 add_result = add(5, 3)
 max_result = max(10, 20)
@@ -205,21 +222,21 @@ classify_result = classify(5)
 describe_result = describe(1)
 grade_result = grade(85) or 'error'
 example_result = example()
-enum_result = handle_result(Ok('success'))
+enum_result = handle_result(Good('success'))
 
 error_result = divide(10, 0) or 0
-error_with_receiver = divide(10, 0) or err -> 0
+_error_with_receiver = divide(10, 0) or _err -> 0
 
-option_result = find_user(0) or User{ id: 0, name: 'default' }
+option_result = find_user(0) or User(id: 0, name: 'default')
 
 positive_pass = check_positive(5)
-positive_fail = check_positive(-1) or err -> -1
+positive_fail = check_positive(-1) or _err -> -1
 
-literal_match1 = match_literal(Ok('special'))
-literal_match2 = match_literal(Err('danger'))
-literal_match3 = match_literal(Ok('something else'))
+literal_match1 = match_literal(Good('special'))
+literal_match2 = match_literal(Bad('danger'))
+literal_match3 = match_literal(Good('something else'))
 
-enum G {
+type G {
 	Test
 	BottledIt
 }
@@ -247,11 +264,21 @@ apply_generic_result = apply_generic(5, triple)
 println(apply_result)
 println(apply_generic_result)
 
-fn inferred_double(x) { x * 2 }
-fn inferred_add(a, b) { a + b }
-fn inferred_greet(name) { 'Hello, ' + name }
-fn inferred_is_positive(n) { n > 0 }
-fn inferred_identity(x) { x }
+fn inferred_double(x) {
+	x * 2
+}
+fn inferred_add(a, b) {
+	a + b
+}
+fn inferred_greet(name) {
+	'Hello, ' + name
+}
+fn inferred_is_positive(n) {
+	n > 0
+}
+fn inferred_identity(x) {
+	x
+}
 
 println(inferred_double(21))
 println(inferred_add(10, 5))
@@ -259,11 +286,11 @@ println(inferred_greet('World'))
 println(inferred_is_positive(42))
 println(inferred_identity('polymorphic'))
 
-countdown = fn(n) {
-	if n > 0 {
-		println(n)
-		countdown(n - 1)
-	}
+countdown = fn(n) if n > 0 {
+	println(n)
+	countdown(n - 1)
+} else {
+	Nil
 }
 countdown(3)
 
@@ -277,7 +304,7 @@ println(inferred_double(inferred_double(3)))
 fn apply_twice(x, f) {
 	f(f(x))
 }
-println(apply_twice(5, fn(n) { n + 1 }))
+println(apply_twice(5, fn(n) n + 1))
 
 // ============================================================================
 // Tuples
@@ -285,13 +312,12 @@ println(apply_twice(5, fn(n) { n + 1 }))
 
 // Tuple literals
 pair = (42, 'hello')
-triple = (true, 100, 'world')
-single = (42)
+trio = (True, 100, 'world')
 
 // Tuple access
 println(pair.0)
 println(pair.1)
-println(triple.2)
+println(trio.2)
 
 // Nested tuple access
 nested = ((1, 2), 'outer')
@@ -299,22 +325,18 @@ println(nested.0.0)
 println(nested.0.1)
 
 // Tuple destructuring with variable binding
-(a, b) = pair
-println('a=${a} b=${b}')
+(ta, tb) = pair
+println('a=${ta} b=${tb}')
 
-// Type consumption (discard value, verify type)
-(Bool, Int, name) = triple
-println('name=${name}')
-
-// All consumption (verify types, discard all)
-(Bool, Int, String) = triple
+(_, _, name3) = trio
+println('name=${name3}')
 
 // Tuple pattern matching
 test_pair = (1, 'hello')
 result = match test_pair {
-	(0, msg) -> 'zero: ${msg}',
-	(1, msg) -> 'one: ${msg}',
-	else -> 'other',
+	(0, msg) -> 'zero: ${msg}'
+	(1, msg) -> 'one: ${msg}'
+	else -> 'other'
 }
 println(result)
 
@@ -322,10 +344,8 @@ println(result)
 // Generic Types Usage
 // ============================================================================
 
-// inferred
-int_pair = Pair{ first: 1, second: 2 }
-// explicit
-mixed_pair = Pair(String, Int){ first: 'age', second: 30 }
+int_pair = Pair(first: 1, second: 2)
+mixed_pair = Pair(first: 'age', second: 30)
 
 println('int_pair.first: ${int_pair.first}')
 println('mixed_pair: ${mixed_pair.first} = ${mixed_pair.second}')
@@ -340,8 +360,8 @@ fn safe_divide(a, b) GenericResult(Int, String) {
 
 fn unwrap_generic_result(r GenericResult(Int, String), default Int) Int {
 	match r {
-		Success(v) -> v,
-		Failure(_) -> default,
+		Success(v) -> v
+		Failure(_) -> default
 	}
 }
 
@@ -350,18 +370,18 @@ div_err = safe_divide(10, 0)
 println('10/2 = ${unwrap_generic_result(div_ok, -1)}')
 println('10/0 = ${unwrap_generic_result(div_err, -1)}')
 
-boxed_int = Box{ value: 42 }
-boxed_str = Box(String){ value: 'hello' }
+boxed_int = Box(value: 42)
+boxed_str = Box(value: 'hello')
 println('boxed int: ${boxed_int.value}')
 println('boxed str: ${boxed_str.value}')
 
-fn make_pair(a A, b B) Pair(A, B) {
-	Pair{ first: a, second: b }
+fn make_pair(x a, y b) Pair(a, b) {
+	Pair(first: x, second: y)
 }
 
 auto_pair = make_pair(100, 'hundred')
 println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')
 
-x Option = Option.Some(0)
+xo = Some(0)
 
-x
+xo

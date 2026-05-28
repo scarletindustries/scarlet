@@ -1,0 +1,15 @@
+Split by comma:
+[apple, banana, cherry]
+Split by space:
+[hello, world, from, al]
+Split by double colon:
+[one, two, three]
+No delimiter found:
+[no delimiters here]
+Consecutive delimiters:
+[a, , b, , c]
+First fruit: apple
+Second word: world
+length: 19
+contains banana: True
+trimmed: [hi]

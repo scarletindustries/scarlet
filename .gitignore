@@ -1,5 +1,5 @@
-main
-al
+/main
+/al
 *.exe
 *.exe~
 *.so
@@ -16,3 +16,4 @@ node_modules
 dist
 extension/out
 /target/
+/docs/

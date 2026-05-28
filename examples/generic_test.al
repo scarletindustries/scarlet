@@ -1,9 +1,14 @@
-fn identity(x A) A { x }
+fn identity(x a) a {
+	x
+}
+fn identity2(x) {
+	x
+}
 
-fn first(arr []A) ?A {
+fn first(arr Array(a)) Option(a) {
 	match arr {
-		[] -> none,
-		[first, ..] -> first,
+		[] -> None
+		[head, ..] -> Some(head)
 	}
 }
 

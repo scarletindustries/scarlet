@@ -5,15 +5,19 @@ println('a=${a} b=${b}')
 println('a=${a} b=${b}')
 
 fn example(a) {
-	(a)
+	a
 }
 
-println({
-	a = example(42)
-	a
-})
+println(
+	{
+		a = example(42)
+		a
+	},
+)
 
-println({
-	a = example('a string')
-	a
-})
+println(
+	{
+		a = example('a string')
+		a
+	},
+)

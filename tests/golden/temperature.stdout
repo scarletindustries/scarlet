@@ -1,6 +1,0 @@
-[
-  Temperature{ kelvin: 273, fahrenheit: 32, celsius: 0 },
-  Temperature{ kelvin: 293, fahrenheit: 68, celsius: 20 },
-  Temperature{ kelvin: 310, fahrenheit: 98, celsius: 37 },
-  Temperature{ kelvin: 373, fahrenheit: 212, celsius: 100 }
-]

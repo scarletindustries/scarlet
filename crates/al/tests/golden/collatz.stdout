@@ -1,0 +1,6 @@
+[
+  CollatzResult{ start: 1, steps: 0 },
+  CollatzResult{ start: 7, steps: 16 },
+  CollatzResult{ start: 27, steps: 111 },
+  CollatzResult{ start: 97, steps: 118 }
+]

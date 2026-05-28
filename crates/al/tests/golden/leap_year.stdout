@@ -1,0 +1,7 @@
+[
+  YearInfo{ year: 2000, is_leap: True, days: 366, feb_days: 29 },
+  YearInfo{ year: 2024, is_leap: True, days: 366, feb_days: 29 },
+  YearInfo{ year: 2023, is_leap: False, days: 365, feb_days: 28 },
+  YearInfo{ year: 1900, is_leap: False, days: 365, feb_days: 28 },
+  YearInfo{ year: 2100, is_leap: False, days: 365, feb_days: 28 }
+]

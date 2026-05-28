@@ -1,0 +1,6 @@
+[
+  GcdResult{ a: 48, b: 18, gcd: 6, lcm: 144 },
+  GcdResult{ a: 54, b: 24, gcd: 6, lcm: 216 },
+  GcdResult{ a: 17, b: 13, gcd: 1, lcm: 221 },
+  GcdResult{ a: 100, b: 35, gcd: 5, lcm: 700 }
+]

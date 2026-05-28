@@ -1,5 +1,0 @@
-[
-  FactResult{ factorial: 1, n: 0 },
-  FactResult{ factorial: 120, n: 5 },
-  FactResult{ factorial: 3628800, n: 10 }
-]

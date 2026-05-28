@@ -1,0 +1,46 @@
+use super::PreludeBindings;
+use super::compiler::Compiler;
+use crate::module;
+use crate::span::point_span;
+use crate::types::ValueKind;
+
+// The prelude defines types and functions that are automatically available in
+// every AL program without an import. Everything — primitives, Nil/Option/
+// Result/Bool, println/inspect — is real AL source in `src/std/al.al`, declared
+// via external/`@vm` and loaded through the normal module pipeline so the same
+// parse/analyse path produces it.
+
+impl Compiler {
+    pub(crate) fn register_prelude(&mut self) {
+        // 1. Load al.al via the module pipeline. analyse_module pushes/pops its
+        //    own env scope, so while type heads land in the flat env.type_info,
+        //    value schemes (Some/None/Ok/Err/Nil/True/False/println/...) are
+        //    defined into a scope that is immediately popped. Pull them back
+        //    from the recorded ModuleInterface into the root scope so they are
+        //    visible everywhere without an explicit import.
+        let at = point_span(0, 0);
+        let path = module::al_prelude();
+        self.load_module(&path, at);
+        let key = module::path_key(&path);
+        if let Some(iface) = self.module_table.get(&key) {
+            for name in iface.types.keys() {
+                self.reserved.insert(name.clone());
+            }
+            for (name, ev) in &iface.values {
+                if matches!(ev.scheme.kind, ValueKind::Constructor { .. }) {
+                    self.reserved.insert(name.clone());
+                }
+                self.env.define(name, ev.scheme);
+            }
+        }
+
+        // 2. Capture strict bindings. After this, every identity check in the
+        //    compiler compares against these refs — no string matching. A
+        //    missing or mis-shaped name is a compile error here, not a silent
+        //    mistype later.
+        match PreludeBindings::capture(&self.env) {
+            Ok(b) => self.prelude = b,
+            Err(msg) => self.error(msg, at),
+        }
+    }
+}

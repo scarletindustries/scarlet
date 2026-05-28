@@ -1,17 +1,16 @@
-[package]
-name = "al"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/al_core", "crates/al"]
+resolver = "2"
 
-[dependencies]
-clap = { version = "4", features = ["derive"] }
-rustyline = "14"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+[workspace.dependencies]
 indexmap = "2"
-ureq = "2"
 
 [profile.release]
 strip = true
 lto = "thin"
 codegen-units = 1
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = true

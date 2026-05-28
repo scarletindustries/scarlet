@@ -1,0 +1,11 @@
+a = Good("hello")
+b = Good("world")
+c = Good("hello")
+
+a == b (should be False):
+False
+
+a == c (should be True):
+True
+
+Payload comparison works correctly!

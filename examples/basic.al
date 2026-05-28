@@ -1,4 +1,4 @@
 const name = 'alistair'
-export fn main() {
+pub fn main() {
 	println(name)
 }

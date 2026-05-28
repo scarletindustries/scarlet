@@ -1,0 +1,11 @@
+[package]
+name = "al_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+indexmap = { workspace = true }
+petgraph = "0.8"
+include_dir = { version = "0.7", features = ["glob"] }
+imbl = "7"
+stacker = "0.1"

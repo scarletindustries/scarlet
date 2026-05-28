@@ -19,7 +19,7 @@ arr = [1, ), 3]
 fn match_errors(n) {
     match n {
         1 -> ),
-        2 -> 'two',
+        2 -> 'two'
     }
 }
 

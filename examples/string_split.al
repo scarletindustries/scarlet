@@ -1,33 +1,42 @@
+import al/string
+
 // split by comma
 csv = 'apple,banana,cherry'
-fruits = str_split(csv, ',')
+fruits = string.split(csv, ',')
 println('Split by comma:')
 println(fruits)
 
 // split by space
 sentence = 'hello world from al'
-words = str_split(sentence, ' ')
+words = string.split(sentence, ' ')
 println('Split by space:')
 println(words)
 
 // split with multi-char delimiter
 data = 'one::two::three'
-parts = str_split(data, '::')
+parts = string.split(data, '::')
 println('Split by double colon:')
 println(parts)
 
 // split with no matches (returns single-element array)
 no_match = 'no delimiters here'
-single = str_split(no_match, ',')
+single = string.split(no_match, ',')
 println('No delimiter found:')
 println(single)
 
 // empty parts from consecutive delimiters
 consecutive = 'a,,b,,c'
-with_empties = str_split(consecutive, ',')
+with_empties = string.split(consecutive, ',')
 println('Consecutive delimiters:')
 println(with_empties)
 
 // access individual elements
-println('First fruit: ${fruits[0]}')
-println('Second word: ${words[1]}')
+first_fruit = fruits[0] or '?'
+second_word = words[1] or '?'
+println('First fruit: ${first_fruit}')
+println('Second word: ${second_word}')
+
+// other ops
+println('length: ${string.length(csv)}')
+println('contains banana: ${string.contains(csv, 'banana')}')
+println('trimmed: [${string.trim('  hi  ')}]')

@@ -1,22 +1,22 @@
-enum Result {
-	Ok(String)
-	Err(String)
+type Outcome {
+	Good(value String)
+	Bad(value String)
 }
 
-a Result = Ok('hello')
-b Result = Ok('world')
-c Result = Ok('hello')
+a Outcome = Good('hello')
+b Outcome = Good('world')
+c Outcome = Good('hello')
 
-println('a = Ok("hello")')
-println('b = Ok("world")')
-println('c = Ok("hello")')
+println('a = Good("hello")')
+println('b = Good("world")')
+println('c = Good("hello")')
 println('')
 
-println('a == b (should be false):')
+println('a == b (should be False):')
 println(a == b)
 
 println('')
-println('a == c (should be true):')
+println('a == c (should be True):')
 println(a == c)
 
 println('')

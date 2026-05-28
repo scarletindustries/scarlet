@@ -1,0 +1,138 @@
+use indexmap::IndexMap;
+use std::fmt;
+
+/// Names of the *structural* prelude types — those whose `Type` is not
+/// `Named` (because exhaustiveness/array-pattern handling needs the dedicated
+/// shape). These four are the only prelude name strings outside
+/// `bytecode::prelude_bindings`.
+pub mod prim_names {
+    pub const INT: &str = "Int";
+    pub const FLOAT: &str = "Float";
+    pub const STRING: &str = "String";
+    pub const ARRAY: &str = "Array";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimitiveKind {
+    Int,
+    Float,
+    String,
+}
+
+/// A labelled field of a constructor variant. Shared between `Type::Named`
+/// (substituted, for downstream consumers) and `environment::TypeInfo`
+/// (template form, holding raw `Var` for type parameters).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDef {
+    pub label: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Primitive {
+        kind: PrimitiveKind,
+    },
+    Array {
+        element: Box<Type>,
+    },
+    Function {
+        params: Vec<Type>,
+        ret: Box<Type>,
+    },
+    /// A user-defined nominal type. `variants` carries the constructor set with
+    /// field types already substituted for `type_args`, so consumers like
+    /// exhaustiveness checking and field access need no further environment
+    /// lookups. A "struct" is the single-variant case whose constructor name
+    /// equals the type name.
+    Named {
+        id: i32,
+        name: String,
+        type_args: Vec<Type>,
+        variants: IndexMap<String, Vec<FieldDef>>,
+    },
+    Var {
+        name: String,
+    },
+    Tuple {
+        elements: Vec<Type>,
+    },
+}
+
+pub fn t_int() -> Type {
+    Type::Primitive {
+        kind: PrimitiveKind::Int,
+    }
+}
+
+pub fn t_float() -> Type {
+    Type::Primitive {
+        kind: PrimitiveKind::Float,
+    }
+}
+
+pub fn t_string() -> Type {
+    Type::Primitive {
+        kind: PrimitiveKind::String,
+    }
+}
+
+pub fn t_var(name: impl Into<String>) -> Type {
+    Type::Var { name: name.into() }
+}
+
+pub fn t_array(element: Type) -> Type {
+    Type::Array {
+        element: Box::new(element),
+    }
+}
+
+pub fn t_tuple(elements: Vec<Type>) -> Type {
+    Type::Tuple { elements }
+}
+
+pub fn t_named(
+    id: i32,
+    name: impl Into<String>,
+    type_args: Vec<Type>,
+    variants: IndexMap<String, Vec<FieldDef>>,
+) -> Type {
+    Type::Named {
+        id,
+        name: name.into(),
+        type_args,
+        variants,
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Primitive { kind } => match kind {
+                PrimitiveKind::Int => write!(f, "Int"),
+                PrimitiveKind::Float => write!(f, "Float"),
+                PrimitiveKind::String => write!(f, "String"),
+            },
+            Type::Array { element } => write!(f, "Array({})", element),
+            Type::Function { params, ret } => {
+                let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+                write!(f, "fn({}) {}", params.join(", "), ret)
+            }
+            Type::Named {
+                name, type_args, ..
+            } => {
+                if type_args.is_empty() {
+                    write!(f, "{}", name)
+                } else {
+                    let args: Vec<String> = type_args.iter().map(|a| a.to_string()).collect();
+                    write!(f, "{}({})", name, args.join(", "))
+                }
+            }
+            Type::Var { name } => write!(f, "{}", name),
+            Type::Tuple { elements } => {
+                let elems: Vec<String> = elements.iter().map(|e| e.to_string()).collect();
+                write!(f, "({})", elems.join(", "))
+            }
+        }
+    }
+}

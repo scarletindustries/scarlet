@@ -3,26 +3,41 @@
   "scopeName": "source.al",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#attributes" },
     { "include": "#strings" },
     { "include": "#characters" },
     { "include": "#numbers" },
-    { "include": "#struct-definition" },
-    { "include": "#enum-definition" },
+    { "include": "#import-statement" },
+    { "include": "#type-definition" },
     { "include": "#function-definition" },
     { "include": "#const-definition" },
     { "include": "#variable-with-type" },
     { "include": "#keywords" },
     { "include": "#constants" },
-    { "include": "#enum-qualified-access" },
-    { "include": "#generic-type-instantiation" },
-    { "include": "#enum-variant-constructor" },
-    { "include": "#struct-instantiation" },
+    { "include": "#module-qualified-access" },
+    { "include": "#constructor-call" },
     { "include": "#function-call" },
+    { "include": "#labeled-argument" },
     { "include": "#types" },
     { "include": "#operators" },
     { "include": "#punctuation" }
   ],
   "repository": {
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.al",
+          "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)(\\()?([a-zA-Z_][a-zA-Z0-9_]*)?(\\))?",
+          "captures": {
+            "1": { "name": "punctuation.definition.attribute.al" },
+            "2": { "name": "entity.name.function.decorator.al" },
+            "3": { "name": "punctuation.brackets.round.al" },
+            "4": { "name": "string.unquoted.attribute.al" },
+            "5": { "name": "punctuation.brackets.round.al" }
+          }
+        }
+      ]
+    },
     "comments": {
       "patterns": [
         {
@@ -95,7 +110,8 @@
         { "include": "#strings" },
         { "include": "#numbers" },
         { "include": "#constants" },
-        { "include": "#enum-qualified-access" },
+        { "include": "#module-qualified-access" },
+        { "include": "#constructor-call" },
         { "include": "#function-call" },
         { "include": "#types" },
         { "include": "#operators" },
@@ -114,21 +130,92 @@
         }
       ]
     },
-    "struct-definition": {
-      "begin": "\\b(struct)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*(\\())?",
+    "import-statement": {
+      "begin": "\\b(import)\\b",
       "beginCaptures": {
-        "1": { "name": "keyword.other.struct.al" },
-        "2": { "name": "entity.name.type.struct.al" },
-        "3": { "name": "punctuation.definition.typeparameters.begin.al" }
+        "1": { "name": "keyword.control.import.al" }
       },
-      "end": "\\}",
-      "endCaptures": {
-        "0": { "name": "punctuation.definition.struct.end.al" }
-      },
+      "end": "(?=$|\\n)",
       "patterns": [
-        { "include": "#comments" },
-        { "include": "#generic-params" },
-        { "include": "#struct-body" }
+        {
+          "name": "keyword.control.import.al",
+          "match": "\\b(as)\\b"
+        },
+        {
+          "name": "punctuation.separator.path.al",
+          "match": "/"
+        },
+        {
+          "name": "entity.name.type.al",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        },
+        {
+          "name": "entity.name.namespace.al",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.accessor.al",
+          "match": "\\."
+        },
+        { "include": "#punctuation" }
+      ]
+    },
+    "type-definition": {
+      "patterns": [
+        {
+          "comment": "type alias: type Name(params) = Type",
+          "match": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*\\(([^)]*)\\))?\\s*(=)",
+          "captures": {
+            "1": { "name": "storage.modifier.visibility.al" },
+            "2": { "name": "keyword.other.type.al" },
+            "3": { "name": "entity.name.type.al" },
+            "4": {
+              "patterns": [
+                {
+                  "name": "variable.other.type.al",
+                  "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+                }
+              ]
+            },
+            "5": { "name": "keyword.operator.assignment.al" }
+          }
+        },
+        {
+          "comment": "opaque type: pub type Name(params) — no body, ends at EOL",
+          "match": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*\\(([^)]*)\\))?\\s*$",
+          "captures": {
+            "1": { "name": "storage.modifier.visibility.al" },
+            "2": { "name": "keyword.other.type.al" },
+            "3": { "name": "entity.name.type.al" },
+            "4": {
+              "patterns": [
+                {
+                  "name": "variable.other.type.al",
+                  "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "comment": "type definition: type Name(params) { ... }",
+          "begin": "\\b(pub\\s+)?(type)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*(\\())?",
+          "beginCaptures": {
+            "1": { "name": "storage.modifier.visibility.al" },
+            "2": { "name": "keyword.other.type.al" },
+            "3": { "name": "entity.name.type.al" },
+            "4": { "name": "punctuation.definition.typeparameters.begin.al" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.type.end.al" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#generic-params" },
+            { "include": "#type-body" }
+          ]
+        }
       ]
     },
     "generic-params": {
@@ -148,16 +235,39 @@
         }
       ]
     },
-    "struct-body": {
+    "type-body": {
       "begin": "\\{",
       "beginCaptures": {
-        "0": { "name": "punctuation.definition.struct.begin.al" }
+        "0": { "name": "punctuation.definition.type.begin.al" }
       },
       "end": "(?=\\})",
       "patterns": [
         { "include": "#comments" },
         {
-          "comment": "Field with concrete type (uppercase)",
+          "comment": "Constructor with payload: Ctor(label Type, ...)",
+          "begin": "\\b([A-Z][a-zA-Z0-9_]*)\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "entity.name.function.constructor.al" },
+            "2": { "name": "punctuation.definition.parameters.begin.al" }
+          },
+          "end": "\\)",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.parameters.end.al" }
+          },
+          "patterns": [{ "include": "#field-decl" }]
+        },
+        {
+          "comment": "Nullary constructor",
+          "name": "entity.name.function.constructor.al",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        },
+        { "include": "#field-decl" }
+      ]
+    },
+    "field-decl": {
+      "patterns": [
+        {
+          "comment": "Field label + concrete type",
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
           "captures": {
             "1": { "name": "variable.other.member.al" },
@@ -165,93 +275,67 @@
           }
         },
         {
-          "comment": "Field with type parameter (lowercase)",
+          "comment": "Field label + type parameter",
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
           "captures": {
             "1": { "name": "variable.other.member.al" },
             "2": { "name": "variable.other.type.al" }
           }
-        }
-      ]
-    },
-    "enum-definition": {
-      "begin": "\\b(enum)\\s+([A-Z][a-zA-Z0-9_]*)(?:\\s*(\\())?",
-      "beginCaptures": {
-        "1": { "name": "keyword.other.enum.al" },
-        "2": { "name": "entity.name.type.enum.al" },
-        "3": { "name": "punctuation.definition.typeparameters.begin.al" }
-      },
-      "end": "\\}",
-      "endCaptures": {
-        "0": { "name": "punctuation.definition.enum.end.al" }
-      },
-      "patterns": [
-        { "include": "#comments" },
-        { "include": "#generic-params" },
-        { "include": "#enum-body" }
-      ]
-    },
-    "enum-body": {
-      "begin": "\\{",
-      "beginCaptures": {
-        "0": { "name": "punctuation.definition.enum.begin.al" }
-      },
-      "end": "(?=\\})",
-      "patterns": [
-        { "include": "#comments" },
-        {
-          "comment": "Enum variant with payload",
-          "begin": "\\b([A-Z][a-zA-Z0-9_]*)\\s*(\\()",
-          "beginCaptures": {
-            "1": { "name": "entity.name.tag.variant.al" },
-            "2": { "name": "punctuation.definition.parameters.begin.al" }
-          },
-          "end": "\\)",
-          "endCaptures": {
-            "0": { "name": "punctuation.definition.parameters.end.al" }
-          },
-          "patterns": [
-            {
-              "name": "entity.name.type.al",
-              "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-            },
-            {
-              "name": "variable.other.type.al",
-              "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-            },
-            {
-              "name": "punctuation.separator.comma.al",
-              "match": ","
-            }
-          ]
         },
         {
-          "comment": "Enum variant without payload",
-          "name": "entity.name.tag.variant.al",
+          "name": "entity.name.type.al",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        }
+        },
+        {
+          "name": "punctuation.separator.comma.al",
+          "match": ","
+        },
+        { "include": "#punctuation" }
       ]
     },
     "function-definition": {
-      "begin": "\\b(fn)\\s+([a-z_][a-zA-Z0-9_]*)\\s*(\\()",
+      "begin": "\\b(pub\\s+)?(fn)\\s+([a-z_][a-zA-Z0-9_]*)",
       "beginCaptures": {
-        "1": { "name": "keyword.other.fn.al" },
-        "2": { "name": "entity.name.function.al" },
-        "3": { "name": "punctuation.definition.parameters.begin.al" }
+        "1": { "name": "storage.modifier.visibility.al" },
+        "2": { "name": "keyword.other.fn.al" },
+        "3": { "name": "entity.name.function.al" }
       },
-      "end": "(?=\\{|$)",
+      "end": "(?=\\{|\\n|$)",
       "patterns": [
+        { "include": "#comments" },
         { "include": "#function-params" },
-        { "include": "#return-type" }
+        { "include": "#type-args" },
+        {
+          "name": "keyword.other.fn.al",
+          "match": "\\bfn\\b"
+        },
+        {
+          "name": "keyword.operator.arrow.al",
+          "match": "->"
+        },
+        {
+          "name": "entity.name.type.al",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        },
+        {
+          "name": "variable.other.type.al",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
       ]
     },
     "function-params": {
-      "begin": "(?<=\\()",
+      "comment": "The param list opens immediately after the function name (\\G) and closes at the matching paren. Nested type-argument parens are consumed by #type-args so the inner ) of e.g. Option(a) cannot end the list early.",
+      "begin": "\\G\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.parameters.begin.al" }
+      },
       "end": "\\)",
       "endCaptures": {
         "0": { "name": "punctuation.definition.parameters.end.al" }
       },
       "patterns": [
+        { "include": "#comments" },
+        { "include": "#type-args" },
         {
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([A-Z][a-zA-Z0-9_]*)\\b",
           "captures": {
@@ -267,6 +351,13 @@
           }
         },
         {
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s+([a-z_][a-zA-Z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "variable.parameter.al" },
+            "2": { "name": "variable.other.type.al" }
+          }
+        },
+        {
           "name": "variable.parameter.al",
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
         },
@@ -276,49 +367,48 @@
         }
       ]
     },
-    "return-type": {
+    "type-args": {
+      "comment": "Balanced ( ... ) for a parametrized/fn type. Recursive so Option(List(a)) and Result(a, e) nest correctly.",
+      "begin": "\\(",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.typeparameters.begin.al" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.typeparameters.end.al" }
+      },
       "patterns": [
+        { "include": "#comments" },
         {
-          "comment": "Optional return type ?Type",
-          "match": "(\\?)([A-Z][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.operator.optional.al" },
-            "2": { "name": "entity.name.type.al" }
-          }
+          "name": "keyword.other.fn.al",
+          "match": "\\bfn\\b"
         },
         {
-          "comment": "Error return type Type!Error",
-          "match": "([A-Z][a-zA-Z0-9_]*)(!)([A-Z][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "entity.name.type.al" },
-            "2": { "name": "keyword.operator.error.al" },
-            "3": { "name": "entity.name.type.al" }
-          }
-        },
-        {
-          "comment": "Error return type !Error (void with error)",
-          "match": "(!)([A-Z][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.operator.error.al" },
-            "2": { "name": "entity.name.type.al" }
-          }
+          "name": "keyword.operator.arrow.al",
+          "match": "->"
         },
         {
           "name": "entity.name.type.al",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
         },
+        { "include": "#type-args" },
         {
           "name": "variable.other.type.al",
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        },
+        {
+          "name": "punctuation.separator.comma.al",
+          "match": ","
         }
       ]
     },
     "const-definition": {
-      "match": "\\b(const)\\s+([a-z_][a-zA-Z0-9_]*)\\s*(=)",
+      "match": "\\b(pub\\s+)?(const)\\s+([a-z_][a-zA-Z0-9_]*)\\s*(=)",
       "captures": {
-        "1": { "name": "keyword.other.const.al" },
-        "2": { "name": "variable.other.constant.al" },
-        "3": { "name": "keyword.operator.assignment.al" }
+        "1": { "name": "storage.modifier.visibility.al" },
+        "2": { "name": "keyword.other.const.al" },
+        "3": { "name": "variable.other.constant.al" },
+        "4": { "name": "keyword.operator.assignment.al" }
       }
     },
     "variable-with-type": {
@@ -334,15 +424,19 @@
       "patterns": [
         {
           "name": "keyword.control.al",
-          "match": "\\b(if|else|match|in|assert)\\b"
+          "match": "\\b(if|else|match|in|or|assert)\\b"
+        },
+        {
+          "name": "keyword.control.import.al",
+          "match": "\\b(import|as)\\b"
+        },
+        {
+          "name": "storage.modifier.visibility.al",
+          "match": "\\bpub\\b"
         },
         {
           "name": "keyword.other.al",
-          "match": "\\b(fn|struct|enum|const|import|from|export)\\b"
-        },
-        {
-          "name": "keyword.control.error.al",
-          "match": "\\b(error|or)\\b"
+          "match": "\\b(fn|type|const)\\b"
         }
       ]
     },
@@ -357,60 +451,24 @@
           "match": "\\bfalse\\b"
         },
         {
-          "name": "constant.language.null.al",
-          "match": "\\bnone\\b"
+          "name": "constant.language.al",
+          "match": "\\b(Nil|None|Some|Ok|Err)\\b"
         }
       ]
     },
-    "enum-qualified-access": {
-      "comment": "Enum.Variant access pattern",
-      "match": "\\b([A-Z][a-zA-Z0-9_]*)\\.([A-Z][a-zA-Z0-9_]*)",
+    "module-qualified-access": {
+      "comment": "module.name access (lowercase qualifier)",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)(\\.)(?=[A-Za-z_])",
       "captures": {
-        "1": { "name": "entity.name.type.enum.al" },
-        "2": { "name": "entity.name.tag.variant.al" }
+        "1": { "name": "entity.name.namespace.al" },
+        "2": { "name": "punctuation.accessor.al" }
       }
     },
-    "generic-type-instantiation": {
-      "comment": "Generic type instantiation like Pair(Int, String)",
-      "begin": "\\b([A-Z][a-zA-Z0-9_]*)(\\()",
-      "beginCaptures": {
-        "1": { "name": "entity.name.type.al" },
-        "2": { "name": "punctuation.definition.typeparameters.begin.al" }
-      },
-      "end": "\\)",
-      "endCaptures": {
-        "0": { "name": "punctuation.definition.typeparameters.end.al" }
-      },
-      "patterns": [
-        {
-          "name": "entity.name.type.al",
-          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-        },
-        { "include": "#strings" },
-        { "include": "#numbers" },
-        { "include": "#constants" },
-        {
-          "name": "variable.other.al",
-          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
-        },
-        {
-          "name": "punctuation.separator.comma.al",
-          "match": ","
-        }
-      ]
-    },
-    "enum-variant-constructor": {
-      "comment": "Standalone variant constructor like Some(x) or Ok(value)",
+    "constructor-call": {
+      "comment": "Constructor invocation / pattern: Uppercase optionally followed by (",
       "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\()",
       "captures": {
-        "1": { "name": "entity.name.tag.variant.al" }
-      }
-    },
-    "struct-instantiation": {
-      "comment": "Struct instantiation like User{ field: value }",
-      "match": "\\b([A-Z][a-zA-Z0-9_]*)(?=\\s*\\{)",
-      "captures": {
-        "1": { "name": "entity.name.type.al" }
+        "1": { "name": "entity.name.function.constructor.al" }
       }
     },
     "function-call": {
@@ -420,16 +478,16 @@
         "1": { "name": "entity.name.function.al" }
       }
     },
+    "labeled-argument": {
+      "comment": "Labeled call argument: label: value",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(:)",
+      "captures": {
+        "1": { "name": "variable.parameter.label.al" },
+        "2": { "name": "punctuation.separator.colon.al" }
+      }
+    },
     "types": {
       "patterns": [
-        {
-          "comment": "Optional type ?Type",
-          "match": "(\\?)([A-Z][a-zA-Z0-9_]*)",
-          "captures": {
-            "1": { "name": "keyword.operator.optional.al" },
-            "2": { "name": "entity.name.type.al" }
-          }
-        },
         {
           "comment": "Standalone type name",
           "name": "entity.name.type.al",
@@ -444,7 +502,7 @@
           "match": "->"
         },
         {
-          "name": "keyword.operator.range.al",
+          "name": "keyword.operator.spread.al",
           "match": "\\.\\."
         },
         {
@@ -453,11 +511,7 @@
         },
         {
           "name": "keyword.operator.logical.al",
-          "match": "(&&|\\|\\|)"
-        },
-        {
-          "name": "keyword.operator.bitwise.al",
-          "match": "(&|\\||\\^|~)"
+          "match": "(&&|\\|\\||!)"
         },
         {
           "name": "keyword.operator.arithmetic.al",
@@ -466,14 +520,6 @@
         {
           "name": "keyword.operator.assignment.al",
           "match": "="
-        },
-        {
-          "name": "keyword.operator.optional.al",
-          "match": "\\?"
-        },
-        {
-          "name": "keyword.operator.error.al",
-          "match": "!"
         },
         {
           "name": "keyword.operator.attribute.al",

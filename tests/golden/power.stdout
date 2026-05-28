@@ -1,6 +1,0 @@
-[
-  PowerResult{ result: 1, exp: 0, base: 2 },
-  PowerResult{ result: 1024, exp: 10, base: 2 },
-  PowerResult{ result: 243, exp: 5, base: 3 },
-  PowerResult{ result: 125, exp: 3, base: 5 }
-]

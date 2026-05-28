@@ -10,16 +10,15 @@ export const examples: { title: string; description: string; code: string }[] =
       code: `// Types inferred from values
 count = 42           // Int
 name = 'alice'       // String
-active = true        // Bool
-nothing = none       // None
+active = True        // Bool
 
 // Reassignment shadows the previous binding
 x = 10
 x = x + 1  // x is now 11
 
-// Arrays
+// Arrays — indexing returns Option(t)
 numbers = [1, 2, 3, 4, 5]
-first = numbers[0]`,
+first = numbers[0] or 0`,
     },
     {
       title: "Constants",
@@ -51,32 +50,29 @@ lt = a < b
 lte = a <= b
 
 // Logical
-and_result = true && false
-or_result = true || false
-not_result = !true`,
+and_result = True && False
+or_result = True || False
+not_result = !True`,
     },
 
     // === FUNCTIONS ===
     {
       title: "Functions with type inference",
       description:
-        "Function parameter and return types are inferred from usage. Single-expression bodies don't need braces. Add explicit types when needed.",
-      code: `// Types fully inferred — single-expression body
-fn double(x) x * 2
-fn add(a, b) a + b
-fn greet(name) 'Hello, ' + name
+        "Function parameter and return types are inferred from usage. Named function bodies are always blocks. Add explicit types when needed.",
+      code: `// Types fully inferred
+fn double(x) { x * 2 }
+fn add(a, b) { a + b }
+fn greet(name) { 'Hello, ' + name }
 
-// Block body when you need multiple statements
-fn abs(n) {
-    if n < 0 { -n } else { n }
-}
+// With explicit types
+fn abs(n Int) Int { if n < 0 { -n } else { n } }
 
-// Explicit types when needed
-struct DivError { message String }
+type DivError { message String }
 
-fn divide(a Int, b Int) Int!DivError {
-    if b == 0 { error DivError{ message: 'divide by zero' } }
-    else { a / b }
+fn divide(a Int, b Int) Result(Int, DivError) {
+    if b == 0 { Err(DivError(message: 'divide by zero')) }
+    else { Ok(a / b) }
 }
 
 // Call functions
@@ -87,20 +83,20 @@ println(greet('world'))  // Hello, world`,
     {
       title: "Generics",
       description:
-        "Single uppercase letters are type variables. The type checker infers concrete types at each call site — the same function can be called with different types.",
-      code: `fn identity(x A) A { x }
+        "Type variables are lowercase identifiers; concrete types start with an uppercase letter. The type checker infers concrete types at each call site, so the same function can be called with different types.",
+      code: `fn identity(x a) a { x }
 
-fn first(arr []A) ?A {
+fn first(arr Array(a)) Option(a) {
     match arr {
-        [] -> none,
-        [head, ..] -> head,
+        [] -> None
+        [head, ..] -> Some(head)
     }
 }
 
-fn map_array(arr []A, f fn(A) B) []B {
+fn map_array(arr Array(a), f fn(a) b) Array(b) {
     match arr {
-        [] -> [],
-        [head, ..rest] -> [f(head), ..map_array(rest, f)],
+        [] -> []
+        [head, ..rest] -> [f(head), ..map_array(rest, f)]
     }
 }
 
@@ -111,12 +107,13 @@ head = first([1, 2, 3]) or 0
 doubled = map_array([1, 2, 3], fn(x) x * 2)  // [2, 4, 6]`,
     },
     {
-      title: "First-class functions",
+      title: "First-class functions and lambdas",
       description:
-        "Functions are values. Pass them around, store them in variables, return them from functions.",
-      code: `fn apply(x, f) f(x)
-fn compose(f, g) fn(x) f(g(x))
+        "Functions are values. Anonymous functions (fn(...) body) infer their return type and don't need braces for a single-expression body.",
+      code: `fn apply(x, f) { f(x) }
+fn compose(f, g) { fn(x) f(g(x)) }
 
+// Braceless lambda — body starts right after )
 double = fn(n) n * 2
 add_one = fn(n) n + 1
 
@@ -127,7 +124,7 @@ double_then_add = compose(add_one, double)
 println(double_then_add(5))  // 11
 
 // Higher-order patterns
-fn twice(x, f) f(f(x))
+fn twice(x, f) { f(f(x)) }
 println(twice(3, fn(n) n + 1))  // 5`,
     },
     {
@@ -145,10 +142,10 @@ fn factorial_iter(n Int, acc Int) Int {
     else { factorial_iter(n - 1, n * acc) }  // tail call
 }
 
-fn sum(arr []Int, acc Int) Int {
+fn sum(arr Array(Int), acc Int) Int {
     match arr {
-        [] -> acc,
-        [head, ..rest] -> sum(rest, acc + head),  // tail call
+        [] -> acc
+        [head, ..rest] -> sum(rest, acc + head)  // tail call
     }
 }
 
@@ -161,7 +158,7 @@ println(sum([1, 2, 3, 4, 5], 0))   // 15`,
     {
       title: "Everything is an expression",
       description:
-        "No statements. If/else, match, and blocks all return values. The last expression in a block is its value.",
+        "If, match, and blocks all return values. Every if requires an else. The last expression in a block is its value.",
       code: `x = 5
 
 result = if x > 0 {
@@ -170,12 +167,13 @@ result = if x > 0 {
     'non-positive'
 }
 
-// Blocks are expressions
+// Blocks are expressions — and double as grouping
 total = {
     a = 10
     b = 20
     a + b
 }
+nine = {1 + 2} * 3
 
 // Use in function bodies
 fn abs(n Int) Int {
@@ -185,150 +183,165 @@ fn abs(n Int) Int {
     {
       title: "Pattern matching",
       description:
-        "Match on values, or-patterns, enums, literal payloads, and arrays. Exhaustive checking ensures you handle all cases.",
+        "Match on values, or-patterns, constructors, literal payloads, and arrays. Exhaustive checking ensures you handle all cases.",
       code: `fn describe(x Int) String {
     match x {
-        0 -> 'zero',
-        1 | 2 | 3 -> 'small',
-        else -> 'other',
+        0 -> 'zero'
+        1 | 2 | 3 -> 'small'
+        else -> 'other'
     }
 }
 
 // Match on arrays
-fn sum(arr []Int) Int {
+fn sum(arr Array(Int)) Int {
     match arr {
-        [] -> 0,
-        [head, ..tail] -> head + sum(tail),
+        [] -> 0
+        [head, ..tail] -> head + sum(tail)
     }
 }
 
-// Wildcard pattern
-fn ignore_second(pair) {
-    match pair {
-        [a, _] -> a,
-        else -> none,
+// Guards: pattern matches first, then condition filters
+fn classify(n Int) String {
+    match n {
+        x if x < 0 -> 'negative'
+        0 -> 'zero'
+        else -> 'positive'
     }
 }`,
     },
     {
-      title: "Enum pattern matching",
+      title: "Constructor pattern matching",
       description:
-        "Match on enum variants and bind payload values. Match literal payloads for specific cases.",
-      code: `enum Result {
-    Ok(String)
-    Err(String)
+        "Match on type constructors and bind payload values. Match literal payloads for specific cases.",
+      code: `type Reply {
+    Ack(value String)
+    Nack(value String)
 }
 
-fn handle(r Result) String {
+fn handle(r Reply) String {
     match r {
-        Result.Ok('special') -> 'matched literal!',
-        Result.Ok(value) -> 'got: \${value}',
-        Result.Err(e) -> 'error: \${e}',
+        Ack('special') -> 'matched literal!'
+        Ack(value) -> 'got: \${value}'
+        Nack(e) -> 'failed: \${e}'
     }
 }
 
-println(handle(Result.Ok('special')))  // 'matched literal!'
-println(handle(Result.Ok('hello')))    // 'got: hello'
-println(handle(Result.Err('oops')))    // 'error: oops'`,
+println(handle(Ack('special')))  // 'matched literal!'
+println(handle(Ack('hello')))    // 'got: hello'
+println(handle(Nack('oops')))    // 'failed: oops'`,
     },
 
     // === DATA TYPES ===
     {
-      title: "Structs",
+      title: "Types",
       description:
-        "Define data structures with named fields. Access fields with dot notation.",
-      code: `struct Person {
+        "Define data with the 'type' keyword. Every field has a label. Single-constructor types may list fields directly; access with dot notation.",
+      code: `type Person {
     name String
     age Int
 }
 
-struct Point {
-    x Int
-    y Int
-}
+type Point { x Int y Int }
 
-// Create instances
-person = Person{ name: 'alice', age: 30 }
-origin = Point{ x: 0, y: 0 }
+// Create instances — constructors are function calls
+person = Person(name: 'alice', age: 30)
+origin = Point(x: 0, y: 0)
 
 // Access fields
 println(person.name)  // alice
-println(person.age)   // 30`,
+println(person.age)   // 30
+
+// Spread to copy with overrides
+older = Person(..person, age: 31)`,
     },
     {
-      title: "Generic structs",
+      title: "Generic types",
       description:
-        "Structs can have type parameters. Type arguments are inferred from field values.",
-      code: `struct Box(T) {
-    value T
-}
+        "Types can have type parameters. Type arguments are inferred from field values.",
+      code: `type Box(t) { value t }
 
-struct Pair(A, B) {
-    first A
-    second B
+type Pair(a, b) {
+    first a
+    second b
 }
 
 // Type args inferred from values
-int_box = Box{ value: 42 }
-pair = Pair{ first: 'hello', second: 123 }
-
-// Or specify explicitly
-Box(String){ value: 'world' }`,
+int_box = Box(value: 42)
+pair = Pair(first: 'hello', second: 123)`,
     },
     {
-      title: "Enums",
+      title: "Multiple constructors",
       description:
-        "Model variants with enums. Variants can carry payloads of any type.",
-      code: `enum Status {
+        "A type with multiple constructors models alternatives. Constructors are first-class — they're just functions.",
+      code: `type Status {
     Active
     Inactive
-    Banned(String)
+    Banned(reason String)
 }
 
-enum Option {
-    Some(Int)
-    Empty
+type Shape {
+    Circle(r Float)
+    Rect(w Float h Float)
 }
 
-// Create enum values
-status = Status.Active
-banned = Status.Banned('spam')
-some_value = Option.Some(42)`,
+// Create values
+status = Active
+banned = Banned('spam')
+c = Circle(r: 1.0)
+
+// Constructors are functions — pass them around
+fn map3(a, b, c, f) { [f(a), f(b), f(c)] }
+xs = map3(1.0, 2.0, 3.0, Circle)`,
     },
     {
-      title: "Generic enums",
+      title: "Generic constructors",
       description:
-        "Enums can have type parameters for flexible data modeling.",
-      code: `enum Maybe(T) {
-    Just(T)
+        "Constructor types can have type parameters for flexible data modeling.",
+      code: `type Maybe(t) {
+    Just(value t)
     Nothing
 }
 
-enum Either(L, R) {
-    Left(L)
-    Right(R)
+type Either(l, r) {
+    Left(value l)
+    Right(value r)
 }
 
 // Type inferred from usage
-x Maybe = Maybe.Just(42)
-y Maybe = Maybe.Nothing
+x = Just(42)
+y = Nothing
 
-result Either = Either.Left('error')`,
+result = Left('failed')`,
+    },
+    {
+      title: "Type aliases",
+      description:
+        "An alias is a transparent second name for a type — they unify freely. Use a single-constructor type instead for a distinct newtype.",
+      code: `type Pair(a, b) { first a second b }
+
+type Id = Int
+type StringPair = Pair(String, String)
+
+// Alias: Email IS String
+type Email = String
+
+// Newtype: UserId is distinct from Int
+type UserId { UserId(value Int) }`,
     },
     {
       title: "Tuples",
       description:
-        "Fixed-size collections of mixed types. Access elements by index.",
-      code: `// Create tuples
+        "Fixed-size collections of mixed types with two or more elements. Access elements by index.",
+      code: `// Create tuples (always 2+ elements; (e) is a syntax error)
 pair = (1, 'hello')
-triple = (true, 42, 'world')
+triple = (True, 42, 'world')
 
 // Access by index
 first = pair.0   // 1
 second = pair.1  // 'hello'
 
-// Return from functions (type inferred)
-fn divide(a, b) (a / b, a % b)
+// Return from functions
+fn divide(a, b) { (a / b, a % b) }
 
 // Destructure with parentheses
 (quotient, remainder) = divide(10, 3)`,
@@ -336,15 +349,15 @@ fn divide(a, b) (a / b, a % b)
     {
       title: "Arrays",
       description:
-        "Ordered collections of values. Access by index, concatenate with spread.",
+        "Ordered collections of values. Indexing returns Option(t). Build and concatenate with spread.",
       code: `numbers = [1, 2, 3, 4, 5]
 names = ['alice', 'bob', 'charlie']
 
-// Access by index
-first = numbers[0]  // 1
-second = names[1]   // 'bob'
+// Indexing returns Option — unwrap with 'or'
+first = numbers[0] or 0       // 1
+second = names[1] or 'anon'   // 'bob'
 
-// Concatenate with spread
+// Build with spread
 combined = [..[1, 2], ..[3, 4]]  // [1, 2, 3, 4]
 more = [0, ..numbers, 6]         // [0, 1, 2, 3, 4, 5, 6]
 
@@ -363,110 +376,261 @@ fn in_range(n Int, start Int, end Int) Bool {
     n >= start && n < end
 }`,
     },
+    {
+      title: "Binaries",
+      description:
+        "The Binary type holds raw bits. Construct with '<<>>' — each bare segment is one byte. Match the same way; a length mismatch falls through, so an 'else' or ':binary' tail is required.",
+      code: `import al/binary
+import al/string
+
+// Three bytes
+header = <<1, 2, 3>>
+println(binary.byte_size(header))   // 3
+
+// Bit-sized segments — two 4-bit nibbles pack into one byte
+packed = <<1:4, 2:4>>
+println(string.inspect(packed))     // <<18>>
+
+// Match on structure: a and b each bind one byte
+sum = match binary.from_string('AB') {
+    <<a, b>> -> a + b
+    else -> 0
+}
+println(sum)  // 131  (65 + 66)
+
+// ':binary' binds the variable-length remainder
+fn drop_one(b Binary) Binary {
+    match b {
+        <<_, rest:binary>> -> rest
+        else -> b
+    }
+}`,
+    },
 
     // === STRINGS ===
     {
       title: "Strings and interpolation",
       description:
         "Strings use single quotes. Embed expressions with $ for variables or ${} for complex expressions.",
-      code: `struct Person {
-    name String
-    age Int
-}
+      code: `type Person { name String age Int }
 
 name = 'world'
 greeting = 'Hello, \$name!'
 math = 'Result: \${1 + 2 * 3}'
 
 // Multi-part interpolation
-person = Person{ name: 'Alice', age: 30 }
+person = Person(name: 'Alice', age: 30)
 bio = '\${person.name} is \${person.age} years old'
 
 // Escape sequences
 quote = 'She said \\'hello\\''`,
     },
 
-    // === ERROR HANDLING ===
+    // === OPTION / RESULT ===
     {
       title: "Optional values",
       description:
-        "Functions that might not return a value use ? in their return type. Handle missing values with 'or'.",
-      code: `struct User {
-    id Int
-    name String
-}
+        "Option(t) models a value that might be absent. The constructors Some and None are in the prelude. Unwrap with 'or'.",
+      code: `type User { id Int name String }
 
-fn find_user(id Int) ?User {
-    if id == 0 { none }
-    else { User{ id: id, name: 'found' } }
+fn find_user(id Int) Option(User) {
+    if id == 0 { None }
+    else { Some(User(id: id, name: 'found')) }
 }
 
 // Provide a default with 'or'
-user = find_user(0) or User{ id: 0, name: 'guest' }
+user = find_user(0) or User(id: 0, name: 'guest')
 
-// Handle with receiver
-result = find_user(0) or missing -> {
-    println('User not found')
-    User{ id: 0, name: 'default' }
-}`,
+// Array indexing returns Option too
+names = ['alice', 'bob']
+who = names[5] or 'nobody'`,
     },
     {
-      title: "Error handling",
+      title: "Result and error handling",
       description:
-        "Functions that can fail use ! with an error type. Handle errors with 'or', optionally binding the error.",
-      code: `struct DivisionError {
-    message String
-}
+        "Result(t, e) models success or failure. The constructors Ok and Err are in the prelude. Unwrap with 'or', optionally binding the error value.",
+      code: `type DivisionError { message String }
 
-fn divide(a Int, b Int) Int!DivisionError {
+fn divide(a Int, b Int) Result(Int, DivisionError) {
     if b == 0 {
-        error DivisionError{ message: 'divide by zero' }
+        Err(DivisionError(message: 'divide by zero'))
     } else {
-        a / b
+        Ok(a / b)
     }
 }
 
-// Provide default on error
+// Provide default on failure
 safe = divide(10, 0) or 0
 
-// Handle error with receiver
+// Bind the error value
 result = divide(10, 0) or err -> {
-    println('Error: \${err.message}')
+    println('Failed: \${err.message}')
     0
 }`,
     },
+
+    // === MODULES ===
+    {
+      title: "Modules and imports",
+      description:
+        "One file is one module. Mark exports with 'pub'. Import by path; access via the qualifier or bring names in directly.",
+      code: `// === main.al ===
+import ./util
+import ./util as u
+import ./util.{quote, Id}
+import al/net.{Socket}      // standard library
+
+println(util.quote('hi'))   // qualified
+println(u.quote('hi'))      // module alias
+println(quote('hi'))        // selective import
+
+// === util.al ===
+// pub fn quote(s String) String { '"' + s + '"' }
+// pub type Id = Int`,
+    },
+
+    // === MORE PATTERNS ===
+    {
+      title: "Tuple and range patterns",
+      description:
+        "Match on tuple structure and integer ranges. 'else' is the catch-all arm; '_' is for nested wildcards.",
+      code: `fn classify(p (Int, String)) String {
+    match p {
+        (0, msg) -> 'zero: \${msg}'
+        (1..10, msg) -> 'small: \${msg}'
+        (_, msg) -> 'other: \${msg}'
+    }
+}
+
+fn label(x Int) String {
+    match x {
+        0..10 -> 'digit'
+        10..100 -> 'tens'
+        else -> 'big'
+    }
+}
+
+println(classify((5, 'hi')))
+println(label(42))`,
+    },
+    {
+      title: "Mutual recursion",
+      description:
+        "Top-level 'fn' declarations see one another regardless of order.",
+      code: `fn is_even(n Int) Bool {
+    if n == 0 { True } else { is_odd(n - 1) }
+}
+
+fn is_odd(n Int) Bool {
+    if n == 0 { False } else { is_even(n - 1) }
+}
+
+println(is_even(10))
+println(is_odd(7))`,
+    },
+    {
+      title: "Field-exhaustive constructor patterns",
+      description:
+        "Positional patterns must match arity; labeled patterns may use '..' to ignore the rest.",
+      code: `type User { name String age Int email String }
+
+fn name_of(u User) String {
+    match u {
+        User(name: n, ..) -> n
+    }
+}
+
+u = User(name: 'alice', age: 30, email: 'a@b.c')
+println(name_of(u))`,
+    },
+    {
+      title: "Discards and unused variables",
+      description:
+        "Unused let-bindings and parameters are an error. Prefix a name with '_' to mark it intentional, or write 'TypeName = expr' to assert a type and drop the value. Single-constructor types can be destructured at binding position.",
+      code: `// '_' prefix marks a binding as intentionally unused
+fn handle(_conn, msg) { println(msg) }
+
+// Typed discard — checks the type, then drops the value
+Nil = println('side effect')   // println returns Nil
+Int = 1 + 2                    // asserts the rhs is Int
+
+// Single-constructor types destructure irrefutably
+type Point { x Int y Int }
+
+Point(x: a, y: b) = Point(x: 3, y: 4)
+println(a + b)  // 7`,
+    },
+
     // === BUILTINS ===
     {
       title: "Built-in functions",
       description: "Core functions available without imports.",
-      code: `// Print any value
+      code: `import al/string
+
+// Print any value
 println(42)
 println('hello')
 println([1, 2, 3])
 
 // Convert to string representation
-s = inspect([1, 2, 3])  // '[1, 2, 3]'
+s = string.inspect([1, 2, 3])  // '[1, 2, 3]'
 
-// Split strings
-parts = str_split('a,b,c', ',')  // ['a', 'b', 'c']`,
+// Strings module
+parts = string.split('a,b,c', ',')  // ['a', 'b', 'c']
+n = string.length('hello')          // 5
+has = string.contains('hello', 'ell')  // True`,
+    },
+    {
+      title: "Floats",
+      description:
+        "Float arithmetic uses the same operators as Int. The 'al/float' module has conversions and helpers.",
+      code: `import al/float
+
+// Float to Int
+println(float.round(2.7))     // 3
+println(float.floor(2.7))     // 2
+println(float.ceil(2.1))      // 3
+println(float.truncate(2.9))  // 2
+
+// Int to Float
+half = float.from_int(1) / 2.0
+
+// Helpers
+diff = 1.0 - 3.5
+println(float.abs(diff))       // 2.5
+println(float.max(1.2, 3.4))   // 3.4
+println(float.to_string(half))`,
     },
     {
       title: "I/O operations (experimental)",
       description:
         "File and network I/O requires the --experimental-shitty-io flag.",
       code: `// Run with: al run --experimental-shitty-io file.al
+import al/io
+import al/net.{Socket}
+import al/binary
 
-// File operations — return Result, handle with 'or'
-content = read_file('data.txt') or ''
-None = write_file('output.txt', 'hello world') or none
+// Text helpers wrap the Binary I/O
+content = io.read_text('data.txt') or ''
 
-// TCP networking — wrap in a failable function to propagate errors
-fn serve() None!String {
-    listener = tcp_listen(8080) or err -> { error err }
-    client = tcp_accept(listener) or err -> { error err }
-    data = tcp_read(client) or ''
-    None = tcp_write(client, 'HTTP/1.1 200 OK\\r\\n\\r\\nHello') or none
-    tcp_close(client) or none
+match io.write_text('output.txt', 'hello') {
+    Ok(Nil) -> Nil
+    Err(e) -> println('write failed: \${e}')
+}
+
+// TCP networking — sockets carry Binary
+fn handle(conn Socket) Nil {
+    body = 'Hello from AL!'
+    match net.write(conn, binary.from_string('HTTP/1.1 200 OK\\r\\n\\r\\n\${body}')) {
+        Ok(Nil) -> Nil
+        Err(e) -> println(e)
+    }
+    net.close(conn) or Nil
+}
+
+match net.listen(8080) {
+    Ok(server) -> println('Listening on :8080')
+    Err(e) -> println(e)
 }`,
     },
   ];
@@ -532,13 +696,14 @@ export function App({ examples }: { examples: RenderedExample[] }) {
           . Every expression has a type known at compile time. The checker
           catches errors before your code runs, while inference keeps the syntax
           clean—no annotations needed for variables or function parameters.
-          Types are capitalized (<code className="text-black dark:text-white">Int</code>,{" "}
-          <code className="text-black dark:text-white">String</code>), variables
-          are lowercase. Single uppercase letters are type variables.
+          Types and constructors are capitalized (
+          <code className="text-black dark:text-white">Int</code>,{" "}
+          <code className="text-black dark:text-white">Some</code>); variables,
+          functions, and field labels are lowercase.
         </p>
         <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
-          The compiler is written in V, producing a single native binary with no
-          dependencies. It compiles to bytecode and runs on a stack-based
+          The compiler is written in Rust, producing a single native binary with
+          no dependencies. It compiles to bytecode and runs on a stack-based
           virtual machine. Includes an{" "}
           <strong className="text-black dark:text-white">
             interactive REPL
@@ -548,11 +713,12 @@ export function App({ examples }: { examples: RenderedExample[] }) {
           for consistent style.
         </p>
         <p className="text-sm text-neutral-600 dark:text-neutral-400">
-          AL supports{" "}
-          <strong className="text-black dark:text-white">generics</strong> via
-          type variables, closures, tagged enums with pattern matching,
-          first-class functions, and a unified error handling model where both
-          optional values and errors are handled with the same{" "}
+          AL has a single{" "}
+          <code className="text-black dark:text-white">type</code> keyword for
+          all data — records, sums, generics, and aliases — with constructors as
+          ordinary functions. <code className="text-black dark:text-white">Option</code>{" "}
+          and <code className="text-black dark:text-white">Result</code> are
+          regular prelude types; both are unwrapped with the same{" "}
           <code className="text-black dark:text-white">or</code> syntax.
         </p>
       </section>
@@ -564,16 +730,16 @@ export function App({ examples }: { examples: RenderedExample[] }) {
           <code className="text-black dark:text-white">hello.al</code>:
         </p>
         <pre className="text-sm p-4 bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 mb-4 overflow-auto">
-          {`struct Person {
-    name String
-    age Int
+          {`type Person {
+    name String,
+    age Int,
 }
 
 fn greet(p Person) String {
     'Hello, \${p.name}! You are \${p.age} years old.'
 }
 
-person = Person{ name: 'Alice', age: 30 }
+person = Person(name: 'Alice', age: 30)
 println(greet(person))`}
         </pre>
         <p className="text-sm text-neutral-600 dark:text-neutral-400">
