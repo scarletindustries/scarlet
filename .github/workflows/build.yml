@@ -1,7 +1,7 @@
 name: Release
 
 env:
-  COMPILER_PATHS: src/ Cargo.toml Cargo.lock VERSION
+  COMPILER_PATHS: crates/ Cargo.toml Cargo.lock VERSION
 
 on:
   push:
@@ -94,10 +94,18 @@ jobs:
             platform: macos
             target: aarch64-apple-darwin
             asset: al-macos-arm64
+          - os: macos-latest
+            platform: macos
+            target: x86_64-apple-darwin
+            asset: al-macos-x86_64
           - os: ubuntu-latest
             platform: linux
             target: x86_64-unknown-linux-gnu
             asset: al-linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux
+            target: aarch64-unknown-linux-gnu
+            asset: al-linux-arm64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -111,6 +119,8 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Update VERSION file
         run: echo "${{ needs.check-changes.outputs.version }}" > VERSION
