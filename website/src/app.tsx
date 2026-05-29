@@ -10,7 +10,7 @@ export const examples: { title: string; description: string; code: string }[] =
       code: `// Types inferred from values
 count = 42           // Int
 name = 'alice'       // String
-active = True        // Bool
+_active = True       // Bool
 
 // Reassignment shadows the previous binding
 x = 10
@@ -18,7 +18,11 @@ x = x + 1  // x is now 11
 
 // Arrays — indexing returns Option(t)
 numbers = [1, 2, 3, 4, 5]
-first = numbers[0] or 0`,
+first = numbers[0] or 0
+
+println('\${name}: \${count}')  // alice: 42
+println(x)                    // 11
+println(first)                // 1`,
     },
     {
       title: "Constants",
@@ -28,7 +32,8 @@ first = numbers[0] or 0`,
 const app_name = 'my app'
 const max_retries = 3
 
-greeting = 'Welcome to \${app_name}!'`,
+greeting = 'Welcome to \${app_name}!'
+println(greeting)  // Welcome to my app!`,
     },
     {
       title: "Basic operators",
@@ -52,7 +57,11 @@ lte = a <= b
 // Logical
 and_result = True && False
 or_result = True || False
-not_result = !True`,
+not_result = !True
+
+println('\${sum} \${diff} \${prod} \${quot} \${rem}')     // 8 2 15 1 2
+println('\${eq} \${neq} \${lt} \${lte}')                 // False True False False
+println('\${and_result} \${or_result} \${not_result}')   // False True False`,
     },
 
     // === FUNCTIONS ===
@@ -104,7 +113,11 @@ fn map_array(arr Array(a), f fn(a) b) Array(b) {
 n = identity(42)        // Int
 s = identity('hello')   // String
 head = first([1, 2, 3]) or 0
-doubled = map_array([1, 2, 3], fn(x) x * 2)  // [2, 4, 6]`,
+doubled = map_array([1, 2, 3], fn(x) x * 2)  // [2, 4, 6]
+
+println('\${n} \${s}')  // 42 hello
+println(head)          // 1
+println(doubled)       // [2, 4, 6]`,
     },
     {
       title: "First-class functions and lambdas",
@@ -118,6 +131,7 @@ double = fn(n) n * 2
 add_one = fn(n) n + 1
 
 result = apply(5, double)  // 10
+println(result)            // 10
 
 // Compose functions
 double_then_add = compose(add_one, double)
@@ -178,7 +192,11 @@ nine = {1 + 2} * 3
 // Use in function bodies
 fn abs(n Int) Int {
     if n < 0 { -n } else { n }
-}`,
+}
+
+println(result)  // positive
+println(total)   // 30
+println(nine)    // 9`,
     },
     {
       title: "Pattern matching",
@@ -249,10 +267,11 @@ origin = Point(x: 0, y: 0)
 
 // Access fields
 println(person.name)  // alice
-println(person.age)   // 30
+println(origin.x)     // 0
 
 // Spread to copy with overrides
-older = Person(..person, age: 31)`,
+older = Person(..person, age: 31)
+println(older.age)    // 31`,
     },
     {
       title: "Generic types",
@@ -267,7 +286,10 @@ type Pair(a, b) {
 
 // Type args inferred from values
 int_box = Box(value: 42)
-pair = Pair(first: 'hello', second: 123)`,
+pair = Pair(first: 'hello', second: 123)
+
+println(int_box.value)  // 42
+println(pair.first)     // hello`,
     },
     {
       title: "Multiple constructors",
@@ -286,12 +308,14 @@ type Shape {
 
 // Create values
 status = Active
-banned = Banned('spam')
-c = Circle(r: 1.0)
+_banned = Banned('spam')
+_c = Circle(r: 1.0)
+println(status)  // Active
 
 // Constructors are functions — pass them around
 fn map3(a, b, c, f) { [f(a), f(b), f(c)] }
-xs = map3(1.0, 2.0, 3.0, Circle)`,
+xs = map3(1.0, 2.0, 3.0, Circle)
+println(xs)`,
     },
     {
       title: "Generic constructors",
@@ -311,7 +335,11 @@ type Either(l, r) {
 x = Just(42)
 y = Nothing
 
-result = Left('failed')`,
+result = Left('failed')
+
+println(x)       // Just(42)
+println(y)       // Nothing
+println(result)  // Left(failed)`,
     },
     {
       title: "Type aliases",
@@ -334,17 +362,19 @@ type UserId { UserId(value Int) }`,
         "Fixed-size collections of mixed types with two or more elements. Access elements by index.",
       code: `// Create tuples (always 2+ elements; (e) is a syntax error)
 pair = (1, 'hello')
-triple = (True, 42, 'world')
+_triple = (True, 42, 'world')
 
 // Access by index
 first = pair.0   // 1
 second = pair.1  // 'hello'
+println('\${first} \${second}')  // 1 hello
 
 // Return from functions
 fn divide(a, b) { (a / b, a % b) }
 
 // Destructure with parentheses
-(quotient, remainder) = divide(10, 3)`,
+(quotient, remainder) = divide(10, 3)
+println('\${quotient} r\${remainder}')  // 3 r1`,
     },
     {
       title: "Arrays",
@@ -356,13 +386,16 @@ names = ['alice', 'bob', 'charlie']
 // Indexing returns Option — unwrap with 'or'
 first = numbers[0] or 0       // 1
 second = names[1] or 'anon'   // 'bob'
+println('\${first} \${second}')  // 1 bob
 
 // Build with spread
 combined = [..[1, 2], ..[3, 4]]  // [1, 2, 3, 4]
 more = [0, ..numbers, 6]         // [0, 1, 2, 3, 4, 5, 6]
+println(combined)                // [1, 2, 3, 4]
+println(more)                    // [0, 1, 2, 3, 4, 5, 6]
 
 // Nested arrays
-matrix = [[1, 2], [3, 4]]`,
+_matrix = [[1, 2], [3, 4]]`,
     },
     {
       title: "Ranges",
@@ -370,11 +403,13 @@ matrix = [[1, 2], [3, 4]]`,
         "Create ranges with the '..' operator. Useful for iteration patterns.",
       code: `// Create a range
 r = 0..10
+println(r[3] or -1)  // 3
 
 // Ranges in expressions
 fn in_range(n Int, start Int, end Int) Bool {
     n >= start && n < end
-}`,
+}
+println(in_range(5, 0, 10))  // True`,
     },
     {
       title: "Binaries",
@@ -417,13 +452,16 @@ fn drop_one(b Binary) Binary {
 name = 'world'
 greeting = 'Hello, \$name!'
 math = 'Result: \${1 + 2 * 3}'
+println(greeting)  // Hello, world!
+println(math)      // Result: 7
 
 // Multi-part interpolation
 person = Person(name: 'Alice', age: 30)
 bio = '\${person.name} is \${person.age} years old'
+println(bio)       // Alice is 30 years old
 
 // Escape sequences
-quote = 'She said \\'hello\\''`,
+_quote = 'She said \\'hello\\''`,
     },
 
     // === OPTION / RESULT ===
@@ -440,10 +478,12 @@ fn find_user(id Int) Option(User) {
 
 // Provide a default with 'or'
 user = find_user(0) or User(id: 0, name: 'guest')
+println(user.name)  // guest
 
 // Array indexing returns Option too
 names = ['alice', 'bob']
-who = names[5] or 'nobody'`,
+who = names[5] or 'nobody'
+println(who)        // nobody`,
     },
     {
       title: "Result and error handling",
@@ -461,12 +501,14 @@ fn divide(a Int, b Int) Result(Int, DivisionError) {
 
 // Provide default on failure
 safe = divide(10, 0) or 0
+println(safe)    // 0
 
 // Bind the error value
 result = divide(10, 0) or err -> {
     println('Failed: \${err.message}')
     0
-}`,
+}
+println(result)  // 0`,
     },
 
     // === MODULES ===
@@ -478,7 +520,7 @@ result = divide(10, 0) or err -> {
 import ./util
 import ./util as u
 import ./util.{quote, Id}
-import al/net.{Socket}      // standard library
+import al/net/socket.{Socket}   // standard library
 
 println(util.quote('hi'))   // qualified
 println(u.quote('hi'))      // module alias
@@ -486,7 +528,7 @@ println(quote('hi'))        // selective import
 
 // === util.al ===
 // pub fn quote(s String) String { '"' + s + '"' }
-// pub type Id = Int`,
+// pub type Id { Id(value Int) }`,
     },
 
     // === MORE PATTERNS ===
@@ -574,11 +616,14 @@ println([1, 2, 3])
 
 // Convert to string representation
 s = string.inspect([1, 2, 3])  // '[1, 2, 3]'
+println(s)
 
 // Strings module
 parts = string.split('a,b,c', ',')  // ['a', 'b', 'c']
 n = string.length('hello')          // 5
-has = string.contains('hello', 'ell')  // True`,
+has = string.contains('hello', 'ell')  // True
+println(parts)           // [a, b, c]
+println('\${n} \${has}')   // 5 True`,
     },
     {
       title: "Floats",
@@ -607,30 +652,31 @@ println(float.to_string(half))`,
         "File and network I/O requires the --experimental-shitty-io flag.",
       code: `// Run with: al run --experimental-shitty-io file.al
 import al/io
-import al/net.{Socket}
+import al/net
+import al/net/socket.{Socket}
+import al/net/address
 import al/binary
 
 // Text helpers wrap the Binary I/O
 content = io.read_text('data.txt') or ''
+println(content)
 
-match io.write_text('output.txt', 'hello') {
-    Ok(Nil) -> Nil
-    Err(e) -> println('write failed: \${e}')
-}
-
-// TCP networking — sockets carry Binary
-fn handle(conn Socket) Nil {
+// TCP — accept gives you a Socket that knows its peer address
+fn respond(sock Socket) Nil {
     body = 'Hello from AL!'
-    match net.write(conn, binary.from_string('HTTP/1.1 200 OK\\r\\n\\r\\n\${body}')) {
-        Ok(Nil) -> Nil
-        Err(e) -> println(e)
-    }
-    net.close(conn) or Nil
+    socket.write(sock, binary.from_string('HTTP/1.1 200 OK\\r\\n\\r\\n\${body}')) or Nil
+    socket.close(sock) or Nil
 }
 
-match net.listen(8080) {
-    Ok(server) -> println('Listening on :8080')
-    Err(e) -> println(e)
+match net.listen('0.0.0.0', 8080) {
+    Err(e) -> println('listen failed: \${e}')
+    Ok(server) -> match net.accept(server) {
+        Ok(sock) -> {
+            println('connection from \${address.to_string(sock.peer)}')
+            respond(sock)
+        }
+        Err(e) -> println('accept failed: \${e}')
+    }
 }`,
     },
   ];

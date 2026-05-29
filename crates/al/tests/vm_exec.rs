@@ -193,3 +193,38 @@ fn inspect_multiline_structures_e2e() {
         "Seg {\n  a: Point{ x: 1, y: 2 },\n  b: Point{ x: 3, y: 4 }\n}\n[\n  [1, 2],\n  [3, 4]\n]\n",
     );
 }
+
+// Or-pattern alternatives are ONE logical binding: every alternative must
+// store the bound name into the same slot the arm body reads. At module scope
+// the shadow-gets-a-fresh-slot rule used to give each alternative its own
+// slot, so a match on the *first* alternative left the body reading an
+// unwritten local (printed `0`). Pins both module scope and fn scope, with
+// the match landing on first, middle, and last alternatives.
+#[test]
+fn or_pattern_binds_same_slot_in_every_alternative() {
+    run_outputs(
+        "or_pattern_bindings",
+        "type Shape {\n\
+         \tCircle(r Int)\n\
+         \tSquare(r Int)\n\
+         \tRect(r Int h Int)\n\
+         }\n\
+         fn size(s Shape) Int {\n\
+         \tmatch s {\n\
+         \t\tCircle(r) | Square(r) | Rect(r, _) -> r\n\
+         \t}\n\
+         }\n\
+         println(size(Circle(3)))\n\
+         println(size(Square(4)))\n\
+         println(size(Rect(5, 9)))\n\
+         first = match Circle(7) {\n\
+         \tCircle(r) | Square(r) | Rect(r, _) -> r\n\
+         }\n\
+         println(first)\n\
+         last = match Rect(8, 1) {\n\
+         \tCircle(r) | Square(r) | Rect(r, _) -> r\n\
+         }\n\
+         println(last)\n",
+        "3\n4\n5\n7\n8\n",
+    );
+}

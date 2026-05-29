@@ -145,6 +145,14 @@ pub struct Compiler {
     /// `undo_log` length captured at each `push_local_scope`; `pop_local_scope`
     /// unwinds the log down to the popped mark.
     scope_marks: Vec<usize>,
+    /// While emitting the 2nd..nth alternative of an or-pattern, maps each name
+    /// bound by the 1st alternative to its slot so every alternative stores the
+    /// binding into the same place (one logical binding, one slot). Without
+    /// this, module scope's shadow-gets-a-fresh-slot rule would leave the arm
+    /// body reading whichever slot the *last* alternative allocated — an
+    /// unwritten slot whenever an earlier alternative was the one that matched.
+    /// A stack because or-patterns nest.
+    or_bind_overrides: Vec<HashMap<String, i32>>,
     /// Per-scope unused-binding tracking. Each frame maps a let/param/match
     /// name (that doesn't start with `_`) to its definition span; `mark_used`
     /// removes the entry on first reference. Anything left when the frame is
@@ -304,6 +312,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         locals: HashMap::new(),
         undo_log: vec![],
         scope_marks: vec![],
+        or_bind_overrides: vec![],
         unused: vec![],
         outer_scopes: vec![],
         local_count: 0,
@@ -1208,6 +1217,15 @@ impl Compiler {
     }
 
     pub(super) fn get_or_create_local(&mut self, name: &str) -> i32 {
+        // A name bound by the first alternative of an in-progress or-pattern
+        // must reuse that slot in every later alternative (see
+        // `or_bind_overrides`); the shadowing rules below are for *sequential*
+        // rebindings, which alternatives are not.
+        if let Some(overrides) = self.or_bind_overrides.last()
+            && let Some(&slot) = overrides.get(name)
+        {
+            return slot;
+        }
         if let Some(entry) = self.locals.get(name).copied() {
             // Reuse only if this slot was bound in the *current* block scope.
             // If it was bound at a strictly shallower depth it is inherited
@@ -4440,16 +4458,34 @@ impl Compiler {
                 let temp = self.spill_temp();
 
                 let mut matched_jumps: Vec<i32> = vec![];
+                let mut overrides_pushed = false;
                 for (i, alt) in patterns.iter().enumerate() {
                     let mut alt_fails: Vec<i32> = vec![];
                     self.emit_arg(Op::PushLocal, temp);
                     self.emit_pattern(alt, &mut alt_fails);
+                    if i == 0 && patterns.len() > 1 {
+                        // Typing guarantees every alternative binds the same
+                        // names; pin them to the slots the first alternative
+                        // chose so the arm body reads a slot that every
+                        // alternative actually wrote.
+                        let mut names = Vec::new();
+                        Self::pattern_bound_names(alt, &mut names);
+                        let map: HashMap<String, i32> = names
+                            .into_iter()
+                            .filter_map(|n| self.locals.get(&n).map(|e| (n, e.slot)))
+                            .collect();
+                        self.or_bind_overrides.push(map);
+                        overrides_pushed = true;
+                    }
                     if i < patterns.len() - 1 {
                         matched_jumps.push(self.emit_jump(Op::Jump));
                         self.patch_all(&alt_fails);
                     } else {
                         fail_jumps.extend(alt_fails);
                     }
+                }
+                if overrides_pushed {
+                    self.or_bind_overrides.pop();
                 }
                 self.patch_all(&matched_jumps);
             }
@@ -4578,6 +4614,63 @@ impl Compiler {
                 self.emit(Op::Eq);
                 fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
             }
+        }
+    }
+
+    /// Collect every name a pattern binds, in source order. For an or-pattern
+    /// only the first alternative is walked — typing already enforces that all
+    /// alternatives bind the identical set.
+    fn pattern_bound_names(pattern: &ast::Pattern, out: &mut Vec<String>) {
+        match pattern {
+            ast::Pattern::Var { name } => {
+                if name.name != "_" {
+                    out.push(name.name.clone());
+                }
+            }
+            ast::Pattern::Constructor { args, .. } => {
+                for arg in args {
+                    let p = match arg {
+                        ast::PatternArg::Positional(p) => p,
+                        ast::PatternArg::Labeled { pattern, .. } => pattern,
+                    };
+                    Self::pattern_bound_names(p, out);
+                }
+            }
+            ast::Pattern::Tuple { elements, .. } => {
+                for p in elements {
+                    Self::pattern_bound_names(p, out);
+                }
+            }
+            ast::Pattern::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ast::ArrayPatternElement::Pattern(p) => Self::pattern_bound_names(p, out),
+                        ast::ArrayPatternElement::Spread { binding, .. } => {
+                            if let Some(id) = binding {
+                                out.push(id.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            ast::Pattern::Binary { segments, rest, .. } => {
+                for seg in segments {
+                    Self::pattern_bound_names(&seg.value, out);
+                }
+                if let Some(r) = rest
+                    && let Some(id) = &r.binding
+                {
+                    out.push(id.name.clone());
+                }
+            }
+            ast::Pattern::Or { patterns, .. } => {
+                if let Some(first) = patterns.first() {
+                    Self::pattern_bound_names(first, out);
+                }
+            }
+            ast::Pattern::Wildcard { .. }
+            | ast::Pattern::Literal(_)
+            | ast::Pattern::Range { .. } => {}
         }
     }
 
