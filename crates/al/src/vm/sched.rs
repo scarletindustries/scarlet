@@ -11,7 +11,7 @@
 //! Idle schedulers park inside their OS poller; submitting a seed (or the last
 //! process finishing) wakes them via [`polling::Poller::notify`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,10 @@ pub(super) struct Runtime {
     /// Bumped on every publish; lets schedulers skip syncing when nothing
     /// changed.
     pub globals_version: AtomicU64,
+    /// Listening sockets shared program-wide, so a listener stored in a
+    /// top-level binding works from any scheduler: each scheduler that needs
+    /// one dups the fd from here into its own table.
+    pub shared_listeners: Mutex<HashMap<i32, TcpListener>>,
     /// Spawned processes waiting for a scheduler to take them.
     pub injector: Mutex<VecDeque<Seed>>,
     /// Live processes across all schedulers, counting injector seeds and the
@@ -179,6 +183,7 @@ pub(super) fn boot(
         program,
         globals: Mutex::new(Vec::new()),
         globals_version: AtomicU64::new(0),
+        shared_listeners: Mutex::new(HashMap::new()),
         injector: Mutex::new(VecDeque::new()),
         // The main process is live.
         live: AtomicUsize::new(1),

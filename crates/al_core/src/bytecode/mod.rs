@@ -185,8 +185,12 @@ pub enum Op {
     FileWrite,
     TcpListen,
     TcpAccept,
+    TcpConnect,
     TcpRead,
     TcpWrite,
+    /// Vectored write: `[sock, Array(Binary)] -> Result(Nil, String)` in one
+    /// writev syscall.
+    TcpWriteParts,
     TcpClose,
     TcpCloseServer,
     TcpLocalAddr,

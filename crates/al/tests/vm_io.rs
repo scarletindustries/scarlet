@@ -94,7 +94,7 @@ match net.listen('127.0.0.1', __PORT__) {
 		match net.accept(server) {
 			Ok(sock) -> {
 				println('peer ${address.to_string(sock.peer)}')
-				match socket.read(sock) {
+				match socket.read(sock, 4096) {
 					Ok(data) -> match socket.write(sock, data) {
 						Ok(_) -> match socket.close(sock) {
 							Ok(_) -> match net.close(server) {
@@ -171,6 +171,81 @@ match net.listen('127.0.0.1', __PORT__) {
     assert_eq!(
         lines[2], "served",
         "server did not complete the listen/accept/read/write/close chain"
+    );
+}
+
+/// The client side of the API, exercised entirely from AL: a spawned process
+/// serves one connection while the main process `net.connect`s to it, writes
+/// in two pieces, and reads the echo back with `read_exact`. The server echoes
+/// with a single vectored `write_parts`. Covers connect (non-blocking
+/// completion), read_exact (cross-read accumulation), and write_parts.
+#[test]
+fn tcp_connect_and_vectored_echo() {
+    let port = free_port();
+    let proj = Project::new("io_connect");
+    let src = r#"import al/experiments/scheduler
+import al/net
+import al/net/socket
+import al/binary
+
+match net.listen('127.0.0.1', __PORT__) {
+	Ok(server) -> {
+		scheduler.spawn(fn() {
+			match net.accept(server) {
+				Ok(sock) -> match socket.read_exact(sock, 5) {
+					Ok(first) -> match socket.read_exact(sock, 6) {
+						Ok(second) -> {
+							socket.write_parts(sock, [first, second]) or Nil
+							socket.close(sock) or Nil
+						}
+						Err(e) -> println('server read2 failed: ${e}')
+					}
+					Err(e) -> println('server read1 failed: ${e}')
+				}
+				Err(e) -> println('server accept failed: ${e}')
+			}
+		})
+
+		match net.connect('127.0.0.1', __PORT__) {
+			Ok(conn) -> {
+				socket.write(conn, binary.from_string('hello')) or Nil
+				socket.write(conn, binary.from_string(' world')) or Nil
+				match socket.read_exact(conn, 11) {
+					Ok(data) -> match binary.to_string(data) {
+						Ok(text) -> println('echoed: ${text}')
+						Err(_e) -> println('not utf8')
+					}
+					Err(e) -> println('client read failed: ${e}')
+				}
+				socket.close(conn) or Nil
+			}
+			Err(e) -> println('connect failed: ${e}')
+		}
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#
+    .replace("__PORT__", &port.to_string());
+    let prog = proj.dir.join("connect.al");
+    std::fs::write(&prog, src).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_al"))
+        .arg("run")
+        .arg(&prog)
+        .output()
+        .expect("run al");
+
+    assert!(
+        out.status.success(),
+        "program failed; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "echoed: hello world\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,6 +51,10 @@ enum Wait {
     Readable(i32),
     /// A connection must become writable.
     Writable(i32),
+    /// An outbound connect must finish (signalled by writability). Unlike the
+    /// other I/O waits, the instruction is not re-run on wake: the completion
+    /// handler pushes the result directly onto the process's stack.
+    Connecting(i32),
     /// Runnable again at this instant.
     Until(Instant),
 }
@@ -169,6 +173,12 @@ pub struct VM {
     next_socket_id: i32,
     tcp_listeners: HashMap<i32, TcpListener>,
     tcp_connections: HashMap<i32, TcpStream>,
+    /// Outbound connections whose non-blocking connect is still in flight,
+    /// keyed by their already-allocated socket id.
+    pending_connects: HashMap<i32, socket2::Socket>,
+    /// Reusable scratch buffer for socket reads, grown on demand, so each
+    /// read allocates only its result.
+    read_scratch: Vec<u8>,
     /// Whether the currently-running process is the main (root) process.
     current_is_main: bool,
     /// The main process's result, stashed if it finishes while other
@@ -228,6 +238,8 @@ pub fn new_vm(program: Program) -> VM {
         next_socket_id: 1,
         tcp_listeners: HashMap::new(),
         tcp_connections: HashMap::new(),
+        pending_connects: HashMap::new(),
+        read_scratch: Vec::new(),
         current_is_main: false,
         main_result: None,
         run_queue: VecDeque::new(),
@@ -1349,27 +1361,28 @@ impl VM {
                             is_listener: true,
                         }))
                     });
+                    // A listener may be stored in a top-level binding and used
+                    // from any scheduler; share its fd program-wide.
+                    if let Some(HeapValue::Socket(sv)) = res.as_ref().ok().and_then(|v| v.as_heap())
+                    {
+                        self.share_listener(sv.id);
+                    }
                     self.push_io_result("listen", res);
                 }
                 Op::TcpAccept => {
                     reds -= IO_REDUCTION_COST;
                     let sv = self.pop_listener("net.accept")?;
+                    if !self.ensure_listener(sv.id) {
+                        return Err("Invalid listener socket".to_string());
+                    }
                     let accept_res = match self.tcp_listeners.get(&sv.id) {
                         Some(listener) => listener.accept(),
                         None => return Err("Invalid listener socket".to_string()),
                     };
                     match accept_res {
                         Ok((conn, peer)) => {
-                            let _ = conn.set_nonblocking(true);
-                            let conn_id = self.alloc_socket_id();
-                            self.tcp_connections.insert(conn_id, conn);
-                            let handle = Value::socket(SocketValue {
-                                id: conn_id,
-                                is_listener: false,
-                            });
-                            let v = self.templates.make_socket(handle, peer);
-                            let ok = self.make_ok(v);
-                            self.stack.push(ok);
+                            let v = self.adopt_connection(conn, peer);
+                            self.stack.push(v);
                         }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
                             // No pending connection: park until the listener is
@@ -1381,27 +1394,69 @@ impl VM {
                         Err(e) => self.push_io_result("accept", Err(e)),
                     }
                 }
+                Op::TcpConnect => {
+                    reds -= IO_REDUCTION_COST;
+                    let port = self.pop_int("net.connect")?;
+                    let host = self.pop_str("net.connect")?;
+
+                    // Resolve the address. IP literals never block; hostnames
+                    // use the system resolver, which does.
+                    let addr = match resolve_addr(&host, port as u16) {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            self.push_io_result("connect", Err(e));
+                            continue;
+                        }
+                    };
+
+                    match start_connect(&addr) {
+                        // Local connects can complete immediately.
+                        Ok(ConnectStart::Connected(stream)) => {
+                            let v = self.adopt_connection(stream, addr);
+                            self.stack.push(v);
+                        }
+                        Ok(ConnectStart::Pending(socket)) => {
+                            // Park until the socket signals completion via
+                            // writability; the completion handler pushes the
+                            // result, and execution resumes after this
+                            // instruction.
+                            let id = self.alloc_socket_id();
+                            self.pending_connects.insert(id, socket);
+                            self.frame_mut().ip = ip;
+                            return Ok(Step::Parked(Wait::Connecting(id)));
+                        }
+                        Err(e) => self.push_io_result("connect", Err(e)),
+                    }
+                }
                 Op::TcpRead => {
                     reds -= IO_REDUCTION_COST;
+                    let max = self.pop_int("socket.read")?;
                     let sock_val = self.pop()?;
                     let sv = connection_socket(&sock_val, "socket.read")?;
+                    // At least 1 byte, at most 8 MiB per read.
+                    let max = (max.max(1) as usize).min(8 * 1024 * 1024);
+                    if self.read_scratch.len() < max {
+                        self.read_scratch.resize(max, 0);
+                    }
                     let read_res = match self.tcp_connections.get_mut(&sv.id) {
-                        Some(conn) => {
-                            let mut buf = [0u8; 4096];
-                            conn.read(&mut buf)
-                                .map(|n| Value::binary(buf[..n].to_vec()))
-                        }
+                        Some(conn) => conn.read(&mut self.read_scratch[..max]),
                         None => return Err("Invalid connection socket".to_string()),
                     };
                     match read_res {
+                        Ok(n) => {
+                            let data = Value::binary(self.read_scratch[..n].to_vec());
+                            let ok = self.make_ok(data);
+                            self.stack.push(ok);
+                        }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
                             // Nothing to read yet: park until readable, then
                             // re-run this instruction.
                             self.stack.push(sock_val);
+                            self.stack.push(Value::int(max as i64));
                             self.frame_mut().ip = ip - 1;
                             return Ok(Step::Parked(Wait::Readable(sv.id)));
                         }
-                        res => self.push_io_result("read", res),
+                        Err(e) => self.push_io_result("read", Err(e)),
                     }
                 }
                 Op::TcpWrite => {
@@ -1450,6 +1505,109 @@ impl VM {
                     let nil = self.make_nil();
                     self.push_io_result("write", result.map(|_| nil));
                 }
+                Op::TcpWriteParts => {
+                    reds -= IO_REDUCTION_COST;
+                    let parts_val = self.pop()?;
+                    let sock_val = self.pop()?;
+                    let sv = connection_socket(&sock_val, "socket.write_parts")?;
+                    let Some(parts) = parts_val.as_array() else {
+                        return Err(
+                            "socket.write_parts requires an Array(Binary). This is likely a compiler bug."
+                                .to_string(),
+                        );
+                    };
+
+                    // Collect the parts, rejecting non-byte-aligned binaries.
+                    let mut bins: Vec<Rc<BinaryValue>> = Vec::with_capacity(parts.len());
+                    let mut unaligned = false;
+                    for p in parts.iter() {
+                        match p.as_heap() {
+                            Some(HeapValue::Binary(b)) => {
+                                if !b.bit_len.is_multiple_of(8) {
+                                    unaligned = true;
+                                    break;
+                                }
+                                bins.push(b.clone());
+                            }
+                            _ => {
+                                return Err(
+                                    "socket.write_parts requires an Array(Binary). This is likely a compiler bug."
+                                        .to_string(),
+                                );
+                            }
+                        }
+                    }
+                    if unaligned {
+                        let err = self
+                            .make_err(Value::str("cannot write non-byte-aligned binary to socket"));
+                        self.stack.push(err);
+                        continue;
+                    }
+
+                    let conn = match self.tcp_connections.get_mut(&sv.id) {
+                        Some(conn) => conn,
+                        None => return Err("Invalid connection socket".to_string()),
+                    };
+
+                    // Vectored write: every part goes to the kernel in one
+                    // syscall per pass. Partial progress advances (idx, offset);
+                    // WouldBlock parks and resumes with only the unwritten tail.
+                    let mut idx = 0usize;
+                    let mut offset = 0usize;
+                    let mut park = false;
+                    let result = loop {
+                        if idx == bins.len() {
+                            break Ok(());
+                        }
+                        let mut slices: Vec<IoSlice> = Vec::with_capacity(bins.len() - idx);
+                        slices.push(IoSlice::new(&bins[idx].bytes[offset..]));
+                        for b in &bins[idx + 1..] {
+                            slices.push(IoSlice::new(&b.bytes));
+                        }
+                        match conn.write_vectored(&slices) {
+                            Ok(0) => {
+                                break Err(std::io::Error::new(
+                                    ErrorKind::WriteZero,
+                                    "connection closed",
+                                ));
+                            }
+                            Ok(mut n) => {
+                                while n > 0 && idx < bins.len() {
+                                    let left = bins[idx].bytes.len() - offset;
+                                    if n >= left {
+                                        n -= left;
+                                        idx += 1;
+                                        offset = 0;
+                                    } else {
+                                        offset += n;
+                                        n = 0;
+                                    }
+                                }
+                            }
+                            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                                park = true;
+                                break Ok(());
+                            }
+                            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                            Err(e) => break Err(e),
+                        }
+                    };
+
+                    if park {
+                        // Re-run with only the unwritten tail.
+                        let mut remaining: Vec<Value> = Vec::with_capacity(bins.len() - idx);
+                        remaining.push(Value::binary(bins[idx].bytes[offset..].to_vec()));
+                        for b in &bins[idx + 1..] {
+                            remaining.push(Value::binary(b.bytes.to_vec()));
+                        }
+                        self.stack.push(sock_val);
+                        self.stack.push(Value::array(remaining));
+                        self.frame_mut().ip = ip - 1;
+                        return Ok(Step::Parked(Wait::Writable(sv.id)));
+                    }
+                    let nil = self.make_nil();
+                    self.push_io_result("write", result.map(|_| nil));
+                }
                 Op::TcpClose => {
                     reds -= IO_REDUCTION_COST;
                     let sv = self.pop_connection("socket.close")?;
@@ -1470,12 +1628,19 @@ impl VM {
                     {
                         let _ = poller.delete(&listener);
                     }
+                    // Closing a server retires it everywhere.
+                    if let Some(rt) = &self.runtime {
+                        sched::lock(&rt.shared_listeners).remove(&sv.id);
+                    }
                     let nil = self.make_nil();
                     let v = self.make_ok(nil);
                     self.stack.push(v);
                 }
                 Op::TcpLocalAddr => {
                     let sv = self.pop_listener("net.local_addr")?;
+                    if !self.ensure_listener(sv.id) {
+                        return Err("Invalid listener socket".to_string());
+                    }
                     let res = match self.tcp_listeners.get(&sv.id) {
                         Some(l) => l.local_addr().map(|a| self.templates.socket_address(a)),
                         None => return Err("Invalid listener socket".to_string()),
@@ -1782,6 +1947,58 @@ impl VM {
         id
     }
 
+    /// Make a listener visible to every scheduler, so a listener stored in a
+    /// top-level binding can be used from spawned processes anywhere.
+    fn share_listener(&mut self, id: i32) {
+        let Some(rt) = &self.runtime else {
+            return;
+        };
+        if let Some(l) = self.tcp_listeners.get(&id)
+            && let Ok(dup) = l.try_clone()
+        {
+            sched::lock(&rt.shared_listeners).insert(id, dup);
+        }
+    }
+
+    /// Resolve `id` to a listener in this scheduler's table, hydrating its fd
+    /// from the runtime's shared listeners on a local miss.
+    fn ensure_listener(&mut self, id: i32) -> bool {
+        if self.tcp_listeners.contains_key(&id) {
+            return true;
+        }
+        let dup = match &self.runtime {
+            Some(rt) => sched::lock(&rt.shared_listeners)
+                .get(&id)
+                .and_then(|l| l.try_clone().ok()),
+            None => None,
+        };
+        match dup {
+            Some(l) => {
+                self.tcp_listeners.insert(id, l);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take ownership of a connected stream (from accept or connect):
+    /// configure it, register it in the connection table, and build the AL
+    /// `Ok(Socket)` result.
+    fn adopt_connection(&mut self, stream: TcpStream, peer: std::net::SocketAddr) -> Value {
+        let _ = stream.set_nonblocking(true);
+        // Small request/response exchanges should not sit in Nagle's buffer
+        // waiting for an ACK.
+        let _ = stream.set_nodelay(true);
+        let id = self.alloc_socket_id();
+        self.tcp_connections.insert(id, stream);
+        let handle = Value::socket(SocketValue {
+            id,
+            is_listener: false,
+        });
+        let v = self.templates.make_socket(handle, peer);
+        self.make_ok(v)
+    }
+
     /// `scheduler.spawn(f)`: start a new process running the closure `f`.
     ///
     /// The first spawn boots the multi-core runtime (one scheduler per CPU
@@ -1818,6 +2035,16 @@ impl VM {
                             let mut sink = Vec::new();
                             for (slot, value) in self.globals.iter().enumerate() {
                                 rt.publish_global(slot, transfer::value_out(value, &mut sink));
+                            }
+                            // Same for already-open listeners: share their fds
+                            // so top-level listener bindings work everywhere.
+                            {
+                                let mut shared = sched::lock(&rt.shared_listeners);
+                                for (id, l) in &self.tcp_listeners {
+                                    if let Ok(dup) = l.try_clone() {
+                                        shared.insert(*id, dup);
+                                    }
+                                }
                             }
                             self.runtime = Some(rt);
                         }
@@ -1925,7 +2152,7 @@ impl VM {
     fn register_wait(&mut self, wait: &Wait) -> VmResult<()> {
         let (id, readable) = match wait {
             Wait::Readable(id) => (*id, true),
-            Wait::Writable(id) => (*id, false),
+            Wait::Writable(id) | Wait::Connecting(id) => (*id, false),
             Wait::Until(_) => return Ok(()),
         };
 
@@ -1965,6 +2192,18 @@ impl VM {
                     }
                 })
                 .map_err(|e| format!("cannot watch connection: {e}"))
+        } else if let Some(pending) = self.pending_connects.get(&id) {
+            // SAFETY: see above — the pending socket stays in `pending_connects`
+            // until its completion handler removes it.
+            unsafe { poller.add(pending, event) }
+                .or_else(|e| {
+                    if e.kind() == ErrorKind::AlreadyExists {
+                        poller.modify(pending, event)
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| format!("cannot watch connecting socket: {e}"))
         } else {
             Err("Invalid socket. This is likely a compiler bug.".to_string())
         }
@@ -2047,11 +2286,18 @@ impl VM {
             let mut i = 0;
             while i < self.parked.len() {
                 let matches_event = match &self.parked[i].0 {
-                    Wait::Readable(sid) | Wait::Writable(sid) => *sid == id,
+                    Wait::Readable(sid) | Wait::Writable(sid) | Wait::Connecting(sid) => *sid == id,
                     Wait::Until(_) => false,
                 };
                 if matches_event {
-                    let (_, p) = self.parked.swap_remove(i);
+                    let (wait, mut p) = self.parked.swap_remove(i);
+                    // A finished connect delivers its result directly onto the
+                    // woken process's stack; the connect instruction is not
+                    // re-run.
+                    if let Wait::Connecting(sid) = wait {
+                        let result = self.finish_connect(sid);
+                        p.stack.push(result);
+                    }
                     self.run_queue.push_back(p);
                 } else {
                     i += 1;
@@ -2059,6 +2305,29 @@ impl VM {
             }
         }
         Ok(())
+    }
+
+    /// Complete a pending non-blocking connect whose socket became writable:
+    /// either adopt the connection or report the error it ended with.
+    fn finish_connect(&mut self, id: i32) -> Value {
+        let Some(socket) = self.pending_connects.remove(&id) else {
+            return self.make_err(Value::str("Failed to connect: unknown socket"));
+        };
+        if let Some(poller) = &self.poller {
+            let _ = poller.delete(&socket);
+        }
+        // Writability after EINPROGRESS means the connect finished; SO_ERROR
+        // says whether it succeeded.
+        match socket.take_error() {
+            Ok(None) => {
+                let stream: TcpStream = socket.into();
+                match stream.peer_addr() {
+                    Ok(peer) => self.adopt_connection(stream, peer),
+                    Err(e) => self.make_err(Value::str(format!("Failed to connect: {e}"))),
+                }
+            }
+            Ok(Some(e)) | Err(e) => self.make_err(Value::str(format!("Failed to connect: {e}"))),
+        }
     }
 }
 
@@ -2085,6 +2354,44 @@ fn worker_main(runtime: Arc<Runtime>, index: usize) {
 /// Extract the underlying `SocketValue` from a `Socket` record value without
 /// consuming it. `Socket` is the AL record `{ conn Connection, peer ... }`;
 /// the raw handle is its first payload field.
+/// Resolve `host:port` to a socket address. IP literals never block; hostnames
+/// go through the system resolver, which does.
+fn resolve_addr(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr> {
+    use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "host not found"))
+}
+
+/// The two ways a non-blocking connect can begin.
+enum ConnectStart {
+    /// Completed immediately (common for loopback).
+    Connected(TcpStream),
+    /// In flight; completion is signalled by writability.
+    Pending(socket2::Socket),
+}
+
+/// Begin a non-blocking TCP connect.
+fn start_connect(addr: &std::net::SocketAddr) -> std::io::Result<ConnectStart> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(*addr),
+        socket2::Type::STREAM,
+        None,
+    )?;
+    socket.set_nonblocking(true)?;
+    match socket.connect(&(*addr).into()) {
+        Ok(()) => Ok(ConnectStart::Connected(socket.into())),
+        // EINPROGRESS (unix) / WouldBlock (windows): completion comes later.
+        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => Ok(ConnectStart::Pending(socket)),
+        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(ConnectStart::Pending(socket)),
+        Err(e) => Err(e),
+    }
+}
+
 fn connection_socket(v: &Value, op: &str) -> VmResult<SocketValue> {
     if let Some(e) = v.as_enum()
         && let Some(HeapValue::Socket(s)) = e.payload.first().and_then(|c| c.as_heap())

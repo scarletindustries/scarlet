@@ -9,6 +9,12 @@ pub fn listen(host String, port Int) Result(Server, String)
 @vm(net__accept)
 pub fn accept(s Server) Result(Socket, String)
 
+// Open a connection to a remote host. `host` may be an IP address or a
+// hostname; hostname resolution currently blocks the calling scheduler, so
+// prefer IP addresses on hot paths.
+@vm(net__connect)
+pub fn connect(host String, port Int) Result(Socket, String)
+
 @vm(net__local_addr)
 pub fn local_addr(s Server) Result(SocketAddress, String)
 

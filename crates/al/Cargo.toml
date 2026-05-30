@@ -8,9 +8,11 @@ build = "build.rs"
 al_core = { path = "../al_core" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
+libc = "0.2"
 polling = "3"
 rustyline = "14"
 serde_json = "1"
+socket2 = "0.5"
 indexmap = { workspace = true }
 ureq = "2"
 
