@@ -1,4 +1,4 @@
-fn fib(n Int) Int {
+fn fib(n) {
 	if n < 2 {
 		n
 	} else {
@@ -6,7 +6,7 @@ fn fib(n Int) Int {
 	}
 }
 
-fn count(n Int, acc Int) Int {
+fn count(n, acc) {
 	if n == 0 {
 		acc
 	} else {
