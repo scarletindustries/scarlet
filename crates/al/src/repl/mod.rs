@@ -3,7 +3,6 @@ use rustyline::DefaultEditor;
 use crate::ast;
 use crate::bytecode;
 use crate::diagnostic;
-use crate::flags::Flags;
 use crate::parser;
 use crate::scanner;
 use crate::span::point_span;
@@ -140,7 +139,7 @@ fn eval_input(input: &str, definitions: &[ast::Node]) -> Vec<ast::Node> {
 
     let program = result.program;
 
-    let mut v = vm::new_vm(program, Flags::default());
+    let mut v = vm::new_vm(program);
     let run_result = match v.run() {
         Ok(val) => val,
         Err(err) => {

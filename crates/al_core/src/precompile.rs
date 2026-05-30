@@ -163,6 +163,7 @@ mod tests {
             "al/bool",
             "al/net",
             "al/io",
+            "al/experiments/scheduler",
         ] {
             assert!(
                 out.blob.interfaces.contains_key(key),

@@ -1,101 +1,20 @@
 // Exercises the VM's I/O opcodes (`Op::FileWrite` / `Op::FileRead` and the TCP
-// ops) together with the `--experimental-shitty-io` gate enforced by
-// `Vm::io_gate`. `common::run_al` can't forward CLI flags, so these spawn the
-// `al` binary directly the way `golden_examples::run_example` does.
+// ops). File and network I/O is always enabled, so these run plain `al run`
+// through `common::run_al`; the TCP echo test spawns the `al` binary directly
+// because the server must run concurrently with the Rust client driving it.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 mod common;
-use common::Project;
+use common::{Project, run_al};
 
-struct Run {
-    stdout: String,
-    stderr: String,
-    success: bool,
-}
-
-/// Spawn `al run [flags...] <path>` and capture its streams.
-fn run_al_flags(path: &Path, flags: &[&str]) -> Run {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_al"));
-    cmd.arg("run");
-    for f in flags {
-        cmd.arg(f);
-    }
-    cmd.arg(path);
-    let out = cmd.output().expect("spawn al");
-    Run {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        success: out.status.success(),
-    }
-}
-
-/// Without the flag, an `io.write_file` (via `io.write_text`) must abort at the
-/// gate *before* touching the filesystem.
+/// `io.write_text` then `io.read_text` round-trips the content: stdout echoes
+/// what was read back, and the bytes are genuinely on disk.
 #[test]
-fn file_write_rejected_without_io_flag() {
-    let proj = Project::new("io_gate_write");
-    let data = proj.dir.join("should_not_exist.txt");
-    let src = format!(
-        "import al/io\nio.write_text('{}', 'hello-io')\n",
-        data.display()
-    );
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
-
-    let out = run_al_flags(&prog, &[]);
-
-    assert!(
-        !out.success,
-        "I/O without the flag should abort\nstdout: {}\nstderr: {}",
-        out.stdout, out.stderr
-    );
-    assert!(
-        out.stderr.contains("--experimental-shitty-io"),
-        "expected the gate error on stderr, got stdout: {:?} stderr: {:?}",
-        out.stdout,
-        out.stderr
-    );
-    // Gate fires before the write opcode does any work — nothing on disk.
-    assert!(
-        !data.exists(),
-        "io.write_text created a file despite the gate rejecting it"
-    );
-}
-
-/// The read opcode is independently gated: `io.read_file` (via `io.read_text`)
-/// must also abort without the flag.
-#[test]
-fn file_read_rejected_without_io_flag() {
-    let proj = Project::new("io_gate_read");
-    let data = proj.dir.join("input.txt");
-    let src = format!("import al/io\nio.read_text('{}')\n", data.display());
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
-
-    let out = run_al_flags(&prog, &[]);
-
-    assert!(
-        !out.success,
-        "read without the flag should abort\nstdout: {}\nstderr: {}",
-        out.stdout, out.stderr
-    );
-    assert!(
-        out.stderr.contains("--experimental-shitty-io"),
-        "expected the gate error on stderr, got stdout: {:?} stderr: {:?}",
-        out.stdout,
-        out.stderr
-    );
-}
-
-/// With the flag, `io.write_text` then `io.read_text` round-trips the content:
-/// stdout echoes what was read back, and the bytes are genuinely on disk.
-#[test]
-fn file_write_then_read_roundtrips_with_io_flag() {
+fn file_write_then_read_roundtrips() {
     let proj = Project::new("io_roundtrip");
     let data = proj.dir.join("out.txt");
     let src = r#"import al/io
@@ -113,11 +32,11 @@ match io.write_text(path, 'hello-io') {
     let prog = proj.dir.join("prog.al");
     std::fs::write(&prog, src).unwrap();
 
-    let out = run_al_flags(&prog, &["--experimental-shitty-io"]);
+    let out = run_al("run", &prog);
 
     assert!(
         out.success,
-        "roundtrip should succeed with the flag\nstdout: {}\nstderr: {}",
+        "roundtrip should succeed\nstdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
     // The Ok arm ran with the value read back through Op::FileRead.
@@ -131,29 +50,6 @@ match io.write_text(path, 'hello-io') {
         std::fs::read_to_string(&data).unwrap(),
         "hello-io",
         "file on disk has wrong content"
-    );
-}
-
-/// The network opcodes share the same gate: `net.listen` must abort without the
-/// flag, before any socket is bound (deterministic — no real accept loop).
-#[test]
-fn tcp_listen_rejected_without_io_flag() {
-    let proj = Project::new("io_gate_net");
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, "import al/net\nnet.listen('0.0.0.0', 8080)\n").unwrap();
-
-    let out = run_al_flags(&prog, &[]);
-
-    assert!(
-        !out.success,
-        "net.listen without the flag should abort\nstdout: {}\nstderr: {}",
-        out.stdout, out.stderr
-    );
-    assert!(
-        out.stderr.contains("--experimental-shitty-io"),
-        "expected the gate error on stderr, got stdout: {:?} stderr: {:?}",
-        out.stdout,
-        out.stderr
     );
 }
 
@@ -177,14 +73,13 @@ fn connect_retry(port: u16) -> TcpStream {
     panic!("server on port {port} never accepted a connection");
 }
 
-/// Full TCP lifecycle through the VM with the io flag: `net.listen` ->
-/// `net.local_addr` -> `net.accept` -> `sock.peer` -> `net.read` ->
-/// `net.write` -> `net.close`. The `al` program is
-/// an echo server; a Rust client drives it and asserts the bytes round-trip and
-/// the server reached its `close` arm (printing `served`). This is the only test
-/// that exercises the socket opcodes' success paths (not just the io gate).
+/// Full TCP lifecycle through the VM: `net.listen` -> `net.local_addr` ->
+/// `net.accept` -> `sock.peer` -> `net.read` -> `net.write` -> `net.close`.
+/// The `al` program is an echo server; a Rust client drives it and asserts the
+/// bytes round-trip and the server reached its `close` arm (printing `served`).
+/// This is the only test that exercises the socket opcodes' success paths.
 #[test]
-fn tcp_echo_server_roundtrip_with_io_flag() {
+fn tcp_echo_server_roundtrip() {
     let port = free_port();
     let proj = Project::new("io_tcp");
     let src = r#"import al/net
@@ -226,7 +121,6 @@ match net.listen('127.0.0.1', __PORT__) {
     // The server blocks on accept(); spawn it and drive it from the client.
     let child = Command::new(env!("CARGO_BIN_EXE_al"))
         .arg("run")
-        .arg("--experimental-shitty-io")
         .arg(&prog)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -280,13 +174,11 @@ match net.listen('127.0.0.1', __PORT__) {
     );
 }
 
-/// With the io flag, writing a *bit-unaligned* binary (`<<1:4>>` is 4 bits) to a
-/// file is rejected inside the write opcode (`reject_unaligned`) and surfaces as
-/// `Err` — the file is never created. Distinct from the io-gate rejection (which
-/// fires without the flag); here the flag is present and the value is the
-/// problem.
+/// Writing a *bit-unaligned* binary (`<<1:4>>` is 4 bits) to a file is rejected
+/// inside the write opcode (`reject_unaligned`) and surfaces as `Err` — the
+/// file is never created.
 #[test]
-fn file_write_unaligned_binary_errors_with_io_flag() {
+fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
     let data = proj.dir.join("out.bin");
     let src = r#"import al/io
@@ -299,7 +191,7 @@ match io.write_file('__PATH__', <<1:4>>) {
     let prog = proj.dir.join("prog.al");
     std::fs::write(&prog, src).unwrap();
 
-    let out = run_al_flags(&prog, &["--experimental-shitty-io"]);
+    let out = run_al("run", &prog);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert!(
@@ -313,11 +205,11 @@ match io.write_file('__PATH__', <<1:4>>) {
     );
 }
 
-/// With the io flag, reading a path that does not exist takes `push_io_result`'s
-/// `Err` branch (the OS error is wrapped into a `Result.Err` string), not a
-/// panic or VM abort.
+/// Reading a path that does not exist takes `push_io_result`'s `Err` branch
+/// (the OS error is wrapped into a `Result.Err` string), not a panic or VM
+/// abort.
 #[test]
-fn file_read_missing_path_errors_with_io_flag() {
+fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
     let missing = proj.dir.join("does_not_exist.txt");
     let src = r#"import al/io
@@ -330,7 +222,7 @@ match io.read_text('__PATH__') {
     let prog = proj.dir.join("prog.al");
     std::fs::write(&prog, src).unwrap();
 
-    let out = run_al_flags(&prog, &["--experimental-shitty-io"]);
+    let out = run_al("run", &prog);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert_eq!(out.stdout, "read-err\n", "stderr: {}", out.stderr);

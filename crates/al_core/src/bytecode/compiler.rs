@@ -3362,6 +3362,8 @@ impl Compiler {
             "float__truncate" => self.emit(Op::FloatTruncate),
             "float__from_int" => self.emit(Op::FloatFromInt),
             "float__to_string" => self.emit(Op::FloatToString),
+            "scheduler__spawn" => self.emit(Op::ProcessSpawn),
+            "scheduler__sleep" => self.emit(Op::Sleep),
             _ => {
                 self.error(format!("Internal: builtin '{}' has no codegen", name), sp);
             }

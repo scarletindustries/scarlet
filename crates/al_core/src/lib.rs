@@ -13,7 +13,6 @@
 pub mod ast;
 pub mod bytecode;
 pub mod diagnostic;
-pub mod flags;
 pub mod formatter;
 pub mod module;
 pub mod parser;

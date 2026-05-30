@@ -1,20 +1,25 @@
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::collections::{HashMap, VecDeque};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use al_core::bytecode::Function;
+use al_core::bytecode::transfer;
 use al_core::bytecode::{
     BinaryValue, ClosureValue, EnumValue, HeapValue, Op, Program, Seq, SocketValue, Value,
     ValueView, enum_hash_with_payload, enum_name_prefix_hash,
 };
-use al_core::flags::Flags;
 use al_core::static_ir::VariantTemplate;
 
 use crate::stdlib;
 
 mod binary;
+mod sched;
+
+use sched::{Runtime, Seed};
 
 type VmResult<T> = Result<T, String>;
 
@@ -28,6 +33,46 @@ struct CallFrame {
     // `Op::Call`/`Op::TailCall`/`Op::CallSelf` is an `Rc` refcount bump rather
     // than an O(k) `Vec<Value>` clone. See `ClosureValue::captures`.
     captures: Rc<[Value]>,
+}
+
+/// How many function applications a process may make before it is preempted.
+/// Mirrors BEAM's per-process reduction budget (`CONTEXT_REDS`).
+const REDUCTION_BUDGET: i32 = 4000;
+
+/// What one I/O operation (a syscall) costs in reductions. Charging I/O keeps
+/// an accept/read loop from monopolizing its scheduler: ~40 I/O ops fill a
+/// budget, after which the process is preempted at its next call.
+const IO_REDUCTION_COST: i32 = 100;
+
+/// What a parked process is waiting for.
+#[derive(Debug)]
+enum Wait {
+    /// A socket (listener or connection) must become readable.
+    Readable(i32),
+    /// A connection must become writable.
+    Writable(i32),
+    /// Runnable again at this instant.
+    Until(Instant),
+}
+
+/// Why an execution slice ended.
+enum Step {
+    /// The current process ran to completion; its result is its top-of-stack.
+    Done,
+    /// The reduction budget ran out; the process is resumable as-is.
+    Yield,
+    /// The process must wait for I/O readiness or a timer.
+    Parked(Wait),
+}
+
+/// A suspended lightweight process — a complete resumable continuation.
+/// The *running* process lives directly in `VM.stack`/`VM.frames` so the
+/// dispatch loop is untouched; a context switch swaps those vectors with a
+/// `Process` (a few pointer moves).
+struct Process {
+    stack: Vec<Value>,
+    frames: Vec<CallFrame>,
+    is_main: bool,
 }
 
 /// Precomputed prelude enum templates. The constant-shape parts (names, labels,
@@ -106,7 +151,6 @@ impl PreludeTemplates {
 }
 
 pub struct VM {
-    flags: Flags,
     program: Program,
     templates: PreludeTemplates,
     stack: Vec<Value>,
@@ -125,9 +169,32 @@ pub struct VM {
     next_socket_id: i32,
     tcp_listeners: HashMap<i32, TcpListener>,
     tcp_connections: HashMap<i32, TcpStream>,
+    /// Whether the currently-running process is the main (root) process.
+    current_is_main: bool,
+    /// The main process's result, stashed if it finishes while other
+    /// processes are still running.
+    main_result: Option<Value>,
+    /// Runnable processes in round-robin order (the running one is not here).
+    run_queue: VecDeque<Process>,
+    /// Processes waiting on I/O readiness or timers.
+    parked: Vec<(Wait, Process)>,
+    /// OS event queue (kqueue/epoll); created when a process first parks on
+    /// I/O, or adopted from the runtime when multi-core scheduling boots.
+    poller: Option<Arc<polling::Poller>>,
+    /// Multi-core runtime, booted by the first spawn. `None` for programs
+    /// that never spawn and for single-core runs (AL_SCHEDULERS=1).
+    runtime: Option<Arc<Runtime>>,
+    /// This VM's scheduler index; 0 is the main thread.
+    scheduler_index: usize,
+    /// The global (literal) area: top-level bindings, addressed by
+    /// `Op::PushGlobal`. On scheduler 0 it mirrors main's frame; workers
+    /// hydrate it from the runtime's shared area.
+    globals: Vec<Value>,
+    /// The shared-area version this scheduler last hydrated from.
+    globals_synced_version: u64,
 }
 
-pub fn new_vm(program: Program, fl: Flags) -> VM {
+pub fn new_vm(program: Program) -> VM {
     let templates = PreludeTemplates::new();
     let empty_captures: Rc<[Value]> = Vec::new().into();
     let self_closures = program
@@ -144,8 +211,14 @@ pub fn new_vm(program: Program, fl: Flags) -> VM {
             })
         })
         .collect();
+    // The global (literal) area is sized by the entry function: top-level
+    // bindings are its "locals", mirrored into this table as they are written.
+    let globals_len = program
+        .functions
+        .get(program.entry as usize)
+        .map(|f| f.locals as usize)
+        .unwrap_or(0);
     VM {
-        flags: fl,
         program,
         templates,
         stack: Vec::new(),
@@ -155,6 +228,15 @@ pub fn new_vm(program: Program, fl: Flags) -> VM {
         next_socket_id: 1,
         tcp_listeners: HashMap::new(),
         tcp_connections: HashMap::new(),
+        current_is_main: false,
+        main_result: None,
+        run_queue: VecDeque::new(),
+        parked: Vec::new(),
+        poller: None,
+        runtime: None,
+        scheduler_index: 0,
+        globals: vec![Value::int(0); globals_len],
+        globals_synced_version: 0,
     }
 }
 
@@ -191,10 +273,244 @@ impl VM {
             self.stack.push(Value::int(0));
         }
 
-        self.execute()
+        self.current_is_main = true;
+        let result = self.scheduler_loop();
+
+        // Multi-core shutdown: by the time scheduler 0's loop returns Ok, the
+        // global live count is zero, so workers are exiting; join them. On
+        // error the program is dying — process exit reaps the workers.
+        if result.is_ok()
+            && let Some(rt) = &self.runtime
+        {
+            let workers = std::mem::take(&mut *sched::lock(&rt.workers));
+            for handle in workers {
+                if handle.join().is_err() {
+                    eprintln!("scheduler: a worker thread terminated abnormally");
+                }
+            }
+        }
+        result
     }
 
-    fn execute(&mut self) -> VmResult<Value> {
+    /// Drive processes to completion, round-robin with reduction-budget
+    /// preemption. Scheduler 0 returns the main process's result once every
+    /// process in the program (across all schedulers) has finished; worker
+    /// schedulers return Nil when the program is over.
+    fn scheduler_loop(&mut self) -> VmResult<Value> {
+        loop {
+            // Make sure some process is current.
+            if self.frames.is_empty() && !self.acquire_work()? {
+                let result = self.main_result.take().unwrap_or_else(|| self.make_nil());
+                return Ok(result);
+            }
+
+            match self.execute_slice()? {
+                Step::Done => {
+                    // The finished process's result is its top-of-stack.
+                    if self.current_is_main {
+                        let result = self.stack.pop().unwrap_or_else(|| self.make_nil());
+                        self.main_result = Some(result);
+                    }
+                    self.stack.clear();
+                    self.frames.clear();
+                    self.current_is_main = false;
+                    if let Some(rt) = &self.runtime {
+                        rt.process_finished();
+                    }
+                }
+                Step::Yield => {
+                    // Preempted. Wake any ready parked processes; when there is
+                    // nothing else local AND no idle scheduler to take them,
+                    // pick up injector seeds so queued work still gets
+                    // time-sliced in when every scheduler is busy.
+                    if !self.parked.is_empty() {
+                        self.poll_parked(false)?;
+                    }
+                    if self.run_queue.is_empty() && !self.others_idle() {
+                        self.take_seeds()?;
+                    }
+                    if !self.run_queue.is_empty() {
+                        let outgoing = self.suspend_current();
+                        self.run_queue.push_back(outgoing);
+                        // The queue is non-empty, so this always succeeds.
+                        if let Some(p) = self.run_queue.pop_front() {
+                            self.resume(p);
+                        }
+                    }
+                }
+                Step::Parked(wait) => {
+                    self.register_wait(&wait)?;
+                    let outgoing = self.suspend_current();
+                    self.parked.push((wait, outgoing));
+                }
+            }
+        }
+    }
+
+    /// Detach the running process's state into a `Process`.
+    fn suspend_current(&mut self) -> Process {
+        Process {
+            stack: std::mem::take(&mut self.stack),
+            frames: std::mem::take(&mut self.frames),
+            is_main: std::mem::take(&mut self.current_is_main),
+        }
+    }
+
+    /// Make `p` the running process.
+    fn resume(&mut self, p: Process) {
+        self.stack = p.stack;
+        self.frames = p.frames;
+        self.current_is_main = p.is_main;
+    }
+
+    /// Get something to run into `stack`/`frames`. Blocks while there is
+    /// nothing local to run but the program is still alive somewhere.
+    /// Returns false once the whole program has finished.
+    fn acquire_work(&mut self) -> VmResult<bool> {
+        loop {
+            // 1. Local runnable processes.
+            if let Some(p) = self.run_queue.pop_front() {
+                self.resume(p);
+                return Ok(true);
+            }
+
+            // 2. Remote seeds.
+            if self.take_seeds()? {
+                continue;
+            }
+
+            // 3. Local parked I/O / timers: wait for them, but stay wakeable
+            //    by other schedulers (seed submissions, program end).
+            if !self.parked.is_empty() {
+                self.set_parked_flag(true);
+                let poll_result = self.poll_parked(true);
+                self.set_parked_flag(false);
+                poll_result?;
+                continue;
+            }
+
+            // 4. Nothing local at all.
+            if self.runtime.is_none() {
+                // Single scheduler: the program is over.
+                return Ok(false);
+            }
+            if self.runtime_finished() {
+                return Ok(false);
+            }
+            // Wait for a seed or for the program to end. Set the parked flag
+            // first, then re-check (a submitter who missed our flag may have
+            // pushed in between; `notify` is sticky so the reverse race is
+            // safe).
+            self.set_parked_flag(true);
+            if self.take_seeds()? {
+                self.set_parked_flag(false);
+                continue;
+            }
+            if self.runtime_finished() {
+                self.set_parked_flag(false);
+                return Ok(false);
+            }
+            let wait_result = self.wait_for_notify();
+            self.set_parked_flag(false);
+            wait_result?;
+        }
+    }
+
+    /// Move a batch of seeds from the shared injector into the local run
+    /// queue. Returns whether any arrived.
+    fn take_seeds(&mut self) -> VmResult<bool> {
+        let batch = match &self.runtime {
+            Some(rt) => rt.take_seeds(),
+            None => return Ok(false),
+        };
+        if batch.is_empty() {
+            return Ok(false);
+        }
+        // Seeds may reference top-level bindings published after our last
+        // sync; refresh the global area first. (Publish happens-before
+        // submit, submit happens-before take, so this can never be stale.)
+        self.sync_globals();
+        for seed in batch {
+            self.hydrate_seed(seed)?;
+        }
+        Ok(true)
+    }
+
+    /// Bring this scheduler's global area up to date with the runtime's
+    /// shared (published) globals.
+    fn sync_globals(&mut self) {
+        let Some(rt) = &self.runtime else {
+            return;
+        };
+        let version = rt
+            .globals_version
+            .load(std::sync::atomic::Ordering::Acquire);
+        if version == self.globals_synced_version {
+            return;
+        }
+        let shared = sched::lock(&rt.globals);
+        if self.globals.len() < shared.len() {
+            self.globals.resize(shared.len(), Value::int(0));
+        }
+        for (slot, entry) in shared.iter().enumerate() {
+            if let Some(sv) = entry {
+                self.globals[slot] = transfer::value_in(sv);
+            }
+        }
+        drop(shared);
+        self.globals_synced_version = version;
+    }
+
+    /// Whether the whole program has finished (multi-core mode only).
+    fn runtime_finished(&self) -> bool {
+        match &self.runtime {
+            Some(rt) => rt.is_finished(),
+            None => false,
+        }
+    }
+
+    /// Whether some other scheduler is idle and able to take injector seeds.
+    fn others_idle(&self) -> bool {
+        match &self.runtime {
+            Some(rt) => rt.any_other_idle(self.scheduler_index),
+            None => false,
+        }
+    }
+
+    /// Mark this scheduler as parked/unparked so seed submitters know who to
+    /// wake.
+    fn set_parked_flag(&self, parked: bool) {
+        if let Some(rt) = &self.runtime {
+            rt.parked_flags[self.scheduler_index]
+                .store(parked, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Block until another scheduler notifies this one (seed submitted or
+    /// program finished).
+    fn wait_for_notify(&mut self) -> VmResult<()> {
+        self.ensure_poller()?;
+        let Some(poller) = &self.poller else {
+            return Ok(());
+        };
+        let mut events = polling::Events::new();
+        poller
+            .wait(&mut events, None)
+            .map_err(|e| format!("scheduler wait failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Create this scheduler's poller if it does not exist yet.
+    fn ensure_poller(&mut self) -> VmResult<()> {
+        if self.poller.is_none() {
+            let poller =
+                polling::Poller::new().map_err(|e| format!("cannot create OS poller: {e}"))?;
+            self.poller = Some(Arc::new(poller));
+        }
+        Ok(())
+    }
+
+    fn execute_slice(&mut self) -> VmResult<Step> {
         // Hoist the active frame's scalar state into locals so the per-instruction
         // path avoids two Vec indexes. Synced back to self.frames on Call/TailCall/Ret.
         // `func_idx` is hoisted for `CallSelf`/`TailCallSelf`, which resolve the
@@ -203,6 +519,9 @@ impl VM {
             let f = self.frame();
             (f.ip, f.code_start, f.base_slot, f.func_idx)
         };
+        // Remaining reduction budget for this slice; one function application
+        // costs one reduction. Exhaustion preempts the process.
+        let mut reds = REDUCTION_BUDGET;
 
         loop {
             let addr = code_start + ip;
@@ -258,14 +577,32 @@ impl VM {
                     self.stack.push(self.stack[slot].clone());
                 }
                 Op::PushGlobal => {
-                    // Entry frame has base_slot 0, so globals are absolute indices.
+                    // Top-level bindings live in the global (literal) area,
+                    // shared by every process on this scheduler.
                     let slot = instr.operand as usize;
-                    self.stack.push(self.stack[slot].clone());
+                    self.stack.push(self.globals[slot].clone());
                 }
                 Op::StoreLocal => {
                     let slot = base_slot + instr.operand as usize;
                     let v = self.pop()?;
                     self.stack[slot] = v;
+                    // Top-level bindings (the main process's entry frame) are
+                    // the program's globals: mirror them into the global area
+                    // and, when other schedulers exist, publish them. Globals
+                    // are write-once, so each slot publishes at most once.
+                    // Spawned processes also run at base_slot 0, hence the
+                    // is_main guard.
+                    if base_slot == 0 && self.current_is_main {
+                        if slot >= self.globals.len() {
+                            self.globals.resize(slot + 1, Value::int(0));
+                        }
+                        self.globals[slot] = self.stack[slot].clone();
+                        if let Some(rt) = &self.runtime {
+                            let mut sink = Vec::new();
+                            let sv = transfer::value_out(&self.globals[slot], &mut sink);
+                            rt.publish_global(slot, sv);
+                        }
+                    }
                 }
                 Op::PushNil => {
                     self.stack.push(self.make_nil());
@@ -454,6 +791,14 @@ impl VM {
                         ip = 0;
                         code_start = func_code_start;
                         func_idx = cl_func_idx;
+
+                        // One function application = one reduction. The callee
+                        // frame is fully consistent here, so preemption is a
+                        // plain return — resume re-hoists from the frame.
+                        reds -= 1;
+                        if reds <= 0 {
+                            return Ok(Step::Yield);
+                        }
                     } else {
                         return Err("Cannot call non-function".to_string());
                     }
@@ -497,6 +842,11 @@ impl VM {
                         self.stack.push(Value::int(0));
                     }
                     ip = 0;
+
+                    reds -= 1;
+                    if reds <= 0 {
+                        return Ok(Step::Yield);
+                    }
                 }
                 Op::Ret => {
                     let ret_val = self.pop()?;
@@ -968,13 +1318,13 @@ impl VM {
                     break;
                 }
                 Op::FileRead => {
-                    self.io_gate()?;
+                    reds -= IO_REDUCTION_COST;
                     let path = self.pop_str("io.read_file")?;
                     let res = std::fs::read(&*path).map(Value::binary);
                     self.push_io_result("read file", res);
                 }
                 Op::FileWrite => {
-                    self.io_gate()?;
+                    reds -= IO_REDUCTION_COST;
                     let bin = self.pop_binary("io.write_file")?;
                     let path = self.pop_str("io.write_file")?;
                     if let Some(v) = self.reject_unaligned(bin.bit_len, "file") {
@@ -986,43 +1336,56 @@ impl VM {
                     self.push_io_result("write file", res);
                 }
                 Op::TcpListen => {
-                    self.io_gate()?;
                     let port = self.pop_int("net.listen")?;
                     let host = self.pop_str("net.listen")?;
-                    let res = TcpListener::bind((&*host, port as u16)).map(|listener| {
-                        let socket_id = self.next_socket_id;
-                        self.next_socket_id += 1;
+                    let res = TcpListener::bind((&*host, port as u16)).and_then(|listener| {
+                        // Non-blocking so accept parks the calling process
+                        // instead of stalling every process on this scheduler.
+                        listener.set_nonblocking(true)?;
+                        let socket_id = self.alloc_socket_id();
                         self.tcp_listeners.insert(socket_id, listener);
-                        Value::socket(SocketValue {
+                        Ok(Value::socket(SocketValue {
                             id: socket_id,
                             is_listener: true,
-                        })
+                        }))
                     });
                     self.push_io_result("listen", res);
                 }
                 Op::TcpAccept => {
-                    self.io_gate()?;
+                    reds -= IO_REDUCTION_COST;
                     let sv = self.pop_listener("net.accept")?;
                     let accept_res = match self.tcp_listeners.get(&sv.id) {
                         Some(listener) => listener.accept(),
                         None => return Err("Invalid listener socket".to_string()),
                     };
-                    let res = accept_res.map(|(conn, peer)| {
-                        let conn_id = self.next_socket_id;
-                        self.next_socket_id += 1;
-                        self.tcp_connections.insert(conn_id, conn);
-                        let handle = Value::socket(SocketValue {
-                            id: conn_id,
-                            is_listener: false,
-                        });
-                        self.templates.make_socket(handle, peer)
-                    });
-                    self.push_io_result("accept", res);
+                    match accept_res {
+                        Ok((conn, peer)) => {
+                            let _ = conn.set_nonblocking(true);
+                            let conn_id = self.alloc_socket_id();
+                            self.tcp_connections.insert(conn_id, conn);
+                            let handle = Value::socket(SocketValue {
+                                id: conn_id,
+                                is_listener: false,
+                            });
+                            let v = self.templates.make_socket(handle, peer);
+                            let ok = self.make_ok(v);
+                            self.stack.push(ok);
+                        }
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            // No pending connection: park until the listener is
+                            // readable, then re-run this instruction.
+                            self.stack.push(Value::socket(sv));
+                            self.frame_mut().ip = ip - 1;
+                            return Ok(Step::Parked(Wait::Readable(sv.id)));
+                        }
+                        Err(e) => self.push_io_result("accept", Err(e)),
+                    }
                 }
                 Op::TcpRead => {
-                    self.io_gate()?;
-                    let sv = self.pop_connection("net.read")?;
-                    let res = match self.tcp_connections.get_mut(&sv.id) {
+                    reds -= IO_REDUCTION_COST;
+                    let sock_val = self.pop()?;
+                    let sv = connection_socket(&sock_val, "socket.read")?;
+                    let read_res = match self.tcp_connections.get_mut(&sv.id) {
                         Some(conn) => {
                             let mut buf = [0u8; 4096];
                             conn.read(&mut buf)
@@ -1030,47 +1393,112 @@ impl VM {
                         }
                         None => return Err("Invalid connection socket".to_string()),
                     };
-                    self.push_io_result("read", res);
+                    match read_res {
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            // Nothing to read yet: park until readable, then
+                            // re-run this instruction.
+                            self.stack.push(sock_val);
+                            self.frame_mut().ip = ip - 1;
+                            return Ok(Step::Parked(Wait::Readable(sv.id)));
+                        }
+                        res => self.push_io_result("read", res),
+                    }
                 }
                 Op::TcpWrite => {
-                    self.io_gate()?;
-                    let bin = self.pop_binary("net.write")?;
-                    let sv = self.pop_connection("net.write")?;
+                    reds -= IO_REDUCTION_COST;
+                    let bin = self.pop_binary("socket.write")?;
+                    let sock_val = self.pop()?;
+                    let sv = connection_socket(&sock_val, "socket.write")?;
                     if let Some(v) = self.reject_unaligned(bin.bit_len, "socket") {
                         self.stack.push(v);
                         continue;
                     }
-                    let nil = self.make_nil();
-                    let res = match self.tcp_connections.get_mut(&sv.id) {
-                        Some(conn) => conn.write_all(&bin.bytes).map(|_| nil),
+                    let conn = match self.tcp_connections.get_mut(&sv.id) {
+                        Some(conn) => conn,
                         None => return Err("Invalid connection socket".to_string()),
                     };
-                    self.push_io_result("write", res);
+                    // Write what the socket will take. If it fills up mid-way,
+                    // park and resume this instruction with the remaining bytes.
+                    let mut written = 0;
+                    let mut park_remaining: Option<Vec<u8>> = None;
+                    let result = loop {
+                        if written == bin.bytes.len() {
+                            break Ok(());
+                        }
+                        match conn.write(&bin.bytes[written..]) {
+                            Ok(0) => {
+                                break Err(std::io::Error::new(
+                                    ErrorKind::WriteZero,
+                                    "connection closed",
+                                ));
+                            }
+                            Ok(n) => written += n,
+                            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                                park_remaining = Some(bin.bytes[written..].to_vec());
+                                break Ok(());
+                            }
+                            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                            Err(e) => break Err(e),
+                        }
+                    };
+                    if let Some(remaining) = park_remaining {
+                        self.stack.push(sock_val);
+                        self.stack.push(Value::binary(remaining));
+                        self.frame_mut().ip = ip - 1;
+                        return Ok(Step::Parked(Wait::Writable(sv.id)));
+                    }
+                    let nil = self.make_nil();
+                    self.push_io_result("write", result.map(|_| nil));
                 }
                 Op::TcpClose => {
-                    self.io_gate()?;
+                    reds -= IO_REDUCTION_COST;
                     let sv = self.pop_connection("socket.close")?;
-                    self.tcp_connections.remove(&sv.id);
+                    if let Some(conn) = self.tcp_connections.remove(&sv.id)
+                        && let Some(poller) = &self.poller
+                    {
+                        // Deregister before dropping; ignore "wasn't registered".
+                        let _ = poller.delete(&conn);
+                    }
                     let nil = self.make_nil();
                     let v = self.make_ok(nil);
                     self.stack.push(v);
                 }
                 Op::TcpCloseServer => {
-                    self.io_gate()?;
                     let sv = self.pop_listener("net.close")?;
-                    self.tcp_listeners.remove(&sv.id);
+                    if let Some(listener) = self.tcp_listeners.remove(&sv.id)
+                        && let Some(poller) = &self.poller
+                    {
+                        let _ = poller.delete(&listener);
+                    }
                     let nil = self.make_nil();
                     let v = self.make_ok(nil);
                     self.stack.push(v);
                 }
                 Op::TcpLocalAddr => {
-                    self.io_gate()?;
                     let sv = self.pop_listener("net.local_addr")?;
                     let res = match self.tcp_listeners.get(&sv.id) {
                         Some(l) => l.local_addr().map(|a| self.templates.socket_address(a)),
                         None => return Err("Invalid listener socket".to_string()),
                     };
                     self.push_io_result("get local address", res);
+                }
+                Op::ProcessSpawn => {
+                    let f = self.pop()?;
+                    self.spawn_process(f)?;
+                    let nil = self.make_nil();
+                    self.stack.push(nil);
+                }
+                Op::Sleep => {
+                    let ms = self.pop_int("scheduler.sleep")?;
+                    let nil = self.make_nil();
+                    self.stack.push(nil);
+                    if ms > 0 {
+                        // The Nil result is already pushed, so on wake the
+                        // process resumes at the next instruction.
+                        self.frame_mut().ip = ip;
+                        let deadline = Instant::now() + Duration::from_millis(ms as u64);
+                        return Ok(Step::Parked(Wait::Until(deadline)));
+                    }
                 }
                 Op::StrSplit => {
                     let delim = self.pop_str("strings.split")?;
@@ -1210,11 +1638,9 @@ impl VM {
             }
         }
 
-        Ok(self
-            .stack
-            .last()
-            .cloned()
-            .unwrap_or_else(|| self.make_nil()))
+        // Halt, Ret with no caller, or running off the end of the code: the
+        // current process is finished and its result is its top-of-stack.
+        Ok(Step::Done)
     }
 
     fn pop(&mut self) -> VmResult<Value> {
@@ -1327,15 +1753,6 @@ impl VM {
     // --- I/O helpers ---------------------------------------------------------
 
     #[inline]
-    fn io_gate(&self) -> VmResult<()> {
-        if self.flags.io_enabled {
-            Ok(())
-        } else {
-            Err("I/O operations require --experimental-shitty-io flag".to_string())
-        }
-    }
-
-    #[inline]
     fn push_io_result(&mut self, label: &str, r: std::io::Result<Value>) {
         let v = match r {
             Ok(v) => self.make_ok(v),
@@ -1352,6 +1769,329 @@ impl VM {
             )))
         })
     }
+
+    // --- Lightweight processes (al/experiments/scheduler) --------------------
+
+    /// Allocate a socket id that is unique across every scheduler: the
+    /// scheduler index lives in the top bits, so sockets can move between
+    /// schedulers (inside spawn seeds) without colliding.
+    #[inline]
+    fn alloc_socket_id(&mut self) -> i32 {
+        let id = ((self.scheduler_index as i32) << 24) | self.next_socket_id;
+        self.next_socket_id += 1;
+        id
+    }
+
+    /// `scheduler.spawn(f)`: start a new process running the closure `f`.
+    ///
+    /// The first spawn boots the multi-core runtime (one scheduler per CPU
+    /// core). With the runtime up, the process is shipped as a `Send` seed
+    /// that whichever scheduler is free will run; otherwise it is created
+    /// directly on this scheduler.
+    fn spawn_process(&mut self, f: Value) -> VmResult<()> {
+        match f.as_closure() {
+            Some(cl) => {
+                if self.program.functions[cl.func_idx as usize].arity != 0 {
+                    return Err(
+                        "spawned functions take no arguments. This is likely a compiler bug."
+                            .to_string(),
+                    );
+                }
+            }
+            None => {
+                return Err("spawn requires a function. This is likely a compiler bug.".to_string());
+            }
+        }
+
+        // Boot the multi-core runtime on the first spawn (scheduler 0 only;
+        // single-core machines and AL_SCHEDULERS=1 stay single-scheduler).
+        if self.runtime.is_none() && self.scheduler_index == 0 {
+            let count = sched::scheduler_count();
+            if count > 1 {
+                self.ensure_poller()?;
+                if let Some(poller) = &self.poller {
+                    let program = Arc::new(transfer::program_out(&self.program));
+                    match sched::boot(program, count, Arc::clone(poller)) {
+                        Ok(rt) => {
+                            // Publish every global written before the runtime
+                            // existed so worker schedulers can hydrate them.
+                            let mut sink = Vec::new();
+                            for (slot, value) in self.globals.iter().enumerate() {
+                                rt.publish_global(slot, transfer::value_out(value, &mut sink));
+                            }
+                            self.runtime = Some(rt);
+                        }
+                        Err(e) => {
+                            eprintln!("warning: cannot start schedulers ({e}); running on one core")
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.runtime.is_some() {
+            let seed = self.build_seed(&f)?;
+            if let Some(rt) = &self.runtime {
+                rt.submit(seed);
+            }
+        } else {
+            self.spawn_process_local(f)?;
+        }
+        Ok(())
+    }
+
+    /// Create a process directly on this scheduler.
+    ///
+    /// The process reads top-level bindings from this scheduler's global
+    /// (literal) area, so its stack holds nothing but the closure's own
+    /// locals — spawning allocates two small vectors and nothing else.
+    fn spawn_process_local(&mut self, f: Value) -> VmResult<()> {
+        let Some(cl) = f.as_closure() else {
+            return Err("spawn requires a function. This is likely a compiler bug.".to_string());
+        };
+        let func = &self.program.functions[cl.func_idx as usize];
+        let (func_idx, code_start, locals) = (cl.func_idx, func.code_start, func.locals);
+
+        let mut stack = Vec::with_capacity(locals as usize + 8);
+        for _ in 0..locals {
+            stack.push(Value::int(0));
+        }
+
+        let frames = vec![CallFrame {
+            func_idx,
+            code_start,
+            ip: 0,
+            base_slot: 0,
+            captures: cl.captures.clone(),
+        }];
+
+        self.run_queue.push_back(Process {
+            stack,
+            frames,
+            is_main: false,
+        });
+        Ok(())
+    }
+
+    /// Deep-copy a closure into a `Send` seed. Captured sockets transfer with
+    /// it: connections move (this scheduler loses them), listeners are dup'd
+    /// so both sides keep accepting.
+    fn build_seed(&mut self, f: &Value) -> VmResult<Seed> {
+        let mut captured_sockets = Vec::new();
+        let closure = transfer::value_out(f, &mut captured_sockets);
+
+        let mut listeners = Vec::new();
+        let mut connections = Vec::new();
+        for id in captured_sockets {
+            if let Some(l) = self.tcp_listeners.get(&id) {
+                match l.try_clone() {
+                    Ok(dup) => listeners.push((id, dup)),
+                    Err(e) => eprintln!("spawn: cannot share listener: {e}"),
+                }
+            }
+            if let Some(c) = self.tcp_connections.remove(&id) {
+                // The fd is leaving this scheduler; drop any poller registration.
+                if let Some(poller) = &self.poller {
+                    let _ = poller.delete(&c);
+                }
+                connections.push((id, c));
+            }
+        }
+
+        Ok(Seed {
+            closure,
+            listeners,
+            connections,
+        })
+    }
+
+    /// Build a runnable process on this scheduler from a `Send` seed: adopt
+    /// its sockets, rebuild its closure on this heap, and queue it. Top-level
+    /// bindings come from the global area (synced in `take_seeds`), so the
+    /// seed itself carries none.
+    fn hydrate_seed(&mut self, seed: Seed) -> VmResult<()> {
+        for (id, l) in seed.listeners {
+            self.tcp_listeners.insert(id, l);
+        }
+        for (id, c) in seed.connections {
+            self.tcp_connections.insert(id, c);
+        }
+
+        let closure = transfer::value_in(&seed.closure);
+        self.spawn_process_local(closure)
+    }
+
+    /// Register interest in I/O readiness with the OS poller before parking.
+    fn register_wait(&mut self, wait: &Wait) -> VmResult<()> {
+        let (id, readable) = match wait {
+            Wait::Readable(id) => (*id, true),
+            Wait::Writable(id) => (*id, false),
+            Wait::Until(_) => return Ok(()),
+        };
+
+        self.ensure_poller()?;
+        let Some(poller) = &self.poller else {
+            return Ok(());
+        };
+
+        let event = if readable {
+            polling::Event::readable(id as usize)
+        } else {
+            polling::Event::writable(id as usize)
+        };
+
+        // The fd lives in one of the socket tables; sockets stay in those
+        // tables (and thus alive) for as long as they are registered — close
+        // deregisters before dropping.
+        if let Some(listener) = self.tcp_listeners.get(&id) {
+            // SAFETY: see above — the listener outlives its registration.
+            unsafe { poller.add(listener, event) }
+                .or_else(|e| {
+                    if e.kind() == ErrorKind::AlreadyExists {
+                        poller.modify(listener, event)
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| format!("cannot watch listener: {e}"))
+        } else if let Some(conn) = self.tcp_connections.get(&id) {
+            // SAFETY: see above — the connection outlives its registration.
+            unsafe { poller.add(conn, event) }
+                .or_else(|e| {
+                    if e.kind() == ErrorKind::AlreadyExists {
+                        poller.modify(conn, event)
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| format!("cannot watch connection: {e}"))
+        } else {
+            Err("Invalid socket. This is likely a compiler bug.".to_string())
+        }
+    }
+
+    /// Move parked processes whose I/O is ready or whose timer has expired
+    /// back onto the run queue.
+    ///
+    /// With `block`, performs one interruptible wait — I/O readiness, the
+    /// nearest timer deadline, or a `notify()` from another scheduler all end
+    /// it — then returns so the caller can re-check for remote work.
+    fn poll_parked(&mut self, block: bool) -> VmResult<()> {
+        if self.parked.is_empty() {
+            return Ok(());
+        }
+
+        // Wake any timers that are already due.
+        let woke = self.wake_due_timers();
+
+        let waiting_on_io = self
+            .parked
+            .iter()
+            .any(|(w, _)| matches!(w, Wait::Readable(_) | Wait::Writable(_)));
+
+        if !block || woke {
+            // Non-blocking (or something already woke): just drain any ready
+            // I/O events and return.
+            if waiting_on_io {
+                self.drain_io_events(Some(Duration::ZERO))?;
+            }
+            return Ok(());
+        }
+
+        // One blocking wait, bounded by the nearest timer deadline. The poller
+        // is used even for timer-only waits so `notify()` can interrupt it.
+        let timeout = self
+            .parked
+            .iter()
+            .filter_map(|(w, _)| match w {
+                Wait::Until(t) => Some(*t),
+                _ => None,
+            })
+            .min()
+            .map(|d| d.saturating_duration_since(Instant::now()));
+        self.ensure_poller()?;
+        self.drain_io_events(timeout)?;
+        self.wake_due_timers();
+        Ok(())
+    }
+
+    /// Wake parked processes whose deadline has passed.
+    fn wake_due_timers(&mut self) -> bool {
+        let now = Instant::now();
+        let mut woke = false;
+        let mut i = 0;
+        while i < self.parked.len() {
+            if matches!(&self.parked[i].0, Wait::Until(t) if *t <= now) {
+                let (_, p) = self.parked.swap_remove(i);
+                self.run_queue.push_back(p);
+                woke = true;
+            } else {
+                i += 1;
+            }
+        }
+        woke
+    }
+
+    /// Wait on the poller for at most `timeout` (None = until something
+    /// happens) and wake every process parked on a socket that became ready.
+    fn drain_io_events(&mut self, timeout: Option<Duration>) -> VmResult<()> {
+        let Some(poller) = &self.poller else {
+            return Ok(());
+        };
+        let mut events = polling::Events::new();
+        poller
+            .wait(&mut events, timeout)
+            .map_err(|e| format!("scheduler poll failed: {e}"))?;
+        for ev in events.iter() {
+            let id = ev.key as i32;
+            let mut i = 0;
+            while i < self.parked.len() {
+                let matches_event = match &self.parked[i].0 {
+                    Wait::Readable(sid) | Wait::Writable(sid) => *sid == id,
+                    Wait::Until(_) => false,
+                };
+                if matches_event {
+                    let (_, p) = self.parked.swap_remove(i);
+                    self.run_queue.push_back(p);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Entry point for worker scheduler threads (indices 1..N), started by
+/// `sched::boot`. Each worker runs a VM of its own against a private
+/// hydration of the shared program, pulling seeds from the runtime's injector
+/// until the whole program finishes.
+fn worker_main(runtime: Arc<Runtime>, index: usize) {
+    let program = transfer::program_in(&runtime.program);
+    let mut vm = new_vm(program);
+    vm.scheduler_index = index;
+    vm.poller = Some(Arc::clone(&runtime.pollers[index]));
+    vm.runtime = Some(runtime);
+
+    // Workers have no main process; scheduler_loop starts by acquiring work.
+    if let Err(e) = vm.scheduler_loop() {
+        // A VM error indicates a compiler bug, not a user error; it is fatal
+        // to the whole program.
+        eprintln!("al: scheduler {index} failed: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Extract the underlying `SocketValue` from a `Socket` record value without
+/// consuming it. `Socket` is the AL record `{ conn Connection, peer ... }`;
+/// the raw handle is its first payload field.
+fn connection_socket(v: &Value, op: &str) -> VmResult<SocketValue> {
+    if let Some(e) = v.as_enum()
+        && let Some(HeapValue::Socket(s)) = e.payload.first().and_then(|c| c.as_heap())
+    {
+        return Ok(*s);
+    }
+    Err(format!("{op} requires a Socket"))
 }
 
 /// Construct a Nil enum value without a `VM`. Retained for tests that build
@@ -1795,7 +2535,7 @@ mod tests {
             entry: 0,
         };
 
-        let mut vm = new_vm(program, Flags::default());
+        let mut vm = new_vm(program);
         let result = vm.run().expect("vm should run cleanly");
         assert_eq!(
             result.as_int(),
@@ -1853,7 +2593,7 @@ mod tests {
                 code,
                 entry: 0,
             };
-            new_vm(program, Flags::default())
+            new_vm(program)
                 .run()
                 .expect("vm must run without panicking or erroring")
         }
@@ -1996,7 +2736,7 @@ mod tests {
             code,
             entry: 0,
         };
-        new_vm(program, Flags::default())
+        new_vm(program)
             .run()
             .expect("vm must run without panicking or erroring")
     }
@@ -2326,7 +3066,7 @@ mod tests {
             code,
             entry: 0,
         };
-        let err = new_vm(program, Flags::default())
+        let err = new_vm(program)
             .run()
             .expect_err("slicing a range out of bounds must error");
         assert!(

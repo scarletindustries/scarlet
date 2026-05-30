@@ -19,7 +19,6 @@ use std::process;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use al::cli::{help, man};
-use al::flags::Flags;
 use al::stdlib;
 use al::{ast, bytecode, diagnostic, formatter, lsp, parser, repl, scanner, vm};
 
@@ -63,9 +62,6 @@ struct RunArgs {
     /// Print the parsed program before execution starts
     #[arg(long = "debug-printer")]
     debug_printer: bool,
-    /// Enable experimental blocking I/O (file and network)
-    #[arg(long = "experimental-shitty-io")]
-    experimental_shitty_io: bool,
 }
 
 #[derive(Args)]
@@ -291,10 +287,6 @@ fn main() {
 }
 
 fn cmd_run(args: RunArgs) {
-    let fl = Flags {
-        io_enabled: args.experimental_shitty_io,
-    };
-
     let file = read_file_or_die(&args.entrypoint);
     let expr = parse_source(&file, &args.entrypoint);
 
@@ -308,7 +300,7 @@ fn cmd_run(args: RunArgs) {
 
     let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
 
-    let mut v = vm::new_vm(result.program, fl);
+    let mut v = vm::new_vm(result.program);
     let run_result = v.run().unwrap_or_else(|e| die(e));
 
     if !matches!(run_result.as_enum(), Some(e) if e.type_id == al::stdlib::prelude::NIL.type_id) {

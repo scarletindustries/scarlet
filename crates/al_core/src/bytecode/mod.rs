@@ -2,6 +2,7 @@ mod analysis;
 pub mod compiler;
 mod prelude;
 pub mod prelude_bindings;
+pub mod transfer;
 mod value;
 use std::rc::Rc;
 
@@ -189,6 +190,12 @@ pub enum Op {
     TcpClose,
     TcpCloseServer,
     TcpLocalAddr,
+
+    // Concurrency (experimental, al/experiments/scheduler)
+    /// Spawn a lightweight process running the popped closure.
+    ProcessSpawn,
+    /// Park the current process for `ms` milliseconds.
+    Sleep,
 }
 
 /// A single bytecode instruction. `a`/`b` are packed sub-operands that reclaim

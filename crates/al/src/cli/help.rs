@@ -11,7 +11,7 @@ const LEARN_MORE: &str = "https://al.alistair.sh";
 /// flags but not show idiomatic usage, so these are maintained by hand.
 fn examples_for(sub: &str) -> &'static [&'static str] {
     match sub {
-        "run" => &["al run hello.al", "al run app.al --experimental-shitty-io"],
+        "run" => &["al run hello.al", "al run server.al"],
         "check" => &["al check src/main.al"],
         "fmt" => &["al fmt .", "al fmt --check src/", "al fmt --stdin < a.al"],
         _ => &[],

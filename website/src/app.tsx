@@ -647,11 +647,10 @@ println(float.max(1.2, 3.4))   // 3.4
 println(float.to_string(half))`,
     },
     {
-      title: "I/O operations (experimental)",
+      title: "I/O operations",
       description:
-        "File and network I/O requires the --experimental-shitty-io flag.",
-      code: `// Run with: al run --experimental-shitty-io file.al
-import al/io
+        "File and network I/O",
+      code: `import al/io
 import al/net
 import al/net/socket.{Socket}
 import al/net/address
@@ -815,8 +814,7 @@ println(greet(person))`}
               al run &lt;file.al&gt;
             </code>
             <p className="text-neutral-600 dark:text-neutral-400 mt-1">
-              Type-check, compile, and run a program. Add{" "}
-              <code>--experimental-shitty-io</code> for file/network I/O.
+              Type-check, compile, and run a program.
             </p>
           </div>
           <div>

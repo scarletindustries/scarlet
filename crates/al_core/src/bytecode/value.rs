@@ -164,6 +164,10 @@ impl Value {
     pub fn bool(b: bool) -> Value {
         Value(HDR_BOOL | b as u64)
     }
+    #[inline(always)]
+    pub fn nil() -> Value {
+        Value(HDR_NIL)
+    }
     #[inline]
     pub fn str(s: impl Into<Rc<str>>) -> Value {
         Value::heap(HeapValue::Str(s.into()))
