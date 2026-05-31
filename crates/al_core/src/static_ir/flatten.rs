@@ -23,6 +23,7 @@ use crate::types::InferEngine;
 pub struct FlatPools {
     pub str_pool: Vec<String>,
     pub str_slice_pool: Vec<u32>,
+    pub byte_pool: Vec<u8>,
 
     pub nodes: Vec<TypeNode>,
     pub children: Vec<Ty>,
@@ -67,6 +68,15 @@ impl FlatPools {
         Slice {
             start,
             len: self.str_slice_pool.len() as u32 - start,
+        }
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) -> Slice {
+        let start = self.byte_pool.len() as u32;
+        self.byte_pool.extend_from_slice(bytes);
+        Slice {
+            start,
+            len: self.byte_pool.len() as u32 - start,
         }
     }
 
@@ -144,6 +154,10 @@ impl FlatPools {
                     })
                     .collect();
                 SConst::StrArray(self.push_str_slice(strs))
+            }
+            ValueView::Heap(HeapValue::Binary(b)) => {
+                let sl = self.push_bytes(&b.to_aligned_vec());
+                SConst::Binary(sl, b.bit_len)
             }
             _ => panic!(
                 "flatten: stdlib constant pool contains a non-scalar value ({v:?}); \
@@ -284,6 +298,10 @@ mod tests {
                         .map(|e| e.as_str().expect("label is string").to_string())
                         .collect();
                     assert_eq!(strs, want);
+                }
+                (SConst::Binary(sl, bit_len), ValueView::Heap(HeapValue::Binary(b))) => {
+                    assert_eq!(*bit_len, b.bit_len);
+                    assert_eq!(&p.byte_pool[sl.range()], b.to_aligned_vec().as_slice());
                 }
                 (other, got) => panic!("constant kind mismatch: {other:?} vs {got:?}"),
             }

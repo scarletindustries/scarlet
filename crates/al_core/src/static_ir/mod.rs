@@ -85,6 +85,9 @@ pub enum SConst {
     Bool(bool),
     Str(u32),
     StrArray(Slice),
+    /// A binary literal: `bit_len` logical bits whose `bit_len.div_ceil(8)`
+    /// bytes live in `byte_pool` at the given slice (bit offset 0).
+    Binary(Slice, u64),
 }
 
 /// Single handle bundling every static pool.
@@ -92,6 +95,7 @@ pub enum SConst {
 pub struct StaticStdlib {
     pub str_pool: &'static [&'static str],
     pub str_slice_pool: &'static [u32],
+    pub byte_pool: &'static [u8],
 
     /// The type arena and side-pools — the same `Copy` types the live engine
     /// uses, so `seed_static` is a memcpy and consumers read them directly.
@@ -191,6 +195,9 @@ impl StaticStdlib {
                         .map(|&i| Value::str(self.str_pool[i as usize]))
                         .collect(),
                 ),
+                SConst::Binary(sl, bit_len) => {
+                    Value::binary_bits(self.byte_pool[sl.range()].to_vec(), bit_len)
+                }
             })
             .collect();
         (code, functions, constants)

@@ -17,7 +17,7 @@ pub fn read(c Socket, max Int) Result(Binary, String)
 // Read exactly `count` bytes, parking until they have all arrived.
 // Errs if the peer closes the connection first.
 pub fn read_exact(c Socket, count Int) Result(Binary, String) {
-	read_exact_loop(c, count, binary.from_string(''))
+	read_exact_loop(c, count, <<>>)
 }
 
 fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, String) {

@@ -20,7 +20,7 @@ pub fn slice(b Binary, at_bit Int, take_bits Int) Result(Binary, Nil)
 pub fn slice_bytes(b Binary, start Int, len Int) Binary {
 	match slice(b, start * 8, len * 8) {
 		Ok(v) -> v
-		Err(_) -> from_string('')
+		Err(Nil) -> <<>>
 	}
 }
 

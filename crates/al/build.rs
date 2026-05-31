@@ -61,7 +61,7 @@ fn main() {
     writeln!(
         src,
         "pub static STDLIB: StaticStdlib = StaticStdlib {{\n    \
-         str_pool: STR_POOL, str_slice_pool: STR_SLICE_POOL,\n    \
+         str_pool: STR_POOL, str_slice_pool: STR_SLICE_POOL, byte_pool: BYTE_POOL,\n    \
          nodes: NODES, children: CHILDREN,\n    \
          quants: QUANTS, str_slices: STR_SLICES, type_params: TYPE_PARAMS, variant_fields: VARIANT_FIELDS, variants: VARIANTS,\n    \
          schemes: SCHEMES, typeinfos: TYPEINFOS,\n    \
@@ -254,6 +254,12 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "u32",
         p.str_slice_pool.iter().map(|i| i.to_string()),
     );
+    emit_static_slice(
+        out,
+        "BYTE_POOL",
+        "u8",
+        p.byte_pool.iter().map(|b| b.to_string()),
+    );
 
     emit_static_slice(out, "NODES", "TypeNode", p.nodes.iter().map(typenode));
     emit_static_slice(
@@ -444,6 +450,7 @@ fn sconst(c: &SConst) -> String {
         SConst::Bool(b) => format!("SConst::Bool({b})"),
         SConst::Str(i) => format!("SConst::Str({i})"),
         SConst::StrArray(sl) => format!("SConst::StrArray({})", slice(sl)),
+        SConst::Binary(sl, bit_len) => format!("SConst::Binary({}, {bit_len}u64)", slice(sl)),
     }
 }
 
