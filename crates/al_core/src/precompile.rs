@@ -164,6 +164,11 @@ mod tests {
             "al/net",
             "al/io",
             "al/experiments/scheduler",
+            "al/http",
+            "al/http/status",
+            "al/http/headers",
+            "al/http/body",
+            "al/http/h1",
         ] {
             assert!(
                 out.blob.interfaces.contains_key(key),
@@ -176,6 +181,39 @@ mod tests {
         let list = &out.blob.interfaces["al/list"];
         for f in ["map", "filter", "fold", "reverse", "length", "contains"] {
             assert!(list.values.contains_key(f), "al/list should export '{f}'");
+        }
+
+        // The al/http stack compiled with its spec-fixed public surface. These
+        // names are the contract the H1 server core is built on (docs/HTTP.md §5);
+        // a renamed or dropped export would silently break the connection driver.
+        let expected_exports: &[(&str, &[&str])] = &[
+            (
+                "al/http",
+                &["serve", "text", "ok", "not_found", "with_header"],
+            ),
+            ("al/http/status", &["reason_phrase"]),
+            (
+                "al/http/headers",
+                &["get", "has", "set", "append", "render"],
+            ),
+            (
+                "al/http/body",
+                &["empty", "from_binary", "pull", "drain", "collect"],
+            ),
+            (
+                "al/http/h1",
+                &["should_close", "want_100_continue", "serialize_head"],
+            ),
+        ];
+        for (module, fns) in expected_exports {
+            let iface = &out.blob.interfaces[*module];
+            for f in *fns {
+                assert!(
+                    iface.values.contains_key(*f),
+                    "{module} should export '{f}'; got {:?}",
+                    iface.values.keys().collect::<Vec<_>>()
+                );
+            }
         }
 
         // The shared program carries real code: functions, instructions and a

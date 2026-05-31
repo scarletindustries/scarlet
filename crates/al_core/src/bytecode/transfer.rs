@@ -12,8 +12,14 @@
 //! id, but the underlying OS resource is owned by the VM's side tables and must
 //! be transferred separately — `value_out` records every socket id it
 //! encounters so the caller can do that.
+//!
+//! Binary buffers are the other exception: their bytes live behind an
+//! `Arc<[u8]>` (atomic, unlike the `Rc` everything else uses), so a binary
+//! crosses the boundary as a single refcount bump — `value_out` clones the
+//! `Arc` and `value_in` clones it back, with no byte copy on either side.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::{
     ClosureValue, EnumValue, Function, HeapValue, Instruction, Program, SocketValue, Value,
@@ -31,7 +37,8 @@ pub enum SendValue {
     Array(Vec<SendValue>),
     Range(i64, i64),
     Binary {
-        bytes: Vec<u8>,
+        backing: Arc<[u8]>,
+        bit_offset: u64,
         bit_len: u64,
     },
     Tuple(Vec<SendValue>),
@@ -96,8 +103,12 @@ pub fn value_out(v: &Value, socket_ids: &mut Vec<i32>) -> SendValue {
                 SendValue::Array(seq.iter().map(|e| value_out(e, socket_ids)).collect())
             }
             HeapValue::Range(s, e) => SendValue::Range(*s, *e),
+            // Share the backing buffer across the boundary by bumping the
+            // `Arc` — no byte copy. The view's `bit_offset`/`bit_len` ride along
+            // so a sub-slice keeps pointing at the same bits on the far side.
             HeapValue::Binary(b) => SendValue::Binary {
-                bytes: b.bytes.to_vec(),
+                backing: Arc::clone(&b.backing),
+                bit_offset: b.bit_offset,
                 bit_len: b.bit_len,
             },
             HeapValue::Tuple(t) => SendValue::Tuple(
@@ -146,7 +157,15 @@ pub fn value_in(sv: &SendValue) -> Value {
         SendValue::Str(s) => Value::str(s.as_str()),
         SendValue::Array(items) => Value::array(items.iter().map(value_in).collect()),
         SendValue::Range(s, e) => Value::range(*s, *e),
-        SendValue::Binary { bytes, bit_len } => Value::binary_bits(bytes.clone(), *bit_len),
+        SendValue::Binary {
+            backing,
+            bit_offset,
+            bit_len,
+        } => {
+            // Clone the shared backing back with no byte copy, preserving the
+            // sub-view offset so a transferred slice stays the same bits.
+            Value::binary_view(Arc::clone(backing), *bit_offset, *bit_len)
+        }
         SendValue::Tuple(items) => Value::tuple(items.iter().map(value_in).collect()),
         SendValue::Closure {
             func_idx,
@@ -269,6 +288,64 @@ mod tests {
             b.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()),
             Some("two".to_string())
         );
+    }
+
+    fn binary_parts(v: &Value) -> (Arc<[u8]>, u64) {
+        match v.as_heap() {
+            Some(HeapValue::Binary(b)) => (Arc::clone(&b.backing), b.bit_len),
+            _ => panic!("expected a binary value"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_binary_shares_backing_no_copy() {
+        let original = Value::binary(vec![1, 2, 3, 4, 5]);
+        let copy = roundtrip(&original);
+        let (orig_backing, orig_bits) = binary_parts(&original);
+        let (copy_backing, copy_bits) = binary_parts(&copy);
+        // Logical value is preserved.
+        assert_eq!(&*copy_backing, &*orig_backing);
+        assert_eq!(copy_bits, orig_bits);
+        // And the bytes were NOT deep-copied: the round-tripped value shares
+        // the very same `Arc` allocation as the original.
+        assert!(Arc::ptr_eq(&orig_backing, &copy_backing));
+    }
+
+    #[test]
+    fn roundtrip_binary_preserves_bit_len() {
+        // A bit-string that is not byte-aligned (5 significant bits).
+        let original = Value::binary_bits(vec![0b1010_1000], 5);
+        let copy = roundtrip(&original);
+        let (orig_backing, orig_bits) = binary_parts(&original);
+        let (copy_backing, copy_bits) = binary_parts(&copy);
+        assert_eq!(&*copy_backing, &*orig_backing);
+        assert_eq!(orig_bits, 5);
+        assert_eq!(copy_bits, 5);
+        assert!(Arc::ptr_eq(&orig_backing, &copy_backing));
+    }
+
+    #[test]
+    fn roundtrip_binary_subview_preserves_offset_no_copy() {
+        // An O(1) sub-view (the middle two bytes of the backing) carries a
+        // non-zero bit_offset. The boundary must ship the offset+len alongside
+        // the shared backing so the slice still points at the same bits.
+        let backing: Arc<[u8]> = Arc::from(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let original = Value::binary_view(Arc::clone(&backing), 8, 16);
+        let copy = roundtrip(&original);
+        match (original.as_heap(), copy.as_heap()) {
+            (Some(HeapValue::Binary(o)), Some(HeapValue::Binary(c))) => {
+                assert_eq!(c.bit_offset, 8);
+                assert_eq!(c.bit_len, 16);
+                // Same shared allocation on both sides — no byte copy.
+                assert!(Arc::ptr_eq(&o.backing, &c.backing));
+                assert!(Arc::ptr_eq(&backing, &c.backing));
+                // Logical window survives the trip (0xAD, 0xBE).
+                assert_eq!(c.byte_window(), &[0xAD, 0xBE]);
+                // And the view compares logically equal to the original.
+                assert_eq!(c, o);
+            }
+            _ => panic!("expected two binary values"),
+        }
     }
 
     #[test]

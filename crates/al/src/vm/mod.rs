@@ -522,6 +522,41 @@ impl VM {
         Ok(())
     }
 
+    /// Collapse the active frame for a tail call: drop the slots in
+    /// `[base, args_start)` and slide the freshly-pushed argument words sitting
+    /// at `[args_start, len)` down to `base`. Behaviourally identical to
+    /// `self.stack.drain(base..args_start)`.
+    ///
+    /// `Vec::drain`'s tail-shift lowers to a `memmove` libcall, and a tail call
+    /// moves only `arity` words (≈ 1–4), so the call setup dwarfs the copy — it
+    /// was ~9% of `bench_heavy.al`'s pure-recursion time. Moving the words by
+    /// hand keeps the shift inline. The destination starts at or below the
+    /// source (`base <= args_start`), so even when the argument block overlaps
+    /// its destination an ascending copy reads each shared slot before it is
+    /// overwritten — exactly the shift `drain` performs.
+    #[inline]
+    fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
+        let len = self.stack.len();
+        debug_assert!(base <= args_start && args_start <= len);
+        let n_args = len - args_start;
+        // SAFETY: both ranges lie within the live stack. Each discarded slot in
+        // `[base, args_start)` is dropped exactly once; the argument words are
+        // then bit-copied down over those already-dropped slots (so they are
+        // not re-dropped), and `set_len` shrinks the logical length so the
+        // moved-from tail is never read or dropped again.
+        unsafe {
+            let p = self.stack.as_mut_ptr();
+            for i in base..args_start {
+                std::ptr::drop_in_place(p.add(i));
+            }
+            for k in 0..n_args {
+                let v = p.add(args_start + k).read();
+                p.add(base + k).write(v);
+            }
+            self.stack.set_len(base + n_args);
+        }
+    }
+
     fn execute_slice(&mut self) -> VmResult<Step> {
         // Hoist the active frame's scalar state into locals so the per-instruction
         // path avoids two Vec indexes. Synced back to self.frames on Call/TailCall/Ret.
@@ -778,7 +813,7 @@ impl VM {
                         let args_start = self.stack.len() - arity as usize;
 
                         if instr.op == Op::TailCall {
-                            self.stack.drain(base_slot..args_start);
+                            self.collapse_tail_frame(base_slot, args_start);
                             let f = self.frame_mut();
                             f.func_idx = cl_func_idx;
                             f.code_start = func_code_start;
@@ -830,7 +865,7 @@ impl VM {
                         // Reuse the frame in place. Captures are already the
                         // current frame's — self-recursion cannot change the
                         // closed-over environment — so no `captures.clone()`.
-                        self.stack.drain(base_slot..args_start);
+                        self.collapse_tail_frame(base_slot, args_start);
                         let f = self.frame_mut();
                         f.ip = 0;
                     } else {
@@ -1344,7 +1379,8 @@ impl VM {
                         continue;
                     }
                     let nil = self.make_nil();
-                    let res = std::fs::write(&*path, &*bin.bytes).map(|_| nil);
+                    let bytes = bin.full_bytes();
+                    let res = std::fs::write(&*path, &*bytes).map(|_| nil);
                     self.push_io_result("write file", res);
                 }
                 Op::TcpListen => {
@@ -1468,6 +1504,7 @@ impl VM {
                         self.stack.push(v);
                         continue;
                     }
+                    let bytes = bin.full_bytes();
                     let conn = match self.tcp_connections.get_mut(&sv.id) {
                         Some(conn) => conn,
                         None => return Err("Invalid connection socket".to_string()),
@@ -1475,12 +1512,12 @@ impl VM {
                     // Write what the socket will take. If it fills up mid-way,
                     // park and resume this instruction with the remaining bytes.
                     let mut written = 0;
-                    let mut park_remaining: Option<Vec<u8>> = None;
+                    let mut park = false;
                     let result = loop {
-                        if written == bin.bytes.len() {
+                        if written == bytes.len() {
                             break Ok(());
                         }
-                        match conn.write(&bin.bytes[written..]) {
+                        match conn.write(&bytes[written..]) {
                             Ok(0) => {
                                 break Err(std::io::Error::new(
                                     ErrorKind::WriteZero,
@@ -1489,16 +1526,22 @@ impl VM {
                             }
                             Ok(n) => written += n,
                             Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                                park_remaining = Some(bin.bytes[written..].to_vec());
+                                park = true;
                                 break Ok(());
                             }
                             Err(e) if e.kind() == ErrorKind::Interrupted => {}
                             Err(e) => break Err(e),
                         }
                     };
-                    if let Some(remaining) = park_remaining {
+                    if park {
                         self.stack.push(sock_val);
-                        self.stack.push(Value::binary(remaining));
+                        // Resume with a zero-copy view over the unwritten tail;
+                        // the binary is byte-aligned (rejected otherwise above).
+                        self.stack.push(Value::binary_view(
+                            bin.backing.clone(),
+                            bin.bit_offset + (written as u64) * 8,
+                            bin.bit_len - (written as u64) * 8,
+                        ));
                         self.frame_mut().ip = ip - 1;
                         return Ok(Step::Parked(Wait::Writable(sv.id)));
                     }
@@ -1549,6 +1592,11 @@ impl VM {
                         None => return Err("Invalid connection socket".to_string()),
                     };
 
+                    // Logical bytes per part: borrows the backing with no copy
+                    // when byte-aligned (the common case), re-aligns otherwise.
+                    // All parts are byte-aligned in length (rejected above).
+                    let logical: Vec<_> = bins.iter().map(|b| b.full_bytes()).collect();
+
                     // Vectored write: every part goes to the kernel in one
                     // syscall per pass. Partial progress advances (idx, offset);
                     // WouldBlock parks and resumes with only the unwritten tail.
@@ -1556,13 +1604,13 @@ impl VM {
                     let mut offset = 0usize;
                     let mut park = false;
                     let result = loop {
-                        if idx == bins.len() {
+                        if idx == logical.len() {
                             break Ok(());
                         }
-                        let mut slices: Vec<IoSlice> = Vec::with_capacity(bins.len() - idx);
-                        slices.push(IoSlice::new(&bins[idx].bytes[offset..]));
-                        for b in &bins[idx + 1..] {
-                            slices.push(IoSlice::new(&b.bytes));
+                        let mut slices: Vec<IoSlice> = Vec::with_capacity(logical.len() - idx);
+                        slices.push(IoSlice::new(&logical[idx][offset..]));
+                        for c in &logical[idx + 1..] {
+                            slices.push(IoSlice::new(c));
                         }
                         match conn.write_vectored(&slices) {
                             Ok(0) => {
@@ -1572,8 +1620,8 @@ impl VM {
                                 ));
                             }
                             Ok(mut n) => {
-                                while n > 0 && idx < bins.len() {
-                                    let left = bins[idx].bytes.len() - offset;
+                                while n > 0 && idx < logical.len() {
+                                    let left = logical[idx].len() - offset;
                                     if n >= left {
                                         n -= left;
                                         idx += 1;
@@ -1594,11 +1642,20 @@ impl VM {
                     };
 
                     if park {
-                        // Re-run with only the unwritten tail.
+                        // Re-run with only the unwritten tail — zero-copy views
+                        // over the same backings (parts are byte-aligned).
                         let mut remaining: Vec<Value> = Vec::with_capacity(bins.len() - idx);
-                        remaining.push(Value::binary(bins[idx].bytes[offset..].to_vec()));
+                        remaining.push(Value::binary_view(
+                            bins[idx].backing.clone(),
+                            bins[idx].bit_offset + (offset as u64) * 8,
+                            bins[idx].bit_len - (offset as u64) * 8,
+                        ));
                         for b in &bins[idx + 1..] {
-                            remaining.push(Value::binary(b.bytes.to_vec()));
+                            remaining.push(Value::binary_view(
+                                b.backing.clone(),
+                                b.bit_offset,
+                                b.bit_len,
+                            ));
                         }
                         self.stack.push(sock_val);
                         self.stack.push(Value::array(remaining));
@@ -1701,7 +1758,8 @@ impl VM {
                     let v = if bin.bit_len % 8 != 0 {
                         self.make_err(self.make_nil())
                     } else {
-                        match std::str::from_utf8(&bin.bytes) {
+                        let bytes = bin.full_bytes();
+                        match std::str::from_utf8(&bytes) {
                             Ok(s) => self.make_ok(Value::str(s)),
                             Err(_) => self.make_err(self.make_nil()),
                         }
@@ -1723,15 +1781,26 @@ impl VM {
                     let v = if at < 0 || take < 0 || (at as u64) + (take as u64) > bin.bit_len {
                         self.make_err(self.make_nil())
                     } else {
-                        let out = binary::slice(&bin.bytes, at as u64, take as u64);
-                        self.make_ok(Value::binary_bits(out, take as u64))
+                        // O(1): a sub-view sharing the backing, no byte copy.
+                        self.make_ok(Value::binary_view(
+                            bin.backing.clone(),
+                            bin.bit_offset + at as u64,
+                            take as u64,
+                        ))
                     };
                     self.stack.push(v);
                 }
                 Op::BinAppend => {
                     let b = self.pop_binary("binary.append")?;
                     let a = self.pop_binary("binary.append")?;
-                    let out = binary::append(&a.bytes, a.bit_len, &b.bytes, b.bit_len);
+                    // `append` needs offset-0 buffers with masked tails; views
+                    // may be offset/partial, so materialise both operands.
+                    let out = binary::append(
+                        &a.to_aligned_vec(),
+                        a.bit_len,
+                        &b.to_aligned_vec(),
+                        b.bit_len,
+                    );
                     self.stack
                         .push(Value::binary_bits(out, a.bit_len + b.bit_len));
                 }
@@ -1748,10 +1817,13 @@ impl VM {
                     let num_bits = self.pop_int("binary segment width")?;
                     let at = self.pop_int("binary segment offset")?;
                     let bin = self.pop_binary("binary pattern")?;
+                    // Read from the shared backing at the view's absolute
+                    // offset; the limit is the view's logical end, so reads past
+                    // it return zero (the view never sees neighbouring bits).
                     let v = binary::read_int(
-                        &bin.bytes,
-                        bin.bit_len,
-                        at.max(0) as u64,
+                        &bin.backing,
+                        bin.bit_offset + bin.bit_len,
+                        bin.bit_offset + at.max(0) as u64,
                         num_bits.max(0) as u64,
                     );
                     self.stack.push(Value::int(v));
@@ -1761,19 +1833,36 @@ impl VM {
                     let n = self.pop_int("binary segment width")?;
                     let bin = self.pop_binary("binary segment")?;
                     let take = (n.max(0) as u64).min(bin.bit_len);
-                    self.stack
-                        .push(Value::binary_bits(binary::slice(&bin.bytes, 0, take), take));
+                    // O(1): a prefix view sharing the backing, no byte copy.
+                    self.stack.push(Value::binary_view(
+                        bin.backing.clone(),
+                        bin.bit_offset,
+                        take,
+                    ));
                 }
                 // `<<c:utf8>>` pattern — decode one codepoint; pushes the
                 // codepoint and the bits consumed (0,0 on decode failure).
                 Op::BinReadUtf8 => {
                     let at = self.pop_int("binary segment offset")?;
                     let bin = self.pop_binary("binary pattern")?;
-                    let (cp, nbits) = binary::read_utf8(&bin.bytes, bin.bit_len, at.max(0) as u64)
-                        .map_or((0, 0), |(c, n)| (c as i64, n as i64));
+                    let (cp, nbits) = binary::read_utf8(
+                        &bin.backing,
+                        bin.bit_offset + bin.bit_len,
+                        bin.bit_offset + at.max(0) as u64,
+                    )
+                    .map_or((0, 0), |(c, n)| (c as i64, n as i64));
                     self.stack.push(Value::int(cp));
                     self.stack.push(Value::int(nbits));
                 }
+                // Byte-oriented ASCII builtins. Routed through one cold,
+                // out-of-line handler so their bodies (and the int<->ASCII
+                // helpers they inline) stay out of the central dispatch loop,
+                // keeping the hot integer arms' codegen undisturbed.
+                Op::BinIndexOf
+                | Op::BinParseInt
+                | Op::BinEqIgnoreAsciiCase
+                | Op::BinToAsciiLower
+                | Op::BinFromIntAscii => self.exec_bin_ascii(instr.op)?,
                 // Float→Int casts use saturating `as i64`; Value floats are
                 // canonicalized finite (no NaN/Inf), so these stay total.
                 Op::FloatFloor => {
@@ -1913,6 +2002,72 @@ impl VM {
     #[inline]
     fn make_err(&self, v: Value) -> Value {
         PreludeTemplates::with_payload(&self.templates.err, v)
+    }
+
+    // --- Binary ASCII builtins -----------------------------------------------
+
+    /// Out-of-line handler for the byte-oriented ASCII binary builtins
+    /// (`index_of`, `parse_int`, `eq_ignore_ascii_case`, `to_ascii_lower`,
+    /// `from_int_ascii`). Marked cold + never-inline so these rarely-hot ops
+    /// — and the int<->ASCII helpers they call — don't bloat the central
+    /// dispatch loop and perturb the hot integer arms' codegen. All operate on
+    /// the byte window (the whole bytes of a byte-aligned binary); a
+    /// non-aligned trailing partial byte is excluded.
+    #[cold]
+    #[inline(never)]
+    fn exec_bin_ascii(&mut self, op: Op) -> VmResult<()> {
+        match op {
+            Op::BinIndexOf => {
+                let from = self.pop_int("binary.index_of")?;
+                let needle = self.pop_binary("binary.index_of")?;
+                let haystack = self.pop_binary("binary.index_of")?;
+                let hay = haystack.full_bytes();
+                let ndl = needle.full_bytes();
+                let start = from.clamp(0, hay.len() as i64) as usize;
+                let v = if ndl.is_empty() {
+                    self.make_some(Value::int(start as i64))
+                } else {
+                    match hay[start..].windows(ndl.len()).position(|w| w == &ndl[..]) {
+                        Some(rel) => self.make_some(Value::int((start + rel) as i64)),
+                        None => self.make_none(),
+                    }
+                };
+                self.stack.push(v);
+            }
+            Op::BinParseInt => {
+                let radix = self.pop_int("binary.parse_int")?;
+                let b = self.pop_binary("binary.parse_int")?;
+                let bytes = b.full_bytes();
+                let v = match parse_int_ascii(&bytes, radix) {
+                    Some(n) => self.make_some(Value::int(n)),
+                    None => self.make_none(),
+                };
+                self.stack.push(v);
+            }
+            Op::BinEqIgnoreAsciiCase => {
+                let b = self.pop_binary("binary.eq_ignore_ascii_case")?;
+                let a = self.pop_binary("binary.eq_ignore_ascii_case")?;
+                let aw = a.full_bytes();
+                let bw = b.full_bytes();
+                self.stack.push(Value::bool(aw.eq_ignore_ascii_case(&bw)));
+            }
+            Op::BinToAsciiLower => {
+                let b = self.pop_binary("binary.to_ascii_lower")?;
+                let mut out = b.full_bytes().into_owned();
+                out.make_ascii_lowercase();
+                self.stack.push(Value::binary(out));
+            }
+            Op::BinFromIntAscii => {
+                let radix = self.pop_int("binary.from_int_ascii")?;
+                let n = self.pop_int("binary.from_int_ascii")?;
+                self.stack.push(Value::binary(int_to_ascii(n, radix)));
+            }
+            // Unreachable: the dispatch arm routes only the five ops above
+            // here. Return an internal error rather than panic (the crate
+            // denies `clippy::unreachable`).
+            _ => return Err(format!("internal error: exec_bin_ascii got {op:?}")),
+        }
+        Ok(())
     }
 
     // --- I/O helpers ---------------------------------------------------------
@@ -2654,6 +2809,55 @@ fn is_truthy(v: &Value) -> bool {
     v.as_bool().unwrap_or(false)
 }
 
+/// Parse ASCII bytes as an integer in radix 10 or 16 (both hex cases).
+/// Returns `None` for an empty input, any non-digit byte, an unsupported
+/// radix, or on overflow — the multiply/add are checked so a value that
+/// would wrap (e.g. an oversized `Content-Length`) is rejected rather than
+/// silently truncated by AL's wrapping arithmetic.
+fn parse_int_ascii(bytes: &[u8], radix: i64) -> Option<i64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let base: i64 = match radix {
+        10 | 16 => radix,
+        _ => return None,
+    };
+    let mut acc: i64 = 0;
+    for &c in bytes {
+        let digit = match c {
+            b'0'..=b'9' => (c - b'0') as i64,
+            b'a'..=b'f' if base == 16 => (c - b'a' + 10) as i64,
+            b'A'..=b'F' if base == 16 => (c - b'A' + 10) as i64,
+            _ => return None,
+        };
+        acc = acc.checked_mul(base)?.checked_add(digit)?;
+    }
+    Some(acc)
+}
+
+/// Render an `Int` as ASCII digits in radix 10 or 16 (lowercase hex),
+/// without a `to_string` round-trip. Handles zero, negatives, and
+/// `i64::MIN` (via `unsigned_abs`). An unsupported radix falls back to 10.
+fn int_to_ascii(n: i64, radix: i64) -> Vec<u8> {
+    let base: u64 = if radix == 16 { 16 } else { 10 };
+    if n == 0 {
+        return vec![b'0'];
+    }
+    let negative = n < 0;
+    let mut mag = n.unsigned_abs();
+    let mut digits = Vec::new();
+    while mag > 0 {
+        let d = (mag % base) as u8;
+        digits.push(if d < 10 { b'0' + d } else { b'a' + (d - 10) });
+        mag /= base;
+    }
+    if negative {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    digits
+}
+
 fn value_type_name(v: &Value) -> String {
     match v.kind() {
         ValueView::Int(_) => "Int".to_string(),
@@ -2680,7 +2884,7 @@ fn is_simple_value(v: &Value) -> bool {
         ValueView::Int(_) | ValueView::Float(_) | ValueView::Bool(_) => true,
         ValueView::Heap(HeapValue::Closure(_)) => true,
         ValueView::Heap(HeapValue::Str(s)) => s.len() < 20,
-        ValueView::Heap(HeapValue::Binary(b)) => b.bytes.len() <= 8,
+        ValueView::Heap(HeapValue::Binary(b)) => b.bit_len.div_ceil(8) as usize <= 8,
         ValueView::Heap(HeapValue::Enum(e)) => e.payload.is_empty(),
         _ => false,
     }
@@ -2735,7 +2939,7 @@ fn inspect_impl(v: &Value, indent: Option<usize>) -> String {
         ValueView::Float(f) => f64_str(f),
         ValueView::Bool(b) => if b { "True" } else { "False" }.to_string(),
         ValueView::Heap(HeapValue::Str(s)) => s.to_string(),
-        ValueView::Heap(HeapValue::Binary(b)) => binary::inspect(&b.bytes, b.bit_len),
+        ValueView::Heap(HeapValue::Binary(b)) => binary::inspect(&b.to_aligned_vec(), b.bit_len),
         ValueView::Heap(HeapValue::Closure(c)) => format!("<fn#{}>", c.name),
         ValueView::Heap(HeapValue::Socket(s)) => {
             let kind = if s.is_listener { "listener" } else { "socket" };

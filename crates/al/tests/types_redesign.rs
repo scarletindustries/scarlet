@@ -1093,6 +1093,46 @@ fn stdlib_binary() {
     );
 }
 
+// The ASCII byte builtins each hydrate a distinct `Scheme` from their `@vm`
+// declaration; one `check_ok` per builtin pins that the call site type-checks
+// against the declared signature (the result is consumed so the program is a
+// complete, well-typed unit).
+#[test]
+fn stdlib_binary_ascii_builtins() {
+    // index_of : (Binary, Binary, Int) -> Option(Int)
+    check_ok(
+        "binary_index_of_ty",
+        "import al/binary\n\
+         i = binary.index_of(binary.from_string('abc'), binary.from_string('b'), 0) or 0\n\
+         println(i)\n",
+    );
+    // parse_int : (Binary, Int) -> Option(Int)
+    check_ok(
+        "binary_parse_int_ty",
+        "import al/binary\n\
+         n = binary.parse_int(binary.from_string('42'), 10) or 0\n\
+         println(n)\n",
+    );
+    // eq_ignore_ascii_case : (Binary, Binary) -> Bool
+    check_ok(
+        "binary_eq_ignore_ascii_case_ty",
+        "import al/binary\n\
+         println(binary.eq_ignore_ascii_case(binary.from_string('A'), binary.from_string('a')))\n",
+    );
+    // to_ascii_lower : (Binary) -> Binary
+    check_ok(
+        "binary_to_ascii_lower_ty",
+        "import al/binary\n\
+         println(binary.to_string(binary.to_ascii_lower(binary.from_string('AB'))))\n",
+    );
+    // from_int_ascii : (Int, Int) -> Binary
+    check_ok(
+        "binary_from_int_ascii_ty",
+        "import al/binary\n\
+         println(binary.to_string(binary.from_int_ascii(255, 16)))\n",
+    );
+}
+
 #[test]
 fn stdlib_float() {
     run_outputs(

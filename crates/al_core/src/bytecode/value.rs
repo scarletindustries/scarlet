@@ -15,6 +15,7 @@
 
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Quiet-NaN signature: exponent all-ones, top mantissa bit set. Any word with
 /// these bits set is a tagged value, never a real float.
@@ -192,10 +193,25 @@ impl Value {
     #[inline]
     pub fn binary_bits(bytes: Vec<u8>, bit_len: u64) -> Value {
         debug_assert!(bit_len.div_ceil(8) as usize == bytes.len());
-        Value::heap(HeapValue::Binary(Rc::new(BinaryValue {
-            bytes: bytes.into_boxed_slice(),
-            bit_len,
-        })))
+        Value::binary_from_arc(Arc::from(bytes), bit_len)
+    }
+    /// Build a whole-buffer binary (bit offset 0) from an already-shared backing
+    /// with no byte copy. Used by `bytecode::transfer::value_in` so a binary
+    /// handed off from another thread keeps sharing the same `Arc` allocation.
+    #[inline]
+    pub fn binary_from_arc(backing: Arc<[u8]>, bit_len: u64) -> Value {
+        debug_assert!(bit_len.div_ceil(8) as usize == backing.len());
+        Value::binary_view(backing, 0, bit_len)
+    }
+    /// Build a binary as a zero-copy sub-view `[bit_offset, bit_offset +
+    /// bit_len)` into a shared backing buffer. `Op::BinSlice`/`Op::BinTake`
+    /// produce slices in O(1) through this: the backing `Arc` is shared and only
+    /// the offset and length change — no bytes are copied.
+    #[inline]
+    pub fn binary_view(backing: Arc<[u8]>, bit_offset: u64, bit_len: u64) -> Value {
+        Value::heap(HeapValue::Binary(Rc::new(BinaryValue::view(
+            backing, bit_offset, bit_len,
+        ))))
     }
     #[inline]
     pub fn tuple(elements: Vec<Value>) -> Value {
@@ -358,16 +374,148 @@ pub struct TupleValue {
     pub elements: Vec<Value>,
 }
 
-/// Bit-addressable binary data. `bit_len` is the logical length in bits
-/// (`bit_len.div_ceil(8) == bytes.len()`). Only the high `bit_len % 8` bits of
-/// the last byte are significant when `bit_len` is not byte-aligned; the
-/// trailing low bits are zero. Addressing is MSB-first (Erlang/Gleam
-/// convention) — see `vm::binary` for the bit-level operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Bit-addressable binary data, stored as a zero-copy sub-view into a shared
+/// backing buffer. The logical value is the `bit_len` bits beginning at
+/// `bit_offset` within `backing`; bits outside `[bit_offset, bit_offset +
+/// bit_len)` belong to other views over the same buffer and are NOT part of
+/// this value. Addressing is MSB-first (Erlang/Gleam convention) — see
+/// `vm::binary` for the bit-level operations.
+///
+/// `backing` is atomically reference-counted for two reasons: a binary can
+/// cross the `scheduler.spawn` thread boundary by an `Arc` bump instead of a
+/// byte copy (see `bytecode::transfer`), and `Op::BinSlice`/`Op::BinTake`
+/// return sub-slices in O(1) by sharing the `Arc` and only adjusting
+/// `bit_offset`/`bit_len`.
+///
+/// Because the buffer is shared, the trailing partial byte may carry bits that
+/// belong to a neighbouring view, so — unlike a freshly materialised buffer —
+/// those bits are NOT guaranteed zero. Equality ([`PartialEq`]) and hashing
+/// ([`hash_value`]) are therefore defined over the LOGICAL bits only (full
+/// bytes plus the masked partial tail): two views with different backings or
+/// offsets but equal logical contents compare `==` and hash identically.
+#[derive(Debug, Clone)]
 pub struct BinaryValue {
-    pub bytes: Box<[u8]>,
+    pub backing: Arc<[u8]>,
+    pub bit_offset: u64,
     pub bit_len: u64,
 }
+
+/// Read bit `i` (MSB-first) from a byte buffer. Caller guarantees `i / 8` is in
+/// bounds.
+#[inline]
+fn bit_at(backing: &[u8], i: u64) -> u8 {
+    (backing[(i / 8) as usize] >> (7 - (i % 8))) & 1
+}
+
+impl BinaryValue {
+    /// A zero-copy sub-view `[bit_offset, bit_offset + bit_len)` into `backing`.
+    #[inline]
+    pub fn view(backing: Arc<[u8]>, bit_offset: u64, bit_len: u64) -> BinaryValue {
+        debug_assert!((bit_offset + bit_len).div_ceil(8) as usize <= backing.len());
+        BinaryValue {
+            backing,
+            bit_offset,
+            bit_len,
+        }
+    }
+
+    /// The complete logical bytes as a borrowed slice. HOT path: valid only when
+    /// the view is fully byte-aligned (`bit_offset` and `bit_len` both multiples
+    /// of 8), which every socket/file write guarantees by rejecting non-aligned
+    /// binaries first. Returns exactly `bit_len / 8` bytes with no copy.
+    #[inline]
+    pub fn byte_window(&self) -> &[u8] {
+        debug_assert!(
+            self.bit_offset.is_multiple_of(8) && self.bit_len.is_multiple_of(8),
+            "byte_window on a non-byte-aligned binary view"
+        );
+        let start = (self.bit_offset / 8) as usize;
+        let len = (self.bit_len / 8) as usize;
+        &self.backing[start..start + len]
+    }
+
+    /// The complete logical bytes (the first `bit_len / 8` bytes; any partial
+    /// trailing byte is excluded). Borrows the backing with no copy when the
+    /// view starts on a byte boundary — the common case — and otherwise
+    /// re-aligns the bits into a fresh buffer. Entry point for every host-side
+    /// byte consumer (socket/file writes and the ASCII `binary.*` builtins).
+    #[inline]
+    pub fn full_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        let full = (self.bit_len / 8) as usize;
+        if self.bit_offset.is_multiple_of(8) {
+            let start = (self.bit_offset / 8) as usize;
+            std::borrow::Cow::Borrowed(&self.backing[start..start + full])
+        } else {
+            let mut v = self.to_aligned_vec();
+            v.truncate(full);
+            std::borrow::Cow::Owned(v)
+        }
+    }
+
+    /// Materialise the logical bits into a fresh, bit-offset-0 buffer of
+    /// `bit_len.div_ceil(8)` bytes with the trailing partial byte masked to zero
+    /// (re-establishing the owned-buffer invariant). COLD path — used for
+    /// bit-unaligned views and by `binary.append`/`binary.to_string`/`inspect`.
+    pub fn to_aligned_vec(&self) -> Vec<u8> {
+        let out_bytes = self.bit_len.div_ceil(8) as usize;
+        let mut out = vec![0u8; out_bytes];
+        if self.bit_offset.is_multiple_of(8) {
+            let start = (self.bit_offset / 8) as usize;
+            let copy = out_bytes.min(self.backing.len() - start);
+            out[..copy].copy_from_slice(&self.backing[start..start + copy]);
+        } else {
+            for i in 0..self.bit_len {
+                let bit = bit_at(&self.backing, self.bit_offset + i);
+                out[(i / 8) as usize] |= bit << (7 - (i % 8));
+            }
+        }
+        let rem = (self.bit_len % 8) as u32;
+        if rem != 0
+            && let Some(last) = out.last_mut()
+        {
+            *last &= 0xFFu8 << (8 - rem);
+        }
+        out
+    }
+
+    /// An owned, bit-offset-0 copy of the logical bits. Alias for
+    /// [`to_aligned_vec`](Self::to_aligned_vec).
+    #[inline]
+    pub fn materialize(&self) -> Vec<u8> {
+        self.to_aligned_vec()
+    }
+}
+
+impl PartialEq for BinaryValue {
+    fn eq(&self, other: &Self) -> bool {
+        if self.bit_len != other.bit_len {
+            return false;
+        }
+        // Both views start on a byte boundary (the overwhelmingly common case):
+        // compare full bytes directly, then the masked partial tail — no alloc.
+        if self.bit_offset.is_multiple_of(8) && other.bit_offset.is_multiple_of(8) {
+            let full = (self.bit_len / 8) as usize;
+            let s = (self.bit_offset / 8) as usize;
+            let o = (other.bit_offset / 8) as usize;
+            if self.backing[s..s + full] != other.backing[o..o + full] {
+                return false;
+            }
+            let rem = (self.bit_len % 8) as u32;
+            if rem == 0 {
+                return true;
+            }
+            let mask = 0xFFu8 << (8 - rem);
+            return (self.backing[s + full] & mask) == (other.backing[o + full] & mask);
+        }
+        // At least one view is bit-unaligned: compare bit by bit.
+        (0..self.bit_len).all(|i| {
+            bit_at(&self.backing, self.bit_offset + i)
+                == bit_at(&other.backing, other.bit_offset + i)
+        })
+    }
+}
+
+impl Eq for BinaryValue {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct SocketValue {
@@ -473,9 +621,26 @@ pub fn hash_value(v: &Value) -> u64 {
             h = hash_sequence(len, (*start..*end).map(Value::int));
         }
         ValueView::Heap(HeapValue::Binary(bin)) => {
+            // Hash the LOGICAL bits so it stays consistent with the hand-written
+            // `BinaryValue` equality: the bit length, the full bytes, then the
+            // masked partial tail. Byte-aligned views hash straight off the
+            // backing; bit-unaligned views re-align first.
             h = fnv1a_combine(h, bin.bit_len);
-            for b in bin.bytes.iter() {
-                h = fnv1a_combine(h, *b as u64);
+            if bin.bit_offset.is_multiple_of(8) {
+                let start = (bin.bit_offset / 8) as usize;
+                let full = (bin.bit_len / 8) as usize;
+                for &b in &bin.backing[start..start + full] {
+                    h = fnv1a_combine(h, b as u64);
+                }
+                let rem = (bin.bit_len % 8) as u32;
+                if rem != 0 {
+                    let mask = 0xFFu8 << (8 - rem);
+                    h = fnv1a_combine(h, (bin.backing[start + full] & mask) as u64);
+                }
+            } else {
+                for b in bin.to_aligned_vec() {
+                    h = fnv1a_combine(h, b as u64);
+                }
             }
         }
         _ => {
@@ -644,7 +809,8 @@ mod tests {
         let v = Value::binary(vec![1u8, 2, 3]);
         match v.as_heap() {
             Some(HeapValue::Binary(b)) => {
-                assert_eq!(&*b.bytes, &[1u8, 2, 3][..]);
+                assert_eq!(b.byte_window(), &[1u8, 2, 3][..]);
+                assert_eq!(b.bit_offset, 0);
                 assert_eq!(b.bit_len, 24);
             }
             _ => panic!("expected Binary"),

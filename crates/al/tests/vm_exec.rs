@@ -228,3 +228,82 @@ fn or_pattern_binds_same_slot_in_every_alternative() {
         "3\n4\n5\n7\n8\n",
     );
 }
+
+// Op::BinIndexOf — byte-substring search returning Option(Int). `from` is
+// clamped into range and an empty needle matches at the (clamped) start. The
+// four lines discriminate: first hit, hit past an offset, miss (None), and the
+// empty-needle convention.
+#[test]
+fn binary_index_of() {
+    run_outputs(
+        "binary_index_of",
+        "import al/binary\n\
+         h = binary.from_string('abcabc')\n\
+         println(binary.index_of(h, binary.from_string('bc'), 0))\n\
+         println(binary.index_of(h, binary.from_string('bc'), 2))\n\
+         println(binary.index_of(h, binary.from_string('xy'), 0))\n\
+         println(binary.index_of(h, binary.from_string(''), 3))\n",
+        "Some(1)\nSome(4)\nNone\nSome(3)\n",
+    );
+}
+
+// Op::BinParseInt — ASCII integer parse in radix 10/16. The checked multiply/
+// add reject an overflowing value as `None` (not a wrapped int — the request-
+// smuggling defense, since AL arithmetic wraps); a non-digit or empty input is
+// also `None`. Hex accepts both cases.
+#[test]
+fn binary_parse_int() {
+    run_outputs(
+        "binary_parse_int",
+        "import al/binary\n\
+         println(binary.parse_int(binary.from_string('255'), 10))\n\
+         println(binary.parse_int(binary.from_string('ff'), 16))\n\
+         println(binary.parse_int(binary.from_string('FF'), 16))\n\
+         println(binary.parse_int(binary.from_string('99999999999999999999'), 10))\n\
+         println(binary.parse_int(binary.from_string('12x'), 10))\n\
+         println(binary.parse_int(binary.from_string(''), 10))\n",
+        "Some(255)\nSome(255)\nSome(255)\nNone\nNone\nNone\n",
+    );
+}
+
+// Op::BinEqIgnoreAsciiCase — ASCII-case-insensitive byte equality (header-name
+// matching). Differing case compares equal; a real byte difference does not.
+#[test]
+fn binary_eq_ignore_ascii_case() {
+    run_outputs(
+        "binary_eq_ignore_ascii_case",
+        "import al/binary\n\
+         a = binary.from_string('Content-Length')\n\
+         println(binary.eq_ignore_ascii_case(a, binary.from_string('content-length')))\n\
+         println(binary.eq_ignore_ascii_case(binary.from_string('abc'), binary.from_string('abd')))\n",
+        "True\nFalse\n",
+    );
+}
+
+// Op::BinToAsciiLower — ASCII lowercasing copy; non-letter bytes pass through.
+#[test]
+fn binary_to_ascii_lower() {
+    run_outputs(
+        "binary_to_ascii_lower",
+        "import al/binary\n\
+         println(binary.to_string(binary.to_ascii_lower(binary.from_string('AbC-123'))))\n",
+        "Ok(abc-123)\n",
+    );
+}
+
+// Op::BinFromIntAscii — render an Int as ASCII (radix 10/16, lowercase hex),
+// handling zero and negatives, and round-tripping through parse_int for the
+// non-negative cases.
+#[test]
+fn binary_from_int_ascii() {
+    run_outputs(
+        "binary_from_int_ascii",
+        "import al/binary\n\
+         println(binary.to_string(binary.from_int_ascii(255, 10)))\n\
+         println(binary.to_string(binary.from_int_ascii(255, 16)))\n\
+         println(binary.to_string(binary.from_int_ascii(0, 10)))\n\
+         println(binary.to_string(binary.from_int_ascii(0 - 42, 10)))\n\
+         println(binary.parse_int(binary.from_int_ascii(4096, 16), 16))\n",
+        "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nSome(4096)\n",
+    );
+}

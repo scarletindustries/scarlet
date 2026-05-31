@@ -166,6 +166,17 @@ pub enum Op {
     BinReadInt,
     BinTake,
     BinReadUtf8,
+    /// `[haystack, needle, from] -> Option(Int)` — byte-substring search.
+    BinIndexOf,
+    /// `[bin, radix] -> Option(Int)` — ASCII integer parse (radix 10/16),
+    /// overflow-checked (returns `None` rather than wrapping).
+    BinParseInt,
+    /// `[a, b] -> Bool` — ASCII-case-insensitive byte equality.
+    BinEqIgnoreAsciiCase,
+    /// `[bin] -> Binary` — ASCII-lowercased copy.
+    BinToAsciiLower,
+    /// `[n, radix] -> Binary` — render an Int as ASCII (radix 10/16).
+    BinFromIntAscii,
 
     // Float operations
     FloatFloor,

@@ -302,3 +302,147 @@ match io.read_text('__PATH__') {
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert_eq!(out.stdout, "read-err\n", "stderr: {}", out.stderr);
 }
+
+/// First byte offset of `needle` within `hay`, or `None`.
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Read exactly one HTTP/1.1 response off `stream`, buffering through `buf`.
+/// Accumulates until the CRLFCRLF head terminator, parses `Content-Length`,
+/// then reads that many body bytes. Any bytes past this response (a pipelined
+/// follow-up) are left in `buf` for the next call. Returns the status line, a
+/// lowercased-name header map, and the body bytes.
+fn read_one_response(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+) -> (String, std::collections::HashMap<String, String>, Vec<u8>) {
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        if let Some(pos) = find_subslice(buf, b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let n = stream
+            .read(&mut tmp)
+            .expect("read response head from server");
+        assert!(
+            n > 0,
+            "server closed before a full response head; buffered: {:?}",
+            String::from_utf8_lossy(&buf[..])
+        );
+        buf.extend_from_slice(&tmp[..n]);
+    };
+
+    let head = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or_default().to_string();
+    let mut headers = std::collections::HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+
+    let content_length: usize = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let total = header_end + content_length;
+    while buf.len() < total {
+        let n = stream
+            .read(&mut tmp)
+            .expect("read response body from server");
+        assert!(n > 0, "server closed before the full response body");
+        buf.extend_from_slice(&tmp[..n]);
+    }
+
+    let body = buf[header_end..total].to_vec();
+    buf.drain(..total);
+    (status_line, headers, body)
+}
+
+/// End-to-end HTTP/1.1 through the pure-AL `al/http` server core: spawn an `al`
+/// server bound to an ephemeral port, drive it with a raw TCP client, and
+/// assert a well-formed 200 with a correct `Content-Length` and body. A second
+/// request is pipelined into the *same* write so the connection driver must
+/// answer it from its carried leftover bytes — exercising keep-alive and the
+/// pipelining handoff without an intervening read.
+#[test]
+fn http_server_get_and_keepalive() {
+    let port = free_port();
+    let proj = Project::new("io_http");
+    let src = r#"import al/http
+
+match http.serve('127.0.0.1', __PORT__, fn(_req) http.text('Hello from al/http!')) {
+	Ok(_) -> Nil
+	Err(e) -> println('serve failed: ${e}')
+}
+"#
+    .replace("__PORT__", &port.to_string());
+    let prog = proj.dir.join("server.al");
+    std::fs::write(&prog, src).unwrap();
+
+    // The server blocks in its accept loop; spawn it and drive it from a client.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
+        .arg("run")
+        .arg(&prog)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn al http server");
+
+    let mut stream = connect_retry(port);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    // Two HTTP/1.1 GETs in a single write. Both land in one server-side read,
+    // so the connection loop must parse the first, respond, then serve the
+    // second from the carried leftover bytes (keep-alive + pipelining).
+    let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    let mut pipelined = Vec::new();
+    pipelined.extend_from_slice(request);
+    pipelined.extend_from_slice(request);
+    stream.write_all(&pipelined).expect("client write");
+
+    let expected_body: &[u8] = b"Hello from al/http!";
+    let mut buf = Vec::new();
+    for which in ["first", "second"] {
+        let (status_line, headers, body) = read_one_response(&mut stream, &mut buf);
+        assert!(
+            status_line.starts_with("HTTP/1.1 200"),
+            "{which} response: status line was {status_line:?}"
+        );
+        let cl: usize = headers
+            .get("content-length")
+            .unwrap_or_else(|| panic!("{which} response: no Content-Length header ({headers:?})"))
+            .parse()
+            .expect("Content-Length must be numeric");
+        assert_eq!(
+            cl,
+            expected_body.len(),
+            "{which} response: Content-Length must equal the body length"
+        );
+        assert_eq!(
+            body.as_slice(),
+            expected_body,
+            "{which} response: body bytes mismatch"
+        );
+    }
+
+    // The server loops forever; tear it down now that both requests answered.
+    drop(stream);
+    child.kill().ok();
+    let out = child.wait_with_output().expect("await server shutdown");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("serve failed"),
+        "server reported a failure: {stdout}"
+    );
+}
