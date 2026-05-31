@@ -54,3 +54,9 @@ pub fn all(xs Array(a), p fn(a) Bool) Bool {
 		[h, ..t] -> if p(h) { all(t, p) } else { False }
 	}
 }
+
+// Concatenate two arrays. Backed by the native concat op: structure is shared,
+// not deep-copied.
+pub fn concat(xs Array(a), ys Array(a)) Array(a) {
+	[..xs, ..ys]
+}

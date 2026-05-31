@@ -22,7 +22,6 @@ const ZERO = binary.from_string('0')
 const HTTP_1_1 = binary.from_string('HTTP/1.1')
 const HTTP_1_0 = binary.from_string('HTTP/1.0')
 const STATUS_LINE_PREFIX = binary.from_string('HTTP/1.1 ')
-const EMPTY = binary.from_string('')
 
 const CONNECTION = binary.from_string('connection')
 const CLOSE = binary.from_string('close')
@@ -67,18 +66,8 @@ type HeaderResult {
 	HBad(status Int)
 }
 
-// A zero-copy byte view of `b[start .. start+len]`. Offsets are bytes; slice
-// takes bits. Ranges are always in-bounds by construction, so a failure (only
-// possible if a caller passes a bad range) degrades to an empty view.
-fn view(b Binary, start Int, len Int) Binary {
-	match binary.slice(b, start * 8, len * 8) {
-		Ok(v) -> v
-		Err(_) -> EMPTY
-	}
-}
-
 fn is_ows(buf Binary, i Int) Bool {
-	b = view(buf, i, 1)
+	b = binary.slice_bytes(buf, i, 1)
 	b == SP || b == HTAB
 }
 
@@ -103,9 +92,9 @@ fn trim_right(buf Binary, lo Int, hi Int) Int {
 // Split METHOD SP request-target SP HTTP-version out of the request line and
 // resolve the version token to a minor-version Int.
 fn build_line(buf Binary, start Int, sp1 Int, sp2 Int, eol Int) ReqLine {
-	method = view(buf, start, sp1 - start)
-	target = view(buf, sp1 + 1, sp2 - sp1 - 1)
-	vtok = view(buf, sp2 + 1, eol - sp2 - 1)
+	method = binary.slice_bytes(buf, start, sp1 - start)
+	target = binary.slice_bytes(buf, sp1 + 1, sp2 - sp1 - 1)
+	vtok = binary.slice_bytes(buf, sp2 + 1, eol - sp2 - 1)
 	if vtok == HTTP_1_1 {
 		Line(method, target, 1)
 	} else if vtok == HTTP_1_0 {
@@ -146,10 +135,10 @@ fn parse_header_line(buf Binary, pos Int, crlf Int, head_start Int) HeaderResult
 			Some(colon) -> if colon >= crlf || colon == pos || is_ows(buf, colon - 1) {
 				HBad(400)
 			} else {
-				name = view(buf, pos, colon - pos)
+				name = binary.slice_bytes(buf, pos, colon - pos)
 				vstart = trim_left(buf, colon + 1, crlf)
 				vend = trim_right(buf, vstart, crlf)
-				value = view(buf, vstart, vend - vstart)
+				value = binary.slice_bytes(buf, vstart, vend - vstart)
 				match parse_headers(buf, crlf + 2, head_start) {
 					HHeaders(rest, consumed) -> HHeaders([Header(name, value), ..rest], consumed)
 					HNeedMore -> HNeedMore
@@ -222,7 +211,7 @@ fn header_count(hs Array(Header), name Binary) Int {
 // documented inter-parser-disagreement smuggling vector. A lone "0" is fine.
 fn leading_zero(v Binary) Bool {
 	if binary.byte_size(v) > 1 {
-		view(v, 0, 1) == ZERO
+		binary.slice_bytes(v, 0, 1) == ZERO
 	} else {
 		False
 	}
@@ -294,19 +283,18 @@ pub fn want_100_continue(hs Array(Header)) Bool {
 	}
 }
 
-fn concat(a Array(Binary), b Array(Binary)) Array(Binary) {
-	match a {
-		[] -> b
-		[h, ..t] -> [h, ..concat(t, b)]
-	}
-}
-
 // Serialize a response status line + header block as a parts array for
 // socket.write_parts — "HTTP/1.1 <status> <reason>\r\n", the rendered headers,
-// then the blank line that terminates the head. Nothing is concatenated.
+// then the blank line that terminates the head. Nothing is concatenated; the
+// parts share the head constants and the rendered header views.
 pub fn serialize_head(code Int, hs Array(Header)) Array(Binary) {
-	concat(
-		[STATUS_LINE_PREFIX, binary.from_int_ascii(code, 10), SP, status.reason_phrase(code), CRLF],
-		concat(headers.render(hs), [CRLF]),
-	)
+	[
+		STATUS_LINE_PREFIX,
+		binary.from_int_ascii(code, 10),
+		SP,
+		status.reason_phrase(code),
+		CRLF,
+		..headers.render(hs),
+		CRLF,
+	]
 }

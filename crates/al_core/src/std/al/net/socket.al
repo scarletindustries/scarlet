@@ -29,7 +29,7 @@ fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, String) {
 				else -> read_exact_loop(
 					c,
 					remaining - binary.byte_size(data),
-					binary.append(acc, data)
+					binary.append(acc, data),
 				)
 			}
 			Err(e) -> Err(e)

@@ -141,15 +141,6 @@ fn build_request(method Binary, target Binary, version Int, hdrs Headers, b Body
 	)
 }
 
-// A zero-copy byte view of `b[start .. start+len]`; an out-of-range request
-// (only reachable on a caller bug) degrades to an empty view.
-fn view(b Binary, start Int, len Int) Binary {
-	match binary.slice(b, start * 8, len * 8) {
-		Ok(v) -> v
-		Err(_) -> EMPTY
-	}
-}
-
 // Listen on host:port and serve each accepted connection on its own process.
 // One slow or hostile connection parks only its own process; the runtime
 // spreads connection processes across every core.
@@ -212,7 +203,7 @@ fn serve_conn(sock Socket, buf Binary, off Int, handler fn(Request) Response) Re
 // Concatenate the unconsumed tail of `buf` (from `off`) with freshly read
 // bytes, resetting the parse offset to 0.
 fn carry(buf Binary, off Int, more Binary) Binary {
-	binary.append(view(buf, off, binary.byte_size(buf) - off), more)
+	binary.append(binary.slice_bytes(buf, off, binary.byte_size(buf) - off), more)
 }
 
 // Decide framing, then deliver the body under the bounded-buffer model.
@@ -272,7 +263,7 @@ fn read_body(
 		Ok(_) -> {
 			avail = binary.byte_size(buf) - consumed
 			buffered = int.min(avail, n)
-			head_bytes = view(buf, consumed, buffered)
+			head_bytes = binary.slice_bytes(buf, consumed, buffered)
 			need = n - buffered
 			match body.collect(h1.content_length_reader(sock, need), MAX_BODY) {
 				Err(e) -> Err(e)

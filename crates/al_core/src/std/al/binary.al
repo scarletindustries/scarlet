@@ -13,6 +13,17 @@ pub fn byte_size(b Binary) Int
 @vm(binary__slice)
 pub fn slice(b Binary, at_bit Int, take_bits Int) Result(Binary, Nil)
 
+// Byte-oriented slice of `b[start .. start+len]` (offsets and length in bytes;
+// `slice` itself takes bits). O(1): shares `b`'s backing and copies nothing.
+// An out-of-range request yields an empty binary, so a parser can take field
+// views by offset without per-call error handling.
+pub fn slice_bytes(b Binary, start Int, len Int) Binary {
+	match slice(b, start * 8, len * 8) {
+		Ok(v) -> v
+		Err(_) -> from_string('')
+	}
+}
+
 @vm(binary__append)
 pub fn append(a Binary, b Binary) Binary
 
