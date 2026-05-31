@@ -6,7 +6,7 @@ import path from "path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { codeToHtml } from "shiki";
 import grammar from "./src/al.tmLanguage.json";
-import { App, examples } from "./src/app";
+import { App, examples, type Rendered } from "./src/app";
 
 const outdir = path.join(import.meta.dir, "dist");
 
@@ -17,10 +17,9 @@ await mkdir(outdir);
 
 console.log("Rendering code blocks with shiki...");
 
-const renderedExamples = await Promise.all(
-  examples.map(async (example) => ({
-    title: example.title,
-    description: example.description,
+const rendered: Rendered = {};
+for (const example of examples) {
+  rendered[example.id] = {
     light: await codeToHtml(example.code, {
       lang: grammar as any,
       theme: "github-light",
@@ -29,12 +28,12 @@ const renderedExamples = await Promise.all(
       lang: grammar as any,
       theme: "github-dark",
     }),
-  }))
-);
+  };
+}
 
 console.log("Rendering HTML...");
 
-const body = renderToStaticMarkup(<App examples={renderedExamples} />);
+const body = renderToStaticMarkup(<App rendered={rendered} />);
 
 console.log("Building CSS with Tailwind...");
 
@@ -55,7 +54,8 @@ const html = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AL - a small programming language</title>
+<meta name="description" content="AL is a small, statically typed language for writing concurrent programs. One binary, no dependencies.">
+<title>The AL programming language</title>
 <style>${css}</style>
 </head>
 <body class="bg-white dark:bg-neutral-950 text-black dark:text-white">
