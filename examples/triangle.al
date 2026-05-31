@@ -4,7 +4,7 @@ fn is_valid_triangle(a Int, b Int, c Int) Bool {
 	a + b > c && b + c > a && a + c > b
 }
 
-fn classify_triangle(a Int, b Int, c Int) String {
+fn classify_triangle(a, b, c) String {
 	if !is_valid_triangle(a, b, c) {
 		'Invalid'
 	} else if a == b && b == c {
@@ -16,7 +16,7 @@ fn classify_triangle(a Int, b Int, c Int) String {
 	}
 }
 
-fn perimeter(a Int, b Int, c Int) Int {
+fn perimeter(a, b, c) {
 	a + b + c
 }
 
@@ -27,7 +27,7 @@ type TriangleInfo {
 	valid Bool
 }
 
-fn analyze_triangle(a Int, b Int, c Int) TriangleInfo {
+fn analyze_triangle(a, b, c) {
 	TriangleInfo(
 		sides: '${a}, ${b}, ${c}',
 		triangle_type: classify_triangle(a, b, c),

@@ -647,7 +647,7 @@ impl LspServer {
             && let Some(def) = graph.definition_at(mid, line, col)
         {
             let signature = match &typed {
-                Some((_, ty, _)) => format!("{} : {}", def.name, ty),
+                Some((_, ty, _)) => format!("{} {}", def.name, ty),
                 None => def.name.clone(),
             };
             let mut value = format!("```al\n{}\n```\n\n*{}*", signature, def.entity().noun());

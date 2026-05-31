@@ -23,6 +23,16 @@ pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
 	}
 }
 
+// You probably want `list.fold`
+pub fn each(xs Array(a), f fn(a) b) {
+	match xs {
+		[] -> Nil
+		[h, ..t] -> {
+			f(h)
+			each(t, f)
+		}
+	}
+}
 
 pub fn reverse(xs Array(a)) Array(a) {
 	fold(xs, [], fn(acc, x) [x, ..acc])
