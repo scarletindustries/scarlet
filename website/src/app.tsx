@@ -53,7 +53,7 @@ http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) or e -> {
     println('serve failed: \${e}')
 }`,
       },
-      "Each connection is handled by its own process. A process in AL is what it is in Erlang: a piece of runtime state costing a few hundred bytes, cheap enough to start one per connection and forget about it. The runtime schedules processes across every CPU core. Code inside a process reads like it blocks, and when it waits on a socket, the runtime parks it and runs another one. The language has no `async` keyword and no locks.",
+      "Each connection is handled by its own process. A process is a piece of runtime state costing a few hundred bytes, cheap enough to start one per connection and forget about it. The runtime schedules processes across every CPU core. Code inside a process reads like it blocks, and when it waits on a socket, the runtime parks it and runs another one. The language has no `async` keyword and no locks.",
       "There is no null and there are no exceptions. A function that can fail returns a `Result`, a value that can be absent is an `Option`, and the type checker rejects programs that ignore either case. Both unwrap with the `or` keyword.",
       "Programs are fully type checked, but you will rarely write a type. The checker infers them, generics included.",
       "The language is small on purpose. One `type` keyword defines every kind of data. Constructors are ordinary functions. Everything is an expression. There are no classes, no inheritance, no interfaces, no macros, and no loops. Recursion covers iteration, and tail calls reuse the stack frame so they never overflow it.",
