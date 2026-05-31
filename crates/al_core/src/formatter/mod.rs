@@ -1038,6 +1038,29 @@ mod tests {
     }
 
     #[test]
+    fn or_handler_overflow_breaks_subject_args() {
+        // `subject(...) or e -> handler(...)` wider than the line: the subject
+        // call's arguments break and the handler call stays intact — not the
+        // other way around (breaking the handler orphans its arguments at the
+        // far right of the line).
+        let out = fmt(
+            "http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) or e -> println('serve failed: ${e}')\n",
+        );
+        assert_eq!(
+            out,
+            "http.serve(\n\t'0.0.0.0',\n\t8080,\n\tfn(_req) http.text('Hello from al/http!'),\n) or e -> println('serve failed: ${e}')\n"
+        );
+    }
+
+    #[test]
+    fn or_block_handler_keeps_subject_flat() {
+        // A `{ … }` handler gives the line a natural break point: the subject
+        // stays flat and the block body breaks.
+        let src = "http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) or e -> {\n\tprintln('serve failed: ${e}')\n}\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
     fn long_call_breaks_per_arg() {
         let out = fmt(
             "x = MakeThing(first_label: some_function_call(a, b, c), second_label: another_one(d, e, f), third_label: yet_more(g, h, i))\n",
