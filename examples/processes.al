@@ -1,6 +1,8 @@
+// Concurrency with lightweight processes from al/experiments/scheduler.
+
 import al/experiments/scheduler
 
-// spawn(f) starts a lightweight process — not an OS thread. Processes are
+// spawn(f) starts a lightweight process, not an OS thread. Processes are
 // cheap (a few hundred bytes), preemptively scheduled, and the runtime spreads
 // them across every CPU core. Each process sees the program's top-level
 // bindings; values passed between processes behave as copies (they are

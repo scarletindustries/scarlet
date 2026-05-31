@@ -1,5 +1,6 @@
-// Demo: Error recovery across different parsing contexts
-// Run with: al build program/src/demo_syntax_errors.al
+// Parser error recovery: this file does not compile, on purpose.
+// Run `al check examples/demo_syntax_errors.al` to see every error reported
+// in one pass, with recovery at statement, array, and match-arm boundaries.
 
 // 1. Top-level error - recovers at next identifier
 x = )

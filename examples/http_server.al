@@ -1,3 +1,6 @@
+// An HTTP server built directly on al/net sockets: one process per connection,
+// pipelined requests answered with a single vectored write.
+
 import al/experiments/scheduler
 import al/net.{Server}
 import al/net/socket.{Socket}
@@ -20,7 +23,7 @@ fn count_requests(data Binary) Int {
 }
 
 // One response per pipelined request, sent to the kernel as a single
-// vectored write — the parts are never concatenated.
+// vectored write; the parts are never concatenated.
 fn responses(n Int, parts Array(Binary)) Array(Binary) {
 	match n {
 		0 -> parts

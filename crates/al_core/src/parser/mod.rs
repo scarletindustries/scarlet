@@ -2147,25 +2147,27 @@ mod tests {
 
     #[test]
     fn test_all_language_features_al() {
-        let src = include_str!("../../../../examples/all_language_features.al");
+        let src = include_str!("../../../../crates/al/tests/programs/all_language_features.al");
         assert_no_errors(src);
     }
 
     #[test]
     fn test_trying_out_tuples_al() {
-        let src = include_str!("../../../../examples/trying_out_tuples.al");
+        let src = include_str!("../../../../crates/al/tests/programs/trying_out_tuples.al");
         assert_no_errors(src);
     }
 
     #[test]
     fn test_generic_structs_and_enums_al() {
-        let src = include_str!("../../../../examples/trying_out_generic_structs_and_enums.al");
+        let src = include_str!(
+            "../../../../crates/al/tests/programs/trying_out_generic_structs_and_enums.al"
+        );
         assert_no_errors(src);
     }
 
     #[test]
     fn test_match_patterns_al() {
-        let src = include_str!("../../../../examples/match_patterns_test.al");
+        let src = include_str!("../../../../crates/al/tests/programs/match_patterns_test.al");
         assert_no_errors(src);
     }
 

@@ -1,7 +1,7 @@
 // Triangle classifier
 
 fn is_valid_triangle(a Int, b Int, c Int) Bool {
-	if a + b <= c || b + c <= a || a + c <= b { False } else { True }
+	a + b > c && b + c > a && a + c > b
 }
 
 fn classify_triangle(a Int, b Int, c Int) String {

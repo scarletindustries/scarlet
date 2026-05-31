@@ -1,6 +1,7 @@
-import al/internal
+// Tail-call optimization: the recursive call below is in tail position, so each
+// level reuses the current stack frame and the reported depth never grows.
 
-_slightly_deeper = fn(n) println('slightly_deeper: ${n} is ${internal.stack_depth()} frames deep')
+import al/internal
 
 countdown = fn(n) {
 	println(n)

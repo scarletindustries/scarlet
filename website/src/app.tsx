@@ -49,9 +49,11 @@ export const sections: Section[] = [
         id: "intro-http",
         code: `import al/http
 
-http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) or e -> {
-    println('serve failed: \${e}')
-}`,
+http.serve(
+    '0.0.0.0',
+    8080,
+    fn(_req) http.text('Hello from al/http!'),
+) or e -> println('serve failed: \${e}')`,
       },
       "Each connection is handled by its own process. A process is a piece of runtime state costing a few hundred bytes, cheap enough to start one per connection and forget about it. The runtime schedules processes across every CPU core. Code inside a process reads like it blocks, and when it waits on a socket, the runtime parks it and runs another one. The language has no `async` keyword and no locks.",
       "There is no null and there are no exceptions. A function that can fail returns a `Result`, a value that can be absent is an `Option`, and the type checker rejects programs that ignore either case. Both unwrap with the `or` keyword.",
@@ -499,12 +501,13 @@ println(person.age)   // 30`,
     title: "Sum types",
     sub: true,
     body: [
-      "A type with several constructors is a sum type: a value is exactly one of the alternatives. Constructors can carry fields or be bare names. Pattern matching is how you find out which one you have.",
+      "A type with several constructors is a sum type: a value is exactly one of the alternatives. Constructors can carry fields or be bare names, and a field can be the type being defined. Pattern matching is how you find out which one you have.",
       {
         id: "sum-types",
-        code: `type Shape {
-    Circle(r Float)
-    Rect(w Float h Float)
+        code: `type Expr {
+    Num(value Int)
+    Add(left Expr right Expr)
+    Mul(left Expr right Expr)
 }
 
 type Status {
@@ -513,16 +516,18 @@ type Status {
     Banned(reason String)
 }
 
-fn area(s Shape) Float {
-    match s {
-        Circle(r) -> 3.14159 * r * r
-        Rect(w, h) -> w * h
+fn evaluate(e Expr) Int {
+    match e {
+        Num(n) -> n
+        Add(l, r) -> evaluate(l) + evaluate(r)
+        Mul(l, r) -> evaluate(l) * evaluate(r)
     }
 }
 
-println(area(Circle(r: 1.0)))           // 3.14159
-println(area(Rect(w: 2.0, h: 3.0)))     // 6.0
-println(Banned('spam'))                 // Banned(spam)`,
+// (1 + 2) * 3
+expr = Mul(Add(Num(1), Num(2)), Num(3))
+println(evaluate(expr))  // 9
+println(Banned('spam'))  // Banned(spam)`,
       },
       "Constructors are ordinary functions. Pass them anywhere a function goes.",
       {
@@ -572,22 +577,40 @@ doubled = map_array([1, 2, 3], fn(x) x * 2)
 println('\${n} \${s}')  // 42 hello
 println(doubled)      // [2, 4, 6]`,
       },
-      "Types take parameters the same way.",
+      "Types take parameters the same way. The binary search tree below stores any element type: `to_array` walks a `Tree(t)`, while `insert` compares values with `<` and so takes a `Tree(Int)`.",
       {
         id: "generic-types",
-        code: `type Box(t) { value t }
+        code: `import al/list
 
-type Pair(a, b) {
-    first a
-    second b
+type Tree(t) {
+    Leaf
+    Node(left Tree(t) value t right Tree(t))
 }
 
-// Type arguments are inferred from the values
-int_box = Box(value: 42)
-pair = Pair(first: 'hello', second: 123)
+// In-order walk: left subtree, value, right subtree
+fn to_array(tree Tree(t)) Array(t) {
+    match tree {
+        Leaf -> []
+        Node(left, value, right) -> [..to_array(left), value, ..to_array(right)]
+    }
+}
 
-println(int_box.value)  // 42
-println(pair.first)     // hello`,
+// Insert keeps the tree ordered, so to_array reads back sorted
+fn insert(tree Tree(Int), x Int) Tree(Int) {
+    match tree {
+        Leaf -> Node(Leaf, x, Leaf)
+        Node(left, value, right) ->
+            if x < value { Node(insert(left, x), value, right) }
+            else { Node(left, value, insert(right, x)) }
+    }
+}
+
+tree = list.fold([5, 3, 8, 1, 9, 2, 7], Leaf, insert)
+println(to_array(tree))  // [1, 2, 3, 5, 7, 8, 9]
+
+// The same to_array works on a Tree(String)
+names = Node(Leaf, 'grace', Node(Leaf, 'linus', Leaf))
+println(to_array(names))  // [grace, linus]`,
       },
     ],
   },
@@ -726,6 +749,22 @@ println(sum([1, 2, 3, 4, 5]))   // 15
 println(describe([]))           // empty
 println(describe([7]))          // one element: 7
 println(describe([7, 8, 9]))    // starts with 7`,
+      },
+      "Array patterns nest inside other patterns. A match on a tuple of two arrays takes both apart at once. The merge step of a merge sort is one match expression:",
+      {
+        id: "merge",
+        code: `// Merge two sorted arrays into one
+fn merge(left Array(Int), right Array(Int)) Array(Int) {
+    match (left, right) {
+        ([], ys) -> ys
+        (xs, []) -> xs
+        ([x, ..xs], [y, ..ys]) ->
+            if x <= y { [x, ..merge(xs, right)] }
+            else { [y, ..merge(left, ys)] }
+    }
+}
+
+println(merge([1, 4, 9], [2, 3, 8]))  // [1, 2, 3, 4, 8, 9]`,
       },
     ],
   },
@@ -922,7 +961,6 @@ println(string.inspect(id))  // Id(7)`,
     title: "Binaries",
     body: [
       "A `Binary` is a sequence of raw bytes. The `<<>>` syntax builds one, and the same syntax takes one apart in a match. Each segment is one byte unless you give it a size in bits. A `:binary` segment matches the rest of the bytes without copying them.",
-      "This is the syntax network protocols are parsed with. The standard library's HTTP parser is written on top of it.",
       {
         id: "binaries",
         code: `import al/binary
@@ -941,19 +979,25 @@ sum = match binary.from_string('AB') {
     <<a, b>> -> a + b
     else -> 0
 }
-println(sum)  // 131  (65 + 66)
+println(sum)  // 131  (65 + 66)`,
+      },
+      "This is the syntax network protocols are parsed with. The standard library's HTTP parser is written on top of it. Here is a small packet format, built and then parsed back into its fields:",
+      {
+        id: "packet",
+        code: `import al/binary
 
-// ':binary' binds the rest without copying
-fn split_first(b Binary) Option((Int, Binary)) {
-    match b {
-        <<first, rest:binary>> -> Some((first, rest))
-        else -> None
+// A packet: 4-bit version, 4-bit kind, 16-bit length, then the payload
+payload = binary.from_string('ping')
+length = binary.byte_size(payload)
+packet = <<1:4, 2:4, length:16, payload:binary>>
+
+// The same segments take it apart
+match packet {
+    <<version:4, kind:4, length:16, body:binary>> -> {
+        text = binary.to_string(body) or '(not utf8)'
+        println('version \${version}, kind \${kind}, \${length} bytes: \${text}')
     }
-}
-
-match split_first(binary.from_string('GET /')) {
-    Some((byte, rest)) -> println('\${byte} then \${binary.byte_size(rest)} more bytes')
-    None -> println('empty')
+    else -> println('malformed packet')
 }`,
       },
       "`al/binary` also has `index_of`, `parse_int`, `slice_bytes`, `append`, and case-insensitive comparison. Slices share the underlying bytes instead of copying them.",

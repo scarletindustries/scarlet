@@ -1,23 +1,31 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples")
 }
 
+// Internal regression-test programs live with the test suite, not in examples/.
+fn programs_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/programs")
+}
+
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
-fn run_example(name: &str, extra_flags: &[&str]) -> String {
+fn programs_golden_dir() -> PathBuf {
+    golden_dir().join("programs")
+}
+
+fn run_file(source: &Path, name: &str, extra_flags: &[&str]) -> String {
     let bin = env!("CARGO_BIN_EXE_al");
-    let example = examples_dir().join(format!("{name}.al"));
     let mut cmd = Command::new(bin);
     cmd.arg("run");
     for f in extra_flags {
         cmd.arg(f);
     }
-    cmd.arg(&example);
+    cmd.arg(source);
     let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn al for {name}: {e}"));
@@ -32,13 +40,60 @@ fn run_example(name: &str, extra_flags: &[&str]) -> String {
     String::from_utf8(out.stdout).expect("stdout not utf8")
 }
 
-fn assert_golden(name: &str, extra_flags: &[&str]) {
-    let want = std::fs::read_to_string(golden_dir().join(format!("{name}.stdout")))
+fn run_example(name: &str, extra_flags: &[&str]) -> String {
+    run_file(
+        &examples_dir().join(format!("{name}.al")),
+        name,
+        extra_flags,
+    )
+}
+
+fn run_program(name: &str, extra_flags: &[&str]) -> String {
+    run_file(
+        &programs_dir().join(format!("{name}.al")),
+        name,
+        extra_flags,
+    )
+}
+
+fn assert_stdout_matches(name: &str, golden: &Path, got: &str) {
+    let want = std::fs::read_to_string(golden)
         .unwrap_or_else(|e| panic!("missing golden for {name}: {e}"));
-    let got = run_example(name, extra_flags);
     if got != want {
-        let diff = diff_lines(&want, &got);
+        let diff = diff_lines(&want, got);
         panic!("output mismatch for {name}:\n{diff}");
+    }
+}
+
+fn assert_golden(name: &str, extra_flags: &[&str]) {
+    let golden = golden_dir().join(format!("{name}.stdout"));
+    let got = run_example(name, extra_flags);
+    assert_stdout_matches(name, &golden, &got);
+}
+
+fn assert_golden_program(name: &str, extra_flags: &[&str]) {
+    let golden = programs_golden_dir().join(format!("{name}.stdout"));
+    let got = run_program(name, extra_flags);
+    assert_stdout_matches(name, &golden, &got);
+}
+
+// Servers and timing-dependent demos have no deterministic output to golden
+// test, but they must still type check.
+fn assert_example_checks(name: &str) {
+    let bin = env!("CARGO_BIN_EXE_al");
+    let example = examples_dir().join(format!("{name}.al"));
+    let out = Command::new(bin)
+        .arg("check")
+        .arg(&example)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn al for {name}: {e}"));
+    if !out.status.success() {
+        panic!(
+            "al check {name} exited {:?}\nstdout:\n{}\nstderr:\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
@@ -69,6 +124,8 @@ fn diff_lines(want: &str, got: &str) -> String {
     out
 }
 
+// Golden test for a showcase example: runs examples/<name>.al and compares
+// stdout to tests/golden/<name>.stdout.
 macro_rules! golden {
     ($name:ident) => {
         #[test]
@@ -78,9 +135,30 @@ macro_rules! golden {
     };
 }
 
+// Golden test for an internal regression program: runs tests/programs/<name>.al
+// and compares stdout to tests/golden/programs/<name>.stdout.
+macro_rules! golden_program {
+    ($name:ident) => {
+        #[test]
+        fn $name() {
+            assert_golden_program(stringify!($name), &[]);
+        }
+    };
+}
+
+// Type-check-only test for examples whose output is not deterministic
+// (servers, scheduler demos).
+macro_rules! checks {
+    ($test_name:ident, $example:literal) => {
+        #[test]
+        fn $test_name() {
+            assert_example_checks($example);
+        }
+    };
+}
+
 // Core language — must pass for parity
 golden!(hello);
-golden!(basic);
 golden!(factorial);
 golden!(fibonacci);
 golden!(fizzbuzz);
@@ -98,22 +176,43 @@ golden!(age);
 golden!(shapes);
 golden!(tco);
 golden!(tco_mutual);
-golden!(conrad_fib);
 golden!(doc_comment);
-golden!(program_type);
-
-// Type system / generics / inference — critical
-golden!(awesome_inference);
-golden!(generic_test);
-golden!(enum_equality_test);
-golden!(match_patterns_test);
-golden!(trying_out_tuples);
-golden!(trying_out_generic_structs_and_enums);
-golden!(all_language_features);
 
 // Stdlib-gated
 golden!(string_split);
+golden!(password);
 golden!(bench_list);
+
+// Data structures and algorithms
+golden!(calculator);
+golden!(tree);
+golden!(life);
+golden!(mergesort);
+golden!(wordcount);
+
+// Binaries and wire protocols
+golden!(packet);
+
+// Internal regression programs (crates/al/tests/programs/), formerly in examples/.
+golden_program!(basic);
+golden_program!(program_type);
+golden_program!(conrad_fib);
+
+// Type system / generics / inference regression programs
+golden_program!(awesome_inference);
+golden_program!(generic_test);
+golden_program!(enum_equality_test);
+golden_program!(match_patterns_test);
+golden_program!(trying_out_tuples);
+golden_program!(trying_out_generic_structs_and_enums);
+golden_program!(all_language_features);
+
+// Servers and timing demos: output is not deterministic, so no golden file.
+// They must still type check.
+checks!(check_http_hello, "http_hello");
+checks!(check_http_server, "http_server");
+checks!(check_echo_server, "echo_server");
+checks!(check_processes, "processes");
 
 // bench is timing-sensitive; just check it runs without error
 #[test]

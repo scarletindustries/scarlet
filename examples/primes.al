@@ -1,4 +1,7 @@
-// Prime number checker
+// Primes up to 50 by trial division.
+// Builds the number range recursively, filters it with is_prime, prints the result.
+
+import al/list
 
 fn is_divisible(n Int, d Int) Bool {
 	n % d == 0
@@ -24,16 +27,19 @@ fn is_prime(n Int) Bool {
 	}
 }
 
-type PrimeCheck {
-	n Int
-	is_prime Bool
+// Numbers from `from` to `to`, inclusive.
+fn range(from Int, to Int) Array(Int) {
+	if from > to {
+		[]
+	} else {
+		[from, ..range(from + 1, to)]
+	}
 }
 
-// Check some numbers
-[
-	PrimeCheck(n: 2, is_prime: is_prime(2)),
-	PrimeCheck(n: 7, is_prime: is_prime(7)),
-	PrimeCheck(n: 13, is_prime: is_prime(13)),
-	PrimeCheck(n: 15, is_prime: is_prime(15)),
-	PrimeCheck(n: 97, is_prime: is_prime(97)),
-]
+const limit = 50
+
+primes = list.filter(range(2, limit), is_prime)
+
+println('primes up to ${limit}:')
+println(primes)
+println('${list.length(primes)} primes found')

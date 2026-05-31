@@ -1,3 +1,5 @@
+// Splitting and inspecting strings with al/string.
+
 import al/string
 
 // split by comma

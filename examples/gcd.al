@@ -1,6 +1,4 @@
-import al/string
-
-// Greatest Common Divisor using Euclidean algorithm
+// Greatest common divisor via the Euclidean algorithm, plus least common multiple.
 
 fn gcd(a Int, b Int) Int {
 	match b {
@@ -21,7 +19,7 @@ type GcdResult {
 	gcd Int
 	lcm Int
 }
- 
+
 fn compute(a Int, b Int) GcdResult {
 	GcdResult(a: a, b: b, gcd: gcd(a, b), lcm: lcm(a, b))
 }

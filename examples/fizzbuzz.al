@@ -1,35 +1,22 @@
+// FizzBuzz for 1 through 20: multiples of 3 print Fizz, multiples of 5 print
+// Buzz, multiples of both print FizzBuzz, everything else prints itself.
+
 fn fizzbuzz(n Int) String {
-	if n % 15 == 0 {
-		'FizzBuzz'
-	} else if n % 3 == 0 {
-		'Fizz'
-	} else if n % 5 == 0 {
-		'Buzz'
-	} else {
-		'${n}'
+	match (n % 3, n % 5) {
+		(0, 0) -> 'FizzBuzz'
+		(0, _) -> 'Fizz'
+		(_, 0) -> 'Buzz'
+		else -> '${n}'
 	}
 }
 
-// Show FizzBuzz for 1-20
-[
-	fizzbuzz(1),
-	fizzbuzz(2),
-	fizzbuzz(3),
-	fizzbuzz(4),
-	fizzbuzz(5),
-	fizzbuzz(6),
-	fizzbuzz(7),
-	fizzbuzz(8),
-	fizzbuzz(9),
-	fizzbuzz(10),
-	fizzbuzz(11),
-	fizzbuzz(12),
-	fizzbuzz(13),
-	fizzbuzz(14),
-	fizzbuzz(15),
-	fizzbuzz(16),
-	fizzbuzz(17),
-	fizzbuzz(18),
-	fizzbuzz(19),
-	fizzbuzz(20),
-]
+fn run(n Int, last Int) Nil {
+	if n > last {
+		Nil
+	} else {
+		println(fizzbuzz(n))
+		run(n + 1, last)
+	}
+}
+
+run(1, 20)

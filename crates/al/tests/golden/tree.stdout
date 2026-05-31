@@ -1,0 +1,6 @@
+input:  [5, 3, 8, 1, 9, 2, 7]
+sorted: [1, 2, 3, 5, 7, 8, 9]
+size:   7
+depth:  4
+contains 7: True
+contains 4: False

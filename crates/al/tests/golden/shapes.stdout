@@ -1,5 +1,4 @@
-[
-  ShapeInfo{ name: Circle r=10, area: 314, perimeter: 62 },
-  ShapeInfo{ name: Rectangle 5x8, area: 40, perimeter: 18 },
-  ShapeInfo{ name: Square 7, area: 49, perimeter: 28 }
-]
+Circle(1.5): area 7.07, perimeter 9.42
+Rect(4.0, 2.5): area 10.0, perimeter 13.0
+Triangle(3.0, 4.0): area 6.0, perimeter 12.0
+total area: 23.07

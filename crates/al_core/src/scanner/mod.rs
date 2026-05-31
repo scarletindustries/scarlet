@@ -578,25 +578,18 @@ mod tests {
 
         #[rustfmt::skip]
         let expected = vec![
-            // type Person { name String age Int }
-            KwType, Identifier, PuncOpenBrace,
-            Identifier, Identifier,
-            Identifier, Identifier,
-            PuncCloseBrace,
-            // fn greet(p Person) String { 'Hello, ${p.name}! You are ${p.age} years old.' }
-            KwFunction, Identifier, PuncOpenParen, Identifier, Identifier, PuncCloseParen, Identifier,
-            PuncOpenBrace,
-            InterpStringStart,
-            InterpStringPart, PuncOpenBrace, Identifier, PuncDot, Identifier, PuncCloseBrace,
-            InterpStringPart, PuncOpenBrace, Identifier, PuncDot, Identifier, PuncCloseBrace,
-            InterpStringPart, InterpStringEnd,
-            PuncCloseBrace,
-            // person = Person(name: 'Alice', age: 30)
-            Identifier, PuncEquals, Identifier, PuncOpenParen,
-            Identifier, PuncColon, LiteralString, PuncComma,
-            Identifier, PuncColon, LiteralNumber, PuncCloseParen,
-            // println(greet(person))
-            Identifier, PuncOpenParen, Identifier, PuncOpenParen, Identifier, PuncCloseParen, PuncCloseParen,
+            // println('hello, world')
+            Identifier, PuncOpenParen, LiteralString, PuncCloseParen,
+            // name = 'AL'
+            Identifier, PuncEquals, LiteralString,
+            // println('hello from ${name}')
+            Identifier, PuncOpenParen,
+            InterpStringStart, InterpStringPart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd,
+            PuncCloseParen,
+            // println('2 + 2 = ${2 + 2}')
+            Identifier, PuncOpenParen,
+            InterpStringStart, InterpStringPart, PuncOpenBrace, LiteralNumber, PuncPlus, LiteralNumber, PuncCloseBrace, InterpStringEnd,
+            PuncCloseParen,
             Eof,
         ];
 
@@ -614,31 +607,41 @@ mod tests {
         assert!(!kinds.contains(&Error));
 
         #[rustfmt::skip]
-        let expected_prefix = vec![
+        let expected = vec![
             // fn fizzbuzz(n Int) String {
             KwFunction, Identifier, PuncOpenParen, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
-            // if n % 15 == 0 { 'FizzBuzz' }
-            KwIf, Identifier, PuncMod, LiteralNumber, PuncEqualsComparator, LiteralNumber, PuncOpenBrace, LiteralString, PuncCloseBrace,
-            // else if n % 3 == 0 { 'Fizz' }
-            KwElse, KwIf, Identifier, PuncMod, LiteralNumber, PuncEqualsComparator, LiteralNumber, PuncOpenBrace, LiteralString, PuncCloseBrace,
-            // else if n % 5 == 0 { 'Buzz' }
-            KwElse, KwIf, Identifier, PuncMod, LiteralNumber, PuncEqualsComparator, LiteralNumber, PuncOpenBrace, LiteralString, PuncCloseBrace,
-            // else { '${n}' }
-            KwElse, PuncOpenBrace, InterpStringStart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd, PuncCloseBrace,
-            // }
-            PuncCloseBrace,
-            // [fizzbuzz(1), ...
-            PuncOpenBracket,
+            // match (n % 3, n % 5) {
+            KwMatch, PuncOpenParen, Identifier, PuncMod, LiteralNumber, PuncComma, Identifier, PuncMod, LiteralNumber, PuncCloseParen, PuncOpenBrace,
+            // (0, 0) -> 'FizzBuzz'
+            PuncOpenParen, LiteralNumber, PuncComma, LiteralNumber, PuncCloseParen, PuncArrow, LiteralString,
+            // (0, _) -> 'Fizz'
+            PuncOpenParen, LiteralNumber, PuncComma, Identifier, PuncCloseParen, PuncArrow, LiteralString,
+            // (_, 0) -> 'Buzz'
+            PuncOpenParen, Identifier, PuncComma, LiteralNumber, PuncCloseParen, PuncArrow, LiteralString,
+            // else -> '${n}'
+            KwElse, PuncArrow, InterpStringStart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd,
+            // } }
+            PuncCloseBrace, PuncCloseBrace,
+            // fn run(n Int, last Int) Nil {
+            KwFunction, Identifier, PuncOpenParen, Identifier, Identifier, PuncComma, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
+            // if n > last {
+            KwIf, Identifier, PuncGt, Identifier, PuncOpenBrace,
+            // Nil
+            Identifier,
+            // } else {
+            PuncCloseBrace, KwElse, PuncOpenBrace,
+            // println(fizzbuzz(n))
+            Identifier, PuncOpenParen, Identifier, PuncOpenParen, Identifier, PuncCloseParen, PuncCloseParen,
+            // run(n + 1, last)
+            Identifier, PuncOpenParen, Identifier, PuncPlus, LiteralNumber, PuncComma, Identifier, PuncCloseParen,
+            // } }
+            PuncCloseBrace, PuncCloseBrace,
+            // run(1, 20)
+            Identifier, PuncOpenParen, LiteralNumber, PuncComma, LiteralNumber, PuncCloseParen,
+            Eof,
         ];
 
-        assert_eq!(&kinds[..expected_prefix.len()], &expected_prefix[..]);
-        assert_eq!(*kinds.last().unwrap(), Eof);
-
-        // The array literal: [ + 20*(ident ( num ) ,?) + ]
-        // 20 calls = 20*4 tokens + 19 commas + open/close bracket = 101
-        let array_part = &kinds[expected_prefix.len() - 1..kinds.len() - 1];
-        assert_eq!(array_part[0], PuncOpenBracket);
-        assert_eq!(*array_part.last().unwrap(), PuncCloseBracket);
+        assert_eq!(kinds, expected);
     }
 
     #[test]

@@ -1,4 +1,5 @@
-// Grade calculator with letter grades
+// Grade calculator: turns numeric scores into letter grades and grade points,
+// then prints a report line for each student.
 
 fn score_to_grade(score Int) String {
 	if score >= 90 {
@@ -50,4 +51,20 @@ fn generate_report(name String, score Int) StudentReport {
 	)
 }
 
-[generate_report('Alice', 95), generate_report('Bob', 72), generate_report('Charlie', 55)]
+fn report_line(r StudentReport) String {
+	status = if r.passing { 'pass' } else { 'fail' }
+	'${r.name}: score ${r.score}, grade ${r.grade}, gpa ${r.gpa}, ${status}'
+}
+
+// One report line per student, via recursion over (name, score) pairs.
+fn print_reports(students Array((String, Int))) Nil {
+	match students {
+		[] -> Nil
+		[(name, score), ..rest] -> {
+			println(report_line(generate_report(name, score)))
+			print_reports(rest)
+		}
+	}
+}
+
+print_reports([('Alice', 95), ('Dana', 83), ('Bob', 72), ('Eve', 61), ('Charlie', 55)])

@@ -1,7 +1,7 @@
 // Mutually-recursive even/odd: every call to the *other* function sits in tail
 // position, so the cross-function tail-call reuses the current frame instead of
 // pushing a new one. The stack stays a constant 2 frames deep (the top-level
-// frame plus the one live ev/od frame) however deep the recursion goes — a
+// frame plus the one live ev/od frame) however deep the recursion goes. A
 // million mutual hops complete without ever growing the stack.
 import al/internal
 

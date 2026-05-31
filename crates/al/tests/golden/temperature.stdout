@@ -1,6 +1,6 @@
-[
-  Temperature{ celsius: 0, fahrenheit: 32, kelvin: 273 },
-  Temperature{ celsius: 20, fahrenheit: 68, kelvin: 293 },
-  Temperature{ celsius: 37, fahrenheit: 98, kelvin: 310 },
-  Temperature{ celsius: 100, fahrenheit: 212, kelvin: 373 }
-]
+0C = 32F = 273K
+20C = 68F = 293K
+37C = 98F = 310K
+100C = 212F = 373K
+212F is 100C
+310K is 37C

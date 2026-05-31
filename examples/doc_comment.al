@@ -1,9 +1,12 @@
+// A tour of AL comment styles: doc comments on functions, constants, types and
+// variants, next to plain block comments that are not documentation.
+
 /** This is a doc comment */
 fn documented() {
 	42
 }
 
-_result = documented()
+println('documented() returns ${documented()}')
 
 /* This is a regular block comment */
 fn undocumented() {
@@ -27,7 +30,7 @@ type User {
 
 user = User(name: 'Alice', age: 30)
 
-_name = user.name
+println('${user.name} is ${user.age} years old')
 
 /** Represents the status of an operation */
 type Status {
@@ -39,7 +42,7 @@ type Status {
 	Failed
 }
 
-_status = Success
+println('status: ${Success}')
 
 /** This is a very long doc comment that spans a single line but contains a lot of text to test how the formatter handles long documentation strings that might need to be wrapped or preserved */
 fn long_doc_single_line() {

@@ -1,0 +1,6 @@
+(1 + (2 * 3)) = 7
+((1 + 2) * 3) = 9
+(12 + (3 * (4 - 1))) = 21
+((100 / 4) - 5) = 20
+(7 / (3 - 3)) = division by zero
+cannot parse '( 8 + 2': missing closing )

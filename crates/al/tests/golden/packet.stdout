@@ -1,0 +1,19 @@
+send Data(hi from al)
+  wire:    <<17, 0, 10, 104, 105, 32, 102, 114, 111, 109, 32, 97, 108>>
+  header:  version 1, kind 1, 10 payload bytes
+  decoded: Data(hi from al)
+send Ping
+  wire:    <<16, 0, 0>>
+  header:  version 1, kind 0, 0 payload bytes
+  decoded: Ping
+send Bye
+  wire:    <<18, 0, 0>>
+  header:  version 1, kind 2, 0 payload bytes
+  decoded: Bye
+
+receive a packet with a lying length field
+  header:  version 1, kind 1, 99 payload bytes
+  refused: truncated or corrupt packet
+receive a version 3 packet
+  header:  version 3, kind 0, 0 payload bytes
+  refused: unsupported version 3
