@@ -34,11 +34,31 @@ fn project() -> Project {
     p
 }
 
-fn checked(p: &Project) -> IncrementalSession {
+/// Fresh session checking `entry` against project `p`, asserting success.
+fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
     let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(ENTRY), Some(&p.dir));
+    let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success, "compile failed: {:?}", r.diagnostics);
     s
+}
+
+fn checked(p: &Project) -> IncrementalSession {
+    checked_with(p, ENTRY)
+}
+
+/// Unused-entity diagnostics for the entry module: asserts every one is a
+/// Hint and returns their messages.
+fn unused_msgs(s: &IncrementalSession) -> Vec<String> {
+    let hints = s
+        .reference_graph()
+        .unused_diagnostics_for(&module::main_module());
+    assert!(
+        hints
+            .iter()
+            .all(|d| d.severity == al::diagnostic::Severity::Hint),
+        "unused diagnostics must be Hints: {hints:?}"
+    );
+    hints.into_iter().map(|d| d.message).collect()
 }
 
 #[test]
@@ -181,9 +201,7 @@ fn stdlib_import_path_is_tracked() {
     let p = Project::new("stdlib");
     let entry = "import al/list\nz = list.length([1, 2, 3])\nprintln(z)\n";
     p.write("a.al", entry);
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let s = checked_with(&p, entry);
 
     let main = s.document_symbols("main");
     let alias = main
@@ -199,7 +217,7 @@ fn stdlib_import_path_is_tracked() {
 
     // Cross-module goto-def into the stdlib: the cursor on `list.length`
     // resolves to the real `length` declaration in `al/list` (`src/std/al/
-    // list.al`, `pub fn length` — 0-based line 30, the identifier span).
+    // list.al`, `pub fn length` — 0-based line 40, the identifier span).
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
@@ -211,7 +229,7 @@ fn stdlib_import_path_is_tracked() {
     );
     assert_eq!(
         (span.start_line, span.start_column, span.end_column),
-        (30, 7, 13),
+        (40, 7, 13),
         "must land on the real `length` declaration span, got {span:?}"
     );
     // The synthesised stdlib definition and the entry's qualified occurrence
@@ -235,15 +253,10 @@ fn stdlib_import_path_is_tracked() {
     );
 
     // A *used* stdlib import is not reported unused.
-    let used_hints = s
-        .reference_graph()
-        .unused_diagnostics_for(&module::main_module());
+    let used = unused_msgs(&s);
     assert!(
-        !used_hints
-            .iter()
-            .any(|d| d.message == "unused import `list`"),
-        "a used stdlib import was wrongly reported unused: {:?}",
-        used_hints.iter().map(|d| &d.message).collect::<Vec<_>>()
+        !used.iter().any(|m| m == "unused import `list`"),
+        "a used stdlib import was wrongly reported unused: {used:?}"
     );
 
     // The unused-import reachability rule reaches stdlib imports: an import
@@ -251,22 +264,11 @@ fn stdlib_import_path_is_tracked() {
     let p2 = Project::new("stdlib_unused");
     let unused = "import al/list\nprintln(1)\n";
     p2.write("a.al", unused);
-    let mut s2 = IncrementalSession::new(al::stdlib());
-    let r2 = s2.check(&parse(unused), Some(&p2.dir));
-    assert!(r2.success, "compile failed: {:?}", r2.diagnostics);
-    let hints = s2
-        .reference_graph()
-        .unused_diagnostics_for(&module::main_module());
+    let s2 = checked_with(&p2, unused);
+    let hints = unused_msgs(&s2);
     assert!(
-        hints
-            .iter()
-            .all(|d| d.severity == al::diagnostic::Severity::Hint),
-        "unused diagnostics must be Hints"
-    );
-    assert!(
-        hints.iter().any(|d| d.message == "unused import `list`"),
-        "stdlib import not run through the unused-import rule: {:?}",
-        hints.iter().map(|d| &d.message).collect::<Vec<_>>()
+        hints.iter().any(|m| m == "unused import `list`"),
+        "stdlib import not run through the unused-import rule: {hints:?}"
     );
 }
 
@@ -278,27 +280,15 @@ fn unused_import_and_dead_private_def_hints() {
     let entry = "import ./c\nfn deadpriv() Int { 0 }\nprintln(1)\n";
     p.write("a.al", entry);
 
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let s = checked_with(&p, entry);
+    let msgs = unused_msgs(&s);
 
-    let hints = s
-        .reference_graph()
-        .unused_diagnostics_for(&module::main_module());
-    let msgs: Vec<&str> = hints.iter().map(|d| d.message.as_str()).collect();
-
-    assert!(
-        hints
-            .iter()
-            .all(|d| d.severity == al::diagnostic::Severity::Hint),
-        "unused diagnostics must be Hints: {msgs:?}"
-    );
     assert!(
         msgs.iter().any(|m| m.contains("unused import `c`")),
         "missing unused-import hint: {msgs:?}"
     );
     assert!(
-        msgs.contains(&"unused function `deadpriv`"),
+        msgs.iter().any(|m| m == "unused function `deadpriv`"),
         "missing dead private-def hint: {msgs:?}"
     );
     // `println` is a used builtin and must never be reported.
@@ -311,11 +301,9 @@ fn unused_import_and_dead_private_def_hints() {
 #[test]
 fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     let p = project();
-    let mut s = IncrementalSession::new(al::stdlib());
 
     // --- initial: b.bridge resolves from the entry and B declares it.
-    let r = s.check(&parse(ENTRY), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
+    let mut s = checked(&p);
     let (bl, bc) = cursor(ENTRY, "bridge", 1, 1);
     let (m0, _) = s.definition("main", bl, bc).expect("bridge resolves");
     assert_eq!(m0.last().map(String::as_str), Some("b"));
@@ -385,9 +373,7 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
     let entry =
         "fn calc(base Int) Int {\n\tscaled = base * 2\n\tscaled + 1\n}\nx = calc(10)\nprintln(x)\n";
     p.write("a.al", entry);
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let s = checked_with(&p, entry);
 
     // documentSymbol lists the top-level fn …
     let doc = s.document_symbols("main");
@@ -457,13 +443,6 @@ fn alias_project() -> Project {
     p
 }
 
-fn alias_checked(p: &Project) -> IncrementalSession {
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(ALIAS_MAIN), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
-    s
-}
-
 /// The exact source text covered by a single-line identifier `span`.
 fn span_text(src: &str, sp: &Span) -> String {
     let line = src.lines().nth(sp.start_line as usize).unwrap_or("");
@@ -481,7 +460,7 @@ fn rename_imported_symbol_does_not_capture_local_alias() {
     // `alias` binder or any `alias` use would yield `{renamed as renamed}` and
     // `renamed()` — name capture that no longer compiles.
     let p = alias_project();
-    let s = alias_checked(&p);
+    let s = checked_with(&p, ALIAS_MAIN);
 
     let (l, c) = cursor(ALIAS_MAIN, "original", 1, 1);
     let (defid, _) = s
@@ -519,7 +498,7 @@ fn rename_local_alias_does_not_touch_imported_symbol() {
     // of it) must rewrite only `alias` occurrences, all in the entry module —
     // never the imported `original` or its declaration in lib.
     let p = alias_project();
-    let s = alias_checked(&p);
+    let s = checked_with(&p, ALIAS_MAIN);
 
     // 2nd occurrence of `alias` is the first use (`x = alias()`).
     let (l, c) = cursor(ALIAS_MAIN, "alias", 2, 1);
@@ -574,21 +553,15 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let entry = "import ./c\nimport ./d\nx = d.helper()\nprintln(x)\n";
     p.write("a.al", entry);
 
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
-
-    let hints = s
-        .reference_graph()
-        .unused_diagnostics_for(&module::main_module());
-    let msgs: Vec<&str> = hints.iter().map(|d| d.message.as_str()).collect();
+    let s = checked_with(&p, entry);
+    let msgs = unused_msgs(&s);
 
     assert!(
-        msgs.contains(&"unused import `c`"),
+        msgs.iter().any(|m| m == "unused import `c`"),
         "the unused `./c` import must be flagged even though `./d` is used: {msgs:?}"
     );
     assert!(
-        !msgs.contains(&"unused import `d`"),
+        !msgs.iter().any(|m| m == "unused import `d`"),
         "the used `./d` import must not be flagged: {msgs:?}"
     );
 }
@@ -707,9 +680,7 @@ fn assert_nav(
 fn navigation_on_constructor_type_constant_and_field() {
     let p = Project::new("nav_entities");
     p.write("a.al", NAV_SRC);
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(NAV_SRC), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let s = checked_with(&p, NAV_SRC);
 
     // Constructor at a value position (`chosen = Red`, the 2nd `Red`): decl is
     // the variant in `type Color { Red ... }`.
@@ -747,14 +718,8 @@ println(r)\n";
 fn session_checks_http_h1_program_clean() {
     let p = Project::new("http_session");
     p.write("a.al", HTTP_ENTRY);
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
-    assert!(
-        r.success,
-        "session check of an al/http/h1 program must pass (parse_request : \
-         fn(Binary, Int) Parsed from the embedded stdlib), got: {:?}",
-        r.diagnostics
-    );
+    // parse_request : fn(Binary, Int) Parsed comes from the embedded stdlib.
+    checked_with(&p, HTTP_ENTRY);
 }
 
 // Same session, two checks: a trivial entry first, then the al/http/h1
@@ -764,11 +729,9 @@ fn session_checks_http_h1_program_clean() {
 fn session_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
     p.write("a.al", HTTP_ENTRY);
-    let mut s = IncrementalSession::new(al::stdlib());
 
     // First check: a trivial program (no http imports at all).
-    let r1 = s.check(&parse("println(1)\n"), Some(&p.dir));
-    assert!(r1.success, "trivial check failed: {:?}", r1.diagnostics);
+    let mut s = checked_with(&p, "println(1)\n");
 
     // Second check: the http program. This is the LSP's reality — one shared
     // session checks many different entry files in sequence.
@@ -793,11 +756,9 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
     let p = Project::new("http_session_order");
     p.write("a.al", HTTP_HELLO_ENTRY);
     p.write("b.al", HTTP_ENTRY);
-    let mut s = IncrementalSession::new(al::stdlib());
 
     // First check: a program that imports al/http (hydrates http + headers).
-    let r1 = s.check(&parse(HTTP_HELLO_ENTRY), Some(&p.dir));
-    assert!(r1.success, "http_hello check failed: {:?}", r1.diagnostics);
+    let mut s = checked_with(&p, HTTP_HELLO_ENTRY);
 
     // Second check: a program that imports al/http/h1 directly.
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
@@ -829,11 +790,9 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
     let p = Project::new("type_shadow");
     p.write("a.al", SHADOWING_ENTRY);
     p.write("b.al", HTTP_ENTRY);
-    let mut s = IncrementalSession::new(al::stdlib());
 
     // Check 1: the shadowing entry itself is fine.
-    let r1 = s.check(&parse(SHADOWING_ENTRY), Some(&p.dir));
-    assert!(r1.success, "shadowing entry failed: {:?}", r1.diagnostics);
+    let mut s = checked_with(&p, SHADOWING_ENTRY);
 
     // Check 2: a different entry that uses the REAL al/http/h1.Parsed must see
     // the enum (3 variants, exhaustive match), not the dead alias.

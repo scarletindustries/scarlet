@@ -562,19 +562,23 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn test_hello_al() {
-        let src = include_str!("../../../../examples/hello.al");
-        let mut s = new_scanner(src.to_string());
-        let tokens = s.scan_all();
-        let kinds: Vec<Kind> = tokens.iter().map(|t| t.kind).collect();
-
+    /// Like `kinds`, but asserts the scan produced no diagnostics or Error tokens.
+    fn kinds_clean(input: &str) -> Vec<Kind> {
+        let mut s = new_scanner(input.to_string());
+        let kinds: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
         assert!(
             s.get_diagnostics().is_empty(),
             "scanner produced diagnostics: {:?}",
             s.get_diagnostics()
         );
         assert!(!kinds.contains(&Error), "found error token");
+        kinds
+    }
+
+    #[test]
+    fn test_hello_al() {
+        let src = include_str!("../../../../examples/hello.al");
+        let kinds = kinds_clean(src);
 
         #[rustfmt::skip]
         let expected = vec![
@@ -599,12 +603,7 @@ mod tests {
     #[test]
     fn test_fizzbuzz_al() {
         let src = include_str!("../../../../examples/fizzbuzz.al");
-        let mut s = new_scanner(src.to_string());
-        let tokens = s.scan_all();
-        let kinds: Vec<Kind> = tokens.iter().map(|t| t.kind).collect();
-
-        assert!(s.get_diagnostics().is_empty());
-        assert!(!kinds.contains(&Error));
+        let kinds = kinds_clean(src);
 
         #[rustfmt::skip]
         let expected = vec![

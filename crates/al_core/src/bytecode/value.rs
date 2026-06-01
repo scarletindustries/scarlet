@@ -478,13 +478,6 @@ impl BinaryValue {
         out
     }
 
-    /// An owned, bit-offset-0 copy of the logical bits. Alias for
-    /// [`to_aligned_vec`](Self::to_aligned_vec).
-    #[inline]
-    pub fn materialize(&self) -> Vec<u8> {
-        self.to_aligned_vec()
-    }
-
     /// Whether this value's logical bits, starting at bit `at`, begin with all
     /// of `prefix`'s logical bits. Out of range (`at + prefix.bit_len >
     /// bit_len`) is `false`, never an error. The all-byte-aligned case — every

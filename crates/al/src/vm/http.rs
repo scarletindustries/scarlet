@@ -746,88 +746,61 @@ mod tests {
     fn framing_decisions() {
         let t = templates();
         let base = "GET / HTTP/1.1\r\n";
-        // No body headers at all.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Host: h\r\n\r\n")),
-            ("NoBody".into(), None)
-        );
-        // Clean Content-Length.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Content-Length: 42\r\n\r\n")),
-            ("Length".into(), Some(42))
-        );
-        // A lone zero is fine.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Content-Length: 0\r\n\r\n")),
-            ("Length".into(), Some(0))
-        );
-        // Leading-zero smuggling vector.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Content-Length: 007\r\n\r\n")),
-            ("Invalid".into(), Some(400))
-        );
-        // Non-numeric / negative / overflow.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Content-Length: abc\r\n\r\n")),
-            ("Invalid".into(), Some(400))
-        );
-        assert_eq!(
-            framing_of(&t, &format!("{base}Content-Length: -1\r\n\r\n")),
-            ("Invalid".into(), Some(400))
-        );
-        assert_eq!(
-            framing_of(
-                &t,
-                &format!("{base}Content-Length: 99999999999999999999\r\n\r\n")
+        // (headers, expected variant, expected payload)
+        let cases: &[(&str, &str, Option<i64>)] = &[
+            // No body headers at all.
+            ("Host: h\r\n\r\n", "NoBody", None),
+            // Clean Content-Length.
+            ("Content-Length: 42\r\n\r\n", "Length", Some(42)),
+            // A lone zero is fine.
+            ("Content-Length: 0\r\n\r\n", "Length", Some(0)),
+            // Leading-zero smuggling vector.
+            ("Content-Length: 007\r\n\r\n", "Invalid", Some(400)),
+            // Non-numeric / negative / overflow.
+            ("Content-Length: abc\r\n\r\n", "Invalid", Some(400)),
+            ("Content-Length: -1\r\n\r\n", "Invalid", Some(400)),
+            (
+                "Content-Length: 99999999999999999999\r\n\r\n",
+                "Invalid",
+                Some(400),
             ),
-            ("Invalid".into(), Some(400))
-        );
-        // Duplicate Content-Length.
-        assert_eq!(
-            framing_of(
-                &t,
-                &format!("{base}Content-Length: 5\r\nContent-Length: 5\r\n\r\n")
+            // Duplicate Content-Length.
+            (
+                "Content-Length: 5\r\nContent-Length: 5\r\n\r\n",
+                "Invalid",
+                Some(400),
             ),
-            ("Invalid".into(), Some(400))
-        );
-        // Transfer-Encoding: chunked — the one decodable transfer coding.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Transfer-Encoding: chunked\r\n\r\n")),
-            ("Chunked".into(), None)
-        );
-        // Case-insensitive coding token.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Transfer-Encoding: CHUNKED\r\n\r\n")),
-            ("Chunked".into(), None)
-        );
-        // Any other coding (or a coding list) is unimplemented, never ignored.
-        assert_eq!(
-            framing_of(&t, &format!("{base}Transfer-Encoding: gzip\r\n\r\n")),
-            ("Invalid".into(), Some(501))
-        );
-        assert_eq!(
-            framing_of(
-                &t,
-                &format!("{base}Transfer-Encoding: gzip, chunked\r\n\r\n")
+            // Transfer-Encoding: chunked — the one decodable transfer coding.
+            ("Transfer-Encoding: chunked\r\n\r\n", "Chunked", None),
+            // Case-insensitive coding token.
+            ("Transfer-Encoding: CHUNKED\r\n\r\n", "Chunked", None),
+            // Any other coding (or a coding list) is unimplemented, never ignored.
+            ("Transfer-Encoding: gzip\r\n\r\n", "Invalid", Some(501)),
+            (
+                "Transfer-Encoding: gzip, chunked\r\n\r\n",
+                "Invalid",
+                Some(501),
             ),
-            ("Invalid".into(), Some(501))
-        );
-        // Repeated TE fields: framing is ambiguous → unimplemented.
-        assert_eq!(
-            framing_of(
-                &t,
-                &format!("{base}Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n")
+            // Repeated TE fields: framing is ambiguous → unimplemented.
+            (
+                "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+                "Invalid",
+                Some(501),
             ),
-            ("Invalid".into(), Some(501))
-        );
-        // TE + CL conflict: the classic smuggling vector.
-        assert_eq!(
-            framing_of(
-                &t,
-                &format!("{base}Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n")
+            // TE + CL conflict: the classic smuggling vector.
+            (
+                "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n",
+                "Invalid",
+                Some(400),
             ),
-            ("Invalid".into(), Some(400))
-        );
+        ];
+        for (headers, variant, arg) in cases {
+            assert_eq!(
+                framing_of(&t, &format!("{base}{headers}")),
+                (variant.to_string(), *arg),
+                "for {headers:?}"
+            );
+        }
     }
 
     // --- Chunked transfer-encoding decoder ---------------------------------

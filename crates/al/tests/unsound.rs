@@ -1,5 +1,5 @@
 mod common;
-use common::{check_rejects, run_al, run_outputs, write_temp};
+use common::{check_rejects, check_rejects_cleanly, run_al, run_outputs, write_temp};
 
 // ---------------------------------------------------------------------------
 // U1: `x = x` self-reference infers ⊥, generalizes to ∀A.A, runtime slot is None.
@@ -7,7 +7,6 @@ use common::{check_rejects, run_al, run_outputs, write_temp};
 #[test]
 fn u1_self_reference_is_rejected() {
     check_rejects(
-        "u1",
         "x = x\n\
          n Int = x\n\
          println(n + 1)\n",
@@ -21,7 +20,6 @@ fn u1_self_reference_is_rejected() {
 #[test]
 fn u2_if_no_else_is_rejected() {
     check_rejects(
-        "u2",
         "fn smuggle() Option(Int) { if True { 'hello' } }\n\
          n = smuggle() or 0\n\
          println(n + 1)\n",
@@ -35,7 +33,6 @@ fn u2_if_no_else_is_rejected() {
 #[test]
 fn u3_err_constructor_typechecks() {
     run_outputs(
-        "u3",
         "type E { E(msg String) }\n\
          fn f() Result(Int, E) {\n\
          \tErr(E(msg: 'boom'))\n\
@@ -53,7 +50,6 @@ fn u3_err_constructor_typechecks() {
 #[test]
 fn u4_block_scope_preserves_outer_slot() {
     run_outputs(
-        "u4",
         "x = 1\n\
          r = {\n\
          \tx = 'hi'\n\
@@ -72,7 +68,6 @@ fn u4_block_scope_preserves_outer_slot() {
 #[test]
 fn u5_generic_type_missing_args_is_rejected() {
     check_rejects(
-        "u5",
         "type Box(t) { Box(value t) }\n\
          type Holder { Holder(box Box) }\n\
          h = Holder(box: Box(value: 'hello'))\n\
@@ -87,7 +82,6 @@ fn u5_generic_type_missing_args_is_rejected() {
 #[test]
 fn u6_bare_variant_on_inferred_subject_dispatches() {
     run_outputs(
-        "u6",
         "type E { A B }\n\
          fn f(e) {\n\
          \tmatch e {\n\
@@ -107,7 +101,6 @@ fn u6_bare_variant_on_inferred_subject_dispatches() {
 #[test]
 fn u7_or_pattern_disjoint_bindings_is_rejected() {
     check_rejects(
-        "u7",
         "fn f(x Int) Int {\n\
          \tmatch x {\n\
          \t\t1 | y -> y + 100\n\
@@ -125,7 +118,6 @@ fn u7_or_pattern_disjoint_bindings_is_rejected() {
 #[test]
 fn u8_range_pattern_bounds_must_be_int() {
     check_rejects(
-        "u8",
         "r = match 5 {\n\
          \ttrue..'z' -> 'huh'\n\
          \t_ -> 'ok'\n\
@@ -141,7 +133,6 @@ fn u8_range_pattern_bounds_must_be_int() {
 #[test]
 fn u9_array_pattern_non_tail_spread_is_rejected() {
     check_rejects(
-        "u9",
         "xs = [1, 2, 3]\n\
          r = match xs {\n\
          \t[a, ..mid, z] -> a + z\n\
@@ -159,7 +150,6 @@ fn u9_array_pattern_non_tail_spread_is_rejected() {
 #[test]
 fn u10_spread_prefix_exhaustiveness_is_rejected() {
     check_rejects(
-        "u10",
         "fn f(xs Array(Bool)) Int {\n\
          \tmatch xs {\n\
          \t\t[True, _, ..rest] -> 1\n\
@@ -178,7 +168,6 @@ fn u10_spread_prefix_exhaustiveness_is_rejected() {
 #[test]
 fn u12_duplicate_pattern_binding_is_rejected() {
     check_rejects(
-        "u12",
         "r = match (1, 2) {\n\
          \t(x, x) -> x\n\
          }\n\
@@ -193,7 +182,6 @@ fn u12_duplicate_pattern_binding_is_rejected() {
 #[test]
 fn u13_socket_literal_is_rejected() {
     check_rejects(
-        "u13",
         "s = Socket\n\
          println(s)\n",
     );
@@ -206,7 +194,6 @@ fn u13_socket_literal_is_rejected() {
 #[test]
 fn u14_generic_enum_exhaustiveness_substitutes_payload() {
     run_outputs(
-        "u14",
         "type Maybe(t) { Just(value t) Nothing }\n\
          fn f(m Maybe(Bool)) Int {\n\
          \tmatch m {\n\
@@ -229,7 +216,6 @@ fn u14_generic_enum_exhaustiveness_substitutes_payload() {
 #[test]
 fn u15_tuple_index_then_field_access() {
     run_outputs(
-        "u15",
         "type P { P(name String) }\n\
          t = (P(name: 'hi'), 5)\n\
          println(t.0.name)\n",
@@ -243,29 +229,7 @@ fn u15_tuple_index_then_field_access() {
 // clean "already defined" rejection, never a panic.
 #[test]
 fn u16_duplicate_fn_is_rejected_without_panic() {
-    let source = "fn a(x) {x}\nfn a() {}\n";
-    let path = write_temp("u16", source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-
-    assert!(
-        !out.success,
-        "expected duplicate `fn a` to be rejected:\n{source}\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("panicked") && !stdout.contains("panicked"),
-        "compiler panicked on duplicate `fn a` instead of rejecting cleanly:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        stdout.contains("already defined") || stderr.contains("already defined"),
-        "expected an 'already defined' diagnostic:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
+    check_rejects_cleanly("fn a(x) {x}\nfn a() {}\n", "already defined");
 }
 
 // U17: a bare `@vm` (no op arg) used to panic an `unreachable!()` in analysis
@@ -275,29 +239,7 @@ fn u16_duplicate_fn_is_rejected_without_panic() {
 // unrepresentable: it must be a clean parse error, never a panic.
 #[test]
 fn u17_bare_vm_attr_is_rejected_without_panic() {
-    let source = "@vm\nfn foo() Int\n";
-    let path = write_temp("u17", source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-
-    assert!(
-        !out.success,
-        "expected bare `@vm` to be rejected:\n{source}\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("panicked") && !stdout.contains("panicked"),
-        "compiler panicked on bare `@vm` instead of rejecting cleanly:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        stdout.contains("@vm requires an op") || stderr.contains("@vm requires an op"),
-        "expected an '@vm requires an op' diagnostic:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
+    check_rejects_cleanly("@vm\nfn foo() Int\n", "@vm requires an op");
 }
 
 // U18: the type-decl twin of U16. Duplicate `type` declarations used to desync
@@ -307,28 +249,9 @@ fn u17_bare_vm_attr_is_rejected_without_panic() {
 // + the Pass-0 dedup make it a clean rejection, never a panic/miscompile.
 #[test]
 fn u18_duplicate_type_is_rejected_without_panic() {
-    let source = "type T = Int\ntype T = String\nx = 1\nprintln(x)\n";
-    let path = write_temp("u18", source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-
-    assert!(
-        !out.success,
-        "expected duplicate `type T` to be rejected:\n{source}\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("panicked") && !stdout.contains("panicked"),
-        "compiler panicked on duplicate `type T` instead of rejecting cleanly:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        stdout.contains("already defined") || stderr.contains("already defined"),
-        "expected an 'already defined' diagnostic:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    check_rejects_cleanly(
+        "type T = Int\ntype T = String\nx = 1\nprintln(x)\n",
+        "already defined",
     );
 }
 
@@ -344,7 +267,7 @@ fn u19_deep_else_if_chain_is_rejected_without_overflow() {
     }
     source.push_str(" else { 0 }\nprintln(x)\n");
 
-    let path = write_temp("u19", &source);
+    let path = write_temp(&source);
     let out = run_al("check", &path);
     let _ = std::fs::remove_file(&path);
 
@@ -376,46 +299,39 @@ fn u19_deep_else_if_chain_is_rejected_without_overflow() {
 #[test]
 fn u20_arithmetic_is_total_vm_never_exits() {
     let exact = [
-        ("u20_div0", "println(1 / 0)\n", "0\n"),
-        ("u20_mod0", "println(5 % 0)\n", "5\n"),
-        ("u20_fdiv0", "println(1.0 / 0.0)\n", "0.0\n"),
-        ("u20_fnan", "println(0.0 / 0.0)\n", "0.0\n"),
+        ("println(1 / 0)\n", "0\n"),
+        ("println(5 % 0)\n", "5\n"),
+        ("println(1.0 / 0.0)\n", "0.0\n"),
+        ("println(0.0 / 0.0)\n", "0.0\n"),
         // Float `%` is total like int `%`: a normal remainder takes the sign of
         // the dividend, and `x % 0.0 = x`. (Regression: float modulo used to
         // type-check but crash the VM with "Unknown binary op".)
-        ("u20_fmod", "println(7.5 % 2.0)\n", "1.5\n"),
-        ("u20_fmod0", "println(7.5 % 0.0)\n", "7.5\n"),
-        ("u20_fmod_neg", "println({0.0 - 7.5} % 2.0)\n", "-1.5\n"),
+        ("println(7.5 % 2.0)\n", "1.5\n"),
+        ("println(7.5 % 0.0)\n", "7.5\n"),
+        ("println({0.0 - 7.5} % 2.0)\n", "-1.5\n"),
         // Integer overflow wraps two's-complement (defined), never traps:
         // i64::MAX + 1 == i64::MIN, i64::MAX * 2 == -2.
         (
-            "u20_add_overflow",
             "println(9223372036854775807 + 1)\n",
             "-9223372036854775808\n",
         ),
-        (
-            "u20_mul_overflow",
-            "println(9223372036854775807 * 2)\n",
-            "-2\n",
-        ),
+        ("println(9223372036854775807 * 2)\n", "-2\n"),
         // Signed division truncates toward zero; the remainder takes the sign
         // of the dividend (Rust `wrapping_div`/`wrapping_rem`). Grouping is
         // `{expr}`, so `{0 - 7}` is the negative dividend.
-        ("u20_neg_div", "println({0 - 7} / 2)\n", "-3\n"),
-        ("u20_neg_mod", "println({0 - 7} % 2)\n", "-1\n"),
-        ("u20_neg_mod_divisor", "println(7 % {0 - 2})\n", "1\n"),
+        ("println({0 - 7} / 2)\n", "-3\n"),
+        ("println({0 - 7} % 2)\n", "-1\n"),
+        ("println(7 % {0 - 2})\n", "1\n"),
         // i64::MIN has no positive counterpart: both unary negation and
         // `int.abs` of it wrap back to itself. The i64::MIN literal is
         // unrepresentable (it exceeds the lexer's positive-magnitude range),
         // so reach it via the wrapped `MAX + 1`.
         (
-            "u20_neg_min",
             "m = 9223372036854775807 + 1\n\
              println(0 - m)\n",
             "-9223372036854775808\n",
         ),
         (
-            "u20_abs_min",
             "import al/int\n\
              m = 9223372036854775807 + 1\n\
              println(int.abs(m))\n",
@@ -425,52 +341,21 @@ fn u20_arithmetic_is_total_vm_never_exits() {
         // Inf/NaN. e-notation does not lex, so reach Inf by squaring: 10^4096
         // overflows f64, becomes 0.0, and every later square stays 0.0.
         (
-            "u20_float_overflow",
             "fn sq(x Float, n Int) Float { if n == 0 { x } else { sq(x * x, n - 1) } }\n\
              println(sq(10.0, 12))\n",
             "0.0\n",
         ),
     ];
-    for (tag, src, want) in exact {
-        let path = write_temp(tag, src);
-        let out = run_al("run", &path);
-        let _ = std::fs::remove_file(&path);
-
-        let stdout = &out.stdout;
-        let stderr = &out.stderr;
-        let code = out.code;
-
-        assert!(
-            out.success,
-            "{tag}: VM exited early ({code:?}) — totality violated:\n{src}\n\
-             --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-        );
-        assert_eq!(
-            out.stdout, want,
-            "{tag}: wrong total value:\n{src}\n--- want ---\n{want}--- got ---\n{stdout}"
-        );
+    for (src, want) in exact {
+        run_outputs(src, want);
     }
 
     // A real recursive computation that overflows mid-stream still completes
     // with the EXACT two's-complement wrapped product: 25! reduced mod 2^64
     // and reinterpreted as a signed i64 is 7034535277573963776.
-    let path = write_temp(
-        "u20_overflow",
+    run_outputs(
         "fn f(n Int) Int { if n == 0 { 1 } else { n * f(n - 1) } }\nprintln(f(25))\n",
-    );
-    let out = run_al("run", &path);
-    let _ = std::fs::remove_file(&path);
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-    assert!(
-        out.success,
-        "u20_overflow: VM exited early on overflow — totality violated:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert_eq!(
-        out.stdout, "7034535277573963776\n",
-        "u20_overflow: wrong wrapped value for 25!:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        "7034535277573963776\n",
     );
 }
 
@@ -489,7 +374,6 @@ fn u20_arithmetic_is_total_vm_never_exits() {
 #[test]
 fn u20b_generic_polymorphic_numeric_ops_are_total() {
     run_outputs(
-        "u20b_generic_poly",
         "fn subtract(a, b) { a - b }\n\
          fn multiply(a, b) { a * b }\n\
          fn divide(a, b) { a / b }\n\
@@ -548,28 +432,16 @@ fn u21_exhaustiveness_respects_field_labels() {
     // (a=True, b=False), so the match is genuinely non-exhaustive. The old
     // source-order lowering read arm 1 as (a=True, b=_), making the matrix
     // look complete and letting `f(Pair(a: True, b: False))` return Nil.
-    let unsound = "type Pair { a Bool b Bool }\n\
-                   fn f(p Pair) Int {\n\
-                   \tmatch p {\n\
-                   \t\tPair(b: True, ..) -> 1\n\
-                   \t\tPair(a: False, ..) -> 2\n\
-                   \t}\n\
-                   }\n\
-                   println(f(Pair(a: True, b: False)))\n";
-    let path = write_temp("u21_unsound", unsound);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-    assert!(
-        !out.success,
-        "non-exhaustive match with reordered labels must be rejected:\n{unsound}\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        stdout.contains("not exhaustive") || stderr.contains("not exhaustive"),
-        "expected a non-exhaustiveness diagnostic:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    check_rejects_cleanly(
+        "type Pair { a Bool b Bool }\n\
+         fn f(p Pair) Int {\n\
+         \tmatch p {\n\
+         \t\tPair(b: True, ..) -> 1\n\
+         \t\tPair(a: False, ..) -> 2\n\
+         \t}\n\
+         }\n\
+         println(f(Pair(a: True, b: False)))\n",
+        "not exhaustive",
     );
 
     // False-positive direction: a genuinely EXHAUSTIVE match whose third arm
@@ -578,7 +450,6 @@ fn u21_exhaustiveness_respects_field_labels() {
     // bogus "missing: Pair(False, True)". It must now be accepted and dispatch
     // correctly: the reversed arm covers (a=False, b=True), so f returns 3.
     run_outputs(
-        "u21_exhaustive",
         "type Pair { a Bool b Bool }\n\
          fn f(p Pair) Int {\n\
          \tmatch p {\n\
@@ -608,7 +479,6 @@ fn u22_module_shadow_preserves_closure_capture() {
     // must not retroactively change what an earlier closure sees. Before the
     // fix every `fn() x` read the same reused slot, so all three printed 30.
     run_outputs(
-        "u22_capture",
         "x = 10\n\
          f = fn() x\n\
          x = 20\n\
@@ -624,7 +494,6 @@ fn u22_module_shadow_preserves_closure_capture() {
     // compiled, so a re-binding whose init reads the prior binding still works:
     // `x = x + 1` must observe the old `x`, not the new (uninitialised) slot.
     run_outputs(
-        "u22_self_init",
         "x = 10\n\
          x = x + 1\n\
          println(x)\n",
@@ -635,7 +504,6 @@ fn u22_module_shadow_preserves_closure_capture() {
     // captured binding. The closure must still return the Int it captured;
     // reusing the slot would let the String shadow flow out of `f()` as an Int.
     run_outputs(
-        "u22_type_safety",
         "n = 1\n\
          f = fn() n + 100\n\
          n = 'hello'\n\
@@ -666,7 +534,7 @@ fn u23_oob_and_reversed_slice_are_clean_errors() {
         ),
     ];
     for (tag, src, want) in cases {
-        let path = write_temp(tag, src);
+        let path = write_temp(src);
         let out = run_al("run", &path);
         let _ = std::fs::remove_file(&path);
 

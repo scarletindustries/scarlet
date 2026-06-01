@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+mod common;
+use common::run_al;
 
 fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples")
@@ -18,42 +20,23 @@ fn programs_golden_dir() -> PathBuf {
     golden_dir().join("programs")
 }
 
-fn run_file(source: &Path, name: &str, extra_flags: &[&str]) -> String {
-    let bin = env!("CARGO_BIN_EXE_al");
-    let mut cmd = Command::new(bin);
-    cmd.arg("run");
-    for f in extra_flags {
-        cmd.arg(f);
-    }
-    cmd.arg(source);
-    let out = cmd
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn al for {name}: {e}"));
-    if !out.status.success() {
+fn run_file(source: &Path, name: &str) -> String {
+    let out = run_al("run", source);
+    if !out.success {
         panic!(
             "example {name} exited {:?}\nstdout:\n{}\nstderr:\n{}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            out.code, out.stdout, out.stderr
         );
     }
-    String::from_utf8(out.stdout).expect("stdout not utf8")
+    out.stdout
 }
 
-fn run_example(name: &str, extra_flags: &[&str]) -> String {
-    run_file(
-        &examples_dir().join(format!("{name}.al")),
-        name,
-        extra_flags,
-    )
+fn run_example(name: &str) -> String {
+    run_file(&examples_dir().join(format!("{name}.al")), name)
 }
 
-fn run_program(name: &str, extra_flags: &[&str]) -> String {
-    run_file(
-        &programs_dir().join(format!("{name}.al")),
-        name,
-        extra_flags,
-    )
+fn run_program(name: &str) -> String {
+    run_file(&programs_dir().join(format!("{name}.al")), name)
 }
 
 fn assert_stdout_matches(name: &str, golden: &Path, got: &str) {
@@ -65,34 +48,27 @@ fn assert_stdout_matches(name: &str, golden: &Path, got: &str) {
     }
 }
 
-fn assert_golden(name: &str, extra_flags: &[&str]) {
+fn assert_golden(name: &str) {
     let golden = golden_dir().join(format!("{name}.stdout"));
-    let got = run_example(name, extra_flags);
+    let got = run_example(name);
     assert_stdout_matches(name, &golden, &got);
 }
 
-fn assert_golden_program(name: &str, extra_flags: &[&str]) {
+fn assert_golden_program(name: &str) {
     let golden = programs_golden_dir().join(format!("{name}.stdout"));
-    let got = run_program(name, extra_flags);
+    let got = run_program(name);
     assert_stdout_matches(name, &golden, &got);
 }
 
 // Servers and timing-dependent demos have no deterministic output to golden
 // test, but they must still type check.
 fn assert_example_checks(name: &str) {
-    let bin = env!("CARGO_BIN_EXE_al");
     let example = examples_dir().join(format!("{name}.al"));
-    let out = Command::new(bin)
-        .arg("check")
-        .arg(&example)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn al for {name}: {e}"));
-    if !out.status.success() {
+    let out = run_al("check", &example);
+    if !out.success {
         panic!(
             "al check {name} exited {:?}\nstdout:\n{}\nstderr:\n{}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            out.code, out.stdout, out.stderr
         );
     }
 }
@@ -130,7 +106,7 @@ macro_rules! golden {
     ($name:ident) => {
         #[test]
         fn $name() {
-            assert_golden(stringify!($name), &[]);
+            assert_golden(stringify!($name));
         }
     };
 }
@@ -141,7 +117,7 @@ macro_rules! golden_program {
     ($name:ident) => {
         #[test]
         fn $name() {
-            assert_golden_program(stringify!($name), &[]);
+            assert_golden_program(stringify!($name));
         }
     };
 }
@@ -222,5 +198,5 @@ checks!(check_processes, "processes");
 // bench is timing-sensitive; just check it runs without error
 #[test]
 fn bench_runs() {
-    run_example("bench", &[]);
+    run_example("bench");
 }

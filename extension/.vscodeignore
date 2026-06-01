@@ -4,5 +4,8 @@ src/**
 node_modules/**
 .gitignore
 tsconfig.json
+bun.lock
+bunfig.toml
 **/*.ts
 **/*.map
+**/*.vsix

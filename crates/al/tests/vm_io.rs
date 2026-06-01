@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 mod common;
@@ -63,14 +63,48 @@ fn free_port() -> u16 {
 
 /// Connect to `127.0.0.1:port`, retrying until the server's `net.listen` has
 /// bound (it is spawned concurrently). Fails the test if it never comes up.
+/// The returned stream has a 10s read timeout so a wedged server fails the
+/// test instead of hanging it.
 fn connect_retry(port: u16) -> TcpStream {
     for _ in 0..200 {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             return s;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
     panic!("server on port {port} never accepted a connection");
+}
+
+/// Write `src` (with `__PORT__` substituted) to `server.al` in `proj`, spawn
+/// `al run` on it with piped output, and connect a client once the server is
+/// listening. The server blocks in its accept loop; the caller drives it.
+fn spawn_al_server(proj: &Project, src: &str, port: u16) -> (Child, TcpStream) {
+    let prog = proj.dir.join("server.al");
+    std::fs::write(&prog, src.replace("__PORT__", &port.to_string())).unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_al"))
+        .arg("run")
+        .arg(&prog)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn al server");
+
+    (child, connect_retry(port))
+}
+
+/// Tear down a `spawn_al_server` pair: drop the client connection, kill the
+/// (forever-looping) server, and assert it never reported a serve failure.
+fn shutdown_clean(mut child: Child, stream: TcpStream) {
+    drop(stream);
+    child.kill().ok();
+    let out = child.wait_with_output().expect("await server shutdown");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("serve failed"),
+        "server reported a failure: {stdout}"
+    );
 }
 
 /// Full TCP lifecycle through the VM: `net.listen` -> `net.local_addr` ->
@@ -113,24 +147,10 @@ match net.listen('127.0.0.1', __PORT__) {
 	}
 	Err(e) -> println('listen-failed: ${e}')
 }
-"#
-    .replace("__PORT__", &port.to_string());
-    let prog = proj.dir.join("server.al");
-    std::fs::write(&prog, src).unwrap();
+"#;
 
     // The server blocks on accept(); spawn it and drive it from the client.
-    let child = Command::new(env!("CARGO_BIN_EXE_al"))
-        .arg("run")
-        .arg(&prog)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn al server");
-
-    let mut stream = connect_retry(port);
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    let (child, mut stream) = spawn_al_server(&proj, src, port);
     stream.write_all(b"ping-over-tcp").expect("client write");
     // Server echoes the bytes then closes the socket, so read_to_end sees the
     // echo followed by EOF.
@@ -383,24 +403,10 @@ match http.serve('127.0.0.1', __PORT__, fn(_req) http.text('Hello from al/http!'
 	Ok(_) -> Nil
 	Err(e) -> println('serve failed: ${e}')
 }
-"#
-    .replace("__PORT__", &port.to_string());
-    let prog = proj.dir.join("server.al");
-    std::fs::write(&prog, src).unwrap();
+"#;
 
     // The server blocks in its accept loop; spawn it and drive it from a client.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
-        .arg("run")
-        .arg(&prog)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn al http server");
-
-    let mut stream = connect_retry(port);
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    let (child, mut stream) = spawn_al_server(&proj, src, port);
 
     // Two HTTP/1.1 GETs in a single write. Both land in one server-side read,
     // so the connection loop must parse the first, respond, then serve the
@@ -437,14 +443,7 @@ match http.serve('127.0.0.1', __PORT__, fn(_req) http.text('Hello from al/http!'
     }
 
     // The server loops forever; tear it down now that both requests answered.
-    drop(stream);
-    child.kill().ok();
-    let out = child.wait_with_output().expect("await server shutdown");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("serve failed"),
-        "server reported a failure: {stdout}"
-    );
+    shutdown_clean(child, stream);
 }
 
 /// End-to-end chunked transfer-encoding decode through the `al/http` server:
@@ -475,23 +474,9 @@ match http.serve('127.0.0.1', __PORT__, fn(req) {
 	Ok(_) -> Nil
 	Err(e) -> println('serve failed: ${e}')
 }
-"#
-    .replace("__PORT__", &port.to_string());
-    let prog = proj.dir.join("server.al");
-    std::fs::write(&prog, src).unwrap();
+"#;
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
-        .arg("run")
-        .arg(&prog)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn al http server");
-
-    let mut stream = connect_retry(port);
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+    let (child, mut stream) = spawn_al_server(&proj, src, port);
 
     // --- Exchange 1: chunked POST with a trailer ---------------------------
     // (Single-line byte string: Rust's `\` line continuation strips leading
@@ -553,9 +538,6 @@ match http.serve('127.0.0.1', __PORT__, fn(req) {
     // (Fresh connection: the 400 closes the current one.)
     let mut bad_stream = connect_retry(port);
     bad_stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    bad_stream
         .write_all(
             b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",
         )
@@ -567,13 +549,6 @@ match http.serve('127.0.0.1', __PORT__, fn(req) {
         "malformed chunk size must be rejected with 400, got {status:?}"
     );
 
-    drop(stream);
     drop(bad_stream);
-    child.kill().ok();
-    let out = child.wait_with_output().expect("await server shutdown");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("serve failed"),
-        "server reported a failure: {stdout}"
-    );
+    shutdown_clean(child, stream);
 }

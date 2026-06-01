@@ -221,20 +221,24 @@ impl LspServer {
             "$/setTrace" | "$/cancelRequest" => {
                 // Notifications, no response needed
             }
-            "shutdown" => self.handle_shutdown(&id),
+            "shutdown" => self.send_response(&id, Json::Null),
             "exit" => {
                 self.running = false;
             }
             "textDocument/didOpen" => self.handle_did_open(&params),
             "textDocument/didChange" => self.handle_did_change(&params),
             "textDocument/didClose" => self.handle_did_close(&params),
-            "textDocument/hover" => self.handle_hover(&id, &params),
-            "textDocument/definition" => self.handle_definition(&id, &params),
-            "textDocument/references" => self.handle_references(&id, &params),
+            "textDocument/hover" => self.respond(&id, &params, Self::hover_response),
+            "textDocument/definition" => self.respond(&id, &params, Self::definition_response),
+            "textDocument/references" => self.respond(&id, &params, Self::references_response),
             "textDocument/rename" => self.handle_rename(&id, &params),
-            "textDocument/prepareRename" => self.handle_prepare_rename(&id, &params),
-            "textDocument/documentSymbol" => self.handle_document_symbol(&id, &params),
-            "workspace/symbol" => self.handle_workspace_symbol(&id, &params),
+            "textDocument/prepareRename" => {
+                self.respond(&id, &params, Self::prepare_rename_response)
+            }
+            "textDocument/documentSymbol" => {
+                self.respond(&id, &params, Self::document_symbol_response)
+            }
+            "workspace/symbol" => self.respond(&id, &params, Self::workspace_symbol_response),
             "workspace/didChangeWorkspaceFolders" => {
                 self.handle_did_change_workspace_folders(&params)
             }
@@ -254,13 +258,10 @@ impl LspServer {
         self.send_message(&response.to_string());
     }
 
-    fn send_null_response(&self, id: &Json) {
-        let response = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": Json::Null,
-        });
-        self.send_message(&response.to_string());
+    /// Compute a request's result with `f` and send it as the response.
+    fn respond(&mut self, id: &Json, params: &Json, f: fn(&mut Self, &Json) -> Json) {
+        let result = f(self, params);
+        self.send_response(id, result);
     }
 
     fn send_error(&self, id: &Json, code: i32, message: &str) {
@@ -446,10 +447,6 @@ impl LspServer {
         }
     }
 
-    fn handle_shutdown(&self, id: &Json) {
-        self.send_null_response(id);
-    }
-
     fn handle_did_open(&mut self, params: &Json) {
         let Some(uri) = doc_uri(params) else { return };
         let text = match params
@@ -494,15 +491,7 @@ impl LspServer {
         if let Some(last_change) = changes.last()
             && let Some(text) = last_change.get("text").and_then(|v| v.as_str())
         {
-            let text = text.to_string();
-            if let Some(doc) = self.documents.get_mut(&uri) {
-                doc.text = text.clone();
-            } else {
-                self.documents
-                    .insert(uri.clone(), DocumentState { text: text.clone() });
-            }
-            self.open.insert(uri.clone());
-            self.analyze_document(&uri, &text);
+            self.open_document(&uri, text);
         }
     }
 
@@ -518,12 +507,8 @@ impl LspServer {
         if let Some(path) = uri_to_path(&uri)
             && let Ok(text) = std::fs::read_to_string(&path)
         {
-            if let Some(doc) = self.documents.get_mut(&uri) {
-                doc.text = text.clone();
-            } else {
-                self.documents
-                    .insert(uri.clone(), DocumentState { text: text.clone() });
-            }
+            self.documents
+                .insert(uri.clone(), DocumentState { text: text.clone() });
             self.analyze_document(&uri, &text);
         } else {
             self.documents.remove(&uri);
@@ -617,11 +602,6 @@ impl LspServer {
         self.ensure_entry(&uri).then_some((uri, line, col))
     }
 
-    fn handle_hover(&mut self, id: &Json, params: &Json) {
-        let r = self.hover_response(params);
-        self.send_response(id, r);
-    }
-
     /// Compute the `textDocument/hover` result: a markdown block describing
     /// the symbol under the cursor, or `Json::Null` when there is nothing to
     /// show.
@@ -658,11 +638,6 @@ impl LspServer {
             return json!({ "contents": { "kind": "markdown", "value": value } });
         }
         Json::Null
-    }
-
-    fn handle_definition(&mut self, id: &Json, params: &Json) {
-        let r = self.definition_response(params);
-        self.send_response(id, r);
     }
 
     /// Compute the `textDocument/definition` result: the `{ uri, range }` of
@@ -715,9 +690,23 @@ impl LspServer {
         Json::Null
     }
 
-    fn handle_references(&mut self, id: &Json, params: &Json) {
-        let r = self.references_response(params);
-        self.send_response(id, r);
+    /// Dependent-file callers of `def`, persisted across re-rooting: an
+    /// importer of the queried file is never inside its imports' closure, so
+    /// the session graph rooted at that file cannot carry these reverse edges
+    /// — their true URIs are stored directly (see [`WorkspaceXrefs`]).
+    /// Import/Definition occurrences are skipped: the declaration's own
+    /// self-occurrence and import bindings are not use sites.
+    fn dependent_callers(&self, uri: &str, def: reference::DefId) -> impl Iterator<Item = &Xref> {
+        uri_to_path(uri)
+            .and_then(|p| self.xrefs.get(&root_for(&self.workspace_roots, &p)))
+            .into_iter()
+            .flat_map(move |wx| wx.callers(def))
+            .filter(|x| {
+                !matches!(
+                    x.kind,
+                    reference::ReferenceKind::Import | reference::ReferenceKind::Definition
+                )
+            })
     }
 
     /// Compute the `textDocument/references` result: an array of
@@ -769,25 +758,11 @@ impl LspServer {
                     push(u, &rr.span, &mut out);
                 }
             }
-            // Dependent-file callers persisted across re-rooting: an importer of
-            // the queried file is never inside its imports' closure, so the
-            // session graph rooted here cannot carry these reverse edges (see
-            // `WorkspaceXrefs`). Their URIs are stored directly. Dedup with the
-            // live edges above (an importer that happens to be the current entry
-            // appears in both).
-            if let Some(p) = uri_to_path(&uri) {
-                let root = root_for(&self.workspace_roots, &p);
-                if let Some(wx) = self.xrefs.get(&root) {
-                    for x in wx.callers(defid) {
-                        if matches!(
-                            x.kind,
-                            reference::ReferenceKind::Import | reference::ReferenceKind::Definition
-                        ) {
-                            continue;
-                        }
-                        push(x.uri.clone(), &x.span, &mut out);
-                    }
-                }
+            // Dependent-file callers (see `dependent_callers`): dedup with the
+            // live edges above — an importer that happens to be the current
+            // entry appears in both.
+            for x in self.dependent_callers(&uri, defid) {
+                push(x.uri.clone(), &x.span, &mut out);
             }
             if include_decl && let Some(u) = uri_for(graph, &uri, defid.module) {
                 push(u, &def_span, &mut out);
@@ -840,35 +815,25 @@ impl LspServer {
             let base_dir = base.as_deref().and_then(|p| p.parent());
             return match graph.rename(defid, &new_name, base_dir, Some((mid, uri.as_str()))) {
                 Ok(mut we) => {
-                    // Fold in dependent-file callers persisted across re-rooting:
-                    // the session graph rooted at the queried file omits its
-                    // importers (an importer is never inside its imports'
-                    // closure), so their use sites are not in `references_to`.
+                    // Fold in dependent-file callers (see `dependent_callers`).
                     // `graph.rename` already validated `new_name` and rejected a
                     // stdlib target, so reuse both for the cross-file edits;
-                    // dedup against the edits it produced.
-                    if let Some(p) = uri_to_path(&uri) {
-                        let root = root_for(&self.workspace_roots, &p);
-                        if let Some(wx) = self.xrefs.get(&root) {
-                            for x in wx.callers(defid) {
-                                if matches!(
-                                    x.kind,
-                                    reference::ReferenceKind::Import
-                                        | reference::ReferenceKind::Definition
-                                ) {
-                                    continue;
-                                }
-                                let edits = we.changes.entry(x.uri.clone()).or_default();
-                                if !edits.iter().any(|e| e.span == x.span) {
-                                    edits.push(reference::rename::TextEdit {
-                                        span: x.span,
-                                        new_text: new_name.clone(),
-                                    });
-                                }
-                            }
-                            for edits in we.changes.values_mut() {
-                                edits.sort_by_key(|e| (e.span.start_line, e.span.start_column));
-                            }
+                    // dedup against the edits it produced, then restore each
+                    // file's positional edit order if anything was appended.
+                    let mut added = false;
+                    for x in self.dependent_callers(&uri, defid) {
+                        let edits = we.changes.entry(x.uri.clone()).or_default();
+                        if !edits.iter().any(|e| e.span == x.span) {
+                            edits.push(reference::rename::TextEdit {
+                                span: x.span,
+                                new_text: new_name.clone(),
+                            });
+                            added = true;
+                        }
+                    }
+                    if added {
+                        for edits in we.changes.values_mut() {
+                            edits.sort_by_key(|e| (e.span.start_line, e.span.start_column));
                         }
                     }
                     Ok(workspace_edit_json(&we))
@@ -877,11 +842,6 @@ impl LspServer {
             };
         }
         Ok(Json::Null)
-    }
-
-    fn handle_prepare_rename(&mut self, id: &Json, params: &Json) {
-        let r = self.prepare_rename_response(params);
-        self.send_response(id, r);
     }
 
     /// Compute the `textDocument/prepareRename` result: `{ range, placeholder }`
@@ -910,11 +870,6 @@ impl LspServer {
             };
         }
         Json::Null
-    }
-
-    fn handle_document_symbol(&mut self, id: &Json, params: &Json) {
-        let r = self.document_symbol_response(params);
-        self.send_response(id, r);
     }
 
     /// Compute the `textDocument/documentSymbol` result: an array of the
@@ -951,11 +906,6 @@ impl LspServer {
             return Json::Array(syms);
         }
         Json::Null
-    }
-
-    fn handle_workspace_symbol(&mut self, id: &Json, params: &Json) {
-        let r = self.workspace_symbol_response(params);
-        self.send_response(id, r);
     }
 
     /// Compute the `workspace/symbol` result: every workspace declaration
@@ -1281,13 +1231,9 @@ fn import_target_at(
         .iter()
         .filter(|o| {
             o.kind == reference::ReferenceKind::Import
-                && (o.span.start_line, o.span.start_column) <= (line, col)
-                && (line, col) < (o.span.end_line, o.span.end_column)
+                && reference::span_contains(&o.span, line, col)
         })
-        .min_by_key(|o| {
-            (o.span.end_line - o.span.start_line) as i64 * 1_000_000
-                + (o.span.end_column - o.span.start_column) as i64
-        })
+        .min_by_key(|o| reference::span_width(&o.span))
         .map(|o| o.target.module)
 }
 

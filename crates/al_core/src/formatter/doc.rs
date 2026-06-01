@@ -200,19 +200,25 @@ pub fn join(items: Vec<Doc>, sep: Doc) -> Doc {
     concat(out)
 }
 
-/// `open i0, i1, ... close` on one line, or one item per line indented one tab
-/// with a trailing comma.
-pub fn delimited(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+/// Shared shape of the `delimited*` family: `items` joined by `sep`, with
+/// `tail` between the final item and `close`.
+fn delimited_with(open: &str, items: Vec<Doc>, close: &str, sep: Doc, tail: Doc) -> Doc {
     if items.is_empty() {
         return text(format!("{open}{close}"));
     }
-    let body = join(items, d![text(","), line()]);
+    let body = join(items, sep);
     group(d![
         text(open),
         nest(1, d![line0(), body]),
-        break_(",", ""),
+        tail,
         text(close),
     ])
+}
+
+/// `open i0, i1, ... close` on one line, or one item per line indented one tab
+/// with a trailing comma.
+pub fn delimited(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+    delimited_with(open, items, close, d![text(","), line()], break_(",", ""))
 }
 
 /// Like `delimited`, but a final item that provably renders across multiple
@@ -259,16 +265,7 @@ pub fn delimited_hug(open: &str, mut items: Vec<Doc>, close: &str) -> Doc {
 /// parser rejects a comma after `..` (rest must be last), so a wrapped pattern
 /// must end `..\n<close>` rather than `..,\n<close>`.
 pub fn delimited_no_trailing(open: &str, items: Vec<Doc>, close: &str) -> Doc {
-    if items.is_empty() {
-        return text(format!("{open}{close}"));
-    }
-    let body = join(items, d![text(","), line()]);
-    group(d![
-        text(open),
-        nest(1, d![line0(), body]),
-        line0(),
-        text(close),
-    ])
+    delimited_with(open, items, close, d![text(","), line()], line0())
 }
 
 /// Like `delimited`, but items are separated by a single space when flat and by
@@ -277,16 +274,7 @@ pub fn delimited_no_trailing(open: &str, items: Vec<Doc>, close: &str) -> Doc {
 /// (constructor fields, type args/params, fn-type params, import items,
 /// attribute args) — their items are self-delimiting, so the comma was noise.
 pub fn delimited_ws(open: &str, items: Vec<Doc>, close: &str) -> Doc {
-    if items.is_empty() {
-        return text(format!("{open}{close}"));
-    }
-    let body = join(items, line());
-    group(d![
-        text(open),
-        nest(1, d![line0(), body]),
-        line0(),
-        text(close),
-    ])
+    delimited_with(open, items, close, line(), line0())
 }
 
 /// `{ body }` on one line, or broken across lines with the body indented.

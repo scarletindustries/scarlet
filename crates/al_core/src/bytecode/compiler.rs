@@ -15,7 +15,8 @@ use crate::module::{
     source_hash,
 };
 use crate::reference::{
-    DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, ReferenceGraph,
+    DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, ReferenceGraph, span_contains,
+    span_width,
 };
 use crate::span::Span;
 use crate::token::Kind;
@@ -751,10 +752,6 @@ impl IncrementalSession {
         self.c.module_table.overlays.insert(path, text);
     }
 
-    pub fn clear_overlay(&mut self, path: &Path) {
-        self.c.module_table.overlays.remove(path);
-    }
-
     pub fn check(&mut self, expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
         // 1. Drop the previous entry's contributions; cached modules' arena
         //    state is below this line and survives intact.
@@ -790,6 +787,41 @@ impl IncrementalSession {
         self.c.reset_to(&floor);
         self.c.base_dir = base_dir.map(|p| p.to_path_buf());
 
+        self.compile_entry(expr);
+
+        // Overflow fallback (rare path; strictly flag-guarded so the common
+        // case is zero-cost). A recompiled module reused its assigned id range
+        // but spilled past `MODULE_TYPE_ID_RANGE`, so it may have collided with
+        // a sibling's already-assigned block. Evict every user module, drop
+        // every `id_base` assignment, truncate back to the earliest evicted
+        // watermark, and recompile the entry once. Every module is now a fresh
+        // (non-reused) allocation, so ranges are re-sized to current usage and
+        // the overflow flag cannot be re-raised this pass — hence a single
+        // pass, not a loop.
+        if self.c.module_table.id_range_overflow
+            && let Some(w) = self.c.module_table.invalidate_all()
+        {
+            self.c.module_table.reset_id_bases();
+            let floor = w.max(self.seed);
+            self.c.reset_to(&floor);
+            self.last_entry = None;
+            self.compile_entry(expr);
+        }
+        // `snapshot_result` rebuilds the workspace graph wholesale (merging the
+        // entry file's freshly-collected references with every surviving cached
+        // module) so an invalidated module leaves no dangling reverse edge, and
+        // resolves the hover-type table. The session shares the same graph Rc
+        // and keeps the type table to answer LSP queries.
+        let (result, facts) = self.c.snapshot_result();
+        self.graph = result.references.clone();
+        self.type_facts = facts;
+        result
+    }
+
+    /// Compile the entry expression and capture its `last_entry` watermark.
+    /// Shared by [`Self::check`]'s normal path and its id-range-overflow
+    /// fallback.
+    fn compile_entry(&mut self, expr: &ast::Expression) {
         if let ast::Expression::BlockExpression(block) = expr {
             // `env.type_info` is a flat map, not a scope stack, so a selective
             // `import m.{Type}` binding written by `process_imports` is not
@@ -834,56 +866,6 @@ impl IncrementalSession {
             self.last_entry = Some(self.c.watermark());
             self.c.compile_expr(expr);
         }
-
-        // Overflow fallback (rare path; strictly flag-guarded so the common
-        // case is zero-cost). A recompiled module reused its assigned id range
-        // but spilled past `MODULE_TYPE_ID_RANGE`, so it may have collided with
-        // a sibling's already-assigned block. Evict every user module, drop
-        // every `id_base` assignment, truncate back to the earliest evicted
-        // watermark, and recompile the entry once. Every module is now a fresh
-        // (non-reused) allocation, so ranges are re-sized to current usage and
-        // the overflow flag cannot be re-raised this pass — hence a single
-        // pass, not a loop.
-        if self.c.module_table.id_range_overflow
-            && let Some(w) = self.c.module_table.invalidate_all()
-        {
-            self.c.module_table.reset_id_bases();
-            let floor = w.max(self.seed);
-            self.c.reset_to(&floor);
-            self.last_entry = None;
-            if let ast::Expression::BlockExpression(block) = expr {
-                // Same flat-map rollback as the normal path: keep the entry's
-                // selective type imports out of the persisted watermark so a
-                // later check rewinds them instead of resolving a removed import.
-                let pre_import = self.c.env.watermark();
-                self.c.process_imports(block);
-                // Same reserved-range guard as the normal path: after the
-                // re-allocated imports the entry must allocate past every
-                // module's reserved block, before the `last_entry` watermark.
-                let hw = self.c.module_table.id_high_water();
-                let cur = self.c.env.next_type_id();
-                if hw > cur {
-                    self.c.env.set_next_type_id(hw);
-                }
-                let mut wm = self.c.watermark();
-                wm.env.type_info = pre_import.type_info;
-                wm.env.journal = pre_import.journal;
-                self.last_entry = Some(wm);
-                self.c.analyse_module(block, None);
-            } else {
-                self.last_entry = Some(self.c.watermark());
-                self.c.compile_expr(expr);
-            }
-        }
-        // `snapshot_result` rebuilds the workspace graph wholesale (merging the
-        // entry file's freshly-collected references with every surviving cached
-        // module) so an invalidated module leaves no dangling reverse edge, and
-        // resolves the hover-type table. The session shares the same graph Rc
-        // and keeps the type table to answer LSP queries.
-        let (result, facts) = self.c.snapshot_result();
-        self.graph = result.references.clone();
-        self.type_facts = facts;
-        result
     }
 }
 
@@ -923,14 +905,8 @@ impl IncrementalSession {
             .and_then(|mr| {
                 mr.occurrences()
                     .iter()
-                    .filter(|o| {
-                        (o.span.start_line, o.span.start_column) <= (line, col)
-                            && (line, col) < (o.span.end_line, o.span.end_column)
-                    })
-                    .min_by_key(|o| {
-                        (o.span.end_line - o.span.start_line) as i64 * 1_000_000
-                            + (o.span.end_column - o.span.start_column) as i64
-                    })
+                    .filter(|o| span_contains(&o.span, line, col))
+                    .min_by_key(|o| span_width(&o.span))
                     .map(|o| o.span)
             })
             .unwrap_or(id.span);
@@ -1042,15 +1018,8 @@ impl IncrementalSession {
         let f = self
             .type_facts
             .iter()
-            .filter(|f| {
-                f.module == m
-                    && (f.span.start_line, f.span.start_column) <= (line, col)
-                    && (line, col) < (f.span.end_line, f.span.end_column)
-            })
-            .min_by_key(|f| {
-                (f.span.end_line - f.span.start_line) as i64 * 1_000_000
-                    + (f.span.end_column - f.span.start_column) as i64
-            })?;
+            .filter(|f| f.module == m && span_contains(&f.span, line, col))
+            .min_by_key(|f| span_width(&f.span))?;
         Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
     }
 }

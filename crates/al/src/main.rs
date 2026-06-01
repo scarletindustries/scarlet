@@ -81,17 +81,23 @@ struct FmtArgs {
     debug: bool,
 }
 
+/// Print diagnostics (if any) and exit when `fail` is set.
+fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entrypoint: &str) {
+    if !diagnostics.is_empty() {
+        diagnostic::print_diagnostics(diagnostics, file, entrypoint);
+        if fail {
+            process::exit(1);
+        }
+    }
+}
+
 fn parse_source(file: &str, entrypoint: &str) -> ast::Expression {
     let mut s = scanner::new_scanner(file.to_string());
     let mut p = parser::new_parser(&mut s);
     let result = p.parse_program();
 
-    if !result.diagnostics.is_empty() {
-        diagnostic::print_diagnostics(&result.diagnostics, file, entrypoint);
-        if diagnostic::has_errors(&result.diagnostics) {
-            process::exit(1);
-        }
-    }
+    let fail = diagnostic::has_errors(&result.diagnostics);
+    report(&result.diagnostics, fail, file, entrypoint);
 
     ast::Expression::BlockExpression(result.ast)
 }
@@ -112,24 +118,12 @@ fn compile_source(
     let base_dir = path.parent();
     // Editing the AL repo's own stdlib: analyse as that module so `@vm`/
     // external are permitted and prelude self-redefinition is suppressed.
-    if let Some(m) = al::module::detect_stdlib_module(path) {
-        let result = bytecode::check_as_module(expr, base_dir, m);
-        if !result.diagnostics.is_empty() {
-            diagnostic::print_diagnostics(&result.diagnostics, file, entrypoint);
-            if !result.success {
-                process::exit(1);
-            }
-        }
-        return result;
-    }
-    let result = f(expr, base_dir, Some(stdlib()));
+    let result = match al::module::detect_stdlib_module(path) {
+        Some(m) => bytecode::check_as_module(expr, base_dir, m),
+        None => f(expr, base_dir, Some(stdlib())),
+    };
 
-    if !result.diagnostics.is_empty() {
-        diagnostic::print_diagnostics(&result.diagnostics, file, entrypoint);
-        if !result.success {
-            process::exit(1);
-        }
-    }
+    report(&result.diagnostics, !result.success, file, entrypoint);
 
     result
 }
@@ -162,28 +156,28 @@ struct FormatFileResult {
     errors: Vec<String>,
 }
 
+// BUGFIX: V's main.v uses 0-indexed line/col for files but +1 for stdin; the
+// rust port emits 1-indexed consistently.
+fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnostic) -> String {
+    let line = d.span.start_line + 1;
+    let col = d.span.start_column + 1;
+    format!("{path}:{line}:{col}: {}", d.message)
+}
+
 fn format_file(path: &Path, debug: bool) -> io::Result<FormatFileResult> {
     let content = fs::read_to_string(path)?;
     let result = formatter::format_with_debug(&content, debug);
 
     if result.has_errors {
-        let mut error_msgs = Vec::new();
-        for d in &result.diagnostics {
-            // BUGFIX: V's main.v uses 0-indexed line/col here but +1 on the stdin
-            // path; emit 1-indexed consistently in the rust port.
-            error_msgs.push(format!(
-                "{}:{}:{}: {}",
-                path.display(),
-                d.span.start_line + 1,
-                d.span.start_column + 1,
-                d.message
-            ));
-        }
         return Ok(FormatFileResult {
             changed: false,
             output: content,
             has_errors: true,
-            errors: error_msgs,
+            errors: result
+                .diagnostics
+                .iter()
+                .map(|d| render_fmt_diagnostic(path.display(), d))
+                .collect(),
         });
     }
 
@@ -317,12 +311,7 @@ fn cmd_fmt(args: FmtArgs) {
         let result = formatter::format_with_debug(&content, args.debug);
         if result.has_errors {
             for d in &result.diagnostics {
-                eprintln!(
-                    "stdin:{}:{}: {}",
-                    d.span.start_line + 1,
-                    d.span.start_column + 1,
-                    d.message
-                );
+                eprintln!("{}", render_fmt_diagnostic("stdin", d));
             }
             process::exit(1);
         }

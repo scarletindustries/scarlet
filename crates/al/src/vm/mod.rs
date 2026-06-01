@@ -3160,29 +3160,46 @@ mod tests {
     use super::*;
     use al_core::bytecode::{Instruction, op, op_ab, op_arg};
 
-    #[test]
-    fn test_push_add_halt() {
-        let program = Program {
-            constants: vec![Value::int(1), Value::int(2)],
+    // A single-function Program ("main", arity 0, no captures) over the given
+    // constants and code, with `locals` preallocated local slots.
+    fn single_fn_program(constants: Vec<Value>, code: Vec<Instruction>, locals: i32) -> Program {
+        Program {
+            constants,
             functions: vec![Function {
                 name: "main".into(),
                 arity: 0,
-                locals: 0,
+                locals,
                 capture_count: 0,
                 code_start: 0,
-                code_len: 4,
+                code_len: code.len() as i32,
             }],
-            code: vec![
+            code,
+            entry: 0,
+        }
+    }
+
+    // Build a single-function `Program` with `locals` preallocated local slots,
+    // run it to completion, and return the value left on top of the stack.
+    // Mirrors the entry-frame setup in `VM::run` (base_slot 0, locals zeroed), so
+    // `local[i]` lives at stack slot `i`.
+    fn run_fn(constants: Vec<Value>, code: Vec<Instruction>, locals: i32) -> Value {
+        new_vm(single_fn_program(constants, code, locals))
+            .run()
+            .expect("vm must run without panicking or erroring")
+    }
+
+    #[test]
+    fn test_push_add_halt() {
+        let result = run_fn(
+            vec![Value::int(1), Value::int(2)],
+            vec![
                 op_arg(Op::PushConst, 0),
                 op_arg(Op::PushConst, 1),
                 op(Op::Add),
                 op(Op::Halt),
             ],
-            entry: 0,
-        };
-
-        let mut vm = new_vm(program);
-        let result = vm.run().expect("vm should run cleanly");
+            0,
+        );
         assert_eq!(
             result.as_int(),
             Some(3),
@@ -3224,29 +3241,9 @@ mod tests {
     // range length must saturate rather than wrap.
     #[test]
     fn range_index_and_len_do_not_overflow() {
-        fn run_ops(constants: Vec<Value>, code: Vec<Instruction>) -> Value {
-            let code_len = code.len() as i32;
-            let program = Program {
-                constants,
-                functions: vec![Function {
-                    name: "main".into(),
-                    arity: 0,
-                    locals: 0,
-                    capture_count: 0,
-                    code_start: 0,
-                    code_len,
-                }],
-                code,
-                entry: 0,
-            };
-            new_vm(program)
-                .run()
-                .expect("vm must run without panicking or erroring")
-        }
-
         // `(5..10)[idx]` via Op::Index.
         let index_at = |idx: i64| -> Value {
-            run_ops(
+            run_fn(
                 vec![Value::int(5), Value::int(10), Value::int(idx)],
                 vec![
                     op_arg(Op::PushConst, 0),
@@ -3256,6 +3253,7 @@ mod tests {
                     op(Op::Index),
                     op(Op::Halt),
                 ],
+                0,
             )
         };
         // In-bounds indexing is unchanged.
@@ -3269,7 +3267,7 @@ mod tests {
 
         // `len(i64::MIN..i64::MAX)` via Op::ArrayLen: `end - start` overflows,
         // so the length must saturate to i64::MAX instead of panicking/wrapping.
-        let len = run_ops(
+        let len = run_fn(
             vec![Value::int(i64::MIN), Value::int(i64::MAX)],
             vec![
                 op_arg(Op::PushConst, 0),
@@ -3278,6 +3276,7 @@ mod tests {
                 op(Op::ArrayLen),
                 op(Op::Halt),
             ],
+            0,
         );
         assert_eq!(len.as_int(), Some(i64::MAX));
 
@@ -3289,6 +3288,11 @@ mod tests {
         ));
     }
 
+    // `Option::Some(payload)` with the payload-folded hash the VM computes.
+    fn build_some(payload: Value) -> Value {
+        ev(7, "Option", "Some", &["value"], vec![payload])
+    }
+
     // Regression: wrapping a range in a constructor (`Some(0..n)`) eagerly folds
     // the payload hash via `enum_hash_with_payload`. Hashing the range must be
     // O(1), and must still match the hash of the array it materialises to, so
@@ -3296,21 +3300,6 @@ mod tests {
     // equal pair. Pre-fix this hashed every element and hung on a large range.
     #[test]
     fn enum_with_range_payload_equals_materialized_and_builds_fast() {
-        let build_some = |payload: Value| -> Value {
-            let hash = enum_hash_with_payload(
-                enum_name_prefix_hash("Option", "Some"),
-                std::slice::from_ref(&payload),
-            );
-            Value::enum_(EnumValue {
-                type_id: 7,
-                enum_name: "Option".into(),
-                variant_name: "Some".into(),
-                field_labels: Rc::from(vec![Rc::from("value")]),
-                payload: vec![payload],
-                hash,
-            })
-        };
-
         let from_range = build_some(Value::range(0, 4));
         let from_array = build_some(Value::array((0..4).map(Value::int).collect()));
         assert!(
@@ -3337,21 +3326,6 @@ mod tests {
         // Premise: the scalar payloads compare equal.
         assert!(values_equal(&Value::float(0.0), &Value::float(-0.0)));
 
-        let build_some = |payload: Value| -> Value {
-            let hash = enum_hash_with_payload(
-                enum_name_prefix_hash("Option", "Some"),
-                std::slice::from_ref(&payload),
-            );
-            Value::enum_(EnumValue {
-                type_id: 7,
-                enum_name: "Option".into(),
-                variant_name: "Some".into(),
-                field_labels: Rc::from(vec![Rc::from("value")]),
-                payload: vec![payload],
-                hash,
-            })
-        };
-
         let pos = build_some(Value::float(0.0));
         let neg = build_some(Value::float(-0.0));
         assert!(
@@ -3361,30 +3335,6 @@ mod tests {
         assert!(values_equal(&neg, &pos), "equality must be symmetric");
         // A genuinely distinct payload must still compare unequal.
         assert!(!values_equal(&pos, &build_some(Value::float(1.0))));
-    }
-
-    // Build a single-function `Program` with `locals` preallocated local slots,
-    // run it to completion, and return the value left on top of the stack.
-    // Mirrors the entry-frame setup in `VM::run` (base_slot 0, locals zeroed), so
-    // `local[i]` lives at stack slot `i`.
-    fn run_fn(constants: Vec<Value>, code: Vec<Instruction>, locals: i32) -> Value {
-        let code_len = code.len() as i32;
-        let program = Program {
-            constants,
-            functions: vec![Function {
-                name: "main".into(),
-                arity: 0,
-                locals,
-                capture_count: 0,
-                code_start: 0,
-                code_len,
-            }],
-            code,
-            entry: 0,
-        };
-        new_vm(program)
-            .run()
-            .expect("vm must run without panicking or erroring")
     }
 
     // The peephole pass fuses `PushLocal a; PushConst b; AddInt` into a single
@@ -3437,36 +3387,38 @@ mod tests {
         assert_eq!(sub(i64::MIN, 1).as_int(), Some(i64::MAX));
     }
 
+    // Run a fused `local[0] <jump_op> constants[1]` branch and report whether it
+    // was taken. The taken target (ip 5) and the fall-through (ip 3) push
+    // distinct markers, so the return value reveals which path executed.
+    fn jump_lc_taken(jump_op: Op, local: i64, c: i64) -> bool {
+        let r = run_fn(
+            vec![
+                Value::int(local), // 0: local value
+                Value::int(c),     // 1: compared constant
+                Value::int(0),     // 2: fall-through marker (not taken)
+                Value::int(1),     // 3: jump-target marker (taken)
+            ],
+            vec![
+                op_arg(Op::PushConst, 0),
+                op_arg(Op::StoreLocal, 0),
+                op_ab(jump_op, 0, 1, 5),
+                op_arg(Op::PushConst, 2),
+                op(Op::Halt),
+                op_arg(Op::PushConst, 3),
+                op(Op::Halt),
+            ],
+            1,
+        );
+        r.as_int() == Some(1)
+    }
+
     // `PushLocal a; PushConst b; LtInt; JumpIfFalse t` fuses to `JumpGeIntLC`: a
     // zero-stack-traffic branch taken iff `local[a] >= constants[b]`, jumping to
     // the absolute target in `operand` (the VM computes `operand - code_start`).
     // Pins both the `>=` semantics (incl. the equal boundary) and the retarget.
     #[test]
     fn superinstr_jump_ge_int_lc_branches_and_retargets() {
-        // Branch on `local[0] >= constants[1]`. The taken target (ip 5) and the
-        // fall-through (ip 3) push distinct markers, so the return value reveals
-        // which path executed.
-        let taken = |local: i64, c: i64| -> bool {
-            let r = run_fn(
-                vec![
-                    Value::int(local), // 0: local value
-                    Value::int(c),     // 1: compared constant
-                    Value::int(0),     // 2: fall-through marker (not taken)
-                    Value::int(1),     // 3: jump-target marker (taken)
-                ],
-                vec![
-                    op_arg(Op::PushConst, 0),
-                    op_arg(Op::StoreLocal, 0),
-                    op_ab(Op::JumpGeIntLC, 0, 1, 5),
-                    op_arg(Op::PushConst, 2),
-                    op(Op::Halt),
-                    op_arg(Op::PushConst, 3),
-                    op(Op::Halt),
-                ],
-                1,
-            );
-            r.as_int() == Some(1)
-        };
+        let taken = |local: i64, c: i64| jump_lc_taken(Op::JumpGeIntLC, local, c);
         assert!(taken(10, 5), "10 >= 5 takes the branch");
         assert!(taken(5, 5), "5 >= 5: the equal boundary is taken");
         assert!(!taken(4, 5), "4 >= 5 is false: falls through");
@@ -3478,27 +3430,7 @@ mod tests {
     // branch taken iff `local[a] != constants[b]`.
     #[test]
     fn superinstr_jump_ne_int_lc_branches_and_retargets() {
-        let taken = |local: i64, c: i64| -> bool {
-            let r = run_fn(
-                vec![
-                    Value::int(local), // 0: local value
-                    Value::int(c),     // 1: compared constant
-                    Value::int(0),     // 2: fall-through marker (not taken)
-                    Value::int(1),     // 3: jump-target marker (taken)
-                ],
-                vec![
-                    op_arg(Op::PushConst, 0),
-                    op_arg(Op::StoreLocal, 0),
-                    op_ab(Op::JumpNeIntLC, 0, 1, 5),
-                    op_arg(Op::PushConst, 2),
-                    op(Op::Halt),
-                    op_arg(Op::PushConst, 3),
-                    op(Op::Halt),
-                ],
-                1,
-            );
-            r.as_int() == Some(1)
-        };
+        let taken = |local: i64, c: i64| jump_lc_taken(Op::JumpNeIntLC, local, c);
         assert!(taken(10, 5), "10 != 5 takes the branch");
         assert!(
             !taken(5, 5),
@@ -3690,28 +3622,19 @@ mod tests {
     #[test]
     fn array_slice_range_out_of_bounds_errors() {
         // (0..5)[2..99]
-        let code = vec![
-            op_arg(Op::PushConst, 0),
-            op_arg(Op::PushConst, 1),
-            op(Op::MakeRange),
-            op_arg(Op::PushConst, 2),
-            op_arg(Op::PushConst, 3),
-            op(Op::ArraySlice),
-            op(Op::Halt),
-        ];
-        let program = Program {
-            constants: vec![Value::int(0), Value::int(5), Value::int(2), Value::int(99)],
-            functions: vec![Function {
-                name: "main".into(),
-                arity: 0,
-                locals: 0,
-                capture_count: 0,
-                code_start: 0,
-                code_len: code.len() as i32,
-            }],
-            code,
-            entry: 0,
-        };
+        let program = single_fn_program(
+            vec![Value::int(0), Value::int(5), Value::int(2), Value::int(99)],
+            vec![
+                op_arg(Op::PushConst, 0),
+                op_arg(Op::PushConst, 1),
+                op(Op::MakeRange),
+                op_arg(Op::PushConst, 2),
+                op_arg(Op::PushConst, 3),
+                op(Op::ArraySlice),
+                op(Op::Halt),
+            ],
+            0,
+        );
         let err = new_vm(program)
             .run()
             .expect_err("slicing a range out of bounds must error");

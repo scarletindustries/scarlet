@@ -13,7 +13,6 @@ use common::run_outputs;
 #[test]
 fn range_index_or_else() {
     run_outputs(
-        "range_index_or_else",
         "r = 5..10\n\
          println(r[2] or -1)\n\
          println(r[99] or -1)\n",
@@ -27,7 +26,6 @@ fn range_index_or_else() {
 #[test]
 fn range_index_option() {
     run_outputs(
-        "range_index_option",
         "r = 5..10\n\
          println(r[2])\n\
          println(r[99])\n",
@@ -41,7 +39,6 @@ fn range_index_option() {
 #[test]
 fn range_slice() {
     run_outputs(
-        "range_slice",
         "r = 5..10\n\
          println(r[1..3])\n",
         "[6, 7]\n",
@@ -54,7 +51,6 @@ fn range_slice() {
 #[test]
 fn match_range_with_array_pattern() {
     run_outputs(
-        "match_range_array_pat",
         "r = 0..5\n\
          out = match r {\n\
          \t[h, ..t] -> [h, ..t]\n\
@@ -77,7 +73,6 @@ fn match_range_with_array_pattern() {
 #[test]
 fn generic_unary_neg_dispatches_on_runtime_tag() {
     run_outputs(
-        "generic_neg",
         "fn n(x) { -x }\n\
          println(n(5))\n\
          println(n(0 - 7))\n\
@@ -93,7 +88,6 @@ fn generic_unary_neg_dispatches_on_runtime_tag() {
 #[test]
 fn recursive_fn_passed_as_value() {
     run_outputs(
-        "push_self",
         "fn step(f fn(Int) Int, n Int) Int {\n\
          \tif n <= 0 { 0 } else { f(n - 1) }\n\
          }\n\
@@ -110,7 +104,6 @@ fn recursive_fn_passed_as_value() {
 #[test]
 fn string_split_nonempty_delimiter() {
     run_outputs(
-        "split_nonempty",
         "import al/string\n\
          println(string.split('a,b,c', ','))\n\
          println(string.split('a,,b,', ','))\n\
@@ -124,7 +117,6 @@ fn string_split_nonempty_delimiter() {
 #[test]
 fn binary_value_equality() {
     run_outputs(
-        "binary_eq",
         "println(<<1, 2, 3>> == <<1, 2, 3>>)\n\
          println(<<1, 2, 3>> == <<1, 2, 4>>)\n\
          println(<<1, 2>> != <<1, 2, 3>>)\n",
@@ -138,7 +130,6 @@ fn binary_value_equality() {
 #[test]
 fn float_division_is_total() {
     run_outputs(
-        "float_div",
         "println(7.0 / 2.0)\n\
          println(1.0 / 0.0)\n\
          println(0.0 - 9.0 / 3.0)\n",
@@ -151,7 +142,6 @@ fn float_division_is_total() {
 #[test]
 fn array_index_yields_option() {
     run_outputs(
-        "array_index_option",
         "xs = [10, 20, 30]\n\
          println(xs[1])\n\
          println(xs[99])\n",
@@ -166,7 +156,6 @@ fn array_index_yields_option() {
 #[test]
 fn capturing_self_referential_closure() {
     run_outputs(
-        "push_self_capture",
         "fn apply(f fn(Int) Int, n Int) Int { f(n) }\n\
          fn make(base Int) Int {\n\
          \thelper = fn(n) {\n\
@@ -185,7 +174,6 @@ fn capturing_self_referential_closure() {
 #[test]
 fn inspect_multiline_structures_e2e() {
     run_outputs(
-        "inspect_multiline",
         "type Point { x Int  y Int }\n\
          type Seg { a Point  b Point }\n\
          println(Seg(a: Point(x: 1, y: 2), b: Point(x: 3, y: 4)))\n\
@@ -203,7 +191,6 @@ fn inspect_multiline_structures_e2e() {
 #[test]
 fn or_pattern_binds_same_slot_in_every_alternative() {
     run_outputs(
-        "or_pattern_bindings",
         "type Shape {\n\
          \tCircle(r Int)\n\
          \tSquare(r Int)\n\
@@ -236,7 +223,6 @@ fn or_pattern_binds_same_slot_in_every_alternative() {
 #[test]
 fn binary_index_of() {
     run_outputs(
-        "binary_index_of",
         "import al/binary\n\
          h = binary.from_string('abcabc')\n\
          println(binary.index_of(h, binary.from_string('bc'), 0))\n\
@@ -254,7 +240,6 @@ fn binary_index_of() {
 #[test]
 fn binary_parse_int() {
     run_outputs(
-        "binary_parse_int",
         "import al/binary\n\
          println(binary.parse_int(binary.from_string('255'), 10))\n\
          println(binary.parse_int(binary.from_string('ff'), 16))\n\
@@ -271,7 +256,6 @@ fn binary_parse_int() {
 #[test]
 fn binary_eq_ignore_ascii_case() {
     run_outputs(
-        "binary_eq_ignore_ascii_case",
         "import al/binary\n\
          a = binary.from_string('Content-Length')\n\
          println(binary.eq_ignore_ascii_case(a, binary.from_string('content-length')))\n\
@@ -284,7 +268,6 @@ fn binary_eq_ignore_ascii_case() {
 #[test]
 fn binary_to_ascii_lower() {
     run_outputs(
-        "binary_to_ascii_lower",
         "import al/binary\n\
          println(binary.to_string(binary.to_ascii_lower(binary.from_string('AbC-123'))))\n",
         "Ok(abc-123)\n",
@@ -297,7 +280,6 @@ fn binary_to_ascii_lower() {
 #[test]
 fn binary_from_int_ascii() {
     run_outputs(
-        "binary_from_int_ascii",
         "import al/binary\n\
          println(binary.to_string(binary.from_int_ascii(255, 10)))\n\
          println(binary.to_string(binary.from_int_ascii(255, 16)))\n\

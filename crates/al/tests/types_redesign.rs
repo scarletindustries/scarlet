@@ -8,7 +8,6 @@ use common::{check_fails, check_ok, check_rejects, run_outputs};
 #[test]
 fn type_keyword_single_variant() {
     run_outputs(
-        "ty_single",
         "type User { User(name String age Int) }\n\
          u = User(name: 'al', age: 18)\n\
          println(u.name)\n\
@@ -20,7 +19,6 @@ fn type_keyword_single_variant() {
 #[test]
 fn type_keyword_multi_variant() {
     run_outputs(
-        "ty_multi",
         "type Shape { Circle(r Int) Rect(w Int h Int) }\n\
          fn area(s Shape) Int {\n\
          \tmatch s {\n\
@@ -37,7 +35,6 @@ fn type_keyword_multi_variant() {
 #[test]
 fn type_alias_is_transparent() {
     run_outputs(
-        "ty_alias",
         "type Id = Int\n\
          fn next(i Id) Id { i + 1 }\n\
          println(next(41))\n",
@@ -49,7 +46,6 @@ fn type_alias_is_transparent() {
 fn unlabeled_field_in_def_is_rejected() {
     // Every field in a type definition must carry a label.
     check_rejects(
-        "ty_unlabeled",
         "type Wrap { Wrap(Int) }\n\
          x = Wrap(1)\n",
     );
@@ -62,7 +58,6 @@ fn unlabeled_field_in_def_is_rejected() {
 #[test]
 fn some_call_is_ordinary_call() {
     run_outputs(
-        "ctor_call",
         "x = Some(5)\n\
          println(x or 0)\n",
         "5\n",
@@ -72,7 +67,6 @@ fn some_call_is_ordinary_call() {
 #[test]
 fn constructor_is_first_class() {
     run_outputs(
-        "ctor_firstclass",
         "fn map(f fn(a) b, xs Array(a)) Array(b) {\n\
          \tmatch xs {\n\
          \t\t[] -> []\n\
@@ -89,7 +83,6 @@ fn constructor_is_first_class() {
 #[test]
 fn nullary_constructor_is_value() {
     run_outputs(
-        "ctor_nullary",
         "x = None\n\
          println(x or 7)\n",
         "7\n",
@@ -103,7 +96,6 @@ fn nullary_constructor_is_value() {
 #[test]
 fn if_without_else_is_error() {
     check_fails(
-        "if_no_else",
         "x = if True { 1 }\n\
          println(x)\n",
         "else",
@@ -116,17 +108,17 @@ fn if_without_else_is_error() {
 
 #[test]
 fn empty_parens_is_parse_error() {
-    check_rejects("paren_empty", "x = ()\nprintln(x)\n");
+    check_rejects("x = ()\nprintln(x)\n");
 }
 
 #[test]
 fn single_parens_is_parse_error() {
-    check_rejects("paren_single", "x = (5)\nprintln(x)\n");
+    check_rejects("x = (5)\nprintln(x)\n");
 }
 
 #[test]
 fn block_is_grouping() {
-    run_outputs("group_block", "println({1 + 2} * 3)\n", "9\n");
+    run_outputs("println({1 + 2} * 3)\n", "9\n");
 }
 
 // ===========================================================================
@@ -136,7 +128,6 @@ fn block_is_grouping() {
 #[test]
 fn index_returns_option() {
     run_outputs(
-        "idx_option",
         "xs = [10, 20, 30]\n\
          println(xs[0] or -1)\n\
          println(xs[9] or -1)\n",
@@ -148,7 +139,6 @@ fn index_returns_option() {
 fn index_without_unwrap_is_option_typed() {
     // `xs[0] + 1` should be rejected because `xs[0]` is `Option(Int)`, not `Int`.
     check_rejects(
-        "idx_raw",
         "xs = [10, 20, 30]\n\
          y = xs[0] + 1\n\
          println(y)\n",
@@ -163,7 +153,6 @@ fn index_negative_returns_none() {
     // rejects the access. Both `-1` and a large negative magnitude yield the
     // `None` Option, while a valid in-bounds index still boxes `Some`.
     run_outputs(
-        "idx_negative",
         "xs = [10, 20, 30]\n\
          println(xs[-1])\n\
          println(xs[-100] or -1)\n\
@@ -182,7 +171,6 @@ fn slice_in_bounds_returns_subarray() {
     // an `Option`). Indexing back into the slice confirms its exact contents
     // and length: `[20, 30, 40]` has elements at 0..3, so index 3 is `None`.
     run_outputs(
-        "slice_inbounds",
         "xs = [10, 20, 30, 40, 50]\n\
          s = xs[1..4]\n\
          println(s)\n\
@@ -204,7 +192,6 @@ fn range_as_value_materializes() {
     // `5..2` is empty too — a reversed range saturates to length 0, never a
     // negative length or a crash.
     run_outputs(
-        "range_value",
         "println(0..5)\n\
          println(3..3)\n\
          println(5..2)\n",
@@ -219,7 +206,6 @@ fn range_as_value_materializes() {
 #[test]
 fn redefining_prelude_type_is_rejected() {
     check_rejects(
-        "prelude_type",
         "type Option(a) { Some(value a) None }\n\
          x = Some(1)\n",
     );
@@ -228,7 +214,6 @@ fn redefining_prelude_type_is_rejected() {
 #[test]
 fn redefining_prelude_ctor_is_rejected() {
     check_rejects(
-        "prelude_ctor",
         "type X { Ok(value Int) }\n\
          x = Ok(1)\n",
     );
@@ -241,7 +226,6 @@ fn redefining_prelude_ctor_is_rejected() {
 #[test]
 fn field_access_total_across_variants() {
     run_outputs(
-        "field_total",
         "type Named { Person(name String age Int) Org(name String size Int) }\n\
          fn name_of(n Named) String { n.name }\n\
          println(name_of(Person(name: 'al', age: 18)))\n\
@@ -253,7 +237,6 @@ fn field_access_total_across_variants() {
 #[test]
 fn field_access_partial_is_rejected() {
     check_rejects(
-        "field_partial",
         "type Named { Person(name String age Int) Org(name String size Int) }\n\
          fn age_of(n Named) Int { n.age }\n\
          println(age_of(Person(name: 'al', age: 18)))\n",
@@ -263,7 +246,6 @@ fn field_access_partial_is_rejected() {
 #[test]
 fn field_access_on_unbound_var_is_rejected() {
     check_rejects(
-        "field_unbound",
         "fn name_of(x) { x.name }\n\
          println(name_of(1))\n",
     );
@@ -276,7 +258,6 @@ fn field_access_on_unbound_var_is_rejected() {
 #[test]
 fn recursive_type_compiles() {
     check_ok(
-        "ty_recursive",
         "type Tree(a) { Leaf Node(l Tree(a) v a r Tree(a)) }\n\
          t Tree(Int) = Node(l: Leaf, v: 1, r: Leaf)\n\
          t\n",
@@ -286,7 +267,6 @@ fn recursive_type_compiles() {
 #[test]
 fn recursive_type_runs() {
     run_outputs(
-        "ty_recursive_run",
         "type Tree(a) { Leaf Node(l Tree(a) v a r Tree(a)) }\n\
          fn size(t Tree(a)) Int {\n\
          \tmatch t {\n\
@@ -315,7 +295,6 @@ fn recursive_type_runs() {
 #[test]
 fn nested_option_match_is_exhaustive() {
     check_ok(
-        "exhaust_nested_option",
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -329,7 +308,6 @@ fn nested_option_match_is_exhaustive() {
 #[test]
 fn nested_option_match_runs() {
     run_outputs(
-        "exhaust_nested_option_run",
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -344,7 +322,6 @@ fn nested_option_match_runs() {
 #[test]
 fn nested_result_match_is_exhaustive() {
     check_ok(
-        "exhaust_nested_result",
         "fn classify(x Result(Result(Int, String), String)) String {\n\
          \tmatch x {\n\
          \t\tOk(Ok(n)) -> 'ok ${n}'\n\
@@ -362,7 +339,6 @@ fn nested_option_missing_inner_arm_reports_precise_witness() {
     // `Option`'s variants are known the witness names it exactly instead of
     // collapsing to `Some(_)`.
     check_fails(
-        "exhaust_nested_option_missing",
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -379,7 +355,6 @@ fn nested_option_redundant_wildcard_is_rejected() {
     // non-exhaustiveness error; now the explicit inner arms already cover
     // `Some(_)`, so that wildcard is correctly reported as dead code.
     check_fails(
-        "exhaust_nested_option_redundant",
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -399,7 +374,6 @@ fn non_uniform_recursive_type_resolution_terminates() {
     // A match on it still type-checks: the recursive position is cut off to an
     // infinite-constructor type, so the wildcard arm is required and accepted.
     check_ok(
-        "exhaust_non_uniform_rec",
         "type Nest(t) { More(inner Nest((t, t))) Done }\n\
          fn f(n Nest(Int)) Int {\n\
          \tmatch n {\n\
@@ -414,7 +388,6 @@ fn non_uniform_recursive_type_resolution_terminates() {
 #[test]
 fn mutual_recursion_functions() {
     run_outputs(
-        "fn_mutual",
         "fn is_even(n Int) Bool {\n\
          \tif n == 0 { True } else { is_odd(n - 1) }\n\
          }\n\
@@ -434,7 +407,6 @@ fn mutual_recursion_functions() {
 #[test]
 fn unreachable_arm_is_error() {
     check_rejects(
-        "unreach",
         "fn f(b Bool) Int {\n\
          \tmatch b {\n\
          \t\tTrue -> 1\n\
@@ -449,7 +421,6 @@ fn unreachable_arm_is_error() {
 #[test]
 fn ctor_pattern_missing_fields_without_spread_is_error() {
     check_rejects(
-        "pat_missing",
         "type User { User(name String age Int email String) }\n\
          fn f(u User) String {\n\
          \tmatch u {\n\
@@ -463,7 +434,6 @@ fn ctor_pattern_missing_fields_without_spread_is_error() {
 #[test]
 fn ctor_pattern_with_spread_is_ok() {
     run_outputs(
-        "pat_spread",
         "type User { User(name String age Int email String) }\n\
          fn f(u User) String {\n\
          \tmatch u {\n\
@@ -482,7 +452,6 @@ fn ctor_pattern_with_spread_is_ok() {
 #[test]
 fn or_on_non_option_result_is_rejected() {
     check_rejects(
-        "or_int",
         "x = 5 or 0\n\
          println(x)\n",
     );
@@ -491,7 +460,6 @@ fn or_on_non_option_result_is_rejected() {
 #[test]
 fn or_on_result_unwraps_ok() {
     run_outputs(
-        "or_result",
         "fn f(b Bool) Result(Int, String) {\n\
          \tif b { Ok(42) } else { Err('nope') }\n\
          }\n\
@@ -509,7 +477,6 @@ fn or_on_result_unwraps_ok() {
 fn rigid_tyvar_body_mismatch_is_rejected() {
     // Body returns concrete `Int` where signature promised `a`.
     check_rejects(
-        "rigid_body",
         "fn bad(x a) a { 1 }\n\
          println(bad('s'))\n",
     );
@@ -519,7 +486,6 @@ fn rigid_tyvar_body_mismatch_is_rejected() {
 fn rigid_tyvar_same_var_unifies_args() {
     // `f` declares both params as `a`, so `f(1, 's')` must be rejected.
     check_rejects(
-        "rigid_args",
         "fn f(x a, y a) a { x }\n\
          println(f(1, 's'))\n",
     );
@@ -528,7 +494,6 @@ fn rigid_tyvar_same_var_unifies_args() {
 #[test]
 fn rigid_tyvar_same_var_accepts_same_type() {
     run_outputs(
-        "rigid_ok",
         "fn f(x a, _y a) a { x }\n\
          println(f(1, 2))\n",
         "1\n",
@@ -542,7 +507,6 @@ fn rigid_tyvar_same_var_accepts_same_type() {
 #[test]
 fn positional_construction() {
     run_outputs(
-        "ctor_positional",
         "type Pair { Pair(fst Int snd Int) }\n\
          p = Pair(1, 2)\n\
          println(p.fst + p.snd)\n",
@@ -553,7 +517,6 @@ fn positional_construction() {
 #[test]
 fn labeled_construction_reordered() {
     run_outputs(
-        "ctor_labeled",
         "type Pair { Pair(fst Int snd Int) }\n\
          p = Pair(snd: 2, fst: 1)\n\
          println(p.fst)\n\
@@ -574,7 +537,6 @@ fn ctor_record_update_overrides_and_projects() {
     // (al), `age` is overridden (19), and the original `base.age` is unchanged
     // (18) — proving record-update builds a fresh value rather than mutating.
     run_outputs(
-        "ctor_record_update",
         "type P { P(name String age Int) }\n\
          base = P(name: 'al', age: 18)\n\
          older = P(..base, age: 19)\n\
@@ -590,7 +552,6 @@ fn ctor_record_update_at_most_one_spread() {
     // A constructor record-update accepts a single `..base`; a second spread is
     // rejected.
     check_fails(
-        "ctor_two_spreads",
         "type P { P(name String age Int) }\n\
          base = P(name: 'al', age: 18)\n\
          older = P(..base, ..base)\n\
@@ -604,7 +565,6 @@ fn spread_arg_in_plain_call_rejected() {
     // Spread arguments only make sense in constructor record-update calls; in an
     // ordinary function call they are a placement error.
     check_fails(
-        "spread_plain_call",
         "fn f(a Int) Int { a }\n\
          println(f(..[1]))\n",
         "Spread arguments are only allowed in constructor record-update calls",
@@ -616,7 +576,6 @@ fn labelled_arg_in_plain_call_rejected() {
     // Labelled arguments are a constructor-only affordance; passing one to an
     // ordinary function is a placement error.
     check_fails(
-        "labelled_plain_call",
         "fn f(a Int) Int { a }\n\
          println(f(a: 1))\n",
         "Labelled arguments are only allowed in constructor calls",
@@ -626,7 +585,6 @@ fn labelled_arg_in_plain_call_rejected() {
 #[test]
 fn match_guard_basic() {
     run_outputs(
-        "guard_basic",
         "fn classify(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x < 0 -> 'neg'\n\
@@ -646,7 +604,6 @@ fn match_guard_basic() {
 #[test]
 fn match_guard_with_constructor() {
     run_outputs(
-        "guard_ctor",
         "fn pos(o Option(Int)) Int {\n\
          \tmatch o {\n\
          \t\tSome(n) if n > 0 -> n\n\
@@ -664,7 +621,6 @@ fn match_guard_with_constructor() {
 #[test]
 fn match_guard_non_exhaustive_errors() {
     check_fails(
-        "guard_nonexhaust",
         "fn f(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x < 2 -> 'a'\n\
@@ -677,7 +633,6 @@ fn match_guard_non_exhaustive_errors() {
 #[test]
 fn match_guard_type_must_be_bool() {
     check_fails(
-        "guard_nonbool",
         "fn f(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x -> 'a'\n\
@@ -694,7 +649,6 @@ fn or_pattern_binding_after_or_in_tuple() {
     // `Alternative` mode, so a sibling binding *after* it (`y`) was rejected as
     // "not bound in the first alternative" even though `(0 | 1, y)` is valid.
     run_outputs(
-        "or_after",
         "fn f(t (Int, Int)) Int {\n\
          \tmatch t {\n\
          \t\t(0 | 1, y) -> y\n\
@@ -713,7 +667,6 @@ fn or_pattern_binding_before_or_in_tuple() {
     // initial-binding count, so a binding *before* an or-pattern (`y`) was
     // wrongly reported as "must be bound in every alternative" for `(y, 0 | 1)`.
     run_outputs(
-        "or_before",
         "fn g(t (Int, Int)) Int {\n\
          \tmatch t {\n\
          \t\t(y, 0 | 1) -> y\n\
@@ -731,7 +684,6 @@ fn or_pattern_unequal_bindings_still_rejected() {
     // The scoping fix must not relax the core invariant: every alternative of
     // an or-pattern must bind exactly the same names.
     check_fails(
-        "or_unequal",
         "type R { Good(v Int) Bad(v Int) }\n\
          fn h(r R) Int {\n\
          \tmatch r {\n\
@@ -746,7 +698,6 @@ fn or_pattern_unequal_bindings_still_rejected() {
 #[test]
 fn array_spread_literal() {
     run_outputs(
-        "spread_basic",
         "xs = [1, 2]\n\
          ys = [4, 5]\n\
          zs = [..xs, 3, ..ys, 6]\n\
@@ -757,7 +708,7 @@ fn array_spread_literal() {
 
 #[test]
 fn array_concat_operator_removed() {
-    check_rejects("plusplus_gone", "xs = [1] ++ [2]\nprintln(xs)\n");
+    check_rejects("xs = [1] ++ [2]\nprintln(xs)\n");
 }
 
 #[test]
@@ -765,12 +716,8 @@ fn nested_ctor_pattern_exhaustive() {
     // Regression: cycle-guard in resolve_icon leaked `seen` across sibling
     // type-args, so the payload type after specializing on Ok had no variants
     // and `Ok(Nil)` was reported as non-exhaustive.
+    check_ok("match Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n");
     check_ok(
-        "ok_nil",
-        "match Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n",
-    );
-    check_ok(
-        "ok_ab",
         "type T { A B }\n\
          match Ok(A) { Ok(A) -> println('a') Ok(B) -> println('b') Err(e) -> println(e) }\n",
     );
@@ -779,18 +726,15 @@ fn nested_ctor_pattern_exhaustive() {
 #[test]
 fn module_builtins_qualified_and_destructured() {
     check_ok(
-        "net_qualified",
         "import al/net\n\
          match net.listen('0.0.0.0', 8080) { Ok(s) -> println(s) Err(e) -> println(e) }\n",
     );
     check_ok(
-        "net_destructured",
         "import al/net.{listen, Server}\n\
          fn go(s Server) Nil { println(s) }\n\
          match listen('0.0.0.0', 8080) { Ok(s) -> go(s) Err(e) -> println(e) }\n",
     );
     check_ok(
-        "io_qualified",
         "import al/io\n\
          x = io.read_text('a') or ''\n\
          println(x)\n",
@@ -800,15 +744,10 @@ fn module_builtins_qualified_and_destructured() {
 #[test]
 fn vm_attribute_stdlib_only() {
     check_fails(
-        "vm_user",
         "@vm(tcp_listen)\nfn listen(p Int) Int\n",
         "'@vm' is only allowed in the standard library",
     );
-    check_fails(
-        "unknown_attr",
-        "@nope\nfn f() Nil { Nil }\n",
-        "Unknown attribute '@nope'",
-    );
+    check_fails("@nope\nfn f() Nil { Nil }\n", "Unknown attribute '@nope'");
 }
 
 // ===========================================================================
@@ -818,23 +757,19 @@ fn vm_attribute_stdlib_only() {
 #[test]
 fn bool_is_a_normal_two_ctor_type() {
     run_outputs(
-        "bool_ctor",
         "println(True)\nprintln(False)\nprintln(!True)\n",
         "True\nFalse\nFalse\n",
     );
     run_outputs(
-        "bool_match",
         "fn show(b Bool) String { match b { True -> 'yes'\nFalse -> 'no' } }\n\
          println(show(True))\nprintln(show(1 == 2))\n",
         "yes\nno\n",
     );
     check_fails(
-        "bool_non_exhaustive",
         "fn f(b Bool) Int { match b { True -> 1 } }\nprintln(f(True))\n",
         "not exhaustive",
     );
     check_fails(
-        "bool_reserved",
         "type My { True }\n",
         "is defined in the prelude and cannot be redefined",
     );
@@ -842,29 +777,23 @@ fn bool_is_a_normal_two_ctor_type() {
 
 #[test]
 fn lowercase_true_is_just_an_identifier() {
-    check_fails("lc_true", "x = true\n", "Unknown identifier");
+    check_fails("x = true\n", "Unknown identifier");
 }
 
 #[test]
 fn reserved_set_derived_from_prelude_iface() {
     // Prelude types/ctors are reserved...
     check_fails(
-        "redefine_option",
         "type Option(a) { Just(value a) Nothing }\n",
         "is defined in the prelude and cannot be redefined",
     );
     // ...but `@vm` functions are not.
-    run_outputs(
-        "shadow_println",
-        "fn println(x Int) Int { x + 1 }\n_ = println(41)\n",
-        "",
-    );
+    run_outputs("fn println(x Int) Int { x + 1 }\n_ = println(41)\n", "");
 }
 
 #[test]
 fn stdlib_option_result_list_int_bool() {
     run_outputs(
-        "stdlib_option",
         "import al/option\n\
          println(option.map(Some(5), fn(x) x * 2))\n\
          println(option.unwrap(None, 99))\n\
@@ -874,7 +803,6 @@ fn stdlib_option_result_list_int_bool() {
     // then: Some threads the inner value into f (Some(5) -> Some(6)); None
     // short-circuits, returning None without ever calling f.
     run_outputs(
-        "stdlib_option_then",
         "import al/option\n\
          println(option.then(Some(5), fn(x) Some(x + 1)))\n\
          println(option.then(None, fn(x) Some(x + 1)))\n",
@@ -882,7 +810,6 @@ fn stdlib_option_result_list_int_bool() {
     );
     // or_else: Some keeps the original option; None falls back to the supplied one.
     run_outputs(
-        "stdlib_option_or_else",
         "import al/option\n\
          println(option.or_else(Some(1), Some(2)))\n\
          println(option.or_else(None, Some(2)))\n",
@@ -890,7 +817,6 @@ fn stdlib_option_result_list_int_bool() {
     );
     // is_none: True on None, False on Some — exercising both match arms.
     run_outputs(
-        "stdlib_option_is_none",
         "import al/option\n\
          println(option.is_none(None))\n\
          println(option.is_none(Some(1)))\n",
@@ -899,7 +825,6 @@ fn stdlib_option_result_list_int_bool() {
     // The arms the existing stdlib_option block misses: map leaves None untouched,
     // unwrap on Some yields the inner value, is_some is False on None.
     run_outputs(
-        "stdlib_option_passthrough",
         "import al/option\n\
          println(option.map(None, fn(x) x * 2))\n\
          println(option.unwrap(Some(5), 99))\n\
@@ -907,7 +832,6 @@ fn stdlib_option_result_list_int_bool() {
         "None\n5\nFalse\n",
     );
     run_outputs(
-        "stdlib_result",
         "import al/result\n\
          println(result.map(Ok(5), fn(x) x + 1))\n\
          println(result.map_err(Err('bad'), fn(e) '${e}!'))\n",
@@ -916,7 +840,6 @@ fn stdlib_option_result_list_int_bool() {
     // then: Ok threads the inner value into f (here Ok(5) -> Ok(6)); Err
     // short-circuits, propagating the original error untouched.
     run_outputs(
-        "stdlib_result_then",
         "import al/result\n\
          println(result.then(Ok(5), fn(x) Ok(x + 1)))\n\
          println(result.then(Err('e'), fn(x) Ok(x + 1)))\n",
@@ -925,7 +848,6 @@ fn stdlib_option_result_list_int_bool() {
     // unwrap: Ok yields the inner value; Err discards the error and returns
     // the supplied default.
     run_outputs(
-        "stdlib_result_unwrap",
         "import al/result\n\
          println(result.unwrap(Ok(5), 0))\n\
          println(result.unwrap(Err('e'), 99))\n",
@@ -934,7 +856,6 @@ fn stdlib_option_result_list_int_bool() {
     // is_ok / is_err: each predicate is True on its own constructor and False
     // on the other, exercising both match arms of each.
     run_outputs(
-        "stdlib_result_predicates",
         "import al/result\n\
          println(result.is_ok(Ok(1)))\n\
          println(result.is_ok(Err('x')))\n\
@@ -945,14 +866,12 @@ fn stdlib_option_result_list_int_bool() {
     // Passthrough arms (the ones the existing stdlib_result misses): map leaves
     // an Err untouched, map_err leaves an Ok untouched.
     run_outputs(
-        "stdlib_result_passthrough",
         "import al/result\n\
          println(result.map(Err('e'), fn(x) x + 1))\n\
          println(result.map_err(Ok(5), fn(e) e))\n",
         "Err(e)\nOk(5)\n",
     );
     run_outputs(
-        "stdlib_list",
         "import al/list\n\
          println(list.map([1, 2, 3], fn(x) x * 10))\n\
          println(list.filter([1, 2, 3, 4], fn(x) x > 2))\n\
@@ -963,7 +882,6 @@ fn stdlib_option_result_list_int_bool() {
     );
     // find: returns Some(first match), None when nothing satisfies the predicate.
     run_outputs(
-        "stdlib_list_find",
         "import al/list\n\
          println(list.find([1, 2, 3], fn(x) x > 1))\n\
          println(list.find([1, 2, 3], fn(x) x > 9))\n",
@@ -971,7 +889,6 @@ fn stdlib_option_result_list_int_bool() {
     );
     // any / all: any is True iff some element matches; all is True iff every one does.
     run_outputs(
-        "stdlib_list_any_all",
         "import al/list\n\
          println(list.any([1, 2, 3], fn(x) x > 2))\n\
          println(list.any([1, 2, 3], fn(x) x > 9))\n\
@@ -982,7 +899,6 @@ fn stdlib_option_result_list_int_bool() {
     // Empty-list base cases: the `[] ->` arm of each recursive list fn and the
     // not-found terminal of contains.
     run_outputs(
-        "stdlib_list_empty",
         "import al/list\n\
          println(list.map([], fn(x) x * 10))\n\
          println(list.filter([], fn(x) x > 2))\n\
@@ -993,7 +909,6 @@ fn stdlib_option_result_list_int_bool() {
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
     run_outputs(
-        "stdlib_int",
         "import al/int\n\
          println(int.max(3, 7))\n\
          println(int.min(3, 7))\n\
@@ -1003,7 +918,6 @@ fn stdlib_option_result_list_int_bool() {
         "7\n3\n5\n10\n42\n",
     );
     run_outputs(
-        "stdlib_bool",
         "import al/bool\n\
          println(bool.negate(True))\n\
          println(bool.to_string(False))\n",
@@ -1014,7 +928,6 @@ fn stdlib_option_result_list_int_bool() {
 #[test]
 fn stdlib_binary() {
     run_outputs(
-        "binary_roundtrip",
         "import al/binary\n\
          b = binary.from_string('hi')\n\
          println(binary.to_string(b))\n\
@@ -1024,7 +937,6 @@ fn stdlib_binary() {
         "Ok(hi)\n16\n2\n<<104, 105>>\n",
     );
     run_outputs(
-        "binary_slice_append",
         "import al/binary\n\
          b = binary.from_string('ABC')\n\
          println(binary.slice(b, 8, 8))\n\
@@ -1039,7 +951,6 @@ fn stdlib_binary() {
     // codepoint 233 and advances 16 bits so `..` swallows the empty remainder.
     // A byte-wise read would bind 195 instead, so 233 discriminates the opcode.
     run_outputs(
-        "binary_utf8_pattern",
         "import al/binary\n\
          r = match <<195, 169>> {\n\
          \t<<c:utf8, ..>> -> c\n\
@@ -1052,7 +963,6 @@ fn stdlib_binary() {
     // From a 5-byte source `bytes(3)` keeps exactly 65,66,67 ('A','B','C'):
     // discriminates count (not 5) and prefix-vs-suffix (not 'C','D','E').
     run_outputs(
-        "binary_bytes_literal",
         "import al/binary\n\
          import al/string\n\
          src = binary.from_string('ABCDE')\n\
@@ -1063,7 +973,6 @@ fn stdlib_binary() {
     // undecodable), and `<<1:4>>` is bit-unaligned (bit_len % 8 != 0). Both
     // yield Err(Nil) rather than panicking or lossily decoding.
     run_outputs(
-        "binary_to_string_err",
         "import al/binary\n\
          println(binary.to_string(<<255>>))\n\
          println(binary.to_string(<<1:4>>))\n",
@@ -1072,7 +981,6 @@ fn stdlib_binary() {
     // binary.byte_size rounds up: a 4-bit binary occupies 1 byte (div_ceil),
     // not 0. The existing aligned case (16 bits -> 2) cannot catch the rounding.
     run_outputs(
-        "binary_byte_size_unaligned",
         "import al/binary\n\
          println(binary.byte_size(<<1:4>>))\n",
         "1\n",
@@ -1080,13 +988,11 @@ fn stdlib_binary() {
     // binary.slice with a negative offset takes the `at < 0` Err branch (a
     // different guard than the existing OOB `at + take > bit_len` case).
     run_outputs(
-        "binary_slice_negative",
         "import al/binary\n\
          println(binary.slice(binary.from_string('ABC'), 0 - 1, 8))\n",
         "Err(Nil)\n",
     );
     check_fails(
-        "net_write_rejects_string",
         "import al/net/socket.{Socket}\n\
          fn f(c Socket) Nil { socket.write(c, 'nope') or Nil }\n",
         "Type mismatch",
@@ -1103,7 +1009,6 @@ fn binary_string_literal_patterns() {
     // (Op::BinMatchPrefix): `<<'GET ', ..rest>>` is one bounds-checked byte
     // compare. The rest binding is a zero-copy view over the remainder.
     run_outputs(
-        "bin_pat_string_prefix",
         "import al/binary\n\
          r = match binary.from_string('GET /index.html') {\n\
          \t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
@@ -1114,7 +1019,6 @@ fn binary_string_literal_patterns() {
     );
     // Explicit `:utf8` on a string literal is the same pattern.
     run_outputs(
-        "bin_pat_string_prefix_explicit_utf8",
         "import al/binary\n\
          r = match binary.from_string('POST /x') {\n\
          \t<<'POST ':utf8, ..>> -> 1\n\
@@ -1126,7 +1030,6 @@ fn binary_string_literal_patterns() {
     // Without `..rest` the whole binary must be consumed: 'GET' matches
     // exactly, 'GETX' and 'GE' fall through.
     run_outputs(
-        "bin_pat_string_exact",
         "import al/binary\n\
          fn is_get(b Binary) Bool {\n\
          \tmatch b {\n\
@@ -1142,7 +1045,6 @@ fn binary_string_literal_patterns() {
     // A literal prefix longer than the scrutinee fails cleanly (no read past
     // the end), and arms are tried in order.
     run_outputs(
-        "bin_pat_string_arm_order",
         "import al/binary\n\
          r = match binary.from_string('DELETE /v') {\n\
          \t<<'GET ', ..>> -> 'get'\n\
@@ -1156,7 +1058,6 @@ fn binary_string_literal_patterns() {
     // A literal prefix can be followed by destructuring segments: parse the
     // minor version digit out of an HTTP version token.
     run_outputs(
-        "bin_pat_string_then_int",
         "import al/binary\n\
          r = match binary.from_string('HTTP/1.1') {\n\
          \t<<'HTTP/1.', minor>> -> minor - 48\n\
@@ -1168,7 +1069,6 @@ fn binary_string_literal_patterns() {
     // Multi-byte UTF-8 literals ('é' is 2 bytes) keep byte-accurate offsets
     // for the rest binding.
     run_outputs(
-        "bin_pat_string_multibyte",
         "import al/binary\n\
          r = match binary.from_string('héllo world') {\n\
          \t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
@@ -1180,7 +1080,6 @@ fn binary_string_literal_patterns() {
     // Consecutive integer literals coalesce into the same single-compare
     // prefix: <<13, 10, ..>> is CRLF.
     run_outputs(
-        "bin_pat_int_literal_run",
         "import al/binary\n\
          r = match binary.from_string('\\r\\nrest') {\n\
          \t<<13, 10, ..rest>> -> binary.byte_size(rest)\n\
@@ -1192,7 +1091,6 @@ fn binary_string_literal_patterns() {
     // Mixed string/int literal runs and sub-byte literal widths coalesce too;
     // compile-time encoding must match Op::BinFromInt's MSB-first layout.
     run_outputs(
-        "bin_pat_mixed_literal_run",
         "import al/binary\n\
          packet = <<1:4, 2:4, 'AB', 7>>\n\
          r = match packet {\n\
@@ -1205,7 +1103,6 @@ fn binary_string_literal_patterns() {
     // String-literal segments in EXPRESSIONS build the UTF-8 bytes (and fold
     // to a constant): equal to the runtime-built binary.
     run_outputs(
-        "bin_expr_string_literal",
         "import al/binary\n\
          println(<<'hi there'>> == binary.from_string('hi there'))\n\
          println(<<'AB', 67, 'D'>> == binary.from_string('ABCD'))\n\
@@ -1215,7 +1112,6 @@ fn binary_string_literal_patterns() {
     // A string literal with an Int size spec is still a type error (the
     // Utf8 default applies only to bare string segments).
     check_fails(
-        "bin_pat_string_with_size_rejected",
         "import al/binary\n\
          r = match binary.from_string('AB') {\n\
          \t<<'AB':16>> -> 1\n\
@@ -1231,7 +1127,6 @@ fn stdlib_binary_byte_at() {
     // byte_at : (Binary, Int) -> Int — in-bounds bytes, -1 out of bounds (both
     // sides), and views (slices) read through their offset.
     run_outputs(
-        "binary_byte_at",
         "import al/binary\n\
          b = binary.from_string('AZ')\n\
          println(binary.byte_at(b, 0))\n\
@@ -1254,7 +1149,6 @@ fn stdlib_http_builtins() {
     // each hydrate a Scheme from their @vm declaration. Behaviour is golden
     // tested (tests/programs/http_parse.al); these pin the call-site types.
     check_ok(
-        "h1_parse_request_ty",
         "import al/binary\n\
          import al/http/h1.{Done, NeedMore, Bad}\n\
          r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
@@ -1265,7 +1159,6 @@ fn stdlib_http_builtins() {
          println(r)\n",
     );
     check_ok(
-        "h1_framing_ty",
         "import al/binary\n\
          import al/http/h1.{Done, NoBody, Length, Chunked, Invalid}\n\
          r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
@@ -1282,7 +1175,6 @@ fn stdlib_http_builtins() {
     // chunk_decode : (Binary, Int, Int) -> ChunkBody, with the decoded body /
     // trailers / consumed offset destructurable from ChunkedDone.
     check_ok(
-        "h1_chunk_decode_ty",
         "import al/binary\n\
          import al/http/h1.{ChunkedDone, ChunkedNeedMore, ChunkedBad}\n\
          import al/http/headers\n\
@@ -1297,7 +1189,6 @@ fn stdlib_http_builtins() {
          println(r)\n",
     );
     check_ok(
-        "h1_serialize_head_ty",
         "import al/binary\n\
          import al/http/h1\n\
          import al/http/headers.{Header}\n\
@@ -1305,7 +1196,6 @@ fn stdlib_http_builtins() {
          println(binary.byte_size(head))\n",
     );
     check_ok(
-        "headers_get_has_ty",
         "import al/binary\n\
          import al/http/headers.{Header}\n\
          hs = [Header(name: binary.from_string('Host'), value: binary.from_string('x'))]\n\
@@ -1319,33 +1209,28 @@ fn stdlib_http_builtins() {
 fn stdlib_binary_ascii_builtins() {
     // index_of : (Binary, Binary, Int) -> Option(Int)
     check_ok(
-        "binary_index_of_ty",
         "import al/binary\n\
          i = binary.index_of(binary.from_string('abc'), binary.from_string('b'), 0) or 0\n\
          println(i)\n",
     );
     // parse_int : (Binary, Int) -> Option(Int)
     check_ok(
-        "binary_parse_int_ty",
         "import al/binary\n\
          n = binary.parse_int(binary.from_string('42'), 10) or 0\n\
          println(n)\n",
     );
     // eq_ignore_ascii_case : (Binary, Binary) -> Bool
     check_ok(
-        "binary_eq_ignore_ascii_case_ty",
         "import al/binary\n\
          println(binary.eq_ignore_ascii_case(binary.from_string('A'), binary.from_string('a')))\n",
     );
     // to_ascii_lower : (Binary) -> Binary
     check_ok(
-        "binary_to_ascii_lower_ty",
         "import al/binary\n\
          println(binary.to_string(binary.to_ascii_lower(binary.from_string('AB'))))\n",
     );
     // from_int_ascii : (Int, Int) -> Binary
     check_ok(
-        "binary_from_int_ascii_ty",
         "import al/binary\n\
          println(binary.to_string(binary.from_int_ascii(255, 16)))\n",
     );
@@ -1354,7 +1239,6 @@ fn stdlib_binary_ascii_builtins() {
 #[test]
 fn stdlib_float() {
     run_outputs(
-        "float_vm_builtins",
         "import al/float\n\
          println(float.round(2.7))\n\
          println(float.floor(2.7))\n\
@@ -1365,7 +1249,6 @@ fn stdlib_float() {
         "3\n2\n3\n2\n5.0\n3.14\n",
     );
     run_outputs(
-        "float_pure_al",
         "import al/float\n\
          println(float.abs(0.0 - 2.5))\n\
          println(float.min(1.5, 3.2))\n\
@@ -1379,7 +1262,6 @@ fn stdlib_float() {
     // pairs pin the equal boundary — each would fail if the op were the strict
     // `<`/`>`.
     run_outputs(
-        "float_operators",
         "x = 2.5\n\
          z = 0.0\n\
          println(1.5 + 2.0)\n\
@@ -1396,7 +1278,6 @@ fn stdlib_float() {
     // sign discriminator a positives-only test misses. round is
     // half-away-from-zero (-2.5 -> -3); ceil toward +inf (-2.1 -> -2).
     run_outputs(
-        "float_rounding_negatives",
         "import al/float\n\
          println(float.floor(0.0 - 2.7))\n\
          println(float.ceil(0.0 - 2.1))\n\
@@ -1419,7 +1300,6 @@ fn stdlib_string() {
     // string.inspect on a String passes the text through verbatim (the
     // ToString already-Str fast path) while on a scalar it stringifies (42).
     run_outputs(
-        "stdlib_string",
         "import al/string\n\
          println(string.length('héllo'))\n\
          println(string.split('abc', ''))\n\
@@ -1435,7 +1315,6 @@ fn stdlib_string() {
 fn binary_literal_and_pattern_e2e() {
     // <<a, b>> pattern: scan→parse→compile→VM. 'A'=65, 'B'=66, sum=131.
     run_outputs(
-        "binary_pat_match",
         "import al/binary\n\
          r = match binary.from_string('AB') {\n\
          \t<<a, b>> -> a + b\n\
@@ -1446,7 +1325,6 @@ fn binary_literal_and_pattern_e2e() {
     );
     // <<1:4, 2:4>> literal: 0001_0010 = 18, inspect emits whole-byte form.
     run_outputs(
-        "binary_lit_bits_inspect",
         "import al/string\n\
          println(string.inspect(<<1:4, 2:4>>))\n",
         "<<18>>\n",
@@ -1460,7 +1338,6 @@ fn binary_literal_and_pattern_e2e() {
 #[test]
 fn ctor_destructure_single_variant_ok() {
     run_outputs(
-        "ctor_destruct_ok",
         "type Box { Box(value Int) }\n\
          Box(n) = Box(42)\n\
          println(n)\n",
@@ -1471,7 +1348,6 @@ fn ctor_destructure_single_variant_ok() {
 #[test]
 fn ctor_destructure_multi_field_ok() {
     run_outputs(
-        "ctor_destruct_multi",
         "type Pair { Pair(a Int b String) }\n\
          Pair(x, y) = Pair(7, 'hi')\n\
          println(x)\n\
@@ -1482,17 +1358,12 @@ fn ctor_destructure_multi_field_ok() {
 
 #[test]
 fn ctor_destructure_refutable_rejected() {
-    check_fails(
-        "ctor_destruct_some",
-        "Some(x) = Some(1)\nprintln(x)\n",
-        "refutable",
-    );
+    check_fails("Some(x) = Some(1)\nprintln(x)\n", "refutable");
 }
 
 #[test]
 fn ctor_destructure_nested_refutable_rejected() {
     check_fails(
-        "ctor_destruct_nested",
         "type Box { Box(value Option(Int)) }\n\
          Box(Some(n)) = Box(Some(1))\n\
          println(n)\n",
@@ -1506,13 +1377,12 @@ fn ctor_destructure_nested_refutable_rejected() {
 
 #[test]
 fn typed_discard_nil_println_ok() {
-    run_outputs("typed_discard_nil", "Nil = println('x')\n", "x\n");
+    run_outputs("Nil = println('x')\n", "x\n");
 }
 
 #[test]
 fn typed_discard_string_int_mismatch() {
     check_fails(
-        "typed_discard_string",
         "String = 5\n",
         "Type mismatch: expected 'String', got 'Int'",
     );
@@ -1520,16 +1390,12 @@ fn typed_discard_string_int_mismatch() {
 
 #[test]
 fn typed_discard_int_string_mismatch() {
-    check_fails(
-        "typed_discard_int",
-        "Int = 'a'\n",
-        "Type mismatch: expected 'Int', got 'String'",
-    );
+    check_fails("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'");
 }
 
 #[test]
 fn typed_discard_constructor_is_not_a_type() {
-    check_fails("typed_discard_ctor", "Some = 1\n", "'Some' is not a type");
+    check_fails("Some = 1\n", "'Some' is not a type");
 }
 
 // ===========================================================================
@@ -1548,7 +1414,6 @@ fn closure_captures_enclosing_function_local() {
     // (5 and 10) prove the capture is materialized per-closure: a shared/global
     // slot would make both print the same value (the last `x` written).
     run_outputs(
-        "closure_capture_local",
         "fn make_adder(x Int) fn(Int) Int {\n\
          \tfn(y Int) x + y\n\
          }\n\
@@ -1567,7 +1432,6 @@ fn closure_captures_multiple_enclosing_locals() {
     // closure carries its own materialized capture array, read back in order:
     // f = 2*10 + 3 = 23, g = 5*10 + 1 = 51.
     run_outputs(
-        "closure_capture_multi",
         "fn make_affine(a Int, b Int) fn(Int) Int {\n\
          \tfn(x Int) a * x + b\n\
          }\n\
@@ -1585,7 +1449,6 @@ fn closure_captures_non_parameter_local() {
     // function, not a parameter — still an enclosing-function local, so still
     // the `PushCapture` path. p = 100 + 5 = 105, q = 200 + 5 = 205.
     run_outputs(
-        "closure_capture_letbind",
         "fn counter_from(start Int) fn(Int) Int {\n\
          \tbase = start * 100\n\
          \tfn(n Int) base + n\n\
@@ -1609,7 +1472,6 @@ fn and_or_short_circuit_skips_rhs() {
     // is decided by the LHS (JumpIfFalse), and `True || _` likewise (JumpIfTrue),
     // so neither RHS call runs: output is just the two boolean results.
     run_outputs(
-        "and_or_short_circuit",
         "fn loud(b Bool) Bool {\n\
          \tprintln('evaluated')\n\
          \tb\n\
@@ -1627,7 +1489,6 @@ fn and_or_evaluate_rhs_when_lhs_undecided() {
     // emits 'evaluated' before the println prints the operator's result, which
     // also confirms `loud` genuinely prints when reached.
     run_outputs(
-        "and_or_eval_rhs",
         "fn loud(b Bool) Bool {\n\
          \tprintln('evaluated')\n\
          \tb\n\
@@ -1659,7 +1520,6 @@ fn neq_on_int_and_enum() {
     // and fields structurally: `Good('x') != Good('y')` differs in its field
     // (True), while `Good('x') != Good('x')` is structurally equal (False).
     run_outputs(
-        "neq_int_enum",
         "type C { Good(v String) Bad(v String) }\n\
          println(1 != 2)\n\
          println(1 != 1)\n\
@@ -1677,7 +1537,6 @@ fn eq_on_string_array_tuple() {
     // String compares by contents, Array element-wise, and Tuple component-wise
     // (the inequal tuples differ only in their second component).
     run_outputs(
-        "eq_compound",
         "println('ab' == 'ab')\n\
          println('ab' == 'ac')\n\
          println([1, 2] == [1, 2])\n\

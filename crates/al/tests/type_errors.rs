@@ -3,13 +3,12 @@ use common::{check_fails, check_ok};
 
 #[test]
 fn int_plus_string_is_type_error() {
-    check_fails("te_int_str", "x = 1 + 'a'\n", "Type mismatch");
+    check_fails("x = 1 + 'a'\n", "Type mismatch");
 }
 
 #[test]
 fn non_exhaustive_match_is_error() {
     check_fails(
-        "te_nonexhaustive",
         "f = fn(x) { match x { True -> 1 } }\nf(False)\n",
         "not exhaustive",
     );
@@ -17,12 +16,12 @@ fn non_exhaustive_match_is_error() {
 
 #[test]
 fn unknown_identifier_is_error() {
-    check_fails("te_unknown_ident", "x = foo\n", "Unknown identifier");
+    check_fails("x = foo\n", "Unknown identifier");
 }
 
 #[test]
 fn if_condition_must_be_bool() {
-    check_fails("te_if_cond", "if 1 { 2 } else { 3 }\n", "Type mismatch");
+    check_fails("if 1 { 2 } else { 3 }\n", "Type mismatch");
 }
 
 // An integer literal whose source text overflows i64 was previously coerced
@@ -32,17 +31,12 @@ fn if_condition_must_be_bool() {
 
 #[test]
 fn integer_literal_overflow_is_error() {
-    check_fails(
-        "te_int_overflow",
-        "x = 99999999999999999999999999\n",
-        "out of range for Int",
-    );
+    check_fails("x = 99999999999999999999999999\n", "out of range for Int");
 }
 
 #[test]
 fn integer_literal_overflow_in_match_pattern_is_error() {
     check_fails(
-        "te_overflow_match",
         "match 1 { 99999999999999999999999999 -> 0\n _ -> 1 }\n",
         "out of range for Int",
     );
@@ -51,7 +45,6 @@ fn integer_literal_overflow_in_match_pattern_is_error() {
 #[test]
 fn integer_literal_overflow_in_range_pattern_is_error() {
     check_fails(
-        "te_overflow_range",
         "match 1 { 99999999999999999999999999..0 -> 0\n _ -> 1 }\n",
         "out of range for Int",
     );
@@ -60,7 +53,6 @@ fn integer_literal_overflow_in_range_pattern_is_error() {
 #[test]
 fn unused_let_binding_is_error() {
     check_fails(
-        "te_unused_let",
         "x = 1\nprintln('done')\n",
         "'x' is unused; prefix with '_' to ignore",
     );
@@ -69,7 +61,6 @@ fn unused_let_binding_is_error() {
 #[test]
 fn unused_param_is_error() {
     check_fails(
-        "te_unused_param",
         "fn f(a Int, b Int) Int { a }\nprintln(f(1, 2))\n",
         "'b' is unused; prefix with '_' to ignore",
     );
@@ -78,7 +69,6 @@ fn unused_param_is_error() {
 #[test]
 fn unused_match_binding_is_error() {
     check_fails(
-        "te_unused_match",
         "match Some(1) { Some(x) -> 0\n None -> 0 }\n",
         "'x' is unused; prefix with '_' to ignore",
     );
@@ -86,17 +76,17 @@ fn unused_match_binding_is_error() {
 
 #[test]
 fn underscore_prefix_suppresses_unused_error() {
-    check_ok("te_underscore", "_x = 1\nprintln('done')\n");
+    check_ok("_x = 1\nprintln('done')\n");
 }
 
 #[test]
 fn used_let_binding_is_ok() {
-    check_ok("te_used_let", "x = 1\nprintln(x)\n");
+    check_ok("x = 1\nprintln(x)\n");
 }
 
 #[test]
 fn closure_capture_counts_as_use() {
-    check_ok("te_closure", "x = 1\nf = fn() { x }\nprintln(f())\n");
+    check_ok("x = 1\nf = fn() { x }\nprintln(f())\n");
 }
 
 // Two of the most common call-site mistakes. `match_fun_type` reports a known
@@ -107,7 +97,6 @@ fn closure_capture_counts_as_use() {
 #[test]
 fn wrong_argument_count_is_error() {
     check_fails(
-        "te_arity",
         "fn f(a Int, b Int) Int { a + b }\nprintln(f(1))\n",
         "Expected 2 argument(s), got 1",
     );
@@ -116,7 +105,6 @@ fn wrong_argument_count_is_error() {
 #[test]
 fn calling_non_function_is_error() {
     check_fails(
-        "te_not_a_fn",
         "x = 5\ny = x(3)\nprintln(y)\n",
         "This value of type 'Int' is not a function and cannot be called",
     );
@@ -130,7 +118,6 @@ fn calling_non_function_is_error() {
 #[test]
 fn ctor_missing_field_is_error() {
     check_fails(
-        "te_ctor_missing",
         "type P { P(name String age Int) }\nP(name: 'a')\n",
         "Constructor 'P' is missing field(s): age",
     );
@@ -139,7 +126,6 @@ fn ctor_missing_field_is_error() {
 #[test]
 fn ctor_unknown_field_is_error() {
     check_fails(
-        "te_ctor_unknown",
         "type P { P(name String age Int) }\nP(name: 'a', bogus: 1)\n",
         "Constructor 'P' has no field 'bogus'. Available: name, age",
     );
@@ -148,7 +134,6 @@ fn ctor_unknown_field_is_error() {
 #[test]
 fn ctor_too_many_positional_is_error() {
     check_fails(
-        "te_ctor_toomany",
         "type P { P(name String age Int) }\nP('a', 'b', 'c')\n",
         "Constructor 'P' has 2 field(s) but more were supplied",
     );
@@ -157,7 +142,6 @@ fn ctor_too_many_positional_is_error() {
 #[test]
 fn ctor_nullary_with_args_is_error() {
     check_fails(
-        "te_ctor_nullary",
         "type C { Red Green }\nRed(1)\n",
         "Constructor 'Red' has 0 field(s) but more were supplied",
     );
@@ -166,7 +150,6 @@ fn ctor_nullary_with_args_is_error() {
 #[test]
 fn ctor_duplicate_field_is_error() {
     check_fails(
-        "te_ctor_dup",
         "type P { P(name String age Int) }\nP(name: 'a', name: 'b', age: 1)\n",
         "Field 'name' is specified more than once",
     );
@@ -181,7 +164,6 @@ fn ctor_duplicate_field_is_error() {
 #[test]
 fn ctor_unknown_in_pattern_is_error() {
     check_fails(
-        "te_pat_unknown_ctor",
         "r = match Some(1) { Bogus(x) -> 0\n _ -> 1 }\nprintln(r)\n",
         "Unknown constructor 'Bogus' in pattern",
     );
@@ -192,7 +174,6 @@ fn ctor_unknown_in_pattern_is_error() {
 #[test]
 fn ctor_nullary_with_args_in_pattern_is_error() {
     check_fails(
-        "te_pat_nullary_ctor",
         "type C { Red Green }\nfn f(c C) Int { match c { Red(x) -> x\n Green -> 0 } }\nprintln(f(Red))\n",
         "Constructor 'Red' takes no arguments but 1 were given",
     );
@@ -205,11 +186,7 @@ fn ctor_nullary_with_args_in_pattern_is_error() {
 // go through a different path and are *not* subject to this rule.)
 #[test]
 fn unconsumed_block_expr_statement_is_error() {
-    check_fails(
-        "te_unconsumed_block_expr",
-        "r = {\n\t1 + 2\n\t9\n}\nprintln(r)\n",
-        "must be consumed",
-    );
+    check_fails("r = {\n\t1 + 2\n\t9\n}\nprintln(r)\n", "must be consumed");
 }
 
 // The flip side of the rule above: a *Nil*-typed non-last statement (here a
@@ -218,10 +195,7 @@ fn unconsumed_block_expr_statement_is_error() {
 // side-effecting statements.
 #[test]
 fn nil_typed_block_expr_statement_is_ok() {
-    check_ok(
-        "te_nil_block_expr",
-        "r = {\n\tprintln(1)\n\t9\n}\nprintln(r)\n",
-    );
+    check_ok("r = {\n\tprintln(1)\n\t9\n}\nprintln(r)\n");
 }
 
 // Type-annotation hydration diagnostics (the `Hydrator` that turns a written
@@ -235,7 +209,6 @@ fn nil_typed_block_expr_statement_is_ok() {
 #[test]
 fn type_arg_arity_mismatch_is_error() {
     check_fails(
-        "te_type_arity",
         "fn f(_x Option(Int, String)) Int { 1 }\n",
         "Type 'Option' expects 1 type argument, got 2",
     );
@@ -247,11 +220,7 @@ fn type_arg_arity_mismatch_is_error() {
 // disabled, so an unseen var is an error rather than an implicit fresh one.)
 #[test]
 fn unknown_type_variable_in_ctor_field_is_error() {
-    check_fails(
-        "te_unknown_tyvar",
-        "type Box { Box(v t) }\n",
-        "Unknown type variable 't'",
-    );
+    check_fails("type Box { Box(v t) }\n", "Unknown type variable 't'");
 }
 
 // A lowercase name is a type variable and cannot be applied to type arguments
@@ -259,7 +228,6 @@ fn unknown_type_variable_in_ctor_field_is_error() {
 #[test]
 fn type_variable_cannot_take_arguments_is_error() {
     check_fails(
-        "te_tyvar_args",
         "fn f(x a(Int)) a { x }\n",
         "Type variable 'a' cannot take arguments",
     );
@@ -270,7 +238,6 @@ fn type_variable_cannot_take_arguments_is_error() {
 #[test]
 fn duplicate_type_parameter_is_error() {
     check_fails(
-        "te_dup_typaram",
         "type Box(t, t) { Box(a t) }\n",
         "Duplicate type parameter 't'",
     );
@@ -281,11 +248,7 @@ fn duplicate_type_parameter_is_error() {
 // pass detects it before hydrating the RHS and reports the offending alias.
 #[test]
 fn recursive_type_alias_self_is_error() {
-    check_fails(
-        "te_rec_alias_self",
-        "type A = A\n",
-        "Recursive type alias 'A'",
-    );
+    check_fails("type A = A\n", "Recursive type alias 'A'");
 }
 
 // The mutual case: `A = B`, `B = A` forms a two-node cycle that is likewise
@@ -293,11 +256,7 @@ fn recursive_type_alias_self_is_error() {
 // detector, so this pins the diagnostic class rather than a specific name).
 #[test]
 fn mutually_recursive_type_alias_is_error() {
-    check_fails(
-        "te_rec_alias_mutual",
-        "type A = B\ntype B = A\n",
-        "Recursive type alias",
-    );
+    check_fails("type A = B\ntype B = A\n", "Recursive type alias");
 }
 
 // HM inference occurs-check: `x(x)` forces `x`'s type to unify with `t -> u`
@@ -305,11 +264,7 @@ fn mutually_recursive_type_alias_is_error() {
 // rather than looping.
 #[test]
 fn infinite_type_self_application_is_error() {
-    check_fails(
-        "te_infinite_type",
-        "fn f(x) { x(x) }\n",
-        "Infinite type detected",
-    );
+    check_fails("fn f(x) { x(x) }\n", "Infinite type detected");
 }
 
 // Field/tuple access diagnostics. `tuple.N` numeric indexing and `value.field`
@@ -323,7 +278,6 @@ fn infinite_type_self_application_is_error() {
 #[test]
 fn tuple_index_out_of_bounds_is_error() {
     check_fails(
-        "te_tuple_oob",
         "t = (1, 2)\nprintln(t.5)\n",
         "Tuple index 5 out of bounds (tuple has 2 elements)",
     );
@@ -333,11 +287,7 @@ fn tuple_index_out_of_bounds_is_error() {
 // receiver (here an `Int`) is rejected naming the offending index.
 #[test]
 fn numeric_index_on_non_tuple_is_error() {
-    check_fails(
-        "te_nontuple_index",
-        "x = 5\nprintln(x.0)\n",
-        "Cannot index .0 on non-tuple type",
-    );
+    check_fails("x = 5\nprintln(x.0)\n", "Cannot index .0 on non-tuple type");
 }
 
 // `value.field` projects a label that must be present on EVERY variant, since
@@ -347,7 +297,6 @@ fn numeric_index_on_non_tuple_is_error() {
 #[test]
 fn field_not_on_every_variant_is_error() {
     check_fails(
-        "te_field_not_every_variant",
         "type Shape { Circle(r Int) Square(side Int) }\nfn g(s Shape) Int { s.r }\n",
         "Field 'r' is not present on every variant of 'Shape' (missing on 'Square')",
     );
@@ -357,11 +306,7 @@ fn field_not_on_every_variant_is_error() {
 // the receiver type is rendered structurally in the message.
 #[test]
 fn field_access_on_tuple_is_error() {
-    check_fails(
-        "te_field_on_tuple",
-        "t = (1, 2)\nt.x\n",
-        "Type '(Int, Int)' has no field 'x'",
-    );
+    check_fails("t = (1, 2)\nt.x\n", "Type '(Int, Int)' has no field 'x'");
 }
 
 // Projecting a field off a value whose type is still an unresolved inference
@@ -370,7 +315,6 @@ fn field_access_on_tuple_is_error() {
 #[test]
 fn field_access_on_unknown_type_is_error() {
     check_fails(
-        "te_field_unknown_type",
         "fn g(x) { x.name }\n",
         "Cannot access field 'name' on a value of unknown type — add a type annotation",
     );
@@ -382,11 +326,7 @@ fn field_access_on_unknown_type_is_error() {
 // no-suggestion path is covered by `unknown_identifier_is_error` above.)
 #[test]
 fn unknown_identifier_suggests_close_name() {
-    check_fails(
-        "te_did_you_mean",
-        "println = 1\nfoo = prntln\n",
-        "Did you mean 'println'?",
-    );
+    check_fails("println = 1\nfoo = prntln\n", "Did you mean 'println'?");
 }
 
 // A builtin has a type but no first-class runtime binding, so naming one in
@@ -394,7 +334,6 @@ fn unknown_identifier_suggests_close_name() {
 #[test]
 fn builtin_used_as_value_is_error() {
     check_fails(
-        "te_builtin_as_value",
         "x = println\n",
         "'println' is a builtin and cannot be used as a value",
     );
@@ -413,7 +352,6 @@ fn builtin_used_as_value_is_error() {
 #[test]
 fn refutable_tuple_destructuring_binding_is_error() {
     check_fails(
-        "te_tuple_destructure_refutable",
         "(x, 1) = (1, 2)\nprintln(x)\n",
         "Destructuring binding pattern must be irrefutable",
     );
@@ -423,10 +361,7 @@ fn refutable_tuple_destructuring_binding_is_error() {
 // so the check above fires on refutability, not on tuple destructuring itself.
 #[test]
 fn irrefutable_tuple_destructuring_binding_is_ok() {
-    check_ok(
-        "te_tuple_destructure_ok",
-        "(x, y) = (1, 2)\nprintln(x + y)\n",
-    );
+    check_ok("(x, y) = (1, 2)\nprintln(x + y)\n");
 }
 
 // Declarations (`type`/`fn`/`const`) are only legal at a module's top level. A
@@ -435,7 +370,6 @@ fn irrefutable_tuple_destructuring_binding_is_ok() {
 #[test]
 fn nested_type_declaration_is_error() {
     check_fails(
-        "te_nested_type_decl",
         "fn outer() Int {\n\ttype Inner { A }\n\t1\n}\n",
         "type declarations are only allowed at the top level",
     );
@@ -447,7 +381,6 @@ fn nested_type_declaration_is_error() {
 #[test]
 fn or_with_receiver_on_option_is_error() {
     check_fails(
-        "te_or_option_binder",
         "x = Some(5) or v -> 0\nprintln(x)\n",
         "'or' on an Option does not bind a value",
     );
@@ -458,7 +391,7 @@ fn or_with_receiver_on_option_is_error() {
 // on `or` over an `Option`.
 #[test]
 fn or_without_receiver_on_option_is_ok() {
-    check_ok("te_or_option_no_binder", "x = Some(5) or 0\nprintln(x)\n");
+    check_ok("x = Some(5) or 0\nprintln(x)\n");
 }
 
 // Nominal identity: a locally-declared type that shares its NAME with a
@@ -469,7 +402,6 @@ fn or_without_receiver_on_option_is_ok() {
 #[test]
 fn same_named_type_from_another_module_does_not_unify() {
     check_fails(
-        "te_nominal_identity",
         "import al/binary\n\
          import al/http/h1\n\
          type Parsed {\n\
@@ -489,7 +421,6 @@ fn same_named_type_from_another_module_does_not_unify() {
 #[test]
 fn same_named_local_and_stdlib_types_coexist() {
     check_ok(
-        "te_nominal_coexist",
         "import al/binary\n\
          import al/http/h1.{Done, NeedMore, Bad}\n\
          type Parsed {\n\

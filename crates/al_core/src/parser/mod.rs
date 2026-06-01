@@ -2074,7 +2074,7 @@ mod tests {
         p.parse_program()
     }
 
-    fn assert_no_errors(src: &str) {
+    fn assert_no_errors(src: &str) -> ParseResult {
         let result = parse(src);
         let errors: Vec<_> = result
             .diagnostics
@@ -2087,6 +2087,7 @@ mod tests {
             src,
             errors
         );
+        result
     }
 
     fn assert_has_error(src: &str, snippet: &str) {
@@ -2125,26 +2126,14 @@ mod tests {
     #[test]
     fn test_hello_al() {
         let src = include_str!("../../../../examples/hello.al");
-        let result = parse(src);
-        let errors: Vec<_> = result
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == diagnostic::Severity::Error)
-            .collect();
-        assert!(errors.is_empty(), "diagnostics: {:#?}", errors);
+        let result = assert_no_errors(src);
         assert!(!result.ast.body.is_empty());
     }
 
     #[test]
     fn test_fizzbuzz_al() {
         let src = include_str!("../../../../examples/fizzbuzz.al");
-        let result = parse(src);
-        let errors: Vec<_> = result
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == diagnostic::Severity::Error)
-            .collect();
-        assert!(errors.is_empty(), "diagnostics: {:#?}", errors);
+        assert_no_errors(src);
     }
 
     #[test]

@@ -17,3 +17,4 @@ dist
 extension/out
 /target/
 /docs/
+*.vsix

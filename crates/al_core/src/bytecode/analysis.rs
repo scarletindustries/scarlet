@@ -232,17 +232,7 @@ impl Compiler {
             let module = self.current_module_slice();
             self.env
                 .register_type_head(&td.identifier.name, name_id, module, type_params);
-            self.env.store_definition(
-                &td.identifier.name,
-                def_loc(td.identifier.span, module, EntityKind::Type),
-            );
-            self.env.store_doc_opt(&td.identifier.name, &td.doc);
-            self.emit_def(
-                def_loc(td.identifier.span, module, EntityKind::Type),
-                &td.identifier.name,
-                td.doc.clone(),
-                *is_public,
-            );
+            self.store_and_emit_def(&td.identifier, &td.doc, EntityKind::Type, *is_public);
             if matches!(td.body, ast::TypeBody::External) {
                 self.env
                     .set_type_body(&td.identifier.name, TypeBody::External);
@@ -520,6 +510,21 @@ impl Compiler {
         sl
     }
 
+    /// Record a named declaration: store its definition location and doc in
+    /// the env, and emit the matching graph definition.
+    fn store_and_emit_def(
+        &mut self,
+        id: &ast::Identifier,
+        doc: &Option<String>,
+        entity: EntityKind,
+        is_pub: bool,
+    ) {
+        let dl = def_loc(id.span, self.current_module_slice(), entity);
+        self.env.store_definition(&id.name, dl);
+        self.env.store_doc_opt(&id.name, doc);
+        self.emit_def(dl, &id.name, doc.clone(), is_pub);
+    }
+
     /// Run `f` with `current_owner` set to `owner`, restoring the previous
     /// owner afterwards, so references emitted inside `f` are attributed to it.
     fn with_owner<R>(&mut self, owner: DefId, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -620,17 +625,7 @@ impl Compiler {
             let target = self.with_owner(owner, |c| c.hydrate(&mut h, rhs));
             self.env
                 .set_type_body(&td.identifier.name, TypeBody::Alias { target });
-            self.env.store_definition(
-                &td.identifier.name,
-                def_loc(td.identifier.span, module, EntityKind::Type),
-            );
-            self.env.store_doc_opt(&td.identifier.name, &td.doc);
-            self.emit_def(
-                def_loc(td.identifier.span, module, EntityKind::Type),
-                &td.identifier.name,
-                td.doc.clone(),
-                is_pub,
-            );
+            self.store_and_emit_def(&td.identifier, &td.doc, EntityKind::Type, is_pub);
         }
     }
 
@@ -728,15 +723,10 @@ impl Compiler {
 
                 let name = &ctor.identifier.name;
                 c.env.define(name, scheme);
-                c.env.store_definition(
-                    name,
-                    def_loc(ctor.identifier.span, m, EntityKind::Constructor),
-                );
-                c.env.store_doc_opt(name, &ctor.doc);
-                c.emit_def(
-                    def_loc(ctor.identifier.span, m, EntityKind::Constructor),
-                    name,
-                    ctor.doc.clone(),
+                c.store_and_emit_def(
+                    &ctor.identifier,
+                    &ctor.doc,
+                    EntityKind::Constructor,
                     ctors_public,
                 );
                 if is_public {

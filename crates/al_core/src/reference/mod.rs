@@ -274,7 +274,7 @@ pub struct ResolvedRef {
 /// Half-open containment: `[start, end)` in (line, column) order. A
 /// `point_span(l, c)` (end column `c + 1`) therefore contains exactly column
 /// `c` on line `l`.
-pub(crate) fn span_contains(s: &Span, line: i32, col: i32) -> bool {
+pub fn span_contains(s: &Span, line: i32, col: i32) -> bool {
     let start = (s.start_line, s.start_column);
     let end = (s.end_line, s.end_column);
     let p = (line, col);
@@ -285,7 +285,7 @@ pub(crate) fn span_contains(s: &Span, line: i32, col: i32) -> bool {
 /// a point. Ordered lexicographically as `(line-span, col-span)`, so any
 /// single-line span sorts before any multi-line one; exact width is irrelevant,
 /// only the ordering is.
-pub(crate) fn span_width(s: &Span) -> (i32, i32) {
+pub fn span_width(s: &Span) -> (i32, i32) {
     (s.end_line - s.start_line, s.end_column - s.start_column)
 }
 
@@ -877,6 +877,13 @@ mod tests {
         DefId::new(module, range_span(line, c0, c1), kind)
     }
 
+    fn main_graph() -> (ReferenceGraph, ModuleId, ModuleReferences) {
+        let mut g = ReferenceGraph::new();
+        let m = g.intern_module(&mp(&["main"]));
+        let mr = ModuleReferences::new(m);
+        (g, m, mr)
+    }
+
     // ---- ModuleInterner ----
 
     #[test]
@@ -1104,9 +1111,7 @@ mod tests {
 
     #[test]
     fn edges_only_emitted_for_owned_occurrences() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["m"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
 
         let a = def(m, 1, 0, 1, EntityKind::Function);
         let b = def(m, 2, 0, 1, EntityKind::Function);
@@ -1134,9 +1139,7 @@ mod tests {
 
     #[test]
     fn reachable_closes_transitively_and_skips_self_only_recursion() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
 
         // pub `a` -> private `b` -> private `deep`: a multi-hop chain whose
         // middle node `b` is not itself a root.
@@ -1186,11 +1189,16 @@ mod tests {
         d
     }
 
+    #[track_caller]
+    fn sole_unused(g: &ReferenceGraph, m: ModuleId) -> Diagnostic {
+        let mut d = g.unused_diagnostics(m);
+        assert_eq!(d.len(), 1, "expected exactly one unused diagnostic: {d:?}");
+        d.pop().unwrap()
+    }
+
     #[test]
     fn unused_diag_flags_private_fn_keeps_pub_and_used() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         let api = add_def(&mut mr, m, "api", 1, EntityKind::Function, true);
         let used = add_def(&mut mr, m, "used", 3, EntityKind::Function, false);
         let dead = add_def(&mut mr, m, "dead", 5, EntityKind::Function, false);
@@ -1201,18 +1209,15 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].severity, Severity::Hint);
-        assert_eq!(d[0].message, "unused function `dead`");
-        assert_eq!(d[0].span, dead.span);
+        let d = sole_unused(&g, m);
+        assert_eq!(d.severity, Severity::Hint);
+        assert_eq!(d.message, "unused function `dead`");
+        assert_eq!(d.span, dead.span);
     }
 
     #[test]
     fn unused_diag_entry_toplevel_body_keeps_def_live() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         let helper = add_def(&mut mr, m, "helper", 1, EntityKind::Function, false);
         let dead = add_def(&mut mr, m, "dead", 4, EntityKind::Function, false);
         // `helper` is only called by the executed top-level body (owner None).
@@ -1222,17 +1227,14 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused function `dead`");
-        assert_eq!(d[0].span, dead.span);
+        let d = sole_unused(&g, m);
+        assert_eq!(d.message, "unused function `dead`");
+        assert_eq!(d.span, dead.span);
     }
 
     #[test]
     fn unused_diag_self_recursive_only_is_flagged() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         let spin = add_def(&mut mr, m, "spin", 1, EntityKind::Function, false);
         // `spin` references only itself — a self edge never makes it reachable.
         mr.add_reference(
@@ -1241,18 +1243,14 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused function `spin`");
+        assert_eq!(sole_unused(&g, m).message, "unused function `spin`");
     }
 
     #[test]
     fn unused_diag_only_reports_entry_module() {
-        let mut g = ReferenceGraph::new();
-        let entry = g.intern_module(&mp(&["main"]));
+        let (mut g, entry, mut em) = main_graph();
         let lib = g.intern_module(&mp(&["lib"]));
 
-        let mut em = ModuleReferences::new(entry);
         add_def(&mut em, entry, "go", 1, EntityKind::Function, true);
         g.insert_module(em);
 
@@ -1267,9 +1265,7 @@ mod tests {
 
     #[test]
     fn unused_diag_unused_and_used_module_alias_import() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         let unused_imp = add_def(&mut mr, m, "io", 1, EntityKind::ModuleAlias, false);
         let used_imp = add_def(&mut mr, m, "fmt", 2, EntityKind::ModuleAlias, false);
         // `fmt` is used through a qualified access; `io` never is.
@@ -1279,17 +1275,14 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused import `io`");
-        assert_eq!(d[0].span, unused_imp.span);
+        let d = sole_unused(&g, m);
+        assert_eq!(d.message, "unused import `io`");
+        assert_eq!(d.span, unused_imp.span);
     }
 
     #[test]
     fn unused_diag_import_with_only_decl_occurrences_is_flagged() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         let imp = add_def(&mut mr, m, "util", 1, EntityKind::ModuleAlias, false);
         // The import declaration's own occurrences are not "uses".
         mr.add_reference(
@@ -1302,9 +1295,7 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused import `util`");
+        assert_eq!(sole_unused(&g, m).message, "unused import `util`");
     }
 
     #[test]
@@ -1320,10 +1311,8 @@ mod tests {
         // span. The `Import` *occurrence* covers only the final module-name
         // segment (`b`), too narrow to contain the binding — modelled here to
         // prove that narrowing does not regress unused detection.
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
+        let (mut g, m, mut mr) = main_graph();
         let lib = g.intern_module(&mp(&["a", "b"]));
-        let mut mr = ModuleReferences::new(m);
 
         let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
         mr.add_definition(Definition::new(alias, "b", None, false));
@@ -1380,9 +1369,7 @@ mod tests {
         add_def(&mut mr2, m, "main", 3, EntityKind::Function, true);
         g.insert_module(mr2);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused import `b`");
+        assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
     #[test]
@@ -1398,10 +1385,8 @@ mod tests {
         //
         //   import ./util as u.{empty}
         //   0      ^9   ^13 ^17^20   ^25
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
+        let (mut g, m, mut mr) = main_graph();
         let lib = g.intern_module(&mp(&["util"]));
-        let mut mr = ModuleReferences::new(m);
 
         // The alias `ModuleAlias` definition covers only the `as u` name.
         let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
@@ -1473,17 +1458,14 @@ mod tests {
         );
         g.insert_module(mr2);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused import `u`");
-        assert_eq!(d[0].span, alias2.span);
+        let d = sole_unused(&g, m);
+        assert_eq!(d.message, "unused import `u`");
+        assert_eq!(d.span, alias2.span);
     }
 
     #[test]
     fn unused_diag_constant_and_type_wording_and_ordering() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         // Declared out of source order to prove the output is position-sorted.
         add_def(&mut mr, m, "Color", 9, EntityKind::Type, false);
         add_def(&mut mr, m, "MAX", 2, EntityKind::Constant, false);
@@ -1496,9 +1478,7 @@ mod tests {
 
     #[test]
     fn unused_diag_value_binders_are_not_reported() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         // `Value` is the unused-binding checker's job, never a dead-code hint.
         add_def(&mut mr, m, "x", 1, EntityKind::Value, false);
         g.insert_module(mr);
@@ -1507,8 +1487,7 @@ mod tests {
 
     #[test]
     fn unused_diag_cross_module_pub_keeps_private_live() {
-        let mut g = ReferenceGraph::new();
-        let entry = g.intern_module(&mp(&["app"]));
+        let (mut g, entry, mut em) = main_graph();
         let lib = g.intern_module(&mp(&["lib"]));
 
         // lib: pub `run` -> private `helper`.
@@ -1522,7 +1501,6 @@ mod tests {
         g.insert_module(lm);
 
         // entry top-level body calls `lib.run` qualified.
-        let mut em = ModuleReferences::new(entry);
         em.add_reference(
             None,
             Reference::new(range_span(5, 0, 7), ReferenceKind::Qualified, run),
@@ -1536,9 +1514,7 @@ mod tests {
 
     #[test]
     fn unused_diag_for_path_and_unknown_entry() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         add_def(&mut mr, m, "dead", 1, EntityKind::Function, false);
         g.insert_module(mr);
 
@@ -1558,9 +1534,7 @@ mod tests {
     /// definition roots itself and no dead private code is ever reported.
     #[test]
     fn unused_diag_definition_self_occurrence_does_not_root_dead_code() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
 
         let api = add_def(&mut mr, m, "api", 1, EntityKind::Function, true);
         let used = add_def(&mut mr, m, "used", 3, EntityKind::Function, false);
@@ -1577,10 +1551,9 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1, "dead private fn must still be flagged");
-        assert_eq!(d[0].message, "unused function `dead`");
-        assert_eq!(d[0].span, dead.span);
+        let d = sole_unused(&g, m);
+        assert_eq!(d.message, "unused function `dead`");
+        assert_eq!(d.span, dead.span);
     }
 
     /// Production shape of `import a/b` + `b.foo()`: the populator records the
@@ -1592,8 +1565,7 @@ mod tests {
     /// reported as unused, and dropping the use must flag it again.
     #[test]
     fn unused_diag_plain_qualified_import_recovers_use() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
+        let (mut g, m, mut mr) = main_graph();
         let lib = g.intern_module(&mp(&["a", "b"]));
 
         // `a/b` defines pub `foo` (+ its emit_def self-occurrence).
@@ -1612,7 +1584,6 @@ mod tests {
         let import_seg = def(lib, 1, 7, 8, EntityKind::ModuleAlias);
 
         // main: `import a/b` then `pub fn run() { b.foo() }`.
-        let mut mr = ModuleReferences::new(m);
         let alias = add_def(&mut mr, m, "b", 1, EntityKind::ModuleAlias, false);
         mr.add_reference(
             None,
@@ -1658,9 +1629,7 @@ mod tests {
         );
         g.insert_module(mr2);
 
-        let d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1);
-        assert_eq!(d[0].message, "unused import `b`");
+        assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
     /// Two plain qualified imports where only one is used: the unused one must
@@ -1670,8 +1639,7 @@ mod tests {
     /// qualified use, so `c.use()` wrongly suppressed `import a/b`'s hint).
     #[test]
     fn unused_diag_one_of_two_plain_qualified_imports_still_flagged() {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
+        let (mut g, m, mut mr) = main_graph();
         let lib_b = g.intern_module(&mp(&["a", "b"]));
         let lib_c = g.intern_module(&mp(&["a", "c"]));
 
@@ -1689,7 +1657,6 @@ mod tests {
         //   import a/b   (line 1, unused)
         //   import a/c   (line 2, used via c.used())
         //   pub fn run() { c.used() }
-        let mut mr = ModuleReferences::new(m);
         let alias_b = def(m, 1, 7, 8, EntityKind::ModuleAlias);
         mr.add_definition(Definition::new(alias_b, "b", None, false));
         mr.add_reference(
@@ -1718,11 +1685,9 @@ mod tests {
         );
         g.insert_module(mr);
 
-        let d = g.unused_diagnostics(m);
-        let msgs: Vec<&str> = d.iter().map(|x| x.message.as_str()).collect();
         assert_eq!(
-            msgs,
-            vec!["unused import `b`"],
+            sole_unused(&g, m).message,
+            "unused import `b`",
             "the unused `a/b` import must be flagged while the used `a/c` is not"
         );
     }
@@ -1735,9 +1700,7 @@ mod tests {
         // the workspace/symbol picker, which list a module's structural
         // declarations only. The single chokepoint is
         // `Definition::is_symbol_listable`, applied by every symbol projection.
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mut mr = ModuleReferences::new(m);
+        let (mut g, m, mut mr) = main_graph();
         let func = add_def(&mut mr, m, "compute", 1, EntityKind::Function, true);
         let local = add_def(&mut mr, m, "tmp", 2, EntityKind::Value, false);
         g.insert_module(mr);

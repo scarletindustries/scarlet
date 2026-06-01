@@ -241,10 +241,6 @@ impl ModuleTable {
         self.loading.insert(key.to_string());
     }
 
-    pub fn unmark_loading(&mut self, key: &str) {
-        self.loading.remove(key);
-    }
-
     pub fn unmark_all_loading(&mut self) {
         self.loading.clear();
     }
@@ -695,9 +691,6 @@ mod tests {
         // insert clears the loading mark and makes the interface visible.
         assert!(!t.is_loading("foo"));
         assert!(t.get("foo").is_some());
-
-        // unmark of an absent key is a no-op.
-        t.unmark_loading("never-loaded");
 
         let loaded = t.into_loaded();
         assert!(loaded.contains_key("foo"));

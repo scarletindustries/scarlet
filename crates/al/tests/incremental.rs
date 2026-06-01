@@ -8,20 +8,27 @@ mod common;
 use common::{Project, cursor, parse};
 
 const A_SRC: &str = "import ./b\nprintln(b.b())\n";
+const B_SRC: &str = "import ./c\npub fn b() Int { c.val() + 1 }\n";
+const C_SRC: &str = "pub fn val() Int { 1 }\n";
 
-#[test]
-fn three_module_incremental() {
-    let p = Project::new("3mod");
-    p.write("c.al", "pub fn val() Int { 1 }\n");
-    p.write("b.al", "import ./c\npub fn b() Int { c.val() + 1 }\n");
+/// Write the A→B→C chain to a fresh project and run the initial `check`,
+/// asserting the baseline: it succeeds and exactly b + c compile fresh.
+fn fresh_three_module_session(tag: &str) -> (Project, IncrementalSession) {
+    let p = Project::new(tag);
+    p.write("c.al", C_SRC);
+    p.write("b.al", B_SRC);
     p.write("a.al", A_SRC);
 
     let mut s = IncrementalSession::new(al::stdlib());
-
-    // --- initial compile: both b and c compile fresh.
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success, "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "b + c compile on first check");
+    (p, s)
+}
+
+#[test]
+fn three_module_incremental() {
+    let (p, mut s) = fresh_three_module_session("3mod");
 
     // --- no change: b and c are cache hits, only entry recompiles.
     let r = s.check(&parse(A_SRC), Some(&p.dir));
@@ -59,14 +66,7 @@ fn three_module_incremental() {
 
 #[test]
 fn overlay_preferred_over_disk() {
-    let p = Project::new("overlay");
-    p.write("c.al", "pub fn val() Int { 1 }\n");
-    p.write("b.al", "import ./c\npub fn b() Int { c.val() + 1 }\n");
-
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success);
-    assert_eq!(s.compile_count(), 2);
+    let (p, mut s) = fresh_three_module_session("overlay");
 
     // Unsaved buffer for c.al with a type error; disk is unchanged.
     s.set_overlay(
@@ -94,17 +94,8 @@ fn overlay_preferred_over_disk() {
 /// `invalidate_path` and nothing else. No other test in this file calls it.
 #[test]
 fn invalidate_path_drops_overlay_and_force_evicts() {
-    let p = Project::new("invalidate");
-    p.write("c.al", "pub fn val() Int { 1 }\n");
-    p.write("b.al", "import ./c\npub fn b() Int { c.val() + 1 }\n");
+    let (p, mut s) = fresh_three_module_session("invalidate");
     let cpath = p.dir.join("c.al");
-
-    let mut s = IncrementalSession::new(al::stdlib());
-
-    // Clean disk: b + c compile, check passes.
-    let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
-    assert_eq!(s.compile_count(), 2, "b + c compile on first check");
 
     // Control: with the disk untouched, the (mtime,len) stat gate treats c
     // (and b) as cached, so a second check recompiles nothing. This baseline
@@ -195,14 +186,7 @@ fn unrelated_module_keeps_type_id_base() {
 
 #[test]
 fn query_api_resolves_across_the_module_chain() {
-    let p = Project::new("queryapi");
-    p.write("c.al", "pub fn val() Int { 1 }\n");
-    p.write("b.al", "import ./c\npub fn b() Int { c.val() + 1 }\n");
-    p.write("a.al", A_SRC);
-
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
+    let (_p, s) = fresh_three_module_session("queryapi");
 
     // goto-def: `b.b()` in the entry resolves into module B.
     let (l, c) = cursor(A_SRC, "b()", 1, 0);
@@ -222,7 +206,7 @@ fn query_api_resolves_across_the_module_chain() {
     assert!(s.workspace_symbols("val").iter().any(|x| x.name == "val"));
 
     // find-references on C.val: declaration in C + the qualified use in B.
-    let (cl, cc) = cursor("import ./c\npub fn b() Int { c.val() + 1 }\n", "val", 1, 0);
+    let (cl, cc) = cursor(B_SRC, "val", 1, 0);
     let (vdef, _) = s.prepare_rename("./b", cl, cc).expect("val DefId via B");
     let rmods: Vec<String> = s
         .references(vdef)
@@ -238,14 +222,7 @@ fn query_api_resolves_across_the_module_chain() {
 
 #[test]
 fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
-    let p = Project::new("revedges");
-    p.write("c.al", "pub fn val() Int { 1 }\n");
-    p.write("b.al", "import ./c\npub fn b() Int { c.val() + 1 }\n");
-    p.write("a.al", A_SRC);
-
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
+    let (p, mut s) = fresh_three_module_session("revedges");
 
     let (l, c) = cursor(A_SRC, "b()", 1, 0);
     let (bdef0, _) = s.prepare_rename("main", l, c).expect("b DefId");

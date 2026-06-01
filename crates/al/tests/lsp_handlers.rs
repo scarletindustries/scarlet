@@ -118,7 +118,7 @@ fn hover_markdown_includes_inferred_type() {
     let (l, c) = cursor(TYPED, "base", 1, 1);
     let at_binder = md(&mut s, l, c);
     assert!(
-        at_binder.contains("base : Int"),
+        at_binder.contains("base Int"),
         "binder hover must show the inferred type: {at_binder:?}"
     );
 
@@ -126,7 +126,7 @@ fn hover_markdown_includes_inferred_type() {
     let (l, c) = cursor(TYPED, "base", 2, 1);
     let at_use = md(&mut s, l, c);
     assert!(
-        at_use.contains("base : Int"),
+        at_use.contains("base Int"),
         "use-site hover must show the inferred type: {at_use:?}"
     );
 
@@ -135,7 +135,7 @@ fn hover_markdown_includes_inferred_type() {
     let (l, c) = cursor(TYPED, "answer", 2, 1);
     let at_call = md(&mut s, l, c);
     assert!(
-        at_call.contains("answer : fn() Int"),
+        at_call.contains("answer fn() Int"),
         "call-site hover must show the function type: {at_call:?}"
     );
 }
@@ -298,25 +298,26 @@ fn start(result: &Json) -> (i64, i64) {
     )
 }
 
-#[test]
-fn bug2_goto_def_local_var_use_lands_on_binder() {
-    let p = Project::new("b2_local_def");
+/// Open `BUG2_SRC` in a project named `tag`, put the cursor on the `use_nth`
+/// occurrence of `needle`, and assert goto-def resolves to the `binder_nth`
+/// occurrence (the binder's identifier span) in the same file.
+fn assert_goto_def_lands(tag: &str, needle: &str, use_nth: usize, binder_nth: usize) {
+    let p = Project::new(tag);
     p.write("a.al", BUG2_SRC);
     let (mut s, uri) = open(&p, "a.al", BUG2_SRC);
 
-    // The `total` in `total + 3` must jump to the `total = add(1, 2)` binder.
-    let (l, c) = cursor(BUG2_SRC, "total", 2, 1);
+    let (l, c) = cursor(BUG2_SRC, needle, use_nth, 1);
     let def = s.definition_response(&pos(&uri, l, c));
     assert!(
         !def.is_null(),
-        "goto-def on a local-var use must resolve, got null"
+        "goto-def on a `{needle}` use must resolve, got null"
     );
     assert_eq!(
         def["uri"].as_str(),
         Some(uri.as_str()),
         "the binder is in the same file"
     );
-    let binder = cursor(BUG2_SRC, "total", 1, 0);
+    let binder = cursor(BUG2_SRC, needle, binder_nth, 0);
     assert_eq!(
         start(&def),
         (binder.0 as i64, binder.1 as i64),
@@ -325,24 +326,15 @@ fn bug2_goto_def_local_var_use_lands_on_binder() {
 }
 
 #[test]
-fn bug2_goto_def_param_use_lands_on_parameter() {
-    let p = Project::new("b2_param_def");
-    p.write("a.al", BUG2_SRC);
-    let (mut s, uri) = open(&p, "a.al", BUG2_SRC);
+fn bug2_goto_def_local_var_use_lands_on_binder() {
+    // The `total` in `total + 3` must jump to the `total = add(1, 2)` binder.
+    assert_goto_def_lands("b2_local_def", "total", 2, 1);
+}
 
+#[test]
+fn bug2_goto_def_param_use_lands_on_parameter() {
     // The `lhs` in `lhs + rhs` must jump to the `lhs` parameter of `add`.
-    let (l, c) = cursor(BUG2_SRC, "lhs", 2, 1);
-    let def = s.definition_response(&pos(&uri, l, c));
-    assert!(
-        !def.is_null(),
-        "goto-def on a parameter use must resolve, got null"
-    );
-    let param = cursor(BUG2_SRC, "lhs", 1, 0);
-    assert_eq!(
-        start(&def),
-        (param.0 as i64, param.1 as i64),
-        "goto-def must land on the parameter's identifier span"
-    );
+    assert_goto_def_lands("b2_param_def", "lhs", 2, 1);
 }
 
 #[test]
@@ -693,6 +685,175 @@ fn xmod_project() -> (Project, LspServer, String, String) {
     (p, s, main_uri, lib_uri)
 }
 
+/// The single location in `arr` whose `uri` is `want`, as its `range.start`
+/// `(line, character)`. Panics unless exactly one location matches.
+fn location_in(arr: &[Json], want: &str) -> (i64, i64) {
+    let hits: Vec<&Json> = arr
+        .iter()
+        .filter(|r| r["uri"].as_str() == Some(want))
+        .collect();
+    assert_eq!(hits.len(), 1, "exactly one location in {want}, got {arr:?}");
+    start(hits[0])
+}
+
+/// First-query portion shared by every cross-module find-references test:
+/// queries references on `greet` from `query_uri` (either the qualified use in
+/// main.al or the declaration in lib.al) with `includeDeclaration: true` and
+/// asserts the result is a Location[] whose URIs span exactly lib.al and
+/// main.al. Returns the locations plus the queried (line, character) so
+/// `assert_refs_span_lib_and_main` can layer on the exact-span assertions and
+/// the `includeDeclaration: false` re-query.
+fn assert_refs_uris_span_lib_and_main(
+    s: &mut LspServer,
+    query_uri: &str,
+    main_uri: &str,
+    lib_uri: &str,
+) -> (Vec<Json>, i32, i32) {
+    let query_src = if query_uri == main_uri {
+        XMOD_MAIN
+    } else {
+        XMOD_LIB
+    };
+    let (l, c) = cursor(query_src, "greet", 1, 1);
+    let refs = s.references_response(&json!({
+        "textDocument": { "uri": query_uri },
+        "position": { "line": l, "character": c },
+        "context": { "includeDeclaration": true },
+    }));
+    let arr = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references must be an array, got {refs}"));
+
+    let uris: std::collections::BTreeSet<&str> =
+        arr.iter().filter_map(|r| r["uri"].as_str()).collect();
+    assert_eq!(
+        uris,
+        [lib_uri, main_uri].into_iter().collect(),
+        "find-refs must span exactly lib.al and main.al, got {uris:?}"
+    );
+    (arr.clone(), l, c)
+}
+
+/// Full shared assertion block for the cross-module find-references tests that
+/// pin exact spans. On top of the URI-set check above, asserts:
+///   * the result holds exactly two locations — the declaration's identifier
+///     in lib.al (line 0) and the `greet` token of `lib.greet()` in main.al
+///     (line 1), never the `lib` qualifier;
+///   * re-querying with `includeDeclaration: false` drops the declaration,
+///     leaving only the main.al use — an array, never empty/null.
+fn assert_refs_span_lib_and_main(
+    s: &mut LspServer,
+    query_uri: &str,
+    main_uri: &str,
+    lib_uri: &str,
+) {
+    let (arr, l, c) = assert_refs_uris_span_lib_and_main(s, query_uri, main_uri, lib_uri);
+
+    assert_eq!(
+        arr.len(),
+        2,
+        "expected the use in main.al + the decl in lib.al, got {arr:?}"
+    );
+
+    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
+    assert_eq!(
+        location_in(&arr, lib_uri),
+        (lib_decl.0 as i64, lib_decl.1 as i64),
+        "the lib.al location must cover greet's declaration span: {arr:?}"
+    );
+    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
+    assert_eq!(
+        location_in(&arr, main_uri),
+        (main_use.0 as i64, main_use.1 as i64),
+        "the main.al location must cover the `greet` of `lib.greet()`: {arr:?}"
+    );
+
+    let no_decl = s.references_response(&json!({
+        "textDocument": { "uri": query_uri },
+        "position": { "line": l, "character": c },
+        "context": { "includeDeclaration": false },
+    }));
+    let arr2 = no_decl
+        .as_array()
+        .unwrap_or_else(|| panic!("references must be an array, got {no_decl}"));
+    assert_eq!(
+        arr2.len(),
+        1,
+        "without the declaration only the main.al use remains: {arr2:?}"
+    );
+    assert_eq!(
+        arr2[0]["uri"].as_str(),
+        Some(main_uri),
+        "the surviving location is the use in main.al, the declaration is gone: {arr2:?}"
+    );
+    assert_eq!(
+        start(&arr2[0]),
+        (main_use.0 as i64, main_use.1 as i64),
+        "and it still covers the `greet` of `lib.greet()`: {arr2:?}"
+    );
+}
+
+/// Shared assertion block for the cross-module rename tests. The WorkspaceEdit
+/// `changes` map must be keyed by exactly lib.al and main.al, each holding one
+/// edit — the declaration's identifier in lib.al (line 0) and the `greet` token
+/// of `lib.greet()` in main.al (line 1), never the `lib` qualifier — and every
+/// edit must substitute exactly `new_name`.
+fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, new_name: &str) {
+    let changes = resp
+        .get("changes")
+        .and_then(Json::as_object)
+        .expect("a WorkspaceEdit with a `changes` map");
+
+    let keys: std::collections::BTreeSet<&str> = changes.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        [lib_uri, main_uri].into_iter().collect(),
+        "changes must be keyed by lib.al and main.al exactly, got {keys:?}"
+    );
+
+    let lib_edits = changes
+        .get(lib_uri)
+        .and_then(Json::as_array)
+        .expect("edits for lib.al");
+    assert_eq!(
+        lib_edits.len(),
+        1,
+        "lib.al holds only the declaration rewrite: {lib_edits:?}"
+    );
+    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
+    assert_eq!(
+        start(&lib_edits[0]),
+        (lib_decl.0 as i64, lib_decl.1 as i64),
+        "lib.al edit must cover greet's declaration span: {lib_edits:?}"
+    );
+
+    let main_edits = changes
+        .get(main_uri)
+        .and_then(Json::as_array)
+        .expect("edits for main.al");
+    assert_eq!(
+        main_edits.len(),
+        1,
+        "main.al holds only the use rewrite: {main_edits:?}"
+    );
+    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
+    assert_eq!(
+        start(&main_edits[0]),
+        (main_use.0 as i64, main_use.1 as i64),
+        "main.al edit must cover the `greet` token of `lib.greet()`: {main_edits:?}"
+    );
+
+    for (uri, edits) in changes {
+        for e in edits.as_array().expect("each file's edits is an array") {
+            assert_eq!(
+                e["newText"],
+                json!(new_name),
+                "every edit must rewrite to the new name, got {e} in {uri}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cross_module_goto_def_returns_the_other_files_uri() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
@@ -747,67 +908,7 @@ fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
     let resp = s
         .rename_response(&params)
         .expect("a cross-module rename of a user fn must be allowed, not refused");
-    let changes = resp
-        .get("changes")
-        .and_then(Json::as_object)
-        .expect("a WorkspaceEdit with a `changes` map");
-
-    // Exactly the two involved files, keyed by their exact URIs.
-    let keys: std::collections::BTreeSet<&str> = changes.keys().map(String::as_str).collect();
-    assert_eq!(
-        keys,
-        [lib_uri.as_str(), main_uri.as_str()].into_iter().collect(),
-        "changes must be keyed by lib.al and main.al exactly, got {keys:?}"
-    );
-
-    // lib.al: the single declaration edit, landing on greet's identifier (line
-    // 0). decl span + any Definition occurrence dedupe to one edit.
-    let lib_edits = changes
-        .get(&lib_uri)
-        .and_then(Json::as_array)
-        .expect("edits for lib.al");
-    assert_eq!(
-        lib_edits.len(),
-        1,
-        "lib.al holds only the declaration rewrite: {lib_edits:?}"
-    );
-    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
-    assert_eq!(
-        start(&lib_edits[0]),
-        (lib_decl.0 as i64, lib_decl.1 as i64),
-        "lib.al edit must cover greet's declaration span: {lib_edits:?}"
-    );
-
-    // main.al: the single qualified-use edit, on the `greet` token of
-    // `lib.greet()` (line 1) — never the `lib` qualifier.
-    let main_edits = changes
-        .get(&main_uri)
-        .and_then(Json::as_array)
-        .expect("edits for main.al");
-    assert_eq!(
-        main_edits.len(),
-        1,
-        "main.al holds only the use rewrite: {main_edits:?}"
-    );
-    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
-    assert_eq!(
-        start(&main_edits[0]),
-        (main_use.0 as i64, main_use.1 as i64),
-        "main.al edit must cover the `greet` token of `lib.greet()`: {main_edits:?}"
-    );
-
-    // Every edit in either file substitutes exactly the new name.
-    for (uri, edits) in changes {
-        let arr = edits.as_array().expect("each file's edits is an array");
-        assert!(!arr.is_empty(), "no empty edit list for {uri}");
-        for e in arr {
-            assert_eq!(
-                e["newText"],
-                json!("salute"),
-                "every edit must rewrite to the new name, got {e} in {uri}"
-            );
-        }
-    }
+    assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
 
 /// The third cross-module handler seam: `references_response` shaping a flat
@@ -824,87 +925,10 @@ fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
 fn cross_module_find_references_spans_decl_and_use_across_files() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Cursor on the `greet` token of `lib.greet()` in main.al.
-    let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
-    let refs = s.references_response(&json!({
-        "textDocument": { "uri": main_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": true },
-    }));
-    let arr = refs
-        .as_array()
-        .unwrap_or_else(|| panic!("references must be an array, got {refs}"));
-
-    // The use plus its declaration = two locations, keyed by exactly the two
-    // files' URIs — the result genuinely crosses the module boundary, it is not
-    // a single-file answer.
-    assert_eq!(
-        arr.len(),
-        2,
-        "expected the use in main.al + the decl in lib.al, got {arr:?}"
-    );
-    let uris: std::collections::BTreeSet<&str> =
-        arr.iter().filter_map(|r| r["uri"].as_str()).collect();
-    assert_eq!(
-        uris,
-        [lib_uri.as_str(), main_uri.as_str()].into_iter().collect(),
-        "find-refs must span exactly lib.al and main.al, got {uris:?}"
-    );
-
-    let at = |arr: &[Json], want: &str| -> (i64, i64) {
-        let hits: Vec<&Json> = arr
-            .iter()
-            .filter(|r| r["uri"].as_str() == Some(want))
-            .collect();
-        assert_eq!(hits.len(), 1, "exactly one location in {want}, got {arr:?}");
-        start(hits[0])
-    };
-
-    // lib.al: the declaration's identifier span (line 0, the `g` of greet) —
-    // reached cross-module through the `include_decl` arm.
-    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
-    assert_eq!(
-        at(arr, &lib_uri),
-        (lib_decl.0 as i64, lib_decl.1 as i64),
-        "the lib.al location must cover greet's declaration span: {arr:?}"
-    );
-
-    // main.al: the qualified use, on the `greet` token of `lib.greet()` (line
-    // 1) — never the `lib` qualifier.
-    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
-    assert_eq!(
-        at(arr, &main_uri),
-        (main_use.0 as i64, main_use.1 as i64),
-        "the main.al location must cover the `greet` of `lib.greet()`: {arr:?}"
-    );
-
-    // includeDeclaration = false drops the declaration. Here the declaration is
-    // the *cross-module* entry (lib.al), so the result collapses to just the
-    // same-file use in main.al — pinning that the toggle gates the decl
-    // specifically, and that an empty-of-decl result stays an array, not null.
-    let no_decl = s.references_response(&json!({
-        "textDocument": { "uri": main_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": false },
-    }));
-    let arr2 = no_decl
-        .as_array()
-        .unwrap_or_else(|| panic!("references must be an array, got {no_decl}"));
-    assert_eq!(
-        arr2.len(),
-        1,
-        "without the declaration only the use remains: {arr2:?}"
-    );
-    assert_eq!(
-        arr2[0]["uri"].as_str(),
-        Some(main_uri.as_str()),
-        "the surviving location is the use in main.al, the cross-module decl is gone: {arr2:?}"
-    );
-    assert_eq!(
-        start(&arr2[0]),
-        (main_use.0 as i64, main_use.1 as i64),
-        "and it still covers the `greet` of `lib.greet()`: {arr2:?}"
-    );
+    // Cursor on the `greet` token of `lib.greet()` in main.al: the use is
+    // same-module (request-URI branch) while the declaration is reached
+    // cross-module through the `include_decl` arm.
+    assert_refs_span_lib_and_main(&mut s, &main_uri, &main_uri, &lib_uri);
 }
 
 // ============================================================================
@@ -927,78 +951,9 @@ fn cross_module_find_references_spans_decl_and_use_across_files() {
 fn find_references_from_library_declaration_includes_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Cursor on greet's DECLARATION in lib.al (`pub fn greet`, line 0).
-    let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
-    let refs = s.references_response(&json!({
-        "textDocument": { "uri": lib_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": true },
-    }));
-    let arr = refs
-        .as_array()
-        .unwrap_or_else(|| panic!("references must be an array, got {refs}"));
-
-    // The declaration in lib.al *and* the call site in main.al = two locations,
-    // spanning exactly the two files. Pre-fix this returned only the lib.al
-    // declaration (count 1), dropping main.al's caller.
-    assert_eq!(
-        arr.len(),
-        2,
-        "find-refs from lib.al's declaration must include the main.al caller, got {arr:?}"
-    );
-    let uris: std::collections::BTreeSet<&str> =
-        arr.iter().filter_map(|r| r["uri"].as_str()).collect();
-    assert_eq!(
-        uris,
-        [lib_uri.as_str(), main_uri.as_str()].into_iter().collect(),
-        "find-refs must span exactly lib.al and main.al, got {uris:?}"
-    );
-
-    let at = |arr: &[Json], want: &str| -> (i64, i64) {
-        let hits: Vec<&Json> = arr
-            .iter()
-            .filter(|r| r["uri"].as_str() == Some(want))
-            .collect();
-        assert_eq!(hits.len(), 1, "exactly one location in {want}, got {arr:?}");
-        start(hits[0])
-    };
-
-    // lib.al: greet's declaration span (line 0).
-    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
-    assert_eq!(
-        at(arr, &lib_uri),
-        (lib_decl.0 as i64, lib_decl.1 as i64),
-        "the lib.al location must cover greet's declaration span: {arr:?}"
-    );
-    // main.al: the `greet` token of `lib.greet()` (line 1) — never the `lib`
-    // qualifier.
-    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
-    assert_eq!(
-        at(arr, &main_uri),
-        (main_use.0 as i64, main_use.1 as i64),
-        "the main.al location must cover the `greet` of `lib.greet()`: {arr:?}"
-    );
-
-    // includeDeclaration = false drops lib.al's declaration, leaving only the
-    // cross-file caller in main.al — never an empty/null result.
-    let no_decl = s.references_response(&json!({
-        "textDocument": { "uri": lib_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": false },
-    }));
-    let arr2 = no_decl
-        .as_array()
-        .unwrap_or_else(|| panic!("references must be an array, got {no_decl}"));
-    assert_eq!(
-        arr2.len(),
-        1,
-        "without the declaration only the main.al caller remains: {arr2:?}"
-    );
-    assert_eq!(
-        arr2[0]["uri"].as_str(),
-        Some(main_uri.as_str()),
-        "the surviving location is the main.al caller: {arr2:?}"
-    );
+    // Cursor on greet's DECLARATION in lib.al (`pub fn greet`, line 0). Pre-fix
+    // this returned only the lib.al declaration, dropping main.al's caller.
+    assert_refs_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }
 
 #[test]
@@ -1014,43 +969,7 @@ fn rename_from_library_declaration_rewrites_dependent_callers() {
     let resp = s
         .rename_response(&params)
         .expect("a rename driven from a library declaration must be allowed");
-    let changes = resp
-        .get("changes")
-        .and_then(Json::as_object)
-        .expect("a WorkspaceEdit with a `changes` map");
-
-    let keys: std::collections::BTreeSet<&str> = changes.keys().map(String::as_str).collect();
-    assert_eq!(
-        keys,
-        [lib_uri.as_str(), main_uri.as_str()].into_iter().collect(),
-        "rename from lib.al's declaration must touch lib.al and main.al, got {keys:?}"
-    );
-
-    let lib_edits = changes
-        .get(&lib_uri)
-        .and_then(Json::as_array)
-        .expect("edits for lib.al");
-    assert_eq!(lib_edits.len(), 1, "lib.al holds the declaration rewrite");
-    let main_edits = changes
-        .get(&main_uri)
-        .and_then(Json::as_array)
-        .expect("edits for main.al");
-    assert_eq!(main_edits.len(), 1, "main.al holds the caller rewrite");
-    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
-    assert_eq!(
-        start(&main_edits[0]),
-        (main_use.0 as i64, main_use.1 as i64),
-        "main.al edit must cover the `greet` of `lib.greet()`: {main_edits:?}"
-    );
-    for (uri, edits) in changes {
-        for e in edits.as_array().expect("edit array") {
-            assert_eq!(
-                e["newText"],
-                json!("salute"),
-                "every edit must rewrite to the new name, got {e} in {uri}"
-            );
-        }
-    }
+    assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
 
 #[test]
@@ -1070,20 +989,8 @@ fn find_references_from_library_declaration_when_only_library_is_open() {
     let main_uri = uri_of(&p, "main.al");
     s.open_document(&lib_uri, XMOD_LIB);
 
-    let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
-    let refs = s.references_response(&json!({
-        "textDocument": { "uri": lib_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": true },
-    }));
-    let arr = refs
-        .as_array()
-        .unwrap_or_else(|| panic!("references must be an array, got {refs}"));
-    let uris: std::collections::BTreeSet<&str> =
-        arr.iter().filter_map(|r| r["uri"].as_str()).collect();
-    assert_eq!(
-        uris,
-        [lib_uri.as_str(), main_uri.as_str()].into_iter().collect(),
-        "find-refs from lib.al must include the (never-opened) main.al caller, got {uris:?}"
-    );
+    // Only the URI set is pinned here: what matters is that the never-opened
+    // main.al caller shows up at all. Exact spans and the includeDeclaration
+    // arm are covered by the tests above, where both files are open.
+    assert_refs_uris_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }

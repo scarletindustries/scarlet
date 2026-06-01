@@ -1,0 +1,5 @@
+[install]
+registry = "https://registry.npmjs.org"
+
+[install.security]
+scanner = "@socketsecurity/bun-security-scanner"

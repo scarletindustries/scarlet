@@ -19,13 +19,14 @@ fn hash_str(s: &str) -> u64 {
 }
 
 /// Write `source` to a uniquely-named temp `.al` file and return its path.
-/// `tag` separates concurrent tests within a binary, the pid separates test
-/// binaries, and the thread-id hash separates parallel test threads.
-pub fn write_temp(tag: &str, source: &str) -> std::path::PathBuf {
+/// The pid separates test binaries and the thread-id hash separates parallel
+/// test threads (ThreadIds are never reused); same-thread tests run
+/// sequentially, so that pair is enough to keep names unique.
+pub fn write_temp(source: &str) -> std::path::PathBuf {
     let mut tmp = std::env::temp_dir();
     let pid = std::process::id();
     let tid = format!("{:?}", std::thread::current().id());
-    tmp.push(format!("al_{tag}_{pid}_{}.al", hash_str(&tid)));
+    tmp.push(format!("al_{pid}_{}.al", hash_str(&tid)));
     let mut f = std::fs::File::create(&tmp).expect("create temp file");
     f.write_all(source.as_bytes()).expect("write temp file");
     tmp
@@ -62,26 +63,45 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
     }
 }
 
+/// Write `source` to a temp file, run `al <cmd>` on it, and remove the file.
+fn run_source(cmd: &str, source: &str) -> AlOutput {
+    let path = write_temp(source);
+    let out = run_al(cmd, &path);
+    let _ = std::fs::remove_file(&path);
+    out
+}
+
+/// `source` followed by the captured streams — the body shared by the
+/// assertion-failure messages below.
+fn dump(source: &str, out: &AlOutput) -> String {
+    format!(
+        "{source}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.stdout, out.stderr
+    )
+}
+
+/// Assert the exit status matches `want_success`, panicking with `what` and
+/// the standard dump otherwise.
+fn assert_status(out: &AlOutput, want_success: bool, what: &str, source: &str) {
+    assert!(
+        out.success == want_success,
+        "{what}:\n{}",
+        dump(source, out)
+    );
+}
+
 /// Assert `al check` rejects `source` (failure exit, code 1) and that the
 /// combined stdout+stderr contains `expected_substring`.
-pub fn check_fails(tag: &str, source: &str, expected_substring: &str) {
-    let path = write_temp(tag, source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-    let combined = out.combined();
-
-    assert!(
-        !out.success,
-        "expected `al check` to REJECT:\n{source}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
+pub fn check_fails(source: &str, expected_substring: &str) {
+    let out = run_source("check", source);
+    assert_status(&out, false, "expected `al check` to REJECT", source);
     assert_eq!(
         out.code,
         Some(1),
-        "expected exit code 1 for:\n{source}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        "expected exit code 1 for:\n{}",
+        dump(source, &out)
     );
+    let combined = out.combined();
     assert!(
         combined.contains(expected_substring),
         "expected output to contain {expected_substring:?} for:\n{source}\n--- output ---\n{combined}"
@@ -90,45 +110,38 @@ pub fn check_fails(tag: &str, source: &str, expected_substring: &str) {
 
 /// Assert `al check` rejects `source` (failure exit). Diagnostic text and the
 /// exact exit code are not pinned.
-pub fn check_rejects(tag: &str, source: &str) {
-    let path = write_temp(tag, source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
+pub fn check_rejects(source: &str) {
+    let out = run_source("check", source);
+    assert_status(&out, false, "expected `al check` to REJECT", source);
+}
 
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-
+/// Assert `al check` rejects `source` cleanly: failure exit, no Rust panic in
+/// the output, and a diagnostic containing `expected_diag` on either stream.
+pub fn check_rejects_cleanly(source: &str, expected_diag: &str) {
+    let out = run_source("check", source);
+    assert_status(&out, false, "expected `al check` to REJECT", source);
+    let combined = out.combined();
     assert!(
-        !out.success,
-        "expected `al check` to REJECT:\n{source}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+        !combined.contains("panicked"),
+        "compiler panicked instead of rejecting cleanly:\n{}",
+        dump(source, &out)
+    );
+    assert!(
+        combined.contains(expected_diag),
+        "expected output to contain {expected_diag:?} for:\n{source}\n--- output ---\n{combined}"
     );
 }
 
 /// Assert `al check` accepts `source` (success exit).
-pub fn check_ok(tag: &str, source: &str) {
-    let path = write_temp(tag, source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-
-    assert!(
-        out.success,
-        "expected `al check` to ACCEPT:\n{source}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
+pub fn check_ok(source: &str) {
+    let out = run_source("check", source);
+    assert_status(&out, true, "expected `al check` to ACCEPT", source);
 }
 
 /// Assert `al run` succeeds (exit 0) and its stdout is exactly `expected`.
-pub fn run_outputs(tag: &str, source: &str, expected: &str) {
-    let path = write_temp(tag, source);
-    let out = run_al("run", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-    let code = out.code;
-
+pub fn run_outputs(source: &str, expected: &str) {
+    let out = run_source("run", source);
+    let (stdout, stderr, code) = (&out.stdout, &out.stderr, out.code);
     assert!(
         out.success,
         "expected `al run` to succeed for:\n{source}\n\
