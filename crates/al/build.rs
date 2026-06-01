@@ -118,8 +118,11 @@ fn typenode(n: &TypeNode) -> String {
     match *n {
         TypeNode::Var(id) => format!("TypeNode::Var({id})"),
         TypeNode::Bound(i) => format!("TypeNode::Bound({i})"),
-        TypeNode::Con { name, args } => {
-            format!("TypeNode::Con {{ name: {name}, args: {} }}", aslice(args))
+        TypeNode::Con { id, name, args } => {
+            format!(
+                "TypeNode::Con {{ id: {id}, name: {name}, args: {} }}",
+                aslice(args)
+            )
         }
         TypeNode::Fun { params, ret } => {
             format!("TypeNode::Fun {{ params: {}, ret: {ret} }}", aslice(params))

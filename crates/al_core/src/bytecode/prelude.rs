@@ -39,7 +39,14 @@ impl Compiler {
         //    missing or mis-shaped name is a compile error here, not a silent
         //    mistype later.
         match PreludeBindings::capture(&self.env) {
-            Ok(b) => self.prelude = b,
+            Ok(b) => {
+                self.prelude = b;
+                self.engine.set_prim_ids(crate::types::PrimIds {
+                    int: self.prelude.int.id,
+                    float: self.prelude.float.id,
+                    string: self.prelude.string.id,
+                });
+            }
             Err(msg) => self.error(msg, at),
         }
     }

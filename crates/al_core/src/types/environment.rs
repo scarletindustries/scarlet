@@ -103,12 +103,39 @@ impl TypeInfo {
     }
 }
 
+/// One in-place modification of a flat-map entry that already existed when it
+/// was written. The flat maps (`type_info` / `definitions` / `docs`) roll back
+/// by truncating to a recorded length, which cannot undo an insert that
+/// REPLACED an existing entry — `IndexMap::insert` keeps the entry at its
+/// original (possibly pre-watermark) index, so a later truncation never
+/// reaches it. Without this journal, an entry file declaring `type Parsed`
+/// would permanently clobber the seeded stdlib `Parsed` for the rest of an
+/// LSP session. Every overwrite is recorded here and replayed (newest first)
+/// by `truncate_to` before the length truncation.
+#[derive(Debug, Clone)]
+enum Overwrite {
+    TypeInfo(String, TypeInfo),
+    TypeInfoById(i32, TypeInfo),
+    Definition(String, DefinitionLocation),
+    Doc(String, String),
+}
+
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
     pub scopes: Vec<IndexMap<String, Scheme>>,
+    /// Type lookup by SOURCE name — annotation resolution only, where lexical
+    /// shadowing (an entry's `type Parsed` over the stdlib's) is the correct
+    /// semantics. Semantic lookups (exhaustiveness, field access, hover
+    /// resolution) must go through `type_info_by_id` instead.
     pub type_info: IndexMap<String, TypeInfo>,
+    /// Type lookup by NOMINAL id — the identity carried in `TypeNode::Con`.
+    /// Ids are allocator-unique, so entries here are never overwritten in
+    /// place by a name collision; rollback is plain truncation.
+    pub type_info_by_id: IndexMap<i32, TypeInfo>,
     pub definitions: IndexMap<String, DefinitionLocation>,
     pub docs: IndexMap<String, String>,
+    /// Replay log of in-place overwrites; see [`Overwrite`].
+    journal: Vec<Overwrite>,
     next_type_id: i32,
 }
 
@@ -124,8 +151,10 @@ impl TypeEnv {
         EnvWatermark {
             root_scope: self.scopes.first().map(|s| s.len()).unwrap_or(0),
             type_info: self.type_info.len(),
+            type_info_by_id: self.type_info_by_id.len(),
             definitions: self.definitions.len(),
             docs: self.docs.len(),
+            journal: self.journal.len(),
             next_type_id: self.next_type_id,
         }
     }
@@ -135,7 +164,30 @@ impl TypeEnv {
         if let Some(root) = self.scopes.first_mut() {
             root.truncate(w.root_scope);
         }
+        // Undo in-place overwrites first (newest first, so the oldest value of
+        // a multiply-overwritten key wins), then truncate by length. A
+        // restored entry that itself sits above the truncation point is
+        // removed again by the truncation — the replay is still correct, just
+        // transient.
+        while self.journal.len() > w.journal {
+            match self.journal.pop() {
+                Some(Overwrite::TypeInfo(name, ti)) => {
+                    self.type_info.insert(name, ti);
+                }
+                Some(Overwrite::TypeInfoById(id, ti)) => {
+                    self.type_info_by_id.insert(id, ti);
+                }
+                Some(Overwrite::Definition(name, dl)) => {
+                    self.definitions.insert(name, dl);
+                }
+                Some(Overwrite::Doc(name, doc)) => {
+                    self.docs.insert(name, doc);
+                }
+                None => break,
+            }
+        }
         self.type_info.truncate(w.type_info);
+        self.type_info_by_id.truncate(w.type_info_by_id);
         self.definitions.truncate(w.definitions);
         self.docs.truncate(w.docs);
         self.next_type_id = w.next_type_id;
@@ -146,8 +198,10 @@ impl TypeEnv {
 pub struct EnvWatermark {
     pub root_scope: usize,
     pub type_info: usize,
+    pub type_info_by_id: usize,
     pub definitions: usize,
     pub docs: usize,
+    pub journal: usize,
     pub next_type_id: i32,
 }
 
@@ -155,8 +209,10 @@ pub fn new_env() -> TypeEnv {
     TypeEnv {
         scopes: vec![IndexMap::new()],
         type_info: IndexMap::new(),
+        type_info_by_id: IndexMap::new(),
         definitions: IndexMap::new(),
         docs: IndexMap::new(),
+        journal: Vec::new(),
         next_type_id: 1,
     }
 }
@@ -199,13 +255,43 @@ impl TypeEnv {
     }
 
     pub fn store_doc(&mut self, name: &str, doc: String) {
+        if let Some(old) = self.docs.get(name) {
+            self.journal
+                .push(Overwrite::Doc(name.to_string(), old.clone()));
+        }
         self.docs.insert(name.to_string(), doc);
     }
 
     pub fn store_doc_opt(&mut self, name: &str, doc: &Option<String>) {
         if let Some(d) = doc {
-            self.docs.insert(name.to_string(), d.clone());
+            self.store_doc(name, d.clone());
         }
+    }
+
+    /// Insert a definition location, journaling any overwrite of an existing
+    /// entry so `truncate_to` can restore it.
+    pub fn store_definition(&mut self, name: &str, loc: DefinitionLocation) {
+        if let Some(old) = self.definitions.get(name) {
+            self.journal
+                .push(Overwrite::Definition(name.to_string(), *old));
+        }
+        self.definitions.insert(name.to_string(), loc);
+    }
+
+    /// Insert (or rebind) a type's info under `name`, journaling any overwrite
+    /// of an existing entry so `truncate_to` can restore it. Selective type
+    /// imports re-bind through here on every check. The by-id registry is kept
+    /// in lockstep.
+    pub fn store_type_info(&mut self, name: &str, ti: TypeInfo) {
+        if let Some(old) = self.type_info.get(name) {
+            self.journal
+                .push(Overwrite::TypeInfo(name.to_string(), *old));
+        }
+        self.type_info.insert(name.to_string(), ti);
+        if let Some(old) = self.type_info_by_id.get(&ti.id) {
+            self.journal.push(Overwrite::TypeInfoById(ti.id, *old));
+        }
+        self.type_info_by_id.insert(ti.id, ti);
     }
 
     pub fn lookup_doc(&self, name: &str) -> Option<String> {
@@ -237,8 +323,8 @@ impl TypeEnv {
     ) -> i32 {
         let id = self.next_type_id;
         self.next_type_id += 1;
-        self.type_info.insert(
-            name.to_string(),
+        self.store_type_info(
+            name,
             TypeInfo {
                 id,
                 name: name_id,
@@ -256,14 +342,36 @@ impl TypeEnv {
     /// head for every type decl before any body is attached here.
     #[allow(clippy::panic)]
     pub fn set_type_body(&mut self, name: &str, body: TypeBody) {
-        self.type_info
+        let entry = self
+            .type_info
             .get_mut(name)
-            .unwrap_or_else(|| panic!("set_type_body: '{name}' head not registered"))
-            .body = body;
+            .unwrap_or_else(|| panic!("set_type_body: '{name}' head not registered"));
+        // Journal the pre-body value: the head may be a pre-watermark entry
+        // (an overwritten one already journaled by `store_type_info`, in which
+        // case this preserves the chain head→body→restore ordering).
+        let old = *entry;
+        entry.body = body;
+        let updated = *entry;
+        self.journal
+            .push(Overwrite::TypeInfo(name.to_string(), old));
+        // Mirror into the by-id registry (same journal discipline).
+        if let Some(old_by_id) = self.type_info_by_id.get(&old.id) {
+            self.journal
+                .push(Overwrite::TypeInfoById(old.id, *old_by_id));
+        }
+        self.type_info_by_id.insert(updated.id, updated);
     }
 
     pub fn lookup_type_info(&self, name: &str) -> Option<TypeInfo> {
         self.type_info.get(name).copied()
+    }
+
+    /// Nominal lookup by the id carried in `TypeNode::Con`. This is the only
+    /// correct way to answer "what are this type's variants/fields" — the
+    /// by-name map can be shadowed by whatever same-named type was analysed
+    /// most recently.
+    pub fn lookup_type_info_by_id(&self, id: i32) -> Option<TypeInfo> {
+        self.type_info_by_id.get(&id).copied()
     }
 
     pub fn suggest_name(&self, name: &str) -> Option<String> {

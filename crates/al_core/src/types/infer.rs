@@ -111,8 +111,20 @@ pub enum TypeNode {
     /// substitutes every `Bound` away before the type enters live inference,
     /// so `unify`/`find`/`occurs` never see one.
     Bound(u32),
-    /// `Name(args...)` — `name` → `engine.strings`, `args` → `engine.children`.
-    Con { name: StrId, args: ArenaSlice },
+    /// `Name(args...)` — a nominal type application.
+    ///
+    /// `id` is the type's registered nominal identity (`TypeInfo.id`,
+    /// allocated once per declaration); `name` → `engine.strings` is carried
+    /// for display only. Unification and every semantic lookup
+    /// (exhaustiveness, field access, Option/Result detection) go through
+    /// `id`, never the name: two types that happen to share a name — a user's
+    /// `type Parsed` next to `al/http/h1.Parsed` — are different types and
+    /// must neither unify nor answer for each other's variants.
+    Con {
+        id: i32,
+        name: StrId,
+        args: ArenaSlice,
+    },
     /// `fn(params...) ret`.
     Fun { params: ArenaSlice, ret: Ty },
     /// `(elems...)`.
@@ -351,7 +363,36 @@ pub struct InferEngine {
     /// of rebuilding a `HashSet` from `var_names.values()` on every call.
     used_names: HashSet<StrId>,
     next_name_uid: u64,
+    /// Nominal ids of the primitive types the engine itself mints `Con` nodes
+    /// for during literal inference (`icon_int`/`icon_float`/`icon_string`).
+    /// Set once after the prelude is registered (or seeded) so engine-minted
+    /// primitives carry the same identity as compiler-minted ones; defaults
+    /// keep engine-only unit tests working without a prelude.
+    prim_ids: PrimIds,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Nominal ids for the three primitives whose types the inference engine
+/// mints on its own (integer/float/string literals).
+#[derive(Debug, Clone, Copy)]
+pub struct PrimIds {
+    pub int: i32,
+    pub float: i32,
+    pub string: i32,
+}
+
+impl Default for PrimIds {
+    fn default() -> Self {
+        // Engine-only tests mint primitives before any prelude exists; these
+        // placeholder ids are distinct from each other and from the 1-based
+        // ids `register_type_head` allocates, and they are overwritten by
+        // `set_prim_ids` as soon as a compiler owns the engine.
+        PrimIds {
+            int: -1,
+            float: -2,
+            string: -3,
+        }
+    }
 }
 
 pub fn new_engine() -> InferEngine {
@@ -557,17 +598,24 @@ impl InferEngine {
         self.variants.extend_from_slice(variants);
     }
 
-    // --- Type constructors ---
-
-    pub fn mk_con(&mut self, name: &str, args: &[Ty]) -> Ty {
-        let name = self.intern(name);
-        let args = self.push_children(args);
-        self.push(TypeNode::Con { name, args })
+    /// Wire the nominal ids of Int/Float/String so engine-minted literal
+    /// types carry the same identity as compiler-minted ones. Called once by
+    /// the compiler right after the prelude is registered or seeded.
+    pub fn set_prim_ids(&mut self, ids: PrimIds) {
+        self.prim_ids = ids;
     }
 
-    pub fn mk_con_id(&mut self, name: StrId, args: &[Ty]) -> Ty {
+    // --- Type constructors ---
+
+    pub fn mk_con(&mut self, id: i32, name: &str, args: &[Ty]) -> Ty {
+        let name = self.intern(name);
         let args = self.push_children(args);
-        self.push(TypeNode::Con { name, args })
+        self.push(TypeNode::Con { id, name, args })
+    }
+
+    pub fn mk_con_id(&mut self, id: i32, name: StrId, args: &[Ty]) -> Ty {
+        let args = self.push_children(args);
+        self.push(TypeNode::Con { id, name, args })
     }
 
     pub fn mk_fun(&mut self, params: &[Ty], ret: Ty) -> Ty {
@@ -585,13 +633,16 @@ impl InferEngine {
     }
 
     pub fn icon_int(&mut self) -> Ty {
-        self.mk_con(pn::INT, &[])
+        let id = self.prim_ids.int;
+        self.mk_con(id, pn::INT, &[])
     }
     pub fn icon_float(&mut self) -> Ty {
-        self.mk_con(pn::FLOAT, &[])
+        let id = self.prim_ids.float;
+        self.mk_con(id, pn::FLOAT, &[])
     }
     pub fn icon_string(&mut self) -> Ty {
-        self.mk_con(pn::STRING, &[])
+        let id = self.prim_ids.string;
+        self.mk_con(id, pn::STRING, &[])
     }
 
     // --- Annotation name tracking ---
@@ -775,13 +826,16 @@ impl InferEngine {
         match (na, nb) {
             (
                 TypeNode::Con {
-                    name: sa, args: aa, ..
+                    id: ia, args: aa, ..
                 },
                 TypeNode::Con {
-                    name: sb, args: ab, ..
+                    id: ib, args: ab, ..
                 },
             ) => {
-                if sa != sb || aa.len != ab.len {
+                // Nominal identity: same registered type id. Names play no
+                // part — two `Parsed`s from different modules are different
+                // types and must not unify.
+                if ia != ib || aa.len != ab.len {
                     return Err(could_not_unify(fa, fb));
                 }
                 self.unify_children(aa, ab, fa, fb)
@@ -1087,9 +1141,9 @@ impl InferEngine {
         match n {
             TypeNode::Var(_) | TypeNode::Bound(_) => r,
             TypeNode::Con { args, .. } if args.len == 0 => r,
-            TypeNode::Con { name, args } => {
+            TypeNode::Con { id, name, args } => {
                 let kids = self.map_children(args, |e, k| e.rewrite(k, leaf));
-                self.mk_con_id(name, &kids)
+                self.mk_con_id(id, name, &kids)
             }
             TypeNode::Fun { params, ret } => {
                 let kids = self.map_children(params, |e, k| e.rewrite(k, leaf));
@@ -1264,10 +1318,10 @@ impl InferEngine {
                 }
                 t_var(self.var_display_name(id))
             }
-            TypeNode::Con { name, args } => {
+            TypeNode::Con { id, name, args } => {
                 let name = self.str(name).to_string();
                 let args: Vec<Ty> = self.children_of(args).to_vec();
-                self.resolve_icon(&name, &args, env, path)
+                self.resolve_icon(id, &name, &args, env, path)
             }
             TypeNode::Fun { params, ret } => {
                 let params: Vec<Type> = self
@@ -1297,6 +1351,7 @@ impl InferEngine {
 
     fn resolve_icon(
         &mut self,
+        id: i32,
         name: &str,
         args: &[Ty],
         env: Option<&TypeEnv>,
@@ -1322,8 +1377,10 @@ impl InferEngine {
             _ => {}
         }
 
-        let info = env.and_then(|e| e.lookup_type_info(name));
-        let id = info.map_or(-1, |i| i.id);
+        // Resolve the type's variant info by its NOMINAL id — the identity
+        // carried in the Con node — never by name: a same-named type declared
+        // by whatever file the LSP analysed last must not answer for this one.
+        let info = env.and_then(|e| e.lookup_type_info_by_id(id));
 
         // Resolve the type arguments first — each on its own copy of the path so
         // one argument's expansion can't leak into the next — then key the
@@ -1828,7 +1885,7 @@ mod tests {
         let i = e.icon_int();
         assert_eq!(e.resolve(i, None), t_int());
         let s = e.icon_string();
-        let arr = e.mk_con(pn::ARRAY, &[s]);
+        let arr = e.mk_con(-7, pn::ARRAY, &[s]);
         assert_eq!(e.resolve(arr, None), t_array(t_string()));
     }
 
@@ -1865,8 +1922,8 @@ mod tests {
         let outer = e.fresh_var();
         e.enter_level();
         let inner = e.fresh_var();
-        let arr_inner = e.mk_con(pn::ARRAY, &[inner]);
-        let arr_outer = e.mk_con(pn::ARRAY, &[outer]);
+        let arr_inner = e.mk_con(-7, pn::ARRAY, &[inner]);
+        let arr_outer = e.mk_con(-7, pn::ARRAY, &[outer]);
         assert!(e.unify(arr_inner, arr_outer).is_ok());
         e.leave_level();
         let scheme = e.generalize(inner);

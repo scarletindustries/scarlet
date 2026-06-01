@@ -198,6 +198,11 @@ golden_program!(basic);
 golden_program!(program_type);
 golden_program!(conrad_fib);
 
+// HTTP/1.1 protocol surface: parsing, framing, smuggling rejects, header
+// lookup, serialization. Locks the native (VM-builtin) scanners behind
+// al/http/h1 to the sans-IO contract the AL reference parser defined.
+golden_program!(http_parse);
+
 // Type system / generics / inference regression programs
 golden_program!(awesome_inference);
 golden_program!(generic_test);

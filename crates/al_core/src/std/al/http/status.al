@@ -7,65 +7,65 @@ import al/binary
 // constant-folded).
 
 // 1xx informational
-const rp_continue = binary.from_string('Continue')
-const rp_switching_protocols = binary.from_string('Switching Protocols')
+const rp_continue = <<'Continue'>>
+const rp_switching_protocols = <<'Switching Protocols'>>
 
 // 2xx success
-const rp_ok = binary.from_string('OK')
-const rp_created = binary.from_string('Created')
-const rp_accepted = binary.from_string('Accepted')
-const rp_non_authoritative = binary.from_string('Non-Authoritative Information')
-const rp_no_content = binary.from_string('No Content')
-const rp_reset_content = binary.from_string('Reset Content')
-const rp_partial_content = binary.from_string('Partial Content')
+const rp_ok = <<'OK'>>
+const rp_created = <<'Created'>>
+const rp_accepted = <<'Accepted'>>
+const rp_non_authoritative = <<'Non-Authoritative Information'>>
+const rp_no_content = <<'No Content'>>
+const rp_reset_content = <<'Reset Content'>>
+const rp_partial_content = <<'Partial Content'>>
 
 // 3xx redirection
-const rp_multiple_choices = binary.from_string('Multiple Choices')
-const rp_moved_permanently = binary.from_string('Moved Permanently')
-const rp_found = binary.from_string('Found')
-const rp_see_other = binary.from_string('See Other')
-const rp_not_modified = binary.from_string('Not Modified')
-const rp_temporary_redirect = binary.from_string('Temporary Redirect')
-const rp_permanent_redirect = binary.from_string('Permanent Redirect')
+const rp_multiple_choices = <<'Multiple Choices'>>
+const rp_moved_permanently = <<'Moved Permanently'>>
+const rp_found = <<'Found'>>
+const rp_see_other = <<'See Other'>>
+const rp_not_modified = <<'Not Modified'>>
+const rp_temporary_redirect = <<'Temporary Redirect'>>
+const rp_permanent_redirect = <<'Permanent Redirect'>>
 
 // 4xx client error
-const rp_bad_request = binary.from_string('Bad Request')
-const rp_unauthorized = binary.from_string('Unauthorized')
-const rp_payment_required = binary.from_string('Payment Required')
-const rp_forbidden = binary.from_string('Forbidden')
-const rp_not_found = binary.from_string('Not Found')
-const rp_method_not_allowed = binary.from_string('Method Not Allowed')
-const rp_not_acceptable = binary.from_string('Not Acceptable')
-const rp_proxy_auth_required = binary.from_string('Proxy Authentication Required')
-const rp_request_timeout = binary.from_string('Request Timeout')
-const rp_conflict = binary.from_string('Conflict')
-const rp_gone = binary.from_string('Gone')
-const rp_length_required = binary.from_string('Length Required')
-const rp_precondition_failed = binary.from_string('Precondition Failed')
-const rp_content_too_large = binary.from_string('Content Too Large')
-const rp_uri_too_long = binary.from_string('URI Too Long')
-const rp_unsupported_media_type = binary.from_string('Unsupported Media Type')
-const rp_range_not_satisfiable = binary.from_string('Range Not Satisfiable')
-const rp_expectation_failed = binary.from_string('Expectation Failed')
-const rp_misdirected_request = binary.from_string('Misdirected Request')
-const rp_unprocessable_content = binary.from_string('Unprocessable Content')
-const rp_upgrade_required = binary.from_string('Upgrade Required')
-const rp_precondition_required = binary.from_string('Precondition Required')
-const rp_too_many_requests = binary.from_string('Too Many Requests')
-const rp_header_fields_too_large = binary.from_string('Request Header Fields Too Large')
-const rp_unavailable_legal = binary.from_string('Unavailable For Legal Reasons')
+const rp_bad_request = <<'Bad Request'>>
+const rp_unauthorized = <<'Unauthorized'>>
+const rp_payment_required = <<'Payment Required'>>
+const rp_forbidden = <<'Forbidden'>>
+const rp_not_found = <<'Not Found'>>
+const rp_method_not_allowed = <<'Method Not Allowed'>>
+const rp_not_acceptable = <<'Not Acceptable'>>
+const rp_proxy_auth_required = <<'Proxy Authentication Required'>>
+const rp_request_timeout = <<'Request Timeout'>>
+const rp_conflict = <<'Conflict'>>
+const rp_gone = <<'Gone'>>
+const rp_length_required = <<'Length Required'>>
+const rp_precondition_failed = <<'Precondition Failed'>>
+const rp_content_too_large = <<'Content Too Large'>>
+const rp_uri_too_long = <<'URI Too Long'>>
+const rp_unsupported_media_type = <<'Unsupported Media Type'>>
+const rp_range_not_satisfiable = <<'Range Not Satisfiable'>>
+const rp_expectation_failed = <<'Expectation Failed'>>
+const rp_misdirected_request = <<'Misdirected Request'>>
+const rp_unprocessable_content = <<'Unprocessable Content'>>
+const rp_upgrade_required = <<'Upgrade Required'>>
+const rp_precondition_required = <<'Precondition Required'>>
+const rp_too_many_requests = <<'Too Many Requests'>>
+const rp_header_fields_too_large = <<'Request Header Fields Too Large'>>
+const rp_unavailable_legal = <<'Unavailable For Legal Reasons'>>
 
 // 5xx server error
-const rp_internal_server_error = binary.from_string('Internal Server Error')
-const rp_not_implemented = binary.from_string('Not Implemented')
-const rp_bad_gateway = binary.from_string('Bad Gateway')
-const rp_service_unavailable = binary.from_string('Service Unavailable')
-const rp_gateway_timeout = binary.from_string('Gateway Timeout')
-const rp_http_version_not_supported = binary.from_string('HTTP Version Not Supported')
+const rp_internal_server_error = <<'Internal Server Error'>>
+const rp_not_implemented = <<'Not Implemented'>>
+const rp_bad_gateway = <<'Bad Gateway'>>
+const rp_service_unavailable = <<'Service Unavailable'>>
+const rp_gateway_timeout = <<'Gateway Timeout'>>
+const rp_http_version_not_supported = <<'HTTP Version Not Supported'>>
 
 // Unknown / unregistered codes get an empty reason phrase, which is a valid
 // (zero-length) reason-phrase in the status line per RFC 9110 section 15.
-const rp_unknown = binary.from_string('')
+const rp_unknown = <<>>
 
 // The reason phrase for a status code, e.g. 404 -> "Not Found". Returns an
 // empty binary for codes not in the registry.

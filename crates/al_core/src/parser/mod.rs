@@ -862,13 +862,23 @@ impl Parser {
 
     // `<<seg, seg, ..>>` bit-string literal. Each segment is a value expression
     // optionally followed by `:` and a size spec; a bare segment is an 8-bit
-    // Int (so `<<1, 2, 3>>` is three bytes).
+    // Int (so `<<1, 2, 3>>` is three bytes), except a bare string which is its
+    // UTF-8 bytes (so `<<'GET '>>` needs no `:utf8`).
     fn parse_binary_literal(&mut self) -> PResult<ast::Expression> {
         let start = self.current_span();
         let segments = self.parse_comma_list(Kind::BinOpen, Kind::BinClose, |p| {
             let seg_start = p.current_span();
             let value = p.parse_expression()?;
-            let (size, unit, kind) = p.parse_bin_size_spec()?;
+            let (size, unit, mut kind) = p.parse_bin_size_spec()?;
+            if size.is_none()
+                && kind == ast::BinKind::Int
+                && matches!(
+                    value,
+                    ast::Expression::StringLiteral(_) | ast::Expression::InterpolatedString(_)
+                )
+            {
+                kind = ast::BinKind::Utf8;
+            }
             Ok(ast::BinSegment {
                 value,
                 size,
@@ -888,8 +898,10 @@ impl Parser {
     //   :size(expr) -> expr bits, Int (dynamic)
     //   :bytes(expr)-> expr bytes, Binary slice
     //   :binary     -> remaining bytes, Binary
-    //   :utf8       -> one codepoint (pattern) / whole string (expr), Utf8
-    // Absent spec -> default 8-bit Int (size left None; codegen supplies 8).
+    //   :utf8       -> string literal: its UTF-8 bytes; otherwise one
+    //                  codepoint (pattern) / whole string (expr), Utf8
+    // Absent spec -> default 8-bit Int (size left None; codegen supplies 8),
+    // except string-literal segments which default to Utf8 (callers patch).
     fn parse_bin_size_spec(
         &mut self,
     ) -> PResult<(Option<ast::Expression>, ast::BinUnit, ast::BinKind)> {
@@ -1294,7 +1306,15 @@ impl Parser {
 
             let seg_start = self.current_span();
             let value = self.parse_pattern_atom()?;
-            let (size, unit, kind) = self.parse_bin_size_spec()?;
+            let (size, unit, mut kind) = self.parse_bin_size_spec()?;
+            // A bare string-literal segment matches its UTF-8 bytes as a
+            // prefix (`<<'GET ', ..rest>>`), not a single 8-bit Int.
+            if size.is_none()
+                && kind == ast::BinKind::Int
+                && matches!(value, ast::Pattern::Literal(ast::PatternLiteral::String(_)))
+            {
+                kind = ast::BinKind::Utf8;
+            }
             segments.push(ast::BinSegmentPat {
                 value,
                 size,

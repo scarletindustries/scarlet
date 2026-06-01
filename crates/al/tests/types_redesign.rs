@@ -1098,6 +1098,224 @@ fn stdlib_binary() {
 // against the declared signature (the result is consumed so the program is a
 // complete, well-typed unit).
 #[test]
+fn binary_string_literal_patterns() {
+    // A bare string-literal segment matches its UTF-8 bytes as a prefix
+    // (Op::BinMatchPrefix): `<<'GET ', ..rest>>` is one bounds-checked byte
+    // compare. The rest binding is a zero-copy view over the remainder.
+    run_outputs(
+        "bin_pat_string_prefix",
+        "import al/binary\n\
+         r = match binary.from_string('GET /index.html') {\n\
+         \t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
+         \telse -> Err(Nil)\n\
+         }\n\
+         println(r)\n",
+        "Ok(/index.html)\n",
+    );
+    // Explicit `:utf8` on a string literal is the same pattern.
+    run_outputs(
+        "bin_pat_string_prefix_explicit_utf8",
+        "import al/binary\n\
+         r = match binary.from_string('POST /x') {\n\
+         \t<<'POST ':utf8, ..>> -> 1\n\
+         \telse -> 0\n\
+         }\n\
+         println(r)\n",
+        "1\n",
+    );
+    // Without `..rest` the whole binary must be consumed: 'GET' matches
+    // exactly, 'GETX' and 'GE' fall through.
+    run_outputs(
+        "bin_pat_string_exact",
+        "import al/binary\n\
+         fn is_get(b Binary) Bool {\n\
+         \tmatch b {\n\
+         \t\t<<'GET'>> -> True\n\
+         \t\telse -> False\n\
+         \t}\n\
+         }\n\
+         println(is_get(binary.from_string('GET')))\n\
+         println(is_get(binary.from_string('GETX')))\n\
+         println(is_get(binary.from_string('GE')))\n",
+        "True\nFalse\nFalse\n",
+    );
+    // A literal prefix longer than the scrutinee fails cleanly (no read past
+    // the end), and arms are tried in order.
+    run_outputs(
+        "bin_pat_string_arm_order",
+        "import al/binary\n\
+         r = match binary.from_string('DELETE /v') {\n\
+         \t<<'GET ', ..>> -> 'get'\n\
+         \t<<'DELETE /very/long/path/that/overruns', ..>> -> 'overrun'\n\
+         \t<<'DELETE ', ..>> -> 'delete'\n\
+         \telse -> 'other'\n\
+         }\n\
+         println(r)\n",
+        "delete\n",
+    );
+    // A literal prefix can be followed by destructuring segments: parse the
+    // minor version digit out of an HTTP version token.
+    run_outputs(
+        "bin_pat_string_then_int",
+        "import al/binary\n\
+         r = match binary.from_string('HTTP/1.1') {\n\
+         \t<<'HTTP/1.', minor>> -> minor - 48\n\
+         \telse -> 0 - 1\n\
+         }\n\
+         println(r)\n",
+        "1\n",
+    );
+    // Multi-byte UTF-8 literals ('é' is 2 bytes) keep byte-accurate offsets
+    // for the rest binding.
+    run_outputs(
+        "bin_pat_string_multibyte",
+        "import al/binary\n\
+         r = match binary.from_string('héllo world') {\n\
+         \t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
+         \telse -> Err(Nil)\n\
+         }\n\
+         println(r)\n",
+        "Ok(world)\n",
+    );
+    // Consecutive integer literals coalesce into the same single-compare
+    // prefix: <<13, 10, ..>> is CRLF.
+    run_outputs(
+        "bin_pat_int_literal_run",
+        "import al/binary\n\
+         r = match binary.from_string('\\r\\nrest') {\n\
+         \t<<13, 10, ..rest>> -> binary.byte_size(rest)\n\
+         \telse -> 0 - 1\n\
+         }\n\
+         println(r)\n",
+        "4\n",
+    );
+    // Mixed string/int literal runs and sub-byte literal widths coalesce too;
+    // compile-time encoding must match Op::BinFromInt's MSB-first layout.
+    run_outputs(
+        "bin_pat_mixed_literal_run",
+        "import al/binary\n\
+         packet = <<1:4, 2:4, 'AB', 7>>\n\
+         r = match packet {\n\
+         \t<<1:4, 2:4, 'AB', n>> -> n\n\
+         \telse -> 0 - 1\n\
+         }\n\
+         println(r)\n",
+        "7\n",
+    );
+    // String-literal segments in EXPRESSIONS build the UTF-8 bytes (and fold
+    // to a constant): equal to the runtime-built binary.
+    run_outputs(
+        "bin_expr_string_literal",
+        "import al/binary\n\
+         println(<<'hi there'>> == binary.from_string('hi there'))\n\
+         println(<<'AB', 67, 'D'>> == binary.from_string('ABCD'))\n\
+         println(binary.bit_size(<<''>>))\n",
+        "True\nTrue\n0\n",
+    );
+    // A string literal with an Int size spec is still a type error (the
+    // Utf8 default applies only to bare string segments).
+    check_fails(
+        "bin_pat_string_with_size_rejected",
+        "import al/binary\n\
+         r = match binary.from_string('AB') {\n\
+         \t<<'AB':16>> -> 1\n\
+         \telse -> 0\n\
+         }\n\
+         println(r)\n",
+        "Type mismatch",
+    );
+}
+
+#[test]
+fn stdlib_binary_byte_at() {
+    // byte_at : (Binary, Int) -> Int — in-bounds bytes, -1 out of bounds (both
+    // sides), and views (slices) read through their offset.
+    run_outputs(
+        "binary_byte_at",
+        "import al/binary\n\
+         b = binary.from_string('AZ')\n\
+         println(binary.byte_at(b, 0))\n\
+         println(binary.byte_at(b, 1))\n\
+         println(binary.byte_at(b, 2))\n\
+         println(binary.byte_at(b, 0 - 1))\n\
+         tail = match b {\n\
+         \t<<_, ..rest>> -> rest\n\
+         \telse -> b\n\
+         }\n\
+         println(binary.byte_at(tail, 0))\n",
+        "65\n90\n-1\n-1\n90\n",
+    );
+}
+
+#[test]
+fn stdlib_http_builtins() {
+    // The native h1 ops surfaced through al/http/h1 and al/http/headers:
+    // parse_request / framing / serialize_head / headers.get / headers.has
+    // each hydrate a Scheme from their @vm declaration. Behaviour is golden
+    // tested (tests/programs/http_parse.al); these pin the call-site types.
+    check_ok(
+        "h1_parse_request_ty",
+        "import al/binary\n\
+         import al/http/h1.{Done, NeedMore, Bad}\n\
+         r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \tDone(_, _, version, _, consumed) -> version + consumed\n\
+         \tNeedMore -> 0\n\
+         \tBad(s) -> s\n\
+         }\n\
+         println(r)\n",
+    );
+    check_ok(
+        "h1_framing_ty",
+        "import al/binary\n\
+         import al/http/h1.{Done, NoBody, Length, Chunked, Invalid}\n\
+         r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \tDone(_, _, _, hdrs, _) -> match h1.framing(hdrs) {\n\
+         \t\tNoBody -> 0\n\
+         \t\tLength(n) -> n\n\
+         \t\tChunked -> 0 - 2\n\
+         \t\tInvalid(s) -> s\n\
+         \t}\n\
+         \telse -> 0 - 1\n\
+         }\n\
+         println(r)\n",
+    );
+    // chunk_decode : (Binary, Int, Int) -> ChunkBody, with the decoded body /
+    // trailers / consumed offset destructurable from ChunkedDone.
+    check_ok(
+        "h1_chunk_decode_ty",
+        "import al/binary\n\
+         import al/http/h1.{ChunkedDone, ChunkedNeedMore, ChunkedBad}\n\
+         import al/http/headers\n\
+         r = match h1.chunk_decode(binary.from_string('5\\r\\nhello\\r\\n0\\r\\n\\r\\n'), 0, 1024) {\n\
+         \tChunkedDone(body, trailers, consumed) -> {\n\
+         \t\thas_sum = headers.has(trailers, binary.from_string('x-sum'))\n\
+         \t\tif has_sum { consumed } else { binary.byte_size(body) + consumed }\n\
+         \t}\n\
+         \tChunkedNeedMore -> 0\n\
+         \tChunkedBad(s) -> s\n\
+         }\n\
+         println(r)\n",
+    );
+    check_ok(
+        "h1_serialize_head_ty",
+        "import al/binary\n\
+         import al/http/h1\n\
+         import al/http/headers.{Header}\n\
+         head = h1.serialize_head(200, [Header(name: binary.from_string('A'), value: binary.from_string('b'))])\n\
+         println(binary.byte_size(head))\n",
+    );
+    check_ok(
+        "headers_get_has_ty",
+        "import al/binary\n\
+         import al/http/headers.{Header}\n\
+         hs = [Header(name: binary.from_string('Host'), value: binary.from_string('x'))]\n\
+         v = headers.get(hs, binary.from_string('host')) or binary.from_string('')\n\
+         println(binary.to_string(v))\n\
+         println(headers.has(hs, binary.from_string('HOST')))\n",
+    );
+}
+
+#[test]
 fn stdlib_binary_ascii_builtins() {
     // index_of : (Binary, Binary, Int) -> Option(Int)
     check_ok(

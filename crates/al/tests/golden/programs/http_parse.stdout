@@ -1,0 +1,95 @@
+== request line ==
+simple get: Done method=GET target=/ version=1 headers=0 consumed=18
+post with path: Done method=POST target=/api/users?id=1 version=1 headers=1 consumed=42
+http10: Done method=GET target=/ version=0 headers=0 consumed=18
+leading empty line: Done method=GET target=/ version=1 headers=0 consumed=20
+unknown version: Bad 505
+garbage version: Bad 505
+no spaces: Bad 400
+one space: Bad 400
+leading space: Bad 400
+double space: Bad 400
+
+== incomplete heads ==
+empty: NeedMore
+partial request line: NeedMore
+no blank line yet: NeedMore
+
+== headers ==
+two headers: Done method=GET target=/ version=1 headers=2 consumed=50
+ows trimmed: Done method=GET target=/ version=1 headers=1 consumed=37
+obs-fold rejected: Bad 400
+ws before colon rejected: Bad 400
+no colon rejected: Bad 400
+empty name rejected: Bad 400
+
+== header values survive zero-copy ==
+host (lower lookup): example.com
+cookie (upper lookup): a=1; b=2
+x-missing: missing
+has x-custom: True
+
+== pipelined requests ==
+first: /first (consumed 32)
+second: /second (consumed 65)
+
+== body framing ==
+no body headers: NoBody
+content-length 42: Length 42
+content-length 0: Length 0
+case-insensitive name: Length 7
+leading zero rejected: Invalid 400
+non-numeric rejected: Invalid 400
+negative rejected: Invalid 400
+overflow rejected: Invalid 400
+duplicate cl rejected: Invalid 400
+te chunked: Chunked
+te chunked case-insensitive: Chunked
+te gzip unimplemented: Invalid 501
+te coding list unimplemented: Invalid 501
+te + cl conflict: Invalid 400
+
+== chunked body decode ==
+single chunk: Done body=hello trailers=0 consumed=15
+multiple chunks: Done body=hello world trailers=0 consumed=26
+empty body: Done body= trailers=0 consumed=5
+extensions ignored: Done body=hello trailers=0 consumed=28
+trailers: Done body=hello trailers=1 consumed=32
+partial needs more: NeedMore
+terminator missing: NeedMore
+bad hex rejected: Bad 400
+size lie rejected: Bad 400
+oversize rejected: Bad 413
+trailer obs-fold rejected: Bad 400
+
+== chunked pipelining ==
+head: target=/upload framing=chunked consumed=53
+body: abc (ends at 66)
+next pipelined request: /after
+
+== connection semantics ==
+http11 default: close=False want100=False
+http11 close: close=True want100=False
+http10 keep-alive: close=False want100=False
+http10 default: close=True want100=False
+expect 100: close=False want100=True
+
+== response head serialization ==
+Ok(
+  HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 5
+
+
+)
+Ok(
+  HTTP/1.1 404 Not Found
+
+
+)
+Ok(HTTP/1.1 418 
+
+)
+
+== method dispatch via binary patterns ==
+[Get, Post, Put, Delete, Patch, Head, Options, Other(BREW)]

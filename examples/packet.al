@@ -5,8 +5,8 @@
 import al/binary
 import al/string
 
-// Wire format: version (4 bits), kind (4 bits), payload length in bytes
-// (16 bits), then the payload itself.
+// Wire format: the magic string "AL" (2 bytes), version (4 bits), kind
+// (4 bits), payload length in bytes (16 bits), then the payload itself.
 const VERSION = 1
 
 type Message {
@@ -15,21 +15,23 @@ type Message {
 	Bye
 }
 
-// Building a packet is one expression. Integer segments encode big-endian
-// into the width they are given; a :binary segment splices bytes in as-is.
+// Building a packet is one expression. A string segment contributes its UTF-8
+// bytes; integer segments encode big-endian into the width they are given; a
+// :binary segment splices bytes in as-is.
 fn encode(msg Message) Binary {
 	(kind, payload) = match msg {
 		Ping -> (0, <<>>)
 		Data(text) -> (1, binary.from_string(text))
 		Bye -> (2, <<>>)
 	}
-	<<VERSION:4, kind:4, binary.byte_size(payload):16, payload:binary>>
+	<<'AL', VERSION:4, kind:4, binary.byte_size(payload):16, payload:binary>>
 }
 
-// Read the raw header fields, ignoring the payload bytes.
+// Read the raw header fields, ignoring the payload bytes. A string literal in
+// a pattern matches its bytes as a prefix — one compare for the whole magic.
 fn header(wire Binary) String {
 	match wire {
-		<<version:4, kind:4, len:16, _:binary>> -> {
+		<<'AL', version:4, kind:4, len:16, _:binary>> -> {
 			'version ${version}, kind ${kind}, ${len} payload bytes'
 		}
 		else -> 'not a packet'
@@ -37,19 +39,19 @@ fn header(wire Binary) String {
 }
 
 // Parse a packet back into a Message. The pattern mirrors the build syntax:
-// a literal segment like 1:4 matches only that value, and bytes(len) takes
-// exactly the number of bytes the length field announced.
+// a literal segment like 'AL' or 1:4 matches only that value, and bytes(len)
+// takes exactly the number of bytes the length field announced.
 fn decode(wire Binary) Result(Message, String) {
 	match wire {
-		<<v:4, _:4, _:16, _:binary>> if v != VERSION -> Err('unsupported version ${v}')
-		<<_:4, 0:4, 0:16>> -> Ok(Ping)
-		<<_:4, 1:4, len:16, payload:bytes(len)>> -> {
+		<<'AL', v:4, _:4, _:16, _:binary>> if v != VERSION -> Err('unsupported version ${v}')
+		<<'AL', _:4, 0:4, 0:16>> -> Ok(Ping)
+		<<'AL', _:4, 1:4, len:16, payload:bytes(len)>> -> {
 			match binary.to_string(payload) {
 				Ok(text) -> Ok(Data(text))
 				Err(_) -> Err('payload is not text')
 			}
 		}
-		<<_:4, 2:4, 0:16>> -> Ok(Bye)
+		<<'AL', _:4, 2:4, 0:16>> -> Ok(Bye)
 		else -> Err('truncated or corrupt packet')
 	}
 }
@@ -77,8 +79,11 @@ round_trip(Bye)
 println('')
 
 // Forged packets are rejected by the same match: one whose length field
-// claims 99 bytes it does not have, and one from a newer protocol version.
+// claims 99 bytes it does not have, one from a newer protocol version, and
+// one that is not this protocol at all (wrong magic).
 println('receive a packet with a lying length field')
-receive(<<VERSION:4, 1:4, 99:16, 104, 105>>)
+receive(<<'AL', VERSION:4, 1:4, 99:16, 104, 105>>)
 println('receive a version 3 packet')
-receive(<<3:4, 0:4, 0:16>>)
+receive(<<'AL', 3:4, 0:4, 0:16>>)
+println('receive bytes from some other protocol')
+receive(<<'HTTP/1.1 200 OK'>>)

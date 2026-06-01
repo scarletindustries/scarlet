@@ -484,6 +484,30 @@ impl BinaryValue {
     pub fn materialize(&self) -> Vec<u8> {
         self.to_aligned_vec()
     }
+
+    /// Whether this value's logical bits, starting at bit `at`, begin with all
+    /// of `prefix`'s logical bits. Out of range (`at + prefix.bit_len >
+    /// bit_len`) is `false`, never an error. The all-byte-aligned case — every
+    /// `<<'literal', ..>>` pattern over a socket buffer — is a single slice
+    /// compare (memcmp); anything else falls back to bit-by-bit.
+    pub fn starts_with_at(&self, at: u64, prefix: &BinaryValue) -> bool {
+        if at + prefix.bit_len > self.bit_len {
+            return false;
+        }
+        let abs = self.bit_offset + at;
+        if abs.is_multiple_of(8)
+            && prefix.bit_offset.is_multiple_of(8)
+            && prefix.bit_len.is_multiple_of(8)
+        {
+            let s = (abs / 8) as usize;
+            let p = (prefix.bit_offset / 8) as usize;
+            let n = (prefix.bit_len / 8) as usize;
+            return self.backing[s..s + n] == prefix.backing[p..p + n];
+        }
+        (0..prefix.bit_len).all(|i| {
+            bit_at(&self.backing, abs + i) == bit_at(&prefix.backing, prefix.bit_offset + i)
+        })
+    }
 }
 
 impl PartialEq for BinaryValue {

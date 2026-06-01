@@ -10,12 +10,12 @@ fn idx_sum(a Array(Int), i Int, acc Int) Int {
 	if i < 0 {
 		acc
 	} else {
-		idx_sum(a, i - 1, acc + {a[i] or 0})
+		idx_sum(a, i - 1, acc + { a[i] or 0 })
 	}
 }
 
 n = 60
-xs = [..{0..n}, ..[]]
+xs = [..{ 0..n }, ..[]]
 
 // consumers (recurse via [h, ..t])
 total = list.fold(xs, 0, fn(a, b) a + b)

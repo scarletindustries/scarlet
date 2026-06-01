@@ -166,8 +166,21 @@ pub enum Op {
     BinReadInt,
     BinTake,
     BinReadUtf8,
+    /// `[bin, at_bits, prefix] -> Bool` — whether `bin`'s logical bits starting
+    /// at `at_bits` begin with `prefix`'s logical bits. Out-of-range is `false`,
+    /// never an error. Emitted by `<<>>` pattern codegen for literal segments
+    /// (string literals and coalesced integer-literal runs): one bounds check +
+    /// one byte compare instead of per-byte read/compare ops.
+    BinMatchPrefix,
+    /// `[bin, at_bits, len_bits] -> Binary` — O(1) sub-view sharing the backing,
+    /// no `Result` wrapper. Emitted by `<<>>` pattern codegen after its own
+    /// bounds check has proven the range valid; `BinSlice` (checked, `Result`)
+    /// remains the public builtin.
+    BinView,
     /// `[haystack, needle, from] -> Option(Int)` — byte-substring search.
     BinIndexOf,
+    /// `[bin, i] -> Int` — byte at index `i`, or -1 when out of range.
+    BinByteAt,
     /// `[bin, radix] -> Option(Int)` — ASCII integer parse (radix 10/16),
     /// overflow-checked (returns `None` rather than wrapping).
     BinParseInt,
@@ -177,6 +190,35 @@ pub enum Op {
     BinToAsciiLower,
     /// `[n, radix] -> Binary` — render an Int as ASCII (radix 10/16).
     BinFromIntAscii,
+
+    // HTTP/1.1 protocol ops (al/http/h1, al/http/headers). The byte scanning
+    // and value assembly run in native code — the Erlang
+    // `erlang:decode_packet(http_bin, ...)` precedent — while every protocol
+    // *decision* (framing precedence, keep-alive, 100-continue) stays in AL.
+    /// `[buf, off] -> Parsed` — parse one request head (request line + header
+    /// block) from `buf` at byte offset `off`. Pushes an `al/http/h1.Parsed`:
+    /// `Done(method, target, version, headers, consumed)` / `NeedMore` /
+    /// `Bad(status)`. Method, target, and header names/values are zero-copy
+    /// views into `buf`'s backing.
+    HttpParseHead,
+    /// `[headers] -> Framing` — RFC 7230 §3.3.3 body framing over an
+    /// `Array(Header)`: `NoBody` / `Length(n)` / `Chunked` / `Invalid(status)`.
+    HttpFraming,
+    /// `[buf, off, max] -> ChunkBody` — decode a chunked transfer-encoded body
+    /// from `buf` at byte offset `off`, refusing to decode more than `max`
+    /// bytes. Pushes an `al/http/h1.ChunkBody`: `ChunkedDone(body, trailers,
+    /// consumed)` / `ChunkedNeedMore` / `ChunkedBad(status)`. The decoded body
+    /// is one owned binary; trailer names/values are zero-copy views.
+    HttpChunkDecode,
+    /// `[headers, name] -> Option(Binary)` — value of the first header whose
+    /// name matches `name` ASCII-case-insensitively.
+    HttpHeaderGet,
+    /// `[headers, name] -> Bool` — whether any header name matches `name`
+    /// ASCII-case-insensitively.
+    HttpHeaderHas,
+    /// `[code, reason, headers] -> Binary` — serialize a response head (status
+    /// line, header block, terminating blank line) as one contiguous buffer.
+    HttpSerializeHead,
 
     // Float operations
     FloatFloor,

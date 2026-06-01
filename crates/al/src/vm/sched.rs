@@ -50,9 +50,17 @@ pub(super) struct Runtime {
     /// top-level binding works from any scheduler: each scheduler that needs
     /// one dups the fd from here into its own table.
     pub shared_listeners: Mutex<HashMap<i32, TcpListener>>,
-    /// Spawned processes waiting for a scheduler to take them.
+    /// Per-scheduler seed inboxes. `submit` hands a seed directly to a chosen
+    /// idle scheduler's inbox so an already-running scheduler can never race
+    /// it away from the one that was woken for it.
+    pub inboxes: Vec<Mutex<VecDeque<Seed>>>,
+    /// Overflow queue: seeds submitted while every scheduler was busy. Taken
+    /// (one per visit) by whichever scheduler frees up first.
     pub injector: Mutex<VecDeque<Seed>>,
-    /// Live processes across all schedulers, counting injector seeds and the
+    /// Rotates the starting point of `submit`'s idle-scheduler search so
+    /// consecutive submissions spread across different schedulers.
+    pub submit_cursor: AtomicUsize,
+    /// Live processes across all schedulers, counting undelivered seeds and the
     /// main process. The program is over when this reaches zero.
     pub live: AtomicUsize,
     /// One OS poller per scheduler. `notify()` wakes that scheduler whether it
@@ -65,9 +73,40 @@ pub(super) struct Runtime {
 }
 
 impl Runtime {
-    /// Submit a seed for any scheduler to run, and wake one to take it.
+    /// Submit a seed: hand it directly to an idle scheduler when one exists,
+    /// otherwise push it onto the shared overflow queue for whichever busy
+    /// scheduler frees up first.
+    ///
+    /// Direct handoff is what spreads work across cores. A seed in a shared
+    /// queue is raced for by every scheduler — and the one that is already
+    /// awake almost always wins, because taking a queue lock is microseconds
+    /// faster than waking a parked thread. Under a connection flood that race
+    /// pins every connection process onto the first one or two schedulers
+    /// while the rest of the machine sits idle. Claiming a parked scheduler's
+    /// flag and writing into its private inbox makes the placement decision
+    /// at submit time, where it cannot be raced.
     pub fn submit(&self, seed: Seed) {
         self.live.fetch_add(1, Ordering::AcqRel);
+
+        // Prefer a parked (idle) scheduler, starting the scan at a rotating
+        // offset so back-to-back submissions land on different schedulers.
+        let n = self.parked_flags.len();
+        let start = self.submit_cursor.fetch_add(1, Ordering::Relaxed);
+        for off in 0..n {
+            let i = (start + off) % n;
+            if self.parked_flags[i]
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                lock(&self.inboxes[i]).push_back(seed);
+                let _ = self.pollers[i].notify();
+                return;
+            }
+        }
+
+        // Every scheduler is busy: overflow. Then re-wake one in case a
+        // scheduler parked between the scan above and this push (it would
+        // otherwise sleep until its own I/O fires, with the seed stranded).
         {
             let mut q = lock(&self.injector);
             q.push_back(seed);
@@ -75,11 +114,20 @@ impl Runtime {
         self.wake_one();
     }
 
-    /// Take up to [`SEED_BATCH`] seeds from the injector.
-    pub fn take_seeds(&self) -> Vec<Seed> {
-        let mut q = lock(&self.injector);
-        let take = q.len().min(SEED_BATCH);
-        q.drain(..take).collect()
+    /// Take the seeds destined for scheduler `me`: everything handed to its
+    /// inbox, plus (when the inbox is empty) up to [`SEED_BATCH`] from the
+    /// shared overflow queue.
+    pub fn take_seeds(&self, me: usize) -> Vec<Seed> {
+        let mut out: Vec<Seed> = {
+            let mut inbox = lock(&self.inboxes[me]);
+            inbox.drain(..).collect()
+        };
+        if out.is_empty() {
+            let mut q = lock(&self.injector);
+            let take = q.len().min(SEED_BATCH);
+            out.extend(q.drain(..take));
+        }
+        out
     }
 
     /// A process finished. When it was the last one, wake every scheduler so
@@ -184,13 +232,15 @@ pub(super) fn boot(
         globals: Mutex::new(Vec::new()),
         globals_version: AtomicU64::new(0),
         shared_listeners: Mutex::new(HashMap::new()),
+        inboxes: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
         injector: Mutex::new(VecDeque::new()),
+        submit_cursor: AtomicUsize::new(0),
         // The main process is live.
         live: AtomicUsize::new(1),
         pollers,
         // Workers start flagged idle — they are about to be — so that seeds
-        // submitted while they boot are left for them rather than hoarded by
-        // the schedulers that are already running.
+        // submitted while they boot are handed straight to them rather than
+        // hoarded by the schedulers that are already running.
         parked_flags: (0..count).map(|i| AtomicBool::new(i != 0)).collect(),
         workers: Mutex::new(Vec::new()),
     });

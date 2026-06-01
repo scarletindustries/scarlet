@@ -960,7 +960,7 @@ println(string.inspect(id))  // Id(7)`,
     id: "binaries",
     title: "Binaries",
     body: [
-      "A `Binary` is a sequence of raw bytes. The `<<>>` syntax builds one, and the same syntax takes one apart in a match. Each segment is one byte unless you give it a size in bits. A `:binary` segment matches the rest of the bytes without copying them.",
+      "A `Binary` is a sequence of raw bytes. The `<<>>` syntax builds one, and the same syntax takes one apart in a match. Each segment is one byte unless you give it a size in bits; a string segment is its UTF-8 bytes; a `:binary` segment matches the rest of the bytes without copying them.",
       {
         id: "binaries",
         code: `import al/binary
@@ -981,7 +981,25 @@ sum = match binary.from_string('AB') {
 }
 println(sum)  // 131  (65 + 66)`,
       },
-      "This is the syntax network protocols are parsed with. The standard library's HTTP parser is written on top of it. Here is a small packet format, built and then parsed back into its fields:",
+      "A string literal in a pattern matches its bytes as a prefix — one machine-level compare, no matter how long the literal. This is how a wire protocol's keywords are matched: name the prefix, bind the rest.",
+      {
+        id: "binary-prefix",
+        code: `import al/binary
+
+// Dispatch on an HTTP request line without copying anything.
+fn route(line Binary) String {
+    match line {
+        <<'GET ', ..rest>> -> 'get \${binary.to_string(rest) or ''}'
+        <<'POST ', ..rest>> -> 'post \${binary.to_string(rest) or ''}'
+        <<'PING'>> -> 'pong'
+        else -> 'unknown'
+    }
+}
+
+println(route(binary.from_string('GET /users HTTP/1.1')))
+println(route(binary.from_string('PING')))`,
+      },
+      "This is the syntax network protocols are parsed with. The standard library's HTTP method and version dispatch is written on top of it. Here is a small packet format, built and then parsed back into its fields:",
       {
         id: "packet",
         code: `import al/binary
@@ -1000,7 +1018,7 @@ match packet {
     else -> println('malformed packet')
 }`,
       },
-      "`al/binary` also has `index_of`, `parse_int`, `slice_bytes`, `append`, and case-insensitive comparison. Slices share the underlying bytes instead of copying them.",
+      "`al/binary` also has `index_of`, `byte_at`, `parse_int`, `slice_bytes`, `append`, and case-insensitive comparison. Slices share the underlying bytes instead of copying them.",
     ],
   },
 
@@ -1248,7 +1266,7 @@ al/bool      negate, to_string
 al/option    map, then, unwrap, or_else, is_some, is_none
 al/result    map, map_err, then, unwrap, is_ok, is_err
 al/binary    from_string, to_string, bit_size, byte_size, slice, slice_bytes,
-             append, index_of, parse_int, eq_ignore_ascii_case,
+             append, index_of, byte_at, parse_int, eq_ignore_ascii_case,
              to_ascii_lower, from_int_ascii
 al/io        read_file, write_file, read_text, write_text
 al/net       listen, accept, connect, local_addr, close

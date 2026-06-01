@@ -232,8 +232,8 @@ impl Compiler {
             let module = self.current_module_slice();
             self.env
                 .register_type_head(&td.identifier.name, name_id, module, type_params);
-            self.env.definitions.insert(
-                td.identifier.name.clone(),
+            self.env.store_definition(
+                &td.identifier.name,
                 def_loc(td.identifier.span, module, EntityKind::Type),
             );
             self.env.store_doc_opt(&td.identifier.name, &td.doc);
@@ -620,8 +620,8 @@ impl Compiler {
             let target = self.with_owner(owner, |c| c.hydrate(&mut h, rhs));
             self.env
                 .set_type_body(&td.identifier.name, TypeBody::Alias { target });
-            self.env.definitions.insert(
-                td.identifier.name.clone(),
+            self.env.store_definition(
+                &td.identifier.name,
                 def_loc(td.identifier.span, module, EntityKind::Type),
             );
             self.env.store_doc_opt(&td.identifier.name, &td.doc);
@@ -710,7 +710,7 @@ impl Compiler {
                 let field_labels = c.engine.push_str_ids(&label_ids);
 
                 // Build the constructor's type scheme.
-                let result_ty = c.engine.mk_con(&type_name, &param_generics);
+                let result_ty = c.engine.mk_con(type_id, &type_name, &param_generics);
                 let ctor_ty = if field_itys.is_empty() {
                     result_ty
                 } else {
@@ -728,8 +728,8 @@ impl Compiler {
 
                 let name = &ctor.identifier.name;
                 c.env.define(name, scheme);
-                c.env.definitions.insert(
-                    name.clone(),
+                c.env.store_definition(
+                    name,
                     def_loc(ctor.identifier.span, m, EntityKind::Constructor),
                 );
                 c.env.store_doc_opt(name, &ctor.doc);

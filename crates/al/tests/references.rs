@@ -199,7 +199,7 @@ fn stdlib_import_path_is_tracked() {
 
     // Cross-module goto-def into the stdlib: the cursor on `list.length`
     // resolves to the real `length` declaration in `al/list` (`src/std/al/
-    // list.al`, `pub fn length` — 0-based line 25, the identifier span).
+    // list.al`, `pub fn length` — 0-based line 30, the identifier span).
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
@@ -211,7 +211,7 @@ fn stdlib_import_path_is_tracked() {
     );
     assert_eq!(
         (span.start_line, span.start_column, span.end_column),
-        (25, 7, 13),
+        (30, 7, 13),
         "must land on the real `length` declaration span, got {span:?}"
     );
     // The synthesised stdlib definition and the entry's qualified occurrence
@@ -725,4 +725,131 @@ fn navigation_on_constructor_type_constant_and_field() {
     // field declaration, the 2nd is the construction label `Box(label: ...)`
     // (not recorded as a graph reference), the 3rd is the access.
     assert_nav(&s, NAV_SRC, "label", 3, EntityKind::Field);
+}
+
+// --- Embedded-stdlib type fidelity through the session -------------------------
+
+// A program that imports al/http/h1 and matches its `Parsed` enum exhaustively
+// must check clean through `IncrementalSession` (the LSP's check path for
+// non-stdlib files) exactly like it does through `al check`: both resolve the
+// import against the same precompiled stdlib. A mismatch here means the
+// session's hydration of the embedded blob lost or mangled a declaration.
+const HTTP_ENTRY: &str = "import al/binary\n\
+import al/http/h1.{Done, NeedMore, Bad}\n\
+r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+\tDone(_, _, version, _, _) -> version\n\
+\tNeedMore -> 0 - 1\n\
+\tBad(s) -> s\n\
+}\n\
+println(r)\n";
+
+#[test]
+fn session_checks_http_h1_program_clean() {
+    let p = Project::new("http_session");
+    p.write("a.al", HTTP_ENTRY);
+    let mut s = IncrementalSession::new(al::stdlib());
+    let r = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    assert!(
+        r.success,
+        "session check of an al/http/h1 program must pass (parse_request : \
+         fn(Binary, Int) Parsed from the embedded stdlib), got: {:?}",
+        r.diagnostics
+    );
+}
+
+// Same session, two checks: a trivial entry first, then the al/http/h1
+// program. The stdlib types hydrated for the second entry must not be
+// corrupted by arena truncation between checks.
+#[test]
+fn session_recheck_keeps_stdlib_types_intact() {
+    let p = Project::new("http_session_recheck");
+    p.write("a.al", HTTP_ENTRY);
+    let mut s = IncrementalSession::new(al::stdlib());
+
+    // First check: a trivial program (no http imports at all).
+    let r1 = s.check(&parse("println(1)\n"), Some(&p.dir));
+    assert!(r1.success, "trivial check failed: {:?}", r1.diagnostics);
+
+    // Second check: the http program. This is the LSP's reality — one shared
+    // session checks many different entry files in sequence.
+    let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    assert!(
+        r2.success,
+        "re-check of an al/http/h1 program in a reused session failed: {:?}",
+        r2.diagnostics
+    );
+}
+
+// The LSP-workspace reality that broke in the field: one entry hydrates
+// al/http (examples/http_hello.al), a later entry in the same session imports
+// al/http/h1 directly. h1's hydration must still resolve `Parsed` /
+// `Framing` / `Header` to real enum types — not collapse them to a builtin —
+// even though al/http and al/http/headers were hydrated by an earlier check.
+const HTTP_HELLO_ENTRY: &str = "import al/http\n\
+http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) or e -> println(e)\n";
+
+#[test]
+fn session_hydrates_h1_after_http_in_earlier_check() {
+    let p = Project::new("http_session_order");
+    p.write("a.al", HTTP_HELLO_ENTRY);
+    p.write("b.al", HTTP_ENTRY);
+    let mut s = IncrementalSession::new(al::stdlib());
+
+    // First check: a program that imports al/http (hydrates http + headers).
+    let r1 = s.check(&parse(HTTP_HELLO_ENTRY), Some(&p.dir));
+    assert!(r1.success, "http_hello check failed: {:?}", r1.diagnostics);
+
+    // Second check: a program that imports al/http/h1 directly.
+    let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    assert!(
+        r2.success,
+        "al/http/h1 program checked after an al/http program in the same \
+         session must still see Parsed as an enum: {:?}",
+        r2.diagnostics
+    );
+}
+
+// THE field bug (found via VSCode, 2026-06-01): an entry file declaring a type
+// whose name collides with a seeded stdlib type — calculator.al's
+// `type Parsed = Result(...)` vs al/http/h1's `Parsed` enum — overwrote the
+// seeded `type_info` entry IN PLACE (IndexMap::insert keeps the existing,
+// pre-watermark index), so the next check's truncate-by-length rollback could
+// not restore it: every later check in the session saw the (truncated, now
+// garbage) alias instead of the enum, breaking exhaustiveness and hover for
+// that stdlib type. The env's overwrite journal is what fixes this; this test
+// pins it.
+const SHADOWING_ENTRY: &str = "type Parsed = Result(Int, String)\n\
+fn f(x Int) Parsed {\n\
+\tOk(x)\n\
+}\n\
+println(f(1) or 0)\n";
+
+#[test]
+fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
+    let p = Project::new("type_shadow");
+    p.write("a.al", SHADOWING_ENTRY);
+    p.write("b.al", HTTP_ENTRY);
+    let mut s = IncrementalSession::new(al::stdlib());
+
+    // Check 1: the shadowing entry itself is fine.
+    let r1 = s.check(&parse(SHADOWING_ENTRY), Some(&p.dir));
+    assert!(r1.success, "shadowing entry failed: {:?}", r1.diagnostics);
+
+    // Check 2: a different entry that uses the REAL al/http/h1.Parsed must see
+    // the enum (3 variants, exhaustive match), not the dead alias.
+    let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
+    assert!(
+        r2.success,
+        "h1.Parsed corrupted by an earlier entry's shadowing type alias: {:?}",
+        r2.diagnostics
+    );
+
+    // And back: re-checking the shadowing entry still works (the journal
+    // restore is itself rolled back cleanly).
+    let r3 = s.check(&parse(SHADOWING_ENTRY), Some(&p.dir));
+    assert!(
+        r3.success,
+        "re-check of shadowing entry failed: {:?}",
+        r3.diagnostics
+    );
 }

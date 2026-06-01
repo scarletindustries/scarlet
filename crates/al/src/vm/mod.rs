@@ -17,6 +17,7 @@ use al_core::static_ir::VariantTemplate;
 use crate::stdlib;
 
 mod binary;
+mod http;
 mod sched;
 
 use sched::{Runtime, Seed};
@@ -94,6 +95,20 @@ struct PreludeTemplates {
     ip_v6: EnumValue,
     socket_address: EnumValue,
     socket: EnumValue,
+    // HTTP protocol templates (al/http/h1, al/http/headers), used by the
+    // native scanners in `vm::http`. Variant-only values (NeedMore, NoBody)
+    // are pre-built behind an `Rc` so pushing one is a refcount bump.
+    header: EnumValue,
+    parsed_done: EnumValue,
+    parsed_need_more: Rc<EnumValue>,
+    parsed_bad: EnumValue,
+    framing_no_body: Rc<EnumValue>,
+    framing_length: EnumValue,
+    framing_chunked: Rc<EnumValue>,
+    framing_invalid: EnumValue,
+    chunked_done: EnumValue,
+    chunked_need_more: Rc<EnumValue>,
+    chunked_bad: EnumValue,
 }
 
 /// Convert a build.rs-emitted `stdlib::*` template into the runtime form.
@@ -120,6 +135,17 @@ impl PreludeTemplates {
             ip_v6: enum_template(&stdlib::net::address::V6),
             socket_address: enum_template(&stdlib::net::address::SOCKET_ADDRESS),
             socket: enum_template(&stdlib::net::socket::SOCKET),
+            header: enum_template(&stdlib::http::headers::HEADER),
+            parsed_done: enum_template(&stdlib::http::h1::DONE),
+            parsed_need_more: Rc::new(enum_template(&stdlib::http::h1::NEED_MORE)),
+            parsed_bad: enum_template(&stdlib::http::h1::BAD),
+            framing_no_body: Rc::new(enum_template(&stdlib::http::h1::NO_BODY)),
+            framing_length: enum_template(&stdlib::http::h1::LENGTH),
+            framing_chunked: Rc::new(enum_template(&stdlib::http::h1::CHUNKED)),
+            framing_invalid: enum_template(&stdlib::http::h1::INVALID),
+            chunked_done: enum_template(&stdlib::http::h1::CHUNKED_DONE),
+            chunked_need_more: Rc::new(enum_template(&stdlib::http::h1::CHUNKED_NEED_MORE)),
+            chunked_bad: enum_template(&stdlib::http::h1::CHUNKED_BAD),
         }
     }
 
@@ -395,6 +421,14 @@ impl VM {
             //    by other schedulers (seed submissions, program end).
             if !self.parked.is_empty() {
                 self.set_parked_flag(true);
+                // Re-check for seeds after publishing the flag: a submitter
+                // who scanned before the flag was visible may have pushed to
+                // the overflow queue (or straight into our inbox) expecting
+                // someone to pick it up.
+                if self.take_seeds()? {
+                    self.set_parked_flag(false);
+                    continue;
+                }
                 let poll_result = self.poll_parked(true);
                 self.set_parked_flag(false);
                 poll_result?;
@@ -428,11 +462,12 @@ impl VM {
         }
     }
 
-    /// Move a batch of seeds from the shared injector into the local run
-    /// queue. Returns whether any arrived.
+    /// Move seeds destined for this scheduler (its inbox, falling back to the
+    /// shared overflow queue) into the local run queue. Returns whether any
+    /// arrived.
     fn take_seeds(&mut self) -> VmResult<bool> {
         let batch = match &self.runtime {
-            Some(rt) => rt.take_seeds(),
+            Some(rt) => rt.take_seeds(self.scheduler_index),
             None => return Ok(false),
         };
         if batch.is_empty() {
@@ -1854,15 +1889,49 @@ impl VM {
                     self.stack.push(Value::int(cp));
                     self.stack.push(Value::int(nbits));
                 }
+                // `<<'literal', ..>>` pattern — does the binary, at a bit
+                // offset, start with a constant prefix? One compare for the
+                // whole literal; out-of-range is false, never an error.
+                Op::BinMatchPrefix => {
+                    let prefix = self.pop_binary("binary pattern")?;
+                    let at = self.pop_int("binary pattern")?;
+                    let bin = self.pop_binary("binary pattern")?;
+                    self.stack
+                        .push(Value::bool(bin.starts_with_at(at.max(0) as u64, &prefix)));
+                }
+                // `<<x:bytes(n), ..rest>>` pattern — sub-view at [at, at+len).
+                // The compiler emits a bounds check first, so this is total:
+                // the range is clamped, never an error and never a Result.
+                Op::BinView => {
+                    let len = self.pop_int("binary pattern")?;
+                    let at = self.pop_int("binary pattern")?;
+                    let bin = self.pop_binary("binary pattern")?;
+                    let at = (at.max(0) as u64).min(bin.bit_len);
+                    let len = (len.max(0) as u64).min(bin.bit_len - at);
+                    self.stack.push(Value::binary_view(
+                        bin.backing.clone(),
+                        bin.bit_offset + at,
+                        len,
+                    ));
+                }
                 // Byte-oriented ASCII builtins. Routed through one cold,
                 // out-of-line handler so their bodies (and the int<->ASCII
                 // helpers they inline) stay out of the central dispatch loop,
                 // keeping the hot integer arms' codegen undisturbed.
                 Op::BinIndexOf
+                | Op::BinByteAt
                 | Op::BinParseInt
                 | Op::BinEqIgnoreAsciiCase
                 | Op::BinToAsciiLower
                 | Op::BinFromIntAscii => self.exec_bin_ascii(instr.op)?,
+                // HTTP/1.1 protocol ops: native byte scanning + value assembly,
+                // out-of-line for the same reason as the ASCII builtins.
+                Op::HttpParseHead
+                | Op::HttpFraming
+                | Op::HttpChunkDecode
+                | Op::HttpHeaderGet
+                | Op::HttpHeaderHas
+                | Op::HttpSerializeHead => self.exec_http(instr.op)?,
                 // Float→Int casts use saturating `as i64`; Value floats are
                 // canonicalized finite (no NaN/Inf), so these stay total.
                 Op::FloatFloor => {
@@ -2027,12 +2096,25 @@ impl VM {
                 let v = if ndl.is_empty() {
                     self.make_some(Value::int(start as i64))
                 } else {
-                    match hay[start..].windows(ndl.len()).position(|w| w == &ndl[..]) {
+                    // SIMD substring search; the single-byte needle case is a
+                    // straight memchr.
+                    match memchr::memmem::find(&hay[start..], &ndl) {
                         Some(rel) => self.make_some(Value::int((start + rel) as i64)),
                         None => self.make_none(),
                     }
                 };
                 self.stack.push(v);
+            }
+            Op::BinByteAt => {
+                let i = self.pop_int("binary.byte_at")?;
+                let bin = self.pop_binary("binary.byte_at")?;
+                let bytes = bin.full_bytes();
+                let v = if i >= 0 && (i as usize) < bytes.len() {
+                    bytes[i as usize] as i64
+                } else {
+                    -1
+                };
+                self.stack.push(Value::int(v));
             }
             Op::BinParseInt => {
                 let radix = self.pop_int("binary.parse_int")?;
@@ -2062,10 +2144,63 @@ impl VM {
                 let n = self.pop_int("binary.from_int_ascii")?;
                 self.stack.push(Value::binary(int_to_ascii(n, radix)));
             }
-            // Unreachable: the dispatch arm routes only the five ops above
-            // here. Return an internal error rather than panic (the crate
-            // denies `clippy::unreachable`).
+            // Unreachable: the dispatch arm routes only the ops above here.
+            // Return an internal error rather than panic (the crate denies
+            // `clippy::unreachable`).
             _ => return Err(format!("internal error: exec_bin_ascii got {op:?}")),
+        }
+        Ok(())
+    }
+
+    // --- HTTP protocol builtins ------------------------------------------------
+
+    /// Out-of-line handler for the HTTP/1.1 ops (`al/http/h1` and
+    /// `al/http/headers` hot paths; see `vm::http`). Cold + never-inline for
+    /// the same reason as `exec_bin_ascii`: keep the protocol scanners out of
+    /// the central dispatch loop's codegen.
+    #[cold]
+    #[inline(never)]
+    fn exec_http(&mut self, op: Op) -> VmResult<()> {
+        match op {
+            Op::HttpParseHead => {
+                let off = self.pop_int("h1.parse_request")?;
+                let buf = self.pop_binary("h1.parse_request")?;
+                let v = http::parse_head(&self.templates, &buf, off);
+                self.stack.push(v);
+            }
+            Op::HttpFraming => {
+                let headers = self.pop()?;
+                let v = http::framing(&self.templates, &headers)?;
+                self.stack.push(v);
+            }
+            Op::HttpChunkDecode => {
+                let max = self.pop_int("h1.chunk_decode")?;
+                let off = self.pop_int("h1.chunk_decode")?;
+                let buf = self.pop_binary("h1.chunk_decode")?;
+                let v = http::chunk_decode(&self.templates, &buf, off, max);
+                self.stack.push(v);
+            }
+            Op::HttpHeaderGet => {
+                let name = self.pop_binary("headers.get")?;
+                let headers = self.pop()?;
+                let v = http::header_get(&self.templates, &headers, &name)?;
+                self.stack.push(v);
+            }
+            Op::HttpHeaderHas => {
+                let name = self.pop_binary("headers.has")?;
+                let headers = self.pop()?;
+                let v = http::header_has(&headers, &name)?;
+                self.stack.push(v);
+            }
+            Op::HttpSerializeHead => {
+                let headers = self.pop()?;
+                let reason = self.pop_binary("h1.serialize_head")?;
+                let code = self.pop_int("h1.serialize_head")?;
+                let v = http::serialize_head(code, &reason, &headers)?;
+                self.stack.push(v);
+            }
+            // Unreachable: the dispatch arm routes only the ops above.
+            _ => return Err(format!("internal error: exec_http got {op:?}")),
         }
         Ok(())
     }

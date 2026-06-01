@@ -9,6 +9,7 @@ al_core = { path = "../al_core" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
 libc = "0.2"
+memchr = "2"
 polling = "3"
 rustyline = "14"
 serde_json = "1"

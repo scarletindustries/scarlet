@@ -16,12 +16,12 @@ fn idx(arr Array(Int), i Int, acc Int) Int {
 	if i < 0 {
 		acc
 	} else {
-		idx(arr, i - 1, acc + {arr[i] or 0})
+		idx(arr, i - 1, acc + { arr[i] or 0 })
 	}
 }
 
 n = 500000
-xs = [..{0..n}, ..[]]
+xs = [..{ 0..n }, ..[]]
 
 a = list.fold(xs, 0, fn(p, q) p + q)
 b = list.length(xs)
@@ -30,4 +30,4 @@ r = list.reverse(xs)
 d = list.length(r)
 e = idx(xs, n - 1, 0)
 
-println(a + b + d + e + {if c { 1 } else { 0 }})
+println(a + b + d + e + { if c { 1 } else { 0 } })

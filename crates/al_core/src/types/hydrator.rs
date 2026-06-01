@@ -188,14 +188,11 @@ impl Hydrator {
                         Ok(engine.substitute_type_vars(target, ti.type_params, &arg_tys))
                     }
                     // Custom, External, and Unresolved heads all hydrate to a
-                    // nominal application; bodies are consulted later by
-                    // resolve/exhaustiveness, not by annotation hydration.
-                    // Build the con with the type's *canonical* name (`ti.name`),
-                    // not the local `name`: under `import mod.{T as X}` the local
-                    // string is the alias `X`, but the type's values carry the
-                    // canonical `T`, and unification compares `Con` by name, so an
-                    // alias-named con would never unify with the real type.
-                    _ => Ok(engine.mk_con_id(ti.name, &arg_tys)),
+                    // nominal application carrying the type's registered id —
+                    // the identity unification and every semantic lookup use.
+                    // The display name is the canonical `ti.name` (under
+                    // `import mod.{T as X}` the local string is the alias `X`).
+                    _ => Ok(engine.mk_con_id(ti.id, ti.name, &arg_tys)),
                 }
             }
             None => Err(err(name_span, format!("Unknown type '{}'", name))),

@@ -794,16 +794,20 @@ impl IncrementalSession {
             // `env.type_info` is a flat map, not a scope stack, so a selective
             // `import m.{Type}` binding written by `process_imports` is not
             // confined to the throwaway scope the way a value binding is. Record
-            // its length *before* the entry's imports run so the `last_entry`
-            // watermark excludes them; otherwise the binding folds into the
-            // watermark and the next check's `reset_to` preserves it, leaving a
-            // removed or renamed type import still resolving to a stale
-            // `TypeInfo` with no diagnostic. The entry re-binds whatever it
-            // imports from the (persistent) cached module interfaces on every
-            // check, so rolling this map back to the pre-import position discards
-            // only re-derivable lookup state — never the engine arena those
-            // interfaces point into.
-            let pre_import_type_info = self.c.env.watermark().type_info;
+            // the env watermark *before* the entry's imports run so the
+            // `last_entry` watermark excludes them; otherwise the binding folds
+            // into the watermark and the next check's `reset_to` preserves it,
+            // leaving a removed or renamed type import still resolving to a
+            // stale `TypeInfo` with no diagnostic. The entry re-binds whatever
+            // it imports from the (persistent) cached module interfaces on
+            // every check, so rolling this map back to the pre-import position
+            // discards only re-derivable lookup state — never the engine arena
+            // those interfaces point into. The journal position rolls back with
+            // it: an entry type that shadowed a seeded stdlib name (`type
+            // Parsed = ...` over al/http/h1's `Parsed`) overwrote that entry
+            // in-place below the watermark, and replaying the journal is what
+            // restores the stdlib value on the next check.
+            let pre_import = self.c.env.watermark();
             self.c.process_imports(block);
             // A cache-hit dependency reserved its id range but contributed
             // nothing to `next_type_id` this pass, so bump the entry file past
@@ -818,11 +822,12 @@ impl IncrementalSession {
             // The watermark records the persistent root scope (prelude seed)
             // plus the bumped id position; the entry's imports live in the
             // throwaway scope `reset_to` layered on top (value bindings) or are
-            // rewound to `pre_import_type_info` (type bindings), so they — like
-            // the entry body analysed below — are discarded and rebuilt next
-            // time.
+            // rewound to the pre-import type_info/journal position (type
+            // bindings), so they — like the entry body analysed below — are
+            // discarded and rebuilt next time.
             let mut wm = self.c.watermark();
-            wm.env.type_info = pre_import_type_info;
+            wm.env.type_info = pre_import.type_info;
+            wm.env.journal = pre_import.journal;
             self.last_entry = Some(wm);
             self.c.analyse_module(block, None);
         } else {
@@ -850,7 +855,7 @@ impl IncrementalSession {
                 // Same flat-map rollback as the normal path: keep the entry's
                 // selective type imports out of the persisted watermark so a
                 // later check rewinds them instead of resolving a removed import.
-                let pre_import_type_info = self.c.env.watermark().type_info;
+                let pre_import = self.c.env.watermark();
                 self.c.process_imports(block);
                 // Same reserved-range guard as the normal path: after the
                 // re-allocated imports the entry must allocate past every
@@ -861,7 +866,8 @@ impl IncrementalSession {
                     self.c.env.set_next_type_id(hw);
                 }
                 let mut wm = self.c.watermark();
-                wm.env.type_info = pre_import_type_info;
+                wm.env.type_info = pre_import.type_info;
+                wm.env.journal = pre_import.journal;
                 self.last_entry = Some(wm);
                 self.c.analyse_module(block, None);
             } else {
@@ -1095,6 +1101,11 @@ impl Compiler {
         self.static_stdlib = Some(s);
         self.module_table.static_fallback = Some(s);
         self.prelude = s.prelude.clone();
+        self.engine.set_prim_ids(crate::types::PrimIds {
+            int: self.prelude.int.id,
+            float: self.prelude.float.id,
+            string: self.prelude.string.id,
+        });
         self.env.set_next_type_id(s.next_type_id);
         // The static type arena IS the live arena's prefix — every `Ty`/
         // `ArenaSlice` in stdlib schemes/typeinfos indexes into it. memcpy
@@ -1119,12 +1130,15 @@ impl Compiler {
             self.bind_local(format!("__pre{}", slot), slot);
         }
 
-        // Prelude type-infos: small fixed set, copy eagerly so the immutable
-        // `lookup_type_info` callers (resolve_icon, hydrator) hit the map.
+        // Stdlib type-infos: copy eagerly so both the by-name map (annotation
+        // resolution) and the by-id registry (nominal lookups: exhaustiveness,
+        // field access, hover) hit without hydration. Seeded below the session
+        // watermark, so they are never truncated and never overwritten in
+        // place (a colliding user type gets its own id and its own entry).
         for (name, idx) in s.typeinfo_by_name {
-            self.env
-                .type_info
-                .insert((*name).to_string(), s.typeinfos[*idx as usize]);
+            let ti = s.typeinfos[*idx as usize];
+            self.env.type_info.insert((*name).to_string(), ti);
+            self.env.type_info_by_id.insert(ti.id, ti);
         }
 
         // Re-export prelude constructor/@vm schemes (Some/None/Ok/Err/True/...)
@@ -1675,28 +1689,36 @@ impl Compiler {
     /// captured `PreludeBindings` so the type identity (not just the name
     /// string) is the source of truth where it matters.
     fn ty_bool(&mut self) -> Ty {
-        self.engine.mk_con(self.prelude.bool.name, &[])
+        self.engine
+            .mk_con(self.prelude.bool.id, self.prelude.bool.name, &[])
     }
     fn ty_int(&mut self) -> Ty {
-        self.engine.mk_con(self.prelude.int.name, &[])
+        self.engine
+            .mk_con(self.prelude.int.id, self.prelude.int.name, &[])
     }
     fn ty_string(&mut self) -> Ty {
-        self.engine.mk_con(self.prelude.string.name, &[])
+        self.engine
+            .mk_con(self.prelude.string.id, self.prelude.string.name, &[])
     }
     fn ty_nil(&mut self) -> Ty {
-        self.engine.mk_con(self.prelude.nil.name, &[])
+        self.engine
+            .mk_con(self.prelude.nil.id, self.prelude.nil.name, &[])
     }
     fn ty_array(&mut self, elem: Ty) -> Ty {
-        self.engine.mk_con(self.prelude.array.name, &[elem])
+        self.engine
+            .mk_con(self.prelude.array.id, self.prelude.array.name, &[elem])
     }
     fn ty_binary(&mut self) -> Ty {
-        self.engine.mk_con(self.prelude.binary.name, &[])
+        self.engine
+            .mk_con(self.prelude.binary.id, self.prelude.binary.name, &[])
     }
     fn ty_option(&mut self, inner: Ty) -> Ty {
-        self.engine.mk_con(self.prelude.option.name, &[inner])
+        self.engine
+            .mk_con(self.prelude.option.id, self.prelude.option.name, &[inner])
     }
     fn ty_result(&mut self, ok: Ty, err: Ty) -> Ty {
-        self.engine.mk_con(self.prelude.result.name, &[ok, err])
+        self.engine
+            .mk_con(self.prelude.result.id, self.prelude.result.name, &[ok, err])
     }
 
     /// Hydrate a type annotation through `h`, recording any error and falling
@@ -2128,7 +2150,7 @@ impl Compiler {
                 // (module-aware, after the loop) from the imported module's
                 // reference graph, never the constructor-clobbered
                 // `env.definitions`.
-                self.env.type_info.insert(local_name.clone(), ti);
+                self.env.store_type_info(&local_name, ti);
                 type_item_refs.push((
                     item.name.span,
                     crate::reference::ReferenceKind::Unqualified,
@@ -2370,7 +2392,7 @@ impl Compiler {
                         let resolved = self.engine.find(ty);
                         let is_nil = matches!(
                             self.engine.node(resolved),
-                            TypeNode::Con { name, .. } if self.engine.str(name) == self.prelude.nil.name
+                            TypeNode::Con { id, .. } if id == self.prelude.nil.id
                         );
                         let is_var = matches!(self.engine.node(resolved), TypeNode::Var(_));
                         if !is_nil && !is_var {
@@ -2825,6 +2847,15 @@ impl Compiler {
             self.emit_arg(Op::PushConst, c);
             return bin_ty;
         }
+        // All-literal binaries (`<<'\r\n'>>`, `<<13, 10>>`, `<<1:4, 2:4>>`)
+        // fold to a single pooled constant: zero runtime ops and zero
+        // allocation per evaluation instead of a BinFromString/BinFromInt +
+        // BinAppend chain.
+        if let Some((bytes, bit_len)) = Self::const_fold_binary_literal(bl) {
+            let c = self.add_constant(Value::binary_bits(bytes, bit_len));
+            self.emit_arg(Op::PushConst, c);
+            return bin_ty;
+        }
         for (i, seg) in bl.segments.iter().enumerate() {
             self.compile_bin_segment_value(seg);
             if i > 0 {
@@ -2833,6 +2864,47 @@ impl Compiler {
             }
         }
         bin_ty
+    }
+
+    /// The compile-time bytes of a `<<>>` literal whose every segment is a
+    /// literal: string segments contribute UTF-8 bytes, integer segments their
+    /// value MSB-first at their (literal) width. `None` when any segment needs
+    /// runtime evaluation; type errors (float widths, non-Int values) also
+    /// yield `None` so the normal path reports them.
+    fn const_fold_binary_literal(bl: &ast::BinaryLiteral) -> Option<(Vec<u8>, u64)> {
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut bit_len: u64 = 0;
+        for seg in &bl.segments {
+            match seg.kind {
+                ast::BinKind::Utf8 => match &seg.value {
+                    ast::Expression::StringLiteral(s) => {
+                        push_literal_bytes(&mut bytes, &mut bit_len, s.value.as_bytes());
+                    }
+                    _ => return None,
+                },
+                ast::BinKind::Int => {
+                    let ast::Expression::NumberLiteral(n) = &seg.value else {
+                        return None;
+                    };
+                    let v = n.value.parse::<i64>().ok()?;
+                    let bits = match &seg.size {
+                        None => 8,
+                        Some(ast::Expression::NumberLiteral(w)) => {
+                            let w = w.value.parse::<i64>().ok()?;
+                            if seg.unit == ast::BinUnit::Bytes {
+                                w.max(0) * 8
+                            } else {
+                                w.max(0)
+                            }
+                        }
+                        Some(_) => return None,
+                    };
+                    push_literal_bits(&mut bytes, &mut bit_len, v, bits as u64);
+                }
+                ast::BinKind::Binary => return None,
+            }
+        }
+        Some((bytes, bit_len))
     }
 
     /// Push a single segment's value onto the stack as a `Binary` fragment.
@@ -3359,10 +3431,17 @@ impl Compiler {
             "binary__slice" => self.emit(Op::BinSlice),
             "binary__append" => self.emit(Op::BinAppend),
             "binary__index_of" => self.emit(Op::BinIndexOf),
+            "binary__byte_at" => self.emit(Op::BinByteAt),
             "binary__parse_int" => self.emit(Op::BinParseInt),
             "binary__eq_ignore_ascii_case" => self.emit(Op::BinEqIgnoreAsciiCase),
             "binary__to_ascii_lower" => self.emit(Op::BinToAsciiLower),
             "binary__from_int_ascii" => self.emit(Op::BinFromIntAscii),
+            "http__parse_head" => self.emit(Op::HttpParseHead),
+            "http__framing" => self.emit(Op::HttpFraming),
+            "http__chunk_decode" => self.emit(Op::HttpChunkDecode),
+            "http__header_get" => self.emit(Op::HttpHeaderGet),
+            "http__header_has" => self.emit(Op::HttpHeaderHas),
+            "http__serialize_head" => self.emit(Op::HttpSerializeHead),
             "float__floor" => self.emit(Op::FloatFloor),
             "float__ceil" => self.emit(Op::FloatCeil),
             "float__round" => self.emit(Op::FloatRound),
@@ -3471,8 +3550,9 @@ impl Compiler {
     /// the receiver type carries a label of that name and at the same type.
     fn compile_field_access(&mut self, receiver_ty: Ty, field: &str, field_span: Span) -> Ty {
         let resolved = self.engine.find(receiver_ty);
-        let (type_name, type_args) = match self.engine.node(resolved) {
-            TypeNode::Con { name, args } => (
+        let (type_id, type_name, type_args) = match self.engine.node(resolved) {
+            TypeNode::Con { id, name, args } => (
+                id,
                 self.engine.str(name).to_string(),
                 self.engine.children_of(args).to_vec(),
             ),
@@ -3494,7 +3574,10 @@ impl Compiler {
             }
         };
 
-        let Some(info) = self.env.lookup_type_info(&type_name) else {
+        // Nominal lookup: the receiver's variants come from the type the Con
+        // node identifies, never from whatever same-named type a flat name
+        // lookup would find first.
+        let Some(info) = self.env.lookup_type_info_by_id(type_id) else {
             return self.field_access_bail(
                 format!("Type '{}' has no field '{}'", type_name, field),
                 field_span,
@@ -3598,15 +3681,11 @@ impl Compiler {
 
         let success_var = self.engine.fresh_var();
 
-        // Determine which prelude type the LHS is. We compare by the
-        // registered type-id (not by name) so user-defined types that happen
-        // to be called "Option"/"Result" don't accidentally match.
+        // Determine which prelude type the LHS is. The Con node carries its
+        // nominal id, so user-defined types that happen to be called
+        // "Option"/"Result" can never match.
         let lhs_type_id = match self.engine.node(resolved) {
-            TypeNode::Con { name, .. } => self
-                .env
-                .lookup_type_info(self.engine.str(name))
-                .map(|ti| ti.id)
-                .unwrap_or(0),
+            TypeNode::Con { id, .. } => id,
             _ => 0,
         };
 
@@ -4047,10 +4126,16 @@ impl Compiler {
                 let bin_ty = self.ty_binary();
                 let mut ok = self.engine.unify_at(expected, bin_ty, *span);
                 for seg in segments {
-                    // Int / Utf8 segments bind an integer (a value or a
-                    // codepoint); Binary segments bind a sub-binary. Size
-                    // expressions are runtime values, not bindings, so they are
-                    // type-checked alongside codegen in `emit_pattern`.
+                    // A string-literal Utf8 segment (`<<'GET ', ..>>`) matches
+                    // its encoded bytes as a prefix; it binds nothing and has
+                    // no value type to check. Other Int / Utf8 segments bind an
+                    // integer (a value or a codepoint); Binary segments bind a
+                    // sub-binary. Size expressions are runtime values, not
+                    // bindings, so they are type-checked alongside codegen in
+                    // `emit_pattern`.
+                    if Self::utf8_literal_segment(seg).is_some() {
+                        continue;
+                    }
                     let seg_val_ty = match seg.kind {
                         ast::BinKind::Int | ast::BinKind::Utf8 => self.ty_int(),
                         ast::BinKind::Binary => self.ty_binary(),
@@ -4502,11 +4587,27 @@ impl Compiler {
     }
 
     /// Destructure the `Binary` on top of the stack against a `<<>>` pattern.
-    /// A bit cursor walks the value: each segment bounds-checks
-    /// `cursor + width <= total`, extracts its bits (an integer for `Int` /
-    /// `Utf8`, a sub-binary for `Binary`), recursively matches the segment's
-    /// value pattern, then advances. With no trailing `..rest` the binary must
-    /// be consumed exactly; `..` allows (and optionally binds) the remainder.
+    ///
+    /// A bit cursor walks the value. The cursor is tracked at COMPILE TIME
+    /// (`Some(bit_offset)`) for as long as every preceding segment has a
+    /// statically-known width — literal prefixes, Int segments with literal
+    /// sizes, `bytes(k)` slices with literal `k` — and is spilled into a
+    /// runtime temp only at the first variable-width segment (a `:utf8`
+    /// codepoint or a runtime size expression). Fixed-layout patterns
+    /// therefore compile to constant-offset reads with consolidated bounds
+    /// checks and no cursor arithmetic at all.
+    ///
+    /// Consecutive literal segments (string literals, integer literals with
+    /// literal widths) are coalesced into one constant prefix compared with a
+    /// single `Op::BinMatchPrefix`: `<<'HTTP/1.1', ..rest>>` is one byte
+    /// compare, not eight read/compare pairs.
+    ///
+    /// Binary-kind segments and `..rest` bind zero-copy views via
+    /// `Op::BinView` (no `Result` box) — the surrounding bounds checks have
+    /// already proven the range valid.
+    ///
+    /// With no trailing `..rest` the binary must be consumed exactly; `..`
+    /// allows (and optionally binds) the remainder.
     fn emit_binary_pattern(
         &mut self,
         segments: &[ast::BinSegmentPat],
@@ -4520,14 +4621,78 @@ impl Compiler {
         self.emit(Op::BinBitSize);
         let total_temp = self.spill_temp();
 
-        let zero = self.add_constant(Value::int(0));
-        self.emit_arg(Op::PushConst, zero);
-        let cursor_temp = self.spill_temp();
+        // Per-segment static widths; None = width known only at runtime.
+        let widths: Vec<Option<i64>> = segments.iter().map(Self::static_segment_bits).collect();
+        let all_static = widths.iter().all(|w| w.is_some());
 
-        for seg in segments {
+        // The bit cursor: `Some(k)` while statically known, `None` once it
+        // lives in cursor_temp. The temp slot is reserved up front but written
+        // only if the cursor actually goes dynamic.
+        let cursor_temp = self.alloc_temp();
+        let mut cursor: Option<i64> = Some(0);
+        // Static bit offset already proven in bounds by an emitted check.
+        let mut checked: i64 = 0;
+
+        // Fully-static exact-length pattern: ONE up-front total-length check
+        // covers every segment read and replaces the trailing
+        // exact-consumption check.
+        if all_static && rest.is_none() {
+            let static_total: i64 = widths.iter().flatten().sum();
+            let c = self.add_constant(Value::int(static_total));
+            self.emit_arg(Op::PushConst, c);
+            self.emit_arg(Op::PushLocal, total_temp);
+            self.emit(Op::Eq);
+            fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+            checked = static_total;
+        }
+
+        let mut i = 0;
+        while i < segments.len() {
+            // At a static cursor, one bounds check covers the whole run of
+            // statically-sized segments ahead of it.
+            if let Some(at) = cursor
+                && widths[i].is_some()
+            {
+                let mut end = at;
+                for w in &widths[i..] {
+                    match w {
+                        Some(bits) => end += bits,
+                        None => break,
+                    }
+                }
+                if end > checked {
+                    let c = self.add_constant(Value::int(end));
+                    self.emit_arg(Op::PushConst, c);
+                    self.emit_arg(Op::PushLocal, total_temp);
+                    self.emit(Op::Lte);
+                    fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                    checked = end;
+                }
+            }
+
+            // Literal segments: coalesce the run starting here into one
+            // constant prefix and compare it with a single op.
+            if let Some((bytes, bit_len, run)) = Self::literal_prefix_run(&segments[i..]) {
+                let c = self.add_constant(Value::binary_bits(bytes, bit_len));
+                self.emit_arg(Op::PushLocal, bin_temp);
+                self.emit_push_cursor(cursor, cursor_temp);
+                self.emit_arg(Op::PushConst, c);
+                self.emit(Op::BinMatchPrefix);
+                fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                self.emit_advance_cursor(&mut cursor, cursor_temp, bit_len as i64);
+                i += run;
+                continue;
+            }
+
+            let seg = &segments[i];
+            let width = widths[i];
+            i += 1;
+
+            // `:utf8` codepoint segment — variable width: read one codepoint,
+            // match it, then advance by however many bits it consumed
+            // (0 == decode failure).
             if seg.kind == ast::BinKind::Utf8 {
-                // UTF-8 is variable-width: read one codepoint, then advance by
-                // however many bits it consumed (0 == decode failure).
+                self.emit_spill_cursor(&mut cursor, cursor_temp);
                 self.emit_arg(Op::PushLocal, bin_temp);
                 self.emit_arg(Op::PushLocal, cursor_temp);
                 self.emit(Op::BinReadUtf8);
@@ -4550,55 +4715,100 @@ impl Compiler {
                 continue;
             }
 
-            // Fixed-width segment: compute its bit width into bits_temp.
-            let bits_temp = self.alloc_temp();
-            if let Some(e) = &seg.size {
-                let ety = self.compile_expr(e);
-                let int_ty = self.ty_int();
-                self.engine.unify_at(int_ty, ety, e.span());
-                if seg.unit == ast::BinUnit::Bytes {
-                    let c = self.add_constant(Value::int(8));
-                    self.emit_arg(Op::PushConst, c);
-                    self.emit(Op::Mul);
+            match (width, cursor) {
+                // Statically-sized segment at a static cursor: bounds proven by
+                // the consolidated check; read at constant offset/width.
+                (Some(bits), Some(at)) => {
+                    self.emit_arg(Op::PushLocal, bin_temp);
+                    let ac = self.add_constant(Value::int(at));
+                    self.emit_arg(Op::PushConst, ac);
+                    let wc = self.add_constant(Value::int(bits));
+                    self.emit_arg(Op::PushConst, wc);
+                    if seg.kind == ast::BinKind::Binary {
+                        self.emit(Op::BinView);
+                    } else {
+                        self.emit(Op::BinReadInt);
+                    }
+                    self.emit_pattern(&seg.value, fail_jumps);
+                    cursor = Some(at + bits);
                 }
-            } else if seg.kind == ast::BinKind::Binary {
-                // `:binary` with no size consumes all remaining bits.
-                self.emit_arg(Op::PushLocal, total_temp);
-                self.emit_arg(Op::PushLocal, cursor_temp);
-                self.emit(Op::Sub);
-            } else {
-                // Bare Int segment defaults to 8 bits (Utf8 handled above).
-                let c = self.add_constant(Value::int(8));
-                self.emit_arg(Op::PushConst, c);
+                // Statically-sized segment at a runtime cursor: per-segment
+                // bounds check, read at cursor with constant width.
+                (Some(bits), None) => {
+                    let wc = self.add_constant(Value::int(bits));
+
+                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_arg(Op::PushConst, wc);
+                    self.emit(Op::Add);
+                    self.emit_arg(Op::PushLocal, total_temp);
+                    self.emit(Op::Lte);
+                    fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+
+                    self.emit_arg(Op::PushLocal, bin_temp);
+                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_arg(Op::PushConst, wc);
+                    if seg.kind == ast::BinKind::Binary {
+                        self.emit(Op::BinView);
+                    } else {
+                        self.emit(Op::BinReadInt);
+                    }
+                    self.emit_pattern(&seg.value, fail_jumps);
+
+                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_arg(Op::PushConst, wc);
+                    self.emit(Op::Add);
+                    self.emit_arg(Op::StoreLocal, cursor_temp);
+                }
+                // Runtime-sized segment: a dynamic `size(e)`/`bytes(e)`, or a
+                // sizeless `:binary` slice that consumes the remaining bits.
+                (None, _) => {
+                    let bits_temp = self.alloc_temp();
+                    if let Some(e) = &seg.size {
+                        let ety = self.compile_expr(e);
+                        let int_ty = self.ty_int();
+                        self.engine.unify_at(int_ty, ety, e.span());
+                        if seg.unit == ast::BinUnit::Bytes {
+                            let c = self.add_constant(Value::int(8));
+                            self.emit_arg(Op::PushConst, c);
+                            self.emit(Op::Mul);
+                        }
+                        self.emit_arg(Op::StoreLocal, bits_temp);
+
+                        // Bounds: cursor + width <= total.
+                        self.emit_spill_cursor(&mut cursor, cursor_temp);
+                        self.emit_arg(Op::PushLocal, cursor_temp);
+                        self.emit_arg(Op::PushLocal, bits_temp);
+                        self.emit(Op::Add);
+                        self.emit_arg(Op::PushLocal, total_temp);
+                        self.emit(Op::Lte);
+                        fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                    } else {
+                        // `:binary` with no size: all remaining bits. In bounds
+                        // by the cursor <= total invariant; no check needed.
+                        self.emit_spill_cursor(&mut cursor, cursor_temp);
+                        self.emit_arg(Op::PushLocal, total_temp);
+                        self.emit_arg(Op::PushLocal, cursor_temp);
+                        self.emit(Op::Sub);
+                        self.emit_arg(Op::StoreLocal, bits_temp);
+                    }
+
+                    // Extract [cursor, cursor+width) and match the pattern.
+                    self.emit_arg(Op::PushLocal, bin_temp);
+                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_arg(Op::PushLocal, bits_temp);
+                    if seg.kind == ast::BinKind::Binary {
+                        self.emit(Op::BinView);
+                    } else {
+                        self.emit(Op::BinReadInt);
+                    }
+                    self.emit_pattern(&seg.value, fail_jumps);
+
+                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_arg(Op::PushLocal, bits_temp);
+                    self.emit(Op::Add);
+                    self.emit_arg(Op::StoreLocal, cursor_temp);
+                }
             }
-            self.emit_arg(Op::StoreLocal, bits_temp);
-
-            // Bounds: cursor + width <= total, else this arm cannot match.
-            self.emit_arg(Op::PushLocal, cursor_temp);
-            self.emit_arg(Op::PushLocal, bits_temp);
-            self.emit(Op::Add);
-            self.emit_arg(Op::PushLocal, total_temp);
-            self.emit(Op::Lte);
-            fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
-
-            // Extract [cursor, cursor+width) and match the value pattern.
-            self.emit_arg(Op::PushLocal, bin_temp);
-            self.emit_arg(Op::PushLocal, cursor_temp);
-            self.emit_arg(Op::PushLocal, bits_temp);
-            if seg.kind == ast::BinKind::Binary {
-                // In-bounds, so the sliced Result is always Ok(_).
-                self.emit(Op::BinSlice);
-                self.emit(Op::UnwrapEnum);
-            } else {
-                // Bare/sized Int segment (Utf8 handled above).
-                self.emit(Op::BinReadInt);
-            }
-            self.emit_pattern(&seg.value, fail_jumps);
-
-            self.emit_arg(Op::PushLocal, cursor_temp);
-            self.emit_arg(Op::PushLocal, bits_temp);
-            self.emit(Op::Add);
-            self.emit_arg(Op::StoreLocal, cursor_temp);
         }
 
         match rest {
@@ -4606,24 +4816,127 @@ impl Compiler {
                 if let Some(id) = &r.binding {
                     // rest = bin[cursor .. total]  (cursor <= total holds).
                     self.emit_arg(Op::PushLocal, bin_temp);
-                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_push_cursor(cursor, cursor_temp);
                     self.emit_arg(Op::PushLocal, total_temp);
-                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit_push_cursor(cursor, cursor_temp);
                     self.emit(Op::Sub);
-                    self.emit(Op::BinSlice);
-                    self.emit(Op::UnwrapEnum);
+                    self.emit(Op::BinView);
                     let idx = self.get_or_create_local(&id.name);
                     self.emit_arg(Op::StoreLocal, idx);
                 }
             }
             None => {
-                // No rest: the binary must be consumed exactly.
-                self.emit_arg(Op::PushLocal, cursor_temp);
-                self.emit_arg(Op::PushLocal, total_temp);
-                self.emit(Op::Eq);
-                fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                // No rest: the binary must be consumed exactly. Fully-static
+                // patterns already proved this with the up-front length check.
+                if !(all_static && cursor.is_some()) {
+                    self.emit_push_cursor(cursor, cursor_temp);
+                    self.emit_arg(Op::PushLocal, total_temp);
+                    self.emit(Op::Eq);
+                    fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                }
             }
         }
+    }
+
+    /// Push the current bit cursor: a constant when statically known, the
+    /// runtime temp otherwise.
+    fn emit_push_cursor(&mut self, cursor: Option<i64>, cursor_temp: i32) {
+        match cursor {
+            Some(k) => {
+                let c = self.add_constant(Value::int(k));
+                self.emit_arg(Op::PushConst, c);
+            }
+            None => self.emit_arg(Op::PushLocal, cursor_temp),
+        }
+    }
+
+    /// Advance the cursor by a statically-known number of bits: arithmetic at
+    /// compile time while static, an add-and-store once dynamic.
+    fn emit_advance_cursor(&mut self, cursor: &mut Option<i64>, cursor_temp: i32, bits: i64) {
+        match cursor {
+            Some(k) => *cursor = Some(*k + bits),
+            None => {
+                self.emit_arg(Op::PushLocal, cursor_temp);
+                let c = self.add_constant(Value::int(bits));
+                self.emit_arg(Op::PushConst, c);
+                self.emit(Op::Add);
+                self.emit_arg(Op::StoreLocal, cursor_temp);
+            }
+        }
+    }
+
+    /// Force the cursor into its runtime temp (writing the temp if it was
+    /// still static). After this, `cursor_temp` holds the live cursor.
+    fn emit_spill_cursor(&mut self, cursor: &mut Option<i64>, cursor_temp: i32) {
+        if let Some(k) = *cursor {
+            let c = self.add_constant(Value::int(k));
+            self.emit_arg(Op::PushConst, c);
+            self.emit_arg(Op::StoreLocal, cursor_temp);
+            *cursor = None;
+        }
+    }
+
+    /// The compile-time bit width of a pattern segment, or `None` when it is
+    /// known only at runtime: a dynamic size expression, a `:utf8` codepoint,
+    /// or a sizeless `:binary` (rest-of-binary) slice.
+    fn static_segment_bits(seg: &ast::BinSegmentPat) -> Option<i64> {
+        match seg.kind {
+            // String literals have a fixed UTF-8 width; codepoints don't.
+            ast::BinKind::Utf8 => Self::utf8_literal_segment(seg).map(|s| (s.len() as i64) * 8),
+            ast::BinKind::Int | ast::BinKind::Binary => match &seg.size {
+                None => (seg.kind == ast::BinKind::Int).then_some(8),
+                Some(ast::Expression::NumberLiteral(n)) => {
+                    let v = n.value.parse::<i64>().ok()?;
+                    Some(if seg.unit == ast::BinUnit::Bytes {
+                        v.max(0) * 8
+                    } else {
+                        v.max(0)
+                    })
+                }
+                Some(_) => None,
+            },
+        }
+    }
+
+    /// The string of a `<<'literal'>>` (Utf8 string-literal) pattern segment.
+    fn utf8_literal_segment(seg: &ast::BinSegmentPat) -> Option<&str> {
+        if seg.kind != ast::BinKind::Utf8 {
+            return None;
+        }
+        match &seg.value {
+            ast::Pattern::Literal(ast::PatternLiteral::String(s)) => Some(&s.value),
+            _ => None,
+        }
+    }
+
+    /// Coalesce the longest run of literal segments starting at `segs[0]` into
+    /// one constant bit-string: string literals contribute their UTF-8 bytes,
+    /// integer literals their value encoded MSB-first at their (literal)
+    /// width, mirroring `Op::BinFromInt`. Returns the encoded bytes, the bit
+    /// length, and how many segments the run covers; `None` when `segs[0]` is
+    /// not a literal segment.
+    fn literal_prefix_run(segs: &[ast::BinSegmentPat]) -> Option<(Vec<u8>, u64, usize)> {
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut bit_len: u64 = 0;
+        let mut run = 0;
+        for seg in segs {
+            if let Some(s) = Self::utf8_literal_segment(seg) {
+                push_literal_bytes(&mut bytes, &mut bit_len, s.as_bytes());
+                run += 1;
+                continue;
+            }
+            if seg.kind == ast::BinKind::Int
+                && let ast::Pattern::Literal(ast::PatternLiteral::Number(n)) = &seg.value
+                && let Ok(v) = n.value.parse::<i64>()
+                && let Some(bits) = Self::static_segment_bits(seg)
+            {
+                push_literal_bits(&mut bytes, &mut bit_len, v, bits as u64);
+                run += 1;
+                continue;
+            }
+            break;
+        }
+        (run > 0).then_some((bytes, bit_len, run))
     }
 
     /// Collect every name a pattern binds, in source order. For an or-pattern
@@ -4845,6 +5158,43 @@ fn number_literal_value(s: &str) -> Result<Value, NumLitError> {
         s.parse()
             .map(Value::int)
             .map_err(|_| NumLitError::IntOutOfRange)
+    }
+}
+
+// --- Compile-time bit-string building for `<<>>` literal pattern prefixes ---
+
+/// Append one bit (MSB-first addressing) onto a bit-string accumulator.
+fn push_literal_bit(bytes: &mut Vec<u8>, bit_len: &mut u64, bit: u8) {
+    let idx = (*bit_len / 8) as usize;
+    if idx >= bytes.len() {
+        bytes.push(0);
+    }
+    bytes[idx] |= (bit & 1) << (7 - (*bit_len % 8));
+    *bit_len += 1;
+}
+
+/// Append the low `n_bits` of `value` MSB-first, mirroring `Op::BinFromInt`'s
+/// runtime encoding so a coalesced literal prefix is bit-identical to what the
+/// segments would have produced one by one.
+fn push_literal_bits(bytes: &mut Vec<u8>, bit_len: &mut u64, value: i64, n_bits: u64) {
+    let v = value as u64;
+    for i in 0..n_bits {
+        let pos = n_bits - 1 - i;
+        let bit = if pos < 64 { ((v >> pos) & 1) as u8 } else { 0 };
+        push_literal_bit(bytes, bit_len, bit);
+    }
+}
+
+/// Append whole bytes; a byte-aligned accumulator (the common case) extends
+/// directly, an unaligned one packs bit by bit.
+fn push_literal_bytes(bytes: &mut Vec<u8>, bit_len: &mut u64, new: &[u8]) {
+    if bit_len.is_multiple_of(8) {
+        bytes.extend_from_slice(new);
+        *bit_len += (new.len() as u64) * 8;
+    } else {
+        for &b in new {
+            push_literal_bits(bytes, bit_len, b as i64, 8);
+        }
     }
 }
 

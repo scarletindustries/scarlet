@@ -1,5 +1,16 @@
-import al/http/h1.{Done, NeedMore, Bad, NoBody, Length, Invalid}
-import al/http/body.{Body}
+import al/http/h1.{
+	Done,
+	NeedMore,
+	Bad,
+	NoBody,
+	Length,
+	Chunked,
+	Invalid,
+	ChunkedDone,
+	ChunkedNeedMore,
+	ChunkedBad,
+}
+import al/http/body.{Body, Empty, Whole, Streaming}
 import al/http/headers.{Header, Headers}
 import al/net.{Server}
 import al/net/socket.{Socket}
@@ -58,40 +69,30 @@ pub type Response {
 // neither exhaust memory nor pin the connection).
 const MAX_BODY = 1048576
 const READ_SIZE = 65536
-const EMPTY = binary.from_string('')
+const EMPTY = <<>>
 
-const M_GET = binary.from_string('GET')
-const M_POST = binary.from_string('POST')
-const M_PUT = binary.from_string('PUT')
-const M_DELETE = binary.from_string('DELETE')
-const M_PATCH = binary.from_string('PATCH')
-const M_HEAD = binary.from_string('HEAD')
-const M_OPTIONS = binary.from_string('OPTIONS')
+const NAME_CONTENT_TYPE = <<'Content-Type'>>
+const NAME_CONTENT_LENGTH = <<'Content-Length'>>
+const NAME_CONNECTION = <<'Connection'>>
+const VAL_TEXT_PLAIN = <<'text/plain; charset=utf-8'>>
+const VAL_CLOSE = <<'close'>>
+const ZERO = <<'0'>>
+const NAME_TRANSFER_ENCODING = <<'Transfer-Encoding'>>
+const VAL_CHUNKED = <<'chunked'>>
 
-const NAME_CONTENT_TYPE = binary.from_string('Content-Type')
-const NAME_CONTENT_LENGTH = binary.from_string('Content-Length')
-const NAME_CONNECTION = binary.from_string('Connection')
-const VAL_TEXT_PLAIN = binary.from_string('text/plain; charset=utf-8')
-const VAL_CLOSE = binary.from_string('close')
-const ZERO = binary.from_string('0')
-
+// The wire method name, matched as bytes. Each arm is a single prefix compare
+// against the parser's zero-copy method view — no per-method constants and no
+// allocation.
 fn to_method(m Binary) Method {
-	if m == M_GET {
-		Get
-	} else if m == M_POST {
-		Post
-	} else if m == M_PUT {
-		Put
-	} else if m == M_DELETE {
-		Delete
-	} else if m == M_PATCH {
-		Patch
-	} else if m == M_HEAD {
-		Head
-	} else if m == M_OPTIONS {
-		Options
-	} else {
-		Other(m)
+	match m {
+		<<'GET'>> -> Get
+		<<'POST'>> -> Post
+		<<'PUT'>> -> Put
+		<<'DELETE'>> -> Delete
+		<<'PATCH'>> -> Patch
+		<<'HEAD'>> -> Head
+		<<'OPTIONS'>> -> Options
+		else -> Other(m)
 	}
 }
 
@@ -99,15 +100,15 @@ fn to_version(minor Int) Version {
 	if minor == 0 { Http10 } else { Http11 }
 }
 
-// A 200 response whose body is supplied directly as a pull thunk. The thunk
-// carries no length, so on HTTP/1.1 the body can only be framed by closing the
-// connection after it: without that, a keep-alive client cannot tell where this
-// body ends and the next response begins. So this sets `Connection: close` and
-// is the H1 streaming escape hatch. A handler that knows its length should send
-// a Content-Length response instead (e.g. `text`), which keeps the connection
+// A 200 response whose body is supplied directly as a pull thunk of unknown
+// length. It sets NO framing header: the connection driver frames it at send
+// time from the request's HTTP version — Transfer-Encoding: chunked on
+// HTTP/1.1 (so the connection stays alive), or connection-close on HTTP/1.0
+// (which has no chunked encoding). A handler that knows its length should send
+// a Content-Length response instead (e.g. `text`); both keep the connection
 // alive.
 pub fn ok(b Body) Response {
-	Response(status: 200, headers: [Header(name: NAME_CONNECTION, value: VAL_CLOSE)], body: b)
+	Response(status: 200, headers: [], body: b)
 }
 
 pub fn not_found() Response {
@@ -122,7 +123,12 @@ pub fn text(s String) Response {
 fn text_response(code Int, s String) Response {
 	bin = binary.from_string(s)
 	len = binary.from_int_ascii(binary.byte_size(bin), 10)
-	hdrs = headers.set(headers.set([], NAME_CONTENT_TYPE, VAL_TEXT_PLAIN), NAME_CONTENT_LENGTH, len)
+	// Built as a literal: these two names cannot collide, so there is nothing
+	// for headers.set's replace-or-append walk to do.
+	hdrs = [
+		Header(name: NAME_CONTENT_TYPE, value: VAL_TEXT_PLAIN),
+		Header(name: NAME_CONTENT_LENGTH, value: len),
+	]
 	Response(status: code, headers: hdrs, body: body.from_binary(bin))
 }
 
@@ -164,39 +170,62 @@ fn accept_loop(server Server, handler fn(Request) Response) Result(Nil, String) 
 // Own one connection start-to-finish and always close it on the way out. The
 // loop itself never closes the socket: it returns to here, which closes once.
 fn drive(sock Socket, handler fn(Request) Response) Nil {
-	serve_conn(sock, EMPTY, 0, handler) or Nil
+	serve_conn(sock, EMPTY, 0, handler, []) or Nil
 	socket.close(sock) or Nil
 }
 
 // The keep-alive / pipelining loop. `buf`/`off` carry the bytes already read
 // but not yet consumed (the start of the next request when pipelined).
+// `pending` carries the responses to requests already handled but not yet
+// written: they accumulate while complete pipelined requests keep coming out
+// of `buf`, and the whole batch goes to the kernel as ONE vectored write at
+// the next read boundary — N pipelined requests cost one read and one write,
+// not one write each.
 // Returning Ok(Nil) stops the loop so `drive` closes; recursing keeps the
 // connection alive. The connection is only ever reused from the one place
 // below where the previous request's body has been fully read.
-fn serve_conn(sock Socket, buf Binary, off Int, handler fn(Request) Response) Result(Nil, String) {
+fn serve_conn(
+	sock Socket,
+	buf Binary,
+	off Int,
+	handler fn(Request) Response,
+	pending Array(Binary),
+) Result(Nil, String) {
 	match h1.parse_request(buf, off) {
-		NeedMore -> match socket.read(sock, READ_SIZE) {
-			Ok(more) -> if binary.byte_size(more) == 0 {
-				Ok(Nil)
-			} else {
-				serve_conn(sock, carry(buf, off, more), 0, handler)
-			}
+		NeedMore -> match flush(sock, pending) {
 			Err(e) -> Err(e)
+			Ok(_) -> match socket.read(sock, READ_SIZE) {
+				Ok(more) -> if binary.byte_size(more) == 0 {
+					Ok(Nil)
+				} else {
+					serve_conn(sock, carry(buf, off, more), 0, handler, [])
+				}
+				Err(e) -> Err(e)
+			}
 		}
 		Bad(status) -> {
+			flush(sock, pending) or Nil
 			write_error(sock, status)
 			Ok(Nil)
 		}
-		Done(method, target, version, hdrs, consumed) -> handle(
-			sock,
-			buf,
-			consumed,
+		Done(
 			method,
 			target,
 			version,
 			hdrs,
-			handler,
-		)
+			consumed,
+		) -> handle(sock, buf, consumed, method, target, version, hdrs, handler, pending)
+	}
+}
+
+// Write out accumulated response parts, if any, as one vectored write.
+fn flush(sock Socket, pending Array(Binary)) Result(Nil, String) {
+	match pending {
+		[] -> Ok(Nil)
+		else -> match socket.write_parts(sock, pending) {
+			Ok(_) -> Ok(Nil)
+			Err(e) -> Err(e)
+		}
 	}
 }
 
@@ -216,9 +245,11 @@ fn handle(
 	version Int,
 	hdrs Headers,
 	handler fn(Request) Response,
+	pending Array(Binary),
 ) Result(Nil, String) {
 	match h1.framing(hdrs) {
 		Invalid(status) -> {
+			flush(sock, pending) or Nil
 			write_error(sock, status)
 			Ok(Nil)
 		}
@@ -230,12 +261,25 @@ fn handle(
 			hdrs,
 			build_request(method, target, version, hdrs, body.empty()),
 			handler,
+			pending,
 		)
 		Length(n) -> if n > MAX_BODY {
+			flush(sock, pending) or Nil
 			write_error(sock, 413)
 			Ok(Nil)
 		} else {
-			read_body(sock, buf, consumed, n, method, target, version, hdrs, handler)
+			// The body is read off the socket: anything still pending must go
+			// out first, or the client could sit waiting for those responses
+			// before it sends the body we are about to wait for.
+			match flush(sock, pending) {
+				Err(e) -> Err(e)
+				Ok(_) -> read_body(sock, buf, consumed, n, method, target, version, hdrs, handler)
+			}
+		}
+		// Chunked body: same flush-first reasoning as Content-Length.
+		Chunked -> match flush(sock, pending) {
+			Err(e) -> Err(e)
+			Ok(_) -> read_chunked_body(sock, buf, consumed, method, target, version, hdrs, handler)
 		}
 	}
 }
@@ -267,6 +311,8 @@ fn read_body(
 			need = n - buffered
 			match body.collect(h1.content_length_reader(sock, need), MAX_BODY) {
 				Err(e) -> Err(e)
+				// Pending responses were flushed before the body was read, so
+				// this request starts a fresh batch.
 				Ok(tail) -> respond_and_continue(
 					sock,
 					if avail > n { buf } else { EMPTY },
@@ -285,9 +331,106 @@ fn read_body(
 						body.from_binary(binary.append(head_bytes, tail)),
 					),
 					handler,
+					[],
 				)
 			}
 		}
+	}
+}
+
+// Read and decode a chunked request body into one bounded buffer, then
+// dispatch. The 100-continue interim response (if asked for) goes out once,
+// before any body bytes are awaited.
+fn read_chunked_body(
+	sock Socket,
+	buf Binary,
+	off Int,
+	method Binary,
+	target Binary,
+	version Int,
+	hdrs Headers,
+	handler fn(Request) Response,
+) Result(Nil, String) {
+	match maybe_continue(sock, hdrs) {
+		Err(e) -> Err(e)
+		Ok(_) -> chunked_loop(sock, buf, off, method, target, version, hdrs, handler)
+	}
+}
+
+// The chunked read/decode loop. The native decoder (h1.chunk_decode) scans
+// whatever is buffered so far; this loop owns the I/O decision —
+// ChunkedNeedMore means read more off the socket (parking on backpressure)
+// and retry from the same offset, exactly like serve_conn's head-parsing
+// loop. The decoder caps the decoded size at MAX_BODY (413), so memory stays
+// bounded no matter what the wire claims, and `consumed` points at the first
+// byte after the terminator so pipelined requests carry forward through
+// respond_and_continue unchanged.
+fn chunked_loop(
+	sock Socket,
+	buf Binary,
+	off Int,
+	method Binary,
+	target Binary,
+	version Int,
+	hdrs Headers,
+	handler fn(Request) Response,
+) Result(Nil, String) {
+	match h1.chunk_decode(buf, off, MAX_BODY) {
+		ChunkedNeedMore -> match socket.read(sock, READ_SIZE) {
+			Ok(more) -> if binary.byte_size(more) == 0 {
+				// Peer closed mid-body: there is no complete request to answer.
+				Ok(Nil)
+			} else {
+				chunked_loop(
+					sock,
+					binary.append(buf, more),
+					off,
+					method,
+					target,
+					version,
+					hdrs,
+					handler,
+				)
+			}
+			Err(e) -> Err(e)
+		}
+		ChunkedBad(status) -> {
+			write_error(sock, status)
+			Ok(Nil)
+		}
+		// Pending responses were flushed before the body was read, so this
+		// request starts a fresh batch.
+		ChunkedDone(
+			decoded,
+			trailers,
+			consumed,
+		) -> respond_and_continue(
+			sock,
+			buf,
+			consumed,
+			version,
+			hdrs,
+			build_request(
+				method,
+				target,
+				version,
+				with_trailers(hdrs, trailers),
+				body.from_binary(decoded),
+			),
+			handler,
+			[],
+		)
+	}
+}
+
+// Trailer fields arrive after a chunked body (RFC 7230 section 4.1.2); expose
+// them to the handler by appending them to the request's header list — after
+// the original headers, so lookups that matched before the body still match
+// the same field.
+fn with_trailers(hdrs Headers, trailers Array(Header)) Headers {
+	match trailers {
+		[] -> hdrs
+		else -> [..hdrs, ..trailers]
 	}
 }
 
@@ -295,16 +438,17 @@ fn read_body(
 // is read, so a client that waits for it will start sending.
 fn maybe_continue(sock Socket, hdrs Headers) Result(Nil, String) {
 	if h1.want_100_continue(hdrs) {
-		socket.write_parts(sock, h1.serialize_head(100, []))
+		socket.write(sock, h1.serialize_head(100, []))
 	} else {
 		Ok(Nil)
 	}
 }
 
-// Run the handler, write the response, then decide keep-alive vs close. This
-// is the ONLY place the connection is reused, and it is reached only after the
-// request body was fully read above — so the socket sits exactly at the next
-// request boundary and there is no unconsumed body to be misframed.
+// Run the handler, hand the response to `respond`, then decide keep-alive vs
+// close. This is the ONLY place the connection is reused, and it is reached
+// only after the request body was fully read above — so the socket sits
+// exactly at the next request boundary and there is no unconsumed body to be
+// misframed.
 fn respond_and_continue(
 	sock Socket,
 	leftover_buf Binary,
@@ -313,32 +457,98 @@ fn respond_and_continue(
 	hdrs Headers,
 	req Request,
 	handler fn(Request) Response,
+	pending Array(Binary),
 ) Result(Nil, String) {
 	resp = handler(req)
-	match respond(sock, req.method, resp) {
+	match respond(sock, pending, req.method, version, resp) {
 		Err(e) -> Err(e)
-		Ok(_) -> if h1.should_close(version, hdrs) || response_close(resp) {
-			Ok(Nil)
+		Ok(
+			(keep_alive, still_pending),
+		) -> if keep_alive && !h1.should_close(version, hdrs) && !response_close(resp) {
+			serve_conn(sock, leftover_buf, leftover_off, handler, still_pending)
 		} else {
-			serve_conn(sock, leftover_buf, leftover_off, handler)
+			// Closing: whatever is still unwritten goes out now.
+			flush(sock, still_pending)
 		}
 	}
 }
 
-// Write the response head, then drain its body — unless the request method or
-// the status forbids a body, in which case the head is written and the body is
-// skipped. The head still advertises whatever Content-Length the handler set (a
-// HEAD response reports the length its GET would have had), so declining to
-// drain here is exactly what keeps a kept-alive connection in frame: those body
-// bytes would otherwise be read by the client as the start of the next response.
-fn respond(sock Socket, method Method, resp Response) Result(Nil, String) {
-	match socket.write_parts(sock, h1.serialize_head(resp.status, resp.headers)) {
+// Turn a response into wire bytes with the correct framing. Returns whether
+// the connection may stay alive, and the updated batch of unwritten parts.
+//
+// Buffered responses (Content-Length set and the body already in memory — the
+// http.text case — or a bodiless HEAD/1xx/204/304 response) are NOT written
+// here: their head + body parts are appended to `pending` and ride the next
+// batched vectored write. Streaming responses first flush `pending` (their
+// bytes must follow the earlier responses on the wire) and then write
+// directly:
+//   * unknown-length body (from `ok`) on HTTP/1.1 → Transfer-Encoding:
+//     chunked; the connection stays alive.
+//   * unknown-length body on HTTP/1.0 (no chunked) → Connection: close and
+//     raw drain; the connection MUST close (close is the only body delimiter).
+//   * a Content-Length body that turns out to be multi-chunk → head + first
+//     chunks flush, the rest drains chunk by chunk.
+// Declining to drain a suppressed body is what keeps a kept-alive connection
+// in frame — those bytes would otherwise be read as the next response.
+fn respond(
+	sock Socket,
+	pending Array(Binary),
+	method Method,
+	version Int,
+	resp Response,
+) Result((Bool, Array(Binary)), String) {
+	stream = !headers.has(resp.headers, NAME_CONTENT_LENGTH) && !suppress_body(method, resp.status)
+	if stream && version == 1 {
+		hdrs = headers.set(resp.headers, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
+		match flush(sock, pending) {
+			Err(e) -> Err(e)
+			Ok(
+				_,
+			) -> match body.drain_chunked_with_head(
+				h1.serialize_head(resp.status, hdrs),
+				resp.body,
+				sock,
+			) {
+				Ok(_) -> Ok((True, []))
+				Err(e) -> Err(e)
+			}
+		}
+	} else if stream {
+		hdrs = headers.set(resp.headers, NAME_CONNECTION, VAL_CLOSE)
+		match flush(sock, pending) {
+			Err(e) -> Err(e)
+			Ok(
+				_,
+			) -> match body.drain_with_head(h1.serialize_head(resp.status, hdrs), resp.body, sock) {
+				Ok(_) -> Ok((False, []))
+				Err(e) -> Err(e)
+			}
+		}
+	} else if suppress_body(method, resp.status) {
+		Ok((True, [..pending, h1.serialize_head(resp.status, resp.headers)]))
+	} else {
+		buffer_body(sock, pending, h1.serialize_head(resp.status, resp.headers), resp.body)
+	}
+}
+
+// Append a Content-Length-framed response to the pending batch. The body is
+// dissected here: one already in memory (http.text) just becomes parts; one
+// that keeps producing chunks is a real stream, so everything accumulated so
+// far flushes and the rest drains directly.
+fn buffer_body(
+	sock Socket,
+	pending Array(Binary),
+	head Binary,
+	b Body,
+) Result((Bool, Array(Binary)), String) {
+	match body.take_buffered(b) {
 		Err(e) -> Err(e)
-		Ok(_) -> if suppress_body(method, resp.status) {
-			Ok(Nil)
-		} else {
-			match body.drain(resp.body, sock) {
-				Ok(_) -> Ok(Nil)
+		Ok(Empty) -> Ok((True, [..pending, head]))
+		Ok(Whole(data)) -> Ok((True, [..pending, head, data]))
+		Ok(Streaming(first, second, rest)) -> match flush(sock, [..pending, head, first, second]) {
+			Err(e) -> Err(e)
+			Ok(_) -> match body.drain(rest, sock) {
+				Ok(_) -> Ok((True, []))
 				Err(e) -> Err(e)
 			}
 		}
@@ -354,11 +564,7 @@ fn suppress_body(method Method, status Int) Bool {
 	}
 }
 
-// Whether the handler's response asked to close the connection. The streaming
-// `ok` escape hatch sets `Connection: close` because its body has no
-// Content-Length and so can only be framed by close on HTTP/1.1; honoring it
-// here, alongside the request-side should_close, stops an unframed streaming
-// response from desyncing a kept-alive connection.
+// Whether the handler's response asked to close the connection.
 fn response_close(resp Response) Bool {
 	match headers.get(resp.headers, NAME_CONNECTION) {
 		None -> False
@@ -373,5 +579,5 @@ fn write_error(sock Socket, status Int) Nil {
 		Header(name: NAME_CONTENT_LENGTH, value: ZERO),
 		Header(name: NAME_CONNECTION, value: VAL_CLOSE),
 	]
-	socket.write_parts(sock, h1.serialize_head(status, hdrs)) or Nil
+	socket.write(sock, h1.serialize_head(status, hdrs)) or Nil
 }

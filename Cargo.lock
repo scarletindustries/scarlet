@@ -17,6 +17,7 @@ dependencies = [
  "clap_mangen",
  "indexmap",
  "libc",
+ "memchr",
  "polling",
  "rustyline",
  "serde_json",

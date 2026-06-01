@@ -10,8 +10,8 @@ use crate::token::{Kind, Trivia, TriviaKind};
 
 pub mod doc;
 use doc::{
-    Doc, block, delimited, delimited_no_trailing, delimited_ws, group, hard_braces, hardline,
-    hardlines, join, line, nil, text,
+    Doc, block, delimited, delimited_hug, delimited_no_trailing, delimited_ws, group, hard_braces,
+    hardline, hardlines, join, line, nil, text,
 };
 
 const MAX_WIDTH: isize = 100;
@@ -488,7 +488,15 @@ impl Formatter {
             E::FunctionExpression(f) => self.fn_expr(f),
             E::FunctionCallExpression(c) => {
                 let args: Vec<Doc> = c.arguments.iter().map(|a| self.call_arg(a)).collect();
-                d![self.expr(&c.callee), delimited("(", args, ")")]
+                // A block-shaped final argument hugs the call's parentheses
+                // (`f(a, fn() { … })`) instead of forcing one argument per
+                // line.
+                let parens = if c.arguments.last().is_some_and(arg_can_hug) {
+                    delimited_hug("(", args, ")")
+                } else {
+                    delimited("(", args, ")")
+                };
+                d![self.expr(&c.callee), parens]
             }
             E::PropertyAccessExpression(p) => {
                 d![self.expr(&p.left), text("."), self.expr(&p.right)]
@@ -501,7 +509,17 @@ impl Formatter {
                 let segs: Vec<Doc> = b
                     .segments
                     .iter()
-                    .map(|s| d![self.expr(&s.value), self.bin_size_spec(s.kind, &s.size)])
+                    .map(|s| {
+                        let is_string = matches!(
+                            s.value,
+                            ast::Expression::StringLiteral(_)
+                                | ast::Expression::InterpolatedString(_)
+                        );
+                        d![
+                            self.expr(&s.value),
+                            self.bin_size_spec(s.kind, &s.size, is_string)
+                        ]
+                    })
                     .collect();
                 delimited("<<", segs, ">>")
             }
@@ -534,8 +552,14 @@ impl Formatter {
 
     /// Render the `:spec` suffix of a `<<>>` segment, inverting
     /// `parse_bin_size_spec`. Int-kind with a literal width emits the bare
-    /// `:N` shorthand; a dynamic Int width uses `:size(..)`.
-    fn bin_size_spec(&self, kind: ast::BinKind, size: &Option<ast::Expression>) -> Doc {
+    /// `:N` shorthand; a dynamic Int width uses `:size(..)`. A string-literal
+    /// segment's Utf8 kind is the parser default, so its `:utf8` is omitted.
+    fn bin_size_spec(
+        &self,
+        kind: ast::BinKind,
+        size: &Option<ast::Expression>,
+        value_is_string: bool,
+    ) -> Doc {
         match (kind, size) {
             (ast::BinKind::Int, None) => nil(),
             (ast::BinKind::Int, Some(ast::Expression::NumberLiteral(n))) => {
@@ -544,6 +568,7 @@ impl Formatter {
             (ast::BinKind::Int, Some(e)) => d![text(":size("), self.expr(e), text(")")],
             (ast::BinKind::Binary, None) => text(":binary"),
             (ast::BinKind::Binary, Some(e)) => d![text(":bytes("), self.expr(e), text(")")],
+            (ast::BinKind::Utf8, _) if value_is_string => nil(),
             (ast::BinKind::Utf8, _) => text(":utf8"),
         }
     }
@@ -729,7 +754,16 @@ impl Formatter {
             P::Binary { segments, rest, .. } => {
                 let mut segs: Vec<Doc> = segments
                     .iter()
-                    .map(|s| d![self.pattern(&s.value), self.bin_size_spec(s.kind, &s.size)])
+                    .map(|s| {
+                        let is_string = matches!(
+                            s.value,
+                            ast::Pattern::Literal(ast::PatternLiteral::String(_))
+                        );
+                        d![
+                            self.pattern(&s.value),
+                            self.bin_size_spec(s.kind, &s.size, is_string)
+                        ]
+                    })
                     .collect();
                 match rest {
                     None => delimited("<<", segs, ">>"),
@@ -836,6 +870,26 @@ fn escape_string(s: &str, quote: char) -> String {
         }
     }
     result
+}
+
+/// Whether a call argument in final position may hug the call's parentheses.
+/// Only block-shaped expressions hug — ones that read `head { … }` so the
+/// call's closing paren can follow their closing brace. Anything else (calls,
+/// arrays, binary expressions, …) keeps the standard one-argument-per-line
+/// fallback even when it spans multiple lines.
+fn arg_can_hug(a: &ast::CallArg) -> bool {
+    let e = match a {
+        ast::CallArg::Positional(e) => e,
+        ast::CallArg::Labeled { value, .. } => value,
+        ast::CallArg::Spread(e) => e,
+    };
+    matches!(
+        e,
+        ast::Expression::FunctionExpression(_)
+            | ast::Expression::MatchExpression(_)
+            | ast::Expression::BlockExpression(_)
+            | ast::Expression::IfExpression(_)
+    )
 }
 
 /// Whether the formatted form of `e` begins with a `-` glyph. The check walks
@@ -1068,6 +1122,89 @@ mod tests {
         assert!(out.contains("MakeThing(\n\tfirst_label: "), "got:\n{out}");
         assert!(out.contains(",\n\tthird_label: "), "got:\n{out}");
         assert!(out.contains(",\n)\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn block_lambda_arg_hugs_call_parens() {
+        // A multi-statement lambda as the only argument hugs the call's
+        // parentheses instead of forcing the argument list to break.
+        let src = "scheduler.spawn(fn() {\n\tprintln('Hello!')\n\tprintln('Hello!')\n})\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn match_arg_hugs_call_parens() {
+        let src = "println(match 10 {\n\t0 -> 'zero'\n\telse -> 'else'\n})\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn block_lambda_after_leading_args_hugs() {
+        // Leading arguments stay on the call head line; the lambda hugs.
+        let src = "scheduler.run_after(1000, fn() {\n\tprintln('a')\n\tprintln('b')\n})\n";
+        assert_eq!(fmt(src), src);
+    }
+
+    #[test]
+    fn hug_falls_back_when_head_does_not_fit() {
+        // The head line (callee, leading arguments, and the lambda's `{`) is
+        // wider than the limit: every argument goes onto its own line.
+        let out = fmt(&format!(
+            "serve('{}', '{}', fn(request) {{\n\thandle(request)\n\thandle(request)\n}})\n",
+            "a".repeat(40),
+            "b".repeat(40),
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "serve(\n\t'{}',\n\t'{}',\n\tfn(request) {{\n\t\thandle(request)\n\t\thandle(request)\n\t}},\n)\n",
+                "a".repeat(40),
+                "b".repeat(40),
+            )
+        );
+    }
+
+    #[test]
+    fn multiline_lambda_in_non_final_position_breaks_args() {
+        // Only a *final* block-shaped argument hugs. A multi-line lambda
+        // followed by another argument forces the standard per-argument
+        // layout.
+        let src = "f(fn() {\n\ta()\n\tb()\n}, other)\n";
+        assert_eq!(
+            fmt(src),
+            "f(\n\tfn() {\n\t\ta()\n\t\tb()\n\t},\n\tother,\n)\n"
+        );
+    }
+
+    #[test]
+    fn hugging_call_as_argument_breaks_outer_call() {
+        // A call whose lambda hugs still renders across multiple lines, so an
+        // outer call wrapping it breaks per-argument (the hug never leaks
+        // upward through another call).
+        let src = "outer(inner(fn() {\n\ta()\n\tb()\n}), other)\n";
+        assert_eq!(
+            fmt(src),
+            "outer(\n\tinner(fn() {\n\t\ta()\n\t\tb()\n\t}),\n\tother,\n)\n"
+        );
+    }
+
+    #[test]
+    fn hugged_lambda_body_still_wraps_wide_statements() {
+        // Statements inside a hugged lambda still re-probe their own width:
+        // a too-wide call inside the body breaks per-argument.
+        let a = "a".repeat(45);
+        let b = "b".repeat(45);
+        let src = format!("go(fn() {{\n\tfirst()\n\tprocess('{a}', '{b}')\n}})\n");
+        let expected =
+            format!("go(fn() {{\n\tfirst()\n\tprocess(\n\t\t'{a}',\n\t\t'{b}',\n\t)\n}})\n");
+        assert_eq!(fmt(&src), expected);
+    }
+
+    #[test]
+    fn hugged_call_chains_format_each_link() {
+        // Each call in a member chain makes its own hug decision.
+        let src = "list.map(fn(x) {\n\tlog(x)\n\tx * 2\n}).filter(fn(x) {\n\tlog(x)\n\tx > 0\n})\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]

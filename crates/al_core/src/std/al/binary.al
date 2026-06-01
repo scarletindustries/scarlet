@@ -30,6 +30,12 @@ pub fn append(a Binary, b Binary) Binary
 @vm(binary__index_of)
 pub fn index_of(haystack Binary, needle Binary, from Int) Option(Int)
 
+// The byte at index `i`, or -1 when `i` is out of range. Total and
+// allocation-free, so byte-level scanners can probe without boxing an Option
+// per probe.
+@vm(binary__byte_at)
+pub fn byte_at(b Binary, i Int) Int
+
 @vm(binary__parse_int)
 pub fn parse_int(b Binary, radix Int) Option(Int)
 

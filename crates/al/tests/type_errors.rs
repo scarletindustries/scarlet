@@ -460,3 +460,53 @@ fn or_with_receiver_on_option_is_error() {
 fn or_without_receiver_on_option_is_ok() {
     check_ok("te_or_option_no_binder", "x = Some(5) or 0\nprintln(x)\n");
 }
+
+// Nominal identity: a locally-declared type that shares its NAME with a
+// stdlib type is still a different type. Before types carried their nominal
+// id in the Con node, unification compared names, so h1's `Parsed` flowed
+// silently into a binding annotated with the local `Parsed` — a soundness
+// hole, not just a diagnostics gap.
+#[test]
+fn same_named_type_from_another_module_does_not_unify() {
+    check_fails(
+        "te_nominal_identity",
+        "import al/binary\n\
+         import al/http/h1\n\
+         type Parsed {\n\
+         \tLocalDone(x Int)\n\
+         \tLocalOther\n\
+         }\n\
+         fn f() Parsed {\n\
+         \th1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0)\n\
+         }\n\
+         println(f())\n",
+        "Type mismatch",
+    );
+}
+
+// And the local type keeps working on its own terms next to the import: each
+// `Parsed` answers for its own constructors and exhaustiveness.
+#[test]
+fn same_named_local_and_stdlib_types_coexist() {
+    check_ok(
+        "te_nominal_coexist",
+        "import al/binary\n\
+         import al/http/h1.{Done, NeedMore, Bad}\n\
+         type Parsed {\n\
+         \tLocalDone(x Int)\n\
+         \tLocalOther\n\
+         }\n\
+         fn local_value(p Parsed) Int {\n\
+         \tmatch p {\n\
+         \t\tLocalDone(x) -> x\n\
+         \t\tLocalOther -> 0\n\
+         \t}\n\
+         }\n\
+         remote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
+         \tDone(_, _, version, _, _) -> version\n\
+         \tNeedMore -> 0 - 1\n\
+         \tBad(s) -> s\n\
+         }\n\
+         println(remote + local_value(LocalDone(41)))\n",
+    );
+}

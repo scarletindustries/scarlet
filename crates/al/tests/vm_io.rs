@@ -446,3 +446,134 @@ match http.serve('127.0.0.1', __PORT__, fn(_req) http.text('Hello from al/http!'
         "server reported a failure: {stdout}"
     );
 }
+
+/// End-to-end chunked transfer-encoding decode through the `al/http` server:
+/// a Rust client POSTs a chunked-encoded body (two chunks + trailer) over a
+/// kept-alive connection, the AL handler reads the decoded body and the
+/// trailer, and a SECOND request on the same connection must also succeed —
+/// proving the chunked framing consumed exactly the body + terminator and the
+/// connection did not desync. A third exchange pipelines a chunked POST and a
+/// GET into one write.
+#[test]
+fn http_server_chunked_post_roundtrip() {
+    let port = free_port();
+    let proj = Project::new("io_http_chunked");
+    let src = r#"import al/http
+import al/http/body
+import al/http/headers
+import al/binary
+
+match http.serve('127.0.0.1', __PORT__, fn(req) {
+	collected = body.collect(req.body, 1048576) or <<>>
+	echoed = binary.to_string(collected) or '<not-utf8>'
+	trailer = match headers.get(req.headers, <<'x-checksum'>>) {
+		Some(v) -> binary.to_string(v) or '?'
+		None -> 'none'
+	}
+	http.text('body=[${echoed}] trailer=[${trailer}]')
+}) {
+	Ok(_) -> Nil
+	Err(e) -> println('serve failed: ${e}')
+}
+"#
+    .replace("__PORT__", &port.to_string());
+    let prog = proj.dir.join("server.al");
+    std::fs::write(&prog, src).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
+        .arg("run")
+        .arg(&prog)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn al http server");
+
+    let mut stream = connect_retry(port);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    // --- Exchange 1: chunked POST with a trailer ---------------------------
+    // (Single-line byte string: Rust's `\` line continuation strips leading
+    // whitespace, which would corrupt the " world" chunk's leading space.)
+    let chunked_post: &[u8] = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\nX-Checksum: abc123\r\n\r\n";
+    stream.write_all(chunked_post).expect("write chunked POST");
+
+    let mut buf = Vec::new();
+    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "chunked POST status: {status:?}"
+    );
+    assert_eq!(
+        body.as_slice(),
+        b"body=[hello world] trailer=[abc123]",
+        "decoded body / trailer mismatch: {:?}",
+        String::from_utf8_lossy(&body)
+    );
+
+    // --- Exchange 2: the SAME connection must still be in frame ------------
+    let get = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    stream.write_all(get).expect("write follow-up GET");
+    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "follow-up GET status: {status:?} (connection desynced after chunked body?)"
+    );
+    assert_eq!(
+        body.as_slice(),
+        b"body=[] trailer=[none]",
+        "follow-up GET body mismatch"
+    );
+
+    // --- Exchange 3: chunked POST + GET pipelined in ONE write -------------
+    let mut pipelined = Vec::new();
+    pipelined.extend_from_slice(
+        b"POST /pipelined HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+    );
+    pipelined.extend_from_slice(get);
+    stream.write_all(&pipelined).expect("write pipelined batch");
+
+    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
+    assert!(status.starts_with("HTTP/1.1 200"), "pipelined POST status");
+    assert_eq!(
+        body.as_slice(),
+        b"body=[abc] trailer=[none]",
+        "pipelined chunked POST body mismatch"
+    );
+    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
+    assert!(status.starts_with("HTTP/1.1 200"), "pipelined GET status");
+    assert_eq!(
+        body.as_slice(),
+        b"body=[] trailer=[none]",
+        "pipelined GET body mismatch"
+    );
+
+    // --- Malformed chunked body is rejected with 400 -----------------------
+    // (Fresh connection: the 400 closes the current one.)
+    let mut bad_stream = connect_retry(port);
+    bad_stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    bad_stream
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",
+        )
+        .expect("write malformed chunked POST");
+    let mut bad_buf = Vec::new();
+    let (status, _headers, _body) = read_one_response(&mut bad_stream, &mut bad_buf);
+    assert!(
+        status.starts_with("HTTP/1.1 400"),
+        "malformed chunk size must be rejected with 400, got {status:?}"
+    );
+
+    drop(stream);
+    drop(bad_stream);
+    child.kill().ok();
+    let out = child.wait_with_output().expect("await server shutdown");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("serve failed"),
+        "server reported a failure: {stdout}"
+    );
+}

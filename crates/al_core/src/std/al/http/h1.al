@@ -13,27 +13,21 @@ import al/net/socket.{Socket}
 // imports this one; keeping h1 on raw bytes + offsets is what keeps the layer
 // acyclic. `parse_request` returns the raw pieces (method/target/version/
 // headers/consumed-offset); the caller maps them onto its own types.
+//
+// The byte scanning itself — finding the CRLF/SP/colon boundaries, building
+// the field views, the RFC 7230 §3.3.3 framing precedence — runs as native VM
+// builtins (the Erlang `erlang:decode_packet(http_bin, ...)` precedent): one
+// op per request head instead of one op per byte. Every protocol DECISION
+// (keep-alive, 100-continue, how to frame the response) stays in AL, here and
+// in al/http.
 
-const CRLF = binary.from_string('\r\n')
-const SP = binary.from_string(' ')
-const HTAB = binary.from_string('\t')
-const COLON = binary.from_string(':')
-const ZERO = binary.from_string('0')
-const HTTP_1_1 = binary.from_string('HTTP/1.1')
-const HTTP_1_0 = binary.from_string('HTTP/1.0')
-const STATUS_LINE_PREFIX = binary.from_string('HTTP/1.1 ')
-
-const CONNECTION = binary.from_string('connection')
-const CLOSE = binary.from_string('close')
-const KEEP_ALIVE = binary.from_string('keep-alive')
-const EXPECT = binary.from_string('expect')
-const CONTINUE_100 = binary.from_string('100-continue')
-const CONTENT_LENGTH = binary.from_string('content-length')
-const TRANSFER_ENCODING = binary.from_string('transfer-encoding')
-
-// Total request-head size cap (request line + all header fields). A head that
-// grows past this without completing is rejected rather than buffered forever.
-const MAX_HEAD = 65536
+// Header names matched per request (case-insensitive); the values are the
+// tokens RFC 9112 defines for them.
+const CONNECTION = <<'connection'>>
+const CLOSE = <<'close'>>
+const KEEP_ALIVE = <<'keep-alive'>>
+const EXPECT = <<'expect'>>
+const CONTINUE_100 = <<'100-continue'>>
 
 // The outcome of parsing one request head out of `buf` starting at an offset.
 // `Done` threads the consumed-offset so the connection loop can resume parsing
@@ -46,209 +40,77 @@ pub type Parsed {
 }
 
 // How a message body is framed, after applying RFC 7230 section 3.3.3
-// precedence and the smuggling rejects. P1 supports Content-Length and
-// no-body; Transfer-Encoding is out of scope and is rejected rather than
-// silently ignored (ignoring it is a classic request-smuggling vector).
+// precedence and the smuggling rejects. Content-Length and chunked
+// transfer-encoding are both supported; any other Transfer-Encoding is
+// rejected (501) rather than silently ignored (ignoring a transfer coding is
+// a classic request-smuggling vector).
 pub type Framing {
 	NoBody
 	Length(n Int)
+	Chunked
 	Invalid(status Int)
 }
 
-type ReqLine {
-	Line(method Binary target Binary version Int)
-	BadLine(status Int)
-}
-
-type HeaderResult {
-	HHeaders(headers Array(Header) consumed Int)
-	HNeedMore
-	HBad(status Int)
-}
-
-fn is_ows(buf Binary, i Int) Bool {
-	b = binary.slice_bytes(buf, i, 1)
-	b == SP || b == HTAB
-}
-
-// First non-OWS index in [lo, hi), or hi if all OWS.
-fn trim_left(buf Binary, lo Int, hi Int) Int {
-	if lo < hi && is_ows(buf, lo) {
-		trim_left(buf, lo + 1, hi)
-	} else {
-		lo
-	}
-}
-
-// One past the last non-OWS index in [lo, hi), or lo if all OWS.
-fn trim_right(buf Binary, lo Int, hi Int) Int {
-	if hi > lo && is_ows(buf, hi - 1) {
-		trim_right(buf, lo, hi - 1)
-	} else {
-		hi
-	}
-}
-
-// Split METHOD SP request-target SP HTTP-version out of the request line and
-// resolve the version token to a minor-version Int.
-fn build_line(buf Binary, start Int, sp1 Int, sp2 Int, eol Int) ReqLine {
-	method = binary.slice_bytes(buf, start, sp1 - start)
-	target = binary.slice_bytes(buf, sp1 + 1, sp2 - sp1 - 1)
-	vtok = binary.slice_bytes(buf, sp2 + 1, eol - sp2 - 1)
-	if vtok == HTTP_1_1 {
-		Line(method, target, 1)
-	} else if vtok == HTTP_1_0 {
-		Line(method, target, 0)
-	} else {
-		BadLine(505)
-	}
-}
-
-fn parse_request_line(buf Binary, start Int, eol Int) ReqLine {
-	match binary.index_of(buf, SP, start) {
-		None -> BadLine(400)
-		Some(sp1) -> if sp1 >= eol || sp1 == start {
-			BadLine(400)
-		} else {
-			match binary.index_of(buf, SP, sp1 + 1) {
-				None -> BadLine(400)
-				Some(sp2) -> if sp2 >= eol || sp2 <= sp1 + 1 {
-					BadLine(400)
-				} else {
-					build_line(buf, start, sp1, sp2, eol)
-				}
-			}
-		}
-	}
-}
-
-// Parse one header field at `pos` (its line ends at the CRLF at `crlf`), then
-// recurse for the rest. Rejects obs-fold (a line beginning with SP/HTAB) and
-// whitespace between the field name and the colon — both are smuggling
-// vectors that different parsers disagree on (RFC 7230 section 3.2.4).
-fn parse_header_line(buf Binary, pos Int, crlf Int, head_start Int) HeaderResult {
-	if is_ows(buf, pos) {
-		HBad(400)
-	} else {
-		match binary.index_of(buf, COLON, pos) {
-			None -> HBad(400)
-			Some(colon) -> if colon >= crlf || colon == pos || is_ows(buf, colon - 1) {
-				HBad(400)
-			} else {
-				name = binary.slice_bytes(buf, pos, colon - pos)
-				vstart = trim_left(buf, colon + 1, crlf)
-				vend = trim_right(buf, vstart, crlf)
-				value = binary.slice_bytes(buf, vstart, vend - vstart)
-				match parse_headers(buf, crlf + 2, head_start) {
-					HHeaders(rest, consumed) -> HHeaders([Header(name, value), ..rest], consumed)
-					HNeedMore -> HNeedMore
-					HBad(s) -> HBad(s)
-				}
-			}
-		}
-	}
-}
-
-// Walk the header block from `pos`. A blank line ends the block; the consumed
-// offset points just past it (the start of the body / next request).
-fn parse_headers(buf Binary, pos Int, head_start Int) HeaderResult {
-	if pos - head_start > MAX_HEAD {
-		HBad(431)
-	} else {
-		match binary.index_of(buf, CRLF, pos) {
-			None -> if binary.byte_size(buf) - head_start > MAX_HEAD {
-				HBad(431)
-			} else {
-				HNeedMore
-			}
-			Some(crlf) -> if crlf == pos {
-				HHeaders([], pos + 2)
-			} else {
-				parse_header_line(buf, pos, crlf, head_start)
-			}
-		}
-	}
+// The outcome of decoding a chunked transfer-encoded body out of `buf`
+// starting at an offset. Mirrors `Parsed`'s incremental contract:
+// `ChunkedNeedMore` means the buffer does not yet hold the whole body — read
+// more bytes and call again with the same offset. `ChunkedDone` carries the
+// decoded body, any trailer fields, and the offset just past the final CRLF —
+// the start of the next pipelined request.
+pub type ChunkBody {
+	ChunkedDone(body Binary trailers Array(Header) consumed Int)
+	ChunkedNeedMore
+	ChunkedBad(status Int)
 }
 
 // Parse a request head out of `buf` starting at `off`. Incomplete input yields
 // NeedMore (read more and call again with the same offset); a malformed head
 // yields Bad(status). A leading empty line before the request line is skipped
 // (RFC 7230 section 3.5).
-pub fn parse_request(buf Binary, off Int) Parsed {
-	match binary.index_of(buf, CRLF, off) {
-		None -> if binary.byte_size(buf) - off > MAX_HEAD {
-			Bad(414)
-		} else {
-			NeedMore
-		}
-		Some(eol) -> if eol == off {
-			parse_request(buf, off + 2)
-		} else {
-			match parse_request_line(buf, off, eol) {
-				BadLine(s) -> Bad(s)
-				Line(method, target, version) -> match parse_headers(buf, eol + 2, off) {
-					HHeaders(hs, consumed) -> Done(method, target, version, hs, consumed)
-					HNeedMore -> NeedMore
-					HBad(s) -> Bad(s)
-				}
-			}
-		}
-	}
-}
-
-fn header_count(hs Array(Header), name Binary) Int {
-	match hs {
-		[] -> 0
-		[h, ..t] -> if binary.eq_ignore_ascii_case(h.name, name) {
-			1 + header_count(t, name)
-		} else {
-			header_count(t, name)
-		}
-	}
-}
-
-// A Content-Length with a redundant leading zero ("007") is rejected: it is a
-// documented inter-parser-disagreement smuggling vector. A lone "0" is fine.
-fn leading_zero(v Binary) Bool {
-	if binary.byte_size(v) > 1 {
-		binary.slice_bytes(v, 0, 1) == ZERO
-	} else {
-		False
-	}
-}
+//
+// One native pass over the bytes; the returned method/target/header
+// names/values are zero-copy views into `buf`. Obs-fold and whitespace before
+// the field colon are rejected (400) — both are request-smuggling vectors —
+// and a head larger than 64 KiB is rejected (431, or 414 when the request
+// line itself never ends) rather than buffered forever.
+@vm(http__parse_head)
+pub fn parse_request(buf Binary, off Int) Parsed
 
 // Determine body framing from the request headers, enforcing RFC 7230 section
-// 3.3.3 precedence and the MUST-reject smuggling conflicts. Transfer-Encoding
-// is unsupported in P1: present alongside Content-Length it is a conflict
-// (400); alone it is unimplemented (501). Multiple Content-Length fields, or a
-// value that is not a strict run of digits / overflows Int (parse_int returns
-// None) / carries a leading zero, are all rejected (400).
-pub fn framing(hs Array(Header)) Framing {
-	te = header_count(hs, TRANSFER_ENCODING)
-	cl = header_count(hs, CONTENT_LENGTH)
-	if te > 0 {
-		if cl > 0 {
-			Invalid(400)
-		} else {
-			Invalid(501)
-		}
-	} else {
-		match cl {
-			0 -> NoBody
-			1 -> match headers.get(hs, CONTENT_LENGTH) {
-				None -> NoBody
-				Some(v) -> match binary.parse_int(v, 10) {
-					None -> Invalid(400)
-					Some(n) -> if leading_zero(v) {
-						Invalid(400)
-					} else {
-						Length(n)
-					}
-				}
-			}
-			else -> Invalid(400)
-		}
-	}
+// 3.3.3 precedence and the MUST-reject smuggling conflicts. `Transfer-Encoding:
+// chunked` (the only/final coding, case-insensitive) frames the body as
+// Chunked. Transfer-Encoding alongside Content-Length is a conflict (400);
+// any other transfer coding is unimplemented (501) — never silently ignored.
+// Multiple Content-Length fields, or a value that is not a strict run of
+// digits / overflows Int / carries a redundant leading zero ("007"), are all
+// rejected (400).
+@vm(http__framing)
+pub fn framing(hs Array(Header)) Framing
+
+// Decode a chunked transfer-encoded body from `buf` starting at `off`,
+// refusing to decode more than `max` body bytes (413). Each chunk is
+// "<hex-size>[;extensions]CRLF <data> CRLF"; extensions are ignored. A
+// zero-size chunk terminates the body, optionally followed by a trailer
+// header block (same grammar and smuggling rejects as the request head,
+// capped like the head -> 431) and the final blank line. A malformed or
+// over-long size line, or chunk data not followed by CRLF, is rejected (400)
+// — the decoder never resynchronizes after a framing lie.
+//
+// One native pass over the buffered bytes per call. The decoded body comes
+// back as one owned Binary: the keep-alive-safe bounded-buffer model — the
+// caller never hands a half-consumed socket to a handler.
+@vm(http__chunk_decode)
+pub fn chunk_decode(buf Binary, off Int, max Int) ChunkBody
+
+// Serialize a status line + header block as one contiguous binary:
+// "HTTP/1.1 <status> <reason>\r\n", the rendered headers, then the blank line
+// that terminates the head. Native single-buffer assembly so the head can be
+// the first part of one vectored write alongside the body.
+@vm(http__serialize_head)
+fn serialize_head_with(code Int, reason Binary, hs Array(Header)) Binary
+
+pub fn serialize_head(code Int, hs Array(Header)) Binary {
+	serialize_head_with(code, status.reason_phrase(code), hs)
 }
 
 // Build a Content-Length-framed request-body reader over `sock`.
@@ -281,20 +143,4 @@ pub fn want_100_continue(hs Array(Header)) Bool {
 		None -> False
 		Some(v) -> binary.eq_ignore_ascii_case(v, CONTINUE_100)
 	}
-}
-
-// Serialize a response status line + header block as a parts array for
-// socket.write_parts — "HTTP/1.1 <status> <reason>\r\n", the rendered headers,
-// then the blank line that terminates the head. Nothing is concatenated; the
-// parts share the head constants and the rendered header views.
-pub fn serialize_head(code Int, hs Array(Header)) Array(Binary) {
-	[
-		STATUS_LINE_PREFIX,
-		binary.from_int_ascii(code, 10),
-		SP,
-		status.reason_phrase(code),
-		CRLF,
-		..headers.render(hs),
-		CRLF,
-	]
 }

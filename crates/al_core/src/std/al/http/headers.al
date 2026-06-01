@@ -13,32 +13,17 @@ pub type Header {
 pub type Headers = Array(Header)
 
 // Hoisted so the separator/terminator binaries are built once, not per render.
-const colon_space = binary.from_string(': ')
-const crlf = binary.from_string('\r\n')
+const colon_space = <<': '>>
+const crlf = <<'\r\n'>>
 
 // The value of the first field whose name matches `name` (case-insensitive).
-pub fn get(h Headers, name Binary) Option(Binary) {
-	match h {
-		[] -> None
-		[field, ..rest] -> if binary.eq_ignore_ascii_case(field.name, name) {
-			Some(field.value)
-		} else {
-			get(rest, name)
-		}
-	}
-}
+// Native walk: one op per lookup instead of one call frame per field.
+@vm(http__header_get)
+pub fn get(h Headers, name Binary) Option(Binary)
 
 // Whether any field matches `name` (case-insensitive).
-pub fn has(h Headers, name Binary) Bool {
-	match h {
-		[] -> False
-		[field, ..rest] -> if binary.eq_ignore_ascii_case(field.name, name) {
-			True
-		} else {
-			has(rest, name)
-		}
-	}
-}
+@vm(http__header_has)
+pub fn has(h Headers, name Binary) Bool
 
 // Replace the value of the first field matching `name` (keeping its position
 // and original casing), or append a new field if none matches.
@@ -65,6 +50,8 @@ pub fn append(h Headers, name Binary, value Binary) Headers {
 // The wire bytes of the header block as a parts array — `name`, `": "`,
 // `value`, CRLF for each field — ready for socket.write_parts. The pieces are
 // never concatenated; the blank line that ends the block is the caller's job.
+// (Response heads use h1.serialize_head, which renders natively; this stays
+// for trailer blocks and any caller that wants the parts themselves.)
 pub fn render(h Headers) Array(Binary) {
 	match h {
 		[] -> []
