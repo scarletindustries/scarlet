@@ -1,6 +1,7 @@
 import al/binary
 import al/int
 import al/net/socket.{Socket}
+import al/net/error.{NetError, UnexpectedEof, MessageTooLarge}
 import al/http/headers.{Header}
 
 const CRLF = <<'\r\n'>>
@@ -11,9 +12,9 @@ const LAST_CHUNK = <<'0\r\n\r\n'>>
 // A message body as a pull thunk: calling it advances the stream by one step,
 // returning the next chunk plus its own continuation, or the end of the body
 // with any trailers. The continuation lives *inside* the result so a body is a
-// plain `fn() Result(Pull, String)` — a transparent alias, never a nominal
+// plain `fn() Result(Pull, NetError)` — a transparent alias, never a nominal
 // wrapper, so there is no per-chunk allocation beyond the chunk itself. Errors
-// are `String` to pass socket errors through verbatim.
+// are `NetError` to pass socket failures through verbatim.
 //
 // `Pull` and `Body` are mutually recursive and must stay in one module: the
 // continuation in `Chunk` is a `Body`, and a `Body` yields a `Pull`. Splitting
@@ -23,7 +24,7 @@ pub type Pull {
 	Done(trailers Array(Header))
 }
 
-pub type Body = fn() Result(Pull, String)
+pub type Body = fn() Result(Pull, NetError)
 
 // A body that yields nothing — one step straight to Done with no trailers.
 pub fn empty() Body {
@@ -40,7 +41,7 @@ pub fn from_binary(b Binary) Body {
 // across as many chunks as the socket hands back, then Done. `n` is threaded
 // immutably — the socket fd is the real cursor — and capped at 64 KiB per read.
 // A zero-byte read before `n` is reached means the peer closed mid-body, which
-// is an error, not a clean end.
+// is an error (UnexpectedEof), not a clean end.
 pub fn content_length(reader Socket, n Int) Body {
 	fn() match n {
 		0 -> Ok(Done([]))
@@ -48,7 +49,7 @@ pub fn content_length(reader Socket, n Int) Body {
 			Ok(chunk) -> {
 				got = binary.byte_size(chunk)
 				match got {
-					0 -> Err('connection closed mid-body')
+					0 -> Err(UnexpectedEof)
 					else -> Ok(Chunk(chunk, content_length(reader, n - got)))
 				}
 			}
@@ -71,7 +72,7 @@ pub fn eof_reader(sock Socket) Body {
 }
 
 // Advance a body by one step. A body is just a thunk; this names the operation.
-pub fn pull(b Body) Result(Pull, String) {
+pub fn pull(b Body) Result(Pull, NetError) {
 	b()
 }
 
@@ -91,7 +92,7 @@ pub type Buffered {
 // `Streaming` so the caller can drain it for real. This is what lets a server
 // coalesce a batch of pipelined buffered responses into one vectored write
 // while still streaming the responses that need it.
-pub fn take_buffered(b Body) Result(Buffered, String) {
+pub fn take_buffered(b Body) Result(Buffered, NetError) {
 	match pull(b) {
 		Err(e) -> Err(e)
 		Ok(Done(_)) -> Ok(Empty)
@@ -107,7 +108,7 @@ pub fn take_buffered(b Body) Result(Buffered, String) {
 // parks on backpressure, so a slow consumer naturally rate-limits the source —
 // the next chunk is not pulled until the previous one has drained. Returns the
 // trailers carried by Done. Nothing is buffered: memory stays O(chunk).
-pub fn drain(body Body, sock Socket) Result(Array(Header), String) {
+pub fn drain(body Body, sock Socket) Result(Array(Header), NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match socket.write(sock, data) {
 			Ok(_) -> drain(next, sock)
@@ -122,7 +123,7 @@ pub fn drain(body Body, sock Socket) Result(Array(Header), String) {
 // vectored write as the first body chunk: a buffered single-chunk response
 // (http.text) reaches the kernel in exactly ONE syscall, head and body
 // together. Subsequent chunks drain as usual.
-pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Array(Header), String) {
+pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Array(Header), NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [head, data]) {
 			Ok(_) -> drain(next, sock)
@@ -144,7 +145,7 @@ pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Array(Header)
 // truncate the body. Like `drain`, the write parks on backpressure, so a slow
 // consumer rate-limits the source. Lets an unknown-length body keep the
 // connection alive on HTTP/1.1 instead of framing by close.
-pub fn drain_chunked(body Body, sock Socket) Result(Nil, String) {
+pub fn drain_chunked(body Body, sock Socket) Result(Nil, NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
 			0 -> drain_chunked(next, sock)
@@ -175,7 +176,7 @@ pub fn drain_chunked(body Body, sock Socket) Result(Nil, String) {
 // first chunk, then the stream drains as usual. Empty leading chunks are
 // skipped with the head still pending; a body that ends without producing a
 // chunk writes head + terminator together.
-pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, String) {
+pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
 			0 -> drain_chunked_with_head(head, next, sock)
@@ -206,16 +207,16 @@ pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, 
 
 // Buffer a whole body into one binary, refusing to grow past `max` bytes. The
 // cap is a denial-of-service guard: the size is checked before each append, so
-// an over-long body errs without ever materializing past the limit. Done
-// returns whatever has accumulated; trailers are discarded.
-pub fn collect(body Body, max Int) Result(Binary, String) {
+// an over-long body errs (MessageTooLarge) without ever materializing past the
+// limit. Done returns whatever has accumulated; trailers are discarded.
+pub fn collect(body Body, max Int) Result(Binary, NetError) {
 	collect_into(body, max, <<>>)
 }
 
-fn collect_into(body Body, max Int, acc Binary) Result(Binary, String) {
+fn collect_into(body Body, max Int, acc Binary) Result(Binary, NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> if binary.byte_size(acc) + binary.byte_size(data) > max {
-			Err('body exceeds maximum size')
+			Err(MessageTooLarge)
 		} else {
 			collect_into(next, max, binary.append(acc, data))
 		}

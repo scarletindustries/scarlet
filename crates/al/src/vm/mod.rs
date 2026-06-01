@@ -199,6 +199,72 @@ fn enum_template(t: &VariantTemplate) -> EnumValue {
     }
 }
 
+/// A nullary stdlib enum value built on demand from its template (cold paths).
+#[inline]
+fn enum_value(t: &VariantTemplate) -> Value {
+    Value::enum_(enum_template(t))
+}
+
+/// The raw OS errno (or 0 if the error carries none), as the `Errno(code)`
+/// residual's payload.
+#[inline]
+fn errno_of(e: &std::io::Error) -> Value {
+    Value::int(e.raw_os_error().unwrap_or(0) as i64)
+}
+
+/// Build an `al/net/error.NetError` from a socket/connect `std::io::Error`,
+/// mapping `ErrorKind` to the matching variant. Anything without a named
+/// variant becomes the typed `Errno(code)` residual — never a string.
+fn net_error_value(e: &std::io::Error) -> Value {
+    // Match the raw OS errno (not ErrorKind): many of the kinds we want
+    // (HostUnreachable, NetworkDown, …) are still unstable under
+    // `io_error_more`, and the errno is exact. `UnexpectedEof` /
+    // `MessageTooLarge` / `UnalignedBinary` are produced in AL, not here.
+    let t = match e.raw_os_error() {
+        Some(libc::ETIMEDOUT) => &stdlib::net::error::TIMED_OUT,
+        Some(libc::ECONNREFUSED) => &stdlib::net::error::CONNECTION_REFUSED,
+        Some(libc::ECONNRESET) => &stdlib::net::error::CONNECTION_RESET,
+        Some(libc::ECONNABORTED) => &stdlib::net::error::CONNECTION_ABORTED,
+        Some(libc::ENOTCONN) => &stdlib::net::error::NOT_CONNECTED,
+        Some(libc::EPIPE) => &stdlib::net::error::BROKEN_PIPE,
+        Some(libc::EADDRINUSE) => &stdlib::net::error::ADDR_IN_USE,
+        Some(libc::EADDRNOTAVAIL) => &stdlib::net::error::ADDR_NOT_AVAILABLE,
+        Some(libc::ENETDOWN) => &stdlib::net::error::NETWORK_DOWN,
+        Some(libc::ENETUNREACH) => &stdlib::net::error::NETWORK_UNREACHABLE,
+        Some(libc::EHOSTUNREACH) => &stdlib::net::error::HOST_UNREACHABLE,
+        Some(libc::EACCES) => &stdlib::net::error::PERMISSION_DENIED,
+        _ => {
+            return PreludeTemplates::with_payload(
+                &enum_template(&stdlib::net::error::ERRNO),
+                errno_of(e),
+            );
+        }
+    };
+    enum_value(t)
+}
+
+/// Build an `al/io.IoError` from a filesystem `std::io::Error`, tagging
+/// path-bearing variants with `path`. Unnamed kinds become `Errno(code)`.
+fn io_error_value(e: &std::io::Error, path: &str) -> Value {
+    // Match the raw OS errno (see `net_error_value`). `InvalidData` is produced
+    // in AL (read_text on non-UTF-8), not here.
+    let with_path =
+        |t| PreludeTemplates::with_payload(&enum_template(t), Value::str(path.to_string()));
+    match e.raw_os_error() {
+        Some(libc::ENOENT) => with_path(&stdlib::io::NOT_FOUND),
+        Some(libc::EACCES) => with_path(&stdlib::io::PERMISSION_DENIED),
+        Some(libc::EEXIST) => with_path(&stdlib::io::ALREADY_EXISTS),
+        Some(libc::ENOTDIR) => with_path(&stdlib::io::NOT_ADIRECTORY),
+        Some(libc::EISDIR) => with_path(&stdlib::io::IS_ADIRECTORY),
+        Some(libc::EROFS) => with_path(&stdlib::io::READ_ONLY_FILESYSTEM),
+        Some(libc::ELOOP) => with_path(&stdlib::io::FILESYSTEM_LOOP),
+        Some(libc::ENOSPC) => enum_value(&stdlib::io::STORAGE_FULL),
+        Some(libc::EDQUOT) => enum_value(&stdlib::io::QUOTA_EXCEEDED),
+        Some(libc::EFBIG) => with_path(&stdlib::io::FILE_TOO_LARGE),
+        _ => PreludeTemplates::with_payload(&enum_template(&stdlib::io::ERRNO), errno_of(e)),
+    }
+}
+
 impl PreludeTemplates {
     fn new() -> Self {
         PreludeTemplates {
@@ -1502,20 +1568,22 @@ impl VM {
                     reds -= IO_REDUCTION_COST;
                     let path = self.pop_str("io.read_file")?;
                     let res = std::fs::read(&*path).map(Value::binary);
-                    self.push_io_result("read file", res);
+                    self.push_file(&path, res);
                 }
                 Op::FileWrite => {
                     reds -= IO_REDUCTION_COST;
                     let bin = self.pop_binary("io.write_file")?;
                     let path = self.pop_str("io.write_file")?;
-                    if let Some(v) = self.reject_unaligned(bin.bit_len, "file") {
+                    if let Some(v) =
+                        self.reject_unaligned(bin.bit_len, &stdlib::io::UNALIGNED_BINARY)
+                    {
                         self.stack.push(v);
                         continue;
                     }
                     let nil = self.make_nil();
                     let bytes = bin.full_bytes();
                     let res = std::fs::write(&*path, &*bytes).map(|_| nil);
-                    self.push_io_result("write file", res);
+                    self.push_file(&path, res);
                 }
                 Op::TcpListen => {
                     let port = self.pop_int("net.listen")?;
@@ -1537,7 +1605,7 @@ impl VM {
                     {
                         self.share_listener(sv.id);
                     }
-                    self.push_io_result("listen", res);
+                    self.push_net(res);
                 }
                 Op::TcpAccept => {
                     reds -= IO_REDUCTION_COST;
@@ -1561,7 +1629,7 @@ impl VM {
                             self.frame_mut().ip = ip - 1;
                             return Ok(Step::Parked(Wait::readable(sv.id)));
                         }
-                        Err(e) => self.push_io_result("accept", Err(e)),
+                        Err(e) => self.push_net(Err(e)),
                     }
                 }
                 Op::TcpConnect => {
@@ -1574,7 +1642,7 @@ impl VM {
                     let addr = match resolve_addr(&host, port as u16) {
                         Ok(addr) => addr,
                         Err(e) => {
-                            self.push_io_result("connect", Err(e));
+                            self.push_net(Err(e));
                             continue;
                         }
                     };
@@ -1595,7 +1663,7 @@ impl VM {
                             self.frame_mut().ip = ip;
                             return Ok(Step::Parked(Wait::connecting(id)));
                         }
-                        Err(e) => self.push_io_result("connect", Err(e)),
+                        Err(e) => self.push_net(Err(e)),
                     }
                 }
                 Op::TcpRead => {
@@ -1626,7 +1694,7 @@ impl VM {
                             self.frame_mut().ip = ip - 1;
                             return Ok(Step::Parked(Wait::readable(sv.id)));
                         }
-                        Err(e) => self.push_io_result("read", Err(e)),
+                        Err(e) => self.push_net(Err(e)),
                     }
                 }
                 Op::TcpReadUntil => {
@@ -1663,7 +1731,7 @@ impl VM {
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
                             if monotonic_now_ms() >= deadline_ms {
                                 // The deadline passed with nothing to read.
-                                let err = self.make_err(Value::str("read timed out"));
+                                let err = self.make_err(enum_value(&stdlib::net::error::TIMED_OUT));
                                 self.stack.push(err);
                             } else {
                                 // Re-push the args unchanged and re-run on wake.
@@ -1682,7 +1750,7 @@ impl VM {
                                 return Ok(Step::Parked(Wait::read_with_deadline(sv.id, deadline)));
                             }
                         }
-                        Err(e) => self.push_io_result("read", Err(e)),
+                        Err(e) => self.push_net(Err(e)),
                     }
                 }
                 Op::TcpWrite => {
@@ -1690,7 +1758,9 @@ impl VM {
                     let bin = self.pop_binary("socket.write")?;
                     let sock_val = self.pop()?;
                     let sv = connection_socket(&sock_val, "socket.write")?;
-                    if let Some(v) = self.reject_unaligned(bin.bit_len, "socket") {
+                    if let Some(v) =
+                        self.reject_unaligned(bin.bit_len, &stdlib::net::error::UNALIGNED_BINARY)
+                    {
                         self.stack.push(v);
                         continue;
                     }
@@ -1736,7 +1806,7 @@ impl VM {
                         return Ok(Step::Parked(Wait::writable(sv.id)));
                     }
                     let nil = self.make_nil();
-                    self.push_io_result("write", result.map(|_| nil));
+                    self.push_net(result.map(|_| nil));
                 }
                 Op::TcpWriteParts => {
                     reds -= IO_REDUCTION_COST;
@@ -1771,8 +1841,7 @@ impl VM {
                         }
                     }
                     if unaligned {
-                        let err = self
-                            .make_err(Value::str("cannot write non-byte-aligned binary to socket"));
+                        let err = self.make_err(enum_value(&stdlib::net::error::UNALIGNED_BINARY));
                         self.stack.push(err);
                         continue;
                     }
@@ -1853,7 +1922,7 @@ impl VM {
                         return Ok(Step::Parked(Wait::writable(sv.id)));
                     }
                     let nil = self.make_nil();
-                    self.push_io_result("write", result.map(|_| nil));
+                    self.push_net(result.map(|_| nil));
                 }
                 Op::TcpClose => {
                     reds -= IO_REDUCTION_COST;
@@ -1892,7 +1961,7 @@ impl VM {
                         Some(l) => l.local_addr().map(|a| self.templates.socket_address(a)),
                         None => return Err("Invalid listener socket".to_string()),
                     };
-                    self.push_io_result("get local address", res);
+                    self.push_net(res);
                 }
                 Op::ProcessSpawn => {
                     let f = self.pop()?;
@@ -2362,22 +2431,32 @@ impl VM {
 
     // --- I/O helpers ---------------------------------------------------------
 
+    /// Push `Ok(v)` or a typed `NetError` built from the socket `io::Error`.
     #[inline]
-    fn push_io_result(&mut self, label: &str, r: std::io::Result<Value>) {
+    fn push_net(&mut self, r: std::io::Result<Value>) {
         let v = match r {
             Ok(v) => self.make_ok(v),
-            Err(err) => self.make_err(Value::str(format!("Failed to {}: {}", label, err))),
+            Err(err) => self.make_err(net_error_value(&err)),
         };
         self.stack.push(v);
     }
 
+    /// Push `Ok(v)` or a typed `IoError` (tagged with `path`) from the file
+    /// `io::Error`.
     #[inline]
-    fn reject_unaligned(&self, bits: u64, dest: &str) -> Option<Value> {
-        (!bits.is_multiple_of(8)).then(|| {
-            self.make_err(Value::str(format!(
-                "cannot write non-byte-aligned binary to {dest}"
-            )))
-        })
+    fn push_file(&mut self, path: &str, r: std::io::Result<Value>) {
+        let v = match r {
+            Ok(v) => self.make_ok(v),
+            Err(err) => self.make_err(io_error_value(&err, path)),
+        };
+        self.stack.push(v);
+    }
+
+    /// If `bits` is not byte-aligned, the error to push — built from the
+    /// caller's `unaligned` template (`NetError`/`IoError`).
+    #[inline]
+    fn reject_unaligned(&self, bits: u64, unaligned: &VariantTemplate) -> Option<Value> {
+        (!bits.is_multiple_of(8)).then(|| self.make_err(enum_value(unaligned)))
     }
 
     // --- Lightweight processes (al/experiments/scheduler) --------------------
@@ -2821,7 +2900,7 @@ impl VM {
     /// either adopt the connection or report the error it ended with.
     fn finish_connect(&mut self, id: i32) -> Value {
         let Some(socket) = self.pending_connects.remove(&id) else {
-            return self.make_err(Value::str("Failed to connect: unknown socket"));
+            return self.make_err(enum_value(&stdlib::net::error::CONNECTION_ABORTED));
         };
         if let Some(poller) = &self.poller {
             let _ = poller.delete(&socket);
@@ -2833,10 +2912,10 @@ impl VM {
                 let stream: TcpStream = socket.into();
                 match stream.peer_addr() {
                     Ok(peer) => self.adopt_connection(stream, peer),
-                    Err(e) => self.make_err(Value::str(format!("Failed to connect: {e}"))),
+                    Err(e) => self.make_err(net_error_value(&e)),
                 }
             }
-            Ok(Some(e)) | Err(e) => self.make_err(Value::str(format!("Failed to connect: {e}"))),
+            Ok(Some(e)) | Err(e) => self.make_err(net_error_value(&e)),
         }
     }
 }

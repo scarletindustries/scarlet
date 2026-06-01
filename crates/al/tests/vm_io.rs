@@ -376,15 +376,16 @@ match net.listen('127.0.0.1', __PORT__) {
 }
 
 /// Writing a *bit-unaligned* binary (`<<1:4>>` is 4 bits) to a file is rejected
-/// inside the write opcode (`reject_unaligned`) and surfaces as `Err` — the
-/// file is never created.
+/// inside the write opcode and surfaces as the typed `IoError::UnalignedBinary`
+/// variant (matched directly here) — the file is never created.
 #[test]
 fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
     let data = proj.dir.join("out.bin");
-    let src = r#"import al/io
+    let src = r#"import al/io.{UnalignedBinary}
 match io.write_file('__PATH__', <<1:4>>) {
-	Err(e) -> println('rejected: ${e}')
+	Err(UnalignedBinary) -> println('rejected')
+	Err(_) -> println('wrong-error')
 	Ok(_) -> println('wrote')
 }
 "#
@@ -395,9 +396,9 @@ match io.write_file('__PATH__', <<1:4>>) {
     let out = run_al("run", &prog);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
-    assert!(
-        out.stdout.starts_with("rejected:") && out.stdout.contains("non-byte-aligned"),
-        "expected the unaligned-write rejection, got: {:?}",
+    assert_eq!(
+        out.stdout, "rejected\n",
+        "expected the typed UnalignedBinary rejection, got: {:?}",
         out.stdout
     );
     assert!(
@@ -406,17 +407,18 @@ match io.write_file('__PATH__', <<1:4>>) {
     );
 }
 
-/// Reading a path that does not exist takes `push_io_result`'s `Err` branch
-/// (the OS error is wrapped into a `Result.Err` string), not a panic or VM
-/// abort.
+/// Reading a missing path surfaces the typed `IoError::NotFound(path)`, matched
+/// directly here — the offending path is carried in the variant, not buried in
+/// a string. (Proves both the typing and the "carry arguments" goal.)
 #[test]
 fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
     let missing = proj.dir.join("does_not_exist.txt");
-    let src = r#"import al/io
+    let src = r#"import al/io.{NotFound}
 match io.read_text('__PATH__') {
 	Ok(_) -> println('read-ok')
-	Err(_) -> println('read-err')
+	Err(NotFound(p)) -> println('missing: ${p}')
+	Err(_) -> println('wrong-error')
 }
 "#
     .replace("__PATH__", &missing.display().to_string());
@@ -426,7 +428,41 @@ match io.read_text('__PATH__') {
     let out = run_al("run", &prog);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
-    assert_eq!(out.stdout, "read-err\n", "stderr: {}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        format!("missing: {}\n", missing.display()),
+        "expected NotFound carrying the path, stderr: {}",
+        out.stderr
+    );
+}
+
+/// Connecting to a port with no listener surfaces the typed
+/// `NetError::ConnectionRefused`, matched directly (not a string compare). This
+/// also exercises the non-blocking-connect completion path (`finish_connect`).
+#[test]
+fn connect_refused_is_typed() {
+    let port = free_port();
+    let proj = Project::new("net_refused");
+    let src = r#"import al/net
+import al/net/error.{ConnectionRefused}
+match net.connect('127.0.0.1', __PORT__) {
+	Err(ConnectionRefused) -> println('refused')
+	Err(_) -> println('other-error')
+	Ok(_) -> println('connected')
+}
+"#
+    .replace("__PORT__", &port.to_string());
+    let prog = proj.dir.join("prog.al");
+    std::fs::write(&prog, src).unwrap();
+
+    let out = run_al("run", &prog);
+
+    assert!(out.success, "program should run, stderr: {}", out.stderr);
+    assert_eq!(
+        out.stdout, "refused\n",
+        "expected typed ConnectionRefused, got: {:?} (stderr: {})",
+        out.stdout, out.stderr
+    );
 }
 
 /// First byte offset of `needle` within `hay`, or `None`.

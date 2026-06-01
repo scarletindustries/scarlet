@@ -14,6 +14,7 @@ import al/http/body.{Body, Empty, Whole, Streaming}
 import al/http/headers.{Header, Headers}
 import al/net.{Server}
 import al/net/socket.{Socket}
+import al/net/error.{NetError}
 import al/binary
 import al/int
 import al/experiments/scheduler
@@ -150,14 +151,14 @@ fn build_request(method Binary, target Binary, version Int, hdrs Headers, b Body
 // Listen on host:port and serve each accepted connection on its own process.
 // One slow or hostile connection parks only its own process; the runtime
 // spreads connection processes across every core.
-pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, String) {
+pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, NetError) {
 	match net.listen(host, port) {
 		Err(e) -> Err(e)
 		Ok(server) -> accept_loop(server, handler)
 	}
 }
 
-fn accept_loop(server Server, handler fn(Request) Response) Result(Nil, String) {
+fn accept_loop(server Server, handler fn(Request) Response) Result(Nil, NetError) {
 	match net.accept(server) {
 		Ok(sock) -> {
 			scheduler.spawn(fn() drive(sock, handler))
@@ -190,7 +191,7 @@ fn serve_conn(
 	off Int,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, String) {
+) Result(Nil, NetError) {
 	match h1.parse_request(buf, off) {
 		NeedMore -> match flush(sock, pending) {
 			Err(e) -> Err(e)
@@ -219,7 +220,7 @@ fn serve_conn(
 }
 
 // Write out accumulated response parts, if any, as one vectored write.
-fn flush(sock Socket, pending Array(Binary)) Result(Nil, String) {
+fn flush(sock Socket, pending Array(Binary)) Result(Nil, NetError) {
 	match pending {
 		[] -> Ok(Nil)
 		else -> match socket.write_parts(sock, pending) {
@@ -246,7 +247,7 @@ fn handle(
 	hdrs Headers,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, String) {
+) Result(Nil, NetError) {
 	match h1.framing(hdrs) {
 		Invalid(status) -> {
 			flush(sock, pending) or Nil
@@ -301,7 +302,7 @@ fn read_body(
 	version Int,
 	hdrs Headers,
 	handler fn(Request) Response,
-) Result(Nil, String) {
+) Result(Nil, NetError) {
 	match maybe_continue(sock, hdrs) {
 		Err(e) -> Err(e)
 		Ok(_) -> {
@@ -350,7 +351,7 @@ fn read_chunked_body(
 	version Int,
 	hdrs Headers,
 	handler fn(Request) Response,
-) Result(Nil, String) {
+) Result(Nil, NetError) {
 	match maybe_continue(sock, hdrs) {
 		Err(e) -> Err(e)
 		Ok(_) -> chunked_loop(sock, buf, off, method, target, version, hdrs, handler)
@@ -374,7 +375,7 @@ fn chunked_loop(
 	version Int,
 	hdrs Headers,
 	handler fn(Request) Response,
-) Result(Nil, String) {
+) Result(Nil, NetError) {
 	match h1.chunk_decode(buf, off, MAX_BODY) {
 		ChunkedNeedMore -> match socket.read(sock, READ_SIZE) {
 			Ok(more) -> if binary.byte_size(more) == 0 {
@@ -436,7 +437,7 @@ fn with_trailers(hdrs Headers, trailers Array(Header)) Headers {
 
 // Honor Expect: 100-continue by writing the interim response before the body
 // is read, so a client that waits for it will start sending.
-fn maybe_continue(sock Socket, hdrs Headers) Result(Nil, String) {
+fn maybe_continue(sock Socket, hdrs Headers) Result(Nil, NetError) {
 	if h1.want_100_continue(hdrs) {
 		socket.write(sock, h1.serialize_head(100, []))
 	} else {
@@ -458,7 +459,7 @@ fn respond_and_continue(
 	req Request,
 	handler fn(Request) Response,
 	pending Array(Binary),
-) Result(Nil, String) {
+) Result(Nil, NetError) {
 	resp = handler(req)
 	match respond(sock, pending, req.method, version, resp) {
 		Err(e) -> Err(e)
@@ -496,7 +497,7 @@ fn respond(
 	method Method,
 	version Int,
 	resp Response,
-) Result((Bool, Array(Binary)), String) {
+) Result((Bool, Array(Binary)), NetError) {
 	stream = !headers.has(resp.headers, NAME_CONTENT_LENGTH) && !suppress_body(method, resp.status)
 	if stream && version == 1 {
 		hdrs = headers.set(resp.headers, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
@@ -540,7 +541,7 @@ fn buffer_body(
 	pending Array(Binary),
 	head Binary,
 	b Body,
-) Result((Bool, Array(Binary)), String) {
+) Result((Bool, Array(Binary)), NetError) {
 	match body.take_buffered(b) {
 		Err(e) -> Err(e)
 		Ok(Empty) -> Ok((True, [..pending, head]))
