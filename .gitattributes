@@ -1,4 +1,8 @@
 * text=auto eol=lf
 *.bat eol=crlf
 
+# Golden test outputs are compared byte-for-byte; some contain literal CRLF
+# (e.g. HTTP wire output), so they must never be eol-normalized.
+crates/al/tests/golden/** -text
+
 *.al linguist-language=Text
