@@ -3385,6 +3385,7 @@ impl Compiler {
             "net__close" => self.emit(Op::TcpCloseServer),
             "net__local_addr" => self.emit(Op::TcpLocalAddr),
             "socket__read" => self.emit(Op::TcpRead),
+            "socket__read_until" => self.emit(Op::TcpReadUntil),
             "socket__write" => self.emit(Op::TcpWrite),
             "socket__write_parts" => self.emit(Op::TcpWriteParts),
             "socket__close" => self.emit(Op::TcpClose),
@@ -3419,6 +3420,7 @@ impl Compiler {
             "float__to_string" => self.emit(Op::FloatToString),
             "scheduler__spawn" => self.emit(Op::ProcessSpawn),
             "scheduler__sleep" => self.emit(Op::Sleep),
+            "time__monotonic" => self.emit(Op::Monotonic),
             _ => {
                 self.error(format!("Internal: builtin '{}' has no codegen", name), sp);
             }

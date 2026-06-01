@@ -21,6 +21,7 @@ dependencies = [
  "polling",
  "rustyline",
  "serde_json",
+ "smallvec",
  "socket2",
  "ureq",
 ]

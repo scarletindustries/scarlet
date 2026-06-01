@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod common;
 use common::{Project, run_al};
@@ -266,6 +266,112 @@ match net.listen('127.0.0.1', __PORT__) {
         "echoed: hello world\n",
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Wait up to `secs` for a self-terminating server `child` to exit, then collect
+/// its output. Unlike `shutdown_clean` (which kills a forever-looping server),
+/// these `read_within` servers are expected to finish on their own once the
+/// deadline fires or the data arrives; the bound just guarantees a wedged read
+/// fails the test instead of hanging the suite.
+fn wait_or_kill(mut child: Child, secs: u64) -> std::process::Output {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    // No-op if it already exited; forces the issue if it overran the deadline.
+    child.kill().ok();
+    child.wait_with_output().expect("collect server output")
+}
+
+/// `socket.read_within` against a peer that connects but never sends must hit
+/// its deadline and take the `Err(timeout)` arm rather than blocking forever.
+/// The Rust client stays connected and silent for the whole window, so the only
+/// thing that can wake the parked read is the deadline timer.
+#[test]
+fn tcp_read_within_times_out() {
+    let port = free_port();
+    let proj = Project::new("io_read_within_timeout");
+    let src = r#"import al/net
+import al/net/socket
+
+match net.listen('127.0.0.1', __PORT__) {
+	Ok(server) -> match net.accept(server) {
+		Ok(sock) -> match socket.read_within(sock, 4096, 150) {
+			Ok(_) -> println('unexpected-data')
+			Err(e) -> println('timed-out: ${e}')
+		}
+		Err(e) -> println('accept-failed: ${e}')
+	}
+	Err(e) -> println('listen-failed: ${e}')
+}
+"#;
+
+    // The client connects (so `accept` returns) but never writes. Holding the
+    // stream open keeps the socket alive-but-silent across the read window.
+    let (child, _stream) = spawn_al_server(&proj, src, port);
+    let out = wait_or_kill(child, 5);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "server should exit cleanly after the timeout\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("timed-out:"),
+        "read_within must take its Err(timeout) arm; got stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("unexpected-data"),
+        "read_within must not return Ok when no bytes ever arrive: {stdout:?}"
+    );
+}
+
+/// `socket.read_within` returns `Ok` with the bytes when data arrives before the
+/// deadline: the readable wake fires and the op re-runs to a successful read.
+/// The generous timeout makes the success path independent of scheduler timing.
+#[test]
+fn tcp_read_within_returns_data() {
+    let port = free_port();
+    let proj = Project::new("io_read_within_data");
+    let src = r#"import al/net
+import al/net/socket
+import al/binary
+
+match net.listen('127.0.0.1', __PORT__) {
+	Ok(server) -> match net.accept(server) {
+		Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
+			Ok(data) -> match binary.to_string(data) {
+				Ok(text) -> println('got: ${text}')
+				Err(_) -> println('not-utf8')
+			}
+			Err(e) -> println('read-failed: ${e}')
+		}
+		Err(e) -> println('accept-failed: ${e}')
+	}
+	Err(e) -> println('listen-failed: ${e}')
+}
+"#;
+
+    let (child, mut stream) = spawn_al_server(&proj, src, port);
+    stream.write_all(b"hello").expect("client write");
+    let out = wait_or_kill(child, 5);
+    drop(stream);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "server should exit cleanly after reading\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("got: hello"),
+        "read_within must return the bytes that arrived; got stdout: {stdout:?}"
     );
 }
 

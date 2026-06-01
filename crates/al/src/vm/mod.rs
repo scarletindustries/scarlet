@@ -1,8 +1,9 @@
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::io::{ErrorKind, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -13,6 +14,7 @@ use al_core::bytecode::{
     ValueView, enum_hash_with_payload, enum_name_prefix_hash,
 };
 use al_core::static_ir::VariantTemplate;
+use smallvec::{SmallVec, smallvec};
 
 use crate::stdlib;
 
@@ -45,19 +47,93 @@ const REDUCTION_BUDGET: i32 = 4000;
 /// budget, after which the process is preempted at its next call.
 const IO_REDUCTION_COST: i32 = 100;
 
-/// What a parked process is waiting for.
+/// A socket-readiness condition a parked process can wait on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interest {
+    /// The socket (listener or connection) must become readable.
+    Readable,
+    /// The connection must become writable.
+    Writable,
+}
+
+/// How a parked process resumes once its `Wait` is satisfied.
+#[derive(Debug, Clone, Copy)]
+enum WakeAction {
+    /// Resume wherever the op left `ip`. Covers both the syscall-retry waits
+    /// (accept/read/write set `ip - 1` to re-run) and `Sleep` (which leaves
+    /// `ip` at the next instruction with its result already on the stack).
+    Rerun,
+    /// Complete the pending non-blocking connect on this socket id: on wake the
+    /// completion handler pushes the result directly onto the process's stack
+    /// instead of re-running the instruction.
+    CompleteConnect(i32),
+}
+
+/// What a parked process is waiting for: any of a set of socket-readiness
+/// interests and/or a deadline. Whichever fires first wakes the process, after
+/// which `action` decides how it resumes.
 #[derive(Debug)]
-enum Wait {
-    /// A socket (listener or connection) must become readable.
-    Readable(i32),
-    /// A connection must become writable.
-    Writable(i32),
-    /// An outbound connect must finish (signalled by writability). Unlike the
-    /// other I/O waits, the instruction is not re-run on wake: the completion
-    /// handler pushes the result directly onto the process's stack.
-    Connecting(i32),
-    /// Runnable again at this instant.
-    Until(Instant),
+struct Wait {
+    /// `(socket id, condition)` pairs; the process wakes when any one is ready.
+    /// Single-fd parks are overwhelmingly the common case, so this stays inline
+    /// and allocation-free for them.
+    interests: SmallVec<[(i32, Interest); 1]>,
+    /// Wake no later than this instant, if set. A `Wait` with no interests and
+    /// a deadline is a pure timer (e.g. `Sleep`).
+    deadline: Option<Instant>,
+    /// How the process resumes once woken.
+    action: WakeAction,
+}
+
+impl Wait {
+    /// Park until socket `id` becomes readable, then re-run the instruction.
+    fn readable(id: i32) -> Self {
+        Wait {
+            interests: smallvec![(id, Interest::Readable)],
+            deadline: None,
+            action: WakeAction::Rerun,
+        }
+    }
+
+    /// Park until socket `id` becomes writable, then re-run the instruction.
+    fn writable(id: i32) -> Self {
+        Wait {
+            interests: smallvec![(id, Interest::Writable)],
+            deadline: None,
+            action: WakeAction::Rerun,
+        }
+    }
+
+    /// Park until the pending connect on socket `id` completes (signalled by
+    /// writability); on wake, finish the connect and push its result.
+    fn connecting(id: i32) -> Self {
+        Wait {
+            interests: smallvec![(id, Interest::Writable)],
+            deadline: None,
+            action: WakeAction::CompleteConnect(id),
+        }
+    }
+
+    /// Park until `deadline`, then resume at the next instruction (the result
+    /// is already on the stack).
+    fn until(deadline: Instant) -> Self {
+        Wait {
+            interests: SmallVec::new(),
+            deadline: Some(deadline),
+            action: WakeAction::Rerun,
+        }
+    }
+
+    /// Park until socket `id` becomes readable or `deadline` passes, whichever
+    /// comes first, then re-run the instruction (which re-derives whether data
+    /// arrived or the read timed out).
+    fn read_with_deadline(id: i32, deadline: Instant) -> Self {
+        Wait {
+            interests: smallvec![(id, Interest::Readable)],
+            deadline: Some(deadline),
+            action: WakeAction::Rerun,
+        }
+    }
 }
 
 /// Why an execution slice ended.
@@ -212,8 +288,18 @@ pub struct VM {
     main_result: Option<Value>,
     /// Runnable processes in round-robin order (the running one is not here).
     run_queue: VecDeque<Process>,
-    /// Processes waiting on I/O readiness or timers.
-    parked: Vec<(Wait, Process)>,
+    /// Processes waiting on I/O readiness or timers, keyed by a unique wait id
+    /// so the timer heap can refer to a park without owning it.
+    parked: HashMap<u64, (Wait, Process)>,
+    /// Monotonically increasing id handed to each park; the key into `parked`
+    /// and the identity (and tie-breaker) recorded in `timer_heap`.
+    next_wait_id: u64,
+    /// Lazy-deletion min-heap of `(deadline, wait id)`. A park with a deadline
+    /// pushes one entry and never eagerly removes it: when the park instead
+    /// wakes early on I/O, the entry is discarded on pop once its id is gone
+    /// from `parked` (or its live deadline no longer matches). This keeps the
+    /// nearest deadline an O(log n) peek instead of an O(n) scan of `parked`.
+    timer_heap: BinaryHeap<Reverse<(Instant, u64)>>,
     /// OS event queue (kqueue/epoll); created when a process first parks on
     /// I/O, or adopted from the runtime when multi-core scheduling boots.
     poller: Option<Arc<polling::Poller>>,
@@ -269,7 +355,9 @@ pub fn new_vm(program: Program) -> VM {
         current_is_main: false,
         main_result: None,
         run_queue: VecDeque::new(),
-        parked: Vec::new(),
+        parked: HashMap::new(),
+        next_wait_id: 0,
+        timer_heap: BinaryHeap::new(),
         poller: None,
         runtime: None,
         scheduler_index: 0,
@@ -377,9 +465,17 @@ impl VM {
                     }
                 }
                 Step::Parked(wait) => {
+                    // Allocate this park's id, record its deadline (if any) in
+                    // the timer heap, arm its I/O interests, then stash the
+                    // suspended process under the id.
+                    let id = self.next_wait_id;
+                    self.next_wait_id += 1;
+                    if let Some(deadline) = wait.deadline {
+                        self.timer_heap.push(Reverse((deadline, id)));
+                    }
                     self.register_wait(&wait)?;
                     let outgoing = self.suspend_current();
-                    self.parked.push((wait, outgoing));
+                    self.parked.insert(id, (wait, outgoing));
                 }
             }
         }
@@ -1263,6 +1359,9 @@ impl VM {
                 Op::StackDepth => {
                     self.stack.push(Value::int(self.frames.len() as i64));
                 }
+                Op::Monotonic => {
+                    self.stack.push(Value::int(monotonic_now_ms()));
+                }
                 Op::MakeEnumPayload => {
                     let payload_count = instr.b as usize;
                     let payloads = self.pop_n(payload_count)?;
@@ -1460,7 +1559,7 @@ impl VM {
                             // readable, then re-run this instruction.
                             self.stack.push(Value::socket(sv));
                             self.frame_mut().ip = ip - 1;
-                            return Ok(Step::Parked(Wait::Readable(sv.id)));
+                            return Ok(Step::Parked(Wait::readable(sv.id)));
                         }
                         Err(e) => self.push_io_result("accept", Err(e)),
                     }
@@ -1494,7 +1593,7 @@ impl VM {
                             let id = self.alloc_socket_id();
                             self.pending_connects.insert(id, socket);
                             self.frame_mut().ip = ip;
-                            return Ok(Step::Parked(Wait::Connecting(id)));
+                            return Ok(Step::Parked(Wait::connecting(id)));
                         }
                         Err(e) => self.push_io_result("connect", Err(e)),
                     }
@@ -1525,7 +1624,63 @@ impl VM {
                             self.stack.push(sock_val);
                             self.stack.push(Value::int(max as i64));
                             self.frame_mut().ip = ip - 1;
-                            return Ok(Step::Parked(Wait::Readable(sv.id)));
+                            return Ok(Step::Parked(Wait::readable(sv.id)));
+                        }
+                        Err(e) => self.push_io_result("read", Err(e)),
+                    }
+                }
+                Op::TcpReadUntil => {
+                    reds -= IO_REDUCTION_COST;
+                    // Args on the stack, top first: the absolute monotonic
+                    // deadline in ms, the max byte count, then the socket. The
+                    // deadline is captured once in AL as `time.monotonic() +
+                    // timeout_ms`, so it rides the stack as a plain Int: a re-run
+                    // after a wake re-reads the same absolute value and never
+                    // resets the clock.
+                    let deadline_ms = self.pop_int("socket.read_within")?;
+                    let max = self.pop_int("socket.read_within")?;
+                    let sock_val = self.pop()?;
+                    let sv = connection_socket(&sock_val, "socket.read_within")?;
+                    // At least 1 byte, at most 8 MiB per read.
+                    let max = (max.max(1) as usize).min(8 * 1024 * 1024);
+                    if self.read_scratch.len() < max {
+                        self.read_scratch.resize(max, 0);
+                    }
+                    let read_res = match self.tcp_connections.get_mut(&sv.id) {
+                        Some(conn) => conn.read(&mut self.read_scratch[..max]),
+                        None => return Err("Invalid connection socket".to_string()),
+                    };
+                    match read_res {
+                        // The read happens before the deadline check, so bytes
+                        // that arrived as the clock ran out are never discarded.
+                        // A zero-byte read is a peer close, reported as Ok(<<>>),
+                        // exactly as `socket.read` does.
+                        Ok(n) => {
+                            let data = Value::binary(self.read_scratch[..n].to_vec());
+                            let ok = self.make_ok(data);
+                            self.stack.push(ok);
+                        }
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            if monotonic_now_ms() >= deadline_ms {
+                                // The deadline passed with nothing to read.
+                                let err = self.make_err(Value::str("read timed out"));
+                                self.stack.push(err);
+                            } else {
+                                // Re-push the args unchanged and re-run on wake.
+                                // Park until the socket is readable or the
+                                // deadline passes, whichever comes first; the
+                                // re-run re-derives which one happened. The
+                                // deadline instant is reconstructed from the
+                                // absolute ms against the shared monotonic epoch,
+                                // so it is identical on every re-run.
+                                self.stack.push(sock_val);
+                                self.stack.push(Value::int(max as i64));
+                                self.stack.push(Value::int(deadline_ms));
+                                self.frame_mut().ip = ip - 1;
+                                let deadline = *EPOCH.get_or_init(Instant::now)
+                                    + Duration::from_millis(deadline_ms.max(0) as u64);
+                                return Ok(Step::Parked(Wait::read_with_deadline(sv.id, deadline)));
+                            }
                         }
                         Err(e) => self.push_io_result("read", Err(e)),
                     }
@@ -1578,7 +1733,7 @@ impl VM {
                             bin.bit_len - (written as u64) * 8,
                         ));
                         self.frame_mut().ip = ip - 1;
-                        return Ok(Step::Parked(Wait::Writable(sv.id)));
+                        return Ok(Step::Parked(Wait::writable(sv.id)));
                     }
                     let nil = self.make_nil();
                     self.push_io_result("write", result.map(|_| nil));
@@ -1695,7 +1850,7 @@ impl VM {
                         self.stack.push(sock_val);
                         self.stack.push(Value::array(remaining));
                         self.frame_mut().ip = ip - 1;
-                        return Ok(Step::Parked(Wait::Writable(sv.id)));
+                        return Ok(Step::Parked(Wait::writable(sv.id)));
                     }
                     let nil = self.make_nil();
                     self.push_io_result("write", result.map(|_| nil));
@@ -1754,7 +1909,7 @@ impl VM {
                         // process resumes at the next instruction.
                         self.frame_mut().ip = ip;
                         let deadline = Instant::now() + Duration::from_millis(ms as u64);
-                        return Ok(Step::Parked(Wait::Until(deadline)));
+                        return Ok(Step::Parked(Wait::until(deadline)));
                     }
                 }
                 Op::StrSplit => {
@@ -2438,23 +2593,32 @@ impl VM {
         self.spawn_process_local(closure)
     }
 
-    /// Register interest in I/O readiness with the OS poller before parking.
+    /// Register every fd interest of a `wait` with the OS poller before
+    /// parking. A timer-only wait (no interests) registers nothing.
     fn register_wait(&mut self, wait: &Wait) -> VmResult<()> {
-        let (id, readable) = match wait {
-            Wait::Readable(id) => (*id, true),
-            Wait::Writable(id) | Wait::Connecting(id) => (*id, false),
-            Wait::Until(_) => return Ok(()),
-        };
-
+        if wait.interests.is_empty() {
+            return Ok(());
+        }
         self.ensure_poller()?;
+        if self.poller.is_none() {
+            return Ok(());
+        }
+        for &(id, interest) in &wait.interests {
+            self.register_fd(id, interest)?;
+        }
+        Ok(())
+    }
+
+    /// Arm a single `(socket id, interest)` with the poller. polling 3.x is
+    /// oneshot, so re-arming an fd that is still registered surfaces as
+    /// `AlreadyExists` and is upgraded to a `modify`.
+    fn register_fd(&self, id: i32, interest: Interest) -> VmResult<()> {
         let Some(poller) = &self.poller else {
             return Ok(());
         };
-
-        let event = if readable {
-            polling::Event::readable(id as usize)
-        } else {
-            polling::Event::writable(id as usize)
+        let event = match interest {
+            Interest::Readable => polling::Event::readable(id as usize),
+            Interest::Writable => polling::Event::writable(id as usize),
         };
 
         // The fd lives in one of the socket tables; sockets stay in those
@@ -2499,6 +2663,23 @@ impl VM {
         }
     }
 
+    /// Drop a socket id from the poller, whichever interest it was armed for.
+    /// Used to release a woken wait's *other* still-armed fds — oneshot already
+    /// disarmed the one that fired. A socket no longer in any table, or never
+    /// registered, is silently ignored.
+    fn deregister_fd(&self, id: i32) {
+        let Some(poller) = &self.poller else {
+            return;
+        };
+        if let Some(listener) = self.tcp_listeners.get(&id) {
+            let _ = poller.delete(listener);
+        } else if let Some(conn) = self.tcp_connections.get(&id) {
+            let _ = poller.delete(conn);
+        } else if let Some(pending) = self.pending_connects.get(&id) {
+            let _ = poller.delete(pending);
+        }
+    }
+
     /// Move parked processes whose I/O is ready or whose timer has expired
     /// back onto the run queue.
     ///
@@ -2513,10 +2694,7 @@ impl VM {
         // Wake any timers that are already due.
         let woke = self.wake_due_timers();
 
-        let waiting_on_io = self
-            .parked
-            .iter()
-            .any(|(w, _)| matches!(w, Wait::Readable(_) | Wait::Writable(_)));
+        let waiting_on_io = self.parked.values().any(|(w, _)| !w.interests.is_empty());
 
         if !block || woke {
             // Non-blocking (or something already woke): just drain any ready
@@ -2527,36 +2705,62 @@ impl VM {
             return Ok(());
         }
 
-        // One blocking wait, bounded by the nearest timer deadline. The poller
-        // is used even for timer-only waits so `notify()` can interrupt it.
-        let timeout = self
-            .parked
-            .iter()
-            .filter_map(|(w, _)| match w {
-                Wait::Until(t) => Some(*t),
-                _ => None,
-            })
-            .min()
-            .map(|d| d.saturating_duration_since(Instant::now()));
+        // One blocking wait, bounded by the nearest live timer deadline. The
+        // poller is used even for timer-only waits so `notify()` can interrupt
+        // it. Stale heap tops (ids already woken on I/O) are dropped as we look.
+        let next_deadline = loop {
+            let Some(&Reverse((deadline, id))) = self.timer_heap.peek() else {
+                break None;
+            };
+            if matches!(self.parked.get(&id), Some((w, _)) if w.deadline == Some(deadline)) {
+                break Some(deadline);
+            }
+            self.timer_heap.pop();
+        };
+        let timeout = next_deadline.map(|d| d.saturating_duration_since(Instant::now()));
         self.ensure_poller()?;
         self.drain_io_events(timeout)?;
         self.wake_due_timers();
         Ok(())
     }
 
-    /// Wake parked processes whose deadline has passed.
+    /// Wake parked processes whose deadline has passed, draining the
+    /// lazy-deletion timer heap. A popped entry whose id is no longer parked —
+    /// or whose live deadline no longer matches — was already woken on I/O and
+    /// is silently discarded.
     fn wake_due_timers(&mut self) -> bool {
         let now = Instant::now();
         let mut woke = false;
-        let mut i = 0;
-        while i < self.parked.len() {
-            if matches!(&self.parked[i].0, Wait::Until(t) if *t <= now) {
-                let (_, p) = self.parked.swap_remove(i);
-                self.run_queue.push_back(p);
-                woke = true;
-            } else {
-                i += 1;
+        loop {
+            let Some(&Reverse((deadline, id))) = self.timer_heap.peek() else {
+                break;
+            };
+            if deadline > now {
+                break;
             }
+            self.timer_heap.pop();
+            if !matches!(self.parked.get(&id), Some((w, _)) if w.deadline == Some(deadline)) {
+                // Stale: the park already woke on I/O (or was re-keyed). Drop it.
+                continue;
+            }
+            let Some((wait, p)) = self.parked.remove(&id) else {
+                continue;
+            };
+            // The deadline beat the fds: deregister any interests still armed in
+            // the poller (oneshot only auto-disarms fds that actually fired).
+            if let Some(poller) = &self.poller {
+                for &(sid, _) in &wait.interests {
+                    if let Some(l) = self.tcp_listeners.get(&sid) {
+                        let _ = poller.delete(l);
+                    } else if let Some(c) = self.tcp_connections.get(&sid) {
+                        let _ = poller.delete(c);
+                    } else if let Some(s) = self.pending_connects.get(&sid) {
+                        let _ = poller.delete(s);
+                    }
+                }
+            }
+            self.run_queue.push_back(p);
+            woke = true;
         }
         woke
     }
@@ -2572,26 +2776,42 @@ impl VM {
             .wait(&mut events, timeout)
             .map_err(|e| format!("scheduler poll failed: {e}"))?;
         for ev in events.iter() {
-            let id = ev.key as i32;
-            let mut i = 0;
-            while i < self.parked.len() {
-                let matches_event = match &self.parked[i].0 {
-                    Wait::Readable(sid) | Wait::Writable(sid) | Wait::Connecting(sid) => *sid == id,
-                    Wait::Until(_) => false,
+            let key = ev.key as i32;
+            // Collect first — a parked entry can't be removed while the map is
+            // iterated. Each wait wakes at most once: once removed, a later
+            // event for one of its sibling fds finds nothing left to wake.
+            let woken: Vec<u64> = self
+                .parked
+                .iter()
+                .filter_map(|(wid, (w, _))| {
+                    w.interests
+                        .iter()
+                        .any(|&(sid, _)| sid == key)
+                        .then_some(*wid)
+                })
+                .collect();
+            for wid in woken {
+                let Some((wait, mut p)) = self.parked.remove(&wid) else {
+                    continue;
                 };
-                if matches_event {
-                    let (wait, mut p) = self.parked.swap_remove(i);
+                match wait.action {
                     // A finished connect delivers its result directly onto the
                     // woken process's stack; the connect instruction is not
                     // re-run.
-                    if let Wait::Connecting(sid) = wait {
+                    WakeAction::CompleteConnect(sid) => {
                         let result = self.finish_connect(sid);
                         p.stack.push(result);
                     }
-                    self.run_queue.push_back(p);
-                } else {
-                    i += 1;
+                    WakeAction::Rerun => {}
                 }
+                // Oneshot already disarmed the fd that fired; release the wait's
+                // other still-armed interests so they don't fire unwatched.
+                for &(sid, _) in &wait.interests {
+                    if sid != key {
+                        self.deregister_fd(sid);
+                    }
+                }
+                self.run_queue.push_back(p);
             }
         }
         Ok(())
@@ -2619,6 +2839,19 @@ impl VM {
             Ok(Some(e)) | Err(e) => self.make_err(Value::str(format!("Failed to connect: {e}"))),
         }
     }
+}
+
+/// Process-global monotonic epoch, lazily pinned to the first `Instant::now()`
+/// any monotonic reading observes so every reading shares one origin. Reused by
+/// `Op::Monotonic` and the deadline math behind `socket.read_within`.
+static EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// Milliseconds elapsed since the process-global monotonic [`EPOCH`], clamped
+/// into `i64`. Saturating rather than panicking on overflow — the epoch would
+/// have to predate the process by ~292 million years to exceed `i64::MAX`.
+fn monotonic_now_ms() -> i64 {
+    let ms = EPOCH.get_or_init(Instant::now).elapsed().as_millis();
+    ms.min(i64::MAX as u128) as i64
 }
 
 /// Entry point for worker scheduler threads (indices 1..N), started by
@@ -3646,4 +3879,123 @@ mod tests {
 
     #[allow(dead_code)]
     fn _instruction_is_copy(_: Instruction) {}
+
+    // A VM hosting only the scheduler's parked store and timer heap. These tests
+    // drive the timer helpers directly and never resume the parked process, so a
+    // halt-only program is enough.
+    fn timer_test_vm() -> VM {
+        let program = Program {
+            constants: vec![],
+            functions: vec![Function {
+                name: "main".into(),
+                arity: 0,
+                locals: 0,
+                capture_count: 0,
+                code_start: 0,
+                code_len: 1,
+            }],
+            code: vec![op(Op::Halt)],
+            entry: 0,
+        };
+        new_vm(program)
+    }
+
+    // A placeholder suspended process. wake_due_timers only moves it between the
+    // parked store and the run queue; it is never resumed.
+    fn parked_process() -> Process {
+        Process {
+            stack: Vec::new(),
+            frames: Vec::new(),
+            is_main: false,
+        }
+    }
+
+    // Park `wait` under a fresh id, mirroring scheduler_loop's park arm: a
+    // deadline (if any) goes on the timer heap, the (wait, process) pair into the
+    // parked store. Returns the allocated wait id.
+    fn park_wait(vm: &mut VM, wait: Wait) -> u64 {
+        let id = vm.next_wait_id;
+        vm.next_wait_id += 1;
+        if let Some(deadline) = wait.deadline {
+            vm.timer_heap.push(Reverse((deadline, id)));
+        }
+        vm.parked.insert(id, (wait, parked_process()));
+        id
+    }
+
+    // A deadline-only Wait (no socket interests) is a pure timer: it must not
+    // wake before its instant, and must wake once the instant has passed, while
+    // a not-yet-due timer stays parked.
+    #[test]
+    fn deadline_only_wait_wakes_after_its_duration() {
+        let mut vm = timer_test_vm();
+
+        // A far-future pure timer must not wake.
+        let far = park_wait(
+            &mut vm,
+            Wait::until(Instant::now() + Duration::from_secs(3600)),
+        );
+        assert!(!vm.wake_due_timers(), "a future deadline must not wake");
+        assert_eq!(vm.run_queue.len(), 0);
+
+        // A short timer wakes only once its duration has elapsed.
+        park_wait(
+            &mut vm,
+            Wait::until(Instant::now() + Duration::from_millis(50)),
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(vm.wake_due_timers(), "an elapsed deadline must wake");
+        assert_eq!(
+            vm.run_queue.len(),
+            1,
+            "only the due timer moves to the run queue"
+        );
+
+        // The far-future timer is untouched, still parked.
+        assert!(
+            vm.parked.contains_key(&far),
+            "the future timer stays parked"
+        );
+        assert_eq!(vm.parked.len(), 1);
+    }
+
+    // A Wait carrying both a readable interest and a deadline (the read_within
+    // shape) lives in `parked` and leaves a deadline entry in `timer_heap`. If
+    // the fd fires first, drain_io_events removes the parked entry but the heap
+    // entry remains — now stale. When that stale deadline later comes due,
+    // wake_due_timers must drop it: no spurious wake, no panic on the absent id.
+    #[test]
+    fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
+        let mut vm = timer_test_vm();
+        let id = park_wait(
+            &mut vm,
+            Wait::read_with_deadline(7, Instant::now() + Duration::from_millis(50)),
+        );
+        assert_eq!(vm.timer_heap.len(), 1);
+
+        // Simulate the fd firing first: the parked entry is removed and its
+        // process queued (as drain_io_events would), but the timer heap still
+        // holds the now-stale deadline id.
+        let (_wait, p) = vm.parked.remove(&id).expect("parked entry present");
+        vm.run_queue.push_back(p);
+        assert!(vm.parked.is_empty());
+        assert_eq!(vm.timer_heap.len(), 1, "the deadline entry is now stale");
+
+        // Once the stale deadline comes due it must be discarded silently.
+        std::thread::sleep(Duration::from_millis(150));
+        let before = vm.run_queue.len();
+        assert!(
+            !vm.wake_due_timers(),
+            "a stale timer entry must not report a wake"
+        );
+        assert_eq!(
+            vm.run_queue.len(),
+            before,
+            "no process is spuriously re-queued"
+        );
+        assert!(
+            vm.timer_heap.is_empty(),
+            "the stale entry is drained from the heap"
+        );
+    }
 }

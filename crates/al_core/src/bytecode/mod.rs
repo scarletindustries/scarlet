@@ -240,6 +240,10 @@ pub enum Op {
     TcpAccept,
     TcpConnect,
     TcpRead,
+    /// Read with an absolute monotonic-ms deadline:
+    /// `[sock, max, deadline_ms] -> Result(Binary, String)`. Parks until data
+    /// arrives, the peer closes, or the deadline passes (then `Err`).
+    TcpReadUntil,
     TcpWrite,
     /// Vectored write: `[sock, Array(Binary)] -> Result(Nil, String)` in one
     /// writev syscall.
@@ -253,6 +257,8 @@ pub enum Op {
     ProcessSpawn,
     /// Park the current process for `ms` milliseconds.
     Sleep,
+    /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
+    Monotonic,
 }
 
 /// A single bytecode instruction. `a`/`b` are packed sub-operands that reclaim

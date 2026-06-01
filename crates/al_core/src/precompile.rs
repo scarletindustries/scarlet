@@ -163,6 +163,7 @@ mod tests {
             "al/bool",
             "al/net",
             "al/io",
+            "al/time",
             "al/experiments/scheduler",
             "al/http",
             "al/http/status",

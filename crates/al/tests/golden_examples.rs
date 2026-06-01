@@ -194,6 +194,7 @@ checks!(check_http_hello, "http_hello");
 checks!(check_http_server, "http_server");
 checks!(check_echo_server, "echo_server");
 checks!(check_processes, "processes");
+checks!(check_read_within, "read_within");
 
 // bench is timing-sensitive; just check it runs without error
 #[test]
