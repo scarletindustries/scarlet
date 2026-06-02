@@ -251,6 +251,10 @@ pub enum Op {
     TcpClose,
     TcpCloseServer,
     TcpLocalAddr,
+    /// `[host] -> Result(IpAddress, NetError)` — resolve a hostname to an IP
+    /// address. IP literals return immediately; hostnames offload to the
+    /// blocking pool so the syscall never stalls the scheduler. (al/net.resolve)
+    DnsResolve,
 
     // Concurrency (experimental, al/experiments/scheduler)
     /// Spawn a lightweight process running the popped closure.

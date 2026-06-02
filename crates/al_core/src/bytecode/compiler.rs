@@ -3384,6 +3384,7 @@ impl Compiler {
             "net__connect" => self.emit(Op::TcpConnect),
             "net__close" => self.emit(Op::TcpCloseServer),
             "net__local_addr" => self.emit(Op::TcpLocalAddr),
+            "net__resolve" => self.emit(Op::DnsResolve),
             "socket__read" => self.emit(Op::TcpRead),
             "socket__read_until" => self.emit(Op::TcpReadUntil),
             "socket__write" => self.emit(Op::TcpWrite),

@@ -465,6 +465,78 @@ match net.connect('127.0.0.1', __PORT__) {
     );
 }
 
+/// Once the runtime is up (after `spawn`), `io.read_file` offloads to the
+/// blocking thread pool instead of running on a scheduler thread: several
+/// spawned processes plus main all read the same file concurrently and every
+/// read completes correctly (exercises offload → worker → completion → resume).
+/// Before the pool these reads ran inline on the scheduler thread, stalling
+/// that core for the duration of the syscall.
+#[test]
+fn file_read_offloads_to_blocking_pool() {
+    let proj = Project::new("io_pool");
+    let data = proj.dir.join("data.txt");
+    std::fs::write(&data, "payload").unwrap();
+    let src = r#"import al/io
+import al/experiments/scheduler
+
+fn reader() fn() Nil {
+	fn() match io.read_text('__PATH__') {
+		Ok(_) -> println('ok')
+		Err(_) -> println('err')
+	}
+}
+
+scheduler.spawn(reader())
+scheduler.spawn(reader())
+scheduler.spawn(reader())
+match io.read_text('__PATH__') {
+	Ok(_) -> println('ok')
+	Err(_) -> println('err')
+}
+"#
+    .replace("__PATH__", &data.display().to_string());
+    let prog = proj.dir.join("prog.al");
+    std::fs::write(&prog, src).unwrap();
+
+    let out = run_al("run", &prog);
+
+    assert!(out.success, "program should run, stderr: {}", out.stderr);
+    let oks = out.stdout.lines().filter(|&l| l == "ok").count();
+    assert_eq!(
+        oks, 4,
+        "all four reads should complete via the pool; got: {:?}",
+        out.stdout
+    );
+}
+
+/// `net.resolve` runs `getaddrinfo` on the blocking pool (runtime is up after
+/// `spawn`) and returns a typed `IpAddress`. `localhost` always resolves on a
+/// loopback-capable host.
+#[test]
+fn dns_resolve_runs_on_pool() {
+    let proj = Project::new("dns_resolve");
+    let src = r#"import al/net
+import al/net/address.{V4, V6}
+import al/experiments/scheduler
+
+scheduler.spawn(fn() Nil)
+match net.resolve('localhost') {
+	Ok(V4(_)) -> println('resolved')
+	Ok(V6(_)) -> println('resolved')
+	Err(_) -> println('err')
+}
+"#;
+    let prog = proj.dir.join("prog.al");
+    std::fs::write(&prog, src).unwrap();
+    let out = run_al("run", &prog);
+    assert!(out.success, "program should run, stderr: {}", out.stderr);
+    assert_eq!(
+        out.stdout, "resolved\n",
+        "localhost should resolve to a typed IpAddress; got: {:?}",
+        out.stdout
+    );
+}
+
 /// First byte offset of `needle` within `hay`, or `None`.
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {

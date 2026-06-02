@@ -22,7 +22,7 @@ mod binary;
 mod http;
 mod sched;
 
-use sched::{Runtime, Seed};
+use sched::{BlockingOp, BlockingResult, Completion, Runtime, Seed};
 
 type VmResult<T> = Result<T, String>;
 
@@ -83,6 +83,11 @@ struct Wait {
     deadline: Option<Instant>,
     /// How the process resumes once woken.
     action: WakeAction,
+    /// A blocking op to hand to the pool when this park is registered (so the
+    /// job id matches the wait id). The process wakes when its completion is
+    /// delivered; until then it has no interests and no deadline, so only a
+    /// completion can wake it. `None` for ordinary I/O / timer parks.
+    offload: Option<BlockingOp>,
 }
 
 impl Wait {
@@ -92,6 +97,7 @@ impl Wait {
             interests: smallvec![(id, Interest::Readable)],
             deadline: None,
             action: WakeAction::Rerun,
+            offload: None,
         }
     }
 
@@ -101,6 +107,7 @@ impl Wait {
             interests: smallvec![(id, Interest::Writable)],
             deadline: None,
             action: WakeAction::Rerun,
+            offload: None,
         }
     }
 
@@ -111,6 +118,7 @@ impl Wait {
             interests: smallvec![(id, Interest::Writable)],
             deadline: None,
             action: WakeAction::CompleteConnect(id),
+            offload: None,
         }
     }
 
@@ -121,6 +129,7 @@ impl Wait {
             interests: SmallVec::new(),
             deadline: Some(deadline),
             action: WakeAction::Rerun,
+            offload: None,
         }
     }
 
@@ -132,6 +141,19 @@ impl Wait {
             interests: smallvec![(id, Interest::Readable)],
             deadline: Some(deadline),
             action: WakeAction::Rerun,
+            offload: None,
+        }
+    }
+
+    /// Park until the blocking pool finishes a job, with no I/O interest and no
+    /// deadline — only the job's completion can wake it. The op is handed to the
+    /// pool when the park is registered, so its job id matches the wait id.
+    fn offloaded(op: BlockingOp) -> Self {
+        Wait {
+            interests: SmallVec::new(),
+            deadline: None,
+            action: WakeAction::Rerun,
+            offload: Some(op),
         }
     }
 }
@@ -307,6 +329,16 @@ impl PreludeTemplates {
         Value::enum_(e)
     }
 
+    /// Build an `al/net/address.IpAddress` (`V4`/`V6`) from a `std::net::IpAddr`.
+    fn ip_address(&self, ip: std::net::IpAddr) -> Value {
+        let tpl = if ip.is_ipv6() {
+            &self.ip_v6
+        } else {
+            &self.ip_v4
+        };
+        Self::with_payload(tpl, Value::str(ip.to_string()))
+    }
+
     fn socket_address(&self, a: std::net::SocketAddr) -> Value {
         let ip_tpl = if a.is_ipv6() {
             &self.ip_v6
@@ -474,6 +506,7 @@ impl VM {
         if result.is_ok()
             && let Some(rt) = &self.runtime
         {
+            rt.shutdown_blocking();
             let workers = std::mem::take(&mut *sched::lock(&rt.workers));
             for handle in workers {
                 if handle.join().is_err() {
@@ -511,14 +544,14 @@ impl VM {
                     }
                 }
                 Step::Yield => {
-                    // Preempted. Wake any ready parked processes; when there is
-                    // nothing else local AND no idle scheduler to take them,
-                    // pick up injector seeds so queued work still gets
-                    // time-sliced in when every scheduler is busy.
+                    // Preempted. Wake any ready parked processes; when no
+                    // scheduler is idle to take them, pick up injector seeds
+                    // (one per yield) so queued work gets time-sliced in
+                    // rather than starving until a local process finishes.
                     if !self.parked.is_empty() {
                         self.poll_parked(false)?;
                     }
-                    if self.run_queue.is_empty() && !self.others_idle() {
+                    if !self.others_idle() {
                         self.take_seeds()?;
                     }
                     if !self.run_queue.is_empty() {
@@ -530,7 +563,7 @@ impl VM {
                         }
                     }
                 }
-                Step::Parked(wait) => {
+                Step::Parked(mut wait) => {
                     // Allocate this park's id, record its deadline (if any) in
                     // the timer heap, arm its I/O interests, then stash the
                     // suspended process under the id.
@@ -541,6 +574,13 @@ impl VM {
                     }
                     self.register_wait(&wait)?;
                     let outgoing = self.suspend_current();
+                    // A completion park hands its blocking op to the pool now,
+                    // keyed by this wait id so the worker's result resumes it.
+                    if let Some(op) = wait.offload.take()
+                        && let Some(rt) = &self.runtime
+                    {
+                        rt.offload(self.scheduler_index, id, op);
+                    }
                     self.parked.insert(id, (wait, outgoing));
                 }
             }
@@ -1567,6 +1607,16 @@ impl VM {
                 Op::FileRead => {
                     reds -= IO_REDUCTION_COST;
                     let path = self.pop_str("io.read_file")?;
+                    // With a runtime, offload to the blocking pool and park so
+                    // the syscall never stalls this scheduler; the completion
+                    // delivers the result. Single-scheduler programs (no
+                    // runtime) have nothing to starve, so read inline.
+                    if self.runtime.is_some() {
+                        self.frame_mut().ip = ip;
+                        return Ok(Step::Parked(Wait::offloaded(BlockingOp::ReadFile(
+                            path.to_string(),
+                        ))));
+                    }
                     let res = std::fs::read(&*path).map(Value::binary);
                     self.push_file(&path, res);
                 }
@@ -1579,6 +1629,14 @@ impl VM {
                     {
                         self.stack.push(v);
                         continue;
+                    }
+                    if self.runtime.is_some() {
+                        let bytes = bin.full_bytes().into_owned();
+                        self.frame_mut().ip = ip;
+                        return Ok(Step::Parked(Wait::offloaded(BlockingOp::WriteFile(
+                            path.to_string(),
+                            bytes,
+                        ))));
                     }
                     let nil = self.make_nil();
                     let bytes = bin.full_bytes();
@@ -1635,17 +1693,10 @@ impl VM {
                 Op::TcpConnect => {
                     reds -= IO_REDUCTION_COST;
                     let port = self.pop_int("net.connect")?;
-                    let host = self.pop_str("net.connect")?;
-
-                    // Resolve the address. IP literals never block; hostnames
-                    // use the system resolver, which does.
-                    let addr = match resolve_addr(&host, port as u16) {
-                        Ok(addr) => addr,
-                        Err(e) => {
-                            self.push_net(Err(e));
-                            continue;
-                        }
-                    };
+                    let ip_val = self.pop()?;
+                    // The hostname was already resolved off-scheduler by
+                    // al/net.connect; decode the typed IpAddress and connect.
+                    let addr = std::net::SocketAddr::new(decode_ip(&ip_val)?, port as u16);
 
                     match start_connect(&addr) {
                         // Local connects can complete immediately.
@@ -1962,6 +2013,33 @@ impl VM {
                         None => return Err("Invalid listener socket".to_string()),
                     };
                     self.push_net(res);
+                }
+                Op::DnsResolve => {
+                    reds -= IO_REDUCTION_COST;
+                    let host = self.pop_str("net.resolve")?;
+                    if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+                        // An IP literal needs no resolution.
+                        let ip = self.templates.ip_address(addr);
+                        let v = self.make_ok(ip);
+                        self.stack.push(v);
+                    } else if self.runtime.is_some() {
+                        // Offload getaddrinfo to the blocking pool and park, so
+                        // it never stalls this scheduler.
+                        self.frame_mut().ip = ip;
+                        return Ok(Step::Parked(Wait::offloaded(BlockingOp::ResolveDns(
+                            host.to_string(),
+                        ))));
+                    } else {
+                        // No runtime: resolve inline (nothing to starve).
+                        let v = match sched::resolve_host(&host) {
+                            Ok(addr) => {
+                                let ip = self.templates.ip_address(addr);
+                                self.make_ok(ip)
+                            }
+                            Err(e) => self.make_err(net_error_value(&e)),
+                        };
+                        self.stack.push(v);
+                    }
                 }
                 Op::ProcessSpawn => {
                     let f = self.pop()?;
@@ -2770,8 +2848,9 @@ impl VM {
             return Ok(());
         }
 
-        // Wake any timers that are already due.
-        let woke = self.wake_due_timers();
+        // Deliver any finished blocking-pool jobs, then wake due timers.
+        let mut woke = self.drain_completions();
+        woke |= self.wake_due_timers();
 
         let waiting_on_io = self.parked.values().any(|(w, _)| !w.interests.is_empty());
 
@@ -2800,7 +2879,55 @@ impl VM {
         self.ensure_poller()?;
         self.drain_io_events(timeout)?;
         self.wake_due_timers();
+        // A completion notify may be what ended the wait above.
+        self.drain_completions();
         Ok(())
+    }
+
+    /// Deliver finished blocking-pool jobs: for each completion, resume the
+    /// process parked under its `job_id` with the result built on this
+    /// scheduler's `Rc` heap. Returns whether anything was woken.
+    fn drain_completions(&mut self) -> bool {
+        let Some(rt) = self.runtime.clone() else {
+            return false;
+        };
+        let drained: Vec<Completion> = {
+            let mut q = sched::lock(&rt.completions[self.scheduler_index]);
+            if q.is_empty() {
+                return false;
+            }
+            q.drain(..).collect()
+        };
+        let mut woke = false;
+        for c in drained {
+            let Some((_wait, mut p)) = self.parked.remove(&c.job_id) else {
+                continue;
+            };
+            let value = match c.result {
+                BlockingResult::ReadFile { path, result } => match result {
+                    Ok(bytes) => self.make_ok(Value::binary(bytes)),
+                    Err(e) => self.make_err(io_error_value(&e, &path)),
+                },
+                BlockingResult::WriteFile { path, result } => match result {
+                    Ok(()) => {
+                        let nil = self.make_nil();
+                        self.make_ok(nil)
+                    }
+                    Err(e) => self.make_err(io_error_value(&e, &path)),
+                },
+                BlockingResult::ResolveDns { result } => match result {
+                    Ok(addr) => {
+                        let ip = self.templates.ip_address(addr);
+                        self.make_ok(ip)
+                    }
+                    Err(e) => self.make_err(net_error_value(&e)),
+                },
+            };
+            p.stack.push(value);
+            self.run_queue.push_back(p);
+            woke = true;
+        }
+        woke
     }
 
     /// Wake parked processes whose deadline has passed, draining the
@@ -2958,15 +3085,24 @@ fn worker_main(runtime: Arc<Runtime>, index: usize) {
 /// the raw handle is its first payload field.
 /// Resolve `host:port` to a socket address. IP literals never block; hostnames
 /// go through the system resolver, which does.
-fn resolve_addr(host: &str, port: u16) -> std::io::Result<std::net::SocketAddr> {
-    use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, port));
+/// Decode an `al/net/address.IpAddress` value (`V4(s)` / `V6(s)`) into a
+/// `std::net::IpAddr`. The address rides as a string inside the variant, so this
+/// just parses `payload[0]`; a malformed value can only be a compiler bug.
+fn decode_ip(v: &Value) -> VmResult<std::net::IpAddr> {
+    let s = v
+        .as_enum()
+        .and_then(|e| e.payload.first())
+        .and_then(|p| p.as_heap())
+        .and_then(|h| match h {
+            HeapValue::Str(s) => Some(s),
+            _ => None,
+        });
+    match s {
+        Some(s) => s
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| "net.connect: invalid Ip address. This is likely a compiler bug.".into()),
+        None => Err("net.connect: malformed IpAddress. This is likely a compiler bug.".into()),
     }
-    (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "host not found"))
 }
 
 /// The two ways a non-blocking connect can begin.

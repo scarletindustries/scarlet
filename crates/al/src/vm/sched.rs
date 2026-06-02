@@ -14,7 +14,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use al_core::bytecode::transfer::{SendProgram, SendValue};
 
@@ -33,6 +33,78 @@ pub(super) struct Seed {
     pub listeners: Vec<(i32, TcpListener)>,
     /// Connections the closure captured (moved — the spawner loses them).
     pub connections: Vec<(i32, TcpStream)>,
+}
+
+/// A blocking operation handed to the [`BlockingPool`] so it runs on a worker
+/// thread instead of stalling a scheduler. The payload is fully `Send`.
+#[derive(Debug)]
+pub(super) enum BlockingOp {
+    ReadFile(String),
+    WriteFile(String, Vec<u8>),
+    ResolveDns(String),
+}
+
+/// The `Send` result of a [`BlockingOp`], delivered back to the originating
+/// scheduler, which turns it into a `Value` on its own `Rc` heap.
+pub(super) enum BlockingResult {
+    ReadFile {
+        path: String,
+        result: std::io::Result<Vec<u8>>,
+    },
+    WriteFile {
+        path: String,
+        result: std::io::Result<()>,
+    },
+    ResolveDns {
+        result: std::io::Result<std::net::IpAddr>,
+    },
+}
+
+/// A finished blocking job routed back to the scheduler that issued it.
+/// `job_id` is the parked process's wait id, so the scheduler resumes it
+/// directly without re-running the instruction.
+pub(super) struct Completion {
+    pub job_id: u64,
+    pub result: BlockingResult,
+}
+
+/// An elastic pool of OS threads for blocking syscalls (file I/O today, DNS
+/// next) that must never run on a scheduler thread. Idle workers park *warm*
+/// and are reused with no spawn cost; a burst grows the pool up to `max_total`;
+/// as work drains, idle workers above `max_warm` exit so threads aren't leaked.
+struct BlockingPool {
+    /// Pending jobs: `(job_id, origin scheduler, op)`.
+    queue: Mutex<VecDeque<(u64, usize, BlockingOp)>>,
+    /// Workers park here when there is no work.
+    cond: Condvar,
+    /// Live worker threads (busy + parked).
+    total: AtomicUsize,
+    /// Workers currently parked on `cond`.
+    idle: AtomicUsize,
+    /// Hard ceiling on worker threads.
+    max_total: usize,
+    /// Most idle workers kept warm; extras exit on going idle.
+    max_warm: usize,
+    shutdown: AtomicBool,
+}
+
+impl BlockingPool {
+    fn new() -> Self {
+        let max_total = std::env::var("AL_BLOCKING_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| (1..=4096).contains(&n))
+            .unwrap_or(512);
+        BlockingPool {
+            queue: Mutex::new(VecDeque::new()),
+            cond: Condvar::new(),
+            total: AtomicUsize::new(0),
+            idle: AtomicUsize::new(0),
+            max_total,
+            max_warm: 8,
+            shutdown: AtomicBool::new(false),
+        }
+    }
 }
 
 /// State shared by every scheduler in the program.
@@ -70,6 +142,12 @@ pub(super) struct Runtime {
     pub parked_flags: Vec<AtomicBool>,
     /// Worker threads, joined by scheduler 0 at shutdown.
     pub workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Elastic worker pool for blocking syscalls (file I/O, …) that must not
+    /// run on a scheduler thread.
+    blocking: BlockingPool,
+    /// Per-scheduler completion queues: a blocking worker pushes a finished job
+    /// here and `notify()`s that scheduler's poller to deliver the result.
+    pub completions: Vec<Mutex<VecDeque<Completion>>>,
 }
 
 impl Runtime {
@@ -187,6 +265,113 @@ impl Runtime {
             let _ = poller.notify();
         }
     }
+
+    /// Hand a blocking op to the pool, to be delivered back to scheduler
+    /// `origin` under `job_id`. Reuses a warm worker, else spawns one up to the
+    /// cap; at the cap the job waits for a busy worker to free up (a worker
+    /// re-checks the queue before parking, so it is never stranded).
+    pub fn offload(self: &Arc<Self>, origin: usize, job_id: u64, op: BlockingOp) {
+        lock(&self.blocking.queue).push_back((job_id, origin, op));
+        if self.blocking.idle.load(Ordering::Acquire) > 0 {
+            self.blocking.cond.notify_one();
+        } else if self.blocking.total.load(Ordering::Acquire) < self.blocking.max_total {
+            self.spawn_blocking_worker();
+        } else {
+            self.blocking.cond.notify_one();
+        }
+    }
+
+    fn spawn_blocking_worker(self: &Arc<Self>) {
+        self.blocking.total.fetch_add(1, Ordering::AcqRel);
+        let rt = Arc::clone(self);
+        if std::thread::Builder::new()
+            .name("al-blocking".into())
+            .spawn(move || blocking_worker_main(rt))
+            .is_err()
+        {
+            // Couldn't spawn: undo the count and let an existing worker take it.
+            self.blocking.total.fetch_sub(1, Ordering::AcqRel);
+            self.blocking.cond.notify_one();
+        }
+    }
+
+    /// Route a finished blocking job back to its scheduler and wake it.
+    pub fn deliver_completion(&self, origin: usize, c: Completion) {
+        lock(&self.completions[origin]).push_back(c);
+        let _ = self.pollers[origin].notify();
+    }
+
+    /// Signal blocking workers to exit at program end. Idle workers wake and
+    /// return; with `live == 0` none are mid-op, so nothing is interrupted.
+    pub fn shutdown_blocking(&self) {
+        self.blocking.shutdown.store(true, Ordering::Release);
+        self.blocking.cond.notify_all();
+    }
+}
+
+/// A blocking-pool worker: pull a job, run it, deliver the result, repeat.
+/// Parks *warm* between jobs; exits if it would be the `max_warm + 1`-th idle
+/// worker (reaping a burst) or once shutdown is signalled.
+fn blocking_worker_main(rt: Arc<Runtime>) {
+    loop {
+        let (job_id, origin, op) = {
+            let mut q = lock(&rt.blocking.queue);
+            loop {
+                if rt.blocking.shutdown.load(Ordering::Acquire) {
+                    rt.blocking.total.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
+                if let Some(job) = q.pop_front() {
+                    break job;
+                }
+                // No work: keep at most `max_warm` workers parked, reap the rest.
+                if rt.blocking.idle.load(Ordering::Acquire) >= rt.blocking.max_warm {
+                    rt.blocking.total.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
+                rt.blocking.idle.fetch_add(1, Ordering::AcqRel);
+                q = rt.blocking.cond.wait(q).unwrap_or_else(|e| e.into_inner());
+                rt.blocking.idle.fetch_sub(1, Ordering::AcqRel);
+            }
+        };
+        let result = run_blocking(op);
+        rt.deliver_completion(origin, Completion { job_id, result });
+    }
+}
+
+/// Run one blocking op (no locks held). The error is captured `Send` and turned
+/// into a typed `IoError` by the scheduler on delivery.
+fn run_blocking(op: BlockingOp) -> BlockingResult {
+    match op {
+        BlockingOp::ReadFile(path) => {
+            let result = std::fs::read(&path);
+            BlockingResult::ReadFile { path, result }
+        }
+        BlockingOp::WriteFile(path, bytes) => {
+            let result = std::fs::write(&path, &bytes);
+            BlockingResult::WriteFile { path, result }
+        }
+        BlockingOp::ResolveDns(host) => BlockingResult::ResolveDns {
+            result: resolve_host(&host),
+        },
+    }
+}
+
+/// Resolve a hostname to an IP address via the system resolver (`getaddrinfo`).
+/// Runs on a blocking-pool worker, never a scheduler thread. Returns the first
+/// address the resolver yields.
+pub(super) fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    (host, 0u16)
+        .to_socket_addrs()?
+        .next()
+        .map(|sa| sa.ip())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "name resolution returned no addresses",
+            )
+        })
 }
 
 /// Lock a mutex, recovering the data if a holder thread died (the VM never
@@ -237,6 +422,8 @@ pub(super) fn boot(
         submit_cursor: AtomicUsize::new(0),
         // The main process is live.
         live: AtomicUsize::new(1),
+        blocking: BlockingPool::new(),
+        completions: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
         pollers,
         // Workers start flagged idle — they are about to be — so that seeds
         // submitted while they boot are handed straight to them rather than
