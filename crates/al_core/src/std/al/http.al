@@ -154,15 +154,20 @@ fn build_request(method Binary, target Binary, version Int, hdrs Headers, b Body
 pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, NetError) {
 	match net.listen(host, port) {
 		Err(e) -> Err(e)
-		Ok(server) -> accept_loop(server, handler)
+		Ok(server) -> serve_on(server, handler)
 	}
 }
 
-fn accept_loop(server Server, handler fn(Request) Response) Result(Nil, NetError) {
+// Serve connections from a listener the caller already bound. This is the
+// entry point when the caller needs the bound address before serving — e.g.
+// listen on port 0, read the kernel-assigned port back with net.local_addr,
+// then hand the listener over. `serve` is the listen-and-serve convenience on
+// top of this.
+pub fn serve_on(server Server, handler fn(Request) Response) Result(Nil, NetError) {
 	match net.accept(server) {
 		Ok(sock) -> {
 			scheduler.spawn(fn() drive(sock, handler))
-			accept_loop(server, handler)
+			serve_on(server, handler)
 		}
 		Err(e) -> Err(e)
 	}

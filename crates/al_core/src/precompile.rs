@@ -185,7 +185,7 @@ mod tests {
         }
 
         // The al/http stack compiled with its spec-fixed public surface. These
-        // names are the contract the H1 server core is built on (docs/HTTP.md §5);
+        // names are the contract the H1 server core is built on;
         // a renamed or dropped export would silently break the connection driver.
         let expected_exports: &[(&str, &[&str])] = &[
             (

@@ -297,8 +297,8 @@ fn cmd_run(args: RunArgs) {
     let mut v = vm::new_vm(result.program);
     let run_result = v.run().unwrap_or_else(|e| die(e));
 
-    if !matches!(run_result.as_enum(), Some(e) if e.type_id == al::stdlib::prelude::NIL.type_id) {
-        println!("{}", vm::inspect(&run_result));
+    if !matches!(run_result.as_enum(), Some(e) if e.type_id() == al::stdlib::prelude::NIL.type_id) {
+        println!("{}", vm::inspect(&run_result, v.program()));
     }
 }
 

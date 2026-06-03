@@ -1,3 +1,38 @@
+//! Module top level: the multi-pass declaration analysis that fronts the
+//! compiler's fused infer+emit pass.
+//!
+//! Top-level declarations are mutually recursive and order-free — a fn may
+//! call a fn defined below it, a type may mention a type defined below it —
+//! so bodies cannot simply be compiled in source order. `analyse_module`
+//! makes the order explicit in passes, each establishing one kind of fact
+//! before the next pass needs it:
+//!
+//! | pass | does                                                          |
+//! |------|---------------------------------------------------------------|
+//! | 0    | partition nodes; duplicate/reserved checks; siphon `@vm` fns  |
+//! | 1    | register custom-type heads (name + params) and opaque types   |
+//! | 2    | toposort alias dependencies; register aliases                 |
+//! | 3    | pre-allocate one global slot per fn/const; register fn        |
+//! |      | signatures                                                    |
+//! | 3.5  | hydrate constructor bodies; define ctor values                |
+//! | 4    | build the fn/const call graph; Tarjan SCC                     |
+//! | 5    | infer + compile each SCC, callees first; generalize per SCC   |
+//!
+//! Pass 5 hands each body to `compiler.rs` (`compile_declared_function` /
+//! `compile_expr_with_hint`). Members of one SCC are inferred at a single
+//! engine level against their pre-registered signatures and generalized
+//! together afterwards, so mutual recursion typechecks monomorphically
+//! inside the group and polymorphically outside it. Non-declaration nodes
+//! (let bindings, bare expressions) run last, in source order.
+//!
+//! # Invariant: per-decl data is positional, never name-keyed
+//!
+//! Data computed in an early pass and consumed in a later one (`Prepared`,
+//! `PreparedType`) is carried in `Vec`s built one-to-one with the decl
+//! lists and indexed positionally. Keying by name desyncs the moment two
+//! decls share a name — the decl list keeps both while a map keeps one —
+//! so that bug class is kept unrepresentable here.
+
 use std::collections::{HashMap, HashSet};
 
 use petgraph::Directed;
@@ -1145,58 +1180,9 @@ impl<'a, 'g> RefWalker<'a, 'g> {
     }
 
     fn pattern(&mut self, p: &ast::Pattern) {
-        use ast::Pattern as P;
-        match p {
-            P::Wildcard { .. } | P::Literal(_) => {}
-            P::Var { name } => self.define(&name.name),
-            P::Binary { segments, rest, .. } => {
-                for seg in segments {
-                    self.pattern(&seg.value);
-                    if let Some(sz) = &seg.size {
-                        self.expr(sz);
-                    }
-                }
-                if let Some(r) = rest
-                    && let Some(b) = &r.binding
-                {
-                    self.define(&b.name);
-                }
-            }
-            P::Constructor { args, .. } => {
-                // Constructor name is uppercase — never a top-level fn/const.
-                for a in args {
-                    match a {
-                        ast::PatternArg::Positional(p) => self.pattern(p),
-                        ast::PatternArg::Labeled { pattern, .. } => self.pattern(pattern),
-                    }
-                }
-            }
-            P::Tuple { elements, .. } => {
-                for e in elements {
-                    self.pattern(e);
-                }
-            }
-            P::Array { elements, .. } => {
-                for e in elements {
-                    match e {
-                        ast::ArrayPatternElement::Pattern(p) => self.pattern(p),
-                        ast::ArrayPatternElement::Spread { binding, .. } => {
-                            if let Some(b) = binding {
-                                self.define(&b.name);
-                            }
-                        }
-                    }
-                }
-            }
-            P::Or { patterns, .. } => {
-                for sub in patterns {
-                    self.pattern(sub);
-                }
-            }
-            P::Range { start, end, .. } => {
-                self.pattern(start);
-                self.pattern(end);
-            }
-        }
+        p.for_each_binder(ast::OrAlternatives::All, &mut |b| match b {
+            ast::PatternBinder::Name(id) => self.define(&id.name),
+            ast::PatternBinder::SizeExpr(sz) => self.expr(sz),
+        });
     }
 }

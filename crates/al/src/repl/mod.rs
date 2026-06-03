@@ -148,7 +148,7 @@ fn eval_input(input: &str, definitions: &[ast::Node]) -> Vec<ast::Node> {
         }
     };
 
-    println!("{}", vm::inspect(&run_result));
+    println!("{}", vm::inspect(&run_result, v.program()));
 
     let mut new_definitions: Vec<ast::Node> = Vec::new();
     for node in &input_parse_result.ast.body {

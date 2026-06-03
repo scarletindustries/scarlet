@@ -2,11 +2,13 @@
 //!
 //! The first `spawn()` in a program boots one scheduler per CPU core: the main
 //! thread becomes scheduler 0 and the rest are OS threads owned by the
-//! runtime. A spawned process starts life as a [`Seed`] — a fully `Send`
-//! deep copy of the closure and everything it can see — pushed onto a shared
-//! injector queue. Whichever scheduler is free takes it, rebuilds it on its own
-//! `Rc` heap, and runs it to completion; once started, a process is pinned to
-//! its scheduler (heaps never cross threads).
+//! runtime. A spawned process starts life as a [`Seed`] — an owned mini-heap
+//! holding a deep copy of the closure graph plus the root `Value` pointing
+//! into it — pushed onto a shared injector queue or handed to an idle
+//! scheduler. Whichever scheduler takes it adopts the heap as the child
+//! process's initial young space: the arena moves as a unit, nothing is
+//! rebuilt on the receiving side. A process's heap is only ever touched by
+//! the scheduler currently running it.
 //!
 //! Idle schedulers park inside their OS poller; submitting a seed (or the last
 //! process finishing) wakes them via [`polling::Poller::notify`].
@@ -16,23 +18,54 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use al_core::bytecode::transfer::{SendProgram, SendValue};
+use al_core::bytecode::{Program, Value};
+use al_core::heap::ProcHeap;
+
+use super::freeze::FrozenValue;
+use super::migrate::Migrant;
 
 /// How many seeds a scheduler takes from the injector per visit. One at a
 /// time maximizes spread: with k seeds and k idle schedulers, every scheduler
 /// gets exactly one.
 pub(super) const SEED_BATCH: usize = 1;
 
-/// A spawned-but-not-yet-started process in `Send` form: the unit of
-/// cross-scheduler work distribution.
+/// A spawned-but-not-yet-started process: the unit of cross-scheduler work
+/// distribution. `Send` by construction — `heap` is owned memory and `root`
+/// points only into it (or into the frozen area), so handing a seed to
+/// another scheduler is a plain move.
 pub(super) struct Seed {
-    /// The deep-copied closure to run.
-    pub closure: SendValue,
+    /// The child's initial young space: a fresh mini-arena sized to the
+    /// spawned closure's graph, filled by `copy_graph` spawn-side (sharing
+    /// preserved via forwarding pointers; `Binary` `Arc` backings are shared
+    /// zero-copy — only the arena box is copied, never the bytes).
+    pub heap: ProcHeap,
+    /// The spawned closure, as a pointer into `heap`.
+    pub root: Value,
     /// Listening sockets the closure captured (dup'd file descriptors —
     /// the spawner keeps accepting too).
     pub listeners: Vec<(i32, TcpListener)>,
     /// Connections the closure captured (moved — the spawner loses them).
     pub connections: Vec<(i32, TcpStream)>,
+}
+
+// A seed crosses scheduler threads (inbox handoff or the shared injector), so
+// the "`Send` by construction" claim above is compiler-checked here, exactly
+// like `Process`/`Migrant`: the heap owns its slabs, `root` is one machine
+// word into them, and the fd handles are inherently `Send`. If `Seed` ever
+// regains a field that cannot move across threads, spawning must not build.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Seed>();
+};
+
+/// A unit of work delivered to a scheduler's private inbox: a process that
+/// has not started yet (a seed) or a process moving between schedulers
+/// mid-execution (a migrant). Migrants are only ever direct-handed to a
+/// chosen peer — a claimed idle scheduler, or the least-loaded busy one —
+/// never queued to the shared overflow injector, which stays `Seed`-only.
+pub(super) enum Inbound {
+    Seed(Seed),
+    Migrant(Migrant),
 }
 
 /// A blocking operation handed to the [`BlockingPool`] so it runs on a worker
@@ -45,7 +78,10 @@ pub(super) enum BlockingOp {
 }
 
 /// The `Send` result of a [`BlockingOp`], delivered back to the originating
-/// scheduler, which turns it into a `Value` on its own `Rc` heap.
+/// scheduler. Only raw data crosses the pool boundary — never a `Value`; the
+/// scheduler constructs the result `Value` into the *resuming process's*
+/// arena at delivery, so no worker thread ever
+/// touches a process heap.
 pub(super) enum BlockingResult {
     ReadFile {
         path: String,
@@ -62,14 +98,15 @@ pub(super) enum BlockingResult {
 
 /// A finished blocking job routed back to the scheduler that issued it.
 /// `job_id` is the parked process's wait id, so the scheduler resumes it
-/// directly without re-running the instruction.
+/// directly without re-running the instruction (the result `Value` is built
+/// into that process's arena at delivery; see `VM::drain_completions`).
 pub(super) struct Completion {
     pub job_id: u64,
     pub result: BlockingResult,
 }
 
-/// An elastic pool of OS threads for blocking syscalls (file I/O today, DNS
-/// next) that must never run on a scheduler thread. Idle workers park *warm*
+/// An elastic pool of OS threads for blocking syscalls (file reads and
+/// writes, DNS resolution) that must never run on a scheduler thread. Idle workers park *warm*
 /// and are reused with no spawn cost; a burst grows the pool up to `max_total`;
 /// as work drains, idle workers above `max_warm` exit so threads aren't leaked.
 struct BlockingPool {
@@ -109,12 +146,14 @@ impl BlockingPool {
 
 /// State shared by every scheduler in the program.
 pub(super) struct Runtime {
-    /// The program in `Send` form; each scheduler hydrates its own `Rc` copy.
-    pub program: Arc<SendProgram>,
-    /// The program's global (literal) area in `Send` form: top-level bindings,
-    /// published once when main writes them. Workers hydrate from here into
-    /// their own `Rc` globals table, gated by `globals_version`.
-    pub globals: Mutex<Vec<Option<SendValue>>>,
+    /// The shared program; each worker scheduler runs a private clone of it
+    /// (constants are frozen words pointing into `program.frozen`, shared).
+    pub program: Arc<Program>,
+    /// The program's global (literal) area: top-level bindings as frozen
+    /// value words,
+    /// published once when main writes them. Workers copy the words into
+    /// their own globals table, gated by `globals_version`.
+    pub globals: Mutex<Vec<Option<FrozenValue>>>,
     /// Bumped on every publish; lets schedulers skip syncing when nothing
     /// changed.
     pub globals_version: AtomicU64,
@@ -122,15 +161,17 @@ pub(super) struct Runtime {
     /// top-level binding works from any scheduler: each scheduler that needs
     /// one dups the fd from here into its own table.
     pub shared_listeners: Mutex<HashMap<i32, TcpListener>>,
-    /// Per-scheduler seed inboxes. `submit` hands a seed directly to a chosen
+    /// Per-scheduler work inboxes. `submit` hands a seed directly to a chosen
     /// idle scheduler's inbox so an already-running scheduler can never race
-    /// it away from the one that was woken for it.
-    pub inboxes: Vec<Mutex<VecDeque<Seed>>>,
+    /// it away from the one that was woken for it; a migrating process is
+    /// handed to a claimed idle peer the same way.
+    pub inboxes: Vec<Mutex<VecDeque<Inbound>>>,
     /// Overflow queue: seeds submitted while every scheduler was busy. Taken
     /// (one per visit) by whichever scheduler frees up first.
     pub injector: Mutex<VecDeque<Seed>>,
-    /// Rotates the starting point of `submit`'s idle-scheduler search so
-    /// consecutive submissions spread across different schedulers.
+    /// Rotates the starting point of the idle-scheduler scans — both
+    /// `submit`'s seed placement and donation's peer claim — so consecutive
+    /// placements spread across different schedulers.
     pub submit_cursor: AtomicUsize,
     /// Live processes across all schedulers, counting undelivered seeds and the
     /// main process. The program is over when this reaches zero.
@@ -140,6 +181,20 @@ pub(super) struct Runtime {
     pub pollers: Vec<Arc<polling::Poller>>,
     /// Which schedulers are currently parked (idle or waiting on I/O).
     pub parked_flags: Vec<AtomicBool>,
+    /// Per-scheduler published load: how many runnable processes (running +
+    /// queued) each scheduler last reported, plus one for every directed
+    /// inbound (donated migrant or direct-handed seed) still in flight to it.
+    /// Donation reads these to find the least-loaded peer, so queue-length
+    /// imbalances are leveled while every scheduler is busy — an overloaded
+    /// scheduler must not wait for a peer to drain completely before any
+    /// work moves.
+    ///
+    /// Advisory, not authoritative: each scheduler overwrites its own slot
+    /// (`publish_load`) every time its runnable count changes, after draining
+    /// its inbox, so in-flight bumps are folded into the owner's next report.
+    /// A stale read can only mistune one donation decision, and the next
+    /// yield self-corrects, so plain relaxed loads/stores suffice.
+    pub run_lens: Vec<AtomicUsize>,
     /// Worker threads, joined by scheduler 0 at shutdown.
     pub workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// Elastic worker pool for blocking syscalls (file I/O, …) that must not
@@ -176,7 +231,8 @@ impl Runtime {
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                lock(&self.inboxes[i]).push_back(seed);
+                self.run_lens[i].fetch_add(1, Ordering::Relaxed);
+                lock(&self.inboxes[i]).push_back(Inbound::Seed(seed));
                 let _ = self.pollers[i].notify();
                 return;
             }
@@ -192,20 +248,169 @@ impl Runtime {
         self.wake_one();
     }
 
-    /// Take the seeds destined for scheduler `me`: everything handed to its
-    /// inbox, plus (when the inbox is empty) up to [`SEED_BATCH`] from the
-    /// shared overflow queue.
-    pub fn take_seeds(&self, me: usize) -> Vec<Seed> {
-        let mut out: Vec<Seed> = {
-            let mut inbox = lock(&self.inboxes[me]);
-            inbox.drain(..).collect()
-        };
+    /// Claim one idle scheduler for a direct handoff: scan `parked_flags`
+    /// from a rotating offset (so back-to-back placements fan out across
+    /// schedulers) and CAS the first set flag `true -> false` — the same
+    /// pattern as [`Runtime::submit`]. A claimed scheduler is invisible to
+    /// every other submitter and donor (its flag is down), so whatever is
+    /// pushed into its inbox next cannot be raced away by another placement
+    /// decision; it keeps sleeping until notified.
+    ///
+    /// Two protocol invariants for callers:
+    ///
+    /// - A successful claim MUST be followed by a `notify` of the claimed
+    ///   scheduler's poller — by handing it work ([`Runtime::donate`]) or,
+    ///   when the handoff falls through, by [`Runtime::abort_donation`]. A
+    ///   claimed-but-never-notified scheduler sleeps with its flag down,
+    ///   unwakeable by submitters, until unrelated I/O happens to fire on
+    ///   its poller.
+    /// - Donors claim BEFORE detaching the victim process's fds. The detach
+    ///   has side effects (it moves connection fds out of the donor's
+    ///   tables), so it must not start until a destination is guaranteed;
+    ///   the local eligibility checks, which are cheap and effect-free, run
+    ///   before the claim.
+    pub fn claim_idle_peer(&self) -> Option<usize> {
+        let n = self.parked_flags.len();
+        let start = self.submit_cursor.fetch_add(1, Ordering::Relaxed);
+        for off in 0..n {
+            let i = (start + off) % n;
+            if self.parked_flags[i]
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Find the least-loaded peer worth donating to when no scheduler is
+    /// idle: the one whose published load ([`Runtime::run_lens`]) is
+    /// smallest, provided moving one process strictly narrows the imbalance
+    /// (`my_load >= peer + 2` — after the move the donor has shed one and
+    /// the peer holds one more, so a smaller gap would only swap the
+    /// imbalance back and forth). This is what levels run-queue lengths
+    /// while every scheduler is busy: long-running CPU-bound processes can
+    /// otherwise sit 5-deep on one scheduler and alone on another for the
+    /// whole run, with the idle-driven path never firing because nobody
+    /// drains.
+    ///
+    /// Ties break from a rotating offset (the [`Runtime::submit`] pattern)
+    /// so concurrent donors fan out across equally starved peers. No claim
+    /// is taken — the loads are advisory and the racing window between
+    /// choosing and donating is one yield at worst; `donate`'s send-time
+    /// bump is what keeps simultaneous donors from all picking the same
+    /// peer.
+    pub fn pick_underloaded_peer(&self, me: usize, my_load: usize) -> Option<usize> {
+        let n = self.run_lens.len();
+        let start = self.submit_cursor.fetch_add(1, Ordering::Relaxed);
+        let mut best: Option<(usize, usize)> = None;
+        for off in 0..n {
+            let i = (start + off) % n;
+            if i == me {
+                continue;
+            }
+            let len = self.run_lens[i].load(Ordering::Relaxed);
+            if best.is_none_or(|(_, b)| len < b) {
+                best = Some((i, len));
+            }
+        }
+        let (peer, len) = best?;
+        (my_load >= len + 2).then_some(peer)
+    }
+
+    /// Publish scheduler `me`'s runnable count (running + queued) for
+    /// donors' [`Runtime::pick_underloaded_peer`] scans. Called after every
+    /// change to the count — and always after draining the inbox, so the
+    /// in-flight bumps from `donate`/`submit` are folded into the owner's
+    /// own report rather than double-counted.
+    pub fn publish_load(&self, me: usize, len: usize) {
+        self.run_lens[me].store(len, Ordering::Relaxed);
+    }
+
+    /// Hand a migrating process to `peer` — an idle scheduler previously
+    /// claimed via [`Runtime::claim_idle_peer`], or a busy one chosen by
+    /// [`Runtime::pick_underloaded_peer`] — and wake it. The wake matters in
+    /// both cases: a claimed peer is asleep, and a busy peer may have parked
+    /// on I/O between being chosen and the push (`notify` is sticky, so the
+    /// worst case for a peer that stayed busy is one spurious poll wakeup).
+    ///
+    /// The destination's published load is bumped here, when the migrant
+    /// becomes visible to other donors, so a freshly fed peer is not
+    /// dog-piled before it can report its own count.
+    ///
+    /// Deliberately NOT routed through [`Runtime::submit`]: a migrant is an
+    /// already-running process, so it is already counted in `live`, and
+    /// counting it again would leave `live` permanently above zero — the
+    /// program would never shut down. The same fact closes the shutdown
+    /// race: a migrant in transit holds `live > 0`, so no scheduler can
+    /// observe program-end and exit while a process sits in transit in an
+    /// inbox.
+    ///
+    /// Migrants are only ever direct-handed like this, never queued to the
+    /// shared injector (which stays `Seed`-only): with no chosen
+    /// destination, a migrant could strand in the overflow queue behind
+    /// busy schedulers — exactly the imbalance donation exists to fix.
+    pub fn donate(&self, peer: usize, m: Migrant) {
+        self.run_lens[peer].fetch_add(1, Ordering::Relaxed);
+        lock(&self.inboxes[peer]).push_back(Inbound::Migrant(m));
+        let _ = self.pollers[peer].notify();
+    }
+
+    /// A donation fell through after `peer` was already claimed (the victim's
+    /// fd detach failed, e.g. it references a listener fd that cannot be
+    /// dup'd).
+    /// Notify the claimed peer anyway: it wakes, finds nothing, re-parks,
+    /// and republishes its parked flag. Skipping this would leave the peer
+    /// asleep with its flag down — invisible to every future submit/donate.
+    pub fn abort_donation(&self, peer: usize) {
+        let _ = self.pollers[peer].notify();
+    }
+
+    /// Take the work destined for scheduler `me`: everything handed to its
+    /// inbox (seeds and migrants), plus (when the inbox is empty) up to
+    /// [`SEED_BATCH`] seeds from the shared overflow queue.
+    pub fn take_inbound(&self, me: usize) -> Vec<Inbound> {
+        let mut out = self.take_directed(me);
         if out.is_empty() {
-            let mut q = lock(&self.injector);
-            let take = q.len().min(SEED_BATCH);
-            out.extend(q.drain(..take));
+            out.extend(self.take_overflow().into_iter().map(Inbound::Seed));
         }
         out
+    }
+
+    /// Drain scheduler `me`'s inbox: work that was explicitly placed here —
+    /// seeds direct-handed by `submit`, migrants donated by peers. Directed
+    /// work is taken unconditionally (a busy scheduler drains its inbox at
+    /// every yield); only the undirected overflow queue is subject to the
+    /// pickup limit.
+    pub fn take_directed(&self, me: usize) -> Vec<Inbound> {
+        lock(&self.inboxes[me]).drain(..).collect()
+    }
+
+    /// Take up to [`SEED_BATCH`] seeds from the shared overflow queue:
+    /// undirected work raced for by whichever scheduler has capacity first.
+    pub fn take_overflow(&self) -> Vec<Seed> {
+        let mut q = lock(&self.injector);
+        let take = q.len().min(SEED_BATCH);
+        q.drain(..take).collect()
+    }
+
+    /// Steal one unit of inbound work from another scheduler's inbox: handed
+    /// off but not yet taken. Called only by an idle scheduler with nothing
+    /// local, so the work starts immediately instead of waiting for its
+    /// assigned scheduler to wake; the owner finding an empty inbox simply
+    /// parks again. This applies to donated migrants as much as seeds — a
+    /// stolen migrant's live count rides with it (counted since its original
+    /// submit), so the handoff is race-free wherever it lands.
+    pub fn steal_inbound(&self, me: usize) -> Option<Inbound> {
+        let n = self.inboxes.len();
+        for off in 1..n {
+            let i = (me + off) % n;
+            if let Some(inbound) = lock(&self.inboxes[i]).pop_front() {
+                return Some(inbound);
+            }
+        }
+        None
     }
 
     /// A process finished. When it was the last one, wake every scheduler so
@@ -225,16 +430,31 @@ impl Runtime {
             .any(|(i, flag)| i != me && flag.load(Ordering::Acquire))
     }
 
-    /// Publish a top-level binding to the shared global area. Globals are
-    /// write-once, so each slot is published at most once (plus once at boot
-    /// for bindings that existed before the runtime did).
-    pub fn publish_global(&self, slot: usize, value: SendValue) {
+    /// Publish a top-level binding's frozen root to the shared global area.
+    /// This is not at-most-once per slot: `Op::StoreLocal` republishes on
+    /// every entry-frame store, and binary-pattern cursor temps and
+    /// or-pattern alternative bindings store the same slot several times.
+    /// All of a slot's stores happen inside the single top-level statement
+    /// that owns it, before any closure that could read the slot exists, so
+    /// each readable slot reaches its final published value before any
+    /// reader can observe it. Runtime boot also replays the table once, for
+    /// bindings stored before the runtime existed; those words are already
+    /// frozen, so the replay copies nothing.
+    ///
+    /// The caller has already deep-copied the value graph into the frozen
+    /// area (`freeze::freeze_global` — the shared `copy_graph` with the
+    /// frozen builder as destination), so `frozen` is an immediate or points
+    /// at fully written frozen segments. The table store happens-before the
+    /// `Release` bump of `globals_version`, and readers `Acquire`-load the
+    /// version before touching the table, so a frozen pointer is only ever
+    /// observed after its segment contents are visible.
+    pub fn publish_global(&self, slot: usize, frozen: FrozenValue) {
         {
             let mut g = lock(&self.globals);
             if g.len() <= slot {
                 g.resize_with(slot + 1, || None);
             }
-            g[slot] = Some(value);
+            g[slot] = Some(frozen);
         }
         self.globals_version.fetch_add(1, Ordering::Release);
     }
@@ -402,7 +622,7 @@ pub(super) fn scheduler_count() -> usize {
 /// `scheduler0_poller` becomes the poller for the calling thread (scheduler 0)
 /// so any I/O it has already registered keeps working.
 pub(super) fn boot(
-    program: Arc<SendProgram>,
+    program: Arc<Program>,
     count: usize,
     scheduler0_poller: Arc<polling::Poller>,
 ) -> std::io::Result<Arc<Runtime>> {
@@ -429,6 +649,10 @@ pub(super) fn boot(
         // submitted while they boot are handed straight to them rather than
         // hoarded by the schedulers that are already running.
         parked_flags: (0..count).map(|i| AtomicBool::new(i != 0)).collect(),
+        // Scheduler 0 is about to run the main process; workers start empty.
+        run_lens: (0..count)
+            .map(|i| AtomicUsize::new(usize::from(i == 0)))
+            .collect(),
         workers: Mutex::new(Vec::new()),
     });
 

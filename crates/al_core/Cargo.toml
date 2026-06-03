@@ -7,5 +7,3 @@ edition = "2024"
 indexmap = { workspace = true }
 petgraph = "0.8"
 include_dir = { version = "0.7", features = ["glob"] }
-imbl = "7"
-stacker = "0.1"

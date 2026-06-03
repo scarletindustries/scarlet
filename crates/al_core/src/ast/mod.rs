@@ -524,6 +524,29 @@ pub struct BinaryPatternRest {
     pub span: Span,
 }
 
+/// How [`Pattern::for_each_binder`] treats the alternatives of an or-pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrAlternatives {
+    /// Walk every alternative. Scope analysis needs this: alternatives past
+    /// the first can still contain segment size expressions that reference
+    /// outer names.
+    All,
+    /// Walk only the first alternative. Typing enforces that all
+    /// alternatives bind the identical set, so codegen can take the first
+    /// as canonical.
+    First,
+}
+
+/// A binding-relevant site found by [`Pattern::for_each_binder`].
+pub enum PatternBinder<'a> {
+    /// An identifier the pattern binds: a `Var`, an array spread binding,
+    /// or a binary `..rest` binding.
+    Name(&'a Identifier),
+    /// A binary segment size expression. Not a binder itself, but it can
+    /// reference outer names, so scope analysis must walk it.
+    SizeExpr(&'a Expression),
+}
+
 impl Pattern {
     pub fn span(&self) -> Span {
         match self {
@@ -537,6 +560,76 @@ impl Pattern {
             Pattern::Literal(PatternLiteral::String(s)) => s.span,
             Pattern::Or { span, .. } => *span,
             Pattern::Range { span, .. } => *span,
+        }
+    }
+
+    /// Walk every binding site in this pattern in source order, calling `f`
+    /// with each bound identifier and each binary segment size expression.
+    /// Constructor names are not reported — they are uppercase and can never
+    /// be binders.
+    pub fn for_each_binder<'a>(
+        &'a self,
+        or_mode: OrAlternatives,
+        f: &mut dyn FnMut(PatternBinder<'a>),
+    ) {
+        match self {
+            Pattern::Wildcard { .. } | Pattern::Literal(_) => {}
+            Pattern::Var { name } => f(PatternBinder::Name(name)),
+            Pattern::Constructor { args, .. } => {
+                for arg in args {
+                    let p = match arg {
+                        PatternArg::Positional(p) => p,
+                        PatternArg::Labeled { pattern, .. } => pattern,
+                    };
+                    p.for_each_binder(or_mode, f);
+                }
+            }
+            Pattern::Tuple { elements, .. } => {
+                for p in elements {
+                    p.for_each_binder(or_mode, f);
+                }
+            }
+            Pattern::Array { elements, .. } => {
+                for el in elements {
+                    match el {
+                        ArrayPatternElement::Pattern(p) => p.for_each_binder(or_mode, f),
+                        ArrayPatternElement::Spread { binding, .. } => {
+                            if let Some(id) = binding {
+                                f(PatternBinder::Name(id));
+                            }
+                        }
+                    }
+                }
+            }
+            Pattern::Binary { segments, rest, .. } => {
+                for seg in segments {
+                    seg.value.for_each_binder(or_mode, f);
+                    if let Some(sz) = &seg.size {
+                        f(PatternBinder::SizeExpr(sz));
+                    }
+                }
+                if let Some(r) = rest
+                    && let Some(id) = &r.binding
+                {
+                    f(PatternBinder::Name(id));
+                }
+            }
+            Pattern::Or { patterns, .. } => match or_mode {
+                OrAlternatives::All => {
+                    for p in patterns {
+                        p.for_each_binder(or_mode, f);
+                    }
+                }
+                OrAlternatives::First => {
+                    if let Some(first) = patterns.first() {
+                        first.for_each_binder(or_mode, f);
+                    }
+                }
+            },
+            Pattern::Range { start, end, .. } => {
+                start.for_each_binder(or_mode, f);
+                end.for_each_binder(or_mode, f);
+            }
         }
     }
 }

@@ -612,30 +612,15 @@ impl Parser {
     }
 
     fn parse_unary_expression_inner(&mut self) -> PResult<ast::Expression> {
-        if self.kind() == Kind::PuncExclamationMark {
+        let kind = self.kind();
+        if matches!(kind, Kind::PuncExclamationMark | Kind::PuncMinus) {
             let start = self.current_span();
-            self.eat(Kind::PuncExclamationMark)?;
+            self.eat(kind)?;
             let inner = self.parse_unary_expression()?;
 
             return Ok(ast::Expression::UnaryExpression(ast::UnaryExpression {
                 expression: Box::new(inner),
-                op: ast::Operator {
-                    kind: Kind::PuncExclamationMark,
-                },
-                span: self.span_from(start),
-            }));
-        }
-
-        if self.kind() == Kind::PuncMinus {
-            let start = self.current_span();
-            self.eat(Kind::PuncMinus)?;
-            let inner = self.parse_unary_expression()?;
-
-            return Ok(ast::Expression::UnaryExpression(ast::UnaryExpression {
-                expression: Box::new(inner),
-                op: ast::Operator {
-                    kind: Kind::PuncMinus,
-                },
+                op: ast::Operator { kind },
                 span: self.span_from(start),
             }));
         }

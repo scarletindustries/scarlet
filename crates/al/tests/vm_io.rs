@@ -53,37 +53,94 @@ match io.write_text(path, 'hello-io') {
     );
 }
 
-/// Reserve an ephemeral localhost port, then release it so the spawned `al`
-/// server can bind it. A small TOCTOU window exists but is acceptable for a
-/// test; the server reports `listen-failed` (not a hang) if it loses the race.
+/// Reserve an ephemeral localhost port, then release it, returning a port with
+/// no listener. Used ONLY by `connect_refused_is_typed`, where the port must be
+/// genuinely closed. Tests that spawn a server must never reserve-and-release:
+/// in the window between release and the server's re-bind the kernel can hand
+/// the port to a concurrent test's socket, and a client that connects in that
+/// window reaches the wrong listener. Spawned servers bind port 0 and announce
+/// the kernel-assigned port instead — see `spawn_al_server`.
 fn free_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("reserve a free port");
     l.local_addr().expect("local_addr").port()
 }
 
-/// Connect to `127.0.0.1:port`, retrying until the server's `net.listen` has
-/// bound (it is spawned concurrently). Fails the test if it never comes up.
-/// The returned stream has a 10s read timeout so a wedged server fails the
-/// test instead of hanging it.
-fn connect_retry(port: u16) -> TcpStream {
-    for _ in 0..200 {
-        if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
-            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            return s;
+/// Read the spawned server's first stdout line — the `listening <ip>:<port>`
+/// announcement it prints once `net.listen` has bound port 0 — and return the
+/// kernel-assigned port. The line is read byte-at-a-time so nothing past the
+/// newline is consumed, and the pipe is handed back to `child` so
+/// `wait_with_output` still collects the rest of stdout. A reader thread plus
+/// a receive timeout turns a server that wedges before announcing into a test
+/// failure instead of a hung suite.
+fn read_announced_port(child: &mut Child) -> u16 {
+    fn die(child: &mut Child, msg: String) -> ! {
+        child.kill().ok();
+        let mut stderr = Vec::new();
+        if let Some(mut e) = child.stderr.take() {
+            e.read_to_end(&mut stderr).ok();
         }
-        std::thread::sleep(Duration::from_millis(25));
+        panic!("{msg}\nserver stderr: {}", String::from_utf8_lossy(&stderr));
     }
-    panic!("server on port {port} never accepted a connection");
+
+    let mut stdout = child.stdout.take().expect("server stdout is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stdout.read(&mut byte) {
+                Ok(n) if n > 0 && byte[0] != b'\n' => line.push(byte[0]),
+                _ => break,
+            }
+        }
+        // The receiver may have timed out and gone; nothing to do then.
+        let _ = tx.send((stdout, line));
+    });
+    let Ok((stdout, line)) = rx.recv_timeout(Duration::from_secs(30)) else {
+        die(child, "server announced no port within 30s".to_string());
+    };
+    child.stdout = Some(stdout);
+
+    let line = String::from_utf8_lossy(&line).into_owned();
+    match line
+        .strip_prefix("listening ")
+        .and_then(|addr| addr.rsplit(':').next())
+        .and_then(|p| p.parse().ok())
+    {
+        Some(port) => port,
+        None => die(
+            child,
+            format!("server did not announce its port; first line: {line:?}"),
+        ),
+    }
 }
 
-/// Write `src` (with `__PORT__` substituted) to `server.al` in `proj`, spawn
-/// `al run` on it with piped output, and connect a client once the server is
-/// listening. The server blocks in its accept loop; the caller drives it.
-fn spawn_al_server(proj: &Project, src: &str, port: u16) -> (Child, TcpStream) {
-    let prog = proj.dir.join("server.al");
-    std::fs::write(&prog, src.replace("__PORT__", &port.to_string())).unwrap();
+/// Connect to the port a spawned server announced. The listener is bound
+/// before the announcement is printed, so a single attempt succeeds — the
+/// kernel completes the handshake from the backlog even before the server
+/// calls accept. The 10s read timeout makes a wedged server fail the test
+/// instead of hanging it.
+fn connect(port: u16) -> TcpStream {
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .unwrap_or_else(|e| panic!("connect to announced port {port}: {e}"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+}
 
-    let child = Command::new(env!("CARGO_BIN_EXE_al"))
+/// Write `src` to `server.al` in `proj`, spawn `al run` on it with piped
+/// output, and connect a client once the server announces its port. Every
+/// server source binds `127.0.0.1:0` and prints `listening <ip>:<port>` (via
+/// `net.local_addr`) as its first line; parsing that announcement before
+/// connecting means the client can only ever reach the server's own listener —
+/// there is no reserved-port handoff for a concurrent test to race. Returns
+/// the port too, for tests that open further connections.
+fn spawn_al_server(proj: &Project, src: &str) -> (Child, TcpStream, u16) {
+    let prog = proj.dir.join("server.al");
+    std::fs::write(&prog, src).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
         .arg("run")
         .arg(&prog)
         .stdout(Stdio::piped())
@@ -91,7 +148,8 @@ fn spawn_al_server(proj: &Project, src: &str, port: u16) -> (Child, TcpStream) {
         .spawn()
         .expect("spawn al server");
 
-    (child, connect_retry(port))
+    let port = read_announced_port(&mut child);
+    (child, connect(port), port)
 }
 
 /// Tear down a `spawn_al_server` pair: drop the client connection, kill the
@@ -111,10 +169,11 @@ fn shutdown_clean(mut child: Child, stream: TcpStream) {
 /// `net.accept` -> `sock.peer` -> `net.read` -> `net.write` -> `net.close`.
 /// The `al` program is an echo server; a Rust client drives it and asserts the
 /// bytes round-trip and the server reached its `close` arm (printing `served`).
-/// This is the only test that exercises the socket opcodes' success paths.
+/// `net.local_addr` is proven by the harness itself: the client connects to
+/// the port the announcement line reported. This is the only test that
+/// exercises the socket opcodes' success paths.
 #[test]
 fn tcp_echo_server_roundtrip() {
-    let port = free_port();
     let proj = Project::new("io_tcp");
     let src = r#"import al/net
 import al/net/socket
@@ -122,9 +181,9 @@ import al/net/address
 import al/binary
 import al/result
 
-match net.listen('127.0.0.1', __PORT__) {
+match net.listen('127.0.0.1', 0) {
 	Ok(server) -> {
-		println('local ${result.map(net.local_addr(server), address.to_string) or '?'}')
+		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
 		match net.accept(server) {
 			Ok(sock) -> {
 				println('peer ${address.to_string(sock.peer)}')
@@ -150,7 +209,7 @@ match net.listen('127.0.0.1', __PORT__) {
 "#;
 
     // The server blocks on accept(); spawn it and drive it from the client.
-    let (child, mut stream) = spawn_al_server(&proj, src, port);
+    let (child, mut stream, _port) = spawn_al_server(&proj, src);
     stream.write_all(b"ping-over-tcp").expect("client write");
     // Server echoes the bytes then closes the socket, so read_to_end sees the
     // echo followed by EOF.
@@ -168,28 +227,20 @@ match net.listen('127.0.0.1', __PORT__) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    // The announcement line was consumed by the harness; what remains starts
+    // at the peer line.
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(
-        lines.len(),
-        3,
-        "expected local/peer/served, got: {stdout:?}"
-    );
-    // local_addr must report the bound port; ip is whatever the VM binds to.
-    assert!(
-        lines[0].starts_with("local ") && lines[0].ends_with(&format!(":{port}")),
-        "local_addr line mismatch: {:?}",
-        lines[0]
-    );
+    assert_eq!(lines.len(), 2, "expected peer/served, got: {stdout:?}");
     // peer_addr is the Rust client's loopback connection; port is ephemeral.
     assert!(
-        lines[1].starts_with("peer 127.0.0.1:"),
+        lines[0].starts_with("peer 127.0.0.1:"),
         "peer_addr line mismatch: {:?}",
-        lines[1]
+        lines[0]
     );
     // `served` proves every arm down to net.close returned Ok.
     assert_eq!(
-        lines[2], "served",
+        lines[1], "served",
         "server did not complete the listen/accept/read/write/close chain"
     );
 }
@@ -201,51 +252,52 @@ match net.listen('127.0.0.1', __PORT__) {
 /// completion), read_exact (cross-read accumulation), and write_parts.
 #[test]
 fn tcp_connect_and_vectored_echo() {
-    let port = free_port();
     let proj = Project::new("io_connect");
     let src = r#"import al/experiments/scheduler
 import al/net
 import al/net/socket
 import al/binary
 
-match net.listen('127.0.0.1', __PORT__) {
-	Ok(server) -> {
-		scheduler.spawn(fn() {
-			match net.accept(server) {
-				Ok(sock) -> match socket.read_exact(sock, 5) {
-					Ok(first) -> match socket.read_exact(sock, 6) {
-						Ok(second) -> {
-							socket.write_parts(sock, [first, second]) or Nil
-							socket.close(sock) or Nil
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> match net.local_addr(server) {
+		Ok(addr) -> {
+			scheduler.spawn(fn() {
+				match net.accept(server) {
+					Ok(sock) -> match socket.read_exact(sock, 5) {
+						Ok(first) -> match socket.read_exact(sock, 6) {
+							Ok(second) -> {
+								socket.write_parts(sock, [first, second]) or Nil
+								socket.close(sock) or Nil
+							}
+							Err(e) -> println('server read2 failed: ${e}')
 						}
-						Err(e) -> println('server read2 failed: ${e}')
+						Err(e) -> println('server read1 failed: ${e}')
 					}
-					Err(e) -> println('server read1 failed: ${e}')
+					Err(e) -> println('server accept failed: ${e}')
 				}
-				Err(e) -> println('server accept failed: ${e}')
-			}
-		})
+			})
 
-		match net.connect('127.0.0.1', __PORT__) {
-			Ok(conn) -> {
-				socket.write(conn, binary.from_string('hello')) or Nil
-				socket.write(conn, binary.from_string(' world')) or Nil
-				match socket.read_exact(conn, 11) {
-					Ok(data) -> match binary.to_string(data) {
-						Ok(text) -> println('echoed: ${text}')
-						Err(_e) -> println('not utf8')
+			match net.connect('127.0.0.1', addr.port) {
+				Ok(conn) -> {
+					socket.write(conn, binary.from_string('hello')) or Nil
+					socket.write(conn, binary.from_string(' world')) or Nil
+					match socket.read_exact(conn, 11) {
+						Ok(data) -> match binary.to_string(data) {
+							Ok(text) -> println('echoed: ${text}')
+							Err(_e) -> println('not utf8')
+						}
+						Err(e) -> println('client read failed: ${e}')
 					}
-					Err(e) -> println('client read failed: ${e}')
+					socket.close(conn) or Nil
 				}
-				socket.close(conn) or Nil
+				Err(e) -> println('connect failed: ${e}')
 			}
-			Err(e) -> println('connect failed: ${e}')
 		}
+		Err(e) -> println('local_addr failed: ${e}')
 	}
 	Err(e) -> println('listen failed: ${e}')
 }
-"#
-    .replace("__PORT__", &port.to_string());
+"#;
     let prog = proj.dir.join("connect.al");
     std::fs::write(&prog, src).unwrap();
 
@@ -273,7 +325,10 @@ match net.listen('127.0.0.1', __PORT__) {
 /// its output. Unlike `shutdown_clean` (which kills a forever-looping server),
 /// these `read_within` servers are expected to finish on their own once the
 /// deadline fires or the data arrives; the bound just guarantees a wedged read
-/// fails the test instead of hanging the suite.
+/// fails the test instead of hanging the suite. Callers pass a bound far above
+/// the happy-path runtime: under a full parallel `cargo test` the spawned VM
+/// competes with every other test binary for CPU, and a tight bound turns load
+/// into a spurious kill (a non-success exit) on an otherwise correct run.
 fn wait_or_kill(mut child: Child, secs: u64) -> std::process::Output {
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
@@ -294,18 +349,22 @@ fn wait_or_kill(mut child: Child, secs: u64) -> std::process::Output {
 /// thing that can wake the parked read is the deadline timer.
 #[test]
 fn tcp_read_within_times_out() {
-    let port = free_port();
     let proj = Project::new("io_read_within_timeout");
     let src = r#"import al/net
 import al/net/socket
+import al/net/address
+import al/result
 
-match net.listen('127.0.0.1', __PORT__) {
-	Ok(server) -> match net.accept(server) {
-		Ok(sock) -> match socket.read_within(sock, 4096, 150) {
-			Ok(_) -> println('unexpected-data')
-			Err(e) -> println('timed-out: ${e}')
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> {
+		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
+		match net.accept(server) {
+			Ok(sock) -> match socket.read_within(sock, 4096, 150) {
+				Ok(_) -> println('unexpected-data')
+				Err(e) -> println('timed-out: ${e}')
+			}
+			Err(e) -> println('accept-failed: ${e}')
 		}
-		Err(e) -> println('accept-failed: ${e}')
 	}
 	Err(e) -> println('listen-failed: ${e}')
 }
@@ -313,8 +372,8 @@ match net.listen('127.0.0.1', __PORT__) {
 
     // The client connects (so `accept` returns) but never writes. Holding the
     // stream open keeps the socket alive-but-silent across the read window.
-    let (child, _stream) = spawn_al_server(&proj, src, port);
-    let out = wait_or_kill(child, 5);
+    let (child, _stream, _port) = spawn_al_server(&proj, src);
+    let out = wait_or_kill(child, 30);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -337,30 +396,34 @@ match net.listen('127.0.0.1', __PORT__) {
 /// The generous timeout makes the success path independent of scheduler timing.
 #[test]
 fn tcp_read_within_returns_data() {
-    let port = free_port();
     let proj = Project::new("io_read_within_data");
     let src = r#"import al/net
 import al/net/socket
+import al/net/address
 import al/binary
+import al/result
 
-match net.listen('127.0.0.1', __PORT__) {
-	Ok(server) -> match net.accept(server) {
-		Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
-			Ok(data) -> match binary.to_string(data) {
-				Ok(text) -> println('got: ${text}')
-				Err(_) -> println('not-utf8')
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> {
+		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
+		match net.accept(server) {
+			Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
+				Ok(data) -> match binary.to_string(data) {
+					Ok(text) -> println('got: ${text}')
+					Err(_) -> println('not-utf8')
+				}
+				Err(e) -> println('read-failed: ${e}')
 			}
-			Err(e) -> println('read-failed: ${e}')
+			Err(e) -> println('accept-failed: ${e}')
 		}
-		Err(e) -> println('accept-failed: ${e}')
 	}
 	Err(e) -> println('listen-failed: ${e}')
 }
 "#;
 
-    let (child, mut stream) = spawn_al_server(&proj, src, port);
+    let (child, mut stream, _port) = spawn_al_server(&proj, src);
     stream.write_all(b"hello").expect("client write");
-    let out = wait_or_kill(child, 5);
+    let out = wait_or_kill(child, 30);
     drop(stream);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -609,18 +672,26 @@ fn read_one_response(
 /// pipelining handoff without an intervening read.
 #[test]
 fn http_server_get_and_keepalive() {
-    let port = free_port();
     let proj = Project::new("io_http");
     let src = r#"import al/http
+import al/net
+import al/net/address
+import al/result
 
-match http.serve('127.0.0.1', __PORT__, fn(_req) http.text('Hello from al/http!')) {
-	Ok(_) -> Nil
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> {
+		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
+		match http.serve_on(server, fn(_req) http.text('Hello from al/http!')) {
+			Ok(_) -> Nil
+			Err(e) -> println('serve failed: ${e}')
+		}
+	}
 	Err(e) -> println('serve failed: ${e}')
 }
 "#;
 
     // The server blocks in its accept loop; spawn it and drive it from a client.
-    let (child, mut stream) = spawn_al_server(&proj, src, port);
+    let (child, mut stream, _port) = spawn_al_server(&proj, src);
 
     // Two HTTP/1.1 GETs in a single write. Both land in one server-side read,
     // so the connection loop must parse the first, respond, then serve the
@@ -669,28 +740,36 @@ match http.serve('127.0.0.1', __PORT__, fn(_req) http.text('Hello from al/http!'
 /// GET into one write.
 #[test]
 fn http_server_chunked_post_roundtrip() {
-    let port = free_port();
     let proj = Project::new("io_http_chunked");
     let src = r#"import al/http
 import al/http/body
 import al/http/headers
 import al/binary
+import al/net
+import al/net/address
+import al/result
 
-match http.serve('127.0.0.1', __PORT__, fn(req) {
-	collected = body.collect(req.body, 1048576) or <<>>
-	echoed = binary.to_string(collected) or '<not-utf8>'
-	trailer = match headers.get(req.headers, <<'x-checksum'>>) {
-		Some(v) -> binary.to_string(v) or '?'
-		None -> 'none'
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> {
+		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
+		match http.serve_on(server, fn(req) {
+			collected = body.collect(req.body, 1048576) or <<>>
+			echoed = binary.to_string(collected) or '<not-utf8>'
+			trailer = match headers.get(req.headers, <<'x-checksum'>>) {
+				Some(v) -> binary.to_string(v) or '?'
+				None -> 'none'
+			}
+			http.text('body=[${echoed}] trailer=[${trailer}]')
+		}) {
+			Ok(_) -> Nil
+			Err(e) -> println('serve failed: ${e}')
+		}
 	}
-	http.text('body=[${echoed}] trailer=[${trailer}]')
-}) {
-	Ok(_) -> Nil
 	Err(e) -> println('serve failed: ${e}')
 }
 "#;
 
-    let (child, mut stream) = spawn_al_server(&proj, src, port);
+    let (child, mut stream, port) = spawn_al_server(&proj, src);
 
     // --- Exchange 1: chunked POST with a trailer ---------------------------
     // (Single-line byte string: Rust's `\` line continuation strips leading
@@ -750,7 +829,7 @@ match http.serve('127.0.0.1', __PORT__, fn(req) {
 
     // --- Malformed chunked body is rejected with 400 -----------------------
     // (Fresh connection: the 400 closes the current one.)
-    let mut bad_stream = connect_retry(port);
+    let mut bad_stream = connect(port);
     bad_stream
         .write_all(
             b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",

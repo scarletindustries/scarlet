@@ -590,6 +590,15 @@ impl LspServer {
         graph.module_id(&self.query_module_path(uri))
     }
 
+    /// [`graph_for`](Self::graph_for) and
+    /// [`query_module_id`](Self::query_module_id) in one step: the shared
+    /// guard pair every position-based responder runs after `resolve_pos`.
+    fn graph_module(&self, uri: &str) -> Option<(&reference::ReferenceGraph, reference::ModuleId)> {
+        let graph = self.graph_for(uri)?;
+        let mid = self.query_module_id(graph, uri)?;
+        Some((graph, mid))
+    }
+
     /// Shared preamble for the position-based query responders. Re-analyses
     /// the requested document as the compilation entry (mutating) but does
     /// NOT answer the request: it returns `None` and lets the caller fold
@@ -620,10 +629,7 @@ impl LspServer {
             self.session_for(&uri)
                 .and_then(|s| s.hover(&key, line, col))
         });
-        let Some(graph) = self.graph_for(&uri) else {
-            return Json::Null;
-        };
-        if let Some(mid) = self.query_module_id(graph, &uri)
+        if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(def) = graph.definition_at(mid, line, col)
         {
             let signature = match &typed {
@@ -646,10 +652,7 @@ impl LspServer {
         let Some((uri, line, col)) = self.resolve_pos(params) else {
             return Json::Null;
         };
-        let Some(graph) = self.graph_for(&uri) else {
-            return Json::Null;
-        };
-        let Some(mid) = self.query_module_id(graph, &uri) else {
+        let Some((graph, mid)) = self.graph_module(&uri) else {
             return Json::Null;
         };
         // The final module-name segment of an `import a/b` resolves to the
@@ -722,10 +725,7 @@ impl LspServer {
         let Some((uri, line, col)) = self.resolve_pos(params) else {
             return Json::Null;
         };
-        let Some(graph) = self.graph_for(&uri) else {
-            return Json::Null;
-        };
-        if let Some(mid) = self.query_module_id(graph, &uri)
+        if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(def) = graph.definition_at(mid, line, col)
         {
             let defid = def.defid;
@@ -794,10 +794,7 @@ impl LspServer {
         let Some((uri, line, col)) = self.resolve_pos(params) else {
             return Ok(Json::Null);
         };
-        let Some(graph) = self.graph_for(&uri) else {
-            return Ok(Json::Null);
-        };
-        if let Some(mid) = self.query_module_id(graph, &uri)
+        if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(defid) = graph.def_id_at(mid, line, col)
         {
             // A `ModuleAlias` target is an `import` declaration position (the
@@ -851,25 +848,22 @@ impl LspServer {
         let Some((uri, line, col)) = self.resolve_pos(params) else {
             return Json::Null;
         };
-        let Some(graph) = self.graph_for(&uri) else {
+        let Some((graph, mid)) = self.graph_module(&uri) else {
             return Json::Null;
         };
-        if let Some(mid) = self.query_module_id(graph, &uri) {
-            return match graph.prepare_rename(mid, line, col) {
-                // A `ModuleAlias` target is an `import` declaration position —
-                // the narrowed `Import` occurrence only guards *its* final
-                // segment, so the alias `Definition` (spanning the whole
-                // declaration) still resolves on the keyword / a non-final
-                // path segment / the `as` binding. Renaming it would rewrite
-                // the import line and orphan the qualified uses (which target
-                // the remote member, not the alias). Mirror goto-def's
-                // suppression and `rename`'s file-not-symbol refusal.
-                Ok(p) if p.def.entity == reference::EntityKind::ModuleAlias => Json::Null,
-                Ok(p) => json!({ "range": range_json(&p.range), "placeholder": p.placeholder }),
-                Err(_) => Json::Null,
-            };
+        match graph.prepare_rename(mid, line, col) {
+            // A `ModuleAlias` target is an `import` declaration position —
+            // the narrowed `Import` occurrence only guards *its* final
+            // segment, so the alias `Definition` (spanning the whole
+            // declaration) still resolves on the keyword / a non-final
+            // path segment / the `as` binding. Renaming it would rewrite
+            // the import line and orphan the qualified uses (which target
+            // the remote member, not the alias). Mirror goto-def's
+            // suppression and `rename`'s file-not-symbol refusal.
+            Ok(p) if p.def.entity == reference::EntityKind::ModuleAlias => Json::Null,
+            Ok(p) => json!({ "range": range_json(&p.range), "placeholder": p.placeholder }),
+            Err(_) => Json::Null,
         }
-        Json::Null
     }
 
     /// Compute the `textDocument/documentSymbol` result: an array of the
@@ -887,25 +881,22 @@ impl LspServer {
         if !self.ensure_entry(&uri) {
             return Json::Null;
         }
-        let Some(graph) = self.graph_for(&uri) else {
+        let Some((graph, mid)) = self.graph_module(&uri) else {
             return Json::Null;
         };
-        if let Some(mid) = self.query_module_id(graph, &uri) {
-            let syms: Vec<Json> = graph
-                .defs_in(mid)
-                .filter(|d| d.is_symbol_listable())
-                .map(|d| {
-                    json!({
-                        "name": d.name,
-                        "kind": d.entity().lsp_symbol_kind(),
-                        "range": range_json(&d.span()),
-                        "selectionRange": range_json(&d.span()),
-                    })
+        let syms: Vec<Json> = graph
+            .defs_in(mid)
+            .filter(|d| d.is_symbol_listable())
+            .map(|d| {
+                json!({
+                    "name": d.name,
+                    "kind": d.entity().lsp_symbol_kind(),
+                    "range": range_json(&d.span()),
+                    "selectionRange": range_json(&d.span()),
                 })
-                .collect();
-            return Json::Array(syms);
-        }
-        Json::Null
+            })
+            .collect();
+        Json::Array(syms)
     }
 
     /// Compute the `workspace/symbol` result: every workspace declaration

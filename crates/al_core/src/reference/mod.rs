@@ -1311,38 +1311,45 @@ mod tests {
         // span. The `Import` *occurrence* covers only the final module-name
         // segment (`b`), too narrow to contain the binding — modelled here to
         // prove that narrowing does not regress unused detection.
-        let (mut g, m, mut mr) = main_graph();
+        let (mut g, m, _) = main_graph();
         let lib = g.intern_module(&mp(&["a", "b"]));
 
-        let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
-        mr.add_definition(Definition::new(alias, "b", None, false));
-        let remote_used = def(lib, 1, 3, 7, EntityKind::Function);
-        // The `Import` occurrence covers only the `b` path segment; the `used`
-        // item-binding occurrence sits inside the declaration span.
-        mr.add_reference(
-            None,
-            Reference::new(range_span(1, 9, 10), ReferenceKind::Import, alias),
-        );
-        mr.add_reference(
-            None,
-            Reference::new(
-                range_span(1, 12, 16),
-                ReferenceKind::Unqualified,
-                remote_used,
-            ),
-        );
-        // `pub fn main() { used() }` — a real use, outside the declaration.
-        let main = add_def(&mut mr, m, "main", 3, EntityKind::Function, true);
-        mr.add_reference(
-            Some(main),
-            Reference::new(
-                range_span(3, 16, 20),
-                ReferenceKind::Unqualified,
-                remote_used,
-            ),
-        );
-        g.insert_module(mr);
+        let build = |with_use: bool| {
+            let mut mr = ModuleReferences::new(m);
+            let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
+            mr.add_definition(Definition::new(alias, "b", None, false));
+            let remote_used = def(lib, 1, 3, 7, EntityKind::Function);
+            // The `Import` occurrence covers only the `b` path segment; the
+            // `used` item-binding occurrence sits inside the declaration span.
+            mr.add_reference(
+                None,
+                Reference::new(range_span(1, 9, 10), ReferenceKind::Import, alias),
+            );
+            mr.add_reference(
+                None,
+                Reference::new(
+                    range_span(1, 12, 16),
+                    ReferenceKind::Unqualified,
+                    remote_used,
+                ),
+            );
+            let main = add_def(&mut mr, m, "main", 3, EntityKind::Function, true);
+            if with_use {
+                // `pub fn main() { used() }` — a real use, outside the
+                // declaration.
+                mr.add_reference(
+                    Some(main),
+                    Reference::new(
+                        range_span(3, 16, 20),
+                        ReferenceKind::Unqualified,
+                        remote_used,
+                    ),
+                );
+            }
+            mr
+        };
 
+        g.insert_module(build(true));
         assert!(
             g.unused_diagnostics(m).is_empty(),
             "an import whose unqualified item is used must not be flagged"
@@ -1350,25 +1357,7 @@ mod tests {
 
         // Drop the use: the same import is now genuinely unused again, so
         // the check is still live (we didn't just disable it).
-        let mut mr2 = ModuleReferences::new(m);
-        let alias2 = def(m, 1, 0, 18, EntityKind::ModuleAlias);
-        mr2.add_definition(Definition::new(alias2, "b", None, false));
-        let remote_used2 = def(lib, 1, 3, 7, EntityKind::Function);
-        mr2.add_reference(
-            None,
-            Reference::new(range_span(1, 9, 10), ReferenceKind::Import, alias2),
-        );
-        mr2.add_reference(
-            None,
-            Reference::new(
-                range_span(1, 12, 16),
-                ReferenceKind::Unqualified,
-                remote_used2,
-            ),
-        );
-        add_def(&mut mr2, m, "main", 3, EntityKind::Function, true);
-        g.insert_module(mr2);
-
+        g.insert_module(build(false));
         assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
@@ -1385,46 +1374,55 @@ mod tests {
         //
         //   import ./util as u.{empty}
         //   0      ^9   ^13 ^17^20   ^25
-        let (mut g, m, mut mr) = main_graph();
+        let (mut g, m, _) = main_graph();
         let lib = g.intern_module(&mp(&["util"]));
 
         // The alias `ModuleAlias` definition covers only the `as u` name.
         let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
-        mr.add_definition(Definition::new(alias, "u", None, false));
-        let remote_empty = def(lib, 2, 7, 12, EntityKind::Function);
-        // `Import` path segment (`util`) -> the imported module; `Alias` name
-        // (`u`) -> this alias; `empty` item binding -> the remote `empty`.
-        mr.add_reference(
-            None,
-            Reference::new(
-                range_span(1, 9, 13),
-                ReferenceKind::Import,
-                def(lib, 1, 9, 13, EntityKind::ModuleAlias),
-            ),
-        );
-        mr.add_reference(
-            None,
-            Reference::new(range_span(1, 17, 18), ReferenceKind::Alias, alias),
-        );
-        mr.add_reference(
-            None,
-            Reference::new(
-                range_span(1, 20, 25),
-                ReferenceKind::Unqualified,
-                remote_empty,
-            ),
-        );
-        // `println(empty())` on line 2 — a real use, outside the declaration.
-        mr.add_reference(
-            None,
-            Reference::new(
-                range_span(2, 8, 13),
-                ReferenceKind::Unqualified,
-                remote_empty,
-            ),
-        );
-        g.insert_module(mr);
 
+        let build = |with_use: bool| {
+            let mut mr = ModuleReferences::new(m);
+            mr.add_definition(Definition::new(alias, "u", None, false));
+            let remote_empty = def(lib, 2, 7, 12, EntityKind::Function);
+            // `Import` path segment (`util`) -> the imported module; `Alias`
+            // name (`u`) -> this alias; `empty` item binding -> the remote
+            // `empty`.
+            mr.add_reference(
+                None,
+                Reference::new(
+                    range_span(1, 9, 13),
+                    ReferenceKind::Import,
+                    def(lib, 1, 9, 13, EntityKind::ModuleAlias),
+                ),
+            );
+            mr.add_reference(
+                None,
+                Reference::new(range_span(1, 17, 18), ReferenceKind::Alias, alias),
+            );
+            mr.add_reference(
+                None,
+                Reference::new(
+                    range_span(1, 20, 25),
+                    ReferenceKind::Unqualified,
+                    remote_empty,
+                ),
+            );
+            if with_use {
+                // `println(empty())` on line 2 — a real use, outside the
+                // declaration.
+                mr.add_reference(
+                    None,
+                    Reference::new(
+                        range_span(2, 8, 13),
+                        ReferenceKind::Unqualified,
+                        remote_empty,
+                    ),
+                );
+            }
+            mr
+        };
+
+        g.insert_module(build(true));
         assert!(
             g.unused_diagnostics(m).is_empty(),
             "a used item from an aliased selective import must not be flagged"
@@ -1432,35 +1430,10 @@ mod tests {
 
         // Drop the use: the same import is now genuinely unused, so the check
         // is still live (the widened boundary did not just disable it).
-        let mut mr2 = ModuleReferences::new(m);
-        let alias2 = def(m, 1, 17, 18, EntityKind::ModuleAlias);
-        mr2.add_definition(Definition::new(alias2, "u", None, false));
-        let remote_empty2 = def(lib, 2, 7, 12, EntityKind::Function);
-        mr2.add_reference(
-            None,
-            Reference::new(
-                range_span(1, 9, 13),
-                ReferenceKind::Import,
-                def(lib, 1, 9, 13, EntityKind::ModuleAlias),
-            ),
-        );
-        mr2.add_reference(
-            None,
-            Reference::new(range_span(1, 17, 18), ReferenceKind::Alias, alias2),
-        );
-        mr2.add_reference(
-            None,
-            Reference::new(
-                range_span(1, 20, 25),
-                ReferenceKind::Unqualified,
-                remote_empty2,
-            ),
-        );
-        g.insert_module(mr2);
-
+        g.insert_module(build(false));
         let d = sole_unused(&g, m);
         assert_eq!(d.message, "unused import `u`");
-        assert_eq!(d.span, alias2.span);
+        assert_eq!(d.span, alias.span);
     }
 
     #[test]

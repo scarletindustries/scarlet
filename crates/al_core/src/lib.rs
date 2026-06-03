@@ -14,6 +14,8 @@ pub mod ast;
 pub mod bytecode;
 pub mod diagnostic;
 pub mod formatter;
+pub mod frozen;
+pub mod heap;
 pub mod module;
 pub mod parser;
 pub mod precompile;
@@ -26,6 +28,8 @@ pub mod type_def;
 pub mod types;
 
 pub use bytecode::{CtorRef, PreludeBindings, TypeRef};
+pub use frozen::{FrozenArea, FrozenBuilder};
+pub use heap::ProcHeap;
 pub use indexmap::IndexMap;
 pub use precompile::{PrecompileOutput, precompile_stdlib};
 pub use static_ir::{StaticStdlib, VariantTemplate};

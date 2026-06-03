@@ -1,3 +1,45 @@
+//! AST → [`Program`]: Hindley–Milner type inference fused with bytecode
+//! emission in a single traversal.
+//!
+//! There is no separate typed IR and no second walk — `compile_expr` infers
+//! a node's type and emits its instructions in the same call. The fusion is
+//! the point: a type that unification just resolved is immediately
+//! available to pick typed opcodes (`AddInt` over `Add`), pattern codegen
+//! consults variant layouts mid-emission, and every diagnostic span comes
+//! from the one traversal that saw the source. Module top level is the
+//! exception: declarations are mutually recursive and order-free, so
+//! `analysis.rs` runs its multi-pass declaration analysis first and hands
+//! each body back to this file's pass.
+//!
+//! # Map of the file
+//!
+//! - **Reference-graph scaffolding** (`RawRef` → [`HoverFact`]): every name
+//!   occurrence is buffered with its live `Ty` during the pass and lowered
+//!   into the workspace `ReferenceGraph` once all unifications have settled.
+//! - **[`Compiler`] + entry points** ([`compile`] / [`check`] /
+//!   [`check_as_module`]): all codegen, scoping, and inference state in one
+//!   struct, documented field by field.
+//! - **Incremental recompilation** ([`Watermark`] / `reset_to`): a snapshot
+//!   is six lengths, a rollback is six truncations.
+//! - **[`IncrementalSession`]**: the LSP/workspace layer — owns a
+//!   `Compiler` across edits, invalidates cached modules, answers
+//!   hover/goto-def/find-refs/rename from the reference graph.
+//! - **The pass itself** (`compile_node` / `compile_expr` and friends): the
+//!   bulk of the file, one method per AST form.
+//!
+//! # Invariants
+//!
+//! - Every constant `Value` is built through the compiler's
+//!   `FrozenBuilder` handle (the `const_*` helpers), never a bare `Value`
+//!   constructor, so all constants live in the program's frozen area and
+//!   stay valid for the program's life on any thread.
+//! - Everything a compile appends to (inference pool, type env, code,
+//!   functions, constants) stays append-only between module boundaries;
+//!   that is what makes `Watermark` rollback pure truncation.
+//! - Local scoping is undo-log based (`undo_log` / `scope_marks`): popping
+//!   a scope replays only the bindings it actually shadowed, never a map
+//!   snapshot.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -8,6 +50,7 @@ use super::{
 };
 use crate::ast;
 use crate::diagnostic::{Diagnostic, has_errors};
+use crate::frozen::FrozenBuilder;
 use indexmap::IndexMap;
 
 use crate::module::{
@@ -63,16 +106,6 @@ pub struct HoverFact {
     pub name: String,
     pub ty: Type,
     pub doc: Option<String>,
-}
-
-/// A document/workspace symbol surfaced from a graph `Definition`.
-#[derive(Debug, Clone)]
-pub struct SymbolInfo {
-    pub name: String,
-    pub kind: EntityKind,
-    pub module: ModulePath,
-    pub span: Span,
-    pub container: Option<String>,
 }
 
 // ============================================================================
@@ -135,6 +168,13 @@ struct FnFrame {
 pub struct Compiler {
     // --- Codegen state ---
     program: Program,
+    /// Append handle to `program`'s frozen area.
+    /// Every constant `Value` the compiler builds — literals, enum
+    /// construction/match headers, folded binaries — is constructed through
+    /// this builder (the `const_*` helpers below), never via bare `Value`
+    /// constructors, so enum names and field labels from compile-time
+    /// constants all point at the area's canonical interned allocations.
+    frozen: FrozenBuilder,
     locals: HashMap<String, LocalSlot>,
     /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
     /// open block scope appends `(name, previous entry)`; `pop_local_scope`
@@ -308,8 +348,13 @@ pub fn check_as_module(
 pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compiler {
     let mut ref_interner = ModuleInterner::new();
     let main_refs = ModuleReferences::new(ref_interner.intern(&module::main_module()));
+    let program = Program::default();
+    // The builder appends to the area the emitted `Program` anchors, so the
+    // constants built during this compile stay frozen for the program's life.
+    let frozen = program.frozen.builder();
     Compiler {
-        program: Program::default(),
+        program,
+        frozen,
         locals: HashMap::new(),
         undo_log: vec![],
         scope_marks: vec![],
@@ -870,9 +915,9 @@ impl IncrementalSession {
 }
 
 // ============================================================================
-// IncrementalSession — LSP query API over the workspace reference graph.
-// `module_or_uri` is matched by interned key, falling back to the entry
-// (`main`) module for the common single-open-file case.
+// IncrementalSession — hover query over the session's type-fact table. All
+// other LSP queries (goto-def / find-refs / rename / symbols) are answered
+// directly from the [`ReferenceGraph`] by the LSP server.
 // ============================================================================
 
 impl IncrementalSession {
@@ -886,11 +931,54 @@ impl IncrementalSession {
         })
     }
 
-    /// `textDocument/prepareRename`: the canonical [`DefId`] plus the span of
-    /// the identifier under the cursor (what the editor highlights). The
-    /// `DefId` is the rename anchor handed back to [`Self::rename`]; the
-    /// `Span` is the smallest occurrence enclosing the cursor (or the
-    /// declaration span when the cursor sits on the declaration itself).
+    /// The base of the type-id range reserved for module `key`, if one was
+    /// allocated. Used by the incremental test harness to assert range reuse.
+    pub fn module_id_base(&self, key: &str) -> Option<i32> {
+        self.c.module_table.id_base_of(key)
+    }
+
+    /// hover: name + inferred type + doc. The reference graph is identity-only,
+    /// so the inferred `Type` is joined from the session's hover-type table.
+    /// The tightest fact containing the cursor wins (min span-width, mirroring
+    /// `resolve_position`) so a nested sub-expr's type beats an enclosing one
+    /// rather than whichever was recorded first.
+    pub fn hover(
+        &self,
+        module_or_uri: &str,
+        line: i32,
+        col: i32,
+    ) -> Option<(String, Type, Option<String>)> {
+        let m = self.module_for(module_or_uri)?;
+        let f = self
+            .type_facts
+            .iter()
+            .filter(|f| f.module == m && span_contains(&f.span, line, col))
+            .min_by_key(|f| span_width(&f.span))?;
+        Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
+    }
+}
+
+/// A document/workspace symbol surfaced from a graph `Definition`.
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: EntityKind,
+    pub module: ModulePath,
+    pub span: Span,
+    pub container: Option<String>,
+}
+
+// IncrementalSession — string-keyed convenience queries over the workspace
+// reference graph (the test harness's query surface; the LSP queries the
+// graph directly with resolved `ModuleId`s). `module_or_uri` is matched by
+// interned key, falling back to the entry (`main`) module for the common
+// single-open-file case.
+impl IncrementalSession {
+    /// The canonical [`DefId`] plus the span of the identifier under the
+    /// cursor (what an editor would highlight). The `DefId` is the anchor
+    /// handed to [`Self::rename`]; the `Span` is the smallest occurrence
+    /// enclosing the cursor (or the declaration span when the cursor sits on
+    /// the declaration itself).
     pub fn prepare_rename(
         &self,
         module_or_uri: &str,
@@ -963,13 +1051,13 @@ impl IncrementalSession {
         out
     }
 
-    /// `textDocument/rename`: every span to rewrite (declaration + uses). The
-    /// reverse-edge closure is identical to find-references.
+    /// Every span a rename rewrites (declaration + uses): the reverse-edge
+    /// closure, identical to find-references.
     pub fn rename(&self, def: DefId) -> Vec<(ModulePath, Span)> {
         self.references(def)
     }
 
-    /// `textDocument/documentSymbol`: every definition declared in the module.
+    /// Every definition declared in the module.
     pub fn document_symbols(&self, module_or_uri: &str) -> Vec<SymbolInfo> {
         match self.module_for(module_or_uri) {
             Some(m) => self
@@ -981,7 +1069,7 @@ impl IncrementalSession {
         }
     }
 
-    /// `workspace/symbol`: case-insensitive substring over every declaration.
+    /// Case-insensitive substring search over every workspace declaration.
     pub fn workspace_symbols(&self, query: &str) -> Vec<SymbolInfo> {
         let needle = query.to_lowercase();
         self.graph
@@ -989,38 +1077,6 @@ impl IncrementalSession {
             .filter(|d| needle.is_empty() || d.name.to_lowercase().contains(needle.as_str()))
             .filter_map(|d| self.symbol_of(d))
             .collect()
-    }
-
-    /// Resolve a `ModulePath` to its interned `ModuleId` so an LSP caller can
-    /// phrase `definition_at` / `references_to` queries against the graph.
-    pub fn module_id(&self, path: &ModulePath) -> Option<ModuleId> {
-        self.graph.module_id(path)
-    }
-
-    /// The base of the type-id range reserved for module `key`, if one was
-    /// allocated. Used by the incremental test harness to assert range reuse.
-    pub fn module_id_base(&self, key: &str) -> Option<i32> {
-        self.c.module_table.id_base_of(key)
-    }
-
-    /// hover: name + inferred type + doc. The reference graph is identity-only,
-    /// so the inferred `Type` is joined from the session's hover-type table.
-    /// The tightest fact containing the cursor wins (min span-width, mirroring
-    /// [`Self::prepare_rename`] / `resolve_position`) so a nested sub-expr's
-    /// type beats an enclosing one rather than whichever was recorded first.
-    pub fn hover(
-        &self,
-        module_or_uri: &str,
-        line: i32,
-        col: i32,
-    ) -> Option<(String, Type, Option<String>)> {
-        let m = self.module_for(module_or_uri)?;
-        let f = self
-            .type_facts
-            .iter()
-            .filter(|f| f.module == m && span_contains(&f.span, line, col))
-            .min_by_key(|f| span_width(&f.span))?;
-        Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
     }
 }
 
@@ -1090,7 +1146,7 @@ impl Compiler {
             s.variants,
         );
 
-        let (code, functions, constants) = s.hydrate_program();
+        let (code, functions, constants) = s.hydrate_program(&mut self.frozen);
         self.program.code = code;
         self.program.functions = functions;
         self.program.constants = constants;
@@ -1197,6 +1253,55 @@ impl Compiler {
         }
         self.program.constants.push(v);
         self.program.constants.len() as i32 - 1
+    }
+
+    // Frozen constant-pool helpers: every constant `Value` is built through
+    // `self.frozen` and then pooled. Check-only
+    // mode skips the build like `add_constant` skips the pool.
+
+    /// Pool a frozen Int constant.
+    fn const_int(&mut self, i: i64) -> i32 {
+        if self.check_only {
+            return 0;
+        }
+        let v = self.frozen.int(i);
+        self.add_constant(v)
+    }
+
+    /// Pool a frozen string constant (interned: every pool entry with the
+    /// same contents shares one frozen allocation).
+    fn const_str(&mut self, s: &str) -> i32 {
+        if self.check_only {
+            return 0;
+        }
+        let v = self.frozen.str(s);
+        self.add_constant(v)
+    }
+
+    /// Pool a frozen field-label array for the interned label ids in
+    /// `field_labels`. Interned as a unit, so every construction site of the
+    /// same variant shares one frozen label array.
+    fn const_str_array(&mut self, field_labels: ArenaSlice) -> i32 {
+        if self.check_only {
+            return 0;
+        }
+        let labels: Vec<&str> = self
+            .engine
+            .str_ids_of(field_labels)
+            .iter()
+            .map(|&l| self.engine.str(l))
+            .collect();
+        let v = self.frozen.str_array(&labels);
+        self.add_constant(v)
+    }
+
+    /// Pool a frozen binary constant of `bit_len` bits.
+    fn const_binary(&mut self, bytes: Vec<u8>, bit_len: u64) -> i32 {
+        if self.check_only {
+            return 0;
+        }
+        let v = self.frozen.binary_bits(bytes, bit_len);
+        self.add_constant(v)
     }
 
     pub(super) fn get_or_create_local(&mut self, name: &str) -> i32 {
@@ -1567,19 +1672,13 @@ impl Compiler {
         variant_name: &str,
         field_labels: ArenaSlice,
     ) {
-        let id_c = self.add_constant(Value::int(type_id as i64));
+        let id_c = self.const_int(type_id as i64);
         self.emit_arg(Op::PushConst, id_c);
-        let en_c = self.add_constant(Value::str(type_name));
+        let en_c = self.const_str(type_name);
         self.emit_arg(Op::PushConst, en_c);
-        let vn_c = self.add_constant(Value::str(variant_name));
+        let vn_c = self.const_str(variant_name);
         self.emit_arg(Op::PushConst, vn_c);
-        let labels: Vec<Value> = self
-            .engine
-            .str_ids_of(field_labels)
-            .iter()
-            .map(|&l| Value::str(self.engine.str(l)))
-            .collect();
-        let lc = self.add_constant(Value::array(labels));
+        let lc = self.const_str_array(field_labels);
         self.emit_arg(Op::PushConst, lc);
     }
 
@@ -1602,7 +1701,7 @@ impl Compiler {
     ) -> i32 {
         self.emit_construct_header(type_id, type_name, variant_name, field_labels);
         let prefix = enum_name_prefix_hash(type_name, variant_name);
-        self.add_constant(Value::int(prefix as i64))
+        self.const_int(prefix as i64)
     }
 
     /// Push the slim two-item match header `[type_id, variant_name]`. `MatchEnum`
@@ -1610,9 +1709,9 @@ impl Compiler {
     /// construction header it needs neither the enum name nor the field-label
     /// array. The VM pops `variant_name`, then `type_id`, then the scrutinee.
     fn emit_match_header(&mut self, type_id: i32, variant_name: &str) {
-        let id_c = self.add_constant(Value::int(type_id as i64));
+        let id_c = self.const_int(type_id as i64);
         self.emit_arg(Op::PushConst, id_c);
-        let vn_c = self.add_constant(Value::str(variant_name));
+        let vn_c = self.const_str(variant_name);
         self.emit_arg(Op::PushConst, vn_c);
     }
 
@@ -2397,13 +2496,13 @@ impl Compiler {
                 ty
             }
             ast::Expression::StringLiteral(sl) => {
-                let idx = self.add_constant(Value::str(sl.value.as_str()));
+                let idx = self.const_str(sl.value.as_str());
                 self.emit_arg(Op::PushConst, idx);
                 self.ty_string()
             }
             ast::Expression::InterpolatedString(is) => {
                 if is.parts.is_empty() {
-                    let idx = self.add_constant(Value::str(""));
+                    let idx = self.const_str("");
                     self.emit_arg(Op::PushConst, idx);
                 } else {
                     for part in &is.parts {
@@ -2805,14 +2904,14 @@ impl Compiler {
     // ========================================================================
 
     /// Build a `Binary` by encoding each segment to a bit-string fragment and
-    /// concatenating them left-to-right. Erlang/Gleam bit syntax: a bare
+    /// concatenating them left-to-right. Bit-syntax defaults: a bare
     /// segment is an 8-bit big-endian integer; `:N` / `:size(e)` give an
     /// explicit bit width; `:bytes(e)` / `:binary` splice a (prefix of a)
     /// binary; `:utf8` UTF-8-encodes a string.
     fn compile_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> Ty {
         let bin_ty = self.ty_binary();
         if bl.segments.is_empty() {
-            let c = self.add_constant(Value::binary(vec![]));
+            let c = self.const_binary(vec![], 0);
             self.emit_arg(Op::PushConst, c);
             return bin_ty;
         }
@@ -2821,7 +2920,7 @@ impl Compiler {
         // allocation per evaluation instead of a BinFromString/BinFromInt +
         // BinAppend chain.
         if let Some((bytes, bit_len)) = Self::const_fold_binary_literal(bl) {
-            let c = self.add_constant(Value::binary_bits(bytes, bit_len));
+            let c = self.const_binary(bytes, bit_len);
             self.emit_arg(Op::PushConst, c);
             return bin_ty;
         }
@@ -2916,7 +3015,7 @@ impl Compiler {
     ) {
         match size {
             None => {
-                let c = self.add_constant(Value::int(default));
+                let c = self.const_int(default);
                 self.emit_arg(Op::PushConst, c);
             }
             Some(e) => {
@@ -2924,7 +3023,7 @@ impl Compiler {
                 let int_ty = self.ty_int();
                 self.engine.unify_at(int_ty, ety, e.span());
                 if unit == ast::BinUnit::Bytes {
-                    let c = self.add_constant(Value::int(8));
+                    let c = self.const_int(8);
                     self.emit_arg(Op::PushConst, c);
                     self.emit(Op::Mul);
                 }
@@ -4444,7 +4543,7 @@ impl Compiler {
             ast::Pattern::Literal(lit) => {
                 let v = match lit {
                     ast::PatternLiteral::Number(n) => self.const_number(n),
-                    ast::PatternLiteral::String(s) => Value::str(s.value.as_str()),
+                    ast::PatternLiteral::String(s) => self.frozen.str(s.value.as_str()),
                 };
                 let c = self.add_constant(v);
                 self.emit_arg(Op::PushConst, c);
@@ -4485,7 +4584,7 @@ impl Compiler {
 
                 self.emit_arg(Op::PushLocal, temp);
                 self.emit(Op::ArrayLen);
-                let pc = self.add_constant(Value::int(pre_count as i64));
+                let pc = self.const_int(pre_count as i64);
                 self.emit_arg(Op::PushConst, pc);
                 if spread_idx.is_some() {
                     self.emit(Op::Gte);
@@ -4510,7 +4609,7 @@ impl Compiler {
                     && let Some(id) = binding
                 {
                     self.emit_arg(Op::PushLocal, temp);
-                    let pc2 = self.add_constant(Value::int(pre_count as i64));
+                    let pc2 = self.const_int(pre_count as i64);
                     self.emit_arg(Op::PushConst, pc2);
                     self.emit(Op::Drop);
                     let local_idx = self.get_or_create_local(&id.name);
@@ -4586,6 +4685,8 @@ impl Compiler {
         rest: Option<&ast::BinaryPatternRest>,
         fail_jumps: &mut Vec<i32>,
     ) {
+        use BinOperand::{Const, Local};
+
         // scrutinee Binary -> bin_temp (consumed off the stack on every path).
         let bin_temp = self.spill_temp();
 
@@ -4610,7 +4711,7 @@ impl Compiler {
         // exact-consumption check.
         if all_static && rest.is_none() {
             let static_total: i64 = widths.iter().flatten().sum();
-            let c = self.add_constant(Value::int(static_total));
+            let c = self.const_int(static_total);
             self.emit_arg(Op::PushConst, c);
             self.emit_arg(Op::PushLocal, total_temp);
             self.emit(Op::Eq);
@@ -4633,7 +4734,7 @@ impl Compiler {
                     }
                 }
                 if end > checked {
-                    let c = self.add_constant(Value::int(end));
+                    let c = self.const_int(end);
                     self.emit_arg(Op::PushConst, c);
                     self.emit_arg(Op::PushLocal, total_temp);
                     self.emit(Op::Lte);
@@ -4645,13 +4746,13 @@ impl Compiler {
             // Literal segments: coalesce the run starting here into one
             // constant prefix and compare it with a single op.
             if let Some((bytes, bit_len, run)) = Self::literal_prefix_run(&segments[i..]) {
-                let c = self.add_constant(Value::binary_bits(bytes, bit_len));
+                let c = self.const_binary(bytes, bit_len);
                 self.emit_arg(Op::PushLocal, bin_temp);
                 self.emit_push_cursor(cursor, cursor_temp);
                 self.emit_arg(Op::PushConst, c);
                 self.emit(Op::BinMatchPrefix);
                 fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
-                self.emit_advance_cursor(&mut cursor, cursor_temp, bit_len as i64);
+                self.emit_advance_cursor(&mut cursor, cursor_temp, Const(bit_len as i64));
                 i += run;
                 continue;
             }
@@ -4672,7 +4773,7 @@ impl Compiler {
                 let cp_temp = self.spill_temp();
 
                 self.emit_arg(Op::PushLocal, nbits_temp);
-                let zc = self.add_constant(Value::int(0));
+                let zc = self.const_int(0);
                 self.emit_arg(Op::PushConst, zc);
                 self.emit(Op::Gt);
                 fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
@@ -4680,107 +4781,65 @@ impl Compiler {
                 self.emit_arg(Op::PushLocal, cp_temp);
                 self.emit_pattern(&seg.value, fail_jumps);
 
-                self.emit_arg(Op::PushLocal, cursor_temp);
-                self.emit_arg(Op::PushLocal, nbits_temp);
-                self.emit(Op::Add);
-                self.emit_arg(Op::StoreLocal, cursor_temp);
+                self.emit_advance_cursor(&mut cursor, cursor_temp, Local(nbits_temp));
                 continue;
             }
 
-            match (width, cursor) {
-                // Statically-sized segment at a static cursor: bounds proven by
-                // the consolidated check; read at constant offset/width.
-                (Some(bits), Some(at)) => {
-                    self.emit_arg(Op::PushLocal, bin_temp);
-                    let ac = self.add_constant(Value::int(at));
-                    self.emit_arg(Op::PushConst, ac);
-                    let wc = self.add_constant(Value::int(bits));
-                    self.emit_arg(Op::PushConst, wc);
-                    if seg.kind == ast::BinKind::Binary {
-                        self.emit(Op::BinView);
-                    } else {
-                        self.emit(Op::BinReadInt);
-                    }
-                    self.emit_pattern(&seg.value, fail_jumps);
-                    cursor = Some(at + bits);
-                }
-                // Statically-sized segment at a runtime cursor: per-segment
-                // bounds check, read at cursor with constant width.
-                (Some(bits), None) => {
-                    let wc = self.add_constant(Value::int(bits));
-
+            let width_src = if let Some(bits) = width {
+                // Statically-sized segment. At a static cursor bounds were
+                // proven by the consolidated check; at a runtime cursor each
+                // segment checks cursor + width <= total itself.
+                if cursor.is_none() {
                     self.emit_arg(Op::PushLocal, cursor_temp);
-                    self.emit_arg(Op::PushConst, wc);
+                    self.emit_push_operand(Const(bits));
                     self.emit(Op::Add);
                     self.emit_arg(Op::PushLocal, total_temp);
                     self.emit(Op::Lte);
                     fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
-
-                    self.emit_arg(Op::PushLocal, bin_temp);
-                    self.emit_arg(Op::PushLocal, cursor_temp);
-                    self.emit_arg(Op::PushConst, wc);
-                    if seg.kind == ast::BinKind::Binary {
-                        self.emit(Op::BinView);
-                    } else {
-                        self.emit(Op::BinReadInt);
-                    }
-                    self.emit_pattern(&seg.value, fail_jumps);
-
-                    self.emit_arg(Op::PushLocal, cursor_temp);
-                    self.emit_arg(Op::PushConst, wc);
-                    self.emit(Op::Add);
-                    self.emit_arg(Op::StoreLocal, cursor_temp);
                 }
+                Const(bits)
+            } else {
                 // Runtime-sized segment: a dynamic `size(e)`/`bytes(e)`, or a
                 // sizeless `:binary` slice that consumes the remaining bits.
-                (None, _) => {
-                    let bits_temp = self.alloc_temp();
-                    if let Some(e) = &seg.size {
-                        let ety = self.compile_expr(e);
-                        let int_ty = self.ty_int();
-                        self.engine.unify_at(int_ty, ety, e.span());
-                        if seg.unit == ast::BinUnit::Bytes {
-                            let c = self.add_constant(Value::int(8));
-                            self.emit_arg(Op::PushConst, c);
-                            self.emit(Op::Mul);
-                        }
-                        self.emit_arg(Op::StoreLocal, bits_temp);
-
-                        // Bounds: cursor + width <= total.
-                        self.emit_spill_cursor(&mut cursor, cursor_temp);
-                        self.emit_arg(Op::PushLocal, cursor_temp);
-                        self.emit_arg(Op::PushLocal, bits_temp);
-                        self.emit(Op::Add);
-                        self.emit_arg(Op::PushLocal, total_temp);
-                        self.emit(Op::Lte);
-                        fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
-                    } else {
-                        // `:binary` with no size: all remaining bits. In bounds
-                        // by the cursor <= total invariant; no check needed.
-                        self.emit_spill_cursor(&mut cursor, cursor_temp);
-                        self.emit_arg(Op::PushLocal, total_temp);
-                        self.emit_arg(Op::PushLocal, cursor_temp);
-                        self.emit(Op::Sub);
-                        self.emit_arg(Op::StoreLocal, bits_temp);
+                let bits_temp = self.alloc_temp();
+                if let Some(e) = &seg.size {
+                    let ety = self.compile_expr(e);
+                    let int_ty = self.ty_int();
+                    self.engine.unify_at(int_ty, ety, e.span());
+                    if seg.unit == ast::BinUnit::Bytes {
+                        let c = self.const_int(8);
+                        self.emit_arg(Op::PushConst, c);
+                        self.emit(Op::Mul);
                     }
+                    self.emit_arg(Op::StoreLocal, bits_temp);
 
-                    // Extract [cursor, cursor+width) and match the pattern.
-                    self.emit_arg(Op::PushLocal, bin_temp);
-                    self.emit_arg(Op::PushLocal, cursor_temp);
-                    self.emit_arg(Op::PushLocal, bits_temp);
-                    if seg.kind == ast::BinKind::Binary {
-                        self.emit(Op::BinView);
-                    } else {
-                        self.emit(Op::BinReadInt);
-                    }
-                    self.emit_pattern(&seg.value, fail_jumps);
-
+                    // Bounds: cursor + width <= total.
+                    self.emit_spill_cursor(&mut cursor, cursor_temp);
                     self.emit_arg(Op::PushLocal, cursor_temp);
                     self.emit_arg(Op::PushLocal, bits_temp);
                     self.emit(Op::Add);
-                    self.emit_arg(Op::StoreLocal, cursor_temp);
+                    self.emit_arg(Op::PushLocal, total_temp);
+                    self.emit(Op::Lte);
+                    fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                } else {
+                    // `:binary` with no size: all remaining bits. In bounds
+                    // by the cursor <= total invariant; no check needed.
+                    self.emit_spill_cursor(&mut cursor, cursor_temp);
+                    self.emit_arg(Op::PushLocal, total_temp);
+                    self.emit_arg(Op::PushLocal, cursor_temp);
+                    self.emit(Op::Sub);
+                    self.emit_arg(Op::StoreLocal, bits_temp);
                 }
-            }
+                Local(bits_temp)
+            };
+            self.emit_segment_read(
+                bin_temp,
+                width_src,
+                seg,
+                &mut cursor,
+                cursor_temp,
+                fail_jumps,
+            );
         }
 
         match rest {
@@ -4810,38 +4869,68 @@ impl Compiler {
         }
     }
 
-    /// Push the current bit cursor: a constant when statically known, the
-    /// runtime temp otherwise.
-    fn emit_push_cursor(&mut self, cursor: Option<i64>, cursor_temp: i32) {
-        match cursor {
-            Some(k) => {
-                let c = self.add_constant(Value::int(k));
+    /// Push an operand: a pooled int constant or a local slot.
+    fn emit_push_operand(&mut self, src: BinOperand) {
+        match src {
+            BinOperand::Const(v) => {
+                let c = self.const_int(v);
                 self.emit_arg(Op::PushConst, c);
             }
-            None => self.emit_arg(Op::PushLocal, cursor_temp),
+            BinOperand::Local(slot) => self.emit_arg(Op::PushLocal, slot),
         }
     }
 
-    /// Advance the cursor by a statically-known number of bits: arithmetic at
-    /// compile time while static, an add-and-store once dynamic.
-    fn emit_advance_cursor(&mut self, cursor: &mut Option<i64>, cursor_temp: i32, bits: i64) {
-        match cursor {
-            Some(k) => *cursor = Some(*k + bits),
-            None => {
-                self.emit_arg(Op::PushLocal, cursor_temp);
-                let c = self.add_constant(Value::int(bits));
-                self.emit_arg(Op::PushConst, c);
-                self.emit(Op::Add);
-                self.emit_arg(Op::StoreLocal, cursor_temp);
-            }
+    /// Push the current bit cursor: a constant when statically known, the
+    /// runtime temp otherwise.
+    fn emit_push_cursor(&mut self, cursor: Option<i64>, cursor_temp: i32) {
+        let src = cursor.map_or(BinOperand::Local(cursor_temp), BinOperand::Const);
+        self.emit_push_operand(src);
+    }
+
+    /// Read `width` bits at the current cursor — a zero-copy view for
+    /// `:binary` segments, an int read otherwise — match the result against
+    /// the segment's value pattern, and advance the cursor past the segment.
+    fn emit_segment_read(
+        &mut self,
+        bin_temp: i32,
+        width: BinOperand,
+        seg: &ast::BinSegmentPat,
+        cursor: &mut Option<i64>,
+        cursor_temp: i32,
+        fail_jumps: &mut Vec<i32>,
+    ) {
+        self.emit_arg(Op::PushLocal, bin_temp);
+        self.emit_push_cursor(*cursor, cursor_temp);
+        self.emit_push_operand(width);
+        if seg.kind == ast::BinKind::Binary {
+            self.emit(Op::BinView);
+        } else {
+            self.emit(Op::BinReadInt);
         }
+        self.emit_pattern(&seg.value, fail_jumps);
+        self.emit_advance_cursor(cursor, cursor_temp, width);
+    }
+
+    /// Advance the cursor by `by` bits: arithmetic at compile time while both
+    /// cursor and width are static, an add-and-store otherwise (spilling the
+    /// cursor first if needed).
+    fn emit_advance_cursor(&mut self, cursor: &mut Option<i64>, cursor_temp: i32, by: BinOperand) {
+        if let (Some(k), BinOperand::Const(b)) = (*cursor, by) {
+            *cursor = Some(k + b);
+            return;
+        }
+        self.emit_spill_cursor(cursor, cursor_temp);
+        self.emit_arg(Op::PushLocal, cursor_temp);
+        self.emit_push_operand(by);
+        self.emit(Op::Add);
+        self.emit_arg(Op::StoreLocal, cursor_temp);
     }
 
     /// Force the cursor into its runtime temp (writing the temp if it was
     /// still static). After this, `cursor_temp` holds the live cursor.
     fn emit_spill_cursor(&mut self, cursor: &mut Option<i64>, cursor_temp: i32) {
         if let Some(k) = *cursor {
-            let c = self.add_constant(Value::int(k));
+            let c = self.const_int(k);
             self.emit_arg(Op::PushConst, c);
             self.emit_arg(Op::StoreLocal, cursor_temp);
             *cursor = None;
@@ -4915,57 +5004,11 @@ impl Compiler {
     /// only the first alternative is walked — typing already enforces that all
     /// alternatives bind the identical set.
     fn pattern_bound_names(pattern: &ast::Pattern, out: &mut Vec<String>) {
-        match pattern {
-            ast::Pattern::Var { name } => {
-                if name.name != "_" {
-                    out.push(name.name.clone());
-                }
+        pattern.for_each_binder(ast::OrAlternatives::First, &mut |b| {
+            if let ast::PatternBinder::Name(id) = b {
+                out.push(id.name.clone());
             }
-            ast::Pattern::Constructor { args, .. } => {
-                for arg in args {
-                    let p = match arg {
-                        ast::PatternArg::Positional(p) => p,
-                        ast::PatternArg::Labeled { pattern, .. } => pattern,
-                    };
-                    Self::pattern_bound_names(p, out);
-                }
-            }
-            ast::Pattern::Tuple { elements, .. } => {
-                for p in elements {
-                    Self::pattern_bound_names(p, out);
-                }
-            }
-            ast::Pattern::Array { elements, .. } => {
-                for el in elements {
-                    match el {
-                        ast::ArrayPatternElement::Pattern(p) => Self::pattern_bound_names(p, out),
-                        ast::ArrayPatternElement::Spread { binding, .. } => {
-                            if let Some(id) = binding {
-                                out.push(id.name.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            ast::Pattern::Binary { segments, rest, .. } => {
-                for seg in segments {
-                    Self::pattern_bound_names(&seg.value, out);
-                }
-                if let Some(r) = rest
-                    && let Some(id) = &r.binding
-                {
-                    out.push(id.name.clone());
-                }
-            }
-            ast::Pattern::Or { patterns, .. } => {
-                if let Some(first) = patterns.first() {
-                    Self::pattern_bound_names(first, out);
-                }
-            }
-            ast::Pattern::Wildcard { .. }
-            | ast::Pattern::Literal(_)
-            | ast::Pattern::Range { .. } => {}
-        }
+        });
     }
 
     fn emit_ctor_pattern(
@@ -5036,11 +5079,11 @@ impl Compiler {
     /// post-diagnostic error branch, so it can never masquerade as a valid
     /// literal `0`: the compile has already failed.
     fn const_number(&mut self, n: &ast::NumberLiteral) -> Value {
-        match number_literal_value(&n.value) {
+        match number_literal_value(&n.value, &mut self.frozen) {
             Ok(v) => v,
             Err(e) => {
                 self.error(e.message(&n.value), n.span);
-                e.recovery()
+                e.recovery(&mut self.frozen)
             }
         }
     }
@@ -5053,7 +5096,7 @@ impl Compiler {
         } else {
             // type_pattern already errored on non-numeric bounds; emit a 0 so
             // the bytecode stays balanced.
-            let c = self.add_constant(Value::int(0));
+            let c = self.const_int(0);
             self.emit_arg(Op::PushConst, c);
         }
     }
@@ -5076,6 +5119,13 @@ pub fn type_defining_span(expr: &ast::Expression) -> Span {
         },
         _ => expr.span(),
     }
+}
+
+/// Operand source for binary-pattern codegen: a constant or a local slot.
+#[derive(Clone, Copy)]
+enum BinOperand {
+    Const(i64),
+    Local(i32),
 }
 
 /// Why a numeric literal's source text could not be turned into a `Value`.
@@ -5107,28 +5157,29 @@ impl NumLitError {
     /// Value to substitute so codegen can continue after the diagnostic has
     /// been emitted. Kind-preserving so the inferred type still matches user
     /// intent and the compile doesn't cascade into spurious type errors.
-    fn recovery(&self) -> Value {
+    fn recovery(&self, frozen: &mut FrozenBuilder) -> Value {
         match self {
-            NumLitError::IntOutOfRange => Value::int(0),
-            NumLitError::InvalidFloat => Value::float(0.0),
+            NumLitError::IntOutOfRange => frozen.int(0),
+            NumLitError::InvalidFloat => frozen.float(0.0),
         }
     }
 }
 
-/// Parse a numeric literal's source text into a `Value`.
+/// Parse a numeric literal's source text into a constant `Value`, built
+/// through the frozen builder like every other program constant.
 ///
 /// Total: the partiality is lifted into the return type so no caller can
 /// obtain a fabricated `Value` for out-of-domain input. The only
 /// `Value`-producing path for callers is [`Compiler::const_number`], which
 /// emits a diagnostic before recovering.
-fn number_literal_value(s: &str) -> Result<Value, NumLitError> {
+fn number_literal_value(s: &str, frozen: &mut FrozenBuilder) -> Result<Value, NumLitError> {
     if s.contains('.') {
         s.parse()
-            .map(Value::float)
+            .map(|f| frozen.float(f))
             .map_err(|_| NumLitError::InvalidFloat)
     } else {
         s.parse()
-            .map(Value::int)
+            .map(|i| frozen.int(i))
             .map_err(|_| NumLitError::IntOutOfRange)
     }
 }

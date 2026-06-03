@@ -1,14 +1,23 @@
+//! Prelude bootstrap: load `src/std/al.al` into a fresh compiler so its
+//! names are visible in every AL program without an import.
+//!
+//! The prelude is real AL source — primitives, `Nil`/`Bool`/`Option`/
+//! `Result`, `println`/`inspect` — declared via external/`@vm` and loaded
+//! through the ordinary module pipeline, so the exact parse/analyse path
+//! that handles user modules produces it; nothing here redefines a prelude
+//! type in Rust.
+//!
+//! Runs exactly once per compiler, before any user code is seen. Its last
+//! act is `PreludeBindings::capture` (see `prelude_bindings.rs`): a strict
+//! typed snapshot of every prelude name the compiler relies on, so a
+//! drifted `al.al` fails loudly here instead of surfacing as a confused
+//! unify error somewhere downstream.
+
 use super::PreludeBindings;
 use super::compiler::Compiler;
 use crate::module;
 use crate::span::point_span;
 use crate::types::ValueKind;
-
-// The prelude defines types and functions that are automatically available in
-// every AL program without an import. Everything — primitives, Nil/Option/
-// Result/Bool, println/inspect — is real AL source in `src/std/al.al`, declared
-// via external/`@vm` and loaded through the normal module pipeline so the same
-// parse/analyse path produces it.
 
 impl Compiler {
     pub(crate) fn register_prelude(&mut self) {

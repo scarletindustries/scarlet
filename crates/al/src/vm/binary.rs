@@ -1,5 +1,5 @@
-//! Bit-granular operations on `HeapValue::Binary`. Bits are addressed MSB-first
-//! (Erlang/Gleam convention): bit `i` lives at byte `i / 8`, position
+//! Bit-granular operations on `HeapValue::Binary`. Bits are addressed MSB-first:
+//! bit `i` lives at byte `i / 8`, position
 //! `7 - (i % 8)`. The trailing low bits of the last byte beyond `bit_len` are
 //! always zero.
 

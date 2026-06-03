@@ -16,7 +16,7 @@ import al/net/socket.{Socket}
 //
 // The byte scanning itself — finding the CRLF/SP/colon boundaries, building
 // the field views, the RFC 7230 §3.3.3 framing precedence — runs as native VM
-// builtins (the Erlang `erlang:decode_packet(http_bin, ...)` precedent): one
+// builtins: one
 // op per request head instead of one op per byte. Every protocol DECISION
 // (keep-alive, 100-continue, how to frame the response) stays in AL, here and
 // in al/http.

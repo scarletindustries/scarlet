@@ -770,7 +770,7 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
     );
 }
 
-// THE field bug (found via VSCode, 2026-06-01): an entry file declaring a type
+// The shadowed-stdlib-type bug: an entry file declaring a type
 // whose name collides with a seeded stdlib type — calculator.al's
 // `type Parsed = Result(...)` vs al/http/h1's `Parsed` enum — overwrote the
 // seeded `type_info` entry IN PLACE (IndexMap::insert keeps the existing,

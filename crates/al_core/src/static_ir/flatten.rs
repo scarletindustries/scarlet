@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 
 use super::*;
-use crate::bytecode::{HeapValue, Value, ValueView};
+use crate::bytecode::{Value, ValueView};
 use crate::module::ModuleInterface;
 use crate::precompile::PrecompileOutput;
 use crate::types::InferEngine;
@@ -141,8 +141,8 @@ impl FlatPools {
             ValueView::Int(n) => SConst::Int(n),
             ValueView::Float(f) => SConst::Float(f),
             ValueView::Bool(b) => SConst::Bool(b),
-            ValueView::Heap(HeapValue::Str(s)) => SConst::Str(self.intern(s)),
-            ValueView::Heap(HeapValue::Array(a)) => {
+            ValueView::Str(s) => SConst::Str(self.intern(s)),
+            ValueView::Array(a) => {
                 let strs: Vec<String> = a
                     .iter()
                     .map(|v| match v.as_str() {
@@ -155,9 +155,9 @@ impl FlatPools {
                     .collect();
                 SConst::StrArray(self.push_str_slice(strs))
             }
-            ValueView::Heap(HeapValue::Binary(b)) => {
+            ValueView::Binary(b) => {
                 let sl = self.push_bytes(&b.to_aligned_vec());
-                SConst::Binary(sl, b.bit_len)
+                SConst::Binary(sl, b.bit_len())
             }
             _ => panic!(
                 "flatten: stdlib constant pool contains a non-scalar value ({v:?}); \
@@ -285,10 +285,10 @@ mod tests {
                 (SConst::Int(n), ValueView::Int(m)) => assert_eq!(*n, m),
                 (SConst::Float(f), ValueView::Float(g)) => assert_eq!(*f, g),
                 (SConst::Bool(b), ValueView::Bool(c)) => assert_eq!(*b, c),
-                (SConst::Str(i), ValueView::Heap(HeapValue::Str(s))) => {
-                    assert_eq!(p.str_pool[*i as usize].as_str(), &**s);
+                (SConst::Str(i), ValueView::Str(s)) => {
+                    assert_eq!(p.str_pool[*i as usize].as_str(), s);
                 }
-                (SConst::StrArray(sl), ValueView::Heap(HeapValue::Array(arr))) => {
+                (SConst::StrArray(sl), ValueView::Array(arr)) => {
                     let strs: Vec<&str> = p.str_slice_pool[sl.range()]
                         .iter()
                         .map(|&i| p.str_pool[i as usize].as_str())
@@ -299,11 +299,11 @@ mod tests {
                         .collect();
                     assert_eq!(strs, want);
                 }
-                (SConst::Binary(sl, bit_len), ValueView::Heap(HeapValue::Binary(b))) => {
-                    assert_eq!(*bit_len, b.bit_len);
+                (SConst::Binary(sl, bit_len), ValueView::Binary(b)) => {
+                    assert_eq!(*bit_len, b.bit_len());
                     assert_eq!(&p.byte_pool[sl.range()], b.to_aligned_vec().as_slice());
                 }
-                (other, got) => panic!("constant kind mismatch: {other:?} vs {got:?}"),
+                (other, _) => panic!("constant kind mismatch for {other:?}"),
             }
         }
 

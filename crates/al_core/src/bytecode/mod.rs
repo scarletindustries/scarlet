@@ -1,16 +1,62 @@
+//! The compiled program: the instruction set, its 8-byte encoding, and the
+//! [`Program`] container the VM executes.
+//!
+//! This module is the contract between the compiler (this crate) and the VM
+//! (the `al` crate): everything needed to build, describe, and ship a
+//! runnable program lives under `bytecode/`. The VM consumes these types;
+//! it never sees the AST.
+//!
+//! # The three load-bearing facts
+//!
+//! 1. **An [`Instruction`] is one aligned 8-byte word** (1B op + 1B `a` +
+//!    2B `b` + 4B operand, `repr(C)`), so the dispatch loop's fetch is a
+//!    single load via [`fetch`]. `a`/`b` reclaim padding bytes for
+//!    superinstructions that need a second and third operand.
+//! 2. **[`Program::constants`] point into [`Program::frozen`]**, the
+//!    `Arc`-held program-wide frozen area. Constants are therefore stable
+//!    raw pointers for the program's whole life, readable from every
+//!    scheduler thread, and skipped by every per-process GC.
+//! 3. **`Program` is `Send + Sync`** (asserted below): constants are frozen
+//!    or immediate words and function names are `Arc<str>`s, so a worker
+//!    scheduler thread takes a plain `clone()` of the shared program — no
+//!    owned mirror, no per-thread constant re-hydration.
+//!
+//! Adding an opcode touches three places: emission in [`compiler`],
+//! dispatch in the VM's interpreter loop, and — if the op allocates — the
+//! VM's ensure-budget table, which must reserve the op's worst-case
+//! allocation while its operands are still rooted on the stack (the
+//! rooting rule).
+//!
+//! # Reading order
+//!
+//! | file                | the one thing it does                          |
+//! |---------------------|------------------------------------------------|
+//! | this file           | [`Op`], [`Instruction`], [`Function`],         |
+//! |                     | [`Program`]                                    |
+//! | [`compiler`]        | AST → `Program`: HM inference fused with       |
+//! |                     | bytecode emission, plus `IncrementalSession`   |
+//! | `analysis`          | module top level: multi-pass declaration       |
+//! |                     | analysis (type heads → aliases → slots →       |
+//! |                     | ctors → SCC inference)                         |
+//! | `prelude` /         | load `src/std/al.al` into every compile;       |
+//! | [`prelude_bindings`]| capture strongly-typed handles to its names    |
+//! | [`value`]           | the NaN-boxed [`Value`] word, heap object      |
+//! |                     | layouts, the [`Arena`] trait                   |
+//! | [`seq`]             | the persistent RRB vector backing `Array`      |
+
 mod analysis;
 pub mod compiler;
 mod prelude;
 pub mod prelude_bindings;
-pub mod transfer;
-mod value;
-use std::rc::Rc;
+pub mod seq;
+pub mod value;
+use std::sync::Arc;
 
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use value::{
-    BinaryValue, ClosureValue, EnumValue, HeapValue, Seq, SocketValue, TupleValue, Value,
-    ValueView, enum_hash_with_payload, enum_name_prefix_hash, hash_value,
+    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, SeqRef, SocketValue, Value, ValueView,
+    enum_hash_with_payload, enum_name_prefix_hash, hash_value,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,8 +238,7 @@ pub enum Op {
     BinFromIntAscii,
 
     // HTTP/1.1 protocol ops (al/http/h1, al/http/headers). The byte scanning
-    // and value assembly run in native code — the Erlang
-    // `erlang:decode_packet(http_bin, ...)` precedent — while every protocol
+    // and value assembly run in native code, while every protocol
     // *decision* (framing precedence, keep-alive, 100-continue) stays in AL.
     /// `[buf, off] -> Parsed` — parse one request head (request line + header
     /// block) from `buf` at byte offset `off`. Pushes an `al/http/h1.Parsed`:
@@ -308,7 +353,7 @@ pub unsafe fn fetch(code: &[Instruction], i: usize) -> Instruction {
 
 #[derive(Debug, Clone)]
 pub struct Function {
-    pub name: Rc<str>,
+    pub name: Arc<str>,
     pub arity: i32,
     pub locals: i32,
     pub capture_count: i32,
@@ -322,7 +367,20 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub code: Vec<Instruction>,
     pub entry: i32,
+    /// The program-wide frozen area the `constants`
+    /// were built into by the compiler / hydration `FrozenBuilder`. `Arc`-held
+    /// here so the area lives exactly as long as the program that points into
+    /// it; every scheduler's clone of the program shares the same area.
+    pub frozen: Arc<crate::frozen::FrozenArea>,
 }
+
+// Worker scheduler threads clone the shared program (load-bearing fact 3):
+// constants are frozen/immediate words, names are `Arc<str>`, the area is
+// `Arc<FrozenArea>`. This must stay thread-shareable.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Program>();
+};
 
 pub fn op(o: Op) -> Instruction {
     Instruction {

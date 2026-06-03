@@ -10,9 +10,10 @@
 
 pub mod flatten;
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::bytecode::{Function, Instruction, PreludeBindings, Value};
+use crate::frozen::FrozenBuilder;
 use crate::module::{ExportedValue, ModuleInterface};
 use crate::types::{
     QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
@@ -167,13 +168,21 @@ impl StaticStdlib {
             .map(|i| self.hydrate_module(&self.modules[i].1))
     }
 
-    pub fn hydrate_program(&self) -> (Vec<Instruction>, Vec<Function>, Vec<Value>) {
+    /// Hydrate the precompiled stdlib's code/functions/constants into live
+    /// form. Program literals/constants are built through the explicit
+    /// `frozen` builder: string constants and label
+    /// lists intern to the frozen area's canonical allocations, shared with
+    /// everything else the same program compiles.
+    pub fn hydrate_program(
+        &self,
+        frozen: &mut FrozenBuilder,
+    ) -> (Vec<Instruction>, Vec<Function>, Vec<Value>) {
         let code = self.code.to_vec();
         let functions: Vec<Function> = self
             .functions
             .iter()
             .map(|f| Function {
-                name: Rc::from(self.str_pool[f.name as usize]),
+                name: Arc::from(self.str_pool[f.name as usize]),
                 arity: f.arity,
                 locals: f.locals,
                 capture_count: f.capture_count,
@@ -185,18 +194,19 @@ impl StaticStdlib {
             .constants
             .iter()
             .map(|c| match *c {
-                SConst::Int(n) => Value::int(n),
-                SConst::Float(f) => Value::float(f),
-                SConst::Bool(b) => Value::bool(b),
-                SConst::Str(i) => Value::str(self.str_pool[i as usize]),
-                SConst::StrArray(sl) => Value::array(
-                    self.str_slice_pool[sl.range()]
+                SConst::Int(n) => frozen.int(n),
+                SConst::Float(f) => frozen.float(f),
+                SConst::Bool(b) => frozen.bool(b),
+                SConst::Str(i) => frozen.str(self.str_pool[i as usize]),
+                SConst::StrArray(sl) => {
+                    let strs: Vec<&str> = self.str_slice_pool[sl.range()]
                         .iter()
-                        .map(|&i| Value::str(self.str_pool[i as usize]))
-                        .collect(),
-                ),
+                        .map(|&i| self.str_pool[i as usize])
+                        .collect();
+                    frozen.str_array(&strs)
+                }
                 SConst::Binary(sl, bit_len) => {
-                    Value::binary_bits(self.byte_pool[sl.range()].to_vec(), bit_len)
+                    frozen.binary_bits(self.byte_pool[sl.range()].to_vec(), bit_len)
                 }
             })
             .collect();
