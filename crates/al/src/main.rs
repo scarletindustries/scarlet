@@ -10,6 +10,7 @@
         clippy::unimplemented,
     )
 )]
+#![deny(unsafe_code)]
 
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -294,7 +295,7 @@ fn cmd_run(args: RunArgs) {
 
     let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
 
-    let mut v = vm::new_vm(result.program);
+    let mut v = vm::new_vm(result.program).unwrap_or_else(|e| die(e));
     let run_result = v.run().unwrap_or_else(|e| die(e));
 
     if !matches!(run_result.as_enum(), Some(e) if e.type_id() == al::stdlib::prelude::NIL.type_id) {

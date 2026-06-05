@@ -17,6 +17,7 @@
 //! as a `Vec<String>` so a `DefId` can ride on `Copy` types and survive
 //! incremental recompiles independent of any one inference engine's arenas.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
@@ -271,12 +272,17 @@ pub struct ResolvedRef {
 // Span geometry
 // ============================================================================
 
+/// A `Span`'s `(start, end)` endpoints as `(line, column)` pairs; all span
+/// geometry compares these lexicographically.
+fn endpoints(s: &Span) -> ((i32, i32), (i32, i32)) {
+    ((s.start_line, s.start_column), (s.end_line, s.end_column))
+}
+
 /// Half-open containment: `[start, end)` in (line, column) order. A
 /// `point_span(l, c)` (end column `c + 1`) therefore contains exactly column
 /// `c` on line `l`.
 pub fn span_contains(s: &Span, line: i32, col: i32) -> bool {
-    let start = (s.start_line, s.start_column);
-    let end = (s.end_line, s.end_column);
+    let (start, end) = endpoints(s);
     let p = (line, col);
     start <= p && p < end
 }
@@ -294,27 +300,19 @@ pub fn span_width(s: &Span) -> (i32, i32) {
 /// compiler records inside the `import` declaration's span — apart from a real
 /// *use* of that imported name elsewhere in the module.
 fn span_within(inner: &Span, outer: &Span) -> bool {
-    let o = (
-        (outer.start_line, outer.start_column),
-        (outer.end_line, outer.end_column),
-    );
-    let i = (
-        (inner.start_line, inner.start_column),
-        (inner.end_line, inner.end_column),
-    );
-    o.0 <= i.0 && i.1 <= o.1
+    let (i_start, i_end) = endpoints(inner);
+    let (o_start, o_end) = endpoints(outer);
+    o_start <= i_start && i_end <= o_end
 }
 
 /// The smallest `Span` covering both `a` and `b` (`(line, col)` order). Used to
 /// recover an `import` declaration's full lexical extent from its constituent
 /// occurrences.
 fn span_union(a: &Span, b: &Span) -> Span {
-    let (start_line, start_column) = std::cmp::min(
-        (a.start_line, a.start_column),
-        (b.start_line, b.start_column),
-    );
-    let (end_line, end_column) =
-        std::cmp::max((a.end_line, a.end_column), (b.end_line, b.end_column));
+    let (a_start, a_end) = endpoints(a);
+    let (b_start, b_end) = endpoints(b);
+    let (start_line, start_column) = a_start.min(b_start);
+    let (end_line, end_column) = a_end.max(b_end);
     Span {
         start_line,
         start_column,
@@ -344,6 +342,24 @@ pub struct ModuleReferences {
     occurrence_owner: Vec<Option<DefId>>,
     /// Declared name → the defs declared under it in this module.
     name_to_defs: HashMap<String, Vec<DefId>>,
+    /// Source line → every occurrence/definition span touching that line,
+    /// built lazily on the first [`cursor_hit`](Self::cursor_hit) and
+    /// invalidated by any mutation. Makes a position query O(spans on the
+    /// queried line) instead of O(all occurrences + all definitions); spans
+    /// are identifier-sized, so a line holds a handful of entries.
+    line_index: OnceCell<HashMap<i32, Vec<LineEntry>>>,
+}
+
+/// One candidate in the [`ModuleReferences::line_index`]. `rank` reproduces
+/// the original linear-scan tie-break order — occurrences in insertion order,
+/// then definitions in declaration order — so equal-width matches resolve
+/// identically to the pre-index scan.
+#[derive(Debug, Clone, Copy)]
+struct LineEntry {
+    span: Span,
+    target: DefId,
+    kind: ReferenceKind,
+    rank: (u8, u32),
 }
 
 /// What the cursor is sitting on, as resolved by
@@ -364,6 +380,7 @@ impl ModuleReferences {
             occurrences: Vec::new(),
             occurrence_owner: Vec::new(),
             name_to_defs: HashMap::new(),
+            line_index: OnceCell::new(),
         }
     }
 
@@ -375,12 +392,11 @@ impl ModuleReferences {
     /// previous record (last write wins, matching the existing flat env).
     pub fn add_definition(&mut self, def: Definition) {
         let defid = def.defid;
-        if self.definitions.insert(defid, def.clone()).is_none() {
-            self.name_to_defs
-                .entry(def.name.clone())
-                .or_default()
-                .push(defid);
+        let name = def.name.clone();
+        if self.definitions.insert(defid, def).is_none() {
+            self.name_to_defs.entry(name).or_default().push(defid);
         }
+        self.line_index.take();
     }
 
     /// Record an occurrence. `owner` is the definition this occurrence is
@@ -388,6 +404,7 @@ impl ModuleReferences {
     pub fn add_reference(&mut self, owner: Option<DefId>, reference: Reference) {
         self.occurrences.push(reference);
         self.occurrence_owner.push(owner);
+        self.line_index.take();
     }
 
     pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
@@ -415,29 +432,59 @@ impl ModuleReferences {
         self.cursor_hit(line, col).map(|h| h.target)
     }
 
-    /// The tightest thing the cursor is on: walk occurrences then definitions,
-    /// gate by [`span_contains`], and keep the narrowest [`span_width`] match
-    /// (the first wins on a tie). A position on a declaration's own name
-    /// resolves to itself with kind [`ReferenceKind::Definition`], even when no
-    /// explicit `Definition` occurrence was recorded. Backs both
+    /// The tightest thing the cursor is on: consult the per-line index, gate
+    /// by [`span_contains`], and keep the narrowest [`span_width`] match
+    /// (occurrences beat definitions on a tie, in insertion order — the
+    /// `rank` key preserves the original scan order). A position on a
+    /// declaration's own name resolves to itself with kind
+    /// [`ReferenceKind::Definition`], even when no explicit `Definition`
+    /// occurrence was recorded. Backs both
     /// [`resolve_position`](Self::resolve_position) (which keeps only the
     /// `target`) and the rename layer (which also needs the matched `range` and
     /// `kind`).
     pub(crate) fn cursor_hit(&self, line: i32, col: i32) -> Option<CursorHit> {
-        let occurrences = self.occurrences.iter().map(|o| (o.span, o.target, o.kind));
+        let index = self.line_index.get_or_init(|| self.build_line_index());
+        index
+            .get(&line)?
+            .iter()
+            .filter(|e| span_contains(&e.span, line, col))
+            .min_by_key(|e| (span_width(&e.span), e.rank))
+            .map(|e| CursorHit {
+                target: e.target,
+                range: e.span,
+                kind: e.kind,
+            })
+    }
+
+    /// Build the line → candidate-spans index `cursor_hit` queries. A span is
+    /// registered on every line it touches (multi-line spans are rare —
+    /// occurrences and declaring names are identifier-sized), so any span
+    /// containing a point is reachable from that point's line bucket.
+    fn build_line_index(&self) -> HashMap<i32, Vec<LineEntry>> {
+        let mut index: HashMap<i32, Vec<LineEntry>> = HashMap::new();
+        let occurrences = self
+            .occurrences
+            .iter()
+            .map(|o| (o.span, o.target, o.kind))
+            .enumerate()
+            .map(|(i, (span, target, kind))| (span, target, kind, (0u8, i as u32)));
         let definitions = self
             .definitions
             .values()
-            .map(|d| (d.span(), d.defid, ReferenceKind::Definition));
-        occurrences
-            .chain(definitions)
-            .filter(|(s, ..)| span_contains(s, line, col))
-            .min_by_key(|(s, ..)| span_width(s))
-            .map(|(span, target, kind)| CursorHit {
-                target,
-                range: span,
-                kind,
-            })
+            .map(|d| (d.span(), d.defid, ReferenceKind::Definition))
+            .enumerate()
+            .map(|(i, (span, target, kind))| (span, target, kind, (1u8, i as u32)));
+        for (span, target, kind, rank) in occurrences.chain(definitions) {
+            for line in span.start_line..=span.end_line {
+                index.entry(line).or_default().push(LineEntry {
+                    span,
+                    target,
+                    kind,
+                    rank,
+                });
+            }
+        }
+        index
     }
 }
 

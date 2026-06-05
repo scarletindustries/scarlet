@@ -208,6 +208,12 @@ pub enum Op {
     BinByteSize,
     BinSlice,
     BinAppend,
+    /// `[b1, .., bn] -> Binary` — N-ary concatenation (operand = n). Emitted
+    /// for multi-segment `<<>>` literals so an n-segment build copies each
+    /// byte once into a single backing, instead of a `BinAppend` chain that
+    /// re-copies the accumulated prefix per segment (O(n*B)) and discards
+    /// n-1 intermediate boxes. The binary mirror of `StrConcatN`.
+    BinConcatN,
     BinFromInt,
     BinReadInt,
     BinTake,
@@ -334,12 +340,22 @@ const _: () = assert!(std::mem::align_of::<Instruction>() == 8);
 /// Fetch one instruction with a single 8-byte load. See the `Instruction` doc
 /// for why the dispatch loop must go through this rather than `code[i]`.
 ///
-/// # Safety
-/// `i` must be in-bounds for `code`.
+/// Returns `None` when `i` is out of bounds.
+// Designated unsafe scope: the bounded u64-load + transmute below is the one
+// unsafe site in this module. Measured safe alternatives, both rejected
+// (bench_heavy.al, best-of-N, 2026-06): plain `code.get(i).copied()` on this
+// struct +19%; `repr(transparent)` u64 newtype with shift accessors +8-11%
+// even with an unsafe op decode, +18% fully safe via num_enum — LLVM
+// schedules the dispatch loop worse against shift extraction than against
+// SROA'd struct fields, so the packed-newtype "zero-cost" theory fails.
+#[allow(unsafe_code)]
 #[inline(always)]
-pub unsafe fn fetch(code: &[Instruction], i: usize) -> Instruction {
-    debug_assert!(i < code.len());
-    // SAFETY: `repr(C, align(8))` + `repr(u8)` on `Op` + the size/align asserts
+pub fn fetch(code: &[Instruction], i: usize) -> Option<Instruction> {
+    if i >= code.len() {
+        return None;
+    }
+    // SAFETY: `i < code.len()` is checked above, so the read is in-bounds.
+    // `repr(C, align(8))` + `repr(u8)` on `Op` + the size/align asserts
     // pin `Instruction` to a fully-initialized 8-byte POD, so reading the slice
     // as `[u64]` is sound and transmuting one element back recovers the same
     // `Instruction` (the `Op` byte is valid because it came from `code`). The
@@ -347,7 +363,7 @@ pub unsafe fn fetch(code: &[Instruction], i: usize) -> Instruction {
     // a direct struct copy would otherwise emit four separate field loads.
     unsafe {
         let raw = *code.as_ptr().cast::<u64>().add(i);
-        std::mem::transmute::<u64, Instruction>(raw)
+        Some(std::mem::transmute::<u64, Instruction>(raw))
     }
 }
 

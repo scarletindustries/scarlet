@@ -128,8 +128,11 @@ pub struct CompileResult {
 // Compiler — single-pass: HM type inference + bytecode emission
 // ============================================================================
 
+/// An enclosing function frame's locals, moved here wholesale by
+/// `enter_fn_frame` and moved back by `finish_fn_frame`. Holding the map
+/// itself (rather than a name→slot copy) makes the frame push/pop O(1).
 struct Scope {
-    locals: HashMap<String, i32>,
+    locals: HashMap<String, LocalSlot>,
 }
 
 /// A live local binding: the stack slot it occupies plus the block-scope
@@ -147,12 +150,12 @@ struct LocalSlot {
 /// Compiler state snapshotted on entry to a nested function body and restored
 /// by `finish_fn_frame` once its bytecode and closure have been emitted.
 struct FnFrame {
-    locals: HashMap<String, LocalSlot>,
     /// `undo_log`/`scope_marks` lengths at frame entry. A nested body's
     /// param/local bindings live in the *enclosing* scope's mark range (no
     /// `push_local_scope` wraps bare params), so `finish_fn_frame` truncates
-    /// back to these — `locals` is restored wholesale, so the inner frame's
-    /// undo entries must be discarded, never replayed against the parent map.
+    /// back to these — `locals` is restored wholesale from `outer_scopes`, so
+    /// the inner frame's undo entries must be discarded, never replayed
+    /// against the parent map.
     undo_base: usize,
     marks_base: usize,
     local_count: i32,
@@ -462,14 +465,7 @@ fn compile_impl(
     let main_start = 0i32;
     if let ast::Expression::BlockExpression(block) = expr {
         c.process_imports(block);
-        // A cache-hit dependency reserved its id range but contributed nothing
-        // to `next_type_id` this pass, so bump the entry file past every
-        // reserved block before it allocates any of its own type ids.
-        let hw = c.module_table.id_high_water();
-        let cur = c.env.next_type_id();
-        if hw > cur {
-            c.env.set_next_type_id(hw);
-        }
+        c.bump_type_ids_past_reserved();
         c.analyse_module(block, None);
     } else {
         c.compile_expr(expr);
@@ -886,16 +882,9 @@ impl IncrementalSession {
             // restores the stdlib value on the next check.
             let pre_import = self.c.env.watermark();
             self.c.process_imports(block);
-            // A cache-hit dependency reserved its id range but contributed
-            // nothing to `next_type_id` this pass, so bump the entry file past
-            // every reserved block before it allocates any of its own ids —
-            // this must precede the `last_entry` watermark capture so the
-            // seed reflects the bumped position.
-            let hw = self.c.module_table.id_high_water();
-            let cur = self.c.env.next_type_id();
-            if hw > cur {
-                self.c.env.set_next_type_id(hw);
-            }
+            // Must precede the `last_entry` watermark capture below so the
+            // seed reflects the bumped id position.
+            self.c.bump_type_ids_past_reserved();
             // The watermark records the persistent root scope (prelude seed)
             // plus the bumped id position; the entry's imports live in the
             // throwaway scope `reset_to` layered on top (value bindings) or are
@@ -1459,12 +1448,12 @@ impl Compiler {
         // is what makes mutually-recursive top-level fns work — the sibling's
         // slot is read at call time, not at MakeClosure time.
         for (i, scope) in self.outer_scopes.iter().enumerate().rev() {
-            if let Some(slot) = scope.locals.get(name) {
+            if let Some(entry) = scope.locals.get(name) {
                 if name == self.current_binding {
                     return Some(VarAccess::Self_);
                 }
                 if i == 0 {
-                    return Some(VarAccess::Global(*slot));
+                    return Some(VarAccess::Global(entry.slot));
                 }
                 let capture_idx = self.capture_names.len() as i32;
                 self.captures.insert(name.to_string(), capture_idx);
@@ -2065,6 +2054,17 @@ impl Compiler {
                 break;
             };
             self.process_import(imp);
+        }
+    }
+
+    /// A cache-hit dependency reserved its id range but contributed nothing to
+    /// `next_type_id` this pass, so bump the entry file past every reserved
+    /// block before it allocates any of its own type ids.
+    fn bump_type_ids_past_reserved(&mut self) {
+        let hw = self.module_table.id_high_water();
+        let cur = self.env.next_type_id();
+        if hw > cur {
+            self.env.set_next_type_id(hw);
         }
     }
 
@@ -2918,18 +2918,20 @@ impl Compiler {
         // All-literal binaries (`<<'\r\n'>>`, `<<13, 10>>`, `<<1:4, 2:4>>`)
         // fold to a single pooled constant: zero runtime ops and zero
         // allocation per evaluation instead of a BinFromString/BinFromInt +
-        // BinAppend chain.
+        // BinConcatN.
         if let Some((bytes, bit_len)) = Self::const_fold_binary_literal(bl) {
             let c = self.const_binary(bytes, bit_len);
             self.emit_arg(Op::PushConst, c);
             return bin_ty;
         }
-        for (i, seg) in bl.segments.iter().enumerate() {
+        // Push every segment's fragment, then concatenate once: each byte is
+        // copied a single time into one backing, instead of a BinAppend chain
+        // that re-copies the accumulated prefix per segment.
+        for seg in &bl.segments {
             self.compile_bin_segment_value(seg);
-            if i > 0 {
-                // (acc, frag) -> acc ++ frag
-                self.emit(Op::BinAppend);
-            }
+        }
+        if bl.segments.len() > 1 {
+            self.emit_arg(Op::BinConcatN, bl.segments.len() as i32);
         }
         bin_ty
     }
@@ -3035,6 +3037,17 @@ impl Compiler {
     // Array
     // ========================================================================
 
+    /// Compile a run of non-spread array elements, unifying each with the
+    /// array's element type variable.
+    fn compile_array_run(&mut self, elems: &[ast::ArrayElement], elem_var: Ty) {
+        for elem in elems {
+            if let ast::ArrayElement::Expression(e) = elem {
+                let ty = self.compile_expr(e);
+                self.engine.unify_at(elem_var, ty, type_defining_span(e));
+            }
+        }
+    }
+
     fn compile_array(&mut self, expr: &ast::ArrayExpression) -> Ty {
         let elem_var = self.engine.fresh_var();
         let has_spread = expr
@@ -3043,12 +3056,7 @@ impl Compiler {
             .any(|e| matches!(e, ast::ArrayElement::SpreadElement(_)));
 
         if !has_spread {
-            for elem in &expr.elements {
-                if let ast::ArrayElement::Expression(e) = elem {
-                    let ty = self.compile_expr(e);
-                    self.engine.unify_at(elem_var, ty, type_defining_span(e));
-                }
-            }
+            self.compile_array_run(&expr.elements, elem_var);
             self.emit_arg(Op::MakeArray, expr.elements.len() as i32);
             return self.ty_array(elem_var);
         }
@@ -3094,12 +3102,7 @@ impl Compiler {
                 && let ast::ArrayElement::SpreadElement(spread) = &expr.elements[j]
                 && let Some(inner) = &spread.expression
             {
-                for e in &expr.elements[i..j] {
-                    if let ast::ArrayElement::Expression(ae) = e {
-                        let ty = self.compile_expr(ae);
-                        self.engine.unify_at(elem_var, ty, type_defining_span(ae));
-                    }
-                }
+                self.compile_array_run(&expr.elements[i..j], elem_var);
                 let spread_ty = self.compile_expr(inner);
                 let expected = self.ty_array(elem_var);
                 self.engine.unify_at(expected, spread_ty, inner.span());
@@ -3109,12 +3112,7 @@ impl Compiler {
                 continue;
             }
 
-            for e in &expr.elements[i..j] {
-                if let ast::ArrayElement::Expression(ae) = e {
-                    let ty = self.compile_expr(ae);
-                    self.engine.unify_at(elem_var, ty, type_defining_span(ae));
-                }
-            }
+            self.compile_array_run(&expr.elements[i..j], elem_var);
             let group_count = (j - i) as i32;
             if have_result {
                 self.emit_arg(Op::Append, group_count);
@@ -3971,19 +3969,18 @@ impl Compiler {
     /// body, and open a new type-env scope. Param binding emits no bytecode so
     /// `func_start` here equals the address after params are bound.
     fn enter_fn_frame(&mut self, binding: Option<&str>) -> FnFrame {
-        let locals = std::mem::take(&mut self.locals);
-        // The saved locals already map any preallocated entry-frame slots
-        // (analysis.rs Pass 3); pushing their slots as-is lets a nested lambda
-        // resolve the enclosing fn name through outer_scopes[0] at the right
-        // slot (depth is irrelevant for outer-scope resolution).
+        // The enclosing frame's locals already map any preallocated
+        // entry-frame slots (analysis.rs Pass 3); moving the map into
+        // `outer_scopes` as-is lets a nested lambda resolve the enclosing fn
+        // name through outer_scopes[0] at the right slot (depth is irrelevant
+        // for outer-scope resolution). `finish_fn_frame` moves it back.
         self.outer_scopes.push(Scope {
-            locals: locals.iter().map(|(k, v)| (k.clone(), v.slot)).collect(),
+            locals: std::mem::take(&mut self.locals),
         });
         let jump_over = self.emit_jump(Op::Jump);
         self.env.push_scope();
         self.unused.push(HashMap::new());
         FnFrame {
-            locals,
             undo_base: self.undo_log.len(),
             marks_base: self.scope_marks.len(),
             local_count: std::mem::replace(&mut self.local_count, 0),
@@ -4056,8 +4053,10 @@ impl Compiler {
         }
         let func_idx = self.program.functions.len() as i32 - 1;
 
-        self.outer_scopes.pop();
-        self.locals = saved.locals;
+        // `enter_fn_frame` pushed the enclosing frame's locals; move them back.
+        if let Some(scope) = self.outer_scopes.pop() {
+            self.locals = scope.locals;
+        }
         // `locals` is restored wholesale, so the inner frame's undo entries
         // (params bound in the enclosing mark range, never wrapped by a
         // `push_local_scope`) must be dropped, not replayed against the parent.
@@ -4084,7 +4083,6 @@ impl Compiler {
 
         let result_ty = self.engine.fresh_var();
         let mut end_jumps: Vec<i32> = vec![];
-        let mut arm_spans: Vec<Span> = vec![];
         let mut any_pattern_err = false;
 
         for arm in &m.arms {
@@ -4118,7 +4116,6 @@ impl Compiler {
             end_jumps.push(self.emit_jump(Op::Jump));
             self.patch_all(&fail_jumps);
 
-            arm_spans.push(arm.pattern.span());
             self.pop_local_scope();
             self.env.pop_scope();
         }
@@ -4157,7 +4154,7 @@ impl Compiler {
                     self.error(
                         "This pattern is unreachable; a previous pattern matches the same values"
                             .to_string(),
-                        arm_spans[i],
+                        arm.pattern.span(),
                     );
                 }
                 if arm.guard.is_none() {

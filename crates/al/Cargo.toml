@@ -10,7 +10,7 @@ clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
 libc = "0.2"
 memchr = "2"
-polling = "3"
+mio = { version = "1", features = ["os-poll", "os-ext"] }
 rustyline = "14"
 serde_json = "1"
 smallvec = "1.15"

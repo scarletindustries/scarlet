@@ -62,15 +62,11 @@ impl VM {
         // work shrinks the slice it happens in and never carries
         // across a context switch — the owing process already yielded.
         self.gc.pending_reds = 0;
-
         loop {
             let addr = code_start + ip;
-            if addr as usize >= self.program.code.len() {
+            let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize) else {
                 break;
-            }
-
-            // SAFETY: bounds checked immediately above.
-            let instr = unsafe { al_core::bytecode::fetch(&self.program.code, addr as usize) };
+            };
             ip += 1;
 
             // Debug discipline: every opcode's budget
@@ -126,6 +122,15 @@ impl VM {
                     let $b = self.program.constants[instr.b as usize].as_int_typed();
                     if $cond {
                         ip = instr.operand - code_start;
+                    }
+                }};
+            }
+            // Parking-op arm body: a `Some(step)` return means the process
+            // parked and the slice is over.
+            macro_rules! park {
+                ($call:expr) => {{
+                    if let Some(step) = $call? {
+                        return Ok(step);
                     }
                 }};
             }
@@ -211,9 +216,7 @@ impl VM {
                             self.stack[slot],
                         );
                         self.globals[slot] = frozen.value();
-                        if let Some(rt) = &self.runtime {
-                            rt.publish_global(slot, frozen);
-                        }
+                        self.runtime.publish_global(slot, frozen);
                     }
                 }
                 Op::PushNil => {
@@ -287,27 +290,7 @@ impl VM {
                     })
                 }
                 Op::NegFloat => un!(as_float_typed, float, |a| -a),
-                Op::AddStr => {
-                    // Size the concatenation while both operands are rooted.
-                    let need = cost::str(self.peek_str_len(1) + self.peek_str_len(0));
-                    self.ensure(need);
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    match (a.as_str(), b.as_str()) {
-                        (Some(sa), Some(sb)) => {
-                            let mut out = String::with_capacity(sa.len() + sb.len());
-                            out.push_str(sa);
-                            out.push_str(sb);
-                            let v = Value::str_in(&mut self.heap, &out);
-                            self.stack.push(v);
-                        }
-                        _ => {
-                            debug_assert!(false, "AddStr on non-Str");
-                            let v = Value::str_in(&mut self.heap, "");
-                            self.stack.push(v);
-                        }
-                    }
-                }
+                Op::AddStr => self.str_concat2()?,
 
                 Op::Eq => {
                     let b = self.pop()?;
@@ -525,8 +508,9 @@ impl VM {
                     // The one place captures are materialized: the closure
                     // object holds them inline; later invocations copy the
                     // one-word handle.
-                    let captures = self.pop_n(cc)?;
-                    let v = Value::closure_in(&mut self.heap, func_idx, &captures);
+                    let base = self.operand_base(cc)?;
+                    let v = Value::closure_in(&mut self.heap, func_idx, &self.stack[base..]);
+                    self.stack.truncate(base);
                     self.stack.push(v);
                 }
                 Op::PushCapture => {
@@ -569,12 +553,16 @@ impl VM {
                     // Names and labels are constant-pool references; only the
                     // enum cell and its payload slots are fresh.
                     self.ensure(cost::enum_(payload_count));
-                    let payloads = self.pop_n(payload_count)?;
+                    // The payload stays rooted in place; the four header
+                    // words sit at fixed offsets just below it. All are read
+                    // before the single truncate that retires the operands.
+                    let base = self.operand_base(payload_count + 4)?;
+                    let payload_base = base + 4;
 
-                    let labels_val = self.pop()?;
-                    let variant_name_val = self.pop()?;
-                    let enum_name_val = self.pop()?;
-                    let type_id_val = self.pop()?;
+                    let type_id_val = self.stack[base];
+                    let enum_name_val = self.stack[base + 1];
+                    let variant_name_val = self.stack[base + 2];
+                    let labels_val = self.stack[base + 3];
 
                     let Some(type_id) = type_id_val.as_int() else {
                         return Err("Enum type id must be int".to_string());
@@ -624,7 +612,8 @@ impl VM {
                     // per-construction refcount churn on the path.
                     let name_prefix_hash =
                         self.program.constants[instr.operand as usize].as_int_typed() as u64;
-                    let hash = enum_hash_with_payload(name_prefix_hash, &payloads);
+                    let hash =
+                        enum_hash_with_payload(name_prefix_hash, &self.stack[payload_base..]);
                     // `enum_name`/`variant_name` are frozen constant-pool
                     // `Str` values — stored as single reference words, never
                     // copied per construction.
@@ -635,8 +624,9 @@ impl VM {
                         enum_name_val,
                         variant_name_val,
                         field_labels,
-                        &payloads,
+                        &self.stack[payload_base..],
                     );
+                    self.stack.truncate(base);
                     self.stack.push(v);
                 }
                 Op::MatchEnum => {
@@ -722,61 +712,21 @@ impl VM {
                 // method per op (see `vm::io`); their cost is the syscall,
                 // not the call. A `Some(step)` return means the process
                 // parked and the slice is over.
-                Op::FileRead => {
-                    if let Some(step) = self.file_read(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
-                Op::FileWrite => {
-                    if let Some(step) = self.file_write(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
+                Op::FileRead => park!(self.file_read(ip, &mut reds)),
+                Op::FileWrite => park!(self.file_write(ip, &mut reds)),
                 Op::TcpListen => self.tcp_listen()?,
-                Op::TcpAccept => {
-                    if let Some(step) = self.tcp_accept(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
-                Op::TcpConnect => {
-                    if let Some(step) = self.tcp_connect(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
-                Op::TcpRead => {
-                    if let Some(step) = self.tcp_read(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
-                Op::TcpReadUntil => {
-                    if let Some(step) = self.tcp_read_until(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
-                Op::TcpWrite => {
-                    if let Some(step) = self.tcp_write(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
-                Op::TcpWriteParts => {
-                    if let Some(step) = self.tcp_write_parts(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
+                Op::TcpAccept => park!(self.tcp_accept(ip, &mut reds)),
+                Op::TcpConnect => park!(self.tcp_connect(ip, &mut reds)),
+                Op::TcpRead => park!(self.tcp_read(ip, &mut reds)),
+                Op::TcpReadUntil => park!(self.tcp_read_until(ip, &mut reds)),
+                Op::TcpWrite => park!(self.tcp_write(ip, &mut reds)),
+                Op::TcpWriteParts => park!(self.tcp_write_parts(ip, &mut reds)),
                 Op::TcpClose => self.tcp_close(&mut reds)?,
                 Op::TcpCloseServer => self.tcp_close_server()?,
                 Op::TcpLocalAddr => self.tcp_local_addr()?,
-                Op::DnsResolve => {
-                    if let Some(step) = self.dns_resolve(ip, &mut reds)? {
-                        return Ok(step);
-                    }
-                }
+                Op::DnsResolve => park!(self.dns_resolve(ip, &mut reds)),
                 Op::ProcessSpawn => self.process_spawn(&mut reds)?,
-                Op::Sleep => {
-                    if let Some(step) = self.sleep(ip)? {
-                        return Ok(step);
-                    }
-                }
+                Op::Sleep => park!(self.sleep(ip)),
                 // String and binary builtins: pure stack transformations,
                 // one method per op (see `vm::text`).
                 Op::StrSplit => self.str_split()?,
@@ -790,6 +740,7 @@ impl VM {
                 Op::BinByteSize => self.bin_byte_size()?,
                 Op::BinSlice => self.bin_slice()?,
                 Op::BinAppend => self.bin_append()?,
+                Op::BinConcatN => self.bin_concat_n(instr.operand as usize)?,
                 Op::BinFromInt => self.bin_from_int()?,
                 Op::BinReadInt => self.bin_read_int()?,
                 Op::BinTake => self.bin_take()?,
@@ -852,39 +803,20 @@ impl VM {
         Ok(Step::Done)
     }
 
-    /// Collapse the active frame for a tail call: drop the slots in
+    /// Collapse the active frame for a tail call: discard the slots in
     /// `[base, args_start)` and slide the freshly-pushed argument words sitting
     /// at `[args_start, len)` down to `base`. Behaviourally identical to
-    /// `self.stack.drain(base..args_start)`.
-    ///
-    /// `Vec::drain`'s tail-shift lowers to a `memmove` libcall, and a tail call
-    /// moves only `arity` words (≈ 1–4), so the call setup dwarfs the copy — it
-    /// was ~9% of `bench_heavy.al`'s pure-recursion time. Moving the words by
-    /// hand keeps the shift inline. The destination starts at or below the
-    /// source (`base <= args_start`), so even when the argument block overlaps
-    /// its destination an ascending copy reads each shared slot before it is
-    /// overwritten — exactly the shift `drain` performs.
+    /// `self.stack.drain(base..args_start)`, but `Value` is `Copy` (heap data
+    /// is owned by the GC, not by the stack slots), so the discarded slots
+    /// need no drops and the whole shift is a plain overlapping copy plus a
+    /// length shrink.
     #[inline]
     fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
         let len = self.stack.len();
         debug_assert!(base <= args_start && args_start <= len);
         let n_args = len - args_start;
-        // SAFETY: both ranges lie within the live stack. Each discarded slot in
-        // `[base, args_start)` is dropped exactly once; the argument words are
-        // then bit-copied down over those already-dropped slots (so they are
-        // not re-dropped), and `set_len` shrinks the logical length so the
-        // moved-from tail is never read or dropped again.
-        unsafe {
-            let p = self.stack.as_mut_ptr();
-            for i in base..args_start {
-                std::ptr::drop_in_place(p.add(i));
-            }
-            for k in 0..n_args {
-                let v = p.add(args_start + k).read();
-                p.add(base + k).write(v);
-            }
-            self.stack.set_len(base + n_args);
-        }
+        self.stack.copy_within(args_start..len, base);
+        self.stack.truncate(base + n_args);
     }
 
     pub(super) fn pop(&mut self) -> VmResult<Value> {
@@ -893,12 +825,19 @@ impl VM {
             .ok_or_else(|| "Stack underflow. This is likely a compiler bug.".to_string())
     }
 
-    pub(super) fn pop_n(&mut self, n: usize) -> VmResult<Vec<Value>> {
+    /// Index of the first of the top `n` operand slots, left in place. The
+    /// caller reads them via `&self.stack[base..]` (heap and stack are
+    /// disjoint fields, so a `*_in` constructor borrow is legal alongside)
+    /// and truncates to `base` afterwards — no temporary buffer. Sound for
+    /// the same reason as the StrConcatN arm: every caller ensure()s first,
+    /// so the constructor only allocates and the rooted operands stay valid
+    /// while being read.
+    pub(super) fn operand_base(&self, n: usize) -> VmResult<usize> {
         let len = self.stack.len();
         if n > len {
             return Err("Stack underflow. This is likely a compiler bug.".to_string());
         }
-        Ok(self.stack.split_off(len - n))
+        Ok(len - n)
     }
 
     fn peek(&self) -> VmResult<&Value> {
@@ -1014,31 +953,44 @@ impl VM {
         tpl.instantiate(&mut self.heap, &[])
     }
 
+    /// Concatenate the two strings on top of the stack. The result is sized
+    /// and budgeted while both operands are still rooted on the stack (the
+    /// rooting rule). Shared by the `AddStr` opcode and the Str + Str case
+    /// of the untyped [`add`](Self::add).
+    #[inline]
+    fn str_concat2(&mut self) -> VmResult<()> {
+        let need = cost::str(self.peek_str_len(1) + self.peek_str_len(0));
+        self.ensure(need);
+        let b = self.pop()?;
+        let a = self.pop()?;
+        match (a.as_str(), b.as_str()) {
+            (Some(sa), Some(sb)) => {
+                let mut out = String::with_capacity(sa.len() + sb.len());
+                out.push_str(sa);
+                out.push_str(sb);
+                let v = Value::str_in(&mut self.heap, &out);
+                self.stack.push(v);
+            }
+            _ => {
+                debug_assert!(false, "string concat on non-Str");
+                let v = Value::str_in(&mut self.heap, "");
+                self.stack.push(v);
+            }
+        }
+        Ok(())
+    }
+
     /// `+` — the one arithmetic op with a non-numeric case: Str + Str
-    /// concatenation, whose result is sized and budgeted while both operands
-    /// are still rooted on the stack (the rooting rule). Numeric pairs fall
-    /// through to [`arith`](Self::arith).
+    /// concatenation via [`str_concat2`](Self::str_concat2). Numeric pairs
+    /// fall through to [`arith`](Self::arith).
     pub(super) fn add(&mut self) -> VmResult<()> {
-        let need = match (
-            self.peek_at(1).and_then(|v| v.as_str()),
-            self.peek_at(0).and_then(|v| v.as_str()),
-        ) {
-            (Some(a), Some(b)) => cost::str(a.len() + b.len()),
-            _ => 0,
-        };
-        if need > 0 {
-            self.ensure(need);
+        let both_str = self.peek_at(1).is_some_and(|v| v.as_str().is_some())
+            && self.peek_at(0).is_some_and(|v| v.as_str().is_some());
+        if both_str {
+            return self.str_concat2();
         }
         let b = self.pop()?;
         let a = self.pop()?;
-        if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-            let mut out = String::with_capacity(sa.len() + sb.len());
-            out.push_str(sa);
-            out.push_str(sb);
-            let v = Value::str_in(&mut self.heap, &out);
-            self.stack.push(v);
-            return Ok(());
-        }
         self.arith(a, b, |x, y| x.wrapping_add(y), |x, y| x + y)
     }
 

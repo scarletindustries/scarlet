@@ -674,24 +674,27 @@ impl InferEngine {
 
     // --- Fresh variables ---
 
-    pub fn fresh_var(&mut self) -> Ty {
+    fn alloc_var(&mut self, state: TyVarState) -> (Ty, i32) {
         let id = self.next_var_id;
-        self.vars.push(TyVarState::Unbound {
+        self.vars.push(state);
+        self.next_var_id += 1;
+        (self.push(TypeNode::Var(id)), id)
+    }
+
+    pub fn fresh_var(&mut self) -> Ty {
+        self.alloc_var(TyVarState::Unbound {
             level: self.current_level,
             constraint: None,
-        });
-        self.next_var_id += 1;
-        self.push(TypeNode::Var(id))
+        })
+        .0
     }
 
     pub fn fresh_constrained_var(&mut self, c: Constraint) -> Ty {
-        let id = self.next_var_id;
-        self.vars.push(TyVarState::Unbound {
+        self.alloc_var(TyVarState::Unbound {
             level: self.current_level,
             constraint: Some(c),
-        });
-        self.next_var_id += 1;
-        self.push(TypeNode::Var(id))
+        })
+        .0
     }
 
     /// Mint a fresh rigid generic variable. Used by the hydrator when reading
@@ -700,12 +703,10 @@ impl InferEngine {
     /// type while checking the body.
     pub fn fresh_generic_var(&mut self) -> (Ty, i32) {
         let id = self.next_var_id;
-        self.vars.push(TyVarState::Generic {
+        self.alloc_var(TyVarState::Generic {
             id,
             constraint: None,
-        });
-        self.next_var_id += 1;
-        (self.push(TypeNode::Var(id)), id)
+        })
     }
 
     // --- Union-find: find with path compression ---
@@ -959,8 +960,7 @@ impl InferEngine {
     ) -> Result<(), UnifyError> {
         let resolved = self.find(ty);
         match self.node(resolved) {
-            TypeNode::Var(id) => {
-                let other_id = id;
+            TypeNode::Var(other_id) => {
                 let other_state = self.vars[other_id as usize];
                 match other_state {
                     TyVarState::Unbound {
@@ -1080,11 +1080,6 @@ impl InferEngine {
         // snapshot its constraint + display name. After this the closed type
         // contains no engine-local references, so the scheme can be moved
         // between engines (precompiled stdlib) without dragging `vars`.
-        let index_of: HashMap<i32, u32> = ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i as u32))
-            .collect();
         let quantified: Vec<QuantVar> = ids
             .iter()
             .map(|id| {
@@ -1101,7 +1096,7 @@ impl InferEngine {
                 }
             })
             .collect();
-        let closed_ty = self.close_over(ty, &index_of);
+        let closed_ty = self.close_over(ty, &ids);
         Scheme {
             quantified: self.push_quants(&quantified),
             ty: closed_ty,
@@ -1111,20 +1106,19 @@ impl InferEngine {
     }
 
     /// Replace every `Var(id)` whose representative is a `Generic` listed in
-    /// `index_of` with `Bound(idx)`, fully resolving links along the way.
-    fn close_over(&mut self, ty: Ty, index_of: &HashMap<i32, u32>) -> Ty {
+    /// `ids` with `Bound(idx)` of its position, fully resolving links along
+    /// the way.
+    fn close_over(&mut self, ty: Ty, ids: &[i32]) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => match e.vars[id as usize] {
-                TyVarState::Generic { id: gid, .. } => index_of.get(&gid).map(|ix| e.mk_bound(*ix)),
+                TyVarState::Generic { id: gid, .. } => ids
+                    .iter()
+                    .position(|&i| i == gid)
+                    .map(|ix| e.mk_bound(ix as u32)),
                 _ => None,
             },
             _ => None,
         })
-    }
-
-    fn map_children(&mut self, sl: ArenaSlice, mut f: impl FnMut(&mut Self, Ty) -> Ty) -> Vec<Ty> {
-        let kids: Vec<Ty> = self.children_of(sl).to_vec();
-        kids.into_iter().map(|k| f(self, k)).collect()
     }
 
     /// Structural type rewrite: resolve `ty`, give `leaf` first refusal at
@@ -1132,29 +1126,82 @@ impl InferEngine {
     /// children. Var/Bound that `leaf` declines fall through to the resolved
     /// node unchanged. Shared spine of close_over / open_with /
     /// substitute_type_vars / close_body, which differ only at the leaves.
+    /// Subtrees in which nothing was rewritten are returned as-is, so fresh
+    /// arena nodes are only built along paths that actually changed.
     fn rewrite(&mut self, ty: Ty, leaf: &mut impl FnMut(&mut Self, TypeNode) -> Option<Ty>) -> Ty {
+        self.rewrite_node(ty, leaf).0
+    }
+
+    /// Core of `rewrite`. The bool reports whether the result differs from the
+    /// input `ty` — resolving a union-find link counts as a change, so parents
+    /// rebuild with `find`-resolved children and rewritten output never
+    /// contains live link-vars. `false` means the result is exactly `ty`.
+    fn rewrite_node(
+        &mut self,
+        ty: Ty,
+        leaf: &mut impl FnMut(&mut Self, TypeNode) -> Option<Ty>,
+    ) -> (Ty, bool) {
         let r = self.find(ty);
         let n = self.node(r);
         if let Some(out) = leaf(self, n) {
-            return out;
+            return (out, out != ty);
         }
         match n {
-            TypeNode::Var(_) | TypeNode::Bound(_) => r,
-            TypeNode::Con { args, .. } if args.len == 0 => r,
-            TypeNode::Con { id, name, args } => {
-                let kids = self.map_children(args, |e, k| e.rewrite(k, leaf));
-                self.mk_con_id(id, name, &kids)
-            }
+            TypeNode::Var(_) | TypeNode::Bound(_) => (r, r != ty),
+            TypeNode::Con { args, .. } if args.len == 0 => (r, r != ty),
+            TypeNode::Con { id, name, args } => match self.rewrite_children(args, leaf) {
+                Some(kids) => (self.mk_con_id(id, name, &kids), true),
+                None => (r, r != ty),
+            },
             TypeNode::Fun { params, ret } => {
-                let kids = self.map_children(params, |e, k| e.rewrite(k, leaf));
-                let ret = self.rewrite(ret, leaf);
-                self.mk_fun(&kids, ret)
+                let kids = self.rewrite_children(params, leaf);
+                let (new_ret, ret_changed) = self.rewrite_node(ret, leaf);
+                match kids {
+                    Some(kids) => (self.mk_fun(&kids, new_ret), true),
+                    // Params untouched: reuse their existing child slice (the
+                    // arena is append-only, so it stays valid) and only mint
+                    // the Fun node itself.
+                    None if ret_changed => (
+                        self.push(TypeNode::Fun {
+                            params,
+                            ret: new_ret,
+                        }),
+                        true,
+                    ),
+                    None => (r, r != ty),
+                }
             }
-            TypeNode::Tuple { elems } => {
-                let kids = self.map_children(elems, |e, k| e.rewrite(k, leaf));
-                self.mk_tuple(&kids)
+            TypeNode::Tuple { elems } => match self.rewrite_children(elems, leaf) {
+                Some(kids) => (self.mk_tuple(&kids), true),
+                None => (r, r != ty),
+            },
+        }
+    }
+
+    /// Rewrite each child of `sl`, returning `None` when every child came back
+    /// unchanged. Iterates the child range by index — the arena is append-only
+    /// with stable indices, so no host copy of the slice is needed — and only
+    /// allocates the result Vec once a child actually changes.
+    fn rewrite_children(
+        &mut self,
+        sl: ArenaSlice,
+        leaf: &mut impl FnMut(&mut Self, TypeNode) -> Option<Ty>,
+    ) -> Option<Vec<Ty>> {
+        let mut kids: Option<Vec<Ty>> = None;
+        for (off, i) in sl.range().enumerate() {
+            let k = self.children[i];
+            let (rk, changed) = self.rewrite_node(k, leaf);
+            if let Some(kids) = &mut kids {
+                kids.push(rk);
+            } else if changed {
+                let mut v = Vec::with_capacity(sl.len as usize);
+                let start = sl.start as usize;
+                v.extend_from_slice(&self.children[start..start + off]);
+                v.push(rk);
+                kids = Some(v);
             }
         }
+        kids
     }
 
     fn assign_names(&mut self, quantified: &[i32]) {
@@ -1403,9 +1450,10 @@ impl InferEngine {
             .collect();
 
         let args_key = type_args_key(&resolved_args);
-        let cut_off = info.is_some() && path.would_recurse(id, &args_key);
 
-        if !cut_off && let Some(info) = info {
+        if let Some(info) = info
+            && !path.would_recurse(id, &args_key)
+        {
             match info.body {
                 TypeBody::Custom { variants } => {
                     let vs: Vec<Variant> = self.variants_of(variants).to_vec();
@@ -1805,6 +1853,67 @@ mod tests {
         let scheme = e.generalize_top(x);
         assert_eq!(scheme.quantified.len, 1);
         assert!(matches!(scheme.kind, ValueKind::ModuleFn));
+    }
+
+    fn assert_no_live_vars(e: &InferEngine, ty: Ty) {
+        match e.node(ty) {
+            TypeNode::Var(id) => panic!("live Var({id}) survived close_over"),
+            TypeNode::Bound(_) => {}
+            TypeNode::Con { args, .. } => {
+                for i in args.range() {
+                    assert_no_live_vars(e, e.children[i]);
+                }
+            }
+            TypeNode::Fun { params, ret } => {
+                for i in params.range() {
+                    assert_no_live_vars(e, e.children[i]);
+                }
+                assert_no_live_vars(e, ret);
+            }
+            TypeNode::Tuple { elems } => {
+                for i in elems.range() {
+                    assert_no_live_vars(e, e.children[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generalize_resolves_linked_vars_in_scheme() {
+        // A monomorphic fn whose param/ret vars are Linked to Int must close
+        // to a scheme with no live Var nodes: stored Schemes outlive
+        // `truncate_to`'s `vars.clear()`, so any surviving var id would read
+        // an unrelated fresh var (or panic OOB) on the next compile.
+        let mut e = new_engine();
+        e.enter_level();
+        let p = e.fresh_var();
+        let r = e.fresh_var();
+        let int_t = e.icon_int();
+        e.unify(p, int_t).unwrap();
+        e.unify(r, int_t).unwrap();
+        let f = e.mk_fun(&[p], r);
+        e.leave_level();
+        let scheme = e.generalize_top(f);
+        assert_no_live_vars(&e, scheme.ty);
+    }
+
+    #[test]
+    fn generalize_resolves_linked_vars_among_unchanged_siblings() {
+        // A linked var next to an already-resolved sibling: the rebuild must
+        // not re-copy the original (link-bearing) child slots.
+        let mut e = new_engine();
+        e.enter_level();
+        let v = e.fresh_var();
+        let int_t = e.icon_int();
+        e.unify(v, int_t).unwrap();
+        let str_t = e.icon_string();
+        let tup = e.mk_tuple(&[str_t, v]);
+        let tup2 = e.mk_tuple(&[v, str_t]);
+        e.leave_level();
+        let s1 = e.generalize_top(tup);
+        let s2 = e.generalize_top(tup2);
+        assert_no_live_vars(&e, s1.ty);
+        assert_no_live_vars(&e, s2.ty);
     }
 
     #[test]

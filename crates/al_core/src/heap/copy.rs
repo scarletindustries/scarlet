@@ -45,6 +45,19 @@
 //! [`sweep_off_heap_list`] walks it after every Move-mode copy and releases
 //! the backings of the boxes that did not get forwarded — the one
 //! destructor-like duty Cheney cannot perform.
+//!
+//! # Encapsulation contract
+//!
+//! This file and `dest.rs` are the *only* modules under `heap/` that contain
+//! `unsafe` code, and `heap/` exports no unsafe API: every `pub(super)` item
+//! here ([`copy_graph`], [`sweep_off_heap_list`], [`release_off_heap_list`],
+//! the [`CopyDest`] trait) is a safe fn or trait whose raw-pointer traffic
+//! stays between this file and `dest.rs`. Policy code (`proc_heap.rs`) and
+//! the tests drive the engine through these safe entry points only.
+
+// Designated unsafe module: the Cheney evacuation engine's raw-pointer copy
+// loop, behind safe `pub(super)` entry points.
+#![allow(unsafe_code)]
 
 use super::roots::{Classifier, Roots};
 use crate::bytecode::value::{
@@ -55,7 +68,7 @@ use crate::bytecode::value::{
 
 /// What a copy means for `Arc`-owning boxes and for the source objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CopyMode {
+pub(super) enum CopyMode {
     /// GC semantics: the source space dies after the copy. Box `Arc` counts
     /// transfer to the copies; the caller sweeps the off-heap list
     /// afterwards ([`sweep_off_heap_list`]) to relink survivors and release
@@ -70,15 +83,16 @@ pub enum CopyMode {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct CopyStats {
-    pub words_copied: usize,
+pub(super) struct CopyStats {
+    pub(super) words_copied: usize,
 }
 
 /// A copy destination: hands out space for evacuated objects, adopts their
 /// off-heap list entries (Clone mode), and replays copied-but-unscanned
 /// objects to the Cheney scan loop. The four implementations live in
-/// `dest.rs`.
-pub trait CopyDest {
+/// `dest.rs`. `pub(super)` on purpose: `next_unscanned` hands out raw object
+/// pointers, so the trait must stay inside the `heap` module.
+pub(super) trait CopyDest {
     /// Allocate `words` for the object whose source header is at `src_addr`
     /// (minor GC uses the source address for its tenuring decision).
     /// Infallible: destinations are pre-sized or grow by appending segments.
@@ -122,6 +136,9 @@ fn evacuate(slot: &mut Value, ctx: &mut CopyCtx<'_>, dst: &mut dyn CopyDest) {
         forwarding_target(header)
     } else {
         let words = header_total_words(header);
+        // Header sanity: a real object describes at least its header word; a
+        // garbage word here means a stale pointer or a missed root rewrite.
+        debug_assert!(words >= 1, "evacuate: header describes zero words");
         let copy = dst.alloc_for(src_addr, words);
         // SAFETY: source and destination are distinct live slabs; `copy` has
         // room for `words` words by the `alloc_for` contract.
@@ -156,7 +173,7 @@ fn evacuate(slot: &mut Value, ctx: &mut CopyCtx<'_>, dst: &mut dyn CopyDest) {
 /// `classifier` covers into `dst`, installing forwarding pointers so sharing
 /// (DAGs) is preserved, and fix up every traversed reference — including the
 /// root slots themselves.
-pub fn copy_graph(
+pub(super) fn copy_graph(
     roots: &mut dyn Roots,
     classifier: &Classifier,
     dst: &mut dyn CopyDest,
@@ -231,4 +248,35 @@ pub(super) fn sweep_off_heap_list(head: usize, collected: &Classifier) -> (usize
         cur = next;
     }
     (new_head, dropped)
+}
+
+/// Release every backing on the off-heap list headed at `head` without
+/// rebuilding it: the heap is dying (process death), so every box on the
+/// list is dead and its strong count must be dropped. The cold counterpart
+/// of [`sweep_off_heap_list`]; sole caller is `ProcHeap::drop`.
+pub(super) fn release_off_heap_list(head: usize) {
+    let mut cur = head;
+    while cur != 0 {
+        let obj = cur as *const u64;
+        // SAFETY: at rest (no collection in flight) the list holds live,
+        // non-forwarded Binary boxes in slabs the dropping heap still owns;
+        // each owns exactly one strong count, and the list is consumed
+        // exactly once because the caller is the heap's destructor.
+        unsafe {
+            debug_assert!(!header_is_forwarding(*obj));
+            let next = binary_off_heap_next(obj);
+            binary_drop_backing(obj);
+            cur = next;
+        }
+    }
+}
+
+/// Test-only safe view of a Binary box's off-heap link word. `addr` must be
+/// the header address of a live Binary box (tests obtain it from
+/// `Value::object_addr` on a binary they just built).
+#[cfg(test)]
+pub(super) fn off_heap_next(addr: usize) -> usize {
+    // SAFETY: confined to heap tests, which pass header addresses of live,
+    // fully initialized Binary boxes.
+    unsafe { binary_off_heap_next(addr as *const u64) }
 }

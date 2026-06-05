@@ -59,8 +59,8 @@ fn is_type_name(name: &str) -> bool {
 
 // Checks whether a token begins a type annotation in let/const binding position.
 // Lowercase identifiers are NOT type-starts here: free type variables are
-// meaningless in let/const annotations. Function param and return positions use
-// their own inline checks because they DO admit lowercase type variables.
+// meaningless in let/const annotations. Function param and return positions
+// DO admit lowercase type variables and use `at_loose_type_start` instead.
 fn is_type_start_token(tok: &Token) -> bool {
     match tok.kind {
         Kind::KwFunction => true,
@@ -227,6 +227,18 @@ impl Parser {
 
             self.advance();
         }
+    }
+
+    // Shared error-recovery step for top-level and block node loops: record the
+    // diagnostic, skip to a synchronization point, and produce an error node
+    // standing in for the unparseable region.
+    fn recover_node(&mut self, err: String, span: Span) -> ast::Node {
+        self.add_error(err.clone());
+        self.synchronize();
+        ast::Node::Expression(ast::Expression::ErrorNode(ast::ErrorNode {
+            message: err,
+            span,
+        }))
     }
 
     fn advance(&mut self) {
@@ -409,12 +421,8 @@ impl Parser {
                     body.push(node)
                 }
                 Err(err) => {
-                    self.add_error(err.clone());
-                    self.synchronize();
-
-                    let err_expr =
-                        ast::Expression::ErrorNode(ast::ErrorNode { message: err, span });
-                    body.push(ast::Node::Expression(err_expr));
+                    let node = self.recover_node(err, span);
+                    body.push(node);
                     continue;
                 }
             }
@@ -750,11 +758,8 @@ impl Parser {
             match self.parse_node() {
                 Ok(node) => body.push(node),
                 Err(err) => {
-                    self.add_error(err.clone());
-                    self.synchronize();
-                    let err_expr =
-                        ast::Expression::ErrorNode(ast::ErrorNode { message: err, span });
-                    body.push(ast::Node::Expression(err_expr));
+                    let node = self.recover_node(err, span);
+                    body.push(node);
                     continue;
                 }
             }
@@ -1404,7 +1409,7 @@ impl Parser {
                 .ok_or_else(|| "@vm requires an op name, e.g. @vm(add)".to_string())?;
             ast::FnBody::Vm(op)
         } else {
-            ast::FnBody::Block(self.parse_function_body()?)
+            ast::FnBody::Block(self.parse_braced_body("Function body")?)
         };
 
         Ok(ast::Declaration::Function(ast::FunctionDeclaration {
@@ -1437,18 +1442,18 @@ impl Parser {
         ))
     }
 
-    fn parse_function_body(&mut self) -> PResult<ast::Expression> {
-        if self.kind() != Kind::PuncOpenBrace {
-            return Err("Function body must be a block `{ ... }`".to_string());
-        }
-        self.parse_expression()
+    // Checks whether a token begins a type in param/return position. Unlike
+    // `is_type_start_token`, any identifier qualifies: these positions admit
+    // lowercase type variables.
+    fn at_loose_type_start(&self) -> bool {
+        matches!(
+            self.kind(),
+            Kind::Identifier | Kind::KwFunction | Kind::PuncOpenParen
+        )
     }
 
     fn parse_function_return_types(&mut self) -> PResult<Option<ast::TypeIdentifier>> {
-        if matches!(
-            self.kind(),
-            Kind::Identifier | Kind::KwFunction | Kind::PuncOpenParen
-        ) {
+        if self.at_loose_type_start() {
             return Ok(Some(self.parse_type_identifier()?));
         }
         Ok(None)
@@ -1468,10 +1473,7 @@ impl Parser {
 
         let mut typ: Option<ast::TypeIdentifier> = None;
 
-        if matches!(
-            self.kind(),
-            Kind::Identifier | Kind::KwFunction | Kind::PuncOpenParen
-        ) {
+        if self.at_loose_type_start() {
             typ = Some(self.parse_type_identifier()?);
         }
 
@@ -1535,10 +1537,7 @@ impl Parser {
 
         let mut return_type: Option<Box<ast::TypeIdentifier>> = None;
 
-        if matches!(
-            self.kind(),
-            Kind::Identifier | Kind::KwFunction | Kind::PuncOpenParen
-        ) {
+        if self.at_loose_type_start() {
             let ret = self.parse_type_identifier()?;
             return_type = Some(Box::new(ret));
         }
@@ -1996,8 +1995,10 @@ impl Parser {
             match self.kind() {
                 Kind::InterpStringPart => {
                     let part_span = self.current_span();
-                    let value = self.cur().literal.clone().unwrap_or_default();
-                    self.eat(Kind::InterpStringPart)?;
+                    let value = self
+                        .eat(Kind::InterpStringPart)?
+                        .literal
+                        .unwrap_or_default();
                     parts.push(ast::Expression::StringLiteral(ast::StringLiteral {
                         value,
                         span: part_span,
@@ -2015,8 +2016,7 @@ impl Parser {
                 }
                 Kind::Identifier => {
                     let ident_span = self.current_span();
-                    let name = self.cur().literal.clone().unwrap_or_default();
-                    self.eat(Kind::Identifier)?;
+                    let name = self.eat(Kind::Identifier)?.literal.unwrap_or_default();
                     parts.push(ast::Expression::Identifier(ast::Identifier {
                         name,
                         span: ident_span,

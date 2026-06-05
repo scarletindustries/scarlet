@@ -449,15 +449,14 @@ impl LspServer {
 
     fn handle_did_open(&mut self, params: &Json) {
         let Some(uri) = doc_uri(params) else { return };
-        let text = match params
+        let Some(text) = params
             .get("textDocument")
             .and_then(|t| t.get("text"))
             .and_then(|v| v.as_str())
-        {
-            Some(v) => v.to_string(),
-            None => return,
+        else {
+            return;
         };
-        self.open_document(&uri, &text);
+        self.open_document(&uri, text);
     }
 
     /// Test seam: register a workspace root, as the client's `initialize`
@@ -483,9 +482,8 @@ impl LspServer {
 
     fn handle_did_change(&mut self, params: &Json) {
         let Some(uri) = doc_uri(params) else { return };
-        let changes = match params.get("contentChanges").and_then(|v| v.as_array()) {
-            Some(v) => v,
-            None => return,
+        let Some(changes) = params.get("contentChanges").and_then(|v| v.as_array()) else {
+            return;
         };
 
         if let Some(last_change) = changes.last()
@@ -536,17 +534,12 @@ impl LspServer {
     /// normal file still works via the session graph's synthesised stdlib
     /// defs.
     fn graph_for(&self, uri: &str) -> Option<&reference::ReferenceGraph> {
-        let path = uri_to_path(uri)?;
-        if module::detect_stdlib_module(&path).is_some() {
-            return None;
-        }
-        let root = root_for(&self.workspace_roots, &path);
-        Some(self.sessions.get(&root)?.reference_graph())
+        Some(self.session_for(uri)?.reference_graph())
     }
 
-    /// The persistent compiler session that owns `uri`. Mirrors `graph_for`:
-    /// it buckets the file into its workspace root and returns that root's
-    /// session, with the same in-repo stdlib carve-out (those files are
+    /// The persistent compiler session that owns `uri`: it buckets the file
+    /// into its workspace root and returns that root's session, with an
+    /// in-repo stdlib carve-out (those files are
     /// checked via `check_as_module`, so they have no session and
     /// session-backed features no-op for them). Where `graph_for` exposes
     /// only the identity-level reference graph, this hands back the session
@@ -580,22 +573,12 @@ impl LspServer {
         query_module(uri).unwrap_or_else(module::main_module)
     }
 
-    /// The interned module id [`query_module_path`](Self::query_module_path)
-    /// resolves to in `graph`.
-    fn query_module_id(
-        &self,
-        graph: &reference::ReferenceGraph,
-        uri: &str,
-    ) -> Option<reference::ModuleId> {
-        graph.module_id(&self.query_module_path(uri))
-    }
-
-    /// [`graph_for`](Self::graph_for) and
-    /// [`query_module_id`](Self::query_module_id) in one step: the shared
+    /// [`graph_for`](Self::graph_for) plus the interned module id of
+    /// [`query_module_path`](Self::query_module_path) in one step: the shared
     /// guard pair every position-based responder runs after `resolve_pos`.
     fn graph_module(&self, uri: &str) -> Option<(&reference::ReferenceGraph, reference::ModuleId)> {
         let graph = self.graph_for(uri)?;
-        let mid = self.query_module_id(graph, uri)?;
+        let mid = graph.module_id(&self.query_module_path(uri))?;
         Some((graph, mid))
     }
 
@@ -1169,9 +1152,8 @@ fn doc_uri(params: &Json) -> Option<String> {
 }
 
 fn extract_position_params(params: &Json) -> Option<(String, i32, i32)> {
-    let text_doc = params.get("textDocument")?;
+    let uri = doc_uri(params)?;
     let pos = params.get("position")?;
-    let uri = text_doc.get("uri")?.as_str()?.to_string();
     let line = pos.get("line")?.as_i64()? as i32;
     let col = pos.get("character")?.as_i64()? as i32;
     Some((uri, line, col))

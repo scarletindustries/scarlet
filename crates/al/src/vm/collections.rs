@@ -30,8 +30,9 @@ impl VM {
     pub(super) fn make_array(&mut self, operand: i32) -> VmResult<()> {
         let len = operand as usize;
         self.ensure(cost::seq_build(len));
-        let arr = self.pop_n(len)?;
-        let v = Value::array_in(&mut self.heap, &arr);
+        let base = self.operand_base(len)?;
+        let v = Value::array_in(&mut self.heap, &self.stack[base..]);
+        self.stack.truncate(base);
         self.stack.push(v);
         Ok(())
     }
@@ -39,8 +40,9 @@ impl VM {
     pub(super) fn make_tuple(&mut self, operand: i32) -> VmResult<()> {
         let len = operand as usize;
         self.ensure(cost::tuple(len));
-        let arr = self.pop_n(len)?;
-        let v = Value::tuple_in(&mut self.heap, &arr);
+        let base = self.operand_base(len)?;
+        let v = Value::tuple_in(&mut self.heap, &self.stack[base..]);
+        self.stack.truncate(base);
         self.stack.push(v);
         Ok(())
     }
@@ -343,12 +345,15 @@ impl VM {
         let (len, mat) = self.peek_seq(m);
         let need = mat + m * cost::seq_push(len + m);
         self.ensure(need);
-        let tail = self.pop_n(m)?;
-        let seq_val = self.pop()?;
+        // The sequence word sits just below the m pushed elements; read the
+        // elements in place (rooted) and truncate once at the end.
+        let base = self.operand_base(m + 1)?;
+        let seq_val = self.stack[base];
         let mut root = self.seq_root(seq_val)?;
-        for e in tail {
-            root = seq::push_back(&mut self.heap, root, e);
+        for i in base + 1..base + 1 + m {
+            root = seq::push_back(&mut self.heap, root, self.stack[i]);
         }
+        self.stack.truncate(base);
         self.stack.push(root);
         Ok(())
     }

@@ -60,8 +60,9 @@
 //!    shelves the process, arms the OS poller and the timer heap, and runs
 //!    something else; the wake re-runs the instruction or completes the
 //!    pending connect ([`poll::WakeAction`]).
-//! 4. **Work moves between schedulers as owned memory.** The first spawn
-//!    boots one scheduler per core ([`sched`]); each spawn copies its
+//! 4. **Work moves between schedulers as owned memory.** The runtime
+//!    ([`sched`]) exists from VM construction; the first spawn summons its
+//!    worker threads, one scheduler per core. Each spawn copies its
 //!    closure graph into a fresh mini-arena and submits the result as a
 //!    [`sched::Seed`]; load balancing donates whole queued processes the
 //!    same way ([`migrate`]). Plain moves, in both cases — the receiver
@@ -97,7 +98,7 @@
 //! |                   | that can park — and the per-scheduler fd tables    |
 //! | [`poll`]          | parking and wake-up: [`Wait`], the OS poller, the  |
 //! |                   | timer heap, blocking-pool completion delivery      |
-//! | [`sched`]         | the multi-core runtime: scheduler threads, the     |
+//! | [`sched`]         | the scheduler runtime: worker threads, the         |
 //! |                   | seed injector and inboxes, the blocking pool,      |
 //! |                   | park/notify                                        |
 //! | [`migrate`]       | cross-scheduler process movement: donation glue    |
@@ -143,6 +144,7 @@ use al_core::bytecode::{BinaryRef, Program, Value};
 use al_core::bytecode::{Function, Op, op};
 use al_core::frozen::FrozenBuilder;
 use al_core::heap::ProcHeap;
+use smallvec::SmallVec;
 
 mod binary;
 mod collections;
@@ -254,6 +256,13 @@ fn bin_ref(v: &Value) -> BinaryRef<'_> {
 }
 
 pub struct VM {
+    /// This scheduler's private copy of the program tables, cloned from the
+    /// runtime's shared [`Runtime::program`] at construction (see
+    /// [`vm_for_runtime`]). Kept inline — not behind the `Arc` — because the
+    /// dispatch loop reads `code`/`constants`/`functions` on every
+    /// instruction and the extra pointer hop is measurable there; the copy
+    /// is shallow where it matters (constants are frozen words pointing
+    /// into the shared `program.frozen`).
     program: Program,
     templates: PreludeTemplates,
     /// Builder over the program's frozen area, kept for runtime freezing of
@@ -300,6 +309,14 @@ pub struct VM {
     /// Processes waiting on I/O readiness or timers, keyed by a unique wait id
     /// so the timer heap can refer to a park without owning it.
     parked: HashMap<u64, (Wait, Process)>,
+    /// Reverse index from socket id to the wait ids parked on it, kept in
+    /// lockstep with `parked` by `park_insert`/`park_remove`. Lets an I/O
+    /// event find its waiters in O(1) instead of scanning every park, and
+    /// makes "is anything waiting on I/O" a non-emptiness check. A socket id
+    /// maps to multiple waits only transiently (e.g. a reader and a writer
+    /// parked on the same connection), so the one-element inline case
+    /// dominates.
+    io_waiters: HashMap<i32, SmallVec<[u64; 1]>>,
     /// Monotonically increasing id handed to each park; the key into `parked`
     /// and the identity (and tie-breaker) recorded in `timer_heap`.
     next_wait_id: u64,
@@ -309,12 +326,17 @@ pub struct VM {
     /// from `parked` (or its live deadline no longer matches). This keeps the
     /// nearest deadline an O(log n) peek instead of an O(n) scan of `parked`.
     timer_heap: BinaryHeap<Reverse<(Instant, u64)>>,
-    /// OS event queue (kqueue/epoll); created when a process first parks on
-    /// I/O, or adopted from the runtime when multi-core scheduling boots.
-    poller: Option<Arc<polling::Poller>>,
-    /// Multi-core runtime, booted by the first spawn. `None` for programs
-    /// that never spawn and for single-core runs (AL_SCHEDULERS=1).
-    runtime: Option<Arc<Runtime>>,
+    /// This scheduler's OS event queue (kqueue/epoll). Owned by this
+    /// scheduler alone; other schedulers reach it only through the waker
+    /// in the runtime's `wakers` slot for `scheduler_index`.
+    poll: mio::Poll,
+    /// Reusable event buffer for `poll` (mio clears it on each `poll()`),
+    /// allocated once per VM instead of per poll call — the parked-I/O
+    /// drain runs every scheduler slice under I/O load.
+    poll_events: mio::Events,
+    /// The scheduler runtime, present from construction. Worker threads
+    /// inside it start lazily on the first spawn.
+    runtime: Arc<Runtime>,
     /// This VM's scheduler index; 0 is the main thread.
     scheduler_index: usize,
     /// The global (literal) area: top-level bindings, addressed by
@@ -325,7 +347,29 @@ pub struct VM {
     globals_synced_version: u64,
 }
 
-pub fn new_vm(program: Program) -> VM {
+/// Build the VM that runs `program` as scheduler 0. The runtime is
+/// constructed here, before any code runs; its worker threads start lazily
+/// on the first spawn, so tooling callers (REPL, tests) pay only the
+/// allocations, one copy of the program tables, and one OS poller.
+///
+/// Fails only when scheduler 0's poller cannot be created (fd exhaustion):
+/// the calling thread could never park, so there is no VM to build.
+pub fn new_vm(program: Program) -> VmResult<VM> {
+    let (runtime, poll) = Runtime::new(Arc::new(program), sched::scheduler_count())
+        .map_err(|e| format!("cannot create OS poller: {e}"))?;
+    Ok(vm_for_runtime(runtime, 0, poll))
+}
+
+/// Build the VM for scheduler `index` over an existing runtime: scheduler 0
+/// via [`new_vm`], workers via [`worker_main`]. `poll` is this scheduler's
+/// own OS poller (created alongside the runtime for scheduler 0, alongside
+/// the worker thread by `ensure_workers`); its waker lives in the runtime's
+/// `wakers` slot so other schedulers can interrupt the wait.
+fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
+    // Every scheduler runs against a private copy of the program tables
+    // (the constants are frozen words pointing into `program.frozen`, which
+    // stays shared — only the vectors copy).
+    let program = (*runtime.program).clone();
     let mut frozen = program.frozen.builder();
     let templates = PreludeTemplates::new(&mut frozen);
     // The global (literal) area is sized by the entry function: top-level
@@ -354,11 +398,13 @@ pub fn new_vm(program: Program) -> VM {
         main_result: None,
         run_queue: VecDeque::new(),
         parked: HashMap::new(),
+        io_waiters: HashMap::new(),
         next_wait_id: 0,
         timer_heap: BinaryHeap::new(),
-        poller: None,
-        runtime: None,
-        scheduler_index: 0,
+        poll,
+        poll_events: mio::Events::with_capacity(poll::EVENTS_CAPACITY),
+        runtime,
+        scheduler_index: index,
         globals: vec![Value::nil(); globals_len],
         globals_synced_version: 0,
     }
@@ -393,6 +439,12 @@ impl VM {
     /// alive (the scheduler loop re-adopts it as `self.heap` on exit): the
     /// value is valid for as long as the VM is, so callers may print or
     /// inspect it after `run` returns but must not let it outlive the VM.
+    ///
+    /// An `Err` is an internal invariant breach, and the runtime behind this
+    /// VM is leaked rather than shut down (see the shutdown comment in the
+    /// body): an embedder that keeps the process alive after an errored run
+    /// — the REPL — accepts that leak; a one-shot embedder — the CLI —
+    /// exits, which reaps everything.
     pub fn run(&mut self) -> VmResult<Value> {
         let entry = self.program.entry;
         let main_func = &self.program.functions[entry as usize];
@@ -415,19 +467,28 @@ impl VM {
             captures: entry_closure,
         });
 
-        for _ in 0..locals {
-            self.stack.push(Value::small_int(0));
-        }
+        self.stack
+            .extend(std::iter::repeat_n(Value::small_int(0), locals as usize));
 
         self.current_is_main = true;
         let result = self.scheduler_loop();
 
-        // Multi-core shutdown: by the time scheduler 0's loop returns Ok, the
-        // global live count is zero, so workers are exiting; join them. On
-        // error the program is dying — process exit reaps the workers.
-        if result.is_ok()
-            && let Some(rt) = &self.runtime
-        {
+        // Shutdown: by the time scheduler 0's loop returns Ok, the global
+        // live count is zero, so workers are exiting; join them.
+        //
+        // On Err no shutdown is attempted, by contract. An Err is an
+        // internal invariant breach (the "likely a compiler bug" failures),
+        // and the errored main never decrements `live`, so the count cannot
+        // reach zero: the workers cannot be joined — they would park
+        // forever — and the runtime (worker threads, warm blocking-pool
+        // threads, the runtime Arc) is deliberately leaked instead. A
+        // one-shot embedder (the CLI) exits right after, reaping
+        // everything; a long-lived embedder that swallows the error (the
+        // REPL) pays one leaked runtime per errored evaluation. The
+        // symmetric worker-side breach exits the whole process — see
+        // `worker_main`.
+        if result.is_ok() {
+            let rt = &self.runtime;
             rt.shutdown_blocking();
             let workers = std::mem::take(&mut *sched::lock(&rt.workers));
             for handle in workers {
@@ -484,9 +545,7 @@ impl VM {
                     self.stack.clear();
                     self.frames.clear();
                     self.current_is_main = false;
-                    if let Some(rt) = &self.runtime {
-                        rt.process_finished();
-                    }
+                    self.runtime.process_finished();
                 }
                 Step::Yield => {
                     // Preempted. Wake any ready parked processes, take the
@@ -521,23 +580,21 @@ impl VM {
                 }
                 Step::Parked(mut wait) => {
                     // Allocate this park's id, record its deadline (if any) in
-                    // the timer heap, arm its I/O interests, then stash the
-                    // suspended process under the id.
+                    // the timer heap, then stash the suspended process under
+                    // the id. The wait's sockets have been registered with the
+                    // poller since adoption; parking arms nothing.
                     let id = self.next_wait_id;
                     self.next_wait_id += 1;
                     if let Some(deadline) = wait.deadline {
                         self.timer_heap.push(Reverse((deadline, id)));
                     }
-                    self.register_wait(&wait)?;
                     let outgoing = self.suspend_current();
                     // A completion park hands its blocking op to the pool now,
                     // keyed by this wait id so the worker's result resumes it.
-                    if let Some(op) = wait.offload.take()
-                        && let Some(rt) = &self.runtime
-                    {
-                        rt.offload(self.scheduler_index, id, op);
+                    if let Some(op) = wait.offload.take() {
+                        self.runtime.offload(self.scheduler_index, id, op);
                     }
-                    self.parked.insert(id, (wait, outgoing));
+                    self.park_insert(id, wait, outgoing);
                 }
             }
             // Every step may have changed this scheduler's runnable count
@@ -612,9 +669,7 @@ impl VM {
         if victim.is_main {
             return;
         }
-        let Some(rt) = self.runtime.clone() else {
-            return;
-        };
+        let rt = Arc::clone(&self.runtime);
         // Effect-free target probe before anything costly: most yields have
         // no one worth donating to.
         let busy_peer = if peer_idle {
@@ -688,6 +743,12 @@ impl VM {
                 continue;
             }
 
+            // Nothing runnable here: republish the (zero) load before any
+            // park below. A direct-handed seed a peer stole out of this
+            // scheduler's inbox leaves `submit`'s in-flight bump in our
+            // `run_lens` slot, and nothing else corrects it while we sleep.
+            self.publish_load();
+
             // 3. Local parked I/O / timers: wait for them, but stay wakeable
             //    by other schedulers (seed submissions, program end).
             if !self.parked.is_empty() {
@@ -707,10 +768,6 @@ impl VM {
             }
 
             // 4. Nothing local at all.
-            if self.runtime.is_none() {
-                // Single scheduler: the program is over.
-                return Ok(false);
-            }
             if self.runtime_finished() {
                 return Ok(false);
             }
@@ -737,10 +794,7 @@ impl VM {
     /// to the shared overflow queue) into the local run queue. Returns whether
     /// any arrived.
     fn take_inbound(&mut self) -> VmResult<bool> {
-        let batch = match &self.runtime {
-            Some(rt) => rt.take_inbound(self.scheduler_index),
-            None => return Ok(false),
-        };
+        let batch = self.runtime.take_inbound(self.scheduler_index);
         self.admit(batch)
     }
 
@@ -749,20 +803,19 @@ impl VM {
     /// every yield — directed work has a chosen destination and must not
     /// wait, unlike overflow seeds. Returns whether any arrived.
     fn take_directed(&mut self) -> VmResult<bool> {
-        let batch = match &self.runtime {
-            Some(rt) => rt.take_directed(self.scheduler_index),
-            None => return Ok(false),
-        };
+        let batch = self.runtime.take_directed(self.scheduler_index);
         self.admit(batch)
     }
 
     /// Pick up undirected overflow seeds (the shared injector) into the
     /// local run queue. Returns whether any arrived.
     fn take_overflow_seed(&mut self) -> VmResult<bool> {
-        let batch: Vec<Inbound> = match &self.runtime {
-            Some(rt) => rt.take_overflow().into_iter().map(Inbound::Seed).collect(),
-            None => return Ok(false),
-        };
+        let batch: Vec<Inbound> = self
+            .runtime
+            .take_overflow()
+            .into_iter()
+            .map(Inbound::Seed)
+            .collect();
         self.admit(batch)
     }
 
@@ -790,10 +843,7 @@ impl VM {
     /// Steal one undelivered unit of inbound work from a peer scheduler's
     /// inbox. Only called when this scheduler has nothing local to run.
     fn steal_inbound(&mut self) -> VmResult<bool> {
-        let Some(rt) = &self.runtime else {
-            return Ok(false);
-        };
-        let Some(inbound) = rt.steal_inbound(self.scheduler_index) else {
+        let Some(inbound) = self.runtime.steal_inbound(self.scheduler_index) else {
             return Ok(false);
         };
         self.admit(vec![inbound])
@@ -802,21 +852,19 @@ impl VM {
     /// Bring this scheduler's global area up to date with the runtime's
     /// shared (published) globals. The shared table holds frozen value
     /// words — pointers into the program-wide frozen area, or immediates —
-    /// so syncing is a plain word copy per slot: no decode, no allocation
-    ///. The `Acquire` load of `globals_version`
-    /// pairs with the `Release` bump in `publish_global`, making the frozen
+    /// so syncing is a plain word copy per slot: no decode, no allocation.
+    /// The `Acquire` load of `globals_version` pairs with the `Release`
+    /// bump in `publish_global`, making the frozen
     /// segment contents visible before the words are read.
     fn sync_globals(&mut self) {
-        let Some(rt) = &self.runtime else {
-            return;
-        };
-        let version = rt
+        let version = self
+            .runtime
             .globals_version
             .load(std::sync::atomic::Ordering::Acquire);
         if version == self.globals_synced_version {
             return;
         }
-        let shared = sched::lock(&rt.globals);
+        let shared = sched::lock(&self.runtime.globals);
         if self.globals.len() < shared.len() {
             self.globals.resize(shared.len(), Value::nil());
         }
@@ -829,61 +877,37 @@ impl VM {
         self.globals_synced_version = version;
     }
 
-    /// Whether the whole program has finished (multi-core mode only).
+    /// Whether the whole program — every process on every scheduler — has
+    /// finished (the runtime's live count reached zero).
     fn runtime_finished(&self) -> bool {
-        match &self.runtime {
-            Some(rt) => rt.is_finished(),
-            None => false,
-        }
+        self.runtime.is_finished()
     }
 
     /// Report this scheduler's runnable count (running process + queue) to
     /// the shared load board peers read when picking a donation target.
     fn publish_load(&self) {
-        if let Some(rt) = &self.runtime {
-            let load = usize::from(!self.frames.is_empty()) + self.run_queue.len();
-            rt.publish_load(self.scheduler_index, load);
-        }
+        let load = usize::from(!self.frames.is_empty()) + self.run_queue.len();
+        self.runtime.publish_load(self.scheduler_index, load);
     }
 
     /// Whether some other scheduler is idle and able to take injector seeds.
     fn others_idle(&self) -> bool {
-        match &self.runtime {
-            Some(rt) => rt.any_other_idle(self.scheduler_index),
-            None => false,
-        }
+        self.runtime.any_other_idle(self.scheduler_index)
     }
 
     /// Mark this scheduler as parked/unparked so seed submitters know who to
     /// wake.
     fn set_parked_flag(&self, parked: bool) {
-        if let Some(rt) = &self.runtime {
-            rt.parked_flags[self.scheduler_index]
-                .store(parked, std::sync::atomic::Ordering::Release);
-        }
+        self.runtime.parked_flags[self.scheduler_index]
+            .store(parked, std::sync::atomic::Ordering::Release);
     }
 
     /// Block until another scheduler notifies this one (seed submitted or
     /// program finished).
     fn wait_for_notify(&mut self) -> VmResult<()> {
-        self.ensure_poller()?;
-        let Some(poller) = &self.poller else {
-            return Ok(());
-        };
-        let mut events = polling::Events::new();
-        poller
-            .wait(&mut events, None)
+        self.poll
+            .poll(&mut self.poll_events, None)
             .map_err(|e| format!("scheduler wait failed: {e}"))?;
-        Ok(())
-    }
-
-    /// Create this scheduler's poller if it does not exist yet.
-    fn ensure_poller(&mut self) -> VmResult<()> {
-        if self.poller.is_none() {
-            let poller =
-                polling::Poller::new().map_err(|e| format!("cannot create OS poller: {e}"))?;
-            self.poller = Some(Arc::new(poller));
-        }
         Ok(())
     }
 
@@ -891,83 +915,25 @@ impl VM {
 
     /// `scheduler.spawn(f)`: start a new process running the closure `f`.
     ///
-    /// The first spawn boots the multi-core runtime (one scheduler per CPU
-    /// core). With the runtime up, the process is shipped as a `Send` seed
-    /// that whichever scheduler is free will run; otherwise it is created
-    /// directly on this scheduler.
+    /// The process is shipped as a `Send` seed that whichever scheduler is
+    /// free will run; the first submit summons the runtime's worker threads
+    /// (one scheduler per CPU core). When no scheduler is idle — including
+    /// when scheduler 0 is the only one — the seed overflows to the shared
+    /// injector and whichever scheduler frees up first picks it up at its
+    /// next yield or idle scan.
     fn spawn_process(&mut self, f: Value) -> VmResult<()> {
-        match f.as_closure() {
-            Some(cl) => {
-                if self.program.functions[cl.func_idx() as usize].arity != 0 {
-                    return Err(
-                        "spawned functions take no arguments. This is likely a compiler bug."
-                            .to_string(),
-                    );
-                }
-            }
-            None => {
-                return Err("spawn requires a function. This is likely a compiler bug.".to_string());
-            }
+        let Some(cl) = f.as_closure() else {
+            return Err("spawn requires a function. This is likely a compiler bug.".to_string());
+        };
+        if self.program.functions[cl.func_idx() as usize].arity != 0 {
+            return Err(
+                "spawned functions take no arguments. This is likely a compiler bug.".to_string(),
+            );
         }
 
-        // Boot the multi-core runtime on the first spawn (scheduler 0 only;
-        // single-core machines and AL_SCHEDULERS=1 stay single-scheduler).
-        if self.runtime.is_none() && self.scheduler_index == 0 {
-            let count = sched::scheduler_count();
-            if count > 1 {
-                self.ensure_poller()?;
-                if let Some(poller) = &self.poller {
-                    let program = Arc::new(self.program.clone());
-                    match sched::boot(program, count, Arc::clone(poller)) {
-                        Ok(rt) => {
-                            // Publish every global written before the runtime
-                            // existed so worker schedulers can load them. The
-                            // table already holds frozen words (StoreLocal
-                            // freezes at store time), so no copying happens
-                            // here.
-                            for (slot, value) in self.globals.iter().enumerate() {
-                                rt.publish_global(slot, freeze::FrozenValue::new(*value));
-                            }
-                            // Same for already-open listeners: share their fds
-                            // so top-level listener bindings work everywhere.
-                            {
-                                let mut shared = sched::lock(&rt.shared_listeners);
-                                for (id, l) in &self.tcp_listeners {
-                                    if let Ok(dup) = l.try_clone() {
-                                        shared.insert(*id, dup);
-                                    }
-                                }
-                            }
-                            self.runtime = Some(rt);
-                        }
-                        Err(e) => {
-                            eprintln!("warning: cannot start schedulers ({e}); running on one core")
-                        }
-                    }
-                }
-            }
-        }
-
-        if self.runtime.is_some() {
-            let seed = self.build_seed(&f)?;
-            if let Some(rt) = &self.runtime {
-                rt.submit(seed);
-            }
-        } else {
-            self.spawn_process_local(f)?;
-        }
+        let seed = self.build_seed(&f)?;
+        self.runtime.submit(seed);
         Ok(())
-    }
-
-    /// Create a process directly on this scheduler.
-    ///
-    /// Per-process heaps hold even without the multi-core runtime: the child
-    /// gets its own mini-arena (a `copy_graph` copy of the closure graph,
-    /// exactly like a cross-scheduler seed), so its allocation, GC, and
-    /// lifetime stay independent of the spawner's.
-    fn spawn_process_local(&mut self, f: Value) -> VmResult<()> {
-        let (heap, root) = self.heap.spawn_copy(&f);
-        self.spawn_process_with_heap(heap, root)
     }
 
     /// Create a process whose initial young space is `heap` — the seeded
@@ -981,9 +947,7 @@ impl VM {
         let (func_idx, code_start, locals) = (cl.func_idx(), func.code_start, func.locals);
 
         let mut stack = Vec::with_capacity(locals as usize + 8);
-        for _ in 0..locals {
-            stack.push(Value::small_int(0));
-        }
+        stack.extend(std::iter::repeat_n(Value::small_int(0), locals as usize));
 
         let frames = vec![CallFrame {
             func_idx,
@@ -1041,19 +1005,17 @@ impl VM {
     /// Build a runnable process on this scheduler from a seed: adopt its
     /// sockets, adopt its heap (the spawn-side copy of the closure graph) as
     /// the child's initial young space, and queue it. Top-level bindings come
-    /// from the global area (synced in `take_inbound`), so the seed itself
-    /// carries none.
+    /// from the global area (synced in `admit`, the intake gate every arrival
+    /// path — inbox drain, overflow pickup, steal — funnels through), so the
+    /// seed itself carries none.
     fn hydrate_seed(&mut self, seed: Seed) -> VmResult<()> {
         for (id, l) in seed.listeners {
-            // The destination may already hold this listener id (adopted via
-            // an earlier seed or `ensure_listener`). The incoming dup is the
-            // same underlying socket; replacing the entry would drop — and
-            // close — an fd this scheduler's poller may have registered. Keep
-            // the existing entry and let the dup drop instead.
-            self.tcp_listeners.entry(id).or_insert(l);
+            self.track_listener(id, l)
+                .map_err(|e| format!("cannot watch adopted listener: {e}"))?;
         }
         for (id, c) in seed.connections {
-            self.tcp_connections.insert(id, c);
+            self.track_connection(id, c)
+                .map_err(|e| format!("cannot watch adopted connection: {e}"))?;
         }
 
         self.spawn_process_with_heap(seed.heap, seed.root)
@@ -1089,37 +1051,34 @@ impl VM {
         if ids.is_empty() {
             return true;
         }
-        ids.sort_unstable();
-        ids.dedup();
 
         if ids.iter().any(|id| self.pending_connects.contains_key(id)) {
             return false;
         }
         // The victim itself is runnable (in run_queue, not parked), so its own
         // interests cannot appear here — any hit is a sibling's armed fd.
-        !self.parked.values().any(|(wait, _)| {
-            wait.interests
-                .iter()
-                .any(|(fd, _)| ids.binary_search(fd).is_ok())
-        })
+        !ids.iter().any(|id| self.io_waiters.contains_key(id))
     }
 }
 
-/// Entry point for worker scheduler threads (indices 1..N), started by
-/// `sched::boot`. Each worker runs a VM of its own against a private clone
-/// of the shared program (`Program` is `Send`; its constants are frozen
-/// words shared across schedulers, never re-built), pulling seeds from the
-/// runtime's injector until the whole program finishes.
-fn worker_main(runtime: Arc<Runtime>, index: usize) {
-    let mut vm = new_vm((*runtime.program).clone());
-    vm.scheduler_index = index;
-    vm.poller = Some(Arc::clone(&runtime.pollers[index]));
-    vm.runtime = Some(runtime);
+/// Entry point for worker scheduler threads (indices 1..N), spawned by
+/// `Runtime::ensure_workers` on the first submit. Each worker runs a VM of
+/// its own over the shared runtime (its poller was created alongside the
+/// thread; the poller's waker sits in the runtime's waker table for
+/// `notify`),
+/// acquiring work like any scheduler — seeds direct-handed to its inbox by
+/// `submit` and migrants donated by peers first, falling back to the shared
+/// overflow injector and to stealing undelivered work from peers' inboxes —
+/// until the whole program finishes.
+fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {
+    let mut vm = vm_for_runtime(runtime, index, poll);
 
     // Workers have no main process; scheduler_loop starts by acquiring work.
     if let Err(e) = vm.scheduler_loop() {
-        // A VM error indicates a compiler bug, not a user error; it is fatal
-        // to the whole program.
+        // A VM error indicates a compiler bug, not a user error: program
+        // state is unreliable and there is no path to hand the error to
+        // scheduler 0, so it is fatal to the whole process — even a
+        // long-lived embedder (the REPL) goes down with it.
         eprintln!("al: scheduler {index} failed: {e}");
         std::process::exit(1);
     }
@@ -1152,6 +1111,7 @@ fn halt_test_vm() -> VM {
         entry: 0,
         frozen: Arc::new(al_core::frozen::FrozenArea::new()),
     })
+    .expect("test VM construction must succeed")
 }
 
 #[inline]

@@ -87,8 +87,8 @@ impl VM {
         // i64::MIN renders in 20 bytes; that is the ceiling.
         self.ensure(cost::str(20));
         let n = self.pop_int("int.to_string")?;
-        let s = n.to_string();
-        let v = Value::str_in(&mut self.heap, &s);
+        let digits = int_to_ascii(n, 10);
+        let v = Value::str_in(&mut self.heap, digits.as_str());
         self.stack.push(v);
         Ok(())
     }
@@ -170,16 +170,91 @@ impl VM {
         let b_v = self.pop_binary("binary.append")?;
         let a_v = self.pop_binary("binary.append")?;
         let (a, b) = (bin_ref(&a_v), bin_ref(&b_v));
-        // `append` needs offset-0 buffers with masked tails; views
-        // may be offset/partial, so materialise both operands.
-        let out = binary::append(
-            &a.to_aligned_vec(),
-            a.bit_len(),
-            &b.to_aligned_vec(),
-            b.bit_len(),
-        );
         let bits = a.bit_len() + b.bit_len();
-        let v = Value::binary_bits_in(&mut self.heap, out, bits);
+        // Fast path: `a` ends on a byte boundary and `b` starts on one (the
+        // invariant socket buffers and string-derived binaries always
+        // satisfy), so the result is the two byte windows back to back —
+        // built once, directly in the shared backing allocation.
+        let v = if a.bit_offset().is_multiple_of(8)
+            && a.bit_len().is_multiple_of(8)
+            && b.bit_offset().is_multiple_of(8)
+        {
+            let b_start = (b.bit_offset() / 8) as usize;
+            let b_len = b.bit_len().div_ceil(8) as usize;
+            Value::binary_concat_in(
+                &mut self.heap,
+                a.byte_window(),
+                &b.backing()[b_start..b_start + b_len],
+                bits,
+            )
+        } else {
+            // Bit-unaligned slow path: `append` needs offset-0 buffers with
+            // masked tails, so materialise both operands.
+            let out = binary::append(
+                &a.to_aligned_vec(),
+                a.bit_len(),
+                &b.to_aligned_vec(),
+                b.bit_len(),
+            );
+            Value::binary_bits_in(&mut self.heap, out, bits)
+        };
+        self.stack.push(v);
+        Ok(())
+    }
+
+    /// `Op::BinConcatN` — pop the top `n` binaries, push their concatenation.
+    /// Emitted for multi-segment `<<>>` literals: the bit length is summed
+    /// while all operands are still rooted on the stack, the backing is
+    /// allocated once, and every source byte is copied exactly once — the
+    /// binary mirror of the `StrConcatN` arm, replacing the `BinAppend` chain
+    /// that re-copied the accumulated prefix per segment.
+    pub(super) fn bin_concat_n(&mut self, n: usize) -> VmResult<()> {
+        // One fresh box; the concatenated bytes live off-heap.
+        self.ensure(cost::BINARY);
+        let base = self.operand_base(n)?;
+        let mut total_bits = 0u64;
+        let mut aligned = true;
+        for (i, v) in self.stack[base..].iter().enumerate() {
+            if v.as_binary().is_none() {
+                return Err("binary construction requires Binary segments".to_string());
+            }
+            let b = bin_ref(v);
+            // The fast path needs every fragment to start on a byte boundary
+            // and all but the last to be whole bytes, so the result is the
+            // byte windows laid back to back.
+            if !b.bit_offset().is_multiple_of(8) || (i + 1 < n && !b.bit_len().is_multiple_of(8)) {
+                aligned = false;
+            }
+            total_bits += b.bit_len();
+        }
+        // ensure() may move the operands, but the stack roots them, so the
+        // slots hold valid pointers here; the constructors only allocate —
+        // never collect — so the fragment bytes can be read while building.
+        let v = if aligned {
+            let parts: Vec<&[u8]> = self.stack[base..]
+                .iter()
+                .map(|v| {
+                    let b = bin_ref(v);
+                    let start = (b.bit_offset() / 8) as usize;
+                    let len = b.bit_len().div_ceil(8) as usize;
+                    &b.backing()[start..start + len]
+                })
+                .collect();
+            Value::binary_concat_parts_in(&mut self.heap, &parts, total_bits)
+        } else {
+            // Bit-unaligned slow path: OR each fragment's logical bits into a
+            // zeroed buffer at a running bit cursor. Still O(total bits) —
+            // no fragment is ever re-copied.
+            let mut out = vec![0u8; total_bits.div_ceil(8) as usize];
+            let mut at = 0u64;
+            for v in &self.stack[base..] {
+                let b = bin_ref(v);
+                copy_bits_into(&mut out, at, b.backing(), b.bit_offset(), b.bit_len());
+                at += b.bit_len();
+            }
+            Value::binary_bits_in(&mut self.heap, out, total_bits)
+        };
+        self.stack.truncate(base);
         self.stack.push(v);
         Ok(())
     }
@@ -375,7 +450,7 @@ impl VM {
         self.ensure(cost::BINARY);
         let radix = self.pop_int("binary.from_int_ascii")?;
         let n = self.pop_int("binary.from_int_ascii")?;
-        let v = Value::binary_in(&mut self.heap, int_to_ascii(n, radix));
+        let v = Value::binary_from_slice_in(&mut self.heap, int_to_ascii(n, radix).as_bytes());
         self.stack.push(v);
         Ok(())
     }
@@ -469,6 +544,26 @@ impl VM {
     }
 }
 
+/// Copy `bits` logical bits of `src` starting at bit `src_at` into `out`
+/// starting at bit `at` (MSB-first addressing, as [`super::binary`]). The
+/// target bits in `out` must currently be zero — the writes OR — which a
+/// fresh zeroed buffer and a strictly advancing cursor guarantee. The
+/// all-byte-aligned span is a memcpy; only ragged edges take the per-bit
+/// loop, so an N-way concat through this is O(total bits).
+fn copy_bits_into(out: &mut [u8], at: u64, src: &[u8], src_at: u64, bits: u64) {
+    let mut done = 0u64;
+    if at.is_multiple_of(8) && src_at.is_multiple_of(8) {
+        let full = (bits / 8) as usize;
+        let (d, s) = ((at / 8) as usize, (src_at / 8) as usize);
+        out[d..d + full].copy_from_slice(&src[s..s + full]);
+        done = (full as u64) * 8;
+    }
+    for i in done..bits {
+        let bit = (src[((src_at + i) / 8) as usize] >> (7 - ((src_at + i) % 8))) & 1;
+        out[((at + i) / 8) as usize] |= bit << (7 - ((at + i) % 8));
+    }
+}
+
 /// Parse ASCII bytes as an integer in radix 10 or 16 (both hex cases).
 /// Returns `None` for an empty input, any non-digit byte, an unsupported
 /// radix, or on overflow — the multiply/add are checked so a value that
@@ -495,25 +590,50 @@ pub(super) fn parse_int_ascii(bytes: &[u8], radix: i64) -> Option<i64> {
     Some(acc)
 }
 
+/// Stack-rendered ASCII digits of an `Int`; `i64::MIN` in base 10 is the
+/// 20-byte ceiling. Avoids a heap allocation per conversion.
+pub(super) struct IntAscii {
+    buf: [u8; 20],
+    start: usize,
+}
+
+impl IntAscii {
+    pub(super) fn as_bytes(&self) -> &[u8] {
+        &self.buf[self.start..]
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        // The buffer holds only ASCII digits, '-', and hex letters, so
+        // this cannot fail; the fallback is unreachable in practice.
+        std::str::from_utf8(self.as_bytes()).unwrap_or("0")
+    }
+}
+
 /// Render an `Int` as ASCII digits in radix 10 or 16 (lowercase hex),
-/// without a `to_string` round-trip. Handles zero, negatives, and
-/// `i64::MIN` (via `unsigned_abs`). An unsupported radix falls back to 10.
-pub(super) fn int_to_ascii(n: i64, radix: i64) -> Vec<u8> {
+/// without a `to_string` round-trip or heap allocation. Handles zero,
+/// negatives, and `i64::MIN` (via `unsigned_abs`). An unsupported radix
+/// falls back to 10.
+pub(super) fn int_to_ascii(n: i64, radix: i64) -> IntAscii {
     let base: u64 = if radix == 16 { 16 } else { 10 };
+    let mut buf = [0u8; 20];
+    let mut start = buf.len();
     if n == 0 {
-        return vec![b'0'];
+        start -= 1;
+        buf[start] = b'0';
+        return IntAscii { buf, start };
     }
     let negative = n < 0;
     let mut mag = n.unsigned_abs();
-    let mut digits = Vec::new();
+    // Fill from the back so the digits land in order without a reverse.
     while mag > 0 {
         let d = (mag % base) as u8;
-        digits.push(if d < 10 { b'0' + d } else { b'a' + (d - 10) });
+        start -= 1;
+        buf[start] = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
         mag /= base;
     }
     if negative {
-        digits.push(b'-');
+        start -= 1;
+        buf[start] = b'-';
     }
-    digits.reverse();
-    digits
+    IntAscii { buf, start }
 }

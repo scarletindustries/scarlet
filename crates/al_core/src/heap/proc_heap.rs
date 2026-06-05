@@ -9,7 +9,7 @@
 //! shrinks — plus the two outward-facing copies (spawn, frozen publish) and
 //! the debug enforcement of the rooting rule.
 
-use super::copy::{CopyMode, copy_graph, sweep_off_heap_list};
+use super::copy::{CopyMode, copy_graph, release_off_heap_list, sweep_off_heap_list};
 use super::dest::{FrozenDest, MinorDest, SegDest, SpaceDest};
 use super::flags::{gc_stress, heap_stats_enabled};
 use super::roots::{Classifier, Roots};
@@ -18,9 +18,7 @@ use super::sizing::{
     size_for,
 };
 use super::space::{SegSpace, Space};
-use crate::bytecode::value::{
-    Value, binary_drop_backing, binary_off_heap_next, header_is_forwarding,
-};
+use crate::bytecode::value::Value;
 use crate::frozen::FrozenBuilder;
 
 /// Counters for one heap's lifetime, printed on drop under
@@ -471,7 +469,8 @@ impl ProcHeap {
     /// fully written `Arc`-owning Binary box inside this heap whose link
     /// word already holds the previous head. Anything else — a foreign or
     /// stale address, a half-written box, an unset link word — corrupts the
-    /// unsafe list walks in [`sweep_off_heap_list`] and this heap's `Drop`.
+    /// list walks in [`sweep_off_heap_list`] and [`release_off_heap_list`]
+    /// (this heap's `Drop`).
     /// Tests may also reset the head to `0` after condemning boxes by hand,
     /// so the teardown sweep does not double-drop their backings.
     pub fn set_off_heap_head(&mut self, addr: usize) {
@@ -533,20 +532,9 @@ impl Default for ProcHeap {
 impl Drop for ProcHeap {
     fn drop(&mut self) {
         // Process death releases every backing the heap's boxes still own —
-        // the off-heap list is exactly the set of live Arc-owning boxes.
-        let mut cur = self.off_heap_head;
-        while cur != 0 {
-            let obj = cur as *const u64;
-            // SAFETY: at rest (no collection in flight) the list holds live,
-            // non-forwarded Binary boxes in slabs this heap still owns; each
-            // owns exactly one strong count.
-            unsafe {
-                debug_assert!(!header_is_forwarding(*obj));
-                let next = binary_off_heap_next(obj);
-                binary_drop_backing(obj);
-                cur = next;
-            }
-        }
+        // the off-heap list is exactly the set of live Arc-owning boxes. The
+        // raw walk lives with the rest of the engine in `copy.rs`.
+        release_off_heap_list(self.off_heap_head);
         self.off_heap_head = 0;
 
         if !heap_stats_enabled() {

@@ -16,6 +16,13 @@ use doc::{
 
 const MAX_WIDTH: isize = 100;
 
+fn is_comment(t: &Trivia) -> bool {
+    matches!(
+        t.kind,
+        TriviaKind::LineComment | TriviaKind::BlockComment | TriviaKind::DocComment
+    )
+}
+
 pub struct FormatResult {
     pub output: String,
     pub has_errors: bool,
@@ -118,22 +125,20 @@ impl Formatter {
         let mut newlines = 0usize;
         let mut emitted_any = !first;
         for t in trivia {
-            match t.kind {
-                TriviaKind::Newline => newlines += 1,
-                TriviaKind::Whitespace => {}
-                TriviaKind::LineComment | TriviaKind::BlockComment | TriviaKind::DocComment => {
-                    let blanks = if emitted_any {
-                        newlines.saturating_sub(1).min(max_blanks)
-                    } else {
-                        0
-                    };
-                    if emitted_any {
-                        parts.push(hardlines(1 + blanks));
-                    }
-                    parts.push(text(t.text.trim_end().to_string()));
-                    emitted_any = true;
-                    newlines = 0;
+            if is_comment(t) {
+                let blanks = if emitted_any {
+                    newlines.saturating_sub(1).min(max_blanks)
+                } else {
+                    0
+                };
+                if emitted_any {
+                    parts.push(hardlines(1 + blanks));
                 }
+                parts.push(text(t.text.trim_end().to_string()));
+                emitted_any = true;
+                newlines = 0;
+            } else if t.kind == TriviaKind::Newline {
+                newlines += 1;
             }
         }
         let blanks = if emitted_any {
@@ -153,10 +158,7 @@ impl Formatter {
         };
         let mut parts = Vec::new();
         for t in trivia {
-            if matches!(
-                t.kind,
-                TriviaKind::LineComment | TriviaKind::BlockComment | TriviaKind::DocComment
-            ) {
+            if is_comment(t) {
                 parts.push(hardline());
                 parts.push(text(t.text.trim_end().to_string()));
             }
@@ -165,26 +167,17 @@ impl Formatter {
     }
 
     fn has_comment_at(&self, s: Span) -> bool {
-        self.trivia_at(s).is_some_and(|tr| {
-            tr.iter().any(|t| {
-                matches!(
-                    t.kind,
-                    TriviaKind::LineComment | TriviaKind::BlockComment | TriviaKind::DocComment
-                )
-            })
-        })
+        self.trivia_at(s)
+            .is_some_and(|tr| tr.iter().any(is_comment))
     }
 
     // ------------------------------------------------------------------ program
 
     fn program(&self, block: &ast::BlockExpression, eof_trivia: &[Trivia]) -> Doc {
-        let mut parts = Vec::new();
-        for (i, node) in block.body.iter().enumerate() {
-            parts.push(self.leading_trivia(node.span(), i == 0, 2));
-            parts.push(self.node(node));
-        }
-        parts.push(self.trivia_doc(eof_trivia, block.body.is_empty(), 2));
-        doc::concat(parts)
+        d![
+            self.nodes_with_trivia(&block.body, 2),
+            self.trivia_doc(eof_trivia, block.body.is_empty(), 2),
+        ]
     }
 
     fn node(&self, n: &ast::Node) -> Doc {
@@ -192,6 +185,17 @@ impl Formatter {
             ast::Node::Statement(s) => self.statement(s),
             ast::Node::Expression(e) => self.expr(e),
         }
+    }
+
+    /// Emit each node preceded by its leading trivia, capping preserved blank
+    /// lines at `max_blanks`.
+    fn nodes_with_trivia(&self, nodes: &[ast::Node], max_blanks: usize) -> Doc {
+        let mut parts = Vec::new();
+        for (i, n) in nodes.iter().enumerate() {
+            parts.push(self.leading_trivia(n.span(), i == 0, max_blanks));
+            parts.push(self.node(n));
+        }
+        doc::concat(parts)
     }
 
     // -------------------------------------------------------------- statements
@@ -595,16 +599,9 @@ impl Formatter {
         if b.body.is_empty() && matches!(trail, Doc::Nil) {
             return text("{}");
         }
-        let mut parts = Vec::new();
-        let mut hard = !matches!(trail, Doc::Nil);
-        for (i, n) in b.body.iter().enumerate() {
-            if self.has_comment_at(n.span()) {
-                hard = true;
-            }
-            parts.push(self.leading_trivia(n.span(), i == 0, 1));
-            parts.push(self.node(n));
-        }
-        let body = d![doc::concat(parts), trail];
+        let hard =
+            !matches!(trail, Doc::Nil) || b.body.iter().any(|n| self.has_comment_at(n.span()));
+        let body = d![self.nodes_with_trivia(&b.body, 1), trail];
         if b.body.len() <= 1 && !hard {
             block(body)
         } else {
@@ -689,12 +686,10 @@ impl Formatter {
     fn body_as_hard_block(&self, body: &ast::Expression) -> Doc {
         let inner = match body {
             ast::Expression::BlockExpression(b) => {
-                let mut parts = Vec::new();
-                for (i, n) in b.body.iter().enumerate() {
-                    parts.push(self.leading_trivia(n.span(), i == 0, 1));
-                    parts.push(self.node(n));
-                }
-                d![doc::concat(parts), self.trailing_comments(b.span)]
+                d![
+                    self.nodes_with_trivia(&b.body, 1),
+                    self.trailing_comments(b.span)
+                ]
             }
             other => self.expr(other),
         };

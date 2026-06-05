@@ -9,6 +9,10 @@
         clippy::unimplemented,
     )
 )]
+// Unsafe code is confined to one designated module (vm::freeze Send/Sync
+// impls), which carries its own `allow(unsafe_code)` and justification.
+// Everything else is compiler-enforced safe.
+#![deny(unsafe_code)]
 
 pub use al_core::*;
 

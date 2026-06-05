@@ -51,7 +51,7 @@ fn run_fn(
     code: Vec<Instruction>,
     locals: i32,
 ) -> (VM, Value) {
-    let mut vm = new_vm(single_fn_program(constants, code, locals));
+    let mut vm = new_vm(single_fn_program(constants, code, locals)).expect("vm must construct");
     let value = vm.run().expect("vm must run without panicking or erroring");
     (vm, value)
 }
@@ -563,6 +563,7 @@ fn array_slice_range_out_of_bounds_errors() {
         0,
     );
     let err = new_vm(program)
+        .expect("vm must construct")
         .run()
         .expect_err("slicing a range out of bounds must error");
     assert!(
@@ -579,7 +580,8 @@ fn array_slice_range_out_of_bounds_errors() {
 // `take_gc_reds`.
 #[test]
 fn gc_collect_charges_reductions_for_live_words() {
-    let mut vm = new_vm(single_fn_program(|_| Vec::new(), vec![op(Op::Halt)], 0));
+    let mut vm = new_vm(single_fn_program(|_| Vec::new(), vec![op(Op::Halt)], 0))
+        .expect("vm must construct");
     vm.heap = ProcHeap::new();
     vm.heap.set_stress(false);
 
@@ -639,7 +641,7 @@ fn stress_collections_move_the_live_graph_under_every_opcode() {
         ],
         0,
     );
-    let mut vm = new_vm(program);
+    let mut vm = new_vm(program).expect("vm must construct");
 
     // `VM::run`'s entry setup, with the stress override installed before
     // the first safepoint (`run` would replace the heap and lose it).
@@ -683,7 +685,8 @@ fn stale_gc_debt_is_dropped_at_slice_entry() {
         |_| vec![Value::small_int(7)],
         vec![op_arg(Op::PushConst, 0), op(Op::Halt)],
         0,
-    ));
+    ))
+    .expect("vm must construct");
     vm.gc.pending_reds = i32::MAX; // leftover from a "previous" process
     let result = vm.run().expect("stale GC debt must not fail the program");
     assert_eq!(result.as_int(), Some(7));
@@ -752,7 +755,7 @@ fn gc_work_preempts_at_the_next_call_checkpoint() {
     // program constant would be skipped as frozen/foreign by the
     // collector) and rooted on the operand stack; the young space is
     // then filled so the array build's `ensure` must collect.
-    let mut vm = new_vm(program);
+    let mut vm = new_vm(program).expect("vm must construct");
     vm.heap = ProcHeap::with_young_capacity(cost::seq_build(big_len) + cost::closure(0));
     vm.heap.set_stress(false);
     let entry_closure = Value::closure_in(&mut vm.heap, 0, &[]);
@@ -809,7 +812,7 @@ fn park_wait(vm: &mut VM, wait: Wait) -> u64 {
     if let Some(deadline) = wait.deadline {
         vm.timer_heap.push(Reverse((deadline, id)));
     }
-    vm.parked.insert(id, (wait, parked_process()));
+    vm.park_insert(id, wait, parked_process());
     id
 }
 
@@ -866,7 +869,7 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
     // Simulate the fd firing first: the parked entry is removed and its
     // process queued (as drain_io_events would), but the timer heap still
     // holds the now-stale deadline id.
-    let (_wait, p) = vm.parked.remove(&id).expect("parked entry present");
+    let (_wait, p) = vm.park_remove(id).expect("parked entry present");
     vm.run_queue.push_back(p);
     assert!(vm.parked.is_empty());
     assert_eq!(vm.timer_heap.len(), 1, "the deadline entry is now stale");
@@ -945,4 +948,36 @@ fn donation_fd_guard_blocks_entangled_connections() {
 
     // Unrelated connection ids remain donatable throughout.
     assert!(vm.can_donate_fds(&victim(sock(8, false))));
+}
+
+// Donation targeting must skip workers that never spawned. A worker
+// `ensure_workers` failed to start publishes a load of 0 forever, so a
+// load-only scan would always prefer it — and a migrant donated there
+// would sit in an inbox no thread drains. The marker for "spawned" is a
+// filled poller slot.
+#[test]
+fn donation_skips_never_spawned_workers() {
+    use std::sync::atomic::Ordering;
+
+    let program = single_fn_program(|_f| vec![], vec![op(Op::Halt)], 0);
+    let (rt, _poll) = sched::Runtime::new(Arc::new(program), 3).expect("runtime must construct");
+    // Worker 1 spawned (slot filled, busier); worker 2's spawn failed
+    // (slot empty, permanent load 0) — the state ensure_workers leaves
+    // behind on partial failure.
+    let poll = mio::Poll::new().expect("poller must construct");
+    let waker = mio::Waker::new(poll.registry(), poll::WAKER_TOKEN).expect("waker must construct");
+    let _ = rt.wakers[1].set(Arc::new(waker));
+    rt.run_lens[1].store(3, Ordering::Relaxed);
+    rt.run_lens[2].store(0, Ordering::Relaxed);
+
+    assert_eq!(
+        rt.pick_underloaded_peer(0, 9),
+        Some(1),
+        "the busier-but-live worker is chosen over the dead one"
+    );
+    assert_eq!(
+        rt.pick_underloaded_peer(0, 4),
+        None,
+        "with the only live peer too loaded to narrow the gap, nothing is picked"
+    );
 }

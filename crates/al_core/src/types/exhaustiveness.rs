@@ -1,6 +1,7 @@
 use crate::ast;
 use crate::type_def::Type;
-use indexmap::IndexMap;
+use indexmap::IndexSet;
+use std::borrow::Cow;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -10,9 +11,92 @@ pub enum Pat {
     Or { patterns: Vec<Pat> },
 }
 
+/// Per-check constructor-name interner. Every ctor name (real variants plus
+/// the synthetic `lit:`/`#bin:`/`range:`/`#tuple` names) is mapped to a dense
+/// u32 id once at the public entry points, so the matrix recursion compares
+/// and stores integers instead of `String`s and seen-ctor membership is a
+/// bitset lookup. Ids 0 and 1 are pre-reserved for the array constructors so
+/// `get_type_ctors` and `pat_to_string` can refer to them without a lookup.
+#[derive(Debug, Default)]
+struct Interner(IndexSet<String>);
+
+const EMPTY_LIST_ID: u32 = 0;
+const CONS_ID: u32 = 1;
+
+impl Interner {
+    fn new() -> Self {
+        let mut set = IndexSet::new();
+        set.insert("[]".to_string());
+        set.insert("::".to_string());
+        Interner(set)
+    }
+
+    fn intern(&mut self, name: &str) -> u32 {
+        match self.0.get_index_of(name) {
+            Some(i) => i as u32,
+            None => self.0.insert_full(name.to_string()).0 as u32,
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<u32> {
+        self.0.get_index_of(name).map(|i| i as u32)
+    }
+
+    fn name(&self, id: u32) -> &str {
+        &self.0[id as usize]
+    }
+}
+
+/// Bitset over interner ids. Ids are dense and small (one per distinct ctor
+/// name in the match + subject type), so membership is a single word probe.
+#[derive(Debug, Default)]
+struct CtorIdSet {
+    words: Vec<u64>,
+}
+
+impl CtorIdSet {
+    fn insert(&mut self, id: u32) {
+        let w = (id / 64) as usize;
+        if w >= self.words.len() {
+            self.words.resize(w + 1, 0);
+        }
+        self.words[w] |= 1u64 << (id % 64);
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        self.words
+            .get((id / 64) as usize)
+            .is_some_and(|w| w & (1u64 << (id % 64)) != 0)
+    }
+}
+
+/// Interned mirror of `Pat` used inside the matrix recursion: ctor names are
+/// interner ids and sub-pattern lists are `Rc`-shared, so the row clones
+/// performed by `specialize`/`default_matrix`/`is_useful` are refcount bumps
+/// instead of deep copies of the pattern subtree.
+#[derive(Debug, Clone)]
+enum IPat {
+    Wildcard,
+    Ctor { id: u32, args: Rc<[IPat]> },
+    Or { patterns: Rc<[IPat]> },
+}
+
+fn intern_pat(p: &Pat, interner: &mut Interner) -> IPat {
+    match p {
+        Pat::Wildcard => IPat::Wildcard,
+        Pat::Ctor { name, args } => IPat::Ctor {
+            id: interner.intern(name),
+            args: args.iter().map(|a| intern_pat(a, interner)).collect(),
+        },
+        Pat::Or { patterns } => IPat::Or {
+            patterns: patterns.iter().map(|a| intern_pat(a, interner)).collect(),
+        },
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CtorInfo {
-    name: String,
+    id: u32,
     arity: usize,
     /// Field labels in declaration order (parallel to `types`). Empty for
     /// constructors without named fields (array `::`/`[]`, tuples). Used by
@@ -28,8 +112,8 @@ struct TypeCtors {
 }
 
 impl TypeCtors {
-    fn find(&self, name: &str) -> Option<&CtorInfo> {
-        self.ctors.iter().find(|c| c.name == name)
+    fn find(&self, id: u32) -> Option<&CtorInfo> {
+        self.ctors.iter().find(|c| c.id == id)
     }
 }
 
@@ -43,128 +127,102 @@ fn tuple_ctor_name(n: usize) -> String {
 /// Interned, structurally-shared projection of `type_def::Type` carrying only
 /// what the usefulness matrix needs: the constructor set of a nominal/array/
 /// tuple type. Lowered from a `&Type` once at each public entry point
-/// (`pattern_to_pat`, `check_exhaustiveness`, `UsefulnessMatrix::new`). The
-/// compiler calls `pattern_to_pat` once per match arm, so an N-arm match
-/// performs N+2 of these O(type-size) lowerings. Each is still strictly
-/// cheaper than the pre-interning code: thereafter every clone the Maranget
-/// recursion performs (`splice`, `get_type_ctors`, `row.types.clone()`, …) is
-/// an `Rc` refcount bump rather than an O(subtree-size) deep copy of the
-/// nested `Named` variant table. Collapsing the N+2 to a single lowering —
-/// lower once in `compile_match` and thread `&RcType` through — is possible
-/// but a cross-cutting API change (these entry points take `&Type`), deferred.
+/// (`pattern_to_pat`, `check_exhaustiveness`, `UsefulnessMatrix::new`), with
+/// ctor names interned into the entry point's `Interner` as part of the
+/// lowering. `Named`/`Tuple` store their fully-built `TypeCtors` behind an
+/// `Rc`, so `get_type_ctors` — called once per recursion level — borrows the
+/// table instead of re-allocating ctor names/labels/types each time.
 ///
 /// `type_def::Type` itself can't hold the `Rc` — it is built with struct
 /// literals in the inferencer — so the interning is local to this module.
 #[derive(Debug, Clone)]
 enum RcType {
     /// No finite constructor set: primitives, functions, type variables, and
-    /// opaque/unresolved nominal types (empty variant table). `get_type_ctors`
-    /// reports these as `infinite`, so a wildcard arm is required.
+    /// opaque/unresolved nominal types (empty variant table). Also used as the
+    /// placeholder for sub-patterns whose type could not be resolved from the
+    /// surrounding context. `get_type_ctors` reports these as `infinite`, so a
+    /// wildcard arm is required.
     Infinite,
     Array(Rc<RcType>),
-    /// ctor name -> per-field label + interned type, in declaration order.
-    /// Non-empty by construction (an empty variant table lowers to `Infinite`).
-    Named(Rc<IndexMap<String, Vec<RcField>>>),
-    Tuple(Rc<Vec<RcType>>),
-}
-
-/// A constructor field: its declaration label paired with its interned type.
-/// The label lets `pattern_to_pat` slot labeled pattern args into
-/// field-declaration order, matching `slot_ctor_args` in the compiler.
-#[derive(Debug, Clone)]
-struct RcField {
-    label: String,
-    ty: RcType,
+    /// Constructor table in declaration order. Non-empty by construction (an
+    /// empty variant table lowers to `Infinite`).
+    Named(Rc<TypeCtors>),
+    /// Single synthetic `#tupleN` ctor whose `types` are the element types.
+    Tuple(Rc<TypeCtors>),
 }
 
 /// One-time O(type-size) lowering of a `&Type` into the shared `RcType` graph.
 /// `Type::Named.variants` already carries field types substituted for the
 /// concrete `type_args`, so no environment lookup is needed here.
-fn rc_type(t: &Type) -> RcType {
+fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
     match t {
         Type::Primitive { .. } | Type::Function { .. } | Type::Var { .. } => RcType::Infinite,
-        Type::Array { element } => RcType::Array(Rc::new(rc_type(element))),
-        Type::Tuple { elements } => RcType::Tuple(Rc::new(elements.iter().map(rc_type).collect())),
+        Type::Array { element } => RcType::Array(Rc::new(rc_type(element, interner))),
+        Type::Tuple { elements } => {
+            let types: Vec<RcType> = elements.iter().map(|e| rc_type(e, interner)).collect();
+            let ctor = CtorInfo {
+                id: interner.intern(&tuple_ctor_name(types.len())),
+                arity: types.len(),
+                labels: vec![],
+                types,
+            };
+            RcType::Tuple(Rc::new(TypeCtors {
+                ctors: vec![ctor],
+                infinite: false,
+            }))
+        }
         Type::Named { variants, .. } => {
             if variants.is_empty() {
                 RcType::Infinite
             } else {
-                let table: IndexMap<String, Vec<RcField>> = variants
+                let ctors: Vec<CtorInfo> = variants
                     .iter()
-                    .map(|(name, fields)| {
-                        (
-                            name.clone(),
-                            fields
-                                .iter()
-                                .map(|f| RcField {
-                                    label: f.label.clone(),
-                                    ty: rc_type(&f.ty),
-                                })
-                                .collect(),
-                        )
+                    .map(|(name, fields)| CtorInfo {
+                        id: interner.intern(name),
+                        arity: fields.len(),
+                        labels: fields.iter().map(|f| f.label.clone()).collect(),
+                        types: fields.iter().map(|f| rc_type(&f.ty, interner)).collect(),
                     })
                     .collect();
-                RcType::Named(Rc::new(table))
+                RcType::Named(Rc::new(TypeCtors {
+                    ctors,
+                    infinite: false,
+                }))
             }
         }
     }
 }
 
-fn get_type_ctors(t: &RcType) -> TypeCtors {
+fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
     match t {
-        RcType::Infinite => TypeCtors {
+        RcType::Infinite => Cow::Owned(TypeCtors {
             ctors: vec![],
             infinite: true,
-        },
-        RcType::Named(variants) => {
-            let mut ctors = Vec::with_capacity(variants.len());
-            for (name, fields) in variants.iter() {
-                ctors.push(CtorInfo {
-                    name: name.clone(),
-                    arity: fields.len(),
-                    labels: fields.iter().map(|f| f.label.clone()).collect(),
-                    // Per-field type clone: one allocation + O(arity) refcount
-                    // bumps, not an O(subtree-size) recursive copy.
-                    types: fields.iter().map(|f| f.ty.clone()).collect(),
-                });
-            }
-            TypeCtors {
-                ctors,
-                infinite: false,
-            }
-        }
-        RcType::Array(element) => TypeCtors {
+        }),
+        RcType::Named(ctors) | RcType::Tuple(ctors) => Cow::Borrowed(ctors.as_ref()),
+        RcType::Array(element) => Cow::Owned(TypeCtors {
             ctors: vec![
                 CtorInfo {
-                    name: "[]".to_string(),
+                    id: EMPTY_LIST_ID,
                     arity: 0,
                     labels: vec![],
                     types: vec![],
                 },
                 CtorInfo {
-                    name: "::".to_string(),
+                    id: CONS_ID,
                     arity: 2,
                     labels: vec![],
                     types: vec![(**element).clone(), t.clone()],
                 },
             ],
             infinite: false,
-        },
-        RcType::Tuple(elements) => TypeCtors {
-            ctors: vec![CtorInfo {
-                name: tuple_ctor_name(elements.len()),
-                arity: elements.len(),
-                labels: vec![],
-                types: elements.as_ref().clone(),
-            }],
-            infinite: false,
-        },
+        }),
     }
 }
 
 #[derive(Debug, Clone)]
 struct PatternRow {
-    pats: Vec<Pat>,
+    pats: Vec<IPat>,
     types: Vec<RcType>,
 }
 
@@ -173,9 +231,9 @@ impl PatternRow {
     /// `ctor_types ++ rest_types` — the splice that `specialize`/`is_useful`
     /// perform when expanding a constructor in the first column.
     fn splice(
-        mut head: Vec<Pat>,
+        mut head: Vec<IPat>,
         ctor_types: &[RcType],
-        rest_pats: &[Pat],
+        rest_pats: &[IPat],
         rest_types: &[RcType],
     ) -> Self {
         head.extend_from_slice(rest_pats);
@@ -195,23 +253,19 @@ impl PatternMatrix {
         self.rows.is_empty()
     }
 
-    fn first_col_ctors(&self) -> Vec<String> {
-        fn collect(p: &Pat, seen: &mut Vec<String>) {
+    fn first_col_ctors(&self) -> CtorIdSet {
+        fn collect(p: &IPat, seen: &mut CtorIdSet) {
             match p {
-                Pat::Ctor { name, .. } => {
-                    if !seen.contains(name) {
-                        seen.push(name.clone());
-                    }
-                }
-                Pat::Or { patterns } => {
-                    for inner in patterns {
+                IPat::Ctor { id, .. } => seen.insert(*id),
+                IPat::Or { patterns } => {
+                    for inner in patterns.iter() {
                         collect(inner, seen);
                     }
                 }
-                Pat::Wildcard => {}
+                IPat::Wildcard => {}
             }
         }
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen = CtorIdSet::default();
         for row in &self.rows {
             if let Some(first) = row.pats.first() {
                 collect(first, &mut seen);
@@ -223,11 +277,11 @@ impl PatternMatrix {
     /// Visit every row's first column with Or-patterns recursively flattened,
     /// so `f` only ever sees `Wildcard` or `Ctor` heads. Shared iteration core
     /// for `specialize` and `default_matrix`.
-    fn for_each_head(&self, mut f: impl FnMut(&Pat, &[Pat], &[RcType])) {
-        fn go(p: &Pat, rp: &[Pat], rt: &[RcType], f: &mut impl FnMut(&Pat, &[Pat], &[RcType])) {
+    fn for_each_head(&self, mut f: impl FnMut(&IPat, &[IPat], &[RcType])) {
+        fn go(p: &IPat, rp: &[IPat], rt: &[RcType], f: &mut impl FnMut(&IPat, &[IPat], &[RcType])) {
             match p {
-                Pat::Or { patterns } => {
-                    for a in patterns {
+                IPat::Or { patterns } => {
+                    for a in patterns.iter() {
                         go(a, rp, rt, f);
                     }
                 }
@@ -244,14 +298,14 @@ impl PatternMatrix {
     fn specialize(&self, ctor: &CtorInfo) -> PatternMatrix {
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest_p, rest_t| match head {
-            Pat::Wildcard => result.rows.push(PatternRow::splice(
-                vec![Pat::Wildcard; ctor.arity],
+            IPat::Wildcard => result.rows.push(PatternRow::splice(
+                vec![IPat::Wildcard; ctor.arity],
                 &ctor.types,
                 rest_p,
                 rest_t,
             )),
-            Pat::Ctor { name, args } if *name == ctor.name => result.rows.push(PatternRow::splice(
-                args.clone(),
+            IPat::Ctor { id, args } if *id == ctor.id => result.rows.push(PatternRow::splice(
+                args.to_vec(),
                 &ctor.types,
                 rest_p,
                 rest_t,
@@ -264,7 +318,7 @@ impl PatternMatrix {
     fn default_matrix(&self) -> PatternMatrix {
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest_p, rest_t| {
-            if matches!(head, Pat::Wildcard) {
+            if matches!(head, IPat::Wildcard) {
                 result.rows.push(PatternRow {
                     pats: rest_p.to_vec(),
                     types: rest_t.to_vec(),
@@ -275,16 +329,8 @@ impl PatternMatrix {
     }
 }
 
-fn is_complete(seen_ctors: &[String], type_ctors: &TypeCtors) -> bool {
-    if type_ctors.infinite {
-        return false;
-    }
-    for c in &type_ctors.ctors {
-        if !seen_ctors.contains(&c.name) {
-            return false;
-        }
-    }
-    true
+fn is_complete(seen_ctors: &CtorIdSet, type_ctors: &TypeCtors) -> bool {
+    !type_ctors.infinite && type_ctors.ctors.iter().all(|c| seen_ctors.contains(c.id))
 }
 
 fn is_useful(m: &PatternMatrix, row: &PatternRow) -> bool {
@@ -302,11 +348,11 @@ fn is_useful(m: &PatternMatrix, row: &PatternRow) -> bool {
 
     let first_pat = &row.pats[0];
     match first_pat {
-        Pat::Wildcard => {
+        IPat::Wildcard => {
             if is_complete(&seen_ctors, &type_ctors) {
                 for ctor in &type_ctors.ctors {
                     let specialized_m = m.specialize(ctor);
-                    let head = vec![Pat::Wildcard; ctor.arity];
+                    let head = vec![IPat::Wildcard; ctor.arity];
                     let new_row =
                         PatternRow::splice(head, &ctor.types, &row.pats[1..], &row.types[1..]);
                     if is_useful(&specialized_m, &new_row) {
@@ -324,24 +370,35 @@ fn is_useful(m: &PatternMatrix, row: &PatternRow) -> bool {
                 )
             }
         }
-        Pat::Ctor { name, args } => {
-            let ctor_info = type_ctors.find(name).cloned().unwrap_or_else(|| CtorInfo {
-                name: name.clone(),
-                arity: args.len(),
-                labels: vec![],
-                types: vec![],
-            });
-            let specialized_m = m.specialize(&ctor_info);
+        IPat::Ctor { id, args } => {
+            // Constructors absent from the type's table (literals, binary
+            // shapes, ranges, type-error fallout) get an empty payload type
+            // list, matching their lowering as opaque nullary ctors.
+            let fallback;
+            let ctor_info = match type_ctors.find(*id) {
+                Some(c) => c,
+                None => {
+                    fallback = CtorInfo {
+                        id: *id,
+                        arity: args.len(),
+                        labels: vec![],
+                        types: vec![],
+                    };
+                    &fallback
+                }
+            };
+            let specialized_m = m.specialize(ctor_info);
             let new_row = PatternRow::splice(
-                args.clone(),
+                args.to_vec(),
                 &ctor_info.types,
                 &row.pats[1..],
                 &row.types[1..],
             );
             is_useful(&specialized_m, &new_row)
         }
-        Pat::Or { patterns } => patterns.iter().any(|p| {
-            let mut pats = vec![p.clone()];
+        IPat::Or { patterns } => patterns.iter().any(|p| {
+            let mut pats = Vec::with_capacity(row.pats.len());
+            pats.push(p.clone());
             pats.extend_from_slice(&row.pats[1..]);
             is_useful(
                 m,
@@ -354,7 +411,7 @@ fn is_useful(m: &PatternMatrix, row: &PatternRow) -> bool {
     }
 }
 
-fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<Pat>> {
+fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<IPat>> {
     if types.is_empty() {
         if m.is_empty() {
             return Some(vec![]);
@@ -372,13 +429,10 @@ fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<Pat>> {
             let mut sub_types = ctor.types.clone();
             sub_types.extend_from_slice(&types[1..]);
             if let Some(witness_vec) = find_witness_vec(&specialized_m, &sub_types) {
-                let args: Vec<Pat> = (0..ctor.arity)
-                    .map(|i| witness_vec.get(i).cloned().unwrap_or(Pat::Wildcard))
+                let args: Rc<[IPat]> = (0..ctor.arity)
+                    .map(|i| witness_vec.get(i).cloned().unwrap_or(IPat::Wildcard))
                     .collect();
-                let head = Pat::Ctor {
-                    name: ctor.name.clone(),
-                    args,
-                };
+                let head = IPat::Ctor { id: ctor.id, args };
                 let tail = witness_vec.get(ctor.arity..).unwrap_or(&[]);
                 return Some(std::iter::once(head).chain(tail.iter().cloned()).collect());
             }
@@ -386,19 +440,19 @@ fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<Pat>> {
         None
     } else {
         for ctor in &type_ctors.ctors {
-            if !seen_ctors.contains(&ctor.name) {
-                let mut result = vec![Pat::Ctor {
-                    name: ctor.name.clone(),
-                    args: vec![Pat::Wildcard; ctor.arity],
+            if !seen_ctors.contains(ctor.id) {
+                let mut result = vec![IPat::Ctor {
+                    id: ctor.id,
+                    args: vec![IPat::Wildcard; ctor.arity].into(),
                 }];
-                result.resize(types.len(), Pat::Wildcard);
+                result.resize(types.len(), IPat::Wildcard);
                 return Some(result);
             }
         }
         if type_ctors.infinite {
             let default_m = m.default_matrix();
             if let Some(witness_vec) = find_witness_vec(&default_m, &types[1..]) {
-                return Some(std::iter::once(Pat::Wildcard).chain(witness_vec).collect());
+                return Some(std::iter::once(IPat::Wildcard).chain(witness_vec).collect());
             }
         }
         None
@@ -452,42 +506,42 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
     key
 }
 
-/// Placeholder type for sub-patterns whose type could not be resolved from the
-/// surrounding context. Falls through to `infinite: true` in `get_type_ctors`.
-fn unknown_type() -> RcType {
-    RcType::Infinite
-}
-
-fn pat_to_string(p: &Pat, t: &RcType) -> String {
+fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
     match p {
-        Pat::Wildcard => "_".to_string(),
-        Pat::Ctor { name, args } => {
-            if name == "[]" {
+        IPat::Wildcard => "_".to_string(),
+        IPat::Ctor { id, args } => {
+            if *id == EMPTY_LIST_ID {
                 return "[]".to_string();
             }
-            if name == "::" {
+            if *id == CONS_ID {
                 return "[_, ..]".to_string();
             }
+            let name = interner.name(*id);
             let type_ctors = get_type_ctors(t);
             let ctor_types = type_ctors
-                .find(name)
+                .find(*id)
                 .map(|c| c.types.as_slice())
                 .unwrap_or(&[]);
             let parts: Vec<String> = args
                 .iter()
                 .enumerate()
-                .map(|(i, a)| pat_to_string(a, ctor_types.get(i).unwrap_or(&unknown_type())))
+                .map(|(i, a)| {
+                    pat_to_string(a, ctor_types.get(i).unwrap_or(&RcType::Infinite), interner)
+                })
                 .collect();
             if name.starts_with("#tuple") {
                 return format!("({})", parts.join(", "));
             }
             if parts.is_empty() {
-                return name.clone();
+                return name.to_string();
             }
             format!("{}({})", name, parts.join(", "))
         }
-        Pat::Or { patterns } => {
-            let parts: Vec<String> = patterns.iter().map(|pp| pat_to_string(pp, t)).collect();
+        IPat::Or { patterns } => {
+            let parts: Vec<String> = patterns
+                .iter()
+                .map(|pp| pat_to_string(pp, t, interner))
+                .collect();
             parts.join(" | ")
         }
     }
@@ -498,10 +552,12 @@ fn pat_to_string(p: &Pat, t: &RcType) -> String {
 /// used to recover sub-pattern types for constructor arguments and to pad
 /// `Ctor(..)` rest-patterns to the constructor's full arity.
 pub fn pattern_to_pat(p: &ast::Pattern, t: &Type) -> Pat {
-    pattern_to_pat_rc(p, &rc_type(t))
+    let mut interner = Interner::new();
+    let rc = rc_type(t, &mut interner);
+    pattern_to_pat_rc(p, &rc, &interner)
 }
 
-fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
+fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
     match p {
         ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => Pat::Wildcard,
         ast::Pattern::Literal(lit) => match lit {
@@ -516,7 +572,10 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
         },
         ast::Pattern::Constructor { name, args, .. } => {
             let type_ctors = get_type_ctors(t);
-            let pat_args = match type_ctors.find(&name.name) {
+            let known = interner
+                .lookup(&name.name)
+                .and_then(|id| type_ctors.find(id));
+            let pat_args = match known {
                 Some(ctor) => {
                     // Slot args into field-DECLARATION order, mirroring the
                     // compiler's `slot_ctor_args`: positional args fill
@@ -546,7 +605,7 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
                             ),
                         };
                         if idx < arity {
-                            slots[idx] = Some(pattern_to_pat_rc(inner, &ctor.types[idx]));
+                            slots[idx] = Some(pattern_to_pat_rc(inner, &ctor.types[idx], interner));
                         }
                     }
                     slots
@@ -563,7 +622,7 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
                             ast::PatternArg::Positional(p) => p,
                             ast::PatternArg::Labeled { pattern, .. } => pattern,
                         };
-                        pattern_to_pat_rc(inner, &unknown_type())
+                        pattern_to_pat_rc(inner, &RcType::Infinite, interner)
                     })
                     .collect(),
             };
@@ -573,30 +632,28 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
             }
         }
         ast::Pattern::Tuple { elements, .. } => {
-            let elem_types: Vec<RcType> = if let RcType::Tuple(ts) = t {
-                ts.as_ref().clone()
+            let elem_types: &[RcType] = if let RcType::Tuple(ctors) = t {
+                &ctors.ctors[0].types
             } else {
-                vec![]
+                &[]
             };
-            let mut args: Vec<Pat> = Vec::with_capacity(elements.len());
-            for (i, e) in elements.iter().enumerate() {
-                let sub_t = if i < elem_types.len() {
-                    elem_types[i].clone()
-                } else {
-                    unknown_type()
-                };
-                args.push(pattern_to_pat_rc(e, &sub_t));
-            }
+            let args = elements
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    pattern_to_pat_rc(e, elem_types.get(i).unwrap_or(&RcType::Infinite), interner)
+                })
+                .collect();
             Pat::Ctor {
                 name: tuple_ctor_name(elements.len()),
                 args,
             }
         }
         ast::Pattern::Array { elements, .. } => {
-            let elem_type = if let RcType::Array(element) = t {
-                (**element).clone()
+            let elem_type: &RcType = if let RcType::Array(element) = t {
+                element
             } else {
-                unknown_type()
+                &RcType::Infinite
             };
             // Build a cons-list right-to-left. A spread element terminates the
             // chain with a wildcard tail (matches any remaining list, including
@@ -613,7 +670,7 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
                     ast::ArrayPatternElement::Pattern(p) => {
                         acc = Pat::Ctor {
                             name: "::".to_string(),
-                            args: vec![pattern_to_pat_rc(p, &elem_type), acc],
+                            args: vec![pattern_to_pat_rc(p, elem_type, interner), acc],
                         };
                     }
                 }
@@ -636,7 +693,10 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
             }
         }
         ast::Pattern::Or { patterns, .. } => Pat::Or {
-            patterns: patterns.iter().map(|p| pattern_to_pat_rc(p, t)).collect(),
+            patterns: patterns
+                .iter()
+                .map(|p| pattern_to_pat_rc(p, t, interner))
+                .collect(),
         },
         ast::Pattern::Range { start, end, .. } => {
             let bound_str = |b: &ast::Pattern| -> String {
@@ -657,30 +717,36 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType) -> Pat {
 /// Incremental usefulness checker for a single match expression. The compiler
 /// pushes each unguarded arm once after its usefulness check, so N arms cost
 /// O(N) row constructions instead of the O(N²) incurred by rebuilding the
-/// matrix from a `&[Pat]` slice on every arm.
+/// matrix from a `&[Pat]` slice on every arm. The interner lives for the whole
+/// match, so each arm's ctor names are interned exactly once.
 #[derive(Debug)]
 pub struct UsefulnessMatrix {
     matrix: PatternMatrix,
     subject_type: RcType,
+    interner: Interner,
 }
 
 impl UsefulnessMatrix {
     pub fn new(subject_type: Type) -> Self {
+        let mut interner = Interner::new();
+        let subject_type = rc_type(&subject_type, &mut interner);
         Self {
             matrix: PatternMatrix::default(),
-            subject_type: rc_type(&subject_type),
+            subject_type,
+            interner,
         }
     }
 
-    pub fn is_useful(&self, pat: &Pat) -> bool {
+    pub fn is_useful(&mut self, pat: &Pat) -> bool {
         let row = PatternRow {
-            pats: vec![pat.clone()],
+            pats: vec![intern_pat(pat, &mut self.interner)],
             types: vec![self.subject_type.clone()],
         };
         is_useful(&self.matrix, &row)
     }
 
     pub fn push(&mut self, pat: Pat) {
+        let pat = intern_pat(&pat, &mut self.interner);
         self.matrix.rows.push(PatternRow {
             pats: vec![pat],
             types: vec![self.subject_type.clone()],
@@ -689,23 +755,24 @@ impl UsefulnessMatrix {
 }
 
 pub fn check_exhaustiveness(patterns: &[Pat], subject_type: &Type) -> Option<String> {
-    let subject = rc_type(subject_type);
+    let mut interner = Interner::new();
+    let subject = rc_type(subject_type, &mut interner);
     let mut matrix = PatternMatrix::default();
     for p in patterns {
         matrix.rows.push(PatternRow {
-            pats: vec![p.clone()],
+            pats: vec![intern_pat(p, &mut interner)],
             types: vec![subject.clone()],
         });
     }
 
     let wildcard_row = PatternRow {
-        pats: vec![Pat::Wildcard],
+        pats: vec![IPat::Wildcard],
         types: vec![subject.clone()],
     };
     if is_useful(&matrix, &wildcard_row) {
         if let Some(witness_vec) = find_witness_vec(&matrix, std::slice::from_ref(&subject)) {
-            let witness = witness_vec.into_iter().next().unwrap_or(Pat::Wildcard);
-            return Some(pat_to_string(&witness, &subject));
+            let witness = witness_vec.into_iter().next().unwrap_or(IPat::Wildcard);
+            return Some(pat_to_string(&witness, &subject, &interner));
         }
         return Some("_".to_string());
     }

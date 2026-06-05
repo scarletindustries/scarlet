@@ -9,10 +9,15 @@
 //! [`super`] lock that shape.
 //!
 //! Everything here is read-only over the value graph: no allocation in
-//! any arena, just host `String`s. Closure names resolve through the
-//! program (`functions[func_idx].name`), which is why `inspect` takes
-//! the [`Program`] and why it stays `pub`: the CLI and REPL print final
-//! results with it after `run()` returns.
+//! any arena, just one host `String`. The whole rendering streams into a
+//! single output buffer — leaves, separators, and indentation are written
+//! in place, so a nested value costs O(total bytes) instead of re-copying
+//! every child rendering once per ancestor level. Closure names resolve
+//! through the program (`functions[func_idx].name`), which is why
+//! `inspect` takes the [`Program`] and why it stays `pub`: the CLI and
+//! REPL print final results with it after `run()` returns.
+
+use std::fmt::Write;
 
 use al_core::bytecode::{Program, Value, ValueView};
 
@@ -38,7 +43,9 @@ pub(super) fn value_type_name(v: &Value) -> String {
 /// `func_idx` + captures, so its name is resolved here through
 /// `program.functions[func_idx]`.
 pub fn inspect(v: &Value, program: &Program) -> String {
-    inspect_impl(v, program, Some(0))
+    let mut out = String::new();
+    inspect_impl(v, program, Some(0), &mut out);
+    out
 }
 
 fn is_simple_value(v: &Value) -> bool {
@@ -63,146 +70,251 @@ fn is_record(e: &al_core::bytecode::EnumRef<'_>) -> bool {
 }
 
 pub(super) fn f64_str(f: f64) -> String {
-    // Match V's f64.str() — always include a decimal point for finite values.
-    let s = format!("{}", f);
-    if f.is_finite() && !s.contains('.') && !s.contains('e') && !s.contains('E') {
-        format!("{}.0", s)
-    } else {
-        s
+    let mut s = String::new();
+    write_f64(&mut s, f);
+    s
+}
+
+/// Match V's f64.str() — always include a decimal point for finite values.
+fn write_f64(out: &mut String, f: f64) {
+    let start = out.len();
+    let _ = write!(out, "{}", f);
+    if f.is_finite()
+        && !out[start..]
+            .bytes()
+            .any(|b| matches!(b, b'.' | b'e' | b'E'))
+    {
+        out.push_str(".0");
     }
 }
 
-fn join_inline(xs: &[Value], program: &Program) -> String {
-    xs.iter()
-        .map(|v| inspect_impl(v, program, None))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn push_indent(out: &mut String, n: usize) {
+    for _ in 0..n {
+        out.push_str("  ");
+    }
 }
 
-fn block(open: &str, close: char, lines: Vec<String>, n: usize) -> String {
-    let inner = "  ".repeat(n + 1);
-    let body = lines
-        .into_iter()
-        .map(|l| format!("{}{}", inner, l))
-        .collect::<Vec<_>>()
-        .join(",\n");
-    format!("{}\n{}\n{}{}", open, body, "  ".repeat(n), close)
+fn join_inline(out: &mut String, xs: &[Value], program: &Program) {
+    for (i, v) in xs.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        inspect_impl(v, program, None, out);
+    }
 }
 
-/// Render a value. `indent = None` forces a single-line rendering; `Some(n)`
-/// pretty-prints, expanding containers across lines at indent depth `n` when
-/// their children aren't all simple leaves.
-fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>) -> String {
-    let pretty = |xs: &[Value], n: usize| -> Vec<String> {
-        xs.iter()
-            .map(|v| inspect_impl(v, program, Some(n + 1)))
-            .collect()
-    };
+/// Body of an expanded container: one line per element, indented one level
+/// past `n`, closing delimiter back at `n`. The caller has already written
+/// the opening delimiter.
+fn block_body(
+    out: &mut String,
+    close: char,
+    n: usize,
+    count: usize,
+    write_line: &mut dyn FnMut(usize, &mut String),
+) {
+    out.push('\n');
+    for i in 0..count {
+        if i > 0 {
+            out.push_str(",\n");
+        }
+        push_indent(out, n + 1);
+        write_line(i, out);
+    }
+    out.push('\n');
+    push_indent(out, n);
+    out.push(close);
+}
+
+/// Array-of-leaves layout: flat `[..]` when it fits in 80 columns, otherwise
+/// wrapped six elements per line at indent depth `n`. Streams the flat
+/// attempt into `out` and bails as soon as it exceeds the budget, then
+/// truncates and re-renders wrapped — each leaf is written at most twice.
+fn wrap_six(
+    out: &mut String,
+    n: usize,
+    count: usize,
+    write_elem: &mut dyn FnMut(usize, &mut String),
+) {
+    let start = out.len();
+    out.push('[');
+    let mut fits = true;
+    for i in 0..count {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_elem(i, out);
+        if out.len() - start > 80 {
+            fits = false;
+            break;
+        }
+    }
+    if fits {
+        out.push(']');
+        if out.len() - start <= 80 {
+            return;
+        }
+    }
+    out.truncate(start);
+    out.push_str("[\n");
+    push_indent(out, n + 1);
+    for i in 0..count {
+        if i > 0 {
+            if i % 6 == 0 {
+                out.push_str(", \n");
+                push_indent(out, n + 1);
+            } else {
+                out.push_str(", ");
+            }
+        }
+        write_elem(i, out);
+    }
+    out.push('\n');
+    push_indent(out, n);
+    out.push(']');
+}
+
+/// Render a value into `out`. `indent = None` forces a single-line rendering;
+/// `Some(n)` pretty-prints, expanding containers across lines at indent depth
+/// `n` when their children aren't all simple leaves.
+fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut String) {
     match v.kind() {
-        ValueView::Int(i) => i.to_string(),
-        ValueView::Float(f) => f64_str(f),
-        ValueView::Bool(b) => if b { "True" } else { "False" }.to_string(),
-        ValueView::Str(s) => s.to_string(),
-        ValueView::Binary(b) => binary::inspect(&b.to_aligned_vec(), b.bit_len()),
+        ValueView::Int(i) => {
+            let _ = write!(out, "{}", i);
+        }
+        ValueView::Float(f) => write_f64(out, f),
+        ValueView::Bool(b) => out.push_str(if b { "True" } else { "False" }),
+        ValueView::Str(s) => out.push_str(s),
+        ValueView::Binary(b) => out.push_str(&binary::inspect(&b.to_aligned_vec(), b.bit_len())),
         ValueView::Closure(c) => {
-            format!("<fn#{}>", program.functions[c.func_idx() as usize].name)
+            let _ = write!(
+                out,
+                "<fn#{}>",
+                program.functions[c.func_idx() as usize].name
+            );
         }
         ValueView::Socket(s) => {
             let kind = if s.is_listener { "listener" } else { "socket" };
-            format!("<{}#{}>", kind, s.id)
+            let _ = write!(out, "<{}#{}>", kind, s.id);
         }
         ValueView::Range(a, z) => {
             // Render like the materialized array, without building one in
-            // any arena (printing must not allocate heap values).
-            let elems: Vec<String> = (a..z).map(|i| i.to_string()).collect();
+            // any arena (printing must not allocate heap values). Each
+            // element streams straight into `out` — no per-element String.
+            let count = (z as i128 - a as i128).clamp(0, usize::MAX as i128) as usize;
             match indent {
-                None => format!("[{}]", elems.join(", ")),
-                Some(_) if elems.is_empty() => "[]".into(),
-                Some(n) => {
-                    let flat = format!("[{}]", elems.join(", "));
-                    if flat.len() <= 80 {
-                        return flat;
+                None => {
+                    out.push('[');
+                    for i in 0..count {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        let _ = write!(out, "{}", a + i as i64);
                     }
-                    let inner = "  ".repeat(n + 1);
-                    let body = elems
-                        .chunks(6)
-                        .map(|chunk| chunk.join(", "))
-                        .collect::<Vec<_>>()
-                        .join(&format!(", \n{}", inner));
-                    format!("[\n{}{}\n{}]", inner, body, "  ".repeat(n))
+                    out.push(']');
                 }
+                Some(_) if count == 0 => out.push_str("[]"),
+                Some(n) => wrap_six(out, n, count, &mut |i, out| {
+                    let _ = write!(out, "{}", a + i as i64);
+                }),
             }
         }
-        ValueView::Nil => "Nil".to_string(),
-        ValueView::Enum(e) if e.payload().is_empty() => e.variant_name().to_string(),
+        ValueView::Nil => out.push_str("Nil"),
+        ValueView::Enum(e) if e.payload().is_empty() => out.push_str(e.variant_name()),
         ValueView::Enum(e) if is_record(&e) => {
             let payload = e.payload();
-            let fields = |mode: Option<usize>| -> Vec<String> {
-                e.field_labels()
-                    .iter()
-                    .zip(payload)
-                    .map(|(l, v)| format!("{}: {}", str_ref(l), inspect_impl(v, program, mode)))
-                    .collect()
-            };
+            let labels = e.field_labels();
             match indent {
-                Some(n) if !payload.iter().all(is_simple_value) => block(
-                    &format!("{} {{", e.variant_name()),
-                    '}',
-                    fields(Some(n + 1)),
-                    n,
-                ),
-                _ => format!("{}{{ {} }}", e.variant_name(), fields(None).join(", ")),
+                Some(n) if !payload.iter().all(is_simple_value) => {
+                    out.push_str(e.variant_name());
+                    out.push_str(" {");
+                    block_body(out, '}', n, payload.len(), &mut |i, out| {
+                        out.push_str(str_ref(&labels[i]));
+                        out.push_str(": ");
+                        inspect_impl(&payload[i], program, Some(n + 1), out);
+                    });
+                }
+                _ => {
+                    out.push_str(e.variant_name());
+                    out.push_str("{ ");
+                    for (i, (l, v)) in labels.iter().zip(payload).enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(str_ref(l));
+                        out.push_str(": ");
+                        inspect_impl(v, program, None, out);
+                    }
+                    out.push_str(" }");
+                }
             }
         }
         ValueView::Enum(e) => {
             let payload = e.payload();
             match indent {
-                Some(n) if !payload.iter().all(is_simple_value) => block(
-                    &format!("{}(", e.variant_name()),
-                    ')',
-                    pretty(payload, n),
-                    n,
-                ),
-                _ => format!("{}({})", e.variant_name(), join_inline(payload, program)),
+                Some(n) if !payload.iter().all(is_simple_value) => {
+                    out.push_str(e.variant_name());
+                    out.push('(');
+                    block_body(out, ')', n, payload.len(), &mut |i, out| {
+                        inspect_impl(&payload[i], program, Some(n + 1), out);
+                    });
+                }
+                _ => {
+                    out.push_str(e.variant_name());
+                    out.push('(');
+                    join_inline(out, payload, program);
+                    out.push(')');
+                }
             }
         }
         ValueView::Tuple(t) => match indent {
-            None => format!("({})", join_inline(t, program)),
-            Some(_) if t.is_empty() => "()".into(),
+            None => {
+                out.push('(');
+                join_inline(out, t, program);
+                out.push(')');
+            }
+            Some(_) if t.is_empty() => out.push_str("()"),
             Some(n) => {
                 if t.iter().all(is_simple_value) {
-                    let flat = format!("({})", join_inline(t, program));
-                    if flat.len() <= 80 {
-                        return flat;
+                    let start = out.len();
+                    out.push('(');
+                    join_inline(out, t, program);
+                    out.push(')');
+                    if out.len() - start <= 80 {
+                        return;
                     }
+                    out.truncate(start);
                 }
-                block("(", ')', pretty(t, n), n)
+                out.push('(');
+                block_body(out, ')', n, t.len(), &mut |i, out| {
+                    inspect_impl(&t[i], program, Some(n + 1), out);
+                });
             }
         },
         ValueView::Array(arr) => {
-            // The tree lacks slice APIs (chunks/&[Value]); materialise into
-            // host memory once so the formatting body below stays
-            // byte-identical to the old behaviour (this is a cold path).
+            // The tree lacks slice APIs (chunks/&[Value]); materialise the
+            // word-sized handles into host memory once so elements can be
+            // indexed below. Only Value words are copied — the rendered text
+            // streams directly into `out`.
             let arr: Vec<Value> = arr.iter().collect();
-            let arr: &[Value] = &arr;
             match indent {
-                None => format!("[{}]", join_inline(arr, program)),
-                Some(_) if arr.is_empty() => "[]".into(),
-                Some(n) if arr.iter().all(is_simple_value) => {
-                    let flat = format!("[{}]", join_inline(arr, program));
-                    if flat.len() <= 80 {
-                        return flat;
-                    }
-                    // Long array of leaves: wrap 6-per-line rather than one-per-line.
-                    let inner = "  ".repeat(n + 1);
-                    let body = arr
-                        .chunks(6)
-                        .map(|chunk| join_inline(chunk, program))
-                        .collect::<Vec<_>>()
-                        .join(&format!(", \n{}", inner));
-                    format!("[\n{}{}\n{}]", inner, body, "  ".repeat(n))
+                None => {
+                    out.push('[');
+                    join_inline(out, &arr, program);
+                    out.push(']');
                 }
-                Some(n) => block("[", ']', pretty(arr, n), n),
+                Some(_) if arr.is_empty() => out.push_str("[]"),
+                Some(n) if arr.iter().all(is_simple_value) => {
+                    wrap_six(out, n, arr.len(), &mut |i, out| {
+                        inspect_impl(&arr[i], program, None, out);
+                    });
+                }
+                Some(n) => {
+                    out.push('[');
+                    block_body(out, ']', n, arr.len(), &mut |i, out| {
+                        inspect_impl(&arr[i], program, Some(n + 1), out);
+                    });
+                }
             }
         }
     }

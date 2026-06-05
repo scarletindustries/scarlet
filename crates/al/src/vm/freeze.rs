@@ -32,6 +32,10 @@
 //! the append-only frozen area, so source pointers stay valid throughout
 //! the copy.
 
+// Designated unsafe module: the `Send`/`Sync` impls for `FrozenValue` rest on
+// the frozen-area publication protocol documented on the type.
+#![allow(unsafe_code)]
+
 use al_core::bytecode::Value;
 use al_core::frozen::FrozenBuilder;
 use al_core::heap::ProcHeap;

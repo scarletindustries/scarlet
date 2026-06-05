@@ -528,12 +528,12 @@ match net.connect('127.0.0.1', __PORT__) {
     );
 }
 
-/// Once the runtime is up (after `spawn`), `io.read_file` offloads to the
-/// blocking thread pool instead of running on a scheduler thread: several
-/// spawned processes plus main all read the same file concurrently and every
-/// read completes correctly (exercises offload → worker → completion → resume).
-/// Before the pool these reads ran inline on the scheduler thread, stalling
-/// that core for the duration of the syscall.
+/// `io.read_file` offloads to the blocking thread pool instead of running on
+/// a scheduler thread: several spawned processes plus main all read the same
+/// file concurrently and every read completes correctly (exercises offload →
+/// worker → completion → resume). Without the pool these reads would run
+/// inline on the scheduler thread, stalling that core for the duration of
+/// the syscall.
 #[test]
 fn file_read_offloads_to_blocking_pool() {
     let proj = Project::new("io_pool");
@@ -572,9 +572,8 @@ match io.read_text('__PATH__') {
     );
 }
 
-/// `net.resolve` runs `getaddrinfo` on the blocking pool (runtime is up after
-/// `spawn`) and returns a typed `IpAddress`. `localhost` always resolves on a
-/// loopback-capable host.
+/// `net.resolve` runs `getaddrinfo` on the blocking pool and returns a typed
+/// `IpAddress`. `localhost` always resolves on a loopback-capable host.
 #[test]
 fn dns_resolve_runs_on_pool() {
     let proj = Project::new("dns_resolve");

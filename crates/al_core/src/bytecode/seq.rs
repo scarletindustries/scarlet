@@ -61,29 +61,66 @@ const LEAF_WORDS: usize = 2 + B;
 const BRANCH_WORDS: usize = 3 + 2 * B;
 const ROOT_WORDS: usize = 6;
 
-// ---- node accessors -------------------------------------------------------
-
-#[inline]
-fn expect_root(root: Value) -> *const u64 {
-    debug_assert!(root.is_tag(HeapTag::Seq), "seq op on a non-array value");
-    root.heap_obj()
+/// Fixed-capacity stack buffer for assembling a replacement node image
+/// before copying it into the arena. Every node image is bounded by `B`
+/// slots (`2 * B` during a concat rebalance), so a stack array covers the
+/// worst case with zero heap traffic — this matters because `push_back`/
+/// `push_front` assemble one image per element pushed.
+struct Buf {
+    items: [Value; 2 * B],
+    len: usize,
 }
+
+impl Buf {
+    #[inline]
+    fn new() -> Buf {
+        Buf {
+            items: [Value::nil(); 2 * B],
+            len: 0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, v: Value) {
+        self.items[self.len] = v;
+        self.len += 1;
+    }
+
+    #[inline]
+    fn extend(&mut self, vs: &[Value]) {
+        self.items[self.len..self.len + vs.len()].copy_from_slice(vs);
+        self.len += vs.len();
+    }
+}
+
+impl std::ops::Deref for Buf {
+    type Target = [Value];
+    #[inline]
+    fn deref(&self) -> &[Value] {
+        &self.items[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Buf {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [Value] {
+        &mut self.items[..self.len]
+    }
+}
+
+// ---- node accessors -------------------------------------------------------
+//
+// All layout knowledge lives in `value.rs`: nodes are read through the typed
+// `SeqRootRef` / `SeqNodeRef` views and allocated through the
+// `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders, so this module
+// contains no unsafe code.
 
 /// `(len, shift, head, tree, tail)` of a root. `head`/`tree`/`tail` are
 /// node values or nil; `shift` is the tree height (0 = leaf or nil).
 #[inline]
 fn root_parts(root: Value) -> (usize, usize, Value, Value, Value) {
-    let obj = expect_root(root);
-    // SAFETY: tag-checked Seq root has the 5-word layout.
-    unsafe {
-        (
-            payload_word(obj, 0) as usize,
-            payload_word(obj, 1) as usize,
-            payload_value(obj, 2),
-            payload_value(obj, 3),
-            payload_value(obj, 4),
-        )
-    }
+    let r = SeqRootRef::new(root);
+    (r.len, r.shift, r.head, r.tree, r.tail)
 }
 
 fn root_in<A: Arena + ?Sized>(
@@ -94,17 +131,7 @@ fn root_in<A: Arena + ?Sized>(
     tree: Value,
     tail: Value,
 ) -> Value {
-    let obj = alloc_obj(a, HeapTag::Seq, 5, false);
-    // SAFETY: freshly allocated 5-word payload.
-    unsafe {
-        let p = obj.as_ptr().add(1);
-        p.write(len as u64);
-        p.add(1).write(shift as u64);
-        p.add(2).write(head.to_bits());
-        p.add(3).write(tree.to_bits());
-        p.add(4).write(tail.to_bits());
-    }
-    Value::from_object_ptr(obj)
+    seq_root_in(a, len, shift, head, tree, tail)
 }
 
 #[inline]
@@ -116,25 +143,20 @@ fn node_is_leaf(node: Value) -> bool {
 /// current (non-collecting) operation only.
 #[inline]
 fn leaf_elems<'x>(leaf: Value) -> &'x [Value] {
-    debug_assert!(node_is_leaf(leaf));
-    let obj = leaf.heap_obj();
-    // SAFETY: tag-checked leaf; count word bounds the slice.
-    unsafe {
-        let n = payload_word(obj, 0) as usize;
-        payload_values(obj, 1, n)
+    match SeqNodeRef::of(leaf) {
+        SeqNodeRef::Leaf(elems) => elems,
+        SeqNodeRef::Branch { .. } => seq_view_mismatch(),
     }
 }
 
 /// `(sizes, children)` of a branch. Unbounded lifetimes as [`leaf_elems`].
 #[inline]
 fn branch_parts<'x>(branch: Value) -> (&'x [u64], &'x [Value]) {
-    debug_assert!(branch.is_tag(HeapTag::SeqBranch));
-    let obj = branch.heap_obj();
-    // SAFETY: tag-checked branch; count word bounds both slices.
-    unsafe {
-        let n = payload_word(obj, 0) as usize;
-        let sizes = std::slice::from_raw_parts(obj.add(3), n);
-        (sizes, payload_values(obj, 2 + n, n))
+    match SeqNodeRef::of(branch) {
+        SeqNodeRef::Branch {
+            sizes, children, ..
+        } => (sizes, children),
+        SeqNodeRef::Leaf(_) => seq_view_mismatch(),
     }
 }
 
@@ -142,12 +164,11 @@ fn branch_parts<'x>(branch: Value) -> (&'x [u64], &'x [Value]) {
 #[inline]
 fn node_len(node: Value) -> usize {
     if node.is_nil() {
-        0
-    } else if node_is_leaf(node) {
-        leaf_elems(node).len()
-    } else {
-        let (sizes, _) = branch_parts(node);
-        sizes[sizes.len() - 1] as usize
+        return 0;
+    }
+    match SeqNodeRef::of(node) {
+        SeqNodeRef::Leaf(elems) => elems.len(),
+        SeqNodeRef::Branch { sizes, .. } => sizes[sizes.len() - 1] as usize,
     }
 }
 
@@ -155,35 +176,24 @@ fn node_len(node: Value) -> usize {
 /// — the density measure the rebalance invariant is defined over.
 #[inline]
 fn slot_count(node: Value) -> usize {
-    if node_is_leaf(node) {
-        leaf_elems(node).len()
-    } else {
-        branch_parts(node).1.len()
+    match SeqNodeRef::of(node) {
+        SeqNodeRef::Leaf(elems) => elems.len(),
+        SeqNodeRef::Branch { children, .. } => children.len(),
     }
 }
 
 /// Direct slots of a node as values (elements or children).
 #[inline]
 fn slots<'x>(node: Value) -> &'x [Value] {
-    if node_is_leaf(node) {
-        leaf_elems(node)
-    } else {
-        branch_parts(node).1
+    match SeqNodeRef::of(node) {
+        SeqNodeRef::Leaf(elems) => elems,
+        SeqNodeRef::Branch { children, .. } => children,
     }
 }
 
 fn leaf_from<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     debug_assert!(!items.is_empty() && items.len() <= B);
-    let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + items.len(), false);
-    // SAFETY: freshly allocated payload of exactly 1 + len words.
-    unsafe {
-        let p = obj.as_ptr().add(1);
-        p.write(items.len() as u64);
-        for (i, v) in items.iter().enumerate() {
-            p.add(1 + i).write(v.to_bits());
-        }
-    }
-    Value::from_object_ptr(obj)
+    seq_leaf_in(a, items)
 }
 
 /// A leaf, or nil for an empty slice.
@@ -196,30 +206,16 @@ fn opt_leaf_from<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
 }
 
 /// Build a branch at height `shift` over `children` (all at
-/// `shift - BITS`), computing the cumulative size table.
+/// `shift - BITS`); `seq_branch_in` computes the cumulative size table.
 fn branch_from<A: Arena + ?Sized>(a: &mut A, shift: usize, children: &[Value]) -> Value {
     debug_assert!(!children.is_empty() && children.len() <= B);
     debug_assert!(shift >= BITS);
-    let n = children.len();
-    let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * n, false);
-    // SAFETY: freshly allocated payload of exactly 2 + 2n words.
-    unsafe {
-        let p = obj.as_ptr().add(1);
-        p.write(n as u64);
-        p.add(1).write(shift as u64);
-        let mut total = 0u64;
-        for (i, c) in children.iter().enumerate() {
-            debug_assert!(if shift == BITS {
-                node_is_leaf(*c)
-            } else {
-                c.is_tag(HeapTag::SeqBranch)
-            });
-            total += node_len(*c) as u64;
-            p.add(2 + i).write(total);
-            p.add(2 + n + i).write(c.to_bits());
-        }
-    }
-    Value::from_object_ptr(obj)
+    debug_assert!(children.iter().all(|c| if shift == BITS {
+        node_is_leaf(*c)
+    } else {
+        c.is_tag(HeapTag::SeqBranch)
+    }));
+    seq_branch_in(a, shift, children)
 }
 
 // ---- public queries ---------------------------------------------------------
@@ -245,20 +241,23 @@ pub fn get(root: Value, i: usize) -> Option<Value> {
     }
     let mut node = tree;
     loop {
-        if node_is_leaf(node) {
-            return Some(leaf_elems(node)[idx]);
+        match SeqNodeRef::of(node) {
+            SeqNodeRef::Leaf(elems) => return Some(elems[idx]),
+            SeqNodeRef::Branch {
+                sizes, children, ..
+            } => {
+                // Size tables are cumulative: descend into the first child
+                // whose cumulative size exceeds the index.
+                let mut k = 0;
+                while sizes[k] as usize <= idx {
+                    k += 1;
+                }
+                if k > 0 {
+                    idx -= sizes[k - 1] as usize;
+                }
+                node = children[k];
+            }
         }
-        let (sizes, children) = branch_parts(node);
-        // Size tables are cumulative: descend into the first child whose
-        // cumulative size exceeds the index.
-        let mut k = 0;
-        while sizes[k] as usize <= idx {
-            k += 1;
-        }
-        if k > 0 {
-            idx -= sizes[k - 1] as usize;
-        }
-        node = children[k];
     }
 }
 
@@ -314,12 +313,12 @@ fn push_end<A: Arena + ?Sized, const FRONT: bool>(a: &mut A, root: Value, x: Val
     } else {
         let elems = leaf_elems(old);
         if elems.len() < B {
-            let mut buf: Vec<Value> = Vec::with_capacity(elems.len() + 1);
+            let mut buf = Buf::new();
             if FRONT {
                 buf.push(x);
-                buf.extend_from_slice(elems);
+                buf.extend(elems);
             } else {
-                buf.extend_from_slice(elems);
+                buf.extend(elems);
                 buf.push(x);
             }
             leaf_from(a, &buf)
@@ -384,36 +383,31 @@ pub fn update<A: Arena + ?Sized>(a: &mut A, root: Value, i: usize, x: Value) -> 
 }
 
 fn leaf_replace<A: Arena + ?Sized>(a: &mut A, leaf: Value, i: usize, x: Value) -> Value {
-    let mut buf: Vec<Value> = leaf_elems(leaf).to_vec();
+    let mut buf = Buf::new();
+    buf.extend(leaf_elems(leaf));
     buf[i] = x;
     leaf_from(a, &buf)
 }
 
 fn tree_update<A: Arena + ?Sized>(a: &mut A, node: Value, idx: usize, x: Value) -> Value {
-    if node_is_leaf(node) {
-        return leaf_replace(a, node, idx, x);
-    }
-    let (sizes, children) = branch_parts(node);
-    let mut k = 0;
-    while sizes[k] as usize <= idx {
-        k += 1;
-    }
-    let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
-    let child = tree_update(a, children[k], idx - before, x);
-    let mut buf: Vec<Value> = children.to_vec();
-    buf[k] = child;
-    let (_, shift) = node_shift(node);
-    branch_from(a, shift, &buf)
-}
-
-#[inline]
-fn node_shift(node: Value) -> (bool, usize) {
-    if node_is_leaf(node) {
-        (true, 0)
-    } else {
-        let obj = node.heap_obj();
-        // SAFETY: tag-checked branch stores its shift at payload word 1.
-        (false, unsafe { payload_word(obj, 1) as usize })
+    match SeqNodeRef::of(node) {
+        SeqNodeRef::Leaf(_) => leaf_replace(a, node, idx, x),
+        SeqNodeRef::Branch {
+            shift,
+            sizes,
+            children,
+        } => {
+            let mut k = 0;
+            while sizes[k] as usize <= idx {
+                k += 1;
+            }
+            let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+            let child = tree_update(a, children[k], idx - before, x);
+            let mut buf = Buf::new();
+            buf.extend(children);
+            buf[k] = child;
+            branch_from(a, shift, &buf)
+        }
     }
 }
 
@@ -464,18 +458,19 @@ fn try_push<A: Arena + ?Sized, const FRONT: bool>(
     let (_, children) = branch_parts(node);
     let edge = if FRONT { 0 } else { children.len() - 1 };
     if let Some(sub) = try_push::<A, FRONT>(a, children[edge], shift - BITS, leaf) {
-        let mut buf: Vec<Value> = children.to_vec();
+        let mut buf = Buf::new();
+        buf.extend(children);
         buf[edge] = sub;
         return Some(branch_from(a, shift, &buf));
     }
     if children.len() < B {
         let spine = make_spine(a, leaf, shift - BITS);
-        let mut buf: Vec<Value> = Vec::with_capacity(children.len() + 1);
+        let mut buf = Buf::new();
         if FRONT {
             buf.push(spine);
-            buf.extend_from_slice(children);
+            buf.extend(children);
         } else {
-            buf.extend_from_slice(children);
+            buf.extend(children);
             buf.push(spine);
         }
         return Some(branch_from(a, shift, &buf));
@@ -494,11 +489,11 @@ fn tree_pop_leftmost<A: Arena + ?Sized>(a: &mut A, node: Value, shift: usize) ->
     if sub.is_nil() && children.len() == 1 {
         return (leaf, Value::nil());
     }
-    let mut buf: Vec<Value> = Vec::with_capacity(children.len());
+    let mut buf = Buf::new();
     if !sub.is_nil() {
         buf.push(sub);
     }
-    buf.extend_from_slice(&children[1..]);
+    buf.extend(&children[1..]);
     (leaf, branch_from(a, shift, &buf))
 }
 
@@ -576,23 +571,34 @@ pub fn skip<A: Arena + ?Sized>(a: &mut A, root: Value, n: usize) -> Value {
 
 /// Keep the first `m` (1 <= m <= node_len) elements of a tree node.
 fn tree_take<A: Arena + ?Sized>(a: &mut A, node: Value, m: usize) -> Value {
-    if m >= node_len(node) {
-        return node;
+    match SeqNodeRef::of(node) {
+        SeqNodeRef::Leaf(elems) => {
+            if m >= elems.len() {
+                node
+            } else {
+                leaf_from(a, &elems[..m])
+            }
+        }
+        SeqNodeRef::Branch {
+            shift,
+            sizes,
+            children,
+        } => {
+            if m >= sizes[sizes.len() - 1] as usize {
+                return node;
+            }
+            let mut k = 0;
+            while (sizes[k] as usize) < m {
+                k += 1;
+            }
+            let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+            let child = tree_take(a, children[k], m - before);
+            let mut buf = Buf::new();
+            buf.extend(&children[..k]);
+            buf.push(child);
+            branch_from(a, shift, &buf)
+        }
     }
-    if node_is_leaf(node) {
-        return leaf_from(a, &leaf_elems(node)[..m]);
-    }
-    let (sizes, children) = branch_parts(node);
-    let mut k = 0;
-    while (sizes[k] as usize) < m {
-        k += 1;
-    }
-    let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
-    let child = tree_take(a, children[k], m - before);
-    let mut buf: Vec<Value> = children[..k].to_vec();
-    buf.push(child);
-    let (_, shift) = node_shift(node);
-    branch_from(a, shift, &buf)
 }
 
 /// Drop the first `m` (0 <= m < node_len) elements of a tree node.
@@ -600,21 +606,25 @@ fn tree_drop<A: Arena + ?Sized>(a: &mut A, node: Value, m: usize) -> Value {
     if m == 0 {
         return node;
     }
-    if node_is_leaf(node) {
-        return leaf_from(a, &leaf_elems(node)[m..]);
+    match SeqNodeRef::of(node) {
+        SeqNodeRef::Leaf(elems) => leaf_from(a, &elems[m..]),
+        SeqNodeRef::Branch {
+            shift,
+            sizes,
+            children,
+        } => {
+            let mut k = 0;
+            while sizes[k] as usize <= m {
+                k += 1;
+            }
+            let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+            let child = tree_drop(a, children[k], m - before);
+            let mut buf = Buf::new();
+            buf.push(child);
+            buf.extend(&children[k + 1..]);
+            branch_from(a, shift, &buf)
+        }
     }
-    let (sizes, children) = branch_parts(node);
-    let mut k = 0;
-    while sizes[k] as usize <= m {
-        k += 1;
-    }
-    let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
-    let child = tree_drop(a, children[k], m - before);
-    let mut buf: Vec<Value> = Vec::with_capacity(children.len() - k);
-    buf.push(child);
-    buf.extend_from_slice(&children[k + 1..]);
-    let (_, shift) = node_shift(node);
-    branch_from(a, shift, &buf)
 }
 
 // ---- concatenation (RRB merge with rebalancing) -----------------------------------
@@ -680,9 +690,9 @@ fn concat_sub<A: Arena + ?Sized>(
     } else if lshift == 0 {
         let (le, re) = (leaf_elems(l), leaf_elems(r));
         if le.len() + re.len() <= B {
-            let mut buf: Vec<Value> = Vec::with_capacity(le.len() + re.len());
-            buf.extend_from_slice(le);
-            buf.extend_from_slice(re);
+            let mut buf = Buf::new();
+            buf.extend(le);
+            buf.extend(re);
             vec![leaf_from(a, &buf)]
         } else {
             vec![l, r]
@@ -706,10 +716,10 @@ fn rebalance<A: Arena + ?Sized>(
     right: &[Value],
     shift: usize,
 ) -> Vec<Value> {
-    let mut all: Vec<Value> = Vec::with_capacity(left.len() + mid.len() + right.len());
-    all.extend_from_slice(left);
-    all.extend_from_slice(mid);
-    all.extend_from_slice(right);
+    let mut all = Buf::new();
+    all.extend(left);
+    all.extend(mid);
+    all.extend(right);
     debug_assert!(!all.is_empty() && all.len() <= 2 * B);
 
     let total: usize = all.iter().map(|n| slot_count(*n)).sum();
@@ -769,8 +779,8 @@ fn execute_plan<A: Arena + ?Sized>(
     old: &[Value],
     plan: &[usize],
     child_shift: usize,
-) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::with_capacity(plan.len());
+) -> Buf {
+    let mut out = Buf::new();
     let mut src = 0usize;
     let mut off = 0usize;
     for &want in plan {
@@ -779,11 +789,11 @@ fn execute_plan<A: Arena + ?Sized>(
             src += 1;
             continue;
         }
-        let mut buf: Vec<Value> = Vec::with_capacity(want);
+        let mut buf = Buf::new();
         while buf.len() < want {
             let items = slots(old[src]);
             let take = (want - buf.len()).min(items.len() - off);
-            buf.extend_from_slice(&items[off..off + take]);
+            buf.extend(&items[off..off + take]);
             off += take;
             if off == items.len() {
                 src += 1;
@@ -886,13 +896,19 @@ impl<'a> SeqIter<'a> {
 
     /// Descend `node`'s leftmost spine and land on its first leaf.
     fn enter(&mut self, mut node: Value) {
-        while !node_is_leaf(node) {
-            let children = branch_parts(node).1;
-            self.stack.push((node, 1));
-            node = children[0];
+        loop {
+            match SeqNodeRef::of(node) {
+                SeqNodeRef::Leaf(elems) => {
+                    self.cur = elems;
+                    self.pos = 0;
+                    return;
+                }
+                SeqNodeRef::Branch { children, .. } => {
+                    self.stack.push((node, 1));
+                    node = children[0];
+                }
+            }
         }
-        self.cur = leaf_elems(node);
-        self.pos = 0;
     }
 
     /// Step to the next leaf: resume the deepest unfinished branch, or open
@@ -978,7 +994,10 @@ fn check_node(node: Value, shift: usize) -> usize {
         node.is_tag(HeapTag::SeqBranch),
         "shift {shift} must be a branch"
     );
-    let (_, stored_shift) = node_shift(node);
+    let stored_shift = match SeqNodeRef::of(node) {
+        SeqNodeRef::Branch { shift, .. } => shift,
+        SeqNodeRef::Leaf(_) => unreachable!(),
+    };
     assert_eq!(stored_shift, shift, "stored shift disagrees with position");
     let (sizes, children) = branch_parts(node);
     assert!(!children.is_empty() && children.len() <= B);

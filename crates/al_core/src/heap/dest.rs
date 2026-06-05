@@ -14,6 +14,18 @@
 //! binaries. The mutator-side half — `Arena::link_off_heap` in
 //! `bytecode/value.rs` — links each binary once at first allocation. Same
 //! push-front protocol on both sides; only the trigger differs.
+//!
+//! # Encapsulation contract
+//!
+//! Together with `copy.rs` this file is the designated home of all `unsafe`
+//! under `heap/`: the raw scan-cursor reads here never leave the module —
+//! `next_unscanned`'s `*mut u64` flows only into `copy.rs`'s scan loop, and
+//! the [`CopyDest`] trait itself is `pub(super)`, so no unsafe-adjacent API
+//! escapes `heap/*`.
+
+// Designated unsafe module: Cheney destination scan cursors hand raw object
+// pointers to `copy.rs`; nothing unsafe escapes `heap/*`.
+#![allow(unsafe_code)]
 
 use super::copy::CopyDest;
 use super::space::{SegSpace, Space};
@@ -53,10 +65,19 @@ impl CopyDest for SpaceDest<'_> {
         if self.scan >= self.space.top {
             return None;
         }
-        // SAFETY: every word below `top` is part of a copied object image.
+        // SAFETY: `scan < top` (checked above) and every word below `top` is
+        // part of a copied object image, so `p` is a valid header slot.
         let p = unsafe { self.space.words.as_mut_ptr().add(self.scan) };
+        // SAFETY: `p` points at an initialized header word (see above).
         let header = unsafe { *p };
         self.scan += header_total_words(header);
+        // cfg-gated (not debug_assert!) so the hot scan loop carries zero
+        // extra MIR in release builds.
+        #[cfg(debug_assertions)]
+        assert!(
+            self.scan <= self.space.top,
+            "scan cursor overshot the copied region"
+        );
         Some(p)
     }
 }
@@ -101,10 +122,20 @@ impl CopyDest for SegDest<'_> {
             }
             let s = &mut self.seg.segments[self.seg_idx];
             if self.scan < s.top {
-                // SAFETY: every word below `top` is a copied object image.
+                // SAFETY: `scan < top` (checked above) and every word below
+                // `top` is a copied object image, so `p` is a valid header
+                // slot.
                 let p = unsafe { s.words.as_mut_ptr().add(self.scan) };
+                // SAFETY: `p` points at an initialized header word.
                 let header = unsafe { *p };
                 self.scan += header_total_words(header);
+                // cfg-gated (not debug_assert!) so the hot scan loop carries
+                // zero extra MIR in release builds.
+                #[cfg(debug_assertions)]
+                assert!(
+                    self.scan <= s.top,
+                    "scan cursor overshot the segment's copied region"
+                );
                 return Some(p);
             }
             // Only the last segment grows, so a fully scanned non-last

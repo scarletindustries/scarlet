@@ -55,6 +55,31 @@
 //! A frozen pointer must consequently never be shared through a channel or
 //! table that lacks such an edge — `globals_version` (or an equivalent
 //! synchronizing handoff) is the only publication door.
+//!
+//! # Why this module keeps `unsafe` (designated unsafe module)
+//!
+//! The remaining unsafe here is the segment writes themselves: callers fill
+//! their allocated word range through the returned raw pointer (e.g. the
+//! `copy_nonoverlapping` in [`FrozenBuilder::alloc_from`], or the `Arena`
+//! object constructors in `bytecode::value`). These writes must stay
+//! raw-pointer writes and must NOT be rewritten as `&mut`-slice writes:
+//! every segment is one boxed slice shared by many allocations, and earlier
+//! allocations in the same slice may already be published — concurrently
+//! read by other threads with no lock. Forming `&mut seg.words[..]` (or any
+//! `&mut` reaching into the slice) would assert exclusive access over those
+//! published words and alias the readers, which is undefined behavior even
+//! if the code only writes to its own disjoint range. `UnsafeCell` plus raw
+//! pointers is the only sound way to express "write my disjoint range while
+//! other ranges of the same allocation are being read", so this module is a
+//! designated unsafe module behind safe public APIs:
+//! [`FrozenBuilder::alloc`] and [`FrozenBuilder::alloc_from`] are safe fns —
+//! the publication protocol above is a usage discipline for soundness of
+//! *later* reads, not a memory-safety precondition of calling them.
+
+// Designated unsafe module: the segment allocator writes through raw pointers
+// because earlier allocations in the same boxed slice may already be read by
+// other threads (see the aliasing rationale above).
+#![allow(unsafe_code)]
 
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -168,6 +193,9 @@ impl FrozenArea {
     /// Bump-allocate `words` words. Appends a new segment when the open
     /// (last) one is full; earlier segments are never touched again, which
     /// is what makes the area append-only.
+    // Cold path: `expect` over `new_unchecked` costs nothing here and turns
+    // a hypothetical null segment base into a panic instead of UB.
+    #[allow(clippy::expect_used)]
     fn alloc(&self, words: usize) -> NonNull<u64> {
         assert!(words > 0, "frozen allocation must be at least one word");
         let mut segments = lock(&self.segments);
@@ -177,15 +205,14 @@ impl FrozenArea {
             let at = seg.used;
             seg.used += words;
             // SAFETY: `at + words <= capacity`, so the offset stays in
-            // bounds of the boxed slice; the slice allocation is non-null
-            // and outlives the area.
-            return unsafe { NonNull::new_unchecked(seg.base().add(at)) };
+            // bounds of the boxed slice.
+            let ptr = unsafe { seg.base().add(at) };
+            return NonNull::new(ptr).expect("frozen segment base is non-null");
         }
         let cap = Self::next_capacity(segments.last().map(|s| s.words.len()), words);
         let mut seg = FrozenSegment::with_capacity(cap);
         seg.used = words;
-        // SAFETY: a fresh boxed slice's base pointer is non-null.
-        let ptr = unsafe { NonNull::new_unchecked(seg.base()) };
+        let ptr = NonNull::new(seg.base()).expect("frozen segment base is non-null");
         segments.push(seg);
         ptr
     }

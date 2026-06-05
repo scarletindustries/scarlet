@@ -14,17 +14,18 @@
 //! - **Live count.** A migrant stays counted in `Runtime::live` for its whole
 //!   journey: it was counted when it spawned, donation never decrements, and
 //!   adoption never increments. This is why [`VM::adopt_migrant`] pushes the
-//!   run queue directly instead of going through `spawn_process_local`/`submit`
+//!   run queue directly instead of going through `Runtime::submit`
 //!   (which would double-count), and why a migrant in transit holds
 //!   `live > 0` — there is no shutdown race while one is in flight.
 //! - **Abort safety.** [`VM::detach_fds`] either succeeds or leaves the
 //!   donor's tables exactly as they were (every fd it had already moved is
 //!   re-inserted), so the donor can simply re-queue the untouched process.
 
+use std::collections::HashSet;
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 
 use al_core::bytecode::{SocketValue, Value, ValueView};
-use smallvec::SmallVec;
 
 use super::{Process, VM};
 
@@ -104,13 +105,12 @@ pub(super) fn for_each_process_socket(p: &Process, visit: &mut impl FnMut(Socket
     for v in &p.stack {
         for_each_socket(v, visit);
     }
-    let mut seen: SmallVec<[usize; 8]> = SmallVec::new();
+    let mut seen: HashSet<usize> = HashSet::new();
     for frame in &p.frames {
-        if let Some(addr) = frame.captures.object_addr() {
-            if seen.contains(&addr) {
-                continue;
-            }
-            seen.push(addr);
+        if let Some(addr) = frame.captures.object_addr()
+            && !seen.insert(addr)
+        {
+            continue;
         }
         for_each_socket(&frame.captures, visit);
     }
@@ -169,7 +169,11 @@ impl VM {
                     Err(e) => {
                         eprintln!("{ctx}: cannot share listener: {e}");
                         for (cid, c) in connections {
-                            self.tcp_connections.insert(cid, c);
+                            // Undo the detach: re-table and re-watch the
+                            // connections already moved out.
+                            if let Err(e) = self.track_connection(cid, c) {
+                                eprintln!("{ctx}: cannot re-watch connection: {e}");
+                            }
                         }
                         return None;
                     }
@@ -178,9 +182,7 @@ impl VM {
             if let Some(c) = self.tcp_connections.remove(&id) {
                 // The fd is leaving this scheduler; drop any poller
                 // registration before it goes (defensive — see doc comment).
-                if let Some(poller) = &self.poller {
-                    let _ = poller.delete(&c);
-                }
+                self.poller_deregister(c.as_raw_fd());
                 connections.push((id, c));
             }
         }
@@ -194,22 +196,24 @@ impl VM {
     ///
     /// The migrant is already counted in `Runtime::live` (counted at its
     /// original spawn; donation never decrements), so it is pushed onto the
-    /// run queue directly — never routed through `spawn_process_local` or
-    /// `Runtime::submit`, both of which assume uncounted work.
+    /// run queue directly — never routed through `Runtime::submit`, which
+    /// assumes uncounted work.
     ///
     /// The caller must `sync_globals()` before invoking this, exactly as for
     /// seed hydration, so any top-level bindings the migrant reads exist here.
     pub(super) fn adopt_migrant(&mut self, m: Migrant) {
+        // There is no error channel at this layer (exactly as on the detach
+        // side), so a socket the poller refuses is reported to stderr; the
+        // migrant still runs, and ops on that socket fail at use.
         for (id, l) in m.listeners {
-            // This scheduler may already hold the listener id (adopted via an
-            // earlier seed/migrant or `ensure_listener`). The incoming dup is
-            // the same underlying socket; replacing the entry would drop — and
-            // close — an fd this scheduler's poller may have registered. Keep
-            // the existing entry and let the dup drop instead.
-            self.tcp_listeners.entry(id).or_insert(l);
+            if let Err(e) = self.track_listener(id, l) {
+                eprintln!("adopt: cannot watch listener: {e}");
+            }
         }
         for (id, c) in m.connections {
-            self.tcp_connections.insert(id, c);
+            if let Err(e) = self.track_connection(id, c) {
+                eprintln!("adopt: cannot watch connection: {e}");
+            }
         }
 
         // Only non-main runnable processes are eligible for donation, so the

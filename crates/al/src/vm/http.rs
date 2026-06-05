@@ -71,6 +71,37 @@ fn field_bytes(v: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
 
 const NOT_HEADERS: &str = "expected an Array(Header). This is likely a compiler bug.";
 
+/// The logical byte window of `bin` as `(backing, base, len)`. Socket buffers
+/// are always byte-aligned views, which share the backing `Arc` zero-copy. A
+/// bit-unaligned buffer (hand-built via `<<>>`) is materialized into an
+/// aligned copy, so views built over the window point into that copy instead
+/// of the original.
+fn byte_window(bin: &BinaryRef<'_>) -> (Arc<[u8]>, usize, usize) {
+    let len = (bin.bit_len() / 8) as usize;
+    if bin.bit_offset().is_multiple_of(8) {
+        (bin.backing_arc(), (bin.bit_offset() / 8) as usize, len)
+    } else {
+        (bin.to_aligned_vec().into(), 0, len)
+    }
+}
+
+/// A zero-copy binary view over `n` bytes at offset `start` of the byte
+/// window `backing[base..]`.
+fn window_view(
+    a: &mut ProcHeap,
+    backing: &Arc<[u8]>,
+    base: usize,
+    start: usize,
+    n: usize,
+) -> Value {
+    Value::binary_view_in(
+        a,
+        Arc::clone(backing),
+        ((base + start) * 8) as u64,
+        (n * 8) as u64,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Request-head parser
 // ---------------------------------------------------------------------------
@@ -83,18 +114,8 @@ pub(super) fn parse_head(
     bin: &BinaryRef<'_>,
     off: i64,
 ) -> Value {
-    // Socket buffers are always byte-aligned views. A bit-unaligned buffer
-    // (hand-built via `<<>>`) is parsed over a materialized aligned copy, so
-    // the returned views point into that copy instead of the original.
-    if bin.bit_offset().is_multiple_of(8) {
-        let base = (bin.bit_offset() / 8) as usize;
-        let len = (bin.bit_len() / 8) as usize;
-        parse_head_window(t, a, &bin.backing_arc(), base, len, off)
-    } else {
-        let aligned: Arc<[u8]> = bin.to_aligned_vec().into();
-        let len = (bin.bit_len() / 8) as usize;
-        parse_head_window(t, a, &aligned, 0, len, off)
-    }
+    let (backing, base, len) = byte_window(bin);
+    parse_head_window(t, a, &backing, base, len, off)
 }
 
 /// `backing[base .. base+len]` is the logical byte window of the request
@@ -110,15 +131,6 @@ fn parse_head_window(
     off: i64,
 ) -> Value {
     let bytes = &backing[base..base + len];
-    let view = |a: &mut ProcHeap, start: usize, n: usize| -> Value {
-        Value::binary_view_in(
-            a,
-            Arc::clone(backing),
-            ((base + start) * 8) as u64,
-            (n * 8) as u64,
-        )
-    };
-
     let mut off = (off.max(0) as usize).min(len);
 
     // Request line: skip a leading empty line (RFC 7230 §3.5), then split
@@ -168,8 +180,8 @@ fn parse_head_window(
             HeaderBlock::Bad(status) => return bad(t, a, status),
         };
 
-    let method = view(a, off, sp1 - off);
-    let target = view(a, sp1 + 1, sp2 - sp1 - 1);
+    let method = window_view(a, backing, base, off, sp1 - off);
+    let target = window_view(a, backing, base, sp1 + 1, sp2 - sp1 - 1);
     let headers = Value::array_in(a, &headers);
     t.parsed_done.instantiate(
         a,
@@ -214,14 +226,6 @@ fn parse_header_block(
     cap: usize,
     over_cap_status: i64,
 ) -> HeaderBlock {
-    let view = |a: &mut ProcHeap, s: usize, n: usize| -> Value {
-        Value::binary_view_in(
-            a,
-            Arc::clone(backing),
-            ((base + s) * 8) as u64,
-            (n * 8) as u64,
-        )
-    };
     let len = bytes.len();
     let mut pos = start;
     let mut headers: Vec<Value> = Vec::with_capacity(8);
@@ -258,8 +262,8 @@ fn parse_header_block(
         while vend > vstart && is_ows(bytes[vend - 1]) {
             vend -= 1;
         }
-        let name = view(a, pos, colon - pos);
-        let value = view(a, vstart, vend - vstart);
+        let name = window_view(a, backing, base, pos, colon - pos);
+        let value = window_view(a, backing, base, vstart, vend - vstart);
         headers.push(t.header.instantiate(a, &[name, value]));
         pos = crlf + 2;
     }
@@ -389,17 +393,8 @@ pub(super) fn chunk_decode(
     off: i64,
     max: i64,
 ) -> Value {
-    // Socket buffers are always byte-aligned views; mirror parse_head for the
-    // pathological hand-built unaligned case.
-    if bin.bit_offset().is_multiple_of(8) {
-        let base = (bin.bit_offset() / 8) as usize;
-        let len = (bin.bit_len() / 8) as usize;
-        chunk_decode_window(t, a, &bin.backing_arc(), base, len, off, max)
-    } else {
-        let aligned: Arc<[u8]> = bin.to_aligned_vec().into();
-        let len = (bin.bit_len() / 8) as usize;
-        chunk_decode_window(t, a, &aligned, 0, len, off, max)
-    }
+    let (backing, base, len) = byte_window(bin);
+    chunk_decode_window(t, a, &backing, base, len, off, max)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -416,8 +411,14 @@ fn chunk_decode_window(
     let off = (off.max(0) as usize).min(len);
     let max = max.max(0);
 
+    // Structural scan first: walk the chunk framing recording each data range
+    // without copying a byte, so a NeedMore return (the common case while the
+    // body streams in) costs O(chunk count), not O(decoded bytes). The body is
+    // copied exactly once, into an exact-size Vec, only when the terminator
+    // and trailers are fully present.
     let mut pos = off;
-    let mut body: Vec<u8> = Vec::new();
+    let mut total: i64 = 0;
+    let mut segments: Vec<(usize, usize)> = Vec::new();
 
     loop {
         // ---- chunk-size line: 1*HEXDIG [;extensions] CRLF ------------------
@@ -459,6 +460,10 @@ fn chunk_decode_window(
                 431,
             ) {
                 HeaderBlock::Done(trailers, consumed) => {
+                    let mut body: Vec<u8> = Vec::with_capacity(total as usize);
+                    for &(start, end) in &segments {
+                        body.extend_from_slice(&bytes[start..end]);
+                    }
                     let body = Value::binary_in(a, body);
                     let trailers = Value::array_in(a, &trailers);
                     t.chunked_done
@@ -469,9 +474,9 @@ fn chunk_decode_window(
             };
         }
 
-        // ---- decoded-size cap: checked BEFORE the data is buffered ---------
+        // ---- decoded-size cap: checked BEFORE the data is accepted ---------
         // The check is in i64 space so a hostile 16-hex-digit size cannot wrap.
-        if (body.len() as i64).saturating_add(size) > max {
+        if total.saturating_add(size) > max {
             return chunked_bad(t, a, 413);
         }
         let size = size as usize;
@@ -489,7 +494,8 @@ fn chunk_decode_window(
             // framing is lying. Never resynchronize — reject.
             return chunked_bad(t, a, 400);
         }
-        body.extend_from_slice(&bytes[data_start..data_end]);
+        segments.push((data_start, data_end));
+        total += size as i64;
         pos = data_end + 2;
     }
 }
@@ -559,7 +565,7 @@ pub(super) fn serialize_head(
     let reason_bytes = reason.full_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(64 + reason_bytes.len() + arr.len() * 64);
     out.extend_from_slice(b"HTTP/1.1 ");
-    out.extend_from_slice(&int_to_ascii(code, 10));
+    out.extend_from_slice(int_to_ascii(code, 10).as_bytes());
     out.push(b' ');
     out.extend_from_slice(&reason_bytes);
     out.extend_from_slice(b"\r\n");

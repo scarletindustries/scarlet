@@ -5,19 +5,34 @@
 //! connection, a `read` on an empty socket, a `sleep`, a blocking-pool
 //! offload), it returns `Step::Parked` carrying a [`Wait`] — the complete
 //! description of what the process is waiting for. The scheduler stashes
-//! the suspended process under a fresh wait id and this module takes over:
-//! it arms the OS poller (kqueue/epoll via `polling`) with the wait's fd
-//! [`Interest`]s, records its deadline in the VM's lazy-deletion timer
-//! heap, and on each scheduling pause delivers whatever became ready —
-//! I/O events, due timers, blocking-pool completions — back onto the run
-//! queue ([`VM::poll_parked`]).
+//! the suspended process under a fresh wait id, records its deadline (if
+//! any) in the VM's lazy-deletion timer heap, and on each scheduling pause
+//! this module delivers whatever became ready — I/O events, due timers,
+//! blocking-pool completions — back onto the run queue
+//! ([`VM::poll_parked`]).
+//!
+//! Parking arms nothing: every socket is registered with the OS poller
+//! (kqueue/epoll via `mio`) once, when it enters this scheduler's tables
+//! (`track_listener`/`track_connection`/`track_pending`), with every
+//! interest it can ever park on, and stays registered until it leaves
+//! them. The poller is edge-triggered, so a registration with no parked
+//! wait behind it costs nothing in steady state; its events are dropped
+//! by the drain.
+//!
+//! Edge-triggering loses no wakeups because of one VM invariant: **an I/O
+//! park is only ever created by an immediately-preceding `WouldBlock`
+//! syscall, and a woken process re-runs that syscall.** The syscall is the
+//! readiness probe — a dropped edge event's readiness is either consumed
+//! by a successful retry or re-announced by the kernel at the next
+//! transition out of the empty/full state the `WouldBlock` proved. (This
+//! is the classic "retry until `WouldBlock`" edge-trigger contract; it is
+//! why no per-fd readiness cache is needed.)
 //!
 //! Invariants this module maintains:
 //!
 //! - **A wait wakes exactly once.** Whichever of its conditions fires
-//!   first removes the park; later events for sibling fds find nothing,
-//!   and the wait's other still-armed interests are explicitly released
-//!   (the poller is oneshot, so only the fd that fired auto-disarmed).
+//!   first removes the park; later events for sibling fds find nothing
+//!   left to wake.
 //! - **Timer entries are lazily deleted.** A park with a deadline pushes
 //!   one `(deadline, id)` entry and never removes it eagerly; a popped
 //!   entry whose id is gone (or re-keyed) is discarded. The nearest live
@@ -36,16 +51,20 @@
 //! an absolute deadline means the same instant on every scheduler.
 
 use std::cmp::Reverse;
-use std::io::ErrorKind;
-use std::net::TcpStream;
+use std::io::{self, ErrorKind};
+use std::net::{TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use mio::Token;
+use mio::unix::SourceFd;
 
 use al_core::bytecode::Value;
 use smallvec::{SmallVec, smallvec};
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
-use super::{VM, VmResult, cost, sched};
+use super::{Process, VM, VmResult, cost, sched};
 use crate::stdlib;
 
 /// A socket-readiness condition a parked process can wait on.
@@ -64,9 +83,9 @@ pub(super) enum WakeAction {
     /// (accept/read/write set `ip - 1` to re-run) and `Sleep` (which leaves
     /// `ip` at the next instruction with its result already on the stack).
     Rerun,
-    /// Complete the pending non-blocking connect on this socket id: on wake the
-    /// completion handler pushes the result directly onto the process's stack
-    /// instead of re-running the instruction.
+    /// Complete the pending non-blocking connect on this socket id: on wake
+    /// `VM::finish_connect` builds the result and pushes it directly onto the
+    /// process's stack instead of re-running the instruction.
     CompleteConnect(i32),
 }
 
@@ -159,6 +178,16 @@ impl Wait {
     }
 }
 
+/// The token every scheduler's [`mio::Waker`] registers under: `notify()`
+/// events carry it, and the event drains skip it — a wake delivers no I/O,
+/// it only ends the wait. Socket ids are small positive `i32`s, so the
+/// token can never collide with a socket registration.
+pub(super) const WAKER_TOKEN: Token = Token(usize::MAX);
+
+/// Event-buffer capacity for one poll call, same for the parked-I/O drain
+/// and the idle wait.
+pub(super) const EVENTS_CAPACITY: usize = 1024;
+
 /// Process-global monotonic epoch, lazily pinned to the first `Instant::now()`
 /// any monotonic reading observes so every reading shares one origin. Reused by
 /// `Op::Monotonic` and the deadline math behind `socket.read_within`.
@@ -172,94 +201,101 @@ pub(super) fn monotonic_now_ms() -> i64 {
     ms.min(i64::MAX as u128) as i64
 }
 
-/// Arm `src` with the poller. polling 3.x is oneshot, so re-arming an fd that
-/// is still registered surfaces as `AlreadyExists` and is upgraded to a
-/// `modify`.
-///
-/// # Safety
-///
-/// `src` must outlive its poller registration: it must stay alive until it is
-/// deleted from the poller (or the poller is dropped).
-unsafe fn add_or_modify<S>(
-    poller: &polling::Poller,
-    src: &S,
-    event: polling::Event,
-    what: &str,
-) -> VmResult<()>
-where
-    for<'a> &'a S: polling::AsRawSource + polling::AsSource,
-{
-    // SAFETY: forwarded — the caller guarantees `src` outlives its
-    // registration.
-    unsafe { poller.add(src, event) }
-        .or_else(|e| {
-            if e.kind() == ErrorKind::AlreadyExists {
-                poller.modify(src, event)
-            } else {
-                Err(e)
-            }
-        })
-        .map_err(|e| format!("cannot watch {what}: {e}"))
-}
-
 impl VM {
-    /// Register every fd interest of a `wait` with the OS poller before
-    /// parking. A timer-only wait (no interests) registers nothing.
-    pub(super) fn register_wait(&mut self, wait: &Wait) -> VmResult<()> {
-        if wait.interests.is_empty() {
+    /// Register `fd` with the poller under socket `id`, with every interest
+    /// the socket can ever park on. Registration is per-socket, not per-park:
+    /// it is made once when the fd enters this scheduler's tables and lives
+    /// until the fd leaves them ([`VM::poller_deregister`]); parking arms
+    /// nothing. An fd number that is somehow still registered (a close that
+    /// bypassed deregistration, then kernel fd reuse) is re-registered under
+    /// the new id.
+    fn poller_register(&self, fd: RawFd, id: i32, interests: mio::Interest) -> io::Result<()> {
+        let registry = self.poll.registry();
+        registry
+            .register(&mut SourceFd(&fd), Token(id as usize), interests)
+            .or_else(|e| {
+                if e.kind() == ErrorKind::AlreadyExists {
+                    registry.reregister(&mut SourceFd(&fd), Token(id as usize), interests)
+                } else {
+                    Err(e)
+                }
+            })
+    }
+
+    /// Drop `fd` from the poller. An fd that was never registered (or is
+    /// already deregistered) is silently ignored. Paths that close or hand
+    /// off a socket call this before dropping it so a stale registration
+    /// never outlives its fd.
+    pub(super) fn poller_deregister(&self, fd: RawFd) {
+        let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
+    }
+
+    /// Adopt a listener into this scheduler's table and watch it for
+    /// incoming connections. An id already present keeps its existing entry
+    /// and registration — the incoming fd is a dup of the same underlying
+    /// socket and is dropped (replacing the entry would close an fd the
+    /// poller still watches).
+    pub(super) fn track_listener(&mut self, id: i32, listener: TcpListener) -> io::Result<()> {
+        if self.tcp_listeners.contains_key(&id) {
             return Ok(());
         }
-        self.ensure_poller()?;
-        if self.poller.is_none() {
-            return Ok(());
-        }
-        for &(id, interest) in &wait.interests {
-            self.register_fd(id, interest)?;
-        }
+        self.poller_register(listener.as_raw_fd(), id, mio::Interest::READABLE)?;
+        self.tcp_listeners.insert(id, listener);
         Ok(())
     }
 
-    /// Arm a single `(socket id, interest)` with the poller, looking the fd up
-    /// in whichever socket table holds it (see [`add_or_modify`]).
-    fn register_fd(&self, id: i32, interest: Interest) -> VmResult<()> {
-        let Some(poller) = &self.poller else {
-            return Ok(());
-        };
-        let event = match interest {
-            Interest::Readable => polling::Event::readable(id as usize),
-            Interest::Writable => polling::Event::writable(id as usize),
-        };
-
-        // SAFETY: the fd lives in one of the socket tables; sockets stay in
-        // those tables (and thus alive) for as long as they are registered —
-        // close deregisters before dropping. That upholds `add_or_modify`'s
-        // contract that each source outlives its registration.
-        if let Some(listener) = self.tcp_listeners.get(&id) {
-            unsafe { add_or_modify(poller, listener, event, "listener") }
-        } else if let Some(conn) = self.tcp_connections.get(&id) {
-            unsafe { add_or_modify(poller, conn, event, "connection") }
-        } else if let Some(pending) = self.pending_connects.get(&id) {
-            unsafe { add_or_modify(poller, pending, event, "connecting socket") }
-        } else {
-            Err("Invalid socket. This is likely a compiler bug.".to_string())
-        }
+    /// Adopt a connection into this scheduler's table, watched for both
+    /// readability and writability — the interests its reads and writes can
+    /// park on. On registration failure the connection is dropped (closed),
+    /// never tabled: a socket that cannot wake its parks must not exist.
+    pub(super) fn track_connection(&mut self, id: i32, conn: TcpStream) -> io::Result<()> {
+        self.poller_register(
+            conn.as_raw_fd(),
+            id,
+            mio::Interest::READABLE | mio::Interest::WRITABLE,
+        )?;
+        self.tcp_connections.insert(id, conn);
+        Ok(())
     }
 
-    /// Drop a socket id from the poller, whichever interest it was armed for.
-    /// Used to release a woken wait's *other* still-armed fds — oneshot already
-    /// disarmed the one that fired. A socket no longer in any table, or never
-    /// registered, is silently ignored.
-    fn deregister_fd(&self, id: i32) {
-        let Some(poller) = &self.poller else {
-            return;
-        };
-        if let Some(listener) = self.tcp_listeners.get(&id) {
-            let _ = poller.delete(listener);
-        } else if let Some(conn) = self.tcp_connections.get(&id) {
-            let _ = poller.delete(conn);
-        } else if let Some(pending) = self.pending_connects.get(&id) {
-            let _ = poller.delete(pending);
+    /// Adopt an in-progress non-blocking connect, watched for the
+    /// writability that signals completion. Failure drops the socket,
+    /// exactly as [`VM::track_connection`].
+    pub(super) fn track_pending(&mut self, id: i32, socket: socket2::Socket) -> io::Result<()> {
+        self.poller_register(socket.as_raw_fd(), id, mio::Interest::WRITABLE)?;
+        self.pending_connects.insert(id, socket);
+        Ok(())
+    }
+
+    /// Stash a suspended process under wait id `id` and index each of its
+    /// socket interests in `io_waiters`, so an I/O event finds its waiters by
+    /// lookup instead of a scan of every park.
+    pub(super) fn park_insert(&mut self, id: u64, wait: Wait, p: Process) {
+        for &(sid, _) in &wait.interests {
+            let waiters = self.io_waiters.entry(sid).or_default();
+            // A wait listing the same socket twice (e.g. readable and
+            // writable) still indexes once.
+            if !waiters.contains(&id) {
+                waiters.push(id);
+            }
         }
+        self.parked.insert(id, (wait, p));
+    }
+
+    /// Remove a park, dropping its entries from the socket reverse index.
+    /// Every wake path goes through here so `io_waiters` stays in lockstep
+    /// with `parked`.
+    pub(super) fn park_remove(&mut self, id: u64) -> Option<(Wait, Process)> {
+        let (wait, p) = self.parked.remove(&id)?;
+        for &(sid, _) in &wait.interests {
+            if let Some(waiters) = self.io_waiters.get_mut(&sid) {
+                waiters.retain(|w| *w != id);
+                if waiters.is_empty() {
+                    self.io_waiters.remove(&sid);
+                }
+            }
+        }
+        Some((wait, p))
     }
 
     /// Move parked processes whose I/O is ready or whose timer has expired
@@ -277,7 +313,9 @@ impl VM {
         let mut woke = self.drain_completions();
         woke |= self.wake_due_timers();
 
-        let waiting_on_io = self.parked.values().any(|(w, _)| !w.interests.is_empty());
+        // The reverse index is non-empty exactly when some park has a socket
+        // interest, so this check is O(1) rather than a scan of every park.
+        let waiting_on_io = !self.io_waiters.is_empty();
 
         if !block || woke {
             // Non-blocking (or something already woke): just drain any ready
@@ -301,7 +339,6 @@ impl VM {
             self.timer_heap.pop();
         };
         let timeout = next_deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        self.ensure_poller()?;
         self.drain_io_events(timeout)?;
         self.wake_due_timers();
         // A completion notify may be what ended the wait above.
@@ -320,11 +357,8 @@ impl VM {
     /// process at a `Step::Yield` poll, or the empty placeholder between
     /// slices — is detached around the delivery and restored after.
     pub(super) fn drain_completions(&mut self) -> bool {
-        let Some(rt) = self.runtime.clone() else {
-            return false;
-        };
         let drained: Vec<Completion> = {
-            let mut q = sched::lock(&rt.completions[self.scheduler_index]);
+            let mut q = sched::lock(&self.runtime.completions[self.scheduler_index]);
             if q.is_empty() {
                 return false;
             }
@@ -332,7 +366,7 @@ impl VM {
         };
         let mut woke = false;
         for c in drained {
-            let Some((_wait, p)) = self.parked.remove(&c.job_id) else {
+            let Some((_wait, p)) = self.park_remove(c.job_id) else {
                 continue;
             };
             let interrupted = self.suspend_current();
@@ -416,22 +450,11 @@ impl VM {
                 // Stale: the park already woke on I/O (or was re-keyed). Drop it.
                 continue;
             }
-            let Some((wait, p)) = self.parked.remove(&id) else {
+            let Some((_wait, p)) = self.park_remove(id) else {
                 continue;
             };
-            // The deadline beat the fds: deregister any interests still armed in
-            // the poller (oneshot only auto-disarms fds that actually fired).
-            if let Some(poller) = &self.poller {
-                for &(sid, _) in &wait.interests {
-                    if let Some(l) = self.tcp_listeners.get(&sid) {
-                        let _ = poller.delete(l);
-                    } else if let Some(c) = self.tcp_connections.get(&sid) {
-                        let _ = poller.delete(c);
-                    } else if let Some(s) = self.pending_connects.get(&sid) {
-                        let _ = poller.delete(s);
-                    }
-                }
-            }
+            // The deadline beat the fds; their registrations belong to the
+            // sockets, not this wait, so there is nothing to disarm.
             self.run_queue.push_back(p);
             woke = true;
         }
@@ -441,30 +464,31 @@ impl VM {
     /// Wait on the poller for at most `timeout` (None = until something
     /// happens) and wake every process parked on a socket that became ready.
     fn drain_io_events(&mut self, timeout: Option<Duration>) -> VmResult<()> {
-        let Some(poller) = &self.poller else {
-            return Ok(());
-        };
-        let mut events = polling::Events::new();
-        poller
-            .wait(&mut events, timeout)
-            .map_err(|e| format!("scheduler poll failed: {e}"))?;
+        // Take the VM's reusable buffer out for the iteration (the wake paths
+        // below need `&mut self`); `poll()` clears it, so no per-call
+        // allocation. The capacity-0 placeholder left behind allocates
+        // nothing.
+        let mut events = std::mem::replace(&mut self.poll_events, mio::Events::with_capacity(0));
+        if let Err(e) = self.poll.poll(&mut events, timeout) {
+            self.poll_events = events;
+            return Err(format!("scheduler poll failed: {e}"));
+        }
         for ev in events.iter() {
-            let key = ev.key as i32;
-            // Collect first — a parked entry can't be removed while the map is
-            // iterated. Each wait wakes at most once: once removed, a later
-            // event for one of its sibling fds finds nothing left to wake.
-            let woken: Vec<u64> = self
-                .parked
-                .iter()
-                .filter_map(|(wid, (w, _))| {
-                    w.interests
-                        .iter()
-                        .any(|&(sid, _)| sid == key)
-                        .then_some(*wid)
-                })
-                .collect();
+            if ev.token() == WAKER_TOKEN {
+                // A `notify()` from another scheduler: it only ends the
+                // wait, there is no I/O behind it.
+                continue;
+            }
+            let key = ev.token().0 as i32;
+            // The reverse index hands over this socket's waiters directly.
+            // Clone first — `park_remove` edits the index. Each wait wakes at
+            // most once: once removed, a later event for one of its sibling
+            // fds finds nothing left to wake.
+            let Some(woken) = self.io_waiters.get(&key).cloned() else {
+                continue;
+            };
             for wid in woken {
-                let Some((wait, p)) = self.parked.remove(&wid) else {
+                let Some((wait, p)) = self.park_remove(wid) else {
                     continue;
                 };
                 match wait.action {
@@ -486,15 +510,12 @@ impl VM {
                     }
                     WakeAction::Rerun => self.run_queue.push_back(p),
                 }
-                // Oneshot already disarmed the fd that fired; release the wait's
-                // other still-armed interests so they don't fire unwatched.
-                for &(sid, _) in &wait.interests {
-                    if sid != key {
-                        self.deregister_fd(sid);
-                    }
-                }
+                // The fds' registrations stay armed: they belong to the
+                // sockets, which remain in the tables. An event with no
+                // parked wait behind it lands in this loop and is dropped.
             }
         }
+        self.poll_events = events;
         Ok(())
     }
 
@@ -508,9 +529,7 @@ impl VM {
             let aborted = self.stdlib_enum(&stdlib::net::error::CONNECTION_ABORTED);
             return self.make_err(aborted);
         };
-        if let Some(poller) = &self.poller {
-            let _ = poller.delete(&socket);
-        }
+        self.poller_deregister(socket.as_raw_fd());
         // Writability after EINPROGRESS means the connect finished; SO_ERROR
         // says whether it succeeded.
         match socket.take_error() {

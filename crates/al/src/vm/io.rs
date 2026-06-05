@@ -2,15 +2,36 @@
 //! every op whose syscall may refuse to complete now, plus the socket
 //! tables they run against.
 //!
-//! The discipline: sockets are non-blocking, and an op that
-//! would block never stalls the scheduler thread. Instead it re-pushes its
-//! operands (or stashes its continuation state), rewinds `ip` so the
-//! instruction re-runs on wake, and parks the process with a [`Wait`]
-//! describing the readiness it needs ([`super::poll`] owns the wake side).
-//! Ops with no readiness signal to wait on (file reads, getaddrinfo) are
-//! offloaded to the blocking pool when the multi-core runtime is up;
-//! single-scheduler programs run them inline because there is nothing else
-//! to starve.
+//! The discipline: sockets are non-blocking, and an op that would block
+//! never stalls the scheduler thread — it parks the process with a [`Wait`]
+//! describing what must happen before it can continue ([`super::poll`] owns
+//! the wake side). Three resume protocols, distinguished by the `ip` the
+//! park stores (the `ip - 1` / `ip` convention is the method contract
+//! below):
+//!
+//! - **Re-run** (accept, socket reads and writes): the op re-pushes its
+//!   operands — possibly transformed, e.g. `tcp_write` re-pushes a view
+//!   over the unwritten tail — and rewinds `ip` so the whole instruction
+//!   re-runs when the socket signals readiness.
+//! - **Resume-after, result delivered** (file reads and writes,
+//!   getaddrinfo): no readiness signal exists to wait on, so the op is
+//!   shipped to the blocking pool ([`super::sched`]) and the wake side
+//!   pushes the result before resuming at the already-advanced `ip`. The
+//!   [`BlockingOp`] rides inside the `Wait` and is handed to the pool only
+//!   when the scheduler registers the park, so the pool job's id is the
+//!   wait id and a completion can never arrive before its process is
+//!   parked. The pool is its own elastic set of `al-blocking` threads,
+//!   spawned lazily per job and independent of the worker schedulers —
+//!   which is what keeps the semantics identical at every scheduler count:
+//!   a one-scheduler program still offloads a file read to a pool thread
+//!   and keeps running other processes instead of blocking on the syscall.
+//! - **Resume-after, result built on wake** (pending connect): the
+//!   in-flight socket is stashed in `pending_connects`; when it signals
+//!   writability the wake side finishes the connect and pushes the result
+//!   (`WakeAction::CompleteConnect`) — no re-run, no operand re-push.
+//!
+//! `sleep` is the degenerate resume-after case: its Nil result is pushed
+//! before parking and the deadline alone wakes it.
 //!
 //! Socket bookkeeping lives here too:
 //!
@@ -31,8 +52,10 @@
 //! — `NetError` from socket errnos, path-tagged `IoError` from file errnos,
 //! with a typed `Errno(code)` residual — never strings.
 
+use std::collections::HashMap;
 use std::io::{ErrorKind, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use al_core::bytecode::{BinaryRef, SocketValue, Value};
@@ -54,34 +77,24 @@ impl VM {
 
     pub(super) fn file_read(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Budget while the path is rooted: a binary box + Ok, or
-        // the path-tagged IoError. The file bytes live off-heap.
-        self.ensure(cost::BINARY + cost::WRAP + cost::io_err(self.peek_str_len(0)));
+        // Nothing allocates before the park: the path is copied off-heap and
+        // the result graph is budgeted at completion delivery.
         let path_v = self.pop_str("io.read_file")?;
-        let path = str_ref(&path_v);
-        // With a runtime, offload to the blocking pool and park so
-        // the syscall never stalls this scheduler; the completion
-        // delivers the result. Single-scheduler programs (no
-        // runtime) have nothing to starve, so read inline.
-        if self.runtime.is_some() {
-            let path = path.to_string();
-            self.frame_mut().ip = ip;
-            return Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::ReadFile(
-                path,
-            )))));
-        }
-        let read = std::fs::read(path);
-        let res = read.map(|bytes| Value::binary_in(&mut self.heap, bytes));
-        self.push_file(str_ref(&path_v), res);
-        Ok(None)
+        // Offload to the blocking pool and park so the syscall never stalls
+        // this scheduler; the completion delivers the result.
+        let path = str_ref(&path_v).to_string();
+        self.frame_mut().ip = ip;
+        Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::ReadFile(
+            path,
+        )))))
     }
 
     pub(super) fn file_write(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Budget while the operands are rooted (the path is one
-        // below the binary): Ok(Nil), the path-tagged IoError, or
-        // the unaligned-binary reject.
-        self.ensure(cost::enum_(0) + cost::WRAP + cost::io_err(self.peek_str_len(1)));
+        // Budget while the operands are rooted: only the unaligned-binary
+        // reject allocates here — the write itself is offloaded and its
+        // result graph is budgeted at completion delivery.
+        self.ensure(cost::enum_(0) + cost::WRAP);
         let bin_v = self.pop_binary("io.write_file")?;
         let path_v = self.pop_str("io.write_file")?;
         if let Some(v) =
@@ -90,19 +103,14 @@ impl VM {
             self.stack.push(v);
             return Ok(None);
         }
-        if self.runtime.is_some() {
-            let bytes = bin_ref(&bin_v).full_bytes().into_owned();
-            self.frame_mut().ip = ip;
-            return Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::WriteFile(
-                str_ref(&path_v).to_string(),
-                bytes,
-            )))));
-        }
-        let nil = self.make_nil();
-        let bytes = bin_ref(&bin_v).full_bytes();
-        let res = std::fs::write(str_ref(&path_v), &*bytes).map(|_| nil);
-        self.push_file(str_ref(&path_v), res);
-        Ok(None)
+        // Offload to the blocking pool and park so the syscall never stalls
+        // this scheduler.
+        let bytes = bin_ref(&bin_v).full_bytes().into_owned();
+        self.frame_mut().ip = ip;
+        Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::WriteFile(
+            str_ref(&path_v).to_string(),
+            bytes,
+        )))))
     }
 
     pub(super) fn tcp_listen(&mut self) -> VmResult<()> {
@@ -115,7 +123,7 @@ impl VM {
             // instead of stalling every process on this scheduler.
             listener.set_nonblocking(true)?;
             let socket_id = self.alloc_socket_id();
-            self.tcp_listeners.insert(socket_id, listener);
+            self.track_listener(socket_id, listener)?;
             Ok(Value::socket(SocketValue {
                 id: socket_id,
                 is_listener: true,
@@ -136,13 +144,7 @@ impl VM {
         // listener handle on the park path.
         self.ensure(cost::ADOPT.max(cost::SOCKET) + cost::NET_ERR + cost::WRAP);
         let sv = self.pop_listener("net.accept")?;
-        if !self.ensure_listener(sv.id) {
-            return Err("Invalid listener socket".to_string());
-        }
-        let accept_res = match self.tcp_listeners.get(&sv.id) {
-            Some(listener) => listener.accept(),
-            None => return Err("Invalid listener socket".to_string()),
-        };
+        let accept_res = self.listener(sv.id)?.accept();
         match accept_res {
             Ok((conn, peer)) => {
                 let v = self.adopt_connection(conn, peer);
@@ -178,14 +180,19 @@ impl VM {
                 self.stack.push(v);
             }
             Ok(ConnectStart::Pending(socket)) => {
-                // Park until the socket signals completion via
-                // writability; the completion handler pushes the
-                // result, and execution resumes after this
+                // Park until writability signals the connect finished;
+                // the wake side (`VM::finish_connect`) builds and pushes
+                // the result, and execution resumes after this
                 // instruction.
                 let id = self.alloc_socket_id();
-                self.pending_connects.insert(id, socket);
-                self.frame_mut().ip = ip;
-                return Ok(Some(Step::Parked(Wait::connecting(id))));
+                match self.track_pending(id, socket) {
+                    Ok(()) => {
+                        self.frame_mut().ip = ip;
+                        return Ok(Some(Step::Parked(Wait::connecting(id))));
+                    }
+                    // Unwatchable means unwakeable: report instead of parking.
+                    Err(e) => self.push_net(Err(e)),
+                }
             }
             Err(e) => self.push_net(Err(e)),
         }
@@ -286,10 +293,7 @@ impl VM {
         }
         let bin = bin_ref(&bin_v);
         let bytes = bin.full_bytes();
-        let conn = match self.tcp_connections.get_mut(&sv.id) {
-            Some(conn) => conn,
-            None => return Err("Invalid connection socket".to_string()),
-        };
+        let conn = connection_mut(&mut self.tcp_connections, sv.id)?;
         // Write what the socket will take. If it fills up mid-way,
         // park and resume this instruction with the remaining bytes.
         let result = drain_write(conn, std::slice::from_ref(&bytes));
@@ -357,10 +361,7 @@ impl VM {
             return Ok(None);
         }
 
-        let conn = match self.tcp_connections.get_mut(&sv.id) {
-            Some(conn) => conn,
-            None => return Err("Invalid connection socket".to_string()),
-        };
+        let conn = connection_mut(&mut self.tcp_connections, sv.id)?;
 
         // Logical bytes per part: borrows the backing with no copy
         // when byte-aligned (the common case), re-aligns otherwise.
@@ -395,11 +396,9 @@ impl VM {
         // Ok(Nil) only.
         self.ensure(cost::WRAP);
         let sv = self.pop_connection("socket.close")?;
-        if let Some(conn) = self.tcp_connections.remove(&sv.id)
-            && let Some(poller) = &self.poller
-        {
+        if let Some(conn) = self.tcp_connections.remove(&sv.id) {
             // Deregister before dropping; ignore "wasn't registered".
-            let _ = poller.delete(&conn);
+            self.poller_deregister(conn.as_raw_fd());
         }
         let nil = self.make_nil();
         let v = self.make_ok(nil);
@@ -411,15 +410,11 @@ impl VM {
         // Ok(Nil) only.
         self.ensure(cost::WRAP);
         let sv = self.pop_listener("net.close")?;
-        if let Some(listener) = self.tcp_listeners.remove(&sv.id)
-            && let Some(poller) = &self.poller
-        {
-            let _ = poller.delete(&listener);
+        if let Some(listener) = self.tcp_listeners.remove(&sv.id) {
+            self.poller_deregister(listener.as_raw_fd());
         }
         // Closing a server retires it everywhere.
-        if let Some(rt) = &self.runtime {
-            sched::lock(&rt.shared_listeners).remove(&sv.id);
-        }
+        sched::lock(&self.runtime.shared_listeners).remove(&sv.id);
         let nil = self.make_nil();
         let v = self.make_ok(nil);
         self.stack.push(v);
@@ -430,13 +425,7 @@ impl VM {
         // Ok(SocketAddress) or a NetError.
         self.ensure(cost::SOCK_ADDR + cost::WRAP + cost::NET_ERR);
         let sv = self.pop_listener("net.local_addr")?;
-        if !self.ensure_listener(sv.id) {
-            return Err("Invalid listener socket".to_string());
-        }
-        let res = match self.tcp_listeners.get(&sv.id) {
-            Some(l) => l.local_addr(),
-            None => return Err("Invalid listener socket".to_string()),
-        };
+        let res = self.listener(sv.id)?.local_addr();
         let res = res.map(|a| self.templates.socket_address(&mut self.heap, a));
         self.push_net(res);
         Ok(())
@@ -444,9 +433,9 @@ impl VM {
 
     pub(super) fn dns_resolve(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Ok(IpAddress) or a NetError; the offload path parks and
-        // its result is budgeted at completion delivery.
-        self.ensure(cost::IP_ADDR + cost::WRAP + cost::NET_ERR);
+        // Budget for the IP-literal fast path's Ok(IpAddress); the offload
+        // path parks and its result is budgeted at completion delivery.
+        self.ensure(cost::IP_ADDR + cost::WRAP);
         let host_v = self.pop_str("net.resolve")?;
         let host = str_ref(&host_v);
         if let Ok(addr) = host.parse::<std::net::IpAddr>() {
@@ -454,29 +443,15 @@ impl VM {
             let ip_val = self.templates.ip_address(&mut self.heap, addr);
             let v = self.make_ok(ip_val);
             self.stack.push(v);
-        } else if self.runtime.is_some() {
-            // Offload getaddrinfo to the blocking pool and park, so
-            // it never stalls this scheduler.
-            let host = host.to_string();
-            self.frame_mut().ip = ip;
-            return Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::ResolveDns(
-                host,
-            )))));
-        } else {
-            // No runtime: resolve inline (nothing to starve).
-            let v = match sched::resolve_host(host) {
-                Ok(addr) => {
-                    let ip_val = self.templates.ip_address(&mut self.heap, addr);
-                    self.make_ok(ip_val)
-                }
-                Err(e) => {
-                    let err = self.net_error_value(&e);
-                    self.make_err(err)
-                }
-            };
-            self.stack.push(v);
+            return Ok(None);
         }
-        Ok(None)
+        // Offload getaddrinfo to the blocking pool and park, so it never
+        // stalls this scheduler.
+        let host = host.to_string();
+        self.frame_mut().ip = ip;
+        Ok(Some(Step::Parked(Wait::offloaded(BlockingOp::ResolveDns(
+            host,
+        )))))
     }
 
     pub(super) fn process_spawn(&mut self, reds: &mut i32) -> VmResult<()> {
@@ -516,13 +491,19 @@ impl VM {
     /// `Socket` is the AL record `{ conn Connection, peer SocketAddress }`;
     /// the underlying `SocketValue` is the first payload field.
     fn pop_connection(&mut self, op: &str) -> VmResult<SocketValue> {
-        let v = self.pop()?;
-        if let Some(e) = v.as_enum()
-            && let Some(s) = e.payload().first().and_then(Value::as_socket)
-        {
-            return Ok(s);
+        connection_socket(&self.pop()?, op)
+    }
+
+    /// Resolve `id` to a listener in this scheduler's table, hydrating from
+    /// the runtime's shared listeners on a local miss.
+    #[inline]
+    fn listener(&mut self, id: i32) -> VmResult<&TcpListener> {
+        if !self.ensure_listener(id) {
+            return Err("Invalid listener socket".to_string());
         }
-        Err(format!("{op} requires a Socket"))
+        self.tcp_listeners
+            .get(&id)
+            .ok_or_else(|| "Invalid listener socket".to_string())
     }
 
     /// Build an `al/net/error.NetError` from a socket/connect
@@ -588,18 +569,15 @@ impl VM {
         if self.read_scratch.len() < max {
             self.read_scratch.resize(max, 0);
         }
-        match self.tcp_connections.get_mut(&id) {
-            Some(conn) => Ok((max, conn.read(&mut self.read_scratch[..max]))),
-            None => Err("Invalid connection socket".to_string()),
-        }
+        let conn = connection_mut(&mut self.tcp_connections, id)?;
+        Ok((max, conn.read(&mut self.read_scratch[..max])))
     }
 
     /// Push `Ok(Binary)` over the first `n` bytes just read into the scratch
     /// buffer (copied out). The caller ensured `cost::BINARY + cost::WRAP`.
     #[inline]
     fn push_read_ok(&mut self, n: usize) {
-        let bytes = self.read_scratch[..n].to_vec();
-        let data = Value::binary_in(&mut self.heap, bytes);
+        let data = Value::binary_from_slice_in(&mut self.heap, &self.read_scratch[..n]);
         let ok = self.make_ok(data);
         self.stack.push(ok);
     }
@@ -624,21 +602,6 @@ impl VM {
             Ok(v) => self.make_ok(v),
             Err(err) => {
                 let e = self.net_error_value(&err);
-                self.make_err(e)
-            }
-        };
-        self.stack.push(v);
-    }
-
-    /// Push `Ok(v)` or a typed `IoError` (tagged with `path`) from the file
-    /// `io::Error`. The caller budgeted `cost::WRAP` plus
-    /// `cost::io_err(path)` before popping.
-    #[inline]
-    fn push_file(&mut self, path: &str, r: std::io::Result<Value>) {
-        let v = match r {
-            Ok(v) => self.make_ok(v),
-            Err(err) => {
-                let e = self.io_error_value(&err, path);
                 self.make_err(e)
             }
         };
@@ -674,13 +637,10 @@ impl VM {
     /// Make a listener visible to every scheduler, so a listener stored in a
     /// top-level binding can be used from spawned processes anywhere.
     fn share_listener(&mut self, id: i32) {
-        let Some(rt) = &self.runtime else {
-            return;
-        };
         if let Some(l) = self.tcp_listeners.get(&id)
             && let Ok(dup) = l.try_clone()
         {
-            sched::lock(&rt.shared_listeners).insert(id, dup);
+            sched::lock(&self.runtime.shared_listeners).insert(id, dup);
         }
     }
 
@@ -690,26 +650,22 @@ impl VM {
         if self.tcp_listeners.contains_key(&id) {
             return true;
         }
-        let dup = match &self.runtime {
-            Some(rt) => sched::lock(&rt.shared_listeners)
-                .get(&id)
-                .and_then(|l| l.try_clone().ok()),
-            None => None,
-        };
+        let dup = sched::lock(&self.runtime.shared_listeners)
+            .get(&id)
+            .and_then(|l| l.try_clone().ok());
         match dup {
-            Some(l) => {
-                self.tcp_listeners.insert(id, l);
-                true
-            }
+            Some(l) => self.track_listener(id, l).is_ok(),
             None => false,
         }
     }
 
     /// Take ownership of a connected stream (from accept or connect):
-    /// configure it, register it in the connection table, and build the AL
-    /// `Ok(Socket)` result.
-    /// Allocates `cost::ADOPT`; callers ensure it before popping (the
-    /// rooting rule).
+    /// configure it, register it in the connection table and with the
+    /// poller, and build the AL `Ok(Socket)` result — or `Err(NetError)`
+    /// when the poller refuses the fd (a connection that cannot wake its
+    /// parks must not be adopted).
+    /// Allocates `cost::ADOPT` (or `cost::NET_ERR`); callers ensure both
+    /// before popping (the rooting rule).
     pub(super) fn adopt_connection(
         &mut self,
         stream: TcpStream,
@@ -720,7 +676,10 @@ impl VM {
         // waiting for an ACK.
         let _ = stream.set_nodelay(true);
         let id = self.alloc_socket_id();
-        self.tcp_connections.insert(id, stream);
+        if let Err(e) = self.track_connection(id, stream) {
+            let err = self.net_error_value(&e);
+            return self.make_err(err);
+        }
         let handle = Value::socket(SocketValue {
             id,
             is_listener: false,
@@ -849,4 +808,13 @@ fn connection_socket(v: &Value, op: &str) -> VmResult<SocketValue> {
         return Ok(s);
     }
     Err(format!("{op} requires a Socket"))
+}
+
+/// Resolve `id` in the connection table. A free function over the field (not
+/// a `&mut self` method) so callers keep split borrows of other VM fields.
+#[inline]
+fn connection_mut(conns: &mut HashMap<i32, TcpStream>, id: i32) -> VmResult<&mut TcpStream> {
+    conns
+        .get_mut(&id)
+        .ok_or_else(|| "Invalid connection socket".to_string())
 }

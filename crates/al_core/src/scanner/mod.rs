@@ -75,6 +75,11 @@ impl Scanner {
             let ch = self.peek_char();
 
             if ch == b' ' || ch == b'\t' {
+                // Whitespace trivia is never read by any consumer (parser and
+                // formatter match only Newline/comment kinds), so don't record
+                // it at all — recording it would force a fresh Vec<Trivia>
+                // allocation for nearly every token, since most tokens follow
+                // a space.
                 while self.pos < self.input_len() {
                     let c = self.peek_char();
                     if c != b' ' && c != b'\t' {
@@ -82,12 +87,6 @@ impl Scanner {
                     }
                     self.incr_pos();
                 }
-                // Whitespace trivia text is never read (parser inspects by
-                // `kind`, formatter ignores it) — skip the heap String alloc.
-                self.pending_trivia.push(Trivia {
-                    kind: TriviaKind::Whitespace,
-                    text: String::new(),
-                });
                 continue;
             }
 
@@ -101,7 +100,7 @@ impl Scanner {
                 continue;
             }
 
-            if ch == b'/' && self.pos + 1 < self.input_len() && self.byte_at(self.pos + 1) == b'/' {
+            if ch == b'/' && self.byte_at(self.pos + 1) == b'/' {
                 let start = self.pos;
                 while self.pos < self.input_len() && self.peek_char() != b'\n' {
                     self.incr_pos();
@@ -114,7 +113,7 @@ impl Scanner {
                 continue;
             }
 
-            if ch == b'/' && self.pos + 1 < self.input_len() && self.byte_at(self.pos + 1) == b'*' {
+            if ch == b'/' && self.byte_at(self.pos + 1) == b'*' {
                 let start = self.pos;
                 self.incr_pos(); // skip /
                 self.incr_pos(); // skip *
@@ -123,7 +122,7 @@ impl Scanner {
                 // i.e., /** but not /**/
                 let is_doc = self.pos < self.input_len()
                     && self.peek_char() == b'*'
-                    && (self.pos + 1 >= self.input_len() || self.byte_at(self.pos + 1) != b'/');
+                    && self.byte_at(self.pos + 1) != b'/';
 
                 while self.pos + 1 < self.input_len() {
                     if self.peek_char() == b'*' && self.byte_at(self.pos + 1) == b'/' {
@@ -211,12 +210,8 @@ impl Scanner {
             return self.new_token(Kind::PuncDotdot, None);
         }
 
-        if ch.is_ascii_alphanumeric() {
-            if ch.is_ascii_digit() {
-                return self.scan_number();
-            }
-
-            return self.scan_identifier();
+        if ch.is_ascii_digit() {
+            return self.scan_number();
         }
 
         if token::is_quote(ch) {
@@ -241,7 +236,8 @@ impl Scanner {
                 }
 
                 if next == b'\\' {
-                    result.extend_from_slice(self.scan_escape_sequence().as_bytes());
+                    let b = self.scan_escape_sequence();
+                    result.push(b);
                 } else {
                     result.push(next);
                 }
@@ -326,28 +322,14 @@ impl Scanner {
     }
 
     fn new_token(&mut self, kind: Kind, literal: Option<String>) -> Token {
-        let trivia = self.take_trivia();
-        self.new_token_with_trivia(kind, literal, trivia)
-    }
-
-    fn new_token_with_trivia(
-        &mut self,
-        kind: Kind,
-        literal: Option<String>,
-        trivia: Vec<Trivia>,
-    ) -> Token {
         Token {
             kind,
             literal,
             line: self.token_start_line,
             column: self.token_start_column,
             length: self.column - self.token_start_column,
-            leading_trivia: trivia,
+            leading_trivia: std::mem::take(&mut self.pending_trivia),
         }
-    }
-
-    fn take_trivia(&mut self) -> Vec<Trivia> {
-        std::mem::take(&mut self.pending_trivia)
     }
 
     // Advance past the rest of a name and return its `[start, end)` byte range.
@@ -391,8 +373,7 @@ impl Scanner {
                     chars_after_dot += 1;
                 }
             } else if next == b'.' && !has_dot {
-                if self.pos + 1 >= self.input_len() || !self.byte_at(self.pos + 1).is_ascii_digit()
-                {
+                if !self.byte_at(self.pos + 1).is_ascii_digit() {
                     break;
                 }
                 has_dot = true;
@@ -450,7 +431,7 @@ impl Scanner {
             if ch == b'\n' {
                 return false;
             }
-            if ch == b'\\' && pos + 1 < self.input_len() {
+            if ch == b'\\' {
                 pos += 2;
                 continue;
             }
@@ -462,22 +443,26 @@ impl Scanner {
         false
     }
 
-    fn scan_escape_sequence(&mut self) -> String {
+    // Every recognized escape denotes a single ASCII byte, so this returns
+    // the byte directly instead of allocating a String per escape. An unknown
+    // escape recovers by yielding the escaped byte itself (preserving any
+    // following raw UTF-8 continuation bytes) after reporting a diagnostic.
+    fn scan_escape_sequence(&mut self) -> u8 {
         let peeked = self.peek_char();
         self.incr_pos();
 
         match peeked {
-            b'n' => "\n".to_string(),
-            b't' => "\t".to_string(),
-            b'r' => "\r".to_string(),
-            b'0' => "\0".to_string(),
-            b'"' => "\"".to_string(),
-            b'\'' => "'".to_string(),
-            b'\\' => "\\".to_string(),
-            b'$' => "$".to_string(),
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'0' => b'\0',
+            b'"' => b'"',
+            b'\'' => b'\'',
+            b'\\' => b'\\',
+            b'$' => b'$',
             _ => {
                 self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
-                (peeked as char).to_string()
+                peeked
             }
         }
     }
@@ -535,7 +520,8 @@ impl Scanner {
             self.incr_pos();
 
             if ch == b'\\' {
-                result.extend_from_slice(self.scan_escape_sequence().as_bytes());
+                let b = self.scan_escape_sequence();
+                result.push(b);
             } else {
                 result.push(ch);
             }
@@ -827,11 +813,10 @@ mod tests {
         let toks = s.scan_all();
         assert_eq!(toks[0].kind, Identifier);
         let trivia = &toks[0].leading_trivia;
-        assert_eq!(trivia.len(), 3);
-        assert_eq!(trivia[0].kind, TriviaKind::Whitespace);
-        assert_eq!(trivia[1].kind, TriviaKind::LineComment);
-        assert_eq!(trivia[1].text, "// hi");
-        assert_eq!(trivia[2].kind, TriviaKind::Newline);
+        assert_eq!(trivia.len(), 2);
+        assert_eq!(trivia[0].kind, TriviaKind::LineComment);
+        assert_eq!(trivia[0].text, "// hi");
+        assert_eq!(trivia[1].kind, TriviaKind::Newline);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use super::flags::{env_flag_truthy, gc_stress};
 use super::sizing::{INITIAL_YOUNG_WORDS, size_for};
 use super::*;
-use crate::bytecode::value::{Value, binary_off_heap_next};
+use crate::bytecode::value::Value;
 use crate::frozen::FrozenArea;
 use std::ffi::OsStr;
 use std::sync::Arc;
@@ -604,7 +604,7 @@ fn frozen_binaries_keep_their_backing_alive() {
     assert_eq!(fr.bit_len(), 64);
     // Frozen keeps no off-heap list: the link word is cleared.
     let addr = frozen_b.object_addr().expect("heap value");
-    assert_eq!(unsafe { binary_off_heap_next(addr as *const u64) }, 0);
+    assert_eq!(super::copy::off_heap_next(addr), 0);
 }
 
 // Deep recursion + allocation churn: a deep linked list of

@@ -139,10 +139,20 @@ fn eval_input(input: &str, definitions: &[ast::Node]) -> Vec<ast::Node> {
 
     let program = result.program;
 
-    let mut v = vm::new_vm(program);
+    let mut v = match vm::new_vm(program) {
+        Ok(vm) => vm,
+        Err(err) => {
+            eprintln!("Runtime error: {}", err);
+            return Vec::new();
+        }
+    };
     let run_result = match v.run() {
         Ok(val) => val,
         Err(err) => {
+            // Per `VM::run`'s contract, an errored run leaks its scheduler
+            // runtime (worker and blocking-pool threads); the REPL accepts
+            // one such leak per errored evaluation to keep the session
+            // alive. A worker-side error still exits the whole process.
             eprintln!("Runtime error: {}", err);
             return Vec::new();
         }

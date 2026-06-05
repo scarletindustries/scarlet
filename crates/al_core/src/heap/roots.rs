@@ -47,8 +47,14 @@ impl Roots for &mut [Value] {
 }
 
 /// Address-range whitelist of the spaces a copy evacuates from.
+///
+/// Ranges are disjoint (each is a distinct slab's used prefix) and kept
+/// sorted by `push_space`, so [`covers`](Classifier::covers) — called once
+/// per traced value slot in the Cheney inner loop — is a binary search
+/// rather than a linear scan over every old-generation segment.
 #[derive(Default)]
 pub struct Classifier {
+    /// Disjoint `(lo, hi)` ranges, sorted by `lo`.
     ranges: Vec<(usize, usize)>,
 }
 
@@ -61,12 +67,20 @@ impl Classifier {
     pub fn push_space(&mut self, space: &Space) {
         if space.used() > 0 {
             let base = space.base_addr();
-            self.ranges
-                .push((base, base + space.used() * std::mem::size_of::<u64>()));
+            let range = (base, base + space.used() * std::mem::size_of::<u64>());
+            let idx = self.ranges.partition_point(|&(lo, _)| lo < range.0);
+            debug_assert!(
+                self.ranges.get(idx).is_none_or(|&(lo, _)| range.1 <= lo)
+                    && (idx == 0 || self.ranges[idx - 1].1 <= range.0),
+                "classifier ranges must be disjoint"
+            );
+            self.ranges.insert(idx, range);
         }
     }
 
     pub fn covers(&self, addr: usize) -> bool {
-        self.ranges.iter().any(|&(lo, hi)| addr >= lo && addr < hi)
+        // The candidate range is the last one starting at or below `addr`.
+        let idx = self.ranges.partition_point(|&(lo, _)| lo <= addr);
+        idx > 0 && addr < self.ranges[idx - 1].1
     }
 }

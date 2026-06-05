@@ -59,7 +59,25 @@
 //!
 //! All `unsafe` in the value representation is confined to this file: header
 //! and payload reads/writes behind typed accessors, and the `Arc<[u8]>`
-//! pack/unpack for binary backings.
+//! pack/unpack for binary backings. The only escape hatches are a handful of
+//! `pub(crate) unsafe fn`s that hand layout knowledge to the designated GC
+//! engine modules — they never leave the crate:
+//!
+//! - `for_each_child`: object tracing, called by `heap::copy` on freshly
+//!   copied destination images.
+//! - `binary_off_heap_next` / `set_binary_off_heap_next` /
+//!   `binary_clone_backing` / `binary_drop_backing`: the `Binary`
+//!   off-heap-list words and `Arc` ownership, called by `heap::copy`'s
+//!   off-heap sweep and `heap::proc_heap`'s drop walk.
+//!
+//! The `seq` persistent-vector module is fully safe code: it reads nodes
+//! through the typed [`SeqRootRef`] / [`SeqNodeRef`] views and allocates them
+//! through the `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders
+//! defined here.
+
+// Designated unsafe module: NaN-box encoding and raw heap object layout
+// (header/payload reads and writes) live here behind typed safe accessors.
+#![allow(unsafe_code)]
 
 use std::borrow::Cow;
 use std::fmt;
@@ -98,6 +116,15 @@ const SMALL_INT_MAX: i64 = (1i64 << 47) - 1;
 
 /// Socket immediate payload: low 32 bits = id, bit 32 = is_listener.
 const SOCKET_LISTENER_BIT: u64 = 1 << 32;
+
+/// Decode the socket immediate payload; caller must have checked `is_socket`.
+#[inline]
+fn decode_socket(bits: u64) -> SocketValue {
+    SocketValue {
+        id: (bits & 0xFFFF_FFFF) as u32 as i32,
+        is_listener: bits & SOCKET_LISTENER_BIT != 0,
+    }
+}
 
 // ---- object headers ---------------------------------------------------------
 
@@ -277,7 +304,7 @@ impl Arena for FrozenBuilder {
 /// Allocate an object and write its header; payload writes follow at the
 /// returned pointer + 1.
 #[inline]
-pub(crate) fn alloc_obj<A: Arena + ?Sized>(
+fn alloc_obj<A: Arena + ?Sized>(
     a: &mut A,
     tag: HeapTag,
     payload_words: usize,
@@ -299,12 +326,12 @@ pub(crate) fn alloc_obj<A: Arena + ?Sized>(
 /// length its header declares. Every caller in this file derives `obj` from a
 /// tag-checked `Value`.
 #[inline]
-pub(crate) unsafe fn payload_word(obj: *const u64, i: usize) -> u64 {
+unsafe fn payload_word(obj: *const u64, i: usize) -> u64 {
     unsafe { *obj.add(1 + i) }
 }
 
 #[inline]
-pub(crate) unsafe fn payload_value(obj: *const u64, i: usize) -> Value {
+unsafe fn payload_value(obj: *const u64, i: usize) -> Value {
     Value::from_bits(unsafe { payload_word(obj, i) })
 }
 
@@ -312,7 +339,7 @@ pub(crate) unsafe fn payload_value(obj: *const u64, i: usize) -> Value {
 /// is unbounded; private callers immediately constrain it to a borrow of the
 /// `Value`/view that produced `obj`.
 #[inline]
-pub(crate) unsafe fn payload_values<'a>(obj: *const u64, at: usize, n: usize) -> &'a [Value] {
+unsafe fn payload_values<'a>(obj: *const u64, at: usize, n: usize) -> &'a [Value] {
     // SAFETY: `Value` is `repr(transparent)` over `u64`.
     unsafe { std::slice::from_raw_parts(obj.add(1 + at) as *const Value, n) }
 }
@@ -327,6 +354,212 @@ unsafe fn str_contents<'a>(obj: *const u64) -> &'a str {
         let bytes = std::slice::from_raw_parts(obj.add(2) as *const u8, len);
         std::str::from_utf8_unchecked(bytes)
     }
+}
+
+// ---- seq node views and builders ----------------------------------------------
+//
+// Safe windows over the three `Seq` object layouts so the `seq` module
+// contains no unsafe code. Each view constructor performs one header load,
+// dispatches on the tag, and aborts on a wrong tag even in release builds.
+// The views are sound safe functions under two crate invariants: heap values
+// point at live, non-forwarded arena objects, and the count word of every
+// `SeqLeaf`/`SeqBranch` agrees with its header (count = payload - 1, resp.
+// (payload - 2) / 2) because only the builders below write those words and
+// the GC/freeze engines copy objects verbatim. The latter keeps every slice
+// in bounds without per-access clamping (debug builds assert it).
+
+/// Release-mode backstop for a seq view applied to the wrong kind of value.
+/// Like [`arena_exhausted`], this is a VM bug, never a user-program
+/// condition; out of line so the tag dispatch in the hot accessors stays
+/// small.
+#[cold]
+#[inline(never)]
+pub(crate) fn seq_view_mismatch() -> ! {
+    eprintln!("al: internal error: seq view on a non-seq value");
+    std::process::abort()
+}
+
+/// Decoded `Seq` root: payload `[len | shift | head | tree | tail]`.
+pub(crate) struct SeqRootRef {
+    pub(crate) len: usize,
+    pub(crate) shift: usize,
+    pub(crate) head: Value,
+    pub(crate) tree: Value,
+    pub(crate) tail: Value,
+}
+
+impl SeqRootRef {
+    #[inline(always)]
+    pub(crate) fn new(root: Value) -> SeqRootRef {
+        if !root.is_heap() {
+            seq_view_mismatch();
+        }
+        let obj = root.heap_obj();
+        // SAFETY: heap values point at live, non-forwarded arena objects.
+        let header = unsafe { *obj };
+        if header_tag(header) != HeapTag::Seq || header_payload_words(header) < 5 {
+            seq_view_mismatch();
+        }
+        // SAFETY: tag checked above; the header declares at least 5 payload
+        // words.
+        unsafe {
+            SeqRootRef {
+                len: payload_word(obj, 0) as usize,
+                shift: payload_word(obj, 1) as usize,
+                head: payload_value(obj, 2),
+                tree: payload_value(obj, 3),
+                tail: payload_value(obj, 4),
+            }
+        }
+    }
+}
+
+/// Decoded `SeqLeaf` / `SeqBranch` node. The lifetime is unbounded — callers
+/// in the `seq` module use a view only within the current (non-collecting)
+/// operation.
+pub(crate) enum SeqNodeRef<'a> {
+    Leaf(&'a [Value]),
+    Branch {
+        shift: usize,
+        sizes: &'a [u64],
+        children: &'a [Value],
+    },
+}
+
+impl<'a> SeqNodeRef<'a> {
+    #[inline(always)]
+    pub(crate) fn of(node: Value) -> SeqNodeRef<'a> {
+        if !node.is_heap() {
+            seq_view_mismatch();
+        }
+        let obj = node.heap_obj();
+        // SAFETY: heap values point at live, non-forwarded arena objects.
+        let header = unsafe { *obj };
+        match header_tag(header) {
+            HeapTag::SeqLeaf => {
+                // Payload: [count | elems[count]].
+                // SAFETY: tag checked; the builder-written count word bounds
+                // the slice (see the section comment).
+                unsafe {
+                    let n = payload_word(obj, 0) as usize;
+                    debug_assert_eq!(1 + n, header_payload_words(header));
+                    SeqNodeRef::Leaf(payload_values(obj, 1, n))
+                }
+            }
+            HeapTag::SeqBranch => {
+                // Payload: [count | shift | sizes[count] | children[count]].
+                // SAFETY: tag checked; the builder-written count word bounds
+                // both slices (see the section comment).
+                unsafe {
+                    let n = payload_word(obj, 0) as usize;
+                    debug_assert_eq!(2 + 2 * n, header_payload_words(header));
+                    let shift = payload_word(obj, 1) as usize;
+                    let sizes = std::slice::from_raw_parts(obj.add(3), n);
+                    let children = payload_values(obj, 2 + n, n);
+                    SeqNodeRef::Branch {
+                        shift,
+                        sizes,
+                        children,
+                    }
+                }
+            }
+            _ => seq_view_mismatch(),
+        }
+    }
+}
+
+/// Allocate a `Seq` root over the given parts.
+#[inline]
+pub(crate) fn seq_root_in<A: Arena + ?Sized>(
+    a: &mut A,
+    len: usize,
+    shift: usize,
+    head: Value,
+    tree: Value,
+    tail: Value,
+) -> Value {
+    let obj = alloc_obj(a, HeapTag::Seq, 5, false);
+    // SAFETY: freshly allocated 5-word payload.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(len as u64);
+        p.add(1).write(shift as u64);
+        p.add(2).write(head.to_bits());
+        p.add(3).write(tree.to_bits());
+        p.add(4).write(tail.to_bits());
+    }
+    Value::from_object_ptr(obj)
+}
+
+/// Allocate a `SeqLeaf` holding `items`.
+#[inline]
+pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
+    let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + items.len(), false);
+    // SAFETY: freshly allocated payload of exactly 1 + len words.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(items.len() as u64);
+        for (i, v) in items.iter().enumerate() {
+            p.add(1 + i).write(v.to_bits());
+        }
+    }
+    Value::from_object_ptr(obj)
+}
+
+/// Element count under a seq node: leaf count, or a branch's last cumulative
+/// size. The branch builder's inner loop — unclamped reads keep it as cheap
+/// as the raw layout walk it replaces. In-bounds without a clamp because the
+/// count word of every `SeqLeaf`/`SeqBranch` is written only by
+/// [`seq_leaf_in`]/[`seq_branch_in`] (count = payload - 1, resp.
+/// (payload - 2) / 2) and the GC copies objects verbatim, so
+/// `payload_word(obj, 1 + n)` never passes the payload end — even for a
+/// degenerate empty node.
+#[inline]
+fn seq_node_total(node: Value) -> u64 {
+    if !node.is_heap() {
+        seq_view_mismatch();
+    }
+    let obj = node.heap_obj();
+    // SAFETY: heap values point at live, non-forwarded arena objects; both
+    // arms read within the payload length the builder-written count word
+    // implies (see above).
+    unsafe {
+        let header = *obj;
+        match header_tag(header) {
+            HeapTag::SeqLeaf => payload_word(obj, 0),
+            HeapTag::SeqBranch => {
+                let n = payload_word(obj, 0) as usize;
+                debug_assert_eq!(2 + 2 * n, header_payload_words(header));
+                payload_word(obj, 1 + n)
+            }
+            _ => seq_view_mismatch(),
+        }
+    }
+}
+
+/// Allocate a `SeqBranch` at height `shift` over `children` (each a leaf or
+/// branch), computing the cumulative size table.
+#[inline]
+pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
+    a: &mut A,
+    shift: usize,
+    children: &[Value],
+) -> Value {
+    let n = children.len();
+    let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * n, false);
+    // SAFETY: freshly allocated payload of exactly 2 + 2n words.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(n as u64);
+        p.add(1).write(shift as u64);
+        let mut total = 0u64;
+        for (i, c) in children.iter().enumerate() {
+            total += seq_node_total(*c);
+            p.add(2 + i).write(total);
+            p.add(2 + n + i).write(c.to_bits());
+        }
+    }
+    Value::from_object_ptr(obj)
 }
 
 // ---- Value -------------------------------------------------------------------
@@ -654,6 +887,82 @@ impl Value {
         Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
     }
 
+    /// Whole-buffer binary copied from a borrowed slice: a single
+    /// allocation+copy into the shared backing (`Arc::<[u8]>::from(&[u8])`),
+    /// unlike going through a `Vec<u8>` which copies twice.
+    #[inline]
+    pub fn binary_from_slice_in<A: Arena + ?Sized>(a: &mut A, bytes: &[u8]) -> Value {
+        let bit_len = (bytes.len() as u64) * 8;
+        Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
+    }
+
+    /// Whole-buffer binary that is the concatenation of two byte windows,
+    /// copied directly into the freshly allocated shared backing: one
+    /// allocation, each source byte copied exactly once (no intermediate
+    /// `Vec`). `head` must be whole bytes (its bit length a multiple of 8);
+    /// `tail` holds the remaining `bit_len` bits, so its final byte may carry
+    /// neighbouring bits from a shared backing past `bit_len` — they are
+    /// masked to zero here. This is `binary.append`'s byte-aligned fast path.
+    pub fn binary_concat_in<A: Arena + ?Sized>(
+        a: &mut A,
+        head: &[u8],
+        tail: &[u8],
+        bit_len: u64,
+    ) -> Value {
+        Value::binary_concat_parts_in(a, &[head, tail], bit_len)
+    }
+
+    /// Whole-buffer binary that is the concatenation of N byte windows,
+    /// copied directly into the freshly allocated shared backing: one
+    /// allocation, each source byte copied exactly once (no intermediate
+    /// `Vec`). Every window but the last must be whole bytes; the last holds
+    /// the trailing bits of `bit_len`, so its final byte may carry
+    /// neighbouring bits from a shared backing past `bit_len` — they are
+    /// masked to zero here. This is `Op::BinConcatN`'s byte-aligned fast path.
+    pub fn binary_concat_parts_in<A: Arena + ?Sized>(
+        a: &mut A,
+        parts: &[&[u8]],
+        bit_len: u64,
+    ) -> Value {
+        let n: usize = parts.iter().map(|p| p.len()).sum();
+        debug_assert_eq!(n, bit_len.div_ceil(8) as usize);
+        let mut uninit = Arc::new_uninit_slice(n);
+        let Some(dst) = Arc::get_mut(&mut uninit) else {
+            // Unreachable — a freshly created `Arc` is unique — but kept as a
+            // safe fallback rather than a panic.
+            let mut v = Vec::with_capacity(n);
+            for p in parts {
+                v.extend_from_slice(p);
+            }
+            if let Some(mask) = tail_mask(bit_len)
+                && let Some(last) = v.last_mut()
+            {
+                *last &= mask;
+            }
+            return Value::binary_bits_in(a, v, bit_len);
+        };
+        // SAFETY: `dst` is exactly `n` bytes (the summed part lengths); the
+        // copies are laid back-to-back so they stay in bounds and together
+        // initialise every byte, and the tail mask only touches the last
+        // byte when one exists.
+        unsafe {
+            let base = dst.as_mut_ptr() as *mut u8;
+            let mut p = base;
+            for part in parts {
+                std::ptr::copy_nonoverlapping(part.as_ptr(), p, part.len());
+                p = p.add(part.len());
+            }
+            if let Some(mask) = tail_mask(bit_len)
+                && n > 0
+            {
+                *base.add(n - 1) &= mask;
+            }
+        }
+        // SAFETY: every byte was initialised above.
+        let backing = unsafe { uninit.assume_init() };
+        Value::binary_from_arc_in(a, backing, bit_len)
+    }
+
     /// Whole-buffer binary (bit offset 0) over an already-shared backing with
     /// no byte copy — the `Arc` is shared, exactly as the spawn/migration
     /// zero-copy paths require.
@@ -761,10 +1070,7 @@ impl Value {
     #[inline]
     pub fn as_socket(&self) -> Option<SocketValue> {
         if self.is_socket() {
-            Some(SocketValue {
-                id: (self.0 & 0xFFFF_FFFF) as u32 as i32,
-                is_listener: self.0 & SOCKET_LISTENER_BIT != 0,
-            })
+            Some(decode_socket(self.0))
         } else {
             None
         }
@@ -857,10 +1163,7 @@ impl Value {
         } else if self.is_bool() {
             ValueView::Bool(self.0 & 1 == 1)
         } else if self.is_socket() {
-            ValueView::Socket(SocketValue {
-                id: (self.0 & 0xFFFF_FFFF) as u32 as i32,
-                is_listener: self.0 & SOCKET_LISTENER_BIT != 0,
-            })
+            ValueView::Socket(decode_socket(self.0))
         } else if self.is_heap() {
             let obj = self.heap_obj();
             // SAFETY: heap values point at live arena objects; each arm is
@@ -925,10 +1228,7 @@ impl fmt::Debug for Value {
                 e.variant_name(),
                 e.payload()
             ),
-            ValueView::Array(s) => {
-                let items: Vec<Value> = s.iter().collect();
-                f.debug_list().entries(items.iter()).finish()
-            }
+            ValueView::Array(s) => f.debug_list().entries(s.iter()).finish(),
         }
     }
 }
@@ -1269,7 +1569,7 @@ impl<'a> SeqRef<'a> {
 /// `obj` must point at a live, non-forwarded arena object header, and the
 /// callback must only rewrite the visited slot (no reads of other arena state
 /// mid-evacuation, no collection).
-pub unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)) {
+pub(crate) unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)) {
     // SAFETY (whole body): the header declares the payload length; every slot
     // index below stays within it per the layouts in the module docs.
     unsafe {
@@ -1316,8 +1616,14 @@ pub unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)) {
 /// `obj` must point at a live `Binary` arena box. The link word survives
 /// forwarding (only the header word is overwritten), so the sweep may read it
 /// from an evacuated source box.
-pub unsafe fn binary_off_heap_next(obj: *const u64) -> usize {
-    unsafe { *obj.add(5) as usize }
+pub(crate) unsafe fn binary_off_heap_next(obj: *const u64) -> usize {
+    unsafe {
+        let h = *obj;
+        // A forwarded source box is fine here (the sweep reads the link from
+        // it); anything else must still carry the Binary tag.
+        debug_assert!(header_is_forwarding(h) || header_tag(h) == HeapTag::Binary);
+        *obj.add(5) as usize
+    }
 }
 
 /// Set the off-heap list link of a `Binary` box.
@@ -1326,8 +1632,13 @@ pub unsafe fn binary_off_heap_next(obj: *const u64) -> usize {
 ///
 /// As [`binary_off_heap_next`]; the box must be exclusively owned by the
 /// caller (a collector relinking into a destination space).
-pub unsafe fn set_binary_off_heap_next(obj: *mut u64, next: usize) {
-    unsafe { obj.add(5).write(next as u64) };
+pub(crate) unsafe fn set_binary_off_heap_next(obj: *mut u64, next: usize) {
+    unsafe {
+        let h = *obj;
+        debug_assert!(!header_is_forwarding(h));
+        debug_assert!(header_tag(h) == HeapTag::Binary);
+        obj.add(5).write(next as u64);
+    }
 }
 
 /// Bump the backing `Arc` of the `Binary` box at `obj` by one strong count.
@@ -1338,10 +1649,15 @@ pub unsafe fn set_binary_off_heap_next(obj: *mut u64, next: usize) {
 /// # Safety
 ///
 /// `obj` must point at a live `Binary` arena box whose Arc words are intact.
-pub unsafe fn binary_clone_backing(obj: *const u64) {
+pub(crate) unsafe fn binary_clone_backing(obj: *const u64) {
     // SAFETY (forget): the clone's strong count is the bump being handed to
     // the copied box; nothing must release it here.
-    unsafe { std::mem::forget(Arc::clone(&binary_backing_reborrow(obj))) }
+    unsafe {
+        let h = *obj;
+        debug_assert!(!header_is_forwarding(h));
+        debug_assert!(header_tag(h) == HeapTag::Binary);
+        std::mem::forget(Arc::clone(&binary_backing_reborrow(obj)))
+    }
 }
 
 /// Release the backing `Arc` owned by the `Binary` box at `obj`. The off-heap
@@ -1351,10 +1667,15 @@ pub unsafe fn binary_clone_backing(obj: *const u64) {
 ///
 /// `obj` must point at a `Binary` arena box whose Arc words are intact and
 /// whose strong count has not already been released for this box.
-pub unsafe fn binary_drop_backing(obj: *const u64) {
+pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
     // No reborrow guard here: this is the one place that CONSUMES the box's
     // strong count, so the reconstructed Arc is dropped for real.
-    unsafe { drop(Arc::from_raw(binary_backing_raw(obj))) }
+    unsafe {
+        let h = *obj;
+        debug_assert!(!header_is_forwarding(h));
+        debug_assert!(header_tag(h) == HeapTag::Binary);
+        drop(Arc::from_raw(binary_backing_raw(obj)))
+    }
 }
 
 // ---- hashing ------------------------------------------------------------------
@@ -1366,12 +1687,72 @@ fn fnv1a_combine(h: u64, val: u64) -> u64 {
     (h ^ val).wrapping_mul(0x100000001b3)
 }
 
+/// Fold each byte into the hash. [`hash_value`] and [`enum_name_prefix_hash`]
+/// must agree byte-for-byte for the cached enum hash fast-reject to hold, so
+/// both fold byte runs through this one helper.
+#[inline]
+fn fnv1a_bytes(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h = fnv1a_combine(h, b as u64);
+    }
+    h
+}
+
 /// Number of leading elements folded into a sequence hash. The stored hash is a
 /// fast-reject filter for value equality, not a cryptographic digest, so
 /// sampling a bounded prefix (plus the length) keeps hashing O(1) for a compact
 /// `Range` — `Some(0..n)` must not walk the whole range at build time — while
 /// staying collision-resistant enough to reject mismatched payloads cheaply.
 const SEQ_HASH_SAMPLE: usize = 32;
+
+/// Number of leading and trailing bytes folded into a `Str`/`Binary` hash.
+/// Like [`SEQ_HASH_SAMPLE`], the stored hash is only an equality fast-reject,
+/// so hashing the length plus a bounded prefix and suffix keeps enum
+/// construction O(1) in payload size — wrapping a multi-megabyte read buffer
+/// in `Ok(...)` must not re-walk the whole buffer. Payloads at most twice the
+/// sample are hashed in full.
+const BYTES_HASH_SAMPLE: usize = 64;
+
+/// Hash `len` logical bytes via `byte_at`: every byte when `len` is at most
+/// twice the sample, otherwise a leading and trailing [`BYTES_HASH_SAMPLE`]
+/// window. Callers fold the length in separately (`Str` folds byte length,
+/// `Binary` folds bit length), so equal contents hash equally and differing
+/// lengths fast-reject.
+#[inline]
+fn fnv1a_bytes_sampled(mut h: u64, len: usize, mut byte_at: impl FnMut(usize) -> u8) -> u64 {
+    if len <= 2 * BYTES_HASH_SAMPLE {
+        for i in 0..len {
+            h = fnv1a_combine(h, byte_at(i) as u64);
+        }
+    } else {
+        for i in 0..BYTES_HASH_SAMPLE {
+            h = fnv1a_combine(h, byte_at(i) as u64);
+        }
+        for i in len - BYTES_HASH_SAMPLE..len {
+            h = fnv1a_combine(h, byte_at(i) as u64);
+        }
+    }
+    h
+}
+
+/// The `i`-th logical byte of a bit-unaligned binary view (bits
+/// `bit_offset + 8*i .. bit_offset + 8*i + 8` of `backing`, MSB-first).
+/// Bits past the end of `backing` read as zero; callers mask any partial
+/// tail through [`tail_mask`], which zeroes exactly those padding bits —
+/// matching [`BinaryRef::to_aligned_vec`].
+#[inline]
+fn logical_byte(backing: &[u8], bit_offset: u64, i: usize) -> u8 {
+    let bit = bit_offset + 8 * i as u64;
+    let idx = (bit / 8) as usize;
+    let shift = (bit % 8) as u32;
+    if shift == 0 {
+        backing[idx]
+    } else {
+        let hi = backing[idx] << shift;
+        let lo = backing.get(idx + 1).map_or(0, |b| b >> (8 - shift));
+        hi | lo
+    }
+}
 
 #[inline]
 fn hash_int(i: i64) -> u64 {
@@ -1416,9 +1797,11 @@ pub fn hash_value(v: &Value) -> u64 {
             h = fnv1a_combine(h, if b { 1 } else { 0 });
         }
         ValueView::Str(s) => {
-            for c in s.bytes() {
-                h = fnv1a_combine(h, c as u64);
-            }
+            // Length plus a sampled prefix/suffix: equal strings hash equally
+            // and construction stays O(1) in string size.
+            let bytes = s.as_bytes();
+            h = fnv1a_combine(h, bytes.len() as u64);
+            h = fnv1a_bytes_sampled(h, bytes.len(), |i| bytes[i]);
         }
         ValueView::Enum(e) => {
             h = e.hash();
@@ -1432,24 +1815,26 @@ pub fn hash_value(v: &Value) -> u64 {
         }
         ValueView::Binary(bin) => {
             // Hash the LOGICAL bits so it stays consistent with
-            // `BinaryRef::bits_eq`: the bit length, the full bytes, then the
-            // masked partial tail. Byte-aligned views hash straight off the
-            // backing; bit-unaligned views re-align first.
+            // `BinaryRef::bits_eq`: the bit length, sampled full bytes, then
+            // the masked partial tail. Byte-aligned views hash straight off
+            // the backing; bit-unaligned views extract logical bytes on the
+            // fly. Both fold the same logical byte values, so aligned and
+            // unaligned views of equal bits hash identically.
             let (bit_offset, bit_len) = (bin.bit_offset(), bin.bit_len());
+            let backing = bin.backing();
+            let full = (bit_len / 8) as usize;
             h = fnv1a_combine(h, bit_len);
             if bit_offset.is_multiple_of(8) {
-                let backing = bin.backing();
                 let start = (bit_offset / 8) as usize;
-                let full = (bit_len / 8) as usize;
-                for &b in &backing[start..start + full] {
-                    h = fnv1a_combine(h, b as u64);
-                }
+                let window = &backing[start..start + full];
+                h = fnv1a_bytes_sampled(h, full, |i| window[i]);
                 if let Some(mask) = tail_mask(bit_len) {
                     h = fnv1a_combine(h, (backing[start + full] & mask) as u64);
                 }
             } else {
-                for b in bin.to_aligned_vec() {
-                    h = fnv1a_combine(h, b as u64);
+                h = fnv1a_bytes_sampled(h, full, |i| logical_byte(backing, bit_offset, i));
+                if let Some(mask) = tail_mask(bit_len) {
+                    h = fnv1a_combine(h, (logical_byte(backing, bit_offset, full) & mask) as u64);
                 }
             }
         }
@@ -1488,14 +1873,8 @@ pub fn hash_value(v: &Value) -> u64 {
 /// [`enum_hash_with_payload`] instead of re-walking the name bytes on every
 /// construction.
 pub fn enum_name_prefix_hash(enum_name: &str, variant_name: &str) -> u64 {
-    let mut h = HASH_BASIS;
-    for c in enum_name.bytes() {
-        h = fnv1a_combine(h, c as u64);
-    }
-    for c in variant_name.bytes() {
-        h = fnv1a_combine(h, c as u64);
-    }
-    h
+    let h = fnv1a_bytes(HASH_BASIS, enum_name.as_bytes());
+    fnv1a_bytes(h, variant_name.as_bytes())
 }
 
 /// Fold payload value hashes into a precomputed [`enum_name_prefix_hash`].
@@ -1650,6 +2029,22 @@ mod tests {
         let v2 = Value::binary_bits_in(&mut h, vec![0xFF], 5);
         assert_eq!(v2.as_binary().unwrap().bit_len(), 5);
         assert_eq!(v2.as_binary().unwrap().to_aligned_vec(), vec![0xF8]);
+    }
+
+    #[test]
+    fn binary_concat_windows() {
+        let mut h = test_heap();
+        let v = Value::binary_concat_in(&mut h, &[0xAB, 0xCD], &[0xEF], 24);
+        let b = v.as_binary().unwrap();
+        assert_eq!(b.byte_window(), &[0xAB, 0xCD, 0xEF][..]);
+        assert_eq!(b.bit_offset(), 0);
+        // A partial tail byte from a shared backing gets its low bits masked.
+        let v2 = Value::binary_concat_in(&mut h, &[0xAB], &[0xFF], 11);
+        let b2 = v2.as_binary().unwrap();
+        assert_eq!(b2.bit_len(), 11);
+        assert_eq!(b2.to_aligned_vec(), vec![0xAB, 0b1110_0000]);
+        let v3 = Value::binary_concat_in(&mut h, &[], &[], 0);
+        assert_eq!(v3.as_binary().unwrap().bit_len(), 0);
     }
 
     #[test]
@@ -2184,5 +2579,66 @@ mod tests {
         let empty_range = Value::range_in(&mut h, i64::MAX, i64::MAX);
         let empty_arr = Value::array_in(&mut h, &[]);
         assert_eq!(hash_value(&empty_range), hash_value(&empty_arr));
+    }
+
+    // The sampled Str/Binary hash must still reject payloads that differ only
+    // outside the prefix sample: the length and the trailing sample are both
+    // folded in, so a flipped last byte or a one-byte extension changes the
+    // hash even for payloads far larger than the sample.
+    #[test]
+    fn sampled_hash_rejects_tail_and_length_differences() {
+        let mut h = test_heap();
+        let long = "x".repeat(10 * BYTES_HASH_SAMPLE);
+        let sa = Value::str_in(&mut h, &(long.clone() + "a"));
+        let sb = Value::str_in(&mut h, &(long.clone() + "b"));
+        let sc = Value::str_in(&mut h, &(long.clone() + "aa"));
+        assert_ne!(hash_value(&sa), hash_value(&sb));
+        assert_ne!(hash_value(&sa), hash_value(&sc));
+
+        let bytes: Vec<u8> = (0..10 * BYTES_HASH_SAMPLE).map(|i| i as u8).collect();
+        let mut flipped = bytes.clone();
+        *flipped.last_mut().unwrap() ^= 0xFF;
+        let ba = Value::binary_in(&mut h, bytes.clone());
+        let bb = Value::binary_in(&mut h, flipped);
+        let mut extended = bytes.clone();
+        extended.push(0);
+        let bc = Value::binary_in(&mut h, extended);
+        assert_ne!(hash_value(&ba), hash_value(&bb));
+        assert_ne!(hash_value(&ba), hash_value(&bc));
+    }
+
+    // Aligned and bit-unaligned views over the same logical bits are
+    // `bits_eq`, so they must hash identically — both for payloads small
+    // enough to hash in full and for ones large enough that the hash samples
+    // a prefix and suffix, with and without a partial trailing byte.
+    #[test]
+    fn unaligned_binary_hashes_like_aligned() {
+        let mut h = test_heap();
+        for (len, dropped_bits) in [(3usize, 0u64), (16, 3), (300, 0), (300, 5)] {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+            let bit_len = (len as u64) * 8 - dropped_bits;
+            let aligned = Value::binary_bits_in(&mut h, bytes.clone(), bit_len);
+            for shift in 1u32..8 {
+                // The same bit stream shifted right by `shift` bits, viewed
+                // at bit_offset = shift: identical logical bits.
+                let mut backing = vec![0u8; len + 1];
+                for (i, &b) in bytes.iter().enumerate() {
+                    backing[i] |= b >> shift;
+                    backing[i + 1] |= b << (8 - shift);
+                }
+                let unaligned =
+                    Value::binary_view_in(&mut h, Arc::from(backing), shift as u64, bit_len);
+                let (a, u) = (aligned.as_binary().unwrap(), unaligned.as_binary().unwrap());
+                assert!(
+                    a.bits_eq(&u),
+                    "len {len} -{dropped_bits} bits, shift {shift}"
+                );
+                assert_eq!(
+                    hash_value(&aligned),
+                    hash_value(&unaligned),
+                    "bits_eq views must hash identically (len {len}, -{dropped_bits} bits, shift {shift})"
+                );
+            }
+        }
     }
 }

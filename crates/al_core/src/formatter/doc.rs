@@ -242,17 +242,12 @@ pub fn delimited_hug(open: &str, mut items: Vec<Doc>, close: &str) -> Doc {
         items.push(last);
         return delimited(open, items, close);
     }
-    let mut body: Vec<Doc> = Vec::new();
-    for item in items {
-        body.push(item);
-        body.push(text(","));
-        body.push(line());
-    }
-    body.push(hug(last));
+    items.push(hug(last));
+    let body = join(items, d![text(","), line()]);
     Doc::Group {
         doc: Box::new(d![
             text(open),
-            nest_if_broken(1, d![line0(), concat(body)]),
+            nest_if_broken(1, d![line0(), body]),
             break_(",", ""),
             text(close),
         ]),

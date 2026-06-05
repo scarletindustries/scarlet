@@ -18,7 +18,8 @@ fn set_bit(out: &mut [u8], i: u64, v: u8) {
 
 /// Extract `take` bits starting at bit offset `at`. Caller has already
 /// bounds-checked `at + take <= bit_len`.
-pub fn slice(bytes: &[u8], at: u64, take: u64) -> Vec<u8> {
+#[cfg(test)]
+fn slice(bytes: &[u8], at: u64, take: u64) -> Vec<u8> {
     let out_bytes = take.div_ceil(8) as usize;
     let mut out = vec![0u8; out_bytes];
     if at.is_multiple_of(8) {
@@ -57,7 +58,7 @@ pub fn append(a: &[u8], a_bits: u64, b: &[u8], b_bits: u64) -> Vec<u8> {
     out
 }
 
-#[inline]
+#[cfg(test)]
 fn mask_tail(out: &mut [u8], bit_len: u64) {
     let rem = (bit_len % 8) as u8;
     if rem != 0
@@ -82,13 +83,25 @@ pub fn inspect(bytes: &[u8], bit_len: u64) -> String {
 /// bit-string. Bits beyond 64 are zero; `num_bits == 0` yields an empty
 /// bit-string. Total: never panics, never errors.
 pub fn from_int(value: i64, num_bits: u64) -> Vec<u8> {
-    let mut out = vec![0u8; num_bits.div_ceil(8) as usize];
-    let v = value as u64;
-    for i in 0..num_bits {
-        let pos = num_bits - 1 - i;
-        let bit = if pos < 64 { ((v >> pos) & 1) as u8 } else { 0 };
-        set_bit(&mut out, i, bit);
+    let n = num_bits.div_ceil(8) as usize;
+    let mut out = vec![0u8; n];
+    if num_bits == 0 {
+        return out;
     }
+    let v = value as u64;
+    let low = if num_bits < 64 {
+        v & ((1u64 << num_bits) - 1)
+    } else {
+        v
+    };
+    // Left-align the low `num_bits` of the value: the segment ends at bit
+    // `num_bits`, leaving `tail` zero pad bits in the last byte. The shifted
+    // value spans at most 71 bits, so the low 16 bytes of a u128 cover it;
+    // any output bytes before that stay zero (bits beyond 64 encode as zero).
+    let tail = (8 * n) as u64 - num_bits;
+    let be = ((low as u128) << tail).to_be_bytes();
+    let take = n.min(16);
+    out[n - take..].copy_from_slice(&be[16 - take..]);
     out
 }
 
@@ -96,6 +109,29 @@ pub fn from_int(value: i64, num_bits: u64) -> Vec<u8> {
 /// Bits outside `[0, bit_len)` read as zero and a width over 64 wraps into
 /// `i64` (consistent with the language's wrapping integer arithmetic). Total.
 pub fn read_int(bytes: &[u8], bit_len: u64, at: u64, num_bits: u64) -> i64 {
+    // Fast path: byte-aligned start and a width that fits one word — covers
+    // the dominant 8/16/32/64-bit segments of byte-aligned binaries with a
+    // clamped byte copy instead of a per-bit loop. `bytes` may be a shared
+    // backing extending past `bit_len` (the view's logical end), so bytes and
+    // bits past `bit_len` must read as zero, never copied through.
+    if at.is_multiple_of(8) && (1..=64).contains(&num_bits) {
+        let mut buf = [0u8; 8];
+        if at < bit_len {
+            let start = (at / 8) as usize;
+            let want = num_bits.div_ceil(8) as usize;
+            let avail =
+                ((bit_len - at).div_ceil(8) as usize).min(bytes.len().saturating_sub(start));
+            let copy = want.min(avail);
+            buf[..copy].copy_from_slice(&bytes[start..start + copy]);
+            // Zero the bits of the last copied byte at or past `bit_len`.
+            let rem = ((bit_len - at) % 8) as u8;
+            if rem != 0 && at + 8 * copy as u64 > bit_len {
+                buf[copy - 1] &= 0xFFu8 << (8 - rem);
+            }
+        }
+        return (u64::from_be_bytes(buf) >> (64 - num_bits)) as i64;
+    }
+    // Misaligned (or zero/over-64-bit width) fallback: one bit per iteration.
     let mut v: u128 = 0;
     for i in 0..num_bits {
         let idx = at + i;
@@ -109,6 +145,19 @@ pub fn read_int(bytes: &[u8], bit_len: u64, at: u64, num_bits: u64) -> i64 {
     v as i64
 }
 
+/// Read the 8 bits starting at bit `at` as one byte. Caller has already
+/// bounds-checked `at + 8 <= bit_len`.
+#[inline]
+fn read_byte(bytes: &[u8], at: u64) -> u8 {
+    let idx = (at / 8) as usize;
+    let sh = (at % 8) as u32;
+    if sh == 0 {
+        bytes[idx]
+    } else {
+        (bytes[idx] << sh) | (bytes[idx + 1] >> (8 - sh))
+    }
+}
+
 /// Decode one UTF-8 codepoint starting at bit `at`. Returns `(codepoint,
 /// bits_consumed)` or `None` if there are too few bits or the bytes are not
 /// valid UTF-8. Total.
@@ -116,7 +165,7 @@ pub fn read_utf8(bytes: &[u8], bit_len: u64, at: u64) -> Option<(u32, u64)> {
     if at + 8 > bit_len {
         return None;
     }
-    let b0 = slice(bytes, at, 8)[0];
+    let b0 = read_byte(bytes, at);
     let len: u64 = if b0 < 0x80 {
         1
     } else if b0 >> 5 == 0b110 {
@@ -132,13 +181,20 @@ pub fn read_utf8(bytes: &[u8], bit_len: u64, at: u64) -> Option<(u32, u64)> {
     if at + nbits > bit_len {
         return None;
     }
-    let buf = slice(bytes, at, nbits);
-    let s = std::str::from_utf8(&buf).ok()?;
-    let mut chars = s.chars();
-    let c = chars.next()?;
-    if chars.next().is_some() {
-        return None;
+    let mut buf = [0u8; 4];
+    let n = len as usize;
+    if at.is_multiple_of(8) {
+        let start = (at / 8) as usize;
+        buf[..n].copy_from_slice(&bytes[start..start + n]);
+    } else {
+        for i in 0..len {
+            buf[i as usize] = read_byte(bytes, at + i * 8);
+        }
     }
+    // The lead byte fixes the sequence length, so a valid `buf[..n]`
+    // contains exactly one codepoint.
+    let s = std::str::from_utf8(&buf[..n]).ok()?;
+    let c = s.chars().next()?;
     Some((c as u32, nbits))
 }
 
@@ -220,6 +276,45 @@ mod tests {
     }
 
     #[test]
+    fn read_int_aligned_word_widths() {
+        let b = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11];
+        assert_eq!(read_int(&b, 72, 0, 16), 0x1234);
+        assert_eq!(read_int(&b, 72, 8, 32), 0x3456789A);
+        assert_eq!(read_int(&b, 72, 0, 64), 0x123456789ABCDEF0u64 as i64);
+        assert_eq!(read_int(&b, 72, 8, 64), 0x3456789ABCDEF011u64 as i64);
+        // Aligned start, sub-byte width.
+        assert_eq!(read_int(&b, 72, 8, 4), 0x3);
+        // Aligned start reading past `bit_len` zero-fills, even though the
+        // backing slice has live bytes there (view semantics).
+        assert_eq!(read_int(&b, 16, 8, 16), 0x3400);
+        assert_eq!(read_int(&b, 12, 0, 16), 0x1230);
+        assert_eq!(read_int(&b, 12, 8, 8), 0x30);
+        assert_eq!(read_int(&b, 72, 72, 8), 0);
+        assert_eq!(read_int(&b, 72, 0, 0), 0);
+    }
+
+    #[test]
+    fn from_int_word_widths() {
+        assert_eq!(
+            from_int(0x123456789ABCDEF0u64 as i64, 64),
+            vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
+        );
+        assert_eq!(from_int(-1, 64), vec![0xFF; 8]);
+        // Width over 64: leading bits are zero.
+        assert_eq!(from_int(-1, 72), [vec![0x00], vec![0xFF; 8]].concat());
+        assert_eq!(from_int(-1, 68), {
+            let mut v = vec![0x0F];
+            v.extend(vec![0xFF; 7]);
+            v.push(0xF0);
+            v
+        });
+        // Sub-byte tail: low bits masked into the top of the last byte.
+        assert_eq!(from_int(0x1FF, 9), vec![0xFF, 0b1000_0000]);
+        // Value wider than the segment is truncated to the low bits.
+        assert_eq!(from_int(0x1AB, 8), vec![0xAB]);
+    }
+
+    #[test]
     fn read_utf8_codepoints() {
         let s = "aé€".as_bytes();
         let bits = (s.len() as u64) * 8;
@@ -231,5 +326,21 @@ mod tests {
         assert_eq!((c2, n2), ('€' as u32, 24));
         assert_eq!(read_utf8(&[0xFF], 8, 0), None);
         assert_eq!(read_utf8(&[], 0, 0), None);
+        // Truncated multi-byte sequence.
+        assert_eq!(read_utf8(&"€".as_bytes()[..2], 16, 0), None);
+    }
+
+    #[test]
+    fn read_utf8_unaligned() {
+        let s = "aé€".as_bytes();
+        let s_bits = (s.len() as u64) * 8;
+        let shifted = append(&[0u8], 4, s, s_bits);
+        let bits = 4 + s_bits;
+        let (c0, n0) = read_utf8(&shifted, bits, 4).unwrap();
+        assert_eq!((c0, n0), ('a' as u32, 8));
+        let (c1, n1) = read_utf8(&shifted, bits, 4 + n0).unwrap();
+        assert_eq!((c1, n1), ('é' as u32, 16));
+        let (c2, n2) = read_utf8(&shifted, bits, 4 + n0 + n1).unwrap();
+        assert_eq!((c2, n2), ('€' as u32, 24));
     }
 }

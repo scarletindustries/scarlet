@@ -23,7 +23,7 @@
 //!   recorded an explicit [`ReferenceKind::Definition`] occurrence for it;
 //!   identical edits are de-duplicated so the two paths can't double-apply.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::module::{ModulePath, ModuleSource, resolve};
@@ -211,21 +211,14 @@ impl ReferenceGraph {
         // Resolve every involved module to a URI up front; refuse the whole
         // rename if any can't be located (a partial rewrite is worse than no
         // rewrite).
-        let mut uris: BTreeMap<ModuleId, String> = BTreeMap::new();
-        let mut unresolved: BTreeSet<ModuleId> = BTreeSet::new();
+        let mut resolved: BTreeMap<ModuleId, Option<String>> = BTreeMap::new();
         for (m, _) in &sites {
-            if uris.contains_key(m) {
-                continue;
-            }
-            match uri_of(*m) {
-                Some(u) => {
-                    uris.insert(*m, u);
-                }
-                None => {
-                    unresolved.insert(*m);
-                }
-            }
+            resolved.entry(*m).or_insert_with(|| uri_of(*m));
         }
+        let unresolved: Vec<ModuleId> = resolved
+            .iter()
+            .filter_map(|(m, u)| u.is_none().then_some(*m))
+            .collect();
         if !unresolved.is_empty() {
             let mods = unresolved
                 .into_iter()
@@ -234,14 +227,19 @@ impl ReferenceGraph {
             return Err(RenameError::Unresolvable(mods));
         }
 
+        // Past the check above every entry is Some, so the build loop can
+        // index unconditionally.
+        let uris: BTreeMap<ModuleId, String> = resolved
+            .into_iter()
+            .filter_map(|(m, u)| u.map(|u| (m, u)))
+            .collect();
+
         let mut changes: BTreeMap<String, Vec<TextEdit>> = BTreeMap::new();
         for (m, span) in sites {
-            if let Some(uri) = uris.get(&m) {
-                changes.entry(uri.clone()).or_default().push(TextEdit {
-                    span,
-                    new_text: new_name.to_string(),
-                });
-            }
+            changes.entry(uris[&m].clone()).or_default().push(TextEdit {
+                span,
+                new_text: new_name.to_string(),
+            });
         }
         for edits in changes.values_mut() {
             edits.sort_by_key(|e| (e.span.start_line, e.span.start_column));
