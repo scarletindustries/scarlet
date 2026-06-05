@@ -2,7 +2,7 @@ use al::bytecode::IncrementalSession;
 use al::reference::EntityKind;
 
 mod common;
-use common::{Project, cursor, parse, run_al, run_outputs};
+use common::{Project, SessionQueryExt, cursor, parse, run_al, run_outputs};
 
 const UTIL_SRC: &str =
     "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";

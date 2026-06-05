@@ -5,7 +5,7 @@ use al::bytecode::IncrementalSession;
 use al::reference::EntityKind;
 
 mod common;
-use common::{Project, cursor, parse};
+use common::{Project, SessionQueryExt, cursor, parse};
 
 const A_SRC: &str = "import ./b\nprintln(b.b())\n";
 const B_SRC: &str = "import ./c\npub fn b() Int { c.val() + 1 }\n";

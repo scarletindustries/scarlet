@@ -13,7 +13,7 @@ use al::reference::EntityKind;
 use al::span::Span;
 
 mod common;
-use common::{Project, cursor, parse};
+use common::{Project, SessionQueryExt, cursor, parse};
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
 const B_SRC: &str = "import ./c\npub fn bridge() Int { c.shared() + 1 }\n";

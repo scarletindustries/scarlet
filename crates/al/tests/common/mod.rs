@@ -237,3 +237,125 @@ impl Drop for Project {
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
+
+use al::bytecode::IncrementalSession;
+use al::module::{self, ModulePath};
+use al::reference::{
+    DefId, Definition, EntityKind, ModuleId, ReferenceGraph, span_contains, span_width,
+};
+use al::span::Span;
+
+/// A document/workspace symbol projected from a graph `Definition`.
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub kind: EntityKind,
+    pub module: ModulePath,
+    pub span: Span,
+}
+
+fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
+    g.module_id_by_key(module_or_uri)
+        .or_else(|| g.module_id_by_key(&module::path_key(&module::main_module())))
+}
+
+fn symbol_of(g: &ReferenceGraph, d: &Definition) -> Option<SymbolInfo> {
+    if !d.is_symbol_listable() {
+        return None;
+    }
+    Some(SymbolInfo {
+        name: d.name.clone(),
+        kind: d.entity(),
+        module: g.module_path(d.defid.module)?.clone(),
+        span: d.span(),
+    })
+}
+
+/// String-keyed LSP-style queries (goto-def / prepare-rename / find-refs /
+/// rename / symbols) answered from [`IncrementalSession::reference_graph`].
+/// The production LSP server queries the graph directly with resolved
+/// `ModuleId`s; these helpers key by module path, falling back to the entry
+/// `main` module for the single-open-file case.
+pub trait SessionQueryExt {
+    fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)>;
+    fn prepare_rename(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(DefId, Span)>;
+    fn references(&self, def: DefId) -> Vec<(ModulePath, Span)>;
+    fn rename(&self, def: DefId) -> Vec<(ModulePath, Span)>;
+    fn document_symbols(&self, module_or_uri: &str) -> Vec<SymbolInfo>;
+    fn workspace_symbols(&self, query: &str) -> Vec<SymbolInfo>;
+}
+
+impl SessionQueryExt for IncrementalSession {
+    /// goto-definition: the occurrence under the cursor resolved (through any
+    /// import alias) to its canonical declaration.
+    fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)> {
+        let g = self.reference_graph();
+        let m = module_for(g, module_or_uri)?;
+        let id = g.canonical(g.def_id_at(m, line, col)?);
+        Some((g.module_path(id.module)?.clone(), id.span))
+    }
+
+    /// The raw (alias-preserving) `DefId` under the cursor plus the span of
+    /// the smallest enclosing occurrence.
+    fn prepare_rename(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(DefId, Span)> {
+        let g = self.reference_graph();
+        let m = module_for(g, module_or_uri)?;
+        let id = g.def_id_at(m, line, col)?;
+        let cursor = g
+            .module_refs(m)
+            .and_then(|mr| {
+                mr.occurrences()
+                    .iter()
+                    .filter(|o| span_contains(&o.span, line, col))
+                    .min_by_key(|o| span_width(&o.span))
+                    .map(|o| o.span)
+            })
+            .unwrap_or(id.span);
+        Some((id, cursor))
+    }
+
+    /// find-references: the declaration (its self-occurrence de-duplicated)
+    /// plus every occurrence workspace-wide.
+    fn references(&self, def: DefId) -> Vec<(ModulePath, Span)> {
+        let g = self.reference_graph();
+        let mut out: Vec<(ModulePath, Span)> = Vec::new();
+        if let Some(p) = g.module_path(def.module) {
+            out.push((p.clone(), def.span));
+        }
+        for rr in g.references_to(def) {
+            if (rr.module, rr.span.start_line, rr.span.start_column)
+                == (def.module, def.span.start_line, def.span.start_column)
+            {
+                continue;
+            }
+            if let Some(p) = g.module_path(rr.module) {
+                out.push((p.clone(), rr.span));
+            }
+        }
+        out
+    }
+
+    /// Every span a rename rewrites: identical to find-references.
+    fn rename(&self, def: DefId) -> Vec<(ModulePath, Span)> {
+        self.references(def)
+    }
+
+    /// Every symbol-listable definition declared in the module.
+    fn document_symbols(&self, module_or_uri: &str) -> Vec<SymbolInfo> {
+        let g = self.reference_graph();
+        match module_for(g, module_or_uri) {
+            Some(m) => g.defs_in(m).filter_map(|d| symbol_of(g, d)).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Case-insensitive substring search over every workspace declaration.
+    fn workspace_symbols(&self, query: &str) -> Vec<SymbolInfo> {
+        let g = self.reference_graph();
+        let needle = query.to_lowercase();
+        g.all_defs()
+            .filter(|d| needle.is_empty() || d.name.to_lowercase().contains(needle.as_str()))
+            .filter_map(|d| symbol_of(g, d))
+            .collect()
+    }
+}
