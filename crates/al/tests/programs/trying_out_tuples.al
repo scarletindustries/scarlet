@@ -8,16 +8,12 @@ fn example(a) {
 	a
 }
 
-println(
-	{
-		a = example(42)
-		a
-	},
-)
+println({
+	a = example(42)
+	a
+})
 
-println(
-	{
-		a = example('a string')
-		a
-	},
-)
+println({
+	a = example('a string')
+	a
+})

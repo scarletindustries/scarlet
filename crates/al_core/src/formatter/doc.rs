@@ -129,7 +129,7 @@ pub fn group(d: Doc) -> Doc {
     group_as(Breaks::Reluctantly, d)
 }
 
-fn group_as(breaks: Breaks, d: Doc) -> Doc {
+pub fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d {
         Doc::Group { .. } | Doc::Text(_) | Doc::Nil => d,
         _ => {
@@ -144,6 +144,20 @@ fn group_as(breaks: Breaks, d: Doc) -> Doc {
             }
         }
     }
+}
+
+/// Whether the doc, used as the trailing element of a line, provides the
+/// line's natural end: it provably hard-breaks, or it is a block-shaped group
+/// that breaks willingly at its opening delimiter. Content before such a doc
+/// never needs to break on its behalf.
+pub fn ends_line(d: &Doc) -> bool {
+    matches!(
+        d,
+        Doc::Group {
+            breaks: Breaks::Willingly,
+            ..
+        }
+    ) || contains_hardline(d)
 }
 
 /// Whether the doc contains a hard newline. Nested groups answer from their

@@ -10,8 +10,8 @@ use crate::token::{Kind, Trivia, TriviaKind};
 
 pub mod doc;
 use doc::{
-    Doc, block, delimited, delimited_hug, delimited_no_trailing, delimited_ws, group, hard_braces,
-    hardline, hardlines, join, line, nil, text,
+    Breaks, Doc, block, delimited, delimited_hug, delimited_no_trailing, delimited_ws, group,
+    group_as, hard_braces, hardline, hardlines, join, line, nest, nil, text,
 };
 
 const MAX_WIDTH: isize = 100;
@@ -709,7 +709,20 @@ impl Formatter {
             } else {
                 self.pattern(&arm.pattern)
             };
-            arms.push(d![head, guard, text(" -> "), self.expr(&arm.body)]);
+            let body = self.expr(&arm.body);
+            // A body that ends the line itself (a block, a match, a hugging
+            // call) hugs the arrow: `Pattern -> match x {`. Anything else gets
+            // a break point after the arrow, so an overflowing arm wraps there
+            // — never inside the pattern, which must stay intact:
+            //
+            //   Pattern(a, b) if guard ->
+            //       wide_body(...)
+            let tail = if doc::ends_line(&body) {
+                d![text(" -> "), body]
+            } else {
+                group_as(Breaks::Willingly, nest(1, d![text(" ->"), line(), body]))
+            };
+            arms.push(d![head, guard, tail]);
         }
         let trail = self.trailing_comments(m.span);
         d![
@@ -1252,6 +1265,42 @@ mod tests {
         let r = format_with_debug(&out, false);
         assert!(!r.has_errors, "formatted output does not re-parse:\n{out}");
         assert_eq!(out, r.output, "formatter not idempotent:\n{out}");
+    }
+
+    #[test]
+    fn long_match_arm_breaks_after_arrow_not_inside_pattern() {
+        // An overflowing arm wraps after the `->` with the body one indent
+        // deeper. The pattern must stay intact — the old layout broke the
+        // pattern's argument list (`Some(\n\tvalue,\n) -> …`).
+        let src = "match x {\n\tSome(value) -> quite_long_function_name(value, another_argument, \
+                   and_yet_another_long_argument_here)\n\telse -> None\n}\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "match x {\n\tSome(value) ->\n\t\tquite_long_function_name(value, another_argument, \
+             and_yet_another_long_argument_here)\n\telse -> None\n}\n"
+        );
+    }
+
+    #[test]
+    fn long_guarded_match_arm_breaks_after_arrow() {
+        // Pattern and guard share the head line; the body wraps after `->`.
+        let src = "match x {\n\tSome(value) if value <= some_limit(value) - tolerance -> \
+                   build_result(value, scale_factor, offset)\n\telse -> None\n}\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "match x {\n\tSome(value) if value <= some_limit(value) - tolerance ->\n\t\t\
+             build_result(value, scale_factor, offset)\n\telse -> None\n}\n"
+        );
+    }
+
+    #[test]
+    fn match_arm_block_body_hugs_arrow() {
+        // A body that ends the line itself (match, if, block) keeps hugging
+        // the arrow instead of wrapping after it.
+        let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> 'zero'\n\t\telse -> 'more'\n\t}\n\telse -> 'none'\n}\n";
+        assert_eq!(fmt(src), src);
     }
 
     #[test]

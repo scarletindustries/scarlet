@@ -214,13 +214,8 @@ fn serve_conn(
 			write_error(sock, status)
 			Ok(Nil)
 		}
-		Done(
-			method,
-			target,
-			version,
-			hdrs,
-			consumed,
-		) -> handle(sock, buf, consumed, method, target, version, hdrs, handler, pending)
+		Done(method, target, version, hdrs, consumed) ->
+			handle(sock, buf, consumed, method, target, version, hdrs, handler, pending)
 	}
 }
 
@@ -259,16 +254,17 @@ fn handle(
 			write_error(sock, status)
 			Ok(Nil)
 		}
-		NoBody -> respond_and_continue(
-			sock,
-			buf,
-			consumed,
-			version,
-			hdrs,
-			build_request(method, target, version, hdrs, body.empty()),
-			handler,
-			pending,
-		)
+		NoBody ->
+			respond_and_continue(
+				sock,
+				buf,
+				consumed,
+				version,
+				hdrs,
+				build_request(method, target, version, hdrs, body.empty()),
+				handler,
+				pending,
+			)
 		Length(n) -> if n > MAX_BODY {
 			flush(sock, pending) or Nil
 			write_error(sock, 413)
@@ -406,26 +402,23 @@ fn chunked_loop(
 		}
 		// Pending responses were flushed before the body was read, so this
 		// request starts a fresh batch.
-		ChunkedDone(
-			decoded,
-			trailers,
-			consumed,
-		) -> respond_and_continue(
-			sock,
-			buf,
-			consumed,
-			version,
-			hdrs,
-			build_request(
-				method,
-				target,
+		ChunkedDone(decoded, trailers, consumed) ->
+			respond_and_continue(
+				sock,
+				buf,
+				consumed,
 				version,
-				with_trailers(hdrs, trailers),
-				body.from_binary(decoded),
-			),
-			handler,
-			[],
-		)
+				hdrs,
+				build_request(
+					method,
+					target,
+					version,
+					with_trailers(hdrs, trailers),
+					body.from_binary(decoded),
+				),
+				handler,
+				[],
+			)
 	}
 }
 

@@ -25,5 +25,9 @@ pub fn min(a Float, b Float) Float {
 }
 
 pub fn abs(f Float) Float {
-	if f < 0.0 { 0.0 - f } else { f }
+	if f < 0.0 {
+		0.0 - f
+	} else {
+		f
+	}
 }

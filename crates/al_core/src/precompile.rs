@@ -159,6 +159,7 @@ mod tests {
             "al/result",
             "al/int",
             "al/float",
+            "al/decimal",
             "al/binary",
             "al/bool",
             "al/net",

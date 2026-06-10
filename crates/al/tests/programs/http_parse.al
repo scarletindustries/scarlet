@@ -258,15 +258,10 @@ old_keep = binary.from_string('GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n'
 old_plain = binary.from_string('GET / HTTP/1.0\r\n\r\n')
 expect = binary.from_string('POST / HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n')
 show_close = fn(label String, req2 Binary) match h1.parse_request(req2, 0) {
-	Done(
-		_,
-		_,
-		version,
-		hdrs,
-		_,
-	) -> println(
-		'${label}: close=${h1.should_close(version, hdrs)} want100=${h1.want_100_continue(hdrs)}',
-	)
+	Done(_, _, version, hdrs, _) ->
+		println(
+			'${label}: close=${h1.should_close(version, hdrs)} want100=${h1.want_100_continue(hdrs)}',
+		)
 	else -> println('${label}: parse failed')
 }
 show_close('http11 default', keep)

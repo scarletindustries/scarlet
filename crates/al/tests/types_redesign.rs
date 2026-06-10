@@ -926,6 +926,90 @@ fn stdlib_option_result_list_int_bool() {
 }
 
 #[test]
+fn stdlib_decimal() {
+    // Construction, exact arithmetic, and scale propagation: add aligns to the
+    // wider scale, mul sums scales, sub is add of the negation.
+    run_outputs(
+        "import al/decimal\n\
+         a = decimal.new(1999, 2)\n\
+         println(decimal.to_string(decimal.add(a, decimal.new(1, 2))))\n\
+         println(decimal.to_string(decimal.sub(a, decimal.new(1, 2))))\n\
+         println(decimal.to_string(decimal.mul(a, decimal.from_int(3))))\n\
+         println(decimal.to_string(decimal.mul(decimal.new(15, 1), decimal.new(25, 2))))\n\
+         println(decimal.units(a))\n\
+         println(decimal.scale(a))\n\
+         println(decimal.to_string(decimal.new(5, 0 - 3)))\n",
+        "20.00\n19.98\n59.97\n0.375\n1999\n2\n5000\n",
+    );
+    // Rounding: HalfEven is the default (ties to even — 0.125 down, 0.135 up),
+    // HalfUp breaks ties away from zero on both signs, Down truncates, and a
+    // wider target scale zero-pads instead of rounding.
+    run_outputs(
+        "import al/decimal.{HalfUp, Down}\n\
+         x = decimal.new(2345, 3)\n\
+         println(decimal.to_string(decimal.round(x, 2)))\n\
+         println(decimal.to_string(decimal.round(decimal.new(125, 3), 2)))\n\
+         println(decimal.to_string(decimal.round(decimal.new(135, 3), 2)))\n\
+         println(decimal.to_string(decimal.round_with(x, 2, HalfUp)))\n\
+         println(decimal.to_string(decimal.round_with(decimal.neg(x), 2, HalfUp)))\n\
+         println(decimal.to_string(decimal.round_with(x, 2, Down)))\n\
+         println(decimal.to_string(decimal.round(x, 5)))\n",
+        "2.34\n0.12\n0.14\n2.35\n-2.35\n2.34\n2.34500\n",
+    );
+    // Division takes an explicit result scale and is None on a zero divisor.
+    run_outputs(
+        "import al/decimal\n\
+         import al/option\n\
+         bill = decimal.new(10000, 2)\n\
+         println(option.map(decimal.div(bill, decimal.from_int(3), 2), decimal.to_string))\n\
+         println(option.map(decimal.div(decimal.from_int(1), decimal.from_int(8), 4), decimal.to_string))\n\
+         println(decimal.div(bill, decimal.from_int(0), 2))\n",
+        "Some(33.33)\nSome(0.1250)\nNone\n",
+    );
+    // Numeric comparison is scale-blind (1.5 == 1.500) even though the
+    // representation differs; normalize strips the trailing zeros.
+    run_outputs(
+        "import al/decimal\n\
+         a = decimal.new(15, 1)\n\
+         b = decimal.new(1500, 3)\n\
+         println(decimal.eq(a, b))\n\
+         println(decimal.compare(decimal.new(0 - 1, 2), decimal.from_int(0)))\n\
+         println(decimal.lt(a, decimal.new(16, 1)))\n\
+         println(decimal.to_string(decimal.max(a, decimal.new(2, 0))))\n\
+         println(decimal.scale(decimal.normalize(b)))\n\
+         println(decimal.is_negative(decimal.neg(a)))\n\
+         println(decimal.is_zero(decimal.new(0, 5)))\n",
+        "True\n-1\nTrue\n2\n1\nTrue\nTrue\n",
+    );
+    // parse round-trips through to_string, keeps the written scale, handles
+    // signs, and rejects malformed or Int-overflowing input instead of
+    // wrapping. -0.05 exercises the sign-on-zero-whole-part case.
+    run_outputs(
+        "import al/decimal\n\
+         import al/option\n\
+         println(option.map(decimal.parse('19.99'), decimal.to_string))\n\
+         println(option.map(decimal.parse('-0.05'), decimal.to_string))\n\
+         println(option.map(decimal.parse('+1.50'), decimal.to_string))\n\
+         println(option.map(decimal.parse('42'), decimal.to_string))\n\
+         println(decimal.parse('1.'))\n\
+         println(decimal.parse('.5'))\n\
+         println(decimal.parse('1.2.3'))\n\
+         println(decimal.parse(''))\n\
+         println(decimal.parse('-'))\n\
+         println(decimal.parse('9223372036854775807.99'))\n\
+         println(option.map(decimal.parse('92233720368547758.07'), decimal.units))\n",
+        "Some(19.99)\nSome(-0.05)\nSome(1.50)\nSome(42)\nNone\nNone\nNone\nNone\nNone\nNone\nSome(9223372036854775807)\n",
+    );
+    // Float bridges are explicitly lossy conveniences.
+    run_outputs(
+        "import al/decimal\n\
+         println(decimal.to_float(decimal.new(25, 1)))\n\
+         println(decimal.to_string(decimal.from_float(2.5, 2)))\n",
+        "2.5\n2.50\n",
+    );
+}
+
+#[test]
 fn stdlib_binary() {
     run_outputs(
         "import al/binary\n\

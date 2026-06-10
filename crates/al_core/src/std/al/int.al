@@ -10,9 +10,19 @@ pub fn min(a Int, b Int) Int {
 }
 
 pub fn abs(n Int) Int {
-	if n < 0 { 0 - n } else { n }
+	if n < 0 {
+		0 - n
+	} else {
+		n
+	}
 }
 
 pub fn clamp(n Int, lo Int, hi Int) Int {
-	if n < lo { lo } else if n > hi { hi } else { n }
+	if n < lo {
+		lo
+	} else if n > hi {
+		hi
+	} else {
+		n
+	}
 }

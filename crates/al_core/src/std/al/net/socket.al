@@ -28,11 +28,8 @@ fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError)
 		else -> match read(c, remaining) {
 			Ok(data) -> match binary.byte_size(data) {
 				0 -> Err(UnexpectedEof)
-				else -> read_exact_loop(
-					c,
-					remaining - binary.byte_size(data),
-					binary.append(acc, data),
-				)
+				else ->
+					read_exact_loop(c, remaining - binary.byte_size(data), binary.append(acc, data))
 			}
 			Err(e) -> Err(e)
 		}
