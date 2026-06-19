@@ -712,7 +712,7 @@ pub struct IncrementalSession {
     seed: Watermark,
     /// Watermark immediately before the previous entry-body analysis, i.e.
     /// after every imported module had been compiled. The next `check()`
-    /// truncates here first (discarding only the previous entry's own arena
+    /// truncates here first (discarding only the previous entry's own heap
     /// contributions) before deciding whether any module needs invalidating.
     last_entry: Option<Watermark>,
     /// Workspace reference graph, rebuilt from scratch at the end of every

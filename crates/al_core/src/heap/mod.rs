@@ -1,109 +1,72 @@
-//! Per-process memory: arena heaps and the copying collector.
+//! Per-process memory: mimalloc storage and non-atomic reference counting.
 //!
-//! This module is the al runtime's entire memory model. It exists so that a
-//! lightweight process *owns* all of its values outright — which is what
-//! lets a suspended process migrate between scheduler threads as a plain
-//! Rust move, and what lets process death free everything in one shot.
+//! This module is the al runtime's memory model. A lightweight process *owns*
+//! all of its values outright — which is what lets a suspended process migrate
+//! between scheduler threads as a plain Rust move.
 //!
 //! # The model in one diagram
 //!
 //! ```text
-//!   Process ──owns──> ProcHeap
-//!                      ├─ young from-space   [ live ██████ | free ... ]  ← alloc bumps here
-//!                      ├─ young to-space     [ empty until a minor GC ]
-//!                      ├─ old (tenured)      [ seg ][ seg ][ seg ]
-//!                      └─ off-heap list      Binary boxes that own an Arc<[u8]>
+//!   Process ──owns──> ProcHeap (a zero-sized allocator marker)
+//!                          │
+//!                          └─ allocates from mimalloc's per-thread DEFAULT heap
+//!                             (mi_malloc); each object carries a refcount word:
+//!                             [ rc ][ header ][ payload… ]
 //!
-//!   stack / frames ──point into──> the arena spaces      (the GC root set)
-//!   constants / globals ──live in──> the frozen area     (never collected,
-//!                                                         shared by all threads,
-//!                                                         skipped by every GC)
+//!   stack / frames ──hold owned──> Value handles (each edge is one count)
+//!   constants / globals ──live in──> the frozen area (immortal, never counted,
+//!                                                     shared by every thread)
 //! ```
 //!
-//! # The six ideas (everything else is consequence)
+//! # The ideas (everything else is consequence)
 //!
-//! 1. **A `Value` is a tagged word.** Immediates (ints, floats, …) are
-//!    self-contained; heap values carry a raw pointer into an arena or the
-//!    frozen area. No `Rc`, no refcounts — cloning a `Value` copies a `u64`.
-//!    (Owned by `bytecode::value`; this module consumes its layout hooks.)
-//! 2. **Allocation is a pointer bump** in a space the process owns
-//!    ([`space`]).
-//! 3. **Reclamation is evacuation**: copy what is still reachable to a fresh
-//!    space, drop the rest by never visiting it. One Cheney loop,
-//!    [`copy::copy_graph`], serves minor GC, major GC, spawn, and frozen
-//!    publish — they differ only in source ranges, destination, and whether
-//!    the source survives ([`copy`], destinations in [`dest`]).
-//! 4. **al values are immutable and acyclic**, so an object can only
-//!    reference older objects. Old→young pointers are *impossible*: the
-//!    generational collector needs no write barriers and no remembered
-//!    sets, and tenuring by address (the high-water mark) is sound
-//!    ([`dest::MinorDest`]).
-//! 5. **The rooting rule**: the collector moves objects and can only fix
-//!    references it can see — the operand stack and frames. So every opcode
-//!    reserves its allocation up front (`ensure(need)`) *while its operands
-//!    are still on the VM stack*, then pops and allocates collection-free.
-//!    Enforced by `AL_GC_STRESS=1` (collect at every safepoint) and a debug
-//!    watermark in `alloc_young` ([`flags`], [`proc_heap`]).
-//! 6. **What the arena cannot own lives on lists the collector sweeps**:
-//!    `Binary` bytes sit off-heap behind an `Arc` whose count the off-heap
-//!    list releases for dead boxes — Cheney runs no destructors
-//!    ([`copy::sweep_off_heap_list`]).
+//! 1. **A `Value` is a tagged word** ([`crate::bytecode::value`]). Immediates
+//!    (ints, floats, …) are self-contained; a heap value carries a raw pointer
+//!    to an object's header. A `Value` is **not `Copy`**: `Clone` increments
+//!    the object's refcount, `Drop` decrements it and frees at zero.
+//! 2. **Allocation is `mi_malloc`** from the calling thread's default heap, with
+//!    a refcount word prefixed before the header ([`mimheap`]). There is no
+//!    per-process `mi_heap_t`: a heap is bound to its creating thread, so a
+//!    per-process heap built on the spawner and run on a worker would be
+//!    allocated off-thread (UB). `mi_free` is cross-thread safe, so an object
+//!    allocated on one core and freed on another after a migration is fine.
+//! 3. **Reclamation is reference counting.** An object is freed the instant its
+//!    last referrer drops; a process's whole graph is reclaimed as its roots
+//!    (stack, frames, result) drop at death. Freeing walks an explicit work
+//!    list ([`crate::bytecode::value`]), never native `Drop` recursion, so a
+//!    deep list cannot overflow the stack.
+//! 4. **al values are immutable and acyclic by construction**, so reference
+//!    counting is *complete* — no cycle can form, so there is no cycle
+//!    collector. (Closures capture by value; self-recursion uses the live call
+//!    frame; mutual recursion resolves through the immortal global table.)
+//! 5. **Two things are shared and keep their own treatment**: frozen/global
+//!    values are *immortal* (the header's immortal bit; reference counting skips
+//!    them), and a `Binary`'s bytes sit behind an `Arc<[u8]>` (atomic, shared
+//!    cross-process) whose count is released when the box's count hits zero.
 //!
 //! # Reading order
 //!
 //! | file           | the one thing it does                                  |
 //! |----------------|--------------------------------------------------------|
-//! | [`space`]      | own words; bump-allocate them                          |
-//! | [`roots`]      | say what is live ([`Roots`]) and what is movable       |
-//! |                | ([`Classifier`])                                       |
-//! | [`copy`]       | the Cheney loop: evacuate, forward, preserve sharing   |
-//! | [`dest`]       | the four places a copy can land                        |
-//! | [`proc_heap`]  | policy: when to collect / tenure / grow / shrink;      |
-//! |                | spawn and frozen publish                               |
-//! | [`sizing`]     | how big the next space is                              |
-//! | [`flags`]      | `AL_GC_STRESS`, `AL_HEAP_STATS`                        |
+//! | [`mimheap`]    | allocate/free one object via mimalloc; spawn + freeze  |
+//! |                | graph copies                                           |
+//! | [`proc_heap`]  | the per-process allocator handle (`ProcHeap`)          |
 //!
-//! # The life of a value
-//!
-//! `"a" ++ "b"` in a process: the concat opcode peeks both lengths (operands
-//! still rooted), calls `ensure(need)` — which may run a minor GC, moving
-//! both strings and rewriting the stack slots that point at them — then pops
-//! the (fresh) pointers, bump-allocates the result, and pushes it. If the
-//! result survives until the next minor it is evacuated to the to-space; if
-//! it survives another it tenures into old; if the process spawns a closure
-//! capturing it, `spawn_seed` clones it into the child's fresh arena; if it
-//! is published as a global, `publish_frozen` clones it into the frozen
-//! area where every thread can read it forever. If none of those: it is
-//! never visited again, and the next collection reclaims its space by
-//! omission.
+//! The refcount semantics themselves (`Clone`/`Drop`, the free-at-zero work
+//! list, `store_child`/`move_child`) live in [`crate::bytecode::value`].
 
-mod copy;
-mod dest;
-mod flags;
 mod mimheap;
 mod proc_heap;
-mod roots;
-mod sizing;
-mod space;
 
-#[cfg(test)]
-mod tests;
+// The crate-facing surface is deliberately small: the VM owns a `ProcHeap`,
+// allocates objects through it, and lets reference counting reclaim them.
+pub use proc_heap::ProcHeap;
 
-// The crate-facing surface is deliberately this small: the VM owns a
-// `ProcHeap` and implements `Roots` over its operand stack and frames —
-// nothing else. `Classifier`, `HeapStats`, and `Space` are public only
-// because they appear in that surface's signatures (`ProcHeap::classifier`,
-// `ProcHeap::stats`, `Classifier::push_space`). The copy engine, the
-// destinations, sizing, and the env flags are internal machinery; submodules
-// reach them by path, not through re-exports.
-pub use proc_heap::{HeapStats, ProcHeap};
-pub use roots::{Classifier, Roots};
-pub use space::Space;
-
-// A `ProcHeap` crosses OS threads inside a migrating `Process`; migration is
-// a plain move, which is only sound because the heap owns its memory.
+// A `ProcHeap` crosses OS threads inside a migrating `Process`. It is a
+// zero-sized allocator marker, so the move is trivially sound; the objects it
+// allocated travel as plain `Value` words and are freed (via `mi_free`, which
+// is cross-thread safe) wherever the process next runs.
 const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<ProcHeap>();
-    assert_send::<Space>();
 };

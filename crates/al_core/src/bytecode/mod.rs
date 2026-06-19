@@ -21,11 +21,9 @@
 //!    scheduler thread takes a plain `clone()` of the shared program — no
 //!    owned mirror, no per-thread constant re-hydration.
 //!
-//! Adding an opcode touches three places: emission in [`compiler`],
-//! dispatch in the VM's interpreter loop, and — if the op allocates — the
-//! VM's ensure-budget table, which must reserve the op's worst-case
-//! allocation while its operands are still rooted on the stack (the
-//! rooting rule).
+//! Adding an opcode touches two places: emission in [`compiler`] and
+//! dispatch in the VM's interpreter loop. Heap values the op builds are
+//! reference counted, so it simply allocates its result.
 //!
 //! # Reading order
 //!
@@ -57,7 +55,8 @@ pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use value::{
     Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapBacking, MapRef, SeqRef, SocketValue, Value,
-    ValueView, enum_hash_with_payload, enum_name_prefix_hash, hash_value, values_equal,
+    ValueView, enum_hash_with_payload, enum_name_prefix_hash, freed_objects_pending, hash_value,
+    take_freed_objects, values_equal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

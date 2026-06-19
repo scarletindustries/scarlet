@@ -1242,10 +1242,8 @@ impl InferEngine {
                             quantified.push(id);
                         }
                     }
-                    TyVarState::Generic { id: gid, .. } => {
-                        if !quantified.contains(&gid) {
-                            quantified.push(gid);
-                        }
+                    TyVarState::Generic { id: gid, .. } if !quantified.contains(&gid) => {
+                        quantified.push(gid);
                     }
                     _ => {}
                 }

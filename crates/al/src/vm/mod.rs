@@ -5,21 +5,21 @@
 //! scheduler thread — whose dispatch loop (`execute_slice`) runs thousands
 //! of cooperatively preempted processes over a handful of OS threads
 //! without ever letting one block another. The memory those processes run
-//! on is [`al_core::heap`]'s: each process owns an arena, and this module
-//! is the opcode-side counterpart of that design — it decides when to run,
-//! park, move, and collect, while the heap decides how to allocate and
-//! evacuate. The scheduling shape: reduction budgets, run
+//! on is [`al_core::heap`]'s: each process owns its reference-counted value
+//! graph, and this module is the opcode-side counterpart of that design — it
+//! decides when to run, park, and move a process, while the heap decides how
+//! to allocate and free. The scheduling shape: reduction budgets, run
 //! queues, an injector for spawns, work stealing, and donation-based
 //! migration.
 //!
 //! # The process lifecycle in one diagram
 //!
 //! ```text
-//!   spawn(f) — the closure graph is copied into a fresh mini-arena
+//!   spawn(f) — the closure graph is deep-copied into a fresh heap
 //!      │
 //!      ▼
 //!   SEED ──────── submit ───────> injector / a scheduler's inbox
-//!      │  take_inbound / steal_inbound: the receiver adopts the arena wholesale
+//!      │  take_inbound / steal_inbound: the receiver adopts the process whole
 //!      ▼
 //!   RUNNABLE   run_queue, round-robin ◄────────────────────────────┐
 //!      │  resume: the process's heap/stack/frames swap into the VM │
@@ -37,8 +37,8 @@
 //!      │      Process moves, heap and all, fds re-homed, into the  │
 //!      │      peer's inbox and onto its run queue) ────────────────┘
 //!      ▼
-//!   DONE       the result is its top-of-stack; the arena drops with
-//!              the process (main's is stashed until run() returns it)
+//!   DONE       the result is its top-of-stack; the process's values are
+//!              freed as it drops (main's result is stashed until run() returns)
 //! ```
 //!
 //! # The six ideas (everything else is consequence)
@@ -50,10 +50,8 @@
 //!    `suspend_current`/`resume` just swap them.
 //! 2. **Preemption is budgeted.** A slice runs until
 //!    its [`REDUCTION_BUDGET`] is spent: a call costs one reduction, a
-//!    syscall [`IO_REDUCTION_COST`], collection work one per
-//!    [`gc::GC_WORDS_PER_REDUCTION`] words copied — so accept loops and
-//!    GC-heavy processes are preempted like everything else, and no
-//!    process rides free.
+//!    syscall [`IO_REDUCTION_COST`] — so accept loops are preempted like
+//!    everything else, and no process rides free.
 //! 3. **Blocking parks the process, never the thread.** An op that would
 //!    block returns [`Step::Parked`] carrying a [`Wait`] — socket
 //!    interests, a deadline, and/or a blocking-pool job. The scheduler
@@ -63,21 +61,21 @@
 //! 4. **Work moves between schedulers as owned memory.** The runtime
 //!    ([`sched`]) exists from VM construction; the first spawn summons its
 //!    worker threads, one scheduler per core. Each spawn copies its
-//!    closure graph into a fresh mini-arena and submits the result as a
+//!    closure graph into a fresh heap and submits the result as a
 //!    [`sched::Seed`]; load balancing donates whole queued processes the
 //!    same way ([`migrate`]). Plain moves, in both cases — the receiver
-//!    adopts the arriving memory as-is.
-//! 5. **The rooting rule.** Every allocating opcode computes its
-//!    worst-case need from the [`cost`] tables BEFORE popping operands —
-//!    while they still sit on the VM stack, where the collector can see
-//!    and rewrite them — calls `ensure(need)`, the one safepoint
-//!    ([`gc`]), and only then pops and allocates, collection-free.
-//! 6. **A value and its arena travel together.** A process owns every
+//!    adopts the arriving values as-is.
+//! 5. **Memory is reference-counted.** A `Value` is not `Copy`: `Clone`
+//!    increments an object's count, `Drop` frees it at zero (see
+//!    [`al_core::heap`]). Nothing moves, so there is no rooting rule and no
+//!    allocation reservation — an opcode just pops its operands and builds
+//!    its result. A large cascading free is billed to the running process at
+//!    the next call checkpoint ([`gc`]) so it cannot stall the scheduler.
+//! 6. **A value and its memory travel together.** A process owns every
 //!    heap value it can reach, which is what makes seeds, migrants, and
 //!    suspended processes `Send` by construction — and why main's result
 //!    is stashed as a `(value, heap)` pair until `run()`'s caller is done
-//!    with it. No value is ever handed anywhere without the memory it
-//!    points into.
+//!    with it.
 //!
 //! # Reading order
 //!
@@ -88,10 +86,8 @@
 //! |                   | donation policy, spawn/seed glue                   |
 //! | [`exec`]          | the dispatch loop (`execute_slice`): inline arms,  |
 //! |                   | family-handler routing, stack + constructor helpers|
-//! | [`cost`]          | the opcode side of the rooting rule: worst-case    |
-//! |                   | word budgets for everything the VM allocates       |
-//! | [`gc`]            | the collection side: `ensure`/`collect`, the root  |
-//! |                   | set, GC reduction charging, budget peeks           |
+//! | [`gc`]            | the call-checkpoint reclamation-fairness seam and  |
+//! |                   | the operand-peek helper                            |
 //! | [`collections`]   | array/tuple/range/field-access opcodes             |
 //! | [`text`]          | string/binary builtins and HTTP-scanner opcodes    |
 //! | [`io`]            | file/socket/DNS/sleep/spawn opcodes — everything   |
@@ -115,20 +111,20 @@
 //!
 //! # The life of a process
 //!
-//! `spawn(handler)` in a server: the opcode copies the handler closure's
-//! graph into a mini-arena sized to fit and submits the pair as a seed,
-//! waking an idle scheduler. That scheduler adopts the arena as the
-//! child's young space, frames the closure, and resumes it; the child's
+//! `spawn(handler)` in a server: the opcode deep-copies the handler closure's
+//! graph into a fresh heap and submits the pair as a seed,
+//! waking an idle scheduler. That scheduler adopts the process, frames the
+//! closure, and resumes it; the child's
 //! `accept` would block, so it parks — interests armed in the poller, the
 //! suspended [`Process`] shelved under a wait id — and the scheduler runs
 //! its next process. A connection arrives: the poller wakes the process,
 //! the accept re-runs and succeeds. Later it exhausts a reduction budget
 //! mid-computation and yields to the back of the run queue; a peer
 //! scheduler goes idle, and at this scheduler's next yield it claims
-//! that peer and donates the queued process — arena, stack, frames,
+//! that peer and donates the queued process — values, stack, frames,
 //! socket fds — which moves over in one piece and keeps running there.
 //! Its final `Ret` leaves the result on top of the stack: the process
-//! is done, its arena is dropped in one shot, and the runtime's live
+//! is done, its values are freed as it drops, and the runtime's live
 //! count falls. When the count reaches zero, `acquire_work` returns
 //! false on every scheduler, the workers exit, and scheduler 0 hands
 //! main's stashed result back to `run()`'s caller.
@@ -148,7 +144,6 @@ use smallvec::SmallVec;
 
 mod binary;
 mod collections;
-mod cost;
 mod exec;
 mod freeze;
 mod gc;
@@ -164,7 +159,6 @@ mod templates;
 mod tests;
 mod text;
 
-use gc::GcDebt;
 pub use inspect::inspect;
 use inspect::{f64_str, value_type_name};
 use migrate::Migrant;
@@ -230,10 +224,13 @@ enum Step {
 /// construction — migrating it to another scheduler is a plain move of this
 /// struct, heap and all.
 struct Process {
-    heap: ProcHeap,
+    // Field order is not load-bearing: `heap` is a zero-sized allocator marker
+    // (allocation goes to mimalloc's per-thread default heap), and `mi_free` is
+    // global and thread-safe, so a `Value` dropping after `heap` is fine.
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     is_main: bool,
+    heap: ProcHeap,
 }
 
 // A migrant crosses an OS-thread boundary as a plain move; this must hold by
@@ -266,21 +263,23 @@ pub struct VM {
     /// into the shared `program.frozen`).
     program: Program,
     templates: PreludeTemplates,
-    /// Builder over the program's frozen area, kept for runtime freezing of
-    /// stdlib templates (`stdlib_template`) built on demand (error values).
-    frozen: FrozenBuilder,
     /// Frozen stdlib enum templates memoized by `VariantTemplate` identity.
     template_cache: HashMap<usize, EnumTemplate>,
+    /// Builder over the program's frozen area, kept for runtime freezing of
+    /// stdlib templates (`stdlib_template`) built on demand (error values).
+    /// Field order is not load-bearing: frozen `Value`s are immortal, so their
+    /// `Drop` never reads the frozen area (see `VALUE_IMMORTAL`).
+    frozen: FrozenBuilder,
+    stack: Vec<Value>,
+    frames: Vec<CallFrame>,
     /// The *running* process's arena. Swapped in/out with `stack`/`frames` on
     /// every context switch (`suspend_current`/`resume`); between processes it
     /// is the empty placeholder (`ProcHeap::default()`), which owns nothing.
+    ///
+    /// Declared AFTER `stack`/`frames`: under reference counting their `Value`s
+    /// free into this heap on drop, so the heap must outlive them at teardown
+    /// (Rust drops fields top-to-bottom).
     heap: ProcHeap,
-    stack: Vec<Value>,
-    frames: Vec<CallFrame>,
-    /// Reductions owed for collection work. The slot is scheduler-wide, but
-    /// the debt never crosses processes: `execute_slice` drops any leftover
-    /// at slice entry. See `VM::collect`/`VM::take_gc_reds`.
-    gc: GcDebt,
     /// Memoized field-label tuples, one entry per non-prelude ctor site,
     /// keyed by the address of that site's pooled labels-array constant. The
     /// labels are statically constant per constructor, so each site freezes
@@ -398,7 +397,6 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         heap: ProcHeap::default(),
         stack: Vec::new(),
         frames: Vec::new(),
-        gc: GcDebt::default(),
         label_cache: HashMap::new(),
         next_socket_id: 1,
         tcp_listeners: HashMap::new(),
@@ -467,7 +465,6 @@ impl VM {
         // closure value for it so every frame is shaped the same. Budgeted
         // like any other allocation — the stack and frames are empty, so
         // the root set is trivially consistent.
-        self.ensure(cost::closure(0));
         let entry_closure = Value::closure_in(&mut self.heap, entry, &[]);
 
         self.frames.push(CallFrame {
@@ -949,7 +946,7 @@ impl VM {
     /// accepted on, keeping the connection's buffers and fd local to one core.
     fn spawn_local(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
-        // Copy the closure graph into the child's own arena (processes share no
+        // Copy the closure graph into the child's own heap (processes share no
         // heap), but leave captured fds in place — parent and child run on the
         // same scheduler and reference the same per-scheduler socket tables.
         let (heap, root) = self.heap.spawn_copy(&f);
@@ -986,8 +983,8 @@ impl VM {
         Ok(())
     }
 
-    /// Create a process whose initial young space is `heap` — the seeded
-    /// mini-arena a cross-scheduler spawn copied the closure graph into. The
+    /// Create a process whose initial heap is `heap` — the seeded
+    /// heap a cross-scheduler spawn copied the closure graph into. The
     /// closure `f` points into that heap.
     fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) -> VmResult<()> {
         let Some(cl) = f.as_closure() else {
@@ -1016,25 +1013,23 @@ impl VM {
         Ok(())
     }
 
-    /// Copy a closure into a seed the child adopts wholesale: a fresh
-    /// mini-arena sized to the closure's graph, filled by `copy_graph`
-    /// spawn-side (sharing preserved via forwarding pointers; no value is
-    /// shared with this scheduler afterwards), so handing the seed to another
-    /// OS thread is a plain move. `Binary` `Arc` backings are shared
-    /// zero-copy — only the arena box is copied, never the bytes. Captured
-    /// sockets transfer with it: connections move (this scheduler loses
-    /// them), listeners are dup'd so both sides keep accepting.
+    /// Copy a closure into a seed the child adopts wholesale: a fresh heap
+    /// holding a deep copy of the closure's graph (sharing preserved via a
+    /// `src → dst` map; no value is shared with this scheduler afterwards), so
+    /// handing the seed to another OS thread is a plain move. `Binary` `Arc`
+    /// backings are shared zero-copy — only the box is copied, never the bytes.
+    /// Captured sockets transfer with it: connections move (this scheduler
+    /// loses them), listeners are dup'd so both sides keep accepting.
     fn build_seed(&mut self, f: &Value) -> VmResult<Seed> {
         // The heap copy knows nothing about fd tables, so the captured
         // sockets are gathered by their own walk and moved/dup'd alongside
-        // the arena.
+        // the values.
         let mut captured_sockets = Vec::new();
         migrate::for_each_socket(f, &mut |s| captured_sockets.push(s.id));
 
-        // The child's initial young space: a fresh arena sized to the
-        // closure graph, with the graph evacuated into it. `root` points
-        // into that arena, so `(heap, root)` is self-contained and `Send`
-        // as a unit.
+        // The child's initial heap: a fresh heap holding a deep copy of the
+        // closure graph. `root` points into it, so `(heap, root)` is
+        // self-contained and `Send` as a unit.
         let (heap, root) = self.heap.spawn_copy(f);
 
         // Same fd transfer as donation: captured connections move to the
@@ -1051,7 +1046,7 @@ impl VM {
 
     /// Build a runnable process on this scheduler from a seed: adopt its
     /// sockets, adopt its heap (the spawn-side copy of the closure graph) as
-    /// the child's initial young space, and queue it. Top-level bindings come
+    /// the child's initial heap, and queue it. Top-level bindings come
     /// from the global area (synced in `admit`, the intake gate every arrival
     /// path — inbox drain, overflow pickup, steal — funnels through), so the
     /// seed itself carries none.

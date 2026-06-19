@@ -1,5 +1,8 @@
-// Counts word frequencies in a paragraph. AL has no map type, so the tallies
-// live in an assoc list: an Array((String, Int)) updated by recursion.
+// Counts word frequencies in a paragraph, building the tallies from scratch as
+// an assoc list — an Array((String, Int)) updated by recursion — to show the
+// pattern-matching style. For the same task with the built-in map type, see
+// `maps.al`; assoc lists still earn their keep when first-appearance order
+// matters, as it does here.
 
 import al/list
 import al/string

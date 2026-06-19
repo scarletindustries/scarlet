@@ -1,13 +1,12 @@
 //! The string and binary builtins: `strings.*`, `binary.*`, the binary
 //! pattern-match segment ops, and the HTTP/1.1 protocol scanners — the
-//! typed, budget-aware stack layer over [`super::binary`] (bit math) and
+//! typed stack layer over [`super::binary`] (bit math) and
 //! [`super::http`] (byte scanning).
 //!
 //! Layering: this file owns the *opcode contract* — operand order, typed
-//! pops, worst-case `ensure` budgets computed while operands are still
-//! rooted (the rooting rule), and result shape (`Ok`/`Err`/`Option`
-//! wrappers, zero-copy views) — while the byte work itself lives in the
-//! VM-free helpers it calls. Nothing here parks a process and nothing
+//! pops, and result shape (`Ok`/`Err`/`Option` wrappers, zero-copy views)
+//! — while the byte work itself lives in the VM-free helpers it calls.
+//! Nothing here parks a process and nothing
 //! touches `ip`: every op is a pure stack transformation, one method per
 //! opcode, called directly from the dispatch loop's exhaustive match.
 //!
@@ -22,20 +21,12 @@
 
 use al_core::bytecode::Value;
 
-use super::{VM, VmResult, bin_ref, binary, cost, http, str_ref};
+use super::{VM, VmResult, bin_ref, binary, http, str_ref};
 
 impl VM {
     // --- String builtins -------------------------------------------------------
 
     pub(super) fn str_split(&mut self) -> VmResult<()> {
-        // Worst case while both operands are rooted: every byte of
-        // `s` becomes its own part (≤ len+1 parts), part bytes sum
-        // to at most len, and each part's word count rounds up by
-        // at most one word — hence the `str(0) + 1` per part.
-        let slen = self.peek_str_len(1);
-        let pmax = slen + 1;
-        let need = cost::seq_build(pmax) + pmax * (cost::str(0) + 1) + cost::bytes(slen);
-        self.ensure(need);
         let delim_v = self.pop_str("strings.split")?;
         let s_v = self.pop_str("strings.split")?;
         let (delim, s) = (str_ref(&delim_v), str_ref(&s_v));
@@ -73,9 +64,6 @@ impl VM {
     }
 
     pub(super) fn str_trim(&mut self) -> VmResult<()> {
-        // The trimmed result is at most the operand's length.
-        let need = cost::str(self.peek_str_len(0));
-        self.ensure(need);
         let s_v = self.pop_str("strings.trim")?;
         let trimmed = str_ref(&s_v).trim();
         let v = Value::str_in(&mut self.heap, trimmed);
@@ -85,7 +73,6 @@ impl VM {
 
     pub(super) fn int_to_string(&mut self) -> VmResult<()> {
         // i64::MIN renders in 20 bytes; that is the ceiling.
-        self.ensure(cost::str(20));
         let n = self.pop_int("int.to_string")?;
         let digits = int_to_ascii(n, 10);
         let v = Value::str_in(&mut self.heap, digits.as_str());
@@ -97,7 +84,6 @@ impl VM {
 
     pub(super) fn bin_from_string(&mut self) -> VmResult<()> {
         // The bytes are copied off-heap; only the box is arena.
-        self.ensure(cost::BINARY);
         let s_v = self.pop_str("binary.from_string")?;
         let bytes = str_ref(&s_v).as_bytes().to_vec();
         let v = Value::binary_in(&mut self.heap, bytes);
@@ -107,7 +93,6 @@ impl VM {
 
     pub(super) fn bin_to_string(&mut self) -> VmResult<()> {
         // Ok(Str) of the binary's byte length, or Err(Nil).
-        self.ensure(cost::str(self.peek_bin_len(0)) + cost::WRAP);
         let bin_v = self.pop_binary("binary.to_string")?;
         let bin = bin_ref(&bin_v);
         let v = if !bin.bit_len().is_multiple_of(8) {
@@ -146,7 +131,6 @@ impl VM {
 
     pub(super) fn bin_slice(&mut self) -> VmResult<()> {
         // Ok(view box) or Err(Nil); the bytes are shared.
-        self.ensure(cost::BINARY + cost::WRAP);
         let take = self.pop_int("binary.slice")?;
         let at = self.pop_int("binary.slice")?;
         let bin_v = self.pop_binary("binary.slice")?;
@@ -166,7 +150,6 @@ impl VM {
 
     pub(super) fn bin_append(&mut self) -> VmResult<()> {
         // One fresh box; the appended bytes live off-heap.
-        self.ensure(cost::BINARY);
         let b_v = self.pop_binary("binary.append")?;
         let a_v = self.pop_binary("binary.append")?;
         let (a, b) = (bin_ref(&a_v), bin_ref(&b_v));
@@ -210,7 +193,6 @@ impl VM {
     /// that re-copied the accumulated prefix per segment.
     pub(super) fn bin_concat_n(&mut self, n: usize) -> VmResult<()> {
         // One fresh box; the concatenated bytes live off-heap.
-        self.ensure(cost::BINARY);
         let base = self.operand_base(n)?;
         let mut total_bits = 0u64;
         let mut aligned = true;
@@ -261,7 +243,6 @@ impl VM {
 
     /// `<<v:n>>` — encode the low `n` bits of an integer.
     pub(super) fn bin_from_int(&mut self) -> VmResult<()> {
-        self.ensure(cost::BINARY);
         let num_bits = self.pop_int("binary segment width")?;
         let value = self.pop_int("binary segment value")?;
         let nb = num_bits.max(0) as u64;
@@ -291,7 +272,6 @@ impl VM {
 
     /// `<<x:bytes(n)>>` — splice the first `min(n, len)` bits.
     pub(super) fn bin_take(&mut self) -> VmResult<()> {
-        self.ensure(cost::BINARY);
         let n = self.pop_int("binary segment width")?;
         let bin_v = self.pop_binary("binary segment")?;
         let bin = bin_ref(&bin_v);
@@ -336,7 +316,6 @@ impl VM {
     /// The compiler emits a bounds check first, so this is total:
     /// the range is clamped, never an error and never a Result.
     pub(super) fn bin_view(&mut self) -> VmResult<()> {
-        self.ensure(cost::BINARY);
         let len = self.pop_int("binary pattern")?;
         let at = self.pop_int("binary pattern")?;
         let bin_v = self.pop_binary("binary pattern")?;
@@ -358,7 +337,6 @@ impl VM {
     #[inline(never)]
     pub(super) fn bin_index_of(&mut self) -> VmResult<()> {
         // Some(Int) wrapper at most.
-        self.ensure(cost::WRAP);
         let from = self.pop_int("binary.index_of")?;
         let needle_v = self.pop_binary("binary.index_of")?;
         let haystack_v = self.pop_binary("binary.index_of")?;
@@ -403,7 +381,6 @@ impl VM {
     pub(super) fn bin_parse_int(&mut self) -> VmResult<()> {
         // Some(Int) wrapper, plus a boxed big int for a 19-digit
         // parse.
-        self.ensure(cost::WRAP + cost::BIG_INT);
         let radix = self.pop_int("binary.parse_int")?;
         let b_v = self.pop_binary("binary.parse_int")?;
         let parsed = parse_int_ascii(&bin_ref(&b_v).full_bytes(), radix);
@@ -435,7 +412,6 @@ impl VM {
     #[inline(never)]
     pub(super) fn bin_to_ascii_lower(&mut self) -> VmResult<()> {
         // One fresh box; the lowered bytes live off-heap.
-        self.ensure(cost::BINARY);
         let b_v = self.pop_binary("binary.to_ascii_lower")?;
         let mut out = bin_ref(&b_v).full_bytes().into_owned();
         out.make_ascii_lowercase();
@@ -447,7 +423,6 @@ impl VM {
     #[cold]
     #[inline(never)]
     pub(super) fn bin_from_int_ascii(&mut self) -> VmResult<()> {
-        self.ensure(cost::BINARY);
         let radix = self.pop_int("binary.from_int_ascii")?;
         let n = self.pop_int("binary.from_int_ascii")?;
         let v = Value::binary_from_slice_in(&mut self.heap, int_to_ascii(n, radix).as_bytes());
@@ -465,12 +440,6 @@ impl VM {
     #[cold]
     #[inline(never)]
     pub(super) fn http_parse_head(&mut self) -> VmResult<()> {
-        // The head is line-structured, so the buffer's CRLF count
-        // (from the requested offset, capped well above the parser's
-        // own head cap) bounds the header values it can build.
-        let off = self.peek_at(0).and_then(|v| v.as_int()).unwrap_or(0);
-        let lines = self.peek_http_head_lines(1, off);
-        self.ensure(cost::http_head(lines));
         let off = self.pop_int("h1.parse_request")?;
         let buf_v = self.pop_binary("h1.parse_request")?;
         let v = http::parse_head(&self.templates, &mut self.heap, &bin_ref(&buf_v), off);
@@ -483,7 +452,6 @@ impl VM {
     pub(super) fn http_framing(&mut self) -> VmResult<()> {
         // Length(Int) is the only fresh allocation; the other
         // framings are prebuilt templates.
-        self.ensure(cost::enum_(1));
         let headers = self.pop()?;
         let v = http::framing(&self.templates, &mut self.heap, &headers)?;
         self.stack.push(v);
@@ -493,13 +461,6 @@ impl VM {
     #[cold]
     #[inline(never)]
     pub(super) fn http_chunk_decode(&mut self) -> VmResult<()> {
-        // The trailer block sits past the chunk data — arbitrarily
-        // far from `off` — so its pre-scan covers the whole remaining
-        // buffer, clamped to the parser's own trailer-field cap; plus
-        // the decoded-body box (its bytes are off-heap).
-        let off = self.peek_at(1).and_then(|v| v.as_int()).unwrap_or(0);
-        let lines = self.peek_http_trailer_lines(2, off);
-        self.ensure(cost::http_chunks(lines));
         let max = self.pop_int("h1.chunk_decode")?;
         let off = self.pop_int("h1.chunk_decode")?;
         let buf_v = self.pop_binary("h1.chunk_decode")?;
@@ -512,7 +473,6 @@ impl VM {
     #[inline(never)]
     pub(super) fn http_header_get(&mut self) -> VmResult<()> {
         // Some(view clone) at most — the view itself is shared.
-        self.ensure(cost::WRAP);
         let name_v = self.pop_binary("headers.get")?;
         let headers = self.pop()?;
         let v = http::header_get(&self.templates, &mut self.heap, &headers, &bin_ref(&name_v))?;
@@ -534,7 +494,6 @@ impl VM {
     #[inline(never)]
     pub(super) fn http_serialize_head(&mut self) -> VmResult<()> {
         // One fresh box over the serialized bytes (off-heap).
-        self.ensure(cost::BINARY);
         let headers = self.pop()?;
         let reason_v = self.pop_binary("h1.serialize_head")?;
         let code = self.pop_int("h1.serialize_head")?;

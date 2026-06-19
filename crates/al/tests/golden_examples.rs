@@ -165,6 +165,7 @@ golden!(tree);
 golden!(life);
 golden!(mergesort);
 golden!(wordcount);
+golden!(maps);
 golden!(money);
 
 // Binaries and wire protocols

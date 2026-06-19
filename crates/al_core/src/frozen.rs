@@ -4,10 +4,9 @@
 //!
 //! - **immutable once written** — every word is written exactly once, by the
 //!   allocating [`FrozenBuilder`], before any pointer to it escapes;
-//! - **never collected** — the GC does not trace or move frozen objects.
-//!   Pointer classification in the heap is by address-range check against
-//!   the process's *own* spaces; anything outside them (frozen or foreign)
-//!   is left untouched, so the collector never needs to consult this module;
+//! - **never reclaimed** — frozen objects are marked immortal, so reference
+//!   counting never touches them: they carry no refcount prefix and are never
+//!   freed, living for the whole program;
 //! - **stable for the program lifetime** — segment storage is a separately
 //!   boxed slice whose heap allocation never moves or reallocates, and the
 //!   area itself is `Arc`-held by the runtime, so a raw pointer into a
@@ -27,7 +26,7 @@
 //!   `&mut FrozenBuilder` while the program is being loaded;
 //! - publishing a top-level binding deep-copies the global's value graph
 //!   into the area through the `al` crate's `vm::freeze::freeze_global`
-//!   (the heap's `copy_graph` with a builder as destination). The
+//!   (`rc_publish_graph` with a builder as destination). The
 //!   subsequent `Runtime::publish_global` does no copying: it only stores
 //!   the already-frozen word into the shared table and release-bumps
 //!   `globals_version`.
@@ -246,7 +245,7 @@ type StrAggregateMap = HashMap<Box<[Box<str>]>, Value>;
 
 /// Append handle to a [`FrozenArea`]. Hydration threads one through the
 /// compiler as `&mut FrozenBuilder` so write access to the frozen area is
-/// visible in signatures; `copy_graph` takes one as its destination when
+/// visible in signatures; `rc_publish_graph` takes one as its destination when
 /// publishing a global. Several builders coexist over one area (see
 /// [`FrozenArea::builder`]).
 ///
@@ -267,6 +266,11 @@ type StrAggregateMap = HashMap<Box<[Box<str>]>, Value>;
 /// string contents, never pointers, so cross-builder duplicates are
 /// invisible to the program.
 pub struct FrozenBuilder {
+    /// The frozen area these interned `Value`s point into. Field order is not
+    /// load-bearing: the interned values are immortal, and an immortal `Value`'s
+    /// `Clone`/`Drop` is pure bit math that never dereferences the object (see
+    /// `VALUE_IMMORTAL` in `bytecode::value`), so they may drop in any order
+    /// relative to the area.
     area: Arc<FrozenArea>,
     /// Canonical frozen `Str` constant per distinct contents.
     strs: HashMap<Box<str>, Value>,
@@ -356,10 +360,10 @@ impl FrozenBuilder {
     /// points at the same frozen allocation.
     pub fn str(&mut self, s: &str) -> Value {
         if let Some(v) = self.strs.get(s) {
-            return *v;
+            return v.clone();
         }
         let v = Value::str_in(self, s);
-        self.strs.insert(Box::from(s), v);
+        self.strs.insert(Box::from(s), v.clone());
         v
     }
 
@@ -438,11 +442,11 @@ impl FrozenBuilder {
     ) -> Value {
         let key: Box<[Box<str>]> = items.iter().map(|&s| Box::from(s)).collect();
         if let Some(v) = map(self).get(&key) {
-            return *v;
+            return v.clone();
         }
         let elems: Vec<Value> = items.iter().map(|s| self.str(s)).collect();
         let v = construct(self, &elems);
-        map(self).insert(key, v);
+        map(self).insert(key, v.clone());
         v
     }
 }
@@ -644,7 +648,7 @@ mod tests {
     /// The frozen object address of a heap-backed constant, for identity
     /// assertions: interning must hand out the *same allocation*, not just
     /// equal contents.
-    fn addr(v: Value) -> usize {
+    fn addr(v: &Value) -> usize {
         v.object_addr().expect("constant should be heap-backed")
     }
 
@@ -659,9 +663,9 @@ mod tests {
         let a2 = b.str("Some");
         let other = b.str("None");
         assert_eq!(a1.as_str(), Some("Some"));
-        assert_eq!(addr(a1), addr(a2), "same contents, same allocation");
-        assert_ne!(addr(a1), addr(other));
-        assert!(area.contains(addr(a1) as *const u64));
+        assert_eq!(addr(&a1), addr(&a2), "same contents, same allocation");
+        assert_ne!(addr(&a1), addr(&other));
+        assert!(area.contains(addr(&a1) as *const u64));
         // Interning means no second allocation: the area holds exactly the
         // words of "Some" and "None".
         let words = area.words_used();
@@ -676,13 +680,13 @@ mod tests {
         let l1 = b.str_array(&["host", "port"]);
         let l2 = b.str_array(&["host", "port"]);
         let l3 = b.str_array(&["host"]);
-        assert_eq!(addr(l1), addr(l2), "same contents, same array");
-        assert_ne!(addr(l1), addr(l3));
-        assert!(area.contains(addr(l1) as *const u64));
+        assert_eq!(addr(&l1), addr(&l2), "same contents, same array");
+        assert_ne!(addr(&l1), addr(&l3));
+        assert!(area.contains(addr(&l1) as *const u64));
         // Elements share the canonical interned strings.
         let elem = l1.as_array().unwrap().get(0).unwrap();
         assert_eq!(elem.as_str(), Some("host"));
-        assert_eq!(addr(elem), addr(b.str("host")));
+        assert_eq!(addr(&elem), addr(&b.str("host")));
     }
 
     /// Enum constants built through the builder carry interned names/labels:
@@ -694,18 +698,21 @@ mod tests {
         let mut b = area.builder();
         let v1 = b.enum_(7, "Credentials", "Basic", &["user", "pass"], vec![]);
         let v2 = b.enum_(7, "Credentials", "Basic", &["user", "pass"], vec![]);
-        assert_ne!(addr(v1), addr(v2), "distinct enum objects");
-        assert!(area.contains(addr(v1) as *const u64));
+        assert_ne!(addr(&v1), addr(&v2), "distinct enum objects");
+        assert!(area.contains(addr(&v1) as *const u64));
         let (e1, e2) = (v1.as_enum().unwrap(), v2.as_enum().unwrap());
         assert_eq!(e1.enum_name(), "Credentials");
         assert_eq!(e1.variant_name(), "Basic");
         assert_eq!(e1.field_labels()[1].as_str(), Some("pass"));
         assert_eq!(e1.hash(), e2.hash());
         // Names and the labels tuple are canonical frozen allocations.
-        assert_eq!(addr(e1.enum_name_value()), addr(e2.enum_name_value()));
-        assert_eq!(addr(e1.variant_name_value()), addr(e2.variant_name_value()));
-        assert_eq!(addr(e1.labels_value()), addr(e2.labels_value()));
-        assert_eq!(addr(e1.enum_name_value()), addr(b.str("Credentials")));
-        assert!(area.contains(addr(e1.labels_value()) as *const u64));
+        assert_eq!(addr(&e1.enum_name_value()), addr(&e2.enum_name_value()));
+        assert_eq!(
+            addr(&e1.variant_name_value()),
+            addr(&e2.variant_name_value())
+        );
+        assert_eq!(addr(&e1.labels_value()), addr(&e2.labels_value()));
+        assert_eq!(addr(&e1.enum_name_value()), addr(&b.str("Credentials")));
+        assert!(area.contains(addr(&e1.labels_value()) as *const u64));
     }
 }

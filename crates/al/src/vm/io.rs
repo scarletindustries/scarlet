@@ -48,11 +48,10 @@
 //!   (`adopt_connection`) and move between tables only via migration's fd
 //!   re-homing ([`super::migrate`]).
 //!
-//! Every arm obeys the rooting rule: it computes its worst-case allocation
-//! need from [`cost`] while its operands are still rooted on the VM stack,
-//! calls `ensure`, and only then pops. Failures become typed stdlib values
-//! — `NetError` from socket errnos, path-tagged `IoError` from file errnos,
-//! with a typed `Errno(code)` residual — never strings.
+//! Allocation is reference-counted, so an arm just pops its operands and
+//! builds its result. Failures become typed stdlib values — `NetError` from
+//! socket errnos, path-tagged `IoError` from file errnos, with a typed
+//! `Errno(code)` residual — never strings.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, IoSlice, Read, Write};
@@ -67,7 +66,7 @@ use al_core::static_ir::VariantTemplate;
 
 use super::poll::{EPOCH, Wait, monotonic_now_ms};
 use super::sched::BlockingOp;
-use super::{IO_REDUCTION_COST, Step, VM, VmResult, bin_ref, cost, sched, str_ref};
+use super::{IO_REDUCTION_COST, Step, VM, VmResult, bin_ref, sched, str_ref};
 use crate::stdlib;
 
 impl VM {
@@ -98,7 +97,6 @@ impl VM {
         // Budget while the operands are rooted: only the unaligned-binary
         // reject allocates here — the write itself is offloaded and its
         // result graph is budgeted at completion delivery.
-        self.ensure(cost::enum_(0) + cost::WRAP);
         let bin_v = self.pop_binary("io.write_file")?;
         let path_v = self.pop_str("io.write_file")?;
         if let Some(v) =
@@ -119,7 +117,6 @@ impl VM {
 
     pub(super) fn tcp_listen(&mut self) -> VmResult<()> {
         // Socket handle + Ok, or a NetError on bind failure.
-        self.ensure(cost::SOCKET + cost::WRAP + cost::NET_ERR);
         let port = self.pop_int("net.listen")?;
         let host_v = self.pop_str("net.listen")?;
         let res = resolve_listen_addr(str_ref(&host_v), port as u16)
@@ -146,7 +143,6 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Adopted Ok(Socket) result, a NetError, or the re-pushed
         // listener handle on the park path.
-        self.ensure(cost::ADOPT.max(cost::SOCKET) + cost::NET_ERR + cost::WRAP);
         let sv = self.pop_listener("net.accept")?;
         let accept_res = self.listener(sv.id)?.accept();
         match accept_res {
@@ -170,7 +166,6 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Adopted Ok(Socket) result or a NetError; the pending
         // path parks and allocates nothing.
-        self.ensure(cost::ADOPT + cost::NET_ERR + cost::WRAP);
         let port = self.pop_int("net.connect")?;
         let ip_val = self.pop()?;
         // The hostname was already resolved off-scheduler by
@@ -208,7 +203,6 @@ impl VM {
         // Ok(Binary) (bytes are off-heap; the box is constant
         // sized) or a NetError; the park path re-pushes existing
         // values only.
-        self.ensure(cost::BINARY + cost::WRAP + cost::NET_ERR);
         let max = self.pop_int("socket.read")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.read")?;
@@ -232,7 +226,6 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Ok(Binary), the TimedOut error, or a NetError; the park
         // path re-pushes existing values only.
-        self.ensure(cost::BINARY + cost::WRAP + cost::NET_ERR.max(cost::enum_(0)));
         // Args on the stack, top first: the absolute monotonic
         // deadline in ms, the max byte count, then the socket. The
         // deadline is captured once in AL as `time.monotonic() +
@@ -284,7 +277,6 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Ok(Nil), a NetError, the unaligned reject, or the park
         // path's zero-copy view box over the unwritten tail.
-        self.ensure(cost::BINARY.max(cost::enum_(0)) + cost::WRAP + cost::NET_ERR);
         let bin_v = self.pop_binary("socket.write")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.write")?;
@@ -317,15 +309,6 @@ impl VM {
 
     pub(super) fn tcp_write_parts(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // The parts array is on top; its length sizes the park
-        // path's worst case (a view box per remaining part plus a
-        // fresh array) — budgeted while everything is rooted.
-        let (nparts, _) = self.peek_seq(0);
-        self.ensure(
-            (nparts * cost::BINARY + cost::seq_build(nparts)).max(cost::enum_(0))
-                + cost::WRAP
-                + cost::NET_ERR,
-        );
         let parts_val = self.pop()?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.write_parts")?;
@@ -398,7 +381,6 @@ impl VM {
     pub(super) fn tcp_close(&mut self, reds: &mut i32) -> VmResult<()> {
         *reds -= IO_REDUCTION_COST;
         // Ok(Nil) only.
-        self.ensure(cost::WRAP);
         let sv = self.pop_connection("socket.close")?;
         if let Some(conn) = self.tcp_connections.remove(&sv.id) {
             // Deregister before dropping; ignore "wasn't registered".
@@ -412,7 +394,6 @@ impl VM {
 
     pub(super) fn tcp_close_server(&mut self) -> VmResult<()> {
         // Ok(Nil) only.
-        self.ensure(cost::WRAP);
         let sv = self.pop_listener("net.close")?;
         if let Some(listener) = self.tcp_listeners.remove(&sv.id) {
             self.poller_deregister(listener.as_raw_fd());
@@ -427,7 +408,6 @@ impl VM {
 
     pub(super) fn tcp_local_addr(&mut self) -> VmResult<()> {
         // Ok(SocketAddress) or a NetError.
-        self.ensure(cost::SOCK_ADDR + cost::WRAP + cost::NET_ERR);
         let sv = self.pop_listener("net.local_addr")?;
         let res = self.listener_addr(sv.id);
         let res = res.map(|a| self.templates.socket_address(&mut self.heap, a));
@@ -439,7 +419,6 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Budget for the IP-literal fast path's Ok(IpAddress); the offload
         // path parks and its result is budgeted at completion delivery.
-        self.ensure(cost::IP_ADDR + cost::WRAP);
         let host_v = self.pop_str("net.resolve")?;
         let host = str_ref(&host_v);
         if let Ok(addr) = host.parse::<std::net::IpAddr>() {
@@ -703,7 +682,7 @@ impl VM {
     /// when the poller refuses the fd (a connection that cannot wake its
     /// parks must not be adopted).
     /// Allocates `cost::ADOPT` (or `cost::NET_ERR`); callers ensure both
-    /// before popping (the rooting rule).
+    /// before popping.
     pub(super) fn adopt_connection(
         &mut self,
         stream: TcpStream,
@@ -738,7 +717,7 @@ fn errno_of(e: &std::io::Error) -> Value {
 /// `std::net::IpAddr`. The address rides as a string inside the variant, so this
 /// just parses `payload[0]`; a malformed value can only be a compiler bug.
 fn decode_ip(v: &Value) -> VmResult<std::net::IpAddr> {
-    let payload = v.as_enum().and_then(|e| e.payload().first().copied());
+    let payload = v.as_enum().and_then(|e| e.payload().first().cloned());
     let s = payload.as_ref().and_then(|p| p.as_str());
     match s {
         Some(s) => s

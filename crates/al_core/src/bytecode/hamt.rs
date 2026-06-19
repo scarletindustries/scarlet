@@ -21,22 +21,14 @@
 //! distinct keys whose full 64-bit hashes are equal share a `HamtCollision`
 //! bucket, compared with [`values_equal`] — the same `==` the language exposes.
 //!
-//! ## Persistence and the GC
+//! ## Persistence
 //!
-//! Like the `seq` vector, nodes are ordinary arena objects traced by the
-//! copying collector ([`super::value::for_each_child`]); "mutation" is
-//! *path copying* — [`insert`]/[`remove`] allocate replacements only for the
+//! Like the `seq` vector, nodes are reference-counted arena objects; "mutation"
+//! is *path copying* — [`insert`]/[`remove`] allocate replacements only for the
 //! O(log₃₂ n) nodes on the root-to-leaf path and share every untouched subtree
-//! with the previous version. A previous version stays valid, which is what
-//! makes `next = map.set(m, k, v)` leave `m` untouched.
-//!
-//! ## The rooting rule
-//!
-//! Every builder here allocates but **never collects**. The VM reserves an
-//! operation's worst-case need with `ensure(...)` — sized by [`insert_cost`] /
-//! [`remove_cost`] / [`EMPTY_WORDS`] — *before* the operands are read, exactly
-//! as the `seq` and `text` ops do. Costs are upper bounds; overshooting wastes
-//! a little arena headroom, under-shooting is the watermark-panic bug.
+//! with the previous version. A shared node carries one count per referrer, so
+//! a previous version stays valid (`next = map.set(m, k, v)` leaves `m`
+//! untouched) and a version's exclusive nodes are freed as it drops.
 
 use super::value::{
     Arena, HamtMapRef, HamtNodeRef, MapBacking, MapRef, Value, hamt_branch_in, hamt_collision_in,
@@ -69,35 +61,6 @@ fn compact(bitmap: u32, bit: u32) -> usize {
     (bitmap & (bit - 1)).count_ones() as usize
 }
 
-// ---- worst-case allocation budgets (the rooting rule) ------------------------
-
-/// Header + bitmap + a full 32 children.
-const MAX_BRANCH_WORDS: usize = 1 + 1 + 32;
-/// Header + key + value.
-const ENTRY_WORDS: usize = 1 + 2;
-/// Header + `[backing, size, root]`.
-pub const EMPTY_WORDS: usize = 1 + 3;
-
-/// A `HamtCollision` holding `count` pairs: header + hash + count + 2·count.
-const fn collision_words(count: usize) -> usize {
-    1 + 2 + 2 * count
-}
-
-/// Upper bound on the arena words a single [`insert`] into a map of `size`
-/// entries can allocate: a fresh root, a full root-to-leaf path of branches,
-/// the new entry, and — the only size-dependent term — a collision bucket that
-/// might grow to hold every key (the pathological all-hashes-collide case).
-pub fn insert_cost(size: usize) -> usize {
-    EMPTY_WORDS + MAX_DEPTH * MAX_BRANCH_WORDS + ENTRY_WORDS + collision_words(size + 1)
-}
-
-/// Upper bound on the arena words a single [`remove`] can allocate: a fresh
-/// root and a copied root-to-leaf path, plus collapsing a collision back to an
-/// entry. Never grows a node, so it is independent of map size.
-pub fn remove_cost() -> usize {
-    EMPTY_WORDS + MAX_DEPTH * MAX_BRANCH_WORDS + ENTRY_WORDS
-}
-
 // ---- construction & reads ----------------------------------------------------
 
 /// The empty map.
@@ -106,29 +69,31 @@ pub fn empty<A: Arena + ?Sized>(a: &mut A) -> Value {
 }
 
 /// Entry count.
-pub fn size(map: Value) -> usize {
+pub fn size(map: &Value) -> usize {
     HamtMapRef::of(map).size
 }
 
 /// Look up `key` (whose [`hash_value`] is `hash`); `None` if absent.
-pub fn get(map: Value, key: &Value, hash: u64) -> Option<Value> {
+pub fn get(map: &Value, key: &Value, hash: u64) -> Option<Value> {
     let root = HamtMapRef::of(map).root;
     if root.is_nil() {
         return None;
     }
-    node_get(root, key, hash, 0)
+    node_get(&root, key, hash, 0)
 }
 
-fn node_get(node: Value, key: &Value, hash: u64, shift: u32) -> Option<Value> {
+fn node_get(node: &Value, key: &Value, hash: u64, shift: u32) -> Option<Value> {
     match HamtNodeRef::of(node) {
         HamtNodeRef::Entry { key: k, value } => values_equal(&k, key).then_some(value),
-        HamtNodeRef::Collision { pairs, .. } => collision_find(pairs, key).map(|i| pairs[i + 1]),
+        HamtNodeRef::Collision { pairs, .. } => {
+            collision_find(pairs, key).map(|i| pairs[i + 1].clone())
+        }
         HamtNodeRef::Branch { bitmap, children } => {
             let b = bit(hash, shift);
             if bitmap & b == 0 {
                 None
             } else {
-                node_get(children[compact(bitmap, b)], key, hash, shift + BITS)
+                node_get(&children[compact(bitmap, b)], key, hash, shift + BITS)
             }
         }
     }
@@ -143,7 +108,7 @@ fn collision_find(pairs: &[Value], key: &Value) -> Option<usize> {
 
 /// Visit every `(key, value)`. Used for iteration (`keys`/`values`/`to_list`)
 /// and structural hashing/equality.
-fn for_each_entry(node: Value, f: &mut impl FnMut(Value, Value)) {
+fn for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value)) {
     if node.is_nil() {
         return;
     }
@@ -151,25 +116,25 @@ fn for_each_entry(node: Value, f: &mut impl FnMut(Value, Value)) {
         HamtNodeRef::Entry { key, value } => f(key, value),
         HamtNodeRef::Collision { pairs, .. } => {
             for i in (0..pairs.len()).step_by(2) {
-                f(pairs[i], pairs[i + 1]);
+                f(pairs[i].clone(), pairs[i + 1].clone());
             }
         }
         HamtNodeRef::Branch { children, .. } => {
             // `children` aliases the arena; this read never allocates, so the
             // borrow stays valid for the whole walk.
-            for &child in children {
+            for child in children {
                 for_each_entry(child, f);
             }
         }
     }
 }
 
-/// Collect every `(key, value)` into host memory. The returned `Value`s alias
-/// the arena, so the caller must already have reserved its result budget — no
-/// collection may run before they are consumed.
-pub fn collect_entries(map: Value) -> Vec<(Value, Value)> {
-    let mut out = Vec::with_capacity(HamtMapRef::of(map).size);
-    for_each_entry(HamtMapRef::of(map).root, &mut |k, v| out.push((k, v)));
+/// Collect every `(key, value)` into host memory. The returned `Value`s are
+/// owned (counted) references the caller takes ownership of.
+pub fn collect_entries(map: &Value) -> Vec<(Value, Value)> {
+    let m = HamtMapRef::of(map);
+    let mut out = Vec::with_capacity(m.size);
+    for_each_entry(&m.root, &mut |k, v| out.push((k, v)));
     out
 }
 
@@ -179,7 +144,7 @@ pub fn collect_entries(map: Value) -> Vec<(Value, Value)> {
 /// subtrees. Overwrites an existing binding (size unchanged) or adds a new one.
 pub fn insert<A: Arena + ?Sized>(
     a: &mut A,
-    map: Value,
+    map: &Value,
     key: Value,
     value: Value,
     hash: u64,
@@ -188,7 +153,7 @@ pub fn insert<A: Arena + ?Sized>(
     let (root, added) = if m.root.is_nil() {
         (hamt_entry_in(a, key, value), true)
     } else {
-        node_insert(a, m.root, key, value, hash, 0)
+        node_insert(a, &m.root, key, value, hash, 0)
     };
     hamt_map_in(a, m.size + usize::from(added), root)
 }
@@ -196,7 +161,7 @@ pub fn insert<A: Arena + ?Sized>(
 /// Returns the rebuilt node and whether a *new* key was added (vs. overwritten).
 fn node_insert<A: Arena + ?Sized>(
     a: &mut A,
-    node: Value,
+    node: &Value,
     key: Value,
     value: Value,
     hash: u64,
@@ -243,7 +208,7 @@ fn node_insert<A: Arena + ?Sized>(
                 nc.insert(i, hamt_entry_in(a, key, value));
                 (hamt_branch_in(a, bitmap | b, &nc), true)
             } else {
-                let (child, added) = node_insert(a, children[i], key, value, hash, shift + BITS);
+                let (child, added) = node_insert(a, &children[i], key, value, hash, shift + BITS);
                 let mut nc = children.to_vec();
                 nc[i] = child;
                 (hamt_branch_in(a, bitmap, &nc), added)
@@ -259,7 +224,7 @@ fn node_insert<A: Arena + ?Sized>(
 /// `HamtEntry`.
 fn split<A: Arena + ?Sized>(
     a: &mut A,
-    left: Value,
+    left: &Value,
     lhash: u64,
     right: Value,
     rhash: u64,
@@ -277,9 +242,9 @@ fn split<A: Arena + ?Sized>(
         let child = split(a, left, lhash, right, rhash, shift + BITS);
         hamt_branch_in(a, 1u32 << li, &[child])
     } else if li < ri {
-        hamt_branch_in(a, (1 << li) | (1 << ri), &[left, right])
+        hamt_branch_in(a, (1 << li) | (1 << ri), &[left.clone(), right])
     } else {
-        hamt_branch_in(a, (1 << li) | (1 << ri), &[right, left])
+        hamt_branch_in(a, (1 << li) | (1 << ri), &[right, left.clone()])
     }
 }
 
@@ -287,7 +252,7 @@ fn split<A: Arena + ?Sized>(
 /// into a `HamtCollision`.
 fn merge_into_collision<A: Arena + ?Sized>(
     a: &mut A,
-    left: Value,
+    left: &Value,
     hash: u64,
     right: Value,
 ) -> Value {
@@ -297,7 +262,7 @@ fn merge_into_collision<A: Arena + ?Sized>(
         // keys at its own level via the `chash == hash` arm above.
         _ => unreachable_collision(),
     };
-    let (rk, rv) = match HamtNodeRef::of(right) {
+    let (rk, rv) = match HamtNodeRef::of(&right) {
         HamtNodeRef::Entry { key, value } => (key, value),
         _ => unreachable_collision(),
     };
@@ -323,13 +288,13 @@ enum Removed {
 
 /// `map` without `key`. Returns `map` unchanged (same value) if the key is
 /// absent, so the caller can skip rebuilding the root.
-pub fn remove<A: Arena + ?Sized>(a: &mut A, map: Value, key: &Value, hash: u64) -> Value {
+pub fn remove<A: Arena + ?Sized>(a: &mut A, map: &Value, key: &Value, hash: u64) -> Value {
     let m = HamtMapRef::of(map);
     if m.root.is_nil() {
-        return map;
+        return map.clone();
     }
-    match node_remove(a, m.root, key, hash, 0) {
-        Removed::Absent => map,
+    match node_remove(a, &m.root, key, hash, 0) {
+        Removed::Absent => map.clone(),
         Removed::Empty => hamt_map_in(a, m.size - 1, Value::nil()),
         Removed::Node(root) => hamt_map_in(a, m.size - 1, root),
     }
@@ -337,7 +302,7 @@ pub fn remove<A: Arena + ?Sized>(a: &mut A, map: Value, key: &Value, hash: u64) 
 
 fn node_remove<A: Arena + ?Sized>(
     a: &mut A,
-    node: Value,
+    node: &Value,
     key: &Value,
     hash: u64,
     shift: u32,
@@ -357,7 +322,9 @@ fn node_remove<A: Arena + ?Sized>(
                 np.drain(i..i + 2);
                 // Two keys collided; one left collapses the bucket to an entry.
                 if np.len() == 2 {
-                    Removed::Node(hamt_entry_in(a, np[0], np[1]))
+                    let k = np.remove(0);
+                    let v = np.remove(0);
+                    Removed::Node(hamt_entry_in(a, k, v))
                 } else {
                     Removed::Node(hamt_collision_in(a, chash, &np))
                 }
@@ -369,7 +336,7 @@ fn node_remove<A: Arena + ?Sized>(
                 return Removed::Absent;
             }
             let i = compact(bitmap, b);
-            match node_remove(a, children[i], key, hash, shift + BITS) {
+            match node_remove(a, &children[i], key, hash, shift + BITS) {
                 Removed::Absent => Removed::Absent,
                 Removed::Node(child) => {
                     let mut nc = children.to_vec();
@@ -385,8 +352,8 @@ fn node_remove<A: Arena + ?Sized>(
                     nc.remove(i);
                     // Collapse a branch that now holds a single leaf so equal
                     // maps keep a canonical shape and depth stays minimal.
-                    if nc.len() == 1 && is_leaf(nc[0]) {
-                        Removed::Node(nc[0])
+                    if nc.len() == 1 && is_leaf(&nc[0]) {
+                        Removed::Node(nc.remove(0))
                     } else {
                         Removed::Node(hamt_branch_in(a, nbitmap, &nc))
                     }
@@ -397,7 +364,7 @@ fn node_remove<A: Arena + ?Sized>(
 }
 
 /// Whether `node` is a leaf (entry or collision) rather than a branch.
-fn is_leaf(node: Value) -> bool {
+fn is_leaf(node: &Value) -> bool {
     !matches!(HamtNodeRef::of(node), HamtNodeRef::Branch { .. })
 }
 
@@ -410,7 +377,8 @@ pub fn map_hash(m: MapRef<'_>) -> u64 {
         return 0;
     }
     let mut acc = 0u64;
-    for_each_entry(m.hamt_root(), &mut |k, v| {
+    let root = m.hamt_root();
+    for_each_entry(&root, &mut |k, v| {
         // Per-entry hash combines key and value; the cross-entry fold is
         // commutative so insertion order does not matter.
         acc = acc.wrapping_add(hash_value(&k).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ hash_value(&v));
@@ -430,9 +398,10 @@ pub fn maps_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
             }
             let broot = b.hamt_root();
             let mut equal = true;
-            for_each_entry(a.hamt_root(), &mut |k, v| {
+            let aroot = a.hamt_root();
+            for_each_entry(&aroot, &mut |k, v| {
                 if equal {
-                    equal = match node_get_root(broot, &k, hash_value(&k)) {
+                    equal = match node_get_root(&broot, &k, hash_value(&k)) {
                         Some(bv) => values_equal(&v, &bv),
                         None => false,
                     };
@@ -445,7 +414,7 @@ pub fn maps_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
 }
 
 /// Lookup against a (possibly empty) root node.
-fn node_get_root(root: Value, key: &Value, hash: u64) -> Option<Value> {
+fn node_get_root(root: &Value, key: &Value, hash: u64) -> Option<Value> {
     if root.is_nil() {
         None
     } else {
@@ -458,24 +427,22 @@ mod tests {
     use super::*;
     use crate::heap::ProcHeap;
 
-    /// A test arena with a large pre-ensured budget — these tests allocate
-    /// freely without driving the VM's `ensure`/collect loop.
+    /// A test heap for the HAMT unit tests.
     fn heap() -> ProcHeap {
-        let mut h = ProcHeap::with_young_capacity(1 << 20);
-        h.note_ensured(1 << 20);
-        h
+        ProcHeap::new()
     }
 
     fn key(i: i64) -> Value {
         Value::small_int(i)
     }
 
-    fn set(h: &mut ProcHeap, m: Value, k: i64, v: i64) -> Value {
+    fn set(h: &mut ProcHeap, m: &Value, k: i64, v: i64) -> Value {
         let kv = key(k);
-        insert(h, m, kv, key(v), hash_value(&kv))
+        let hash = hash_value(&kv);
+        insert(h, m, kv, key(v), hash)
     }
 
-    fn lookup(m: Value, k: i64) -> Option<i64> {
+    fn lookup(m: &Value, k: i64) -> Option<i64> {
         get(m, &key(k), hash_value(&key(k))).and_then(|v| v.as_int())
     }
 
@@ -483,38 +450,38 @@ mod tests {
     fn empty_has_no_entries() {
         let mut h = heap();
         let m = empty(&mut h);
-        assert_eq!(size(m), 0);
-        assert_eq!(lookup(m, 1), None);
+        assert_eq!(size(&m), 0);
+        assert_eq!(lookup(&m, 1), None);
     }
 
     #[test]
     fn insert_get_and_overwrite() {
         let mut h = heap();
         let m = empty(&mut h);
-        let m = set(&mut h, m, 1, 10);
-        let m = set(&mut h, m, 2, 20);
-        assert_eq!(size(m), 2);
-        assert_eq!(lookup(m, 1), Some(10));
-        assert_eq!(lookup(m, 2), Some(20));
-        assert_eq!(lookup(m, 3), None);
+        let m = set(&mut h, &m, 1, 10);
+        let m = set(&mut h, &m, 2, 20);
+        assert_eq!(size(&m), 2);
+        assert_eq!(lookup(&m, 1), Some(10));
+        assert_eq!(lookup(&m, 2), Some(20));
+        assert_eq!(lookup(&m, 3), None);
 
         // Overwrite does not grow the map.
-        let m = set(&mut h, m, 1, 99);
-        assert_eq!(size(m), 2);
-        assert_eq!(lookup(m, 1), Some(99));
+        let m = set(&mut h, &m, 1, 99);
+        assert_eq!(size(&m), 2);
+        assert_eq!(lookup(&m, 1), Some(99));
     }
 
     #[test]
     fn updates_are_persistent() {
         let mut h = heap();
         let m0 = empty(&mut h);
-        let base = set(&mut h, m0, 1, 10);
-        let derived = set(&mut h, base, 2, 20);
+        let base = set(&mut h, &m0, 1, 10);
+        let derived = set(&mut h, &base, 2, 20);
         // The earlier version is untouched by the later insert.
-        assert_eq!(size(base), 1);
-        assert_eq!(lookup(base, 2), None);
-        assert_eq!(size(derived), 2);
-        assert_eq!(lookup(derived, 2), Some(20));
+        assert_eq!(size(&base), 1);
+        assert_eq!(lookup(&base, 2), None);
+        assert_eq!(size(&derived), 2);
+        assert_eq!(lookup(&derived, 2), Some(20));
     }
 
     #[test]
@@ -522,13 +489,13 @@ mod tests {
         let mut h = heap();
         let mut m = empty(&mut h);
         for i in 0..2000 {
-            m = set(&mut h, m, i, i * 3);
+            m = set(&mut h, &m, i, i * 3);
         }
-        assert_eq!(size(m), 2000);
+        assert_eq!(size(&m), 2000);
         for i in 0..2000 {
-            assert_eq!(lookup(m, i), Some(i * 3), "key {i}");
+            assert_eq!(lookup(&m, i), Some(i * 3), "key {i}");
         }
-        assert_eq!(lookup(m, 2000), None);
+        assert_eq!(lookup(&m, 2000), None);
     }
 
     #[test]
@@ -536,50 +503,50 @@ mod tests {
         let mut h = heap();
         let mut m = empty(&mut h);
         for i in 0..100 {
-            m = set(&mut h, m, i, i);
+            m = set(&mut h, &m, i, i);
         }
         // Removing an absent key returns the same map value unchanged.
-        let same = remove(&mut h, m, &key(1000), hash_value(&key(1000)));
-        assert_eq!(size(same), 100);
+        let same = remove(&mut h, &m, &key(1000), hash_value(&key(1000)));
+        assert_eq!(size(&same), 100);
 
         // Remove the even keys; odds survive, evens are gone, size halves.
-        let mut r = m;
+        let mut r = m.clone();
         for i in (0..100).step_by(2) {
-            r = remove(&mut h, r, &key(i), hash_value(&key(i)));
+            r = remove(&mut h, &r, &key(i), hash_value(&key(i)));
         }
-        assert_eq!(size(r), 50);
+        assert_eq!(size(&r), 50);
         for i in 0..100 {
-            assert_eq!(lookup(r, i), if i % 2 == 0 { None } else { Some(i) });
+            assert_eq!(lookup(&r, i), if i % 2 == 0 { None } else { Some(i) });
         }
         // The pre-removal version still has everything (persistence).
-        assert_eq!(size(m), 100);
-        assert_eq!(lookup(m, 0), Some(0));
+        assert_eq!(size(&m), 100);
+        assert_eq!(lookup(&m, 0), Some(0));
     }
 
     #[test]
     fn remove_to_empty() {
         let mut h = heap();
         let m0 = empty(&mut h);
-        let m = set(&mut h, m0, 42, 1);
-        let m = remove(&mut h, m, &key(42), hash_value(&key(42)));
-        assert_eq!(size(m), 0);
-        assert_eq!(lookup(m, 42), None);
+        let m = set(&mut h, &m0, 42, 1);
+        let m = remove(&mut h, &m, &key(42), hash_value(&key(42)));
+        assert_eq!(size(&m), 0);
+        assert_eq!(lookup(&m, 42), None);
     }
 
     #[test]
     fn structural_equality_is_order_independent() {
         let mut h = heap();
         let e1 = empty(&mut h);
-        let a1 = set(&mut h, e1, 1, 10);
-        let a = set(&mut h, a1, 2, 20);
+        let a1 = set(&mut h, &e1, 1, 10);
+        let a = set(&mut h, &a1, 2, 20);
         let e2 = empty(&mut h);
-        let b1 = set(&mut h, e2, 2, 20);
-        let b = set(&mut h, b1, 1, 10);
+        let b1 = set(&mut h, &e2, 2, 20);
+        let b = set(&mut h, &b1, 1, 10);
         assert!(values_equal(&a, &b));
         assert_eq!(hash_value(&a), hash_value(&b));
 
         // A differing value breaks equality.
-        let c = set(&mut h, a, 1, 11);
+        let c = set(&mut h, &a, 1, 11);
         assert!(!values_equal(&a, &c));
     }
 

@@ -12,11 +12,7 @@
 //! - **Ranges stay lazy until they must not.** `s..e` is two words;
 //!   index/len/slice/drop on it are O(1) arithmetic, and only the ops
 //!   that need real elements (concat, push) materialize it into a tree
-//!   — that materialization is the op's real cost and is budgeted by
-//!   the caller's `peek_seq`.
-//! - **The rooting rule.** Each method sizes its worst case from
-//!   [`cost`] (tree split/push/concat bounds included) while the
-//!   operands are still on the VM stack, ensures, then pops and builds.
+//!   — that materialization is the op's real cost.
 //!
 //! [`VM::seq_index_or_else`] is the one method that branches: in-bounds
 //! pushes the element and falls through, out-of-bounds jumps to the
@@ -24,12 +20,11 @@
 
 use al_core::bytecode::{Value, ValueView, seq};
 
-use super::{VM, VmResult, cost, range_len, value_type_name};
+use super::{VM, VmResult, range_len, value_type_name};
 
 impl VM {
     pub(super) fn make_array(&mut self, operand: i32) -> VmResult<()> {
         let len = operand as usize;
-        self.ensure(cost::seq_build(len));
         let base = self.operand_base(len)?;
         let v = Value::array_in(&mut self.heap, &self.stack[base..]);
         self.stack.truncate(base);
@@ -39,7 +34,6 @@ impl VM {
 
     pub(super) fn make_tuple(&mut self, operand: i32) -> VmResult<()> {
         let len = operand as usize;
-        self.ensure(cost::tuple(len));
         let base = self.operand_base(len)?;
         let v = Value::tuple_in(&mut self.heap, &self.stack[base..]);
         self.stack.truncate(base);
@@ -52,7 +46,7 @@ impl VM {
         if let Some(t) = tuple_val.as_tuple() {
             let idx = operand;
             if idx >= 0 && (idx as usize) < t.len() {
-                self.stack.push(t[idx as usize]);
+                self.stack.push(t[idx as usize].clone());
                 Ok(())
             } else {
                 Err(format!(
@@ -70,7 +64,6 @@ impl VM {
     }
 
     pub(super) fn make_range(&mut self) -> VmResult<()> {
-        self.ensure(cost::RANGE);
         let end_val = self.pop()?;
         let start_val = self.pop()?;
 
@@ -91,7 +84,6 @@ impl VM {
     pub(super) fn seq_index(&mut self) -> VmResult<()> {
         // Worst case: the Some wrapper, plus a boxed big int for
         // a far-out-of-range Range element.
-        self.ensure(cost::WRAP + cost::BIG_INT);
         let idx_val = self.pop()?;
         let arr_val = self.pop()?;
         let v = match (arr_val.kind(), idx_val.as_int()) {
@@ -206,17 +198,6 @@ impl VM {
     }
 
     pub(super) fn seq_slice(&mut self) -> VmResult<()> {
-        // Size from the sequence operand (two below the indices)
-        // while everything is rooted: a tree split path-copies
-        // along both cut edges (logarithmic, so even a huge lazy
-        // Range's length budgets only a few nodes); a Range slice
-        // is one fresh Range, far below the split cost.
-        let need = match self.peek_at(2).map(Value::kind) {
-            Some(ValueView::Array(a)) => cost::seq_split(a.len()),
-            Some(ValueView::Range(..)) => cost::RANGE,
-            _ => 0,
-        };
-        self.ensure(need);
         let end_val = self.pop()?;
         let start_val = self.pop()?;
         let arr_val = self.pop()?;
@@ -227,10 +208,9 @@ impl VM {
         match arr_val.kind() {
             ValueView::Array(arr) => {
                 if start >= 0 && (end as usize) <= arr.len() && start <= end {
-                    // take + skip: two splits, matching the
-                    // `seq_split` budget ensured above.
-                    let prefix = seq::take(&mut self.heap, arr_val, end as usize);
-                    let sliced = seq::skip(&mut self.heap, prefix, start as usize);
+                    // take + skip: two persistent splits.
+                    let prefix = seq::take(&mut self.heap, &arr_val, end as usize);
+                    let sliced = seq::skip(&mut self.heap, &prefix, start as usize);
                     self.stack.push(sliced);
                     Ok(())
                 } else {
@@ -263,13 +243,6 @@ impl VM {
     }
 
     pub(super) fn seq_concat(&mut self) -> VmResult<()> {
-        // Size both sequence operands while rooted: a Range is
-        // materialized into a fresh tree by `seq_root` (its real
-        // length), then concat merges border nodes.
-        let (la, mat_a) = self.peek_seq(1);
-        let (lb, mat_b) = self.peek_seq(0);
-        let need = mat_a + mat_b + cost::seq_concat(la + lb);
-        self.ensure(need);
         let arr2_val = self.pop()?;
         let arr1_val = self.pop()?;
         // Persistent concat: both operands stay structurally
@@ -277,18 +250,13 @@ impl VM {
         // routing + error messages live in `seq_root`.
         let a = self.seq_root(arr1_val)?;
         let b = self.seq_root(arr2_val)?;
-        let merged = seq::concat(&mut self.heap, a, b);
+        let merged = seq::concat(&mut self.heap, &a, &b);
         self.stack.push(merged);
         Ok(())
     }
 
     pub(super) fn seq_prepend(&mut self, operand: i32) -> VmResult<()> {
         let k = operand as usize;
-        // The sequence is on top (elements below it): k path
-        // copies, plus materialization when it is a Range.
-        let (len, mat) = self.peek_seq(0);
-        let need = mat + k * cost::seq_push(len + k);
-        self.ensure(need);
         let seq_val = self.pop()?;
         let mut root = self.seq_root(seq_val)?;
         // Stack below `seq` holds e0..e_{k-1} (e0 pushed first), so
@@ -296,22 +264,13 @@ impl VM {
         // order is [e0, e1, .., e_{k-1}, ..seq].
         for _ in 0..k {
             let e = self.pop()?;
-            root = seq::push_front(&mut self.heap, root, e);
+            root = seq::push_front(&mut self.heap, &root, e);
         }
         self.stack.push(root);
         Ok(())
     }
 
     pub(super) fn seq_drop(&mut self) -> VmResult<()> {
-        // Budget from the sequence below the count: a Range drop
-        // is one fresh Range (never materialized); an Array drop
-        // is a front split (path copies along the cut).
-        let need = match self.peek_at(1).map(Value::kind) {
-            Some(ValueView::Array(a)) => cost::seq_split(a.len()),
-            Some(ValueView::Range(..)) => cost::RANGE,
-            _ => 0,
-        };
-        self.ensure(need);
         let n_val = self.pop()?;
         let seq_val = self.pop()?;
         let Some(n) = n_val.as_int() else {
@@ -330,28 +289,22 @@ impl VM {
             return Ok(());
         }
         let root = self.seq_root(seq_val)?;
-        let n = (n as usize).min(seq::len(root));
-        // One front split (path copies along the cut), matching
-        // the `seq_split` budget ensured above — not n pops.
-        let v = seq::skip(&mut self.heap, root, n);
+        let n = (n as usize).min(seq::len(&root));
+        // One front split (path copies along the cut), not n pops.
+        let v = seq::skip(&mut self.heap, &root, n);
         self.stack.push(v);
         Ok(())
     }
 
     pub(super) fn seq_append(&mut self, operand: i32) -> VmResult<()> {
         let m = operand as usize;
-        // The sequence sits below the m pushed elements: m path
-        // copies, plus materialization when it is a Range.
-        let (len, mat) = self.peek_seq(m);
-        let need = mat + m * cost::seq_push(len + m);
-        self.ensure(need);
         // The sequence word sits just below the m pushed elements; read the
-        // elements in place (rooted) and truncate once at the end.
+        // elements in place and truncate once at the end.
         let base = self.operand_base(m + 1)?;
-        let seq_val = self.stack[base];
+        let seq_val = self.stack[base].clone();
         let mut root = self.seq_root(seq_val)?;
         for i in base + 1..base + 1 + m {
-            root = seq::push_back(&mut self.heap, root, self.stack[i]);
+            root = seq::push_back(&mut self.heap, &root, self.stack[i].clone());
         }
         self.stack.truncate(base);
         self.stack.push(root);
@@ -364,7 +317,7 @@ impl VM {
         if let Some(ev) = val.as_enum() {
             let payload = ev.payload();
             if idx >= 0 && (idx as usize) < payload.len() {
-                self.stack.push(payload[idx as usize]);
+                self.stack.push(payload[idx as usize].clone());
                 Ok(())
             } else {
                 Err(format!(

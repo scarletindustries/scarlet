@@ -1,0 +1,12 @@
+the: 4
+dog: 2
+fox: 2
+cat: 0
+distinct words: 8
+total words: 13
+has "lazy": True
+deleted "the" -> fewer has it: False
+deleted "the" -> counts still has it: True
+words seen more than once: 3
+merged "the": 4
+merged "newword": 7

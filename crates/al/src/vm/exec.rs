@@ -20,11 +20,10 @@
 //! - [`super::text`] — string/binary builtins, HTTP scanners
 //! - [`super::io`] — files, sockets, DNS, sleep, spawn (the parking ops)
 //!
-//! The rooting rule governs every allocating arm, inline or routed: it
-//! computes its worst-case word need from [`cost`] BEFORE popping its
-//! operands — while they are still on the VM stack, where a collection
-//! triggered by `ensure` can see and rewrite them — then pops and
-//! allocates collection-free. The typed pop helpers and the
+//! Allocation is reference-counted, so an arm simply pops its operands and
+//! builds its result: nothing moves, so there is no rooting rule and no
+//! pre-allocation reservation. Popped operands are owned `Value`s and drop
+//! (decrement) at the end of the arm. The typed pop helpers and the
 //! `make_*`/`stdlib_*` constructors at the bottom of this file are the
 //! shared vocabulary those arms (and the sibling handlers) build on.
 //!
@@ -38,7 +37,7 @@ use al_core::static_ir::VariantTemplate;
 
 use super::poll::monotonic_now_ms;
 use super::{
-    CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmResult, cost,
+    CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmResult,
     enum_template, f64_str, freeze, inspect, value_type_name,
 };
 
@@ -55,27 +54,17 @@ impl VM {
         // Remaining reduction budget for this slice; one function application
         // costs one reduction. Exhaustion preempts the process.
         let mut reds = REDUCTION_BUDGET;
-        // Drop GC debt left over from the previous slice. `GcDebt` is
-        // scheduler-wide, so a charge accrued by a process that blocked or
-        // finished between its last collection and its next call checkpoint
-        // would otherwise be billed to whatever process runs next. GC
-        // work shrinks the slice it happens in and never carries
-        // across a context switch — the owing process already yielded.
-        self.gc.pending_reds = 0;
+        // Discard any reclamation count left over from before this slice (a
+        // previous process's death-free, scheduler bookkeeping): it must not be
+        // billed to the process about to run. Frees during this slice accumulate
+        // from here and are charged at its call checkpoints (see `vm::gc`).
+        al_core::bytecode::take_freed_objects();
         loop {
             let addr = code_start + ip;
             let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize) else {
                 break;
             };
             ip += 1;
-
-            // Debug discipline: every opcode's budget
-            // starts at zero, so an allocation without its own `ensure` trips
-            // the watermark in `alloc_young` even when the previous opcode
-            // left slack behind. Compiled out of release builds.
-            if cfg!(debug_assertions) {
-                self.heap.note_ensured(0);
-            }
 
             // Typed-op dispatch helpers. Defined here (after `instr`) so the
             // free `self`/`instr`/`ip`/`base_slot`/`code_start` resolve by
@@ -138,17 +127,17 @@ impl VM {
             match instr.op {
                 Op::PushConst => {
                     self.stack
-                        .push(self.program.constants[instr.operand as usize]);
+                        .push(self.program.constants[instr.operand as usize].clone());
                 }
                 Op::PushLocal => {
                     let slot = base_slot + instr.operand as usize;
-                    self.stack.push(self.stack[slot]);
+                    self.stack.push(self.stack[slot].clone());
                 }
                 Op::PushGlobal => {
                     // Top-level bindings live in the global (literal) area,
                     // shared by every process on this scheduler.
                     let slot = instr.operand as usize;
-                    self.stack.push(self.globals[slot]);
+                    self.stack.push(self.globals[slot].clone());
                 }
                 Op::StoreLocal => {
                     let slot = base_slot + instr.operand as usize;
@@ -156,7 +145,7 @@ impl VM {
                     self.stack[slot] = v;
                     // Top-level bindings (the main process's entry frame) are
                     // the program's globals: freeze the binding's graph into
-                    // the program-wide frozen area (the shared `copy_graph`
+                    // the program-wide frozen area (the graph copy
                     // with the frozen builder as destination) and mirror the
                     // frozen root into the global area. The table holds only
                     // frozen words — never arena pointers — so it is not a GC
@@ -213,7 +202,7 @@ impl VM {
                         let frozen = freeze::freeze_global(
                             &mut self.heap,
                             &mut self.frozen,
-                            self.stack[slot],
+                            self.stack[slot].clone(),
                         );
                         self.globals[slot] = frozen.value();
                         self.runtime.publish_global(slot, frozen);
@@ -232,7 +221,7 @@ impl VM {
                     self.pop()?;
                 }
                 Op::Dup => {
-                    let v = *self.peek()?;
+                    let v = self.peek()?.clone();
                     self.stack.push(v);
                 }
                 // Polymorphic arithmetic (the untyped fallbacks; the
@@ -408,9 +397,7 @@ impl VM {
                     // The callee frame is fully consistent here, so preemption
                     // is a plain return — resume re-hoists from the frame.
                     reds -= 1;
-                    if self.gc.pending_reds != 0 {
-                        reds = reds.saturating_sub(self.take_gc_reds());
-                    }
+                    self.charge_reclamation(&mut reds);
                     if reds <= 0 {
                         return Ok(Step::Yield);
                     }
@@ -436,9 +423,9 @@ impl VM {
                     } else {
                         // Push a child frame. A self-call from inside a
                         // capture-carrying closure must see the same captures,
-                        // so the child shares the current frame's closure
-                        // handle (a one-word `Value` copy).
-                        let captures = self.frame().captures;
+                        // so the child takes a new reference to the current
+                        // frame's closure handle.
+                        let captures = self.frame().captures.clone();
                         self.frame_mut().ip = ip;
                         self.frames.push(CallFrame {
                             func_idx,
@@ -458,9 +445,7 @@ impl VM {
                     // Same checkpoint shape as `Call`: one reduction, GC debt
                     // drained only when a collection actually charged some.
                     reds -= 1;
-                    if self.gc.pending_reds != 0 {
-                        reds = reds.saturating_sub(self.take_gc_reds());
-                    }
+                    self.charge_reclamation(&mut reds);
                     if reds <= 0 {
                         return Ok(Step::Yield);
                     }
@@ -504,7 +489,6 @@ impl VM {
                 Op::MakeClosure => {
                     let func_idx = instr.operand;
                     let cc = self.program.functions[func_idx as usize].capture_count as usize;
-                    self.ensure(cost::closure(cc));
                     // The one place captures are materialized: the closure
                     // object holds them inline; later invocations copy the
                     // one-word handle.
@@ -519,7 +503,7 @@ impl VM {
                         .frame()
                         .captures
                         .as_closure()
-                        .and_then(|cl| cl.captures().get(capture_idx).copied())
+                        .and_then(|cl| cl.captures().get(capture_idx).cloned())
                     {
                         Some(v) => v,
                         None => {
@@ -530,9 +514,8 @@ impl VM {
                 }
                 Op::PushSelf => {
                     // The frame's `captures` handle IS the closure being
-                    // executed, so pushing self is a one-word clone — no
-                    // rebuild, no cache.
-                    let val = self.frame().captures;
+                    // executed; pushing self takes a new reference to it.
+                    let val = self.frame().captures.clone();
                     self.stack.push(val);
                 }
                 Op::Print => {
@@ -563,17 +546,16 @@ impl VM {
                     let payload_count = instr.b as usize;
                     // Names and labels are constant-pool references; only the
                     // enum cell and its payload slots are fresh.
-                    self.ensure(cost::enum_(payload_count));
                     // The payload stays rooted in place; the four header
                     // words sit at fixed offsets just below it. All are read
                     // before the single truncate that retires the operands.
                     let base = self.operand_base(payload_count + 4)?;
                     let payload_base = base + 4;
 
-                    let type_id_val = self.stack[base];
-                    let enum_name_val = self.stack[base + 1];
-                    let variant_name_val = self.stack[base + 2];
-                    let labels_val = self.stack[base + 3];
+                    let type_id_val = &self.stack[base];
+                    let enum_name_val = self.stack[base + 1].clone();
+                    let variant_name_val = self.stack[base + 2].clone();
+                    let labels_val = &self.stack[base + 3];
 
                     let Some(type_id) = type_id_val.as_int() else {
                         return Err("Enum type id must be int".to_string());
@@ -596,14 +578,14 @@ impl VM {
                         _ => return Err("Field labels must be an array".to_string()),
                     };
                     let field_labels = match self.label_cache.get(&labels_key) {
-                        Some(cached) => *cached,
+                        Some(cached) => cached.clone(),
                         None => {
                             // The label strings are frozen constants; build
                             // the canonical labels Tuple in the frozen area
                             // once per ctor site, shared by every instance.
-                            let labels = expect_string_array(&labels_val)?;
+                            let labels = expect_string_array(labels_val)?;
                             let tuple = self.frozen.tuple(labels);
-                            self.label_cache.insert(labels_key, tuple);
+                            self.label_cache.insert(labels_key, tuple.clone());
                             tuple
                         }
                     };
@@ -665,7 +647,7 @@ impl VM {
                     let enum_val = self.pop()?;
                     if let Some(ev) = enum_val.as_enum() {
                         for p in ev.payload() {
-                            self.stack.push(*p);
+                            self.stack.push(p.clone());
                         }
                     } else {
                         return Err("Cannot unwrap non-enum value".to_string());
@@ -684,7 +666,6 @@ impl VM {
                         // real need; `val` is never read past this point, so
                         // nothing unrooted is consulted across the safepoint.
                         let s = inspect(&val, &self.program);
-                        self.ensure(cost::str(s.len()));
                         let v = Value::str_in(&mut self.heap, &s);
                         self.stack.push(v);
                     }
@@ -705,7 +686,6 @@ impl VM {
                             None => return Err("str_concat requires strings".to_string()),
                         }
                     }
-                    self.ensure(cost::str(total));
                     let mut out = String::with_capacity(total);
                     for v in self.stack.drain(base..) {
                         if let Some(s) = v.as_str() {
@@ -802,7 +782,6 @@ impl VM {
                 }
                 Op::FloatToString => {
                     // f64 renders in at most 24 bytes through `f64_str`.
-                    self.ensure(cost::str(24));
                     let f = self.pop_float("float.to_string")?;
                     let s = f64_str(f);
                     let v = Value::str_in(&mut self.heap, &s);
@@ -818,18 +797,14 @@ impl VM {
 
     /// Collapse the active frame for a tail call: discard the slots in
     /// `[base, args_start)` and slide the freshly-pushed argument words sitting
-    /// at `[args_start, len)` down to `base`. Behaviourally identical to
-    /// `self.stack.drain(base..args_start)`, but `Value` is `Copy` (heap data
-    /// is owned by the GC, not by the stack slots), so the discarded slots
-    /// need no drops and the whole shift is a plain overlapping copy plus a
-    /// length shrink.
+    /// at `[args_start, len)` down to `base`. Under reference counting the
+    /// discarded slots own references: `drain` drops each of them (decref) and
+    /// shifts the surviving args down by *moving* them (no clone), which is
+    /// exactly the required behaviour.
     #[inline]
     fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
-        let len = self.stack.len();
-        debug_assert!(base <= args_start && args_start <= len);
-        let n_args = len - args_start;
-        self.stack.copy_within(args_start..len, base);
-        self.stack.truncate(base + n_args);
+        debug_assert!(base <= args_start && args_start <= self.stack.len());
+        self.stack.drain(base..args_start);
     }
 
     pub(super) fn pop(&mut self) -> VmResult<Value> {
@@ -918,30 +893,30 @@ impl VM {
 
     #[inline]
     pub(super) fn make_nil(&self) -> Value {
-        self.templates.nil
+        self.templates.nil.clone()
     }
 
     #[inline]
     pub(super) fn make_none(&self) -> Value {
-        self.templates.none
+        self.templates.none.clone()
     }
 
     #[inline]
     pub(super) fn make_some(&mut self, v: Value) -> Value {
-        let t = self.templates.some;
-        t.instantiate(&mut self.heap, &[v])
+        self.templates
+            .some
+            .clone()
+            .instantiate(&mut self.heap, &[v])
     }
 
     #[inline]
     pub(super) fn make_ok(&mut self, v: Value) -> Value {
-        let t = self.templates.ok;
-        t.instantiate(&mut self.heap, &[v])
+        self.templates.ok.clone().instantiate(&mut self.heap, &[v])
     }
 
     #[inline]
     pub(super) fn make_err(&mut self, v: Value) -> Value {
-        let t = self.templates.err;
-        t.instantiate(&mut self.heap, &[v])
+        self.templates.err.clone().instantiate(&mut self.heap, &[v])
     }
 
     /// The frozen [`EnumTemplate`] for a stdlib variant, built on first use
@@ -952,10 +927,10 @@ impl VM {
     pub(super) fn stdlib_template(&mut self, t: &'static VariantTemplate) -> EnumTemplate {
         let key = t as *const VariantTemplate as usize;
         if let Some(tpl) = self.template_cache.get(&key) {
-            return *tpl;
+            return tpl.clone();
         }
         let tpl = enum_template(&mut self.frozen, t);
-        self.template_cache.insert(key, tpl);
+        self.template_cache.insert(key, tpl.clone());
         tpl
     }
 
@@ -966,14 +941,10 @@ impl VM {
         tpl.instantiate(&mut self.heap, &[])
     }
 
-    /// Concatenate the two strings on top of the stack. The result is sized
-    /// and budgeted while both operands are still rooted on the stack (the
-    /// rooting rule). Shared by the `AddStr` opcode and the Str + Str case
-    /// of the untyped [`add`](Self::add).
+    /// Concatenate the two strings on top of the stack. Shared by the `AddStr`
+    /// opcode and the Str + Str case of the untyped [`add`](Self::add).
     #[inline]
     fn str_concat2(&mut self) -> VmResult<()> {
-        let need = cost::str(self.peek_str_len(1) + self.peek_str_len(0));
-        self.ensure(need);
         let b = self.pop()?;
         let a = self.pop()?;
         match (a.as_str(), b.as_str()) {
@@ -1112,7 +1083,6 @@ impl VM {
     #[cold]
     #[inline(never)]
     fn spill_int(&mut self, i: i64) -> Value {
-        self.ensure(cost::BIG_INT);
         Value::int_in(&mut self.heap, i)
     }
 
@@ -1133,8 +1103,6 @@ impl VM {
     pub(super) fn argv(&mut self) -> VmResult<()> {
         let runtime = self.runtime.clone();
         let args = &runtime.argv;
-        let strs: usize = args.iter().map(|a| cost::str(a.len())).sum();
-        self.ensure(cost::seq_build(args.len()) + strs);
         let mut items: Vec<Value> = Vec::with_capacity(args.len());
         for arg in args {
             items.push(Value::str_in(&mut self.heap, arg));

@@ -202,7 +202,7 @@ mod tests {
     //!   allocations in the heap that traveled with it — shared captures stay
     //!   shared, distinct allocations stay distinct, nothing is rebuilt or
     //!   deduplicated.
-    //! - **Spawn is a copy** (`ProcHeap::spawn_copy`, the copy_graph spawn
+    //! - **Spawn is a copy** (`ProcHeap::spawn_copy`, the spawn-side graph copy
     //!   entry): sharing in the source graph is sharing in the copy, and the
     //!   copy aliases nothing in the spawner.
     //!
@@ -221,7 +221,7 @@ mod tests {
     /// A process heap with a pre-granted allocation budget: these tests fill
     /// the heap directly, with no VM `ensure()` loop staking budgets.
     fn test_heap() -> ProcHeap {
-        ProcHeap::with_young_capacity(4096)
+        ProcHeap::new()
     }
 
     /// The arena header address of a heap-backed value — the identity the
@@ -253,21 +253,21 @@ mod tests {
                 code_start: 0,
                 ip: 3,
                 base_slot: 0,
-                captures: shared,
+                captures: shared.clone(),
             },
             CallFrame {
                 func_idx: 1,
                 code_start: 10,
                 ip: 5,
                 base_slot: 2,
-                captures: shared,
+                captures: shared.clone(),
             },
             CallFrame {
                 func_idx: 1,
                 code_start: 10,
                 ip: 7,
                 base_slot: 4,
-                captures: shared,
+                captures: shared.clone(),
             },
         ];
         let p = Process {
@@ -302,7 +302,6 @@ mod tests {
                 .iter()
                 .all(|f| f.captures.object_addr() == Some(shared_addr))
         );
-        assert!(q.heap.contains(shared_addr));
 
         // Each stack slot is the original word: heap-backed slots kept their
         // exact addresses, and the payloads read back intact through them.
@@ -415,8 +414,6 @@ mod tests {
         // the heap that traveled with the process...
         assert_eq!(q.frames[0].captures.object_addr(), Some(a_addr));
         assert_eq!(q.frames[1].captures.object_addr(), Some(b_addr));
-        assert!(q.heap.contains(a_addr));
-        assert!(q.heap.contains(b_addr));
         // ...and the two equal closures were not collapsed into one
         // (`a_addr != b_addr` above; the addresses did not change). The
         // payloads read back intact through the moved handles.
@@ -430,14 +427,14 @@ mod tests {
 
     #[test]
     fn seed_copy_preserves_sharing_without_dedup_or_aliasing() {
-        // The spawn-side copy (`ProcHeap::spawn_copy`, the copy_graph entry
+        // The spawn-side copy (`ProcHeap::spawn_copy`, the spawn-side graph copy entry
         // point) is the one cross-scheduler transport that copies a value
         // graph. Its required properties:
         //
         // - a node referenced twice travels as ONE allocation referenced
         //   twice (shared captures stay shared), and
-        // - two distinct-but-equal allocations stay DISTINCT (forwarding is
-        //   keyed by identity, never by value).
+        // - two distinct-but-equal allocations stay DISTINCT (the copy's
+        //   `src → dst` map is keyed by identity, never by value).
         //
         // The graph must live in the spawner's own spaces: the copy
         // classifies pointers by address range and leaves frozen/foreign
@@ -448,16 +445,12 @@ mod tests {
         let shared = Value::array_in(&mut spawner, &[Value::small_int(1), cap]);
         let twin_cap = Value::str_in(&mut spawner, "cap");
         let twin = Value::array_in(&mut spawner, &[Value::small_int(1), twin_cap]);
-        let root = Value::closure_in(&mut spawner, 0, &[shared, shared, twin]);
+        let root = Value::closure_in(&mut spawner, 0, &[shared.clone(), shared.clone(), twin]);
 
         let mut src_nodes = Vec::new();
         distinct_heap_nodes(&root, &mut src_nodes);
-        assert!(
-            src_nodes.iter().all(|&a| spawner.contains(a)),
-            "test setup: the source graph must live in the spawner's heap"
-        );
 
-        let (child_heap, copy) = spawner.spawn_copy(&root);
+        let (_child_heap, copy) = spawner.spawn_copy(&root);
 
         // The spawner's graph is untouched (Clone-mode copy restores every
         // forwarded header): same objects at the same addresses.
@@ -477,17 +470,12 @@ mod tests {
             "the copy must preserve sharing exactly — no duplication, no dedup"
         );
 
-        // No aliasing: every copied object lives in the child heap's spaces,
-        // none in the spawner's (both heaps are alive here, so no address
-        // reuse).
+        // No aliasing: every copied object is a fresh allocation, disjoint
+        // from the source graph (both are live here, so addresses don't reuse).
         for &a in &copy_nodes {
             assert!(
-                child_heap.contains(a),
-                "copied node must live in the child heap"
-            );
-            assert!(
-                !spawner.contains(a),
-                "copied node must not alias the spawner"
+                !src_nodes.contains(&a),
+                "copied node must not alias the source graph"
             );
         }
 

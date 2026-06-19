@@ -33,7 +33,7 @@ use crate::stdlib;
 /// instance) and the compile-time name-prefix hash, completed per instance
 /// by folding the payload in. Plain words — copying a template costs
 /// nothing and borrows nothing.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct EnumTemplate {
     type_id: i32,
     /// `enum_name_prefix_hash(enum_name, variant_name)`.
@@ -56,9 +56,9 @@ impl EnumTemplate {
             a,
             self.type_id,
             hash,
-            self.enum_name,
-            self.variant_name,
-            self.labels,
+            self.enum_name.clone(),
+            self.variant_name.clone(),
+            self.labels.clone(),
             payload,
         )
     }
@@ -145,7 +145,11 @@ impl PreludeTemplates {
     /// Build an `al/net/address.IpAddress` (`V4`/`V6`) from a
     /// `std::net::IpAddr`. The caller has ensured `cost::IP_ADDR`.
     pub(super) fn ip_address<A: Arena + ?Sized>(&self, a: &mut A, ip: std::net::IpAddr) -> Value {
-        let tpl = if ip.is_ipv6() { self.ip_v6 } else { self.ip_v4 };
+        let tpl = if ip.is_ipv6() {
+            self.ip_v6.clone()
+        } else {
+            self.ip_v4.clone()
+        };
         let text = Value::str_in(a, &ip.to_string());
         tpl.instantiate(a, &[text])
     }

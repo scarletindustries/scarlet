@@ -40,7 +40,7 @@
 //!   pop each.
 //! - **Wake-time construction runs in the woken process's context.** A
 //!   completion or finished connect builds its result value in that
-//!   process's own arena with its own stack/frames as GC roots —
+//!   process's own heap with its own stack/frames as roots —
 //!   `drain_completions`/`drain_io_events` swap the process in around the
 //!   construction, exactly like a context switch.
 //! - **Registered fds outlive their registration.** Sockets stay in the
@@ -64,7 +64,7 @@ use al_core::bytecode::Value;
 use smallvec::{SmallVec, smallvec};
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
-use super::{Process, VM, VmResult, cost, sched};
+use super::{Process, VM, VmResult, sched};
 use crate::stdlib;
 
 /// A socket-readiness condition a parked process can wait on.
@@ -348,11 +348,11 @@ impl VM {
 
     /// Deliver finished blocking-pool jobs: for each completion, resume the
     /// process parked under its `job_id` with the result constructed
-    /// scheduler-side into that process's own arena (the rooting rule).
+    /// scheduler-side into that process's own heap.
     /// Returns whether anything was woken.
     ///
     /// The woken process is made *current* for the construction, so its heap
-    /// is the allocation target and its own stack/frames are the GC roots if
+    /// is the allocation target and its own stack/frames are the roots if
     /// `ensure` collects. Whatever was current when the drain ran — a yielded
     /// process at a `Step::Yield` poll, or the empty placeholder between
     /// slices — is detached around the delivery and restored after.
@@ -391,12 +391,10 @@ impl VM {
         match result {
             BlockingResult::ReadFile { path, result } => match result {
                 Ok(bytes) => {
-                    self.ensure(cost::WRAP + cost::BINARY);
                     let bin = Value::binary_in(&mut self.heap, bytes);
                     self.make_ok(bin)
                 }
                 Err(e) => {
-                    self.ensure(cost::WRAP + cost::io_err(path.len()));
                     let err = self.io_error_value(&e, &path);
                     self.make_err(err)
                 }
@@ -406,24 +404,20 @@ impl VM {
                     // `make_nil` clones a prebuilt template (frozen-area in
                     // the end state) and allocates nothing; only the wrapper
                     // needs budget.
-                    self.ensure(cost::WRAP);
                     let nil = self.make_nil();
                     self.make_ok(nil)
                 }
                 Err(e) => {
-                    self.ensure(cost::WRAP + cost::io_err(path.len()));
                     let err = self.io_error_value(&e, &path);
                     self.make_err(err)
                 }
             },
             BlockingResult::ResolveDns { result } => match result {
                 Ok(addr) => {
-                    self.ensure(cost::WRAP + cost::IP_ADDR);
                     let ip = self.templates.ip_address(&mut self.heap, addr);
                     self.make_ok(ip)
                 }
                 Err(e) => {
-                    self.ensure(cost::WRAP + cost::NET_ERR);
                     let err = self.net_error_value(&e);
                     self.make_err(err)
                 }
@@ -438,10 +432,7 @@ impl VM {
     pub(super) fn wake_due_timers(&mut self) -> bool {
         let now = Instant::now();
         let mut woke = false;
-        loop {
-            let Some(&Reverse((deadline, id))) = self.timer_heap.peek() else {
-                break;
-            };
+        while let Some(&Reverse((deadline, id))) = self.timer_heap.peek() {
             if deadline > now {
                 break;
             }
@@ -495,7 +486,7 @@ impl VM {
                     // A finished connect delivers its result directly onto the
                     // woken process's stack; the connect instruction is not
                     // re-run. The result is built in the woken process's own
-                    // context (its arena, its stack and frames as GC roots),
+                    // context (its arena, its stack and frames as roots),
                     // so it is swapped in around the
                     // construction exactly as `drain_completions` swaps in
                     // completion targets.
@@ -524,7 +515,6 @@ impl VM {
     fn finish_connect(&mut self, id: i32) -> Value {
         // Budget the whole result up front in the (just-resumed) woken
         // process's arena: the adopted Ok(Socket) graph or a NetError.
-        self.ensure(cost::ADOPT + cost::NET_ERR);
         let Some(socket) = self.pending_connects.remove(&id) else {
             let aborted = self.stdlib_enum(&stdlib::net::error::CONNECTION_ABORTED);
             return self.make_err(aborted);

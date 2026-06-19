@@ -10,7 +10,7 @@
 //! plus the root `Value` pointing into it — pushed onto a shared injector
 //! queue or handed to an idle scheduler. Whichever scheduler takes it
 //! adopts the heap as the child
-//! process's initial young space: the arena moves as a unit, nothing is
+//! process's initial heap: the heap moves as a unit, nothing is
 //! rebuilt on the receiving side. A process's heap is only ever touched by
 //! the scheduler currently running it.
 //!
@@ -38,17 +38,16 @@ pub(super) const SEED_BATCH: usize = 1;
 /// points only into it (or into the frozen area), so handing a seed to
 /// another scheduler is a plain move.
 pub(super) struct Seed {
-    /// The child's initial young space: a fresh mini-arena sized to the
-    /// spawned closure's graph, filled by `copy_graph` spawn-side (sharing
-    /// preserved via forwarding pointers; `Binary` `Arc` backings are shared
-    /// zero-copy — only the arena box is copied, never the bytes).
-    pub heap: ProcHeap,
-    /// The spawned closure, as a pointer into `heap`.
+    /// The spawned closure, as a pointer into the child heap.
     pub root: Value,
     /// Connections the closure captured (moved — the spawner loses them).
     /// Listeners do not travel: each scheduler binds its own reuseport socket
     /// from the shared address on first accept (`VM::ensure_listener`).
     pub connections: Vec<(i32, TcpStream)>,
+    /// The child's allocator handle. A zero-sized marker (allocation goes to
+    /// mimalloc's per-thread default heap); field order is not load-bearing,
+    /// since `mi_free` is global and frees `root`'s graph from any thread.
+    pub heap: ProcHeap,
 }
 
 // A seed crosses scheduler threads (inbox handoff or the shared injector), so
@@ -667,8 +666,8 @@ impl Runtime {
     /// reader can observe it.
     ///
     /// The caller has already deep-copied the value graph into the frozen
-    /// area (`freeze::freeze_global` — the shared `copy_graph` with the
-    /// frozen builder as destination), so `frozen` is an immediate or points
+    /// area (`freeze::freeze_global` — `rc_publish_graph` with the frozen
+    /// builder as destination), so `frozen` is an immediate or points
     /// at fully written frozen segments. The table store happens-before the
     /// `Release` bump of `globals_version`, and readers `Acquire`-load the
     /// version before touching the table, so a frozen pointer is only ever

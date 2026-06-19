@@ -227,7 +227,7 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
             MapBacking::Env => out.push_str("<map env>"),
             // An in-memory map renders its entries as `{k: v, …}`.
             MapBacking::Hamt => {
-                let entries = hamt::collect_entries(*v);
+                let entries = hamt::collect_entries(v);
                 out.push('{');
                 for (i, (k, val)) in entries.iter().enumerate() {
                     if i > 0 {

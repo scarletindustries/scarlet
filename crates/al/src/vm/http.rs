@@ -33,7 +33,7 @@ const MAX_HEAD: usize = 65536;
 // instantiate into the current process arena under the caller's ensured
 // budget (status codes always fit the small-int payload).
 fn need_more(t: &PreludeTemplates) -> Value {
-    t.parsed_need_more
+    t.parsed_need_more.clone()
 }
 
 fn bad(t: &PreludeTemplates, a: &mut ProcHeap, status: i64) -> Value {
@@ -46,7 +46,7 @@ fn invalid(t: &PreludeTemplates, a: &mut ProcHeap, status: i64) -> Value {
 }
 
 fn chunked_need_more(t: &PreludeTemplates) -> Value {
-    t.chunked_need_more
+    t.chunked_need_more.clone()
 }
 
 fn chunked_bad(t: &PreludeTemplates, a: &mut ProcHeap, status: i64) -> Value {
@@ -58,7 +58,7 @@ fn header_fields(h: &Value) -> Option<(Value, Value)> {
     let e = h.as_enum()?;
     let payload = e.payload();
     match (payload.first(), payload.get(1)) {
-        (Some(n), Some(v)) => Some((*n, *v)),
+        (Some(n), Some(v)) => Some((n.clone(), v.clone())),
         _ => None,
     }
 }
@@ -340,12 +340,12 @@ pub(super) fn framing(
             && let Some(vb) = field_bytes(&v)
             && vb.eq_ignore_ascii_case(b"chunked")
         {
-            return Ok(t.framing_chunked);
+            return Ok(t.framing_chunked.clone());
         }
         return Ok(invalid(t, a, 501));
     }
     match (cl, cl_value) {
-        (0, _) => Ok(t.framing_no_body),
+        (0, _) => Ok(t.framing_no_body.clone()),
         (1, Some(v)) => {
             let parsed = match field_bytes(&v) {
                 Some(bytes) => {
@@ -536,7 +536,7 @@ pub(super) fn header_get(
     Ok(match find_header(headers_val, name, "headers.get")? {
         // The view itself is shared; only the Some wrapper is fresh.
         Some(hvalue) => t.some.instantiate(a, &[hvalue]),
-        None => t.none,
+        None => t.none.clone(),
     })
 }
 
@@ -605,8 +605,7 @@ mod tests {
         let mut fb = frozen.builder();
         let t = PreludeTemplates::new(&mut fb);
         drop(fb);
-        let mut h = ProcHeap::with_young_capacity(1 << 20);
-        h.note_ensured(1 << 20);
+        let h = ProcHeap::new();
         Fix {
             _frozen: frozen,
             t,
@@ -768,7 +767,7 @@ mod tests {
 
     fn header_value(x: &mut Fix, src: &str, name: &str) -> Option<Vec<u8>> {
         let parsed = x.parse(src, 0);
-        let headers = parsed.as_enum().unwrap().payload()[3];
+        let headers = parsed.as_enum().unwrap().payload()[3].clone();
         let name_v = x.bin(name);
         let got = header_get(&x.t, &mut x.h, &headers, &name_v.as_binary().unwrap()).unwrap();
         match got.as_enum() {
@@ -797,7 +796,7 @@ mod tests {
     fn framing_of(x: &mut Fix, src: &str) -> (String, Option<i64>) {
         let parsed = x.parse(src, 0);
         assert_eq!(variant_of(&parsed), "Done", "for {src:?}");
-        let headers = parsed.as_enum().unwrap().payload()[3];
+        let headers = parsed.as_enum().unwrap().payload()[3].clone();
         let f = framing(&x.t, &mut x.h, &headers).unwrap();
         let variant = variant_of(&f);
         let arg = f
@@ -944,7 +943,7 @@ mod tests {
             1 << 20,
         );
         assert_eq!(variant_of(&v), "ChunkedDone");
-        let trailers = v.as_enum().unwrap().payload()[1];
+        let trailers = v.as_enum().unwrap().payload()[1].clone();
         let arr = trailers.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         let h = arr.get(0).unwrap();
@@ -1057,7 +1056,7 @@ mod tests {
             "GET / HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n",
             0,
         );
-        let headers = parsed.as_enum().unwrap().payload()[3];
+        let headers = parsed.as_enum().unwrap().payload()[3].clone();
         let reason = x.bin("OK");
         let head = serialize_head(&mut x.h, 200, &reason.as_binary().unwrap(), &headers).unwrap();
         let bytes = head

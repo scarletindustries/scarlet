@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use super::gc::GC_WORDS_PER_REDUCTION;
 use super::*;
 use al_core::bytecode::values_equal;
 use al_core::bytecode::{Instruction, SocketValue, op, op_ab, op_arg};
@@ -50,18 +49,17 @@ fn run_fn(
     constants: impl FnOnce(&mut FrozenBuilder) -> Vec<Value>,
     code: Vec<Instruction>,
     locals: i32,
-) -> (VM, Value) {
+) -> (Value, VM) {
     let mut vm = new_vm(single_fn_program(constants, code, locals)).expect("vm must construct");
     let value = vm.run().expect("vm must run without panicking or erroring");
-    (vm, value)
+    // `value` first: it lives in `vm`'s heap, so it must drop (decref) before
+    // the VM's heap is destroyed (tuple fields drop in declaration order).
+    (value, vm)
 }
 
-/// A standalone test arena with a generous pre-ensured budget, for
-/// fixtures that build values outside a VM.
+/// A standalone test heap for fixtures that build values outside a VM.
 fn test_heap() -> ProcHeap {
-    let mut h = ProcHeap::with_young_capacity(1 << 16);
-    h.note_ensured(1 << 16);
-    h
+    ProcHeap::new()
 }
 
 // Only closures read the function table when rendering, so every fixture
@@ -73,7 +71,7 @@ fn inspect(v: &Value) -> String {
 
 #[test]
 fn test_push_add_halt() {
-    let (_vm, result) = run_fn(
+    let (result, _vm) = run_fn(
         |_f| vec![Value::small_int(1), Value::small_int(2)],
         vec![
             op_arg(Op::PushConst, 0),
@@ -135,7 +133,7 @@ fn test_values_equal() {
 #[test]
 fn range_index_and_len_do_not_overflow() {
     // `(5..10)[idx]` via Op::Index.
-    let index_at = |idx: i64| -> (VM, Value) {
+    let index_at = |idx: i64| -> (Value, VM) {
         run_fn(
             move |f| vec![f.int(5), f.int(10), f.int(idx)],
             vec![
@@ -151,17 +149,17 @@ fn range_index_and_len_do_not_overflow() {
     };
     // In-bounds indexing is unchanged. Each result points into its VM's
     // arena, so the VM stays bound while the value is read.
-    let (_vm, some) = index_at(2);
+    let (some, _vm) = index_at(2);
     let some = some.as_enum().expect("index returns an Option enum");
     assert_eq!(some.payload()[0].as_int(), Some(7));
     // 5 + i64::MAX overflows i64; the result must be None, not a wrapped
     // value that spuriously passes the `< end` bound.
-    let (_vm, none) = index_at(i64::MAX);
+    let (none, _vm) = index_at(i64::MAX);
     assert!(none.as_enum().expect("Option enum").payload().is_empty());
 
     // `len(i64::MIN..i64::MAX)` via Op::ArrayLen: `end - start` overflows,
     // so the length must saturate to i64::MAX instead of panicking/wrapping.
-    let (_vm, len) = run_fn(
+    let (len, _vm) = run_fn(
         |f| vec![f.int(i64::MIN), f.int(i64::MAX)],
         vec![
             op_arg(Op::PushConst, 0),
@@ -247,7 +245,7 @@ fn enum_with_signed_zero_payload_is_congruent() {
 fn superinstr_add_int_lc_adds_local_and_const_with_wrapping() {
     // local[0] = constants[0]; AddIntLC pushes local[0] + constants[1].
     let add = |local: i64, c: i64| -> Option<i64> {
-        let (_vm, v) = run_fn(
+        let (v, _vm) = run_fn(
             move |f| vec![f.int(local), f.int(c)],
             vec![
                 op_arg(Op::PushConst, 0),
@@ -272,7 +270,7 @@ fn superinstr_add_int_lc_adds_local_and_const_with_wrapping() {
 fn superinstr_sub_int_lc_subtracts_const_from_local_with_wrapping() {
     // local[0] = constants[0]; SubIntLC pushes local[0] - constants[1].
     let sub = |local: i64, c: i64| -> Option<i64> {
-        let (_vm, v) = run_fn(
+        let (v, _vm) = run_fn(
             move |f| vec![f.int(local), f.int(c)],
             vec![
                 op_arg(Op::PushConst, 0),
@@ -294,7 +292,7 @@ fn superinstr_sub_int_lc_subtracts_const_from_local_with_wrapping() {
 // was taken. The taken target (ip 5) and the fall-through (ip 3) push
 // distinct markers, so the return value reveals which path executed.
 fn jump_lc_taken(jump_op: Op, local: i64, c: i64) -> bool {
-    let (_vm, r) = run_fn(
+    let (r, _vm) = run_fn(
         move |f| {
             vec![
                 f.int(local),        // 0: local value
@@ -573,221 +571,6 @@ fn array_slice_range_out_of_bounds_errors() {
 }
 
 // --- GC reduction charging ----------------------
-
-// `collect` charges reductions for collection work: a 1-red
-// floor plus one per `GC_WORDS_PER_REDUCTION` words the collector copied,
-// accrued into `GcDebt::pending_reds` and drained once by
-// `take_gc_reds`.
-#[test]
-fn gc_collect_charges_reductions_for_live_words() {
-    let mut vm = new_vm(single_fn_program(|_| Vec::new(), vec![op(Op::Halt)], 0))
-        .expect("vm must construct");
-    vm.heap = ProcHeap::new();
-    vm.heap.set_stress(false);
-
-    // Room to spare: no collection runs, only the floor charge accrues,
-    // and `take` drains it.
-    vm.collect(0);
-    assert_eq!(vm.take_gc_reds(), 1);
-    assert_eq!(vm.take_gc_reds(), 0, "take_gc_reds must drain the charge");
-
-    // A sizeable live graph in the process arena, rooted on the operand
-    // stack (a host- or constant-built fixture would be skipped as
-    // frozen/foreign by the collector). Demanding more headroom than the
-    // young space holds forces a collection that must copy the whole
-    // graph: the charge is exactly the copied words over the divisor
-    // (plus the floor).
-    let len = 8 * GC_WORDS_PER_REDUCTION;
-    vm.heap = ProcHeap::with_young_capacity(cost::seq_build(len));
-    vm.heap.set_stress(false);
-    let items: Vec<Value> = (0..len as i64).map(Value::small_int).collect();
-    let fixture = Value::array_in(&mut vm.heap, &items);
-    vm.stack.push(fixture);
-    let copied_before = vm.heap.stats().words_copied;
-    let need = vm.heap.young_capacity() + 1;
-    vm.collect(need);
-    let copied = (vm.heap.stats().words_copied - copied_before) as usize;
-    assert!(
-        copied >= GC_WORDS_PER_REDUCTION,
-        "fixture must be big enough to charge beyond the floor"
-    );
-    assert_eq!(
-        vm.take_gc_reds(),
-        (1 + copied / GC_WORDS_PER_REDUCTION) as i32
-    );
-}
-
-// With the per-heap stress override on, EVERY safepoint collects, so each
-// allocating opcode runs against a heap whose objects were just moved by
-// the evacuating collector. Rendering the final value proves the rooted
-// graph survived every move intact — the same property AL_GC_STRESS=1
-// checks across the whole suite.
-#[test]
-fn stress_collections_move_the_live_graph_under_every_opcode() {
-    let program = single_fn_program(
-        |f| vec![f.str("ab")],
-        vec![
-            op_arg(Op::PushConst, 0),
-            op_arg(Op::PushConst, 0),
-            op(Op::AddStr), // "abab"
-            op_arg(Op::PushConst, 0),
-            op(Op::AddStr), // "ababab"
-            op(Op::Dup),
-            op_arg(Op::MakeArray, 2), // [s, s]
-            op_arg(Op::PushConst, 0),
-            op_arg(Op::Append, 1), // [s, s, "ab"]
-            op(Op::ToString),
-            op(Op::Halt),
-        ],
-        0,
-    );
-    let mut vm = new_vm(program).expect("vm must construct");
-
-    // `VM::run`'s entry setup, with the stress override installed before
-    // the first safepoint (`run` would replace the heap and lose it).
-    let entry = vm.program.entry;
-    let func = &vm.program.functions[entry as usize];
-    let (code_start, locals) = (func.code_start, func.locals);
-    vm.heap = ProcHeap::new();
-    vm.heap.set_stress(true);
-    vm.ensure(cost::closure(0));
-    let entry_closure = Value::closure_in(&mut vm.heap, entry, &[]);
-    vm.frames.push(CallFrame {
-        func_idx: entry,
-        code_start,
-        ip: 0,
-        base_slot: 0,
-        captures: entry_closure,
-    });
-    for _ in 0..locals {
-        vm.stack.push(Value::small_int(0));
-    }
-
-    let step = vm.execute_slice().expect("program must run under stress");
-    assert!(matches!(step, Step::Done));
-    let result = vm.stack.pop().expect("result on top of the stack");
-    assert_eq!(result.as_str(), Some("[ababab, ababab, ab]"));
-    assert!(
-        vm.heap.minor_count() > 5,
-        "stress mode must collect at every safepoint (got {})",
-        vm.heap.minor_count()
-    );
-}
-
-// GC debt left by the previous slice must not be billed to the next one:
-// `GcDebt` is scheduler-wide, so debt from a process that blocked or
-// finished before its next call checkpoint would otherwise preempt
-// whatever process the scheduler runs next. `execute_slice` drops stale
-// debt at entry.
-#[test]
-fn stale_gc_debt_is_dropped_at_slice_entry() {
-    let mut vm = new_vm(single_fn_program(
-        |_| vec![Value::small_int(7)],
-        vec![op_arg(Op::PushConst, 0), op(Op::Halt)],
-        0,
-    ))
-    .expect("vm must construct");
-    vm.gc.pending_reds = i32::MAX; // leftover from a "previous" process
-    let result = vm.run().expect("stale GC debt must not fail the program");
-    assert_eq!(result.as_int(), Some(7));
-    assert_eq!(
-        vm.gc.pending_reds, 0,
-        "slice entry must drop debt the slice did not accrue"
-    );
-}
-
-// End to end: collection work performed inside a slice is charged against
-// the reduction budget at the next call checkpoint, preempting a GC-heavy
-// process. The fixture pre-builds a graph in the process arena large
-// enough that copying it owes more than `REDUCTION_BUDGET` reductions and
-// fills the young space so an array build must collect mid-slice; the
-// single call that follows — which alone could never exhaust the budget —
-// must yield. The process stays resumable and finishes correctly.
-#[test]
-fn gc_work_preempts_at_the_next_call_checkpoint() {
-    // Big enough that 1 + copied/divisor > REDUCTION_BUDGET: the array
-    // tree stores each element in at least one word, so copying it owes
-    // at least big_len / GC_WORDS_PER_REDUCTION = 2 * REDUCTION_BUDGET.
-    let big_len = 2 * REDUCTION_BUDGET as usize * GC_WORDS_PER_REDUCTION;
-    // Elements of the collect-triggering build; any size works once the
-    // young space is full.
-    let small_len = 8usize;
-
-    let mut main_code = vec![op_arg(Op::PushConst, 0); small_len];
-    main_code.extend([
-        op_arg(Op::MakeArray, small_len as i32), // ensure() collects here
-        op(Op::Pop),
-        op_arg(Op::MakeClosure, 1),
-        op_arg(Op::Call, 0), // checkpoint: drains the GC charge, yields
-        op(Op::Halt),
-    ]);
-    let main_len = main_code.len() as i32;
-    let mut code = main_code;
-    code.extend([op_arg(Op::PushConst, 1), op(Op::Ret)]);
-
-    let program = Program {
-        constants: vec![Value::small_int(1), Value::small_int(9)],
-        functions: vec![
-            Function {
-                name: "main".into(),
-                arity: 0,
-                locals: 0,
-                capture_count: 0,
-                code_start: 0,
-                code_len: main_len,
-            },
-            Function {
-                name: "helper".into(),
-                arity: 0,
-                locals: 0,
-                capture_count: 0,
-                code_start: main_len,
-                code_len: 2,
-            },
-        ],
-        code,
-        entry: 0,
-        ..Program::default()
-    };
-
-    // Entry-frame setup as `VM::run` does it, so slices can be driven
-    // one at a time. The big graph is built in the process arena (a
-    // program constant would be skipped as frozen/foreign by the
-    // collector) and rooted on the operand stack; the young space is
-    // then filled so the array build's `ensure` must collect.
-    let mut vm = new_vm(program).expect("vm must construct");
-    vm.heap = ProcHeap::with_young_capacity(cost::seq_build(big_len) + cost::closure(0));
-    vm.heap.set_stress(false);
-    let entry_closure = Value::closure_in(&mut vm.heap, 0, &[]);
-    let items: Vec<Value> = (0..big_len as i64).map(Value::small_int).collect();
-    let big = Value::array_in(&mut vm.heap, &items);
-    vm.stack.push(big);
-    vm.heap.occupy_young(usize::MAX);
-    vm.frames.push(CallFrame {
-        func_idx: 0,
-        code_start: 0,
-        ip: 0,
-        base_slot: 0,
-        captures: entry_closure,
-    });
-
-    let first = vm.execute_slice().expect("first slice must not error");
-    assert!(
-        matches!(first, Step::Yield),
-        "one call can never exhaust the budget by itself; only the GC \
-         charge drained at the call checkpoint can preempt here"
-    );
-    let second = vm.execute_slice().expect("resumed slice must not error");
-    assert!(
-        matches!(second, Step::Done),
-        "the preempted process must be resumable to completion"
-    );
-    assert_eq!(
-        vm.stack.last().and_then(Value::as_int),
-        Some(9),
-        "the helper's return value must be the process result"
-    );
-}
 
 #[allow(dead_code)]
 fn _instruction_is_copy(_: Instruction) {}

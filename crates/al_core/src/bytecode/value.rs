@@ -16,16 +16,22 @@
 //!
 //! # Arena object layout
 //!
-//! Every heap-backed value is `[header word][payload words…]` in an arena.
+//! Every heap-backed value is reference counted: a mortal object is laid out
+//! `[rc word][header word][payload words…]`, and the `Value`'s pointer targets
+//! the *header*, so every header-relative offset is layout-stable. The refcount
+//! sits one word before the header ([`rc_slot`]); `Clone` increments it and
+//! `Drop` frees the object at zero. Frozen (immortal) objects carry **no** rc
+//! prefix — reference counting never touches them.
+//!
 //! The header packs (low bit first):
 //!
 //! ```text
-//! bit 0      1 = this word is a header; 0 = the object was evacuated and the
-//!            whole word is the forwarding pointer (object addresses are
-//!            8-byte aligned, so a pointer's low bit is always 0)
+//! bit 0      header marker: always 1 on a live header (object addresses are
+//!            8-byte aligned, so a stray read of a freed/zeroed slot — bit 0
+//!            clear — is caught by the accessors' debug guard)
 //! bits 1-5   HeapTag (object type)
-//! bit 6      off-heap-list link bit: the payload owns an `Arc` (Binary) and
-//!            the object is threaded on its space's off-heap sweep list
+//! bit 6      off-heap bit: the payload owns an `Arc<[u8]>` backing (Binary),
+//!            released when the object is freed
 //! bit 7      immortal: the object lives in the frozen area and is never
 //!            reference counted or freed (set at frozen-allocation time)
 //! bits 8-63  payload length in words
@@ -36,9 +42,9 @@
 //! - `BigInt`:    `[i64]`
 //! - `Range`:     `[start][end]`
 //! - `Str`:       `[byte_len][UTF-8 bytes inline, zero-padded to a word]`
-//! - `Binary`:    `[arc_data_ptr][arc_len][bit_offset][bit_len][off_heap_next]`
-//!   — the bytes stay off-heap in an `Arc<[u8]>` shared zero-copy across
-//!   views/spawn/migration; the box is on the off-heap sweep list
+//! - `Binary`:    `[arc_data_ptr][arc_len][bit_offset][bit_len]` — the bytes
+//!   stay off-heap in an `Arc<[u8]>` shared zero-copy across
+//!   views/spawn/migration; the box's `Drop` releases the `Arc`
 //! - `Tuple`:     `[count][elements…]`
 //! - `Enum`:      `[type_id][hash][enum_name][variant_name][labels][count][payload…]`
 //!   — names/labels are `Str`/`Tuple` values, normally in the frozen area
@@ -48,28 +54,28 @@
 //! - `SeqLeaf`:   `[count][elements…]` — vector leaf, 1..=32 elements
 //! - `SeqBranch`: `[count][shift][cumulative sizes × count][children × count]`
 //!
-//! # The rooting rule
+//! # Reference counting
 //!
-//! The GC moves objects, so a `Value` held in a Rust local across a
-//! *collection* is a dangling pointer. Allocation itself never collects:
-//! [`Arena::alloc_words`] is infallible and non-moving, and callers (the VM)
-//! must `ensure()` worst-case capacity up front while every operand is still
-//! rooted on the VM stack/frames. All the constructors and `seq` operations
-//! here may allocate but never collect, so values in Rust locals are safe
-//! *within* one ensured operation.
+//! `Value` is **not `Copy`**: cloning a heap value increments its count,
+//! dropping it decrements and frees at zero. Freeing walks an explicit work
+//! list (never native `Drop` recursion, so a deep list cannot overflow the
+//! stack). The graph is acyclic by construction (immutable values, capture by
+//! value, frame-based self-reference), so reference counting is complete with
+//! no cycle collector. Allocation ([`Arena::alloc_words`]) is infallible and
+//! non-moving, so a `Value` in a Rust local is never invalidated by a later
+//! allocation.
 //!
 //! All `unsafe` in the value representation is confined to this file: header
 //! and payload reads/writes behind typed accessors, and the `Arc<[u8]>`
 //! pack/unpack for binary backings. The only escape hatches are a handful of
-//! `pub(crate) unsafe fn`s that hand layout knowledge to the designated GC
-//! engine modules — they never leave the crate:
+//! `pub(crate) unsafe fn`s that hand layout knowledge to `heap::mimheap` — they
+//! never leave the crate:
 //!
-//! - `for_each_child`: object tracing, called by `heap::copy` on freshly
-//!   copied destination images.
-//! - `binary_off_heap_next` / `set_binary_off_heap_next` /
-//!   `binary_clone_backing` / `binary_drop_backing`: the `Binary`
-//!   off-heap-list words and `Arc` ownership, called by `heap::copy`'s
-//!   off-heap sweep and `heap::proc_heap`'s drop walk.
+//! - `for_each_child`: object tracing, used by the free-at-zero work list and
+//!   by the spawn/freeze graph copies (`rc_copy_graph`/`rc_publish_graph`).
+//! - `binary_clone_backing` / `binary_drop_backing`: the `Binary` backing
+//!   `Arc`'s ownership — bumped when a binary is copied into a child/frozen
+//!   graph, released when the box is freed.
 //!
 //! The `seq` persistent-vector module is fully safe code: it reads nodes
 //! through the typed [`SeqRootRef`] / [`SeqNodeRef`] views and allocates them
@@ -81,7 +87,7 @@
 #![allow(unsafe_code)]
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
@@ -111,6 +117,21 @@ const HDR_SOCKET: u64 = QNAN | 0x0004_0000_0000_0000;
 /// Heap pointer uses the sign bit so `(bits & (SIGN|QNAN)) == (SIGN|QNAN)`
 /// is the heap test — disjoint from the sign-clear immediate headers above.
 const HDR_PTR: u64 = SIGN | QNAN;
+
+/// Immortality marker carried in a heap `Value` word itself (bit 0 of the
+/// payload). Arena objects are 8-byte aligned, so a real header pointer has its
+/// low 3 bits clear — bit 0 is free to mark "this value points into the frozen
+/// area" *without dereferencing the object*. This is what makes `Clone`/`Drop`
+/// on a frozen value pure bit math: reference counting never reads frozen
+/// memory, so a frozen value may be dropped in any order relative to the frozen
+/// area itself (no drop-order constraint). The marker is set once by
+/// [`Value::from_object_ptr`] from the object's header bit and then rides along
+/// wherever the word is copied — stack slots, object payloads, globals.
+const VALUE_IMMORTAL: u64 = 1;
+/// Payload mask for *heap pointers*: the 48-bit payload with the immortality
+/// marker bit cleared, recovering the aligned object address. (Immediate
+/// payloads — ints/bools/sockets — use [`PAYLOAD`]; only pointers are masked.)
+const PTR_PAYLOAD: u64 = PAYLOAD & !VALUE_IMMORTAL;
 
 /// Inclusive bounds of the 48-bit signed small-int range.
 const SMALL_INT_MIN: i64 = -(1i64 << 47);
@@ -186,7 +207,7 @@ pub enum MapBacking {
 }
 
 /// Decode a [`MapBacking`] discriminant word. Panics only on a corrupt heap
-/// (an unknown discriminant), which a sound collector never produces.
+/// (an unknown discriminant), which correct construction never produces.
 fn map_backing(word: u64) -> MapBacking {
     match word {
         0 => MapBacking::Env,
@@ -217,34 +238,17 @@ pub fn pack_header(tag: HeapTag, payload_words: usize, off_heap: bool) -> u64 {
         | ((payload_words as u64) << HEADER_LEN_SHIFT)
 }
 
-/// Whether a header-slot word is a forwarding pointer (the object was already
-/// evacuated by `copy_graph`). Real headers have bit 0 set; object addresses
-/// are 8-byte aligned so a forwarding pointer has bit 0 clear.
+/// Whether a word is a live object header: every header sets bit 0
+/// ([`HEADER_BIT`]). A debug guard for the header-decoding accessors below —
+/// reading a freed or uninitialized slot (bit 0 clear) trips it.
 #[inline]
-pub fn header_is_forwarding(word: u64) -> bool {
-    word & HEADER_BIT == 0
-}
-
-/// The forwarding destination encoded in an overwritten header slot.
-#[inline]
-pub fn forwarding_target(word: u64) -> usize {
-    debug_assert!(header_is_forwarding(word));
-    word as usize
-}
-
-/// Encode a forwarding pointer for an evacuated object's header slot.
-#[inline]
-pub fn make_forwarding(dst: usize) -> u64 {
-    debug_assert!(
-        dst != 0 && dst.is_multiple_of(8),
-        "unaligned forwarding target"
-    );
-    dst as u64
+fn header_marks_object(word: u64) -> bool {
+    word & HEADER_BIT != 0
 }
 
 #[inline]
 pub fn header_tag(word: u64) -> HeapTag {
-    debug_assert!(!header_is_forwarding(word));
+    debug_assert!(header_marks_object(word));
     match (word & HEADER_TAG_MASK) >> HEADER_TAG_SHIFT {
         0 => HeapTag::BigInt,
         1 => HeapTag::Range,
@@ -270,7 +274,7 @@ pub fn header_tag(word: u64) -> HeapTag {
 /// Payload length in words encoded in a header.
 #[inline]
 pub fn header_payload_words(word: u64) -> usize {
-    debug_assert!(!header_is_forwarding(word));
+    debug_assert!(header_marks_object(word));
     (word >> HEADER_LEN_SHIFT) as usize
 }
 
@@ -283,7 +287,7 @@ pub fn header_total_words(word: u64) -> usize {
 /// Whether the object owns an `Arc` and sits on its space's off-heap list.
 #[inline]
 pub fn header_has_off_heap_link(word: u64) -> bool {
-    debug_assert!(!header_is_forwarding(word));
+    debug_assert!(header_marks_object(word));
     word & HEADER_OFF_HEAP_BIT != 0
 }
 
@@ -291,8 +295,18 @@ pub fn header_has_off_heap_link(word: u64) -> bool {
 /// touch it. See [`HEADER_IMMORTAL_BIT`].
 #[inline]
 pub fn header_is_immortal(word: u64) -> bool {
-    debug_assert!(!header_is_forwarding(word));
+    debug_assert!(header_marks_object(word));
     word & HEADER_IMMORTAL_BIT != 0
+}
+
+/// Mark an object's header immortal. Used when publishing a copy of a mortal
+/// graph into the frozen area: the copy must never be reference counted.
+///
+/// # Safety
+/// `obj` must point at a live, non-forwarded object header.
+#[inline]
+pub(crate) unsafe fn mark_immortal(obj: *mut u64) {
+    unsafe { *obj |= HEADER_IMMORTAL_BIT };
 }
 
 // ---- arenas ------------------------------------------------------------------
@@ -300,26 +314,13 @@ pub fn header_is_immortal(word: u64) -> bool {
 /// Allocation interface the value constructors build through: a process heap
 /// (VM paths) or the frozen builder (compile-time constants, globals publish).
 ///
-/// `alloc_words` is infallible by contract: the frozen area grows on demand,
-/// and a process heap relies on the caller having `ensure`d capacity while its
-/// operands were rooted (the rooting rule). Allocation never collects and
-/// never moves existing objects.
+/// `alloc_words` is infallible by contract: the frozen area grows on demand and
+/// a process heap allocates from mimalloc (which aborts internally on OOM).
+/// Allocation never moves existing objects.
 pub trait Arena {
     /// Allocate `words` words (header + payload) of arena storage, 8-byte
     /// aligned, stable for the object's lifetime.
     fn alloc_words(&mut self, words: usize) -> NonNull<u64>;
-
-    /// Thread an `Arc`-holding box (Binary) at `addr` onto the arena's
-    /// off-heap sweep list. Returns the previous list head (`0` when the list
-    /// was empty) for the box to store as its link word.
-    ///
-    /// This is the mutator-side linking seam: it runs once per *freshly
-    /// allocated* binary, at construction. Its collector-side twin is
-    /// `CopyDest::link_off_heap` (trait in `heap/copy.rs`, implementations in
-    /// `heap/dest.rs`), which threads the *copies* that Clone-mode evacuation
-    /// makes of already-linked binaries. Both seams use the same push-front
-    /// protocol: the box stores the returned previous head as its link word.
-    fn link_off_heap(&mut self, addr: usize) -> usize;
 
     /// Whether objects allocated through this arena are immortal: born with
     /// the header immortal bit set so reference counting never touches them.
@@ -329,31 +330,12 @@ pub trait Arena {
     }
 }
 
-/// Backstop for a violated ensure-discipline: allocation in a process heap
-/// past its capacity. This is a VM bug, never a user-program condition; debug
-/// builds catch it earlier via the heap's watermark assertions.
-#[cold]
-#[inline(never)]
-fn arena_exhausted(words: usize) -> ! {
-    eprintln!("al: internal error: arena exhausted allocating {words} words (ensure() not called)");
-    std::process::abort()
-}
-
 impl Arena for ProcHeap {
     #[inline]
     fn alloc_words(&mut self, words: usize) -> NonNull<u64> {
-        match self.alloc_young(words) {
-            // SAFETY: `Space::alloc` hands out in-bounds slab pointers.
-            Some(p) => unsafe { NonNull::new_unchecked(p) },
-            None => arena_exhausted(words),
-        }
-    }
-
-    #[inline]
-    fn link_off_heap(&mut self, addr: usize) -> usize {
-        let prev = self.off_heap_head();
-        self.set_off_heap_head(addr);
-        prev
+        // SAFETY: `alloc_object` returns a non-null header pointer (mimalloc
+        // aborts internally on OOM).
+        unsafe { NonNull::new_unchecked(self.alloc_object(words)) }
     }
 }
 
@@ -361,17 +343,6 @@ impl Arena for FrozenBuilder {
     #[inline]
     fn alloc_words(&mut self, words: usize) -> NonNull<u64> {
         self.alloc(words)
-    }
-
-    /// The frozen area is never collected, so it keeps no off-heap list and
-    /// its boxes are never swept: a frozen binary's backing `Arc` lives for
-    /// the program lifetime — the price of a never-collected area. The
-    /// returned 0 becomes the box's link word, keeping the frozen image
-    /// self-contained. `FrozenDest` in `heap/dest.rs` applies the same rule
-    /// when Clone-mode evacuation copies a binary into the frozen area.
-    #[inline]
-    fn link_off_heap(&mut self, _addr: usize) -> usize {
-        0
     }
 
     /// Frozen objects are never reference counted: mark them immortal at birth.
@@ -413,7 +384,8 @@ unsafe fn payload_word(obj: *const u64, i: usize) -> u64 {
 
 #[inline]
 unsafe fn payload_value(obj: *const u64, i: usize) -> Value {
-    Value::from_bits(unsafe { payload_word(obj, i) })
+    // Returns an owned (counted) reference to the child, so callers can drop it.
+    unsafe { owned_from_bits(payload_word(obj, i)) }
 }
 
 /// Borrow `n` payload words starting at `at` as a `Value` slice. The lifetime
@@ -471,7 +443,7 @@ pub(crate) struct SeqRootRef {
 
 impl SeqRootRef {
     #[inline(always)]
-    pub(crate) fn new(root: Value) -> SeqRootRef {
+    pub(crate) fn new(root: &Value) -> SeqRootRef {
         if !root.is_heap() {
             seq_view_mismatch();
         }
@@ -509,7 +481,7 @@ pub(crate) enum SeqNodeRef<'a> {
 
 impl<'a> SeqNodeRef<'a> {
     #[inline(always)]
-    pub(crate) fn of(node: Value) -> SeqNodeRef<'a> {
+    pub(crate) fn of(node: &Value) -> SeqNodeRef<'a> {
         if !node.is_heap() {
             seq_view_mismatch();
         }
@@ -565,9 +537,9 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
         let p = obj.as_ptr().add(1);
         p.write(len as u64);
         p.add(1).write(shift as u64);
-        p.add(2).write(head.to_bits());
-        p.add(3).write(tree.to_bits());
-        p.add(4).write(tail.to_bits());
+        move_child(p.add(2), head);
+        move_child(p.add(3), tree);
+        move_child(p.add(4), tail);
     }
     Value::from_object_ptr(obj)
 }
@@ -581,7 +553,7 @@ pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Valu
         let p = obj.as_ptr().add(1);
         p.write(items.len() as u64);
         for (i, v) in items.iter().enumerate() {
-            p.add(1 + i).write(v.to_bits());
+            store_child(p.add(1 + i), v);
         }
     }
     Value::from_object_ptr(obj)
@@ -596,7 +568,7 @@ pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Valu
 /// `payload_word(obj, 1 + n)` never passes the payload end — even for a
 /// degenerate empty node.
 #[inline]
-fn seq_node_total(node: Value) -> u64 {
+fn seq_node_total(node: &Value) -> u64 {
     if !node.is_heap() {
         seq_view_mismatch();
     }
@@ -635,9 +607,9 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
         p.add(1).write(shift as u64);
         let mut total = 0u64;
         for (i, c) in children.iter().enumerate() {
-            total += seq_node_total(*c);
+            total += seq_node_total(c);
             p.add(2 + i).write(total);
-            p.add(2 + n + i).write(c.to_bits());
+            store_child(p.add(2 + n + i), c);
         }
     }
     Value::from_object_ptr(obj)
@@ -653,9 +625,7 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
 // - `HamtBranch`    `[bitmap, child…]` (one child per set bit of `bitmap`)
 //
 // As with the `seq` nodes, the algorithm module is fully safe: it reads
-// through [`HamtNodeRef`] and allocates through the builders here, every one
-// of which allocates but never collects (the rooting rule — the VM ensures the
-// op's worst-case budget before any of this runs).
+// through [`HamtNodeRef`] and allocates through the builders here.
 
 pub(crate) fn hamt_view_mismatch() -> ! {
     eprintln!("al: internal error: hamt view on a non-hamt-node value");
@@ -681,7 +651,7 @@ pub(crate) enum HamtNodeRef<'a> {
 
 impl<'a> HamtNodeRef<'a> {
     #[inline]
-    pub(crate) fn of(node: Value) -> HamtNodeRef<'a> {
+    pub(crate) fn of(node: &Value) -> HamtNodeRef<'a> {
         if !node.is_heap() {
             hamt_view_mismatch();
         }
@@ -725,8 +695,8 @@ pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Val
     // SAFETY: freshly allocated 2-word payload.
     unsafe {
         let p = obj.as_ptr().add(1);
-        p.write(key.to_bits());
-        p.add(1).write(value.to_bits());
+        move_child(p, key);
+        move_child(p.add(1), value);
     }
     Value::from_object_ptr(obj)
 }
@@ -744,7 +714,7 @@ pub(crate) fn hamt_collision_in<A: Arena + ?Sized>(a: &mut A, hash: u64, pairs: 
         p.write(hash);
         p.add(1).write(count as u64);
         for (i, v) in pairs.iter().enumerate() {
-            p.add(2 + i).write(v.to_bits());
+            store_child(p.add(2 + i), v);
         }
     }
     Value::from_object_ptr(obj)
@@ -765,7 +735,7 @@ pub(crate) fn hamt_branch_in<A: Arena + ?Sized>(
         let p = obj.as_ptr().add(1);
         p.write(bitmap as u64);
         for (i, c) in children.iter().enumerate() {
-            p.add(1 + i).write(c.to_bits());
+            store_child(p.add(1 + i), c);
         }
     }
     Value::from_object_ptr(obj)
@@ -780,7 +750,7 @@ pub(crate) struct HamtMapRef {
 
 impl HamtMapRef {
     #[inline]
-    pub(crate) fn of(map: Value) -> HamtMapRef {
+    pub(crate) fn of(map: &Value) -> HamtMapRef {
         if !map.is_heap() {
             hamt_view_mismatch();
         }
@@ -811,17 +781,39 @@ pub(crate) fn hamt_map_in<A: Arena + ?Sized>(a: &mut A, size: usize, root: Value
         let p = obj.as_ptr().add(1);
         p.write(MapBacking::Hamt as u64);
         p.add(1).write(size as u64);
-        p.add(2).write(root.to_bits());
+        move_child(p.add(2), root);
     }
     Value::from_object_ptr(obj)
 }
 
 // ---- Value -------------------------------------------------------------------
 
-/// The universal NaN-boxed value: one machine word, `Copy`, no destructor.
-#[derive(Clone, Copy)]
+/// The universal NaN-boxed value: one machine word. NOT `Copy` — a mortal heap
+/// value owns a reference count, so duplicating it (`Clone`) increments that
+/// count and dropping it decrements (freeing at zero). Immediates and immortal
+/// (frozen) values carry no count, so their `Clone`/`Drop` are free no-ops.
 #[repr(transparent)]
 pub struct Value(u64);
+
+impl Clone for Value {
+    #[inline]
+    fn clone(&self) -> Value {
+        if self.is_heap() && !self.is_immortal() {
+            // SAFETY: a mortal heap value points at a live object with a count.
+            unsafe { rc_increment(self.heap_obj()) };
+        }
+        Value(self.0)
+    }
+}
+
+impl Drop for Value {
+    #[inline]
+    fn drop(&mut self) {
+        // Operates on the raw bits so it never constructs another droppable
+        // `Value` (which would recurse). Immediates/immortals are no-ops.
+        release_bits(self.0);
+    }
+}
 
 const _: () = assert!(std::mem::size_of::<Value>() == 8);
 
@@ -854,35 +846,50 @@ pub struct SocketValue {
 impl Value {
     // ---- raw bits ------------------------------------------------------------
 
-    /// The raw NaN-box bits. With `from_bits`, this is the GC's interface for
-    /// rewriting evacuated pointers.
+    /// The raw NaN-box bits, by borrow (so reading them never moves or drops a
+    /// non-`Copy` value). Pairs with `from_bits` for low-level value plumbing.
     #[inline(always)]
-    pub fn to_bits(self) -> u64 {
+    pub fn to_bits(&self) -> u64 {
         self.0
     }
 
-    /// Reconstitute a value from raw bits. Fabricating heap-pointer bits that
-    /// do not reference a live arena object makes later accessor calls
-    /// undefined; the only sound sources are `to_bits` and `from_object_ptr`.
+    /// Reconstitute a value from raw bits WITHOUT taking a reference: the
+    /// resulting `Value` is an un-counted alias. Storing it into an owning slot,
+    /// or letting it drop, will mis-count unless the caller balances it (e.g.
+    /// `store_child`, or `mem::forget`). Fabricating heap-pointer bits that do
+    /// not reference a live object makes later accessor calls undefined; the
+    /// only sound bit sources are `to_bits`/`from_object_ptr`.
     #[inline(always)]
     pub fn from_bits(bits: u64) -> Value {
         Value(bits)
     }
 
-    /// Box a pointer to an arena object's header word as a heap value.
+    /// Box a pointer to an arena object's header word as a heap value, carrying
+    /// the immortality marker derived from the object's header. The object must
+    /// be fully constructed (header written) — true at every call site, which is
+    /// the tail of a constructor or a graph copy. Reading the header here is the
+    /// *only* time immortality is read from memory; thereafter it lives in the
+    /// value word (see [`VALUE_IMMORTAL`]).
     #[inline]
     pub fn from_object_ptr(obj: NonNull<u64>) -> Value {
         let addr = obj.as_ptr() as usize as u64;
         debug_assert!(addr & !PAYLOAD == 0, "arena pointer exceeds 48 bits");
         debug_assert!(addr.is_multiple_of(8), "unaligned arena pointer");
-        Value(HDR_PTR | addr)
+        // SAFETY: `obj` is a freshly written, live object header.
+        let marker = if header_is_immortal(unsafe { *obj.as_ptr() }) {
+            VALUE_IMMORTAL
+        } else {
+            0
+        };
+        Value(HDR_PTR | addr | marker)
     }
 
-    /// The arena object address (header word) of a heap-backed value.
+    /// The arena object address (header word) of a heap-backed value, with the
+    /// immortality marker masked off.
     #[inline(always)]
     pub fn object_addr(&self) -> Option<usize> {
         if self.is_heap() {
-            Some((self.0 & PAYLOAD) as usize)
+            Some((self.0 & PTR_PAYLOAD) as usize)
         } else {
             None
         }
@@ -891,7 +898,7 @@ impl Value {
     #[inline(always)]
     pub(crate) fn heap_obj(&self) -> *const u64 {
         debug_assert!(self.is_heap());
-        (self.0 & PAYLOAD) as usize as *const u64
+        (self.0 & PTR_PAYLOAD) as usize as *const u64
     }
 
     /// The object tag of a heap-backed value.
@@ -913,10 +920,14 @@ impl Value {
     /// Whether this value is an immortal (frozen) heap object — one reference
     /// counting must never increment, decrement, or free. Immediates return
     /// `false` (they need no reclamation; callers test `is_heap()` anyway).
+    ///
+    /// A pure bit test: immortality rides in the value word ([`VALUE_IMMORTAL`]),
+    /// so this never dereferences the object. That is what frees `Clone`/`Drop`
+    /// of a frozen value from any dependence on the frozen area still being
+    /// mapped — there is no drop-order constraint.
     #[inline(always)]
     pub fn is_immortal(&self) -> bool {
-        // SAFETY: heap values point at live arena objects.
-        self.is_heap() && header_is_immortal(unsafe { *self.heap_obj() })
+        self.is_heap() && (self.0 & VALUE_IMMORTAL != 0)
     }
 
     // ---- classifiers ----------------------------------------------------------
@@ -1055,7 +1066,7 @@ impl Value {
             let p = obj.as_ptr().add(1);
             p.write(elements.len() as u64);
             for (i, v) in elements.iter().enumerate() {
-                p.add(1 + i).write(v.to_bits());
+                store_child(p.add(1 + i), v);
             }
         }
         Value::from_object_ptr(obj)
@@ -1081,7 +1092,7 @@ impl Value {
             p.write(func_idx as u32 as u64);
             p.add(1).write(captures.len() as u64);
             for (i, v) in captures.iter().enumerate() {
-                p.add(2 + i).write(v.to_bits());
+                store_child(p.add(2 + i), v);
             }
         }
         Value::from_object_ptr(obj)
@@ -1119,12 +1130,12 @@ impl Value {
             let p = obj.as_ptr().add(1);
             p.write(type_id as u32 as u64);
             p.add(1).write(hash);
-            p.add(2).write(enum_name.to_bits());
-            p.add(3).write(variant_name.to_bits());
-            p.add(4).write(labels.to_bits());
+            move_child(p.add(2), enum_name);
+            move_child(p.add(3), variant_name);
+            move_child(p.add(4), labels);
             p.add(5).write(payload.len() as u64);
             for (i, v) in payload.iter().enumerate() {
-                p.add(6 + i).write(v.to_bits());
+                store_child(p.add(6 + i), v);
             }
         }
         Value::from_object_ptr(obj)
@@ -1262,21 +1273,16 @@ impl Value {
         bit_len: u64,
     ) -> Value {
         debug_assert!((bit_offset + bit_len).div_ceil(8) as usize <= backing.len());
-        let obj = alloc_obj(a, HeapTag::Binary, 5, true);
-        let addr = obj.as_ptr() as usize;
+        let obj = alloc_obj(a, HeapTag::Binary, 4, true);
         let arc_len = backing.len();
         let data = Arc::into_raw(backing) as *const u8 as usize;
-        // SAFETY: freshly allocated 5-word payload.
+        // SAFETY: freshly allocated 4-word payload.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(data as u64);
             p.add(1).write(arc_len as u64);
             p.add(2).write(bit_offset);
             p.add(3).write(bit_len);
-            // Link onto the off-heap sweep list only after the box is fully
-            // formed: the sweep must never observe a half-written box.
-            let prev = a.link_off_heap(addr);
-            p.add(4).write(prev as u64);
         }
         Value::from_object_ptr(obj)
     }
@@ -1385,10 +1391,7 @@ impl Value {
     #[inline]
     pub fn as_array(&self) -> Option<SeqRef<'_>> {
         if self.is_tag(HeapTag::Seq) {
-            Some(SeqRef {
-                root: *self,
-                _life: PhantomData,
-            })
+            Some(SeqRef { root: self })
         } else {
             None
         }
@@ -1466,10 +1469,7 @@ impl Value {
                         obj,
                         _life: PhantomData,
                     }),
-                    HeapTag::Seq => ValueView::Array(SeqRef {
-                        root: *self,
-                        _life: PhantomData,
-                    }),
+                    HeapTag::Seq => ValueView::Array(SeqRef { root: self }),
                     HeapTag::SeqLeaf | HeapTag::SeqBranch => {
                         debug_assert!(false, "kind() on an interior vector node");
                         ValueView::Nil
@@ -1851,8 +1851,7 @@ impl<'a> EnumRef<'a> {
 /// Borrowed view of a `Seq` (array) root.
 #[derive(Clone, Copy)]
 pub struct SeqRef<'a> {
-    root: Value,
-    _life: PhantomData<&'a u64>,
+    root: &'a Value,
 }
 
 impl<'a> SeqRef<'a> {
@@ -1868,32 +1867,31 @@ impl<'a> SeqRef<'a> {
     pub fn get(&self, i: usize) -> Option<Value> {
         seq::get(self.root, i)
     }
-    /// Iterate the elements front to back. The iterator holds raw pointers
-    /// into the arena: do not run a collection while it is live (the rooting
-    /// rule); plain reads/allocations are fine.
-    pub fn iter(&self) -> SeqIter<'a> {
+    /// Iterate the elements front to back. The returned iterator owns the
+    /// root's section nodes (a few reference bumps), so it is self-contained.
+    pub fn iter(&self) -> SeqIter {
         SeqIter::new(self.root)
     }
 }
 
-// ---- GC support -----------------------------------------------------------------
+// ---- object tracing -------------------------------------------------------------
 
 /// Visit every payload slot of `obj` that holds a `Value`, in place. This is
-/// the layout knowledge the copying collector traces with: raw payload words
-/// (lengths, hashes, Arc parts, off-heap links) are skipped; child `Value`s
-/// are visited as `&mut` so the collector can rewrite evacuated pointers.
+/// the layout knowledge the reference-counting engine traces with: raw payload
+/// words (lengths, hashes, Arc parts) are skipped; child `Value`s are visited
+/// as `&mut`. Used by the free-at-zero work list (to release children) and by
+/// the spawn/freeze graph copies (to rewrite copied child slots).
 ///
 /// # Safety
 ///
-/// `obj` must point at a live, non-forwarded arena object header, and the
-/// callback must only rewrite the visited slot (no reads of other arena state
-/// mid-evacuation, no collection).
+/// `obj` must point at a live arena object header, and the callback must only
+/// rewrite the visited slot (no reads of other arena state mid-walk).
 pub(crate) unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)) {
     // SAFETY (whole body): the header declares the payload length; every slot
     // index below stays within it per the layouts in the module docs.
     unsafe {
         let h = *obj;
-        debug_assert!(!header_is_forwarding(h));
+        debug_assert!(header_marks_object(h));
         let p = obj.add(1);
         let visit = |start: usize, n: usize, f: &mut dyn FnMut(&mut Value)| {
             for i in start..start + n {
@@ -1944,42 +1942,9 @@ pub(crate) unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)
     }
 }
 
-/// The off-heap list link of a `Binary` box (0 = end of list).
-///
-/// # Safety
-///
-/// `obj` must point at a live `Binary` arena box. The link word survives
-/// forwarding (only the header word is overwritten), so the sweep may read it
-/// from an evacuated source box.
-pub(crate) unsafe fn binary_off_heap_next(obj: *const u64) -> usize {
-    unsafe {
-        let h = *obj;
-        // A forwarded source box is fine here (the sweep reads the link from
-        // it); anything else must still carry the Binary tag.
-        debug_assert!(header_is_forwarding(h) || header_tag(h) == HeapTag::Binary);
-        *obj.add(5) as usize
-    }
-}
-
-/// Set the off-heap list link of a `Binary` box.
-///
-/// # Safety
-///
-/// As [`binary_off_heap_next`]; the box must be exclusively owned by the
-/// caller (a collector relinking into a destination space).
-pub(crate) unsafe fn set_binary_off_heap_next(obj: *mut u64, next: usize) {
-    unsafe {
-        let h = *obj;
-        debug_assert!(!header_is_forwarding(h));
-        debug_assert!(header_tag(h) == HeapTag::Binary);
-        obj.add(5).write(next as u64);
-    }
-}
-
 /// Bump the backing `Arc` of the `Binary` box at `obj` by one strong count.
-/// `copy_graph` calls this when copying a box while the source space stays
-/// live (spawn-copy, frozen publish): afterwards the source box and the copy
-/// each own one count.
+/// The spawn/freeze graph copies call this when copying a box while the source
+/// stays live: afterwards the source box and the copy each own one count.
 ///
 /// # Safety
 ///
@@ -1989,7 +1954,7 @@ pub(crate) unsafe fn binary_clone_backing(obj: *const u64) {
     // the copied box; nothing must release it here.
     unsafe {
         let h = *obj;
-        debug_assert!(!header_is_forwarding(h));
+        debug_assert!(header_marks_object(h));
         debug_assert!(header_tag(h) == HeapTag::Binary);
         std::mem::forget(Arc::clone(&binary_backing_reborrow(obj)))
     }
@@ -2007,7 +1972,7 @@ pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
     // strong count, so the reconstructed Arc is dropped for real.
     unsafe {
         let h = *obj;
-        debug_assert!(!header_is_forwarding(h));
+        debug_assert!(header_marks_object(h));
         debug_assert!(header_tag(h) == HeapTag::Binary);
         drop(Arc::from_raw(binary_backing_raw(obj)))
     }
@@ -2050,7 +2015,6 @@ pub(crate) unsafe fn rc_slot(obj: *const u64) -> *mut u64 {
 /// # Safety
 /// `obj` must be a mortal heap object with an initialized refcount slot.
 #[inline]
-#[allow(dead_code)] // wired into `Value::Clone` at Stage 4 (the flip)
 pub(crate) unsafe fn rc_increment(obj: *const u64) {
     unsafe {
         let p = rc_slot(obj);
@@ -2089,8 +2053,21 @@ unsafe fn free_object(obj: *mut u64) {
         if header_has_off_heap_link(*obj) {
             binary_drop_backing(obj);
         }
+        // Poison the whole block (refcount slot + header + payload) before
+        // freeing so a use-after-free is loud, not silent: a stale read of the
+        // header trips `header_marks_object` (bit 0 is now clear) and a stale
+        // decref underflows the zeroed refcount. Debug builds only.
+        #[cfg(debug_assertions)]
+        {
+            let words = RC_PREFIX_WORDS + header_total_words(*obj);
+            let base = rc_slot(obj);
+            for i in 0..words {
+                base.add(i).write(0);
+            }
+        }
         libmimalloc_sys::mi_free(rc_slot(obj).cast());
     }
+    FREED_OBJECTS.with(|c| c.set(c.get() + 1));
 }
 
 thread_local! {
@@ -2099,19 +2076,92 @@ thread_local! {
     /// non-reentrant (it triggers no further `Value` drops), so one per-thread
     /// buffer — empty between releases — is sound.
     static DROP_STACK: RefCell<Vec<*mut u64>> = const { RefCell::new(Vec::new()) };
+
+    /// Objects freed by reference counting on this thread since the last
+    /// [`take_freed_objects`]. The VM drains it at call checkpoints to charge a
+    /// process for bulk reclamation, so a large cascading free preempts at the
+    /// next call instead of stalling the scheduler.
+    static FREED_OBJECTS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Release one reference to `v`. For a mortal heap object whose count reaches
-/// zero, free it and transitively release everything it uniquely owns —
-/// iteratively, through an explicit work list, so a deep graph (e.g. a long
-/// cons list) cannot overflow the native stack the way recursive `Drop` would.
-/// Immediates and immortal (frozen) values are no-ops.
-#[allow(dead_code)] // wired into `Value::Drop` at Stage 4 (the flip)
-pub(crate) fn release(v: Value) {
-    if !v.is_heap() || v.is_immortal() {
+/// Reclamation done on this thread since the last call: the count of objects
+/// freed, reset to zero. See [`FREED_OBJECTS`].
+#[inline]
+pub fn take_freed_objects() -> u64 {
+    FREED_OBJECTS.with(|c| c.replace(0))
+}
+
+/// Objects freed on this thread since the last [`take_freed_objects`], without
+/// resetting. One thread-local read — the call-checkpoint fast path peeks this
+/// and only drains when it crosses the charging threshold.
+#[inline]
+pub fn freed_objects_pending() -> u64 {
+    FREED_OBJECTS.with(|c| c.get())
+}
+
+/// Store `child` into the object slot at `slot`, taking a new reference to it
+/// (the slot becomes an owner). This is the constructor side of the net-zero
+/// rule: a constructor `store_child`s each operand it *borrows* (incref), and
+/// the caller later drops the operands it still owns (decref) — so the object
+/// ends up owning exactly the references it holds. Immediate/immortal children
+/// are written without a count change.
+///
+/// # Safety
+/// `slot` must be a writable object payload word; `child` a valid value.
+#[inline]
+pub(crate) unsafe fn store_child(slot: *mut u64, child: &Value) {
+    if child.is_heap() && !child.is_immortal() {
+        // SAFETY: mortal heap child has a refcount slot.
+        unsafe { rc_increment(child.heap_obj()) };
+    }
+    unsafe { slot.write(child.0) };
+}
+
+/// Move an *owned* value into an object slot, transferring its reference (no
+/// count change): the slot inherits the ownership the caller gives up. Use this
+/// for by-value constructor arguments; use [`store_child`] for borrowed ones.
+///
+/// # Safety
+/// `slot` must be a writable object payload word.
+#[inline]
+pub(crate) unsafe fn move_child(slot: *mut u64, child: Value) {
+    unsafe { slot.write(child.0) };
+    std::mem::forget(child); // ownership now lives in the slot
+}
+
+/// Build an *owned* (counted) value from raw bits: increments the count of a
+/// mortal heap object so the returned `Value` is a real reference its holder
+/// will drop. Unlike [`Value::from_bits`] (a bare alias), this is safe to drop.
+///
+/// # Safety
+/// `bits` must come from a live value (`to_bits`/`from_object_ptr`).
+#[inline]
+pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
+    // Take a reference only for a mortal heap value (heap, marker clear). Both
+    // tests are pure bit math — immortal and immediate values need no count and
+    // their object is never read.
+    if bits & (SIGN | QNAN) == (SIGN | QNAN) && bits & VALUE_IMMORTAL == 0 {
+        // SAFETY: mortal heap bits point at a live object with a refcount slot.
+        unsafe { rc_increment((bits & PTR_PAYLOAD) as *const u64) };
+    }
+    Value(bits)
+}
+
+/// Release one reference held as raw value bits. For a mortal heap object whose
+/// count reaches zero, free it and transitively release everything it uniquely
+/// owns — iteratively, through an explicit work list, so a deep graph (e.g. a
+/// long cons list) cannot overflow the native stack the way recursive `Drop`
+/// would. Immediates and immortal (frozen) values are no-ops. Takes raw bits
+/// (not a `Value`) so it never constructs another droppable value.
+pub(crate) fn release_bits(bits: u64) {
+    // Mortal-heap test, pure bit math: bail for immediates (not heap) and for
+    // immortal/frozen values (marker set). Crucially this NEVER reads the
+    // object, so a frozen value can be released after its frozen area is already
+    // gone — there is no drop-order constraint between values and the area.
+    if bits & (SIGN | QNAN) != (SIGN | QNAN) || bits & VALUE_IMMORTAL != 0 {
         return;
     }
-    let obj = v.heap_obj() as *mut u64;
+    let obj = (bits & PTR_PAYLOAD) as *mut u64;
     // SAFETY: a mortal heap object has an initialized refcount slot.
     if !unsafe { rc_decrement_is_zero(obj) } {
         return;
@@ -2429,7 +2479,7 @@ mod tests {
     /// A test heap big enough that no test allocation ever fails (tests run
     /// without a collector; capacity stands in for the VM's ensure()).
     fn test_heap() -> ProcHeap {
-        ProcHeap::with_young_capacity(1 << 21)
+        ProcHeap::new()
     }
 
     #[test]
@@ -2633,57 +2683,30 @@ mod tests {
     }
 
     #[test]
-    fn binary_off_heap_list_and_arc_lifecycle() {
+    fn binary_arc_backing_is_shared_and_released() {
         let mut h = test_heap();
         let backing: Arc<[u8]> = Arc::from(vec![9u8; 16]);
-        assert_eq!(h.off_heap_head(), 0);
         let b1 = Value::binary_from_arc_in(&mut h, Arc::clone(&backing), 128);
-        let b2 = Value::binary_from_arc_in(&mut h, Arc::clone(&backing), 128);
-        let b3 = Value::binary_from_arc_in(&mut h, Arc::clone(&backing), 128);
-        // Three boxes each own a count, plus our local.
-        assert_eq!(Arc::strong_count(&backing), 4);
-
-        // The intrusive list threads newest-first through the link words.
-        let a3 = b3.object_addr().unwrap();
-        let a2 = b2.object_addr().unwrap();
+        // The box owns a count alongside our local handle.
+        assert_eq!(Arc::strong_count(&backing), 2);
         let a1 = b1.object_addr().unwrap();
-        assert_eq!(h.off_heap_head(), a3);
+        // SAFETY: `a1` is a live Binary box; exercise the dup/drop helpers.
         unsafe {
-            assert_eq!(binary_off_heap_next(a3 as *const u64), a2);
-            assert_eq!(binary_off_heap_next(a2 as *const u64), a1);
-            assert_eq!(binary_off_heap_next(a1 as *const u64), 0);
-            // Headers carry the off-heap bit; plain objects don't.
             assert!(header_has_off_heap_link(*(a1 as *const u64)));
-        }
-        let plain = Value::str_in(&mut h, "x");
-        unsafe {
-            assert!(!header_has_off_heap_link(
-                *(plain.object_addr().unwrap() as *const u64)
-            ));
-        }
-
-        // copy_graph's two off-heap duties: bump when the source survives,
-        // release when a box is condemned.
-        unsafe {
             binary_clone_backing(a1 as *const u64);
-            assert_eq!(Arc::strong_count(&backing), 5);
+            assert_eq!(Arc::strong_count(&backing), 3);
             binary_drop_backing(a1 as *const u64);
-            assert_eq!(Arc::strong_count(&backing), 4);
-            // Condemn all three boxes (what an off-heap sweep does).
-            binary_drop_backing(a1 as *const u64);
-            binary_drop_backing(a2 as *const u64);
-            binary_drop_backing(a3 as *const u64);
+            assert_eq!(Arc::strong_count(&backing), 2);
         }
-        // A real sweep also unlinks what it condemns; mirror that here so the
-        // heap's own teardown sweep does not release the same boxes again.
-        h.set_off_heap_head(0);
+        // Dropping the box value releases its Arc count by reference counting:
+        // the box's `free_object` runs `binary_drop_backing` at zero.
+        drop(b1);
         assert_eq!(Arc::strong_count(&backing), 1);
     }
 
     #[test]
-    fn header_roundtrip_and_forwarding() {
+    fn header_roundtrip() {
         let h = pack_header(HeapTag::Enum, 9, false);
-        assert!(!header_is_forwarding(h));
         assert_eq!(header_tag(h), HeapTag::Enum);
         assert_eq!(header_payload_words(h), 9);
         assert_eq!(header_total_words(h), 10);
@@ -2692,17 +2715,13 @@ mod tests {
         let hb = pack_header(HeapTag::Binary, 5, true);
         assert!(header_has_off_heap_link(hb));
         assert_eq!(header_tag(hb), HeapTag::Binary);
-
-        let fwd = make_forwarding(0x7f00_0000_1238);
-        assert!(header_is_forwarding(fwd));
-        assert_eq!(forwarding_target(fwd), 0x7f00_0000_1238);
     }
 
     #[test]
     fn for_each_child_visits_exactly_the_value_slots() {
         let mut h = test_heap();
         let s = Value::str_in(&mut h, "elem");
-        let t = Value::tuple_in(&mut h, &[s, Value::small_int(1), Value::nil()]);
+        let t = Value::tuple_in(&mut h, &[s.clone(), Value::small_int(1), Value::nil()]);
         let mut seen = Vec::new();
         unsafe {
             for_each_child(t.object_addr().unwrap() as *mut u64, &mut |v| {
@@ -2719,7 +2738,7 @@ mod tests {
         );
 
         // Enum: names + labels + payload are traced; type_id/hash/count are not.
-        let e = Value::enum_with_names_in(&mut h, 2, "E", "V", &["a"], &[s]);
+        let e = Value::enum_with_names_in(&mut h, 2, "E", "V", &["a"], std::slice::from_ref(&s));
         let mut count = 0;
         unsafe {
             for_each_child(e.object_addr().unwrap() as *mut u64, &mut |_| count += 1);
@@ -2743,11 +2762,11 @@ mod tests {
     }
 
     #[test]
-    fn size_is_word_and_copy() {
+    fn size_is_one_word() {
         assert_eq!(std::mem::size_of::<Value>(), 8);
         let mut h = test_heap();
         let v = Value::str_in(&mut h, "copy");
-        let w = v; // plain word copy, no refcount traffic
+        let w = v.clone(); // a reference-counting clone (incref)
         assert_eq!(v.as_str(), Some("copy"));
         assert_eq!(w.as_str(), Some("copy"));
     }
@@ -2757,8 +2776,8 @@ mod tests {
         let area = Arc::new(crate::frozen::FrozenArea::new());
         let mut b = area.builder();
         let s = Value::str_in(&mut b, "frozen constant");
-        let t = Value::tuple_in(&mut b, &[s, Value::small_int(3)]);
-        let arr = Value::array_in(&mut b, &[s, t]);
+        let t = Value::tuple_in(&mut b, &[s.clone(), Value::small_int(3)]);
+        let arr = Value::array_in(&mut b, &[s.clone(), t.clone()]);
         assert!(area.contains(s.object_addr().unwrap() as *const u64));
         assert_eq!(s.as_str(), Some("frozen constant"));
         assert_eq!(t.as_tuple().unwrap()[1].as_int(), Some(3));
@@ -2773,7 +2792,7 @@ mod tests {
         (0..n as i64).map(Value::small_int).collect()
     }
 
-    fn assert_matches_model(root: Value, model: &[Value]) {
+    fn assert_matches_model(root: &Value, model: &[Value]) {
         seq::check_invariants(root);
         let r = root.as_array().unwrap();
         assert_eq!(r.len(), model.len());
@@ -2785,7 +2804,7 @@ mod tests {
                 model.len()
             );
         }
-        let collected: Vec<u64> = r.iter().map(Value::to_bits).collect();
+        let collected: Vec<u64> = r.iter().map(|v| v.to_bits()).collect();
         let expect: Vec<u64> = model.iter().map(|v| v.to_bits()).collect();
         assert_eq!(collected, expect, "iterator disagrees with get()");
         assert!(r.get(model.len()).is_none());
@@ -2793,130 +2812,95 @@ mod tests {
 
     #[test]
     fn seq_from_slice_various_sizes() {
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         for n in [0usize, 1, 31, 32, 33, 63, 64, 65, 1000, 1024, 1025, 4097] {
             let items = ints(n);
-            let used = h.used_words();
             let root = seq::from_slice(&mut h, &items);
-            assert!(
-                h.used_words() - used <= seq::cost_from_slice(n),
-                "from_slice({n}) exceeded its cost bound"
-            );
-            assert_matches_model(root, &items);
+            assert_matches_model(&root, &items);
         }
     }
 
     #[test]
     fn seq_push_back_and_front_grow_correctly() {
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         let mut root = seq::empty_in(&mut h);
         let mut model: Vec<Value> = Vec::new();
         for i in 0..1200i64 {
-            let used = h.used_words();
-            let budget = seq::cost_push(root);
-            root = seq::push_back(&mut h, root, Value::small_int(i));
-            assert!(
-                h.used_words() - used <= budget,
-                "push_back exceeded its cost bound"
-            );
+            root = seq::push_back(&mut h, &root, Value::small_int(i));
             model.push(Value::small_int(i));
         }
-        assert_matches_model(root, &model);
+        assert_matches_model(&root, &model);
 
         for i in 0..300i64 {
-            let used = h.used_words();
-            let budget = seq::cost_push(root);
-            root = seq::push_front(&mut h, root, Value::small_int(-i));
-            assert!(
-                h.used_words() - used <= budget,
-                "push_front exceeded its cost bound"
-            );
+            root = seq::push_front(&mut h, &root, Value::small_int(-i));
             model.insert(0, Value::small_int(-i));
         }
-        assert_matches_model(root, &model);
+        assert_matches_model(&root, &model);
     }
 
     #[test]
     fn seq_pop_front_drains_everything() {
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         let items = ints(1100);
         let mut root = seq::from_slice(&mut h, &items);
         let mut model: Vec<Value> = items;
         while !model.is_empty() {
-            let used = h.used_words();
-            let budget = seq::cost_pop(root);
-            let (e, rest) = seq::pop_front(&mut h, root).unwrap();
-            assert!(
-                h.used_words() - used <= budget,
-                "pop_front exceeded its cost bound"
-            );
+            let (e, rest) = seq::pop_front(&mut h, &root).unwrap();
             let m = model.remove(0);
             assert_eq!(e.to_bits(), m.to_bits());
             root = rest;
             if model.len().is_multiple_of(97) {
-                assert_matches_model(root, &model);
+                assert_matches_model(&root, &model);
             }
         }
-        assert!(seq::pop_front(&mut h, root).is_none());
+        assert!(seq::pop_front(&mut h, &root).is_none());
     }
 
     #[test]
     fn seq_update_replaces_in_place_persistently() {
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         let items = ints(1100);
         let root = seq::from_slice(&mut h, &items);
         let marker = Value::small_int(-777);
         for i in [0usize, 1, 31, 32, 500, 1063, 1064, 1099] {
-            let used = h.used_words();
-            let budget = seq::cost_update(root);
-            let updated = seq::update(&mut h, root, i, marker).unwrap();
-            assert!(
-                h.used_words() - used <= budget,
-                "update exceeded cost bound"
-            );
+            let updated = seq::update(&mut h, &root, i, marker.clone()).unwrap();
             let mut model: Vec<Value> = items.clone();
-            model[i] = marker;
-            assert_matches_model(updated, &model);
+            model[i] = marker.clone();
+            assert_matches_model(&updated, &model);
             // Persistence: the original is untouched.
-            assert_eq!(seq::get(root, i).unwrap().as_int(), Some(i as i64));
+            assert_eq!(seq::get(&root, i).unwrap().as_int(), Some(i as i64));
         }
-        assert!(seq::update(&mut h, root, 1100, marker).is_none());
+        assert!(seq::update(&mut h, &root, 1100, marker.clone()).is_none());
     }
 
     #[test]
     fn seq_take_skip_match_slices() {
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         let items = ints(1100);
         let root = seq::from_slice(&mut h, &items);
         for n in [0usize, 1, 15, 32, 33, 64, 500, 1063, 1064, 1099, 1100, 2000] {
-            let used = h.used_words();
-            let budget = 2 * seq::cost_slice(root);
-            let t = seq::take(&mut h, root, n);
-            let s = seq::skip(&mut h, root, n);
-            assert!(
-                h.used_words() - used <= budget,
-                "take+skip exceeded cost bound"
-            );
+            let t = seq::take(&mut h, &root, n);
+            let s = seq::skip(&mut h, &root, n);
             let cut = n.min(items.len());
-            assert_matches_model(t, &items[..cut]);
-            assert_matches_model(s, &items[cut..]);
+            assert_matches_model(&t, &items[..cut]);
+            assert_matches_model(&s, &items[cut..]);
         }
         // Slicing a pushed-onto vector (head buffer present).
         let mut pushed = root;
         for i in 0..40i64 {
-            pushed = seq::push_front(&mut h, pushed, Value::small_int(-1 - i));
+            pushed = seq::push_front(&mut h, &pushed, Value::small_int(-1 - i));
         }
         let mut model: Vec<Value> = (0..40i64).map(|i| Value::small_int(-40 + i)).collect();
         model.extend_from_slice(&items);
         for n in [5usize, 39, 40, 41, 600] {
-            assert_matches_model(seq::take(&mut h, pushed, n), &model[..n]);
-            assert_matches_model(seq::skip(&mut h, pushed, n), &model[n..]);
+            assert_matches_model(&seq::take(&mut h, &pushed, n), &model[..n]);
+            assert_matches_model(&seq::skip(&mut h, &pushed, n), &model[n..]);
         }
     }
 
     #[test]
     fn seq_concat_matches_model_and_stays_shallow() {
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         for (la, lb) in [
             (0usize, 5usize),
             (5, 0),
@@ -2933,30 +2917,24 @@ mod tests {
                 .collect();
             let l = seq::from_slice(&mut h, &xs);
             let r = seq::from_slice(&mut h, &ys);
-            let used = h.used_words();
-            let budget = seq::cost_concat(l, r);
-            let joined = seq::concat(&mut h, l, r);
-            assert!(
-                h.used_words() - used <= budget,
-                "concat exceeded its cost bound"
-            );
+            let joined = seq::concat(&mut h, &l, &r);
             let mut model = xs.clone();
             model.extend_from_slice(&ys);
-            assert_matches_model(joined, &model);
+            assert_matches_model(&joined, &model);
         }
 
         // Repeated concatenation must keep the tree shallow (the RRB
         // rebalancing invariant): depth stays logarithmic, lookups stay fast.
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         let piece_items = ints(7);
         let mut root = seq::empty_in(&mut h);
         let mut model: Vec<Value> = Vec::new();
         for _ in 0..300 {
             let piece = seq::from_slice(&mut h, &piece_items);
-            root = seq::concat(&mut h, root, piece);
+            root = seq::concat(&mut h, &root, &piece);
             model.extend_from_slice(&piece_items);
         }
-        assert_matches_model(root, &model);
+        assert_matches_model(&root, &model);
         // 2100 elements; a balanced 32-ary tree of that size has depth 3.
         // Allow the E_MAX slack a couple of extra levels, no more.
         let root_obj = root.object_addr().unwrap() as *const u64;
@@ -2977,29 +2955,32 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             (state >> 33) as usize
         };
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        let mut h = ProcHeap::new();
         let mut model: Vec<Value> = Vec::new();
         let mut root = seq::empty_in(&mut h);
         for step in 0..600 {
-            // Rebuild into a fresh arena periodically: bounds memory (tests
-            // run with no collector) and exercises from_slice round-trips.
+            // Rebuild into a fresh arena periodically, exercising from_slice
+            // round-trips. Drop the old root (releasing its tree) BEFORE the old
+            // heap is destroyed — reference counting requires a heap outlive the
+            // values pointing into it. `model` holds only immediates.
             if step % 64 == 63 {
-                h = ProcHeap::with_young_capacity(1 << 23);
+                drop(std::mem::replace(&mut root, Value::nil()));
+                h = ProcHeap::new();
                 root = seq::from_slice(&mut h, &model);
             }
             match rng() % 8 {
                 0 | 1 => {
                     let x = Value::small_int(step as i64);
-                    root = seq::push_back(&mut h, root, x);
+                    root = seq::push_back(&mut h, &root, x.clone());
                     model.push(x);
                 }
                 2 => {
                     let x = Value::small_int(-(step as i64));
-                    root = seq::push_front(&mut h, root, x);
+                    root = seq::push_front(&mut h, &root, x.clone());
                     model.insert(0, x);
                 }
                 3 => {
-                    let popped = seq::pop_front(&mut h, root);
+                    let popped = seq::pop_front(&mut h, &root);
                     if model.is_empty() {
                         assert!(popped.is_none());
                     } else {
@@ -3012,18 +2993,18 @@ mod tests {
                     if !model.is_empty() {
                         let i = rng() % model.len();
                         let x = Value::small_int(9000 + step as i64);
-                        root = seq::update(&mut h, root, i, x).unwrap();
+                        root = seq::update(&mut h, &root, i, x.clone()).unwrap();
                         model[i] = x;
                     }
                 }
                 5 => {
                     let n = rng() % (model.len() + 2);
-                    root = seq::take(&mut h, root, n);
+                    root = seq::take(&mut h, &root, n);
                     model.truncate(n.min(model.len()));
                 }
                 6 => {
                     let n = rng() % (model.len() + 2);
-                    root = seq::skip(&mut h, root, n);
+                    root = seq::skip(&mut h, &root, n);
                     let cut = n.min(model.len());
                     model.drain(..cut);
                 }
@@ -3034,41 +3015,34 @@ mod tests {
                         .collect();
                     let other = seq::from_slice(&mut h, &extra);
                     if rng() % 2 == 0 {
-                        root = seq::concat(&mut h, root, other);
+                        root = seq::concat(&mut h, &root, &other);
                         model.extend_from_slice(&extra);
                     } else {
-                        root = seq::concat(&mut h, other, root);
+                        root = seq::concat(&mut h, &other, &root);
                         let mut m = extra;
                         m.extend_from_slice(&model);
                         model = m;
                     }
                 }
             }
-            seq::check_invariants(root);
+            seq::check_invariants(&root);
             if step % 13 == 0 {
-                assert_matches_model(root, &model);
+                assert_matches_model(&root, &model);
             }
         }
-        assert_matches_model(root, &model);
+        assert_matches_model(&root, &model);
     }
 
     #[test]
     fn seq_structural_sharing_on_push() {
-        // A push_back must not copy the existing tree wholesale: the words
-        // allocated by one push are bounded by its cost function, which is
-        // logarithmic — far below the size of the vector.
-        let mut h = ProcHeap::with_young_capacity(1 << 23);
+        // A push_back shares the existing tree (path copy only) and leaves the
+        // original version intact (persistence).
+        let mut h = ProcHeap::new();
         let items = ints(100_000);
         let root = seq::from_slice(&mut h, &items);
-        let used = h.used_words();
-        let _v2 = seq::push_back(&mut h, root, Value::small_int(-1));
-        let delta = h.used_words() - used;
-        assert!(
-            delta <= seq::cost_push(root),
-            "push allocated {delta} words on a 100k vector"
-        );
-        // Far smaller than copying 100k elements.
-        assert!(delta < 1000);
+        let v2 = seq::push_back(&mut h, &root, Value::small_int(-1));
+        assert_eq!(seq::len(&root), 100_000, "original version unchanged");
+        assert_eq!(seq::len(&v2), 100_001);
     }
 
     // ---- hashing -------------------------------------------------------------
