@@ -33,13 +33,13 @@
 //! (a lazy range equals the array of its elements) and the hash
 //! fast-reject on enums.
 
-use al_core::bytecode::{Op, Value, ValueView, enum_hash_with_payload};
+use al_core::bytecode::{Op, Value, ValueView, enum_hash_with_payload, values_equal};
 use al_core::static_ir::VariantTemplate;
 
 use super::poll::monotonic_now_ms;
 use super::{
     CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmResult, cost,
-    enum_template, f64_str, freeze, inspect, range_len, value_type_name,
+    enum_template, f64_str, freeze, inspect, value_type_name,
 };
 
 impl VM {
@@ -548,6 +548,17 @@ impl VM {
                 Op::Monotonic => {
                     self.stack.push(Value::small_int(monotonic_now_ms()));
                 }
+                Op::Argv => self.argv()?,
+                Op::EnvMap => self.env_map()?,
+                Op::MapGet => self.map_get()?,
+                Op::MapHas => self.map_has()?,
+                Op::MapKeys => self.map_keys()?,
+                Op::MapValues => self.map_values()?,
+                Op::MapSize => self.map_size()?,
+                Op::MapNew => self.map_new()?,
+                Op::MapSet => self.map_set()?,
+                Op::MapDelete => self.map_delete()?,
+                Op::MapToList => self.map_to_list()?,
                 Op::MakeEnumPayload => {
                     let payload_count = instr.b as usize;
                     // Names and labels are constant-pool references; only the
@@ -726,6 +737,8 @@ impl VM {
                 Op::TcpLocalAddr => self.tcp_local_addr()?,
                 Op::DnsResolve => park!(self.dns_resolve(ip, &mut reds)),
                 Op::ProcessSpawn => self.process_spawn(&mut reds)?,
+                Op::SpawnLocal => self.process_spawn_local(&mut reds)?,
+                Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
                 Op::Sleep => park!(self.sleep(ip)),
                 // String and binary builtins: pure stack transformations,
                 // one method per op (see `vm::text`).
@@ -1114,6 +1127,23 @@ impl VM {
         }
     }
 
+    /// Push the program's command-line arguments as an `Array(String)`. The
+    /// args live on the shared runtime; the Arc is cloned so the per-arg
+    /// allocation can borrow the heap mutably while the source list is read.
+    pub(super) fn argv(&mut self) -> VmResult<()> {
+        let runtime = self.runtime.clone();
+        let args = &runtime.argv;
+        let strs: usize = args.iter().map(|a| cost::str(a.len())).sum();
+        self.ensure(cost::seq_build(args.len()) + strs);
+        let mut items: Vec<Value> = Vec::with_capacity(args.len());
+        for arg in args {
+            items.push(Value::str_in(&mut self.heap, arg));
+        }
+        let v = Value::array_in(&mut self.heap, &items);
+        self.stack.push(v);
+        Ok(())
+    }
+
     /// Push an integer result (see `boxed_int`).
     #[inline]
     pub(super) fn push_int(&mut self, i: i64) {
@@ -1137,62 +1167,6 @@ fn expect_string_array(v: &Value) -> VmResult<Vec<Value>> {
             Ok(out)
         }
         None => Err("Field labels must be an array".to_string()),
-    }
-}
-
-#[inline]
-fn slices_equal(a: &[Value], b: &[Value]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_equal(x, y))
-}
-
-pub(super) fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a.kind(), b.kind()) {
-        (ValueView::Int(x), ValueView::Int(y)) => x == y,
-        (ValueView::Float(x), ValueView::Float(y)) => x == y,
-        (ValueView::Bool(x), ValueView::Bool(y)) => x == y,
-        (ValueView::Str(x), ValueView::Str(y)) => x == y,
-        (ValueView::Enum(ae), ValueView::Enum(be)) => {
-            ae.hash() == be.hash()
-                && ae.type_id() == be.type_id()
-                && ae.variant_name() == be.variant_name()
-                && slices_equal(ae.payload(), be.payload())
-        }
-        (ValueView::Nil, ValueView::Nil) => true,
-        (ValueView::Closure(x), ValueView::Closure(y)) => {
-            x.func_idx() == y.func_idx() && slices_equal(x.captures(), y.captures())
-        }
-        (ValueView::Array(aa), ValueView::Array(ba)) => {
-            aa.len() == ba.len() && aa.iter().zip(ba.iter()).all(|(x, y)| values_equal(&x, &y))
-        }
-        (ValueView::Range(as_, ae), ValueView::Range(bs, be)) => {
-            // Normalised: empty ranges compare equal regardless of endpoints.
-            let alen = range_len(as_, ae);
-            let blen = range_len(bs, be);
-            (alen == 0 && blen == 0) || (as_ == bs && ae == be)
-        }
-        (ValueView::Range(s, e), ValueView::Array(arr))
-        | (ValueView::Array(arr), ValueView::Range(s, e)) => {
-            let len = range_len(s, e) as usize;
-            if arr.len() != len {
-                return false;
-            }
-            for (i, av) in arr.iter().enumerate() {
-                let n = match av.as_int() {
-                    Some(n) => n,
-                    None => return false,
-                };
-                if n != s + i as i64 {
-                    return false;
-                }
-            }
-            true
-        }
-        (ValueView::Binary(a), ValueView::Binary(b)) => a.bits_eq(&b),
-        (ValueView::Tuple(at), ValueView::Tuple(bt)) => slices_equal(at, bt),
-        (ValueView::Socket(asv), ValueView::Socket(bsv)) => {
-            asv.id == bsv.id && asv.is_listener == bsv.is_listener
-        }
-        _ => false,
     }
 }
 

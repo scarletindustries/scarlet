@@ -6,9 +6,9 @@
 
 use std::time::Duration;
 
-use super::exec::values_equal;
 use super::gc::GC_WORDS_PER_REDUCTION;
 use super::*;
+use al_core::bytecode::values_equal;
 use al_core::bytecode::{Instruction, SocketValue, op, op_ab, op_arg};
 use al_core::frozen::FrozenArea;
 
@@ -960,7 +960,8 @@ fn donation_skips_never_spawned_workers() {
     use std::sync::atomic::Ordering;
 
     let program = single_fn_program(|_f| vec![], vec![op(Op::Halt)], 0);
-    let (rt, _poll) = sched::Runtime::new(Arc::new(program), 3).expect("runtime must construct");
+    let (rt, _poll) =
+        sched::Runtime::new(Arc::new(program), Vec::new(), 3).expect("runtime must construct");
     // Worker 1 spawned (slot filled, busier); worker 2's spawn failed
     // (slot empty, permanent load 0) — the state ensure_workers leaves
     // behind on partial failure.

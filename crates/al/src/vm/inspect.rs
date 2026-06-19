@@ -19,7 +19,7 @@
 
 use std::fmt::Write;
 
-use al_core::bytecode::{Program, Value, ValueView};
+use al_core::bytecode::{MapBacking, Program, Value, ValueView, hamt};
 
 use super::{binary, str_ref};
 
@@ -36,6 +36,7 @@ pub(super) fn value_type_name(v: &Value) -> String {
         ValueView::Enum(e) => e.enum_name().to_string(),
         ValueView::Socket(_) => "Socket".to_string(),
         ValueView::Nil => "Nil".to_string(),
+        ValueView::Map(_) => "Map".to_string(),
     }
 }
 
@@ -220,6 +221,25 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
             }
         }
         ValueView::Nil => out.push_str("Nil"),
+        ValueView::Map(m) => match m.backing() {
+            // A live view of the host environment: render an opaque marker
+            // rather than dumping (and materializing) every variable.
+            MapBacking::Env => out.push_str("<map env>"),
+            // An in-memory map renders its entries as `{k: v, …}`.
+            MapBacking::Hamt => {
+                let entries = hamt::collect_entries(*v);
+                out.push('{');
+                for (i, (k, val)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    inspect_impl(k, program, None, out);
+                    out.push_str(": ");
+                    inspect_impl(val, program, None, out);
+                }
+                out.push('}');
+            }
+        },
         ValueView::Enum(e) if e.payload().is_empty() => out.push_str(e.variant_name()),
         ValueView::Enum(e) if is_record(&e) => {
             let payload = e.payload();

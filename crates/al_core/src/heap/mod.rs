@@ -80,6 +80,7 @@
 mod copy;
 mod dest;
 mod flags;
+mod mimheap;
 mod proc_heap;
 mod roots;
 mod sizing;

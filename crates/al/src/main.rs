@@ -63,6 +63,9 @@ struct RunArgs {
     /// Print the parsed program before execution starts
     #[arg(long = "debug-printer")]
     debug_printer: bool,
+    /// Arguments passed through to the program, readable via `process.argv`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
 }
 
 #[derive(Args)]
@@ -295,7 +298,12 @@ fn cmd_run(args: RunArgs) {
 
     let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
 
-    let mut v = vm::new_vm(result.program).unwrap_or_else(|e| die(e));
+    // argv[0] is the entrypoint path; the rest are the program's own arguments.
+    let mut argv = Vec::with_capacity(args.args.len() + 1);
+    argv.push(args.entrypoint.clone());
+    argv.extend(args.args.iter().cloned());
+
+    let mut v = vm::new_vm_with_argv(result.program, argv).unwrap_or_else(|e| die(e));
     let run_result = v.run().unwrap_or_else(|e| die(e));
 
     if !matches!(run_result.as_enum(), Some(e) if e.type_id() == al::stdlib::prelude::NIL.type_id) {

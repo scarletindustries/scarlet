@@ -17,7 +17,6 @@ import al/net/socket.{Socket}
 import al/net/error.{NetError}
 import al/binary
 import al/int
-import al/experiments/scheduler
 
 // The HTTP/1.1 server core: the typed Request/Response surface a handler sees,
 // and the connection driver that frames requests off a socket and drives
@@ -149,13 +148,12 @@ fn build_request(method Binary, target Binary, version Int, hdrs Headers, b Body
 }
 
 // Listen on host:port and serve each accepted connection on its own process.
-// One slow or hostile connection parks only its own process; the runtime
-// spreads connection processes across every core.
+// One slow or hostile connection parks only its own process. The accept loop
+// runs on every core in parallel (net.serve), each core binding its own
+// SO_REUSEPORT socket, and each connection is handled on the core that
+// accepted it.
 pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, NetError) {
-	match net.listen(host, port) {
-		Err(e) -> Err(e)
-		Ok(server) -> serve_on(server, handler)
-	}
+	net.serve(host, port, fn(sock) drive(sock, handler))
 }
 
 // Serve connections from a listener the caller already bound. This is the
@@ -164,13 +162,7 @@ pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, Ne
 // then hand the listener over. `serve` is the listen-and-serve convenience on
 // top of this.
 pub fn serve_on(server Server, handler fn(Request) Response) Result(Nil, NetError) {
-	match net.accept(server) {
-		Ok(sock) -> {
-			scheduler.spawn(fn() drive(sock, handler))
-			serve_on(server, handler)
-		}
-		Err(e) -> Err(e)
-	}
+	net.serve_on(server, fn(sock) drive(sock, handler))
 }
 
 // Own one connection start-to-finish and always close it on the way out. The

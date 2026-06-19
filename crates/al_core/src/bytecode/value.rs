@@ -26,7 +26,8 @@
 //! bits 1-5   HeapTag (object type)
 //! bit 6      off-heap-list link bit: the payload owns an `Arc` (Binary) and
 //!            the object is threaded on its space's off-heap sweep list
-//! bit 7      unused (always 0)
+//! bit 7      immortal: the object lives in the frozen area and is never
+//!            reference counted or freed (set at frozen-allocation time)
 //! bits 8-63  payload length in words
 //! ```
 //!
@@ -80,6 +81,7 @@
 #![allow(unsafe_code)]
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
@@ -145,12 +147,65 @@ pub enum HeapTag {
     SeqLeaf = 8,
     /// Vector branch node — interior to a `Seq`, never observed via `kind()`.
     SeqBranch = 9,
+    /// A `Map(k, v)` value. The first payload word is a [`MapBacking`]
+    /// discriminant; the remaining layout is backing-specific. The `Env`
+    /// backing carries no further words and holds no `Value` children — it is
+    /// a zero-copy live view of the host process environment. The `Hamt`
+    /// backing carries `[backing, size, root]`, the root being the trie of
+    /// the nodes below.
+    Map = 10,
+    /// HAMT branch node — `[bitmap, child…]`, one child per set bit of the
+    /// 32-wide `bitmap`. Each child is a pointer to another `HamtBranch`, a
+    /// `HamtEntry`, or a `HamtCollision`. Interior to a `Map`; never observed
+    /// via `kind()`. (See [`super::hamt`].)
+    HamtBranch = 11,
+    /// HAMT leaf — `[key, value]`, a single key/value pair. Interior to a
+    /// `Map`; never observed via `kind()`.
+    HamtEntry = 12,
+    /// HAMT collision bucket — `[hash, count, key, value, …]` for the rare set
+    /// of distinct keys sharing one 64-bit hash. Interior to a `Map`; never
+    /// observed via `kind()`.
+    HamtCollision = 13,
+}
+
+/// How a [`HeapTag::Map`] sources its entries. Stored as the map object's
+/// first payload word. The set is open: further backings (an overlay over the
+/// environment, …) get new discriminants without changing the value's
+/// observable type, which stays `Map(k, v)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum MapBacking {
+    /// Zero-copy live view of the host process environment, typed
+    /// `Map(String, String)`. Reads go straight to `std::env`; nothing is
+    /// materialized and the object holds no `Value` words.
+    Env = 0,
+    /// An in-memory persistent hash array mapped trie (see [`super::hamt`]).
+    /// The map object carries `[backing, size, root]`; updates path-copy the
+    /// trie and share every untouched subtree with the prior version.
+    Hamt = 1,
+}
+
+/// Decode a [`MapBacking`] discriminant word. Panics only on a corrupt heap
+/// (an unknown discriminant), which a sound collector never produces.
+fn map_backing(word: u64) -> MapBacking {
+    match word {
+        0 => MapBacking::Env,
+        1 => MapBacking::Hamt,
+        _ => {
+            debug_assert!(false, "unknown MapBacking discriminant {word}");
+            MapBacking::Env
+        }
+    }
 }
 
 const HEADER_BIT: u64 = 1;
 const HEADER_TAG_SHIFT: u32 = 1;
 const HEADER_TAG_MASK: u64 = 0x1F << HEADER_TAG_SHIFT;
 const HEADER_OFF_HEAP_BIT: u64 = 1 << 6;
+/// Immortal (frozen) marker: the object lives in the frozen area, so reference
+/// counting must never increment, decrement, or free it. Set once at frozen
+/// allocation time (`alloc_obj` via [`Arena::marks_immortal`]).
+const HEADER_IMMORTAL_BIT: u64 = 1 << 7;
 const HEADER_LEN_SHIFT: u32 = 8;
 
 /// Pack an object header word.
@@ -201,6 +256,10 @@ pub fn header_tag(word: u64) -> HeapTag {
         7 => HeapTag::Seq,
         8 => HeapTag::SeqLeaf,
         9 => HeapTag::SeqBranch,
+        10 => HeapTag::Map,
+        11 => HeapTag::HamtBranch,
+        12 => HeapTag::HamtEntry,
+        13 => HeapTag::HamtCollision,
         other => {
             debug_assert!(false, "corrupt heap tag {other}");
             HeapTag::BigInt
@@ -228,6 +287,14 @@ pub fn header_has_off_heap_link(word: u64) -> bool {
     word & HEADER_OFF_HEAP_BIT != 0
 }
 
+/// Whether the object is immortal (frozen): reference counting must never
+/// touch it. See [`HEADER_IMMORTAL_BIT`].
+#[inline]
+pub fn header_is_immortal(word: u64) -> bool {
+    debug_assert!(!header_is_forwarding(word));
+    word & HEADER_IMMORTAL_BIT != 0
+}
+
 // ---- arenas ------------------------------------------------------------------
 
 /// Allocation interface the value constructors build through: a process heap
@@ -253,6 +320,13 @@ pub trait Arena {
     /// makes of already-linked binaries. Both seams use the same push-front
     /// protocol: the box stores the returned previous head as its link word.
     fn link_off_heap(&mut self, addr: usize) -> usize;
+
+    /// Whether objects allocated through this arena are immortal: born with
+    /// the header immortal bit set so reference counting never touches them.
+    /// Process heaps return `false`; the frozen builder overrides to `true`.
+    fn marks_immortal(&self) -> bool {
+        false
+    }
 }
 
 /// Backstop for a violated ensure-discipline: allocation in a process heap
@@ -299,6 +373,12 @@ impl Arena for FrozenBuilder {
     fn link_off_heap(&mut self, _addr: usize) -> usize {
         0
     }
+
+    /// Frozen objects are never reference counted: mark them immortal at birth.
+    #[inline]
+    fn marks_immortal(&self) -> bool {
+        true
+    }
 }
 
 /// Allocate an object and write its header; payload writes follow at the
@@ -311,11 +391,12 @@ fn alloc_obj<A: Arena + ?Sized>(
     off_heap: bool,
 ) -> NonNull<u64> {
     let obj = a.alloc_words(1 + payload_words);
+    let mut header = pack_header(tag, payload_words, off_heap);
+    if a.marks_immortal() {
+        header |= HEADER_IMMORTAL_BIT;
+    }
     // SAFETY: freshly allocated, in bounds.
-    unsafe {
-        obj.as_ptr()
-            .write(pack_header(tag, payload_words, off_heap))
-    };
+    unsafe { obj.as_ptr().write(header) };
     obj
 }
 
@@ -562,6 +643,179 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
     Value::from_object_ptr(obj)
 }
 
+// ---- HAMT nodes --------------------------------------------------------------
+//
+// The arena layer for [`super::hamt`]'s persistent hash map. Three node tags,
+// all interior to a `Map` (Hamt backing) and never observed via `kind()`:
+//
+// - `HamtEntry`     `[key, value]`
+// - `HamtCollision` `[hash, count, key, value, …]` (count ≥ 2 distinct keys)
+// - `HamtBranch`    `[bitmap, child…]` (one child per set bit of `bitmap`)
+//
+// As with the `seq` nodes, the algorithm module is fully safe: it reads
+// through [`HamtNodeRef`] and allocates through the builders here, every one
+// of which allocates but never collects (the rooting rule — the VM ensures the
+// op's worst-case budget before any of this runs).
+
+pub(crate) fn hamt_view_mismatch() -> ! {
+    eprintln!("al: internal error: hamt view on a non-hamt-node value");
+    std::process::abort()
+}
+
+/// Decoded HAMT interior node.
+pub(crate) enum HamtNodeRef<'a> {
+    Entry {
+        key: Value,
+        value: Value,
+    },
+    Collision {
+        hash: u64,
+        /// Interleaved `key, value, …`; length is `2 * count`.
+        pairs: &'a [Value],
+    },
+    Branch {
+        bitmap: u32,
+        children: &'a [Value],
+    },
+}
+
+impl<'a> HamtNodeRef<'a> {
+    #[inline]
+    pub(crate) fn of(node: Value) -> HamtNodeRef<'a> {
+        if !node.is_heap() {
+            hamt_view_mismatch();
+        }
+        let obj = node.heap_obj();
+        // SAFETY: heap values point at live, non-forwarded arena objects; each
+        // arm reads within the payload length its builder wrote.
+        unsafe {
+            let header = *obj;
+            match header_tag(header) {
+                HeapTag::HamtEntry => HamtNodeRef::Entry {
+                    key: payload_value(obj, 0),
+                    value: payload_value(obj, 1),
+                },
+                HeapTag::HamtCollision => {
+                    let count = payload_word(obj, 1) as usize;
+                    debug_assert_eq!(2 + 2 * count, header_payload_words(header));
+                    HamtNodeRef::Collision {
+                        hash: payload_word(obj, 0),
+                        pairs: payload_values(obj, 2, 2 * count),
+                    }
+                }
+                HeapTag::HamtBranch => {
+                    let bitmap = payload_word(obj, 0) as u32;
+                    let n = bitmap.count_ones() as usize;
+                    debug_assert_eq!(1 + n, header_payload_words(header));
+                    HamtNodeRef::Branch {
+                        bitmap,
+                        children: payload_values(obj, 1, n),
+                    }
+                }
+                _ => hamt_view_mismatch(),
+            }
+        }
+    }
+}
+
+/// Allocate a `HamtEntry` `[key, value]`.
+#[inline]
+pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Value) -> Value {
+    let obj = alloc_obj(a, HeapTag::HamtEntry, 2, false);
+    // SAFETY: freshly allocated 2-word payload.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(key.to_bits());
+        p.add(1).write(value.to_bits());
+    }
+    Value::from_object_ptr(obj)
+}
+
+/// Allocate a `HamtCollision` over `pairs` (interleaved `key, value, …`, so
+/// `pairs.len()` is even), all sharing `hash`.
+#[inline]
+pub(crate) fn hamt_collision_in<A: Arena + ?Sized>(a: &mut A, hash: u64, pairs: &[Value]) -> Value {
+    debug_assert!(pairs.len() >= 4 && pairs.len().is_multiple_of(2));
+    let count = pairs.len() / 2;
+    let obj = alloc_obj(a, HeapTag::HamtCollision, 2 + pairs.len(), false);
+    // SAFETY: freshly allocated payload of exactly 2 + 2*count words.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(hash);
+        p.add(1).write(count as u64);
+        for (i, v) in pairs.iter().enumerate() {
+            p.add(2 + i).write(v.to_bits());
+        }
+    }
+    Value::from_object_ptr(obj)
+}
+
+/// Allocate a `HamtBranch` whose occupied slots are `bitmap` and whose
+/// `children` are in ascending slot order (`children.len() == bitmap.count_ones()`).
+#[inline]
+pub(crate) fn hamt_branch_in<A: Arena + ?Sized>(
+    a: &mut A,
+    bitmap: u32,
+    children: &[Value],
+) -> Value {
+    debug_assert_eq!(bitmap.count_ones() as usize, children.len());
+    let obj = alloc_obj(a, HeapTag::HamtBranch, 1 + children.len(), false);
+    // SAFETY: freshly allocated payload of exactly 1 + n words.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(bitmap as u64);
+        for (i, c) in children.iter().enumerate() {
+            p.add(1 + i).write(c.to_bits());
+        }
+    }
+    Value::from_object_ptr(obj)
+}
+
+/// Decoded `Map` root with the `Hamt` backing: `[backing, size, root]`.
+pub(crate) struct HamtMapRef {
+    pub(crate) size: usize,
+    /// The top trie node, or `Nil` when the map is empty.
+    pub(crate) root: Value,
+}
+
+impl HamtMapRef {
+    #[inline]
+    pub(crate) fn of(map: Value) -> HamtMapRef {
+        if !map.is_heap() {
+            hamt_view_mismatch();
+        }
+        let obj = map.heap_obj();
+        // SAFETY: tag + backing checked; a Hamt map always has 3 payload words.
+        unsafe {
+            let header = *obj;
+            if header_tag(header) != HeapTag::Map
+                || map_backing(payload_word(obj, 0)) != MapBacking::Hamt
+            {
+                hamt_view_mismatch();
+            }
+            HamtMapRef {
+                size: payload_word(obj, 1) as usize,
+                root: payload_value(obj, 2),
+            }
+        }
+    }
+}
+
+/// Allocate a `Map` with the `Hamt` backing: `[backing, size, root]`. `root`
+/// is `Nil` for an empty map, else a trie node.
+#[inline]
+pub(crate) fn hamt_map_in<A: Arena + ?Sized>(a: &mut A, size: usize, root: Value) -> Value {
+    let obj = alloc_obj(a, HeapTag::Map, 3, false);
+    // SAFETY: freshly allocated 3-word payload.
+    unsafe {
+        let p = obj.as_ptr().add(1);
+        p.write(MapBacking::Hamt as u64);
+        p.add(1).write(size as u64);
+        p.add(2).write(root.to_bits());
+    }
+    Value::from_object_ptr(obj)
+}
+
 // ---- Value -------------------------------------------------------------------
 
 /// The universal NaN-boxed value: one machine word, `Copy`, no destructor.
@@ -588,6 +842,7 @@ pub enum ValueView<'a> {
     Tuple(&'a [Value]),
     Closure(ClosureRef<'a>),
     Enum(EnumRef<'a>),
+    Map(MapRef<'a>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -653,6 +908,15 @@ impl Value {
     #[inline(always)]
     pub(crate) fn is_tag(&self, tag: HeapTag) -> bool {
         self.heap_tag() == Some(tag)
+    }
+
+    /// Whether this value is an immortal (frozen) heap object — one reference
+    /// counting must never increment, decrement, or free. Immediates return
+    /// `false` (they need no reclamation; callers test `is_heap()` anyway).
+    #[inline(always)]
+    pub fn is_immortal(&self) -> bool {
+        // SAFETY: heap values point at live arena objects.
+        self.is_heap() && header_is_immortal(unsafe { *self.heap_obj() })
     }
 
     // ---- classifiers ----------------------------------------------------------
@@ -794,6 +1058,17 @@ impl Value {
                 p.add(1 + i).write(v.to_bits());
             }
         }
+        Value::from_object_ptr(obj)
+    }
+
+    /// A `Map(String, String)` that reads through to the host process
+    /// environment. Allocation: 2 words (header + backing discriminant); no
+    /// environment data is copied — the entries are served live from
+    /// `std::env` on each lookup.
+    pub fn env_map_in<A: Arena + ?Sized>(a: &mut A) -> Value {
+        let obj = alloc_obj(a, HeapTag::Map, 1, false);
+        // SAFETY: freshly allocated 1-word payload for the backing tag.
+        unsafe { obj.as_ptr().add(1).write(MapBacking::Env as u64) };
         Value::from_object_ptr(obj)
     }
 
@@ -1199,6 +1474,14 @@ impl Value {
                         debug_assert!(false, "kind() on an interior vector node");
                         ValueView::Nil
                     }
+                    HeapTag::Map => ValueView::Map(MapRef {
+                        obj,
+                        _life: PhantomData,
+                    }),
+                    HeapTag::HamtBranch | HeapTag::HamtEntry | HeapTag::HamtCollision => {
+                        debug_assert!(false, "kind() on an interior map node");
+                        ValueView::Nil
+                    }
                 }
             }
         } else {
@@ -1229,6 +1512,7 @@ impl fmt::Debug for Value {
                 e.payload()
             ),
             ValueView::Array(s) => f.debug_list().entries(s.iter()).finish(),
+            ValueView::Map(m) => write!(f, "Map({:?})", m.backing()),
         }
     }
 }
@@ -1460,6 +1744,41 @@ impl<'a> ClosureRef<'a> {
     }
 }
 
+/// Borrowed view of a `Map` arena object. The map's entries are not exposed
+/// inline: only the backing kind is observable here, and each backing serves
+/// its own reads (the VM dispatches on [`MapRef::backing`]). The `Env` backing
+/// holds no `Value` words at all.
+#[derive(Clone, Copy)]
+pub struct MapRef<'a> {
+    obj: *const u64,
+    _life: PhantomData<&'a u64>,
+}
+
+impl MapRef<'_> {
+    #[inline]
+    pub fn backing(&self) -> MapBacking {
+        // SAFETY: constructed from a tag-checked Map value; word 0 is the
+        // backing discriminant for every Map layout.
+        map_backing(unsafe { payload_word(self.obj, 0) })
+    }
+
+    /// Entry count of a `Hamt`-backed map (word 1). Callers must have checked
+    /// `backing() == Hamt`.
+    #[inline]
+    pub(crate) fn hamt_size(&self) -> usize {
+        // SAFETY: a Hamt map always carries `[backing, size, root]`.
+        unsafe { payload_word(self.obj, 1) as usize }
+    }
+
+    /// Trie root of a `Hamt`-backed map (word 2), `Nil` when empty. Callers
+    /// must have checked `backing() == Hamt`.
+    #[inline]
+    pub(crate) fn hamt_root(&self) -> Value {
+        // SAFETY: as `hamt_size`.
+        unsafe { payload_value(self.obj, 2) }
+    }
+}
+
 /// Borrowed view of an `Enum` arena object. Names and labels are `Str`/`Tuple`
 /// values (normally frozen); `hash` is the precomputed structural hash used as
 /// an equality fast-reject.
@@ -1583,6 +1902,22 @@ pub(crate) unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)
         };
         match header_tag(h) {
             HeapTag::BigInt | HeapTag::Range | HeapTag::Str | HeapTag::Binary => {}
+            // A map's children depend on its backing: `Env` holds none, `Hamt`
+            // points at one root node (`[backing, size, root]`; `size` is a raw
+            // count, not a `Value`).
+            HeapTag::Map => match map_backing(*p) {
+                MapBacking::Env => {}
+                MapBacking::Hamt => visit(2, 1, f),
+            },
+            // `[bitmap, child…]` — one child per set bit.
+            HeapTag::HamtBranch => visit(1, (*p as u32).count_ones() as usize, f),
+            // `[key, value]`.
+            HeapTag::HamtEntry => visit(0, 2, f),
+            // `[hash, count, key, value, …]` — `2 * count` value words.
+            HeapTag::HamtCollision => {
+                let count = *p.add(1) as usize;
+                visit(2, 2 * count, f);
+            }
             HeapTag::Tuple => {
                 let n = *p as usize;
                 visit(1, n, f);
@@ -1676,6 +2011,134 @@ pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
         debug_assert!(header_tag(h) == HeapTag::Binary);
         drop(Arc::from_raw(binary_backing_raw(obj)))
     }
+}
+
+// ---- reference counting -----------------------------------------------------
+//
+// A reference-counted (mortal) heap object carries a refcount word immediately
+// BEFORE its header — `[rc][header][payload…]` — and every `Value` points at
+// the HEADER, so all header-relative offsets (constructors, accessors,
+// `for_each_child`) are byte-identical to a non-counted object. The count is
+// the number of live `Value` handles to the object; allocation initializes it
+// to 1 (the constructing handle). Immortal (frozen) objects have NO such word
+// and are never counted — every counting path gates on `is_immortal()` first.
+//
+// Reclamation is COMPLETE without a cycle collector because al's heap is
+// acyclic by construction: values are immutable, closures capture by value with
+// no backpatch, self-reference resolves through the live call frame (`PushSelf`/
+// `CallSelf`), and mutual recursion resolves through the immortal global table.
+// A future construct that can tie a heap cycle would leak under this scheme —
+// it would need a cycle collector (i.e. the tracing GC this replaced).
+
+/// Words reserved before a mortal object's header for its refcount. The
+/// allocation starts here; the object pointer is this many words after it.
+pub(crate) const RC_PREFIX_WORDS: usize = 1;
+
+/// The refcount slot — also the allocation start — of a mortal heap object:
+/// the word immediately before its header.
+///
+/// # Safety
+/// `obj` must be a mortal (non-immortal) heap object pointer.
+#[inline]
+pub(crate) unsafe fn rc_slot(obj: *const u64) -> *mut u64 {
+    unsafe { (obj as *mut u64).sub(RC_PREFIX_WORDS) }
+}
+
+/// Increment a mortal object's refcount, saturating at `u64::MAX` (a saturated
+/// count is treated as permanently live; it is unreachable in practice).
+///
+/// # Safety
+/// `obj` must be a mortal heap object with an initialized refcount slot.
+#[inline]
+#[allow(dead_code)] // wired into `Value::Clone` at Stage 4 (the flip)
+pub(crate) unsafe fn rc_increment(obj: *const u64) {
+    unsafe {
+        let p = rc_slot(obj);
+        *p = (*p).saturating_add(1);
+    }
+}
+
+/// Decrement a mortal object's refcount; return `true` when it reaches zero
+/// (the caller must then free the object). A saturated count never decrements
+/// and never reports zero.
+///
+/// # Safety
+/// `obj` must be a mortal heap object with an initialized refcount slot.
+#[inline]
+pub(crate) unsafe fn rc_decrement_is_zero(obj: *const u64) -> bool {
+    unsafe {
+        let p = rc_slot(obj);
+        if *p == u64::MAX {
+            return false;
+        }
+        *p -= 1;
+        *p == 0
+    }
+}
+
+/// Free a single mortal object's storage, first releasing any off-heap `Arc`
+/// backing it owns. Does NOT touch the object's `Value` children — the caller
+/// (the [`release`] work list) has already decremented them.
+///
+/// # Safety
+/// `obj` must be a live mortal heap object with no remaining references, not
+/// freed before, allocated through a `MiHeap` so `mi_free` reclaims it.
+#[inline]
+unsafe fn free_object(obj: *mut u64) {
+    unsafe {
+        if header_has_off_heap_link(*obj) {
+            binary_drop_backing(obj);
+        }
+        libmimalloc_sys::mi_free(rc_slot(obj).cast());
+    }
+}
+
+thread_local! {
+    /// Reusable scratch for the iterative free-at-zero traversal, so a `Drop`
+    /// never allocates. al runs one scheduler per thread and the traversal is
+    /// non-reentrant (it triggers no further `Value` drops), so one per-thread
+    /// buffer — empty between releases — is sound.
+    static DROP_STACK: RefCell<Vec<*mut u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Release one reference to `v`. For a mortal heap object whose count reaches
+/// zero, free it and transitively release everything it uniquely owns —
+/// iteratively, through an explicit work list, so a deep graph (e.g. a long
+/// cons list) cannot overflow the native stack the way recursive `Drop` would.
+/// Immediates and immortal (frozen) values are no-ops.
+#[allow(dead_code)] // wired into `Value::Drop` at Stage 4 (the flip)
+pub(crate) fn release(v: Value) {
+    if !v.is_heap() || v.is_immortal() {
+        return;
+    }
+    let obj = v.heap_obj() as *mut u64;
+    // SAFETY: a mortal heap object has an initialized refcount slot.
+    if !unsafe { rc_decrement_is_zero(obj) } {
+        return;
+    }
+    DROP_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        debug_assert!(
+            stack.is_empty(),
+            "drop stack must be empty between releases"
+        );
+        stack.push(obj);
+        while let Some(obj) = stack.pop() {
+            // SAFETY: every queued pointer is a mortal heap object at count 0
+            // awaiting free; its child slots stay live until we free it.
+            unsafe {
+                for_each_child(obj, &mut |child: &mut Value| {
+                    if child.is_heap() && !child.is_immortal() {
+                        let c = child.heap_obj() as *mut u64;
+                        if rc_decrement_is_zero(c) {
+                            stack.push(c);
+                        }
+                    }
+                });
+                free_object(obj);
+            }
+        }
+    });
 }
 
 // ---- hashing ------------------------------------------------------------------
@@ -1774,6 +2237,70 @@ fn hash_sequence(len: usize, elem_hashes: impl Iterator<Item = u64>) -> u64 {
     h
 }
 
+fn slices_equal(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_equal(x, y))
+}
+
+/// AL structural equality — the semantics of `==`. Lives here (not in the VM)
+/// because it is the partner of [`hash_value`] and both are needed by
+/// [`super::hamt`] to key the persistent map. Ranges and arrays compare by
+/// their elements; maps compare structurally regardless of internal order.
+pub fn values_equal(a: &Value, b: &Value) -> bool {
+    // `Range`'s normalised empty case (empty ranges are equal regardless of
+    // endpoints) and the range/array cross-equality reuse this inline length.
+    fn range_len(s: i64, e: i64) -> i64 {
+        e.saturating_sub(s).max(0)
+    }
+    match (a.kind(), b.kind()) {
+        (ValueView::Int(x), ValueView::Int(y)) => x == y,
+        (ValueView::Float(x), ValueView::Float(y)) => x == y,
+        (ValueView::Bool(x), ValueView::Bool(y)) => x == y,
+        (ValueView::Str(x), ValueView::Str(y)) => x == y,
+        (ValueView::Enum(ae), ValueView::Enum(be)) => {
+            ae.hash() == be.hash()
+                && ae.type_id() == be.type_id()
+                && ae.variant_name() == be.variant_name()
+                && slices_equal(ae.payload(), be.payload())
+        }
+        (ValueView::Nil, ValueView::Nil) => true,
+        (ValueView::Closure(x), ValueView::Closure(y)) => {
+            x.func_idx() == y.func_idx() && slices_equal(x.captures(), y.captures())
+        }
+        (ValueView::Array(aa), ValueView::Array(ba)) => {
+            aa.len() == ba.len() && aa.iter().zip(ba.iter()).all(|(x, y)| values_equal(&x, &y))
+        }
+        (ValueView::Range(as_, ae), ValueView::Range(bs, be)) => {
+            let alen = range_len(as_, ae);
+            let blen = range_len(bs, be);
+            (alen == 0 && blen == 0) || (as_ == bs && ae == be)
+        }
+        (ValueView::Range(s, e), ValueView::Array(arr))
+        | (ValueView::Array(arr), ValueView::Range(s, e)) => {
+            let len = range_len(s, e) as usize;
+            if arr.len() != len {
+                return false;
+            }
+            for (i, av) in arr.iter().enumerate() {
+                let n = match av.as_int() {
+                    Some(n) => n,
+                    None => return false,
+                };
+                if n != s + i as i64 {
+                    return false;
+                }
+            }
+            true
+        }
+        (ValueView::Binary(a), ValueView::Binary(b)) => a.bits_eq(&b),
+        (ValueView::Tuple(at), ValueView::Tuple(bt)) => slices_equal(at, bt),
+        (ValueView::Socket(asv), ValueView::Socket(bsv)) => {
+            asv.id == bsv.id && asv.is_listener == bsv.is_listener
+        }
+        (ValueView::Map(am), ValueView::Map(bm)) => super::hamt::maps_equal(am, bm),
+        _ => false,
+    }
+}
+
 /// Equality fast-reject hash: `values_equal` values must hash identically;
 /// unequal values may collide. It feeds the cached enum hash
 /// ([`enum_hash_with_payload`]) that gates the enum arm of equality, so every
@@ -1863,6 +2390,13 @@ pub fn hash_value(v: &Value) -> u64 {
             // `Nil` is equal only to itself; any constant respects equality.
             h = fnv1a_combine(h, 0);
         }
+        ValueView::Map(m) => {
+            // Fold the backing, then — for a HAMT — every entry through an
+            // order-independent combine, so two equal maps built by different
+            // insertion orders hash alike. The `Env` view carries no entries.
+            h = fnv1a_combine(h, m.backing() as u64);
+            h = h.wrapping_add(super::hamt::map_hash(m));
+        }
     }
     h
 }
@@ -1896,6 +2430,32 @@ mod tests {
     /// without a collector; capacity stands in for the VM's ensure()).
     fn test_heap() -> ProcHeap {
         ProcHeap::with_young_capacity(1 << 21)
+    }
+
+    #[test]
+    fn immortal_flag_marks_only_frozen_objects() {
+        use crate::frozen::FrozenArea;
+        use std::sync::Arc;
+
+        // A heap object built in a process heap is mortal (reference-counted).
+        let mut h = test_heap();
+        let mortal = Value::int_in(&mut h, i64::MAX); // BigInt box
+        assert!(mortal.is_heap());
+        assert!(!mortal.is_immortal());
+
+        // The same shape built into the frozen area is immortal.
+        let area = Arc::new(FrozenArea::new());
+        let mut b = area.builder();
+        let frozen = b.int(i64::MAX);
+        assert!(frozen.is_heap());
+        assert!(frozen.is_immortal());
+        // Tag/length are still decoded correctly with bit 7 set.
+        assert_eq!(frozen.heap_tag(), Some(HeapTag::BigInt));
+        assert_eq!(frozen.as_int(), Some(i64::MAX));
+
+        // Immediates are never immortal (and never heap).
+        assert!(!Value::small_int(7).is_immortal());
+        assert!(!Value::nil().is_immortal());
     }
 
     #[test]

@@ -62,6 +62,11 @@ pub const BIG_INT: usize = HEADER + 1;
 /// Range: header + start + end.
 pub const RANGE: usize = HEADER + 2;
 
+/// Map handle: header + backing discriminant. The `Env` backing stores no
+/// entries in the arena (it reads through to `std::env`), so this is the whole
+/// cost of `process.env`.
+pub const MAP: usize = HEADER + 1;
+
 /// Socket handles pack into the NaN box — no arena words.
 pub const SOCKET: usize = 0;
 

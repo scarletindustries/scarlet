@@ -1,6 +1,7 @@
 import al/net/address.{SocketAddress, IpAddress}
 import al/net/socket.{Socket}
 import al/net/error.{NetError}
+import al/experiments/scheduler
 
 pub type Server
 
@@ -9,6 +10,45 @@ pub fn listen(host String, port Int) Result(Server, NetError)
 
 @vm(net__accept)
 pub fn accept(s Server) Result(Socket, NetError)
+
+// Listen on host:port and serve connections across every CPU core in parallel.
+//
+// Each core binds its own SO_REUSEPORT socket to the same address, so the
+// kernel load-balances incoming connections across cores — there is no shared
+// accept lock and no single-core accept bottleneck. Every accepted connection
+// is handled on the core that accepted it (the connection's socket never moves
+// between cores), and `handler` runs once per connection in its own
+// lightweight process.
+//
+// Returns once the listeners are bound and the acceptors are running; the
+// acceptors keep the program alive. A bind failure is reported as `Err`.
+pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Nil, NetError) {
+	match listen(host, port) {
+		Ok(server) -> serve_on(server, handler)
+		Err(e) -> Err(e)
+	}
+}
+
+// Serve connections from a listener already bound with `listen`, fanning the
+// accept loop out across every core exactly as `serve` does. Useful to bind on
+// port 0, read the kernel-assigned port back with `local_addr`, then serve.
+pub fn serve_on(server Server, handler fn(Socket) Nil) Result(Nil, NetError) {
+	scheduler.spawn_on_each(fn() accept_loop(server, handler))
+	Ok(Nil)
+}
+
+// The per-core accept loop: accept a connection, hand it to its own process on
+// this same core (so the socket stays local), then loop. One copy of this runs
+// on every core, each draining its own kernel accept queue.
+fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
+	match accept(server) {
+		Ok(sock) -> {
+			scheduler.spawn_local(fn() handler(sock))
+			accept_loop(server, handler)
+		}
+		Err(_) -> Nil
+	}
+}
 
 // Resolve `host` to an `IpAddress`. IP literals pass through unchanged; hostname
 // resolution (getaddrinfo) runs on the blocking thread pool so it never stalls

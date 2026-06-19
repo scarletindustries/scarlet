@@ -3395,8 +3395,21 @@ impl Compiler {
             "float__from_int" => self.emit(Op::FloatFromInt),
             "float__to_string" => self.emit(Op::FloatToString),
             "scheduler__spawn" => self.emit(Op::ProcessSpawn),
+            "scheduler__spawn_local" => self.emit(Op::SpawnLocal),
+            "scheduler__spawn_on_each" => self.emit(Op::SpawnOnEach),
             "scheduler__sleep" => self.emit(Op::Sleep),
             "time__monotonic" => self.emit(Op::Monotonic),
+            "process__argv" => self.emit(Op::Argv),
+            "process__env" => self.emit(Op::EnvMap),
+            "map__get" => self.emit(Op::MapGet),
+            "map__has" => self.emit(Op::MapHas),
+            "map__keys" => self.emit(Op::MapKeys),
+            "map__values" => self.emit(Op::MapValues),
+            "map__size" => self.emit(Op::MapSize),
+            "map__new" => self.emit(Op::MapNew),
+            "map__set" => self.emit(Op::MapSet),
+            "map__delete" => self.emit(Op::MapDelete),
+            "map__to_list" => self.emit(Op::MapToList),
             _ => {
                 self.error(format!("Internal: builtin '{}' has no codegen", name), sp);
             }

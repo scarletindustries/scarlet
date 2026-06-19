@@ -155,6 +155,7 @@ mod gc;
 mod http;
 mod inspect;
 mod io;
+mod map;
 mod migrate;
 mod poll;
 mod sched;
@@ -354,8 +355,18 @@ pub struct VM {
 ///
 /// Fails only when scheduler 0's poller cannot be created (fd exhaustion):
 /// the calling thread could never park, so there is no VM to build.
+///
+/// Built with no command-line arguments; `process.argv` returns an empty
+/// array. Use [`new_vm_with_argv`] to make program arguments visible.
 pub fn new_vm(program: Program) -> VmResult<VM> {
-    let (runtime, poll) = Runtime::new(Arc::new(program), sched::scheduler_count())
+    new_vm_with_argv(program, Vec::new())
+}
+
+/// Build the VM that runs `program` as scheduler 0, exposing `argv` (the
+/// entrypoint path followed by the arguments passed after it) to
+/// `process.argv`.
+pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
+    let (runtime, poll) = Runtime::new(Arc::new(program), argv, sched::scheduler_count())
         .map_err(|e| format!("cannot create OS poller: {e}"))?;
     Ok(vm_for_runtime(runtime, 0, poll))
 }
@@ -701,25 +712,14 @@ impl VM {
             }
             return;
         };
-        match self.detach_fds(&victim) {
-            Some((listeners, connections)) => rt.donate(
-                peer,
-                Migrant {
-                    process: victim,
-                    listeners,
-                    connections,
-                },
-            ),
-            None => {
-                // Fd detach aborted; `detach_fds` restored the donor's
-                // socket tables, so keep the process local and wake the
-                // claimed peer.
-                self.run_queue.push_back(victim);
-                if claimed {
-                    rt.abort_donation(peer);
-                }
-            }
-        }
+        let connections = self.detach_fds(&victim);
+        rt.donate(
+            peer,
+            Migrant {
+                process: victim,
+                connections,
+            },
+        );
     }
 
     /// Get something to run into `stack`/`frames`. Blocks while there is
@@ -922,6 +922,15 @@ impl VM {
     /// injector and whichever scheduler frees up first picks it up at its
     /// next yield or idle scan.
     fn spawn_process(&mut self, f: Value) -> VmResult<()> {
+        self.check_spawnable(&f)?;
+        let seed = self.build_seed(&f)?;
+        self.runtime.submit(seed);
+        Ok(())
+    }
+
+    /// A spawned closure must be a nullary function; both are compiler
+    /// invariants, so a violation is an internal error rather than a user one.
+    fn check_spawnable(&self, f: &Value) -> VmResult<()> {
         let Some(cl) = f.as_closure() else {
             return Err("spawn requires a function. This is likely a compiler bug.".to_string());
         };
@@ -930,9 +939,50 @@ impl VM {
                 "spawned functions take no arguments. This is likely a compiler bug.".to_string(),
             );
         }
+        Ok(())
+    }
 
-        let seed = self.build_seed(&f)?;
-        self.runtime.submit(seed);
+    /// Spawn `f` pinned to this scheduler: the child runs on the core that
+    /// spawned it, so any socket it captured stays in this scheduler's tables —
+    /// no fd detach, no cross-core handoff. This is the shared-nothing half of
+    /// the accept fan-out: an acceptor handles each connection on the core it
+    /// accepted on, keeping the connection's buffers and fd local to one core.
+    fn spawn_local(&mut self, f: Value) -> VmResult<()> {
+        self.check_spawnable(&f)?;
+        // Copy the closure graph into the child's own arena (processes share no
+        // heap), but leave captured fds in place — parent and child run on the
+        // same scheduler and reference the same per-scheduler socket tables.
+        let (heap, root) = self.heap.spawn_copy(&f);
+        self.runtime
+            .live
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.spawn_process_with_heap(heap, root)
+    }
+
+    /// Spawn one copy of `f` pinned to every live scheduler — the fan-out that
+    /// turns a single accept loop into one acceptor per core. Each copy, when
+    /// it first accepts, binds this scheduler's own `SO_REUSEPORT` socket from
+    /// the shared address, so the kernel load-balances connections across the
+    /// per-core sockets. The current scheduler runs its copy locally; every
+    /// other live scheduler gets one pinned to its inbox.
+    fn spawn_on_each(&mut self, f: Value) -> VmResult<()> {
+        self.check_spawnable(&f)?;
+        // Summon the worker threads so every scheduler slot is live before we
+        // place a copy on it (a never-spawned worker is skipped — it binds no
+        // socket, so the kernel never routes connections to a coreless queue).
+        self.runtime.ensure_workers();
+        for i in 0..self.runtime.scheduler_count() {
+            if i == self.scheduler_index {
+                let (heap, root) = self.heap.spawn_copy(&f);
+                self.runtime
+                    .live
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.spawn_process_with_heap(heap, root)?;
+            } else if self.runtime.is_live_scheduler(i) {
+                let seed = self.build_seed(&f)?;
+                self.runtime.submit_to(i, seed);
+            }
+        }
         Ok(())
     }
 
@@ -987,17 +1037,14 @@ impl VM {
         // as a unit.
         let (heap, root) = self.heap.spawn_copy(f);
 
-        // Same fd transfer as donation (`detach_socket_ids` rolls back on
-        // failure), so an undupable listener fails the spawn cleanly instead
-        // of producing a child that silently cannot accept.
-        let (listeners, connections) = self
-            .detach_socket_ids(captured_sockets, "spawn")
-            .ok_or_else(|| "spawn: cannot share captured listener with child".to_string())?;
+        // Same fd transfer as donation: captured connections move to the
+        // child; captured listeners stay put (the child binds its own
+        // reuseport socket from the shared address on first accept).
+        let connections = self.detach_socket_ids(captured_sockets);
 
         Ok(Seed {
             heap,
             root,
-            listeners,
             connections,
         })
     }
@@ -1009,10 +1056,6 @@ impl VM {
     /// path — inbox drain, overflow pickup, steal — funnels through), so the
     /// seed itself carries none.
     fn hydrate_seed(&mut self, seed: Seed) -> VmResult<()> {
-        for (id, l) in seed.listeners {
-            self.track_listener(id, l)
-                .map_err(|e| format!("cannot watch adopted listener: {e}"))?;
-        }
         for (id, c) in seed.connections {
             self.track_connection(id, c)
                 .map_err(|e| format!("cannot watch adopted connection: {e}"))?;

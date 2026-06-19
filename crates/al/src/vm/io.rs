@@ -39,9 +39,11 @@
 //!   `tcp_connections`, `pending_connects`). Socket ids are unique across
 //!   schedulers — the scheduler index rides in the id's top bits — so a
 //!   socket value can migrate inside a spawn seed without colliding.
-//! - Listeners are shared program-wide on creation (`share_listener`):
-//!   a listener bound at top level may be accepted on from any scheduler,
-//!   each hydrating a dup of the fd on first use (`ensure_listener`).
+//! - Listeners are bound with `SO_REUSEPORT` and shared by address, not by
+//!   fd (`share_listener_addr`): a listener bound at top level may be
+//!   accepted on from any scheduler, each binding its own reuseport socket to
+//!   the shared address on first accept (`ensure_listener`), so the kernel
+//!   load-balances incoming connections across the per-core sockets.
 //! - Connections are adopted into the accepting scheduler's table
 //!   (`adopt_connection`) and move between tables only via migration's fd
 //!   re-homing ([`super::migrate`]).
@@ -54,9 +56,11 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, IoSlice, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
+
+use socket2::{Domain, Protocol, Socket, Type};
 
 use al_core::bytecode::{BinaryRef, SocketValue, Value};
 use al_core::static_ir::VariantTemplate;
@@ -118,22 +122,22 @@ impl VM {
         self.ensure(cost::SOCKET + cost::WRAP + cost::NET_ERR);
         let port = self.pop_int("net.listen")?;
         let host_v = self.pop_str("net.listen")?;
-        let res = TcpListener::bind((str_ref(&host_v), port as u16)).and_then(|listener| {
-            // Non-blocking so accept parks the calling process
-            // instead of stalling every process on this scheduler.
-            listener.set_nonblocking(true)?;
-            let socket_id = self.alloc_socket_id();
-            self.track_listener(socket_id, listener)?;
-            Ok(Value::socket(SocketValue {
-                id: socket_id,
-                is_listener: true,
-            }))
-        });
-        // A listener may be stored in a top-level binding and used
-        // from any scheduler; share its fd program-wide.
-        if let Some(sv) = res.as_ref().ok().and_then(|v| v.as_socket()) {
-            self.share_listener(sv.id);
-        }
+        let res = resolve_listen_addr(str_ref(&host_v), port as u16)
+            .and_then(bind_reuseport)
+            .and_then(|listener| {
+                // Pin the *resolved* address (a port of 0 becomes the
+                // kernel-assigned one) so every other scheduler binds its own
+                // reuseport socket to the same address — that is what makes
+                // the kernel load-balance connections across cores.
+                let addr = listener.local_addr()?;
+                let socket_id = self.alloc_socket_id();
+                self.track_listener(socket_id, listener)?;
+                self.share_listener_addr(socket_id, addr);
+                Ok(Value::socket(SocketValue {
+                    id: socket_id,
+                    is_listener: true,
+                }))
+            });
         self.push_net(res);
         Ok(())
     }
@@ -425,7 +429,7 @@ impl VM {
         // Ok(SocketAddress) or a NetError.
         self.ensure(cost::SOCK_ADDR + cost::WRAP + cost::NET_ERR);
         let sv = self.pop_listener("net.local_addr")?;
-        let res = self.listener(sv.id)?.local_addr();
+        let res = self.listener_addr(sv.id);
         let res = res.map(|a| self.templates.socket_address(&mut self.heap, a));
         self.push_net(res);
         Ok(())
@@ -462,6 +466,24 @@ impl VM {
         // Spawning deep-copies the closure and dups captured fds;
         // charge it like I/O so a spawn loop cannot monopolize
         // the scheduler.
+        *reds -= IO_REDUCTION_COST;
+        Ok(())
+    }
+
+    pub(super) fn process_spawn_local(&mut self, reds: &mut i32) -> VmResult<()> {
+        let f = self.pop()?;
+        self.spawn_local(f)?;
+        let nil = self.make_nil();
+        self.stack.push(nil);
+        *reds -= IO_REDUCTION_COST;
+        Ok(())
+    }
+
+    pub(super) fn process_spawn_on_each(&mut self, reds: &mut i32) -> VmResult<()> {
+        let f = self.pop()?;
+        self.spawn_on_each(f)?;
+        let nil = self.make_nil();
+        self.stack.push(nil);
         *reds -= IO_REDUCTION_COST;
         Ok(())
     }
@@ -634,26 +656,42 @@ impl VM {
         id
     }
 
-    /// Make a listener visible to every scheduler, so a listener stored in a
-    /// top-level binding can be used from spawned processes anywhere.
-    fn share_listener(&mut self, id: i32) {
-        if let Some(l) = self.tcp_listeners.get(&id)
-            && let Ok(dup) = l.try_clone()
-        {
-            sched::lock(&self.runtime.shared_listeners).insert(id, dup);
-        }
+    /// Record a listener's bound address program-wide, keyed by socket id, so
+    /// any scheduler that needs to accept on it can bind its own reuseport
+    /// socket to the same address ([`VM::ensure_listener`]).
+    fn share_listener_addr(&mut self, id: i32, addr: SocketAddr) {
+        sched::lock(&self.runtime.shared_listeners).insert(id, addr);
     }
 
-    /// Resolve `id` to a listener in this scheduler's table, hydrating its fd
-    /// from the runtime's shared listeners on a local miss.
+    /// The bound address of listener `id`: this scheduler's own socket if it
+    /// holds one, otherwise the address shared at listen time. Reading the
+    /// shared address never binds a socket — only an actual accept does — so a
+    /// process that merely queries the address does not leave an unaccepted
+    /// reuseport queue behind.
+    fn listener_addr(&self, id: i32) -> std::io::Result<SocketAddr> {
+        if let Some(l) = self.tcp_listeners.get(&id) {
+            return l.local_addr();
+        }
+        sched::lock(&self.runtime.shared_listeners)
+            .get(&id)
+            .copied()
+            .ok_or_else(|| std::io::Error::from(ErrorKind::NotConnected))
+    }
+
+    /// Resolve `id` to a listener in this scheduler's table, binding this
+    /// scheduler's own `SO_REUSEPORT` socket to the shared address on a local
+    /// miss. Each scheduler thus accepts from its own kernel queue; the kernel
+    /// spreads incoming connections across the per-scheduler sockets. Binding
+    /// happens here, on first accept, so only a scheduler that actually
+    /// accepts ever holds a socket in the reuseport group.
     fn ensure_listener(&mut self, id: i32) -> bool {
         if self.tcp_listeners.contains_key(&id) {
             return true;
         }
-        let dup = sched::lock(&self.runtime.shared_listeners)
+        let addr = sched::lock(&self.runtime.shared_listeners)
             .get(&id)
-            .and_then(|l| l.try_clone().ok());
-        match dup {
+            .copied();
+        match addr.and_then(|a| bind_reuseport(a).ok()) {
             Some(l) => self.track_listener(id, l).is_ok(),
             None => false,
         }
@@ -733,6 +771,40 @@ fn start_connect(addr: &std::net::SocketAddr) -> std::io::Result<ConnectStart> {
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(ConnectStart::Pending(socket)),
         Err(e) => Err(e),
     }
+}
+
+/// `listen(2)` backlog: the depth of the kernel's completed-connection queue
+/// per listening socket before new connections are dropped. The platform caps
+/// this at `somaxconn`; a deeper request than the default keeps a connection
+/// burst from overflowing the queue (the std default of 128 is shallow for a
+/// server). Each `SO_REUSEPORT` socket gets its own queue of this depth.
+const LISTEN_BACKLOG: i32 = 1024;
+
+/// Resolve a listen `host`/`port` to a concrete socket address. `host` is
+/// normally an IP literal (`0.0.0.0`, `127.0.0.1`); a name resolves through
+/// the system resolver, and the first address is used — matching the previous
+/// `TcpListener::bind((host, port))` behaviour.
+fn resolve_listen_addr(host: &str, port: u16) -> std::io::Result<SocketAddr> {
+    (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::from(ErrorKind::AddrNotAvailable))
+}
+
+/// Bind a non-blocking TCP listener with `SO_REUSEADDR` + `SO_REUSEPORT`, so
+/// every scheduler can hold its own listening socket on the same address. The
+/// kernel then load-balances incoming connections across the per-scheduler
+/// sockets: each core accepts from its own queue with no shared accept lock
+/// and no cross-core handoff. Non-blocking so accept parks the calling process
+/// rather than stalling the scheduler.
+fn bind_reuseport(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(LISTEN_BACKLOG)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
 }
 
 /// Outcome of [`drain_write`]: everything written, or the socket filled up

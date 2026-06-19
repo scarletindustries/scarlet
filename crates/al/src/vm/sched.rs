@@ -18,7 +18,7 @@
 //! process finishing) wakes them via [`mio::Waker::wake`].
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 
@@ -45,10 +45,9 @@ pub(super) struct Seed {
     pub heap: ProcHeap,
     /// The spawned closure, as a pointer into `heap`.
     pub root: Value,
-    /// Listening sockets the closure captured (dup'd file descriptors —
-    /// the spawner keeps accepting too).
-    pub listeners: Vec<(i32, TcpListener)>,
     /// Connections the closure captured (moved — the spawner loses them).
+    /// Listeners do not travel: each scheduler binds its own reuseport socket
+    /// from the shared address on first accept (`VM::ensure_listener`).
     pub connections: Vec<(i32, TcpStream)>,
 }
 
@@ -153,6 +152,10 @@ pub(super) struct Runtime {
     /// The shared program; each worker scheduler runs a private clone of it
     /// (constants are frozen words pointing into `program.frozen`, shared).
     pub program: Arc<Program>,
+    /// The program's command-line arguments: the entrypoint path followed by
+    /// every argument passed after it. Read once per `Op::Argv`; shared by all
+    /// schedulers so any process can call `process.argv`.
+    pub argv: Vec<String>,
     /// The program's global (literal) area: top-level bindings as frozen
     /// value words,
     /// published once when main writes them. Workers copy the words into
@@ -161,10 +164,12 @@ pub(super) struct Runtime {
     /// Bumped on every publish; lets schedulers skip syncing when nothing
     /// changed.
     pub globals_version: AtomicU64,
-    /// Listening sockets shared program-wide, so a listener stored in a
-    /// top-level binding works from any scheduler: each scheduler that needs
-    /// one dups the fd from here into its own table.
-    pub shared_listeners: Mutex<HashMap<i32, TcpListener>>,
+    /// Bound addresses of every live listener, keyed by socket id. A listener
+    /// is a shared, addr-keyed resource: each scheduler that needs to accept
+    /// on one binds its own `SO_REUSEPORT` socket to this address
+    /// (`VM::ensure_listener`), so the kernel load-balances connections across
+    /// per-core sockets instead of every core sharing one accept queue.
+    pub shared_listeners: Mutex<HashMap<i32, SocketAddr>>,
     /// Per-scheduler work inboxes. `submit` hands a seed directly to a
     /// chosen idle scheduler's inbox so the placement decision is made at
     /// submit time instead of being raced through a shared queue (where the
@@ -175,6 +180,14 @@ pub(super) struct Runtime {
     /// another scheduler's inbox ([`Runtime::steal_inbound`]) — the woken
     /// owner then finds an empty inbox and re-parks.
     pub inboxes: Vec<Mutex<VecDeque<Inbound>>>,
+    /// Per-scheduler *pinned* seeds: work that must run on exactly this
+    /// scheduler and is never stolen ([`Runtime::steal_inbound`] ignores it).
+    /// This is how the accept fan-out ([`super::VM::spawn_on_each`]) keeps one
+    /// acceptor per core: each must bind its own `SO_REUSEPORT` socket, so an
+    /// acceptor stolen onto a core that already has the listener bound would
+    /// leave its own core's socket unbound and starve it of connections. The
+    /// owner drains these like directed work; no other scheduler ever does.
+    pub pinned: Vec<Mutex<VecDeque<Seed>>>,
     /// Overflow queue: seeds submitted while every scheduler was busy. Taken
     /// (one per visit) by whichever scheduler frees up first.
     pub injector: Mutex<VecDeque<Seed>>,
@@ -277,17 +290,23 @@ impl Runtime {
     /// the VM over it — cannot be built at all. The poller itself is
     /// returned to the caller (`mio::Poll` is owned by its scheduler
     /// thread); only its waker goes into the shared slot table.
-    pub fn new(program: Arc<Program>, count: usize) -> std::io::Result<(Arc<Runtime>, mio::Poll)> {
+    pub fn new(
+        program: Arc<Program>,
+        argv: Vec<String>,
+        count: usize,
+    ) -> std::io::Result<(Arc<Runtime>, mio::Poll)> {
         let poll = mio::Poll::new()?;
         let waker = mio::Waker::new(poll.registry(), super::poll::WAKER_TOKEN)?;
         let wakers: Vec<OnceLock<Arc<mio::Waker>>> = (0..count).map(|_| OnceLock::new()).collect();
         let _ = wakers[0].set(Arc::new(waker));
         let runtime = Arc::new(Runtime {
             program,
+            argv,
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),
             inboxes: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
+            pinned: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
             injector: Mutex::new(VecDeque::new()),
             submit_cursor: AtomicUsize::new(0),
             // The main process is live.
@@ -411,6 +430,33 @@ impl Runtime {
             q.push_back(seed);
         }
         self.wake_one();
+    }
+
+    /// Number of schedulers the runtime was built with (live or not).
+    pub fn scheduler_count(&self) -> usize {
+        self.wakers.len()
+    }
+
+    /// Whether scheduler `i` has a live thread behind it. Scheduler 0 always
+    /// does; a worker's slot is filled only once its thread spawns, so an
+    /// empty slot is a worker that never started ([`Runtime::ensure_workers`]).
+    pub fn is_live_scheduler(&self, i: usize) -> bool {
+        self.wakers[i].get().is_some()
+    }
+
+    /// Submit a seed pinned to a specific scheduler — the placement primitive
+    /// behind [`super::VM::spawn_on_each`]'s accept fan-out, where each
+    /// scheduler must run an acceptor against its own reuseport socket. Unlike
+    /// [`Runtime::submit`] there is no idle-peer scan (the target is chosen by
+    /// the caller) and the seed goes to the pinned queue, so it is never stolen
+    /// onto another core — an acceptor must bind *this* core's socket or the
+    /// core gets no connections. Callers must `ensure_workers` first and only
+    /// target live schedulers ([`Runtime::is_live_scheduler`]).
+    pub fn submit_to(self: &Arc<Self>, i: usize, seed: Seed) {
+        self.live.fetch_add(1, Ordering::AcqRel);
+        self.run_lens[i].fetch_add(1, Ordering::Relaxed);
+        lock(&self.pinned[i]).push_back(seed);
+        self.notify(i);
     }
 
     /// Claim one idle scheduler for a direct handoff: scan `parked_flags`
@@ -554,13 +600,18 @@ impl Runtime {
         out
     }
 
-    /// Drain scheduler `me`'s inbox: work that was explicitly placed here —
-    /// seeds direct-handed by `submit`, migrants donated by peers. Directed
-    /// work is taken unconditionally (a busy scheduler drains its inbox at
-    /// every yield); only the undirected overflow queue is subject to the
-    /// pickup limit.
+    /// Drain scheduler `me`'s directed work: pinned seeds that must run here
+    /// ([`Runtime::submit_to`]), plus its inbox — seeds direct-handed by
+    /// `submit` and migrants donated by peers. Directed work is taken
+    /// unconditionally (a busy scheduler drains it at every yield); only the
+    /// undirected overflow queue is subject to the pickup limit.
     pub fn take_directed(&self, me: usize) -> Vec<Inbound> {
-        lock(&self.inboxes[me]).drain(..).collect()
+        let mut out: Vec<Inbound> = lock(&self.pinned[me])
+            .drain(..)
+            .map(Inbound::Seed)
+            .collect();
+        out.extend(lock(&self.inboxes[me]).drain(..));
+        out
     }
 
     /// Take up to [`SEED_BATCH`] seeds from the shared overflow queue:

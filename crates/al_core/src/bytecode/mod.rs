@@ -46,6 +46,7 @@
 
 mod analysis;
 pub mod compiler;
+pub mod hamt;
 mod prelude;
 pub mod prelude_bindings;
 pub mod seq;
@@ -55,8 +56,8 @@ use std::sync::Arc;
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use value::{
-    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, SeqRef, SocketValue, Value, ValueView,
-    enum_hash_with_payload, enum_name_prefix_hash, hash_value,
+    Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapBacking, MapRef, SeqRef, SocketValue, Value,
+    ValueView, enum_hash_with_payload, enum_name_prefix_hash, hash_value, values_equal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,10 +311,52 @@ pub enum Op {
     // Concurrency (experimental, al/experiments/scheduler)
     /// Spawn a lightweight process running the popped closure.
     ProcessSpawn,
+    /// Spawn the popped closure pinned to the current scheduler — the child
+    /// runs on the core that spawned it and any sockets it captured stay in
+    /// place (no fd move, no cross-core handoff). Used by the per-core accept
+    /// loop so a connection is handled on the core that accepted it.
+    SpawnLocal,
+    /// Spawn one copy of the popped closure pinned to every live scheduler.
+    /// Drives the shared-nothing accept fan-out: each core runs its own
+    /// acceptor against its own `SO_REUSEPORT` socket.
+    SpawnOnEach,
     /// Park the current process for `ms` milliseconds.
     Sleep,
     /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
     Monotonic,
+
+    /// Push the program's command-line arguments as an `Array(String)`: the
+    /// entrypoint path followed by every argument given after it on the
+    /// command line. (al/process.argv)
+    Argv,
+
+    // Maps (al/map). A `Map(k, v)` is an opaque heap value with a pluggable
+    // backing; the only backing today is the zero-copy process-environment
+    // view produced by `EnvMap`. Read ops dispatch on the backing.
+    /// Push a `Map(String, String)` that reads through to the process
+    /// environment — no environment data is copied. (al/process.env)
+    EnvMap,
+    /// `[map, key] -> Option(v)` — look up a key. (al/map.get)
+    MapGet,
+    /// `[map, key] -> Bool` — membership test. (al/map.has)
+    MapHas,
+    /// `[map] -> Array(k)` — every key, in the backing's iteration order.
+    /// (al/map.keys)
+    MapKeys,
+    /// `[map] -> Array(v)` — every value, parallel to `MapKeys`. (al/map.values)
+    MapValues,
+    /// `[map] -> Int` — number of entries. (al/map.size)
+    MapSize,
+    /// `[] -> Map(k, v)` — a fresh empty in-memory (HAMT) map. (al/map.new)
+    MapNew,
+    /// `[map, key, value] -> Map(k, v)` — `map` with `key` bound to `value`,
+    /// as a new map sharing untouched subtrees. (al/map.set)
+    MapSet,
+    /// `[map, key] -> Map(k, v)` — `map` without `key`. (al/map.delete)
+    MapDelete,
+    /// `[map] -> Array((k, v))` — every entry as a `(key, value)` tuple.
+    /// (al/map.to_list)
+    MapToList,
 }
 
 /// A single bytecode instruction. `a`/`b` are packed sub-operands that reclaim

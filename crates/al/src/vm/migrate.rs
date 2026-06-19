@@ -22,7 +22,7 @@
 //!   re-inserted), so the donor can simply re-queue the untouched process.
 
 use std::collections::HashSet;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 
 use al_core::bytecode::{SocketValue, Value, ValueView};
@@ -35,10 +35,10 @@ use super::{Process, VM};
 pub(super) struct Migrant {
     /// The suspended process, moved whole — stack, frames, heap untouched.
     pub process: Process,
-    /// Listening sockets the process references (dup'd fds — the donor keeps
-    /// its own entry and keeps accepting).
-    pub listeners: Vec<(i32, TcpListener)>,
     /// Connections the process references (moved — the donor loses them).
+    /// Listeners do not travel: the destination binds its own reuseport socket
+    /// from the shared address on first accept (`VM::ensure_listener`), and the
+    /// donor keeps its own entry.
     pub connections: Vec<(i32, TcpStream)>,
 }
 
@@ -92,7 +92,10 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
         | ValueView::Nil
         | ValueView::Str(_)
         | ValueView::Range(..)
-        | ValueView::Binary(_) => {}
+        | ValueView::Binary(_)
+        // A Map's only backing (Env) holds no values, let alone sockets. A
+        // future socket-bearing backing must re-home its fds here.
+        | ValueView::Map(_) => {}
     }
 }
 
@@ -126,59 +129,33 @@ fn process_socket_ids(p: &Process) -> Vec<i32> {
     ids
 }
 
-/// Socket fds re-homed out of a scheduler's tables: dup'd listeners and
-/// moved connections, ready to travel with a [`Migrant`] or `Seed`.
-pub(super) type DetachedFds = (Vec<(i32, TcpListener)>, Vec<(i32, TcpStream)>);
+/// Connection fds re-homed out of a scheduler's tables, ready to travel with a
+/// [`Migrant`] or `Seed`. Listeners are not included: they are a shared,
+/// addr-keyed resource each scheduler re-materializes on demand
+/// (`VM::ensure_listener`), never moved.
+pub(super) type DetachedFds = Vec<(i32, TcpStream)>;
 
 impl VM {
-    /// Re-home every socket fd a suspended process references out of the
+    /// Re-home every connection fd a suspended process references out of the
     /// donor's per-scheduler tables, for donation: the process itself moves
-    /// whole; only its fds need detaching so they can travel with it.
-    pub(super) fn detach_fds(&mut self, p: &Process) -> Option<DetachedFds> {
-        self.detach_socket_ids(process_socket_ids(p), "migrate")
+    /// whole; only its connections need detaching so they can travel with it.
+    pub(super) fn detach_fds(&mut self, p: &Process) -> DetachedFds {
+        self.detach_socket_ids(process_socket_ids(p))
     }
 
-    /// Re-home `ids` out of this scheduler's socket tables — the one fd
-    /// transfer shared by spawn seeding (`VM::build_seed`) and donation
-    /// ([`VM::detach_fds`]): listeners are dup'd (this scheduler's entry is
-    /// untouched, both sides keep accepting) and connections are moved out
-    /// of the table, with a defensive poller delete first (a runnable
-    /// process has nothing armed, so it is normally a no-op). An id with no
-    /// entry in either table is dangling by design — an earlier spawn moved
-    /// the fd away — and is skipped: the destination will produce the same
-    /// "unknown socket" error this scheduler would have.
-    ///
-    /// On failure (a listener fd that cannot be dup'd — fd exhaustion,
-    /// realistically) the detail goes to stderr: there is no AL-value
-    /// error channel at this layer, and the transfer aborts
-    /// with no net side effects: connections already moved out of the table
-    /// are re-inserted by plain re-insert (their poller registrations were
-    /// no-ops) and `None` is returned, so the caller can carry on with the
-    /// untouched process or fail the spawn cleanly.
-    pub(super) fn detach_socket_ids(
-        &mut self,
-        ids: impl IntoIterator<Item = i32>,
-        ctx: &str,
-    ) -> Option<DetachedFds> {
-        let mut listeners = Vec::new();
+    /// Move the connections among `ids` out of this scheduler's table — the
+    /// one fd transfer shared by spawn seeding (`VM::build_seed`) and donation
+    /// ([`VM::detach_fds`]). A connection belongs to exactly one scheduler, so
+    /// it is removed here (with a defensive poller delete first — a runnable
+    /// process has nothing armed, so it is normally a no-op) and travels to the
+    /// destination. Listeners among `ids` are left untouched: each scheduler
+    /// binds its own reuseport socket from the shared address on first accept,
+    /// so a captured listener needs no transfer and the donor keeps accepting.
+    /// An id with no connection entry is either a listener or dangling (an
+    /// earlier spawn moved it away) and is skipped.
+    pub(super) fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
         let mut connections: Vec<(i32, TcpStream)> = Vec::new();
         for id in ids {
-            if let Some(l) = self.tcp_listeners.get(&id) {
-                match l.try_clone() {
-                    Ok(dup) => listeners.push((id, dup)),
-                    Err(e) => {
-                        eprintln!("{ctx}: cannot share listener: {e}");
-                        for (cid, c) in connections {
-                            // Undo the detach: re-table and re-watch the
-                            // connections already moved out.
-                            if let Err(e) = self.track_connection(cid, c) {
-                                eprintln!("{ctx}: cannot re-watch connection: {e}");
-                            }
-                        }
-                        return None;
-                    }
-                }
-            }
             if let Some(c) = self.tcp_connections.remove(&id) {
                 // The fd is leaving this scheduler; drop any poller
                 // registration before it goes (defensive — see doc comment).
@@ -186,8 +163,7 @@ impl VM {
                 connections.push((id, c));
             }
         }
-
-        Some((listeners, connections))
+        connections
     }
 
     /// Adopt a migrated process: take ownership of its fds and queue the
@@ -205,11 +181,6 @@ impl VM {
         // There is no error channel at this layer (exactly as on the detach
         // side), so a socket the poller refuses is reported to stderr; the
         // migrant still runs, and ops on that socket fail at use.
-        for (id, l) in m.listeners {
-            if let Err(e) = self.track_listener(id, l) {
-                eprintln!("adopt: cannot watch listener: {e}");
-            }
-        }
         for (id, c) in m.connections {
             if let Err(e) = self.track_connection(id, c) {
                 eprintln!("adopt: cannot watch connection: {e}");
@@ -307,17 +278,13 @@ mod tests {
         };
 
         let mut donor = halt_test_vm();
-        let Some((listeners, connections)) = donor.detach_fds(&p) else {
-            panic!("detach_fds must succeed with no sockets in play");
-        };
+        let connections = donor.detach_fds(&p);
         // No sockets referenced: nothing re-homed.
-        assert!(listeners.is_empty());
         assert!(connections.is_empty());
 
         let mut dest = halt_test_vm();
         dest.adopt_migrant(Migrant {
             process: p,
-            listeners,
             connections,
         });
         let q = dest
@@ -436,11 +403,10 @@ mod tests {
         };
 
         let mut donor = halt_test_vm();
-        let (listeners, connections) = donor.detach_fds(&p).expect("no sockets in play");
+        let connections = donor.detach_fds(&p);
         let mut dest = halt_test_vm();
         dest.adopt_migrant(Migrant {
             process: p,
-            listeners,
             connections,
         });
         let q = dest.run_queue.pop_back().expect("queued migrant");
@@ -544,15 +510,15 @@ mod tests {
     }
 
     #[test]
-    fn sockets_dup_listeners_move_connections_skip_dangling() {
+    fn sockets_leave_listeners_put_move_connections_skip_dangling() {
         use al_core::bytecode::SocketValue;
         use std::net::{TcpListener, TcpStream};
-        use std::os::fd::AsRawFd;
 
         let mut donor = halt_test_vm();
 
-        // One listener (dup'd), one established connection (moved), and a
-        // dangling id 3 whose fd an earlier spawn already moved away.
+        // One listener (stays put — not transferred), one established
+        // connection (moved), and a dangling id 3 whose fd an earlier spawn
+        // already moved away.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let bind_addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(bind_addr).expect("connect");
@@ -578,13 +544,11 @@ mod tests {
             is_main: false,
         };
 
-        let Some((listeners, connections)) = donor.detach_fds(&p) else {
-            panic!("detach_fds must succeed");
-        };
+        let connections = donor.detach_fds(&p);
 
-        // The listener travels as a dup and the donor entry is untouched.
-        assert_eq!(listeners.len(), 1);
-        assert_eq!(listeners[0].0, 1);
+        // The listener does not travel: the donor keeps its own entry and
+        // every scheduler binds its own reuseport socket from the shared
+        // address on first accept.
         assert!(donor.tcp_listeners.contains_key(&1));
         // The connection moved exactly once; the donor lost it. The dangling
         // id 3 was skipped entirely.
@@ -592,19 +556,13 @@ mod tests {
         assert_eq!(connections[0].0, 2);
         assert!(donor.tcp_connections.is_empty());
 
-        // Adoption keeps a pre-existing listener entry for the same id: the
-        // incoming dup is the same underlying socket, and replacing the entry
-        // would close an fd the destination's poller may have registered.
+        // Adoption takes only the moved connection; no listener is carried.
         let mut dest = halt_test_vm();
-        let pre = listeners[0].1.try_clone().expect("dup");
-        let pre_fd = pre.as_raw_fd();
-        dest.tcp_listeners.insert(1, pre);
         dest.adopt_migrant(Migrant {
             process: p,
-            listeners,
             connections,
         });
-        assert_eq!(dest.tcp_listeners[&1].as_raw_fd(), pre_fd);
+        assert!(!dest.tcp_listeners.contains_key(&1));
         assert!(dest.tcp_connections.contains_key(&2));
         assert_eq!(dest.run_queue.len(), 1);
 

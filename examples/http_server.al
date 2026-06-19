@@ -1,8 +1,8 @@
-// An HTTP server built directly on al/net sockets: one process per connection,
-// pipelined requests answered with a single vectored write.
+// An HTTP server built directly on al/net sockets: served on every core, one
+// process per connection, pipelined requests answered with a single vectored
+// write.
 
-import al/experiments/scheduler
-import al/net.{Server}
+import al/net
 import al/net/socket.{Socket}
 import al/string
 import al/binary
@@ -53,21 +53,10 @@ fn respond(sock Socket) Nil {
 	}
 }
 
-// Accept connections forever. Each connection is handled by its own process,
-// and the runtime spreads those processes across every CPU core.
-fn serve(server Server) {
-	match net.accept(server) {
-		Ok(sock) -> scheduler.spawn(fn() respond(sock))
-		Err(e) -> println('accept failed: ${e}')
-	}
-
-	serve(server)
-}
-
-match net.listen('0.0.0.0', 8080) {
-	Err(e) -> println('listen failed: ${e}')
-	Ok(server) -> {
-		println('Listening on http://localhost:8080')
-		serve(server)
-	}
+// net.serve runs an accept loop on every core, each binding its own
+// SO_REUSEPORT socket so the kernel load-balances connections across cores;
+// every connection is handled on the core that accepted it.
+match net.serve('0.0.0.0', 8080, respond) {
+	Ok(_) -> println('Listening on http://localhost:8080')
+	Err(e) -> println('serve failed: ${e}')
 }
