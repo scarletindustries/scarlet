@@ -51,10 +51,8 @@ pub fn to_list(m Map(k, v)) Array((k, v))
 // Build a map from a list of `(key, value)` tuples. Later entries win on
 // duplicate keys.
 pub fn from_list(entries Array((k, v))) Map(k, v) {
-	list.fold(entries, new(), fn(acc, entry) {
-		match entry {
-			(key, value) -> set(acc, key, value)
-		}
+	list.fold(entries, new(), fn(acc, entry) match entry {
+		(key, value) -> set(acc, key, value)
 	})
 }
 
@@ -84,11 +82,9 @@ pub fn merge(a Map(k, v), b Map(k, v)) Map(k, v) {
 
 // A new map keeping only the entries whose key/value satisfy `keep`.
 pub fn filter(m Map(k, v), keep fn(k, v) Bool) Map(k, v) {
-	fold(m, new(), fn(acc, key, value) {
-		if keep(key, value) {
-			set(acc, key, value)
-		} else {
-			acc
-		}
+	fold(m, new(), fn(acc, key, value) if keep(key, value) {
+		set(acc, key, value)
+	} else {
+		acc
 	})
 }
