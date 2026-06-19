@@ -70,7 +70,8 @@
 //!    [`al_core::heap`]). Nothing moves, so there is no rooting rule and no
 //!    allocation reservation — an opcode just pops its operands and builds
 //!    its result. A large cascading free is billed to the running process at
-//!    the next call checkpoint ([`gc`]) so it cannot stall the scheduler.
+//!    the next call checkpoint (`VM::charge_reclamation`) so it cannot stall
+//!    the scheduler.
 //! 6. **A value and its memory travel together.** A process owns every
 //!    heap value it can reach, which is what makes seeds, migrants, and
 //!    suspended processes `Send` by construction — and why main's result
@@ -85,9 +86,8 @@
 //! |                   | `scheduler_loop`, `acquire_work`, suspend/resume,  |
 //! |                   | donation policy, spawn/seed glue                   |
 //! | [`exec`]          | the dispatch loop (`execute_slice`): inline arms,  |
-//! |                   | family-handler routing, stack + constructor helpers|
-//! | [`gc`]            | the call-checkpoint reclamation-fairness seam and  |
-//! |                   | the operand-peek helper                            |
+//! |                   | family-handler routing, stack helpers, and the     |
+//! |                   | call-checkpoint reclamation-fairness charge        |
 //! | [`collections`]   | array/tuple/range/field-access opcodes             |
 //! | [`text`]          | string/binary builtins and HTTP-scanner opcodes    |
 //! | [`io`]            | file/socket/DNS/sleep/spawn opcodes — everything   |
@@ -146,7 +146,6 @@ mod binary;
 mod collections;
 mod exec;
 mod freeze;
-mod gc;
 mod http;
 mod inspect;
 mod io;

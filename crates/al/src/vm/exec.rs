@@ -32,7 +32,10 @@
 //! (a lazy range equals the array of its elements) and the hash
 //! fast-reject on enums.
 
-use al_core::bytecode::{Op, Value, ValueView, enum_hash_with_payload, values_equal};
+use al_core::bytecode::{
+    Op, Value, ValueView, enum_hash_with_payload, freed_objects_pending, take_freed_objects,
+    values_equal,
+};
 use al_core::static_ir::VariantTemplate;
 
 use super::poll::monotonic_now_ms;
@@ -40,6 +43,11 @@ use super::{
     CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmResult,
     enum_template, f64_str, freeze, inspect, value_type_name,
 };
+
+/// Objects freed per reduction charged by [`VM::charge_reclamation`]. Tuned so
+/// only big cascading drops (thousands of objects) cost the process budget;
+/// ordinary per-op churn is far below it and never preempts.
+const FREES_PER_REDUCTION: u64 = 256;
 
 impl VM {
     pub(super) fn execute_slice(&mut self) -> VmResult<Step> {
@@ -57,7 +65,7 @@ impl VM {
         // Discard any reclamation count left over from before this slice (a
         // previous process's death-free, scheduler bookkeeping): it must not be
         // billed to the process about to run. Frees during this slice accumulate
-        // from here and are charged at its call checkpoints (see `vm::gc`).
+        // from here and are charged at its call checkpoints (`charge_reclamation`).
         al_core::bytecode::take_freed_objects();
         loop {
             let addr = code_start + ip;
@@ -816,10 +824,7 @@ impl VM {
     /// Index of the first of the top `n` operand slots, left in place. The
     /// caller reads them via `&self.stack[base..]` (heap and stack are
     /// disjoint fields, so a `*_in` constructor borrow is legal alongside)
-    /// and truncates to `base` afterwards — no temporary buffer. Sound for
-    /// the same reason as the StrConcatN arm: every caller ensure()s first,
-    /// so the constructor only allocates and the rooted operands stay valid
-    /// while being read.
+    /// and truncates to `base` afterwards — no temporary buffer.
     pub(super) fn operand_base(&self, n: usize) -> VmResult<usize> {
         let len = self.stack.len();
         if n > len {
@@ -834,13 +839,33 @@ impl VM {
             .ok_or_else(|| "Stack underflow. This is likely a compiler bug.".to_string())
     }
 
+    /// The operand `d` slots below the top of the stack (0 = top), or `None`
+    /// if the stack is shallower than that. Reads without popping.
+    pub(super) fn peek_at(&self, d: usize) -> Option<&Value> {
+        self.stack.len().checked_sub(1 + d).map(|i| &self.stack[i])
+    }
+
+    /// Bill `reds` for reference-counting reclamation done since the last call
+    /// checkpoint. Freeing is not free: dropping a large value graph cascades
+    /// through thousands of objects, anywhere a last reference goes away. The
+    /// allocator counts objects it frees on this thread; this drains that count
+    /// and charges one reduction per [`FREES_PER_REDUCTION`], so a giant
+    /// cascading free preempts at the next call instead of stalling the
+    /// scheduler. Fast path is a single thread-local read.
+    #[inline]
+    pub(super) fn charge_reclamation(&self, reds: &mut i32) {
+        if freed_objects_pending() >= FREES_PER_REDUCTION {
+            let freed = take_freed_objects();
+            *reds = reds.saturating_sub((freed / FREES_PER_REDUCTION) as i32);
+        }
+    }
+
     // --- Typed pop helpers (stdlib / I/O ops only — not the arithmetic loop) --
     //
-    // The popped `Value` is returned whole (a word); callers borrow the
-    // arena contents through it (`str_ref`/`bin_ref`). Holding such a
-    // borrow across `ensure` would be a rooting-rule bug — every opcode
-    // ensures BEFORE popping, and allocation after `ensure` never collects,
-    // so borrows held across `*_in` constructors are sound.
+    // The popped `Value` is returned whole (a word); callers borrow the arena
+    // contents through it (`str_ref`/`bin_ref`). The borrow stays valid across a
+    // following `*_in` constructor because the heap and stack are disjoint VM
+    // fields and allocation never moves existing objects.
 
     #[inline]
     pub(super) fn pop_str(&mut self, op: &str) -> VmResult<Value> {
