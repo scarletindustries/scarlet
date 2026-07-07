@@ -90,7 +90,10 @@ fn walk_std(root: &str) -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from(root)];
     let mut stack = vec![PathBuf::from(root)];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        for entry in
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("build.rs: read_dir {dir:?}: {e}"))
+        {
+            let entry = entry.unwrap_or_else(|e| panic!("build.rs: walk {dir:?}: {e}"));
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p.clone());
@@ -449,7 +452,10 @@ fn scheme(s: &Scheme) -> String {
 
 fn typeinfo(ti: &TypeInfo) -> String {
     let body = match ti.body {
-        TypeBody::Unresolved | TypeBody::External => "TypeBody::External".into(),
+        TypeBody::External => "TypeBody::External".into(),
+        TypeBody::Unresolved => panic!(
+            "build.rs: stdlib type has Unresolved body after precompile — hydration missed it"
+        ),
         TypeBody::Alias { target } => format!("TypeBody::Alias {{ target: {target} }}"),
         TypeBody::Custom { variants } => {
             format!("TypeBody::Custom {{ variants: {} }}", aslice(variants))
