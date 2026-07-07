@@ -210,6 +210,17 @@ pub struct Definition {
     pub doc: Option<String>,
     pub is_pub: bool,
     pub alias_of: Option<DefId>,
+    /// For [`EntityKind::ModuleAlias`]: span of the whole `import ...`
+    /// declaration this alias binds — the boundary that tells an item's
+    /// binding occurrence (inside it) from a real use (outside it). Equals
+    /// `defid.span` for a non-aliased import; for `import a/b as c.{item}`
+    /// `defid.span` is only the `c` identifier while `decl_span` still covers
+    /// the full statement. Defaults to `defid.span` for every non-import.
+    pub decl_span: Span,
+    /// For [`EntityKind::ModuleAlias`]: the module this alias imports — the
+    /// alias→imported-module edge that lets a `Qualified` occurrence resolving
+    /// into that module keep this import alive. `None` for every non-import.
+    pub imports_module: Option<ModuleId>,
 }
 
 impl Definition {
@@ -220,6 +231,8 @@ impl Definition {
             doc,
             is_pub,
             alias_of: None,
+            decl_span: defid.span,
+            imports_module: None,
         }
     }
 
@@ -690,58 +703,35 @@ impl ReferenceGraph {
     /// `Unqualified` occurrence and a `b.foo()` call as a `Qualified`
     /// occurrence whose `target` is the *remote* imported `DefId`, not this
     /// alias — so neither use ever points back at the alias and the direct
-    /// check alone spuriously reports the import as unused. This is al's
-    /// equivalent of Gleam's `module_name_to_node` +
-    /// `register_module_reference`, which add a `use -> import` edge so an
-    /// imported name's use keeps its import reachable. al has no such explicit
-    /// edge, so the link is recovered structurally:
+    /// check alone spuriously reports the import as unused. Both links are
+    /// stored on the alias `Definition` at population time:
     ///
     /// * selective `import a/b.{item}`: every item-binding occurrence sits
-    ///   inside the `import` declaration's span, so any imported target
-    ///   referenced from *outside* that declaration is a genuine use; and
-    /// * plain `import a/b` + `b.foo()`: the use is a `Qualified` occurrence
-    ///   resolving into the *imported* module, so a `Qualified` occurrence —
-    ///   outside the declaration — resolving into the module *this* import
-    ///   brings in keeps the qualified import alive. The imported module is
-    ///   recovered from the declaration's own `Import` occurrence (whose target
-    ///   is owned by that module); matching on it rather than on "any other
-    ///   module" stops one used qualified import from masking a second,
-    ///   genuinely-unused one.
-    fn has_real_use(&self, def: DefId) -> bool {
-        let direct = self.references_to(def).iter().any(|r| r.kind.is_use_site());
-        if direct || def.entity != EntityKind::ModuleAlias {
+    ///   inside the declaration's [`Definition::decl_span`], so any imported
+    ///   target referenced from *outside* it is a genuine use; and
+    /// * plain `import a/b` + `b.foo()`: a `Qualified` occurrence outside the
+    ///   declaration keeps this import alive iff it resolves into the alias's
+    ///   [`Definition::imports_module`]. Matching on that exact module — not
+    ///   "any other module" — stops one used qualified import from masking a
+    ///   second, genuinely-unused one.
+    fn has_real_use(&self, def: &Definition) -> bool {
+        let direct = self
+            .references_to(def.defid)
+            .iter()
+            .any(|r| r.kind.is_use_site());
+        if direct || def.entity() != EntityKind::ModuleAlias {
             return direct;
         }
-        let Some(mr) = self.modules.get(&def.module) else {
+        let Some(mr) = self.modules.get(&def.defid.module) else {
             return false;
         };
-        // The `import ...` declaration's lexical extent. `process_import`
-        // records the alias's `ModuleAlias` *definition* span as the full
-        // declaration only for a *non-aliased* import; for `import a/b as
-        // c.{item}` it is just the `as c` identifier, because the parser emits
-        // `as c` *before* `.{item}`. Deriving the boundary from that narrow
-        // span alone would leave every item-binding occurrence — recorded at
-        // `item.name.span`, after `as c` — *outside* it, so a used selective
-        // item could no longer keep its import alive. Recover the real extent
-        // by unioning the alias-name span with this declaration's own
-        // occurrences (the `Import` path segment, the `Alias` name, and the
-        // item bindings). Imports precede all other code and each sits on its
-        // own line, so an occurrence on the alias's line belongs to this
-        // import; a genuine *use* lives in a later statement, on a later line,
-        // and is correctly left outside the recovered span.
-        let mut imp_span = def.span;
-        let decl_line = imp_span.start_line;
-        for o in mr.occurrences() {
-            if o.span.start_line == decl_line {
-                imp_span = imp_span.union(&o.span);
-            }
-        }
+        let decl_span = def.decl_span;
         // Targets introduced by this import: occurrences nested inside the
         // declaration that resolve somewhere other than the alias itself.
         let imported: HashSet<DefId> = mr
             .occurrences()
             .iter()
-            .filter(|o| o.target != def && o.span.within(&imp_span))
+            .filter(|o| o.target != def.defid && o.span.within(&decl_span))
             .map(|o| o.target)
             .collect();
         // Selective `import a/b.{item}`: used iff one of those imported targets
@@ -750,34 +740,23 @@ impl ReferenceGraph {
         // only within the importing module, so the use is intra-module.
         let selective_item_used = !imported.is_empty()
             && mr.occurrences().iter().any(|o| {
-                imported.contains(&o.target) && o.kind.is_use_site() && !o.span.within(&imp_span)
+                imported.contains(&o.target) && o.kind.is_use_site() && !o.span.within(&decl_span)
             });
         if selective_item_used {
             return true;
         }
-        // Plain `import a/b` + `b.foo()`: the qualified use is a `Qualified`
-        // occurrence whose target is the *remote* member def (owned by the
-        // imported module), recorded outside the declaration — it never points
-        // back at the alias. The alias->imported-module link is the
-        // declaration's own `Import` occurrence: recorded at the module-name
-        // path segment (so inside `imp_span`) with a `target` owned by the
-        // *imported* module. A qualified use keeps *this* import alive only when
-        // it resolves into that same module; checking merely "some other module"
-        // would let one used qualified import mask a second, genuinely-unused
-        // one (two plain imports, only one used). (Only `Qualified` — selective
-        // items are `Unqualified` and handled above.)
-        let imported_modules: HashSet<ModuleId> = mr
-            .occurrences()
-            .iter()
-            .filter(|o| o.kind == ReferenceKind::Import && o.span.within(&imp_span))
-            .map(|o| o.target.module)
-            .collect();
-        mr.occurrences().iter().any(|o| {
-            o.kind == ReferenceKind::Qualified
-                && o.target.module != def.module
-                && imported_modules.contains(&o.target.module)
-                && !o.span.within(&imp_span)
-        })
+        // Plain `import a/b` + `b.foo()`: a `Qualified` occurrence outside the
+        // declaration keeps this import alive iff it resolves into the module
+        // this alias imports. (Only `Qualified` — selective items are
+        // `Unqualified` and handled above.)
+        match def.imports_module {
+            Some(imported_mid) => mr.occurrences().iter().any(|o| {
+                o.kind == ReferenceKind::Qualified
+                    && o.target.module == imported_mid
+                    && !o.span.within(&decl_span)
+            }),
+            None => false,
+        }
     }
 
     /// `Hint` diagnostics for the entry module: unused private definitions and
@@ -802,7 +781,7 @@ impl ReferenceGraph {
             if def.entity() == EntityKind::ModuleAlias {
                 // Unused import: an import/alias binding that nothing uses
                 // qualified or unqualified.
-                if !self.has_real_use(def.defid) {
+                if !self.has_real_use(def) {
                     out.push(Diagnostic::hint(
                         def.span(),
                         format!("unused import `{}`", def.name),
@@ -1349,24 +1328,27 @@ mod tests {
     fn unused_diag_aliased_selective_import_item_used_keeps_import_live() {
         // `import ./util as u.{empty}` then `println(empty())`. The parser
         // emits `as u` *before* `.{empty}`, so production records the alias's
-        // `ModuleAlias` definition span as just the `u` identifier — the item
+        // `ModuleAlias` `defid.span` as just the `u` identifier — the item
         // binding at `empty` (and any later use of it) sit *after* `u`. The
-        // declaration extent must still be recovered so the binding counts as
-        // inside the import and the `empty()` call counts as a real use; a
-        // boundary taken from the `u` span alone would wrongly flag a used,
-        // single-statement aliased+selective import as unused.
+        // full declaration extent is stored on `Definition::decl_span`, so the
+        // binding counts as inside the import and the `empty()` call counts as
+        // a real use.
         //
         //   import ./util as u.{empty}
         //   0      ^9   ^13 ^17^20   ^25
         let (mut g, m, _) = main_graph();
         let lib = g.intern_module(&mp(&["util"]));
 
-        // The alias `ModuleAlias` definition covers only the `as u` name.
+        // The alias `defid.span` covers only the `as u` name; `decl_span`
+        // covers the whole `import ...` statement.
         let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
 
         let build = |with_use: bool| {
             let mut mr = ModuleReferences::new(m);
-            mr.add_definition(Definition::new(alias, "u", None, false));
+            let mut alias_def = Definition::new(alias, "u", None, false);
+            alias_def.decl_span = range_span(1, 0, 26);
+            alias_def.imports_module = Some(lib);
+            mr.add_definition(alias_def);
             let remote_empty = def(lib, 2, 7, 12, EntityKind::Function);
             // `Import` path segment (`util`) -> the imported module; `Alias`
             // name (`u`) -> this alias; `empty` item binding -> the remote
@@ -1536,12 +1518,15 @@ mod tests {
         g.insert_module(lib_mr);
 
         // The `Import` occurrence's target is owned by the imported module
-        // `a/b`, not the importing module — this is the link `has_real_use`
-        // recovers to tell which module the alias brings in.
+        // `a/b`, not the importing module.
         let import_seg = def(lib, 1, 7, 8, EntityKind::ModuleAlias);
 
-        // main: `import a/b` then `pub fn run() { b.foo() }`.
-        let alias = add_def(&mut mr, m, "b", 1, EntityKind::ModuleAlias, false);
+        // main: `import a/b` then `pub fn run() { b.foo() }`. The
+        // alias→imported-module edge is stored on the `Definition`.
+        let alias = def(m, 1, 3, 4, EntityKind::ModuleAlias);
+        let mut alias_def = Definition::new(alias, "b", None, false);
+        alias_def.imports_module = Some(lib);
+        mr.add_definition(alias_def);
         mr.add_reference(
             None,
             Reference::new(alias.span, ReferenceKind::Definition, alias),
@@ -1570,7 +1555,10 @@ mod tests {
         // Drop the use: the import is genuinely unused again and IS flagged
         // (the check is still live, not just disabled).
         let mut mr2 = ModuleReferences::new(m);
-        let alias2 = add_def(&mut mr2, m, "b", 1, EntityKind::ModuleAlias, false);
+        let alias2 = def(m, 1, 3, 4, EntityKind::ModuleAlias);
+        let mut alias_def2 = Definition::new(alias2, "b", None, false);
+        alias_def2.imports_module = Some(lib);
+        mr2.add_definition(alias_def2);
         mr2.add_reference(
             None,
             Reference::new(alias2.span, ReferenceKind::Definition, alias2),
@@ -1615,7 +1603,9 @@ mod tests {
         //   import a/c   (line 2, used via c.used())
         //   pub fn run() { c.used() }
         let alias_b = def(m, 1, 7, 8, EntityKind::ModuleAlias);
-        mr.add_definition(Definition::new(alias_b, "b", None, false));
+        let mut def_b = Definition::new(alias_b, "b", None, false);
+        def_b.imports_module = Some(lib_b);
+        mr.add_definition(def_b);
         mr.add_reference(
             None,
             Reference::new(
@@ -1625,7 +1615,9 @@ mod tests {
             ),
         );
         let alias_c = def(m, 2, 7, 8, EntityKind::ModuleAlias);
-        mr.add_definition(Definition::new(alias_c, "c", None, false));
+        let mut def_c = Definition::new(alias_c, "c", None, false);
+        def_c.imports_module = Some(lib_c);
+        mr.add_definition(def_c);
         mr.add_reference(
             None,
             Reference::new(
