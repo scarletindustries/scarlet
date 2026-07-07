@@ -34,13 +34,75 @@ use super::value::{
     Arena, HamtMapRef, HamtNodeRef, MapRef, Value, hamt_branch_in, hamt_collision_in,
     hamt_entry_in, hamt_map_in, hash_value, values_equal,
 };
+use std::mem::MaybeUninit;
 
 /// Hash bits consumed per trie level (32-way branching).
 const BITS: u32 = 5;
+const WIDTH: usize = 1 << BITS;
 const MASK: u64 = 0x1F;
 /// Levels before a 64-bit hash is fully consumed: ⌈64 / 5⌉. Past this depth two
 /// surviving keys must have equal hashes and go to a `HamtCollision`.
 const MAX_DEPTH: usize = 13;
+
+/// Stack-resident scratch buffer for assembling a replacement branch's children
+/// before handing them to `hamt_branch_in`. A branch has at most `WIDTH`
+/// children (one per bitmap bit), so path copying never touches the host
+/// allocator — only the arena node itself is allocated.
+struct Buf {
+    items: [MaybeUninit<Value>; WIDTH],
+    len: usize,
+}
+
+impl Buf {
+    #[inline]
+    fn new() -> Buf {
+        Buf {
+            items: [const { MaybeUninit::uninit() }; WIDTH],
+            len: 0,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, v: Value) {
+        debug_assert!(self.len < WIDTH);
+        self.items[self.len].write(v);
+        self.len += 1;
+    }
+
+    #[inline]
+    fn extend(&mut self, vs: &[Value]) {
+        debug_assert!(self.len + vs.len() <= WIDTH);
+        for v in vs {
+            self.items[self.len].write(v.clone());
+            self.len += 1;
+        }
+    }
+}
+
+// The `unsafe` below is initialized-prefix bookkeeping for a stack scratch
+// buffer, mirroring `seq::Buf`; it touches no arena layout.
+#[allow(unsafe_code)]
+impl Drop for Buf {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: exactly the first `len` slots were initialized via
+        // `push`/`extend`; each is dropped once here and never read again.
+        for slot in &mut self.items[..self.len] {
+            unsafe { slot.assume_init_drop() };
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+impl std::ops::Deref for Buf {
+    type Target = [Value];
+    #[inline]
+    fn deref(&self) -> &[Value] {
+        // SAFETY: the first `len` slots are initialized `Value`s and
+        // `MaybeUninit<Value>` has the same layout as `Value`.
+        unsafe { std::slice::from_raw_parts(self.items.as_ptr().cast::<Value>(), self.len) }
+    }
+}
 
 /// The 5-bit slot a hash selects at `shift`.
 #[inline]
@@ -219,14 +281,18 @@ fn node_insert<A: Arena + ?Sized>(
         HamtNodeRef::Branch { bitmap, children } => {
             let b = bit(hash, shift);
             let i = compact(bitmap, b);
+            let mut nc = Buf::new();
             if bitmap & b == 0 {
-                let mut nc = children.to_vec();
-                nc.insert(i, hamt_entry_in(a, key, value));
+                let entry = hamt_entry_in(a, key, value);
+                nc.extend(&children[..i]);
+                nc.push(entry);
+                nc.extend(&children[i..]);
                 (hamt_branch_in(a, bitmap | b, &nc), true)
             } else {
                 let (child, added) = node_insert(a, &children[i], key, value, hash, shift + BITS);
-                let mut nc = children.to_vec();
-                nc[i] = child;
+                nc.extend(&children[..i]);
+                nc.push(child);
+                nc.extend(&children[i + 1..]);
                 (hamt_branch_in(a, bitmap, &nc), added)
             }
         }
@@ -361,8 +427,10 @@ fn node_remove<A: Arena + ?Sized>(
                     if children.len() == 1 && is_leaf(&child) {
                         return Removed::Node(child);
                     }
-                    let mut nc = children.to_vec();
-                    nc[i] = child;
+                    let mut nc = Buf::new();
+                    nc.extend(&children[..i]);
+                    nc.push(child);
+                    nc.extend(&children[i + 1..]);
                     Removed::Node(hamt_branch_in(a, bitmap, &nc))
                 }
                 Removed::Empty => {
@@ -370,15 +438,18 @@ fn node_remove<A: Arena + ?Sized>(
                     if nbitmap == 0 {
                         return Removed::Empty;
                     }
-                    let mut nc = children.to_vec();
-                    nc.remove(i);
                     // Collapse a branch that now holds a single leaf so equal
                     // maps keep a canonical shape and depth stays minimal.
-                    if nc.len() == 1 && is_leaf(&nc[0]) {
-                        Removed::Node(nc.remove(0))
-                    } else {
-                        Removed::Node(hamt_branch_in(a, nbitmap, &nc))
+                    if children.len() == 2 {
+                        let survivor = &children[1 - i];
+                        if is_leaf(survivor) {
+                            return Removed::Node(survivor.clone());
+                        }
                     }
+                    let mut nc = Buf::new();
+                    nc.extend(&children[..i]);
+                    nc.extend(&children[i + 1..]);
+                    Removed::Node(hamt_branch_in(a, nbitmap, &nc))
                 }
             }
         }

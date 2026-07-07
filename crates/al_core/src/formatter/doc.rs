@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 const TAB_WIDTH: isize = 4;
@@ -5,7 +6,7 @@ const TAB_WIDTH: isize = 4;
 #[derive(Debug, Clone)]
 pub enum Doc {
     Nil,
-    Text(String),
+    Text(Cow<'static, str>),
     /// Soft break. Flat → `unbroken`; broken → `broken` then newline+indent.
     Break {
         broken: &'static str,
@@ -75,7 +76,7 @@ pub fn nil() -> Doc {
     Doc::Nil
 }
 
-pub fn text(s: impl Into<String>) -> Doc {
+pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     let s = s.into();
     if s.is_empty() { Doc::Nil } else { Doc::Text(s) }
 }
@@ -228,7 +229,13 @@ pub fn join(items: Vec<Doc>, sep: Doc) -> Doc {
 
 /// Shared shape of the `delimited*` family: `items` joined by `sep`, with
 /// `tail` between the final item and `close`.
-fn delimited_with(open: &str, items: Vec<Doc>, close: &str, sep: Doc, tail: Doc) -> Doc {
+fn delimited_with(
+    open: &'static str,
+    items: Vec<Doc>,
+    close: &'static str,
+    sep: Doc,
+    tail: Doc,
+) -> Doc {
     if items.is_empty() {
         return text(format!("{open}{close}"));
     }
@@ -243,7 +250,7 @@ fn delimited_with(open: &str, items: Vec<Doc>, close: &str, sep: Doc, tail: Doc)
 
 /// `open i0, i1, ... close` on one line, or one item per line indented one tab
 /// with a trailing comma.
-pub fn delimited(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+pub fn delimited(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     delimited_with(open, items, close, d![text(","), line()], break_(",", ""))
 }
 
@@ -260,7 +267,7 @@ pub fn delimited(open: &str, items: Vec<Doc>, close: &str) -> Doc {
 /// line; otherwise the whole list falls back to the one-item-per-line layout
 /// of `delimited`. When the final item renders flat anyway (or an earlier item
 /// hard-breaks, leaving nothing to hug onto), this is exactly `delimited`.
-pub fn delimited_hug(open: &str, mut items: Vec<Doc>, close: &str) -> Doc {
+pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static str) -> Doc {
     let Some(last) = items.pop() else {
         return text(format!("{open}{close}"));
     };
@@ -285,7 +292,7 @@ pub fn delimited_hug(open: &str, mut items: Vec<Doc>, close: &str) -> Doc {
 /// For comma-separated groups whose final element is a `..` rest marker: the
 /// parser rejects a comma after `..` (rest must be last), so a wrapped pattern
 /// must end `..\n<close>` rather than `..,\n<close>`.
-pub fn delimited_no_trailing(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+pub fn delimited_no_trailing(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     delimited_with(open, items, close, d![text(","), line()], line0())
 }
 
@@ -294,7 +301,7 @@ pub fn delimited_no_trailing(open: &str, items: Vec<Doc>, close: &str) -> Doc {
 /// constructs whose separator punctuation was removed from the grammar
 /// (constructor fields, type args/params, fn-type params, import items,
 /// attribute args) — their items are self-delimiting, so the comma was noise.
-pub fn delimited_ws(open: &str, items: Vec<Doc>, close: &str) -> Doc {
+pub fn delimited_ws(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     delimited_with(open, items, close, line(), line0())
 }
 
@@ -493,7 +500,7 @@ fn fits<'d>(
 mod tests {
     use super::*;
 
-    fn parens(open: &str, arg: &str) -> Doc {
+    fn parens(open: &'static str, arg: &'static str) -> Doc {
         group(d![
             text(open),
             nest(1, d![line0(), text(arg)]),

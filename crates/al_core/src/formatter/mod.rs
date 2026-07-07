@@ -180,7 +180,7 @@ impl Formatter {
                     None => nil(),
                 };
                 d![
-                    text(&*s.identifier.name),
+                    text(s.identifier.name.clone()),
                     ty,
                     text(" = "),
                     self.expr(&s.init)
@@ -191,7 +191,11 @@ impl Formatter {
                 d![delimited("(", pats, ")"), text(" = "), self.expr(&s.init)]
             }
             ast::Statement::TypedDiscard(s) => {
-                d![text(&*s.ty_name.name), text(" = "), self.expr(&s.init)]
+                d![
+                    text(s.ty_name.name.clone()),
+                    text(" = "),
+                    self.expr(&s.init)
+                ]
             }
             ast::Statement::CtorDestructuringBinding(s) => {
                 d![
@@ -205,15 +209,19 @@ impl Formatter {
                 let mut out = vec![text("import "), text(s.path.join("/"))];
                 if let Some(a) = &s.alias {
                     out.push(text(" as "));
-                    out.push(text(&*a.name));
+                    out.push(text(a.name.clone()));
                 }
                 if !s.items.is_empty() {
                     let items: Vec<Doc> = s
                         .items
                         .iter()
                         .map(|it| match &it.alias {
-                            Some(a) => d![text(&*it.name.name), text(" as "), text(&*a.name)],
-                            None => text(&*it.name.name),
+                            Some(a) => d![
+                                text(it.name.name.clone()),
+                                text(" as "),
+                                text(a.name.clone())
+                            ],
+                            None => text(it.name.name.clone()),
                         })
                         .collect();
                     out.push(text("."));
@@ -231,9 +239,9 @@ impl Formatter {
         let mut parts = Vec::new();
         for a in attrs {
             parts.push(text("@"));
-            parts.push(text(&*a.name.name));
+            parts.push(text(a.name.name.clone()));
             if !a.args.is_empty() {
-                let args: Vec<Doc> = a.args.iter().map(|id| text(&*id.name)).collect();
+                let args: Vec<Doc> = a.args.iter().map(|id| text(id.name.clone())).collect();
                 parts.push(delimited("(", args, ")"));
             }
             parts.push(hardline());
@@ -256,7 +264,7 @@ impl Formatter {
                 };
                 d![
                     text("const "),
-                    text(&*s.identifier.name),
+                    text(s.identifier.name.clone()),
                     ty,
                     text(" = "),
                     self.expr(&s.init)
@@ -281,8 +289,8 @@ impl Formatter {
         let ps: Vec<Doc> = params
             .iter()
             .map(|p| match &p.typ {
-                Some(t) => d![text(&*p.identifier.name), text(" "), self.type_(t)],
-                None => text(&*p.identifier.name),
+                Some(t) => d![text(p.identifier.name.clone()), text(" "), self.type_(t)],
+                None => text(p.identifier.name.clone()),
             })
             .collect();
         let r = match ret {
@@ -341,14 +349,19 @@ impl Formatter {
         let params = if s.type_params.is_empty() {
             nil()
         } else {
-            let ps: Vec<Doc> = s.type_params.iter().map(|p| text(&*p.name)).collect();
+            let ps: Vec<Doc> = s.type_params.iter().map(|p| text(p.name.clone())).collect();
             delimited("(", ps, ")")
         };
         let prefix = match &s.body {
             ast::TypeBody::Variants { opaque: true, .. } => text("opaque "),
             _ => nil(),
         };
-        let head = d![prefix, text("type "), text(&*s.identifier.name), params];
+        let head = d![
+            prefix,
+            text("type "),
+            text(s.identifier.name.clone()),
+            params
+        ];
         match &s.body {
             ast::TypeBody::External => head,
             ast::TypeBody::Alias(t) => d![head, text(" = "), self.type_(t)],
@@ -365,7 +378,11 @@ impl Formatter {
                         if i > 0 {
                             parts.push(hardline());
                         }
-                        parts.push(d![text(&*f.label.name), text(" "), self.type_(&f.typ)]);
+                        parts.push(d![
+                            text(f.label.name.clone()),
+                            text(" "),
+                            self.type_(&f.typ)
+                        ]);
                     }
                     return d![head, text(" "), hard_braces(doc::concat(parts))];
                 }
@@ -381,14 +398,17 @@ impl Formatter {
 
     fn constructor(&self, c: &ast::Constructor) -> Doc {
         if c.fields.is_empty() {
-            return text(&*c.identifier.name);
+            return text(c.identifier.name.clone());
         }
         let fields: Vec<Doc> = c
             .fields
             .iter()
-            .map(|f| d![text(&*f.label.name), text(" "), self.type_(&f.typ)])
+            .map(|f| d![text(f.label.name.clone()), text(" "), self.type_(&f.typ)])
             .collect();
-        d![text(&*c.identifier.name), delimited_ws("(", fields, ")")]
+        d![
+            text(c.identifier.name.clone()),
+            delimited_ws("(", fields, ")")
+        ]
     }
 
     // ----------------------------------------------------------------- expressions
@@ -422,8 +442,8 @@ impl Formatter {
                 out.push(q);
                 text(out)
             }
-            E::NumberLiteral(n) => text(&*n.value),
-            E::Identifier(id) => text(&*id.name),
+            E::NumberLiteral(n) => text(n.value.clone()),
+            E::Identifier(id) => text(id.name.clone()),
             E::BinaryExpression(b) => group(d![
                 self.expr(&b.left),
                 text(format!(" {}", b.op.symbol())),
@@ -447,7 +467,7 @@ impl Formatter {
             E::MatchExpression(m) => self.match_expr(m),
             E::OrExpression(o) => {
                 let recv = match &o.receiver {
-                    Some(r) => d![text(&*r.name), text(" -> ")],
+                    Some(r) => d![text(r.name.clone()), text(" -> ")],
                     None => nil(),
                 };
                 d![
@@ -472,8 +492,8 @@ impl Formatter {
             }
             E::PropertyAccessExpression(p) => {
                 let key = match &p.right {
-                    ast::PropertyKey::Field(id) => text(&*id.name),
-                    ast::PropertyKey::TupleIndex(n) => text(&*n.value),
+                    ast::PropertyKey::Field(id) => text(id.name.clone()),
+                    ast::PropertyKey::TupleIndex(n) => text(n.value.clone()),
                 };
                 d![self.expr(&p.left), text("."), key]
             }
@@ -527,7 +547,7 @@ impl Formatter {
         match a {
             ast::CallArg::Positional(e) => self.expr(e),
             ast::CallArg::Labeled { label, value } => {
-                d![text(&*label.name), text(": "), self.expr(value)]
+                d![text(label.name.clone()), text(": "), self.expr(value)]
             }
             ast::CallArg::Spread(e) => d![text(".."), self.expr(e)],
         }
@@ -546,7 +566,7 @@ impl Formatter {
         match (kind, size) {
             (ast::BinKind::Int, None) => nil(),
             (ast::BinKind::Int, Some(ast::Expression::NumberLiteral(n))) => {
-                d![text(":"), text(&*n.value)]
+                d![text(":"), text(n.value.clone())]
             }
             (ast::BinKind::Int, Some(e)) => d![text(":size("), self.expr(e), text(")")],
             (ast::BinKind::Binary, None) => text(":binary"),
@@ -714,8 +734,8 @@ impl Formatter {
         use ast::Pattern as P;
         match p {
             P::Wildcard { .. } => text("_"),
-            P::Var { name } => text(&*name.name),
-            P::Literal(ast::PatternLiteral::Number(n)) => text(&*n.value),
+            P::Var { name } => text(name.name.clone()),
+            P::Literal(ast::PatternLiteral::Number(n)) => text(n.value.clone()),
             P::Literal(ast::PatternLiteral::String(s)) => text(quoted(&s.value)),
             P::Tuple { elements, .. } => {
                 let es: Vec<Doc> = elements.iter().map(|e| self.pattern(e)).collect();
@@ -727,7 +747,7 @@ impl Formatter {
                     .map(|e| match e {
                         ast::ArrayPatternElement::Pattern(p) => self.pattern(p),
                         ast::ArrayPatternElement::Spread { binding, .. } => match binding {
-                            Some(b) => d![text(".."), text(&*b.name)],
+                            Some(b) => d![text(".."), text(b.name.clone())],
                             None => text(".."),
                         },
                     })
@@ -752,7 +772,7 @@ impl Formatter {
                     None => delimited("<<", segs, ">>"),
                     Some(r) => {
                         segs.push(match &r.binding {
-                            Some(b) => d![text(".."), text(&*b.name)],
+                            Some(b) => d![text(".."), text(b.name.clone())],
                             None => text(".."),
                         });
                         delimited_no_trailing("<<", segs, ">>")
@@ -763,14 +783,14 @@ impl Formatter {
                 name, args, rest, ..
             } => {
                 if args.is_empty() && !*rest {
-                    return text(&*name.name);
+                    return text(name.name.clone());
                 }
                 let mut items: Vec<Doc> = args
                     .iter()
                     .map(|a| match a {
                         ast::PatternArg::Positional(p) => self.pattern(p),
                         ast::PatternArg::Labeled { label, pattern } => {
-                            d![text(&*label.name), text(": "), self.pattern(pattern)]
+                            d![text(label.name.clone()), text(": "), self.pattern(pattern)]
                         }
                     })
                     .collect();
@@ -778,16 +798,23 @@ impl Formatter {
                     items.push(text(".."));
                     // No trailing comma: the parser rejects `..,` (rest must be
                     // the last arg), so a wrapped pattern must end `..\n)`.
-                    return d![text(&*name.name), delimited_no_trailing("(", items, ")")];
+                    return d![
+                        text(name.name.clone()),
+                        delimited_no_trailing("(", items, ")")
+                    ];
                 }
-                d![text(&*name.name), delimited("(", items, ")")]
+                d![text(name.name.clone()), delimited("(", items, ")")]
             }
             P::Or { patterns, .. } => {
                 let ps: Vec<Doc> = patterns.iter().map(|p| self.pattern(p)).collect();
                 join(ps, text(" | "))
             }
             P::Range { start, end, .. } => {
-                d![text(&*start.value), text(".."), text(&*end.value)]
+                d![
+                    text(start.value.clone()),
+                    text(".."),
+                    text(end.value.clone())
+                ]
             }
         }
     }
@@ -810,10 +837,10 @@ impl Formatter {
             }
             ast::TypeKind::NamedType(n) => {
                 if n.type_args.is_empty() {
-                    text(&*n.identifier.name)
+                    text(n.identifier.name.clone())
                 } else {
                     let args: Vec<Doc> = n.type_args.iter().map(|a| self.type_(a)).collect();
-                    d![text(&*n.identifier.name), delimited("(", args, ")")]
+                    d![text(n.identifier.name.clone()), delimited("(", args, ")")]
                 }
             }
         }

@@ -1592,23 +1592,27 @@ impl InferEngine {
         // by whatever file the LSP analysed last must not answer for this one.
         let info = env.and_then(|e| e.lookup_type_info_by_id(id));
 
-        // Resolve the type arguments first — each on its own copy of the path so
-        // one argument's expansion can't leak into the next — then key the
-        // recursion guard on the resolved *instance* (`id` + argument shape), not
-        // the bare nominal id. A type's recursion always flows through its
-        // variant fields (expanded below with the current instance on the path),
-        // never through its arguments, so the arguments need not see the current
-        // instance. Keying on the instance lets a finite re-nesting of the same
-        // nominal type with distinct arguments — `Option(Option(Int))` — expand,
-        // while a genuine self-recursive field — `List(t)` inside `List(t)` — is
-        // still cut off. (Keying on the bare id collapses these two cases: it
-        // takes the inner `Option` for a recursive occurrence, leaves it
-        // variant-less, and so reports nested matches as non-exhaustive.)
+        // Resolve the type arguments first, then key the recursion guard on the
+        // resolved *instance* (`id` + argument shape), not the bare nominal id.
+        // A type's recursion always flows through its variant fields (expanded
+        // below with the current instance on the path), never through its
+        // arguments, so the arguments need not see the current instance — only
+        // the path so far. Every recursive `resolve_inner` balances its own
+        // enter/exit, so the shared path is back at `mark` after each argument;
+        // the truncate is a defensive no-op. Keying on the instance lets a
+        // finite re-nesting of the same nominal type with distinct arguments —
+        // `Option(Option(Int))` — expand, while a genuine self-recursive field
+        // — `List(t)` inside `List(t)` — is still cut off. (Keying on the bare
+        // id collapses these two cases: it takes the inner `Option` for a
+        // recursive occurrence, leaves it variant-less, and so reports nested
+        // matches as non-exhaustive.)
+        let mark = path.stack.len();
         let resolved_args: Vec<Type> = args
             .iter()
             .map(|&a| {
-                let mut branch = path.clone();
-                self.resolve_inner(a, env, &mut branch)
+                let r = self.resolve_inner(a, env, path);
+                path.stack.truncate(mark);
+                r
             })
             .collect();
 
@@ -1697,7 +1701,7 @@ const MAX_NOMINAL_RECURRENCE: usize = 16;
 /// arguments, so the guard can tell a finite re-nesting (`Option(Option(Int))`,
 /// distinct keys) from a true recursive occurrence (`List(t)` inside `List(t)`,
 /// identical keys).
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct ResolvePath {
     stack: Vec<(TypeId, String)>,
 }

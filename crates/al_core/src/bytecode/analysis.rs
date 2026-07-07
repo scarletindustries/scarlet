@@ -978,18 +978,18 @@ struct RefWalker<'a, 'g> {
     targets: &'a HashMap<&'a str, NodeIndex>,
     graph: &'g mut StableGraph<(), (), Directed>,
     from: NodeIndex,
-    shadowed: HashSet<String>,
+    shadowed: HashSet<&'a str>,
     /// Undo log of names newly inserted into `shadowed`, in insertion order.
     /// `scoped` records the log length on entry and removes exactly the names
     /// pushed during the scope on exit, instead of deep-cloning the whole set
     /// per block / match-arm / lambda.
-    undo: Vec<String>,
+    undo: Vec<&'a str>,
 }
 
 impl<'a, 'g> RefWalker<'a, 'g> {
-    fn define(&mut self, name: &str) {
-        if self.shadowed.insert(name.to_string()) {
-            self.undo.push(name.to_string());
+    fn define(&mut self, name: &'a str) {
+        if self.shadowed.insert(name) {
+            self.undo.push(name);
         }
     }
 
@@ -1009,11 +1009,11 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         // removed by the time control returns here, so `drain(mark..)` holds
         // exactly the names newly shadowed at this scope level.
         for name in self.undo.drain(mark..) {
-            self.shadowed.remove(&name);
+            self.shadowed.remove(name);
         }
     }
 
-    fn expr(&mut self, e: &ast::Expression) {
+    fn expr(&mut self, e: &'a ast::Expression) {
         use ast::Expression as E;
         match e {
             E::Identifier(id) => self.referenced(&id.name),
@@ -1134,7 +1134,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         }
     }
 
-    fn node(&mut self, n: &ast::Node) {
+    fn node(&mut self, n: &'a ast::Node) {
         match n {
             ast::Node::Expression(e) => self.expr(e),
             ast::Node::Statement(s) => match s.as_ref() {
@@ -1171,14 +1171,19 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                 }
                 ast::Statement::CtorDestructuringBinding(cdb) => {
                     self.expr(&cdb.init);
-                    self.pattern(&cdb.as_pattern());
+                    for arg in &cdb.args {
+                        self.pattern(match arg {
+                            ast::PatternArg::Positional(p) => p,
+                            ast::PatternArg::Labeled { pattern, .. } => pattern,
+                        });
+                    }
                 }
                 ast::Statement::ImportDeclaration(_) => {}
             },
         }
     }
 
-    fn pattern(&mut self, p: &ast::Pattern) {
+    fn pattern(&mut self, p: &'a ast::Pattern) {
         p.for_each_binder(ast::OrAlternatives::All, &mut |b| match b {
             ast::PatternBinder::Name(id) => self.define(&id.name),
             ast::PatternBinder::SizeExpr(sz) => self.expr(sz),
