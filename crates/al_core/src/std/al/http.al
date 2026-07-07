@@ -51,6 +51,11 @@ pub type Request {
 	path Binary
 	version Version
 	headers Headers
+	// Trailer fields received after a chunked body. Kept separate from
+	// `headers`: RFC 9110 §6.5.1 forbids merging trailers into the header
+	// section for message-control decisions (Connection, Expect), so the
+	// keep-alive check reads only `headers`.
+	trailers Headers
 	body Body
 }
 
@@ -137,12 +142,20 @@ pub fn with_header(r Response, name Binary, value Binary) Response {
 	Response(status: r.status, headers: headers.set(r.headers, name, value), body: r.body)
 }
 
-fn build_request(method Binary, target Binary, version Version, hdrs Headers, b Body) Request {
+fn build_request(
+	method Binary,
+	target Binary,
+	version Version,
+	hdrs Headers,
+	trailers Headers,
+	b Body,
+) Request {
 	Request(
 		method: to_method(method),
 		path: target,
 		version: version,
 		headers: hdrs,
+		trailers: trailers,
 		body: b,
 	)
 }
@@ -251,7 +264,7 @@ fn handle(
 				sock,
 				buf,
 				consumed,
-				build_request(method, target, version, hdrs, body.empty()),
+				build_request(method, target, version, hdrs, [], body.empty()),
 				handler,
 				pending,
 			)
@@ -318,6 +331,7 @@ fn read_body(
 						target,
 						version,
 						hdrs,
+						[],
 						body.from_binary(binary.append(head_bytes, tail)),
 					),
 					handler,
@@ -399,23 +413,13 @@ fn chunked_loop(
 					method,
 					target,
 					version,
-					with_trailers(hdrs, trailers),
+					hdrs,
+					trailers,
 					body.from_binary(decoded),
 				),
 				handler,
 				[],
 			)
-	}
-}
-
-// Trailer fields arrive after a chunked body (RFC 7230 section 4.1.2); expose
-// them to the handler by appending them to the request's header list — after
-// the original headers, so lookups that matched before the body still match
-// the same field.
-fn with_trailers(hdrs Headers, trailers Array(Header)) Headers {
-	match trailers {
-		[] -> hdrs
-		else -> [..hdrs, ..trailers]
 	}
 }
 

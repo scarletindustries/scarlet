@@ -92,8 +92,8 @@ fn trim_ows(v Binary, lo Int, i Int) Int {
 	if i > lo && is_ows(binary.byte_at(v, i - 1)) { trim_ows(v, lo, i - 1) } else { i }
 }
 
-fn is_ows(b Option(Int)) Bool {
-	b == Some(sp) || b == Some(htab)
+fn is_ows(b Int) Bool {
+	b == sp || b == htab
 }
 
 // The wire bytes of the header block as a parts array — `name`, `": "`,
