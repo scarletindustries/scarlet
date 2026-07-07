@@ -689,7 +689,7 @@ impl VM {
         sched::lock(&self.runtime.shared_listeners)
             .get(&id)
             .copied()
-            .ok_or_else(|| std::io::Error::from(ErrorKind::NotConnected))
+            .ok_or_else(stale_socket)
     }
 
     /// Resolve `id` to a listener in this scheduler's table, binding this
@@ -935,5 +935,7 @@ fn connection_mut(conns: &mut HashMap<i32, TcpStream>, id: i32) -> std::io::Resu
 
 #[cold]
 fn stale_socket() -> std::io::Error {
-    std::io::Error::new(ErrorKind::NotConnected, "socket closed")
+    // Built from the raw errno so `net_error_value` (which routes on
+    // `raw_os_error`) maps use-after-close to `NotConnected`, not `Errno(0)`.
+    std::io::Error::from_raw_os_error(libc::ENOTCONN)
 }
