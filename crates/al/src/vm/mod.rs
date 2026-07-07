@@ -134,7 +134,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use al_core::bytecode::value::range_len;
@@ -301,6 +301,15 @@ struct Process {
     frames: Vec<CallFrame>,
     is_main: bool,
     heap: ProcHeap,
+}
+
+/// Lock a mutex, recovering the data if a holder thread died (the VM never
+/// panics, so poisoning is effectively unreachable).
+pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 // A migrant crosses an OS-thread boundary as a plain move; this must hold by
@@ -550,7 +559,7 @@ impl VM {
             .extend(std::iter::repeat_n(Value::small_int(0), locals as usize));
 
         self.current_is_main = true;
-        let result = self.scheduler_loop();
+        let mut result = self.scheduler_loop();
 
         // Shutdown: by the time scheduler 0's loop returns Ok, the global
         // live count is zero, so workers are exiting; join them.
@@ -569,10 +578,11 @@ impl VM {
         if result.is_ok() {
             let rt = &self.runtime;
             rt.shutdown_blocking();
-            let workers = std::mem::take(&mut *sched::lock(&rt.workers));
+            let workers = std::mem::take(&mut *lock(&rt.workers));
             for handle in workers {
                 if handle.join().is_err() {
                     eprintln!("scheduler: a worker thread terminated abnormally");
+                    result = Err(VmError::internal("a scheduler thread panicked"));
                 }
             }
         }
@@ -927,7 +937,7 @@ impl VM {
         if version == self.globals_synced_version {
             return;
         }
-        let shared = sched::lock(&self.runtime.globals);
+        let shared = lock(&self.runtime.globals);
         if self.globals.len() < shared.len() {
             self.globals.resize(shared.len(), Value::nil());
         }
@@ -1013,9 +1023,7 @@ impl VM {
         // heap), but leave captured fds in place — parent and child run on the
         // same scheduler and reference the same per-scheduler socket tables.
         let (heap, root) = ProcHeap::spawn(&f);
-        self.runtime
-            .live
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.runtime.process_started();
         self.spawn_process_with_heap(heap, root);
         Ok(())
     }
@@ -1035,9 +1043,7 @@ impl VM {
         for i in 0..self.runtime.scheduler_count() {
             if i == self.scheduler_index {
                 let (heap, root) = ProcHeap::spawn(&f);
-                self.runtime
-                    .live
-                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                self.runtime.process_started();
                 self.spawn_process_with_heap(heap, root);
             } else if self.runtime.is_live_scheduler(i) {
                 let seed = self.build_seed(&f);
@@ -1119,45 +1125,6 @@ impl VM {
     fn hydrate_seed(&mut self, seed: Seed) {
         self.adopt_connections(seed.connections);
         self.spawn_process_with_heap(seed.heap, seed.root);
-    }
-
-    /// Pre-side-effect donor guard for process migration: may `victim`'s
-    /// connection fds safely leave this scheduler?
-    ///
-    /// Donating a process moves every connection socket it references out of
-    /// this scheduler's `tcp_connections` table. That is only safe while the
-    /// fd is quiescent here, so donation must abort if any referenced
-    /// connection id is
-    ///
-    /// - in `pending_connects`: a non-blocking connect on that id is in
-    ///   flight on this scheduler and its completion handler will look the
-    ///   socket up in this table; or
-    /// - armed in a parked sibling's `Wait::Io` fds: the sleeper's poller
-    ///   registration belongs to this scheduler, and moving the fd away would
-    ///   silently break the sleeper — its wake/re-arm path resolves the id
-    ///   through this scheduler's tables.
-    ///
-    /// This check is read-only and runs strictly before any side effect of
-    /// donation (peer claim, fd detach, socket-table mutation), so an
-    /// abort here costs nothing. Listener ids never need guarding: listeners
-    /// are dup'd on transfer, the donor keeps its entry and any registration.
-    fn can_donate_fds(&self, victim: &Process) -> bool {
-        let mut ids = Vec::new();
-        migrate::for_each_process_socket(victim, &mut |s| {
-            if !s.is_listener {
-                ids.push(s.id);
-            }
-        });
-        if ids.is_empty() {
-            return true;
-        }
-
-        if ids.iter().any(|id| self.pending_connects.contains_key(id)) {
-            return false;
-        }
-        // The victim itself is runnable (in run_queue, not parked), so its own
-        // fds cannot appear here — any hit is a sibling's armed fd.
-        !ids.iter().any(|id| self.io_waiters.contains_key(id))
     }
 }
 

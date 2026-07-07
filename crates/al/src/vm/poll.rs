@@ -62,7 +62,7 @@ use mio::unix::SourceFd;
 use al_core::bytecode::Value;
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
-use super::{Process, VM, VmError, VmResult, sched};
+use super::{Process, VM, VmError, VmResult, lock};
 use crate::stdlib;
 
 /// How a parked I/O wait resumes once one of its sockets is ready.
@@ -380,7 +380,7 @@ impl VM {
     /// between slices — is detached around the delivery and restored after.
     pub(super) fn drain_completions(&mut self) -> bool {
         let drained: Vec<Completion> = {
-            let mut q = sched::lock(&self.runtime.slots[self.scheduler_index].completions);
+            let mut q = lock(&self.runtime.slots[self.scheduler_index].completions);
             if q.is_empty() {
                 return false;
             }

@@ -29,6 +29,12 @@ use al_core::bytecode::{MapBacking, SocketValue, Value, ValueView, hamt};
 
 use super::{Process, VM};
 
+/// Connection fds re-homed out of a scheduler's tables, ready to travel with a
+/// [`Migrant`] or `Seed`. Listeners are not included: they are a shared,
+/// addr-keyed resource each scheduler re-materializes on demand
+/// (`VM::ensure_listener`), never moved.
+pub(super) type DetachedFds = Vec<(i32, TcpStream)>;
+
 /// A process in flight between schedulers: the suspended [`Process`] moved
 /// as-is, alongside the socket fds it references, re-homed out of the donor's
 /// per-scheduler tables for insertion into the destination's.
@@ -39,7 +45,7 @@ pub(super) struct Migrant {
     /// Listeners do not travel: the destination binds its own reuseport socket
     /// from the shared address on first accept (`VM::ensure_listener`), and the
     /// donor keeps its own entry.
-    pub connections: Vec<(i32, TcpStream)>,
+    pub connections: DetachedFds,
 }
 
 // A migrant crosses an OS-thread boundary, so it must be `Send`. The fd
@@ -135,13 +141,46 @@ fn process_socket_ids(p: &Process) -> Vec<i32> {
     ids
 }
 
-/// Connection fds re-homed out of a scheduler's tables, ready to travel with a
-/// [`Migrant`] or `Seed`. Listeners are not included: they are a shared,
-/// addr-keyed resource each scheduler re-materializes on demand
-/// (`VM::ensure_listener`), never moved.
-pub(super) type DetachedFds = Vec<(i32, TcpStream)>;
-
 impl VM {
+    /// Pre-side-effect donor guard for process migration: may `victim`'s
+    /// connection fds safely leave this scheduler?
+    ///
+    /// Donating a process moves every connection socket it references out of
+    /// this scheduler's `tcp_connections` table. That is only safe while the
+    /// fd is quiescent here, so donation must abort if any referenced
+    /// connection id is
+    ///
+    /// - in `pending_connects`: a non-blocking connect on that id is in
+    ///   flight on this scheduler and its completion handler will look the
+    ///   socket up in this table; or
+    /// - armed in a parked sibling's `Wait::Io` fds: the sleeper's poller
+    ///   registration belongs to this scheduler, and moving the fd away would
+    ///   silently break the sleeper — its wake/re-arm path resolves the id
+    ///   through this scheduler's tables.
+    ///
+    /// This check is read-only and runs strictly before any side effect of
+    /// donation (peer claim, fd detach, socket-table mutation), so an
+    /// abort here costs nothing. Listener ids never need guarding: listeners
+    /// are dup'd on transfer, the donor keeps its entry and any registration.
+    pub(super) fn can_donate_fds(&self, victim: &Process) -> bool {
+        let mut ids = Vec::new();
+        for_each_process_socket(victim, &mut |s| {
+            if !s.is_listener {
+                ids.push(s.id);
+            }
+        });
+        if ids.is_empty() {
+            return true;
+        }
+
+        if ids.iter().any(|id| self.pending_connects.contains_key(id)) {
+            return false;
+        }
+        // The victim itself is runnable (in run_queue, not parked), so its own
+        // fds cannot appear here — any hit is a sibling's armed fd.
+        !ids.iter().any(|id| self.io_waiters.contains_key(id))
+    }
+
     /// Re-home every connection fd a suspended process references out of the
     /// donor's per-scheduler tables, for donation: the process itself moves
     /// whole; only its connections need detaching so they can travel with it.

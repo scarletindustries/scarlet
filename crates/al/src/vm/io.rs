@@ -66,7 +66,7 @@ use al_core::static_ir::VariantTemplate;
 
 use super::poll::{EPOCH, Wait, monotonic_now_ms};
 use super::sched::BlockingOp;
-use super::{IO_REDUCTION_COST, Step, VM, VmError, VmResult, bin_ref, sched, str_ref};
+use super::{IO_REDUCTION_COST, Step, VM, VmError, VmResult, bin_ref, lock, str_ref};
 use crate::stdlib;
 
 impl VM {
@@ -199,9 +199,9 @@ impl VM {
 
     pub(super) fn tcp_read(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Ok(Binary) (bytes are off-heap; the box is constant
-        // sized) or a NetError; the park path re-pushes existing
-        // values only.
+        // Ok(Read) — Data(Binary) (bytes are off-heap; the box is
+        // constant sized) or the frozen Closed — or a NetError;
+        // the park path re-pushes existing values only.
         let max = self.pop_int("socket.read")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.read")?;
@@ -239,8 +239,8 @@ impl VM {
         match read_res {
             // The read happens before the deadline check, so bytes
             // that arrived as the clock ran out are never discarded.
-            // A zero-byte read is a peer close, reported as Ok(<<>>),
-            // exactly as `socket.read` does.
+            // A zero-byte read is a peer close, reported as
+            // Ok(Closed), exactly as `socket.read` does.
             Ok(n) => self.push_read_ok(n),
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if monotonic_now_ms() >= deadline_ms {
@@ -393,7 +393,7 @@ impl VM {
             self.poller_deregister(listener.as_raw_fd());
         }
         // Closing a server retires it everywhere.
-        sched::lock(&self.runtime.shared_listeners).remove(&sv.id);
+        lock(&self.runtime.shared_listeners).remove(&sv.id);
         let nil = self.make_nil();
         let v = self.make_ok(nil);
         self.stack.push(v);
@@ -581,12 +581,22 @@ impl VM {
         (max, read_res)
     }
 
-    /// Push `Ok(Binary)` over the first `n` bytes just read into the scratch
-    /// buffer (copied out).
+    /// Push `Ok(socket.Read)` for a syscall-level read of `n` bytes: `n == 0`
+    /// is the POSIX peer-close signal and becomes the frozen `Closed` value;
+    /// otherwise the first `n` bytes of the scratch buffer are copied out and
+    /// wrapped as `Data(bin)`.
     #[inline]
     fn push_read_ok(&mut self, n: usize) {
-        let data = Value::binary_from_slice_in(&mut self.heap, &self.read_scratch[..n]);
-        let ok = self.make_ok(data);
+        let read = if n == 0 {
+            self.templates.read_closed.clone()
+        } else {
+            let bin = Value::binary_from_slice_in(&mut self.heap, &self.read_scratch[..n]);
+            self.templates
+                .read_data
+                .clone()
+                .instantiate(&mut self.heap, &[bin])
+        };
+        let ok = self.make_ok(read);
         self.stack.push(ok);
     }
 
@@ -659,7 +669,7 @@ impl VM {
     /// any scheduler that needs to accept on it can bind its own reuseport
     /// socket to the same address ([`VM::ensure_listener`]).
     fn share_listener_addr(&mut self, id: i32, addr: SocketAddr) {
-        sched::lock(&self.runtime.shared_listeners).insert(id, addr);
+        lock(&self.runtime.shared_listeners).insert(id, addr);
     }
 
     /// The bound address of listener `id`: this scheduler's own socket if it
@@ -671,7 +681,7 @@ impl VM {
         if let Some(l) = self.tcp_listeners.get(&id) {
             return l.local_addr();
         }
-        sched::lock(&self.runtime.shared_listeners)
+        lock(&self.runtime.shared_listeners)
             .get(&id)
             .copied()
             .ok_or_else(stale_socket)
@@ -687,10 +697,7 @@ impl VM {
         if self.tcp_listeners.contains_key(&id) {
             return Ok(());
         }
-        let Some(addr) = sched::lock(&self.runtime.shared_listeners)
-            .get(&id)
-            .copied()
-        else {
+        let Some(addr) = lock(&self.runtime.shared_listeners).get(&id).copied() else {
             return Err(stale_socket());
         };
         bind_reuseport(addr).and_then(|l| self.track_listener(id, l))

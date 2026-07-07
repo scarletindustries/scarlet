@@ -18,7 +18,7 @@
 //! process finishing) wakes them via [`mio::Waker::wake`].
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 
@@ -26,7 +26,8 @@ use al_core::bytecode::{Program, Value};
 use al_core::heap::ProcHeap;
 
 use super::freeze::FrozenValue;
-use super::migrate::Migrant;
+use super::lock;
+use super::migrate::{DetachedFds, Migrant};
 
 /// How many seeds a scheduler takes from the injector per visit. One at a
 /// time maximizes spread: with k seeds and k idle schedulers, every scheduler
@@ -43,7 +44,7 @@ pub(super) struct Seed {
     /// Connections the closure captured (moved — the spawner loses them).
     /// Listeners do not travel: each scheduler binds its own reuseport socket
     /// from the shared address on first accept (`VM::ensure_listener`).
-    pub connections: Vec<(i32, TcpStream)>,
+    pub connections: DetachedFds,
     /// The child's allocator handle. A zero-sized marker (allocation goes to
     /// mimalloc's per-thread default heap); field order is not load-bearing,
     /// since `mi_free` is global and frees `root`'s graph from any thread.
@@ -301,8 +302,11 @@ pub(super) struct Runtime {
     /// placements spread across different schedulers.
     pub submit_cursor: AtomicUsize,
     /// Live processes across all schedulers, counting undelivered seeds and the
-    /// main process. The program is over when this reaches zero.
-    pub live: AtomicUsize,
+    /// main process. The program is over when this reaches zero. Private:
+    /// every increment/decrement goes through [`Runtime::process_started`] /
+    /// [`Runtime::process_finished`] so the paired accounting cannot be
+    /// bypassed at a call site.
+    live: AtomicUsize,
     /// Worker threads, joined by scheduler 0 at shutdown.
     pub workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// One-shot guard for `ensure_workers`: worker threads spawn exactly
@@ -438,7 +442,7 @@ impl Runtime {
         // so the scan below can hand even the very first seed straight to
         // one.
         self.ensure_workers();
-        self.live.fetch_add(1, Ordering::AcqRel);
+        self.process_started();
 
         // Prefer a parked (idle) scheduler, starting the scan at a rotating
         // offset so back-to-back submissions land on different schedulers.
@@ -477,8 +481,8 @@ impl Runtime {
     /// onto another core — an acceptor must bind *this* core's socket or the
     /// core gets no connections. Callers must `ensure_workers` first and only
     /// target live schedulers ([`Runtime::is_live_scheduler`]).
-    pub fn submit_to(self: &Arc<Self>, i: usize, seed: Seed) {
-        self.live.fetch_add(1, Ordering::AcqRel);
+    pub fn submit_to(&self, i: usize, seed: Seed) {
+        self.process_started();
         let slot = &self.slots[i];
         slot.run_len.fetch_add(1, Ordering::Relaxed);
         lock(&slot.pinned).push_back(seed);
@@ -681,6 +685,13 @@ impl Runtime {
         None
     }
 
+    /// A process entered the live set. Paired with [`Runtime::process_finished`];
+    /// every path that adds a process to the count (submit, submit_to, local
+    /// spawn) goes through here so the counter's accounting has one owner.
+    pub fn process_started(&self) {
+        self.live.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// A process finished. When it was the last one, wake every scheduler so
     /// they can observe `live == 0` and shut down.
     pub fn process_finished(&self) {
@@ -842,7 +853,7 @@ fn run_blocking(op: BlockingOp) -> BlockingResult {
 /// Resolve a hostname to an IP address via the system resolver (`getaddrinfo`).
 /// Runs on a blocking-pool worker, never a scheduler thread. Returns the first
 /// address the resolver yields.
-pub(super) fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
+fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
     use std::net::ToSocketAddrs;
     (host, 0u16)
         .to_socket_addrs()?
@@ -854,15 +865,6 @@ pub(super) fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
                 "name resolution returned no addresses",
             )
         })
-}
-
-/// Lock a mutex, recovering the data if a holder thread died (the VM never
-/// panics, so poisoning is effectively unreachable).
-pub(super) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match m.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
 }
 
 /// How many schedulers to run: `AL_SCHEDULERS` env override, else one per CPU
