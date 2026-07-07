@@ -455,6 +455,57 @@ impl VM {
                         return Ok(Step::Yield);
                     }
                 }
+                Op::CallKnown | Op::TailCallKnown => {
+                    // Known top-level target: `func_idx` is an immediate operand
+                    // and the callee is provably capture-free, so there is no
+                    // callee value on the stack — we skip the pop, the closure
+                    // tag check, the heap `func_idx()` read, and the arity check
+                    // that `Op::Call` pays. The frame's `captures` is a sentinel
+                    // immediate; the callee body never emits `PushCapture` /
+                    // `PushSelf` (a top-level fn's own name resolves to
+                    // `Global`, not `Self_`).
+                    let target_idx = instr.operand;
+                    let arity = i32::from(instr.b);
+                    let func = &self.program.functions[target_idx as usize];
+                    let (func_locals, func_code_start) = (func.locals, func.code_start);
+                    debug_assert_eq!(func.capture_count, 0);
+                    debug_assert_eq!(func.arity, arity);
+
+                    let args_start = self.stack.len() - arity as usize;
+
+                    if instr.op == Op::TailCallKnown {
+                        self.collapse_tail_frame(base_slot, args_start);
+                        let f = self.frame_mut();
+                        f.func_idx = target_idx;
+                        f.code_start = func_code_start;
+                        f.ip = 0;
+                        f.captures = Value::small_int(0);
+                    } else {
+                        self.frame_mut().ip = ip;
+                        self.frames.push(CallFrame {
+                            func_idx: target_idx,
+                            code_start: func_code_start,
+                            ip: 0,
+                            base_slot: args_start,
+                            captures: Value::small_int(0),
+                        });
+                        base_slot = args_start;
+                    }
+
+                    for _ in arity..func_locals {
+                        self.stack.push(Value::small_int(0));
+                    }
+
+                    ip = 0;
+                    code_start = func_code_start;
+                    func_idx = target_idx;
+
+                    reds -= 1;
+                    self.charge_reclamation(&mut reds);
+                    if reds <= 0 {
+                        return Ok(Step::Yield);
+                    }
+                }
                 Op::Ret => {
                     let ret_val = self.pop()?;
                     let Some(old_frame) = self.frames.pop() else {
@@ -592,6 +643,19 @@ impl VM {
                     } else {
                         return Err(VmError::internal("unwrap on non-enum value"));
                     }
+                }
+                Op::SwitchTag => {
+                    // Computed jump by variant index. Emitted only when the
+                    // scrutinee's type is a fully resolved enum and the match
+                    // is exhaustive, so `as_enum` is a debug-only invariant and
+                    // `idx < a` is guaranteed by construction of the table.
+                    let scrutinee = self.pop()?;
+                    let Some(ev) = scrutinee.as_enum() else {
+                        return Err(VmError::internal("SwitchTag on non-enum value"));
+                    };
+                    let idx = ev.variant_idx() as i32;
+                    debug_assert!((idx as u32) < instr.a as u32);
+                    ip = self.program.code[(instr.operand + idx) as usize].operand - code_start;
                 }
                 Op::ToString => {
                     let val = self.pop()?;

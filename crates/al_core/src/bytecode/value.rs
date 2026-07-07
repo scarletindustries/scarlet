@@ -1761,6 +1761,14 @@ impl<'a> EnumRef<'a> {
         // SAFETY: constructed from a tag-checked Enum value.
         TypeId(unsafe { payload_word(self.obj, 0) as u32 as i32 })
     }
+    /// Declaration-order index of this value's constructor within its type.
+    /// Packed into the high half of word 0 alongside `type_id`; read by
+    /// `Op::SwitchTag` to turn an exhaustive match into one indexed jump.
+    #[inline]
+    pub fn variant_idx(&self) -> u16 {
+        // SAFETY: constructed from a tag-checked Enum value.
+        unsafe { (payload_word(self.obj, 0) >> 32) as u16 }
+    }
     #[inline]
     pub fn hash(&self) -> u64 {
         // SAFETY: as above.
