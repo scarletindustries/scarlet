@@ -1230,19 +1230,17 @@ mod tests {
     #[test]
     fn pattern_to_pat_slots_labeled_args_in_declaration_order() {
         let pair = pair_bool_bool();
+        let pair_pat = |fields: &[(&str, &str)], rest| {
+            let args = fields.iter().map(|&(l, v)| (l, p_ctor0(v))).collect();
+            pattern_to_pat(&p_ctor_labeled("Pair", args, rest), &pair)
+        };
 
         // `Pair(b: True, ..)` ∪ `Pair(a: False, ..)` MISS (a: True, b: False).
         // Source-order lowering read arm 1 as (a: True, b: _) → false
         // exhaustiveness (this returned `None` before the fix).
         let unsound = vec![
-            pattern_to_pat(
-                &p_ctor_labeled("Pair", vec![("b", p_ctor0("True"))], true),
-                &pair,
-            ),
-            pattern_to_pat(
-                &p_ctor_labeled("Pair", vec![("a", p_ctor0("False"))], true),
-                &pair,
-            ),
+            pair_pat(&[("b", "True")], true),
+            pair_pat(&[("a", "False")], true),
         ];
         assert_eq!(
             check_exhaustiveness(&unsound, &pair),
@@ -1253,38 +1251,10 @@ mod tests {
         // Source-order lowering read it as a duplicate of arm 2 and reported a
         // bogus missing case (this returned `Some(...)` before the fix).
         let exhaustive = vec![
-            pattern_to_pat(
-                &p_ctor_labeled(
-                    "Pair",
-                    vec![("a", p_ctor0("True")), ("b", p_ctor0("True"))],
-                    false,
-                ),
-                &pair,
-            ),
-            pattern_to_pat(
-                &p_ctor_labeled(
-                    "Pair",
-                    vec![("a", p_ctor0("True")), ("b", p_ctor0("False"))],
-                    false,
-                ),
-                &pair,
-            ),
-            pattern_to_pat(
-                &p_ctor_labeled(
-                    "Pair",
-                    vec![("b", p_ctor0("True")), ("a", p_ctor0("False"))],
-                    false,
-                ),
-                &pair,
-            ),
-            pattern_to_pat(
-                &p_ctor_labeled(
-                    "Pair",
-                    vec![("a", p_ctor0("False")), ("b", p_ctor0("False"))],
-                    false,
-                ),
-                &pair,
-            ),
+            pair_pat(&[("a", "True"), ("b", "True")], false),
+            pair_pat(&[("a", "True"), ("b", "False")], false),
+            pair_pat(&[("b", "True"), ("a", "False")], false),
+            pair_pat(&[("a", "False"), ("b", "False")], false),
         ];
         assert_eq!(check_exhaustiveness(&exhaustive, &pair), None);
     }
