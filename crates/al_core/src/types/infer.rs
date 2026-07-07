@@ -707,6 +707,7 @@ impl InferEngine {
     /// the compiler right after the prelude is registered or seeded.
     pub fn set_prim_ids(&mut self, ids: PrimIds) {
         self.prim_ids = ids;
+        self.nullary_cache = NullaryCache::default();
     }
 
     /// Map a nominal type id to the corresponding primitive, if it is one.
