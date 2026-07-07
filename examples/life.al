@@ -2,7 +2,7 @@
 // The grid is an Array(Array(Bool)); reads outside it fall back to dead
 // cells with `or`, so the edges need no special casing.
 
-import al/list
+import al/array
 
 const width = 8
 const height = 8
@@ -46,7 +46,7 @@ fn live_neighbors(grid Array(Array(Bool)), x Int, y Int) Int {
 		cell_at(grid, x, y + 1),
 		cell_at(grid, x + 1, y + 1),
 	]
-	list.length(list.filter(around, fn(alive) alive))
+	array.length(array.filter(around, fn(alive) alive))
 }
 
 // A live cell survives with 2 or 3 neighbors. A dead cell with exactly
@@ -66,11 +66,11 @@ fn step(grid Array(Array(Bool))) Array(Array(Bool)) {
 
 // Render a grid as lines of # (alive) and . (dead).
 fn render_row(row Array(Bool)) String {
-	list.fold(row, '', fn(line, alive) line + if alive { '#' } else { '.' })
+	array.fold(row, '', fn(line, alive) line + if alive { '#' } else { '.' })
 }
 
 fn render(grid Array(Array(Bool))) String {
-	list.fold(grid, '', fn(text, row) text + render_row(row) + '\n')
+	array.fold(grid, '', fn(text, row) text + render_row(row) + '\n')
 }
 
 // Print generations gen through last, stepping in between.
@@ -87,4 +87,4 @@ fn run(grid Array(Array(Bool)), gen Int, last Int) Nil {
 // A glider: the smallest pattern that travels. Every 4 generations the
 // same shape reappears one cell down and one cell to the right.
 glider = [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)]
-run(make_grid(fn(x, y) list.contains(glider, (x, y))), 0, 4)
+run(make_grid(fn(x, y) array.contains(glider, (x, y))), 0, 4)

@@ -1,7 +1,7 @@
 // Password strength checker. Each password is tested against four rules and
 // the verdict comes from how many rules pass.
 
-import al/list
+import al/array
 import al/string
 
 type Rule {
@@ -21,7 +21,7 @@ const symbols = ['!', '@', '#', '\$', '%', '&', '*', '-', '_', '?']
 
 // True when the password contains at least one of the given characters.
 fn contains_any(password String, chars Array(String)) Bool {
-	list.any(chars, fn(c) string.contains(password, c))
+	array.any(chars, fn(c) string.contains(password, c))
 }
 
 fn check_rules(password String) Array(Rule) {
@@ -34,7 +34,7 @@ fn check_rules(password String) Array(Rule) {
 }
 
 fn count_passed(rules Array(Rule)) Int {
-	list.length(list.filter(rules, fn(rule) rule.passed))
+	array.length(array.filter(rules, fn(rule) rule.passed))
 }
 
 fn strength(score Int) String {
@@ -68,7 +68,7 @@ fn print_report(password String) Nil {
 	report = analyze(password)
 	println('password: ${report.password}')
 	print_rules(report.rules)
-	println('  verdict: ${report.strength} (${report.score}/${list.length(report.rules)} rules)')
+	println('  verdict: ${report.strength} (${report.score}/${array.length(report.rules)} rules)')
 	println('')
 }
 

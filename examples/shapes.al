@@ -2,7 +2,7 @@
 // Array(Shape), and area and perimeter pick a formula by pattern matching.
 
 import al/float
-import al/list
+import al/array
 import al/string
 
 type Shape {
@@ -68,5 +68,5 @@ fn print_shapes(shapes Array(Shape)) Nil {
 shapes = [Circle(1.5), Rect(4.0, 2.5), Triangle(3.0, 4.0)]
 print_shapes(shapes)
 
-total = list.fold(shapes, 0.0, fn(sum, s) sum + area(s))
+total = array.fold(shapes, 0.0, fn(sum, s) sum + area(s))
 println('total area: ${round2(total)}')

@@ -794,7 +794,7 @@ mod tests {
     // every statement shape and assert each reports a well-formed span.
     #[test]
     fn statement_span_covers_all_kinds() {
-        let src = "import al/list\n\
+        let src = "import al/array\n\
                    x = 5\n\
                    fn f() { 0 }\n\
                    pub fn g() { 1 }\n\

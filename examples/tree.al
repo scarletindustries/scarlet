@@ -2,7 +2,7 @@
 // size, depth, and an in-order traversal that reads values back out sorted.
 
 import al/int
-import al/list
+import al/array
 import al/string
 
 type Tree(t) {
@@ -66,7 +66,7 @@ fn to_array(tree Tree(t)) Array(t) {
 }
 
 fn from_array(xs Array(Int)) Tree(Int) {
-	list.fold(xs, Leaf, insert)
+	array.fold(xs, Leaf, insert)
 }
 
 values = [5, 3, 8, 1, 9, 2, 7]

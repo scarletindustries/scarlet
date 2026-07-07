@@ -1,7 +1,7 @@
 // Merge sort: split the array in half, sort each half, merge the sorted halves.
 // The merge walks both arrays at once by matching on a tuple of array patterns.
 
-import al/list
+import al/array
 import al/string
 
 // First n elements and the rest, as a pair.
@@ -36,7 +36,7 @@ fn merge(left Array(Int), right Array(Int)) Array(Int) {
 }
 
 fn sort(xs Array(Int)) Array(Int) {
-	n = list.length(xs)
+	n = array.length(xs)
 	if n < 2 {
 		xs
 	} else {

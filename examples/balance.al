@@ -21,7 +21,7 @@
 */
 
 import al/experiments/scheduler
-import al/list
+import al/array
 
 fn liveliness() {
 	println('Alive')
@@ -43,4 +43,4 @@ fn work(i) {
 }
 
 scheduler.spawn(fn() liveliness())
-list.each(1..50, fn(i) scheduler.spawn(fn() work(i)))
+array.each(1..50, fn(i) scheduler.spawn(fn() work(i)))

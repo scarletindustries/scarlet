@@ -3,7 +3,7 @@
 // versions stay valid and unchanged subtrees are shared between them.
 
 import al/map
-import al/list
+import al/array
 import al/option
 import al/string
 
@@ -11,7 +11,7 @@ import al/string
 // a fold: each step looks up the running tally and `set`s the incremented count
 // — no mutation, just a new map per word.
 fn word_counts(words Array(String)) Map(String, Int) {
-	list.fold(words, map.new(), fn(counts, word) {
+	array.fold(words, map.new(), fn(counts, word) {
 		current = option.unwrap(map.get(counts, word), 0)
 		map.set(counts, word, current + 1)
 	})

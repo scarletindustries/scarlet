@@ -156,7 +156,7 @@ mod tests {
         // Every embedded `al/*` module compiled into an interface, keyed by its
         // slash-joined path. `all_modules()` (module/stdlib.rs) discovers these.
         for key in [
-            "al/list",
+            "al/array",
             "al/string",
             "al/option",
             "al/result",
@@ -182,10 +182,10 @@ mod tests {
             );
         }
 
-        // al/list exports the pure-AL combinators as values.
-        let list = &out.blob.interfaces["al/list"];
+        // al/array exports the pure-AL combinators as values.
+        let array = &out.blob.interfaces["al/array"];
         for f in ["map", "filter", "fold", "reverse", "length", "contains"] {
-            assert!(list.values.contains_key(f), "al/list should export '{f}'");
+            assert!(array.values.contains_key(f), "al/array should export '{f}'");
         }
 
         // The al/http stack compiled with its spec-fixed public surface. These

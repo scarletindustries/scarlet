@@ -20,10 +20,10 @@ const B_SRC: &str = "import ./c\npub fn bridge() Int { c.shared() + 1 }\n";
 // Entry uses a def in B, a def in C (also used by B), and a stdlib def.
 const ENTRY: &str = "import ./b\n\
 import ./c\n\
-import al/list\n\
+import al/array\n\
 x = b.bridge()\n\
 y = c.shared()\n\
-z = list.length([1, 2, 3])\n\
+z = array.length([1, 2, 3])\n\
 println(x + y + z)\n";
 
 fn project() -> Project {
@@ -160,12 +160,12 @@ fn document_and_workspace_symbols() {
     );
 
     // documentSymbol for the entry surfaces the import module-aliases,
-    // including the `al/list` stdlib import alias.
+    // including the `al/array` stdlib import alias.
     let main = s.document_symbols("main");
     assert!(
         main.iter()
-            .any(|sym| sym.name == "list" && sym.kind == EntityKind::ModuleAlias),
-        "entry documentSymbol missing the `al/list` import alias: {:?}",
+            .any(|sym| sym.name == "array" && sym.kind == EntityKind::ModuleAlias),
+        "entry documentSymbol missing the `al/array` import alias: {:?}",
         main.iter().map(|x| (&x.name, x.kind)).collect::<Vec<_>>()
     );
 
@@ -186,20 +186,20 @@ fn document_and_workspace_symbols() {
 
 #[test]
 fn stdlib_import_path_is_tracked() {
-    // The `al/list` import binds a `ModuleAlias` in the entry module, a
+    // The `al/array` import binds a `ModuleAlias` in the entry module, a
     // qualified use through it resolves goto-def *into* the precompiled stdlib
     // declaration, and the unused-import reachability rule reaches stdlib
     // imports too.
     let p = Project::new("stdlib");
-    let entry = "import al/list\nz = list.length([1, 2, 3])\nprintln(z)\n";
+    let entry = "import al/array\nz = array.length([1, 2, 3])\nprintln(z)\n";
     p.write("a.al", entry);
     let s = checked_with(&p, entry);
 
     let main = s.document_symbols("main");
     let alias = main
         .iter()
-        .find(|sym| sym.name == "list")
-        .expect("al/list import alias is tracked as a ModuleAlias");
+        .find(|sym| sym.name == "array")
+        .expect("al/array import alias is tracked as a ModuleAlias");
     assert_eq!(alias.kind, EntityKind::ModuleAlias);
     assert_eq!(
         alias.module,
@@ -207,21 +207,21 @@ fn stdlib_import_path_is_tracked() {
         "the alias binding is owned by the importing (entry) module"
     );
 
-    // Cross-module goto-def into the stdlib: the cursor on `list.length`
-    // resolves to the real `length` declaration in `al/list` (`src/std/al/
-    // list.al`, `pub fn length` — 0-based line 40, the identifier span).
+    // Cross-module goto-def into the stdlib: the cursor on `array.length`
+    // resolves to the real `length` declaration in `al/array` (`src/std/al/
+    // array.al`, `pub fn length` — 0-based line 34, the identifier span).
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
-        .expect("list.length resolves into the al/list stdlib module");
+        .expect("array.length resolves into the al/array stdlib module");
     assert_eq!(
         m,
-        vec!["al".to_string(), "list".to_string()],
-        "stdlib goto-def must land in the al/list module, got {m:?}"
+        vec!["al".to_string(), "array".to_string()],
+        "stdlib goto-def must land in the al/array module, got {m:?}"
     );
     assert_eq!(
         (span.start_line, span.start_column, span.end_column),
-        (40, 7, 13),
+        (34, 7, 13),
         "must land on the real `length` declaration span, got {span:?}"
     );
     // The synthesised stdlib definition and the entry's qualified occurrence
@@ -236,8 +236,8 @@ fn stdlib_import_path_is_tracked() {
         .map(|(m, _)| m.join("/"))
         .collect();
     assert!(
-        ref_mods.iter().any(|m| m == "al/list"),
-        "references missing the al/list declaration: {ref_mods:?}"
+        ref_mods.iter().any(|m| m == "al/array"),
+        "references missing the al/array declaration: {ref_mods:?}"
     );
     assert!(
         ref_mods.iter().any(|m| m == "main"),
@@ -247,19 +247,19 @@ fn stdlib_import_path_is_tracked() {
     // A *used* stdlib import is not reported unused.
     let used = unused_msgs(&s);
     assert!(
-        !used.iter().any(|m| m == "unused import `list`"),
+        !used.iter().any(|m| m == "unused import `array`"),
         "a used stdlib import was wrongly reported unused: {used:?}"
     );
 
     // The unused-import reachability rule reaches stdlib imports: an import
     // whose alias has no recorded qualified/unqualified use is a Hint.
     let p2 = Project::new("stdlib_unused");
-    let unused = "import al/list\nprintln(1)\n";
+    let unused = "import al/array\nprintln(1)\n";
     p2.write("a.al", unused);
     let s2 = checked_with(&p2, unused);
     let hints = unused_msgs(&s2);
     assert!(
-        hints.iter().any(|m| m == "unused import `list`"),
+        hints.iter().any(|m| m == "unused import `array`"),
         "stdlib import not run through the unused-import rule: {hints:?}"
     );
 }

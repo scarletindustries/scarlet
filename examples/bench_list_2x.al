@@ -10,7 +10,7 @@
 // Exercises BOTH the consumer destructure path (Drop) and the producer
 // prepend path (reverse = fold + `[x, ..acc]`).
 
-import al/list
+import al/array
 
 fn idx(arr Array(Int), i Int, acc Int) Int {
 	if i < 0 {
@@ -23,11 +23,11 @@ fn idx(arr Array(Int), i Int, acc Int) Int {
 n = 1000000
 xs = [..{ 0..n }, ..[]]
 
-a = list.fold(xs, 0, fn(p, q) p + q)
-b = list.length(xs)
-c = list.contains(xs, -1)
-r = list.reverse(xs)
-d = list.length(r)
+a = array.fold(xs, 0, fn(p, q) p + q)
+b = array.length(xs)
+c = array.contains(xs, -1)
+r = array.reverse(xs)
+d = array.length(r)
 e = idx(xs, n - 1, 0)
 
 println(a + b + d + e + { if c { 1 } else { 0 } })

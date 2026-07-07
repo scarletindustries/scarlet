@@ -93,42 +93,42 @@ fn stdlib_result() {
 }
 
 #[test]
-fn stdlib_list() {
+fn stdlib_array() {
     run_outputs(
-        "import al/list\n\
-         println(list.map([1, 2, 3], fn(x) x * 10))\n\
-         println(list.filter([1, 2, 3, 4], fn(x) x > 2))\n\
-         println(list.fold([1, 2, 3, 4], 0, fn(a, b) a + b))\n\
-         println(list.reverse([1, 2, 3]))\n\
-         println(list.contains([1, 2, 3], 2))\n",
+        "import al/array\n\
+         println(array.map([1, 2, 3], fn(x) x * 10))\n\
+         println(array.filter([1, 2, 3, 4], fn(x) x > 2))\n\
+         println(array.fold([1, 2, 3, 4], 0, fn(a, b) a + b))\n\
+         println(array.reverse([1, 2, 3]))\n\
+         println(array.contains([1, 2, 3], 2))\n",
         "[10, 20, 30]\n[3, 4]\n10\n[3, 2, 1]\nTrue\n",
     );
     // find: returns Some(first match), None when nothing satisfies the predicate.
     run_outputs(
-        "import al/list\n\
-         println(list.find([1, 2, 3], fn(x) x > 1))\n\
-         println(list.find([1, 2, 3], fn(x) x > 9))\n",
+        "import al/array\n\
+         println(array.find([1, 2, 3], fn(x) x > 1))\n\
+         println(array.find([1, 2, 3], fn(x) x > 9))\n",
         "Some(2)\nNone\n",
     );
     // any / all: any is True iff some element matches; all is True iff every one does.
     run_outputs(
-        "import al/list\n\
-         println(list.any([1, 2, 3], fn(x) x > 2))\n\
-         println(list.any([1, 2, 3], fn(x) x > 9))\n\
-         println(list.all([2, 4, 6], fn(x) x % 2 == 0))\n\
-         println(list.all([2, 3], fn(x) x % 2 == 0))\n",
+        "import al/array\n\
+         println(array.any([1, 2, 3], fn(x) x > 2))\n\
+         println(array.any([1, 2, 3], fn(x) x > 9))\n\
+         println(array.all([2, 4, 6], fn(x) x % 2 == 0))\n\
+         println(array.all([2, 3], fn(x) x % 2 == 0))\n",
         "True\nFalse\nTrue\nFalse\n",
     );
-    // Empty-list base cases: the `[] ->` arm of each recursive list fn and the
+    // Empty-array base cases: the `[] ->` arm of each recursive array fn and the
     // not-found terminal of contains.
     run_outputs(
-        "import al/list\n\
-         println(list.map([], fn(x) x * 10))\n\
-         println(list.filter([], fn(x) x > 2))\n\
-         println(list.fold([], 0, fn(a, b) a + b))\n\
-         println(list.length([]))\n\
-         println(list.reverse([]))\n\
-         println(list.contains([1, 2], 9))\n",
+        "import al/array\n\
+         println(array.map([], fn(x) x * 10))\n\
+         println(array.filter([], fn(x) x > 2))\n\
+         println(array.fold([], 0, fn(a, b) a + b))\n\
+         println(array.length([]))\n\
+         println(array.reverse([]))\n\
+         println(array.contains([1, 2], 9))\n",
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
 }

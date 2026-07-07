@@ -1,7 +1,7 @@
 // Primes up to 50 by trial division.
 // Builds the number range recursively, filters it with is_prime, prints the result.
 
-import al/list
+import al/array
 
 fn is_divisible(n Int, d Int) Bool {
 	n % d == 0
@@ -38,8 +38,8 @@ fn range(from Int, to Int) Array(Int) {
 
 const limit = 50
 
-primes = list.filter(range(2, limit), is_prime)
+primes = array.filter(range(2, limit), is_prime)
 
 println('primes up to ${limit}:')
 println(primes)
-println('${list.length(primes)} primes found')
+println('${array.length(primes)} primes found')

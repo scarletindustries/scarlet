@@ -1,4 +1,4 @@
-import al/list
+import al/array
 
 // An immutable map from keys of type `k` to values of type `v`.
 //
@@ -51,7 +51,7 @@ pub fn to_list(m Map(k, v)) Array((k, v))
 // Build a map from a list of `(key, value)` tuples. Later entries win on
 // duplicate keys.
 pub fn from_list(entries Array((k, v))) Map(k, v) {
-	list.fold(entries, new(), fn(acc, entry) match entry {
+	array.fold(entries, new(), fn(acc, entry) match entry {
 		(key, value) -> set(acc, key, value)
 	})
 }
@@ -59,20 +59,12 @@ pub fn from_list(entries Array((k, v))) Map(k, v) {
 // Reduce over the entries: `f` is called with the accumulator, key, and value
 // of each entry. Iteration order is the backing's own.
 //
-// Folds straight over the key and value arrays in lockstep — `keys` and
-// `values` share an order — so no intermediate `(k, v)` list is built.
+// Folds a single `to_list` snapshot so a live-backed map (e.g. `process.env`)
+// cannot skew keys against values between two separate host reads.
 pub fn fold(m Map(k, v), init r, f fn(r, k, v) r) r {
-	fold_entries(keys(m), values(m), init, f)
-}
-
-fn fold_entries(ks Array(k), vs Array(v), acc r, f fn(r, k, v) r) r {
-	match ks {
-		[] -> acc
-		[key, ..krest] -> match vs {
-			[value, ..vrest] -> fold_entries(krest, vrest, f(acc, key, value), f)
-			[] -> acc
-		}
-	}
+	array.fold(to_list(m), init, fn(acc, entry) match entry {
+		(key, value) -> f(acc, key, value)
+	})
 }
 
 // `a` with every entry of `b` added; on a shared key, `b`'s value wins.

@@ -7,7 +7,7 @@
 // and mixing currencies (Usd + Gbp) is a type error.
 
 import al/decimal.{Decimal, Down}
-import al/list
+import al/array
 import al/option
 
 type Usd {
@@ -90,9 +90,9 @@ items = [
 	Item(name: 'orange juice', price: cents(599), qty: 3),
 ]
 
-list.each(items, fn(i) println('${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}'))
+array.each(items, fn(i) println('${i.qty} x ${i.name} @ ${show(i.price)} = ${show(line_total(i))}'))
 
-subtotal = list.fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
+subtotal = array.fold(items, cents(0), fn(acc, i) add(acc, line_total(i)))
 sales_tax = tax(subtotal, d('0.08875'))
 total = add(subtotal, sales_tax)
 
@@ -103,6 +103,6 @@ println('total    ${show(total)}')
 
 println('')
 println('split 3 ways:')
-list.each(split(total, 3), fn(share) println('  ${show(share)}'))
-check = list.fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
+array.each(split(total, 3), fn(share) println('  ${show(share)}'))
+check = array.fold(split(total, 3), cents(0), fn(acc, s) add(acc, s))
 println('shares sum back to ${show(check)}')

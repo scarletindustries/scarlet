@@ -4,7 +4,7 @@
 // `maps.al`; assoc lists still earn their keep when first-appearance order
 // matters, as it does here.
 
-import al/list
+import al/array
 import al/string
 
 // Add one occurrence of a word. New words go on the end, so the list stays
@@ -23,7 +23,7 @@ fn bump(counts Array((String, Int)), word String) Array((String, Int)) {
 }
 
 fn count_words(words Array(String)) Array((String, Int)) {
-	list.fold(words, [], bump)
+	array.fold(words, [], bump)
 }
 
 // Print one 'word: count' line per entry.
@@ -39,7 +39,7 @@ fn print_counts(counts Array((String, Int))) Nil {
 
 // The entry with the highest count, picked by a fold over the assoc list.
 fn most_frequent(counts Array((String, Int))) (String, Int) {
-	list.fold(counts, ('', 0), fn(best, entry) if entry.1 > best.1 { entry } else { best })
+	array.fold(counts, ('', 0), fn(best, entry) if entry.1 > best.1 { entry } else { best })
 }
 
 paragraph = 'the quick brown fox jumps over the lazy dog while the dog naps in the sun'

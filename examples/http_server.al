@@ -3,10 +3,10 @@
 // write.
 
 import al/net
-import al/net/socket.{Socket}
+import al/net/socket.{Socket, Data, Closed}
 import al/string
 import al/binary
-import al/list
+import al/array
 import al.{Ok}
 
 const body = 'Hello from AL!'
@@ -17,7 +17,7 @@ const response = binary.from_string('${header}${body}')
 // blank line; clients may pipeline several into one packet.
 fn count_requests(data Binary) Int {
 	match binary.to_string(data) {
-		Ok(text) -> list.length(string.split(text, '\r\n\r\n')) - 1
+		Ok(text) -> array.length(string.split(text, '\r\n\r\n')) - 1
 		Err(_) -> 0
 	}
 }
@@ -34,22 +34,16 @@ fn responses(n Int, parts Array(Binary)) Array(Binary) {
 // Serve one connection: answer every request it sends until it closes.
 fn respond(sock Socket) Nil {
 	match socket.read(sock, 65536) {
-		Ok(data) -> match binary.byte_size(data) {
-			// Zero bytes read: the client closed the connection.
-			0 -> socket.close(sock) or Nil
-			else -> {
-				n = count_requests(data)
-				match n {
-					// No complete request yet; read more.
-					0 -> respond(sock)
-					else -> {
-						socket.write_parts(sock, responses(n, [])) or Nil
-						respond(sock)
-					}
-				}
+		Ok(Data(data)) -> match count_requests(data) {
+			// No complete request yet; read more.
+			0 -> respond(sock)
+			n -> {
+				socket.write_parts(sock, responses(n, [])) or Nil
+				respond(sock)
 			}
 		}
-		else -> socket.close(sock) or Nil
+		Ok(Closed) -> socket.close(sock) or Nil
+		Err(_) -> socket.close(sock) or Nil
 	}
 }
 

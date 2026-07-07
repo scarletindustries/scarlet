@@ -6,7 +6,7 @@
 
 import al/binary
 import al/string
-import al/list
+import al/array
 import al/http/h1.{
 	Done,
 	NeedMore,
@@ -26,7 +26,7 @@ fn show_parse(label String, input Binary) Nil {
 		Done(method, target, version, hdrs, consumed) -> {
 			m = binary.to_string(method) or '?'
 			t = binary.to_string(target) or '?'
-			'Done method=${m} target=${t} version=${version} headers=${list.length(hdrs)} consumed=${consumed}'
+			'Done method=${m} target=${t} version=${version} headers=${array.length(hdrs)} consumed=${consumed}'
 		}
 		NeedMore -> 'NeedMore'
 		Bad(status) -> 'Bad ${status}'
@@ -52,7 +52,7 @@ fn show_chunked(label String, input Binary, max Int) Nil {
 	out = match h1.chunk_decode(input, 0, max) {
 		ChunkedDone(body, trailers, consumed) -> {
 			s = binary.to_string(body) or '<not utf8>'
-			'Done body=${string.inspect(s)} trailers=${list.length(trailers)} consumed=${consumed}'
+			'Done body=${string.inspect(s)} trailers=${array.length(trailers)} consumed=${consumed}'
 		}
 		ChunkedNeedMore -> 'NeedMore'
 		ChunkedBad(status) -> 'Bad ${status}'
@@ -286,7 +286,7 @@ println(string.inspect(binary.to_string(teapot_head)))
 println('')
 println('== method dispatch via binary patterns ==')
 methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'BREW']
-shown = list.map(methods, fn(name) {
+shown = array.map(methods, fn(name) {
 	req3 = binary.from_string('${name} / HTTP/1.1\r\n\r\n')
 	match h1.parse_request(req3, 0) {
 		Done(m, _, _, _, _) -> match m {

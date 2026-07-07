@@ -8,7 +8,7 @@
 // lookup and an assignment returns a new environment with the name `set`.
 
 import al/binary.{Dec}
-import al/list
+import al/array
 import al/map
 import al/result
 import al/string
@@ -183,7 +183,7 @@ fn print_expr(env Map(String, Int), input String) {
 
 // A whole session: fold the lines through a fresh, empty environment.
 fn run_session(lines Array(String)) {
-	_ = list.fold(lines, map.new(), run_line)
+	_ = array.fold(lines, map.new(), run_line)
 	Nil
 }
 

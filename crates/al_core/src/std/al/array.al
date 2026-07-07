@@ -17,7 +17,7 @@ pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
 	}
 }
 
-// You probably want `list.fold`
+// Runs f on every element for its side effect; if you want a value out, use map or fold.
 pub fn each(xs Array(a), f fn(a) b) {
 	match xs {
 		[] -> Nil
