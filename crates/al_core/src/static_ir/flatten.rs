@@ -168,25 +168,26 @@ impl FlatPools {
 }
 
 pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
-    let mut p = FlatPools::default();
-
     // The engine's pools are the basis of ours; seed them first so every
     // `StrId`/`ArenaSlice` embedded in the snapshot stays valid. Additional
     // strings (function/module names) intern after.
     // str_pool prefix must equal engine.strings verbatim so embedded StrId
     // indices stay valid; direct copy makes that structural instead of relying
     // on engine.strings being dupe-free.
-    p.str_pool = engine.strings.clone();
+    let mut p = FlatPools {
+        str_pool: engine.strings.clone(),
+        nodes: engine.nodes.clone(),
+        children: engine.children.clone(),
+        quants: engine.quants.clone(),
+        str_slices: engine.str_slices.clone(),
+        type_params: engine.type_params.clone(),
+        variant_fields: engine.variant_fields.clone(),
+        variants: engine.variants.clone(),
+        ..FlatPools::default()
+    };
     for (i, s) in engine.strings.iter().enumerate() {
         p.str_intern.entry(s.clone()).or_insert(i as u32);
     }
-    p.nodes = engine.nodes.clone();
-    p.children = engine.children.clone();
-    p.quants = engine.quants.clone();
-    p.str_slices = engine.str_slices.clone();
-    p.type_params = engine.type_params.clone();
-    p.variant_fields = engine.variant_fields.clone();
-    p.variants = engine.variants.clone();
 
     let mut keys: Vec<&String> = out.blob.interfaces.keys().collect();
     keys.sort();

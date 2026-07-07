@@ -716,7 +716,7 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
 const HTTP_ENTRY: &str = "import al/binary\n\
 import al/http/h1.{Done, NeedMore, Bad}\n\
 r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-\tDone(_, _, version, _, _) -> version\n\
+\tDone(_, _, _, _, consumed) -> consumed\n\
 \tNeedMore -> 0 - 1\n\
 \tBad(s) -> s\n\
 }\n\

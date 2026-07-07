@@ -332,6 +332,16 @@ fn field_not_on_every_variant_is_error() {
     );
 }
 
+#[test]
+fn field_access_partial_is_rejected() {
+    check_rejects(
+        "type Named { Person(name String age Int) Org(name String size Int) }\n\
+         fn age_of(n Named) Int { n.age }\n\
+         println(age_of(Person(name: 'al', age: 18)))\n",
+        "Field 'age' is not present on every variant of 'Named' (missing on 'Org')",
+    );
+}
+
 // A labelled-field projection onto a tuple type finds no field of that name;
 // the receiver type is rendered structurally in the message.
 #[test]
@@ -464,7 +474,7 @@ fn same_named_local_and_stdlib_types_coexist() {
          \t}\n\
          }\n\
          remote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \tDone(_, _, version, _, _) -> version\n\
+         \tDone(_, _, _, _, consumed) -> consumed\n\
          \tNeedMore -> 0 - 1\n\
          \tBad(s) -> s\n\
          }\n\

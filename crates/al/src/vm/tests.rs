@@ -579,7 +579,7 @@ fn array_slice_range_out_of_bounds_errors() {
 // parked store and the run queue; it is never resumed.
 fn parked_process() -> Process {
     Process {
-        heap: ProcHeap::default(),
+        heap: ProcHeap,
         stack: Vec::new(),
         frames: Vec::new(),
         is_main: false,
@@ -676,7 +676,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
     let mut vm = halt_test_vm();
     let sock = |id, is_listener| Value::socket(SocketValue { id, is_listener });
     let victim = |v: Value| Process {
-        heap: ProcHeap::default(),
+        heap: ProcHeap,
         stack: vec![v],
         frames: Vec::new(),
         is_main: false,
