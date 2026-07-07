@@ -842,16 +842,32 @@ impl InferEngine {
     // --- Union-find: find with path compression ---
 
     pub fn find(&mut self, t: Ty) -> Ty {
-        let TypeNode::Var(id) = self.node(t) else {
-            return t;
-        };
-        let idx = id as usize;
-        let TyVarState::Link { ty } = self.vars[idx] else {
-            return t;
-        };
-        let rep = self.find(ty);
-        self.vars[idx] = TyVarState::Link { ty: rep };
-        rep
+        // Two-pass iterative: chase links to the representative, then rewrite
+        // every traversed link to point directly at it. Avoids O(chain) native
+        // recursion on first traversal of a long chain.
+        let mut root = t;
+        loop {
+            let TypeNode::Var(id) = self.node(root) else {
+                break;
+            };
+            let TyVarState::Link { ty } = self.vars[id as usize] else {
+                break;
+            };
+            root = ty;
+        }
+        let mut cur = t;
+        while cur != root {
+            let TypeNode::Var(id) = self.node(cur) else {
+                break;
+            };
+            let idx = id as usize;
+            let TyVarState::Link { ty: next } = self.vars[idx] else {
+                break;
+            };
+            self.vars[idx] = TyVarState::Link { ty: root };
+            cur = next;
+        }
+        root
     }
 
     /// State of a root var. `id` must have come from `find()` returning
