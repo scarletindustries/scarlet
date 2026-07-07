@@ -15,22 +15,24 @@
 //! the head — is itself a jump target is left unfused: a branch landing on a
 //! Nop would skip the fused effect entirely.
 
-use std::collections::HashSet;
-
 use super::{Instruction, Op, op, op_ab};
 
 pub(super) fn fuse(code: &mut [Instruction]) {
+    let len = code.len();
     // Absolute addresses anything branches to. Only the head of a fused window
     // may be a target; landing mid-window after fusion would be incorrect.
-    let mut targets: HashSet<i32> = HashSet::new();
+    // Targets are dense indices into `code`, so a bitmap beats a HashSet.
+    let mut is_target = vec![false; len];
     for instr in code.iter() {
         if instr.op.has_jump_target() {
-            targets.insert(instr.operand);
+            let t = instr.operand as usize;
+            if t < len {
+                is_target[t] = true;
+            }
         }
     }
 
     let nop = op(Op::Nop);
-    let len = code.len();
     let mut i = 0usize;
     while i + 2 < len {
         let i0 = code[i];
@@ -39,8 +41,8 @@ pub(super) fn fuse(code: &mut [Instruction]) {
             || i1.op != Op::PushConst
             || i0.operand as u32 > u8::MAX as u32
             || i1.operand as u32 > u16::MAX as u32
-            || targets.contains(&((i + 1) as i32))
-            || targets.contains(&((i + 2) as i32))
+            || is_target[i + 1]
+            || is_target[i + 2]
         {
             i += 1;
             continue;
@@ -49,7 +51,7 @@ pub(super) fn fuse(code: &mut [Instruction]) {
         let i2 = code[i + 2];
 
         // 4-wide: PushLocal; PushConst; {Lt,Eq}Int; JumpIfFalse
-        if i + 3 < len && !targets.contains(&((i + 3) as i32)) {
+        if i + 3 < len && !is_target[i + 3] {
             let i3 = code[i + 3];
             if i3.op == Op::JumpIfFalse {
                 let fused = match i2.op {
