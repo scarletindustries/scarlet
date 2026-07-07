@@ -34,43 +34,49 @@ pub fn main_module() -> ModulePath {
 
 const STDLIB_MARKER: &str = include_str!("../std/.al-stdlib-root");
 
-/// If `file` is a stdlib source file inside the AL compiler repo itself,
-/// return its module path so the compiler can analyse it *as* that module
-/// (allowing `@vm`/external and suppressing prelude-redefinition errors).
-///
-/// Detection: walk up from `file` looking for `src/std/.al-stdlib-root` whose
-/// content matches the value embedded at build time. The marker is a fixed
-/// UUID that never changes, so editing stdlib files doesn't break detection
-/// and a non-AL project can't accidentally match.
-pub fn detect_stdlib_module(file: &Path) -> Option<ModulePath> {
-    let file = file.canonicalize().ok()?;
-    let mut dir = file.parent()?.to_path_buf();
+/// Walk up from `near` looking for `src/std/.al-stdlib-root` whose content
+/// matches the value embedded at build time; on a hit, return the `src/std`
+/// directory (the stdlib source root). The marker is a fixed UUID that never
+/// changes, so editing stdlib files doesn't break detection and a non-AL
+/// project can't accidentally match. Shared by [`detect_stdlib_module`]
+/// (file → module path) and the LSP's inverse mapping (module path → file).
+pub fn find_stdlib_root(near: &Path) -> Option<PathBuf> {
+    let near = near.canonicalize().ok()?;
+    let mut dir = near.parent()?.to_path_buf();
     loop {
         let marker = dir.join("src/std/.al-stdlib-root");
         if let Ok(s) = std::fs::read_to_string(&marker)
             && s.trim() == STDLIB_MARKER.trim()
         {
-            let std_root = dir.join("src/std");
-            let rel = file.strip_prefix(&std_root).ok()?;
-            // src/std/al.al -> ["al"]; src/std/al/net.al -> ["al","net"]
-            let mut segs: ModulePath = rel
-                .with_extension("")
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            // The marker file itself is not a module.
-            if segs.last().map(|s| s.starts_with('.')) == Some(true) {
-                return None;
-            }
-            if segs.is_empty() {
-                segs = al_prelude();
-            }
-            return Some(segs);
+            return Some(dir.join("src/std"));
         }
         if !dir.pop() {
             return None;
         }
     }
+}
+
+/// If `file` is a stdlib source file inside the AL compiler repo itself,
+/// return its module path so the compiler can analyse it *as* that module
+/// (allowing `@vm`/external and suppressing prelude-redefinition errors).
+pub fn detect_stdlib_module(file: &Path) -> Option<ModulePath> {
+    let file = file.canonicalize().ok()?;
+    let std_root = find_stdlib_root(&file)?;
+    let rel = file.strip_prefix(&std_root).ok()?;
+    // src/std/al.al -> ["al"]; src/std/al/net.al -> ["al","net"]
+    let mut segs: ModulePath = rel
+        .with_extension("")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    // The marker file itself is not a module.
+    if segs.last().map(|s| s.starts_with('.')) == Some(true) {
+        return None;
+    }
+    if segs.is_empty() {
+        segs = al_prelude();
+    }
+    Some(segs)
 }
 
 /// Recursively collect every `.al` source file under `dir` into `out`.
@@ -163,7 +169,6 @@ const fn align_to_range(n: i32) -> i32 {
 pub enum ModuleOrigin {
     Hydrated,
     Embedded {
-        source_hash: u64,
         refs: Rc<ModuleReferences>,
     },
     File {
@@ -197,7 +202,7 @@ pub struct CachedModule {
 }
 
 impl CachedModule {
-    fn from_static(iface: ModuleInterface) -> Self {
+    fn hydrated(iface: ModuleInterface) -> Self {
         CachedModule {
             iface,
             origin: ModuleOrigin::Hydrated,
@@ -226,7 +231,7 @@ impl CachedModule {
     /// `None` for hydrated stdlib modules.
     pub fn module_refs(&self) -> Option<&Rc<ModuleReferences>> {
         match &self.origin {
-            ModuleOrigin::Embedded { refs, .. } | ModuleOrigin::File { refs, .. } => Some(refs),
+            ModuleOrigin::Embedded { refs } | ModuleOrigin::File { refs, .. } => Some(refs),
             ModuleOrigin::Hydrated => None,
         }
     }
@@ -240,10 +245,10 @@ pub struct ModuleTable {
     loading: HashSet<String>,
     /// When the binary carries a static stdlib, `get_or_hydrate` falls through
     /// to `s.lookup_module(key)` on a `loaded` miss and caches the result.
-    pub static_fallback: Option<&'static crate::static_ir::StaticStdlib>,
+    static_fallback: Option<&'static crate::static_ir::StaticStdlib>,
     /// In-memory document overrides (LSP unsaved buffers). Module resolution
     /// prefers these over `fs::read_to_string`.
-    pub overlays: HashMap<PathBuf, String>,
+    overlays: HashMap<PathBuf, String>,
     /// Per-module `(mtime, len)` of the on-disk source as of the last time
     /// its content was hashed and found to match the cached `source_hash`.
     /// `IncrementalSession::check` stat-gates the per-keystroke staleness scan
@@ -288,9 +293,9 @@ impl ModuleTable {
         self.loading.clear();
     }
 
-    pub fn insert(&mut self, key: String, iface: ModuleInterface) {
+    pub fn insert_hydrated(&mut self, key: String, iface: ModuleInterface) {
         self.loading.remove(&key);
-        self.loaded.insert(key, CachedModule::from_static(iface));
+        self.loaded.insert(key, CachedModule::hydrated(iface));
     }
 
     pub fn insert_cached(&mut self, key: String, cm: CachedModule) {
@@ -309,7 +314,7 @@ impl ModuleTable {
             && let Some(iface) = s.lookup_module(key)
         {
             self.loaded
-                .insert(key.to_string(), CachedModule::from_static(iface));
+                .insert(key.to_string(), CachedModule::hydrated(iface));
         }
         self.loaded.get(key).map(|c| &c.iface)
     }
@@ -323,11 +328,23 @@ impl ModuleTable {
     }
 
     /// Read the on-disk (or overlaid) content for a previously-resolved file.
-    pub fn read_source(&self, path: &Path) -> Option<String> {
+    pub fn read_source(&self, path: &Path) -> std::io::Result<String> {
         if let Some(t) = self.overlays.get(path) {
-            return Some(t.clone());
+            return Ok(t.clone());
         }
-        std::fs::read_to_string(path).ok()
+        std::fs::read_to_string(path)
+    }
+
+    pub fn set_overlay(&mut self, path: PathBuf, src: String) {
+        self.overlays.insert(path, src);
+    }
+
+    pub fn clear_overlay(&mut self, path: &Path) {
+        self.overlays.remove(path);
+    }
+
+    pub fn set_static_fallback(&mut self, s: &'static crate::static_ir::StaticStdlib) {
+        self.static_fallback = Some(s);
     }
 
     /// Iterate cached user modules (those compiled from a file on disk).
@@ -376,10 +393,11 @@ impl ModuleTable {
 
         match std::fs::read_to_string(&path) {
             Ok(t) => {
-                if let Some(s) = stat {
+                let changed = source_hash(&t) != expected_hash;
+                if !changed && let Some(s) = stat {
                     self.stat_cache.insert(key.to_string(), s);
                 }
-                source_hash(&t) != expected_hash
+                changed
             }
             Err(_) => {
                 self.stat_cache.remove(key);
@@ -630,10 +648,10 @@ mod tests {
     // itself is not a module, and an unrelated path matches nothing.
     #[test]
     fn detect_stdlib_module_resolves_repo_std_files() {
-        let list = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/al/list.al"));
+        let array = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/al/array.al"));
         assert_eq!(
-            detect_stdlib_module(list),
-            Some(vec!["al".to_string(), "list".to_string()])
+            detect_stdlib_module(array),
+            Some(vec!["al".to_string(), "array".to_string()])
         );
 
         let prelude = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/al.al"));
@@ -695,7 +713,7 @@ mod tests {
     fn resolve_stdlib_relative_and_errors() {
         // Embedded stdlib.
         assert!(matches!(
-            resolve(&vec!["al".into(), "list".into()], None),
+            resolve(&vec!["al".into(), "array".into()], None),
             Ok(ModuleSource::Embedded(_))
         ));
         assert!(matches!(
@@ -746,11 +764,11 @@ mod tests {
         t.mark_loading("foo");
         assert!(t.is_loading("foo"));
 
-        t.insert(
+        t.insert_hydrated(
             "foo".to_string(),
             ModuleInterface::new(vec!["foo".to_string()]),
         );
-        // insert clears the loading mark and makes the interface visible.
+        // insert_hydrated clears the loading mark and makes the interface visible.
         assert!(!t.is_loading("foo"));
         assert!(t.get("foo").is_some());
 
@@ -770,7 +788,7 @@ mod tests {
         assert!(!t.source_changed("unknown"));
 
         // Hydrated module never changes.
-        t.insert(
+        t.insert_hydrated(
             "static".to_string(),
             ModuleInterface::new(vec!["static".to_string()]),
         );
