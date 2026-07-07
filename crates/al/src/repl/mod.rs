@@ -67,6 +67,12 @@ pub fn run(version: &str) {
             input_buffer = line_trimmed.to_string();
         }
 
+        if input_buffer.trim().is_empty() {
+            input_buffer.clear();
+            continuation = false;
+            continue;
+        }
+
         match eval_input(&input_buffer, &definitions) {
             EvalOutcome::Incomplete => {
                 continuation = true;
