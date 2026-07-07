@@ -1,9 +1,10 @@
 use super::Kind;
 
 /// The single source of truth for al's keyword set. Adding a keyword means
-/// adding one variant here: `text` and `parse` are exhaustive matches, so the
-/// compiler enforces that the scanner spelling and the display spelling stay in
-/// lockstep with the variant list.
+/// adding one variant here: `text` is an exhaustive match so the compiler
+/// forces a display spelling; `parse` is not (it matches on `&str`), so the
+/// `keyword_roundtrip` test below enforces that every variant in `ALL` has a
+/// `parse` arm that agrees with `text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Keyword {
     Fn,
@@ -21,6 +22,21 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    pub const ALL: [Keyword; 12] = [
+        Self::Fn,
+        Self::Import,
+        Self::Type,
+        Self::In,
+        Self::Match,
+        Self::Const,
+        Self::If,
+        Self::Else,
+        Self::Or,
+        Self::Pub,
+        Self::Opaque,
+        Self::As,
+    ];
+
     pub const fn text(self) -> &'static str {
         match self {
             Self::Fn => "fn",
@@ -61,4 +77,16 @@ impl Keyword {
 #[inline]
 pub fn match_keyword(s: &str) -> Option<Kind> {
     Keyword::parse(s).map(Kind::Keyword)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Keyword;
+
+    #[test]
+    fn keyword_roundtrip() {
+        for kw in Keyword::ALL {
+            assert_eq!(Keyword::parse(kw.text()), Some(kw), "{kw:?}");
+        }
+    }
 }
