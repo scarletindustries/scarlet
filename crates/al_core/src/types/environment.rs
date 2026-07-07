@@ -195,7 +195,7 @@ impl TypeEnv {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EnvWatermark {
     pub root_scope: usize,
     pub type_info: usize,

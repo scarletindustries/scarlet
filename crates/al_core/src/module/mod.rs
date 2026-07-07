@@ -785,11 +785,7 @@ mod tests {
             iface: ModuleInterface::new(vec!["m".to_string()]),
             origin: ModuleOrigin::File {
                 source_hash: source_hash(body),
-                // `source_changed` never reads the watermark; a zeroed one is
-                // sound (`Watermark` and its parts are `Copy` all-integer PODs)
-                // and keeps this test decoupled from those structs' field sets.
-                #[allow(unsafe_code)]
-                watermark: unsafe { std::mem::zeroed() },
+                watermark: Watermark::default(),
                 path: path.clone(),
                 refs: Rc::new(ModuleReferences::new(crate::reference::ModuleId(0))),
             },

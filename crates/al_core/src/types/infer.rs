@@ -401,7 +401,7 @@ pub fn new_engine() -> InferEngine {
     InferEngine::default()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EnginePoolWatermark {
     // Field order is significant: derived `Ord` compares lexicographically, and
     // pools grow monotonically together, so an earlier watermark compares `<`

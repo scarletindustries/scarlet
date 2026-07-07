@@ -74,7 +74,7 @@ pub struct HoverFact {
 /// boundaries so an `IncrementalSession` can roll back exactly to that point.
 /// Ordering follows `EnginePoolWatermark` so `min()` over a set of watermarks
 /// picks the earliest-compiled one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Watermark {
     pub engine: EnginePoolWatermark,
     pub env: EnvWatermark,
