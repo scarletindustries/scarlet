@@ -7,7 +7,7 @@
 // a `Map(String, Int)` threaded through the program — so a reference is a map
 // lookup and an assignment returns a new environment with the name `set`.
 
-import al/binary
+import al/binary.{Dec}
 import al/list
 import al/map
 import al/result
@@ -117,7 +117,7 @@ fn factor(tokens Array(String)) Parsed {
 			Err(m) -> Err(m)
 		}
 		// A number is a literal; any other word is a variable reference.
-		[t, ..rest] -> match binary.parse_int(binary.from_string(t), 10) {
+		[t, ..rest] -> match binary.parse_int(binary.from_string(t), Dec) {
 			Some(n) -> Ok((Num(n), rest))
 			None -> Ok((Var(t), rest))
 		}
