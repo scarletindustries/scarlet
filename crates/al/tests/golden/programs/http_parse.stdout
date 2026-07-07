@@ -1,8 +1,8 @@
 == request line ==
-simple get: Done method=GET target=/ version=1 headers=0 consumed=18
-post with path: Done method=POST target=/api/users?id=1 version=1 headers=1 consumed=42
-http10: Done method=GET target=/ version=0 headers=0 consumed=18
-leading empty line: Done method=GET target=/ version=1 headers=0 consumed=20
+simple get: Done method=GET target=/ version=Http11 headers=0 consumed=18
+post with path: Done method=POST target=/api/users?id=1 version=Http11 headers=1 consumed=42
+http10: Done method=GET target=/ version=Http10 headers=0 consumed=18
+leading empty line: Done method=GET target=/ version=Http11 headers=0 consumed=20
 unknown version: Bad 505
 garbage version: Bad 505
 no spaces: Bad 400
@@ -16,8 +16,8 @@ partial request line: NeedMore
 no blank line yet: NeedMore
 
 == headers ==
-two headers: Done method=GET target=/ version=1 headers=2 consumed=50
-ows trimmed: Done method=GET target=/ version=1 headers=1 consumed=37
+two headers: Done method=GET target=/ version=Http11 headers=2 consumed=50
+ows trimmed: Done method=GET target=/ version=Http11 headers=1 consumed=37
 obs-fold rejected: Bad 400
 ws before colon rejected: Bad 400
 no colon rejected: Bad 400
@@ -75,19 +75,19 @@ http10 default: close=True want100=False
 expect 100: close=False want100=True
 
 == response head serialization ==
-Ok(
+Some(
   HTTP/1.1 200 OK
 Content-Type: text/plain
 Content-Length: 5
 
 
 )
-Ok(
+Some(
   HTTP/1.1 404 Not Found
 
 
 )
-Ok(HTTP/1.1 418 
+Some(HTTP/1.1 418 
 
 )
 

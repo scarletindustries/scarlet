@@ -9,6 +9,9 @@ import al/http/h1.{
 	ChunkedDone,
 	ChunkedNeedMore,
 	ChunkedBad,
+	Version,
+	Http10,
+	Http11,
 }
 import al/http/body.{Body, Empty, Whole, Streaming}
 import al/http/headers.{Header, Headers}
@@ -43,12 +46,6 @@ pub type Method {
 	Other(name Binary)
 }
 
-pub type Version {
-	Http10
-	Http11
-	Http2
-}
-
 pub type Request {
 	method Method
 	path Binary
@@ -61,6 +58,13 @@ pub type Response {
 	status Int
 	headers Headers
 	body Body
+}
+
+// The outcome of writing one response: whether the connection may stay alive,
+// and if so, the batch of bytes still queued for the next vectored write.
+type Sent {
+	KeepAlive(pending Array(Binary))
+	Close
 }
 
 // Largest request body the default buffered path will accept. A Content-Length
@@ -94,10 +98,6 @@ fn to_method(m Binary) Method {
 		<<'OPTIONS'>> -> Options
 		else -> Other(m)
 	}
-}
-
-fn to_version(minor Int) Version {
-	if minor == 0 { Http10 } else { Http11 }
 }
 
 // A 200 response whose body is supplied directly as a pull thunk of unknown
@@ -137,11 +137,11 @@ pub fn with_header(r Response, name Binary, value Binary) Response {
 	Response(status: r.status, headers: headers.set(r.headers, name, value), body: r.body)
 }
 
-fn build_request(method Binary, target Binary, version Int, hdrs Headers, b Body) Request {
+fn build_request(method Binary, target Binary, version Version, hdrs Headers, b Body) Request {
 	Request(
 		method: to_method(method),
 		path: target,
-		version: to_version(version),
+		version: version,
 		headers: hdrs,
 		body: b,
 	)
@@ -235,7 +235,7 @@ fn handle(
 	consumed Int,
 	method Binary,
 	target Binary,
-	version Int,
+	version Version,
 	hdrs Headers,
 	handler fn(Request) Response,
 	pending Array(Binary),
@@ -251,8 +251,6 @@ fn handle(
 				sock,
 				buf,
 				consumed,
-				version,
-				hdrs,
 				build_request(method, target, version, hdrs, body.empty()),
 				handler,
 				pending,
@@ -292,7 +290,7 @@ fn read_body(
 	n Int,
 	method Binary,
 	target Binary,
-	version Int,
+	version Version,
 	hdrs Headers,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
@@ -303,7 +301,7 @@ fn read_body(
 			buffered = int.min(avail, n)
 			head_bytes = binary.slice_bytes(buf, consumed, buffered)
 			need = n - buffered
-			match body.collect(h1.content_length_reader(sock, need), MAX_BODY) {
+			match body.collect(body.content_length(sock, need), MAX_BODY) {
 				Err(e) -> Err(e)
 				// Pending responses were flushed before the body was read, so
 				// this request starts a fresh batch.
@@ -315,8 +313,6 @@ fn read_body(
 					} else {
 						0
 					},
-					version,
-					hdrs,
 					build_request(
 						method,
 						target,
@@ -341,7 +337,7 @@ fn read_chunked_body(
 	off Int,
 	method Binary,
 	target Binary,
-	version Int,
+	version Version,
 	hdrs Headers,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
@@ -365,7 +361,7 @@ fn chunked_loop(
 	off Int,
 	method Binary,
 	target Binary,
-	version Int,
+	version Version,
 	hdrs Headers,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
@@ -399,8 +395,6 @@ fn chunked_loop(
 				sock,
 				buf,
 				consumed,
-				version,
-				hdrs,
 				build_request(
 					method,
 					target,
@@ -444,22 +438,20 @@ fn respond_and_continue(
 	sock Socket,
 	leftover_buf Binary,
 	leftover_off Int,
-	version Int,
-	hdrs Headers,
 	req Request,
 	handler fn(Request) Response,
 	pending Array(Binary),
 ) Result(Nil, NetError) {
 	resp = handler(req)
-	match respond(sock, pending, req.method, version, resp) {
+	match respond(sock, pending, req.method, req.version, resp) {
 		Err(e) -> Err(e)
+		Ok(Close) -> Ok(Nil)
 		Ok(
-			(keep_alive, still_pending),
-		) -> if keep_alive && !h1.should_close(version, hdrs) && !response_close(resp) {
-			serve_conn(sock, leftover_buf, leftover_off, handler, still_pending)
-		} else {
-			// Closing: whatever is still unwritten goes out now.
+			KeepAlive(still_pending),
+		) -> if h1.should_close(req.version, req.headers) || response_close(resp) {
 			flush(sock, still_pending)
+		} else {
+			serve_conn(sock, leftover_buf, leftover_off, handler, still_pending)
 		}
 	}
 }
@@ -485,40 +477,48 @@ fn respond(
 	sock Socket,
 	pending Array(Binary),
 	method Method,
-	version Int,
+	version Version,
 	resp Response,
-) Result((Bool, Array(Binary)), NetError) {
-	stream = !headers.has(resp.headers, NAME_CONTENT_LENGTH) && !suppress_body(method, resp.status)
-	if stream && version == 1 {
-		hdrs = headers.set(resp.headers, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
-		match flush(sock, pending) {
-			Err(e) -> Err(e)
-			Ok(
-				_,
-			) -> match body.drain_chunked_with_head(
-				h1.serialize_head(resp.status, hdrs),
-				resp.body,
-				sock,
-			) {
-				Ok(_) -> Ok((True, []))
-				Err(e) -> Err(e)
-			}
-		}
-	} else if stream {
-		hdrs = headers.set(resp.headers, NAME_CONNECTION, VAL_CLOSE)
-		match flush(sock, pending) {
-			Err(e) -> Err(e)
-			Ok(
-				_,
-			) -> match body.drain_with_head(h1.serialize_head(resp.status, hdrs), resp.body, sock) {
-				Ok(_) -> Ok((False, []))
-				Err(e) -> Err(e)
-			}
-		}
-	} else if suppress_body(method, resp.status) {
-		Ok((True, [..pending, h1.serialize_head(resp.status, resp.headers)]))
-	} else {
+) Result(Sent, NetError) {
+	if suppress_body(method, resp.status) {
+		Ok(KeepAlive([..pending, h1.serialize_head(resp.status, resp.headers)]))
+	} else if headers.has(resp.headers, NAME_CONTENT_LENGTH) {
 		buffer_body(sock, pending, h1.serialize_head(resp.status, resp.headers), resp.body)
+	} else {
+		match version {
+			Http11 -> {
+				hdrs = headers.set(resp.headers, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
+				match flush(sock, pending) {
+					Err(e) -> Err(e)
+					Ok(
+						_,
+					) -> match body.drain_chunked_with_head(
+						h1.serialize_head(resp.status, hdrs),
+						resp.body,
+						sock,
+					) {
+						Ok(_) -> Ok(KeepAlive([]))
+						Err(e) -> Err(e)
+					}
+				}
+			}
+			Http10 -> {
+				hdrs = headers.set(resp.headers, NAME_CONNECTION, VAL_CLOSE)
+				match flush(sock, pending) {
+					Err(e) -> Err(e)
+					Ok(
+						_,
+					) -> match body.drain_with_head(
+						h1.serialize_head(resp.status, hdrs),
+						resp.body,
+						sock,
+					) {
+						Ok(_) -> Ok(Close)
+						Err(e) -> Err(e)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -531,15 +531,15 @@ fn buffer_body(
 	pending Array(Binary),
 	head Binary,
 	b Body,
-) Result((Bool, Array(Binary)), NetError) {
+) Result(Sent, NetError) {
 	match body.take_buffered(b) {
 		Err(e) -> Err(e)
-		Ok(Empty) -> Ok((True, [..pending, head]))
-		Ok(Whole(data)) -> Ok((True, [..pending, head, data]))
+		Ok(Empty) -> Ok(KeepAlive([..pending, head]))
+		Ok(Whole(data)) -> Ok(KeepAlive([..pending, head, data]))
 		Ok(Streaming(first, second, rest)) -> match flush(sock, [..pending, head, first, second]) {
 			Err(e) -> Err(e)
 			Ok(_) -> match body.drain(rest, sock) {
-				Ok(_) -> Ok((True, []))
+				Ok(_) -> Ok(KeepAlive([]))
 				Err(e) -> Err(e)
 			}
 		}
@@ -555,12 +555,10 @@ fn suppress_body(method Method, status Int) Bool {
 	}
 }
 
-// Whether the handler's response asked to close the connection.
+// Whether the handler's response asked to close the connection. `Connection`
+// is a token list, so `close` is matched as one element among possibly several.
 fn response_close(resp Response) Bool {
-	match headers.get(resp.headers, NAME_CONNECTION) {
-		None -> False
-		Some(v) -> binary.eq_ignore_ascii_case(v, VAL_CLOSE)
-	}
+	headers.contains_token(resp.headers, NAME_CONNECTION, VAL_CLOSE)
 }
 
 // Write a minimal framed error response (Content-Length: 0, Connection: close)

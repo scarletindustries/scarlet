@@ -1,8 +1,5 @@
-import al/binary
 import al/http/headers.{Header}
-import al/http/body.{Body}
 import al/http/status
-import al/net/socket.{Socket}
 
 // Sans-IO HTTP/1.1 message parsing, framing, and response-head serialization.
 //
@@ -29,12 +26,19 @@ const KEEP_ALIVE = <<'keep-alive'>>
 const EXPECT = <<'expect'>>
 const CONTINUE_100 = <<'100-continue'>>
 
+// The HTTP/1.x minor version on the wire. HTTP/2 speaks a different framing
+// layer entirely and never reaches this parser, so it is deliberately absent —
+// a `Version` value proves the message was HTTP/1.0 or HTTP/1.1.
+pub type Version {
+	Http10
+	Http11
+}
+
 // The outcome of parsing one request head out of `buf` starting at an offset.
 // `Done` threads the consumed-offset so the connection loop can resume parsing
-// the next pipelined request from exactly where this one ended. `version` is
-// the HTTP minor version: 0 for HTTP/1.0, 1 for HTTP/1.1.
+// the next pipelined request from exactly where this one ended.
 pub type Parsed {
-	Done(method Binary target Binary version Int headers Array(Header) consumed Int)
+	Done(method Binary target Binary version Version headers Array(Header) consumed Int)
 	NeedMore
 	Bad(status Int)
 }
@@ -113,34 +117,19 @@ pub fn serialize_head(code Int, hs Array(Header)) Binary {
 	serialize_head_with(code, status.reason_phrase(code), hs)
 }
 
-// Build a Content-Length-framed request-body reader over `sock`.
-pub fn content_length_reader(sock Socket, n Int) Body {
-	body.content_length(sock, n)
-}
-
-fn connection_is(hs Array(Header), token Binary) Bool {
-	match headers.get(hs, CONNECTION) {
-		None -> False
-		Some(v) -> binary.eq_ignore_ascii_case(v, token)
-	}
-}
-
 // Whether the connection must close after this message. HTTP/1.0 defaults to
 // close unless `Connection: keep-alive`; HTTP/1.1 defaults to keep-alive
-// unless `Connection: close`.
-pub fn should_close(version Int, hs Array(Header)) Bool {
-	if version == 1 {
-		connection_is(hs, CLOSE)
-	} else {
-		if connection_is(hs, KEEP_ALIVE) { False } else { True }
+// unless `Connection: close`. `Connection` is a token list (RFC 9110 §7.6.1),
+// so `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
+pub fn should_close(version Version, hs Array(Header)) Bool {
+	match version {
+		Http11 -> headers.contains_token(hs, CONNECTION, CLOSE)
+		Http10 -> !headers.contains_token(hs, CONNECTION, KEEP_ALIVE)
 	}
 }
 
 // Whether the client asked the server to send an interim 100 response before
 // it streams the request body (`Expect: 100-continue`).
 pub fn want_100_continue(hs Array(Header)) Bool {
-	match headers.get(hs, EXPECT) {
-		None -> False
-		Some(v) -> binary.eq_ignore_ascii_case(v, CONTINUE_100)
-	}
+	headers.contains_token(hs, EXPECT, CONTINUE_100)
 }

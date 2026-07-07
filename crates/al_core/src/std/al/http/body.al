@@ -4,6 +4,10 @@ import al/net/socket.{Socket}
 import al/net/error.{NetError, UnexpectedEof, MessageTooLarge}
 import al/http/headers.{Header}
 
+// The socket read size for the streaming readers below: large enough that a
+// full body arrives in a handful of pulls, small enough that a slow consumer
+// never has more than one chunk of memory pinned.
+const READ_SIZE = 65536
 const CRLF = <<'\r\n'>>
 const ZERO = <<'0'>>
 // 0-size chunk + empty trailer block: the terminator for a trailer-free body.
@@ -45,7 +49,7 @@ pub fn from_binary(b Binary) Body {
 pub fn content_length(reader Socket, n Int) Body {
 	fn() match n {
 		0 -> Ok(Done([]))
-		else -> match socket.read(reader, int.min(n, 65536)) {
+		else -> match socket.read(reader, int.min(n, READ_SIZE)) {
 			Ok(chunk) -> {
 				got = binary.byte_size(chunk)
 				match got {
@@ -62,7 +66,7 @@ pub fn content_length(reader Socket, n Int) Body {
 // 64 KiB, and a zero-byte read is the clean end of the body (Done). Used for
 // responses framed by connection close rather than a known length.
 pub fn eof_reader(sock Socket) Body {
-	fn() match socket.read(sock, 65536) {
+	fn() match socket.read(sock, READ_SIZE) {
 		Ok(chunk) -> match binary.byte_size(chunk) {
 			0 -> Ok(Done([]))
 			else -> Ok(Chunk(chunk, eof_reader(sock)))
