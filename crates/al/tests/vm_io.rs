@@ -531,10 +531,7 @@ import al/result
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> {
 		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		match http.serve_on(server, fn(_req) http.text('Hello from al/http!')) {
-			Ok(_) -> Nil
-			Err(e) -> println('serve failed: ${e}')
-		}
+		http.serve_on(server, fn(_req) http.text('Hello from al/http!'))
 	}
 	Err(e) -> println('serve failed: ${e}')
 }
@@ -602,7 +599,7 @@ import al/result
 match net.listen('127.0.0.1', 0) {
 	Ok(server) -> {
 		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		match http.serve_on(server, fn(req) {
+		http.serve_on(server, fn(req) {
 			collected = body.collect(req.body, 1048576) or <<>>
 			echoed = binary.to_string(collected) or '<not-utf8>'
 			trailer = match headers.get(req.trailers, <<'x-checksum'>>) {
@@ -610,10 +607,7 @@ match net.listen('127.0.0.1', 0) {
 				None -> 'none'
 			}
 			http.text('body=[${echoed}] trailer=[${trailer}]')
-		}) {
-			Ok(_) -> Nil
-			Err(e) -> println('serve failed: ${e}')
-		}
+		})
 	}
 	Err(e) -> println('serve failed: ${e}')
 }
