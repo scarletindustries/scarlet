@@ -56,10 +56,7 @@ pub(super) struct Seed {
 // like `Process`/`Migrant`: the heap owns its slabs, `root` is one machine
 // word into them, and the fd handles are inherently `Send`. If `Seed` ever
 // regains a field that cannot move across threads, spawning must not build.
-const _: () = {
-    const fn assert_send<T: Send>() {}
-    assert_send::<Seed>();
-};
+const _: () = al_core::assert_send::<Seed>();
 
 /// A unit of work delivered to a scheduler's private inbox: a process that
 /// has not started yet (a seed) or a process moving between schedulers

@@ -54,10 +54,7 @@ pub(super) struct Migrant {
 // memory outright, nothing in it is shared with the donor scheduler. This
 // assert is the compile-time gate for migration soundness: if `Process` ever
 // regains a field that cannot move across threads, donation must not build.
-const _: () = {
-    const fn assert_send<T: Send>() {}
-    assert_send::<Migrant>();
-};
+const _: () = al_core::assert_send::<Migrant>();
 
 /// Visit every immediate child `Value` of `v` — the shared descent step for
 /// recursive walks over a value graph. Leaves are matched exhaustively so a

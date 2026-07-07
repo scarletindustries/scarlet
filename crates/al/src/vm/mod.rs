@@ -314,10 +314,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 // A migrant crosses an OS-thread boundary as a plain move; this must hold by
 // construction (owned arena + plain-data frames), never via unsafe impls.
-const _: () = {
-    const fn assert_send<T: Send>() {}
-    assert_send::<Process>();
-};
+const _: () = al_core::assert_send::<Process>();
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
 #[inline]

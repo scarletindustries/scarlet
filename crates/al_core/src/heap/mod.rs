@@ -64,7 +64,4 @@ pub use proc_heap::ProcHeap;
 // zero-sized allocator marker, so the move is trivially sound; the objects it
 // allocated travel as plain `Value` words and are freed (via `mi_free`, which
 // is cross-thread safe) wherever the process next runs.
-const _: () = {
-    const fn assert_send<T: Send>() {}
-    assert_send::<ProcHeap>();
-};
+const _: () = crate::assert_send::<ProcHeap>();

@@ -135,8 +135,7 @@ pub struct FrozenArea {
 }
 
 // Shared across every scheduler thread by construction.
-const fn assert_send_sync<T: Send + Sync>() {}
-const _: () = assert_send_sync::<FrozenArea>();
+const _: () = crate::assert_send_sync::<FrozenArea>();
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)

@@ -537,10 +537,7 @@ pub struct Program {
 // Worker scheduler threads clone the shared program (load-bearing fact 3):
 // constants are frozen/immediate words, names are `Arc<str>`, the area is
 // `Arc<FrozenArea>`. This must stay thread-shareable.
-const _: () = {
-    const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<Program>();
-};
+const _: () = crate::assert_send_sync::<Program>();
 
 pub fn op(o: Op) -> Instruction {
     Instruction {

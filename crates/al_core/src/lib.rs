@@ -40,3 +40,8 @@ pub use indexmap::IndexMap;
 pub use precompile::{PrecompileOutput, precompile_stdlib};
 pub use static_ir::{StaticStdlib, VariantTemplate};
 pub use type_def::TypeId;
+
+/// Compile-time assertion that `T: Send`. Use as `const _: () = assert_send::<T>();`.
+pub const fn assert_send<T: Send>() {}
+/// Compile-time assertion that `T: Send + Sync`.
+pub const fn assert_send_sync<T: Send + Sync>() {}
