@@ -761,7 +761,9 @@ impl InferEngine {
     /// debug_assert (release builds fabricate an Unbound so callers stay total).
     fn root_var(&self, id: i32) -> RootVarState {
         match self.vars[id as usize] {
-            TyVarState::Unbound { level, constraint } => RootVarState::Unbound { level, constraint },
+            TyVarState::Unbound { level, constraint } => {
+                RootVarState::Unbound { level, constraint }
+            }
             TyVarState::Generic { id, constraint } => RootVarState::Generic { id, constraint },
             TyVarState::Link { .. } => {
                 debug_assert!(false, "root_var on Link — find() invariant broken");

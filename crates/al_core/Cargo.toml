@@ -8,3 +8,4 @@ indexmap = { workspace = true }
 petgraph = "0.8"
 include_dir = { version = "0.7", features = ["glob"] }
 libmimalloc-sys = { version = "0.1.49", features = ["v2"] }
+percent-encoding = "2"
