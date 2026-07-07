@@ -301,7 +301,14 @@ impl TypeEnv {
     }
 
     pub fn define(&mut self, name: &str, scheme: Scheme) {
-        let (idx, prev) = self.bindings.insert_full(name.to_string(), scheme);
+        // Probe by borrow first so shadowing an existing name (params, `let`
+        // rebinds, match-arm vars) never allocates a fresh key `String`.
+        let (idx, prev) = if let Some((idx, _, slot)) = self.bindings.get_full_mut(name) {
+            (idx, Some(std::mem::replace(slot, scheme)))
+        } else {
+            let (idx, _) = self.bindings.insert_full(name.to_string(), scheme);
+            (idx, None)
+        };
         if !self.scope_marks.is_empty() {
             self.scope_undo.push((idx, prev));
         }
