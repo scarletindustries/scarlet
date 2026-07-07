@@ -106,7 +106,7 @@ fn dump(source: &str, out: &AlOutput) -> String {
 
 /// The one reject-checker: asserts `out` is a *clean* rejection — failure exit,
 /// a real exit code (never a signal/abort), no Rust panic in the output, and a
-/// diagnostic case-insensitively containing at least one of `expected_diags` on
+/// diagnostic containing at least one of `expected_diags` (case-sensitive) on
 /// either stream. An empty entry pins only the clean-rejection contract, not the
 /// message.
 pub fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diags: &[&str]) {
@@ -126,11 +126,10 @@ pub fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diags: &
         "panicked instead of rejecting cleanly:\n{}",
         dump(source, out)
     );
-    let combined_lc = combined.to_lowercase();
     assert!(
         expected_diags
             .iter()
-            .any(|d| d.is_empty() || combined_lc.contains(&d.to_lowercase())),
+            .any(|d| d.is_empty() || combined.contains(d)),
         "expected output to contain one of {expected_diags:?} for:\n{source}\n--- output ---\n{combined}"
     );
 }
