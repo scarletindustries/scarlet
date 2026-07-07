@@ -39,10 +39,21 @@ pub struct TypeRefHit {
 ///     unseen lowercase name is an error rather than an implicit fresh var.
 #[derive(Debug)]
 pub struct Hydrator {
-    created: HashMap<String, Ty>,
+    created: HashMap<String, (Ty, i32)>,
     rigid_ids: HashSet<i32>,
     permit_new: bool,
     type_refs: Vec<TypeRefHit>,
+}
+
+/// Result of [`Hydrator::add_type_variable`]: the (possibly pre-existing)
+/// type-variable `Ty`, its var id, and whether the name was already seeded.
+/// Returning the id here means callers never re-derive it by pattern-matching
+/// on `TypeNode::Var` — the invariant lives entirely inside this module.
+#[derive(Debug, Clone, Copy)]
+pub struct AddedTypeVar {
+    pub ty: Ty,
+    pub id: i32,
+    pub duplicate: bool,
 }
 
 impl Default for Hydrator {
@@ -79,16 +90,26 @@ impl Hydrator {
     }
 
     /// Pre-seed a declared type parameter (the `a` in `type Foo(a, b) { .. }`).
-    /// Returns `Err(existing)` if `name` was already registered so the caller
-    /// can raise a duplicate-parameter error. Unlike implicit annotation vars
-    /// these are *not* added to `rigid_ids`.
-    pub fn add_type_variable(&mut self, name: &str, engine: &mut InferEngine) -> Result<Ty, Ty> {
-        let (t, _id) = engine.fresh_generic_var();
+    /// On a repeated name the *existing* var is returned with `duplicate: true`
+    /// and no fresh var is minted, so both textual occurrences of the parameter
+    /// resolve to the same id. Unlike implicit annotation vars these are *not*
+    /// added to `rigid_ids`.
+    pub fn add_type_variable(&mut self, name: &str, engine: &mut InferEngine) -> AddedTypeVar {
+        if let Some(&(ty, id)) = self.created.get(name) {
+            return AddedTypeVar {
+                ty,
+                id,
+                duplicate: true,
+            };
+        }
+        let (ty, id) = engine.fresh_generic_var();
         let name_id = engine.intern(name);
-        engine.name_var(t, name_id);
-        match self.created.insert(name.to_string(), t) {
-            Some(_) => Err(t),
-            None => Ok(t),
+        engine.name_var(ty, name_id);
+        self.created.insert(name.to_string(), (ty, id));
+        AddedTypeVar {
+            ty,
+            id,
+            duplicate: false,
         }
     }
 
@@ -133,7 +154,7 @@ impl Hydrator {
         let name = &nt.identifier.name;
         let name_span = nt.identifier.span;
 
-        if let Some(&v) = self.created.get(name) {
+        if let Some(&(v, _)) = self.created.get(name) {
             if !nt.type_args.is_empty() {
                 return Err(err(
                     span,
@@ -164,7 +185,7 @@ impl Hydrator {
             self.rigid_ids.insert(id);
             let name_id = engine.intern(name.as_str());
             engine.name_var(t, name_id);
-            self.created.insert(name.clone(), t);
+            self.created.insert(name.clone(), (t, id));
             return Ok(t);
         }
 

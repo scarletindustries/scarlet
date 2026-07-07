@@ -516,7 +516,8 @@ impl Compiler {
         let mut type_params: Vec<TypeParam> = Vec::with_capacity(params.len());
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
         for tp in params {
-            let AddedTypeVar { ty, id, duplicate } = h.add_type_variable(&tp.name, &mut self.engine);
+            let AddedTypeVar { ty, id, duplicate } =
+                h.add_type_variable(&tp.name, &mut self.engine);
             if duplicate {
                 self.error(format!("Duplicate type parameter '{}'", tp.name), tp.span);
             }
@@ -764,10 +765,10 @@ impl Compiler {
         // Write the now-complete variant slice back into the env.
         let variants = self.engine.push_variants(&variants);
         self.env
-            .set_type_body(&type_name, TypeBody::Custom { variants });
+            .set_type_body(type_name, TypeBody::Custom { variants });
 
-        let ti = self.env.lookup_type_info(&type_name);
-        export_type(iface.as_deref_mut(), &type_name, is_public, ti);
+        let ti = self.env.lookup_type_info(type_name);
+        export_type(iface.as_deref_mut(), type_name, is_public, ti);
     }
 }
 
