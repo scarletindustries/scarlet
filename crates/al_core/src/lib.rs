@@ -28,6 +28,7 @@ pub mod reference;
 pub mod scanner;
 pub mod span;
 pub mod static_ir;
+pub mod term;
 pub mod token;
 pub mod type_def;
 pub mod types;

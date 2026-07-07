@@ -1,5 +1,4 @@
 use std::fmt::Write as _;
-use std::io::IsTerminal;
 
 use super::editor::{Editor, build_editor_url, detect_editor};
 use super::{Diagnostic, Severity, count_errors};
@@ -114,7 +113,7 @@ pub fn format_diagnostic_with_lines(
 pub fn print_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &str) {
     let lines: Vec<&str> = source.lines().collect();
 
-    let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let color = crate::term::color_enabled(&std::io::stderr());
     let editor = detect_editor();
     let abs_path = real_path(file_path);
     let links = color && editor.is_some() && std::path::Path::new(&abs_path).exists();

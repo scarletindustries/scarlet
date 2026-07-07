@@ -1,5 +1,7 @@
 use std::io::IsTerminal;
 
+use al_core::term::color_enabled;
+
 /// Resolved ANSI palette for CLI chrome. Every field is either a real escape
 /// sequence or an empty string, decided once based on the environment so call
 /// sites can interpolate unconditionally.
@@ -36,20 +38,6 @@ const OFF: Palette = Palette {
     link_open: "",
     link_close: "",
 };
-
-/// Decide whether to emit color for the given stream. Honors the de-facto
-/// standards: `NO_COLOR` (presence disables, per no-color.org),
-/// `CLICOLOR_FORCE` (non-zero forces on), otherwise on only when the stream is
-/// a real terminal.
-fn color_enabled(s: &impl IsTerminal) -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    if let Some(force) = std::env::var_os("CLICOLOR_FORCE") {
-        return force != "0";
-    }
-    s.is_terminal()
-}
 
 impl Palette {
     pub fn for_stream(s: &impl IsTerminal) -> Self {
