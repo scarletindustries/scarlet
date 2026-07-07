@@ -1749,6 +1749,14 @@ mod tests {
         v
     }
 
+    #[track_caller]
+    fn assert_cannot_unify(e: &mut InferEngine, a: Ty, b: Ty) {
+        assert!(matches!(
+            e.unify(a, b),
+            Err(UnifyError::CouldNotUnify { .. })
+        ));
+    }
+
     #[test]
     fn next_letter_sequence() {
         let mut uid = 0u64;
@@ -1815,10 +1823,7 @@ mod tests {
         let mut e = new_engine();
         let n = e.fresh_constrained_var(Constraint::Numeric);
         let s = e.icon_string();
-        assert!(matches!(
-            e.unify(n, s),
-            Err(UnifyError::CouldNotUnify { .. })
-        ));
+        assert_cannot_unify(&mut e, n, s);
     }
 
     #[test]
@@ -1849,10 +1854,7 @@ mod tests {
         let mut e = new_engine();
         let n = e.fresh_constrained_var(Constraint::Numeric);
         let (g, _) = e.fresh_generic_var();
-        assert!(matches!(
-            e.unify(n, g),
-            Err(UnifyError::CouldNotUnify { .. })
-        ));
+        assert_cannot_unify(&mut e, n, g);
     }
 
     #[test]
@@ -1862,10 +1864,7 @@ mod tests {
         let mut e = new_engine();
         let (g, _) = e.fresh_generic_var();
         let a = e.fresh_constrained_var(Constraint::Addable);
-        assert!(matches!(
-            e.unify(g, a),
-            Err(UnifyError::CouldNotUnify { .. })
-        ));
+        assert_cannot_unify(&mut e, g, a);
     }
 
     #[test]
@@ -1886,10 +1885,7 @@ mod tests {
         let mut e = new_engine();
         let addable_generic = constrained_generic(&mut e, Constraint::Addable);
         let numeric = e.fresh_constrained_var(Constraint::Numeric);
-        assert!(matches!(
-            e.unify(numeric, addable_generic),
-            Err(UnifyError::CouldNotUnify { .. })
-        ));
+        assert_cannot_unify(&mut e, numeric, addable_generic);
     }
 
     #[test]
@@ -1897,10 +1893,7 @@ mod tests {
         let mut e = new_engine();
         let i = e.icon_int();
         let s = e.icon_string();
-        assert!(matches!(
-            e.unify(i, s),
-            Err(UnifyError::CouldNotUnify { .. })
-        ));
+        assert_cannot_unify(&mut e, i, s);
     }
 
     #[test]
