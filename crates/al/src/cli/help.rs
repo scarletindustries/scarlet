@@ -107,6 +107,23 @@ fn heading(out: &mut String, p: &Palette, text: &str) {
     let _ = writeln!(out, "\n{}{text}{}", p.bold, p.reset);
 }
 
+fn examples_block(o: &mut String, p: &Palette, exs: &[&str]) {
+    if !exs.is_empty() {
+        heading(o, p, "EXAMPLES");
+        for ex in exs {
+            let _ = writeln!(o, "  {}{ex}{}", p.dim, p.reset);
+        }
+    }
+}
+
+fn footer(o: &mut String, p: &Palette, lead: &str, more: &str) {
+    let _ = writeln!(
+        o,
+        "\n  {}{lead}{}  {more}{}{LEARN_MORE}{}\n",
+        p.dim, p.reset, p.link_open, p.link_close
+    );
+}
+
 fn logo_block(out: &mut String, p: &Palette, version: &str, tagline: &str) {
     let _ = writeln!(
         out,
@@ -149,11 +166,7 @@ pub fn home(cmd: &Command) {
         row(&mut o, &p, l, d, w);
     }
 
-    let _ = writeln!(
-        o,
-        "\n  {}Learn more{}  {}{LEARN_MORE}{}\n",
-        p.dim, p.reset, p.link_open, p.link_close
-    );
+    footer(&mut o, &p, "Learn more", "");
     print!("{o}");
 }
 
@@ -187,16 +200,8 @@ fn full_help(cmd: &Command) -> String {
         row(&mut o, &p, l, d, label_w);
     }
 
-    heading(&mut o, &p, "EXAMPLES");
-    for ex in root_examples() {
-        let _ = writeln!(o, "  {}{ex}{}", p.dim, p.reset);
-    }
-
-    let _ = writeln!(
-        o,
-        "\n  {}Learn more{}  {}{LEARN_MORE}{}\n",
-        p.dim, p.reset, p.link_open, p.link_close
-    );
+    examples_block(&mut o, &p, root_examples());
+    footer(&mut o, &p, "Learn more", "");
     o
 }
 
@@ -272,19 +277,8 @@ fn command_help(sub: &Command) -> String {
         row(&mut o, &p, l, d, label_w);
     }
 
-    let ex = examples_for(name);
-    if !ex.is_empty() {
-        heading(&mut o, &p, "EXAMPLES");
-        for e in ex {
-            let _ = writeln!(o, "  {}{e}{}", p.dim, p.reset);
-        }
-    }
-
-    let _ = writeln!(
-        o,
-        "\n  {}See also{}  al --help · {}{LEARN_MORE}{}\n",
-        p.dim, p.reset, p.link_open, p.link_close
-    );
+    examples_block(&mut o, &p, examples_for(name));
+    footer(&mut o, &p, "See also", "al --help · ");
     o
 }
 
