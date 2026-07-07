@@ -86,7 +86,7 @@ fn seam_round_trips_position_queries() {
     // rename / prepareRename are reachable through the seam and return the
     // declared shapes; their *behaviour* is pinned by the Bug-4 tests.
     let _ = s.prepare_rename_response(&pos(&uri, 0, 7));
-    let _: Result<Json, String> = s.rename_response(&json!({
+    let _ = s.rename_response(&json!({
         "textDocument": { "uri": uri },
         "position": { "line": 0, "character": 7 },
         "newName": "greet2",

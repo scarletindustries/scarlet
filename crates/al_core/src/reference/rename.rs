@@ -30,7 +30,7 @@ use crate::module::{ModulePath, ModuleSource, resolve};
 use crate::span::Span;
 use crate::token;
 
-use super::{DefId, ModuleId, ReferenceGraph, ReferenceKind};
+use super::{DefId, EntityKind, ModuleId, ReferenceGraph, ReferenceKind};
 
 /// A single text replacement within one file. `span` is in the compiler's
 /// 0-based, end-exclusive coordinate space (what the LSP already consumes).
@@ -57,14 +57,27 @@ pub struct PreparedRename {
     pub placeholder: String,
 }
 
+/// Why a resolved definition is refused for rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotRenameableReason {
+    /// Defined in the precompiled standard library / prelude / `@vm`.
+    Stdlib,
+    /// Cursor sits on the module-path segment of an `import a/b` — that is a
+    /// file rename, not a symbol rename.
+    ModulePath,
+    /// Target is a `ModuleAlias` (an `import` declaration binding). Renaming
+    /// it would rewrite the import line while every qualified `q.member` use
+    /// targets the remote member, not the alias, so callers would be orphaned.
+    ModuleAlias,
+}
+
 /// Why a rename / prepare-rename was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenameError {
     /// Nothing renameable under the cursor / no such definition.
     NotFound,
-    /// The symbol exists but must not be rewritten (stdlib, `@vm`/external,
-    /// prelude, or a module-path position).
-    NotRenameable(&'static str),
+    /// The symbol exists but must not be rewritten.
+    NotRenameable(NotRenameableReason),
     /// The requested new name is not a legal identifier.
     InvalidName(String),
     /// One or more modules holding occurrences could not be mapped to a file
@@ -78,7 +91,15 @@ impl RenameError {
     pub fn message(&self) -> String {
         match self {
             RenameError::NotFound => "no renameable symbol at this position".to_string(),
-            RenameError::NotRenameable(why) => (*why).to_string(),
+            RenameError::NotRenameable(NotRenameableReason::Stdlib) => {
+                "cannot rename a symbol defined in the standard library".to_string()
+            }
+            RenameError::NotRenameable(NotRenameableReason::ModulePath) => {
+                "cannot rename a module path; rename the file instead".to_string()
+            }
+            RenameError::NotRenameable(NotRenameableReason::ModuleAlias) => {
+                "cannot rename an import declaration".to_string()
+            }
             RenameError::InvalidName(n) => format!("`{n}` is not a valid identifier"),
             RenameError::Unresolvable(mods) => {
                 let list = mods
@@ -90,6 +111,18 @@ impl RenameError {
             }
         }
     }
+
+    /// The JSON-RPC error code this refusal maps to on the LSP wire:
+    /// `InvalidParams` (-32602) for a bad `newName`, `RequestFailed` (-32803)
+    /// for a resolvable-but-refused position.
+    pub fn lsp_code(&self) -> i32 {
+        match self {
+            RenameError::InvalidName(_) => -32602,
+            RenameError::NotFound
+            | RenameError::NotRenameable(_)
+            | RenameError::Unresolvable(_) => -32803,
+        }
+    }
 }
 
 /// Validate a proposed new name against al's identifier grammar (mirrors the
@@ -99,13 +132,13 @@ pub(crate) fn is_valid_identifier(name: &str) -> bool {
     let Some(first) = bytes.next() else {
         return false;
     };
-    if !(first.is_ascii_alphabetic() || first == b'_') {
+    if !token::is_name_start(first) {
         return false;
     }
-    if !bytes.all(token::is_name_char) {
+    if !bytes.all(token::is_name_continue) {
         return false;
     }
-    token::match_keyword(Some(name)).is_none()
+    token::match_keyword(name).is_none()
 }
 
 /// Translate a relative line span to an absolute file path → URI. Mirrors the
@@ -133,13 +166,14 @@ pub fn module_uri(
 }
 
 impl ReferenceGraph {
-    fn reject_if_stdlib(&self, module: ModuleId) -> Result<(), RenameError> {
-        if let Some(path) = self.module_path(module)
+    fn reject_if_not_renameable(&self, def: DefId) -> Result<(), RenameError> {
+        if def.entity == EntityKind::ModuleAlias {
+            return Err(RenameError::NotRenameable(NotRenameableReason::ModuleAlias));
+        }
+        if let Some(path) = self.module_path(def.module)
             && crate::module::is_stdlib(path)
         {
-            return Err(RenameError::NotRenameable(
-                "cannot rename a symbol defined in the standard library",
-            ));
+            return Err(RenameError::NotRenameable(NotRenameableReason::Stdlib));
         }
         Ok(())
     }
@@ -160,14 +194,12 @@ impl ReferenceGraph {
         // A module-path position is an import path, not a symbol — renaming it
         // would be a module/file rename, which is out of scope.
         if hit.kind == ReferenceKind::Import {
-            return Err(RenameError::NotRenameable(
-                "cannot rename a module path; rename the file instead",
-            ));
+            return Err(RenameError::NotRenameable(NotRenameableReason::ModulePath));
         }
 
         let def = self.definition(hit.target).ok_or(RenameError::NotFound)?;
 
-        self.reject_if_stdlib(hit.target.module)?;
+        self.reject_if_not_renameable(hit.target)?;
 
         Ok(PreparedRename {
             def: hit.target,
@@ -195,7 +227,7 @@ impl ReferenceGraph {
 
         let def_record = self.definition(def).ok_or(RenameError::NotFound)?;
 
-        self.reject_if_stdlib(def.module)?;
+        self.reject_if_not_renameable(def)?;
 
         // (module, span) pairs to rewrite. Always include the declaration's
         // own name span; reverse edges supply every use. `Import` occurrences
@@ -274,7 +306,7 @@ impl ReferenceGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::{Definition, EntityKind, ModuleReferences, Reference};
+    use crate::reference::{Definition, ModuleReferences, Reference};
     use crate::span::range_span;
     use std::collections::HashMap;
 
@@ -417,10 +449,13 @@ mod tests {
 
         // prepareRename at the use of a stdlib symbol -> rejected.
         let err = g.prepare_rename(user, 1, 3).unwrap_err();
-        assert!(matches!(err, RenameError::NotRenameable(_)));
+        assert_eq!(err, RenameError::NotRenameable(NotRenameableReason::Stdlib));
         // and rename() itself refuses too.
         let err2 = g.rename(map_fn, "renamed", None, None).unwrap_err();
-        assert!(matches!(err2, RenameError::NotRenameable(_)));
+        assert_eq!(
+            err2,
+            RenameError::NotRenameable(NotRenameableReason::Stdlib)
+        );
     }
 
     #[test]
@@ -428,7 +463,34 @@ mod tests {
         let (g, _lib, app, _helper) = workspace();
         // app line 0 cols [7,14) is the Import occurrence.
         let err = g.prepare_rename(app, 0, 9).unwrap_err();
-        assert!(matches!(err, RenameError::NotRenameable(_)), "got {err:?}");
+        assert_eq!(
+            err,
+            RenameError::NotRenameable(NotRenameableReason::ModulePath),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn prepare_rename_and_rename_reject_module_alias() {
+        let mut g = ReferenceGraph::new();
+        let m = g.intern_module(&mp(&["main"]));
+        let alias = def(m, 0, 7, 10, EntityKind::ModuleAlias);
+        let mut mr = ModuleReferences::new(m);
+        mr.add_definition(Definition::new(alias, "lib", None, false));
+        g.insert_module(mr);
+
+        // Cursor on the alias binding — the wide `ModuleAlias` definition span
+        // resolves here, and core must refuse it (previously the LSP layer had
+        // to remember to post-filter this in three places).
+        assert_eq!(
+            g.prepare_rename(m, 0, 8).unwrap_err(),
+            RenameError::NotRenameable(NotRenameableReason::ModuleAlias)
+        );
+        assert_eq!(
+            g.rename(alias, "renamed", None, Some((m, "file:///main.al")))
+                .unwrap_err(),
+            RenameError::NotRenameable(NotRenameableReason::ModuleAlias)
+        );
     }
 
     #[test]

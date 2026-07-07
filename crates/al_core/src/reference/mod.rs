@@ -70,18 +70,12 @@ impl EntityKind {
         }
     }
 
-    /// This kind as an LSP `SymbolKind` number (the wire enum used by
-    /// `textDocument/documentSymbol` and `workspace/symbol`).
-    pub fn lsp_symbol_kind(self) -> i32 {
-        match self {
-            EntityKind::Function => 12,
-            EntityKind::Value => 13,
-            EntityKind::Constant => 14,
-            EntityKind::Constructor => 9,
-            EntityKind::Type => 23,
-            EntityKind::ModuleAlias => 2,
-            EntityKind::Field => 8,
-        }
+    /// Whether goto-definition on a target of this kind should navigate. A
+    /// `ModuleAlias` definition spans the whole `import` declaration, so
+    /// resolving it would be a no-op self-jump; the final path segment is
+    /// handled separately as an `Import` occurrence.
+    pub fn is_navigable(self) -> bool {
+        !matches!(self, EntityKind::ModuleAlias)
     }
 }
 
@@ -101,6 +95,17 @@ pub enum ReferenceKind {
     /// declaration site). Lets goto-def on a declaration resolve to itself
     /// and lets find-references include the definition.
     Definition,
+}
+
+impl ReferenceKind {
+    /// Whether this occurrence is a real *use* in code — a qualified or
+    /// unqualified name that evaluates the target — as opposed to a binding
+    /// occurrence that merely declares it (`Import` path, `Alias` binding,
+    /// `Definition` self-occurrence). Drives find-references, the xref
+    /// reverse index, and the unused/dead-code use check.
+    pub fn is_use_site(self) -> bool {
+        matches!(self, ReferenceKind::Qualified | ReferenceKind::Unqualified)
+    }
 }
 
 // ============================================================================
@@ -269,59 +274,6 @@ pub struct ResolvedRef {
 }
 
 // ============================================================================
-// Span geometry
-// ============================================================================
-
-/// A `Span`'s `(start, end)` endpoints as `(line, column)` pairs; all span
-/// geometry compares these lexicographically.
-fn endpoints(s: &Span) -> ((i32, i32), (i32, i32)) {
-    ((s.start_line, s.start_column), (s.end_line, s.end_column))
-}
-
-/// Half-open containment: `[start, end)` in (line, column) order. A
-/// `point_span(l, c)` (end column `c + 1`) therefore contains exactly column
-/// `c` on line `l`.
-pub fn span_contains(s: &Span, line: i32, col: i32) -> bool {
-    let (start, end) = endpoints(s);
-    let p = (line, col);
-    start <= p && p < end
-}
-
-/// A monotone "width" key used to pick the tightest of several spans containing
-/// a point. Ordered lexicographically as `(line-span, col-span)`, so any
-/// single-line span sorts before any multi-line one; exact width is irrelevant,
-/// only the ordering is.
-pub fn span_width(s: &Span) -> (i32, i32) {
-    (s.end_line - s.start_line, s.end_column - s.start_column)
-}
-
-/// Whether `inner` lies fully inside `outer` (both half-open, `(line, col)`
-/// order). Used to tell an imported item's *binding* occurrence — which the
-/// compiler records inside the `import` declaration's span — apart from a real
-/// *use* of that imported name elsewhere in the module.
-fn span_within(inner: &Span, outer: &Span) -> bool {
-    let (i_start, i_end) = endpoints(inner);
-    let (o_start, o_end) = endpoints(outer);
-    o_start <= i_start && i_end <= o_end
-}
-
-/// The smallest `Span` covering both `a` and `b` (`(line, col)` order). Used to
-/// recover an `import` declaration's full lexical extent from its constituent
-/// occurrences.
-fn span_union(a: &Span, b: &Span) -> Span {
-    let (a_start, a_end) = endpoints(a);
-    let (b_start, b_end) = endpoints(b);
-    let (start_line, start_column) = a_start.min(b_start);
-    let (end_line, end_column) = a_end.max(b_end);
-    Span {
-        start_line,
-        start_column,
-        end_line,
-        end_column,
-    }
-}
-
-// ============================================================================
 // ModuleReferences — per-module storage
 // ============================================================================
 
@@ -433,7 +385,7 @@ impl ModuleReferences {
     }
 
     /// The tightest thing the cursor is on: consult the per-line index, gate
-    /// by [`span_contains`], and keep the narrowest [`span_width`] match
+    /// by [`Span::contains`], and keep the narrowest [`Span::width`] match
     /// (occurrences beat definitions on a tie, in insertion order — the
     /// `rank` key preserves the original scan order). A position on a
     /// declaration's own name resolves to itself with kind
@@ -447,8 +399,8 @@ impl ModuleReferences {
         index
             .get(&line)?
             .iter()
-            .filter(|e| span_contains(&e.span, line, col))
-            .min_by_key(|e| (span_width(&e.span), e.rank))
+            .filter(|e| e.span.contains(line, col))
+            .min_by_key(|e| (e.span.width(), e.rank))
             .map(|e| CursorHit {
                 target: e.target,
                 range: e.span,
@@ -711,12 +663,7 @@ impl ReferenceGraph {
                 .iter()
                 .zip(mr.occurrence_owner.iter())
                 .filter_map(|(occ, owner)| {
-                    (owner.is_none()
-                        && matches!(
-                            occ.kind,
-                            ReferenceKind::Unqualified | ReferenceKind::Qualified
-                        ))
-                    .then_some(occ.target)
+                    (owner.is_none() && occ.kind.is_use_site()).then_some(occ.target)
                 })
                 .collect(),
             None => Vec::new(),
@@ -761,12 +708,7 @@ impl ReferenceGraph {
     ///   module" stops one used qualified import from masking a second,
     ///   genuinely-unused one.
     fn has_real_use(&self, def: DefId) -> bool {
-        let direct = self.references_to(def).iter().any(|r| {
-            matches!(
-                r.kind,
-                ReferenceKind::Qualified | ReferenceKind::Unqualified
-            )
-        });
+        let direct = self.references_to(def).iter().any(|r| r.kind.is_use_site());
         if direct || def.entity != EntityKind::ModuleAlias {
             return direct;
         }
@@ -791,7 +733,7 @@ impl ReferenceGraph {
         let decl_line = imp_span.start_line;
         for o in mr.occurrences() {
             if o.span.start_line == decl_line {
-                imp_span = span_union(&imp_span, &o.span);
+                imp_span = imp_span.union(&o.span);
             }
         }
         // Targets introduced by this import: occurrences nested inside the
@@ -799,7 +741,7 @@ impl ReferenceGraph {
         let imported: HashSet<DefId> = mr
             .occurrences()
             .iter()
-            .filter(|o| o.target != def && span_within(&o.span, &imp_span))
+            .filter(|o| o.target != def && o.span.within(&imp_span))
             .map(|o| o.target)
             .collect();
         // Selective `import a/b.{item}`: used iff one of those imported targets
@@ -808,12 +750,7 @@ impl ReferenceGraph {
         // only within the importing module, so the use is intra-module.
         let selective_item_used = !imported.is_empty()
             && mr.occurrences().iter().any(|o| {
-                imported.contains(&o.target)
-                    && matches!(
-                        o.kind,
-                        ReferenceKind::Qualified | ReferenceKind::Unqualified
-                    )
-                    && !span_within(&o.span, &imp_span)
+                imported.contains(&o.target) && o.kind.is_use_site() && !o.span.within(&imp_span)
             });
         if selective_item_used {
             return true;
@@ -832,14 +769,14 @@ impl ReferenceGraph {
         let imported_modules: HashSet<ModuleId> = mr
             .occurrences()
             .iter()
-            .filter(|o| o.kind == ReferenceKind::Import && span_within(&o.span, &imp_span))
+            .filter(|o| o.kind == ReferenceKind::Import && o.span.within(&imp_span))
             .map(|o| o.target.module)
             .collect();
         mr.occurrences().iter().any(|o| {
             o.kind == ReferenceKind::Qualified
                 && o.target.module != def.module
                 && imported_modules.contains(&o.target.module)
-                && !span_within(&o.span, &imp_span)
+                && !o.span.within(&imp_span)
         })
     }
 
@@ -977,15 +914,15 @@ mod tests {
     #[test]
     fn span_containment_is_half_open() {
         let s = range_span(5, 2, 6); // columns [2, 6) on line 5
-        assert!(!span_contains(&s, 5, 1));
-        assert!(span_contains(&s, 5, 2));
-        assert!(span_contains(&s, 5, 5));
-        assert!(!span_contains(&s, 5, 6), "end column is exclusive");
-        assert!(!span_contains(&s, 4, 3));
+        assert!(!s.contains(5, 1));
+        assert!(s.contains(5, 2));
+        assert!(s.contains(5, 5));
+        assert!(!s.contains(5, 6), "end column is exclusive");
+        assert!(!s.contains(4, 3));
 
         let p = point_span(7, 9);
-        assert!(span_contains(&p, 7, 9));
-        assert!(!span_contains(&p, 7, 10));
+        assert!(p.contains(7, 9));
+        assert!(!p.contains(7, 10));
     }
 
     #[test]
@@ -998,8 +935,8 @@ mod tests {
             end_line: 3,
             end_column: 0,
         };
-        assert!(span_width(&narrow) < span_width(&wide));
-        assert!(span_width(&wide) < span_width(&multiline));
+        assert!(narrow.width() < wide.width());
+        assert!(wide.width() < multiline.width());
     }
 
     // ---- ModuleReferences: definitions, reverse index, position lookup ----

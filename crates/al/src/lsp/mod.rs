@@ -666,7 +666,7 @@ impl LspServer {
             // to navigate to (only the final segment resolves, above). The
             // `ModuleAlias` definition spans the whole declaration, so suppress
             // the otherwise no-op self-jump it would yield there.
-            if def.entity() == reference::EntityKind::ModuleAlias {
+            if !def.entity().is_navigable() {
                 return Json::Null;
             }
             if let Some(u) = uri_for(graph, &uri, def.defid.module) {
@@ -679,20 +679,15 @@ impl LspServer {
     /// Dependent-file callers of `def`, persisted across re-rooting: an
     /// importer of the queried file is never inside its imports' closure, so
     /// the session graph rooted at that file cannot carry these reverse edges
-    /// — their true URIs are stored directly (see [`WorkspaceXrefs`]).
-    /// Import/Definition occurrences are skipped: the declaration's own
-    /// self-occurrence and import bindings are not use sites.
+    /// — their true URIs are stored directly (see [`WorkspaceXrefs`]). Only
+    /// real use sites are surfaced; the declaration's own self-occurrence and
+    /// import/alias bindings are not.
     fn dependent_callers(&self, uri: &str, def: reference::DefId) -> impl Iterator<Item = &Xref> {
         uri_to_path(uri)
             .and_then(|p| self.xrefs.get(&root_for(&self.workspace_roots, &p)))
             .into_iter()
             .flat_map(move |wx| wx.callers(def))
-            .filter(|x| {
-                !matches!(
-                    x.kind,
-                    reference::ReferenceKind::Import | reference::ReferenceKind::Definition
-                )
-            })
+            .filter(|x| x.kind.is_use_site())
     }
 
     /// Compute the `textDocument/references` result: an array of
@@ -728,13 +723,11 @@ impl LspServer {
                 }
             };
             for rr in graph.references_to(defid) {
-                // The declaration's own self-occurrence (and import bindings)
-                // are excluded here; the declaration is added solely via the
-                // `include_decl` branch below so `includeDeclaration = false`
-                // is actually honored.
-                if rr.kind == reference::ReferenceKind::Import
-                    || rr.kind == reference::ReferenceKind::Definition
-                {
+                // The declaration's own self-occurrence (and import/alias
+                // bindings) are excluded here; the declaration is added solely
+                // via the `include_decl` branch below so `includeDeclaration =
+                // false` is actually honored.
+                if !rr.kind.is_use_site() {
                     continue;
                 }
                 if let Some(u) = uri_for(graph, &uri, rr.module) {
@@ -758,9 +751,7 @@ impl LspServer {
     fn handle_rename(&mut self, id: &Json, params: &Json) {
         match self.rename_response(params) {
             Ok(r) => self.send_response(id, r),
-            // -32602 = InvalidParams: surfaced to the user as the reason the
-            // rename was refused (stdlib, bad name, unresolvable).
-            Err(msg) => self.send_error(id, -32602, &msg),
+            Err(e) => self.send_error(id, e.lsp_code(), &e.message()),
         }
     }
 
@@ -768,7 +759,10 @@ impl LspServer {
     /// a renamable definition under the cursor, `Ok(Json::Null)` when nothing
     /// resolves there, or `Err(reason)` when the rename is refused (the
     /// caller maps that onto a JSON-RPC error).
-    pub fn rename_response(&mut self, params: &Json) -> Result<Json, String> {
+    pub fn rename_response(
+        &mut self,
+        params: &Json,
+    ) -> Result<Json, reference::rename::RenameError> {
         let new_name = params
             .get("newName")
             .and_then(|v| v.as_str())
@@ -780,26 +774,16 @@ impl LspServer {
         if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(defid) = graph.def_id_at(mid, line, col)
         {
-            // A `ModuleAlias` target is an `import` declaration position (the
-            // keyword, a non-final path segment, the `as` binding), not a
-            // symbol. `def_id_at` resolves here because the alias `Definition`
-            // spans the whole declaration; renaming it would rewrite the import
-            // line, and qualified `q.member` uses target the remote member, not
-            // the alias, so they would be orphaned. Mirror goto-def's
-            // suppression and refuse — this also closes the direct-rename
-            // bypass of `prepare_rename_response`'s identical guard.
-            if defid.entity == reference::EntityKind::ModuleAlias {
-                return Ok(Json::Null);
-            }
             let base = uri_to_path(&uri);
             let base_dir = base.as_deref().and_then(|p| p.parent());
             return match graph.rename(defid, &new_name, base_dir, Some((mid, uri.as_str()))) {
                 Ok(mut we) => {
                     // Fold in dependent-file callers (see `dependent_callers`).
-                    // `graph.rename` already validated `new_name` and rejected a
-                    // stdlib target, so reuse both for the cross-file edits;
-                    // dedup against the edits it produced, then restore each
-                    // file's positional edit order if anything was appended.
+                    // `graph.rename` already validated `new_name` and rejected
+                    // stdlib / module-alias targets, so reuse both for the
+                    // cross-file edits; dedup against the edits it produced,
+                    // then restore each file's positional edit order if
+                    // anything was appended.
                     let mut added = false;
                     for x in self.dependent_callers(&uri, defid) {
                         let edits = we.changes.entry(x.uri.clone()).or_default();
@@ -818,7 +802,7 @@ impl LspServer {
                     }
                     Ok(workspace_edit_json(&we))
                 }
-                Err(e) => Err(e.message()),
+                Err(e) => Err(e),
             };
         }
         Ok(Json::Null)
@@ -835,15 +819,6 @@ impl LspServer {
             return Json::Null;
         };
         match graph.prepare_rename(mid, line, col) {
-            // A `ModuleAlias` target is an `import` declaration position —
-            // the narrowed `Import` occurrence only guards *its* final
-            // segment, so the alias `Definition` (spanning the whole
-            // declaration) still resolves on the keyword / a non-final
-            // path segment / the `as` binding. Renaming it would rewrite
-            // the import line and orphan the qualified uses (which target
-            // the remote member, not the alias). Mirror goto-def's
-            // suppression and `rename`'s file-not-symbol refusal.
-            Ok(p) if p.def.entity == reference::EntityKind::ModuleAlias => Json::Null,
             Ok(p) => json!({ "range": range_json(&p.range), "placeholder": p.placeholder }),
             Err(_) => Json::Null,
         }
@@ -873,7 +848,7 @@ impl LspServer {
             .map(|d| {
                 json!({
                     "name": d.name,
-                    "kind": d.entity().lsp_symbol_kind(),
+                    "kind": symbol_kind(d.entity()),
                     "range": range_json(&d.span()),
                     "selectionRange": range_json(&d.span()),
                 })
@@ -912,7 +887,7 @@ impl LspServer {
             if let Some(u) = uri_for(graph, &entry, d.defid.module) {
                 out.push(json!({
                     "name": d.name,
-                    "kind": d.entity().lsp_symbol_kind(),
+                    "kind": symbol_kind(d.entity()),
                     "location": { "uri": u, "range": range_json(&d.span()) },
                 }));
             }
@@ -1089,14 +1064,7 @@ impl LspServer {
                     g.module_refs(entry_id).map_or_else(Vec::new, |mr| {
                         mr.occurrences()
                             .iter()
-                            .filter(|o| {
-                                o.target.module != entry_id
-                                    && matches!(
-                                        o.kind,
-                                        reference::ReferenceKind::Qualified
-                                            | reference::ReferenceKind::Unqualified
-                                    )
-                            })
+                            .filter(|o| o.target.module != entry_id && o.kind.is_use_site())
                             .map(|o| (o.target, o.span, o.kind))
                             .collect()
                     })
@@ -1159,6 +1127,21 @@ fn extract_position_params(params: &Json) -> Option<(String, i32, i32)> {
     Some((uri, line, col))
 }
 
+/// LSP `SymbolKind` wire number for an [`EntityKind`]. Lives here rather than
+/// on `EntityKind` because `al_core` is protocol-agnostic.
+fn symbol_kind(e: reference::EntityKind) -> i32 {
+    use reference::EntityKind;
+    match e {
+        EntityKind::Function => 12,
+        EntityKind::Value => 13,
+        EntityKind::Constant => 14,
+        EntityKind::Constructor => 9,
+        EntityKind::Type => 23,
+        EntityKind::ModuleAlias => 2,
+        EntityKind::Field => 8,
+    }
+}
+
 fn diagnostic_to_json(diag: &diagnostic::Diagnostic) -> Json {
     let severity = match diag.severity {
         diagnostic::Severity::Error => 1,
@@ -1202,11 +1185,8 @@ fn import_target_at(
     let mr = graph.module_refs(module)?;
     mr.occurrences()
         .iter()
-        .filter(|o| {
-            o.kind == reference::ReferenceKind::Import
-                && reference::span_contains(&o.span, line, col)
-        })
-        .min_by_key(|o| reference::span_width(&o.span))
+        .filter(|o| o.kind == reference::ReferenceKind::Import && o.span.contains(line, col))
+        .min_by_key(|o| o.span.width())
         .map(|o| o.target.module)
 }
 
