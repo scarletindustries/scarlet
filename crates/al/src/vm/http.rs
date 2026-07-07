@@ -20,7 +20,7 @@ use al_core::bytecode::{BinaryRef, Value};
 use al_core::heap::ProcHeap;
 
 use super::text::Radix;
-use super::{PreludeTemplates, VmError, VmResult, int_to_ascii, parse_uint_ascii};
+use super::{EnumTemplate, PreludeTemplates, VmError, VmResult, int_to_ascii, parse_uint_ascii};
 
 /// Total request-head size cap (request line + all header fields), mirrored by
 /// `al/http/h1`'s docs. A head that grows past this without completing is
@@ -44,30 +44,11 @@ enum Reject {
 // Parsed / Framing / Option constructors over the prelude templates
 // ---------------------------------------------------------------------------
 
-// Prebuilt frozen variants are pushed by word copy; payload-carrying ones
-// instantiate into the current process arena under the caller's ensured
+// Prebuilt frozen `NeedMore` variants are cloned at call sites; payload-carrying
+// rejects instantiate into the current process arena under the caller's ensured
 // budget (status codes always fit the small-int payload).
-fn need_more(t: &PreludeTemplates) -> Value {
-    t.parsed_need_more.clone()
-}
-
-fn bad(t: &PreludeTemplates, a: &mut ProcHeap, status: Reject) -> Value {
-    t.parsed_bad
-        .instantiate(a, &[Value::small_int(status as i64)])
-}
-
-fn invalid(t: &PreludeTemplates, a: &mut ProcHeap, status: Reject) -> Value {
-    t.framing_invalid
-        .instantiate(a, &[Value::small_int(status as i64)])
-}
-
-fn chunked_need_more(t: &PreludeTemplates) -> Value {
-    t.chunked_need_more.clone()
-}
-
-fn chunked_bad(t: &PreludeTemplates, a: &mut ProcHeap, status: Reject) -> Value {
-    t.chunked_bad
-        .instantiate(a, &[Value::small_int(status as i64)])
+fn reject(tpl: &EnumTemplate, a: &mut ProcHeap, status: Reject) -> Value {
+    tpl.instantiate(a, &[Value::small_int(status as i64)])
 }
 
 /// The `(name, value)` payload values of an `al/http/headers.Header`.
@@ -192,15 +173,15 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
         match find_crlf(bytes, off) {
             None => {
                 return if win.len - head_start > MAX_HEAD {
-                    bad(t, a, Reject::UriTooLong)
+                    reject(&t.parsed_bad, a, Reject::UriTooLong)
                 } else {
-                    need_more(t)
+                    t.parsed_need_more.clone()
                 };
             }
             Some(eol) if eol == off => {
                 off += 2;
                 if off - head_start > 8 {
-                    return bad(t, a, Reject::BadRequest);
+                    return reject(&t.parsed_bad, a, Reject::BadRequest);
                 }
             }
             Some(eol) => break eol,
@@ -209,23 +190,23 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
 
     let line = &bytes[off..eol];
     let Some(sp1_rel) = memchr::memchr(b' ', line) else {
-        return bad(t, a, Reject::BadRequest);
+        return reject(&t.parsed_bad, a, Reject::BadRequest);
     };
     if sp1_rel == 0 {
-        return bad(t, a, Reject::BadRequest);
+        return reject(&t.parsed_bad, a, Reject::BadRequest);
     }
     let Some(sp2_rel) = memchr::memchr(b' ', &line[sp1_rel + 1..]) else {
-        return bad(t, a, Reject::BadRequest);
+        return reject(&t.parsed_bad, a, Reject::BadRequest);
     };
     if sp2_rel == 0 {
-        return bad(t, a, Reject::BadRequest);
+        return reject(&t.parsed_bad, a, Reject::BadRequest);
     }
     let sp1 = off + sp1_rel;
     let sp2 = sp1 + 1 + sp2_rel;
     let version = match &bytes[sp2 + 1..eol] {
         b"HTTP/1.1" => t.version_http11.clone(),
         b"HTTP/1.0" => t.version_http10.clone(),
-        _ => return bad(t, a, Reject::VersionNotSupported),
+        _ => return reject(&t.parsed_bad, a, Reject::VersionNotSupported),
     };
 
     // Header block: one field per CRLF-terminated line, ended by a blank line.
@@ -241,8 +222,8 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
         Reject::HeaderFieldsTooLarge,
     ) {
         HeaderBlock::Done(headers, consumed) => (headers, consumed),
-        HeaderBlock::NeedMore => return need_more(t),
-        HeaderBlock::Bad(status) => return bad(t, a, status),
+        HeaderBlock::NeedMore => return t.parsed_need_more.clone(),
+        HeaderBlock::Bad(status) => return reject(&t.parsed_bad, a, status),
     };
 
     let method = win.view(a, off, sp1 - off);
@@ -389,7 +370,7 @@ pub(super) fn framing(
         // Transfer-Encoding next to Content-Length is the classic
         // request-smuggling conflict: reject before looking at the coding.
         if !matches!(cl, Seen::Zero) {
-            return Ok(invalid(t, a, Reject::BadRequest));
+            return Ok(reject(&t.framing_invalid, a, Reject::BadRequest));
         }
         // Only "chunked" as the sole transfer coding is decodable. A coding
         // list ("gzip, chunked"), a repeated TE field, or anything that is not
@@ -401,7 +382,7 @@ pub(super) fn framing(
         {
             return Ok(t.framing_chunked.clone());
         }
-        return Ok(invalid(t, a, Reject::NotImplemented));
+        return Ok(reject(&t.framing_invalid, a, Reject::NotImplemented));
     }
     match cl {
         Seen::Zero => Ok(t.framing_no_body.clone()),
@@ -416,10 +397,10 @@ pub(super) fn framing(
             };
             match parsed {
                 Some(n) => Ok(t.framing_length.instantiate(a, &[Value::small_int(n)])),
-                None => Ok(invalid(t, a, Reject::BadRequest)),
+                None => Ok(reject(&t.framing_invalid, a, Reject::BadRequest)),
             }
         }
-        Seen::Many => Ok(invalid(t, a, Reject::BadRequest)),
+        Seen::Many => Ok(reject(&t.framing_invalid, a, Reject::BadRequest)),
     }
 }
 
@@ -480,13 +461,13 @@ fn chunk_decode_window(
             // No CRLF yet. A line already over the cap can never become valid;
             // otherwise wait for more bytes.
             return if win.len - pos > MAX_CHUNK_SIZE_LINE {
-                chunked_bad(t, a, Reject::BadRequest)
+                reject(&t.chunked_bad, a, Reject::BadRequest)
             } else {
-                chunked_need_more(t)
+                t.chunked_need_more.clone()
             };
         };
         if eol - pos > MAX_CHUNK_SIZE_LINE {
-            return chunked_bad(t, a, Reject::BadRequest);
+            return reject(&t.chunked_bad, a, Reject::BadRequest);
         }
         let line = &bytes[pos..eol];
         // Chunk extensions (";name=value") are legal and ignored; the size is
@@ -494,7 +475,7 @@ fn chunk_decode_window(
         // no sign, no whitespace — and overflow comes back as None.
         let size_end = memchr::memchr(b';', line).unwrap_or(line.len());
         let Some(size) = parse_uint_ascii(&line[..size_end], Radix::Hex) else {
-            return chunked_bad(t, a, Reject::BadRequest);
+            return reject(&t.chunked_bad, a, Reject::BadRequest);
         };
 
         if size == 0 {
@@ -521,30 +502,30 @@ fn chunk_decode_window(
                     t.chunked_done
                         .instantiate(a, &[body, trailers, Value::small_int(consumed as i64)])
                 }
-                HeaderBlock::NeedMore => chunked_need_more(t),
-                HeaderBlock::Bad(status) => chunked_bad(t, a, status),
+                HeaderBlock::NeedMore => t.chunked_need_more.clone(),
+                HeaderBlock::Bad(status) => reject(&t.chunked_bad, a, status),
             };
         }
 
         // ---- decoded-size cap: checked BEFORE the data is accepted ---------
         // The check is in i64 space so a hostile 16-hex-digit size cannot wrap.
         if total.saturating_add(size) > max {
-            return chunked_bad(t, a, Reject::PayloadTooLarge);
+            return reject(&t.chunked_bad, a, Reject::PayloadTooLarge);
         }
         let size = size as usize;
 
         // ---- chunk data + its trailing CRLF --------------------------------
         let data_start = eol + 2;
         let Some(data_end) = data_start.checked_add(size) else {
-            return chunked_bad(t, a, Reject::BadRequest);
+            return reject(&t.chunked_bad, a, Reject::BadRequest);
         };
         if data_end + 2 > win.len {
-            return chunked_need_more(t);
+            return t.chunked_need_more.clone();
         }
         if &bytes[data_end..data_end + 2] != b"\r\n" {
             // The size said the data ends here; if a CRLF does not follow, the
             // framing is lying. Never resynchronize — reject.
-            return chunked_bad(t, a, Reject::BadRequest);
+            return reject(&t.chunked_bad, a, Reject::BadRequest);
         }
         segments.push((data_start, data_end));
         total += size as i64;
