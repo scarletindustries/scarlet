@@ -54,6 +54,13 @@ pub struct Workspace {
     /// file can't flood the Problems panel with errors for files (example
     /// demos, stdlib) the user never opened.
     pub(super) open: HashSet<String>,
+    /// Diagnostics computed as a side effect of a position query re-rooting the
+    /// entry (see [`ensure_entry`](Self::ensure_entry)) on a client-open file,
+    /// staged for the transport layer to publish. Before the transport split
+    /// `analyze_text` published inline; without this an importer's Problems
+    /// panel goes stale after an in-memory edit to one of its imports until the
+    /// importer itself is edited.
+    pub(super) pending_diagnostics: Vec<(String, Vec<Json>)>,
 }
 
 impl Workspace {
@@ -65,6 +72,7 @@ impl Workspace {
             scanned: false,
             entry_uri: None,
             open: HashSet::new(),
+            pending_diagnostics: Vec::new(),
         }
     }
 
@@ -153,10 +161,21 @@ impl Workspace {
         if self.entry_uri.as_deref() != Some(uri) {
             let text = self.documents.get(uri).cloned();
             if let Some(text) = text {
-                self.analyze_document(uri, &text);
+                let diags = self.analyze_document(uri, &text);
+                if self.open.contains(uri) {
+                    self.pending_diagnostics.push((uri.to_string(), diags));
+                }
             }
         }
         self.entry_uri.as_deref() == Some(uri) && self.graph_for(uri).is_some()
+    }
+
+    /// Drain the diagnostics staged by [`ensure_entry`](Self::ensure_entry) for
+    /// the transport layer to publish alongside the query response. Exposed as
+    /// a test seam so `lsp_handlers.rs` can pin the re-root republish that the
+    /// transport split originally dropped.
+    pub fn take_pending_diagnostics(&mut self) -> Vec<(String, Vec<Json>)> {
+        std::mem::take(&mut self.pending_diagnostics)
     }
 
     /// The workspace reference graph held by the session that owns `uri`.
@@ -303,8 +322,8 @@ impl Workspace {
     /// (session, reverse-edge index, `entry_uri`) and returning the LSP
     /// diagnostics for `uri`. The transport layer decides whether to publish
     /// them (only client-open files get a `publishDiagnostics` notification);
-    /// callers that only need the state warmed — the workspace scan, a query's
-    /// `ensure_entry` re-root — discard the return.
+    /// the workspace scan discards the return, and a query's `ensure_entry`
+    /// re-root stages it for the transport layer to drain.
     fn analyze_text(&mut self, uri: &str, text: &str) -> Vec<Json> {
         eprintln!("[AL LSP] Analyzing: {uri}");
 

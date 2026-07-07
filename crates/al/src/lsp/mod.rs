@@ -162,9 +162,15 @@ impl LspServer {
     }
 
     /// Compute a request's result on the workspace with `f` and send it as the
-    /// response.
+    /// response. Any diagnostics the query's re-root staged (see
+    /// [`Workspace::ensure_entry`]) are published first, so an open importer's
+    /// Problems panel refreshes against an in-memory dependency edit as soon as
+    /// it is queried — the pre-split `analyze_text` published inline.
     fn respond(&mut self, id: &Json, params: &Json, f: fn(&mut Workspace, &Json) -> Json) {
         let result = f(&mut self.ws, params);
+        for (uri, diags) in self.ws.take_pending_diagnostics() {
+            self.publish_diagnostics(&uri, diags);
+        }
         self.send_response(id, result);
     }
 
@@ -382,7 +388,11 @@ impl LspServer {
     }
 
     fn handle_rename(&mut self, id: &Json, params: &Json) {
-        match self.ws.rename_response(params) {
+        let result = self.ws.rename_response(params);
+        for (uri, diags) in self.ws.take_pending_diagnostics() {
+            self.publish_diagnostics(&uri, diags);
+        }
+        match result {
             Ok(r) => self.send_response(id, r),
             Err(e) => self.send_error(id, rename_error_code(&e), &e.message()),
         }

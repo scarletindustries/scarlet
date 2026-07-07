@@ -982,3 +982,41 @@ fn find_references_from_library_declaration_when_only_library_is_open() {
     // arm are covered by the tests above, where both files are open.
     assert_refs_uris_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }
+
+// Before the transport split, `analyze_text` published diagnostics inline for
+// any client-open URI it re-analysed — including when a position query
+// re-rooted the entry. The split made `analyze_text` return the diags and
+// `ensure_entry` dropped them, so an open importer's Problems panel went stale
+// after an in-memory edit to a dependency until the importer itself was
+// edited. This pins the restored behaviour: a re-root of an open file stages
+// its diagnostics for the transport layer to publish.
+#[test]
+fn position_query_reroot_stages_diagnostics_for_open_file() {
+    let (_p, mut s, main_uri, lib_uri) = xmod_project();
+    // Both open; entry is main (last opened). Nothing staged yet.
+    assert!(s.take_pending_diagnostics().is_empty());
+
+    // Hover in lib.al re-roots the entry to lib. lib is open, so its diags
+    // (empty — clean file) are staged for publish.
+    let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
+    s.hover_response(&pos(&lib_uri, l, c));
+    let staged = s.take_pending_diagnostics();
+    assert_eq!(
+        staged.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(),
+        [lib_uri.as_str()],
+        "re-rooting an open file stages its diagnostics"
+    );
+
+    // Drained: a second query on the same (now-entry) file re-roots nothing.
+    s.hover_response(&pos(&lib_uri, l, c));
+    assert!(s.take_pending_diagnostics().is_empty());
+
+    // Switching entry back to the other open file stages that one in turn.
+    let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
+    s.hover_response(&pos(&main_uri, l, c));
+    let staged = s.take_pending_diagnostics();
+    assert_eq!(
+        staged.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(),
+        [main_uri.as_str()]
+    );
+}
