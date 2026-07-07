@@ -175,7 +175,7 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
     // indices stay valid; direct copy makes that structural instead of relying
     // on engine.strings being dupe-free.
     let mut p = FlatPools {
-        str_pool: engine.strings.clone(),
+        str_pool: engine.strings.iter().cloned().collect(),
         nodes: engine.nodes.clone(),
         children: engine.children.clone(),
         quants: engine.quants.clone(),
@@ -252,7 +252,12 @@ mod tests {
         // The string pool is seeded with the engine's strings as its prefix so
         // every pre-existing `StrId` keeps its meaning; later names append.
         assert!(p.str_pool.len() >= engine.strings.len());
-        assert_eq!(&p.str_pool[..engine.strings.len()], &engine.strings[..]);
+        assert!(
+            p.str_pool
+                .iter()
+                .take(engine.strings.len())
+                .eq(engine.strings.iter())
+        );
 
         // Functions round-trip: count, interned name, and every scalar field.
         assert_eq!(p.functions.len(), prog.functions.len());

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
 use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Variant, VariantField};
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -430,8 +430,7 @@ pub struct InferEngine {
     /// indexes into this.
     pub children: Vec<Ty>,
     /// Interned strings. `StrId` indexes into this.
-    pub strings: Vec<String>,
-    string_intern: HashMap<String, StrId>,
+    pub strings: IndexSet<String>,
 
     // ---- Pools backing the `Copy` data carried by `Scheme`/`TypeInfo`.
     // These exist so those structs can be `Copy` and const-constructible
@@ -585,13 +584,10 @@ impl InferEngine {
     }
 
     pub fn intern(&mut self, s: &str) -> StrId {
-        if let Some(&i) = self.string_intern.get(s) {
-            return i;
+        if let Some(i) = self.strings.get_index_of(s) {
+            return i as StrId;
         }
-        let i = self.strings.len() as StrId;
-        self.strings.push(s.to_string());
-        self.string_intern.insert(s.to_string(), i);
-        i
+        self.strings.insert_full(s.to_string()).0 as StrId
     }
 
     #[inline]
@@ -658,8 +654,6 @@ impl InferEngine {
         }
         self.children.truncate(w.children);
         self.strings.truncate(w.strings);
-        let n = w.strings as u32;
-        self.string_intern.retain(|_, &mut id| id < n);
         self.quants.truncate(w.quants);
         self.str_slices.truncate(w.str_slices);
         self.type_params.truncate(w.type_params);
@@ -1224,7 +1218,8 @@ impl InferEngine {
 
     fn generalize_impl(&mut self, ty: Ty, ignore_level: bool, kind: ValueKind) -> Scheme {
         let mut ids: Vec<i32> = Vec::new();
-        self.collect_generalizable(ty, ignore_level, &mut ids);
+        let mut seen: HashSet<i32> = HashSet::new();
+        self.collect_generalizable(ty, ignore_level, &mut ids, &mut seen);
         self.assign_names(&ids);
         // Close the scheme: rewrite each generalized Var to its Bound index and
         // snapshot its constraint + display name. After this the closed type
@@ -1258,12 +1253,14 @@ impl InferEngine {
     /// `ids` with `Bound(idx)` of its position, fully resolving links along
     /// the way.
     fn close_over(&mut self, ty: Ty, ids: &[i32]) -> Ty {
+        let index: HashMap<i32, u32> = ids
+            .iter()
+            .enumerate()
+            .map(|(ix, &id)| (id, ix as u32))
+            .collect();
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => match e.root_var(id) {
-                RootVarState::Generic { id: gid, .. } => ids
-                    .iter()
-                    .position(|&i| i == gid)
-                    .map(|ix| e.mk_bound(ix as u32)),
+                RootVarState::Generic { id: gid, .. } => index.get(&gid).map(|&ix| e.mk_bound(ix)),
                 RootVarState::Unbound { .. } => None,
             },
             _ => None,
@@ -1377,7 +1374,13 @@ impl InferEngine {
         }
     }
 
-    fn collect_generalizable(&mut self, ty: Ty, ignore_level: bool, quantified: &mut Vec<i32>) {
+    fn collect_generalizable(
+        &mut self,
+        ty: Ty,
+        ignore_level: bool,
+        quantified: &mut Vec<i32>,
+        seen: &mut HashSet<i32>,
+    ) {
         let r = self.find(ty);
         match self.node(r) {
             TypeNode::Var(id) => match self.root_var(id) {
@@ -1385,21 +1388,23 @@ impl InferEngine {
                     if ignore_level || level > self.current_level =>
                 {
                     self.vars[id as usize] = TyVarState::Generic { id, constraint };
-                    if !quantified.contains(&id) {
+                    if seen.insert(id) {
                         quantified.push(id);
                     }
                 }
-                RootVarState::Generic { id: gid, .. } if !quantified.contains(&gid) => {
-                    quantified.push(gid);
+                RootVarState::Generic { id: gid, .. } => {
+                    if seen.insert(gid) {
+                        quantified.push(gid);
+                    }
                 }
                 _ => {}
             },
-            TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, quantified),
+            TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, quantified, seen),
             TypeNode::Fun { params, ret } => {
-                self.collect_slice(params, ignore_level, quantified);
-                self.collect_generalizable(ret, ignore_level, quantified);
+                self.collect_slice(params, ignore_level, quantified, seen);
+                self.collect_generalizable(ret, ignore_level, quantified, seen);
             }
-            TypeNode::Tuple { elems } => self.collect_slice(elems, ignore_level, quantified),
+            TypeNode::Tuple { elems } => self.collect_slice(elems, ignore_level, quantified, seen),
             TypeNode::Bound(_) => {}
         }
     }
@@ -1409,10 +1414,11 @@ impl InferEngine {
         sl: ArenaSlice<pool::Children>,
         ignore_level: bool,
         quantified: &mut Vec<i32>,
+        seen: &mut HashSet<i32>,
     ) {
         for i in sl.range() {
             let k = self.children[i];
-            self.collect_generalizable(k, ignore_level, quantified);
+            self.collect_generalizable(k, ignore_level, quantified, seen);
         }
     }
 
