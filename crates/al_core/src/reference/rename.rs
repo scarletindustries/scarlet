@@ -26,6 +26,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+
 use crate::module::{ModulePath, ModuleSource, resolve};
 use crate::span::Span;
 use crate::token;
@@ -129,11 +131,29 @@ pub(crate) fn is_valid_identifier(name: &str) -> bool {
     token::match_keyword(name).is_none()
 }
 
-/// Translate a relative line span to an absolute file path → URI. Mirrors the
-/// LSP's `uri_to_path` (`file://` prefix, no percent-encoding — repo paths
-/// have no spaces/unicode).
+/// Characters that must be percent-encoded in the path component of a
+/// `file://` URI (RFC 3986 non-`pchar`). Leaves `/` and the unreserved set
+/// alone so ordinary repo paths encode to themselves.
+const URI_PATH: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
+
+/// Translate an absolute file path to a `file://` URI. Round-trips with the
+/// LSP's `uri_to_path`: the path component is percent-encoded so a workspace
+/// under `/My Proj/` produces the same key the client sends for it.
 pub fn path_to_uri(p: &Path) -> String {
-    format!("file://{}", p.display())
+    format!(
+        "file://{}",
+        utf8_percent_encode(&p.to_string_lossy(), URI_PATH)
+    )
 }
 
 /// Map a [`ModuleId`] to a file URI via [`crate::module::resolve`] (the
@@ -579,6 +599,18 @@ mod tests {
 
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn path_to_uri_percent_encodes() {
+        assert_eq!(
+            path_to_uri(Path::new("/My Proj/foo.al")),
+            "file:///My%20Proj/foo.al"
+        );
+        assert_eq!(
+            path_to_uri(Path::new("/plain/foo.al")),
+            "file:///plain/foo.al"
+        );
     }
 
     #[test]
