@@ -508,7 +508,12 @@ impl VM {
                         action: WakeAction::CompleteConnect(sid),
                         ..
                     } => self.wake_with(p, |vm| vm.finish_connect(sid)),
-                    _ => self.run_queue.push_back(p),
+                    Wait::Io {
+                        action: WakeAction::Rerun,
+                        ..
+                    }
+                    | Wait::Timer(_)
+                    | Wait::Offload(_) => self.run_queue.push_back(p),
                 }
                 // The fds' registrations stay armed: they belong to the
                 // sockets, which remain in the tables. An event with no

@@ -311,7 +311,7 @@ const _: () = {
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
 #[inline]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
 fn str_ref(v: &Value) -> &str {
     v.as_str().expect("type-checked by pop_str")
 }
@@ -1051,6 +1051,7 @@ impl VM {
     /// closure `f` points into that heap. Every caller has already run
     /// `check_spawnable` on the source closure (`spawn_copy` preserves the
     /// value kind), so `f` is a nullary closure by construction.
+    #[allow(clippy::expect_used)]
     fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) {
         let cl = f
             .as_closure()
