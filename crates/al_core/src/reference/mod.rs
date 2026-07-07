@@ -849,12 +849,15 @@ fn add_ref(
     kind: ReferenceKind,
     target: DefId,
 ) {
-    mr.add_reference(owner, Reference::new(crate::span::range_span(line, c0, c1), kind, target));
+    mr.add_reference(
+        owner,
+        Reference::new(crate::span::range_span(line, c0, c1), kind, target),
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ReferenceKind as K, *};
     use crate::diagnostic::Severity;
     use crate::span::{point_span, range_span};
 
@@ -948,14 +951,8 @@ mod tests {
 
         // two uses of foo inside some other (owner) definition
         let owner = def(m, 10, 3, 7, EntityKind::Function);
-        mr.add_reference(
-            Some(owner),
-            Reference::new(range_span(11, 4, 7), ReferenceKind::Unqualified, foo),
-        );
-        mr.add_reference(
-            Some(owner),
-            Reference::new(range_span(12, 4, 7), ReferenceKind::Unqualified, foo),
-        );
+        add_ref(&mut mr, Some(owner), (11, 4, 7), K::Unqualified, foo);
+        add_ref(&mut mr, Some(owner), (12, 4, 7), K::Unqualified, foo);
 
         assert_eq!(mr.defs_named("foo"), &[foo]);
         assert_eq!(mr.definition(foo).map(|d| d.name.as_str()), Some("foo"));
@@ -972,14 +969,8 @@ mod tests {
 
         // A wide occurrence and a tighter one overlapping the same point.
         let wide = def(m, 9, 0, 1, EntityKind::Value);
-        mr.add_reference(
-            None,
-            Reference::new(range_span(20, 0, 40), ReferenceKind::Unqualified, wide),
-        );
-        mr.add_reference(
-            None,
-            Reference::new(range_span(20, 10, 14), ReferenceKind::Unqualified, target),
-        );
+        add_ref(&mut mr, None, (20, 0, 40), K::Unqualified, wide);
+        add_ref(&mut mr, None, (20, 10, 14), K::Unqualified, target);
 
         // Inside the tight span -> tightest wins.
         assert_eq!(mr.resolve_position(20, 12), Some(target));
@@ -1008,14 +999,8 @@ mod tests {
         let run = def(app, 1, 3, 6, EntityKind::Function);
         let mut app_mr = ModuleReferences::new(app);
         app_mr.add_definition(Definition::new(run, "run", None, true));
-        app_mr.add_reference(
-            Some(run),
-            Reference::new(range_span(2, 4, 14), ReferenceKind::Qualified, helper),
-        );
-        app_mr.add_reference(
-            Some(run),
-            Reference::new(range_span(3, 4, 14), ReferenceKind::Qualified, helper),
-        );
+        add_ref(&mut app_mr, Some(run), (2, 4, 14), K::Qualified, helper);
+        add_ref(&mut app_mr, Some(run), (3, 4, 14), K::Qualified, helper);
         g.insert_module(app_mr);
 
         (g, lib, app, helper)
@@ -1040,7 +1025,7 @@ mod tests {
         let refs = g.references_to(helper);
         assert_eq!(refs.len(), 2);
         assert!(refs.iter().all(|r| r.module == app));
-        assert!(refs.iter().all(|r| r.kind == ReferenceKind::Qualified));
+        assert!(refs.iter().all(|r| r.kind == K::Qualified));
     }
 
     #[test]
@@ -1100,15 +1085,9 @@ mod tests {
         mr.add_definition(Definition::new(b, "b", None, false));
 
         // Owned by `a` -> contributes an a->b edge.
-        mr.add_reference(
-            Some(a),
-            Reference::new(range_span(1, 5, 6), ReferenceKind::Unqualified, b),
-        );
+        add_ref(&mut mr, Some(a), (1, 5, 6), K::Unqualified, b);
         // Unowned top-level occurrence -> no edge.
-        mr.add_reference(
-            None,
-            Reference::new(range_span(9, 0, 1), ReferenceKind::Unqualified, b),
-        );
+        add_ref(&mut mr, None, (9, 0, 1), K::Unqualified, b);
         g.insert_module(mr);
 
         let edges: Vec<(DefId, DefId)> = g.edges().collect();
@@ -1130,18 +1109,9 @@ mod tests {
         // private `loopy`, only self-recursive.
         let loopy = add_def(&mut mr, m, "loopy", 7, EntityKind::Function, false);
 
-        mr.add_reference(
-            Some(a),
-            Reference::new(range_span(2, 4, 5), ReferenceKind::Unqualified, b),
-        );
-        mr.add_reference(
-            Some(b),
-            Reference::new(range_span(4, 4, 8), ReferenceKind::Unqualified, deep),
-        );
-        mr.add_reference(
-            Some(loopy),
-            Reference::new(range_span(8, 4, 9), ReferenceKind::Unqualified, loopy),
-        );
+        add_ref(&mut mr, Some(a), (2, 4, 5), K::Unqualified, b);
+        add_ref(&mut mr, Some(b), (4, 4, 8), K::Unqualified, deep);
+        add_ref(&mut mr, Some(loopy), (8, 4, 9), K::Unqualified, loopy);
         g.insert_module(mr);
 
         let r = g.reachable(Vec::new());
@@ -1184,10 +1154,7 @@ mod tests {
         let used = add_def(&mut mr, m, "used", 3, EntityKind::Function, false);
         let dead = add_def(&mut mr, m, "dead", 5, EntityKind::Function, false);
         // pub `api` calls private `used`; nobody calls `dead`.
-        mr.add_reference(
-            Some(api),
-            Reference::new(range_span(2, 4, 8), ReferenceKind::Unqualified, used),
-        );
+        add_ref(&mut mr, Some(api), (2, 4, 8), K::Unqualified, used);
         g.insert_module(mr);
 
         let d = sole_unused(&g, m);
@@ -1202,10 +1169,7 @@ mod tests {
         let helper = add_def(&mut mr, m, "helper", 1, EntityKind::Function, false);
         let dead = add_def(&mut mr, m, "dead", 4, EntityKind::Function, false);
         // `helper` is only called by the executed top-level body (owner None).
-        mr.add_reference(
-            None,
-            Reference::new(range_span(9, 0, 6), ReferenceKind::Unqualified, helper),
-        );
+        add_ref(&mut mr, None, (9, 0, 6), K::Unqualified, helper);
         g.insert_module(mr);
 
         let d = sole_unused(&g, m);
@@ -1218,10 +1182,7 @@ mod tests {
         let (mut g, m, mut mr) = main_graph();
         let spin = add_def(&mut mr, m, "spin", 1, EntityKind::Function, false);
         // `spin` references only itself — a self edge never makes it reachable.
-        mr.add_reference(
-            Some(spin),
-            Reference::new(range_span(2, 4, 8), ReferenceKind::Unqualified, spin),
-        );
+        add_ref(&mut mr, Some(spin), (2, 4, 8), K::Unqualified, spin);
         g.insert_module(mr);
 
         assert_eq!(sole_unused(&g, m).message, "unused function `spin`");
@@ -1250,10 +1211,7 @@ mod tests {
         let unused_imp = add_def(&mut mr, m, "io", 1, EntityKind::ModuleAlias, false);
         let used_imp = add_def(&mut mr, m, "fmt", 2, EntityKind::ModuleAlias, false);
         // `fmt` is used through a qualified access; `io` never is.
-        mr.add_reference(
-            None,
-            Reference::new(range_span(5, 4, 12), ReferenceKind::Qualified, used_imp),
-        );
+        add_ref(&mut mr, None, (5, 4, 12), K::Qualified, used_imp);
         g.insert_module(mr);
 
         let d = sole_unused(&g, m);
@@ -1266,14 +1224,8 @@ mod tests {
         let (mut g, m, mut mr) = main_graph();
         let imp = add_def(&mut mr, m, "util", 1, EntityKind::ModuleAlias, false);
         // The import declaration's own occurrences are not "uses".
-        mr.add_reference(
-            None,
-            Reference::new(range_span(1, 7, 11), ReferenceKind::Import, imp),
-        );
-        mr.add_reference(
-            None,
-            Reference::new(range_span(1, 7, 11), ReferenceKind::Definition, imp),
-        );
+        add_ref(&mut mr, None, (1, 7, 11), K::Import, imp);
+        add_ref(&mut mr, None, (1, 7, 11), K::Definition, imp);
         g.insert_module(mr);
 
         assert_eq!(sole_unused(&g, m).message, "unused import `util`");
@@ -1302,29 +1254,18 @@ mod tests {
             let remote_used = def(lib, 1, 3, 7, EntityKind::Function);
             // The `Import` occurrence covers only the `b` path segment; the
             // `used` item-binding occurrence sits inside the declaration span.
-            mr.add_reference(
-                None,
-                Reference::new(range_span(1, 9, 10), ReferenceKind::Import, alias),
-            );
-            mr.add_reference(
-                None,
-                Reference::new(
-                    range_span(1, 12, 16),
-                    ReferenceKind::Unqualified,
-                    remote_used,
-                ),
-            );
+            add_ref(&mut mr, None, (1, 9, 10), K::Import, alias);
+            add_ref(&mut mr, None, (1, 12, 16), K::Unqualified, remote_used);
             let main = add_def(&mut mr, m, "main", 3, EntityKind::Function, true);
             if with_use {
                 // `pub fn main() { used() }` — a real use, outside the
                 // declaration.
-                mr.add_reference(
+                add_ref(
+                    &mut mr,
                     Some(main),
-                    Reference::new(
-                        range_span(3, 16, 20),
-                        ReferenceKind::Unqualified,
-                        remote_used,
-                    ),
+                    (3, 16, 20),
+                    K::Unqualified,
+                    remote_used,
                 );
             }
             mr
@@ -1371,37 +1312,19 @@ mod tests {
             // `Import` path segment (`util`) -> the imported module; `Alias`
             // name (`u`) -> this alias; `empty` item binding -> the remote
             // `empty`.
-            mr.add_reference(
+            add_ref(
+                &mut mr,
                 None,
-                Reference::new(
-                    range_span(1, 9, 13),
-                    ReferenceKind::Import,
-                    def(lib, 1, 9, 13, EntityKind::ModuleAlias),
-                ),
+                (1, 9, 13),
+                K::Import,
+                def(lib, 1, 9, 13, EntityKind::ModuleAlias),
             );
-            mr.add_reference(
-                None,
-                Reference::new(range_span(1, 17, 18), ReferenceKind::Alias, alias),
-            );
-            mr.add_reference(
-                None,
-                Reference::new(
-                    range_span(1, 20, 25),
-                    ReferenceKind::Unqualified,
-                    remote_empty,
-                ),
-            );
+            add_ref(&mut mr, None, (1, 17, 18), K::Alias, alias);
+            add_ref(&mut mr, None, (1, 20, 25), K::Unqualified, remote_empty);
             if with_use {
                 // `println(empty())` on line 2 — a real use, outside the
                 // declaration.
-                mr.add_reference(
-                    None,
-                    Reference::new(
-                        range_span(2, 8, 13),
-                        ReferenceKind::Unqualified,
-                        remote_empty,
-                    ),
-                );
+                add_ref(&mut mr, None, (2, 8, 13), K::Unqualified, remote_empty);
             }
             mr
         };
@@ -1451,17 +1374,11 @@ mod tests {
         let mut lm = ModuleReferences::new(lib);
         let run = add_def(&mut lm, lib, "run", 1, EntityKind::Function, true);
         let helper = add_def(&mut lm, lib, "helper", 3, EntityKind::Function, false);
-        lm.add_reference(
-            Some(run),
-            Reference::new(range_span(2, 4, 10), ReferenceKind::Unqualified, helper),
-        );
+        add_ref(&mut lm, Some(run), (2, 4, 10), K::Unqualified, helper);
         g.insert_module(lm);
 
         // entry top-level body calls `lib.run` qualified.
-        em.add_reference(
-            None,
-            Reference::new(range_span(5, 0, 7), ReferenceKind::Qualified, run),
-        );
+        add_ref(&mut em, None, (5, 0, 7), K::Qualified, run);
         g.insert_module(em);
 
         assert!(g.unused_diagnostics(entry).is_empty());
@@ -1484,7 +1401,7 @@ mod tests {
     }
 
     /// Mirrors production `Compiler::emit_def`, which records a
-    /// `ReferenceKind::Definition` self-occurrence (`owner == None`,
+    /// `K::Definition` self-occurrence (`owner == None`,
     /// `target == the def`) for every top-level fn/const/type. Such
     /// self-occurrences must NOT be treated as entry-body reachability roots
     /// (the `entry_toplevel_roots` kind filter) — otherwise every top-level
@@ -1499,13 +1416,10 @@ mod tests {
 
         // emit_def's self-occurrence for every top-level def (owner None).
         for d in [api, used, dead] {
-            mr.add_reference(None, Reference::new(d.span, ReferenceKind::Definition, d));
+            mr.add_reference(None, Reference::new(d.span, K::Definition, d));
         }
         // pub `api` calls private `used`; nobody calls `dead`.
-        mr.add_reference(
-            Some(api),
-            Reference::new(range_span(2, 4, 8), ReferenceKind::Unqualified, used),
-        );
+        add_ref(&mut mr, Some(api), (2, 4, 8), K::Unqualified, used);
         g.insert_module(mr);
 
         let d = sole_unused(&g, m);
@@ -1529,10 +1443,7 @@ mod tests {
         let foo = def(lib, 1, 3, 6, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
         lib_mr.add_definition(Definition::new(foo, "foo", None, true));
-        lib_mr.add_reference(
-            None,
-            Reference::new(foo.span, ReferenceKind::Definition, foo),
-        );
+        lib_mr.add_reference(None, Reference::new(foo.span, K::Definition, foo));
         g.insert_module(lib_mr);
 
         // The `Import` occurrence's target is owned by the imported module
@@ -1545,24 +1456,12 @@ mod tests {
         let mut alias_def = Definition::new(alias, "b", None, false);
         alias_def.imports_module = Some(lib);
         mr.add_definition(alias_def);
-        mr.add_reference(
-            None,
-            Reference::new(alias.span, ReferenceKind::Definition, alias),
-        );
-        mr.add_reference(
-            None,
-            Reference::new(range_span(1, 7, 8), ReferenceKind::Import, import_seg),
-        );
+        mr.add_reference(None, Reference::new(alias.span, K::Definition, alias));
+        add_ref(&mut mr, None, (1, 7, 8), K::Import, import_seg);
         let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
-        mr.add_reference(
-            None,
-            Reference::new(run.span, ReferenceKind::Definition, run),
-        );
+        mr.add_reference(None, Reference::new(run.span, K::Definition, run));
         // `b.foo()` — a `Qualified` occurrence targeting the *remote* `foo`.
-        mr.add_reference(
-            Some(run),
-            Reference::new(range_span(3, 18, 21), ReferenceKind::Qualified, foo),
-        );
+        add_ref(&mut mr, Some(run), (3, 18, 21), K::Qualified, foo);
         g.insert_module(mr);
 
         assert!(
@@ -1577,19 +1476,10 @@ mod tests {
         let mut alias_def2 = Definition::new(alias2, "b", None, false);
         alias_def2.imports_module = Some(lib);
         mr2.add_definition(alias_def2);
-        mr2.add_reference(
-            None,
-            Reference::new(alias2.span, ReferenceKind::Definition, alias2),
-        );
-        mr2.add_reference(
-            None,
-            Reference::new(range_span(1, 7, 8), ReferenceKind::Import, import_seg),
-        );
+        mr2.add_reference(None, Reference::new(alias2.span, K::Definition, alias2));
+        add_ref(&mut mr2, None, (1, 7, 8), K::Import, import_seg);
         let run2 = add_def(&mut mr2, m, "run", 3, EntityKind::Function, true);
-        mr2.add_reference(
-            None,
-            Reference::new(run2.span, ReferenceKind::Definition, run2),
-        );
+        mr2.add_reference(None, Reference::new(run2.span, K::Definition, run2));
         g.insert_module(mr2);
 
         assert_eq!(sole_unused(&g, m).message, "unused import `b`");
@@ -1624,32 +1514,27 @@ mod tests {
         let mut def_b = Definition::new(alias_b, "b", None, false);
         def_b.imports_module = Some(lib_b);
         mr.add_definition(def_b);
-        mr.add_reference(
+        add_ref(
+            &mut mr,
             None,
-            Reference::new(
-                range_span(1, 7, 8),
-                ReferenceKind::Import,
-                def(lib_b, 1, 7, 8, EntityKind::ModuleAlias),
-            ),
+            (1, 7, 8),
+            K::Import,
+            def(lib_b, 1, 7, 8, EntityKind::ModuleAlias),
         );
         let alias_c = def(m, 2, 7, 8, EntityKind::ModuleAlias);
         let mut def_c = Definition::new(alias_c, "c", None, false);
         def_c.imports_module = Some(lib_c);
         mr.add_definition(def_c);
-        mr.add_reference(
+        add_ref(
+            &mut mr,
             None,
-            Reference::new(
-                range_span(2, 7, 8),
-                ReferenceKind::Import,
-                def(lib_c, 2, 7, 8, EntityKind::ModuleAlias),
-            ),
+            (2, 7, 8),
+            K::Import,
+            def(lib_c, 2, 7, 8, EntityKind::ModuleAlias),
         );
         let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
         // `c.used()` — a cross-module `Qualified` occurrence into `a/c` only.
-        mr.add_reference(
-            Some(run),
-            Reference::new(range_span(3, 18, 24), ReferenceKind::Qualified, used),
-        );
+        add_ref(&mut mr, Some(run), (3, 18, 24), K::Qualified, used);
         g.insert_module(mr);
 
         assert_eq!(
