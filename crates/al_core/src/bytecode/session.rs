@@ -72,9 +72,9 @@ pub struct HoverFact {
 
 /// Full snapshot of every append-only compiler structure, captured at module
 /// boundaries so an `IncrementalSession` can roll back exactly to that point.
-/// Ordering follows `EnginePoolWatermark` so `min()` over a set of watermarks
-/// picks the earliest-compiled one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// Ordered so `min()` over a set of watermarks picks the earliest-compiled
+/// one; see [`ord_key`](Self::ord_key) for the comparison key.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Watermark {
     pub engine: EnginePoolWatermark,
     pub env: EnvWatermark,
@@ -82,6 +82,43 @@ pub struct Watermark {
     pub functions: usize,
     pub constants: usize,
     pub local_count: i32,
+}
+
+impl Watermark {
+    /// The "earlier/later" comparison key. Every field here is the length of
+    /// an append-only pool (or a monotone counter), so a watermark captured
+    /// earlier compares `<=` one captured later regardless of which entry the
+    /// tuple happens to differ on first — `ModuleTable::invalidate` relies on
+    /// `min` picking the earliest-compiled module. `env` is deliberately
+    /// excluded: it is a rollback payload for `TypeEnv::truncate_to`, and
+    /// keeping it out means `EnvWatermark`'s field set can grow or reorder
+    /// without any risk of perturbing this ordering.
+    fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, usize, i32) {
+        (
+            self.engine,
+            self.code,
+            self.functions,
+            self.constants,
+            self.local_count,
+        )
+    }
+}
+
+impl PartialEq for Watermark {
+    fn eq(&self, other: &Self) -> bool {
+        self.ord_key() == other.ord_key()
+    }
+}
+impl Eq for Watermark {}
+impl Ord for Watermark {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ord_key().cmp(&other.ord_key())
+    }
+}
+impl PartialOrd for Watermark {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Compiler {
@@ -139,7 +176,7 @@ impl Compiler {
         self.outer_scopes.clear();
         self.captures.clear();
         self.capture_names.clear();
-        self.current_binding.clear();
+        self.current_binding = None;
         self.next_fn_self_name = None;
         self.in_tail_position = false;
         self.current_owner = None;
@@ -420,7 +457,7 @@ impl IncrementalSession {
     /// the path so disk content is re-read, and lowers `last_entry` to the
     /// evicted module's watermark so the arena is truncated correctly.
     pub fn invalidate_path(&mut self, path: &Path) {
-        self.c.module_table.overlays.remove(path);
+        self.c.module_table.clear_overlay(path);
         let key = self
             .c
             .module_table
@@ -436,7 +473,7 @@ impl IncrementalSession {
     }
 
     pub fn set_overlay(&mut self, path: PathBuf, text: String) {
-        self.c.module_table.overlays.insert(path, text);
+        self.c.module_table.set_overlay(path, text);
     }
 
     pub fn check(&mut self, expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
