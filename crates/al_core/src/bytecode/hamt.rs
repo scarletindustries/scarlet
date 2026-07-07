@@ -106,27 +106,42 @@ fn collision_find(pairs: &[Value], key: &Value) -> Option<usize> {
         .find(|&i| values_equal(&pairs[i], key))
 }
 
-/// Visit every `(key, value)`. Used for iteration (`keys`/`values`/`to_list`)
-/// and structural hashing/equality.
-fn for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value)) {
+/// Visit every `(key, value)` while `f` keeps returning `true`. Returns
+/// `false` iff `f` returned `false` (iteration short-circuited).
+fn try_for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value) -> bool) -> bool {
     if node.is_nil() {
-        return;
+        return true;
     }
     match HamtNodeRef::of(node) {
         HamtNodeRef::Entry { key, value } => f(key, value),
         HamtNodeRef::Collision { pairs, .. } => {
             for i in (0..pairs.len()).step_by(2) {
-                f(pairs[i].clone(), pairs[i + 1].clone());
+                if !f(pairs[i].clone(), pairs[i + 1].clone()) {
+                    return false;
+                }
             }
+            true
         }
         HamtNodeRef::Branch { children, .. } => {
             // `children` aliases the arena; this read never allocates, so the
             // borrow stays valid for the whole walk.
             for child in children {
-                for_each_entry(child, f);
+                if !try_for_each_entry(child, f) {
+                    return false;
+                }
             }
+            true
         }
     }
+}
+
+/// Visit every `(key, value)`. Used for iteration (`keys`/`values`/`to_list`)
+/// and structural hashing.
+fn for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value)) {
+    try_for_each_entry(node, &mut |k, v| {
+        f(k, v);
+        true
+    });
 }
 
 /// Collect every `(key, value)` into host memory. The returned `Value`s are
@@ -397,16 +412,13 @@ pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
     if a.size != b.size {
         return false;
     }
-    let mut equal = true;
-    for_each_entry(&a.root, &mut |k, v| {
-        if equal {
-            equal = match node_get_root(&b.root, &k, hash_value(&k)) {
-                Some(bv) => values_equal(&v, &bv),
-                None => false,
-            };
-        }
-    });
-    equal
+    try_for_each_entry(
+        &a.root,
+        &mut |k, v| match node_get_root(&b.root, &k, hash_value(&k)) {
+            Some(bv) => values_equal(&v, &bv),
+            None => false,
+        },
+    )
 }
 
 /// Lookup against a (possibly empty) root node.
