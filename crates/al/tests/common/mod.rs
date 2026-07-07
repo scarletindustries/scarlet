@@ -8,7 +8,8 @@ pub mod net;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output};
+use std::time::{Duration, Instant};
 
 use al::{ast, parser, scanner};
 
@@ -24,7 +25,7 @@ fn hash_str(s: &str) -> u64 {
 /// The pid separates test binaries and the thread-id hash separates parallel
 /// test threads (ThreadIds are never reused); same-thread tests run
 /// sequentially, so that pair is enough to keep names unique.
-pub fn write_temp(source: &str) -> std::path::PathBuf {
+fn write_temp(source: &str) -> std::path::PathBuf {
     let mut tmp = std::env::temp_dir();
     let pid = std::process::id();
     let tid = format!("{:?}", std::thread::current().id());
@@ -65,8 +66,29 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
     }
 }
 
+/// Wait up to `secs` for a self-terminating `child` to exit, then collect its
+/// output. Callers here expect the child to finish on its own; the bound just
+/// guarantees a wedge fails the test instead of hanging the suite. Callers
+/// pass a bound far above the happy-path runtime: under a full parallel
+/// `cargo test` the spawned VM competes with every other test binary for CPU,
+/// and a tight bound turns load into a spurious kill on an otherwise correct
+/// run.
+pub fn wait_or_kill(mut child: Child, secs: u64) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    // No-op if it already exited; forces the issue if it overran the deadline.
+    child.kill().ok();
+    child.wait_with_output().expect("collect child output")
+}
+
 /// Write `source` to a temp file, run `al <cmd>` on it, and remove the file.
-fn run_source(cmd: &str, source: &str) -> AlOutput {
+pub fn run_source(cmd: &str, source: &str) -> AlOutput {
     let path = write_temp(source);
     let out = run_al(cmd, &path);
     let _ = std::fs::remove_file(&path);
@@ -84,9 +106,10 @@ fn dump(source: &str, out: &AlOutput) -> String {
 
 /// The one reject-checker: asserts `out` is a *clean* rejection — failure exit,
 /// a real exit code (never a signal/abort), no Rust panic in the output, and a
-/// diagnostic containing `expected_diag` on either stream. Pass `""` for
-/// `expected_diag` when the test only pins the rejection, not the message.
-fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diag: &str) {
+/// diagnostic case-insensitively containing at least one of `expected_diags` on
+/// either stream. An empty entry pins only the clean-rejection contract, not the
+/// message.
+pub fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diags: &[&str]) {
     assert!(
         !out.success,
         "expected `al {cmd}` to REJECT:\n{}",
@@ -103,22 +126,46 @@ fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diag: &str) 
         "panicked instead of rejecting cleanly:\n{}",
         dump(source, out)
     );
+    let combined_lc = combined.to_lowercase();
     assert!(
-        combined.contains(expected_diag),
-        "expected output to contain {expected_diag:?} for:\n{source}\n--- output ---\n{combined}"
+        expected_diags
+            .iter()
+            .any(|d| d.is_empty() || combined_lc.contains(&d.to_lowercase())),
+        "expected output to contain one of {expected_diags:?} for:\n{source}\n--- output ---\n{combined}"
     );
 }
 
 /// Assert `al check` rejects `source` cleanly with a diagnostic containing
-/// `expected_diag`. See [`assert_rejects`] for the full contract.
-pub fn check_rejects(source: &str, expected_diag: &str) {
-    assert_rejects(&run_source("check", source), "check", source, expected_diag);
+/// `expected_diag`. Returns the captured output for follow-up assertions.
+/// See [`assert_rejects`] for the full contract.
+pub fn check_rejects(source: &str, expected_diag: &str) -> AlOutput {
+    let out = run_source("check", source);
+    assert_rejects(&out, "check", source, &[expected_diag]);
+    out
 }
 
 /// Assert `al run` rejects `source` cleanly with a diagnostic containing
-/// `expected_diag`. See [`assert_rejects`] for the full contract.
-pub fn run_rejects(source: &str, expected_diag: &str) {
-    assert_rejects(&run_source("run", source), "run", source, expected_diag);
+/// `expected_diag`. Returns the captured output for follow-up assertions.
+/// See [`assert_rejects`] for the full contract.
+pub fn run_rejects(source: &str, expected_diag: &str) -> AlOutput {
+    let out = run_source("run", source);
+    assert_rejects(&out, "run", source, &[expected_diag]);
+    out
+}
+
+/// `al <cmd>` the project file `entry` and assert it fails cleanly with a
+/// diagnostic containing at least one of `msgs`. See [`assert_rejects`].
+pub fn project_rejects(proj: &Project, cmd: &str, entry: &str, msgs: &[&str]) {
+    let r = run_al(cmd, &proj.dir.join(entry));
+    assert_rejects(&r, cmd, entry, msgs);
+}
+
+/// `al <cmd>` the project file `entry` and assert it succeeds with exactly
+/// `expected` on stdout.
+pub fn run_project_outputs(proj: &Project, cmd: &str, entry: &str, expected: &str) {
+    let r = run_al(cmd, &proj.dir.join(entry));
+    assert!(r.success, "stdout: {}\nstderr: {}", r.stdout, r.stderr);
+    assert_eq!(r.stdout, expected, "stderr: {}", r.stderr);
 }
 
 /// Assert `al check` accepts `source` (success exit).

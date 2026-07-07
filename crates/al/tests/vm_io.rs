@@ -8,7 +8,7 @@ use std::net::{TcpListener, TcpStream};
 
 mod common;
 use common::Project;
-use common::net::{connect, shutdown_clean, spawn_al_server, wait_or_kill};
+use common::net::spawn_al_server;
 
 /// `io.write_text` then `io.read_text` round-trips the content: stdout echoes
 /// what was read back, and the bytes are genuinely on disk.
@@ -61,7 +61,7 @@ match io.write_text(path, 'hello-io') {
 fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
     let src = r#"import al/net
-import al/net/socket
+import al/net/socket.{Data, Closed}
 import al/net/address
 import al/binary
 import al/result
@@ -73,7 +73,7 @@ match net.listen('127.0.0.1', 0) {
 			Ok(sock) -> {
 				println('peer ${address.to_string(sock.peer)}')
 				match socket.read(sock, 4096) {
-					Ok(data) -> match socket.write(sock, data) {
+					Ok(Data(data)) -> match socket.write(sock, data) {
 						Ok(_) -> match socket.close(sock) {
 							Ok(_) -> match net.close(server) {
 								Ok(_) -> println('served')
@@ -83,6 +83,7 @@ match net.listen('127.0.0.1', 0) {
 						}
 						Err(e) -> println('write-failed: ${e}')
 					}
+					Ok(Closed) -> println('peer-closed')
 					Err(e) -> println('read-failed: ${e}')
 				}
 			}
@@ -94,7 +95,8 @@ match net.listen('127.0.0.1', 0) {
 "#;
 
     // The server blocks on accept(); spawn it and drive it from the client.
-    let (child, mut stream, _port) = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, src);
+    let mut stream = srv.connect();
     stream.write_all(b"ping-over-tcp").expect("client write");
     // Server echoes the bytes then closes the socket, so read_to_end sees the
     // echo followed by EOF.
@@ -105,7 +107,7 @@ match net.listen('127.0.0.1', 0) {
         "echoed bytes must match what was sent"
     );
 
-    let out = child.wait_with_output().expect("await server");
+    let out = srv.wait_or_kill(30);
     assert!(
         out.status.success(),
         "server failed; stdout: {} stderr: {}",
@@ -225,8 +227,9 @@ match net.listen('127.0.0.1', 0) {
 
     // The client connects (so `accept` returns) but never writes. Holding the
     // stream open keeps the socket alive-but-silent across the read window.
-    let (child, _stream, _port) = spawn_al_server(&proj, src);
-    let out = wait_or_kill(child, 30);
+    let srv = spawn_al_server(&proj, src);
+    let _stream = srv.connect();
+    let out = srv.wait_or_kill(30);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -251,7 +254,7 @@ match net.listen('127.0.0.1', 0) {
 fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
     let src = r#"import al/net
-import al/net/socket
+import al/net/socket.{Data, Closed}
 import al/net/address
 import al/binary
 import al/result
@@ -261,10 +264,11 @@ match net.listen('127.0.0.1', 0) {
 		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
 		match net.accept(server) {
 			Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
-				Ok(data) -> match binary.to_string(data) {
+				Ok(Data(data)) -> match binary.to_string(data) {
 					Ok(text) -> println('got: ${text}')
 					Err(_) -> println('not-utf8')
 				}
+				Ok(Closed) -> println('peer-closed')
 				Err(e) -> println('read-failed: ${e}')
 			}
 			Err(e) -> println('accept-failed: ${e}')
@@ -274,9 +278,10 @@ match net.listen('127.0.0.1', 0) {
 }
 "#;
 
-    let (child, mut stream, _port) = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, src);
+    let mut stream = srv.connect();
     stream.write_all(b"hello").expect("client write");
-    let out = wait_or_kill(child, 30);
+    let out = srv.wait_or_kill(30);
     drop(stream);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -498,7 +503,10 @@ fn read_one_response(
 
     let content_length: usize = headers
         .get("content-length")
-        .and_then(|v| v.parse().ok())
+        .map(|v| {
+            v.parse::<usize>()
+                .expect("server sent non-numeric Content-Length")
+        })
         .unwrap_or(0);
     let total = header_end + content_length;
     while buf.len() < total {
@@ -538,7 +546,8 @@ match net.listen('127.0.0.1', 0) {
 "#;
 
     // The server blocks in its accept loop; spawn it and drive it from a client.
-    let (child, mut stream, _port) = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, src);
+    let mut stream = srv.connect();
 
     // Two HTTP/1.1 GETs in a single write. Both land in one server-side read,
     // so the connection loop must parse the first, respond, then serve the
@@ -575,7 +584,7 @@ match net.listen('127.0.0.1', 0) {
     }
 
     // The server loops forever; tear it down now that both requests answered.
-    shutdown_clean(child, stream);
+    srv.shutdown_clean(stream);
 }
 
 /// End-to-end chunked transfer-encoding decode through the `al/http` server:
@@ -613,7 +622,8 @@ match net.listen('127.0.0.1', 0) {
 }
 "#;
 
-    let (child, mut stream, port) = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, src);
+    let mut stream = srv.connect();
 
     // --- Exchange 1: chunked POST with a trailer ---------------------------
     // (Single-line byte string: Rust's `\` line continuation strips leading
@@ -673,7 +683,7 @@ match net.listen('127.0.0.1', 0) {
 
     // --- Malformed chunked body is rejected with 400 -----------------------
     // (Fresh connection: the 400 closes the current one.)
-    let mut bad_stream = connect(port);
+    let mut bad_stream = srv.connect();
     bad_stream
         .write_all(
             b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n",
@@ -687,5 +697,5 @@ match net.listen('127.0.0.1', 0) {
     );
 
     drop(bad_stream);
-    shutdown_clean(child, stream);
+    srv.shutdown_clean(stream);
 }

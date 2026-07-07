@@ -5,10 +5,58 @@
 
 use std::io::Read;
 use std::net::TcpStream;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::Duration;
 
-use super::Project;
+use super::{Project, wait_or_kill};
+
+/// A spawned `al` server subprocess plus the port it announced. The `Drop`
+/// impl kills and reaps the child, so a test that panics between spawn and
+/// teardown never leaks a forever-looping server process. Consuming methods
+/// (`shutdown_clean`, `wait_or_kill`) `take` the child first so `Drop` is a
+/// no-op after them.
+pub struct AlServer {
+    child: Option<Child>,
+    pub port: u16,
+}
+
+impl Drop for AlServer {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+impl AlServer {
+    /// Open a client connection to this server's announced port.
+    pub fn connect(&self) -> TcpStream {
+        connect(self.port)
+    }
+
+    /// Tear down a forever-looping server: drop the client connection, kill the
+    /// child, and assert it neither reported a serve failure on stdout nor
+    /// panicked on stderr.
+    pub fn shutdown_clean(mut self, stream: TcpStream) {
+        drop(stream);
+        let mut child = self.child.take().unwrap();
+        child.kill().ok();
+        let out = child.wait_with_output().expect("await server shutdown");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stdout.contains("serve failed"),
+            "server reported a failure: {stdout}"
+        );
+        assert!(!stderr.contains("panicked"), "server panicked: {stderr}");
+    }
+
+    /// Bounded wait for a self-terminating server; see [`super::wait_or_kill`].
+    pub fn wait_or_kill(mut self, secs: u64) -> Output {
+        wait_or_kill(self.child.take().unwrap(), secs)
+    }
+}
 
 /// Read the spawned server's first stdout line — the `listening <ip>:<port>`
 /// announcement it prints once `net.listen` has bound port 0 — and return the
@@ -75,13 +123,13 @@ pub fn connect(port: u16) -> TcpStream {
 }
 
 /// Write `src` to `server.al` in `proj`, spawn `al run` on it with piped
-/// output, and connect a client once the server announces its port. Every
-/// server source binds `127.0.0.1:0` and prints `listening <ip>:<port>` (via
-/// `net.local_addr`) as its first line; parsing that announcement before
-/// connecting means the client can only ever reach the server's own listener —
-/// there is no reserved-port handoff for a concurrent test to race. Returns
-/// the port too, for tests that open further connections.
-pub fn spawn_al_server(proj: &Project, src: &str) -> (Child, TcpStream, u16) {
+/// output, and wait for it to announce its port. Every server source binds
+/// `127.0.0.1:0` and prints `listening <ip>:<port>` (via `net.local_addr`) as
+/// its first line; parsing that announcement before connecting means the
+/// client can only ever reach the server's own listener — there is no
+/// reserved-port handoff for a concurrent test to race. Call
+/// [`AlServer::connect`] to open a client stream.
+pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
     let prog = proj.dir.join("server.al");
     std::fs::write(&prog, src).unwrap();
 
@@ -94,40 +142,8 @@ pub fn spawn_al_server(proj: &Project, src: &str) -> (Child, TcpStream, u16) {
         .expect("spawn al server");
 
     let port = read_announced_port(&mut child);
-    (child, connect(port), port)
-}
-
-/// Tear down a `spawn_al_server` pair: drop the client connection, kill the
-/// (forever-looping) server, and assert it never reported a serve failure.
-pub fn shutdown_clean(mut child: Child, stream: TcpStream) {
-    drop(stream);
-    child.kill().ok();
-    let out = child.wait_with_output().expect("await server shutdown");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("serve failed"),
-        "server reported a failure: {stdout}"
-    );
-}
-
-/// Wait up to `secs` for a self-terminating `child` to exit, then collect its
-/// output. Unlike `shutdown_clean` (which kills a forever-looping server),
-/// callers here expect the child to finish on its own; the bound just
-/// guarantees a wedge fails the test instead of hanging the suite. Callers
-/// pass a bound far above the happy-path runtime: under a full parallel
-/// `cargo test` the spawned VM competes with every other test binary for CPU,
-/// and a tight bound turns load into a spurious kill on an otherwise correct
-/// run.
-pub fn wait_or_kill(mut child: Child, secs: u64) -> std::process::Output {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break,
-        }
+    AlServer {
+        child: Some(child),
+        port,
     }
-    // No-op if it already exited; forces the issue if it overran the deadline.
-    child.kill().ok();
-    child.wait_with_output().expect("collect child output")
 }

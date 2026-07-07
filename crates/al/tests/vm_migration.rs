@@ -10,14 +10,14 @@ use std::process::{Command, Stdio};
 
 mod common;
 use common::Project;
-use common::net::wait_or_kill;
+use common::wait_or_kill;
 
 /// Run `al run <prog>` with `AL_SCHEDULERS=<schedulers>` and capture output.
 /// A generous wall-clock cap turns a scheduler deadlock (e.g. a donated
 /// process lost in transit, or a claimed-but-never-notified peer sleeping
 /// forever) into a test failure instead of a hung CI job. The cap is an
 /// anti-hang guard only; no assertion depends on how fast the run finishes.
-fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> (String, String) {
+fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String {
     let prog = proj.dir.join("prog.al");
     std::fs::write(&prog, src).unwrap();
 
@@ -31,17 +31,18 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> (String
         .expect("spawn al");
 
     let out = wait_or_kill(child, 120);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
         "al run failed (or hung past 120s) under AL_SCHEDULERS={schedulers}\n\
-         --- stdout ---\n{}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
+         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
     );
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+    assert!(
+        !stderr.contains("panicked"),
+        "runtime panicked under AL_SCHEDULERS={schedulers}:\n{stderr}"
+    );
+    stdout
 }
 
 /// Assert `stdout` is exactly the lines of `expected` modulo order. Process
@@ -80,17 +81,10 @@ fn fib(n) {
 "#;
 
 /// Prepend [`FIB_PREAMBLE`] to `body`, run it under `schedulers` schedulers
-/// in a fresh project named `tag`, assert the runtime did not panic, and
-/// return stdout.
+/// in a fresh project named `tag`, and return stdout.
 fn run_fib_program(tag: &str, schedulers: u32, body: &str) -> String {
     let proj = Project::new(tag);
-    let (stdout, stderr) =
-        run_al_with_schedulers(&proj, &format!("{FIB_PREAMBLE}{body}"), schedulers);
-    assert!(
-        !stderr.contains("panicked"),
-        "runtime panicked under AL_SCHEDULERS={schedulers}:\n{stderr}"
-    );
-    stdout
+    run_al_with_schedulers(&proj, &format!("{FIB_PREAMBLE}{body}"), schedulers)
 }
 
 /// Shared runner for the CPU-bound smoke tests: `spawns` workers each compute
@@ -187,7 +181,7 @@ fn migrated_process_keeps_loaded_globals_valid() {
 labels = ['alpha', 'beta', 'gamma', 'delta']
 banner = 'frozen-global'
 
-list.each(1..9, fn(i) scheduler.spawn(fn() work(labels[i % 4] or '?', banner, i)))
+array.each(1..9, fn(i) scheduler.spawn(fn() work(labels[i % 4] or '?', banner, i)))
 println('main done')
 "#,
     );
