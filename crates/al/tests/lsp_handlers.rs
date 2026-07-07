@@ -722,6 +722,22 @@ fn assert_refs_uris_span_lib_and_main(
     (arr.clone(), l, c)
 }
 
+/// The two `greet` positions every cross-module span test pins: the declaration
+/// identifier in lib.al and the `greet` token of `lib.greet()` in main.al.
+fn greet_spans() -> ((i64, i64), (i64, i64)) {
+    let at = |src| {
+        let (l, c) = cursor(src, "greet", 1, 0);
+        (l as i64, c as i64)
+    };
+    (at(XMOD_LIB), at(XMOD_MAIN))
+}
+
+/// Assert `items` holds exactly one entry whose `range.start` is `want`.
+fn one_at(items: &[Json], want: (i64, i64), what: &str) {
+    assert_eq!(items.len(), 1, "exactly one {what}: {items:?}");
+    assert_eq!(start(&items[0]), want, "{what} span: {items:?}");
+}
+
 /// Full shared assertion block for the cross-module find-references tests that
 /// pin exact spans. On top of the URI-set check above, asserts:
 ///   * the result holds exactly two locations — the declaration's identifier
@@ -743,16 +759,15 @@ fn assert_refs_span_lib_and_main(
         "expected the use in main.al + the decl in lib.al, got {arr:?}"
     );
 
-    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
+    let (lib_decl, main_use) = greet_spans();
     assert_eq!(
         location_in(&arr, lib_uri),
-        (lib_decl.0 as i64, lib_decl.1 as i64),
+        lib_decl,
         "the lib.al location must cover greet's declaration span: {arr:?}"
     );
-    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
     assert_eq!(
         location_in(&arr, main_uri),
-        (main_use.0 as i64, main_use.1 as i64),
+        main_use,
         "the main.al location must cover the `greet` of `lib.greet()`: {arr:?}"
     );
 
@@ -760,20 +775,15 @@ fn assert_refs_span_lib_and_main(
     let arr2 = no_decl
         .as_array()
         .unwrap_or_else(|| panic!("references must be an array, got {no_decl}"));
-    assert_eq!(
-        arr2.len(),
-        1,
-        "without the declaration only the main.al use remains: {arr2:?}"
+    one_at(
+        arr2,
+        main_use,
+        "main.al use once the declaration is dropped",
     );
     assert_eq!(
         arr2[0]["uri"].as_str(),
         Some(main_uri),
         "the surviving location is the use in main.al, the declaration is gone: {arr2:?}"
-    );
-    assert_eq!(
-        start(&arr2[0]),
-        (main_use.0 as i64, main_use.1 as i64),
-        "and it still covers the `greet` of `lib.greet()`: {arr2:?}"
     );
 }
 
@@ -795,36 +805,18 @@ fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, 
         "changes must be keyed by lib.al and main.al exactly, got {keys:?}"
     );
 
-    let lib_edits = changes
-        .get(lib_uri)
-        .and_then(Json::as_array)
-        .expect("edits for lib.al");
-    assert_eq!(
-        lib_edits.len(),
-        1,
-        "lib.al holds only the declaration rewrite: {lib_edits:?}"
-    );
-    let lib_decl = cursor(XMOD_LIB, "greet", 1, 0);
-    assert_eq!(
-        start(&lib_edits[0]),
-        (lib_decl.0 as i64, lib_decl.1 as i64),
-        "lib.al edit must cover greet's declaration span: {lib_edits:?}"
-    );
-
-    let main_edits = changes
-        .get(main_uri)
-        .and_then(Json::as_array)
-        .expect("edits for main.al");
-    assert_eq!(
-        main_edits.len(),
-        1,
-        "main.al holds only the use rewrite: {main_edits:?}"
-    );
-    let main_use = cursor(XMOD_MAIN, "greet", 1, 0);
-    assert_eq!(
-        start(&main_edits[0]),
-        (main_use.0 as i64, main_use.1 as i64),
-        "main.al edit must cover the `greet` token of `lib.greet()`: {main_edits:?}"
+    let (lib_decl, main_use) = greet_spans();
+    let edits_for = |uri: &str| {
+        changes
+            .get(uri)
+            .and_then(Json::as_array)
+            .unwrap_or_else(|| panic!("edits for {uri}"))
+    };
+    one_at(edits_for(lib_uri), lib_decl, "lib.al declaration rewrite");
+    one_at(
+        edits_for(main_uri),
+        main_use,
+        "main.al rewrite at the `greet` of `lib.greet()`",
     );
 
     for (uri, edits) in changes {
