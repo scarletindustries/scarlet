@@ -93,7 +93,7 @@ pub struct CompileResult {
 /// `enter_fn_frame` and moved back by `finish_fn_frame`. Holding the map
 /// itself (rather than a name→slot copy) makes the frame push/pop O(1).
 pub(super) struct Scope {
-    locals: HashMap<String, LocalSlot>,
+    locals: HashMap<StrId, LocalSlot>,
 }
 
 /// A live local binding: the stack slot it occupies plus the block-scope
@@ -120,10 +120,10 @@ struct FnFrame {
     undo_base: usize,
     marks_base: usize,
     local_count: i32,
-    captures: HashMap<String, i32>,
-    capture_names: Vec<String>,
+    captures: HashMap<StrId, i32>,
+    capture_names: Vec<StrId>,
     rigid_ids: HashSet<i32>,
-    binding: Option<String>,
+    binding: Option<StrId>,
     tail: bool,
     jump_over: i32,
     func_start: i32,
@@ -275,7 +275,7 @@ enum VarAccess {
 /// diverge on the failure modes: a non-qualified shape is recoverable (the
 /// caller falls through to its general path), whereas a failed member lookup
 /// has already been diagnosed and must short-circuit.
-enum QualifiedMember {
+enum QualifiedMember<'a> {
     /// Not a `qualifier.member` shape (or the qualifier is not imported).
     NotQualified,
     /// A qualified shape whose member lookup failed; `lookup_module_member`
@@ -283,7 +283,7 @@ enum QualifiedMember {
     LookupFailed,
     Resolved {
         module_key: String,
-        member_name: String,
+        member_name: &'a str,
         member_span: Span,
         scheme: Scheme,
         load: Option<VarAccess>,
@@ -2588,8 +2588,8 @@ impl Compiler {
             // Unqualified/Qualified kind) is emitted in `resolve_simple_callee`.
             // Skip the doc map probe + clone on the non-LSP path, where
             // `record` discards it (see its early return).
-            let doc = self.doc_if_collecting(&name);
-            self.record(&name, inst_ty, name_span, doc);
+            let doc = self.doc_if_collecting(name);
+            self.record(name, inst_ty, name_span, doc);
 
             return match scheme.kind {
                 ValueKind::Constructor {
@@ -2601,7 +2601,7 @@ impl Compiler {
                 } => {
                     let type_name = self.engine.str(type_name).to_string();
                     self.compile_ctor_call(
-                        &name,
+                        name,
                         &type_name,
                         type_id,
                         arity as usize,
@@ -2635,7 +2635,7 @@ impl Compiler {
                             general
                         }
                         None => {
-                            self.no_runtime_binding(&name, None, name_span);
+                            self.no_runtime_binding(name, None, name_span);
                             general
                         }
                     };
@@ -2738,7 +2738,10 @@ impl Compiler {
     /// (`resolve_simple_callee`) and the value position
     /// (`compile_property_access`), which diverge only on how they treat the
     /// two failure modes — see [`QualifiedMember`].
-    fn resolve_qualified_member(&mut self, pa: &ast::PropertyAccessExpression) -> QualifiedMember {
+    fn resolve_qualified_member<'a>(
+        &mut self,
+        pa: &'a ast::PropertyAccessExpression,
+    ) -> QualifiedMember<'a> {
         let ast::Expression::Identifier(left) = pa.left.as_ref() else {
             return QualifiedMember::NotQualified;
         };
@@ -2759,7 +2762,7 @@ impl Compiler {
         self.record_value_use(scheme.def, member.span, ReferenceKind::Qualified);
         QualifiedMember::Resolved {
             module_key,
-            member_name: member.name.clone(),
+            member_name: &member.name,
             member_span: member.span,
             scheme,
             load,
@@ -2770,10 +2773,10 @@ impl Compiler {
     /// `module.name`). Returns the looked-up scheme and how to push the
     /// runtime value when needed. Anything else falls through to the
     /// arbitrary-expression path.
-    fn resolve_simple_callee(
+    fn resolve_simple_callee<'a>(
         &mut self,
-        callee: &ast::Expression,
-    ) -> Option<(String, Span, Scheme, Option<VarAccess>)> {
+        callee: &'a ast::Expression,
+    ) -> Option<(&'a str, Span, Scheme, Option<VarAccess>)> {
         match callee {
             ast::Expression::Identifier(id) => {
                 let scheme = *self.env.lookup(&id.name)?;
@@ -2782,7 +2785,7 @@ impl Compiler {
                 // seam for calls (this path bypasses `compile_identifier`).
                 // `record` in `compile_call` is hover-only.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
-                Some((id.name.clone(), id.span, scheme, load))
+                Some((&id.name, id.span, scheme, load))
             }
             // Qualified callee `module.member()`. Both failure modes mean "no
             // simple callee" (a failed lookup has already been diagnosed by
@@ -2930,9 +2933,9 @@ impl Compiler {
                 load,
             } => {
                 let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
-                self.record(&member_name, ty, member_span, None);
+                self.record(member_name, ty, member_span, None);
                 self.emit_named_value(
-                    &member_name,
+                    member_name,
                     Some(&module_key),
                     member_span,
                     scheme.kind,
