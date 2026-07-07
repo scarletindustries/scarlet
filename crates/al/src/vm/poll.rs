@@ -278,8 +278,9 @@ impl VM {
             }
             Wait::Timer(d) => self.timer_heap.push(Reverse((*d, id))),
             Wait::Offload(op) => {
-                let op = op.take().expect("offload park carries an op");
-                self.runtime.offload(self.scheduler_index, id, op);
+                if let Some(op) = op.take() {
+                    self.runtime.offload(self.scheduler_index, id, op);
+                }
             }
         }
         self.parked.insert(id, (wait, p));
