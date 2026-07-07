@@ -347,7 +347,7 @@ fn ev(
     labels: &[&str],
     payload: Vec<Value>,
 ) -> Value {
-    Value::enum_with_names_in(h, al_core::TypeId(type_id), en, vn, labels, &payload)
+    Value::enum_with_names_in(h, al_core::TypeId(type_id), 0, en, vn, labels, &payload)
 }
 
 // A function value renders as `<fn#name>`, the name resolved through

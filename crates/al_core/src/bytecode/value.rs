@@ -46,7 +46,7 @@
 //!   stay off-heap in an `Arc<[u8]>` shared zero-copy across
 //!   views/spawn/migration; the box's `Drop` releases the `Arc`
 //! - `Tuple`:     `[count][elements…]`
-//! - `Enum`:      `[type_id][hash][enum_name][variant_name][labels][count][payload…]`
+//! - `Enum`:      `[type_id | variant_idx<<32][hash][enum_name][variant_name][labels][count][payload…]`
 //!   — names/labels are `Str`/`Tuple` values, normally in the frozen area
 //! - `Closure`:   `[func_idx][count][captures…]` — no name; printers resolve
 //!   it through `program.functions[func_idx]` at inspect time
@@ -1158,9 +1158,11 @@ impl Value {
     /// Callers either reuse a hash precomputed for the variant's frozen names
     /// (the VM path) or go through [`Value::enum_with_names_in`], which
     /// computes it.
+    #[allow(clippy::too_many_arguments)]
     pub fn enum_in<A: Arena + ?Sized>(
         a: &mut A,
         type_id: TypeId,
+        variant_idx: u16,
         hash: u64,
         enum_name: Value,
         variant_name: Value,
@@ -1174,7 +1176,7 @@ impl Value {
         // header written by `alloc_obj`.
         unsafe {
             let p = obj.as_ptr().add(1);
-            p.write(type_id.0 as u32 as u64);
+            p.write((type_id.0 as u32 as u64) | ((variant_idx as u64) << 32));
             p.add(1).write(hash);
             move_child(p.add(2), enum_name);
             move_child(p.add(3), variant_name);
@@ -1193,6 +1195,7 @@ impl Value {
     pub fn enum_with_names_in<A: Arena + ?Sized>(
         a: &mut A,
         type_id: TypeId,
+        variant_idx: u16,
         enum_name: &str,
         variant_name: &str,
         labels: &[&str],
@@ -1203,7 +1206,7 @@ impl Value {
         let label_vals: Vec<Value> = labels.iter().map(|l| Value::str_in(a, l)).collect();
         let labels_tuple = Value::tuple_in(a, &label_vals);
         let hash = enum_hash_with_payload(enum_name_prefix_hash(enum_name, variant_name), payload);
-        Value::enum_in(a, type_id, hash, en, vn, labels_tuple, payload)
+        Value::enum_in(a, type_id, variant_idx, hash, en, vn, labels_tuple, payload)
     }
 
     /// Whole-buffer binary from owned bytes. Allocation: 6 words (the box).
@@ -2608,6 +2611,7 @@ mod tests {
         let e = Value::enum_with_names_in(
             &mut h,
             TypeId(1),
+            1,
             "Option",
             "Some",
             &["value"],
@@ -2615,6 +2619,7 @@ mod tests {
         );
         let er = e.as_enum().unwrap();
         assert_eq!(er.type_id(), TypeId(1));
+        assert_eq!(er.variant_idx(), 1);
         assert_eq!(er.enum_name(), "Option");
         assert_eq!(er.variant_name(), "Some");
         assert_eq!(er.payload().len(), 1);
@@ -2742,6 +2747,7 @@ mod tests {
         let e = Value::enum_with_names_in(
             &mut h,
             TypeId(2),
+            0,
             "E",
             "V",
             &["a"],

@@ -194,7 +194,7 @@ fn emit_stdlib_templates(out: &mut String, pre: &PrecompileOutput, eng: &InferEn
             let Some(variants) = ti.variants() else {
                 continue;
             };
-            for v in &eng.variants[variants.range()] {
+            for (variant_idx, v) in eng.variants[variants.range()].iter().enumerate() {
                 let variant_name = eng.str(v.name);
                 let labels: Vec<String> = eng.variant_fields[v.fields.range()]
                     .iter()
@@ -202,9 +202,10 @@ fn emit_stdlib_templates(out: &mut String, pre: &PrecompileOutput, eng: &InferEn
                     .collect();
                 let line = format!(
                     "pub static {}: VariantTemplate = VariantTemplate {{ \
-                     type_id: {}, type_name: {}, variant_name: {}, labels: &[{}] }};",
+                     type_id: {}, variant_idx: {}, type_name: {}, variant_name: {}, labels: &[{}] }};",
                     screaming_snake(variant_name),
                     tid(ti.id),
+                    variant_idx,
                     q(type_name),
                     q(variant_name),
                     labels.join(", "),

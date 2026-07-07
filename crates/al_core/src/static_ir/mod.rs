@@ -27,6 +27,7 @@ use crate::types::{
 #[derive(Debug)]
 pub struct VariantTemplate {
     pub type_id: TypeId,
+    pub variant_idx: u16,
     pub type_name: &'static str,
     pub variant_name: &'static str,
     pub labels: &'static [&'static str],

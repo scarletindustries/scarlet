@@ -405,6 +405,7 @@ impl FrozenBuilder {
     pub fn enum_(
         &mut self,
         type_id: crate::type_def::TypeId,
+        variant_idx: u16,
         enum_name: &str,
         variant_name: &str,
         field_labels: &[&str],
@@ -414,7 +415,16 @@ impl FrozenBuilder {
         let en = self.str(enum_name);
         let vn = self.str(variant_name);
         let labels_tuple = self.label_tuple(field_labels);
-        Value::enum_in(self, type_id, hash, en, vn, labels_tuple, &payload)
+        Value::enum_in(
+            self,
+            type_id,
+            variant_idx,
+            hash,
+            en,
+            vn,
+            labels_tuple,
+            &payload,
+        )
     }
 
     /// The canonical frozen labels reference for enum objects. An enum
@@ -696,6 +706,7 @@ mod tests {
         let mut b = area.builder();
         let v1 = b.enum_(
             crate::type_def::TypeId(7),
+            0,
             "Credentials",
             "Basic",
             &["user", "pass"],
@@ -703,6 +714,7 @@ mod tests {
         );
         let v2 = b.enum_(
             crate::type_def::TypeId(7),
+            0,
             "Credentials",
             "Basic",
             &["user", "pass"],

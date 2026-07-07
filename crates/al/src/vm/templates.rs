@@ -32,6 +32,7 @@ use crate::stdlib;
 #[derive(Clone)]
 pub(super) struct EnumTemplate {
     type_id: al_core::TypeId,
+    variant_idx: u16,
     /// `enum_name_prefix_hash(enum_name, variant_name)`.
     prefix_hash: u64,
     /// Frozen `Str` value of the enum type name.
@@ -50,6 +51,7 @@ impl EnumTemplate {
         Value::enum_in(
             a,
             self.type_id,
+            self.variant_idx,
             hash,
             self.enum_name.clone(),
             self.variant_name.clone(),
@@ -101,6 +103,7 @@ pub(super) fn enum_template(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Enum
     let labels: Vec<Value> = t.labels.iter().map(|l| fb.str(l)).collect();
     EnumTemplate {
         type_id: t.type_id,
+        variant_idx: t.variant_idx,
         prefix_hash: enum_name_prefix_hash(t.type_name, t.variant_name),
         enum_name: fb.str(t.type_name),
         variant_name: fb.str(t.variant_name),

@@ -3430,19 +3430,13 @@ impl Compiler {
     pub(super) fn compile_declared_function(
         &mut self,
         name: &str,
+        global_slot: i32,
         params: &[ast::FunctionParameter],
         body: &ast::Expression,
         param_tys: Vec<Ty>,
         ret_ty: Ty,
         hydrator: &Hydrator,
     ) -> Ty {
-        // Capture the entry-frame slot Pass 3 pre-allocated for this fn while
-        // `locals` still holds it (i.e. before `enter_fn_frame` moves the map
-        // into `outer_scopes`). Paired with the `func_idx` assigned by
-        // `finish_fn_frame` below to feed `global_to_func`.
-        let name_id = self.engine.intern(name);
-        let global_slot = self.locals.get(&name_id).map(|e| e.slot);
-
         let saved = self.enter_fn_frame(Some(name));
         self.rigid_ids = hydrator.rigid_ids().clone();
         for (param, p_ty) in params.iter().zip(param_tys.iter()) {

@@ -1153,7 +1153,7 @@ fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {
 /// `VM::make_nil`.
 #[cfg(test)]
 fn nil_value(h: &mut ProcHeap, nil_id: al_core::TypeId) -> Value {
-    Value::enum_with_names_in(h, nil_id, "Nil", "Nil", &[], &[])
+    Value::enum_with_names_in(h, nil_id, 0, "Nil", "Nil", &[], &[])
 }
 
 /// A VM over a minimal halt-only program ("main", arity 0). For tests that
