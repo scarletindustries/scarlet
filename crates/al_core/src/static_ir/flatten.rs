@@ -117,7 +117,7 @@ impl FlatPools {
             self.sexport_pool.push(SExport {
                 name,
                 scheme,
-                local_slot: ev.local_slot.unwrap_or(i32::MIN),
+                local_slot: ev.local_slot,
             });
         }
         let values = Slice {

@@ -40,6 +40,7 @@ fn main() {
         src,
         "use al_core::static_ir::*;\n\
          use al_core::types::*;\n\
+         use al_core::bytecode::Op;\n\
          use al_core::{{PreludeBindings, TypeRef, CtorRef, TypeId}};\n"
     )
     .unwrap();
@@ -119,8 +120,8 @@ fn slice(sl: Slice) -> String {
     lit!(Slice: start = sl.start, len = sl.len)
 }
 
-fn aslice(sl: ArenaSlice) -> String {
-    lit!(ArenaSlice: start = sl.start, len = sl.len)
+fn aslice<P>(sl: ArenaSlice<P>) -> String {
+    format!("ArenaSlice::new({}, {})", sl.start, sl.len)
 }
 
 fn typenode(n: &TypeNode) -> String {
@@ -336,7 +337,7 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "SExport",
         p.sexport_pool
             .iter()
-            .map(|e| lit!(SExport: name = e.name, scheme = e.scheme, local_slot = e.local_slot)),
+            .map(|e| lit!(SExport: name = e.name, scheme = e.scheme, local_slot = format_args!("{:?}", e.local_slot))),
     );
     emit_static_slice(
         out,
@@ -397,7 +398,7 @@ fn valuekind(k: ValueKind) -> String {
     match k {
         ValueKind::Local => "ValueKind::Local".into(),
         ValueKind::ModuleFn => "ValueKind::ModuleFn".into(),
-        ValueKind::Builtin { op } => format!("ValueKind::Builtin {{ op: {op} }}"),
+        ValueKind::Builtin { op } => format!("ValueKind::Builtin {{ op: Op::{op:?} }}"),
         ValueKind::Constructor {
             type_name,
             type_id,

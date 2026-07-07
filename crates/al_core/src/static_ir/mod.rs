@@ -45,7 +45,7 @@ impl Slice {
     pub const EMPTY: Slice = Slice { start: 0, len: 0 };
     #[inline]
     pub fn range(self) -> std::ops::Range<usize> {
-        self.start as usize..(self.start + self.len) as usize
+        self.start as usize..self.start as usize + self.len as usize
     }
 }
 
@@ -53,7 +53,7 @@ impl Slice {
 pub struct SExport {
     pub name: u32,
     pub scheme: u32,
-    pub local_slot: i32,
+    pub local_slot: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -152,7 +152,7 @@ impl StaticStdlib {
                 self.s(e.name),
                 ExportedValue {
                     scheme: self.schemes[e.scheme as usize],
-                    local_slot: (e.local_slot != i32::MIN).then_some(e.local_slot),
+                    local_slot: e.local_slot,
                 },
             );
         }
