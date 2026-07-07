@@ -38,6 +38,7 @@
 //! `concat` O(log n) · `iter` O(n) total.
 
 use super::value::*;
+use smallvec::SmallVec;
 use std::mem::MaybeUninit;
 
 /// Branching factor.
@@ -875,8 +876,9 @@ pub struct SeqIter {
     sections: [Value; 3],
     section: usize,
     /// Branch path to the current leaf: each entry is a branch and the index
-    /// of its next unvisited child.
-    stack: Vec<(Value, usize)>,
+    /// of its next unvisited child. Tree height is `shift / BITS`, so 7 inline
+    /// slots cover any array up to 32^8 (~1.1T) elements without a host alloc.
+    stack: SmallVec<[(Value, usize); 7]>,
     /// The current leaf, owned so its elements stay alive while we yield them
     /// (nil when no leaf is active yet).
     cur: Value,
@@ -890,7 +892,7 @@ impl SeqIter {
         SeqIter {
             sections: [head, tree, tail],
             section: 0,
-            stack: Vec::new(),
+            stack: SmallVec::new(),
             cur: Value::nil(),
             pos: 0,
             remaining: len(root),
