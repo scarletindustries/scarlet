@@ -2225,7 +2225,8 @@ mod tests {
         ($($name:ident: $path:literal,)*) => {$(
             #[test]
             fn $name() {
-                assert_no_errors(include_str!($path));
+                let r = assert_no_errors(include_str!($path));
+                assert!(!r.ast.body.is_empty());
             }
         )*};
     }
