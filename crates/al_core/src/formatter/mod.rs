@@ -314,7 +314,7 @@ impl Formatter {
     fn fn_body(&self, body: &ast::Expression) -> Doc {
         if let ast::Expression::BlockExpression(b) = body {
             let trail = self.trailing_comments(b.span);
-            if b.body.is_empty() && matches!(trail, Doc::Nil) {
+            if b.body.is_empty() && trail.is_nil() {
                 return text("{}");
             }
         }
@@ -326,7 +326,7 @@ impl Formatter {
             && b.body.len() == 1
             && let ast::Node::Expression(inner) = &b.body[0]
             && !self.has_comment_at(inner.span())
-            && matches!(self.trailing_comments(b.span), Doc::Nil)
+            && self.trailing_comments(b.span).is_nil()
         {
             return group(self.expr(inner));
         }
@@ -512,7 +512,14 @@ impl Formatter {
                 ]
             }
             E::RangeExpression(r) => d![self.expr(&r.start), text(".."), self.expr(&r.end)],
-            E::ErrorNode(er) => text(format!("/* error: {} */", er.message)),
+            // Every ErrorNode construction site in the parser also emits an
+            // Error diagnostic, and `format()` returns `ParseFailed` before
+            // building any Doc when errors exist. Reaching here means a parser
+            // path built an ErrorNode without recording the error — surface
+            // that bug instead of silently writing `/* error: … */` into the
+            // formatted output.
+            #[allow(clippy::unreachable)]
+            E::ErrorNode(_) => unreachable!("ErrorNode reached formatter; parser emitted no Error"),
         }
     }
 
@@ -565,11 +572,10 @@ impl Formatter {
 
     fn block_expr(&self, b: &ast::BlockExpression) -> Doc {
         let trail = self.trailing_comments(b.span);
-        if b.body.is_empty() && matches!(trail, Doc::Nil) {
+        if b.body.is_empty() && trail.is_nil() {
             return text("{}");
         }
-        let hard =
-            !matches!(trail, Doc::Nil) || b.body.iter().any(|n| self.has_comment_at(n.span()));
+        let hard = !trail.is_nil() || b.body.iter().any(|n| self.has_comment_at(n.span()));
         let body = d![self.nodes_with_trivia(&b.body, 1), trail];
         if b.body.len() <= 1 && !hard {
             block(body)
@@ -635,7 +641,7 @@ impl Formatter {
         let ast::Expression::BlockExpression(blk) = b else {
             return false;
         };
-        if blk.body.len() != 1 || !matches!(self.trailing_comments(blk.span), Doc::Nil) {
+        if blk.body.len() != 1 || !self.trailing_comments(blk.span).is_nil() {
             return false;
         }
         let ast::Node::Expression(inner) = &blk.body[0] else {

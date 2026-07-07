@@ -35,6 +35,12 @@ pub enum Doc {
     Concat(Vec<Doc>),
 }
 
+impl Doc {
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Doc::Nil)
+    }
+}
+
 /// How willing a group is to be the point where its line breaks. This is what
 /// `fits` consults when a group appears in the content trailing the group
 /// being probed.
@@ -131,7 +137,8 @@ pub fn group(d: Doc) -> Doc {
 
 pub fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d {
-        Doc::Group { .. } | Doc::Text(_) | Doc::Nil => d,
+        Doc::Text(_) | Doc::Nil => d,
+        Doc::Group { doc, .. } => group_as(breaks, *doc),
         _ => {
             let breaks = if contains_hardline(&d) {
                 Breaks::Always
@@ -288,7 +295,7 @@ pub fn delimited_ws(open: &str, items: Vec<Doc>, close: &str) -> Doc {
 
 /// `{ body }` on one line, or broken across lines with the body indented.
 pub fn block(body: Doc) -> Doc {
-    if matches!(body, Doc::Nil) {
+    if body.is_nil() {
         return text("{}");
     }
     group_as(
