@@ -114,6 +114,7 @@ fn root_in<A: Arena + ?Sized>(
     tree: Value,
     tail: Value,
 ) -> Value {
+    debug_assert_eq!(len, node_len(&head) + node_len(&tree) + node_len(&tail));
     seq_root_in(a, len, shift, head, tree, tail)
 }
 
@@ -140,6 +141,18 @@ fn branch_parts(branch: &Value) -> (&[u64], &[Value]) {
         } => (sizes, children),
         SeqNodeRef::Leaf(_) => view_mismatch("seq"),
     }
+}
+
+/// Descend one level: in a branch's cumulative size table, the child slot
+/// containing element index `idx`, and the cumulative count before that slot.
+#[inline]
+fn size_slot(sizes: &[u64], idx: usize) -> (usize, usize) {
+    let mut k = 0;
+    while (sizes[k] as usize) <= idx {
+        k += 1;
+    }
+    let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+    (k, before)
 }
 
 /// Total element count under a node (leaf count or last cumulative size).
@@ -230,15 +243,8 @@ pub fn get(root: &Value, i: usize) -> Option<Value> {
             SeqNodeRef::Branch {
                 sizes, children, ..
             } => {
-                // Size tables are cumulative: descend into the first child
-                // whose cumulative size exceeds the index.
-                let mut k = 0;
-                while sizes[k] as usize <= idx {
-                    k += 1;
-                }
-                if k > 0 {
-                    idx -= sizes[k - 1] as usize;
-                }
+                let (k, before) = size_slot(sizes, idx);
+                idx -= before;
                 children[k].clone()
             }
         };
@@ -386,11 +392,7 @@ fn tree_update<A: Arena + ?Sized>(a: &mut A, node: &Value, idx: usize, x: Value)
             sizes,
             children,
         } => {
-            let mut k = 0;
-            while sizes[k] as usize <= idx {
-                k += 1;
-            }
-            let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+            let (k, before) = size_slot(sizes, idx);
             let child = tree_update(a, &children[k], idx - before, x);
             let mut buf = Buf::new();
             buf.extend(children);
@@ -587,11 +589,8 @@ fn tree_take<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
             if m >= sizes[sizes.len() - 1] as usize {
                 return node.clone();
             }
-            let mut k = 0;
-            while (sizes[k] as usize) < m {
-                k += 1;
-            }
-            let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+            // Keeping the first `m` means the last kept element is index `m - 1`.
+            let (k, before) = size_slot(sizes, m - 1);
             let child = tree_take(a, &children[k], m - before);
             let mut buf = Buf::new();
             buf.extend(&children[..k]);
@@ -613,11 +612,7 @@ fn tree_drop<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
             sizes,
             children,
         } => {
-            let mut k = 0;
-            while sizes[k] as usize <= m {
-                k += 1;
-            }
-            let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
+            let (k, before) = size_slot(sizes, m);
             let child = tree_drop(a, &children[k], m - before);
             let mut buf = Buf::new();
             buf.push(child);
