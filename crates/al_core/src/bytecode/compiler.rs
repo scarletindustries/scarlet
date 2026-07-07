@@ -58,17 +58,14 @@ use crate::module::{
     source_hash,
 };
 use crate::reference::{
-    DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, ReferenceGraph, span_contains,
-    span_width,
+    DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, ReferenceGraph,
 };
 use crate::span::Span;
-use crate::token::Kind;
 use crate::type_def::Type;
 use crate::types::{
     ArenaSlice, Constraint, DefinitionLocation, EnginePoolWatermark, EntityKind, EnvWatermark,
     Hydrator, InferEngine, MatchFunTypeError, Pat, PatternBindings, Prim, Scheme, StrId, Ty,
-    TypeEnv, TypeNode, UsefulnessMatrix, ValueKind, check_exhaustiveness, mono, new_engine,
-    new_env, pattern_to_pat,
+    TypeEnv, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env,
 };
 
 // ============================================================================
@@ -941,8 +938,8 @@ impl IncrementalSession {
         let f = self
             .type_facts
             .iter()
-            .filter(|f| f.module == m && span_contains(&f.span, line, col))
-            .min_by_key(|f| span_width(&f.span))?;
+            .filter(|f| f.module == m && f.span.contains(line, col))
+            .min_by_key(|f| f.span.width())?;
         Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
     }
 }
@@ -1894,8 +1891,9 @@ impl Compiler {
 
                 if typed_ok {
                     let resolved = self.engine.resolve(init_ty, Some(&self.env));
-                    let pat = pattern_to_pat(&cdb.pattern, &resolved);
-                    if let Some(missing) = check_exhaustiveness(&[pat], &resolved) {
+                    let mut um = UsefulnessMatrix::new(resolved);
+                    let pat = um.lower(&cdb.pattern);
+                    if let Some(missing) = um.find_missing(&[pat]) {
                         self.error(
                             format!(
                                 "constructor destructuring binding must be irrefutable; \
@@ -2188,6 +2186,7 @@ impl Compiler {
             self.engine.diagnostics.push(Diagnostic {
                 span: at,
                 severity: d.severity,
+                code: d.code,
                 message: format!("In module '{key}': {}", d.message),
             });
         }
@@ -2398,14 +2397,14 @@ impl Compiler {
             ast::Expression::BinaryExpression(be) => self.compile_binary(be),
             ast::Expression::UnaryExpression(ue) => {
                 let inner_ty = self.compile_expr(&ue.expression);
-                match ue.op.kind {
-                    Kind::PuncExclamationMark => {
+                match ue.op {
+                    ast::UnaryOp::Not => {
                         let b = self.ty_bool();
                         self.engine.unify_at(b, inner_ty, ue.expression.span());
                         self.emit(Op::Not);
                         self.ty_bool()
                     }
-                    Kind::PuncMinus => {
+                    ast::UnaryOp::Neg => {
                         let result = self.engine.fresh_constrained_var(Constraint::Numeric);
                         self.engine.unify_at(result, inner_ty, ue.expression.span());
                         let opc = match self.engine.resolved_prim(result) {
@@ -2415,10 +2414,6 @@ impl Compiler {
                         };
                         self.emit(opc);
                         result
-                    }
-                    _ => {
-                        self.error(format!("Unknown unary operator: {}", ue.op.kind), ue.span);
-                        self.engine.fresh_var()
                     }
                 }
             }
@@ -2696,40 +2691,30 @@ impl Compiler {
     // ========================================================================
 
     fn compile_binary(&mut self, expr: &ast::BinaryExpression) -> Ty {
-        if matches!(expr.op.kind, Kind::LogicalAnd | Kind::LogicalOr) {
-            let jmp = if expr.op.kind == Kind::LogicalAnd {
-                Op::JumpIfFalse
-            } else {
-                Op::JumpIfTrue
-            };
-            let l_ty = self.compile_expr(&expr.left);
-            let b = self.ty_bool();
-            self.engine.unify_at(b, l_ty, expr.left.span());
-            self.emit(Op::Dup);
-            let end_jump = self.emit_jump(jmp);
-            self.emit(Op::Pop);
-            let r_ty = self.compile_expr(&expr.right);
-            self.engine.unify_at(b, r_ty, expr.right.span());
-            self.patch_jump(end_jump);
-            return self.ty_bool();
-        }
-
-        let l_ty = self.compile_expr(&expr.left);
-        let r_ty = self.compile_expr(&expr.right);
-
-        let (constraint, generic, is_cmp) = match expr.op.kind {
-            Kind::PuncPlus => (Constraint::Addable, Op::Add, false),
-            Kind::PuncMinus => (Constraint::Numeric, Op::Sub, false),
-            Kind::PuncMul => (Constraint::Numeric, Op::Mul, false),
-            Kind::PuncDiv => (Constraint::Numeric, Op::Div, false),
-            Kind::PuncMod => (Constraint::Numeric, Op::Mod, false),
-            Kind::PuncLt => (Constraint::Numeric, Op::Lt, true),
-            Kind::PuncGt => (Constraint::Numeric, Op::Gt, true),
-            Kind::PuncLte => (Constraint::Numeric, Op::Lte, true),
-            Kind::PuncGte => (Constraint::Numeric, Op::Gte, true),
-            Kind::PuncEqualsComparator | Kind::PuncNotEqual => {
+        use ast::BinaryOp;
+        let (constraint, generic, is_cmp) = match expr.op {
+            BinaryOp::And | BinaryOp::Or => {
+                let jmp = if expr.op == BinaryOp::And {
+                    Op::JumpIfFalse
+                } else {
+                    Op::JumpIfTrue
+                };
+                let l_ty = self.compile_expr(&expr.left);
+                let b = self.ty_bool();
+                self.engine.unify_at(b, l_ty, expr.left.span());
+                self.emit(Op::Dup);
+                let end_jump = self.emit_jump(jmp);
+                self.emit(Op::Pop);
+                let r_ty = self.compile_expr(&expr.right);
+                self.engine.unify_at(b, r_ty, expr.right.span());
+                self.patch_jump(end_jump);
+                return self.ty_bool();
+            }
+            BinaryOp::Eq | BinaryOp::Ne => {
+                let l_ty = self.compile_expr(&expr.left);
+                let r_ty = self.compile_expr(&expr.right);
                 self.engine.unify_at(l_ty, r_ty, expr.span);
-                let is_eq = expr.op.kind == Kind::PuncEqualsComparator;
+                let is_eq = expr.op == BinaryOp::Eq;
                 let opc = match self.engine.resolved_prim(l_ty) {
                     Some(Prim::Int) if is_eq => Op::EqInt,
                     Some(Prim::Int) => Op::NeqInt,
@@ -2739,14 +2724,18 @@ impl Compiler {
                 self.emit(opc);
                 return self.ty_bool();
             }
-            _ => {
-                self.error(
-                    format!("Unknown binary operator: {}", expr.op.kind),
-                    expr.span,
-                );
-                return self.engine.fresh_var();
-            }
+            BinaryOp::Add => (Constraint::Addable, Op::Add, false),
+            BinaryOp::Sub => (Constraint::Numeric, Op::Sub, false),
+            BinaryOp::Mul => (Constraint::Numeric, Op::Mul, false),
+            BinaryOp::Div => (Constraint::Numeric, Op::Div, false),
+            BinaryOp::Mod => (Constraint::Numeric, Op::Mod, false),
+            BinaryOp::Lt => (Constraint::Numeric, Op::Lt, true),
+            BinaryOp::Gt => (Constraint::Numeric, Op::Gt, true),
+            BinaryOp::Le => (Constraint::Numeric, Op::Lte, true),
+            BinaryOp::Ge => (Constraint::Numeric, Op::Gte, true),
         };
+        let l_ty = self.compile_expr(&expr.left);
+        let r_ty = self.compile_expr(&expr.right);
         let operand = self.engine.fresh_constrained_var(constraint);
         self.engine.unify_at(operand, l_ty, expr.left.span());
         self.engine.unify_at(operand, r_ty, expr.right.span());
@@ -4020,11 +4009,8 @@ impl Compiler {
 
         if !any_pattern_err {
             let resolved_subj = self.engine.resolve(subject_ty, Some(&self.env));
-            let all_pats: Vec<Pat> = m
-                .arms
-                .iter()
-                .map(|arm| pattern_to_pat(&arm.pattern, &resolved_subj))
-                .collect();
+            let mut um = UsefulnessMatrix::new(resolved_subj);
+            let all_pats: Vec<Pat> = m.arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
             // Guarded arms don't contribute to exhaustiveness (the guard may be
             // false) and don't make later arms unreachable.
             let unguarded: Vec<Pat> = m
@@ -4034,15 +4020,14 @@ impl Compiler {
                 .filter(|(arm, _)| arm.guard.is_none())
                 .map(|(_, p)| p.clone())
                 .collect();
-            if let Some(missing) = check_exhaustiveness(&unguarded, &resolved_subj) {
+            if let Some(missing) = um.find_missing(&unguarded) {
                 self.error(
                     format!("Match is not exhaustive, missing: {}", missing),
                     m.subject.span(),
                 );
             }
-            let mut prior_unguarded = UsefulnessMatrix::new(resolved_subj);
             for (i, arm) in m.arms.iter().enumerate() {
-                if !prior_unguarded.is_useful(&all_pats[i]) {
+                if !um.is_useful(&all_pats[i]) {
                     self.error(
                         "This pattern is unreachable; a previous pattern matches the same values"
                             .to_string(),
@@ -4050,7 +4035,7 @@ impl Compiler {
                     );
                 }
                 if arm.guard.is_none() {
-                    prior_unguarded.push(all_pats[i].clone());
+                    um.push(all_pats[i].clone());
                 }
             }
         }

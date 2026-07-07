@@ -132,7 +132,7 @@ fn global_options() -> [(String, &'static str); 2] {
 
 /// `al` with no args — compact landing screen.
 pub fn home(cmd: &Command) {
-    let p = Palette::resolve();
+    let p = Palette::for_stdout();
     let mut o = String::new();
     o.push('\n');
     logo_block(&mut o, &p, version_str(cmd), &about_of(cmd));
@@ -158,7 +158,7 @@ pub fn home(cmd: &Command) {
 
 /// `al --help` / `al help` — the full reference.
 fn full_help(cmd: &Command) -> String {
-    let p = Palette::resolve();
+    let p = Palette::for_stdout();
     let mut o = String::new();
     o.push('\n');
     logo_block(&mut o, &p, version_str(cmd), &about_of(cmd));
@@ -201,7 +201,7 @@ fn full_help(cmd: &Command) -> String {
 
 /// `al <cmd> --help` / `al help <cmd>` — one command in detail.
 fn command_help(sub: &Command) -> String {
-    let p = Palette::resolve();
+    let p = Palette::for_stdout();
     let name = sub.get_name();
     let mut o = String::new();
 
@@ -295,7 +295,7 @@ pub fn help(cmd: &Command, sub: Option<&str>) {
         Some(name) => match cmd.get_subcommands().find(|c| c.get_name() == name) {
             Some(s) => print!("{}", command_help(s)),
             None => {
-                let p = Palette::resolve();
+                let p = Palette::for_stderr();
                 eprintln!(
                     "{}error{}: unknown command {}{name}{}",
                     p.error, p.reset, p.bold, p.reset
@@ -307,7 +307,7 @@ pub fn help(cmd: &Command, sub: Option<&str>) {
 }
 
 pub fn version(cmd: &Command) {
-    let p = Palette::resolve();
+    let p = Palette::for_stdout();
     println!(
         "{}al{} {}{}{}",
         p.bold,
@@ -323,7 +323,7 @@ pub fn version(cmd: &Command) {
 /// blank line, then its own `Usage:`/`For more information` footer). We take
 /// the message block up to that blank line and drop clap's footer entirely.
 pub fn error(err: &clap::Error) {
-    let p = Palette::resolve();
+    let p = Palette::for_stderr();
     let raw = err.to_string();
 
     let mut parts: Vec<String> = Vec::new();

@@ -1,8 +1,8 @@
 use crate::ast;
-use crate::diagnostic::{self, Diagnostic};
+use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
 use crate::scanner::Scanner;
 use crate::span::Span;
-use crate::token::{Kind, Token, TriviaKind};
+use crate::token::{Kind, Token, Trivia, is_type_name};
 
 type PResult<T> = Result<T, String>;
 
@@ -116,20 +116,21 @@ impl Parser {
     }
 
     fn add_error(&mut self, message: String) {
-        self.diagnostics.push(diagnostic::error_at(
-            self.cur().line,
-            self.cur().column,
-            message,
-        ));
+        // Every parse error funnels through here after a failed `eat`; when the
+        // parser is stuck on the EOF token the error is by construction an
+        // unexpected-EOF, so tag it structurally rather than by message text.
+        let code = if self.kind() == Kind::Eof {
+            DiagnosticCode::UnexpectedEof
+        } else {
+            DiagnosticCode::ParseError
+        };
+        let sp = self.cur().span;
+        self.diagnostics
+            .push(diagnostic::error_at(sp.start_line, sp.start_column, message).with_code(code));
     }
 
     fn current_span(&self) -> Span {
-        Span {
-            start_line: self.cur().line,
-            start_column: self.cur().column,
-            end_line: self.cur().line,
-            end_column: self.cur().column + self.cur().length,
-        }
+        self.cur().span
     }
 
     fn span_from(&self, start: Span) -> Span {
@@ -150,11 +151,9 @@ impl Parser {
     }
 
     fn save_token_end(&mut self) {
-        let tok = &self.tokens[self.index];
-        let line = tok.line;
-        let end_column = tok.column + tok.length;
-        self.prev_token_end_line = line;
-        self.prev_token_end_column = end_column;
+        let sp = self.tokens[self.index].span;
+        self.prev_token_end_line = sp.end_line;
+        self.prev_token_end_column = sp.end_column;
     }
 
     fn synchronize(&mut self) {
@@ -260,9 +259,7 @@ impl Parser {
                 Token {
                     kind: Kind::Eof,
                     literal: None,
-                    line: 0,
-                    column: 0,
-                    length: 0,
+                    span: Span::DUMMY,
                     leading_trivia: Vec::new(),
                 },
             );
@@ -409,11 +406,13 @@ impl Parser {
                         ast::Node::Statement(s) if matches!(**s, ast::Statement::ImportDeclaration(_))
                     );
                     if is_import && seen_non_import {
-                        self.diagnostics.push(crate::diagnostic::Diagnostic {
-                            span: node.span(),
-                            severity: crate::diagnostic::Severity::Error,
-                            message: "Imports must precede all other declarations".to_string(),
-                        });
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                node.span(),
+                                "Imports must precede all other declarations".to_string(),
+                            )
+                            .with_code(DiagnosticCode::ParseError),
+                        );
                     }
                     if !is_import {
                         seen_non_import = true;
@@ -449,9 +448,12 @@ impl Parser {
             Kind::KwConst => {
                 let doc = self.extract_doc_comment();
                 let decl = self.parse_const_binding(doc)?;
-                return Ok(ast::Node::Statement(Box::new(ast::Statement::Declaration(
-                    Box::new(decl),
-                ))));
+                return Ok(ast::Node::Statement(Box::new(
+                    ast::Statement::Declaration {
+                        decl: Box::new(decl),
+                        public: false,
+                    },
+                )));
             }
             Kind::KwFunction => {
                 return self.parse_function();
@@ -459,9 +461,12 @@ impl Parser {
             Kind::KwType => {
                 let doc = self.extract_doc_comment();
                 let decl = self.parse_type_declaration(doc, Vec::new(), false)?;
-                return Ok(ast::Node::Statement(Box::new(ast::Statement::Declaration(
-                    Box::new(decl),
-                ))));
+                return Ok(ast::Node::Statement(Box::new(
+                    ast::Statement::Declaration {
+                        decl: Box::new(decl),
+                        public: false,
+                    },
+                )));
             }
             Kind::KwImport => {
                 return Ok(ast::Node::Statement(Box::new(
@@ -548,13 +553,28 @@ impl Parser {
     // Binary-operator precedence ladder, loosest first. Each level is parsed
     // as a left-associative chain over the next-tighter level. Range is spliced
     // between comparison (3) and additive (4); past the table we hit unary.
-    const PRECEDENCE: &[&[Kind]] = &[
-        &[Kind::LogicalOr],
-        &[Kind::LogicalAnd],
-        &[Kind::PuncEqualsComparator, Kind::PuncNotEqual],
-        &[Kind::PuncLt, Kind::PuncGt, Kind::PuncLte, Kind::PuncGte],
-        &[Kind::PuncPlus, Kind::PuncMinus],
-        &[Kind::PuncMul, Kind::PuncDiv, Kind::PuncMod],
+    const PRECEDENCE: &[&[(Kind, ast::BinaryOp)]] = &[
+        &[(Kind::LogicalOr, ast::BinaryOp::Or)],
+        &[(Kind::LogicalAnd, ast::BinaryOp::And)],
+        &[
+            (Kind::PuncEqualsComparator, ast::BinaryOp::Eq),
+            (Kind::PuncNotEqual, ast::BinaryOp::Ne),
+        ],
+        &[
+            (Kind::PuncLt, ast::BinaryOp::Lt),
+            (Kind::PuncGt, ast::BinaryOp::Gt),
+            (Kind::PuncLte, ast::BinaryOp::Le),
+            (Kind::PuncGte, ast::BinaryOp::Ge),
+        ],
+        &[
+            (Kind::PuncPlus, ast::BinaryOp::Add),
+            (Kind::PuncMinus, ast::BinaryOp::Sub),
+        ],
+        &[
+            (Kind::PuncMul, ast::BinaryOp::Mul),
+            (Kind::PuncDiv, ast::BinaryOp::Div),
+            (Kind::PuncMod, ast::BinaryOp::Mod),
+        ],
     ];
 
     fn parse_binary_expression(&mut self) -> PResult<ast::Expression> {
@@ -573,21 +593,23 @@ impl Parser {
             }
         };
         let mut left = next(self)?;
-        while Self::PRECEDENCE[lvl].contains(&self.kind()) {
+        while let Some(&(tok, op)) = Self::PRECEDENCE[lvl]
+            .iter()
+            .find(|(k, _)| *k == self.kind())
+        {
             // A `-` on a fresh line is the start of a new unary expression, not
             // a continuation of an additive chain (P4). Only level 4 has
             // PuncMinus, so this guard is inert elsewhere.
-            if self.kind() == Kind::PuncMinus && self.has_newline_before_current() {
+            if tok == Kind::PuncMinus && self.has_newline_before_current() {
                 break;
             }
-            let operator = self.kind();
-            self.eat(operator)?;
+            self.eat(tok)?;
             let right = next(self)?;
             let span = self.span_from(left.span());
             left = ast::Expression::BinaryExpression(ast::BinaryExpression {
                 left: Box::new(left),
                 right: Box::new(right),
-                op: ast::Operator { kind: operator },
+                op,
                 span,
             });
         }
@@ -621,19 +643,20 @@ impl Parser {
 
     fn parse_unary_expression_inner(&mut self) -> PResult<ast::Expression> {
         let kind = self.kind();
-        if matches!(kind, Kind::PuncExclamationMark | Kind::PuncMinus) {
-            let start = self.current_span();
-            self.eat(kind)?;
-            let inner = self.parse_unary_expression()?;
+        let op = match kind {
+            Kind::PuncExclamationMark => ast::UnaryOp::Not,
+            Kind::PuncMinus => ast::UnaryOp::Neg,
+            _ => return self.parse_postfix_expression(),
+        };
+        let start = self.current_span();
+        self.eat(kind)?;
+        let inner = self.parse_unary_expression()?;
 
-            return Ok(ast::Expression::UnaryExpression(ast::UnaryExpression {
-                expression: Box::new(inner),
-                op: ast::Operator { kind },
-                span: self.span_from(start),
-            }));
-        }
-
-        self.parse_postfix_expression()
+        Ok(ast::Expression::UnaryExpression(ast::UnaryExpression {
+            expression: Box::new(inner),
+            op,
+            span: self.span_from(start),
+        }))
     }
 
     fn parse_postfix_expression(&mut self) -> PResult<ast::Expression> {
@@ -788,7 +811,8 @@ impl Parser {
                 let spread_span = self.current_span();
                 self.eat(Kind::PuncDotdot)?;
 
-                // anonymous spread (.. followed by ] or , or else)
+                // Bare `..` (followed by `]`, `,` or `else`) is a parse error
+                // in an array literal — spreads there always carry a value.
                 if matches!(
                     self.kind(),
                     Kind::PuncCloseBracket | Kind::PuncComma | Kind::KwElse
@@ -796,14 +820,22 @@ impl Parser {
                     if self.kind() == Kind::KwElse {
                         self.advance(); // skip the erroneous 'else' token
                     }
+                    let msg = "Expected expression after `..` in array literal".to_string();
+                    self.diagnostics.push(
+                        Diagnostic::error(spread_span, msg.clone())
+                            .with_code(DiagnosticCode::ParseError),
+                    );
                     Ok(ast::ArrayElement::SpreadElement(ast::SpreadElement {
-                        expression: None,
+                        expression: ast::Expression::ErrorNode(ast::ErrorNode {
+                            message: msg,
+                            span: spread_span,
+                        }),
                         span: spread_span,
                     }))
                 } else {
                     self.parse_expression().map(|inner| {
                         ast::ArrayElement::SpreadElement(ast::SpreadElement {
-                            expression: Some(inner),
+                            expression: inner,
                             span: self.span_from(spread_span),
                         })
                     })
@@ -1141,14 +1173,37 @@ impl Parser {
         if self.kind() == Kind::PuncDotdot {
             self.eat(Kind::PuncDotdot)?;
             let end = self.parse_pattern_atom()?;
+            let span = self.span_from(start);
             return Ok(ast::Pattern::Range {
-                start: Box::new(first),
-                end: Box::new(end),
-                span: self.span_from(start),
+                start: self.require_number_bound(first),
+                end: self.require_number_bound(end),
+                span,
             });
         }
 
         Ok(first)
+    }
+
+    /// Range pattern bounds must be number literals; anything else is
+    /// diagnosed and replaced with a `0` placeholder for recovery.
+    fn require_number_bound(&mut self, p: ast::Pattern) -> ast::NumberLiteral {
+        match p {
+            ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => n,
+            other => {
+                let span = other.span();
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        span,
+                        "Range pattern bounds must be number literals".to_string(),
+                    )
+                    .with_code(DiagnosticCode::ParseError),
+                );
+                ast::NumberLiteral {
+                    value: "0".to_string(),
+                    span,
+                }
+            }
+        }
     }
 
     fn parse_pattern_atom(&mut self) -> PResult<ast::Pattern> {
@@ -1374,9 +1429,12 @@ impl Parser {
         if self.peek_next() == Some(Kind::Identifier) {
             let doc = self.extract_doc_comment();
             let decl = self.parse_function_declaration(doc, Vec::new())?;
-            return Ok(ast::Node::Statement(Box::new(ast::Statement::Declaration(
-                Box::new(decl),
-            ))));
+            return Ok(ast::Node::Statement(Box::new(
+                ast::Statement::Declaration {
+                    decl: Box::new(decl),
+                    public: false,
+                },
+            )));
         }
         Ok(ast::Node::Expression(self.parse_function_expression()?))
     }
@@ -1769,13 +1827,18 @@ impl Parser {
     fn parse_ctor_destructuring(&mut self) -> PResult<ast::Statement> {
         let span = self.current_span();
         // The dispatch in parse_node guarantees an uppercase identifier followed
-        // by `(`, so parse_pattern_atom yields a Pattern::Constructor here.
-        let pattern = self.parse_pattern_atom()?;
+        // by `(`, so parse the constructor head directly.
+        let name = self.eat_identifier("Expected constructor name")?;
+        self.eat(Kind::PuncOpenParen)?;
+        let (args, rest) = self.parse_pattern_args()?;
+        self.eat(Kind::PuncCloseParen)?;
         self.eat(Kind::PuncEquals)?;
         let init = self.parse_expression()?;
         Ok(ast::Statement::CtorDestructuringBinding(
             ast::CtorDestructuringBinding {
-                pattern,
+                name,
+                args,
+                rest,
                 init,
                 span: self.span_from(span),
             },
@@ -1822,10 +1885,9 @@ impl Parser {
         let s = decl.span_mut();
         s.start_line = start.start_line;
         s.start_column = start.start_column;
-        Ok(if is_pub {
-            ast::Statement::PublicDeclaration(Box::new(decl))
-        } else {
-            ast::Statement::Declaration(Box::new(decl))
+        Ok(ast::Statement::Declaration {
+            decl: Box::new(decl),
+            public: is_pub,
         })
     }
 
@@ -1953,10 +2015,10 @@ impl Parser {
             for part in num_str.split('.') {
                 result = ast::Expression::PropertyAccessExpression(ast::PropertyAccessExpression {
                     left: Box::new(result),
-                    right: Box::new(ast::Expression::NumberLiteral(ast::NumberLiteral {
+                    right: ast::PropertyKey::TupleIndex(ast::NumberLiteral {
                         value: part.to_string(),
                         span,
-                    })),
+                    }),
                     span: self.span_from(start),
                 });
             }
@@ -1968,10 +2030,10 @@ impl Parser {
         Ok(ast::Expression::PropertyAccessExpression(
             ast::PropertyAccessExpression {
                 left: Box::new(left),
-                right: Box::new(ast::Expression::Identifier(ast::Identifier {
+                right: ast::PropertyKey::Field(ast::Identifier {
                     name: property,
                     span,
-                })),
+                }),
                 span: self.span_from(start),
             },
         ))
@@ -1989,7 +2051,7 @@ impl Parser {
         let span = self.current_span();
         self.eat(Kind::InterpStringStart)?;
 
-        let mut parts: Vec<ast::Expression> = Vec::new();
+        let mut parts: Vec<ast::InterpPart> = Vec::new();
 
         loop {
             match self.kind() {
@@ -1999,7 +2061,7 @@ impl Parser {
                         .eat(Kind::InterpStringPart)?
                         .literal
                         .unwrap_or_default();
-                    parts.push(ast::Expression::StringLiteral(ast::StringLiteral {
+                    parts.push(ast::InterpPart::Literal(ast::StringLiteral {
                         value,
                         span: part_span,
                     }));
@@ -2011,16 +2073,18 @@ impl Parser {
                 Kind::PuncOpenBrace => {
                     self.eat(Kind::PuncOpenBrace)?;
                     let expr = self.parse_expression()?;
-                    parts.push(expr);
+                    parts.push(ast::InterpPart::Expr(Box::new(expr)));
                     self.eat(Kind::PuncCloseBrace)?;
                 }
                 Kind::Identifier => {
                     let ident_span = self.current_span();
                     let name = self.eat(Kind::Identifier)?.literal.unwrap_or_default();
-                    parts.push(ast::Expression::Identifier(ast::Identifier {
-                        name,
-                        span: ident_span,
-                    }));
+                    parts.push(ast::InterpPart::Expr(Box::new(
+                        ast::Expression::Identifier(ast::Identifier {
+                            name,
+                            span: ident_span,
+                        }),
+                    )));
                 }
                 _ => {
                     return Err(format!(
@@ -2179,7 +2243,7 @@ mod tests {
         assert!(result.diagnostics.is_empty());
         // Should be 1 + (2 * 3): top level is + with right being *
         if let ast::Node::Expression(ast::Expression::BinaryExpression(b)) = &result.ast.body[0] {
-            assert_eq!(b.op.kind, Kind::PuncPlus);
+            assert_eq!(b.op, ast::BinaryOp::Add);
             assert!(matches!(*b.right, ast::Expression::BinaryExpression(_)));
         } else {
             panic!("expected binary expression");
@@ -2240,7 +2304,8 @@ mod tests {
         let ast::Statement::CtorDestructuringBinding(cd) = s.as_ref() else {
             panic!("expected CtorDestructuringBinding, got {:#?}", s)
         };
-        assert!(matches!(cd.pattern, ast::Pattern::Constructor { .. }));
+        assert_eq!(cd.name.name, "Some");
+        assert_eq!(cd.args.len(), 1);
 
         assert_no_errors("Point(x, y) = origin");
         assert_no_errors("Wrapper(a, b, c) = make()");

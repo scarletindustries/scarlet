@@ -1,5 +1,6 @@
-use crate::diagnostic::{self, Diagnostic};
-use crate::token::{self, Kind, Token, Trivia, TriviaKind};
+use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
+use crate::span::Span;
+use crate::token::{self, Kind, Token, Trivia};
 
 pub struct Scanner {
     input: Vec<u8>,
@@ -34,8 +35,8 @@ impl Scanner {
             .push(diagnostic::error_at(self.line, self.column, message));
     }
 
-    pub fn get_diagnostics(&self) -> Vec<Diagnostic> {
-        self.diagnostics.clone()
+    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     fn in_interp_string(&self) -> bool {
@@ -92,11 +93,7 @@ impl Scanner {
 
             if ch == b'\n' {
                 self.incr_pos();
-                // Newline trivia text is never read (counted by `kind`).
-                self.pending_trivia.push(Trivia {
-                    kind: TriviaKind::Newline,
-                    text: String::new(),
-                });
+                self.pending_trivia.push(Trivia::Newline);
                 continue;
             }
 
@@ -106,10 +103,7 @@ impl Scanner {
                     self.incr_pos();
                 }
                 let text = self.slice(start, self.pos);
-                self.pending_trivia.push(Trivia {
-                    kind: TriviaKind::LineComment,
-                    text,
-                });
+                self.pending_trivia.push(Trivia::LineComment(text));
                 continue;
             }
 
@@ -124,23 +118,37 @@ impl Scanner {
                     && self.peek_char() == b'*'
                     && self.byte_at(self.pos + 1) != b'/';
 
+                let mut closed = false;
                 while self.pos + 1 < self.input_len() {
                     if self.peek_char() == b'*' && self.byte_at(self.pos + 1) == b'/' {
                         self.incr_pos(); // skip *
                         self.incr_pos(); // skip /
+                        closed = true;
                         break;
                     }
                     self.incr_pos();
                 }
+                if !closed {
+                    // Swallow whatever tail byte the loop bound left unconsumed
+                    // so it isn't re-lexed as a spurious token after the error.
+                    while self.pos < self.input_len() {
+                        self.incr_pos();
+                    }
+                    self.diagnostics.push(
+                        diagnostic::error_at(
+                            self.line,
+                            self.column,
+                            "Unterminated block comment".to_string(),
+                        )
+                        .with_code(DiagnosticCode::UnexpectedEof),
+                    );
+                }
 
                 let text = self.slice(start, self.pos);
-                self.pending_trivia.push(Trivia {
-                    kind: if is_doc {
-                        TriviaKind::DocComment
-                    } else {
-                        TriviaKind::BlockComment
-                    },
-                    text,
+                self.pending_trivia.push(if is_doc {
+                    Trivia::DocComment(text)
+                } else {
+                    Trivia::BlockComment(text)
                 });
                 continue;
             }
@@ -150,8 +158,8 @@ impl Scanner {
     }
 
     pub fn scan_next(&mut self) -> Token {
-        if matches!(self.interp_stack.last(), Some((_, 0))) {
-            return self.scan_interp_string_content();
+        if let Some(&(quote, 0)) = self.interp_stack.last() {
+            return self.scan_interp_string_content(quote);
         }
 
         self.collect_trivia();
@@ -181,17 +189,16 @@ impl Scanner {
             }
         }
 
-        if ch.is_ascii_alphabetic() || ch == b'_' {
+        if token::is_name_start(ch) {
             let (start, end) = self.scan_name();
 
             // Keyword lookup runs on a borrowed slice of the source, so the
             // common keyword tokens (`if`/`fn`/`match`/...) allocate no String
-            // at all. The name is ASCII by construction (is_name_char), so
-            // from_utf8 never fails.
-            let keyword = token::match_keyword(
-                std::str::from_utf8(&self.input[start as usize..end as usize]).ok(),
-            );
-            if let Some(keyword_kind) = keyword {
+            // at all. The name is ASCII by construction (is_name_start /
+            // is_name_continue), so from_utf8 never fails.
+            let name = std::str::from_utf8(&self.input[start as usize..end as usize])
+                .expect("identifier bytes are ASCII");
+            if let Some(keyword_kind) = token::match_keyword(name) {
                 return self.new_token(keyword_kind, None);
             }
 
@@ -214,7 +221,7 @@ impl Scanner {
             return self.scan_number();
         }
 
-        if token::is_quote(ch) {
+        if is_quote(ch) {
             if self.has_interpolation(ch) {
                 self.enter_interp_string(ch);
                 return self.new_token(Kind::InterpStringStart, None);
@@ -248,11 +255,6 @@ impl Scanner {
         if ch == b'&' && self.peek_char() == b'&' {
             self.incr_pos();
             return self.new_token(Kind::LogicalAnd, None);
-        }
-
-        if ch == b'|' && self.peek_char() == b'|' {
-            self.incr_pos();
-            return self.new_token(Kind::LogicalOr, None);
         }
 
         match ch {
@@ -325,20 +327,23 @@ impl Scanner {
         Token {
             kind,
             literal,
-            line: self.token_start_line,
-            column: self.token_start_column,
-            length: self.column - self.token_start_column,
+            span: Span {
+                start_line: self.token_start_line,
+                start_column: self.token_start_column,
+                end_line: self.line,
+                end_column: self.column,
+            },
             leading_trivia: std::mem::take(&mut self.pending_trivia),
         }
     }
 
     // Advance past the rest of a name and return its `[start, end)` byte range.
     // The first byte is already consumed by the caller, so the name begins one
-    // byte back. Names are ASCII (is_name_char), so byte offsets are char
+    // byte back. Names are ASCII (is_name_continue), so byte offsets are char
     // offsets and `pos - 1` is always >= 0 here.
     fn scan_name(&mut self) -> (i32, i32) {
         let start = self.pos - 1;
-        while token::is_name_char(self.peek_char()) {
+        while token::is_name_continue(self.peek_char()) {
             self.incr_pos();
         }
         (start, self.pos)
@@ -413,12 +418,16 @@ impl Scanner {
 
     fn decr_pos(&mut self) {
         self.pos -= 1;
-
-        if self.byte_at(self.pos) == b'\n' {
-            self.line -= 1;
-        } else {
-            self.column -= 1;
-        }
+        // The only caller (`scan_number`) backs out over ASCII digits and `.`,
+        // never a newline. The old newline branch decremented `line` but could
+        // not restore `column` (previous line's length is unknown), silently
+        // corrupting spans; assert the invariant instead.
+        debug_assert_ne!(
+            self.byte_at(self.pos),
+            b'\n',
+            "decr_pos must not cross a newline"
+        );
+        self.column -= 1;
     }
 
     fn has_interpolation(&self, quote: u8) -> bool {
@@ -467,11 +476,10 @@ impl Scanner {
         }
     }
 
-    fn scan_interp_string_content(&mut self) -> Token {
+    fn scan_interp_string_content(&mut self, quote: u8) -> Token {
         self.token_start_column = self.column;
         self.token_start_line = self.line;
 
-        let quote = self.interp_stack.last().map(|(q, _)| *q).unwrap_or(b'\'');
         let mut result: Vec<u8> = Vec::new();
 
         loop {
@@ -484,13 +492,11 @@ impl Scanner {
             }
 
             if ch == quote {
-                self.incr_pos();
-                self.exit_interp_string();
                 if !result.is_empty() {
-                    self.decr_pos();
-                    self.enter_interp_string(quote);
                     return self.new_token(Kind::InterpStringPart, Some(utf8(result)));
                 }
+                self.incr_pos();
+                self.exit_interp_string();
                 return self.new_token(Kind::InterpStringEnd, None);
             }
 
@@ -508,7 +514,7 @@ impl Scanner {
                         *d = 1;
                     }
                     return self.new_token(Kind::PuncOpenBrace, None);
-                } else if next.is_ascii_alphabetic() || next == b'_' {
+                } else if token::is_name_start(next) {
                     self.incr_pos();
                     return self.scan_identifier();
                 } else {
@@ -527,6 +533,11 @@ impl Scanner {
             }
         }
     }
+}
+
+#[inline]
+fn is_quote(c: u8) -> bool {
+    c == b'\'' || c == b'"'
 }
 
 fn utf8(bytes: Vec<u8>) -> String {
@@ -552,11 +563,8 @@ mod tests {
     fn kinds_clean(input: &str) -> Vec<Kind> {
         let mut s = new_scanner(input.to_string());
         let kinds: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
-        assert!(
-            s.get_diagnostics().is_empty(),
-            "scanner produced diagnostics: {:?}",
-            s.get_diagnostics()
-        );
+        let diags = s.take_diagnostics();
+        assert!(diags.is_empty(), "scanner produced diagnostics: {diags:?}");
         assert!(!kinds.contains(&Error), "found error token");
         kinds
     }
@@ -814,9 +822,8 @@ mod tests {
         assert_eq!(toks[0].kind, Identifier);
         let trivia = &toks[0].leading_trivia;
         assert_eq!(trivia.len(), 2);
-        assert_eq!(trivia[0].kind, TriviaKind::LineComment);
-        assert_eq!(trivia[0].text, "// hi");
-        assert_eq!(trivia[1].kind, TriviaKind::Newline);
+        assert_eq!(trivia[0], Trivia::LineComment("// hi".to_string()));
+        assert_eq!(trivia[1], Trivia::Newline);
     }
 
     #[test]
@@ -824,7 +831,7 @@ mod tests {
         let mut s = new_scanner("&".to_string());
         let toks = s.scan_all();
         assert_eq!(toks[0].kind, Error);
-        assert_eq!(s.get_diagnostics().len(), 1);
+        assert_eq!(s.take_diagnostics().len(), 1);
     }
 
     #[test]
@@ -833,7 +840,7 @@ mod tests {
         let toks = s.scan_all();
         assert_eq!(toks[0].kind, LiteralString);
         assert_eq!(toks[0].literal.as_deref(), Some("hello"));
-        assert!(s.get_diagnostics().is_empty());
+        assert!(s.take_diagnostics().is_empty());
     }
 
     #[test]
@@ -849,7 +856,7 @@ mod tests {
         let mut s = new_scanner("\"hi ${x}\"".to_string());
         let toks = s.scan_all();
         assert_eq!(toks[0].kind, InterpStringStart);
-        assert!(s.get_diagnostics().is_empty());
+        assert!(s.take_diagnostics().is_empty());
     }
 
     #[test]
@@ -859,7 +866,7 @@ mod tests {
         assert!(kinds.contains(&InterpStringStart));
         assert!(kinds.contains(&LiteralString));
         assert!(kinds.contains(&InterpStringEnd));
-        assert!(s.get_diagnostics().is_empty());
+        assert!(s.take_diagnostics().is_empty());
     }
 
     #[test]
@@ -869,7 +876,7 @@ mod tests {
         // completing scan_all without abort/hang IS the proof
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.contains(&Error));
-        assert!(!s.get_diagnostics().is_empty());
+        assert!(!s.take_diagnostics().is_empty());
     }
 
     #[test]
@@ -879,7 +886,7 @@ mod tests {
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.contains(&Error));
         assert!(
-            s.get_diagnostics()
+            s.take_diagnostics()
                 .iter()
                 .any(|d| d.message.contains("Unterminated string literal"))
         );
@@ -904,12 +911,12 @@ mod tests {
         let ks: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.contains(&LiteralString));
+        let diags = s.take_diagnostics();
         assert!(
-            s.get_diagnostics()
+            diags
                 .iter()
                 .any(|d| d.message.contains("Unknown escape sequence '\\q'")),
-            "diagnostics: {:?}",
-            s.get_diagnostics()
+            "diagnostics: {diags:?}"
         );
     }
 }

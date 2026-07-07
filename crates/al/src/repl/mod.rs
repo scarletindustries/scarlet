@@ -1,8 +1,9 @@
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 use crate::ast;
 use crate::bytecode;
-use crate::diagnostic;
+use crate::diagnostic::{self, DiagnosticCode};
 use crate::parser;
 use crate::scanner;
 use crate::span::point_span;
@@ -29,14 +30,20 @@ pub fn run(version: &str) {
 
         let line = match rl.readline(prompt) {
             Ok(l) => l,
-            Err(_) => {
-                if continuation {
-                    println!();
-                    input_buffer.clear();
-                    continuation = false;
-                    continue;
-                }
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl-C: abandon the current (possibly multi-line) entry and
+                // return to a fresh prompt without exiting.
+                println!("^C");
+                input_buffer.clear();
+                continuation = false;
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
                 println!();
+                break;
+            }
+            Err(e) => {
+                eprintln!("readline: {e}");
                 break;
             }
         };
@@ -101,17 +108,17 @@ fn is_input_complete(input: &str) -> bool {
     parens <= 0 && brackets <= 0 && braces <= 0
 }
 
-fn has_eof_error(diagnostics: &[diagnostic::Diagnostic]) -> bool {
-    diagnostics.iter().any(|d| d.message.contains("EOF"))
-}
-
 fn eval_input(input: &str, definitions: &[ast::Node]) -> Vec<ast::Node> {
     let mut input_scanner = scanner::new_scanner(input.to_string());
     let mut input_parser = parser::new_parser(&mut input_scanner);
     let input_parse_result = input_parser.parse_program();
 
     if diagnostic::has_errors(&input_parse_result.diagnostics) {
-        if has_eof_error(&input_parse_result.diagnostics) {
+        if input_parse_result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::UnexpectedEof)
+        {
             println!();
             return Vec::new();
         }

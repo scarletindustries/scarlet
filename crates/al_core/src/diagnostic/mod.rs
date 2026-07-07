@@ -2,7 +2,7 @@ mod editor;
 mod printer;
 
 pub use editor::{Editor, build_editor_url, detect_editor};
-pub use printer::{format_diagnostic_with_lines, print_diagnostics};
+pub use printer::{RenderCtx, format_diagnostic_with_lines, print_diagnostics};
 
 use crate::span::{Span, point_span};
 
@@ -12,10 +12,26 @@ pub enum Severity {
     Hint,
 }
 
+/// Machine-readable discriminator for a diagnostic. Consumers that need to
+/// react to a *class* of diagnostic (e.g. the REPL detecting incomplete input)
+/// match on this instead of substring-matching `message`, so rewording a
+/// message can never silently change downstream behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiagnosticCode {
+    /// Parser or scanner hit end-of-input while more tokens were required.
+    UnexpectedEof,
+    ParseError,
+    TypeError,
+    UnusedBinding,
+    #[default]
+    Other,
+}
+
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub span: Span,
     pub severity: Severity,
+    pub code: DiagnosticCode,
     pub message: String,
 }
 
@@ -24,6 +40,7 @@ impl Diagnostic {
         Diagnostic {
             span,
             severity: Severity::Error,
+            code: DiagnosticCode::Other,
             message,
         }
     }
@@ -32,8 +49,14 @@ impl Diagnostic {
         Diagnostic {
             span,
             severity: Severity::Hint,
+            code: DiagnosticCode::Other,
             message,
         }
+    }
+
+    pub fn with_code(mut self, code: DiagnosticCode) -> Self {
+        self.code = code;
+        self
     }
 }
 
@@ -45,9 +68,9 @@ pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
 }
 
-pub fn count_errors(diagnostics: &[Diagnostic]) -> i32 {
+pub fn count_errors(diagnostics: &[Diagnostic]) -> usize {
     diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
-        .count() as i32
+        .count()
 }

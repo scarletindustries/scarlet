@@ -37,21 +37,30 @@ const OFF: Palette = Palette {
     link_close: "",
 };
 
-/// Decide whether to emit color. Honors the de-facto standards: `NO_COLOR`
-/// (presence disables, per no-color.org), `CLICOLOR_FORCE` (non-zero forces
-/// on), otherwise on only when stdout is a real terminal.
-fn color_enabled() -> bool {
+/// Decide whether to emit color for the given stream. Honors the de-facto
+/// standards: `NO_COLOR` (presence disables, per no-color.org),
+/// `CLICOLOR_FORCE` (non-zero forces on), otherwise on only when the stream is
+/// a real terminal.
+fn color_enabled(s: &impl IsTerminal) -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
     if let Some(force) = std::env::var_os("CLICOLOR_FORCE") {
         return force != "0";
     }
-    std::io::stdout().is_terminal()
+    s.is_terminal()
 }
 
 impl Palette {
-    pub fn resolve() -> Self {
-        if color_enabled() { ON } else { OFF }
+    pub fn for_stream(s: &impl IsTerminal) -> Self {
+        if color_enabled(s) { ON } else { OFF }
+    }
+
+    pub fn for_stdout() -> Self {
+        Self::for_stream(&std::io::stdout())
+    }
+
+    pub fn for_stderr() -> Self {
+        Self::for_stream(&std::io::stderr())
     }
 }

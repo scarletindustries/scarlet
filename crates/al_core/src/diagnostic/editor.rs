@@ -3,7 +3,6 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Editor {
-    Unknown,
     Vscode,
     VscodeInsiders,
     Vscodium,
@@ -42,12 +41,12 @@ fn match_editor(haystack: &str) -> Option<Editor> {
         .map(|(_, e)| *e)
 }
 
-pub fn detect_editor() -> Editor {
+pub fn detect_editor() -> Option<Editor> {
     for env_var in ["VISUAL", "EDITOR"] {
         if let Ok(editor) = env::var(env_var)
             && let Some(detected) = match_editor(&editor)
         {
-            return detected;
+            return Some(detected);
         }
     }
 
@@ -56,7 +55,7 @@ pub fn detect_editor() -> Editor {
     } else if cfg!(target_os = "linux") {
         &["x", "--no-heading", "-o", "comm"]
     } else {
-        return Editor::Unknown;
+        return None;
     };
 
     Command::new("ps")
@@ -69,7 +68,6 @@ pub fn detect_editor() -> Editor {
                 .lines()
                 .find_map(match_editor)
         })
-        .unwrap_or(Editor::Unknown)
 }
 
 pub fn build_editor_url(editor: Editor, abs_path: &str, line: i32, col: i32) -> String {
@@ -84,6 +82,5 @@ pub fn build_editor_url(editor: Editor, abs_path: &str, line: i32, col: i32) -> 
         }
         Editor::Jetbrains => format!("idea://open?file={abs_path}&line={line}&column={col}"),
         Editor::Zed => format!("zed://file{abs_path}:{line}:{col}"),
-        Editor::Unknown => format!("file://{abs_path}"),
     }
 }
