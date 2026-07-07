@@ -3428,10 +3428,11 @@ impl Compiler {
     /// body leaves them intact, and we unify the body's inferred type against
     /// the preregistered shape rather than re-reading the annotations.
     ///
-    /// `global_slot` is this fn's own entry-frame slot from `Prepared::Fn`.
-    /// It must be threaded from Pass 3 rather than re-derived by name here:
-    /// a later top-level decl may shadow the name, so `self.locals[name]`
-    /// can point at the shadow's slot by the time this runs.
+    /// `global_slot` is this fn's entry-frame slot from `Prepared::Fn`,
+    /// threaded from Pass 3 so `global_to_func` is keyed by the same slot the
+    /// caller emits `StoreLocal` for — no reliance on `self.locals[name]`
+    /// still holding that slot by the time this runs.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn compile_declared_function(
         &mut self,
         name: &str,

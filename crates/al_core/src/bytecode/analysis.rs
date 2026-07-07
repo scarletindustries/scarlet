@@ -432,6 +432,7 @@ impl Compiler {
                         let fn_ty = self.with_owner(owner, |c| {
                             c.compile_declared_function(
                                 name,
+                                *slot,
                                 &fd.params,
                                 body,
                                 param_tys.clone(),
