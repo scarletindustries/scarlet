@@ -75,19 +75,19 @@ http10 default: close=True want100=False
 expect 100: close=False want100=True
 
 == response head serialization ==
-Some(
+Ok(
   HTTP/1.1 200 OK
 Content-Type: text/plain
 Content-Length: 5
 
 
 )
-Some(
+Ok(
   HTTP/1.1 404 Not Found
 
 
 )
-Some(HTTP/1.1 418 
+Ok(HTTP/1.1 418 
 
 )
 

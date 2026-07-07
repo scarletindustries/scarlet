@@ -217,10 +217,13 @@ pub fn normalize(d Decimal) Decimal {
 // and more than 18 fractional digits.
 pub fn parse(s String) Option(Decimal) {
 	b = binary.from_string(s)
-	match binary.byte_at(b, 0) {
-		Some(45) -> option.map(parse_unsigned(tail(b)), neg)
-		Some(43) -> parse_unsigned(tail(b))
-		else -> parse_unsigned(b)
+	first = binary.byte_at(b, 0)
+	if first == 45 {
+		option.map(parse_unsigned(tail(b)), neg)
+	} else if first == 43 {
+		parse_unsigned(tail(b))
+	} else {
+		parse_unsigned(b)
 	}
 }
 

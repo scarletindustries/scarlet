@@ -946,6 +946,12 @@ impl VM {
         self.templates.err.clone().instantiate(&mut self.heap, &[v])
     }
 
+    #[inline]
+    pub(super) fn make_err_nil(&mut self) -> Value {
+        let nil = self.make_nil();
+        self.make_err(nil)
+    }
+
     /// The frozen [`EnumTemplate`] for a stdlib variant, built on first use
     /// (interned names go into the program's frozen area) and memoized by
     /// template identity, so runtime error construction allocates only the

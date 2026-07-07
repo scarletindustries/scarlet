@@ -168,8 +168,8 @@ match net.listen('127.0.0.1', 0) {
 					socket.write(conn, binary.from_string(' world')) or Nil
 					match socket.read_exact(conn, 11) {
 						Ok(data) -> match binary.to_string(data) {
-							Some(text) -> println('echoed: ${text}')
-							None -> println('not utf8')
+							Ok(text) -> println('echoed: ${text}')
+							Err(_) -> println('not utf8')
 						}
 						Err(e) -> println('client read failed: ${e}')
 					}
@@ -262,8 +262,8 @@ match net.listen('127.0.0.1', 0) {
 		match net.accept(server) {
 			Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
 				Ok(data) -> match binary.to_string(data) {
-					Some(text) -> println('got: ${text}')
-					None -> println('not-utf8')
+					Ok(text) -> println('got: ${text}')
+					Err(_) -> println('not-utf8')
 				}
 				Err(e) -> println('read-failed: ${e}')
 			}
@@ -433,13 +433,11 @@ match io.read_text('__PATH__') {
 fn dns_resolve_runs_on_pool() {
     let proj = Project::new("dns_resolve");
     let src = r#"import al/net
-import al/net/address.{V4, V6}
 import al/experiments/scheduler
 
 scheduler.spawn(fn() Nil)
 match net.resolve('localhost') {
-	Ok(V4(_)) -> println('resolved')
-	Ok(V6(_)) -> println('resolved')
+	Ok(_) -> println('resolved')
 	Err(_) -> println('err')
 }
 "#;
@@ -607,7 +605,7 @@ match net.listen('127.0.0.1', 0) {
 		match http.serve_on(server, fn(req) {
 			collected = body.collect(req.body, 1048576) or <<>>
 			echoed = binary.to_string(collected) or '<not-utf8>'
-			trailer = match headers.get(req.headers, <<'x-checksum'>>) {
+			trailer = match headers.get(req.trailers, <<'x-checksum'>>) {
 				Some(v) -> binary.to_string(v) or '?'
 				None -> 'none'
 			}

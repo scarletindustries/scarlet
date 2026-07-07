@@ -1029,7 +1029,7 @@ fn stdlib_binary() {
          println(binary.bit_size(b))\n\
          println(binary.byte_size(b))\n\
          println(b)\n",
-        "Some(hi)\n16\n2\n<<104, 105>>\n",
+        "Ok(hi)\n16\n2\n<<104, 105>>\n",
     );
     run_outputs(
         "import al/binary\n\
@@ -1039,7 +1039,7 @@ fn stdlib_binary() {
          joined = binary.append(binary.from_string('AB'), binary.from_string('C'))\n\
          println(binary.to_string(joined))\n\
          println(binary.bit_size(binary.slice(b, 0, 5) or binary.from_string('')))\n",
-        "Some(<<66>>)\nNone\nSome(ABC)\n5\n",
+        "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
     );
     // Op::BinReadUtf8 — `<<c:utf8, ..>>` decodes one *codepoint*, not one byte.
     // [195, 169] is the UTF-8 encoding of 'é' (U+00E9); the pattern binds the
@@ -1064,14 +1064,14 @@ fn stdlib_binary() {
          println(string.inspect(<<src:bytes(3)>>))\n",
         "<<65, 66, 67>>\n",
     );
-    // binary.to_string None branches: 0xFF is not valid UTF-8 (byte-aligned but
+    // binary.to_string Err branches: 0xFF is not valid UTF-8 (byte-aligned but
     // undecodable), and `<<1:4>>` is bit-unaligned (bit_len % 8 != 0). Both
-    // yield None rather than panicking or lossily decoding.
+    // yield Err(Nil) rather than panicking or lossily decoding.
     run_outputs(
         "import al/binary\n\
          println(binary.to_string(<<255>>))\n\
          println(binary.to_string(<<1:4>>))\n",
-        "None\nNone\n",
+        "Err(Nil)\nErr(Nil)\n",
     );
     // binary.byte_size rounds up: a 4-bit binary occupies 1 byte (div_ceil),
     // not 0. The existing aligned case (16 bits -> 2) cannot catch the rounding.
@@ -1080,12 +1080,12 @@ fn stdlib_binary() {
          println(binary.byte_size(<<1:4>>))\n",
         "1\n",
     );
-    // binary.slice with a negative offset takes the `at < 0` None branch (a
+    // binary.slice with a negative offset takes the `at < 0` Err branch (a
     // different guard than the existing OOB `at + take > bit_len` case).
     run_outputs(
         "import al/binary\n\
          println(binary.slice(binary.from_string('ABC'), 0 - 1, 8))\n",
-        "None\n",
+        "Err(Nil)\n",
     );
     check_rejects(
         "import al/net/socket.{Socket}\n\
@@ -1107,10 +1107,10 @@ fn binary_string_literal_patterns() {
         "import al/binary\n\
          r = match binary.from_string('GET /index.html') {\n\
          \t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
-         \telse -> None\n\
+         \telse -> Err(Nil)\n\
          }\n\
          println(r)\n",
-        "Some(/index.html)\n",
+        "Ok(/index.html)\n",
     );
     // Explicit `:utf8` on a string literal is the same pattern.
     run_outputs(
@@ -1167,10 +1167,10 @@ fn binary_string_literal_patterns() {
         "import al/binary\n\
          r = match binary.from_string('héllo world') {\n\
          \t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
-         \telse -> None\n\
+         \telse -> Err(Nil)\n\
          }\n\
          println(r)\n",
-        "Some(world)\n",
+        "Ok(world)\n",
     );
     // Consecutive integer literals coalesce into the same single-compare
     // prefix: <<13, 10, ..>> is CRLF.
@@ -1219,8 +1219,8 @@ fn binary_string_literal_patterns() {
 
 #[test]
 fn stdlib_binary_byte_at() {
-    // byte_at : (Binary, Int) -> Option(Int) — in-bounds bytes, None out of
-    // bounds (both sides), and views (slices) read through their offset.
+    // byte_at : (Binary, Int) -> Int — in-bounds bytes, -1 out of bounds
+    // (both sides), and views (slices) read through their offset.
     run_outputs(
         "import al/binary\n\
          b = binary.from_string('AZ')\n\
@@ -1233,7 +1233,7 @@ fn stdlib_binary_byte_at() {
          \telse -> b\n\
          }\n\
          println(binary.byte_at(tail, 0))\n",
-        "Some(65)\nSome(90)\nNone\nNone\nSome(90)\n",
+        "65\n90\n-1\n-1\n90\n",
     );
 }
 
@@ -1245,9 +1245,9 @@ fn stdlib_http_builtins() {
     // tested (tests/programs/http_parse.al); these pin the call-site types.
     check_ok(
         "import al/binary\n\
-         import al/http/h1.{Done, NeedMore, Bad}\n\
+         import al/http/h1.{Done, NeedMore, Bad, Http10, Http11}\n\
          r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \tDone(_, _, version, _, consumed) -> version + consumed\n\
+         \tDone(_, _, version, _, consumed) -> match version { Http10 -> 10 Http11 -> 11 } + consumed\n\
          \tNeedMore -> 0\n\
          \tBad(s) -> s\n\
          }\n\

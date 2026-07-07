@@ -93,19 +93,19 @@ impl VM {
     }
 
     pub(super) fn bin_to_string(&mut self) -> VmResult<()> {
-        // Some(Str) of the binary's byte length, or None.
+        // Ok(Str) of the binary's byte length, or Err(Nil).
         let bin_v = self.pop_binary("binary.to_string")?;
         let bin = bin_ref(&bin_v);
         let v = if !bin.bit_len().is_multiple_of(8) {
-            self.make_none()
+            self.make_err_nil()
         } else {
             let bytes = bin.full_bytes();
             match std::str::from_utf8(&bytes) {
                 Ok(s) => {
                     let s = Value::str_in(&mut self.heap, s);
-                    self.make_some(s)
+                    self.make_ok(s)
                 }
-                Err(_) => self.make_none(),
+                Err(_) => self.make_err_nil(),
             }
         };
         self.stack.push(v);
@@ -127,18 +127,18 @@ impl VM {
     }
 
     pub(super) fn bin_slice(&mut self) -> VmResult<()> {
-        // Some(view box) or None; the bytes are shared.
+        // Ok(view box) or Err(Nil); the bytes are shared.
         let take = self.pop_int("binary.slice")?;
         let at = self.pop_int("binary.slice")?;
         let bin_v = self.pop_binary("binary.slice")?;
         let bin = bin_ref(&bin_v);
         let v = if at < 0 || take < 0 || (at as u64) + (take as u64) > bin.bit_len() {
-            self.make_none()
+            self.make_err_nil()
         } else {
             // O(1): a sub-view sharing the backing, no byte copy.
             let (backing, off) = (bin.backing_arc(), bin.bit_offset() + at as u64);
             let view = Value::binary_view_in(&mut self.heap, backing, off, take as u64);
-            self.make_some(view)
+            self.make_ok(view)
         };
         self.stack.push(v);
         Ok(())
@@ -333,17 +333,13 @@ impl VM {
         let i = self.pop_int("binary.byte_at")?;
         let bin_v = self.pop_binary("binary.byte_at")?;
         let bytes = bin_ref(&bin_v).full_bytes();
-        let byte = if i >= 0 && (i as usize) < bytes.len() {
-            Some(bytes[i as usize] as i64)
+        let v = if i >= 0 && (i as usize) < bytes.len() {
+            bytes[i as usize] as i64
         } else {
-            None
+            -1
         };
         drop(bytes);
-        let v = match byte {
-            Some(b) => self.make_some(Value::small_int(b)),
-            None => self.make_none(),
-        };
-        self.stack.push(v);
+        self.stack.push(Value::small_int(v));
         Ok(())
     }
 
