@@ -250,23 +250,7 @@ fn publish_node(
 /// subgraphs, and bumping `Binary` Arc backings (which the frozen area then
 /// holds forever).
 pub fn rc_publish_graph(root: &Value, builder: &mut FrozenBuilder) -> Value {
-    let mut map: HashMap<usize, NonNull<u64>> = HashMap::new();
-    let mut queue: Vec<NonNull<u64>> = Vec::new();
-    let root_copy = publish_node(root, builder, &mut map, &mut queue);
-    let mut i = 0;
-    while i < queue.len() {
-        let d = queue[i];
-        i += 1;
-        // SAFETY: child slots hold verbatim source pointer bits; rewrite each
-        // with `ptr::write` (the alias owns no count, so it must not drop).
-        unsafe {
-            for_each_child(d.as_ptr(), &mut |child: &mut Value| {
-                let copied = publish_node(child, builder, &mut map, &mut queue);
-                std::ptr::write(child as *mut Value, copied);
-            });
-        }
-    }
-    root_copy
+    walk_graph(root, |v, map, queue| publish_node(v, builder, map, queue))
 }
 
 #[cfg(test)]
