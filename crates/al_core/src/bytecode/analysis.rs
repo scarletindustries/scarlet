@@ -36,7 +36,7 @@
 use std::collections::{HashMap, HashSet};
 
 use petgraph::Directed;
-use petgraph::algo::{tarjan_scc, toposort};
+use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 use super::Op;
@@ -208,6 +208,7 @@ impl Compiler {
                                 if let ast::TypeBody::Variants { ctors, .. } = &td.body {
                                     for ctor in ctors {
                                         check_reserved(self, &ctor.identifier, in_prelude);
+                                        check_duplicate(self, &mut seen_values, &ctor.identifier);
                                     }
                                 }
                                 if !dup {
@@ -615,37 +616,31 @@ impl Compiler {
             }
         }
 
-        let order = match toposort(&graph, None) {
-            Ok(mut order) => {
-                // toposort yields dependents first (sources → sinks); we want
-                // dependees registered before dependers.
-                order.reverse();
-                order
-            }
-            Err(cycle) => {
-                let bad = cycle.node_id();
-                let alias = aliases
-                    .iter()
-                    .find(|a| idx_of[a.0.identifier.name.as_str()] == bad)
-                    .copied();
-                if let Some((alias, _, _)) = alias {
-                    self.error(
-                        format!("Recursive type alias '{}'", alias.identifier.name),
-                        alias.identifier.span,
-                    );
-                }
-                return;
-            }
-        };
-
         let by_idx: HashMap<NodeIndex, (&ast::TypeDeclaration, &ast::TypeIdentifier, bool)> =
             aliases
                 .iter()
                 .map(|a| (idx_of[a.0.identifier.name.as_str()], *a))
                 .collect();
 
-        for node in order {
-            let Some(&(td, rhs, is_pub)) = by_idx.get(&node) else {
+        // tarjan_scc yields components in reverse topological order (dependees
+        // before dependers). A component with more than one node, or a single
+        // node with a self-edge, is a cycle: report each member and skip it so
+        // one bad alias does not prevent the rest from being registered.
+        for component in tarjan_scc(&graph) {
+            let cyclic =
+                component.len() > 1 || graph.find_edge(component[0], component[0]).is_some();
+            if cyclic {
+                for node in &component {
+                    if let Some(&(td, _, _)) = by_idx.get(node) {
+                        self.error(
+                            format!("Recursive type alias '{}'", td.identifier.name),
+                            td.identifier.span,
+                        );
+                    }
+                }
+                continue;
+            }
+            let Some(&(td, rhs, is_pub)) = by_idx.get(&component[0]) else {
                 continue;
             };
             let (mut h, type_params, _) = self.hydrate_type_params(&td.type_params);

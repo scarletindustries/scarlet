@@ -259,6 +259,44 @@ fn mutually_recursive_type_alias_is_error() {
     check_rejects("type A = B\ntype B = A\n", "Recursive type alias");
 }
 
+// A cycle among some aliases must not stop the remaining, acyclic aliases from
+// being registered. Previously the toposort's cycle branch returned early and
+// dropped every alias in the module, so `Good` below surfaced as
+// "Unknown type 'Good'" instead of the real recursive-alias error.
+#[test]
+fn recursive_type_alias_cycle_does_not_drop_other_aliases() {
+    let src = "type Good = Int\ntype A = B\ntype B = A\nfn f(x Good) Good { x }\nprintln(f(1))\n";
+    let path = common::write_temp(src);
+    let out = common::run_al("check", &path);
+    let _ = std::fs::remove_file(&path);
+    let combined = out.combined();
+    assert!(!out.success, "expected rejection:\n{combined}");
+    assert!(
+        combined.contains("Recursive type alias"),
+        "expected recursive-alias diagnostic:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Unknown type"),
+        "cycle in A/B must not cascade into other aliases:\n{combined}"
+    );
+}
+
+// Constructor names share the value namespace with fns and consts, so a ctor
+// that collides with another ctor (or a fn) is a duplicate definition and
+// should be reported the same way.
+#[test]
+fn duplicate_constructor_across_types_is_error() {
+    check_rejects(
+        "type A { Red }\ntype B { Red }\n",
+        "'Red' is already defined",
+    );
+}
+
+#[test]
+fn constructor_colliding_with_fn_is_error() {
+    check_rejects("fn Red() {}\ntype A { Red }\n", "'Red' is already defined");
+}
+
 // HM inference occurs-check: `x(x)` forces `x`'s type to unify with `t -> u`
 // where the argument `t` is `x` itself, an infinite type. Inference rejects it
 // rather than looping.
