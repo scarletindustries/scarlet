@@ -242,10 +242,14 @@ impl Scanner {
         }
 
         if is_quote(ch) {
-            if self.has_interpolation(ch) {
-                self.enter_interp_string(ch);
-                return self.new_token(Kind::InterpStringStart, None);
-            }
+            // Single pass: build the literal body while watching for `$`. On
+            // seeing `${` / `$ident` we rewind to just after the opening quote
+            // and hand off to the interp scanner, so plain (non-interpolated)
+            // strings — the common case — are scanned once instead of twice.
+            let start_pos = self.pos;
+            let start_col = self.column;
+            let start_line = self.line;
+            let diag_len = self.diagnostics.len();
 
             let mut result: Vec<u8> = Vec::new();
             loop {
@@ -254,6 +258,18 @@ impl Scanner {
                 if next == 0 || next == b'\n' {
                     self.add_error("Unterminated string literal".to_string());
                     return self.new_token(Kind::Error, Some(utf8(result)));
+                }
+
+                if next == b'$' {
+                    let follow = self.byte_at(self.pos + 1);
+                    if follow == b'{' || token::is_name_start(follow) {
+                        self.pos = start_pos;
+                        self.column = start_col;
+                        self.line = start_line;
+                        self.diagnostics.truncate(diag_len);
+                        self.enter_interp_string(ch);
+                        return self.new_token(Kind::InterpStringStart, None);
+                    }
                 }
 
                 self.incr_pos();
@@ -421,31 +437,6 @@ impl Scanner {
         }
 
         self.pos += 1;
-    }
-
-    fn has_interpolation(&self, quote: u8) -> bool {
-        let mut pos = self.pos;
-        while pos < self.input_len() {
-            let ch = self.byte_at(pos);
-            if ch == quote {
-                return false;
-            }
-            if ch == b'\n' {
-                return false;
-            }
-            if ch == b'\\' {
-                pos += 2;
-                continue;
-            }
-            if ch == b'$' {
-                let n = self.byte_at(pos + 1);
-                if n == b'{' || token::is_name_start(n) {
-                    return true;
-                }
-            }
-            pos += 1;
-        }
-        false
     }
 
     // Every recognized escape denotes a single ASCII byte, so this returns
@@ -914,7 +905,7 @@ mod tests {
     #[test]
     fn test_bare_dollar_is_not_interpolation() {
         // A `$` not followed by `{` or an identifier start is a literal char,
-        // so `has_interpolation` must not classify the string as interpolated.
+        // so the scanner must not classify the string as interpolated.
         let (toks, _) = scan("'a$5'");
         assert_tok(&toks, 0, LiteralString, Some("a$5"));
         assert_tok(&toks, 1, Eof, None);
