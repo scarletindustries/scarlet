@@ -59,49 +59,44 @@ const _: () = {
     assert_send::<Migrant>();
 };
 
-/// Visit every socket reachable from `v` — the one fd-walk shared by every
-/// path that pairs a value graph with the per-scheduler socket tables:
-/// seeding a spawn (`VM::build_seed`), detaching a migrant's fds
-/// ([`process_socket_ids`]), and the donor-side guard (`VM::can_donate_fds`,
-/// which filters to connections).
-pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
+/// Visit every immediate child `Value` of `v` — the shared descent step for
+/// recursive walks over a value graph. Leaves are matched exhaustively so a
+/// future value kind must decide its child set here instead of being skipped
+/// silently — this walk is what keeps migration's fd re-homing sound.
+fn for_each_child_value(v: &Value, visit: &mut impl FnMut(&Value)) {
     match v.kind() {
         ValueView::Array(seq) => {
             for e in seq.iter() {
-                for_each_socket(&e, visit);
+                visit(&e);
             }
         }
         ValueView::Tuple(t) => {
             for e in t {
-                for_each_socket(e, visit);
+                visit(e);
             }
         }
         ValueView::Closure(c) => {
             for e in c.captures() {
-                for_each_socket(e, visit);
+                visit(e);
             }
         }
         ValueView::Enum(e) => {
             for p in e.payload() {
-                for_each_socket(p, visit);
+                visit(p);
             }
         }
         ValueView::Map(m) => match m.backing() {
             MapBacking::Env => {}
             MapBacking::Hamt => {
                 for (k, val) in hamt::collect_entries(v) {
-                    for_each_socket(&k, visit);
-                    for_each_socket(&val, visit);
+                    visit(&k);
+                    visit(&val);
                 }
             }
         },
-        ValueView::Socket(s) => visit(s),
-        // Leaves that cannot reference a socket: immediates and heap
-        // values whose payload holds no `Value` words. Listed
-        // explicitly so a future value kind must decide its socket
-        // story here instead of being skipped silently — this walk is
-        // what keeps migration's fd re-homing sound.
-        ValueView::Int(_)
+        // Leaves whose payload holds no `Value` words.
+        ValueView::Socket(_)
+        | ValueView::Int(_)
         | ValueView::Float(_)
         | ValueView::Bool(_)
         | ValueView::Nil
@@ -109,6 +104,18 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
         | ValueView::Range(..)
         | ValueView::Binary(_) => {}
     }
+}
+
+/// Visit every socket reachable from `v` — the one fd-walk shared by every
+/// path that pairs a value graph with the per-scheduler socket tables:
+/// seeding a spawn (`VM::build_seed`), detaching a migrant's fds
+/// ([`process_socket_ids`]), and the donor-side guard (`VM::can_donate_fds`,
+/// which filters to connections).
+pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
+    if let ValueView::Socket(s) = v.kind() {
+        visit(s);
+    }
+    for_each_child_value(v, &mut |c| for_each_socket(c, visit));
 }
 
 /// Visit every socket reachable from the process's stack or any frame's
@@ -392,38 +399,7 @@ mod tests {
             return;
         }
         out.push(a);
-        match v.kind() {
-            ValueView::Array(seq) => {
-                for e in seq.iter() {
-                    distinct_heap_nodes(&e, out);
-                }
-            }
-            ValueView::Tuple(t) => {
-                for e in t {
-                    distinct_heap_nodes(e, out);
-                }
-            }
-            ValueView::Closure(c) => {
-                for e in c.captures() {
-                    distinct_heap_nodes(e, out);
-                }
-            }
-            ValueView::Enum(e) => {
-                for p in e.payload() {
-                    distinct_heap_nodes(p, out);
-                }
-            }
-            ValueView::Map(m) => match m.backing() {
-                MapBacking::Env => {}
-                MapBacking::Hamt => {
-                    for (k, val) in hamt::collect_entries(v) {
-                        distinct_heap_nodes(&k, out);
-                        distinct_heap_nodes(&val, out);
-                    }
-                }
-            },
-            _ => {}
-        }
+        for_each_child_value(v, &mut |c| distinct_heap_nodes(c, out));
     }
 
     #[test]
