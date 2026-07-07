@@ -1,13 +1,13 @@
 pub fn map(xs Array(a), f fn(a) b) Array(b) {
-	reverse(fold(xs, [], fn(acc, x) [f(x), ..acc]))
+	fold(xs, [], fn(acc, x) [..acc, f(x)])
 }
 
 pub fn filter(xs Array(a), p fn(a) Bool) Array(a) {
-	reverse(fold(xs, [], fn(acc, x) if p(x) {
-		[x, ..acc]
+	fold(xs, [], fn(acc, x) if p(x) {
+		[..acc, x]
 	} else {
 		acc
-	}))
+	})
 }
 
 pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
