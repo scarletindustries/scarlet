@@ -199,8 +199,8 @@ impl Compiler {
         let mut other_nodes: Vec<&ast::Node> = Vec::new();
 
         let in_prelude = self.current_module == module::al_prelude();
-        let mut seen_types: HashMap<String, Span> = HashMap::new();
-        let mut seen_values: HashMap<String, Span> = HashMap::new();
+        let mut seen_types: HashMap<&str, Span> = HashMap::new();
+        let mut seen_values: HashMap<&str, Span> = HashMap::new();
 
         let in_stdlib = self.current_module.first().map(String::as_str) == Some("al");
 
@@ -627,10 +627,10 @@ impl Compiler {
         }
         for &(a, rhs, _) in &aliases {
             let from = idx_of[a.identifier.name.as_str()];
-            let mut deps: Vec<String> = Vec::new();
+            let mut deps: Vec<&str> = Vec::new();
             collect_type_ast_deps(rhs, &mut deps);
             for dep in &deps {
-                if let Some(&to) = idx_of.get(dep.as_str()) {
+                if let Some(&to) = idx_of.get(dep) {
                     graph.add_edge(from, to, ());
                 }
             }
@@ -873,12 +873,12 @@ fn export_type(
 /// redundant declaration — keeping it would emit redundant codegen and a
 /// second, confusing definition after the diagnostic. (Downstream passes carry
 /// per-declaration state positionally and do not assume one decl per name.)
-fn check_duplicate(
+fn check_duplicate<'a>(
     c: &mut Compiler,
-    seen: &mut HashMap<String, Span>,
-    id: &ast::Identifier,
+    seen: &mut HashMap<&'a str, Span>,
+    id: &'a ast::Identifier,
 ) -> bool {
-    if let Some(prev) = seen.insert(id.name.clone(), id.span) {
+    if let Some(prev) = seen.insert(id.name.as_str(), id.span) {
         c.error(format!("'{}' is already defined", id.name), id.span);
         c.note("first definition was here".to_string(), prev);
         true
@@ -901,10 +901,10 @@ fn check_reserved(c: &mut Compiler, id: &ast::Identifier, in_prelude: bool) {
 }
 
 /// Walk a type-annotation AST collecting every named-type reference.
-fn collect_type_ast_deps(t: &ast::TypeIdentifier, out: &mut Vec<String>) {
+fn collect_type_ast_deps<'a>(t: &'a ast::TypeIdentifier, out: &mut Vec<&'a str>) {
     match &t.kind {
         ast::TypeKind::NamedType(nt) => {
-            out.push(nt.identifier.name.clone());
+            out.push(nt.identifier.name.as_str());
             for a in &nt.type_args {
                 collect_type_ast_deps(a, out);
             }
