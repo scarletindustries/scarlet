@@ -24,10 +24,7 @@ pub(super) fn fuse(code: &mut [Instruction]) {
     // may be a target; landing mid-window after fusion would be incorrect.
     let mut targets: HashSet<i32> = HashSet::new();
     for instr in code.iter() {
-        if matches!(
-            instr.op,
-            Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue | Op::JumpGeIntLC | Op::JumpNeIntLC
-        ) {
+        if instr.op.has_jump_target() {
             targets.insert(instr.operand);
         }
     }

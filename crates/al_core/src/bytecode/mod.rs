@@ -369,6 +369,96 @@ pub enum Op {
     MapToList,
 }
 
+impl Op {
+    /// True when this op's `operand` is an absolute instruction index that
+    /// jump-patching / peephole must remap. Keep this the ONE authority —
+    /// `emit_jump` debug-asserts against it so a new jump op forgotten here
+    /// trips in debug rather than silently miscompiling under fusion.
+    pub const fn has_jump_target(self) -> bool {
+        matches!(
+            self,
+            Op::Jump
+                | Op::JumpIfFalse
+                | Op::JumpIfTrue
+                | Op::JumpGeIntLC
+                | Op::JumpNeIntLC
+                | Op::IndexOrElse
+        )
+    }
+}
+
+/// Resolve an `@vm(name)` intrinsic key to its VM opcode. This is the ONE
+/// place the string→Op mapping lives; analysis calls it while registering the
+/// stdlib so an unknown key is a well-located compile error at the annotation
+/// rather than an `Internal:` fallthrough during codegen.
+pub fn builtin_op(name: &str) -> Option<Op> {
+    Some(match name {
+        "println" => Op::Print,
+        "string__inspect" => Op::ToString,
+        "internal__stack_depth" => Op::StackDepth,
+        "io__read_file" => Op::FileRead,
+        "io__write_file" => Op::FileWrite,
+        "net__listen" => Op::TcpListen,
+        "net__accept" => Op::TcpAccept,
+        "net__connect" => Op::TcpConnect,
+        "net__close" => Op::TcpCloseServer,
+        "net__local_addr" => Op::TcpLocalAddr,
+        "net__resolve" => Op::DnsResolve,
+        "address__parse" => Op::IpParse,
+        "socket__read" => Op::TcpRead,
+        "socket__read_until" => Op::TcpReadUntil,
+        "socket__write" => Op::TcpWrite,
+        "socket__write_parts" => Op::TcpWriteParts,
+        "socket__close" => Op::TcpClose,
+        "string__split" => Op::StrSplit,
+        "string__length" => Op::StrLen,
+        "string__contains" => Op::StrContains,
+        "string__trim" => Op::StrTrim,
+        "int__to_string" => Op::IntToString,
+        "binary__from_string" => Op::BinFromString,
+        "binary__to_string" => Op::BinToString,
+        "binary__bit_size" => Op::BinBitSize,
+        "binary__byte_size" => Op::BinByteSize,
+        "binary__slice" => Op::BinSlice,
+        "binary__append" => Op::BinAppend,
+        "binary__index_of" => Op::BinIndexOf,
+        "binary__byte_at" => Op::BinByteAt,
+        "binary__parse_int" => Op::BinParseInt,
+        "binary__eq_ignore_ascii_case" => Op::BinEqIgnoreAsciiCase,
+        "binary__to_ascii_lower" => Op::BinToAsciiLower,
+        "binary__from_int_ascii" => Op::BinFromIntAscii,
+        "http__parse_head" => Op::HttpParseHead,
+        "http__framing" => Op::HttpFraming,
+        "http__chunk_decode" => Op::HttpChunkDecode,
+        "http__header_get" => Op::HttpHeaderGet,
+        "http__header_has" => Op::HttpHeaderHas,
+        "http__serialize_head" => Op::HttpSerializeHead,
+        "float__floor" => Op::FloatFloor,
+        "float__ceil" => Op::FloatCeil,
+        "float__round" => Op::FloatRound,
+        "float__truncate" => Op::FloatTruncate,
+        "float__from_int" => Op::FloatFromInt,
+        "float__to_string" => Op::FloatToString,
+        "scheduler__spawn" => Op::ProcessSpawn,
+        "scheduler__spawn_local" => Op::SpawnLocal,
+        "scheduler__spawn_on_each" => Op::SpawnOnEach,
+        "scheduler__sleep" => Op::Sleep,
+        "time__monotonic" => Op::Monotonic,
+        "process__argv" => Op::Argv,
+        "process__env" => Op::EnvMap,
+        "map__get" => Op::MapGet,
+        "map__has" => Op::MapHas,
+        "map__keys" => Op::MapKeys,
+        "map__values" => Op::MapValues,
+        "map__size" => Op::MapSize,
+        "map__new" => Op::MapNew,
+        "map__set" => Op::MapSet,
+        "map__delete" => Op::MapDelete,
+        "map__to_list" => Op::MapToList,
+        _ => return None,
+    })
+}
+
 /// A single bytecode instruction. `a`/`b` are packed sub-operands that reclaim
 /// the 3 bytes of padding between `op` and `operand`; single-operand ops leave
 /// them zero. Layout: 1B op + 1B a + 2B b + 4B operand = 8B, `Copy`.

@@ -600,6 +600,10 @@ impl Compiler {
     /// Emit a forward jump with a placeholder target and return its address
     /// for later `patch_jump`.
     fn emit_jump(&mut self, o: Op) -> i32 {
+        debug_assert!(
+            o.has_jump_target(),
+            "emit_jump({o:?}) but Op::has_jump_target says no — add it there or peephole will miscompile",
+        );
         let addr = self.current_addr();
         self.emit_arg(o, 0);
         addr
