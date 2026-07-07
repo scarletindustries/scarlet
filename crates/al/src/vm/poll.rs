@@ -278,9 +278,12 @@ impl VM {
             }
             Wait::Timer(d) => self.timer_heap.push(Reverse((*d, id))),
             Wait::Offload(op) => {
-                if let Some(op) = op.take() {
-                    self.runtime.offload(self.scheduler_index, id, op);
-                }
+                // Invariant: `Wait::offloaded` is the only constructor and always
+                // yields `Some`; `None` here would mean no job is dispatched and
+                // the process hangs forever, so fail loudly rather than swallow.
+                #[allow(clippy::expect_used)]
+                let op = op.take().expect("offload park carries an op");
+                self.runtime.offload(self.scheduler_index, id, op);
             }
         }
         self.parked.insert(id, (wait, p));
