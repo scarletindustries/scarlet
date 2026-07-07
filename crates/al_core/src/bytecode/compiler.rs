@@ -44,7 +44,8 @@ use std::rc::Rc;
 use super::peephole::fuse;
 use super::session::{RawRef, Watermark};
 use super::{
-    Function, Op, PreludeBindings, Program, Value, enum_name_prefix_hash, op, op_ab, op_arg,
+    Function, Op, PreludeBindings, Program, TypeRef, Value, enum_name_prefix_hash, op, op_ab,
+    op_arg,
 };
 use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
@@ -1168,37 +1169,33 @@ impl Compiler {
     /// Thin wrappers over the engine's `mk_con` for prelude types, fed by the
     /// captured `PreludeBindings` so the type identity (not just the name
     /// string) is the source of truth where it matters.
+    #[inline]
+    fn ty_prelude(&mut self, r: TypeRef, args: &[Ty]) -> Ty {
+        self.engine.mk_con(r.id, r.name, args)
+    }
     fn ty_bool(&mut self) -> Ty {
-        self.engine
-            .mk_con(self.prelude.bool.id, self.prelude.bool.name, &[])
+        self.ty_prelude(self.prelude.bool, &[])
     }
     fn ty_int(&mut self) -> Ty {
-        self.engine
-            .mk_con(self.prelude.int.id, self.prelude.int.name, &[])
+        self.ty_prelude(self.prelude.int, &[])
     }
     fn ty_string(&mut self) -> Ty {
-        self.engine
-            .mk_con(self.prelude.string.id, self.prelude.string.name, &[])
+        self.ty_prelude(self.prelude.string, &[])
     }
     fn ty_nil(&mut self) -> Ty {
-        self.engine
-            .mk_con(self.prelude.nil.id, self.prelude.nil.name, &[])
+        self.ty_prelude(self.prelude.nil, &[])
     }
     fn ty_array(&mut self, elem: Ty) -> Ty {
-        self.engine
-            .mk_con(self.prelude.array.id, self.prelude.array.name, &[elem])
+        self.ty_prelude(self.prelude.array, &[elem])
     }
     fn ty_binary(&mut self) -> Ty {
-        self.engine
-            .mk_con(self.prelude.binary.id, self.prelude.binary.name, &[])
+        self.ty_prelude(self.prelude.binary, &[])
     }
     fn ty_option(&mut self, inner: Ty) -> Ty {
-        self.engine
-            .mk_con(self.prelude.option.id, self.prelude.option.name, &[inner])
+        self.ty_prelude(self.prelude.option, &[inner])
     }
     fn ty_result(&mut self, ok: Ty, err: Ty) -> Ty {
-        self.engine
-            .mk_con(self.prelude.result.id, self.prelude.result.name, &[ok, err])
+        self.ty_prelude(self.prelude.result, &[ok, err])
     }
 
     /// Hydrate a type annotation through `h`, recording any error and falling
