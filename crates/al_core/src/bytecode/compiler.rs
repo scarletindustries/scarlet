@@ -64,8 +64,8 @@ use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
     ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator, InferEngine,
-    MatchFunTypeError, Pat, PatternBindings, Prim, Scheme, StrId, Ty, TypeEnv, TypeNode,
-    UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
+    MatchFunTypeError, NullaryPrim, Pat, PatternBindings, Prim, Scheme, StrId, Ty, TypeEnv,
+    TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
 };
 
 // ============================================================================
@@ -1168,28 +1168,34 @@ impl Compiler {
 
     /// Thin wrappers over the engine's `mk_con` for prelude types, fed by the
     /// captured `PreludeBindings` so the type identity (not just the name
-    /// string) is the source of truth where it matters.
+    /// string) is the source of truth where it matters. The nullary ones go
+    /// through the engine's per-primitive cache so a recompile mints one `Int`
+    /// node instead of one per literal.
     #[inline]
     fn ty_prelude(&mut self, r: TypeRef, args: &[Ty]) -> Ty {
         self.engine.mk_con(r.id, r.name, args)
     }
+    #[inline]
+    fn ty_nullary(&mut self, slot: NullaryPrim, r: TypeRef) -> Ty {
+        self.engine.nullary_con(slot, r.id, r.name)
+    }
     fn ty_bool(&mut self) -> Ty {
-        self.ty_prelude(self.prelude.bool, &[])
+        self.ty_nullary(NullaryPrim::Bool, self.prelude.bool)
     }
     fn ty_int(&mut self) -> Ty {
-        self.ty_prelude(self.prelude.int, &[])
+        self.ty_nullary(NullaryPrim::Int, self.prelude.int)
     }
     fn ty_string(&mut self) -> Ty {
-        self.ty_prelude(self.prelude.string, &[])
+        self.ty_nullary(NullaryPrim::String, self.prelude.string)
     }
     fn ty_nil(&mut self) -> Ty {
-        self.ty_prelude(self.prelude.nil, &[])
+        self.ty_nullary(NullaryPrim::Nil, self.prelude.nil)
     }
     fn ty_array(&mut self, elem: Ty) -> Ty {
         self.ty_prelude(self.prelude.array, &[elem])
     }
     fn ty_binary(&mut self) -> Ty {
-        self.ty_prelude(self.prelude.binary, &[])
+        self.ty_nullary(NullaryPrim::Binary, self.prelude.binary)
     }
     fn ty_option(&mut self, inner: Ty) -> Ty {
         self.ty_prelude(self.prelude.option, &[inner])

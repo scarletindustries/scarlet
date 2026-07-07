@@ -1057,6 +1057,35 @@ impl Value {
         }
     }
 
+    /// Concatenate `parts` into a fresh arena Str, writing each slice directly
+    /// into the payload so the caller need not stage through a host `String`.
+    /// Allocation: `2 + total_len.div_ceil(8)` words.
+    pub fn str_from_parts_in<A: Arena + ?Sized>(a: &mut A, parts: &[&str]) -> Value {
+        let blen: usize = parts.iter().map(|s| s.len()).sum();
+        let payload = 1 + blen.div_ceil(8);
+        let obj = alloc_obj(a, HeapTag::Str, payload, false);
+        // SAFETY: payload sized for the length word plus the padded bytes;
+        // header written by `alloc_obj`. `alloc_words` never collects, so
+        // `parts` that borrow existing arena Strs remain valid across the
+        // allocation, and the fresh object never overlaps them.
+        unsafe {
+            let p = obj.as_ptr().add(1);
+            p.write(blen as u64);
+            if blen > 0 {
+                p.add(payload - 1).write(0);
+                let mut dst = p.add(1) as *mut u8;
+                for s in parts {
+                    let n = s.len();
+                    if n != 0 {
+                        std::ptr::copy_nonoverlapping(s.as_ptr(), dst, n);
+                        dst = dst.add(n);
+                    }
+                }
+            }
+            Value::from_object_ptr(obj)
+        }
+    }
+
     /// Allocation: 3 words.
     pub fn range_in<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
         let obj = alloc_obj(a, HeapTag::Range, 2, false);

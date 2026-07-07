@@ -83,6 +83,33 @@ pub type StrId = u32;
 /// `Option<String>` but the struct must stay `Copy` and const-constructible.
 pub const NO_STR: StrId = u32::MAX;
 
+/// Sentinel `Ty` meaning "no arena node".
+pub const NO_TY: Ty = u32::MAX;
+
+/// Cache slot for a nullary primitive `Con` node. `unify` compares `Con` by
+/// nominal `TypeId` (never arena identity), so one arena node per primitive
+/// can be shared across every literal / comparison / condition instead of
+/// pushing a fresh one on each `ty_int`/`ty_bool`/`icon_*` call.
+#[derive(Debug, Clone, Copy)]
+#[repr(usize)]
+pub enum NullaryPrim {
+    Int = 0,
+    Float = 1,
+    String = 2,
+    Bool = 3,
+    Nil = 4,
+    Binary = 5,
+}
+const NULLARY_CACHE_LEN: usize = 6;
+
+#[derive(Debug)]
+struct NullaryCache([Ty; NULLARY_CACHE_LEN]);
+impl Default for NullaryCache {
+    fn default() -> Self {
+        NullaryCache([NO_TY; NULLARY_CACHE_LEN])
+    }
+}
+
 /// Zero-sized markers naming which `InferEngine` side-pool an [`ArenaSlice`]
 /// indexes. The phantom parameter makes cross-pool indexing (e.g. handing a
 /// `Scheme.quantified` slice to `children_of`) a compile error instead of a
@@ -442,6 +469,11 @@ pub struct InferEngine {
     /// primitives carry the same identity as compiler-minted ones; defaults
     /// keep engine-only unit tests working without a prelude.
     prim_ids: PrimIds,
+    /// One cached arena `Ty` per nullary primitive. Minted on the first
+    /// `nullary_con` call for that slot and returned on every subsequent one,
+    /// so a per-keystroke recompile allocates one `Int` node instead of one
+    /// per literal. Entries past a `truncate_to` watermark are cleared there.
+    nullary_cache: NullaryCache,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -618,6 +650,12 @@ impl InferEngine {
 
     pub fn truncate_to(&mut self, w: &EnginePoolWatermark) {
         self.nodes.truncate(w.nodes);
+        let n = w.nodes as Ty;
+        for c in &mut self.nullary_cache.0 {
+            if *c >= n {
+                *c = NO_TY;
+            }
+        }
         self.children.truncate(w.children);
         self.strings.truncate(w.strings);
         let n = w.strings as u32;
@@ -693,6 +731,22 @@ impl InferEngine {
         self.push(TypeNode::Con { id, name, args })
     }
 
+    /// `mk_con(id, name, &[])` memoised per `slot`. First call mints and
+    /// caches; every later call is a single field read (no intern hash, no
+    /// arena push). Correct because `Con` identity is nominal — see
+    /// [`NullaryPrim`].
+    #[inline]
+    pub fn nullary_con(&mut self, slot: NullaryPrim, id: TypeId, name: &str) -> Ty {
+        let i = slot as usize;
+        let cached = self.nullary_cache.0[i];
+        if cached != NO_TY {
+            return cached;
+        }
+        let t = self.mk_con(id, name, &[]);
+        self.nullary_cache.0[i] = t;
+        t
+    }
+
     pub fn mk_con_id(&mut self, id: TypeId, name: StrId, args: &[Ty]) -> Ty {
         let args = self.push_children(args);
         self.push(TypeNode::Con { id, name, args })
@@ -714,15 +768,15 @@ impl InferEngine {
 
     pub fn icon_int(&mut self) -> Ty {
         let id = self.prim_ids.int;
-        self.mk_con(id, pn::INT, &[])
+        self.nullary_con(NullaryPrim::Int, id, pn::INT)
     }
     pub fn icon_float(&mut self) -> Ty {
         let id = self.prim_ids.float;
-        self.mk_con(id, pn::FLOAT, &[])
+        self.nullary_con(NullaryPrim::Float, id, pn::FLOAT)
     }
     pub fn icon_string(&mut self) -> Ty {
         let id = self.prim_ids.string;
-        self.mk_con(id, pn::STRING, &[])
+        self.nullary_con(NullaryPrim::String, id, pn::STRING)
     }
 
     // --- Annotation name tracking ---

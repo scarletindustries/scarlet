@@ -37,6 +37,7 @@ use al_core::bytecode::{
     values_equal,
 };
 use al_core::static_ir::VariantTemplate;
+use smallvec::SmallVec;
 
 use super::poll::monotonic_now_ms;
 use super::{
@@ -598,20 +599,19 @@ impl VM {
                 Op::StrConcatN => {
                     let n = instr.operand as usize;
                     let base = self.operand_base(n)?;
-                    let mut total = 0usize;
-                    for v in &self.stack[base..] {
-                        match v.as_str() {
-                            Some(s) => total += s.len(),
-                            None => return Err(VmError::internal("str_concat requires strings")),
+                    let v = {
+                        let mut parts: SmallVec<[&str; 8]> = SmallVec::with_capacity(n);
+                        for v in &self.stack[base..] {
+                            match v.as_str() {
+                                Some(s) => parts.push(s),
+                                None => {
+                                    return Err(VmError::internal("str_concat requires strings"));
+                                }
+                            }
                         }
-                    }
-                    let mut out = String::with_capacity(total);
-                    for v in self.stack.drain(base..) {
-                        if let Some(s) = v.as_str() {
-                            out.push_str(s);
-                        }
-                    }
-                    let v = Value::str_in(&mut self.heap, &out);
+                        Value::str_from_parts_in(&mut self.heap, &parts)
+                    };
+                    self.stack.truncate(base);
                     self.stack.push(v);
                 }
                 Op::Halt => {
@@ -974,10 +974,7 @@ impl VM {
         let a = self.pop()?;
         match (a.as_str(), b.as_str()) {
             (Some(sa), Some(sb)) => {
-                let mut out = String::with_capacity(sa.len() + sb.len());
-                out.push_str(sa);
-                out.push_str(sb);
-                let v = Value::str_in(&mut self.heap, &out);
+                let v = Value::str_from_parts_in(&mut self.heap, &[sa, sb]);
                 self.stack.push(v);
                 Ok(())
             }
