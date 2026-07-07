@@ -1,19 +1,13 @@
 pub fn map(xs Array(a), f fn(a) b) Array(b) {
-	match xs {
-		[] -> []
-		[h, ..t] -> [f(h), ..map(t, f)]
-	}
+	reverse(fold(xs, [], fn(acc, x) [f(x), ..acc]))
 }
 
 pub fn filter(xs Array(a), p fn(a) Bool) Array(a) {
-	match xs {
-		[] -> []
-		[h, ..t] -> if p(h) {
-			[h, ..filter(t, p)]
-		} else {
-			filter(t, p)
-		}
-	}
+	reverse(fold(xs, [], fn(acc, x) if p(x) {
+		[x, ..acc]
+	} else {
+		acc
+	}))
 }
 
 pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
