@@ -1750,11 +1750,18 @@ impl Compiler {
     /// module's collected references (the `module_refs` value that was live
     /// between enter and leave).
     fn leave_module_frame(&mut self, old: ModuleFrame) -> ModuleReferences {
-        self.current_module = old.module;
-        self.module_path_slice = old.module_path_slice;
-        self.imported_qualifiers = old.imported_qualifiers;
-        self.base_dir = old.base_dir;
-        std::mem::replace(&mut self.module_refs, old.module_refs)
+        let ModuleFrame {
+            module,
+            module_path_slice,
+            imported_qualifiers,
+            base_dir,
+            module_refs,
+        } = old;
+        self.current_module = module;
+        self.module_path_slice = module_path_slice;
+        self.imported_qualifiers = imported_qualifiers;
+        self.base_dir = base_dir;
+        std::mem::replace(&mut self.module_refs, module_refs)
     }
 
     fn compile_module_body(
