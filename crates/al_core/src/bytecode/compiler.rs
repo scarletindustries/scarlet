@@ -4058,11 +4058,11 @@ impl Compiler {
         result_ty
     }
 
-    /// Bind a pattern's freshly-typed names (populated by `type_pattern`
-    /// into `b.initial`): reserve a local slot for each and funnel it through
+    /// Bind a pattern's freshly-typed names (populated by `type_pattern`):
+    /// reserve a local slot for each and funnel it through
     /// [`Self::register_local_binding`].
     fn bind_pattern_initials(&mut self, b: &PatternBindings) {
-        for (name, (ty, sp)) in &b.initial {
+        for (name, (ty, sp)) in b.bindings() {
             self.get_or_create_local(name);
             self.register_local_binding(name, *ty, *sp);
         }

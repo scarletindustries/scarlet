@@ -7,8 +7,11 @@ use crate::span::Span;
 
 /// Tracks which phase of an or-pattern is being typed. The first alternative
 /// establishes the canonical binding set; every subsequent alternative must
-/// bind exactly the same names at unifiable types.
-pub enum PatternMode {
+/// bind exactly the same names at unifiable types. Private: transitions happen
+/// only through [`PatternBindings::enter_or`] / [`PatternBindings::enter_alternative`]
+/// / [`PatternBindings::exit_or`], so an out-of-range `boundary` (which would
+/// make `finish_alternative`'s `skip` silently miss names) cannot be constructed.
+enum PatternMode {
     Initial,
     /// Typing a non-first alternative of an or-pattern. `boundary` is the index
     /// into `initial` at or past which entries are *this* or-pattern's canonical
@@ -22,11 +25,14 @@ pub enum PatternMode {
 }
 
 /// Accumulator for variable bindings introduced by a pattern. The compiler
-/// runs `type_pattern` against this, then reads `initial` to allocate locals
-/// and populate the type environment before compiling the arm body.
+/// runs `type_pattern` against this, then reads [`bindings`](Self::bindings)
+/// to allocate locals and populate the type environment before compiling the
+/// arm body. Internal state is private so the `mode` / `initial` invariant
+/// (every `Alternative` boundary is a valid index into `initial`) is upheld by
+/// construction.
 pub struct PatternBindings {
-    pub mode: PatternMode,
-    pub initial: IndexMap<String, (Ty, Span)>,
+    mode: PatternMode,
+    initial: IndexMap<String, (Ty, Span)>,
 }
 
 /// State captured when an or-pattern is entered so its canonical binding set
@@ -35,6 +41,7 @@ pub struct PatternBindings {
 /// been typed. Because an or-pattern can be nested inside another pattern (and
 /// even inside another or-pattern's alternative), the surrounding mode must be
 /// saved and restored rather than assumed to be `Initial`.
+#[must_use = "pass to exit_or() to restore the enclosing pattern mode"]
 pub struct OrPatternScope {
     saved_mode: PatternMode,
     boundary: usize,
@@ -46,6 +53,13 @@ impl PatternBindings {
             mode: PatternMode::Initial,
             initial: IndexMap::new(),
         }
+    }
+
+    /// Iterate the canonical bindings this pattern introduces, in insertion
+    /// order. This is the read-only view the compiler uses to allocate locals
+    /// once `type_pattern` has finished.
+    pub fn bindings(&self) -> impl Iterator<Item = (&str, &(Ty, Span))> {
+        self.initial.iter().map(|(k, v)| (k.as_str(), v))
     }
 
     /// Record a binding. Returns `false` (and pushes a diagnostic onto
