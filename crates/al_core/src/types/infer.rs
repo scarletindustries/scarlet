@@ -1507,6 +1507,25 @@ impl InferEngine {
         })
     }
 
+    /// As [`substitute_type_vars`] but the arguments live in the children pool
+    /// (looked up through `e` inside the rewrite closure), so callers that only
+    /// hold an `ArenaSlice` need not materialise a temporary `Vec<Ty>`.
+    fn substitute_type_vars_slice(
+        &mut self,
+        ty: Ty,
+        params: ArenaSlice<pool::TypeParams>,
+        args: ArenaSlice<pool::Children>,
+    ) -> Ty {
+        self.rewrite(ty, &mut |e, n| match n {
+            TypeNode::Var(id) => {
+                let idx = e.type_params_of(params).iter().position(|p| p.id == id);
+                idx.and_then(|i| e.children_of(args).get(i).copied())
+            }
+            TypeNode::Bound(i) => e.children_of(args).get(i as usize).copied(),
+            _ => None,
+        })
+    }
+
     /// Rewrite a `TypeInfo` body from open form (`Var(param_id)`) to closed
     /// form (`Bound(idx)`) so it no longer references engine-local var ids.
     /// Idempotent.
@@ -1543,15 +1562,15 @@ impl InferEngine {
             }
             TypeNode::Con { id, name, args } => {
                 let name = self.str(name).to_string();
-                let args: Vec<Ty> = self.children_of(args).to_vec();
-                self.resolve_icon(id, &name, &args, env, path)
+                self.resolve_icon(id, &name, args, env, path)
             }
             TypeNode::Fun { params, ret } => {
-                let params: Vec<Type> = self
-                    .children_of(params)
-                    .to_vec()
-                    .into_iter()
-                    .map(|p| self.resolve_inner(p, env, path))
+                let params: Vec<Type> = params
+                    .range()
+                    .map(|i| {
+                        let p = self.children[i];
+                        self.resolve_inner(p, env, path)
+                    })
                     .collect();
                 let ret_t = self.resolve_inner(ret, env, path);
                 Type::Function {
@@ -1560,11 +1579,12 @@ impl InferEngine {
                 }
             }
             TypeNode::Tuple { elems } => {
-                let elements: Vec<Type> = self
-                    .children_of(elems)
-                    .to_vec()
-                    .into_iter()
-                    .map(|e| self.resolve_inner(e, env, path))
+                let elements: Vec<Type> = elems
+                    .range()
+                    .map(|i| {
+                        let e = self.children[i];
+                        self.resolve_inner(e, env, path)
+                    })
                     .collect();
                 t_tuple(elements)
             }
@@ -1576,7 +1596,7 @@ impl InferEngine {
         &mut self,
         id: TypeId,
         name: &str,
-        args: &[Ty],
+        args: ArenaSlice<pool::Children>,
         env: Option<&TypeEnv>,
         path: &mut ResolvePath,
     ) -> Type {
@@ -1596,8 +1616,12 @@ impl InferEngine {
             return t_string();
         } else if id == self.prim_ids.array {
             let elem = args
-                .first()
-                .map(|&a| self.resolve_inner(a, env, path))
+                .range()
+                .next()
+                .map(|i| {
+                    let a = self.children[i];
+                    self.resolve_inner(a, env, path)
+                })
                 .unwrap_or_else(|| t_var("a"));
             return t_array(elem);
         }
@@ -1623,8 +1647,9 @@ impl InferEngine {
         // matches as non-exhaustive.)
         let mark = path.stack.len();
         let resolved_args: Vec<Type> = args
-            .iter()
-            .map(|&a| {
+            .range()
+            .map(|i| {
+                let a = self.children[i];
                 let r = self.resolve_inner(a, env, path);
                 path.stack.truncate(mark);
                 r
@@ -1650,8 +1675,11 @@ impl InferEngine {
                                 fields
                                     .into_iter()
                                     .map(|f| {
-                                        let s =
-                                            self.substitute_type_vars(f.ty, info.type_params, args);
+                                        let s = self.substitute_type_vars_slice(
+                                            f.ty,
+                                            info.type_params,
+                                            args,
+                                        );
                                         FieldDef {
                                             label: self.str(f.label).to_string(),
                                             ty: self.resolve_inner(s, env, path),
@@ -1670,7 +1698,7 @@ impl InferEngine {
                     };
                 }
                 TypeBody::Alias { target } => {
-                    let s = self.substitute_type_vars(target, info.type_params, args);
+                    let s = self.substitute_type_vars_slice(target, info.type_params, args);
                     path.enter(id, args_key);
                     let resolved = self.resolve_inner(s, env, path);
                     path.exit();
