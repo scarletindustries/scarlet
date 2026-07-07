@@ -563,9 +563,8 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
 // Constructor / Type / Constant / Field entity kinds. The query layer was
 // previously exercised only for Function / Value / ModuleAlias; these are the
 // remaining four `EntityKind`s. Each is driven from a real *use* site:
-//   - a constructor at a VALUE position (`chosen = Red`) — deliberately not a
-//     match pattern, which records only a hover fact (no graph reference) and
-//     would make find-refs return nothing there;
+//   - a constructor at a VALUE position (`chosen = Red`) — the match-pattern
+//     position is covered by `constructor_in_match_pattern_is_a_graph_reference`;
 //   - a type at an annotation use (`c Color`);
 //   - a constant inside an expression (`LIMIT + 1`);
 //   - a record field projection (`bx.label`).
@@ -688,6 +687,23 @@ fn navigation_on_constructor_type_constant_and_field() {
     // field declaration, the 2nd is the construction label `Box(label: ...)`
     // (not recorded as a graph reference), the 3rd is the access.
     assert_nav(&s, NAV_SRC, "label", 3, EntityKind::Field);
+}
+
+#[test]
+fn constructor_in_match_pattern_is_a_graph_reference() {
+    // A constructor used in a match arm pattern must be recorded as a graph
+    // reference so find-references / rename reach it. `Left` here appears ONLY
+    // in the type declaration and the match arm — never at a value position —
+    // so this pins `type_ctor_pattern`'s `record_value_use` call directly.
+    let p = Project::new("ctor_pattern_ref");
+    let src = "type Side { Left Right }\n\
+               fn f(x Side) Int { match x { Left -> 1 Right -> 2 } }\n\
+               println(f(Right))\n";
+    p.write("a.al", src);
+    let s = checked_with(&p, src);
+
+    // 2nd `Left` is the match-arm pattern occurrence.
+    assert_nav(&s, src, "Left", 2, EntityKind::Constructor);
 }
 
 // --- Embedded-stdlib type fidelity through the session -------------------------

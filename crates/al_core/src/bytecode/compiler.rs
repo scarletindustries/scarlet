@@ -64,7 +64,7 @@ use crate::type_def::TypeId;
 use crate::types::{
     ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator, InferEngine,
     MatchFunTypeError, Pat, PatternBindings, Prim, Scheme, StrId, Ty, TypeEnv, TypeNode,
-    UsefulnessMatrix, ValueKind, mono, new_engine, new_env,
+    UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
 };
 
 // ============================================================================
@@ -125,6 +125,19 @@ struct FnFrame {
     tail: bool,
     jump_over: i32,
     func_start: i32,
+}
+
+/// Per-module compiler state snapshotted on entry to a submodule body by
+/// `enter_module_frame` and restored by `leave_module_frame`. Mirrors
+/// `FnFrame`: adding a per-module field means one line here plus one
+/// swap/restore in the enter/leave pair, not two hand-written
+/// `mem::replace` calls to remember at both ends of `compile_module_body`.
+struct ModuleFrame {
+    module: ModulePath,
+    module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
+    imported_qualifiers: HashMap<String, String>,
+    base_dir: Option<PathBuf>,
+    module_refs: ModuleReferences,
 }
 
 pub struct Compiler {
@@ -216,15 +229,15 @@ pub struct Compiler {
     pub(super) current_module: ModulePath,
     /// Memo of `current_module` interned into `engine.str_slices`; invalidated
     /// (set to `None`) whenever `current_module` is swapped in
-    /// `compile_module_body`.
-    pub(super) module_path_slice: Option<ArenaSlice>,
+    /// `enter_module_frame`.
+    pub(super) module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
     /// Memo of a module-path `ArenaSlice` → its interned `ModuleId`. The
     /// `str_slices` pool is append-only within a compile, so a given
     /// `ArenaSlice` always denotes the same path (hence the same id); cleared
     /// in `reset_to`, the single point where the pool is rewound. Lets
     /// `defid_of`/`record` skip the per-occurrence `strs_of` + `path_key`
     /// allocations and string-hash probe on the per-keystroke recompile.
-    pub(super) defid_module_memo: HashMap<ArenaSlice, ModuleId>,
+    pub(super) defid_module_memo: HashMap<ArenaSlice<pool::StrSlices>, ModuleId>,
     /// Qualifier name in this file → module key (path.join("/")).
     pub(super) imported_qualifiers: HashMap<String, String>,
     pub(super) base_dir: Option<PathBuf>,
@@ -661,7 +674,7 @@ impl Compiler {
     /// Pool a frozen field-label array for the interned label ids in
     /// `field_labels`. Interned as a unit, so every construction site of the
     /// same variant shares one frozen label array.
-    fn const_str_array(&mut self, field_labels: ArenaSlice) -> i32 {
+    fn const_str_array(&mut self, field_labels: ArenaSlice<pool::StrSlices>) -> i32 {
         if self.check_only {
             return 0;
         }
@@ -901,7 +914,7 @@ impl Compiler {
     /// Replaces a per-occurrence `strs_of` (`Vec<String>` + a `String` per
     /// segment) plus `ref_interner.intern` (`path_key` joined `String` + a
     /// string-hash probe) with one `ArenaSlice`-keyed probe on a cache hit.
-    fn module_id_of_slice(&mut self, sl: ArenaSlice) -> ModuleId {
+    fn module_id_of_slice(&mut self, sl: ArenaSlice<pool::StrSlices>) -> ModuleId {
         if let Some(&id) = self.defid_module_memo.get(&sl) {
             return id;
         }
@@ -1038,7 +1051,7 @@ impl Compiler {
         type_id: TypeId,
         type_name: &str,
         variant_name: &str,
-        field_labels: ArenaSlice,
+        field_labels: ArenaSlice<pool::StrSlices>,
     ) {
         let id_c = self.const_int(type_id.0 as i64);
         self.emit_arg(Op::PushConst, id_c);
@@ -1065,7 +1078,7 @@ impl Compiler {
         type_id: TypeId,
         type_name: &str,
         variant_name: &str,
-        field_labels: ArenaSlice,
+        field_labels: ArenaSlice<pool::StrSlices>,
     ) -> i32 {
         self.emit_construct_header(type_id, type_name, variant_name, field_labels);
         let prefix = enum_name_prefix_hash(type_name, variant_name);
@@ -1722,6 +1735,34 @@ impl Compiler {
         true
     }
 
+    /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
+    /// and swap in fresh state for compiling `path`'s body. A fresh
+    /// `ModuleReferences` collector is installed (the typecheck pass populates
+    /// it; `leave_module_frame` moves the result out for the caller to store
+    /// on the module's `CachedModule`). `module_path_slice` is a memo of
+    /// `current_module`, so it is cleared rather than carried over.
+    fn enter_module_frame(&mut self, path: ModulePath, base_dir: Option<PathBuf>) -> ModuleFrame {
+        let mid = self.ref_interner.intern(&path);
+        ModuleFrame {
+            module: std::mem::replace(&mut self.current_module, path),
+            module_path_slice: self.module_path_slice.take(),
+            imported_qualifiers: std::mem::take(&mut self.imported_qualifiers),
+            base_dir: std::mem::replace(&mut self.base_dir, base_dir),
+            module_refs: std::mem::replace(&mut self.module_refs, ModuleReferences::new(mid)),
+        }
+    }
+
+    /// Restore the snapshotted per-module state and return the just-compiled
+    /// module's collected references (the `module_refs` value that was live
+    /// between enter and leave).
+    fn leave_module_frame(&mut self, old: ModuleFrame) -> ModuleReferences {
+        self.current_module = old.module;
+        self.module_path_slice = old.module_path_slice;
+        self.imported_qualifiers = old.imported_qualifiers;
+        self.base_dir = old.base_dir;
+        std::mem::replace(&mut self.module_refs, old.module_refs)
+    }
+
     fn compile_module_body(
         &mut self,
         path: ModulePath,
@@ -1729,17 +1770,7 @@ impl Compiler {
         base_dir: Option<PathBuf>,
     ) -> (CompiledBody, Vec<String>) {
         let mut iface = ModuleInterface::new(path.clone());
-        let mid = self.ref_interner.intern(&path);
-
-        let old_module = std::mem::replace(&mut self.current_module, path);
-        let old_mod_slice = self.module_path_slice.take();
-        let old_qualifiers = std::mem::take(&mut self.imported_qualifiers);
-        let old_base = std::mem::replace(&mut self.base_dir, base_dir);
-        // Swap in a fresh collector for this submodule's body (mirrors the
-        // `current_module`/`imported_qualifiers` save/restore dance); the
-        // typecheck pass populates it and we move the result into the module's
-        // `CachedModule` below.
-        let old_refs = std::mem::replace(&mut self.module_refs, ModuleReferences::new(mid));
+        let old = self.enter_module_frame(path, base_dir);
 
         self.process_imports(block);
         let imports: Vec<String> = self.imported_qualifiers.values().cloned().collect();
@@ -1766,11 +1797,7 @@ impl Compiler {
         let used = self.env.next_type_id().0 - base.0;
         self.module_table.note_id_usage(base, used, reused);
 
-        self.current_module = old_module;
-        self.module_path_slice = old_mod_slice;
-        self.imported_qualifiers = old_qualifiers;
-        self.base_dir = old_base;
-        let refs = std::mem::replace(&mut self.module_refs, old_refs);
+        let refs = self.leave_module_frame(old);
         (
             CompiledBody {
                 iface,
@@ -2132,7 +2159,7 @@ impl Compiler {
         type_id: TypeId,
         type_name: StrId,
         variant: &str,
-        labels: ArenaSlice,
+        labels: ArenaSlice<pool::StrSlices>,
         arity: u16,
     ) {
         let type_name = self.engine.str(type_name).to_string();
@@ -2163,7 +2190,7 @@ impl Compiler {
         type_id: TypeId,
         type_name: &str,
         variant_name: &str,
-        field_labels: ArenaSlice,
+        field_labels: ArenaSlice<pool::StrSlices>,
         arity: i32,
     ) {
         if self.check_only {
@@ -2538,8 +2565,7 @@ impl Compiler {
                 }
                 ValueKind::Builtin { op } => {
                     let ret = self.compile_positional_args(inst_ty, &expr.arguments, expr.span);
-                    let op = self.engine.str(op).to_string();
-                    self.emit_builtin_op(&op, expr.span);
+                    self.emit_builtin_op(op);
                     ret
                 }
                 ValueKind::Local | ValueKind::ModuleFn => {
@@ -2739,7 +2765,7 @@ impl Compiler {
         type_name: &str,
         type_id: TypeId,
         arity: usize,
-        field_labels_sl: ArenaSlice,
+        field_labels_sl: ArenaSlice<pool::StrSlices>,
         inst_ty: Ty,
         args: &[ast::CallArg],
         call_span: Span,
@@ -2827,76 +2853,12 @@ impl Compiler {
         result_ty
     }
 
-    fn emit_builtin_op(&mut self, name: &str, sp: Span) {
-        match name {
-            "println" => {
-                self.emit(Op::Print);
-                self.emit_nil();
-            }
-            "string__inspect" => self.emit(Op::ToString),
-            "internal__stack_depth" => self.emit(Op::StackDepth),
-            "io__read_file" => self.emit(Op::FileRead),
-            "io__write_file" => self.emit(Op::FileWrite),
-            "net__listen" => self.emit(Op::TcpListen),
-            "net__accept" => self.emit(Op::TcpAccept),
-            "net__connect" => self.emit(Op::TcpConnect),
-            "net__close" => self.emit(Op::TcpCloseServer),
-            "net__local_addr" => self.emit(Op::TcpLocalAddr),
-            "net__resolve" => self.emit(Op::DnsResolve),
-            "address__parse" => self.emit(Op::IpParse),
-            "socket__read" => self.emit(Op::TcpRead),
-            "socket__read_until" => self.emit(Op::TcpReadUntil),
-            "socket__write" => self.emit(Op::TcpWrite),
-            "socket__write_parts" => self.emit(Op::TcpWriteParts),
-            "socket__close" => self.emit(Op::TcpClose),
-            "string__split" => self.emit(Op::StrSplit),
-            "string__length" => self.emit(Op::StrLen),
-            "string__contains" => self.emit(Op::StrContains),
-            "string__trim" => self.emit(Op::StrTrim),
-            "int__to_string" => self.emit(Op::IntToString),
-            "binary__from_string" => self.emit(Op::BinFromString),
-            "binary__to_string" => self.emit(Op::BinToString),
-            "binary__bit_size" => self.emit(Op::BinBitSize),
-            "binary__byte_size" => self.emit(Op::BinByteSize),
-            "binary__slice" => self.emit(Op::BinSlice),
-            "binary__append" => self.emit(Op::BinAppend),
-            "binary__index_of" => self.emit(Op::BinIndexOf),
-            "binary__byte_at" => self.emit(Op::BinByteAt),
-            "binary__parse_int" => self.emit(Op::BinParseInt),
-            "binary__eq_ignore_ascii_case" => self.emit(Op::BinEqIgnoreAsciiCase),
-            "binary__to_ascii_lower" => self.emit(Op::BinToAsciiLower),
-            "binary__from_int_ascii" => self.emit(Op::BinFromIntAscii),
-            "http__parse_head" => self.emit(Op::HttpParseHead),
-            "http__framing" => self.emit(Op::HttpFraming),
-            "http__chunk_decode" => self.emit(Op::HttpChunkDecode),
-            "http__header_get" => self.emit(Op::HttpHeaderGet),
-            "http__header_has" => self.emit(Op::HttpHeaderHas),
-            "http__serialize_head" => self.emit(Op::HttpSerializeHead),
-            "float__floor" => self.emit(Op::FloatFloor),
-            "float__ceil" => self.emit(Op::FloatCeil),
-            "float__round" => self.emit(Op::FloatRound),
-            "float__truncate" => self.emit(Op::FloatTruncate),
-            "float__from_int" => self.emit(Op::FloatFromInt),
-            "float__to_string" => self.emit(Op::FloatToString),
-            "scheduler__spawn" => self.emit(Op::ProcessSpawn),
-            "scheduler__spawn_local" => self.emit(Op::SpawnLocal),
-            "scheduler__spawn_on_each" => self.emit(Op::SpawnOnEach),
-            "scheduler__sleep" => self.emit(Op::Sleep),
-            "time__monotonic" => self.emit(Op::Monotonic),
-            "process__argv" => self.emit(Op::Argv),
-            "process__env" => self.emit(Op::EnvMap),
-            "map__get" => self.emit(Op::MapGet),
-            "map__has" => self.emit(Op::MapHas),
-            "map__keys" => self.emit(Op::MapKeys),
-            "map__values" => self.emit(Op::MapValues),
-            "map__size" => self.emit(Op::MapSize),
-            "map__new" => self.emit(Op::MapNew),
-            "map__set" => self.emit(Op::MapSet),
-            "map__delete" => self.emit(Op::MapDelete),
-            "map__to_list" => self.emit(Op::MapToList),
-            _ => {
-                self.error(format!("Internal: builtin '{}' has no codegen", name), sp);
-            }
+    fn emit_builtin_op(&mut self, op: Op) {
+        self.emit(op);
+        // `Print` consumes its argument and pushes nothing; every builtin call
+        // site expects a value on the stack, so supply the `()` here.
+        if op == Op::Print {
+            self.emit_nil();
         }
     }
 
@@ -3081,7 +3043,7 @@ impl Compiler {
         self.emit_arg(Op::GetField, field_idx.unwrap_or(0) as i32);
 
         let qualified = format!("{}.{}", type_name, field);
-        let doc = self.env.lookup_doc(&qualified);
+        let doc = self.doc_if_collecting(&qualified);
         self.record(&qualified, result_ty, field_span, doc);
         // `Type.field` is a dotted key in `env.definitions` (no local can
         // shadow it), so resolving it here is safe and keeps goto-def /
@@ -3733,8 +3695,9 @@ impl Compiler {
 
         let inst = self.engine.instantiate(&scheme, &self.rigid_ids);
         let qualified = format!("{}.{}", type_name, name.name);
-        let doc = self.env.lookup_doc(&qualified);
+        let doc = self.doc_if_collecting(&qualified);
         self.record(&qualified, inst, name.span, doc);
+        self.record_value_use(scheme.def, name.span, ReferenceKind::Unqualified);
 
         let r = self.engine.find(inst);
         match self.engine.node(r) {
@@ -4583,7 +4546,11 @@ fn push_literal_bytes(bytes: &mut Vec<u8>, bit_len: &mut u64, new: &[u8]) {
     }
 }
 
-pub(super) fn def_loc(sp: Span, module: ArenaSlice, entity: EntityKind) -> DefinitionLocation {
+pub(super) fn def_loc(
+    sp: Span,
+    module: ArenaSlice<pool::StrSlices>,
+    entity: EntityKind,
+) -> DefinitionLocation {
     DefinitionLocation {
         line: sp.start_line,
         column: sp.start_column,
