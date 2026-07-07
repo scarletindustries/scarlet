@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use smallvec::SmallVec;
+
 use super::{ArenaSlice, InferEngine, StrId, Ty, TypeBody, TypeEnv, pool};
 use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -121,7 +123,7 @@ impl Hydrator {
             ast::TypeKind::NamedType(nt) => self.named_type(nt, t.span, env, engine),
 
             ast::TypeKind::TupleType(tt) => {
-                let mut elements = Vec::with_capacity(tt.elements.len());
+                let mut elements: SmallVec<[Ty; 4]> = SmallVec::with_capacity(tt.elements.len());
                 for el in &tt.elements {
                     elements.push(self.type_from_ast(el, env, engine)?);
                 }
@@ -129,7 +131,7 @@ impl Hydrator {
             }
 
             ast::TypeKind::FunctionType(ft) => {
-                let mut params = Vec::with_capacity(ft.params.len());
+                let mut params: SmallVec<[Ty; 4]> = SmallVec::with_capacity(ft.params.len());
                 for p in &ft.params {
                     params.push(self.type_from_ast(p, env, engine)?);
                 }
@@ -162,7 +164,7 @@ impl Hydrator {
             return Ok(v);
         }
 
-        let mut arg_tys = Vec::with_capacity(nt.type_args.len());
+        let mut arg_tys: SmallVec<[Ty; 4]> = SmallVec::with_capacity(nt.type_args.len());
         for ta in &nt.type_args {
             arg_tys.push(self.type_from_ast(ta, env, engine)?);
         }
