@@ -126,9 +126,8 @@ fn tuple_ctor_name(n: usize) -> String {
 
 /// Interned, structurally-shared projection of `type_def::Type` carrying only
 /// what the usefulness matrix needs: the constructor set of a nominal/array/
-/// tuple type. Lowered from a `&Type` once at each public entry point
-/// (`pattern_to_pat`, `check_exhaustiveness`, `UsefulnessMatrix::new`), with
-/// ctor names interned into the entry point's `Interner` as part of the
+/// tuple type. Lowered from a `&Type` once in `UsefulnessMatrix::new`, with
+/// ctor names interned into that checker's `Interner` as part of the
 /// lowering. `Named`/`Tuple` store their fully-built `TypeCtors` behind an
 /// `Rc`, so `get_type_ctors` — called once per recursion level — borrows the
 /// table instead of re-allocating ctor names/labels/types each time.
@@ -439,23 +438,21 @@ fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<IPat>> {
         }
         None
     } else {
-        for ctor in &type_ctors.ctors {
-            if !seen_ctors.contains(ctor.id) {
-                let mut result = vec![IPat::Ctor {
-                    id: ctor.id,
-                    args: vec![IPat::Wildcard; ctor.arity].into(),
-                }];
-                result.resize(types.len(), IPat::Wildcard);
-                return Some(result);
-            }
-        }
-        if type_ctors.infinite {
-            let default_m = m.default_matrix();
-            if let Some(witness_vec) = find_witness_vec(&default_m, &types[1..]) {
-                return Some(std::iter::once(IPat::Wildcard).chain(witness_vec).collect());
-            }
-        }
-        None
+        // Maranget: recurse on the default matrix for the remaining columns
+        // FIRST — a wildcard row in the matrix may still constrain later
+        // columns, so padding them with `_` (as an early return would) can
+        // yield a witness that overlaps an existing arm.
+        let rest = find_witness_vec(&m.default_matrix(), &types[1..])?;
+        let head = type_ctors
+            .ctors
+            .iter()
+            .find(|c| !seen_ctors.contains(c.id))
+            .map(|c| IPat::Ctor {
+                id: c.id,
+                args: vec![IPat::Wildcard; c.arity].into(),
+            })
+            .unwrap_or(IPat::Wildcard);
+        Some(std::iter::once(head).chain(rest).collect())
     }
 }
 
@@ -514,7 +511,27 @@ fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
                 return "[]".to_string();
             }
             if *id == CONS_ID {
-                return "[_, ..]".to_string();
+                let elem_t: &RcType = match t {
+                    RcType::Array(e) => e,
+                    _ => &RcType::Infinite,
+                };
+                let mut heads = Vec::new();
+                let mut tail = p;
+                loop {
+                    match tail {
+                        IPat::Ctor { id, args } if *id == CONS_ID && args.len() == 2 => {
+                            heads.push(pat_to_string(&args[0], elem_t, interner));
+                            tail = &args[1];
+                        }
+                        IPat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
+                            return format!("[{}]", heads.join(", "));
+                        }
+                        _ => {
+                            heads.push("..".to_string());
+                            return format!("[{}]", heads.join(", "));
+                        }
+                    }
+                }
             }
             let name = interner.name(*id);
             let type_ctors = get_type_ctors(t);
@@ -545,16 +562,6 @@ fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
             parts.join(" | ")
         }
     }
-}
-
-/// Lower an `ast::Pattern` into the `Pat` form used by the matrix algorithm.
-/// The `t` argument is the type the pattern is being matched against; it is
-/// used to recover sub-pattern types for constructor arguments and to pad
-/// `Ctor(..)` rest-patterns to the constructor's full arity.
-pub fn pattern_to_pat(p: &ast::Pattern, t: &Type) -> Pat {
-    let mut interner = Interner::new();
-    let rc = rc_type(t, &mut interner);
-    pattern_to_pat_rc(p, &rc, &interner)
 }
 
 fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
@@ -698,19 +705,10 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
                 .map(|p| pattern_to_pat_rc(p, t, interner))
                 .collect(),
         },
-        ast::Pattern::Range { start, end, .. } => {
-            let bound_str = |b: &ast::Pattern| -> String {
-                if let ast::Pattern::Literal(ast::PatternLiteral::Number(n)) = b {
-                    n.value.clone()
-                } else {
-                    "_".to_string()
-                }
-            };
-            Pat::Ctor {
-                name: format!("range:{}..{}", bound_str(start), bound_str(end)),
-                args: vec![],
-            }
-        }
+        ast::Pattern::Range { start, end, .. } => Pat::Ctor {
+            name: format!("range:{}..{}", start.value, end.value),
+            args: vec![],
+        },
     }
 }
 
@@ -737,6 +735,13 @@ impl UsefulnessMatrix {
         }
     }
 
+    /// Lower an `ast::Pattern` into the `Pat` form used by the matrix
+    /// algorithm, against this checker's subject type. Uses the same interner
+    /// as `is_useful`/`push`/`find_missing`, so ctor names are looked up once.
+    pub fn lower(&self, p: &ast::Pattern) -> Pat {
+        pattern_to_pat_rc(p, &self.subject_type, &self.interner)
+    }
+
     pub fn is_useful(&mut self, pat: &Pat) -> bool {
         let row = PatternRow {
             pats: vec![intern_pat(pat, &mut self.interner)],
@@ -752,38 +757,46 @@ impl UsefulnessMatrix {
             types: vec![self.subject_type.clone()],
         });
     }
-}
 
-pub fn check_exhaustiveness(patterns: &[Pat], subject_type: &Type) -> Option<String> {
-    let mut interner = Interner::new();
-    let subject = rc_type(subject_type, &mut interner);
-    let mut matrix = PatternMatrix::default();
-    for p in patterns {
-        matrix.rows.push(PatternRow {
-            pats: vec![intern_pat(p, &mut interner)],
-            types: vec![subject.clone()],
-        });
-    }
-
-    let wildcard_row = PatternRow {
-        pats: vec![IPat::Wildcard],
-        types: vec![subject.clone()],
-    };
-    if is_useful(&matrix, &wildcard_row) {
-        if let Some(witness_vec) = find_witness_vec(&matrix, std::slice::from_ref(&subject)) {
-            let witness = witness_vec.into_iter().next().unwrap_or(IPat::Wildcard);
-            return Some(pat_to_string(&witness, &subject, &interner));
+    /// Return a rendered witness pattern the given arms fail to cover, or
+    /// `None` if they are exhaustive. Independent of `is_useful`/`push` — the
+    /// arms passed here (typically the unguarded subset) form their own
+    /// matrix; this checker's incremental matrix is not consulted.
+    pub fn find_missing(&mut self, patterns: &[Pat]) -> Option<String> {
+        let mut matrix = PatternMatrix::default();
+        for p in patterns {
+            matrix.rows.push(PatternRow {
+                pats: vec![intern_pat(p, &mut self.interner)],
+                types: vec![self.subject_type.clone()],
+            });
         }
-        return Some("_".to_string());
+        let wildcard_row = PatternRow {
+            pats: vec![IPat::Wildcard],
+            types: vec![self.subject_type.clone()],
+        };
+        if !is_useful(&matrix, &wildcard_row) {
+            return None;
+        }
+        let witness = find_witness_vec(&matrix, std::slice::from_ref(&self.subject_type))
+            .and_then(|v| v.into_iter().next())
+            .unwrap_or(IPat::Wildcard);
+        Some(pat_to_string(&witness, &self.subject_type, &self.interner))
     }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_def::{self, FieldDef, t_int, t_named, t_tuple};
+    use crate::type_def::{self, FieldDef, TypeId, t_int, t_named, t_tuple};
     use indexmap::IndexMap;
+
+    fn check_exhaustiveness(pats: &[Pat], t: &Type) -> Option<String> {
+        UsefulnessMatrix::new(t.clone()).find_missing(pats)
+    }
+
+    fn pattern_to_pat(p: &ast::Pattern, t: &Type) -> Pat {
+        UsefulnessMatrix::new(t.clone()).lower(p)
+    }
 
     /// `Bool` is no longer a primitive; build the same `Named` shape the
     /// real prelude produces so the matrix tests exercise the variant path.
@@ -902,6 +915,35 @@ mod tests {
         ];
         let result = check_exhaustiveness(&pats, &t);
         assert_eq!(result, None);
+    }
+
+    /// `(True, _)` and `(_, True)` miss exactly `(False, False)`. The
+    /// incomplete-signature branch of `find_witness_vec` used to short-circuit
+    /// with `(False, _)`, which overlaps arm 2 — recursing on the default
+    /// matrix first yields the precise witness.
+    #[test]
+    fn tuple_witness_recurses_default_matrix() {
+        let t = t_tuple(vec![t_bool(), t_bool()]);
+        let tn = tuple_ctor_name(2);
+        let pats = vec![
+            ctor(&tn, vec![ctor("True", vec![]), Pat::Wildcard]),
+            ctor(&tn, vec![Pat::Wildcard, ctor("True", vec![])]),
+        ];
+        let result = check_exhaustiveness(&pats, &t);
+        assert_eq!(result, Some("(False, False)".to_string()));
+    }
+
+    /// `[]` ∪ `[True, ..]` miss any list whose head is `False`; the witness's
+    /// cons chain is walked so the head renders, not a blanket `[_, ..]`.
+    #[test]
+    fn array_witness_renders_cons_head() {
+        let t = type_def::t_array(t_bool());
+        let pats = vec![
+            ctor("[]", vec![]),
+            ctor("::", vec![ctor("True", vec![]), Pat::Wildcard]),
+        ];
+        let result = check_exhaustiveness(&pats, &t);
+        assert_eq!(result, Some("[False]".to_string()));
     }
 
     #[test]
@@ -1038,12 +1080,12 @@ mod tests {
             size: size.map(|n| {
                 ast::Expression::NumberLiteral(ast::NumberLiteral {
                     value: n.to_string(),
-                    span: crate::span::point_span(0, 0),
+                    span: crate::span::Span::DUMMY,
                 })
             }),
             unit: ast::BinUnit::Bits,
             kind: ast::BinKind::Int,
-            span: crate::span::point_span(0, 0),
+            span: crate::span::Span::DUMMY,
         }
     }
 
@@ -1052,9 +1094,9 @@ mod tests {
             segments,
             rest: rest.then(|| ast::BinaryPatternRest {
                 binding: None,
-                span: crate::span::point_span(0, 0),
+                span: crate::span::Span::DUMMY,
             }),
-            span: crate::span::point_span(0, 0),
+            span: crate::span::Span::DUMMY,
         }
     }
 
@@ -1062,7 +1104,7 @@ mod tests {
         ast::Pattern::Var {
             name: ast::Identifier {
                 name: name.to_string(),
-                span: crate::span::point_span(0, 0),
+                span: crate::span::Span::DUMMY,
             },
         }
     }
@@ -1137,7 +1179,7 @@ mod tests {
         let lit = |v: &str| {
             ast::Pattern::Literal(ast::PatternLiteral::Number(ast::NumberLiteral {
                 value: v.to_string(),
-                span: crate::span::point_span(0, 0),
+                span: crate::span::Span::DUMMY,
             }))
         };
         let p1 = pattern_to_pat(&bin_pat(vec![bin_seg(lit("1"), None)], false), &t);
@@ -1151,11 +1193,11 @@ mod tests {
         ast::Pattern::Constructor {
             name: ast::Identifier {
                 name: name.to_string(),
-                span: crate::span::point_span(0, 0),
+                span: crate::span::Span::DUMMY,
             },
             args: vec![],
             rest: false,
-            span: crate::span::point_span(0, 0),
+            span: crate::span::Span::DUMMY,
         }
     }
 
@@ -1164,20 +1206,20 @@ mod tests {
         ast::Pattern::Constructor {
             name: ast::Identifier {
                 name: name.to_string(),
-                span: crate::span::point_span(0, 0),
+                span: crate::span::Span::DUMMY,
             },
             args: fields
                 .into_iter()
                 .map(|(label, pattern)| ast::PatternArg::Labeled {
                     label: ast::Identifier {
                         name: label.to_string(),
-                        span: crate::span::point_span(0, 0),
+                        span: crate::span::Span::DUMMY,
                     },
                     pattern,
                 })
                 .collect(),
             rest,
-            span: crate::span::point_span(0, 0),
+            span: crate::span::Span::DUMMY,
         }
     }
 
@@ -1224,7 +1266,7 @@ mod tests {
         ];
         assert_eq!(
             check_exhaustiveness(&unsound, &pair),
-            Some("Pair(True, _)".to_string())
+            Some("Pair(True, False)".to_string())
         );
 
         // Genuinely exhaustive; the third arm names fields in reverse order.

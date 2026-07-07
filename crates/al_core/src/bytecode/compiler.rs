@@ -54,8 +54,8 @@ use crate::frozen::FrozenBuilder;
 use indexmap::IndexMap;
 
 use crate::module::{
-    self, CachedModule, ModuleInterface, ModulePath, ModuleSource, ModuleTable, ResolveError,
-    source_hash,
+    self, CachedModule, ModuleInterface, ModuleOrigin, ModulePath, ModuleSource, ModuleTable,
+    ResolveError, source_hash,
 };
 use crate::reference::{
     DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, ReferenceGraph,
@@ -1829,10 +1829,10 @@ impl Compiler {
                     }
                 }
             }
-            ast::Statement::Declaration(d) | ast::Statement::PublicDeclaration(d) => {
+            ast::Statement::Declaration { decl, .. } => {
                 // Top-level declarations are handled by `analyse_module`; reaching
                 // one here means it's nested inside an expression block.
-                let (kind, sp) = match d.as_ref() {
+                let (kind, sp) = match decl.as_ref() {
                     ast::Declaration::Function(fd) => ("named function", fd.span),
                     ast::Declaration::Type(td) => ("type", td.span),
                     ast::Declaration::Const(cb) => ("const", cb.span),
@@ -1883,16 +1883,17 @@ impl Compiler {
                 // exhaustive (so only single-constructor types qualify; a
                 // multi-constructor or nested-optional pattern is refutable).
                 let init_ty = self.compile_expr(&cdb.init);
+                let pattern = cdb.as_pattern();
 
                 let mut b = PatternBindings::new();
-                let typed_ok = self.type_pattern(&cdb.pattern, init_ty, &mut b);
+                let typed_ok = self.type_pattern(&pattern, init_ty, &mut b);
 
                 self.bind_pattern_initials(&b);
 
                 if typed_ok {
                     let resolved = self.engine.resolve(init_ty, Some(&self.env));
                     let mut um = UsefulnessMatrix::new(resolved);
-                    let pat = um.lower(&cdb.pattern);
+                    let pat = um.lower(&pattern);
                     if let Some(missing) = um.find_missing(&[pat]) {
                         self.error(
                             format!(
@@ -1907,7 +1908,7 @@ impl Compiler {
                 let temp = self.spill_temp();
                 self.emit_arg(Op::PushLocal, temp);
                 let mut fails: Vec<i32> = vec![];
-                self.emit_pattern(&cdb.pattern, &mut fails);
+                self.emit_pattern(&pattern, &mut fails);
                 self.patch_all(&fails);
             }
             ast::Statement::ImportDeclaration(_) => {
@@ -2384,8 +2385,16 @@ impl Compiler {
                     self.emit_arg(Op::PushConst, idx);
                 } else {
                     for part in &is.parts {
-                        self.compile_expr(part);
-                        self.emit(Op::ToString);
+                        match part {
+                            ast::InterpPart::Literal(sl) => {
+                                let idx = self.const_str(sl.value.as_str());
+                                self.emit_arg(Op::PushConst, idx);
+                            }
+                            ast::InterpPart::Expr(e) => {
+                                self.compile_expr(e);
+                                self.emit(Op::ToString);
+                            }
+                        }
                     }
                     if is.parts.len() > 1 {
                         self.emit_arg(Op::StrConcatN, is.parts.len() as i32);
@@ -2933,14 +2942,7 @@ impl Compiler {
         let mut i = 0usize;
         while i < expr.elements.len() {
             if let ast::ArrayElement::SpreadElement(spread) = &expr.elements[i] {
-                let Some(inner) = &spread.expression else {
-                    self.error(
-                        "Spread in array literal missing expression".to_string(),
-                        spread.span,
-                    );
-                    i += 1;
-                    continue;
-                };
+                let inner = &spread.expression;
                 let spread_ty = self.compile_expr(inner);
                 let expected = self.ty_array(elem_var);
                 self.engine.unify_at(expected, spread_ty, inner.span());
@@ -2968,8 +2970,8 @@ impl Compiler {
             if !have_result
                 && j < expr.elements.len()
                 && let ast::ArrayElement::SpreadElement(spread) = &expr.elements[j]
-                && let Some(inner) = &spread.expression
             {
+                let inner = &spread.expression;
                 self.compile_array_run(&expr.elements[i..j], elem_var);
                 let spread_ty = self.compile_expr(inner);
                 let expected = self.ty_array(elem_var);
@@ -3170,7 +3172,7 @@ impl Compiler {
         let Some(module_key) = self.imported_qualifiers.get(&left.name).cloned() else {
             return QualifiedMember::NotQualified;
         };
-        let ast::Expression::Identifier(member) = pa.right.as_ref() else {
+        let ast::PropertyKey::Field(member) = &pa.right else {
             return QualifiedMember::NotQualified;
         };
         let Some((scheme, slot)) =
@@ -3441,50 +3443,48 @@ impl Compiler {
 
         let left_ty = self.compile_expr(&expr.left);
 
-        // `tuple.N` index.
-        if let ast::Expression::NumberLiteral(num) = expr.right.as_ref() {
-            let index = match num.value.parse::<i32>() {
-                Ok(i) => i,
-                Err(_) => {
+        match &expr.right {
+            // `tuple.N` index.
+            ast::PropertyKey::TupleIndex(num) => {
+                let index = match num.value.parse::<i32>() {
+                    Ok(i) => i,
+                    Err(_) => {
+                        self.error(
+                            format!("Tuple index must be an integer, got '{}'", num.value),
+                            num.span,
+                        );
+                        return self.engine.fresh_var();
+                    }
+                };
+                self.emit_arg(Op::TupleIndex, index);
+
+                let resolved = self.engine.find(left_ty);
+                if let TypeNode::Tuple { elems } = self.engine.node(resolved) {
+                    let elements = self.engine.children_of(elems);
+                    if (index as usize) < elements.len() {
+                        return elements[index as usize];
+                    }
                     self.error(
-                        format!("Tuple index must be an integer, got '{}'", num.value),
+                        format!(
+                            "Tuple index {} out of bounds (tuple has {} elements)",
+                            index,
+                            elements.len()
+                        ),
                         num.span,
                     );
                     return self.engine.fresh_var();
                 }
-            };
-            self.emit_arg(Op::TupleIndex, index);
-
-            let resolved = self.engine.find(left_ty);
-            if let TypeNode::Tuple { elems } = self.engine.node(resolved) {
-                let elements = self.engine.children_of(elems);
-                if (index as usize) < elements.len() {
-                    return elements[index as usize];
-                }
                 self.error(
-                    format!(
-                        "Tuple index {} out of bounds (tuple has {} elements)",
-                        index,
-                        elements.len()
-                    ),
-                    expr.right.span(),
+                    format!("Cannot index .{} on non-tuple type", index),
+                    num.span,
                 );
-                return self.engine.fresh_var();
+                self.engine.fresh_var()
             }
-            self.error(
-                format!("Cannot index .{} on non-tuple type", index),
-                expr.right.span(),
-            );
-            return self.engine.fresh_var();
+            // `value.field` — labelled field shared by every variant.
+            ast::PropertyKey::Field(field) => {
+                self.compile_field_access(left_ty, &field.name, field.span)
+            }
         }
-
-        // `value.field` — labelled field shared by every variant.
-        if let ast::Expression::Identifier(field) = expr.right.as_ref() {
-            return self.compile_field_access(left_ty, &field.name, field.span);
-        }
-
-        self.error("Invalid property access".to_string(), expr.right.span());
-        self.engine.fresh_var()
     }
 
     /// compile_field_access error path: report, pop receiver, push nil, fresh tyvar.
@@ -4111,12 +4111,9 @@ impl Compiler {
                 };
                 self.engine.unify_at(expected, lit_ty, sp)
             }
-            ast::Pattern::Range { start, end, span } => {
+            ast::Pattern::Range { span, .. } => {
                 let int_t = self.ty_int();
-                let mut ok = self.engine.unify_at(expected, int_t, *span);
-                ok &= self.type_pattern(start, int_t, b);
-                ok &= self.type_pattern(end, int_t, b);
-                ok
+                self.engine.unify_at(expected, int_t, *span)
             }
             ast::Pattern::Tuple { elements, span } => {
                 let fresh: Vec<Ty> = (0..elements.len())
@@ -4962,17 +4959,10 @@ impl Compiler {
         }
     }
 
-    fn emit_range_bound(&mut self, p: &ast::Pattern) {
-        if let ast::Pattern::Literal(ast::PatternLiteral::Number(n)) = p {
-            let v = self.const_number(n);
-            let c = self.add_constant(v);
-            self.emit_arg(Op::PushConst, c);
-        } else {
-            // type_pattern already errored on non-numeric bounds; emit a 0 so
-            // the bytecode stays balanced.
-            let c = self.const_int(0);
-            self.emit_arg(Op::PushConst, c);
-        }
+    fn emit_range_bound(&mut self, n: &ast::NumberLiteral) {
+        let v = self.const_number(n);
+        let c = self.add_constant(v);
+        self.emit_arg(Op::PushConst, c);
     }
 }
 

@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use crate::bytecode::{PreludeBindings, Program, compiler::Compiler, new_compiler};
 use crate::diagnostic::{self, has_errors};
 use crate::module::{self, ModuleInterface, stdlib};
-use crate::span::point_span;
+use crate::span::Span;
 use crate::types::{InferEngine, TypeBody, TypeInfo};
 
 /// Everything `precompile_stdlib` extracts. Consumed only by build.rs.
@@ -48,7 +48,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     c.register_prelude();
     bail_on_errors(&c, "prelude")?;
 
-    let at = point_span(0, 0);
+    let at = Span::DUMMY;
     for path in stdlib::all_modules() {
         c.load_module(&path, at);
         bail_on_errors(&c, &module::path_key(&path))?;

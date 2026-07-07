@@ -163,7 +163,6 @@ impl Default for PatternBindings {
 mod tests {
     use super::super::infer::new_engine;
     use super::*;
-    use crate::span::point_span;
 
     // `_` is never recorded as a binding (it can appear repeatedly), and a
     // freshly-defaulted accumulator starts empty; `finish_alternative` outside
@@ -172,7 +171,7 @@ mod tests {
     fn wildcard_is_not_bound_and_default_is_empty() {
         let mut e = new_engine();
         let int_ty = e.icon_int();
-        let sp = point_span(0, 0);
+        let sp = Span::DUMMY;
 
         let mut b = PatternBindings::default();
         assert!(b.initial.is_empty());
@@ -198,7 +197,7 @@ mod tests {
     fn or_alternative_rebinds_canonical_name_and_rejects_duplicates() {
         let mut e = new_engine();
         let int_ty = e.icon_int();
-        let sp = point_span(0, 0);
+        let sp = Span::DUMMY;
 
         let mut b = PatternBindings::new();
         let scope = b.enter_or();
@@ -229,7 +228,7 @@ mod tests {
         let mut e = new_engine();
         let int_ty = e.icon_int();
         let str_ty = e.icon_string();
-        let sp = point_span(0, 0);
+        let sp = Span::DUMMY;
 
         let mut b = PatternBindings::new();
         let scope = b.enter_or();

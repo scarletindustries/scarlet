@@ -16,30 +16,20 @@ use doc::{
 
 const MAX_WIDTH: isize = 100;
 
-pub struct FormatResult {
-    pub output: String,
-    pub has_errors: bool,
-    pub diagnostics: Vec<Diagnostic>,
+pub enum FormatResult {
+    Formatted {
+        output: String,
+        warnings: Vec<Diagnostic>,
+    },
+    ParseFailed {
+        errors: Vec<Diagnostic>,
+    },
 }
 
-pub fn format_with_debug(input: &str, debug: bool) -> FormatResult {
+pub fn format(input: &str) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
     let scanned_tokens = s.scan_all();
     let scanner_diagnostics = s.take_diagnostics();
-
-    if debug {
-        for tok in &scanned_tokens {
-            eprintln!(
-                "Token: {:?} \"{}\" trivia: {}",
-                tok.kind,
-                tok.literal.as_deref().unwrap_or(""),
-                tok.leading_trivia.len()
-            );
-            for t in &tok.leading_trivia {
-                eprintln!("  Trivia: {t:?}");
-            }
-        }
-    }
 
     let mut trivia_map: HashMap<(i32, i32), Vec<Trivia>> = HashMap::new();
     let mut eof_trivia: Vec<Trivia> = Vec::new();
@@ -65,11 +55,7 @@ pub fn format_with_debug(input: &str, debug: bool) -> FormatResult {
         .collect();
 
     if !errors.is_empty() {
-        return FormatResult {
-            output: input.to_string(),
-            has_errors: true,
-            diagnostics: errors,
-        };
+        return FormatResult::ParseFailed { errors };
     }
 
     let f = Formatter { trivia_map };
@@ -80,10 +66,9 @@ pub fn format_with_debug(input: &str, debug: bool) -> FormatResult {
     }
     output.push('\n');
 
-    FormatResult {
+    FormatResult::Formatted {
         output,
-        has_errors: false,
-        diagnostics: result.diagnostics,
+        warnings: result.diagnostics,
     }
 }
 
@@ -916,7 +901,22 @@ mod tests {
     use super::*;
 
     fn fmt(src: &str) -> String {
-        format_with_debug(src, false).output
+        match format(src) {
+            FormatResult::Formatted { output, .. } => output,
+            FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+        }
+    }
+
+    #[track_caller]
+    fn assert_round_trips(out: &str) {
+        match format(out) {
+            FormatResult::Formatted { output, .. } => {
+                assert_eq!(out, output, "formatter not idempotent:\n{out}")
+            }
+            FormatResult::ParseFailed { .. } => {
+                panic!("formatted output does not re-parse:\n{out}")
+            }
+        }
     }
 
     #[test]
@@ -932,18 +932,19 @@ mod tests {
                 continue;
             }
             let src = std::fs::read_to_string(&path).unwrap();
-            let r1 = format_with_debug(&src, false);
-            if r1.has_errors {
+            let once = match format(&src) {
+                FormatResult::Formatted { output, .. } => output,
                 // Source itself does not parse — outside the formatter's remit.
-                continue;
+                FormatResult::ParseFailed { .. } => continue,
+            };
+            match format(&once) {
+                FormatResult::Formatted { output, .. } => {
+                    assert_eq!(once, output, "formatter not idempotent for {name}")
+                }
+                FormatResult::ParseFailed { .. } => {
+                    panic!("formatted output of {name} does not re-parse:\n{once}")
+                }
             }
-            let once = r1.output;
-            let r2 = format_with_debug(&once, false);
-            assert!(
-                !r2.has_errors,
-                "formatted output of {name} does not re-parse:\n{once}"
-            );
-            assert_eq!(once, r2.output, "formatter not idempotent for {name}");
         }
     }
 
@@ -1255,9 +1256,7 @@ mod tests {
         );
         assert!(!out.contains("..,"), "trailing comma after rest:\n{out}");
         // The formatted output must re-parse and be idempotent (round-trip).
-        let r = format_with_debug(&out, false);
-        assert!(!r.has_errors, "formatted output does not re-parse:\n{out}");
-        assert_eq!(out, r.output, "formatter not idempotent:\n{out}");
+        assert_round_trips(&out);
     }
 
     #[test]
@@ -1373,19 +1372,14 @@ mod tests {
             !out.contains("--"),
             "nested unary minus collapsed into the `--` decrement token:\n{out}"
         );
-
-        let r = format_with_debug(&out, false);
-        assert!(!r.has_errors, "formatted output does not re-parse:\n{out}");
-        assert_eq!(out, r.output, "formatter not idempotent:\n{out}");
+        assert_round_trips(&out);
     }
 
     #[test]
     fn deeply_nested_unary_minus_keeps_spaces() {
         let out = fmt("x = - - -y\n");
         assert_eq!(out, "x = - - -y\n");
-        let r = format_with_debug(&out, false);
-        assert!(!r.has_errors, "formatted output does not re-parse:\n{out}");
-        assert_eq!(out, r.output, "formatter not idempotent:\n{out}");
+        assert_round_trips(&out);
     }
 
     #[test]
@@ -1403,7 +1397,9 @@ mod tests {
         // the spacing fix is specific to `-`.
         let out = fmt("x = !!y\n");
         assert_eq!(out, "x = !!y\n");
-        let r = format_with_debug(&out, false);
-        assert!(!r.has_errors, "formatted output does not re-parse:\n{out}");
+        assert!(
+            matches!(format(&out), FormatResult::Formatted { .. }),
+            "formatted output does not re-parse:\n{out}"
+        );
     }
 }

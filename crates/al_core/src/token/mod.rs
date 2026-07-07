@@ -3,20 +3,19 @@ mod kind;
 mod trivia;
 mod util;
 
-pub use keywords::match_keyword;
+pub use keywords::{keyword_text, match_keyword};
 pub use kind::Kind;
-pub use trivia::{Trivia, TriviaKind};
-pub use util::*;
+pub use trivia::Trivia;
+pub use util::{is_name_continue, is_name_start, is_type_name};
 
+use crate::span::Span;
 use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: Kind,
     pub literal: Option<String>,
-    pub line: i32,
-    pub column: i32,
-    pub length: i32,
+    pub span: Span,
     pub leading_trivia: Vec<Trivia>,
 }
 

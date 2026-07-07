@@ -16,7 +16,7 @@
 use super::PreludeBindings;
 use super::compiler::Compiler;
 use crate::module;
-use crate::span::point_span;
+use crate::span::Span;
 use crate::types::ValueKind;
 
 impl Compiler {
@@ -27,7 +27,7 @@ impl Compiler {
         //    defined into a scope that is immediately popped. Pull them back
         //    from the recorded ModuleInterface into the root scope so they are
         //    visible everywhere without an explicit import.
-        let at = point_span(0, 0);
+        let at = Span::DUMMY;
         let path = module::al_prelude();
         self.load_module(&path, at);
         let key = module::path_key(&path);

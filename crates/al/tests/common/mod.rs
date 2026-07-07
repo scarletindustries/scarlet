@@ -240,9 +240,7 @@ impl Drop for Project {
 
 use al::bytecode::IncrementalSession;
 use al::module::{self, ModulePath};
-use al::reference::{
-    DefId, Definition, EntityKind, ModuleId, ReferenceGraph, span_contains, span_width,
-};
+use al::reference::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph};
 use al::span::Span;
 
 /// A document/workspace symbol projected from a graph `Definition`.
@@ -306,8 +304,8 @@ impl SessionQueryExt for IncrementalSession {
             .and_then(|mr| {
                 mr.occurrences()
                     .iter()
-                    .filter(|o| span_contains(&o.span, line, col))
-                    .min_by_key(|o| span_width(&o.span))
+                    .filter(|o| o.span.contains(line, col))
+                    .min_by_key(|o| o.span.width())
                     .map(|o| o.span)
             })
             .unwrap_or(id.span);

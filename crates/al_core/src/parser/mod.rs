@@ -34,7 +34,7 @@ pub struct Parser {
 
 pub fn new_parser(s: &mut Scanner) -> Parser {
     let tokens = s.scan_all();
-    let diags = s.get_diagnostics();
+    let diags = s.take_diagnostics();
     new_parser_from_tokens(tokens, diags)
 }
 
@@ -49,12 +49,6 @@ pub fn new_parser_from_tokens(tokens: Vec<Token>, scanner_diagnostics: Vec<Diagn
         sync_iterations: 0,
         depth: 0,
     }
-}
-
-fn is_type_name(name: &str) -> bool {
-    name.as_bytes()
-        .first()
-        .is_some_and(|b| b.is_ascii_uppercase())
 }
 
 // Checks whether a token begins a type annotation in let/const binding position.
@@ -301,13 +295,13 @@ impl Parser {
         self.cur()
             .leading_trivia
             .iter()
-            .any(|t| t.kind == TriviaKind::Newline)
+            .any(|t| matches!(t, Trivia::Newline))
     }
 
     fn extract_doc_comment(&self) -> Option<String> {
         for trivia in &self.cur().leading_trivia {
-            if trivia.kind == TriviaKind::DocComment {
-                return Some(trivia.text.clone());
+            if let Trivia::DocComment(text) = trivia {
+                return Some(text.clone());
             }
         }
         None
@@ -375,7 +369,7 @@ impl Parser {
                 && tok
                     .leading_trivia
                     .iter()
-                    .any(|t| t.kind == TriviaKind::Newline)
+                    .any(|t| matches!(t, Trivia::Newline))
             {
                 return false;
             }
