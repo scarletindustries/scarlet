@@ -886,6 +886,12 @@ impl Compiler {
             .push(Diagnostic::error(sp, DiagnosticCode::TypeError, msg));
     }
 
+    fn module_error(&mut self, msg: String, sp: Span) {
+        self.engine
+            .diagnostics
+            .push(Diagnostic::error(sp, DiagnosticCode::ModuleError, msg));
+    }
+
     pub(super) fn note(&mut self, msg: String, sp: Span) {
         self.engine
             .diagnostics
@@ -1664,18 +1670,18 @@ impl Compiler {
             return true;
         }
         if self.module_table.is_loading(&key) {
-            self.error(format!("Import cycle detected at module '{key}'"), at);
+            self.module_error(format!("Import cycle detected at module '{key}'"), at);
             return false;
         }
 
         let source = match module::resolve(path, self.base_dir.as_deref()) {
             Ok(s) => s,
             Err(ResolveError::NotFound(p)) => {
-                self.error(format!("Unknown module '{p}' (not found)"), at);
+                self.module_error(format!("Unknown module '{p}' (not found)"), at);
                 return false;
             }
             Err(ResolveError::BareName(p)) => {
-                self.error(
+                self.module_error(
                     format!(
                         "Unknown module '{p}' — package imports are not yet supported; \
                          use a relative path like `./{p}`"
@@ -1685,7 +1691,7 @@ impl Compiler {
                 return false;
             }
             Err(ResolveError::NoBaseDir) => {
-                self.error(
+                self.module_error(
                     "Relative imports are not allowed without a file context (e.g. REPL)"
                         .to_string(),
                     at,
@@ -1700,7 +1706,7 @@ impl Compiler {
                 ModuleSource::File(p) => match self.module_table.read_source(&p) {
                     Ok(t) => (t, p.parent().map(|d| d.to_path_buf()), Some(p)),
                     Err(e) => {
-                        self.error(format!("Failed to read module '{key}': {e}"), at);
+                        self.module_error(format!("Failed to read module '{key}': {e}"), at);
                         return false;
                     }
                 },
@@ -1841,7 +1847,7 @@ impl Compiler {
         member_span: Span,
     ) -> Option<(Scheme, Option<i32>)> {
         let Some(iface) = self.module_table.get_or_hydrate(module_key) else {
-            self.error(format!("Module '{module_key}' is not loaded"), member_span);
+            self.module_error(format!("Module '{module_key}' is not loaded"), member_span);
             return None;
         };
         if let Some(ev) = iface.values.get(member).cloned() {

@@ -132,6 +132,11 @@ fn hug(d: Doc) -> Doc {
 }
 
 pub fn group(d: Doc) -> Doc {
+    // Idempotent: an already-grouped doc keeps its own Breaks. Only explicit
+    // group_as() calls override an inner Group's Breaks.
+    if matches!(d, Doc::Group { .. }) {
+        return d;
+    }
     group_as(Breaks::Reluctantly, d)
 }
 

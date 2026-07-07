@@ -21,6 +21,7 @@ pub enum DiagnosticCode {
     UnexpectedEof,
     ParseError,
     TypeError,
+    ModuleError,
     UnusedBinding,
     Other,
 }
