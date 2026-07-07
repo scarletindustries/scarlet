@@ -57,9 +57,10 @@ fn run_fn(
     (value, vm)
 }
 
-/// A standalone test heap for fixtures that build values outside a VM.
-fn test_heap() -> ProcHeap {
-    ProcHeap::new()
+// An array of small ints, e.g. `ints(&mut h, &[1, 2, 3])` == `[1, 2, 3]`.
+fn ints(h: &mut ProcHeap, xs: &[i64]) -> Value {
+    let elems: Vec<Value> = xs.iter().copied().map(Value::small_int).collect();
+    Value::array_in(h, &elems)
 }
 
 // Only closures read the function table when rendering, so every fixture
@@ -91,20 +92,19 @@ fn test_push_add_halt() {
 
 #[test]
 fn test_inspect_basic() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     assert_eq!(inspect(&Value::small_int(42)), "42");
     assert_eq!(inspect(&Value::bool(true)), "True");
     let nil = nil_value(&mut h, al_core::TypeId(1));
     assert_eq!(inspect(&nil), "Nil");
-    let arr = Value::array_in(&mut h, &[Value::small_int(1), Value::small_int(2)]);
-    assert_eq!(inspect(&arr), "[1, 2]");
+    assert_eq!(inspect(&ints(&mut h, &[1, 2])), "[1, 2]");
     let range = Value::range_in(&mut h, 1, 4);
     assert_eq!(inspect(&range), "[1, 2, 3]");
 }
 
 #[test]
 fn test_values_equal() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     assert!(values_equal(&Value::small_int(5), &Value::small_int(5)));
     assert!(!values_equal(&Value::small_int(5), &Value::small_int(6)));
     let (na, nb) = (
@@ -115,14 +115,7 @@ fn test_values_equal() {
     let five = Value::str_in(&mut h, "5");
     assert!(!values_equal(&Value::small_int(5), &five));
     let range = Value::range_in(&mut h, 0, 3);
-    let arr = Value::array_in(
-        &mut h,
-        &[
-            Value::small_int(0),
-            Value::small_int(1),
-            Value::small_int(2),
-        ],
-    );
+    let arr = ints(&mut h, &[0, 1, 2]);
     assert!(values_equal(&range, &arr));
 }
 
@@ -177,7 +170,7 @@ fn range_index_and_len_do_not_overflow() {
 
     // values_equal's Range length arithmetic must not overflow on extreme
     // bounds either.
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let ra = Value::range_in(&mut h, i64::MIN, i64::MAX);
     let rb = Value::range_in(&mut h, i64::MIN, i64::MAX);
     assert!(values_equal(&ra, &rb));
@@ -195,11 +188,10 @@ fn build_some(h: &mut ProcHeap, payload: Value) -> Value {
 // equal pair. Pre-fix this hashed every element and hung on a large range.
 #[test]
 fn enum_with_range_payload_equals_materialized_and_builds_fast() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let range = Value::range_in(&mut h, 0, 4);
     let from_range = build_some(&mut h, range);
-    let elems: Vec<Value> = (0..4).map(Value::small_int).collect();
-    let arr = Value::array_in(&mut h, &elems);
+    let arr = ints(&mut h, &[0, 1, 2, 3]);
     let from_array = build_some(&mut h, arr);
     assert!(
         values_equal(&from_range, &from_array),
@@ -226,7 +218,7 @@ fn enum_with_signed_zero_payload_is_congruent() {
     // Premise: the scalar payloads compare equal.
     assert!(values_equal(&Value::float(0.0), &Value::float(-0.0)));
 
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let pos = build_some(&mut h, Value::float(0.0));
     let neg = build_some(&mut h, Value::float(-0.0));
     assert!(
@@ -364,7 +356,7 @@ fn ev(
 fn inspect_closure_renders_name() {
     let mut program = single_fn_program(|_| Vec::new(), Vec::new(), 0);
     program.functions[0].name = "myfn".into();
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let c = Value::closure_in(&mut h, 0, &[]);
     assert_eq!(super::inspect(&c, &program), "<fn#myfn>");
 }
@@ -389,7 +381,7 @@ fn inspect_socket_renders_kind_and_id() {
 // the exact 6-per-line layout in `inspect_impl`.
 #[test]
 fn inspect_long_simple_array_wraps_six_per_line() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let elems: Vec<Value> = (1..=30).map(Value::small_int).collect();
     let arr = Value::array_in(&mut h, &elems);
     let s = inspect(&arr);
@@ -406,25 +398,16 @@ fn inspect_long_simple_array_wraps_six_per_line() {
 // A short all-simple array stays on one line (the <= 80 fast path).
 #[test]
 fn inspect_short_array_stays_flat() {
-    let mut h = test_heap();
-    let arr = Value::array_in(
-        &mut h,
-        &[
-            Value::small_int(1),
-            Value::small_int(2),
-            Value::small_int(3),
-        ],
-    );
-    assert_eq!(inspect(&arr), "[1, 2, 3]");
+    let mut h = ProcHeap::new();
+    assert_eq!(inspect(&ints(&mut h, &[1, 2, 3])), "[1, 2, 3]");
 }
 
 // An array whose children are themselves containers (not "simple") expands
 // one element per line via `block`.
 #[test]
 fn inspect_nested_array_expands_per_line() {
-    let mut h = test_heap();
-    let a = Value::array_in(&mut h, &[Value::small_int(1), Value::small_int(2)]);
-    let b = Value::array_in(&mut h, &[Value::small_int(3), Value::small_int(4)]);
+    let mut h = ProcHeap::new();
+    let (a, b) = (ints(&mut h, &[1, 2]), ints(&mut h, &[3, 4]));
     let arr = Value::array_in(&mut h, &[a, b]);
     assert_eq!(inspect(&arr), "[\n  [1, 2],\n  [3, 4]\n]");
 }
@@ -434,7 +417,7 @@ fn inspect_nested_array_expands_per_line() {
 // `T {` block when a field is itself a record.
 #[test]
 fn inspect_record_inline_and_multiline() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let point = |h: &mut ProcHeap, x: i64, y: i64| {
         ev(
             h,
@@ -460,7 +443,7 @@ fn inspect_record_inline_and_multiline() {
 // multiline block when a payload element is itself a non-simple value.
 #[test]
 fn inspect_variant_inline_and_multiline() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let leaf = |h: &mut ProcHeap, v: i64| ev(h, 3, "Tree", "Leaf", &[], vec![Value::small_int(v)]);
     let l1 = leaf(&mut h, 1);
     assert_eq!(inspect(&l1), "Leaf(1)");
@@ -474,17 +457,10 @@ fn inspect_variant_inline_and_multiline() {
 // expands one element per line.
 #[test]
 fn inspect_tuple_empty_and_multiline() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let empty = Value::tuple_in(&mut h, &[]);
     assert_eq!(inspect(&empty), "()");
-    let arr = Value::array_in(
-        &mut h,
-        &[
-            Value::small_int(2),
-            Value::small_int(3),
-            Value::small_int(4),
-        ],
-    );
+    let arr = ints(&mut h, &[2, 3, 4]);
     let t = Value::tuple_in(&mut h, &[Value::small_int(1), arr]);
     assert_eq!(inspect(&t), "(\n  1,\n  [2, 3, 4]\n)");
 }
@@ -494,11 +470,7 @@ fn inspect_tuple_empty_and_multiline() {
 // compare unequal, in either operand order.
 #[test]
 fn values_equal_range_vs_array() {
-    let mut h = test_heap();
-    let ints = |h: &mut ProcHeap, xs: &[i64]| {
-        let elems: Vec<Value> = xs.iter().copied().map(Value::small_int).collect();
-        Value::array_in(h, &elems)
-    };
+    let mut h = ProcHeap::new();
     let range = Value::range_in(&mut h, 0, 3);
     // 0..3 == [0, 1, 2]
     let a = ints(&mut h, &[0, 1, 2]);
@@ -518,7 +490,7 @@ fn values_equal_range_vs_array() {
 // are unequal.
 #[test]
 fn values_equal_binary() {
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let mut bin = |bytes: &[u8]| Value::binary_in(&mut h, bytes.to_vec());
     let (a, b) = (bin(&[1, 2, 3]), bin(&[1, 2, 3]));
     let c = bin(&[1, 2, 4]);
@@ -695,7 +667,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
     assert!(!vm.can_donate_fds(&victim(sock(7, false))));
 
     // The armed id is found through nested containers too.
-    let mut h = test_heap();
+    let mut h = ProcHeap::new();
     let arr = Value::array_in(&mut h, &[sock(7, false)]);
     assert!(!vm.can_donate_fds(&victim(arr)));
 
