@@ -614,13 +614,16 @@ impl Compiler {
     }
 
     #[inline]
-    fn emit_make_enum_payload(&mut self, arity: u16, prefix_hash: i32) {
+    pub(super) fn emit_ab(&mut self, o: Op, a: u8, b: u16, operand: i32) {
         if self.check_only {
             return;
         }
-        self.program
-            .code
-            .push(op_ab(Op::MakeEnumPayload, 0, arity, prefix_hash));
+        self.program.code.push(op_ab(o, a, b, operand));
+    }
+
+    #[inline]
+    fn emit_make_enum_payload(&mut self, arity: u16, prefix_hash: i32) {
+        self.emit_ab(Op::MakeEnumPayload, 0, arity, prefix_hash);
     }
 
     /// Emit a forward jump with a placeholder target and return its address
