@@ -51,12 +51,12 @@ fn reject(tpl: &EnumTemplate, a: &mut ProcHeap, status: Reject) -> Value {
     tpl.instantiate(a, &[Value::small_int(status as i64)])
 }
 
-/// The `(name, value)` payload values of an `al/http/headers.Header`.
-fn header_fields(h: &Value) -> Option<(Value, Value)> {
-    let e = h.as_enum()?;
-    let payload = e.payload();
+/// The `(name, value)` payload values of an `al/http/headers.Header`,
+/// borrowed from `h`'s enum arena storage.
+fn header_fields(h: &Value) -> Option<(&Value, &Value)> {
+    let payload = h.as_enum()?.payload();
     match (payload.first(), payload.get(1)) {
-        (Some(n), Some(v)) => Some((n.clone(), v.clone())),
+        (Some(n), Some(v)) => Some((n, v)),
         _ => None,
     }
 }
@@ -86,8 +86,8 @@ fn for_each_header<B>(
     let arr = headers.as_array().ok_or_else(|| not_headers(op))?;
     for h in arr.iter() {
         let (name, value) = header_fields(&h).ok_or_else(|| not_headers(op))?;
-        let name_bytes = field_bytes(&name).ok_or_else(|| not_headers(op))?;
-        if let ControlFlow::Break(b) = f(&name_bytes, &value)? {
+        let name_bytes = field_bytes(name).ok_or_else(|| not_headers(op))?;
+        if let ControlFlow::Break(b) = f(&name_bytes, value)? {
             return Ok(Some(b));
         }
     }
@@ -701,8 +701,8 @@ mod tests {
         let h = arr.get(0).unwrap();
         let (name, value) = header_fields(&h).unwrap();
         // OWS around the value is trimmed; the name keeps its case.
-        assert_eq!(field_bytes(&name).unwrap().as_ref(), b"Host");
-        assert_eq!(field_bytes(&value).unwrap().as_ref(), b"spaced.example");
+        assert_eq!(field_bytes(name).unwrap().as_ref(), b"Host");
+        assert_eq!(field_bytes(value).unwrap().as_ref(), b"spaced.example");
         // Zero-copy: the view's backing is the request buffer's backing.
         let nb = name.as_binary().expect("expected binary");
         assert!(std::ptr::eq(
@@ -994,8 +994,8 @@ mod tests {
         assert_eq!(arr.len(), 2);
         let h = arr.get(0).unwrap();
         let (name, value) = header_fields(&h).unwrap();
-        assert_eq!(field_bytes(&name).unwrap().as_ref(), b"X-Checksum");
-        assert_eq!(field_bytes(&value).unwrap().as_ref(), b"abc123");
+        assert_eq!(field_bytes(name).unwrap().as_ref(), b"X-Checksum");
+        assert_eq!(field_bytes(value).unwrap().as_ref(), b"abc123");
     }
 
     #[test]
