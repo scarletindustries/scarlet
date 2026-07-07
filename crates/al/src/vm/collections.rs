@@ -330,7 +330,7 @@ impl VM {
         match v.kind() {
             ValueView::Array(_) => Ok(v),
             ValueView::Range(s, e) => {
-                let mut elems = Vec::with_capacity(range_len(s, e).max(0) as usize);
+                let mut elems = Vec::with_capacity(range_len(s, e) as usize);
                 let mut i = s;
                 while i < e {
                     let elem = self.boxed_int(i);

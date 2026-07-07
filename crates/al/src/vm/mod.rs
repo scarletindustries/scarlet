@@ -137,6 +137,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Instant;
 
+use al_core::bytecode::value::range_len;
 use al_core::bytecode::{BinaryRef, Program, Value};
 #[cfg(test)]
 use al_core::bytecode::{Function, Op, op};
@@ -1211,9 +1212,4 @@ fn halt_test_vm() -> VM {
         frozen: Arc::new(al_core::frozen::FrozenArea::new()),
     })
     .expect("test VM construction must succeed")
-}
-
-#[inline]
-fn range_len(s: i64, e: i64) -> i64 {
-    e.saturating_sub(s).max(0)
 }

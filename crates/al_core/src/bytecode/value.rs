@@ -2370,7 +2370,7 @@ pub fn hash_value(v: &Value) -> u64 {
             h = hash_sequence(a.len(), a.iter().map(|e| hash_value(&e)));
         }
         ValueView::Range(start, end) => {
-            let len = (end - start).max(0) as usize;
+            let len = range_len(start, end) as usize;
             h = hash_sequence(len, (start..end).map(hash_int));
         }
         ValueView::Binary(bin) => {
