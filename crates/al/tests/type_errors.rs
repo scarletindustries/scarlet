@@ -266,18 +266,10 @@ fn mutually_recursive_type_alias_is_error() {
 #[test]
 fn recursive_type_alias_cycle_does_not_drop_other_aliases() {
     let src = "type Good = Int\ntype A = B\ntype B = A\nfn f(x Good) Good { x }\nprintln(f(1))\n";
-    let path = common::write_temp(src);
-    let out = common::run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-    let combined = out.combined();
-    assert!(!out.success, "expected rejection:\n{combined}");
+    let out = check_rejects(src, "Recursive type alias");
     assert!(
-        combined.contains("Recursive type alias"),
-        "expected recursive-alias diagnostic:\n{combined}"
-    );
-    assert!(
-        !combined.contains("Unknown type"),
-        "cycle in A/B must not cascade into other aliases:\n{combined}"
+        !out.combined().contains("Unknown type"),
+        "cycle in A/B must not poison C"
     );
 }
 

@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 
 use super::infer::{ArenaSlice, Scheme, StrId, Ty, pool};
+use crate::span::Span;
 use crate::type_def::TypeId;
 
 /// What a definition denotes, stamped on every [`DefinitionLocation`]. This is
@@ -24,6 +25,31 @@ pub struct DefinitionLocation {
     /// → `InferEngine.str_slices`: the owning module's path segments.
     pub module: ArenaSlice<pool::StrSlices>,
     pub entity: EntityKind,
+}
+
+impl DefinitionLocation {
+    pub fn new(sp: Span, module: ArenaSlice<pool::StrSlices>, entity: EntityKind) -> Self {
+        Self {
+            line: sp.start_line,
+            column: sp.start_column,
+            end_col: sp.end_column,
+            module,
+            entity,
+        }
+    }
+
+    /// The declaring-name span this location was built from. A declaring
+    /// identifier is always single-line, so the reconstructed span is exactly
+    /// the one [`Self::new`] was handed — keeping a definition's `DefId` equal
+    /// to the `DefId` every occurrence of it targets.
+    pub fn span(&self) -> Span {
+        Span {
+            start_line: self.line,
+            start_column: self.column,
+            end_line: self.line,
+            end_column: self.end_col,
+        }
+    }
 }
 
 /// A type parameter on a nominal type. `id` is the Generic var id minted by the

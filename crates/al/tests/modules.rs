@@ -1,41 +1,20 @@
 use al::reference::EntityKind;
 
 mod common;
-use common::{Project, SessionQueryExt, checked_with, cursor, run_al, run_outputs};
+use common::{
+    Project, SessionQueryExt, checked_with, cursor, project_rejects, run_al, run_outputs,
+    run_project_outputs,
+};
 
 const UTIL_SRC: &str =
     "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";
-
-/// `al run` the project file `entry` and assert it succeeds with exactly
-/// `expected` on stdout.
-fn run_project_outputs(proj: &Project, entry: &str, expected: &str) {
-    let r = run_al("run", &proj.dir.join(entry));
-    assert!(r.success, "stdout: {}\nstderr: {}", r.stdout, r.stderr);
-    assert_eq!(r.stdout, expected, "stderr: {}", r.stderr);
-}
-
-/// `al <cmd>` the project file `entry` and assert it fails with a diagnostic
-/// containing at least one of `msgs`.
-fn project_rejects(proj: &Project, cmd: &str, entry: &str, msgs: &[&str]) {
-    let r = run_al(cmd, &proj.dir.join(entry));
-    assert!(
-        !r.success,
-        "expected `al {cmd}` to reject {entry}\nstdout: {}\nstderr: {}",
-        r.stdout, r.stderr
-    );
-    let combined = r.combined();
-    assert!(
-        msgs.iter().any(|m| combined.contains(m)),
-        "expected one of {msgs:?}, got: {combined}"
-    );
-}
 
 #[test]
 fn relative_qualified() {
     let proj = Project::new("rel_qual");
     proj.write("util.al", UTIL_SRC);
     proj.write("main.al", "import ./util\nprintln(util.quote('hi'))\n");
-    run_project_outputs(&proj, "main.al", "\"hi\"\n");
+    run_project_outputs(&proj, "run", "main.al", "\"hi\"\n");
 }
 
 #[test]
@@ -46,7 +25,7 @@ fn relative_selective_and_alias() {
         "main.al",
         "import ./util as u\nimport ./util.{quote as q, empty}\nprintln(u.empty())\nprintln(q('x'))\nprintln(empty())\n",
     );
-    run_project_outputs(&proj, "main.al", "\n\"x\"\n\n");
+    run_project_outputs(&proj, "run", "main.al", "\n\"x\"\n\n");
 }
 
 #[test]
@@ -62,7 +41,7 @@ fn aliased_type_import_unifies_with_canonical() {
         "main.al",
         "import ./lib.{Color as C, Red}\nfn id(c C) C { c }\nprintln(id(Red))\n",
     );
-    run_project_outputs(&proj, "main.al", "Red\n");
+    run_project_outputs(&proj, "run", "main.al", "Red\n");
 }
 
 #[test]
@@ -70,7 +49,7 @@ fn relative_import() {
     let proj = Project::new("rel_imp");
     proj.write("helper.al", "pub fn greet() String { 'hello' }\n");
     proj.write("main.al", "import ./helper\nprintln(helper.greet())\n");
-    run_project_outputs(&proj, "main.al", "hello\n");
+    run_project_outputs(&proj, "run", "main.al", "hello\n");
 }
 
 #[test]
@@ -108,7 +87,7 @@ fn opaque_type_hides_constructors() {
          fn use(i Id) Int { get(i) }\n\
          println(use(make(42)))\n",
     );
-    run_project_outputs(&proj, "ok.al", "42\n");
+    run_project_outputs(&proj, "run", "ok.al", "42\n");
 
     // The constructor is not importable by name.
     proj.write("bad_sel.al", "import ./id.{Id}\nx = Id(1)\n");
@@ -151,14 +130,7 @@ fn cycle_detection() {
     let proj = Project::new("cycle");
     proj.write("a.al", "import ./b\npub fn fa() { 1 }\n");
     proj.write("b.al", "import ./a\npub fn fb() { 2 }\n");
-    // Case-insensitive on purpose: accepts "cycle"/"Cycle"/"Circular import" etc.
-    let r = run_al("run", &proj.dir.join("a.al"));
-    assert!(!r.success);
-    let combined = r.combined();
-    assert!(
-        combined.to_lowercase().contains("cycle") || combined.to_lowercase().contains("circular"),
-        "got: {combined}"
-    );
+    project_rejects(&proj, "run", "a.al", &["cycle", "circular"]);
 }
 
 #[test]

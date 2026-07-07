@@ -10,7 +10,7 @@ fn u1_self_reference_is_rejected() {
         "x = x\n\
          n Int = x\n\
          println(n + 1)\n",
-        "",
+        "Unknown identifier 'x'",
     );
 }
 
@@ -24,7 +24,7 @@ fn u2_if_no_else_is_rejected() {
         "fn smuggle() Option(Int) { if True { 'hello' } }\n\
          n = smuggle() or 0\n\
          println(n + 1)\n",
-        "",
+        "'if' requires an 'else' branch",
     );
 }
 
@@ -74,7 +74,7 @@ fn u5_generic_type_missing_args_is_rejected() {
          type Holder { Holder(box Box) }\n\
          h = Holder(box: Box(value: 'hello'))\n\
          println(h.box.value + 100)\n",
-        "",
+        "Type 'Box' expects 1 type argument",
     );
 }
 
@@ -111,7 +111,7 @@ fn u7_or_pattern_disjoint_bindings_is_rejected() {
          \t}\n\
          }\n\
          println(f(1))\n",
-        "",
+        "not bound in the first alternative",
     );
 }
 
@@ -127,7 +127,7 @@ fn u8_range_pattern_bounds_must_be_int() {
          \t_ -> 'ok'\n\
          }\n\
          println(r)\n",
-        "",
+        "Range pattern bounds must be number literals",
     );
 }
 
@@ -144,7 +144,7 @@ fn u9_array_pattern_non_tail_spread_is_rejected() {
          \t_ -> 0\n\
          }\n\
          println(r)\n",
-        "",
+        "Spread in array pattern must be the last element",
     );
 }
 
@@ -164,7 +164,7 @@ fn u10_spread_prefix_exhaustiveness_is_rejected() {
          \t}\n\
          }\n\
          println(f([True]))\n",
-        "",
+        "not exhaustive",
     );
 }
 
@@ -179,7 +179,7 @@ fn u12_duplicate_pattern_binding_is_rejected() {
          \t(x, x) -> x\n\
          }\n\
          println(r)\n",
-        "",
+        "bound more than once in this pattern",
     );
 }
 
@@ -192,7 +192,7 @@ fn u13_socket_literal_is_rejected() {
     check_rejects(
         "s = Socket\n\
          println(s)\n",
-        "",
+        "Unknown identifier 'Socket'",
     );
 }
 

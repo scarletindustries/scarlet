@@ -10,8 +10,8 @@ use common::{Project, checked_with, recheck};
 
 /// Shared rollback check: `lib.al` exports `Color`, `entry1` imports and uses
 /// it (must type-check), then `entry2` drops the import but keeps the use
-/// (must fail, with an `expected_diag` diagnostic when one is given).
-fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_diag: Option<&str>) {
+/// (must fail with an `expected_diag` diagnostic).
+fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_diag: &str) {
     let p = Project::new(tag);
     p.write("lib.al", "pub type Color { Color }\n");
 
@@ -19,10 +19,11 @@ fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_dia
 
     let r2 = recheck(&mut s, &p, entry2);
     assert!(!r2.success, "import still resolves: {:?}", r2.diagnostics);
-    if let Some(diag) = expected_diag {
-        let found = r2.diagnostics.iter().any(|d| d.message.contains(diag));
-        assert!(found, "missing {diag:?}: {:?}", r2.diagnostics);
-    }
+    let found = r2
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains(expected_diag));
+    assert!(found, "missing {expected_diag:?}: {:?}", r2.diagnostics);
 }
 
 #[test]
@@ -31,7 +32,7 @@ fn removed_selective_type_import_stops_resolving() {
         "importrollback",
         "import ./lib.{Color}\nfn paint(_c Color) Int { 1 }\n_x = paint\n",
         "fn paint(_c Color) Int { 1 }\n_x = paint\n",
-        Some("Unknown type 'Color'"),
+        "Unknown type 'Color'",
     );
 }
 
@@ -42,7 +43,7 @@ fn removed_aliased_type_import_stops_resolving() {
         "importrollbackalias",
         "import ./lib.{Color as Hue}\nfn paint(_c Hue) Int { 1 }\n_x = paint\n",
         "fn paint(_c Hue) Int { 1 }\n_x = paint\n",
-        None,
+        "Unknown type 'Hue'",
     );
 }
 
