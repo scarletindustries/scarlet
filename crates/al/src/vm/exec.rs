@@ -1110,6 +1110,8 @@ impl VM {
     /// Push the program's command-line arguments as an `Array(String)`. The
     /// args live on the shared runtime; the Arc is cloned so the per-arg
     /// allocation can borrow the heap mutably while the source list is read.
+    #[cold]
+    #[inline(never)]
     pub(super) fn argv(&mut self) -> VmResult<()> {
         let runtime = self.runtime.clone();
         let args = &runtime.argv;

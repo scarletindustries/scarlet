@@ -841,6 +841,9 @@ impl InferEngine {
 
     // --- Union-find: find with path compression ---
 
+    // The chase loop has two independent let-else exits (non-Var node, or a
+    // root var); a single while-let cannot express both.
+    #[allow(clippy::while_let_loop)]
     pub fn find(&mut self, t: Ty) -> Ty {
         // Two-pass iterative: chase links to the representative, then rewrite
         // every traversed link to point directly at it. Avoids O(chain) native
