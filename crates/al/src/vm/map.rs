@@ -89,42 +89,55 @@ impl VM {
 
     /// `map.keys(m) -> Array(k)`. Map on top.
     pub(super) fn map_keys(&mut self) -> VmResult<()> {
-        self.map_collect("map.keys", true)
+        self.map_collect("map.keys", Proj::Keys)
     }
 
     /// `map.values(m) -> Array(v)`. Map on top.
     pub(super) fn map_values(&mut self) -> VmResult<()> {
-        self.map_collect("map.values", false)
+        self.map_collect("map.values", Proj::Values)
     }
 
-    /// Shared body of `keys`/`values`: build an `Array` of the key (or value)
-    /// of every entry. The keys/values already live in the arena (a HAMT) or
-    /// are built fresh (the environment); either way only the array spine is
-    /// new, so the budget is `seq_build(n)` plus, for the environment, the
-    /// strings.
-    fn map_collect(&mut self, op: &'static str, keys: bool) -> VmResult<()> {
-        match self.map_backing_at(0, op)? {
+    /// `map.to_list(m) -> Array((k, v))`. Map on top.
+    pub(super) fn map_to_list(&mut self) -> VmResult<()> {
+        self.map_collect("map.to_list", Proj::Pairs)
+    }
+
+    /// Shared body of `keys`/`values`/`to_list`: project each entry per
+    /// `proj` into an `Array`. HAMT entries are shared; environment strings
+    /// are built fresh. Only the array spine (and, for `Pairs`, one tuple per
+    /// entry) is new.
+    fn map_collect(&mut self, op: &'static str, proj: Proj) -> VmResult<()> {
+        let items: Vec<Value> = match self.map_backing_at(0, op)? {
             MapBacking::Env => {
                 let entries = env_entries();
-                let pick = |(k, v): &(String, String)| if keys { k.clone() } else { v.clone() };
                 let _map = self.pop()?;
-                let items: Vec<Value> = entries
-                    .iter()
-                    .map(|e| Value::str_in(&mut self.heap, &pick(e)))
-                    .collect();
-                let arr = Value::array_in(&mut self.heap, &items);
-                self.stack.push(arr);
+                entries
+                    .into_iter()
+                    .map(|(k, v)| match proj {
+                        Proj::Keys => Value::str_in(&mut self.heap, &k),
+                        Proj::Values => Value::str_in(&mut self.heap, &v),
+                        Proj::Pairs => {
+                            let kv = Value::str_in(&mut self.heap, &k);
+                            let vv = Value::str_in(&mut self.heap, &v);
+                            Value::tuple_in(&mut self.heap, &[kv, vv])
+                        }
+                    })
+                    .collect()
             }
             MapBacking::Hamt => {
                 let map = self.pop()?;
-                let items: Vec<Value> = hamt::collect_entries(&map)
+                hamt::collect_entries(&map)
                     .into_iter()
-                    .map(|(k, v)| if keys { k } else { v })
-                    .collect();
-                let arr = Value::array_in(&mut self.heap, &items);
-                self.stack.push(arr);
+                    .map(|(k, v)| match proj {
+                        Proj::Keys => k,
+                        Proj::Values => v,
+                        Proj::Pairs => Value::tuple_in(&mut self.heap, &[k, v]),
+                    })
+                    .collect()
             }
-        }
+        };
+        let arr = Value::array_in(&mut self.heap, &items);
+        self.stack.push(arr);
         Ok(())
     }
 
@@ -136,37 +149,6 @@ impl VM {
         };
         let _map = self.pop()?;
         self.push_int(n);
-        Ok(())
-    }
-
-    /// `map.to_list(m) -> Array((k, v))`. Map on top. One 3-word tuple per
-    /// entry plus the array spine; for the environment, the entry strings too.
-    pub(super) fn map_to_list(&mut self) -> VmResult<()> {
-        match self.map_backing_at(0, "map.to_list")? {
-            MapBacking::Env => {
-                let entries = env_entries();
-                let _map = self.pop()?;
-                let items: Vec<Value> = entries
-                    .iter()
-                    .map(|(k, v)| {
-                        let kv = Value::str_in(&mut self.heap, k);
-                        let vv = Value::str_in(&mut self.heap, v);
-                        Value::tuple_in(&mut self.heap, &[kv, vv])
-                    })
-                    .collect();
-                let arr = Value::array_in(&mut self.heap, &items);
-                self.stack.push(arr);
-            }
-            MapBacking::Hamt => {
-                let map = self.pop()?;
-                let items: Vec<Value> = hamt::collect_entries(&map)
-                    .into_iter()
-                    .map(|(k, v)| Value::tuple_in(&mut self.heap, &[k, v]))
-                    .collect();
-                let arr = Value::array_in(&mut self.heap, &items);
-                self.stack.push(arr);
-            }
-        }
         Ok(())
     }
 
@@ -233,6 +215,14 @@ impl VM {
         let key = self.peek_at(d).and_then(|v| v.as_str())?;
         std::env::var(key).ok()
     }
+}
+
+/// What [`VM::map_collect`] pulls out of each entry.
+#[derive(Clone, Copy)]
+enum Proj {
+    Keys,
+    Values,
+    Pairs,
 }
 
 /// Snapshot the process environment as the UTF-8 `(key, value)` pairs that the
