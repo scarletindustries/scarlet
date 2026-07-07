@@ -551,86 +551,7 @@ impl VM {
                 Op::MapSet => self.map_set()?,
                 Op::MapDelete => self.map_delete()?,
                 Op::MapToList => self.map_to_list()?,
-                Op::MakeEnumPayload => {
-                    let payload_count = instr.b as usize;
-                    // Names and labels are constant-pool references; only the
-                    // enum cell and its payload slots are fresh.
-                    // The payload stays rooted in place; the four header
-                    // words sit at fixed offsets just below it. All are read
-                    // before the single truncate that retires the operands.
-                    let base = self.operand_base(payload_count + 4)?;
-                    let payload_base = base + 4;
-
-                    let type_id_val = &self.stack[base];
-                    let enum_name_val = self.stack[base + 1].clone();
-                    let variant_name_val = self.stack[base + 2].clone();
-                    let labels_val = &self.stack[base + 3];
-
-                    let Some(type_id) = type_id_val.as_int() else {
-                        return Err(VmError::internal("enum type id must be int"));
-                    };
-                    let type_id = al_core::TypeId(type_id as i32);
-
-                    if enum_name_val.as_str().is_none() {
-                        return Err(VmError::internal("enum name must be string"));
-                    }
-
-                    // The field-label array is a per-ctor-site pooled constant
-                    // (`emit_construct_header` → a frozen labels array), and
-                    // `PushConst` copies the constant word, so the popped
-                    // value is pointer-identical to the pool entry and stable
-                    // for the program's lifetime. Freeze the labels Tuple
-                    // once per site, memoized by that address; later
-                    // constructions reuse the one frozen tuple.
-                    let labels_key = match (labels_val.as_array(), labels_val.object_addr()) {
-                        (Some(_), Some(addr)) => addr,
-                        _ => return Err(VmError::internal("field labels must be an array")),
-                    };
-                    let field_labels = match self.label_cache.get(&labels_key) {
-                        Some(cached) => cached.clone(),
-                        None => {
-                            // The label strings are frozen constants; build
-                            // the canonical labels Tuple in the frozen area
-                            // once per ctor site, shared by every instance.
-                            let labels = expect_string_array(labels_val)?;
-                            let tuple = self.frozen.tuple(labels);
-                            self.label_cache.insert(labels_key, tuple.clone());
-                            tuple
-                        }
-                    };
-
-                    if variant_name_val.as_str().is_none() {
-                        return Err(VmError::internal("variant name must be string"));
-                    }
-
-                    // `instr.operand` indexes the constant pool at the
-                    // compile-time `enum_name_prefix_hash(enum_name,
-                    // variant_name)`. Folding only the payload hashes here is
-                    // bit-identical to hashing the name bytes then the
-                    // payloads in one pass, without re-walking the static
-                    // name bytes. The prehash constant is read by reference —
-                    // unlike the header it is never `PushConst`-ed, so there is
-                    // no extra opcode dispatch, no stack push/pop, and no
-                    // per-construction refcount churn on the path.
-                    let name_prefix_hash =
-                        self.program.constants[instr.operand as usize].as_int_typed() as u64;
-                    let hash =
-                        enum_hash_with_payload(name_prefix_hash, &self.stack[payload_base..]);
-                    // `enum_name`/`variant_name` are frozen constant-pool
-                    // `Str` values — stored as single reference words, never
-                    // copied per construction.
-                    let v = Value::enum_in(
-                        &mut self.heap,
-                        type_id,
-                        hash,
-                        enum_name_val,
-                        variant_name_val,
-                        field_labels,
-                        &self.stack[payload_base..],
-                    );
-                    self.stack.truncate(base);
-                    self.stack.push(v);
-                }
+                Op::MakeEnumPayload => self.make_enum_payload(instr.operand, instr.b as usize)?,
                 Op::MatchEnum => {
                     let variant_name = self.pop()?;
                     let type_id_val = self.pop()?;
@@ -815,6 +736,84 @@ impl VM {
     fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
         debug_assert!(base <= args_start && args_start <= self.stack.len());
         self.stack.drain(base..args_start);
+    }
+
+    /// `Op::MakeEnumPayload`: build a tagged enum value from the four header
+    /// words (`type_id`, enum name, variant name, field-label array) plus
+    /// `payload_count` payload words on top of the stack. `prehash_idx` indexes
+    /// the constant pool at the compile-time `enum_name_prefix_hash`.
+    fn make_enum_payload(&mut self, prehash_idx: i32, payload_count: usize) -> VmResult<()> {
+        // Names and labels are constant-pool references; only the enum cell and
+        // its payload slots are fresh. The payload stays rooted in place; the
+        // four header words sit at fixed offsets just below it. All are read
+        // before the single truncate that retires the operands.
+        let base = self.operand_base(payload_count + 4)?;
+        let payload_base = base + 4;
+
+        let type_id_val = &self.stack[base];
+        let enum_name_val = self.stack[base + 1].clone();
+        let variant_name_val = self.stack[base + 2].clone();
+        let labels_val = &self.stack[base + 3];
+
+        let Some(type_id) = type_id_val.as_int() else {
+            return Err(VmError::internal("enum type id must be int"));
+        };
+        let type_id = al_core::TypeId(type_id as i32);
+
+        if enum_name_val.as_str().is_none() {
+            return Err(VmError::internal("enum name must be string"));
+        }
+
+        // The field-label array is a per-ctor-site pooled constant
+        // (`emit_construct_header` → a frozen labels array), and `PushConst`
+        // copies the constant word, so the popped value is pointer-identical to
+        // the pool entry and stable for the program's lifetime. Freeze the
+        // labels Tuple once per site, memoized by that address; later
+        // constructions reuse the one frozen tuple.
+        let labels_key = match (labels_val.as_array(), labels_val.object_addr()) {
+            (Some(_), Some(addr)) => addr,
+            _ => return Err(VmError::internal("field labels must be an array")),
+        };
+        let field_labels = match self.label_cache.get(&labels_key) {
+            Some(cached) => cached.clone(),
+            None => {
+                // The label strings are frozen constants; build the canonical
+                // labels Tuple in the frozen area once per ctor site, shared by
+                // every instance.
+                let labels = expect_string_array(labels_val)?;
+                let tuple = self.frozen.tuple(labels);
+                self.label_cache.insert(labels_key, tuple.clone());
+                tuple
+            }
+        };
+
+        if variant_name_val.as_str().is_none() {
+            return Err(VmError::internal("variant name must be string"));
+        }
+
+        // `prehash_idx` indexes the constant pool at the compile-time
+        // `enum_name_prefix_hash(enum_name, variant_name)`. Folding only the
+        // payload hashes here is bit-identical to hashing the name bytes then
+        // the payloads in one pass, without re-walking the static name bytes.
+        // The prehash constant is read by reference — unlike the header it is
+        // never `PushConst`-ed, so there is no extra opcode dispatch, no stack
+        // push/pop, and no per-construction refcount churn on the path.
+        let name_prefix_hash = self.program.constants[prehash_idx as usize].as_int_typed() as u64;
+        let hash = enum_hash_with_payload(name_prefix_hash, &self.stack[payload_base..]);
+        // `enum_name`/`variant_name` are frozen constant-pool `Str` values —
+        // stored as single reference words, never copied per construction.
+        let v = Value::enum_in(
+            &mut self.heap,
+            type_id,
+            hash,
+            enum_name_val,
+            variant_name_val,
+            field_labels,
+            &self.stack[payload_base..],
+        );
+        self.stack.truncate(base);
+        self.stack.push(v);
+        Ok(())
     }
 
     pub(super) fn pop(&mut self) -> VmResult<Value> {

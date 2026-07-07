@@ -32,7 +32,10 @@
 //! | this file           | [`Op`], [`Instruction`], [`Function`],         |
 //! |                     | [`Program`]                                    |
 //! | [`compiler`]        | AST → `Program`: HM inference fused with       |
-//! |                     | bytecode emission, plus `IncrementalSession`   |
+//! |                     | bytecode emission                              |
+//! | `session`           | LSP layer: `IncrementalSession`, `Watermark`   |
+//! |                     | rollback, reference-graph finalization         |
+//! | `peephole`          | superinstruction fusion over the emitted code  |
 //! | `analysis`          | module top level: multi-pass declaration       |
 //! |                     | analysis (type heads → aliases → slots →       |
 //! |                     | ctors → SCC inference)                         |
@@ -46,14 +49,17 @@ mod analysis;
 pub mod bits;
 pub mod compiler;
 pub mod hamt;
+mod peephole;
 mod prelude;
 pub mod prelude_bindings;
 pub mod seq;
+mod session;
 pub mod value;
 use std::sync::Arc;
 
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
+pub use session::{HoverFact, IncrementalSession, Watermark};
 pub use value::{
     Arena, BinaryRef, ClosureRef, EnumRef, HeapTag, MapBacking, MapRef, SeqRef, SocketValue, Value,
     ValueView, enum_hash_with_payload, enum_name_prefix_hash, freed_objects_pending, hash_value,

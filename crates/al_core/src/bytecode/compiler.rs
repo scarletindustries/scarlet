@@ -60,11 +60,11 @@ use crate::reference::{
     ReferenceKind,
 };
 use crate::span::Span;
-use crate::type_def::{Type, TypeId};
+use crate::type_def::TypeId;
 use crate::types::{
-    ArenaSlice, Constraint, DefinitionLocation, EnginePoolWatermark, EntityKind, EnvWatermark,
-    Hydrator, InferEngine, MatchFunTypeError, Pat, PatternBindings, Prim, Scheme, StrId, Ty,
-    TypeEnv, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env,
+    ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator, InferEngine,
+    MatchFunTypeError, Pat, PatternBindings, Prim, Scheme, StrId, Ty, TypeEnv, TypeNode,
+    UsefulnessMatrix, ValueKind, mono, new_engine, new_env,
 };
 
 // ============================================================================
@@ -946,10 +946,8 @@ impl Compiler {
     /// reported. Recording-only: never touches inference, schemes, slots, or
     /// diagnostics.
     fn record_ref(&mut self, occ: Span, kind: ReferenceKind, target: DefId) {
-        self.module_refs.add_reference(
-            self.current_owner,
-            Reference::new(occ, kind, target),
-        );
+        self.module_refs
+            .add_reference(self.current_owner, Reference::new(occ, kind, target));
     }
 
     /// Resolve a value name's canonical [`DefinitionLocation`] (carried on its
@@ -973,13 +971,7 @@ impl Compiler {
     /// definition and record an occurrence of `kind` at `occ`. No-op when the
     /// module has no such type (e.g. static/hydrated stdlib modules). Mirror of
     /// [`Self::record_value_use`] for type references.
-    fn record_type_use(
-        &mut self,
-        path: &ModulePath,
-        name: &str,
-        occ: Span,
-        kind: ReferenceKind,
-    ) {
+    fn record_type_use(&mut self, path: &ModulePath, name: &str, occ: Span, kind: ReferenceKind) {
         if let Some(target) = self.type_defid_in_module(path, name) {
             self.record_ref(occ, kind, target);
         }
@@ -1010,11 +1002,7 @@ impl Compiler {
         if first {
             self.module_refs.add_reference(
                 Some(defid),
-                Reference::new(
-                    defid.span,
-                    ReferenceKind::Definition,
-                    defid,
-                ),
+                Reference::new(defid.span, ReferenceKind::Definition, defid),
             );
         }
     }
@@ -1178,12 +1166,7 @@ impl Compiler {
         let result = h.type_from_ast(t, &self.env, &mut self.engine);
         for hit in h.take_type_refs() {
             let path = self.engine.strs_of(hit.module);
-            self.record_type_use(
-                &path,
-                &hit.name,
-                hit.span,
-                ReferenceKind::Unqualified,
-            );
+            self.record_type_use(&path, &hit.name, hit.span, ReferenceKind::Unqualified);
         }
         match result {
             Ok(ty) => ty,
@@ -1516,11 +1499,7 @@ impl Compiler {
         if let Some(a) = imp.alias.as_ref() {
             self.module_refs.add_reference(
                 None,
-                Reference::new(
-                    a.span,
-                    ReferenceKind::Alias,
-                    alias_defid,
-                ),
+                Reference::new(a.span, ReferenceKind::Alias, alias_defid),
             );
         }
 
@@ -1530,8 +1509,7 @@ impl Compiler {
         // interface. Collected with owned `DefinitionLocation`s / type names
         // while `iface` borrows `module_table`, then turned into `DefId`s and
         // recorded once that borrow has ended.
-        let mut item_refs: Vec<(Span, ReferenceKind, DefinitionLocation)> =
-            Vec::new();
+        let mut item_refs: Vec<(Span, ReferenceKind, DefinitionLocation)> = Vec::new();
         let mut type_item_refs: Vec<(Span, ReferenceKind, String)> = Vec::new();
         for item in &imp.items {
             let local_name = item
@@ -1559,11 +1537,7 @@ impl Compiler {
                 // symbol, so it targets X's canonical def — goto-def on it chains
                 // to the real declaration, and renaming X rewrites it.
                 if let Some(dl) = vdef {
-                    item_refs.push((
-                        item.name.span,
-                        ReferenceKind::Unqualified,
-                        dl,
-                    ));
+                    item_refs.push((item.name.span, ReferenceKind::Unqualified, dl));
                 }
                 // An aliased item `{X as Y}` introduces a *new* local name Y.
                 // Mint Y its own DefId so its rename class is separate from X's:
@@ -1614,11 +1588,7 @@ impl Compiler {
                     item.name.name.clone(),
                 ));
                 if let Some(a) = item.alias.as_ref() {
-                    type_item_refs.push((
-                        a.span,
-                        ReferenceKind::Alias,
-                        item.name.name.clone(),
-                    ));
+                    type_item_refs.push((a.span, ReferenceKind::Alias, item.name.name.clone()));
                 }
             }
             if val.is_none() && typ.is_none() {
@@ -2708,11 +2678,7 @@ impl Compiler {
         let load = slot.map(VarAccess::Global);
         // The member is not in unqualified scope, so resolve the occurrence
         // through the imported scheme's canonical `def`.
-        self.record_value_use(
-            scheme.def,
-            member.span,
-            ReferenceKind::Qualified,
-        );
+        self.record_value_use(scheme.def, member.span, ReferenceKind::Qualified);
         QualifiedMember::Resolved {
             module_key,
             member_name: member.name.clone(),
@@ -2737,11 +2703,7 @@ impl Compiler {
                 // Unqualified callee `name()` — the genuine unqualified-use
                 // seam for calls (this path bypasses `compile_identifier`).
                 // `record` in `compile_call` is hover-only.
-                self.record_value_use(
-                    scheme.def,
-                    id.span,
-                    ReferenceKind::Unqualified,
-                );
+                self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
                 Some((id.name.clone(), id.span, scheme, load))
             }
             // Qualified callee `module.member()`. Both failure modes mean "no
@@ -3122,11 +3084,7 @@ impl Compiler {
         // find-references / rename working for record fields, and feeds the
         // field-level dead-code reachability walk.
         let fdef = self.env.lookup_definition(&qualified);
-        self.record_value_use(
-            fdef,
-            field_span,
-            ReferenceKind::Unqualified,
-        );
+        self.record_value_use(fdef, field_span, ReferenceKind::Unqualified);
         result_ty
     }
 
