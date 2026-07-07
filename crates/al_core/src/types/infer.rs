@@ -1375,10 +1375,19 @@ impl InferEngine {
         // borrow.
         let start = scheme.quantified.start as usize;
         let count = scheme.quantified.len as usize;
-        let mut subst: Vec<Ty> = Vec::with_capacity(count);
-        for i in 0..count {
+        // Almost every scheme has ≤4 bound vars; keep the substitution on the
+        // stack in that case and only spill to the heap for the rare wide one.
+        let mut stack = [0 as Ty; 4];
+        let mut heap: Vec<Ty>;
+        let subst: &mut [Ty] = if count <= stack.len() {
+            &mut stack[..count]
+        } else {
+            heap = vec![0 as Ty; count];
+            &mut heap[..]
+        };
+        for (i, slot) in subst.iter_mut().enumerate() {
             let q = self.quants[start + i];
-            let slot = if let Some(id) = q.origin_id
+            *slot = if let Some(id) = q.origin_id
                 && rigid_ids.contains(&id)
             {
                 self.push(TypeNode::Var(id))
@@ -1392,9 +1401,8 @@ impl InferEngine {
                 }
                 fresh
             };
-            subst.push(slot);
         }
-        self.open_with(scheme.ty, &subst)
+        self.open_with(scheme.ty, subst)
     }
 
     fn open_with(&mut self, ty: Ty, subst: &[Ty]) -> Ty {
