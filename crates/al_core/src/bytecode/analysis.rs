@@ -48,7 +48,7 @@ use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
     AddedTypeVar, ArenaSlice, EntityKind, Hydrator, NO_STR, Scheme, StrId, Ty, TypeBody, TypeInfo,
-    TypeParam, ValueKind, Variant, VariantField,
+    TypeParam, ValueKind, Variant, VariantField, pool,
 };
 
 // ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ impl Compiler {
         // -------------------------------------------------------------------
         let mut type_decls: Vec<(&ast::TypeDeclaration, bool)> = Vec::new();
         let mut decls: Vec<Decl<'_>> = Vec::new();
-        let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, String)> = Vec::new();
+        let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, Op)> = Vec::new();
         let mut other_nodes: Vec<&ast::Node> = Vec::new();
 
         let in_prelude = self.current_module == module::al_prelude();
@@ -223,8 +223,14 @@ impl Compiler {
                                     // real expression body. They are registered
                                     // with their `Builtin` scheme in Pass 3.
                                     match &fd.body {
-                                        ast::FnBody::Vm(op) => {
-                                            vm_fns.push((fd, is_public, op.name.clone()))
+                                        ast::FnBody::Vm(key) => {
+                                            match super::builtin_op(&key.name) {
+                                                Some(op) => vm_fns.push((fd, is_public, op)),
+                                                None => self.error(
+                                                    format!("unknown @vm builtin '{}'", key.name),
+                                                    key.span,
+                                                ),
+                                            }
                                         }
                                         ast::FnBody::Block(body) => decls.push(Decl::Fn {
                                             fd,
@@ -303,13 +309,11 @@ impl Compiler {
         // generalisation (their type is the annotated signature verbatim —
         // there is no body to infer from).
         // -------------------------------------------------------------------
-        for (fd, is_pub, op) in &vm_fns {
+        for &(fd, is_pub, op) in &vm_fns {
             let name = &fd.identifier.name;
             let (_, _, _, fn_ty) = self.hydrate_fn_signature(fd);
             let mut scheme = self.engine.generalize_top(fn_ty);
-            scheme.kind = ValueKind::Builtin {
-                op: self.engine.intern(op),
-            };
+            scheme.kind = ValueKind::Builtin { op };
             let m = self.current_module_slice();
             scheme.def = Some(def_loc(fd.identifier.span, m, EntityKind::Function));
             self.env.define_at(
@@ -322,10 +326,10 @@ impl Compiler {
                 def_loc(fd.identifier.span, m, EntityKind::Function),
                 name,
                 fd.doc.clone(),
-                *is_pub,
+                is_pub,
             );
             self.record(name, scheme.ty, fd.identifier.span, fd.doc.clone());
-            export_value(iface.as_deref_mut(), name, *is_pub, scheme, None);
+            export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
         }
 
         let slots: Vec<i32> = decls
@@ -512,7 +516,7 @@ impl Compiler {
     fn hydrate_type_params(
         &mut self,
         params: &[ast::Identifier],
-    ) -> (Hydrator, ArenaSlice, Vec<Ty>) {
+    ) -> (Hydrator, ArenaSlice<pool::TypeParams>, Vec<Ty>) {
         let mut h = Hydrator::new();
         let mut type_params: Vec<TypeParam> = Vec::with_capacity(params.len());
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
@@ -534,7 +538,7 @@ impl Compiler {
     /// Intern the current module path as a `str_slices` slice. Memoised so each
     /// module's path occupies one pool entry no matter how many types it
     /// declares.
-    pub(super) fn current_module_slice(&mut self) -> ArenaSlice {
+    pub(super) fn current_module_slice(&mut self) -> ArenaSlice<pool::StrSlices> {
         if let Some(sl) = self.module_path_slice {
             return sl;
         }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{ArenaSlice, InferEngine, Ty, TypeBody, TypeEnv};
+use super::{ArenaSlice, InferEngine, Ty, TypeBody, TypeEnv, pool};
 use crate::ast;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
@@ -19,7 +19,7 @@ pub struct TypeRefHit {
     /// Canonical type name as declared (not the local import alias).
     pub name: String,
     /// Owning module path, interned in `InferEngine.str_slices`.
-    pub module: ArenaSlice,
+    pub module: ArenaSlice<pool::StrSlices>,
     /// Resolved `TypeInfo.id`.
     pub type_id: crate::type_def::TypeId,
 }

@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 
 use indexmap::IndexMap;
 
@@ -81,17 +83,69 @@ pub type StrId = u32;
 /// `Option<String>` but the struct must stay `Copy` and const-constructible.
 pub const NO_STR: StrId = u32::MAX;
 
-/// Half-open `[start, start+len)` into `InferEngine.children`. `len` is `u16`
-/// — no AL type has more than 65 535 type-arguments, parameters, or tuple
-/// elements; keeping `TypeNode` at 12 bytes matters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ArenaSlice {
-    pub start: u32,
-    pub len: u16,
+/// Zero-sized markers naming which `InferEngine` side-pool an [`ArenaSlice`]
+/// indexes. The phantom parameter makes cross-pool indexing (e.g. handing a
+/// `Scheme.quantified` slice to `children_of`) a compile error instead of a
+/// silent out-of-bounds / garbage read.
+pub mod pool {
+    pub enum Children {}
+    pub enum Quants {}
+    pub enum StrSlices {}
+    pub enum TypeParams {}
+    pub enum VariantFields {}
+    pub enum Variants {}
 }
 
-impl ArenaSlice {
-    pub const EMPTY: ArenaSlice = ArenaSlice { start: 0, len: 0 };
+/// Half-open `[start, start+len)` into one of the `InferEngine` side-pools,
+/// tagged by which pool `P` it belongs to (see [`pool`]). `len` is `u16` — no
+/// AL type has more than 65 535 type-arguments, parameters, or tuple elements;
+/// keeping `TypeNode` at 12 bytes matters. `PhantomData` is zero-sized so the
+/// tag costs nothing at runtime.
+pub struct ArenaSlice<P> {
+    pub start: u32,
+    pub len: u16,
+    _pool: PhantomData<P>,
+}
+
+// Manual impls: `#[derive]` would add spurious `P: Trait` bounds, but the
+// phantom marker is uninhabited and never inspected.
+impl<P> Clone for ArenaSlice<P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<P> Copy for ArenaSlice<P> {}
+impl<P> PartialEq for ArenaSlice<P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start && self.len == other.len
+    }
+}
+impl<P> Eq for ArenaSlice<P> {}
+impl<P> Hash for ArenaSlice<P> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.start.hash(state);
+        self.len.hash(state);
+    }
+}
+impl<P> std::fmt::Debug for ArenaSlice<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArenaSlice")
+            .field("start", &self.start)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl<P> ArenaSlice<P> {
+    pub const EMPTY: Self = Self::new(0, 0);
+    #[inline]
+    pub const fn new(start: u32, len: u16) -> Self {
+        Self {
+            start,
+            len,
+            _pool: PhantomData,
+        }
+    }
     #[inline]
     pub fn range(self) -> std::ops::Range<usize> {
         self.start as usize..(self.start as usize + self.len as usize)
@@ -123,12 +177,15 @@ pub enum TypeNode {
     Con {
         id: TypeId,
         name: StrId,
-        args: ArenaSlice,
+        args: ArenaSlice<pool::Children>,
     },
     /// `fn(params...) ret`.
-    Fun { params: ArenaSlice, ret: Ty },
+    Fun {
+        params: ArenaSlice<pool::Children>,
+        ret: Ty,
+    },
     /// `(elems...)`.
-    Tuple { elems: ArenaSlice },
+    Tuple { elems: ArenaSlice<pool::Children> },
 }
 
 // ============================================================================
@@ -188,10 +245,10 @@ pub enum ValueKind {
     /// Top-level `fn` in a module. Generic; instantiated on use.
     ModuleFn,
     /// VM intrinsic registered from Rust (`println`, `net.listen`, ...).
-    /// `op` is the dispatch key for `emit_builtin_op`, decoupled from the
-    /// user-facing name so a builtin can be exposed as `net.read` while
-    /// dispatching on `"tcp_read"`.
-    Builtin { op: StrId },
+    /// `op` is the resolved VM opcode; the `@vm(name)` string was mapped
+    /// through `bytecode::builtin_op` at analysis time so an unknown name
+    /// is a compile error at the annotation, never a codegen fallthrough.
+    Builtin { op: crate::bytecode::Op },
     /// A data constructor. Carries enough to compile pattern-match and
     /// constructor-call without re-consulting the type env.
     Constructor {
@@ -200,7 +257,7 @@ pub enum ValueKind {
         variant_idx: u16,
         arity: u16,
         /// → `InferEngine.str_slices`
-        field_labels: ArenaSlice,
+        field_labels: ArenaSlice<pool::StrSlices>,
     },
 }
 
@@ -225,7 +282,7 @@ pub struct QuantVar {
 #[derive(Debug, Clone, Copy)]
 pub struct Scheme {
     /// Bound variables, in `Bound(i)` index order. → `InferEngine.quants`.
-    pub quantified: ArenaSlice,
+    pub quantified: ArenaSlice<pool::Quants>,
     /// Closed type: contains `Bound` (and `Con`/`Fun`/`Tuple`), never `Var`.
     pub ty: Ty,
     pub kind: ValueKind,
@@ -458,12 +515,12 @@ fn bound_letter(index: u32) -> String {
 }
 
 macro_rules! side_pool {
-    ($field:ident : $T:ty => $push:ident, $of:ident) => {
-        pub fn $push(&mut self, items: &[$T]) -> ArenaSlice {
+    ($field:ident : $T:ty, $M:ty => $push:ident, $of:ident) => {
+        pub fn $push(&mut self, items: &[$T]) -> ArenaSlice<$M> {
             Self::pool_slice(&mut self.$field, items)
         }
         #[inline]
-        pub fn $of(&self, sl: ArenaSlice) -> &[$T] {
+        pub fn $of(&self, sl: ArenaSlice<$M>) -> &[$T] {
             &self.$field[sl.range()]
         }
     };
@@ -478,7 +535,7 @@ impl InferEngine {
     }
 
     #[inline]
-    pub fn children_of(&self, sl: ArenaSlice) -> &[Ty] {
+    pub fn children_of(&self, sl: ArenaSlice<pool::Children>) -> &[Ty] {
         &self.children[sl.range()]
     }
 
@@ -489,13 +546,10 @@ impl InferEngine {
         i
     }
 
-    fn push_children(&mut self, kids: &[Ty]) -> ArenaSlice {
+    fn push_children(&mut self, kids: &[Ty]) -> ArenaSlice<pool::Children> {
         let start = self.children.len() as u32;
         self.children.extend_from_slice(kids);
-        ArenaSlice {
-            start,
-            len: kids.len() as u16,
-        }
+        ArenaSlice::new(start, kids.len() as u16)
     }
 
     pub fn intern(&mut self, s: &str) -> StrId {
@@ -515,39 +569,33 @@ impl InferEngine {
 
     // --- Side-pool primitives ---
 
-    fn pool_slice<T: Copy>(pool: &mut Vec<T>, items: &[T]) -> ArenaSlice {
+    fn pool_slice<T: Copy, P>(pool: &mut Vec<T>, items: &[T]) -> ArenaSlice<P> {
         let start = pool.len() as u32;
         pool.extend_from_slice(items);
-        ArenaSlice {
-            start,
-            len: items.len() as u16,
-        }
+        ArenaSlice::new(start, items.len() as u16)
     }
-    side_pool!(quants: QuantVar => push_quants, quants_of);
-    side_pool!(str_slices: StrId => push_str_ids, str_ids_of);
-    side_pool!(type_params: TypeParam => push_type_params, type_params_of);
-    side_pool!(variant_fields: VariantField => push_variant_fields, variant_fields_of);
-    side_pool!(variants: Variant => push_variants, variants_of);
+    side_pool!(quants: QuantVar, pool::Quants => push_quants, quants_of);
+    side_pool!(str_slices: StrId, pool::StrSlices => push_str_ids, str_ids_of);
+    side_pool!(type_params: TypeParam, pool::TypeParams => push_type_params, type_params_of);
+    side_pool!(variant_fields: VariantField, pool::VariantFields => push_variant_fields, variant_fields_of);
+    side_pool!(variants: Variant, pool::Variants => push_variants, variants_of);
     /// Resolve a `field_labels`/`module` slice (a slice of `StrId`s) to owned
     /// strings. Convenience for diagnostic formatting and codegen header
     /// constants; hot paths should iterate `str_ids_of` directly.
-    pub fn strs_of(&self, sl: ArenaSlice) -> Vec<String> {
+    pub fn strs_of(&self, sl: ArenaSlice<pool::StrSlices>) -> Vec<String> {
         self.str_ids_of(sl)
             .iter()
             .map(|&i| self.str(i).to_string())
             .collect()
     }
     /// Intern each string and push the ids as a contiguous slice.
-    pub fn intern_slice<S: AsRef<str>>(&mut self, ss: &[S]) -> ArenaSlice {
+    pub fn intern_slice<S: AsRef<str>>(&mut self, ss: &[S]) -> ArenaSlice<pool::StrSlices> {
         let start = self.str_slices.len() as u32;
         for s in ss {
             let id = self.intern(s.as_ref());
             self.str_slices.push(id);
         }
-        ArenaSlice {
-            start,
-            len: ss.len() as u16,
-        }
+        ArenaSlice::new(start, ss.len() as u16)
     }
 
     /// Snapshot every append-only pool length so a later `truncate_to` can
@@ -839,7 +887,12 @@ impl InferEngine {
         }
     }
 
-    fn occurs_slice(&mut self, var_id: i32, var_level: i32, sl: ArenaSlice) -> bool {
+    fn occurs_slice(
+        &mut self,
+        var_id: i32,
+        var_level: i32,
+        sl: ArenaSlice<pool::Children>,
+    ) -> bool {
         for i in sl.range() {
             let kid = self.children[i];
             if self.occurs_and_adjust(var_id, var_level, kid) {
@@ -922,8 +975,8 @@ impl InferEngine {
 
     fn unify_children(
         &mut self,
-        a: ArenaSlice,
-        b: ArenaSlice,
+        a: ArenaSlice<pool::Children>,
+        b: ArenaSlice<pool::Children>,
         outer_a: Ty,
         outer_b: Ty,
     ) -> Result<(), UnifyError> {
@@ -1221,7 +1274,7 @@ impl InferEngine {
     /// allocates the result Vec once a child actually changes.
     fn rewrite_children(
         &mut self,
-        sl: ArenaSlice,
+        sl: ArenaSlice<pool::Children>,
         leaf: &mut impl FnMut(&mut Self, TypeNode) -> Option<Ty>,
     ) -> Option<Vec<Ty>> {
         let mut kids: Option<Vec<Ty>> = None;
@@ -1292,7 +1345,12 @@ impl InferEngine {
         }
     }
 
-    fn collect_slice(&mut self, sl: ArenaSlice, ignore_level: bool, quantified: &mut Vec<i32>) {
+    fn collect_slice(
+        &mut self,
+        sl: ArenaSlice<pool::Children>,
+        ignore_level: bool,
+        quantified: &mut Vec<i32>,
+    ) {
         for i in sl.range() {
             let k = self.children[i];
             self.collect_generalizable(k, ignore_level, quantified);
@@ -1350,7 +1408,12 @@ impl InferEngine {
     /// (open form, while the originating engine is alive) or as `Bound(i)`
     /// (closed form, after `close_body` — used by precompiled stdlib types).
     /// Both resolve to `args[i]`.
-    pub fn substitute_type_vars(&mut self, ty: Ty, params: ArenaSlice, args: &[Ty]) -> Ty {
+    pub fn substitute_type_vars(
+        &mut self,
+        ty: Ty,
+        params: ArenaSlice<pool::TypeParams>,
+        args: &[Ty],
+    ) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => e
                 .type_params_of(params)
@@ -1365,7 +1428,7 @@ impl InferEngine {
     /// Rewrite a `TypeInfo` body from open form (`Var(param_id)`) to closed
     /// form (`Bound(idx)`) so it no longer references engine-local var ids.
     /// Idempotent.
-    pub fn close_body(&mut self, ty: Ty, params: ArenaSlice) -> Ty {
+    pub fn close_body(&mut self, ty: Ty, params: ArenaSlice<pool::TypeParams>) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => e
                 .type_params_of(params)

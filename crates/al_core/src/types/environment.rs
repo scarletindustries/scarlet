@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use super::infer::{ArenaSlice, Scheme, StrId, Ty};
+use super::infer::{ArenaSlice, Scheme, StrId, Ty, pool};
 use crate::type_def::TypeId;
 
 /// What a definition denotes, stamped on every [`DefinitionLocation`]. This is
@@ -22,7 +22,7 @@ pub struct DefinitionLocation {
     pub column: i32,
     pub end_col: i32,
     /// → `InferEngine.str_slices`: the owning module's path segments.
-    pub module: ArenaSlice,
+    pub module: ArenaSlice<pool::StrSlices>,
     pub entity: EntityKind,
 }
 
@@ -51,7 +51,7 @@ pub struct VariantField {
 #[derive(Debug, Clone, Copy)]
 pub struct Variant {
     pub name: StrId,
-    pub fields: ArenaSlice,
+    pub fields: ArenaSlice<pool::VariantFields>,
 }
 
 /// The body of a registered type. Separated from the head so that Pass 1 can
@@ -64,7 +64,9 @@ pub enum TypeBody {
     Unresolved,
     /// `type Name(params) { Ctor(label Type, ...) ... }` — `variants` →
     /// `InferEngine.variants`.
-    Custom { variants: ArenaSlice },
+    Custom {
+        variants: ArenaSlice<pool::Variants>,
+    },
     /// `type Name(params) = Target`
     Alias { target: Ty },
     /// `pub type Name` with no body — host-backed.
@@ -82,9 +84,9 @@ pub struct TypeInfo {
     pub id: TypeId,
     pub name: StrId,
     /// → `InferEngine.str_slices`
-    pub module: ArenaSlice,
+    pub module: ArenaSlice<pool::StrSlices>,
     /// → `InferEngine.type_params`
-    pub type_params: ArenaSlice,
+    pub type_params: ArenaSlice<pool::TypeParams>,
     pub body: TypeBody,
 }
 
@@ -96,7 +98,7 @@ impl TypeInfo {
     }
 
     /// Convenience accessor for the variant slice when the body is `Custom`.
-    pub fn variants(&self) -> Option<ArenaSlice> {
+    pub fn variants(&self) -> Option<ArenaSlice<pool::Variants>> {
         match self.body {
             TypeBody::Custom { variants } => Some(variants),
             _ => None,
@@ -319,8 +321,8 @@ impl TypeEnv {
         &mut self,
         name: &str,
         name_id: StrId,
-        module: ArenaSlice,
-        type_params: ArenaSlice,
+        module: ArenaSlice<pool::StrSlices>,
+        type_params: ArenaSlice<pool::TypeParams>,
     ) -> TypeId {
         let id = self.next_type_id;
         self.next_type_id.0 += 1;

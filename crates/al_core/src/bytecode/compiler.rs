@@ -514,12 +514,7 @@ impl Compiler {
         self.static_stdlib = Some(s);
         self.module_table.static_fallback = Some(s);
         self.prelude = s.prelude.clone();
-        self.engine.set_prim_ids(crate::types::PrimIds {
-            int: self.prelude.int.id,
-            float: self.prelude.float.id,
-            string: self.prelude.string.id,
-            array: self.prelude.array.id,
-        });
+        self.engine.set_prim_ids(self.prelude.prim_ids());
         self.env.set_next_type_id(s.next_type_id);
         // The static type arena IS the live arena's prefix — every `Ty`/
         // `ArenaSlice` in stdlib schemes/typeinfos indexes into it. memcpy
@@ -1484,27 +1479,26 @@ impl Compiler {
         // back to this import (and the unused-import reachability rule can see
         // it). The `Import` occ is recorded at `imp.path_span` — the final
         // segment only — so the `import` keyword and earlier path segments
-        // (`al` / `/` in `import al/string`) are not clickable; the alias
-        // definition keeps the full `alias_span` so selective-import dead-code
-        // detection still derives the declaration's extent from it.
+        // (`al` / `/` in `import al/string`) are not clickable. The alias
+        // `Definition` also stores the full declaration span (`decl_span`) and
+        // the imported `ModuleId` (`imports_module`) so unused-import detection
+        // reads both directly instead of recovering them from occurrence
+        // geometry.
         let alias_span = imp.alias.as_ref().map_or(imp.span, |a| a.span);
         let cur_path = self.current_module.clone();
         let cur_mid = self.ref_interner.intern(&cur_path);
+        let imported_mid = self.ref_interner.intern(&imp.path);
         let alias_defid = DefId::new(cur_mid, alias_span, EntityKind::ModuleAlias);
-        self.module_refs.add_definition(Definition::new(
-            alias_defid,
-            qualifier.clone(),
-            None,
-            false,
-        ));
+        let mut alias_def = Definition::new(alias_defid, qualifier.clone(), None, false);
+        alias_def.decl_span = imp.span;
+        alias_def.imports_module = Some(imported_mid);
+        self.module_refs.add_definition(alias_def);
         // The module-name segment points at the *imported* module, so its
         // `Import` occurrence targets a `DefId` owned by that module: goto-def
         // on the `b` in `import a/b` lands on `b`'s file, not the importing
         // alias's own binding (a no-op self-jump). find-references / rename / the
-        // unused-import rule all key off the alias `Definition` above
-        // (`has_real_use` derives the declaration extent from it), so retargeting
-        // only the occurrence changes nothing for them.
-        let imported_mid = self.ref_interner.intern(&imp.path);
+        // unused-import rule all key off the alias `Definition` above, so
+        // retargeting only the occurrence changes nothing for them.
         self.module_refs.add_reference(
             None,
             Reference::new(
