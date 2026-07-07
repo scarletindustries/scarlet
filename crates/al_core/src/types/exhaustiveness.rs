@@ -2,6 +2,7 @@ use crate::ast;
 use crate::type_def::Type;
 use indexmap::IndexSet;
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -124,13 +125,26 @@ fn tuple_ctor_name(n: usize) -> String {
     format!("#tuple{}", n)
 }
 
+/// Element type plus a lazily-built `[[], ::]` constructor table. The table is
+/// filled on the first `get_type_ctors` call and then borrowed on every
+/// subsequent recursion level, so an M-arm match over cons-depth-D array
+/// patterns builds the table O(D) times instead of O(M×D). The `::` tail slot
+/// is a fresh `ArrayType` (same element, empty cell) rather than a
+/// self-reference, so no `Rc` cycle is introduced.
+#[derive(Debug)]
+struct ArrayType {
+    element: RcType,
+    ctors: OnceCell<TypeCtors>,
+}
+
 /// Interned, structurally-shared projection of `type_def::Type` carrying only
 /// what the usefulness matrix needs: the constructor set of a nominal/array/
 /// tuple type. Lowered from a `&Type` once in `UsefulnessMatrix::new`, with
 /// ctor names interned into that checker's `Interner` as part of the
 /// lowering. `Named`/`Tuple` store their fully-built `TypeCtors` behind an
-/// `Rc`, so `get_type_ctors` — called once per recursion level — borrows the
-/// table instead of re-allocating ctor names/labels/types each time.
+/// `Rc`, and `Array` caches its `[[], ::]` table behind a `OnceCell`, so
+/// `get_type_ctors` — called once per recursion level — borrows the table
+/// instead of re-allocating ctor names/labels/types each time.
 ///
 /// `type_def::Type` itself can't hold the `Rc` — it is built with struct
 /// literals in the inferencer — so the interning is local to this module.
@@ -142,7 +156,7 @@ enum RcType {
     /// surrounding context. `get_type_ctors` reports these as `infinite`, so a
     /// wildcard arm is required.
     Infinite,
-    Array(Rc<RcType>),
+    Array(Rc<ArrayType>),
     /// Constructor table in declaration order. Non-empty by construction (an
     /// empty variant table lowers to `Infinite`).
     Named(Rc<TypeCtors>),
@@ -156,7 +170,10 @@ enum RcType {
 fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
     match t {
         Type::Primitive { .. } | Type::Function { .. } | Type::Var { .. } => RcType::Infinite,
-        Type::Array { element } => RcType::Array(Rc::new(rc_type(element, interner))),
+        Type::Array { element } => RcType::Array(Rc::new(ArrayType {
+            element: rc_type(element, interner),
+            ctors: OnceCell::new(),
+        })),
         Type::Tuple { elements } => {
             let types: Vec<RcType> = elements.iter().map(|e| rc_type(e, interner)).collect();
             let ctor = CtorInfo {
@@ -199,7 +216,7 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
             infinite: true,
         }),
         RcType::Named(ctors) | RcType::Tuple(ctors) => Cow::Borrowed(ctors.as_ref()),
-        RcType::Array(element) => Cow::Owned(TypeCtors {
+        RcType::Array(arr) => Cow::Borrowed(arr.ctors.get_or_init(|| TypeCtors {
             ctors: vec![
                 CtorInfo {
                     id: EMPTY_LIST_ID,
@@ -211,11 +228,17 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
                     id: CONS_ID,
                     arity: 2,
                     labels: vec![],
-                    types: vec![(**element).clone(), t.clone()],
+                    types: vec![
+                        arr.element.clone(),
+                        RcType::Array(Rc::new(ArrayType {
+                            element: arr.element.clone(),
+                            ctors: OnceCell::new(),
+                        })),
+                    ],
                 },
             ],
             infinite: false,
-        }),
+        })),
     }
 }
 
@@ -512,7 +535,7 @@ fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
             }
             if *id == CONS_ID {
                 let elem_t: &RcType = match t {
-                    RcType::Array(e) => e,
+                    RcType::Array(arr) => &arr.element,
                     _ => &RcType::Infinite,
                 };
                 let mut heads = Vec::new();
@@ -657,8 +680,8 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
             }
         }
         ast::Pattern::Array { elements, .. } => {
-            let elem_type: &RcType = if let RcType::Array(element) = t {
-                element
+            let elem_type: &RcType = if let RcType::Array(arr) = t {
+                &arr.element
             } else {
                 &RcType::Infinite
             };
