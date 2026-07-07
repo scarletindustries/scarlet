@@ -444,29 +444,28 @@ impl VM {
     }
 
     pub(super) fn process_spawn(&mut self, reds: &mut i32) -> VmResult<()> {
-        let f = self.pop()?;
-        self.spawn_process(f)?;
-        let nil = self.make_nil();
-        self.stack.push(nil);
-        // Spawning deep-copies the closure and dups captured fds;
-        // charge it like I/O so a spawn loop cannot monopolize
-        // the scheduler.
-        *reds -= IO_REDUCTION_COST;
-        Ok(())
+        self.spawn_op(reds, Self::spawn_process)
     }
 
     pub(super) fn process_spawn_local(&mut self, reds: &mut i32) -> VmResult<()> {
-        let f = self.pop()?;
-        self.spawn_local(f)?;
-        let nil = self.make_nil();
-        self.stack.push(nil);
-        *reds -= IO_REDUCTION_COST;
-        Ok(())
+        self.spawn_op(reds, Self::spawn_local)
     }
 
     pub(super) fn process_spawn_on_each(&mut self, reds: &mut i32) -> VmResult<()> {
+        self.spawn_op(reds, Self::spawn_on_each)
+    }
+
+    /// Pop the closure, spawn via `spawn`, push Nil. Spawning deep-copies the
+    /// closure and dups captured fds; charge it like I/O so a spawn loop
+    /// cannot monopolize the scheduler.
+    #[inline]
+    fn spawn_op(
+        &mut self,
+        reds: &mut i32,
+        spawn: fn(&mut Self, Value) -> VmResult<()>,
+    ) -> VmResult<()> {
         let f = self.pop()?;
-        self.spawn_on_each(f)?;
+        spawn(self, f)?;
         let nil = self.make_nil();
         self.stack.push(nil);
         *reds -= IO_REDUCTION_COST;
