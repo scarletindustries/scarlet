@@ -539,7 +539,8 @@ fn is_quote(c: u8) -> bool {
 fn utf8(bytes: Vec<u8>) -> String {
     // Source is UTF-8 by construction; degrade with replacement chars rather
     // than aborting the compiler if a slice ever lands off a char boundary.
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8(bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 #[cfg(test)]
