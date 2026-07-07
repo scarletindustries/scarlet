@@ -138,6 +138,12 @@ pub enum Op {
     /// the `PushSelf; pop; match Closure` dance. operand = argc.
     CallSelf,
     TailCallSelf,
+    /// Known-target call: callee is a top-level fn (`capture_count == 0`) whose
+    /// `func_idx` is a compile-time immediate, so the callee value is never
+    /// pushed and the pop / closure tag check / heap `func_idx()` read / arity
+    /// check that `Call` pays are all elided. b = argc, operand = func_idx.
+    CallKnown,
+    TailCallKnown,
     Ret,
 
     // Superinstructions — fused hot sequences from the peephole pass. Packed
@@ -189,11 +195,21 @@ pub enum Op {
     /// `[..spread, x]`; no stdlib use today.
     Append,
     GetField,
+    /// `[enum] -> payload[operand]` — as `GetField` but elides the `as_enum()`
+    /// tag check and payload bounds check. Emitted when the scrutinee's type
+    /// is a resolved `Con` and the field index is compiler-computed.
+    GetFieldUnchecked,
 
     // Tagged values (enums / custom types)
     MakeEnumPayload,
     MatchEnum,
     UnwrapEnum,
+    /// `[enum] -> ` — computed jump by variant index. `a` = variant count,
+    /// `operand` = base of a contiguous jump table (`a` consecutive `Jump`
+    /// instructions, one per variant). Emitted for an exhaustive match whose
+    /// scrutinee type is a fully resolved enum, replacing the per-arm
+    /// `Dup; PushConst; MatchEnum; JumpIfFalse` ladder with one indexed jump.
+    SwitchTag,
 
     // Closures
     MakeClosure,
@@ -384,6 +400,7 @@ impl Op {
                 | Op::JumpGeIntLC
                 | Op::JumpNeIntLC
                 | Op::IndexOrElse
+                | Op::SwitchTag
         )
     }
 }
