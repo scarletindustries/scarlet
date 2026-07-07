@@ -548,20 +548,27 @@ mod tests {
     use crate::token::Keyword as Kw;
     use Kind::*;
 
+    fn scan(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+        let mut s = new_scanner(src);
+        let toks = s.scan_all();
+        (toks, s.take_diagnostics())
+    }
+
+    #[track_caller]
+    fn assert_tok(toks: &[Token], i: usize, kind: Kind, lit: Option<&str>) {
+        assert_eq!(toks[i].kind, kind, "token {i} kind");
+        assert_eq!(toks[i].literal.as_deref(), lit, "token {i} literal");
+    }
+
     fn kinds(input: &str) -> Vec<Kind> {
-        new_scanner(input.to_string())
-            .scan_all()
-            .into_iter()
-            .map(|t| t.kind)
-            .collect()
+        scan(input).0.into_iter().map(|t| t.kind).collect()
     }
 
     /// Like `kinds`, but asserts the scan produced no diagnostics or Error tokens.
     fn kinds_clean(input: &str) -> Vec<Kind> {
-        let mut s = new_scanner(input.to_string());
-        let kinds: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
-        let diags = s.take_diagnostics();
+        let (toks, diags) = scan(input);
         assert!(diags.is_empty(), "scanner produced diagnostics: {diags:?}");
+        let kinds: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert!(!kinds.contains(&Error), "found error token");
         kinds
     }
@@ -777,28 +784,20 @@ mod tests {
 
     #[test]
     fn test_numbers() {
-        let mut s = new_scanner("123 4.56 1..5".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralNumber);
-        assert_eq!(toks[0].literal.as_deref(), Some("123"));
-        assert_eq!(toks[1].kind, LiteralNumber);
-        assert_eq!(toks[1].literal.as_deref(), Some("4.56"));
+        let (toks, _) = scan("123 4.56 1..5");
+        assert_tok(&toks, 0, LiteralNumber, Some("123"));
+        assert_tok(&toks, 1, LiteralNumber, Some("4.56"));
         // 1..5 → number(1), dotdot, number(5)
-        assert_eq!(toks[2].kind, LiteralNumber);
-        assert_eq!(toks[2].literal.as_deref(), Some("1"));
-        assert_eq!(toks[3].kind, PuncDotdot);
-        assert_eq!(toks[4].kind, LiteralNumber);
-        assert_eq!(toks[4].literal.as_deref(), Some("5"));
+        assert_tok(&toks, 2, LiteralNumber, Some("1"));
+        assert_tok(&toks, 3, PuncDotdot, None);
+        assert_tok(&toks, 4, LiteralNumber, Some("5"));
     }
 
     #[test]
     fn test_string_literals() {
-        let mut s = new_scanner("'hello' 'a\\nb'".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralString);
-        assert_eq!(toks[0].literal.as_deref(), Some("hello"));
-        assert_eq!(toks[1].kind, LiteralString);
-        assert_eq!(toks[1].literal.as_deref(), Some("a\nb"));
+        let (toks, _) = scan("'hello' 'a\\nb'");
+        assert_tok(&toks, 0, LiteralString, Some("hello"));
+        assert_tok(&toks, 1, LiteralString, Some("a\nb"));
     }
 
     #[test]
@@ -820,8 +819,7 @@ mod tests {
 
     #[test]
     fn test_trivia_attached_to_next_token() {
-        let mut s = new_scanner("  // hi\nfoo".to_string());
-        let toks = s.scan_all();
+        let (toks, _) = scan("  // hi\nfoo");
         assert_eq!(toks[0].kind, Identifier);
         let trivia = &toks[0].leading_trivia;
         assert_eq!(trivia.len(), 2);
@@ -831,65 +829,57 @@ mod tests {
 
     #[test]
     fn test_single_ampersand_is_error() {
-        let mut s = new_scanner("&".to_string());
-        let toks = s.scan_all();
+        let (toks, diags) = scan("&");
         assert_eq!(toks[0].kind, Error);
-        assert_eq!(s.take_diagnostics().len(), 1);
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn test_double_quotes_accepted() {
-        let mut s = new_scanner("\"hello\"".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralString);
-        assert_eq!(toks[0].literal.as_deref(), Some("hello"));
-        assert!(s.take_diagnostics().is_empty());
+        let (toks, diags) = scan("\"hello\"");
+        assert_tok(&toks, 0, LiteralString, Some("hello"));
+        assert!(diags.is_empty());
     }
 
     #[test]
     fn test_double_quote_with_single_inside() {
-        let mut s = new_scanner("\"it's fine\"".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralString);
-        assert_eq!(toks[0].literal.as_deref(), Some("it's fine"));
+        let (toks, _) = scan("\"it's fine\"");
+        assert_tok(&toks, 0, LiteralString, Some("it's fine"));
     }
 
     #[test]
     fn test_double_quote_interpolation() {
-        let mut s = new_scanner("\"hi ${x}\"".to_string());
-        let toks = s.scan_all();
+        let (toks, diags) = scan("\"hi ${x}\"");
         assert_eq!(toks[0].kind, InterpStringStart);
-        assert!(s.take_diagnostics().is_empty());
+        assert!(diags.is_empty());
     }
 
     #[test]
     fn test_mixed_quote_nesting() {
-        let mut s = new_scanner("\"outer ${'inner'}\"".to_string());
-        let kinds: Vec<_> = s.scan_all().iter().map(|t| t.kind).collect();
-        assert!(kinds.contains(&InterpStringStart));
-        assert!(kinds.contains(&LiteralString));
-        assert!(kinds.contains(&InterpStringEnd));
-        assert!(s.take_diagnostics().is_empty());
+        let ks = kinds_clean("\"outer ${'inner'}\"");
+        assert!(ks.contains(&InterpStringStart));
+        assert!(ks.contains(&LiteralString));
+        assert!(ks.contains(&InterpStringEnd));
     }
 
     #[test]
     fn test_lone_backtick_no_crash() {
-        let mut s = new_scanner("`".to_string());
-        let ks: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
+        let (toks, diags) = scan("`");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         // completing scan_all without abort/hang IS the proof
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.contains(&Error));
-        assert!(!s.take_diagnostics().is_empty());
+        assert!(!diags.is_empty());
     }
 
     #[test]
     fn test_trailing_backslash_unterminated_string_no_crash() {
-        let mut s = new_scanner("x := \"\\".to_string());
-        let ks: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
+        let (toks, diags) = scan("x := \"\\");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.contains(&Error));
         assert!(
-            s.take_diagnostics()
+            diags
                 .iter()
                 .any(|d| d.message.contains("Unterminated string literal"))
         );
@@ -898,49 +888,36 @@ mod tests {
     #[test]
     fn test_backtick_then_eof_terminates() {
         // bare backtick at true EOF exercises the incr_pos-at-EOF path
-        let ks: Vec<Kind> = new_scanner("a`".to_string())
-            .scan_all()
-            .into_iter()
-            .map(|t| t.kind)
-            .collect();
-        assert_eq!(*ks.last().unwrap(), Eof);
+        assert_eq!(*kinds("a`").last().unwrap(), Eof);
     }
 
     #[test]
     fn test_float_then_range() {
         // Regression: `1.5..10` used to backtrack over the first `.` and lex
         // as [1][.][5][..][10]. It must lex as [1.5][..][10].
-        let mut s = new_scanner("1.5..10".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralNumber);
-        assert_eq!(toks[0].literal.as_deref(), Some("1.5"));
-        assert_eq!(toks[1].kind, PuncDotdot);
-        assert_eq!(toks[2].kind, LiteralNumber);
-        assert_eq!(toks[2].literal.as_deref(), Some("10"));
-        assert_eq!(toks[3].kind, Eof);
+        let (toks, _) = scan("1.5..10");
+        assert_tok(&toks, 0, LiteralNumber, Some("1.5"));
+        assert_tok(&toks, 1, PuncDotdot, None);
+        assert_tok(&toks, 2, LiteralNumber, Some("10"));
+        assert_tok(&toks, 3, Eof, None);
     }
 
     #[test]
     fn test_float_then_method() {
-        let mut s = new_scanner("1.5.foo".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralNumber);
-        assert_eq!(toks[0].literal.as_deref(), Some("1.5"));
-        assert_eq!(toks[1].kind, PuncDot);
-        assert_eq!(toks[2].kind, Identifier);
-        assert_eq!(toks[2].literal.as_deref(), Some("foo"));
-        assert_eq!(toks[3].kind, Eof);
+        let (toks, _) = scan("1.5.foo");
+        assert_tok(&toks, 0, LiteralNumber, Some("1.5"));
+        assert_tok(&toks, 1, PuncDot, None);
+        assert_tok(&toks, 2, Identifier, Some("foo"));
+        assert_tok(&toks, 3, Eof, None);
     }
 
     #[test]
     fn test_bare_dollar_is_not_interpolation() {
         // A `$` not followed by `{` or an identifier start is a literal char,
         // so `has_interpolation` must not classify the string as interpolated.
-        let mut s = new_scanner("'a$5'".to_string());
-        let toks = s.scan_all();
-        assert_eq!(toks[0].kind, LiteralString);
-        assert_eq!(toks[0].literal.as_deref(), Some("a$5"));
-        assert_eq!(toks[1].kind, Eof);
+        let (toks, _) = scan("'a$5'");
+        assert_tok(&toks, 0, LiteralString, Some("a$5"));
+        assert_tok(&toks, 1, Eof, None);
 
         // Bare `$` at end of string.
         assert_eq!(kinds("'a$'"), vec![LiteralString, Eof]);
@@ -954,11 +931,10 @@ mod tests {
     fn test_unknown_escape_sequence_diagnostic() {
         // `\q` is not a recognized escape; the scanner reports it but recovers,
         // still emitting a well-formed string token for the rest of the input.
-        let mut s = new_scanner("x = \"a\\qb\"".to_string());
-        let ks: Vec<Kind> = s.scan_all().into_iter().map(|t| t.kind).collect();
+        let (toks, diags) = scan("x = \"a\\qb\"");
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.contains(&LiteralString));
-        let diags = s.take_diagnostics();
         assert!(
             diags
                 .iter()
