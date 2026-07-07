@@ -1,7 +1,7 @@
 import al/net/address.{SocketAddress}
 import al/net/error.{NetError, UnexpectedEof}
 import al/binary
-import al/time
+import al/time.{Instant}
 
 pub type Connection
 
@@ -10,14 +10,24 @@ pub type Socket {
 	peer SocketAddress
 }
 
-// Read whatever data is available, up to `max` bytes. Parks the calling
-// process until at least one byte arrives; a zero-byte result means the
-// peer closed the connection.
-@vm(socket__read)
-pub fn read(c Socket, max Int) Result(Binary, NetError)
+// The outcome of a socket read that did not error at the OS level: either the
+// bytes that arrived (always non-empty), or a clean peer close. Encoding
+// close as its own constructor — rather than the POSIX `read() == 0` sentinel
+// smuggled inside `Ok(Binary)` — makes "forgot to check for close" an
+// exhaustiveness error, not a silent infinite loop on a dead socket.
+pub type Read {
+	Data(bytes Binary)
+	Closed
+}
 
-// Read exactly `count` bytes, parking until they have all arrived. Errs if the
-// peer closes the connection before `count` bytes have been read.
+// Read whatever data is available, up to `max` bytes. Parks the calling
+// process until at least one byte arrives or the peer closes the connection.
+@vm(socket__read)
+pub fn read(c Socket, max Int) Result(Read, NetError)
+
+// Read exactly `count` bytes, parking until they have all arrived. Errs with
+// UnexpectedEof if the peer closes the connection before `count` bytes have
+// been read.
 pub fn read_exact(c Socket, count Int) Result(Binary, NetError) {
 	read_exact_loop(c, count, <<>>)
 }
@@ -26,11 +36,9 @@ fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError)
 	match remaining {
 		0 -> Ok(acc)
 		else -> match read(c, remaining) {
-			Ok(data) -> match binary.byte_size(data) {
-				0 -> Err(UnexpectedEof)
-				else ->
-					read_exact_loop(c, remaining - binary.byte_size(data), binary.append(acc, data))
-			}
+			Ok(Data(b)) ->
+				read_exact_loop(c, remaining - binary.byte_size(b), binary.append(acc, b))
+			Ok(Closed) -> Err(UnexpectedEof)
 			Err(e) -> Err(e)
 		}
 	}
@@ -39,19 +47,22 @@ fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError)
 // Read whatever data is available, up to `max` bytes, but wait no longer than
 // `timeout_ms` milliseconds for data to arrive. The deadline is captured once,
 // here in AL, as an absolute monotonic timestamp, so an internal re-run on a
-// spurious wakeup never resets the clock. Returns Ok(data) once bytes arrive,
-// Ok(<<>>) if the peer closes the connection, or Err(TimedOut) once the
-// deadline passes with no data.
-pub fn read_within(c Socket, max Int, timeout_ms Int) Result(Binary, NetError) {
-	read_until(c, max, time.monotonic() + timeout_ms)
+// spurious wakeup never resets the clock. Returns Ok(Data(b)) once bytes
+// arrive, Ok(Closed) if the peer closes the connection, or Err(TimedOut) once
+// the deadline passes with no data.
+pub fn read_within(c Socket, max Int, timeout_ms Int) Result(Read, NetError) {
+	read_until(c, max, time.add_ms(time.monotonic(), timeout_ms))
 }
 
-// Read up to `max` bytes, parking until data arrives or the absolute monotonic
-// deadline `deadline_ms` (compare against `time.monotonic`) is reached, at which
-// point it errs with TimedOut. An Ok(<<>>) result signals a peer close,
-// matching `read`.
+// Read up to `max` bytes, parking until data arrives or the absolute Instant
+// `deadline` (from `time.monotonic()`) is reached, at which point it errs with
+// TimedOut.
+pub fn read_until(c Socket, max Int, deadline Instant) Result(Read, NetError) {
+	read_until_ms(c, max, time.to_deadline_ms(deadline))
+}
+
 @vm(socket__read_until)
-fn read_until(c Socket, max Int, deadline_ms Int) Result(Binary, NetError)
+fn read_until_ms(c Socket, max Int, deadline_ms Int) Result(Read, NetError)
 
 @vm(socket__write)
 pub fn write(c Socket, data Binary) Result(Nil, NetError)

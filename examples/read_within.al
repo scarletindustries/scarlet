@@ -6,21 +6,18 @@
 // Run it, then in another terminal: nc 127.0.0.1 7788
 
 import al/net
-import al/net/socket.{Socket}
-import al/binary
+import al/net/socket.{Socket, Data, Closed}
 import al/time
 import al/experiments/scheduler
 
 // Echo bytes until the client closes or stays idle past the 30s deadline.
 fn echo(sock Socket) Nil {
 	match socket.read_within(sock, 65536, 30000) {
-		Ok(data) -> if binary.byte_size(data) == 0 {
-			// Zero bytes means the client closed the connection.
-			socket.close(sock) or Nil
-		} else {
+		Ok(Data(data)) -> {
 			socket.write(sock, data) or Nil
 			echo(sock)
 		}
+		Ok(Closed) -> socket.close(sock) or Nil
 		// An Err here is the idle timeout (or a dead socket): drop the client.
 		Err(_) -> socket.close(sock) or Nil
 	}
@@ -32,7 +29,7 @@ fn serve(server) {
 			start = time.monotonic()
 			scheduler.spawn(fn() {
 				echo(sock)
-				println('session lasted ${time.monotonic() - start}ms')
+				println('session lasted ${time.since_ms(time.monotonic(), start)}ms')
 			})
 		}
 		Err(e) -> println('accept failed: ${e}')
