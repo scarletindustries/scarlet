@@ -57,11 +57,7 @@ pub fn module_uri(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::ModulePath;
-
-    fn mp(parts: &[&str]) -> ModulePath {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
+    use crate::reference::mp;
 
     #[test]
     fn path_to_uri_percent_encodes() {

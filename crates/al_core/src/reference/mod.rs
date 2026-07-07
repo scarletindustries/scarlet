@@ -832,18 +832,31 @@ impl ReferenceGraph {
 // ============================================================================
 
 #[cfg(test)]
+fn mp(parts: &[&str]) -> ModulePath {
+    parts.iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(test)]
+fn def(module: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId {
+    DefId::new(module, crate::span::range_span(line, c0, c1), kind)
+}
+
+#[cfg(test)]
+fn add_ref(
+    mr: &mut ModuleReferences,
+    owner: Option<DefId>,
+    (line, c0, c1): (i32, i32, i32),
+    kind: ReferenceKind,
+    target: DefId,
+) {
+    mr.add_reference(owner, Reference::new(crate::span::range_span(line, c0, c1), kind, target));
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::diagnostic::Severity;
     use crate::span::{point_span, range_span};
-
-    fn mp(parts: &[&str]) -> ModulePath {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn def(module: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId {
-        DefId::new(module, range_span(line, c0, c1), kind)
-    }
 
     fn main_graph() -> (ReferenceGraph, ModuleId, ModuleReferences) {
         let mut g = ReferenceGraph::new();

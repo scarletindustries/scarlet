@@ -271,17 +271,9 @@ impl ReferenceGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::{Definition, ModuleReferences, Reference};
+    use crate::reference::{Definition, ModuleReferences, Reference, def, mp};
     use crate::span::range_span;
     use std::collections::HashMap;
-
-    fn mp(parts: &[&str]) -> ModulePath {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    fn def(m: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId {
-        DefId::new(m, range_span(line, c0, c1), kind)
-    }
 
     /// lib defines `helper` (pub); app imports it and uses it twice plus its
     /// own private `run`. Returns the graph and the key ids.
