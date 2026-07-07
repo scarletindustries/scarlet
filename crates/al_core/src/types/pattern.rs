@@ -192,15 +192,17 @@ mod tests {
     use super::super::infer::new_engine;
     use super::*;
 
+    fn setup() -> (InferEngine, Ty, Span, PatternBindings) {
+        let mut e = new_engine();
+        let int_ty = e.icon_int();
+        (e, int_ty, Span::DUMMY, PatternBindings::new())
+    }
+
     // `_` is never recorded as a binding (it can appear repeatedly), and a
     // freshly-defaulted accumulator starts empty.
     #[test]
     fn wildcard_is_not_bound_and_default_is_empty() {
-        let mut e = new_engine();
-        let int_ty = e.icon_int();
-        let sp = Span::DUMMY;
-
-        let mut b = PatternBindings::default();
+        let (mut e, int_ty, sp, mut b) = setup();
         assert!(b.initial.is_empty());
 
         assert!(b.bind("_", int_ty, sp, &mut e));
@@ -219,11 +221,7 @@ mod tests {
     // alternative is an error.
     #[test]
     fn or_alternative_rebinds_canonical_name_and_rejects_duplicates() {
-        let mut e = new_engine();
-        let int_ty = e.icon_int();
-        let sp = Span::DUMMY;
-
-        let mut b = PatternBindings::new();
+        let (mut e, int_ty, sp, mut b) = setup();
         b.enter_or();
         // First alternative establishes the canonical binding `x`.
         assert!(b.bind("x", int_ty, sp, &mut e));
@@ -249,12 +247,8 @@ mod tests {
     // *unifiable* types; a conflicting type is rejected at the bind site.
     #[test]
     fn or_alternative_type_conflict_rejected() {
-        let mut e = new_engine();
-        let int_ty = e.icon_int();
+        let (mut e, int_ty, sp, mut b) = setup();
         let str_ty = e.icon_string();
-        let sp = Span::DUMMY;
-
-        let mut b = PatternBindings::new();
         b.enter_or();
         assert!(b.bind("x", int_ty, sp, &mut e)); // canonical x : Int
 
@@ -276,11 +270,7 @@ mod tests {
     // set and no spurious diagnostic is produced.
     #[test]
     fn nested_or_inside_non_first_alternative() {
-        let mut e = new_engine();
-        let int_ty = e.icon_int();
-        let sp = Span::DUMMY;
-
-        let mut b = PatternBindings::new();
+        let (mut e, int_ty, sp, mut b) = setup();
         // Outer: A(a) | B( C(a) | D(a) )
         b.enter_or();
         assert!(b.bind("a", int_ty, sp, &mut e)); // A(a)
@@ -306,11 +296,7 @@ mod tests {
     // is still a duplicate if the nested or binds it again.
     #[test]
     fn nested_or_rejects_duplicate_from_enclosing_alt() {
-        let mut e = new_engine();
-        let int_ty = e.icon_int();
-        let sp = Span::DUMMY;
-
-        let mut b = PatternBindings::new();
+        let (mut e, int_ty, sp, mut b) = setup();
         // Outer: A(a) | B(a, C(a) | D(a)) — B's first arg and the inner or both bind `a`.
         b.enter_or();
         assert!(b.bind("a", int_ty, sp, &mut e));
