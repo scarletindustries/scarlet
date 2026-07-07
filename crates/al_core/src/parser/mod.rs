@@ -105,6 +105,24 @@ impl Parser {
         }
     }
 
+    // Runs `f` with `ctx` on the context stack, popping unconditionally on
+    // both the Ok and Err paths so a `?` inside `f` cannot leave a stale
+    // context behind (which would misdirect every later `synchronize()`).
+    // Use this for constructs that propagate errors via `?`; constructs that
+    // recover in place (block/array/match) still use push/pop directly
+    // because their `synchronize()` may consume the closer and pop early.
+    fn with_context<T>(
+        &mut self,
+        ctx: ParseContext,
+        f: impl FnOnce(&mut Self) -> PResult<T>,
+    ) -> PResult<T> {
+        self.context_stack.push(ctx);
+        let r = f(self);
+        debug_assert_eq!(self.context_stack.last(), Some(&ctx));
+        self.context_stack.pop();
+        r
+    }
+
     fn current_context(&self) -> ParseContext {
         *self.context_stack.last().unwrap_or(&ParseContext::TopLevel)
     }
@@ -152,6 +170,7 @@ impl Parser {
 
     fn synchronize(&mut self) {
         let ctx = self.current_context();
+        self.sync_iterations = 0;
 
         while self.kind() != Kind::Eof {
             self.sync_iterations += 1;
@@ -571,6 +590,10 @@ impl Parser {
         ],
     ];
 
+    // Range is spliced into the precedence chain between PRECEDENCE[RANGE_LEVEL]
+    // (comparison) and PRECEDENCE[RANGE_LEVEL + 1] (additive); see parse_range.
+    const RANGE_LEVEL: usize = 3;
+
     fn parse_binary_expression(&mut self) -> PResult<ast::Expression> {
         self.parse_level(0)
     }
@@ -580,7 +603,7 @@ impl Parser {
             return self.parse_unary_expression();
         }
         let next = |p: &mut Self| {
-            if lvl == 3 {
+            if lvl == Self::RANGE_LEVEL {
                 p.parse_range()
             } else {
                 p.parse_level(lvl + 1)
@@ -614,12 +637,12 @@ impl Parser {
     // `(-5)..(5)` (unary binds tighter via additive→multiplicative→unary) and
     // `a+b..c+d` parses as `(a+b)..(c+d)`.
     fn parse_range(&mut self) -> PResult<ast::Expression> {
-        let left = self.parse_level(4)?;
+        let left = self.parse_level(Self::RANGE_LEVEL + 1)?;
 
         if self.kind() == Kind::PuncDotdot {
             let start = left.span();
             self.eat(Kind::PuncDotdot)?;
-            let end = self.parse_level(4)?;
+            let end = self.parse_level(Self::RANGE_LEVEL + 1)?;
             let span = self.span_from(start);
             return Ok(ast::Expression::RangeExpression(ast::RangeExpression {
                 start: Box::new(left),
@@ -1512,12 +1535,11 @@ impl Parser {
     }
 
     fn parse_parameters(&mut self) -> PResult<Vec<ast::FunctionParameter>> {
-        self.push_context(ParseContext::FunctionParams);
-        let params = self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
-            p.parse_parameter()
-        })?;
-        self.pop_context();
-        Ok(params)
+        self.with_context(ParseContext::FunctionParams, |p| {
+            p.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
+                p.parse_parameter()
+            })
+        })
     }
 
     fn parse_parameter(&mut self) -> PResult<ast::FunctionParameter> {
@@ -1643,33 +1665,30 @@ impl Parser {
             ast::TypeBody::External
         } else {
             self.eat(Kind::PuncOpenBrace)?;
-            self.push_context(ParseContext::TypeDef);
-            let variants = if self.kind() == Kind::Identifier
-                && self
-                    .cur()
-                    .literal
-                    .as_deref()
-                    .is_some_and(|s| !is_type_name(s))
-            {
-                // Single-constructor shorthand: `type T { field Type ... }`
-                // desugars to `type T { T(field Type ...) }`. Fields are
-                // separated by newlines/spaces; commas are rejected.
-                let fields = self
-                    .parse_separated_list(Kind::PuncCloseBrace, |p| p.parse_constructor_field())?;
-                vec![ast::Constructor {
-                    doc: None,
-                    identifier: identifier.clone(),
-                    fields,
-                    span: identifier.span,
-                }]
-            } else {
-                let mut variants = Vec::new();
-                while self.kind() != Kind::PuncCloseBrace && self.kind() != Kind::Eof {
-                    variants.push(self.parse_constructor()?);
+            let variants = self.with_context(ParseContext::TypeDef, |p| {
+                if p.kind() == Kind::Identifier
+                    && p.cur().literal.as_deref().is_some_and(|s| !is_type_name(s))
+                {
+                    // Single-constructor shorthand: `type T { field Type ... }`
+                    // desugars to `type T { T(field Type ...) }`. Fields are
+                    // separated by newlines/spaces; commas are rejected.
+                    let fields = p.parse_separated_list(Kind::PuncCloseBrace, |q| {
+                        q.parse_constructor_field()
+                    })?;
+                    Ok(vec![ast::Constructor {
+                        doc: None,
+                        identifier: identifier.clone(),
+                        fields,
+                        span: identifier.span,
+                    }])
+                } else {
+                    let mut variants = Vec::new();
+                    while p.kind() != Kind::PuncCloseBrace && p.kind() != Kind::Eof {
+                        variants.push(p.parse_constructor()?);
+                    }
+                    Ok(variants)
                 }
-                variants
-            };
-            self.pop_context();
+            })?;
             self.eat(Kind::PuncCloseBrace)?;
             if variants.is_empty() {
                 return Err("Type definition must have at least one constructor".to_string());
@@ -1718,12 +1737,7 @@ impl Parser {
         let start = self.current_span();
 
         // Detect a bare type with no label and produce the spec'd error.
-        let looks_like_type_start = match self.kind() {
-            Kind::Identifier => self.cur().literal.as_deref().is_some_and(is_type_name),
-            Kind::KwFunction | Kind::PuncOpenParen => true,
-            _ => false,
-        };
-        if looks_like_type_start {
+        if self.is_type_start() {
             return Err("constructor fields must be labeled: write 'label Type'".to_string());
         }
 
@@ -1940,9 +1954,12 @@ impl Parser {
 
         let mut path: Vec<String> = Vec::new();
 
-        // Leading `.` / `..` segments for relative imports.
+        // Leading `.` / `..` segments for relative imports. The literal strings
+        // are the resolver's contract (module::resolve matches on "." / "..");
+        // do not derive them from Kind's Display.
         while matches!(self.kind(), Kind::PuncDot | Kind::PuncDotdot) {
-            path.push(self.kind().to_string());
+            let seg = if self.kind() == Kind::PuncDot { "." } else { ".." };
+            path.push(seg.to_string());
             self.advance();
             if self.kind() != Kind::PuncDiv {
                 return Err("Expected `/` after relative import segment".to_string());
@@ -2051,10 +2068,8 @@ impl Parser {
             match self.kind() {
                 Kind::InterpStringPart => {
                     let part_span = self.current_span();
-                    let value = self
-                        .eat(Kind::InterpStringPart)?
-                        .literal
-                        .unwrap_or_default();
+                    let value =
+                        self.eat_token_literal(Kind::InterpStringPart, "Expected string part")?;
                     parts.push(ast::InterpPart::Literal(ast::StringLiteral {
                         value,
                         span: part_span,
@@ -2071,13 +2086,9 @@ impl Parser {
                     self.eat(Kind::PuncCloseBrace)?;
                 }
                 Kind::Identifier => {
-                    let ident_span = self.current_span();
-                    let name = self.eat(Kind::Identifier)?.literal.unwrap_or_default();
+                    let ident = self.eat_identifier("Expected identifier")?;
                     parts.push(ast::InterpPart::Expr(Box::new(
-                        ast::Expression::Identifier(ast::Identifier {
-                            name,
-                            span: ident_span,
-                        }),
+                        ast::Expression::Identifier(ident),
                     )));
                 }
                 _ => {
@@ -2372,7 +2383,8 @@ mod tests {
     fn test_array_and_tuple() {
         assert_no_errors("[1, 2, 3]");
         assert_no_errors("(1, 2, 3)");
-        assert_no_errors("[..xs, 1, ..]");
+        assert_no_errors("[..xs, 1, ..ys]");
+        assert_has_error("[..xs, 1, ..]", "Expected expression after `..`");
         assert_has_error("()", "tuples need 2+ elements");
         assert_has_error("(1)", "single-element parens");
     }

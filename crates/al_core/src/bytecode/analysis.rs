@@ -45,9 +45,10 @@ use crate::ast;
 use crate::module::{self, ExportedValue, ModuleInterface};
 use crate::reference::DefId;
 use crate::span::Span;
+use crate::type_def::TypeId;
 use crate::types::{
-    ArenaSlice, EntityKind, Hydrator, Scheme, StrId, Ty, TypeBody, TypeInfo, TypeNode, TypeParam,
-    ValueKind, Variant, VariantField,
+    AddedTypeVar, ArenaSlice, EntityKind, Hydrator, NO_STR, Scheme, StrId, Ty, TypeBody, TypeInfo,
+    TypeParam, ValueKind, Variant, VariantField,
 };
 
 // ---------------------------------------------------------------------------
@@ -134,10 +135,13 @@ impl<'a> Prepared<'a> {
 /// the same name collapsed those maps to one entry while `type_decls` kept
 /// both — the exact desync class as the fn/`Prepared` bug. Carrying this in a
 /// `Vec` built one-to-one with `type_decls` makes the desync unrepresentable:
-/// Pass 3.5 reads it positionally, never by name. `hydrator` is `None` for
-/// aliases (registered in Pass 2, not Pass 1).
+/// Pass 3.5 reads it positionally, never by name. Aliases push a placeholder
+/// entry (`TypeId::NONE`, `NO_STR`, empty hydrator) that is dropped unread by
+/// `register_constructors`' non-`Variants` early return.
 struct PreparedType {
-    hydrator: Option<Hydrator>,
+    type_id: TypeId,
+    name_id: StrId,
+    hydrator: Hydrator,
     param_tys: Vec<Ty>,
 }
 
@@ -190,10 +194,9 @@ impl Compiler {
         for node in &block.body {
             match node {
                 ast::Node::Statement(stmt) => match stmt.as_ref() {
-                    ast::Statement::Declaration(d) | ast::Statement::PublicDeclaration(d) => {
-                        let is_public =
-                            matches!(stmt.as_ref(), ast::Statement::PublicDeclaration(_));
-                        match d.as_ref() {
+                    ast::Statement::Declaration { decl, public } => {
+                        let is_public = *public;
+                        match decl.as_ref() {
                             ast::Declaration::Type(td) => {
                                 self.validate_attributes(
                                     &td.attributes,
@@ -257,7 +260,9 @@ impl Compiler {
         for (td, is_public) in &type_decls {
             if matches!(td.body, ast::TypeBody::Alias(_)) {
                 prepared_types.push(PreparedType {
-                    hydrator: None,
+                    type_id: TypeId::NONE,
+                    name_id: NO_STR,
+                    hydrator: Hydrator::new(),
                     param_tys: Vec::new(),
                 });
                 continue;
@@ -265,15 +270,18 @@ impl Compiler {
             let (h, type_params, param_tys) = self.hydrate_type_params(&td.type_params);
             let name_id = self.engine.intern(&td.identifier.name);
             let module = self.current_module_slice();
-            self.env
-                .register_type_head(&td.identifier.name, name_id, module, type_params);
+            let type_id =
+                self.env
+                    .register_type_head(&td.identifier.name, name_id, module, type_params);
             self.store_and_emit_def(&td.identifier, &td.doc, EntityKind::Type, *is_public);
             if matches!(td.body, ast::TypeBody::External) {
                 self.env
                     .set_type_body(&td.identifier.name, TypeBody::External);
             }
             prepared_types.push(PreparedType {
-                hydrator: Some(h),
+                type_id,
+                name_id,
+                hydrator: h,
                 param_tys,
             });
         }
@@ -359,7 +367,7 @@ impl Compiler {
         // Pass 3.5 — hydrate constructor bodies; define ctor values.
         // -------------------------------------------------------------------
         for ((td, is_public), pt) in type_decls.iter().zip(prepared_types) {
-            self.register_constructors(td, *is_public, pt.hydrator, pt.param_tys, &mut iface);
+            self.register_constructors(td, *is_public, pt, &mut iface);
         }
 
         // -------------------------------------------------------------------
@@ -508,26 +516,15 @@ impl Compiler {
         let mut type_params: Vec<TypeParam> = Vec::with_capacity(params.len());
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
         for tp in params {
-            let ity = match h.add_type_variable(&tp.name, &mut self.engine) {
-                Ok(t) => t,
-                Err(t) => {
-                    self.error(format!("Duplicate type parameter '{}'", tp.name), tp.span);
-                    t
-                }
-            };
-            // `add_type_variable` always yields a `Var`; record its id for
-            // later substitution.
-            let id = match self.engine.node(ity) {
-                TypeNode::Var(id) => id,
-                // Not user-reachable: invariant of `add_type_variable`, not input-derived.
-                #[allow(clippy::unreachable)]
-                _ => unreachable!("add_type_variable returns Var"),
-            };
+            let AddedTypeVar { ty, id, duplicate } = h.add_type_variable(&tp.name, &mut self.engine);
+            if duplicate {
+                self.error(format!("Duplicate type parameter '{}'", tp.name), tp.span);
+            }
             type_params.push(TypeParam {
                 name: self.engine.intern(&tp.name),
                 id,
             });
-            param_tys.push(ity);
+            param_tys.push(ty);
         }
         (h, self.engine.push_type_params(&type_params), param_tys)
     }
@@ -672,8 +669,7 @@ impl Compiler {
         &mut self,
         td: &ast::TypeDeclaration,
         is_public: bool,
-        hydrator: Option<Hydrator>,
-        param_generics: Vec<Ty>,
+        pt: PreparedType,
         iface: &mut Option<&mut ModuleInterface>,
     ) {
         let ast::TypeBody::Variants { ctors, opaque } = &td.body else {
@@ -684,22 +680,15 @@ impl Compiler {
         };
         let ctors_public = is_public && !*opaque;
 
-        let mut h = hydrator.unwrap_or_default();
+        let PreparedType {
+            type_id,
+            name_id: type_name_id,
+            hydrator: mut h,
+            param_tys: param_generics,
+        } = pt;
         h.disallow_new_type_variables();
 
-        let type_name = td.identifier.name.clone();
-        let type_name_id = self.engine.intern(&type_name);
-        let type_id = match self.env.lookup_type_info(&type_name) {
-            Some(ti) => ti.id,
-            None => {
-                self.error(
-                    format!("Internal error: type '{}' head not registered", type_name),
-                    td.identifier.span,
-                );
-                return;
-            }
-        };
-
+        let type_name = &td.identifier.name;
         let m = self.current_module_slice();
         let mut variants: Vec<Variant> = Vec::with_capacity(ctors.len());
 
@@ -740,7 +729,7 @@ impl Compiler {
                 let field_labels = c.engine.push_str_ids(&label_ids);
 
                 // Build the constructor's type scheme.
-                let result_ty = c.engine.mk_con(type_id, &type_name, &param_generics);
+                let result_ty = c.engine.mk_con_id(type_id, type_name_id, &param_generics);
                 let ctor_ty = if field_itys.is_empty() {
                     result_ty
                 } else {
@@ -1028,7 +1017,9 @@ impl<'a, 'g> RefWalker<'a, 'g> {
 
             E::InterpolatedString(is) => {
                 for p in &is.parts {
-                    self.expr(p);
+                    if let ast::InterpPart::Expr(e) = p {
+                        self.expr(e);
+                    }
                 }
             }
 
@@ -1036,11 +1027,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                 for el in &a.elements {
                     match el {
                         ast::ArrayElement::Expression(e) => self.expr(e),
-                        ast::ArrayElement::SpreadElement(s) => {
-                            if let Some(inner) = &s.expression {
-                                self.expr(inner);
-                            }
-                        }
+                        ast::ArrayElement::SpreadElement(s) => self.expr(&s.expression),
                     }
                 }
             }
@@ -1147,32 +1134,30 @@ impl<'a, 'g> RefWalker<'a, 'g> {
                         self.pattern(p);
                     }
                 }
-                ast::Statement::Declaration(d) | ast::Statement::PublicDeclaration(d) => {
-                    match d.as_ref() {
-                        ast::Declaration::Const(cb) => {
-                            self.expr(&cb.init);
-                            self.define(&cb.identifier.name);
-                        }
-                        ast::Declaration::Function(fd) => {
-                            self.define(&fd.identifier.name);
-                            self.scoped(|w| {
-                                for p in &fd.params {
-                                    w.define(&p.identifier.name);
-                                }
-                                if let ast::FnBody::Block(body) = &fd.body {
-                                    w.expr(body);
-                                }
-                            });
-                        }
-                        ast::Declaration::Type(_) => {}
+                ast::Statement::Declaration { decl, .. } => match decl.as_ref() {
+                    ast::Declaration::Const(cb) => {
+                        self.expr(&cb.init);
+                        self.define(&cb.identifier.name);
                     }
-                }
+                    ast::Declaration::Function(fd) => {
+                        self.define(&fd.identifier.name);
+                        self.scoped(|w| {
+                            for p in &fd.params {
+                                w.define(&p.identifier.name);
+                            }
+                            if let ast::FnBody::Block(body) = &fd.body {
+                                w.expr(body);
+                            }
+                        });
+                    }
+                    ast::Declaration::Type(_) => {}
+                },
                 ast::Statement::TypedDiscard(td) => {
                     self.expr(&td.init);
                 }
                 ast::Statement::CtorDestructuringBinding(cdb) => {
                     self.expr(&cdb.init);
-                    self.pattern(&cdb.pattern);
+                    self.pattern(&cdb.as_pattern());
                 }
                 ast::Statement::ImportDeclaration(_) => {}
             },
