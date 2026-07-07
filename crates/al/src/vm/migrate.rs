@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 
-use al_core::bytecode::{SocketValue, Value, ValueView};
+use al_core::bytecode::{MapBacking, SocketValue, Value, ValueView, hamt};
 
 use super::{Process, VM};
 
@@ -80,6 +80,15 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
                 for_each_socket(p, visit);
             }
         }
+        ValueView::Map(m) => match m.backing() {
+            MapBacking::Env => {}
+            MapBacking::Hamt => {
+                for (k, val) in hamt::collect_entries(v) {
+                    for_each_socket(&k, visit);
+                    for_each_socket(&val, visit);
+                }
+            }
+        },
         ValueView::Socket(s) => visit(s),
         // Leaves that cannot reference a socket: immediates and heap
         // values whose payload holds no `Value` words. Listed
@@ -92,10 +101,7 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
         | ValueView::Nil
         | ValueView::Str(_)
         | ValueView::Range(..)
-        | ValueView::Binary(_)
-        // A Map's only backing (Env) holds no values, let alone sockets. A
-        // future socket-bearing backing must re-home its fds here.
-        | ValueView::Map(_) => {}
+        | ValueView::Binary(_) => {}
     }
 }
 
@@ -368,6 +374,15 @@ mod tests {
                     distinct_heap_nodes(p, out);
                 }
             }
+            ValueView::Map(m) => match m.backing() {
+                MapBacking::Env => {}
+                MapBacking::Hamt => {
+                    for (k, val) in hamt::collect_entries(v) {
+                        distinct_heap_nodes(&k, out);
+                        distinct_heap_nodes(&val, out);
+                    }
+                }
+            },
             _ => {}
         }
     }
