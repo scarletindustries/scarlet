@@ -38,3 +38,4 @@ pub use heap::ProcHeap;
 pub use indexmap::IndexMap;
 pub use precompile::{PrecompileOutput, precompile_stdlib};
 pub use static_ir::{StaticStdlib, VariantTemplate};
+pub use type_def::TypeId;

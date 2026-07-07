@@ -25,7 +25,7 @@ pub struct PrecompileOutput {
     pub blob: PrecompiledBlob,
     pub prelude: PreludeBindings,
     pub reserved: HashSet<String>,
-    pub next_type_id: i32,
+    pub next_type_id: crate::type_def::TypeId,
 }
 
 /// The variable-size data: module interfaces, the global type table, and the
@@ -248,7 +248,7 @@ mod tests {
 
         // Type ids handed to the first user module must sit past every stdlib
         // id, so next_type_id is strictly positive.
-        assert!(out.next_type_id > 0, "next_type_id should be positive");
+        assert!(out.next_type_id.0 > 0, "next_type_id should be positive");
 
         // The prelude reserves its own constructor/type names so a user can't
         // shadow them.

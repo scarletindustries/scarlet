@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 
 use crate::bytecode::Watermark;
 use crate::reference::ModuleReferences;
+use crate::type_def::TypeId;
 use crate::types::{Scheme, TypeInfo};
 
 pub mod stdlib;
@@ -256,10 +257,10 @@ pub struct ModuleTable {
     /// Per-module type-id range starts. Assigned on a module's first compile
     /// and *retained across cache eviction* so a recompile hands out the same
     /// nominal type ids. Only cleared by `reset_id_bases` (overflow fallback).
-    id_bases: HashMap<String, i32>,
+    id_bases: HashMap<String, TypeId>,
     /// Lowest type id not covered by any allocated `id_base` range; the next
     /// fresh `id_base_for` rounds up from `max(floor, id_high_water)`.
-    id_high_water: i32,
+    id_high_water: TypeId,
     /// Set when a recompiled module allocated past its reserved range and may
     /// have collided with a later module's ids. `IncrementalSession` reacts by
     /// performing a full invalidate on the next `check`.
@@ -412,13 +413,13 @@ impl ModuleTable {
     /// unallocated space and `note_id_usage` simply pushes `id_high_water`
     /// past it; a reused-range overflow may collide with a sibling's already-
     /// assigned block and so raises `id_range_overflow`.
-    pub fn id_base_for(&mut self, key: &str, floor: i32) -> (i32, bool) {
+    pub fn id_base_for(&mut self, key: &str, floor: TypeId) -> (TypeId, bool) {
         if let Some(&b) = self.id_bases.get(key) {
             return (b, true);
         }
-        let base = align_to_range(floor.max(self.id_high_water));
+        let base = TypeId(align_to_range(floor.0.max(self.id_high_water.0)));
         self.id_bases.insert(key.to_string(), base);
-        self.id_high_water = base + MODULE_TYPE_ID_RANGE;
+        self.id_high_water = TypeId(base.0 + MODULE_TYPE_ID_RANGE);
         (base, false)
     }
 
@@ -429,12 +430,14 @@ impl ModuleTable {
     /// base is always `id_high_water` at the time of allocation, deps having
     /// allocated first). Either way the high-water mark is bumped past actual
     /// usage so the next fresh allocation skips the spillover.
-    pub fn note_id_usage(&mut self, base: i32, used: i32, reused: bool) {
+    pub fn note_id_usage(&mut self, base: TypeId, used: i32, reused: bool) {
         if used > MODULE_TYPE_ID_RANGE {
             if reused {
                 self.id_range_overflow = true;
             }
-            self.id_high_water = self.id_high_water.max(align_to_range(base + used));
+            self.id_high_water = self
+                .id_high_water
+                .max(TypeId(align_to_range(base.0 + used)));
         }
     }
 
@@ -442,7 +445,7 @@ impl ModuleTable {
     /// `next_type_id` is bumped to at least this after `process_imports` so it
     /// allocates past every reserved block — including those whose owners were
     /// cache hits and so contributed nothing to `next_type_id` this pass.
-    pub fn id_high_water(&self) -> i32 {
+    pub fn id_high_water(&self) -> TypeId {
         self.id_high_water
     }
 
@@ -450,12 +453,12 @@ impl ModuleTable {
     /// subsequent full recompile re-allocates ranges sized to current usage.
     pub fn reset_id_bases(&mut self) {
         self.id_bases.clear();
-        self.id_high_water = 0;
+        self.id_high_water = TypeId::NONE;
         self.id_range_overflow = false;
     }
 
     /// Look up a previously assigned id_base without allocating.
-    pub fn id_base_of(&self, key: &str) -> Option<i32> {
+    pub fn id_base_of(&self, key: &str) -> Option<TypeId> {
         self.id_bases.get(key).copied()
     }
 
@@ -785,6 +788,7 @@ mod tests {
                 // `source_changed` never reads the watermark; a zeroed one is
                 // sound (`Watermark` and its parts are `Copy` all-integer PODs)
                 // and keeps this test decoupled from those structs' field sets.
+                #[allow(unsafe_code)]
                 watermark: unsafe { std::mem::zeroed() },
                 path: path.clone(),
                 refs: Rc::new(ModuleReferences::new(crate::reference::ModuleId(0))),

@@ -96,6 +96,7 @@ use std::sync::Arc;
 
 use crate::frozen::FrozenBuilder;
 use crate::heap::ProcHeap;
+use crate::type_def::TypeId;
 
 use super::bits::{copy_bits, get_bit, read_byte, tail_mask};
 pub use super::seq;
@@ -1116,7 +1117,7 @@ impl Value {
     /// computes it.
     pub fn enum_in<A: Arena + ?Sized>(
         a: &mut A,
-        type_id: i32,
+        type_id: TypeId,
         hash: u64,
         enum_name: Value,
         variant_name: Value,
@@ -1129,7 +1130,7 @@ impl Value {
         // SAFETY: payload sized for the 6 fixed words plus the payload values.
         unsafe {
             let p = obj.as_ptr().add(1);
-            p.write(type_id as u32 as u64);
+            p.write(type_id.0 as u32 as u64);
             p.add(1).write(hash);
             move_child(p.add(2), enum_name);
             move_child(p.add(3), variant_name);
@@ -1147,7 +1148,7 @@ impl Value {
     /// paths reuse frozen name values via [`Value::enum_in`].
     pub fn enum_with_names_in<A: Arena + ?Sized>(
         a: &mut A,
-        type_id: i32,
+        type_id: TypeId,
         enum_name: &str,
         variant_name: &str,
         labels: &[&str],
@@ -1755,9 +1756,9 @@ pub struct EnumRef<'a> {
 
 impl<'a> EnumRef<'a> {
     #[inline]
-    pub fn type_id(&self) -> i32 {
+    pub fn type_id(&self) -> TypeId {
         // SAFETY: constructed from a tag-checked Enum value.
-        unsafe { payload_word(self.obj, 0) as u32 as i32 }
+        TypeId(unsafe { payload_word(self.obj, 0) as u32 as i32 })
     }
     #[inline]
     pub fn hash(&self) -> u64 {
@@ -2562,14 +2563,14 @@ mod tests {
 
         let e = Value::enum_with_names_in(
             &mut h,
-            1,
+            TypeId(1),
             "Option",
             "Some",
             &["value"],
             &[Value::small_int(5)],
         );
         let er = e.as_enum().unwrap();
-        assert_eq!(er.type_id(), 1);
+        assert_eq!(er.type_id(), TypeId(1));
         assert_eq!(er.enum_name(), "Option");
         assert_eq!(er.variant_name(), "Some");
         assert_eq!(er.payload().len(), 1);
@@ -2694,7 +2695,14 @@ mod tests {
         );
 
         // Enum: names + labels + payload are traced; type_id/hash/count are not.
-        let e = Value::enum_with_names_in(&mut h, 2, "E", "V", &["a"], std::slice::from_ref(&s));
+        let e = Value::enum_with_names_in(
+            &mut h,
+            TypeId(2),
+            "E",
+            "V",
+            &["a"],
+            std::slice::from_ref(&s),
+        );
         let mut count = 0;
         unsafe {
             for_each_child(e.object_addr().unwrap() as *mut u64, &mut |_| count += 1);

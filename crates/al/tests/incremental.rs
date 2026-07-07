@@ -2,6 +2,7 @@
 //! editing one file recompiles only that file and its dependents.
 
 use al::bytecode::IncrementalSession;
+use al::module::MODULE_TYPE_ID_RANGE;
 use al::reference::EntityKind;
 
 mod common;
@@ -161,7 +162,7 @@ fn unrelated_module_keeps_type_id_base() {
 
     let x0 = s.module_id_base("./x").expect("x has an id_base");
     let y0 = s.module_id_base("./y").expect("y has an id_base");
-    assert_eq!(x0 % 256, 0, "id_base is 256-aligned");
+    assert_eq!(x0.0 % MODULE_TYPE_ID_RANGE, 0, "id_base is range-aligned");
     assert_ne!(x0, y0, "distinct modules get distinct ranges");
 
     // Change x: add a second type. y is unrelated.
@@ -268,9 +269,9 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
 /// Each `type Tn { Tn }` consumes exactly one type id
 /// (`register_type_head`, pass 1), so this is the module's per-compile
 /// type-id count after the overflow edit. It is deliberately well above
-/// `MODULE_TYPE_ID_RANGE` (256) so a *reused* range spills past its
-/// reservation and collides with the sibling module's assigned block.
-const BIG_TYPE_COUNT: i32 = 300;
+/// `MODULE_TYPE_ID_RANGE` so a *reused* range spills past its reservation
+/// and collides with the sibling module's assigned block.
+const BIG_TYPE_COUNT: i32 = MODULE_TYPE_ID_RANGE + 44;
 
 /// Number of type heads `big.al` declares in its *initial* form. Kept well
 /// under `MODULE_TYPE_ID_RANGE` (256) so the first compile fits `big`
@@ -341,14 +342,18 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     assert!(r.success, "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "big + y compile on first check");
 
-    let big0 = s.module_id_base("./big").expect("big has an id_base");
-    let y0 = s.module_id_base("./y").expect("y has an id_base");
-    assert_eq!(big0 % 256, 0, "big id_base is 256-aligned");
-    assert_eq!(y0 % 256, 0, "y id_base is 256-aligned");
+    let big0 = s.module_id_base("./big").expect("big has an id_base").0;
+    let y0 = s.module_id_base("./y").expect("y has an id_base").0;
+    assert_eq!(
+        big0 % MODULE_TYPE_ID_RANGE,
+        0,
+        "big id_base is range-aligned"
+    );
+    assert_eq!(y0 % MODULE_TYPE_ID_RANGE, 0, "y id_base is range-aligned");
     assert_ne!(big0, y0, "distinct modules get distinct ranges");
     assert_eq!(
         y0,
-        big0 + 256,
+        big0 + MODULE_TYPE_ID_RANGE,
         "while big is small, y sits in the block right after big's \
          reservation (the block big's spill will collide with): \
          big0={big0} y0={y0}"
@@ -380,10 +385,19 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
 
     let big1 = s
         .module_id_base("./big")
-        .expect("big id_base after recovery");
-    let y1 = s.module_id_base("./y").expect("y id_base after recovery");
-    assert_eq!(big1 % 256, 0, "big id_base still 256-aligned post-recovery");
-    assert_eq!(y1 % 256, 0, "y id_base still 256-aligned post-recovery");
+        .expect("big id_base after recovery")
+        .0;
+    let y1 = s.module_id_base("./y").expect("y id_base after recovery").0;
+    assert_eq!(
+        big1 % MODULE_TYPE_ID_RANGE,
+        0,
+        "big id_base still range-aligned post-recovery"
+    );
+    assert_eq!(
+        y1 % MODULE_TYPE_ID_RANGE,
+        0,
+        "y id_base still range-aligned post-recovery"
+    );
     assert_eq!(
         big1, big0,
         "big keeps a stable id_base across overflow recovery"
@@ -418,12 +432,12 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
         "only y recompiles on the unrelated edit; big is a cache hit"
     );
     assert_eq!(
-        s.module_id_base("./big"),
+        s.module_id_base("./big").map(|t| t.0),
         Some(big0),
         "big id_base remains stable after a later unrelated edit"
     );
     assert_eq!(
-        s.module_id_base("./y"),
+        s.module_id_base("./y").map(|t| t.0),
         Some(y1),
         "y keeps its post-recovery id_base after a later unrelated edit"
     );

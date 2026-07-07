@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 
 use super::infer::{ArenaSlice, Scheme, StrId, Ty};
+use crate::type_def::TypeId;
 
 /// What a definition denotes, stamped on every [`DefinitionLocation`]. This is
 /// the exact enum the reference graph keys [`DefId`](crate::reference::DefId)
@@ -78,7 +79,7 @@ pub enum TypeBody {
 /// `module`/`type_params` slice into engine pools; `name` is a `StrId`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
-    pub id: i32,
+    pub id: TypeId,
     pub name: StrId,
     /// → `InferEngine.str_slices`
     pub module: ArenaSlice,
@@ -115,7 +116,7 @@ impl TypeInfo {
 #[derive(Debug, Clone)]
 enum Overwrite {
     TypeInfo(String, TypeInfo),
-    TypeInfoById(i32, TypeInfo),
+    TypeInfoById(TypeId, TypeInfo),
     Definition(String, DefinitionLocation),
     Doc(String, String),
 }
@@ -131,19 +132,19 @@ pub struct TypeEnv {
     /// Type lookup by NOMINAL id — the identity carried in `TypeNode::Con`.
     /// Ids are allocator-unique, so entries here are never overwritten in
     /// place by a name collision; rollback is plain truncation.
-    pub type_info_by_id: IndexMap<i32, TypeInfo>,
+    pub type_info_by_id: IndexMap<TypeId, TypeInfo>,
     pub definitions: IndexMap<String, DefinitionLocation>,
     pub docs: IndexMap<String, String>,
     /// Replay log of in-place overwrites; see [`Overwrite`].
     journal: Vec<Overwrite>,
-    next_type_id: i32,
+    next_type_id: TypeId,
 }
 
 impl TypeEnv {
-    pub fn next_type_id(&self) -> i32 {
+    pub fn next_type_id(&self) -> TypeId {
         self.next_type_id
     }
-    pub fn set_next_type_id(&mut self, id: i32) {
+    pub fn set_next_type_id(&mut self, id: TypeId) {
         self.next_type_id = id;
     }
 
@@ -202,7 +203,7 @@ pub struct EnvWatermark {
     pub definitions: usize,
     pub docs: usize,
     pub journal: usize,
-    pub next_type_id: i32,
+    pub next_type_id: TypeId,
 }
 
 pub fn new_env() -> TypeEnv {
@@ -213,7 +214,7 @@ pub fn new_env() -> TypeEnv {
         definitions: IndexMap::new(),
         docs: IndexMap::new(),
         journal: Vec::new(),
-        next_type_id: 1,
+        next_type_id: TypeId(1),
     }
 }
 
@@ -320,9 +321,9 @@ impl TypeEnv {
         name_id: StrId,
         module: ArenaSlice,
         type_params: ArenaSlice,
-    ) -> i32 {
+    ) -> TypeId {
         let id = self.next_type_id;
-        self.next_type_id += 1;
+        self.next_type_id.0 += 1;
         self.store_type_info(
             name,
             TypeInfo {
@@ -370,7 +371,7 @@ impl TypeEnv {
     /// correct way to answer "what are this type's variants/fields" — the
     /// by-name map can be shadowed by whatever same-named type was analysed
     /// most recently.
-    pub fn lookup_type_info_by_id(&self, id: i32) -> Option<TypeInfo> {
+    pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
         self.type_info_by_id.get(&id).copied()
     }
 

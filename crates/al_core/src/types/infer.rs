@@ -6,8 +6,8 @@ use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Varia
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
 use crate::type_def::{
-    FieldDef, PrimitiveKind, Type, prim_names as pn, t_array, t_float, t_int, t_string, t_tuple,
-    t_var,
+    FieldDef, PrimitiveKind, Type, TypeId, prim_names as pn, t_array, t_float, t_int, t_string,
+    t_tuple, t_var,
 };
 
 // ============================================================================
@@ -121,7 +121,7 @@ pub enum TypeNode {
     /// `type Parsed` next to `al/http/h1.Parsed` — are different types and
     /// must neither unify nor answer for each other's variants.
     Con {
-        id: i32,
+        id: TypeId,
         name: StrId,
         args: ArenaSlice,
     },
@@ -180,7 +180,7 @@ pub enum ValueKind {
     /// constructor-call without re-consulting the type env.
     Constructor {
         type_name: StrId,
-        type_id: i32,
+        type_id: TypeId,
         variant_idx: u16,
         arity: u16,
         /// → `InferEngine.str_slices`
@@ -376,10 +376,10 @@ pub struct InferEngine {
 /// int/float/string literals, plus `Array` for structural resolution.
 #[derive(Debug, Clone, Copy)]
 pub struct PrimIds {
-    pub int: i32,
-    pub float: i32,
-    pub string: i32,
-    pub array: i32,
+    pub int: TypeId,
+    pub float: TypeId,
+    pub string: TypeId,
+    pub array: TypeId,
 }
 
 impl Default for PrimIds {
@@ -389,10 +389,10 @@ impl Default for PrimIds {
         // ids `register_type_head` allocates, and they are overwritten by
         // `set_prim_ids` as soon as a compiler owns the engine.
         PrimIds {
-            int: -1,
-            float: -2,
-            string: -3,
-            array: -4,
+            int: TypeId(-1),
+            float: TypeId(-2),
+            string: TypeId(-3),
+            array: TypeId(-4),
         }
     }
 }
@@ -609,7 +609,7 @@ impl InferEngine {
 
     /// Map a nominal type id to the corresponding primitive, if it is one.
     /// Identity is by id, never name — a user's `type Int { }` is not `Int`.
-    fn as_prim(&self, id: i32) -> Option<Prim> {
+    fn as_prim(&self, id: TypeId) -> Option<Prim> {
         if id == self.prim_ids.int {
             Some(Prim::Int)
         } else if id == self.prim_ids.float {
@@ -623,13 +623,13 @@ impl InferEngine {
 
     // --- Type constructors ---
 
-    pub fn mk_con(&mut self, id: i32, name: &str, args: &[Ty]) -> Ty {
+    pub fn mk_con(&mut self, id: TypeId, name: &str, args: &[Ty]) -> Ty {
         let name = self.intern(name);
         let args = self.push_children(args);
         self.push(TypeNode::Con { id, name, args })
     }
 
-    pub fn mk_con_id(&mut self, id: i32, name: StrId, args: &[Ty]) -> Ty {
+    pub fn mk_con_id(&mut self, id: TypeId, name: StrId, args: &[Ty]) -> Ty {
         let args = self.push_children(args);
         self.push(TypeNode::Con { id, name, args })
     }
@@ -1406,7 +1406,7 @@ impl InferEngine {
 
     fn resolve_icon(
         &mut self,
-        id: i32,
+        id: TypeId,
         name: &str,
         args: &[Ty],
         env: Option<&TypeEnv>,
@@ -1545,14 +1545,14 @@ const MAX_NOMINAL_RECURRENCE: usize = 16;
 /// identical keys).
 #[derive(Clone, Default)]
 struct ResolvePath {
-    stack: Vec<(i32, String)>,
+    stack: Vec<(TypeId, String)>,
 }
 
 impl ResolvePath {
     /// Whether expanding `id` with argument shape `args_key` would recurse:
     /// either that exact instance is already on the path, or this nominal type
     /// has already recurred [`MAX_NOMINAL_RECURRENCE`] times without repeating.
-    fn would_recurse(&self, id: i32, args_key: &str) -> bool {
+    fn would_recurse(&self, id: TypeId, args_key: &str) -> bool {
         let mut count = 0usize;
         for (i, k) in &self.stack {
             if *i == id {
@@ -1565,7 +1565,7 @@ impl ResolvePath {
         count >= MAX_NOMINAL_RECURRENCE
     }
 
-    fn enter(&mut self, id: i32, args_key: String) {
+    fn enter(&mut self, id: TypeId, args_key: String) {
         self.stack.push((id, args_key));
     }
 
@@ -1623,7 +1623,7 @@ fn write_type_key(t: &Type, out: &mut String) {
         }
         Type::Named { id, type_args, .. } => {
             out.push('N');
-            out.push_str(&id.to_string());
+            out.push_str(&id.0.to_string());
             out.push('<');
             for a in type_args {
                 write_type_key(a, out);
@@ -2042,8 +2042,8 @@ mod tests {
         let outer = e.fresh_var();
         e.enter_level();
         let inner = e.fresh_var();
-        let arr_inner = e.mk_con(-7, pn::ARRAY, &[inner]);
-        let arr_outer = e.mk_con(-7, pn::ARRAY, &[outer]);
+        let arr_inner = e.mk_con(TypeId(-7), pn::ARRAY, &[inner]);
+        let arr_outer = e.mk_con(TypeId(-7), pn::ARRAY, &[outer]);
         assert!(e.unify(arr_inner, arr_outer).is_ok());
         e.leave_level();
         let scheme = e.generalize(inner);

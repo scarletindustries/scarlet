@@ -1,6 +1,34 @@
 use indexmap::IndexMap;
 use std::fmt;
 
+/// Nominal identity of a user-declared type, allocated once per declaration by
+/// [`TypeEnv::register_type_head`](crate::types::TypeEnv::register_type_head).
+/// A newtype so a var-id, `StrId`, ctor-index, or slot number cannot be
+/// silently passed where a nominal type id is expected — every such site is now
+/// a compile error. `repr(transparent)` keeps the runtime encoding a single
+/// `i32` word (the VM stores it in an enum value's header).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct TypeId(pub i32);
+
+impl TypeId {
+    /// Sentinel meaning "no nominal type". Never a real id: allocation starts
+    /// at 1. Used for pre-prelude placeholders and "not a Con" fallbacks.
+    pub const NONE: TypeId = TypeId(0);
+}
+
+impl Default for TypeId {
+    fn default() -> Self {
+        TypeId::NONE
+    }
+}
+
+impl fmt::Display for TypeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Names of the *structural* prelude types — those whose `Type` is not
 /// `Named` (because exhaustiveness/array-pattern handling needs the dedicated
 /// shape). These four are the only prelude name strings outside
@@ -56,7 +84,7 @@ pub enum Type {
     /// lookups. A "struct" is the single-variant case whose constructor name
     /// equals the type name.
     Named {
-        id: i32,
+        id: TypeId,
         name: String,
         type_args: Vec<Type>,
         variants: IndexMap<String, Vec<FieldDef>>,
@@ -102,7 +130,7 @@ pub fn t_tuple(elements: Vec<Type>) -> Type {
 }
 
 pub fn t_named(
-    id: i32,
+    id: TypeId,
     name: impl Into<String>,
     type_args: Vec<Type>,
     variants: IndexMap<String, Vec<FieldDef>>,

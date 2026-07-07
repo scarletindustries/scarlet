@@ -4,6 +4,7 @@ use super::{ArenaSlice, InferEngine, Ty, TypeBody, TypeEnv};
 use crate::ast;
 use crate::diagnostic::Diagnostic;
 use crate::span::Span;
+use crate::token::is_type_name;
 
 /// A successfully-resolved type-name occurrence: the use-site span plus the
 /// canonical identity (owning module + interned name + type id) of the
@@ -20,7 +21,7 @@ pub struct TypeRefHit {
     /// Owning module path, interned in `InferEngine.str_slices`.
     pub module: ArenaSlice,
     /// Resolved `TypeInfo.id`.
-    pub type_id: i32,
+    pub type_id: crate::type_def::TypeId,
 }
 
 /// The Hydrator converts a syntactic type annotation (`ast::TypeIdentifier`)
@@ -149,7 +150,7 @@ impl Hydrator {
 
         // Lowercase identifiers are type variables; uppercase identifiers are
         // concrete types and must be defined in the environment.
-        if !is_type_constructor_name(name) {
+        if !is_type_name(name) {
             if !arg_tys.is_empty() {
                 return Err(err(
                     span,
@@ -198,12 +199,6 @@ impl Hydrator {
             None => Err(err(name_span, format!("Unknown type '{}'", name))),
         }
     }
-}
-
-fn is_type_constructor_name(name: &str) -> bool {
-    name.as_bytes()
-        .first()
-        .is_some_and(|b| b.is_ascii_uppercase())
 }
 
 fn err(span: Span, message: String) -> Diagnostic {

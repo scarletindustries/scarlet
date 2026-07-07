@@ -5,6 +5,7 @@
 //! an `Err` describing the mismatch instead of letting it surface as a confused
 //! unify error downstream.
 
+use crate::type_def::TypeId;
 use crate::types::{Scheme, TypeEnv, ValueKind};
 
 /// Prelude type and constructor names. This module is the ONLY place these
@@ -29,26 +30,37 @@ pub mod names {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRef {
-    pub id: i32,
+    pub id: TypeId,
     pub name: &'static str,
 }
 
 impl TypeRef {
     const fn pending(name: &'static str) -> Self {
-        TypeRef { id: 0, name }
+        TypeRef {
+            id: TypeId::NONE,
+            name,
+        }
+    }
+
+    /// Whether `id` is this prelude type. Guards on `id != NONE` so a
+    /// pre-capture (all-zero) binding never falsely matches — see
+    /// `PreludeBindings::default`.
+    #[inline]
+    pub fn is(&self, id: TypeId) -> bool {
+        id != TypeId::NONE && id == self.id
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CtorRef {
-    pub type_id: i32,
+    pub type_id: TypeId,
     pub variant_idx: u16,
     pub arity: u16,
 }
 
 impl CtorRef {
     const ZERO: Self = CtorRef {
-        type_id: 0,
+        type_id: TypeId::NONE,
         variant_idx: 0,
         arity: 0,
     };
@@ -58,8 +70,8 @@ impl CtorRef {
 /// its `Default` (all-zero ids so it can exist before the prelude loads — see
 /// `compile_impl` analysing `al.al` itself), `capture()`, and the
 /// `(field_name, value)` iterators `build.rs` walks to emit the baked
-/// `const PRELUDE`. `is_*` checks all guard on `id != 0` so a zero binding
-/// never falsely matches.
+/// `const PRELUDE`. Identity checks go through `TypeRef::is`, which guards on
+/// `id != TypeId::NONE` so a zero binding never falsely matches.
 macro_rules! prelude_bindings {
     (
         types: [ $( $tf:ident = $tn:ident ),* $(,)? ],
@@ -137,18 +149,6 @@ prelude_bindings! {
         ok = (OK, result, 1),
         err = (ERR, result, 1),
     ],
-}
-
-impl PreludeBindings {
-    pub fn is_option(&self, id: i32) -> bool {
-        id != 0 && id == self.option.id
-    }
-    pub fn is_result(&self, id: i32) -> bool {
-        id != 0 && id == self.result.id
-    }
-    pub fn is_bool(&self, id: i32) -> bool {
-        id != 0 && id == self.bool.id
-    }
 }
 
 #[cfg(test)]

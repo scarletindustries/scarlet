@@ -35,7 +35,7 @@ use crate::stdlib;
 /// nothing and borrows nothing.
 #[derive(Clone)]
 pub(super) struct EnumTemplate {
-    type_id: i32,
+    type_id: al_core::TypeId,
     /// `enum_name_prefix_hash(enum_name, variant_name)`.
     prefix_hash: u64,
     /// Frozen `Str` value of the enum type name.
@@ -83,6 +83,8 @@ pub(super) struct PreludeTemplates {
     // HTTP protocol templates (al/http/h1, al/http/headers), used by the
     // native scanners in `vm::http`.
     pub(super) header: EnumTemplate,
+    pub(super) version_http10: Value,
+    pub(super) version_http11: Value,
     pub(super) parsed_done: EnumTemplate,
     pub(super) parsed_need_more: Value,
     pub(super) parsed_bad: EnumTemplate,
@@ -129,6 +131,8 @@ impl PreludeTemplates {
             socket_address: enum_template(fb, &stdlib::net::address::SOCKET_ADDRESS),
             socket: enum_template(fb, &stdlib::net::socket::SOCKET),
             header: enum_template(fb, &stdlib::http::headers::HEADER),
+            version_http10: frozen_enum_value(fb, &stdlib::http::h1::HTTP10),
+            version_http11: frozen_enum_value(fb, &stdlib::http::h1::HTTP11),
             parsed_done: enum_template(fb, &stdlib::http::h1::DONE),
             parsed_need_more: frozen_enum_value(fb, &stdlib::http::h1::NEED_MORE),
             parsed_bad: enum_template(fb, &stdlib::http::h1::BAD),

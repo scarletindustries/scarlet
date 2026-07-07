@@ -16,7 +16,7 @@ use al_core::types::{
     ArenaSlice, DefinitionLocation, EntityKind, InferEngine, NO_STR, QuantVar, Scheme, TypeBody,
     TypeInfo, TypeNode, ValueKind,
 };
-use al_core::{PrecompileOutput, PreludeBindings};
+use al_core::{PrecompileOutput, PreludeBindings, TypeId};
 
 fn main() {
     // One rerun-if-changed per file: a directory path alone doesn't reliably
@@ -40,14 +40,19 @@ fn main() {
         src,
         "use al_core::static_ir::*;\n\
          use al_core::types::*;\n\
-         use al_core::{{PreludeBindings, TypeRef, CtorRef}};\n"
+         use al_core::{{PreludeBindings, TypeRef, CtorRef, TypeId}};\n"
     )
     .unwrap();
 
     emit_prelude(&mut src, &pre.prelude);
     emit_stdlib_templates(&mut src, &pre, &engine);
     emit_static_slice(&mut src, "RESERVED", "&str", reserved.iter().map(|s| q(s)));
-    writeln!(src, "pub const NEXT_TYPE_ID: i32 = {};", pre.next_type_id).unwrap();
+    writeln!(
+        src,
+        "pub const NEXT_TYPE_ID: TypeId = {};",
+        tid(pre.next_type_id)
+    )
+    .unwrap();
     writeln!(
         src,
         "pub const STDLIB_LOCAL_COUNT: i32 = {};",
@@ -99,6 +104,10 @@ fn q(s: &str) -> String {
     format!("{s:?}")
 }
 
+fn tid(id: TypeId) -> String {
+    format!("TypeId({})", id.0)
+}
+
 /// `lit!(Type: field = expr, ...)` → `"Type { field: <expr>, ... }"`.
 macro_rules! lit {
     ($T:ident : $($f:ident = $e:expr),+ $(,)?) => {
@@ -120,7 +129,8 @@ fn typenode(n: &TypeNode) -> String {
         TypeNode::Bound(i) => format!("TypeNode::Bound({i})"),
         TypeNode::Con { id, name, args } => {
             format!(
-                "TypeNode::Con {{ id: {id}, name: {name}, args: {} }}",
+                "TypeNode::Con {{ id: {}, name: {name}, args: {} }}",
+                tid(id),
                 aslice(args)
             )
         }
@@ -186,7 +196,7 @@ fn emit_stdlib_templates(out: &mut String, pre: &PrecompileOutput, eng: &InferEn
                     "pub static {}: VariantTemplate = VariantTemplate {{ \
                      type_id: {}, type_name: {}, variant_name: {}, labels: &[{}] }};",
                     screaming_snake(variant_name),
-                    ti.id,
+                    tid(ti.id),
                     q(type_name),
                     q(variant_name),
                     labels.join(", "),
@@ -198,7 +208,7 @@ fn emit_stdlib_templates(out: &mut String, pre: &PrecompileOutput, eng: &InferEn
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     writeln!(out, "pub mod stdlib {{").unwrap();
-    writeln!(out, "    use al_core::VariantTemplate;").unwrap();
+    writeln!(out, "    use al_core::{{VariantTemplate, TypeId}};").unwrap();
     let mut open: Vec<&str> = Vec::new();
     for (segs, line) in &entries {
         // Close mods until `open` is a prefix of `segs`.
@@ -232,11 +242,12 @@ fn emit_prelude(out: &mut String, p: &PreludeBindings) {
     )
     .unwrap();
     for (n, r) in p.type_fields() {
-        let v = lit!(TypeRef: id = r.id, name = format_args!("{:?}", r.name));
+        let v = lit!(TypeRef: id = tid(r.id), name = format_args!("{:?}", r.name));
         writeln!(out, "    {n}: {v},").unwrap();
     }
     for (n, c) in p.ctor_fields() {
-        let v = lit!(CtorRef: type_id = c.type_id, variant_idx = c.variant_idx, arity = c.arity);
+        let v =
+            lit!(CtorRef: type_id = tid(c.type_id), variant_idx = c.variant_idx, arity = c.arity);
         writeln!(out, "    {n}: {v},").unwrap();
     }
     writeln!(out, "}};").unwrap();
@@ -394,7 +405,8 @@ fn valuekind(k: ValueKind) -> String {
             arity,
             field_labels,
         } => format!(
-            "ValueKind::Constructor {{ type_name: {type_name}, type_id: {type_id}, variant_idx: {variant_idx}, arity: {arity}, field_labels: {} }}",
+            "ValueKind::Constructor {{ type_name: {type_name}, type_id: {}, variant_idx: {variant_idx}, arity: {arity}, field_labels: {} }}",
+            tid(type_id),
             aslice(field_labels)
         ),
     }
@@ -442,7 +454,7 @@ fn typeinfo(ti: &TypeInfo) -> String {
             format!("TypeBody::Custom {{ variants: {} }}", aslice(variants))
         }
     };
-    lit!(TypeInfo: id = ti.id, name = ti.name, module = aslice(ti.module),
+    lit!(TypeInfo: id = tid(ti.id), name = ti.name, module = aslice(ti.module),
          type_params = aslice(ti.type_params), body = body)
 }
 

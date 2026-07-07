@@ -804,7 +804,7 @@ mod tests {
         let mut v: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
         v.insert("True".into(), vec![]);
         v.insert("False".into(), vec![]);
-        t_named(99, "Bool", vec![], v)
+        t_named(TypeId(99), "Bool", vec![], v)
     }
 
     fn ctor(name: &str, args: Vec<Pat>) -> Pat {
@@ -824,7 +824,7 @@ mod tests {
             }],
         );
         variants.insert("None".to_string(), vec![]);
-        t_named(1, "Option", vec![], variants)
+        t_named(TypeId(1), "Option", vec![], variants)
     }
 
     fn t_result(ok: Type, err: Type) -> Type {
@@ -843,7 +843,7 @@ mod tests {
                 ty: err,
             }],
         );
-        t_named(2, "Result", vec![], variants)
+        t_named(TypeId(2), "Result", vec![], variants)
     }
 
     fn enum3() -> Type {
@@ -851,7 +851,7 @@ mod tests {
         variants.insert("A".to_string(), vec![]);
         variants.insert("B".to_string(), vec![]);
         variants.insert("C".to_string(), vec![]);
-        t_named(10, "Letter", vec![], variants)
+        t_named(TypeId(10), "Letter", vec![], variants)
     }
 
     #[test]
@@ -1062,7 +1062,7 @@ mod tests {
                 },
             ],
         );
-        let t = t_named(11, "Tree", vec![], variants);
+        let t = t_named(TypeId(11), "Tree", vec![], variants);
         let pats = vec![ctor("Leaf", vec![])];
         let result = check_exhaustiveness(&pats, &t);
         assert_eq!(result, Some("Node(_, _)".to_string()));
@@ -1071,7 +1071,7 @@ mod tests {
     /// Opaque prelude `Binary` — Named with no variants → infinite in
     /// `get_type_ctors`, mirroring how the real prelude registers it.
     fn t_binary() -> Type {
-        t_named(98, "Binary", vec![], IndexMap::new())
+        t_named(TypeId(98), "Binary", vec![], IndexMap::new())
     }
 
     fn bin_seg(value: ast::Pattern, size: Option<&str>) -> ast::BinSegmentPat {
@@ -1092,7 +1092,7 @@ mod tests {
     fn bin_pat(segments: Vec<ast::BinSegmentPat>, rest: bool) -> ast::Pattern {
         ast::Pattern::Binary {
             segments,
-            rest: rest.then(|| ast::BinaryPatternRest {
+            rest: rest.then_some(ast::BinaryPatternRest {
                 binding: None,
                 span: crate::span::Span::DUMMY,
             }),
@@ -1239,7 +1239,7 @@ mod tests {
                 },
             ],
         );
-        t_named(50, "Pair", vec![], variants)
+        t_named(TypeId(50), "Pair", vec![], variants)
     }
 
     /// `pattern_to_pat` must slot labeled constructor args into field-

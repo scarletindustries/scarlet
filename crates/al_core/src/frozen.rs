@@ -406,7 +406,7 @@ impl FrozenBuilder {
     /// working.
     pub fn enum_(
         &mut self,
-        type_id: i32,
+        type_id: crate::type_def::TypeId,
         enum_name: &str,
         variant_name: &str,
         field_labels: &[&str],
@@ -696,8 +696,20 @@ mod tests {
     fn enum_names_and_labels_point_into_the_frozen_area() {
         let area = Arc::new(FrozenArea::new());
         let mut b = area.builder();
-        let v1 = b.enum_(7, "Credentials", "Basic", &["user", "pass"], vec![]);
-        let v2 = b.enum_(7, "Credentials", "Basic", &["user", "pass"], vec![]);
+        let v1 = b.enum_(
+            crate::type_def::TypeId(7),
+            "Credentials",
+            "Basic",
+            &["user", "pass"],
+            vec![],
+        );
+        let v2 = b.enum_(
+            crate::type_def::TypeId(7),
+            "Credentials",
+            "Basic",
+            &["user", "pass"],
+            vec![],
+        );
         assert_ne!(addr(&v1), addr(&v2), "distinct enum objects");
         assert!(area.contains(addr(&v1) as *const u64));
         let (e1, e2) = (v1.as_enum().unwrap(), v2.as_enum().unwrap());

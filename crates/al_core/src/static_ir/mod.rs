@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::bytecode::{Function, Instruction, PreludeBindings, Value};
 use crate::frozen::FrozenBuilder;
 use crate::module::{ExportedValue, ModuleInterface};
+use crate::type_def::TypeId;
 use crate::types::{
     QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
 };
@@ -25,7 +26,7 @@ use crate::types::{
 /// site rather than silently constructing a mismatched value.
 #[derive(Debug)]
 pub struct VariantTemplate {
-    pub type_id: i32,
+    pub type_id: TypeId,
     pub type_name: &'static str,
     pub variant_name: &'static str,
     pub labels: &'static [&'static str],
@@ -122,7 +123,7 @@ pub struct StaticStdlib {
 
     pub prelude: &'static PreludeBindings,
     pub reserved: &'static [&'static str],
-    pub next_type_id: i32,
+    pub next_type_id: TypeId,
     pub local_count: i32,
 }
 

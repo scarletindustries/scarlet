@@ -47,7 +47,7 @@ enum Commands {
     Lsp,
     /// Type check a program without running it
     Check { entrypoint: String },
-    /// Parse and print the AST of a program
+    /// Format a file and print the result to stdout
     Build { entrypoint: String },
     /// Format AL source files
     Fmt(FmtArgs),
@@ -153,13 +153,6 @@ fn find_al_files(path: &str) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-struct FormatFileResult {
-    changed: bool,
-    output: String,
-    has_errors: bool,
-    errors: Vec<String>,
-}
-
 // BUGFIX: V's main.v uses 0-indexed line/col for files but +1 for stdin; the
 // rust port emits 1-indexed consistently.
 fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnostic) -> String {
@@ -168,29 +161,19 @@ fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnosti
     format!("{path}:{line}:{col}: {}", d.message)
 }
 
-fn format_file(path: &Path, debug: bool) -> io::Result<FormatFileResult> {
-    let content = fs::read_to_string(path)?;
-    let result = formatter::format_with_debug(&content, debug);
-
-    if result.has_errors {
-        return Ok(FormatFileResult {
-            changed: false,
-            output: content,
-            has_errors: true,
-            errors: result
-                .diagnostics
-                .iter()
-                .map(|d| render_fmt_diagnostic(path.display(), d))
-                .collect(),
-        });
+fn dump_tokens(src: &str) {
+    let mut s = scanner::new_scanner(src.to_string());
+    for tok in s.scan_all() {
+        eprintln!(
+            "Token: {:?} \"{}\" trivia: {}",
+            tok.kind,
+            tok.literal.as_deref().unwrap_or(""),
+            tok.leading_trivia.len()
+        );
+        for t in &tok.leading_trivia {
+            eprintln!("  Trivia: {t:?}");
+        }
     }
-
-    Ok(FormatFileResult {
-        changed: result.output != content,
-        output: result.output,
-        has_errors: false,
-        errors: vec![],
-    })
 }
 
 fn die(msg: impl std::fmt::Display) -> ! {
@@ -263,12 +246,13 @@ fn main() {
         }
         Some(Commands::Build { entrypoint }) => {
             let file = read_file_or_die(&entrypoint);
-            let r = formatter::format_with_debug(&file, false);
-            if r.has_errors {
-                diagnostic::print_diagnostics(&r.diagnostics, &file, &entrypoint);
-                process::exit(1);
+            match formatter::format(&file) {
+                formatter::FormatResult::Formatted { output, .. } => println!("{output}"),
+                formatter::FormatResult::ParseFailed { errors } => {
+                    diagnostic::print_diagnostics(&errors, &file, &entrypoint);
+                    process::exit(1);
+                }
             }
-            println!("{}", r.output);
         }
         Some(Commands::Upgrade { version }) => {
             if let Err(e) = cmd_upgrade(version) {
@@ -291,7 +275,9 @@ fn cmd_run(args: RunArgs) {
     if args.debug_printer {
         println!();
         println!("================DEBUG: Printed parsed source code================");
-        println!("{}", formatter::format_with_debug(&file, false).output);
+        if let formatter::FormatResult::Formatted { output, .. } = formatter::format(&file) {
+            println!("{output}");
+        }
         println!("=================================================================");
         println!();
     }
@@ -317,15 +303,21 @@ fn cmd_fmt(args: FmtArgs) {
         if let Err(e) = io::stdin().read_to_string(&mut content) {
             die(format!("Error reading stdin: {e}"));
         }
-        let result = formatter::format_with_debug(&content, args.debug);
-        if result.has_errors {
-            for d in &result.diagnostics {
-                eprintln!("{}", render_fmt_diagnostic("stdin", d));
-            }
-            process::exit(1);
+        if args.debug {
+            dump_tokens(&content);
         }
-        print!("{}", result.output);
-        let _ = io::stdout().flush();
+        match formatter::format(&content) {
+            formatter::FormatResult::Formatted { output, .. } => {
+                print!("{output}");
+                let _ = io::stdout().flush();
+            }
+            formatter::FormatResult::ParseFailed { errors } => {
+                for d in &errors {
+                    eprintln!("{}", render_fmt_diagnostic("stdin", d));
+                }
+                process::exit(1);
+            }
+        }
         return;
     }
 
@@ -342,8 +334,8 @@ fn cmd_fmt(args: FmtArgs) {
     let mut has_errors = false;
 
     for file in &files {
-        let result = match format_file(file, args.debug) {
-            Ok(r) => r,
+        let content = match fs::read_to_string(file) {
+            Ok(c) => c,
             Err(e) => {
                 eprintln!("Error formatting {}: {e}", file.display());
                 has_errors = true;
@@ -351,28 +343,35 @@ fn cmd_fmt(args: FmtArgs) {
             }
         };
 
-        if result.has_errors {
-            for err_msg in &result.errors {
-                eprintln!("{err_msg}");
-            }
-            has_errors = true;
-            continue;
+        if args.debug {
+            dump_tokens(&content);
         }
 
-        if args.check {
-            if result.changed {
-                println!("{} needs formatting", file.display());
-                needs_formatting = true;
-            }
-        } else if args.stdout {
-            print!("{}", result.output);
-        } else if result.changed {
-            if let Err(e) = fs::write(file, &result.output) {
-                eprintln!("Error writing {}: {e}", file.display());
+        match formatter::format(&content) {
+            formatter::FormatResult::ParseFailed { errors } => {
+                for d in &errors {
+                    eprintln!("{}", render_fmt_diagnostic(file.display(), d));
+                }
                 has_errors = true;
-                continue;
             }
-            println!("Formatted {}", file.display());
+            formatter::FormatResult::Formatted { output, .. } => {
+                let changed = output != content;
+                if args.check {
+                    if changed {
+                        println!("{} needs formatting", file.display());
+                        needs_formatting = true;
+                    }
+                } else if args.stdout {
+                    print!("{output}");
+                } else if changed {
+                    if let Err(e) = fs::write(file, &output) {
+                        eprintln!("Error writing {}: {e}", file.display());
+                        has_errors = true;
+                        continue;
+                    }
+                    println!("Formatted {}", file.display());
+                }
+            }
         }
     }
 
