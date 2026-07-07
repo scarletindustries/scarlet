@@ -40,6 +40,17 @@ pub(super) fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(&*decoded))
 }
 
+/// Decode an LSP `WorkspaceFolder[]` (array of `{uri, name}`) into filesystem
+/// paths, skipping malformed or non-`file://` entries. `None` / non-array
+/// yields an empty vec.
+pub(super) fn folder_paths(v: Option<&Json>) -> Vec<PathBuf> {
+    v.and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("uri")?.as_str().and_then(uri_to_path))
+        .collect()
+}
+
 /// Pick the workspace root that owns `path`. With nested roots (rare but
 /// permitted by LSP) the deepest one wins so a sub-project gets its own
 /// session. Files outside every root share the empty-path session.

@@ -16,7 +16,7 @@ mod xrefs;
 
 pub use workspace::Workspace;
 
-use wire::{FileChangeType, doc_uri, rename_error_code, uri_to_path};
+use wire::{FileChangeType, doc_uri, folder_paths, rename_error_code, uri_to_path};
 
 /// Outcome of one framed stdin read: a full message body, or clean EOF (the
 /// client closed the pipe). Distinguishing EOF in the type — instead of the
@@ -233,14 +233,9 @@ impl LspServer {
         // back to legacy single `rootUri`. A client may send neither when a
         // loose file is opened, in which case every file lands in the
         // empty-root session.
-        if let Some(folders) = params.get("workspaceFolders").and_then(|v| v.as_array()) {
-            for f in folders {
-                if let Some(uri) = f.get("uri").and_then(|v| v.as_str())
-                    && let Some(p) = uri_to_path(uri)
-                {
-                    self.ws.workspace_roots.push(p);
-                }
-            }
+        let folders = params.get("workspaceFolders");
+        if folders.is_some_and(Json::is_array) {
+            self.ws.workspace_roots.extend(folder_paths(folders));
         } else if let Some(uri) = params.get("rootUri").and_then(|v| v.as_str())
             && let Some(p) = uri_to_path(uri)
         {
@@ -290,41 +285,20 @@ impl LspServer {
 
     fn handle_did_change_workspace_folders(&mut self, params: &Json) {
         let event = params.get("event");
-        if let Some(removed) = event
-            .and_then(|e| e.get("removed"))
-            .and_then(|v| v.as_array())
-        {
-            for f in removed {
-                if let Some(uri) = f.get("uri").and_then(|v| v.as_str())
-                    && let Some(p) = uri_to_path(uri)
-                {
-                    self.ws.workspace_roots.retain(|r| r != &p);
-                    self.ws.roots.remove(&p);
-                }
-            }
+        for p in folder_paths(event.and_then(|e| e.get("removed"))) {
+            self.ws.workspace_roots.retain(|r| r != &p);
+            self.ws.roots.remove(&p);
         }
-        if let Some(added) = event
-            .and_then(|e| e.get("added"))
-            .and_then(|v| v.as_array())
-        {
-            let mut new_roots = Vec::new();
-            for f in added {
-                if let Some(uri) = f.get("uri").and_then(|v| v.as_str())
-                    && let Some(p) = uri_to_path(uri)
-                {
-                    self.ws.workspace_roots.push(p.clone());
-                    new_roots.push(p);
-                }
-            }
-            // A folder added after the initial scan would never be indexed
-            // (the `scanned` latch makes `ensure_workspace_scanned` early
-            // return), leaving its modules invisible to cross-module queries.
-            // Index it now. Before the first scan, the pending
-            // `ensure_workspace_scanned` will cover it from `workspace_roots`.
-            if self.ws.scanned {
-                for r in &new_roots {
-                    self.ws.index_root(r);
-                }
+        let added = folder_paths(event.and_then(|e| e.get("added")));
+        self.ws.workspace_roots.extend(added.iter().cloned());
+        // A folder added after the initial scan would never be indexed
+        // (the `scanned` latch makes `ensure_workspace_scanned` early
+        // return), leaving its modules invisible to cross-module queries.
+        // Index it now. Before the first scan, the pending
+        // `ensure_workspace_scanned` will cover it from `workspace_roots`.
+        if self.ws.scanned {
+            for r in &added {
+                self.ws.index_root(r);
             }
         }
     }
