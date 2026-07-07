@@ -33,9 +33,11 @@ impl Compiler {
             return;
         }
         let key = module::path_key(&path);
-        let Some(iface) = self.module_table.get(&key) else {
-            return;
-        };
+        #[allow(clippy::expect_used)]
+        let iface = self
+            .module_table
+            .get(&key)
+            .expect("load_module returned true so prelude must be in module_table");
         for name in iface.types.keys() {
             self.reserved.insert(name.clone());
         }

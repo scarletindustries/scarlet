@@ -1230,6 +1230,7 @@ impl Value {
         let n: usize = parts.iter().map(|p| p.len()).sum();
         debug_assert_eq!(n, bit_len.div_ceil(8) as usize);
         let mut uninit = Arc::new_uninit_slice(n);
+        #[allow(clippy::expect_used)]
         let dst = Arc::get_mut(&mut uninit).expect("freshly allocated Arc is unique");
         // SAFETY: `dst` is exactly `n` bytes (the summed part lengths); the
         // copies are laid back-to-back so they stay in bounds and together

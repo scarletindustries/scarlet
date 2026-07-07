@@ -269,6 +269,8 @@ fn merge_into_collision<A: Arena + ?Sized>(
     hamt_collision_in(a, hash, &[lk, lv, rkey, rvalue])
 }
 
+#[cold]
+#[allow(clippy::unreachable)]
 fn unreachable_collision() -> ! {
     unreachable!("hamt split reached full depth with a non-entry node")
 }
