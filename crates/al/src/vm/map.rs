@@ -126,14 +126,15 @@ impl VM {
             }
             MapBacking::Hamt => {
                 let map = self.pop()?;
-                hamt::collect_entries(&map)
-                    .into_iter()
-                    .map(|(k, v)| match proj {
+                let mut items = Vec::with_capacity(hamt::size(&map));
+                hamt::for_each(&map, |k, v| {
+                    items.push(match proj {
                         Proj::Keys => k,
                         Proj::Values => v,
                         Proj::Pairs => Value::tuple_in(&mut self.heap, &[k, v]),
-                    })
-                    .collect()
+                    });
+                });
+                items
             }
         };
         let arr = Value::array_in(&mut self.heap, &items);

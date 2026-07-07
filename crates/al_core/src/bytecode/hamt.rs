@@ -206,6 +206,13 @@ fn for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value)) {
     });
 }
 
+/// Visit every `(key, value)` in `map`. The visited `Value`s are owned
+/// (counted) references the caller takes ownership of.
+pub fn for_each(map: &Value, mut f: impl FnMut(Value, Value)) {
+    let m = HamtMapRef::of(map);
+    for_each_entry(&m.root, &mut f);
+}
+
 /// Collect every `(key, value)` into host memory. The returned `Value`s are
 /// owned (counted) references the caller takes ownership of.
 pub fn collect_entries(map: &Value) -> Vec<(Value, Value)> {

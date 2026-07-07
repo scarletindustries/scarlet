@@ -411,7 +411,7 @@ pub enum MatchFunTypeError {
     IncorrectArity {
         expected: usize,
         given: usize,
-        params: Vec<Ty>,
+        params: SmallVec<[Ty; 4]>,
         ret: Ty,
     },
     NotFn {
@@ -1170,12 +1170,12 @@ impl InferEngine {
         &mut self,
         ty: Ty,
         arity: usize,
-    ) -> Result<(Vec<Ty>, Ty), MatchFunTypeError> {
+    ) -> Result<(SmallVec<[Ty; 4]>, Ty), MatchFunTypeError> {
         let resolved = self.find(ty);
         if let TypeNode::Var(id) = self.node(resolved) {
             return match self.root_var(id) {
                 RootVarState::Unbound { .. } => {
-                    let params: Vec<Ty> = (0..arity).map(|_| self.fresh_var()).collect();
+                    let params: SmallVec<[Ty; 4]> = (0..arity).map(|_| self.fresh_var()).collect();
                     let ret = self.fresh_var();
                     let fn_ty = self.mk_fun(&params, ret);
                     self.vars[id as usize] = TyVarState::Link { ty: fn_ty };
@@ -1185,7 +1185,7 @@ impl InferEngine {
             };
         }
         if let TypeNode::Fun { params, ret } = self.node(resolved) {
-            let params: Vec<Ty> = self.children_of(params).to_vec();
+            let params: SmallVec<[Ty; 4]> = self.children_of(params).into();
             if params.len() != arity {
                 return Err(MatchFunTypeError::IncorrectArity {
                     expected: params.len(),
