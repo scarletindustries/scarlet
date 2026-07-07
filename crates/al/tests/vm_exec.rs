@@ -289,3 +289,152 @@ fn binary_from_int_ascii() {
         "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nSome(4096)\n",
     );
 }
+
+// ===========================================================================
+// Closure capture of an *enclosing function's local* — the `PushCapture` /
+// `MakeClosure(capture_count > 0)` path. Distinct from capturing a module-
+// global (U22 in unsound.rs), which resolves to `PushGlobal` and reads the
+// entry frame at call time. Here the inner `fn` captures a binding that lives
+// only in the outer call's frame, so the value must be *materialized into the
+// closure* at `MakeClosure` time and read back via `PushCapture` at call time.
+// ===========================================================================
+
+#[test]
+fn closure_captures_enclosing_function_local() {
+    // `x` is a parameter of `make_adder`; its frame is gone by the time the
+    // returned closure is called. Two closures built over distinct captures
+    // (5 and 10) prove the capture is materialized per-closure: a shared/global
+    // slot would make both print the same value (the last `x` written).
+    run_outputs(
+        "fn make_adder(x Int) fn(Int) Int {\n\
+         \tfn(y Int) x + y\n\
+         }\n\
+         add5 = make_adder(5)\n\
+         add10 = make_adder(10)\n\
+         println(add5(3))\n\
+         println(add10(3))\n",
+        "8\n13\n",
+    );
+}
+
+#[test]
+fn closure_captures_multiple_enclosing_locals() {
+    // Two captures (`a`, `b`) exercise `MakeClosure(capture_count = 2)` and
+    // `PushCapture` at indices 0 and 1. Distinct (a, b) per closure proves each
+    // closure carries its own materialized capture array, read back in order:
+    // f = 2*10 + 3 = 23, g = 5*10 + 1 = 51.
+    run_outputs(
+        "fn make_affine(a Int, b Int) fn(Int) Int {\n\
+         \tfn(x Int) a * x + b\n\
+         }\n\
+         f = make_affine(2, 3)\n\
+         g = make_affine(5, 1)\n\
+         println(f(10))\n\
+         println(g(10))\n",
+        "23\n51\n",
+    );
+}
+
+#[test]
+fn closure_captures_non_parameter_local() {
+    // The captured binding `base` is a let-binding inside the enclosing
+    // function, not a parameter — still an enclosing-function local, so still
+    // the `PushCapture` path. p = 100 + 5 = 105, q = 200 + 5 = 205.
+    run_outputs(
+        "fn counter_from(start Int) fn(Int) Int {\n\
+         \tbase = start * 100\n\
+         \tfn(n Int) base + n\n\
+         }\n\
+         p = counter_from(1)\n\
+         q = counter_from(2)\n\
+         println(p(5))\n\
+         println(q(5))\n",
+        "105\n205\n",
+    );
+}
+
+// ===========================================================================
+// `&&` / `||` short-circuit evaluation
+// ===========================================================================
+
+#[test]
+fn and_or_short_circuit_skips_rhs() {
+    // `loud` prints 'evaluated' whenever its argument is actually computed, so a
+    // missing 'evaluated' line proves the RHS was never reached. `False && _`
+    // is decided by the LHS (JumpIfFalse), and `True || _` likewise (JumpIfTrue),
+    // so neither RHS call runs: output is just the two boolean results.
+    run_outputs(
+        "fn loud(b Bool) Bool {\n\
+         \tprintln('evaluated')\n\
+         \tb\n\
+         }\n\
+         println(False && loud(True))\n\
+         println(True || loud(False))\n",
+        "False\nTrue\n",
+    );
+}
+
+#[test]
+fn and_or_evaluate_rhs_when_lhs_undecided() {
+    // Control for `and_or_short_circuit_skips_rhs`: here the LHS does NOT decide
+    // the result (`True && _`, `False || _`), so the RHS must run. Each call
+    // emits 'evaluated' before the println prints the operator's result, which
+    // also confirms `loud` genuinely prints when reached.
+    run_outputs(
+        "fn loud(b Bool) Bool {\n\
+         \tprintln('evaluated')\n\
+         \tb\n\
+         }\n\
+         println(True && loud(False))\n\
+         println(False || loud(True))\n",
+        "evaluated\nFalse\nevaluated\nTrue\n",
+    );
+}
+
+// ===========================================================================
+// Equality / inequality across types
+//
+// `==`/`!=` over Ints lower to specialized opcodes (`Op::EqInt`/`Op::NeqInt`);
+// over any other value they lower to the generic structural `Op::Eq`/`Op::Neq`.
+// Elsewhere the suite only ever asserts Int `==` (`1 == 2`, `x % 2 == 0`) and
+// discards `!=` results, and the generic `Op::Eq` is only exercised implicitly
+// inside the match matcher. These tests pin `!=` to a concrete result and drive
+// the generic equality path as a value-producing expression over enum, String,
+// Array, and Tuple values.
+// ===========================================================================
+
+#[test]
+fn neq_on_int_and_enum() {
+    // Ints take the specialized `Op::NeqInt`: `1 != 2` is True and `1 != 1` is
+    // False, so the pair pins the opcode to genuine inequality (an always-true,
+    // always-false, or accidental-`==` lowering would flip exactly one line).
+    // Enum values take the *generic* `Op::Neq`, which compares the variant tag
+    // and fields structurally: `Good('x') != Good('y')` differs in its field
+    // (True), while `Good('x') != Good('x')` is structurally equal (False).
+    run_outputs(
+        "type C { Good(v String) Bad(v String) }\n\
+         println(1 != 2)\n\
+         println(1 != 1)\n\
+         println(Good('x') != Good('y'))\n\
+         println(Good('x') != Good('x'))\n",
+        "True\nFalse\nTrue\nFalse\n",
+    );
+}
+
+#[test]
+fn eq_on_string_array_tuple() {
+    // The generic `Op::Eq` path used as a value-producing expression (rather than
+    // inside a match matcher) over each compound kind, pinned in both directions
+    // so neither an always-True nor an always-False implementation could pass:
+    // String compares by contents, Array element-wise, and Tuple component-wise
+    // (the inequal tuples differ only in their second component).
+    run_outputs(
+        "println('ab' == 'ab')\n\
+         println('ab' == 'ac')\n\
+         println([1, 2] == [1, 2])\n\
+         println([1, 2] == [1, 3])\n\
+         println((1, 'a') == (1, 'a'))\n\
+         println((1, 'a') == (1, 'b'))\n",
+        "True\nFalse\nTrue\nFalse\nTrue\nFalse\n",
+    );
+}
