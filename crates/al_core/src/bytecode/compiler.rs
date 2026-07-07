@@ -1117,11 +1117,14 @@ impl Compiler {
     fn emit_construct_header(
         &mut self,
         type_id: TypeId,
+        variant_idx: u16,
         type_name: &str,
         variant_name: &str,
         field_labels: ArenaSlice<pool::StrSlices>,
     ) {
-        let id_c = self.const_int(type_id.0 as i64);
+        // Pack `variant_idx` into the high 32 bits of the type-id constant so
+        // `MakeEnumPayload` can store it in the enum header for `SwitchTag`.
+        let id_c = self.const_int((type_id.0 as u32 as i64) | ((variant_idx as i64) << 32));
         self.emit_arg(Op::PushConst, id_c);
         let en_c = self.const_str(type_name);
         self.emit_arg(Op::PushConst, en_c);
@@ -2914,13 +2917,19 @@ impl Compiler {
         let ph =
             self.emit_construct_header_for_build(type_id, type_name, variant_name, field_labels_sl);
 
-        // The spread base was unified with `result_ty`; when that resolves to a
-        // concrete Con the field indices `i` below are compiler-computed and
-        // provably in-bounds, so the tag/bounds checks in `GetField` are dead.
-        let result_rep = self.engine.find(result_ty);
-        let spread_field_op = match self.engine.node(result_rep) {
-            TypeNode::Con { .. } => Op::GetFieldUnchecked,
-            _ => Op::GetField,
+        // The spread base was unified with the enum TYPE, not the target
+        // variant; for a multi-variant enum the base may be a different variant
+        // with fewer fields than we index below. Only elide the bounds check
+        // when the enum has exactly one variant (base variant == target).
+        let single_variant = self
+            .env
+            .lookup_type_info_by_id(type_id)
+            .and_then(|i| i.variants())
+            .is_some_and(|vs| vs.len == 1);
+        let spread_field_op = if single_variant {
+            Op::GetFieldUnchecked
+        } else {
+            Op::GetField
         };
 
         for (i, slot_expr) in by_pos.iter().enumerate().take(field_labels_sl.len as usize) {
