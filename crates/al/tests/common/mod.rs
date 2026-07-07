@@ -348,6 +348,14 @@ pub fn assert_has_msg(msgs: &[String], needle: &str) {
     );
 }
 
+/// Assert at least one of `msgs` is exactly `exact` (not a substring match).
+pub fn assert_msg_eq(msgs: &[String], exact: &str) {
+    assert!(
+        msgs.iter().any(|m| m == exact),
+        "expected a message == `{exact}`: {msgs:?}"
+    );
+}
+
 /// Assert no message in `msgs` contains `needle`.
 pub fn assert_no_msg(msgs: &[String], needle: &str) {
     assert!(

@@ -14,8 +14,8 @@ use al::span::Span;
 
 mod common;
 use common::{
-    Project, SessionQueryExt, assert_has_msg, assert_has_sym, assert_no_msg, checked_with, cursor,
-    parse, sym_names,
+    Project, SessionQueryExt, assert_has_msg, assert_has_sym, assert_msg_eq, assert_no_msg,
+    checked_with, cursor, parse, sym_names,
 };
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
@@ -240,7 +240,7 @@ fn stdlib_import_path_is_tracked() {
     let unused = "import al/array\nprintln(1)\n";
     p2.write("a.al", unused);
     let s2 = checked_with(&p2, unused);
-    assert_has_msg(&unused_msgs(&s2), "unused import `array`");
+    assert_msg_eq(&unused_msgs(&s2), "unused import `array`");
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn unused_import_and_dead_private_def_hints() {
     let msgs = unused_msgs(&s);
 
     assert_has_msg(&msgs, "unused import `c`");
-    assert_has_msg(&msgs, "unused function `deadpriv`");
+    assert_msg_eq(&msgs, "unused function `deadpriv`");
     // `println` is a used builtin and must never be reported.
     assert_no_msg(&msgs, "println");
 }
@@ -510,7 +510,7 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let s = checked_with(&p, entry);
     let msgs = unused_msgs(&s);
 
-    assert_has_msg(&msgs, "unused import `c`");
+    assert_msg_eq(&msgs, "unused import `c`");
     assert_no_msg(&msgs, "unused import `d`");
 }
 
