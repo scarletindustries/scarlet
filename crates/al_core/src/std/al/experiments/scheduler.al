@@ -9,21 +9,25 @@
 //
 // The program exits when every process has finished.
 
+// The closure returns `Nil`, not a generic `a`: a spawned process has nowhere
+// to send a result — its return value is dropped — so a closure that produces a
+// `Result` would have its error silently discarded. Forcing `Nil` makes the
+// caller decide what to do with any error at the call site.
 @vm(scheduler__spawn)
-pub fn spawn(f fn() a) Nil
+pub fn spawn(f fn() Nil) Nil
 
 // Spawn `f` pinned to the current core. The child runs on the core that
 // spawned it — and any socket it captured stays there too, so no file
 // descriptor moves between cores. This is what keeps a connection on the core
 // that accepted it; for general work prefer `spawn`, which load-balances.
 @vm(scheduler__spawn_local)
-pub fn spawn_local(f fn() a) Nil
+pub fn spawn_local(f fn() Nil) Nil
 
 // Spawn one copy of `f` on every core. Each copy runs independently with no
 // shared state. Used to fan an accept loop out across all cores, so each core
 // accepts and serves connections from its own kernel queue.
 @vm(scheduler__spawn_on_each)
-pub fn spawn_on_each(f fn() a) Nil
+pub fn spawn_on_each(f fn() Nil) Nil
 
 @vm(scheduler__sleep)
 pub fn sleep(ms Int) Nil

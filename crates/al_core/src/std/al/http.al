@@ -174,7 +174,7 @@ pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, Ne
 // listen on port 0, read the kernel-assigned port back with net.local_addr,
 // then hand the listener over. `serve` is the listen-and-serve convenience on
 // top of this.
-pub fn serve_on(server Server, handler fn(Request) Response) Result(Nil, NetError) {
+pub fn serve_on(server Server, handler fn(Request) Response) Nil {
 	net.serve_on(server, fn(sock) drive(sock, handler))
 }
 

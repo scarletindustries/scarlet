@@ -1,6 +1,6 @@
 import al/net/address.{SocketAddress, IpAddress}
 import al/net/socket.{Socket}
-import al/net/error.{NetError}
+import al/net/error.{NetError, ConnectionAborted, ConnectionReset, Errno}
 import al/experiments/scheduler
 
 pub type Server
@@ -37,7 +37,10 @@ pub fn accept(s Server) Result(Socket, NetError)
 // acceptors keep the program alive. A bind failure is reported as `Err`.
 pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Nil, NetError) {
 	match listen(host, port) {
-		Ok(server) -> serve_on(server, handler)
+		Ok(server) -> {
+			serve_on(server, handler)
+			Ok(Nil)
+		}
 		Err(e) -> Err(e)
 	}
 }
@@ -45,20 +48,29 @@ pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Nil, NetError
 // Serve connections from a listener already bound with `listen`, fanning the
 // accept loop out across every core exactly as `serve` does. Useful to bind on
 // port 0, read the kernel-assigned port back with `local_addr`, then serve.
-pub fn serve_on(server Server, handler fn(Socket) Nil) Result(Nil, NetError) {
+// Returns `Nil`: once the listener is bound the acceptors cannot fail here —
+// the only fallible step is the bind, which the caller has already done.
+pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 	scheduler.spawn_on_each(fn() accept_loop(server, handler))
-	Ok(Nil)
 }
 
 // The per-core accept loop: accept a connection, hand it to its own process on
 // this same core (so the socket stays local), then loop. One copy of this runs
 // on every core, each draining its own kernel accept queue.
+//
+// A per-connection accept error (ECONNABORTED, ECONNRESET, an unmapped errno
+// such as EMFILE/EPROTO) means one incoming connection was lost, not that the
+// listening socket is dead — the loop retries. Any other variant means the
+// listener itself is gone, so the loop exits and this core stops accepting.
 fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 	match accept(server) {
 		Ok(sock) -> {
 			scheduler.spawn_local(fn() handler(sock))
 			accept_loop(server, handler)
 		}
+		Err(ConnectionAborted) -> accept_loop(server, handler)
+		Err(ConnectionReset) -> accept_loop(server, handler)
+		Err(Errno(_)) -> accept_loop(server, handler)
 		Err(_) -> Nil
 	}
 }

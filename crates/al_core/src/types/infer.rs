@@ -154,6 +154,22 @@ enum TyVarState {
     },
 }
 
+/// State of a var known to be a union-find root — i.e. what
+/// `vars[id]` holds when `id` came from `find()` returning `Var(id)`. `Link`
+/// is unrepresentable here, so downstream matches need not (and cannot)
+/// invent handling for it.
+#[derive(Debug, Clone, Copy)]
+enum RootVarState {
+    Unbound {
+        level: i32,
+        constraint: Option<Constraint>,
+    },
+    Generic {
+        id: i32,
+        constraint: Option<Constraint>,
+    },
+}
+
 // ============================================================================
 // ValueKind - what a name in the value environment refers to
 // ============================================================================
@@ -740,6 +756,23 @@ impl InferEngine {
         rep
     }
 
+    /// State of a root var. `id` must have come from `find()` returning
+    /// `Var(id)` — the `Link` case is a broken invariant and trips a
+    /// debug_assert (release builds fabricate an Unbound so callers stay total).
+    fn root_var(&self, id: i32) -> RootVarState {
+        match self.vars[id as usize] {
+            TyVarState::Unbound { level, constraint } => RootVarState::Unbound { level, constraint },
+            TyVarState::Generic { id, constraint } => RootVarState::Generic { id, constraint },
+            TyVarState::Link { .. } => {
+                debug_assert!(false, "root_var on Link — find() invariant broken");
+                RootVarState::Unbound {
+                    level: 0,
+                    constraint: None,
+                }
+            }
+        }
+    }
+
     /// If `t` currently resolves (via union-find) to a concrete `Int`, `Float`
     /// or `String` constructor, return which one. Returns `None` for unbound
     /// vars (including constrained `numeric`/`addable` vars that haven't been
@@ -779,7 +812,7 @@ impl InferEngine {
                 if id == var_id {
                     return true;
                 }
-                if let TyVarState::Unbound { level, constraint } = self.vars[id as usize]
+                if let RootVarState::Unbound { level, constraint } = self.root_var(id)
                     && level > var_level
                 {
                     self.vars[id as usize] = TyVarState::Unbound {
@@ -915,18 +948,16 @@ impl InferEngine {
     }
 
     fn unify_var(&mut self, var_id: i32, var_ty: Ty, ty: Ty) -> Result<(), UnifyError> {
-        let state = self.vars[var_id as usize];
-        match state {
-            TyVarState::Link { .. } => Err(could_not_unify(var_ty, ty)),
-            TyVarState::Generic {
+        match self.root_var(var_id) {
+            RootVarState::Generic {
                 id,
                 constraint: gen_c,
             } => {
                 // A rigid generic may only absorb an unbound var (which then
                 // links to the same generic) or an identical generic.
                 if let TypeNode::Var(other_id) = self.node(ty) {
-                    match self.vars[other_id as usize] {
-                        TyVarState::Unbound {
+                    match self.root_var(other_id) {
+                        RootVarState::Unbound {
                             constraint: other_c,
                             ..
                         } => {
@@ -940,15 +971,15 @@ impl InferEngine {
                             self.vars[other_id as usize] = TyVarState::Link { ty: var_ty };
                             return Ok(());
                         }
-                        TyVarState::Generic { id: other_gid, .. } if other_gid == id => {
+                        RootVarState::Generic { id: other_gid, .. } if other_gid == id => {
                             return Ok(());
                         }
-                        _ => {}
+                        RootVarState::Generic { .. } => {}
                     }
                 }
                 Err(could_not_unify(var_ty, ty))
             }
-            TyVarState::Unbound { level, constraint } => {
+            RootVarState::Unbound { level, constraint } => {
                 if self.occurs_and_adjust(var_id, level, ty) {
                     return Err(UnifyError::RecursiveType);
                 }
@@ -972,9 +1003,8 @@ impl InferEngine {
         let resolved = self.find(ty);
         match self.node(resolved) {
             TypeNode::Var(other_id) => {
-                let other_state = self.vars[other_id as usize];
-                match other_state {
-                    TyVarState::Unbound {
+                match self.root_var(other_id) {
+                    RootVarState::Unbound {
                         level: other_level,
                         constraint: other_constraint,
                     } => {
@@ -1000,7 +1030,7 @@ impl InferEngine {
                             };
                         }
                     }
-                    TyVarState::Generic {
+                    RootVarState::Generic {
                         constraint: gen_c, ..
                     } => {
                         // Linking the constrained var to a rigid generic
@@ -1010,7 +1040,6 @@ impl InferEngine {
                             return Err(could_not_unify(var_ty, resolved));
                         }
                     }
-                    TyVarState::Link { .. } => {}
                 }
             }
             TypeNode::Con { id, .. } => match self.as_prim(id) {
@@ -1035,19 +1064,16 @@ impl InferEngine {
     ) -> Result<(Vec<Ty>, Ty), MatchFunTypeError> {
         let resolved = self.find(ty);
         if let TypeNode::Var(id) = self.node(resolved) {
-            match self.vars[id as usize] {
-                TyVarState::Unbound { .. } => {
+            return match self.root_var(id) {
+                RootVarState::Unbound { .. } => {
                     let params: Vec<Ty> = (0..arity).map(|_| self.fresh_var()).collect();
                     let ret = self.fresh_var();
                     let fn_ty = self.mk_fun(&params, ret);
                     self.vars[id as usize] = TyVarState::Link { ty: fn_ty };
-                    return Ok((params, ret));
+                    Ok((params, ret))
                 }
-                TyVarState::Generic { .. } => {
-                    return Err(MatchFunTypeError::NotFn { ty: resolved });
-                }
-                TyVarState::Link { .. } => {}
-            }
+                RootVarState::Generic { .. } => Err(MatchFunTypeError::NotFn { ty: resolved }),
+            };
         }
         if let TypeNode::Fun { params, ret } = self.node(resolved) {
             let params: Vec<Ty> = self.children_of(params).to_vec();
@@ -1093,10 +1119,9 @@ impl InferEngine {
         let quantified: Vec<QuantVar> = ids
             .iter()
             .map(|id| {
-                let constraint = match self.vars[*id as usize] {
-                    TyVarState::Generic { constraint, .. } => constraint,
-                    TyVarState::Unbound { constraint, .. } => constraint,
-                    TyVarState::Link { .. } => None,
+                let constraint = match self.root_var(*id) {
+                    RootVarState::Generic { constraint, .. }
+                    | RootVarState::Unbound { constraint, .. } => constraint,
                 };
                 let name = self.var_names.get(id).copied().unwrap_or(NO_STR);
                 QuantVar {
@@ -1120,12 +1145,12 @@ impl InferEngine {
     /// the way.
     fn close_over(&mut self, ty: Ty, ids: &[i32]) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
-            TypeNode::Var(id) => match e.vars[id as usize] {
-                TyVarState::Generic { id: gid, .. } => ids
+            TypeNode::Var(id) => match e.root_var(id) {
+                RootVarState::Generic { id: gid, .. } => ids
                     .iter()
                     .position(|&i| i == gid)
                     .map(|ix| e.mk_bound(ix as u32)),
-                _ => None,
+                RootVarState::Unbound { .. } => None,
             },
             _ => None,
         })
@@ -1241,23 +1266,20 @@ impl InferEngine {
     fn collect_generalizable(&mut self, ty: Ty, ignore_level: bool, quantified: &mut Vec<i32>) {
         let r = self.find(ty);
         match self.node(r) {
-            TypeNode::Var(id) => {
-                let state = self.vars[id as usize];
-                match state {
-                    TyVarState::Unbound { level, constraint }
-                        if ignore_level || level > self.current_level =>
-                    {
-                        self.vars[id as usize] = TyVarState::Generic { id, constraint };
-                        if !quantified.contains(&id) {
-                            quantified.push(id);
-                        }
+            TypeNode::Var(id) => match self.root_var(id) {
+                RootVarState::Unbound { level, constraint }
+                    if ignore_level || level > self.current_level =>
+                {
+                    self.vars[id as usize] = TyVarState::Generic { id, constraint };
+                    if !quantified.contains(&id) {
+                        quantified.push(id);
                     }
-                    TyVarState::Generic { id: gid, .. } if !quantified.contains(&gid) => {
-                        quantified.push(gid);
-                    }
-                    _ => {}
                 }
-            }
+                RootVarState::Generic { id: gid, .. } if !quantified.contains(&gid) => {
+                    quantified.push(gid);
+                }
+                _ => {}
+            },
             TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, quantified),
             TypeNode::Fun { params, ret } => {
                 self.collect_slice(params, ignore_level, quantified);
@@ -1363,10 +1385,9 @@ impl InferEngine {
         let r = self.find(ty);
         match self.node(r) {
             TypeNode::Var(id) => {
-                let constraint = match self.vars[id as usize] {
-                    TyVarState::Unbound { constraint, .. } => constraint,
-                    TyVarState::Generic { constraint, .. } => constraint,
-                    TyVarState::Link { .. } => None,
+                let constraint = match self.root_var(id) {
+                    RootVarState::Unbound { constraint, .. }
+                    | RootVarState::Generic { constraint, .. } => constraint,
                 };
                 if let Some(c) = constraint {
                     return t_var(c.name());
