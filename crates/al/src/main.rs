@@ -247,7 +247,7 @@ fn main() {
         Some(Commands::Build { entrypoint }) => {
             let file = read_file_or_die(&entrypoint);
             match formatter::format(&file) {
-                formatter::FormatResult::Formatted { output, .. } => println!("{output}"),
+                formatter::FormatResult::Formatted { output } => println!("{output}"),
                 formatter::FormatResult::ParseFailed { errors } => {
                     diagnostic::print_diagnostics(&errors, &file, &entrypoint);
                     process::exit(1);
@@ -275,7 +275,7 @@ fn cmd_run(args: RunArgs) {
     if args.debug_printer {
         println!();
         println!("================DEBUG: Printed parsed source code================");
-        if let formatter::FormatResult::Formatted { output, .. } = formatter::format(&file) {
+        if let formatter::FormatResult::Formatted { output } = formatter::format(&file) {
             println!("{output}");
         }
         println!("=================================================================");
@@ -307,7 +307,7 @@ fn cmd_fmt(args: FmtArgs) {
             dump_tokens(&content);
         }
         match formatter::format(&content) {
-            formatter::FormatResult::Formatted { output, .. } => {
+            formatter::FormatResult::Formatted { output } => {
                 print!("{output}");
                 let _ = io::stdout().flush();
             }
@@ -354,7 +354,7 @@ fn cmd_fmt(args: FmtArgs) {
                 }
                 has_errors = true;
             }
-            formatter::FormatResult::Formatted { output, .. } => {
+            formatter::FormatResult::Formatted { output } => {
                 let changed = output != content;
                 if args.check {
                     if changed {

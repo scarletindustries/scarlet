@@ -17,13 +17,8 @@ use doc::{
 const MAX_WIDTH: isize = 100;
 
 pub enum FormatResult {
-    Formatted {
-        output: String,
-        warnings: Vec<Diagnostic>,
-    },
-    ParseFailed {
-        errors: Vec<Diagnostic>,
-    },
+    Formatted { output: String },
+    ParseFailed { errors: Vec<Diagnostic> },
 }
 
 pub fn format(input: &str) -> FormatResult {
@@ -49,9 +44,8 @@ pub fn format(input: &str) -> FormatResult {
 
     let errors: Vec<Diagnostic> = result
         .diagnostics
-        .iter()
+        .into_iter()
         .filter(|d| d.severity == Severity::Error)
-        .cloned()
         .collect();
 
     if !errors.is_empty() {
@@ -66,10 +60,7 @@ pub fn format(input: &str) -> FormatResult {
     }
     output.push('\n');
 
-    FormatResult::Formatted {
-        output,
-        warnings: result.diagnostics,
-    }
+    FormatResult::Formatted { output }
 }
 
 struct Formatter {
@@ -902,7 +893,7 @@ mod tests {
 
     fn fmt(src: &str) -> String {
         match format(src) {
-            FormatResult::Formatted { output, .. } => output,
+            FormatResult::Formatted { output } => output,
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
         }
     }
@@ -910,7 +901,7 @@ mod tests {
     #[track_caller]
     fn assert_round_trips(out: &str) {
         match format(out) {
-            FormatResult::Formatted { output, .. } => {
+            FormatResult::Formatted { output } => {
                 assert_eq!(out, output, "formatter not idempotent:\n{out}")
             }
             FormatResult::ParseFailed { .. } => {
@@ -933,12 +924,12 @@ mod tests {
             }
             let src = std::fs::read_to_string(&path).unwrap();
             let once = match format(&src) {
-                FormatResult::Formatted { output, .. } => output,
+                FormatResult::Formatted { output } => output,
                 // Source itself does not parse — outside the formatter's remit.
                 FormatResult::ParseFailed { .. } => continue,
             };
             match format(&once) {
-                FormatResult::Formatted { output, .. } => {
+                FormatResult::Formatted { output } => {
                     assert_eq!(once, output, "formatter not idempotent for {name}")
                 }
                 FormatResult::ParseFailed { .. } => {
