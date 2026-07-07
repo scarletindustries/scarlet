@@ -719,7 +719,7 @@ fn concat_sub<A: Arena + ?Sized>(
     lshift: usize,
     r: &Value,
     rshift: usize,
-) -> Vec<Value> {
+) -> Buf {
     if lshift > rshift {
         let (_, lc) = branch_parts(l);
         let mid = concat_sub(a, &lc[lc.len() - 1], lshift - BITS, r, rshift);
@@ -730,14 +730,17 @@ fn concat_sub<A: Arena + ?Sized>(
         rebalance(a, &[], &mid, &rc[1..], rshift)
     } else if lshift == 0 {
         let (le, re) = (leaf_elems(l), leaf_elems(r));
+        let mut out = Buf::new();
         if le.len() + re.len() <= B {
             let mut buf = Buf::new();
             buf.extend(le);
             buf.extend(re);
-            vec![leaf_from(a, &buf)]
+            out.push(leaf_from(a, &buf));
         } else {
-            vec![l.clone(), r.clone()]
+            out.push(l.clone());
+            out.push(r.clone());
         }
+        out
     } else {
         let (_, lc) = branch_parts(l);
         let (_, rc) = branch_parts(r);
@@ -756,7 +759,7 @@ fn rebalance<A: Arena + ?Sized>(
     mid: &[Value],
     right: &[Value],
     shift: usize,
-) -> Vec<Value> {
+) -> Buf {
     let mut all = Buf::new();
     all.extend(left);
     all.extend(mid);
@@ -766,7 +769,11 @@ fn rebalance<A: Arena + ?Sized>(
     let total: usize = all.iter().map(slot_count).sum();
     let optimal = total.div_ceil(B);
     if all.len() > optimal + E_MAX {
-        let mut plan: Vec<usize> = all.iter().map(slot_count).collect();
+        let mut plan = [0usize; 2 * B];
+        let mut plan_len = all.len();
+        for (i, c) in all.iter().enumerate() {
+            plan[i] = slot_count(c);
+        }
         // Shrink the plan: find a sparse node (fewer than B - E_MAX/2
         // slots) and pour its contents into its successors, removing one
         // node per pass until the count meets the invariant. The threshold
@@ -776,12 +783,12 @@ fn rebalance<A: Arena + ?Sized>(
         // with len <= 2 * B that is >= len - E_MAX — contradicting
         // `plan.len() > optimal + E_MAX`. Skipping near-full nodes also
         // keeps the redistribution local instead of rewriting the whole run.
-        while plan.len() > optimal + E_MAX {
+        while plan_len > optimal + E_MAX {
             let mut i = 0;
-            while i < plan.len() && plan[i] >= B - E_MAX / 2 {
+            while i < plan_len && plan[i] >= B - E_MAX / 2 {
                 i += 1;
             }
-            if i >= plan.len() {
+            if i >= plan_len {
                 // Unreachable per the bound above (every node near-full
                 // implies the count is already within optimal + E_MAX);
                 // backstop so a violated invariant degrades to a slightly
@@ -790,24 +797,28 @@ fn rebalance<A: Arena + ?Sized>(
             }
             let mut r = plan[i];
             let mut j = i;
-            while r > 0 && j + 1 < plan.len() {
+            while r > 0 && j + 1 < plan_len {
                 let merged = (r + plan[j + 1]).min(B);
                 r = r + plan[j + 1] - merged;
                 plan[j] = merged;
                 j += 1;
             }
             debug_assert!(r == 0, "rebalance plan lost slots");
-            plan.remove(j);
+            plan.copy_within(j + 1..plan_len, j);
+            plan_len -= 1;
         }
-        all = execute_plan(a, &all, &plan, shift - BITS);
+        all = execute_plan(a, &all, &plan[..plan_len], shift - BITS);
     }
 
+    let mut out = Buf::new();
     if all.len() <= B {
-        vec![branch_from(a, shift, &all)]
+        out.push(branch_from(a, shift, &all));
     } else {
         let (a1, a2) = all.split_at(B);
-        vec![branch_from(a, shift, a1), branch_from(a, shift, a2)]
+        out.push(branch_from(a, shift, a1));
+        out.push(branch_from(a, shift, a2));
     }
+    out
 }
 
 /// Rebuild a run of sibling nodes (at `child_shift`) to the slot counts in
