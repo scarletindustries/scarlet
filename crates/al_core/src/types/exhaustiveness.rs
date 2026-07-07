@@ -6,13 +6,6 @@ use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::rc::Rc;
 
-#[derive(Debug, Clone)]
-pub enum Pat {
-    Wildcard,
-    Ctor { name: String, args: Vec<Pat> },
-    Or { patterns: Vec<Pat> },
-}
-
 /// Per-check constructor-name interner. Every ctor name (real variants plus
 /// the synthetic `lit:`/`#bin:`/`range:`/`#tuple` names) is mapped to a dense
 /// u32 id once at the public entry points, so the matrix recursion compares
@@ -38,10 +31,6 @@ impl Interner {
             Some(i) => i as u32,
             None => self.0.insert_full(name.to_string()).0 as u32,
         }
-    }
-
-    fn lookup(&self, name: &str) -> Option<u32> {
-        self.0.get_index_of(name).map(|i| i as u32)
     }
 
     fn name(&self, id: u32) -> &str {
@@ -74,28 +63,16 @@ impl CtorIdSet {
     }
 }
 
-/// Interned mirror of `Pat` used inside the matrix recursion: ctor names are
-/// interner ids and sub-pattern lists are `Rc`-shared, so the row clones
-/// performed by `specialize`/`default_matrix`/`is_useful` are refcount bumps
-/// instead of deep copies of the pattern subtree.
+/// Lowered pattern used by the matrix recursion: ctor names are interner ids
+/// and sub-pattern lists are `Rc`-shared, so the row clones performed by
+/// `specialize`/`default_matrix`/`is_useful` are refcount bumps instead of deep
+/// copies of the pattern subtree. Built once per arm by `UsefulnessMatrix::lower`
+/// and then borrowed by `is_useful`/`push`/`find_missing`.
 #[derive(Debug, Clone)]
-enum IPat {
+pub enum Pat {
     Wildcard,
-    Ctor { id: u32, args: Rc<[IPat]> },
-    Or { patterns: Rc<[IPat]> },
-}
-
-fn intern_pat(p: &Pat, interner: &mut Interner) -> IPat {
-    match p {
-        Pat::Wildcard => IPat::Wildcard,
-        Pat::Ctor { name, args } => IPat::Ctor {
-            id: interner.intern(name),
-            args: args.iter().map(|a| intern_pat(a, interner)).collect(),
-        },
-        Pat::Or { patterns } => IPat::Or {
-            patterns: patterns.iter().map(|a| intern_pat(a, interner)).collect(),
-        },
-    }
+    Ctor { id: u32, args: Rc<[Pat]> },
+    Or { patterns: Rc<[Pat]> },
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +81,7 @@ struct CtorInfo {
     arity: usize,
     /// Field labels in declaration order (parallel to `types`). Empty for
     /// constructors without named fields (array `::`/`[]`, tuples). Used by
-    /// `pattern_to_pat` to slot labeled pattern args into declaration order.
+    /// `lower_pattern` to slot labeled pattern args into declaration order.
     labels: Vec<String>,
     types: Vec<RcType>,
 }
@@ -122,7 +99,7 @@ impl TypeCtors {
 }
 
 /// Synthetic constructor name for an n-ary tuple. Kept in lockstep with the
-/// lowering in `pattern_to_pat` so the matrix algorithm sees a single ctor per
+/// lowering in `lower_pattern` so the matrix algorithm sees a single ctor per
 /// tuple arity.
 fn tuple_ctor_name(n: usize) -> String {
     format!("#tuple{}", n)
@@ -304,7 +281,7 @@ impl<T: Clone> Stack<T> {
 /// same for every row in a given matrix (they evolve in lockstep with the
 /// query row), so they are carried once alongside the query in `is_useful` /
 /// `find_witness_vec` rather than duplicated per row.
-type PatStack = Stack<IPat>;
+type PatStack = Stack<Pat>;
 type TypeStack = Stack<RcType>;
 
 #[derive(Debug, Clone, Default)]
@@ -318,15 +295,15 @@ impl PatternMatrix {
     }
 
     fn first_col_ctors(&self) -> CtorIdSet {
-        fn collect(p: &IPat, seen: &mut CtorIdSet) {
+        fn collect(p: &Pat, seen: &mut CtorIdSet) {
             match p {
-                IPat::Ctor { id, .. } => seen.insert(*id),
-                IPat::Or { patterns } => {
+                Pat::Ctor { id, .. } => seen.insert(*id),
+                Pat::Or { patterns } => {
                     for inner in patterns.iter() {
                         collect(inner, seen);
                     }
                 }
-                IPat::Wildcard => {}
+                Pat::Wildcard => {}
             }
         }
         let mut seen = CtorIdSet::default();
@@ -341,10 +318,10 @@ impl PatternMatrix {
     /// Visit every row's first column with Or-patterns recursively flattened,
     /// so `f` only ever sees `Wildcard` or `Ctor` heads. Shared iteration core
     /// for `specialize` and `default_matrix`.
-    fn for_each_head(&self, mut f: impl FnMut(&IPat, &PatStack)) {
-        fn go(p: &IPat, rest: &PatStack, f: &mut impl FnMut(&IPat, &PatStack)) {
+    fn for_each_head(&self, mut f: impl FnMut(&Pat, &PatStack)) {
+        fn go(p: &Pat, rest: &PatStack, f: &mut impl FnMut(&Pat, &PatStack)) {
             match p {
-                IPat::Or { patterns } => {
+                Pat::Or { patterns } => {
                     for a in patterns.iter() {
                         go(a, rest, f);
                     }
@@ -362,12 +339,10 @@ impl PatternMatrix {
     fn specialize(&self, ctor: &CtorInfo) -> PatternMatrix {
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest| match head {
-            IPat::Wildcard => {
-                result
-                    .rows
-                    .push(PatStack::prepend_n(IPat::Wildcard, ctor.arity, rest))
-            }
-            IPat::Ctor { id, args } if *id == ctor.id => {
+            Pat::Wildcard => result
+                .rows
+                .push(PatStack::prepend_n(Pat::Wildcard, ctor.arity, rest)),
+            Pat::Ctor { id, args } if *id == ctor.id => {
                 result.rows.push(PatStack::prepend(args, rest))
             }
             _ => {}
@@ -378,7 +353,7 @@ impl PatternMatrix {
     fn default_matrix(&self) -> PatternMatrix {
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest| {
-            if matches!(head, IPat::Wildcard) {
+            if matches!(head, Pat::Wildcard) {
                 result.rows.push(rest.clone());
             }
         });
@@ -402,11 +377,11 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
     let seen_ctors = m.first_col_ctors();
 
     match first_pat {
-        IPat::Wildcard => {
+        Pat::Wildcard => {
             if is_complete(&seen_ctors, &type_ctors) {
                 for ctor in &type_ctors.ctors {
                     let specialized_m = m.specialize(ctor);
-                    let new_pats = PatStack::prepend_n(IPat::Wildcard, ctor.arity, rest_pats);
+                    let new_pats = PatStack::prepend_n(Pat::Wildcard, ctor.arity, rest_pats);
                     let new_types = TypeStack::prepend(&ctor.types, rest_types);
                     if is_useful(&specialized_m, &new_pats, &new_types) {
                         return true;
@@ -417,7 +392,7 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
                 is_useful(&m.default_matrix(), rest_pats, rest_types)
             }
         }
-        IPat::Ctor { id, args } => {
+        Pat::Ctor { id, args } => {
             // Constructors absent from the type's table (literals, binary
             // shapes, ranges, type-error fallout) get an empty payload type
             // list, matching their lowering as opaque nullary ctors.
@@ -439,13 +414,13 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
             let new_types = TypeStack::prepend(&ctor_info.types, rest_types);
             is_useful(&specialized_m, &new_pats, &new_types)
         }
-        IPat::Or { patterns } => patterns
+        Pat::Or { patterns } => patterns
             .iter()
             .any(|p| is_useful(m, &PatStack::cons(p.clone(), rest_pats.clone()), types)),
     }
 }
 
-fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<IPat>> {
+fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
     let Some((first_type, rest_types)) = types.split() else {
         return if m.is_empty() { Some(vec![]) } else { None };
     };
@@ -458,10 +433,10 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<IPat>> {
             let specialized_m = m.specialize(ctor);
             let sub_types = TypeStack::prepend(&ctor.types, rest_types);
             if let Some(witness_vec) = find_witness_vec(&specialized_m, &sub_types) {
-                let args: Rc<[IPat]> = (0..ctor.arity)
-                    .map(|i| witness_vec.get(i).cloned().unwrap_or(IPat::Wildcard))
+                let args: Rc<[Pat]> = (0..ctor.arity)
+                    .map(|i| witness_vec.get(i).cloned().unwrap_or(Pat::Wildcard))
                     .collect();
-                let head = IPat::Ctor { id: ctor.id, args };
+                let head = Pat::Ctor { id: ctor.id, args };
                 let tail = witness_vec.get(ctor.arity..).unwrap_or(&[]);
                 return Some(std::iter::once(head).chain(tail.iter().cloned()).collect());
             }
@@ -477,11 +452,11 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<IPat>> {
             .ctors
             .iter()
             .find(|c| !seen_ctors.contains(c.id))
-            .map(|c| IPat::Ctor {
+            .map(|c| Pat::Ctor {
                 id: c.id,
-                args: vec![IPat::Wildcard; c.arity].into(),
+                args: vec![Pat::Wildcard; c.arity].into(),
             })
-            .unwrap_or(IPat::Wildcard);
+            .unwrap_or(Pat::Wildcard);
         Some(std::iter::once(head).chain(rest).collect())
     }
 }
@@ -533,10 +508,10 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
     key
 }
 
-fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
+fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
     match p {
-        IPat::Wildcard => "_".to_string(),
-        IPat::Ctor { id, args } => {
+        Pat::Wildcard => "_".to_string(),
+        Pat::Ctor { id, args } => {
             if *id == EMPTY_LIST_ID {
                 return "[]".to_string();
             }
@@ -549,11 +524,11 @@ fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
                 let mut tail = p;
                 loop {
                     match tail {
-                        IPat::Ctor { id, args } if *id == CONS_ID && args.len() == 2 => {
+                        Pat::Ctor { id, args } if *id == CONS_ID && args.len() == 2 => {
                             heads.push(pat_to_string(&args[0], elem_t, interner));
                             tail = &args[1];
                         }
-                        IPat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
+                        Pat::Ctor { id, .. } if *id == EMPTY_LIST_ID => {
                             return format!("[{}]", heads.join(", "));
                         }
                         _ => {
@@ -584,7 +559,7 @@ fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
             }
             format!("{}({})", name, parts.join(", "))
         }
-        IPat::Or { patterns } => {
+        Pat::Or { patterns } => {
             let parts: Vec<String> = patterns
                 .iter()
                 .map(|pp| pat_to_string(pp, t, interner))
@@ -594,25 +569,25 @@ fn pat_to_string(p: &IPat, t: &RcType, interner: &Interner) -> String {
     }
 }
 
-fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
+fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
+    fn nullary(id: u32) -> Pat {
+        Pat::Ctor {
+            id,
+            args: Rc::from([]),
+        }
+    }
     match p {
         ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => Pat::Wildcard,
         ast::Pattern::Literal(lit) => match lit {
-            ast::PatternLiteral::Number(n) => Pat::Ctor {
-                name: format!("lit:{}", n.value),
-                args: vec![],
-            },
-            ast::PatternLiteral::String(s) => Pat::Ctor {
-                name: format!("lit:'{}'", s.value),
-                args: vec![],
-            },
+            ast::PatternLiteral::Number(n) => nullary(interner.intern(&format!("lit:{}", n.value))),
+            ast::PatternLiteral::String(s) => {
+                nullary(interner.intern(&format!("lit:'{}'", s.value)))
+            }
         },
         ast::Pattern::Constructor { name, args, .. } => {
             let type_ctors = get_type_ctors(t);
-            let known = interner
-                .lookup(&name.name)
-                .and_then(|id| type_ctors.find(id));
-            let pat_args = match known {
+            let id = interner.intern(&name.name);
+            let pat_args: Rc<[Pat]> = match type_ctors.find(id) {
                 Some(ctor) => {
                     // Slot args into field-DECLARATION order, mirroring the
                     // compiler's `slot_ctor_args`: positional args fill
@@ -642,7 +617,7 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
                             ),
                         };
                         if idx < arity {
-                            slots[idx] = Some(pattern_to_pat_rc(inner, &ctor.types[idx], interner));
+                            slots[idx] = Some(lower_pattern(inner, &ctor.types[idx], interner));
                         }
                     }
                     slots
@@ -659,14 +634,11 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
                             ast::PatternArg::Positional(p) => p,
                             ast::PatternArg::Labeled { pattern, .. } => pattern,
                         };
-                        pattern_to_pat_rc(inner, &RcType::Infinite, interner)
+                        lower_pattern(inner, &RcType::Infinite, interner)
                     })
                     .collect(),
             };
-            Pat::Ctor {
-                name: name.name.clone(),
-                args: pat_args,
-            }
+            Pat::Ctor { id, args: pat_args }
         }
         ast::Pattern::Tuple { elements, .. } => {
             let elem_types: &[RcType] = if let RcType::Tuple(ctors) = t {
@@ -678,11 +650,11 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
                 .iter()
                 .enumerate()
                 .map(|(i, e)| {
-                    pattern_to_pat_rc(e, elem_types.get(i).unwrap_or(&RcType::Infinite), interner)
+                    lower_pattern(e, elem_types.get(i).unwrap_or(&RcType::Infinite), interner)
                 })
                 .collect();
             Pat::Ctor {
-                name: tuple_ctor_name(elements.len()),
+                id: interner.intern(&tuple_ctor_name(elements.len())),
                 args,
             }
         }
@@ -695,10 +667,7 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
             // Build a cons-list right-to-left. A spread element terminates the
             // chain with a wildcard tail (matches any remaining list, including
             // empty); otherwise the chain ends in `[]`.
-            let mut acc = Pat::Ctor {
-                name: "[]".to_string(),
-                args: vec![],
-            };
+            let mut acc = nullary(EMPTY_LIST_ID);
             for el in elements.iter().rev() {
                 match el {
                     ast::ArrayPatternElement::Spread { .. } => {
@@ -706,8 +675,8 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
                     }
                     ast::ArrayPatternElement::Pattern(p) => {
                         acc = Pat::Ctor {
-                            name: "::".to_string(),
-                            args: vec![pattern_to_pat_rc(p, elem_type, interner), acc],
+                            id: CONS_ID,
+                            args: Rc::from([lower_pattern(p, elem_type, interner), acc]),
                         };
                     }
                 }
@@ -723,22 +692,18 @@ fn pattern_to_pat_rc(p: &ast::Pattern, t: &RcType, interner: &Interner) -> Pat {
             if segments.is_empty() && rest.is_some() {
                 Pat::Wildcard
             } else {
-                Pat::Ctor {
-                    name: bin_pattern_key(segments, rest.is_some()),
-                    args: vec![],
-                }
+                nullary(interner.intern(&bin_pattern_key(segments, rest.is_some())))
             }
         }
         ast::Pattern::Or { patterns, .. } => Pat::Or {
             patterns: patterns
                 .iter()
-                .map(|p| pattern_to_pat_rc(p, t, interner))
+                .map(|p| lower_pattern(p, t, interner))
                 .collect(),
         },
-        ast::Pattern::Range { start, end, .. } => Pat::Ctor {
-            name: format!("range:{}..{}", start.value, end.value),
-            args: vec![],
-        },
+        ast::Pattern::Range { start, end, .. } => {
+            nullary(interner.intern(&format!("range:{}..{}", start.value, end.value)))
+        }
     }
 }
 
@@ -765,45 +730,40 @@ impl UsefulnessMatrix {
         }
     }
 
-    /// Lower an `ast::Pattern` into the `Pat` form used by the matrix
-    /// algorithm, against this checker's subject type. Uses the same interner
-    /// as `is_useful`/`push`/`find_missing`, so ctor names are looked up once.
-    pub fn lower(&self, p: &ast::Pattern) -> Pat {
-        pattern_to_pat_rc(p, &self.subject_type, &self.interner)
+    /// Lower an `ast::Pattern` into the interned `Pat` form used by the matrix
+    /// algorithm, against this checker's subject type. Ctor names are interned
+    /// here, once, so `is_useful`/`push`/`find_missing` can borrow the result
+    /// without re-walking the tree.
+    pub fn lower(&mut self, p: &ast::Pattern) -> Pat {
+        lower_pattern(p, &self.subject_type, &mut self.interner)
     }
 
-    pub fn is_useful(&mut self, pat: &Pat) -> bool {
-        let pats = PatStack::one(intern_pat(pat, &mut self.interner));
+    pub fn is_useful(&self, pat: &Pat) -> bool {
+        let pats = PatStack::one(pat.clone());
         let types = TypeStack::one(self.subject_type.clone());
         is_useful(&self.matrix, &pats, &types)
     }
 
     pub fn push(&mut self, pat: &Pat) {
-        let pat = intern_pat(pat, &mut self.interner);
-        self.matrix.rows.push(PatStack::one(pat));
+        self.matrix.rows.push(PatStack::one(pat.clone()));
     }
 
     /// Return a rendered witness pattern the given arms fail to cover, or
     /// `None` if they are exhaustive. Independent of `is_useful`/`push` — the
     /// arms passed here (typically the unguarded subset) form their own
     /// matrix; this checker's incremental matrix is not consulted.
-    pub fn find_missing<'a>(
-        &mut self,
-        patterns: impl IntoIterator<Item = &'a Pat>,
-    ) -> Option<String> {
+    pub fn find_missing<'a>(&self, patterns: impl IntoIterator<Item = &'a Pat>) -> Option<String> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
-            matrix
-                .rows
-                .push(PatStack::one(intern_pat(p, &mut self.interner)));
+            matrix.rows.push(PatStack::one(p.clone()));
         }
         let types = TypeStack::one(self.subject_type.clone());
-        if !is_useful(&matrix, &PatStack::one(IPat::Wildcard), &types) {
+        if !is_useful(&matrix, &PatStack::one(Pat::Wildcard), &types) {
             return None;
         }
         let witness = find_witness_vec(&matrix, &types)
             .and_then(|v| v.into_iter().next())
-            .unwrap_or(IPat::Wildcard);
+            .unwrap_or(Pat::Wildcard);
         Some(pat_to_string(&witness, &self.subject_type, &self.interner))
     }
 }
@@ -813,22 +773,56 @@ mod tests {
     use super::*;
     use crate::type_def::{self, FieldDef, TypeId, t_int, t_named, t_tuple};
 
-    fn check_exhaustiveness(pats: &[Pat], t: &Type) -> Option<String> {
-        UsefulnessMatrix::new(t.clone()).find_missing(pats)
+    /// Test-only string-keyed pattern; interned into a `Pat` against a
+    /// specific `UsefulnessMatrix` before use.
+    #[derive(Debug, Clone)]
+    enum SPat {
+        Wildcard,
+        Ctor { name: String, args: Vec<SPat> },
+        Or { patterns: Vec<SPat> },
+    }
+
+    fn intern_spat(p: &SPat, interner: &mut Interner) -> Pat {
+        match p {
+            SPat::Wildcard => Pat::Wildcard,
+            SPat::Ctor { name, args } => Pat::Ctor {
+                id: interner.intern(name),
+                args: args.iter().map(|a| intern_spat(a, interner)).collect(),
+            },
+            SPat::Or { patterns } => Pat::Or {
+                patterns: patterns.iter().map(|a| intern_spat(a, interner)).collect(),
+            },
+        }
+    }
+
+    impl UsefulnessMatrix {
+        fn intern(&mut self, p: &SPat) -> Pat {
+            intern_spat(p, &mut self.interner)
+        }
+        fn push_s(&mut self, p: &SPat) {
+            let ip = self.intern(p);
+            self.push(&ip);
+        }
+        fn is_useful_s(&mut self, p: &SPat) -> bool {
+            let ip = self.intern(p);
+            self.is_useful(&ip)
+        }
+    }
+
+    fn check_exhaustiveness(pats: &[SPat], t: &Type) -> Option<String> {
+        let mut um = UsefulnessMatrix::new(t.clone());
+        let ipats: Vec<Pat> = pats.iter().map(|p| um.intern(p)).collect();
+        um.find_missing(&ipats)
     }
 
     #[track_caller]
-    fn assert_witness(pats: &[Pat], t: &Type, w: &str) {
+    fn assert_witness(pats: &[SPat], t: &Type, w: &str) {
         assert_eq!(check_exhaustiveness(pats, t).as_deref(), Some(w));
     }
 
     #[track_caller]
-    fn assert_exhaustive(pats: &[Pat], t: &Type) {
+    fn assert_exhaustive(pats: &[SPat], t: &Type) {
         assert_eq!(check_exhaustiveness(pats, t), None);
-    }
-
-    fn pattern_to_pat(p: &ast::Pattern, t: &Type) -> Pat {
-        UsefulnessMatrix::new(t.clone()).lower(p)
     }
 
     /// Build a `Named` enum type from a `(variant, [(field, ty)])` table.
@@ -855,8 +849,8 @@ mod tests {
         t_enum(99, "Bool", vec![("True", vec![]), ("False", vec![])])
     }
 
-    fn ctor(name: &str, args: Vec<Pat>) -> Pat {
-        Pat::Ctor {
+    fn ctor(name: &str, args: Vec<SPat>) -> SPat {
+        SPat::Ctor {
             name: name.to_string(),
             args,
         }
@@ -898,7 +892,7 @@ mod tests {
 
     #[test]
     fn bool_wildcard_exhaustive() {
-        assert_exhaustive(&[Pat::Wildcard], &t_bool());
+        assert_exhaustive(&[SPat::Wildcard], &t_bool());
     }
 
     #[test]
@@ -931,7 +925,7 @@ mod tests {
         let pats = vec![
             ctor(&tn, vec![ctor("True", vec![]), ctor("True", vec![])]),
             ctor(&tn, vec![ctor("True", vec![]), ctor("False", vec![])]),
-            ctor(&tn, vec![ctor("False", vec![]), Pat::Wildcard]),
+            ctor(&tn, vec![ctor("False", vec![]), SPat::Wildcard]),
         ];
         assert_exhaustive(&pats, &t);
     }
@@ -945,8 +939,8 @@ mod tests {
         let t = t_tuple(vec![t_bool(), t_bool()]);
         let tn = tuple_ctor_name(2);
         let pats = vec![
-            ctor(&tn, vec![ctor("True", vec![]), Pat::Wildcard]),
-            ctor(&tn, vec![Pat::Wildcard, ctor("True", vec![])]),
+            ctor(&tn, vec![ctor("True", vec![]), SPat::Wildcard]),
+            ctor(&tn, vec![SPat::Wildcard, ctor("True", vec![])]),
         ];
         assert_witness(&pats, &t, "(False, False)");
     }
@@ -958,7 +952,7 @@ mod tests {
         let t = type_def::t_array(t_bool());
         let pats = vec![
             ctor("[]", vec![]),
-            ctor("::", vec![ctor("True", vec![]), Pat::Wildcard]),
+            ctor("::", vec![ctor("True", vec![]), SPat::Wildcard]),
         ];
         assert_witness(&pats, &t, "[False]");
     }
@@ -968,7 +962,7 @@ mod tests {
         // Option(Option(Int)): cover Some(Some(_)) and None → missing Some(None)
         let t = t_option(t_option(t_int()));
         let pats = vec![
-            ctor("Some", vec![ctor("Some", vec![Pat::Wildcard])]),
+            ctor("Some", vec![ctor("Some", vec![SPat::Wildcard])]),
             ctor("None", vec![]),
         ];
         assert_witness(&pats, &t, "Some(None)");
@@ -978,7 +972,7 @@ mod tests {
     fn nested_option_option_int_exhaustive() {
         let t = t_option(t_option(t_int()));
         let pats = vec![
-            ctor("Some", vec![ctor("Some", vec![Pat::Wildcard])]),
+            ctor("Some", vec![ctor("Some", vec![SPat::Wildcard])]),
             ctor("Some", vec![ctor("None", vec![])]),
             ctor("None", vec![]),
         ];
@@ -988,7 +982,7 @@ mod tests {
     #[test]
     fn option_missing_none() {
         assert_witness(
-            &[ctor("Some", vec![Pat::Wildcard])],
+            &[ctor("Some", vec![SPat::Wildcard])],
             &t_option(t_int()),
             "None",
         );
@@ -997,13 +991,17 @@ mod tests {
     #[test]
     fn result_missing_err() {
         let t = t_result(t_int(), type_def::t_string());
-        assert_witness(&[ctor("Ok", vec![Pat::Wildcard])], &t, "Err(_)");
+        assert_witness(&[ctor("Ok", vec![SPat::Wildcard])], &t, "Err(_)");
     }
 
     #[test]
     fn array_missing_empty() {
         let t = type_def::t_array(t_int());
-        assert_witness(&[ctor("::", vec![Pat::Wildcard, Pat::Wildcard])], &t, "[]");
+        assert_witness(
+            &[ctor("::", vec![SPat::Wildcard, SPat::Wildcard])],
+            &t,
+            "[]",
+        );
     }
 
     #[test]
@@ -1028,36 +1026,36 @@ mod tests {
     fn or_pattern_useful_if_any_alt_useful() {
         // Or in the test row goes through is_useful's PatOr branch: useful if any alt is.
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(&ctor("True", vec![]));
-        let new = Pat::Or {
+        m.push_s(&ctor("True", vec![]));
+        let new = SPat::Or {
             patterns: vec![ctor("True", vec![]), ctor("False", vec![])],
         };
-        assert!(m.is_useful(&new));
+        assert!(m.is_useful_s(&new));
     }
 
     #[test]
     fn or_pattern_not_useful_if_all_covered() {
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(&ctor("True", vec![]));
-        m.push(&ctor("False", vec![]));
-        let new = Pat::Or {
+        m.push_s(&ctor("True", vec![]));
+        m.push_s(&ctor("False", vec![]));
+        let new = SPat::Or {
             patterns: vec![ctor("True", vec![]), ctor("False", vec![])],
         };
-        assert!(!m.is_useful(&new));
+        assert!(!m.is_useful_s(&new));
     }
 
     #[test]
     fn usefulness_redundant_after_wildcard() {
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(&Pat::Wildcard);
-        assert!(!m.is_useful(&ctor("True", vec![])));
+        m.push_s(&SPat::Wildcard);
+        assert!(!m.is_useful_s(&ctor("True", vec![])));
     }
 
     #[test]
     fn usefulness_distinct_ctor() {
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(&ctor("True", vec![]));
-        assert!(m.is_useful(&ctor("False", vec![])));
+        m.push_s(&ctor("True", vec![]));
+        assert!(m.is_useful_s(&ctor("False", vec![])));
     }
 
     #[test]
@@ -1116,74 +1114,66 @@ mod tests {
 
     #[test]
     fn binary_fixed_segments_not_exhaustive() {
-        let t = t_binary();
-        let p = pattern_to_pat(
-            &bin_pat(
-                vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
-                false,
-            ),
-            &t,
-        );
-        assert_witness(&[p], &t, "_");
+        let mut um = UsefulnessMatrix::new(t_binary());
+        let p = um.lower(&bin_pat(
+            vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
+            false,
+        ));
+        assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_empty_literal_not_exhaustive() {
-        let t = t_binary();
-        let p = pattern_to_pat(&bin_pat(vec![], false), &t);
-        assert_witness(&[p], &t, "_");
+        let mut um = UsefulnessMatrix::new(t_binary());
+        let p = um.lower(&bin_pat(vec![], false));
+        assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_rest_only_is_exhaustive() {
-        let t = t_binary();
-        let p = pattern_to_pat(&bin_pat(vec![], true), &t);
+        let mut um = UsefulnessMatrix::new(t_binary());
+        let p = um.lower(&bin_pat(vec![], true));
         assert!(matches!(p, Pat::Wildcard));
-        assert_exhaustive(&[p], &t);
+        assert_eq!(um.find_missing(&[p]), None);
     }
 
     #[test]
     fn binary_segments_with_rest_not_exhaustive() {
-        let t = t_binary();
-        let p = pattern_to_pat(&bin_pat(vec![bin_seg(p_var("a"), None)], true), &t);
-        assert_witness(&[p], &t, "_");
+        let mut um = UsefulnessMatrix::new(t_binary());
+        let p = um.lower(&bin_pat(vec![bin_seg(p_var("a"), None)], true));
+        assert_eq!(um.find_missing(&[p]).as_deref(), Some("_"));
     }
 
     #[test]
     fn binary_fixed_then_else_exhaustive() {
-        let t = t_binary();
-        let p1 = pattern_to_pat(
-            &bin_pat(
-                vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
-                false,
-            ),
-            &t,
-        );
-        assert_exhaustive(&[p1, Pat::Wildcard], &t);
+        let mut um = UsefulnessMatrix::new(t_binary());
+        let p1 = um.lower(&bin_pat(
+            vec![bin_seg(p_var("a"), None), bin_seg(p_var("b"), None)],
+            false,
+        ));
+        assert_eq!(um.find_missing(&[p1, Pat::Wildcard]), None);
     }
 
     #[test]
     fn binary_same_shape_redundant() {
-        let t = t_binary();
-        let mut m = UsefulnessMatrix::new(t.clone());
-        let p1 = pattern_to_pat(&bin_pat(vec![bin_seg(p_var("a"), Some("8"))], false), &t);
-        let p2 = pattern_to_pat(&bin_pat(vec![bin_seg(p_var("b"), Some("8"))], false), &t);
+        let mut m = UsefulnessMatrix::new(t_binary());
+        let p1 = m.lower(&bin_pat(vec![bin_seg(p_var("a"), Some("8"))], false));
+        let p2 = m.lower(&bin_pat(vec![bin_seg(p_var("b"), Some("8"))], false));
         m.push(&p1);
         assert!(!m.is_useful(&p2));
     }
 
     #[test]
     fn binary_different_literal_useful() {
-        let t = t_binary();
-        let mut m = UsefulnessMatrix::new(t.clone());
+        let mut m = UsefulnessMatrix::new(t_binary());
         let lit = |v: &str| {
             ast::Pattern::Literal(ast::PatternLiteral::Number(ast::NumberLiteral {
                 value: v.to_string(),
                 span: crate::span::Span::DUMMY,
             }))
         };
-        let p1 = pattern_to_pat(&bin_pat(vec![bin_seg(lit("1"), None)], false), &t);
-        let p2 = pattern_to_pat(&bin_pat(vec![bin_seg(lit("2"), None)], false), &t);
+        let p1 = m.lower(&bin_pat(vec![bin_seg(lit("1"), None)], false));
+        let p2 = m.lower(&bin_pat(vec![bin_seg(lit("2"), None)], false));
         m.push(&p1);
         assert!(m.is_useful(&p2));
     }
@@ -1232,37 +1222,42 @@ mod tests {
         )
     }
 
-    /// `pattern_to_pat` must slot labeled constructor args into field-
-    /// DECLARATION order, mirroring the compiler's `slot_ctor_args` and the
-    /// runtime matcher. Lowering in source order permuted the usefulness
-    /// matrix, so a non-exhaustive match looked exhaustive (unsound) and a
-    /// genuinely exhaustive one looked incomplete.
+    /// `lower` must slot labeled constructor args into field-DECLARATION
+    /// order, mirroring the compiler's `slot_ctor_args` and the runtime
+    /// matcher. Lowering in source order permuted the usefulness matrix, so a
+    /// non-exhaustive match looked exhaustive (unsound) and a genuinely
+    /// exhaustive one looked incomplete.
     #[test]
-    fn pattern_to_pat_slots_labeled_args_in_declaration_order() {
+    fn lower_slots_labeled_args_in_declaration_order() {
         let pair = pair_bool_bool();
         let pair_pat = |fields: &[(&str, &str)], rest| {
             let args = fields.iter().map(|&(l, v)| (l, p_ctor0(v))).collect();
-            pattern_to_pat(&p_ctor_labeled("Pair", args, rest), &pair)
+            p_ctor_labeled("Pair", args, rest)
+        };
+        let missing = |arms: &[ast::Pattern]| {
+            let mut um = UsefulnessMatrix::new(pair.clone());
+            let ipats: Vec<Pat> = arms.iter().map(|p| um.lower(p)).collect();
+            um.find_missing(&ipats)
         };
 
         // `Pair(b: True, ..)` ∪ `Pair(a: False, ..)` MISS (a: True, b: False).
         // Source-order lowering read arm 1 as (a: True, b: _) → false
         // exhaustiveness (this returned `None` before the fix).
-        let unsound = vec![
+        let unsound = [
             pair_pat(&[("b", "True")], true),
             pair_pat(&[("a", "False")], true),
         ];
-        assert_witness(&unsound, &pair, "Pair(True, False)");
+        assert_eq!(missing(&unsound).as_deref(), Some("Pair(True, False)"));
 
         // Genuinely exhaustive; the third arm names fields in reverse order.
         // Source-order lowering read it as a duplicate of arm 2 and reported a
         // bogus missing case (this returned `Some(...)` before the fix).
-        let exhaustive = vec![
+        let exhaustive = [
             pair_pat(&[("a", "True"), ("b", "True")], false),
             pair_pat(&[("a", "True"), ("b", "False")], false),
             pair_pat(&[("b", "True"), ("a", "False")], false),
             pair_pat(&[("a", "False"), ("b", "False")], false),
         ];
-        assert_exhaustive(&exhaustive, &pair);
+        assert_eq!(missing(&exhaustive), None);
     }
 }
