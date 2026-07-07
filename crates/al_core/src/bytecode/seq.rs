@@ -38,6 +38,7 @@
 //! `concat` O(log n) · `iter` O(n) total.
 
 use super::value::*;
+use std::mem::MaybeUninit;
 
 /// Branching factor.
 const B: usize = 32;
@@ -48,46 +49,75 @@ const BITS: usize = 5;
 /// than the optimal packing, bounding extra search steps per level.
 const E_MAX: usize = 2;
 
-/// Scratch buffer for assembling a replacement node's slots before handing
-/// them to a builder. Holds owned `Value`s: `extend` clones (incref) and the
-/// buffer's drop decrements — balanced by the builder's `store_child`, so the
-/// reference counts come out exactly right (every node image is <= `2 * B`
-/// slots, the reserved capacity).
+/// Stack-resident scratch buffer for assembling a replacement node's slots
+/// before handing them to a builder. Holds owned `Value`s: `extend` clones
+/// (incref) and the buffer's drop decrements — balanced by the builder's
+/// `store_child`, so the reference counts come out exactly right. Every node
+/// image is <= `2 * B` slots (the fixed capacity), so path copying never
+/// touches the host allocator.
 struct Buf {
-    items: Vec<Value>,
+    items: [MaybeUninit<Value>; 2 * B],
+    len: usize,
 }
 
 impl Buf {
     #[inline]
     fn new() -> Buf {
         Buf {
-            items: Vec::with_capacity(2 * B),
+            items: [const { MaybeUninit::uninit() }; 2 * B],
+            len: 0,
         }
     }
 
     #[inline]
     fn push(&mut self, v: Value) {
-        self.items.push(v);
+        debug_assert!(self.len < 2 * B);
+        self.items[self.len].write(v);
+        self.len += 1;
     }
 
     #[inline]
     fn extend(&mut self, vs: &[Value]) {
-        self.items.extend(vs.iter().cloned());
+        debug_assert!(self.len + vs.len() <= 2 * B);
+        for v in vs {
+            self.items[self.len].write(v.clone());
+            self.len += 1;
+        }
     }
 }
 
+// The `unsafe` below is the module's only unsafe: initialized-prefix slice
+// bookkeeping for a stack scratch buffer. It touches no arena layout — that
+// lives entirely in `value.rs`.
+#[allow(unsafe_code)]
+impl Drop for Buf {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: exactly the first `len` slots were initialized via
+        // `push`/`extend`; each is dropped once here and never read again.
+        for slot in &mut self.items[..self.len] {
+            unsafe { slot.assume_init_drop() };
+        }
+    }
+}
+
+#[allow(unsafe_code)]
 impl std::ops::Deref for Buf {
     type Target = [Value];
     #[inline]
     fn deref(&self) -> &[Value] {
-        &self.items
+        // SAFETY: the first `len` slots are initialized `Value`s and
+        // `MaybeUninit<Value>` has the same layout as `Value`.
+        unsafe { std::slice::from_raw_parts(self.items.as_ptr().cast::<Value>(), self.len) }
     }
 }
 
+#[allow(unsafe_code)]
 impl std::ops::DerefMut for Buf {
     #[inline]
     fn deref_mut(&mut self) -> &mut [Value] {
-        &mut self.items
+        // SAFETY: as for `Deref`; unique borrow of `self` gives unique access.
+        unsafe { std::slice::from_raw_parts_mut(self.items.as_mut_ptr().cast::<Value>(), self.len) }
     }
 }
 
@@ -95,8 +125,9 @@ impl std::ops::DerefMut for Buf {
 //
 // All layout knowledge lives in `value.rs`: nodes are read through the typed
 // `SeqRootRef` / `SeqNodeRef` views and allocated through the
-// `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders, so this module
-// contains no unsafe code.
+// `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders. The only `unsafe`
+// in this module is `Buf`'s initialized-prefix bookkeeping above; the RRB
+// algorithm itself is written entirely in safe code.
 
 /// `(len, shift, head, tree, tail)` of a root. `head`/`tree`/`tail` are
 /// node values or nil; `shift` is the tree height (0 = leaf or nil).
@@ -145,9 +176,13 @@ fn branch_parts(branch: &Value) -> (&[u64], &[Value]) {
 
 /// Descend one level: in a branch's cumulative size table, the child slot
 /// containing element index `idx`, and the cumulative count before that slot.
+/// Starts the scan at the radix guess `idx >> shift`: each child holds at most
+/// `1 << shift` elements, so `sizes[k] <= (k + 1) << shift` and the guess never
+/// overshoots. Strict subtrees hit immediately; relaxed ones walk at most
+/// `E_MAX` extra steps.
 #[inline]
-fn size_slot(sizes: &[u64], idx: usize) -> (usize, usize) {
-    let mut k = 0;
+fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> (usize, usize) {
+    let mut k = (idx >> shift).min(sizes.len() - 1);
     while (sizes[k] as usize) <= idx {
         k += 1;
     }
@@ -241,9 +276,11 @@ pub fn get(root: &Value, i: usize) -> Option<Value> {
         let next = match SeqNodeRef::of(&node) {
             SeqNodeRef::Leaf(elems) => return Some(elems[idx].clone()),
             SeqNodeRef::Branch {
-                sizes, children, ..
+                shift,
+                sizes,
+                children,
             } => {
-                let (k, before) = size_slot(sizes, idx);
+                let (k, before) = size_slot(sizes, idx, shift);
                 idx -= before;
                 children[k].clone()
             }
@@ -392,7 +429,7 @@ fn tree_update<A: Arena + ?Sized>(a: &mut A, node: &Value, idx: usize, x: Value)
             sizes,
             children,
         } => {
-            let (k, before) = size_slot(sizes, idx);
+            let (k, before) = size_slot(sizes, idx, shift);
             let child = tree_update(a, &children[k], idx - before, x);
             let mut buf = Buf::new();
             buf.extend(children);
@@ -590,7 +627,7 @@ fn tree_take<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
                 return node.clone();
             }
             // Keeping the first `m` means the last kept element is index `m - 1`.
-            let (k, before) = size_slot(sizes, m - 1);
+            let (k, before) = size_slot(sizes, m - 1, shift);
             let child = tree_take(a, &children[k], m - before);
             let mut buf = Buf::new();
             buf.extend(&children[..k]);
@@ -612,7 +649,7 @@ fn tree_drop<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
             sizes,
             children,
         } => {
-            let (k, before) = size_slot(sizes, m);
+            let (k, before) = size_slot(sizes, m, shift);
             let child = tree_drop(a, &children[k], m - before);
             let mut buf = Buf::new();
             buf.push(child);
