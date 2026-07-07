@@ -86,7 +86,7 @@ The `(ρ, α)` inference threads type info to the compiler; the codebase researc
 
 No measurable win — and on inspection that's expected, not a bug in the new ops. `bench_heavy.al` is `fib(33)` + `count(10⁷,0)`: pure self-recursion and `Int` `<`/`==`. The baseline already emitted `CallSelf`/`TailCallSelf` for self-recursion and `LtInt`/`JumpGeIntLC`/`JumpNeIntLC` for the guards, so the hot loop's opcode stream is byte-identical before and after. None of the Phase 1 ops fire on this workload: `CallKnown` targets *cross-function* known callees (self-calls hit the older `CallSelf` fast path), and `SwitchTag`/`GetFieldUnchecked` need an enum/record scrutinee the bench doesn't have. The spec's "fib is all self-calls → biggest win" premise was wrong — self-calls were already the fast case.
 
-Action item: `bench_heavy.al` needs a companion workload that actually exercises Phase 1 — a mutually-recursive pair (forces `CallKnown`), an exhaustive enum match in the hot loop (forces `SwitchTag`), and a record projection (forces `GetFieldUnchecked`) — before Phase 1's real speedup can be quoted. The `Float` compare ops (`LtFloat`…) are also new vs baseline and unbenched.
+Action item: `bench_heavy.al` needs a companion workload that actually exercises Phase 1 — a mutually-recursive pair (forces `CallKnown`), an exhaustive enum match in the hot loop (forces `SwitchTag`), and a record projection (forces `GetFieldUnchecked`) — before Phase 1's real speedup can be quoted. Le/Ge variants (`LeInt`/`GeInt`/`LeFloat`/`GeFloat`) from spec item 3 were not added — baseline already had `LtInt`/`GtInt`/`EqInt`/`LtFloat`/`GtFloat`, so typed compares are unchanged vs baseline.
 
 ## References
 
