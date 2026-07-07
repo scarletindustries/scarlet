@@ -56,6 +56,19 @@ impl AlServer {
     pub fn wait_or_kill(mut self, secs: u64) -> Output {
         wait_or_kill(self.child.take().unwrap(), secs)
     }
+
+    /// Bounded wait asserting a clean exit; dumps both streams on failure and
+    /// returns captured stdout.
+    pub fn wait_ok(self, secs: u64) -> String {
+        let out = self.wait_or_kill(secs);
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "server exited unsuccessfully\nstdout: {stdout}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    }
 }
 
 /// Read the spawned server's first stdout line — the `listening <ip>:<port>`

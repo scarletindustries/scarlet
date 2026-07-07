@@ -107,16 +107,9 @@ match net.listen('127.0.0.1', 0) {
         "echoed bytes must match what was sent"
     );
 
-    let out = srv.wait_or_kill(30);
-    assert!(
-        out.status.success(),
-        "server failed; stdout: {} stderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
     // The announcement line was consumed by the harness; what remains starts
     // at the peer line.
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = srv.wait_ok(30);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "expected peer/served, got: {stdout:?}");
     // peer_addr is the Rust client's loopback connection; port is ephemeral.
@@ -229,14 +222,7 @@ match net.listen('127.0.0.1', 0) {
     // stream open keeps the socket alive-but-silent across the read window.
     let srv = spawn_al_server(&proj, src);
     let _stream = srv.connect();
-    let out = srv.wait_or_kill(30);
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "server should exit cleanly after the timeout\nstdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stdout = srv.wait_ok(30);
     assert!(
         stdout.contains("timed-out:"),
         "read_within must take its Err(timeout) arm; got stdout: {stdout:?}"
@@ -281,15 +267,8 @@ match net.listen('127.0.0.1', 0) {
     let srv = spawn_al_server(&proj, src);
     let mut stream = srv.connect();
     stream.write_all(b"hello").expect("client write");
-    let out = srv.wait_or_kill(30);
+    let stdout = srv.wait_ok(30);
     drop(stream);
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "server should exit cleanly after reading\nstdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
     assert!(
         stdout.contains("got: hello"),
         "read_within must return the bytes that arrived; got stdout: {stdout:?}"
