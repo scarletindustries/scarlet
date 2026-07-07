@@ -751,7 +751,7 @@ impl LspServer {
     fn handle_rename(&mut self, id: &Json, params: &Json) {
         match self.rename_response(params) {
             Ok(r) => self.send_response(id, r),
-            Err(e) => self.send_error(id, e.lsp_code(), &e.message()),
+            Err(e) => self.send_error(id, rename_error_code(&e), &e.message()),
         }
     }
 
@@ -1139,6 +1139,20 @@ fn symbol_kind(e: reference::EntityKind) -> i32 {
         EntityKind::Type => 23,
         EntityKind::ModuleAlias => 2,
         EntityKind::Field => 8,
+    }
+}
+
+/// JSON-RPC error code for a refused rename: `InvalidParams` (-32602) for a
+/// bad `newName`, `RequestFailed` (-32803) for a resolvable-but-refused
+/// position. Lives here rather than on `RenameError` because `al_core` is
+/// protocol-agnostic.
+fn rename_error_code(e: &reference::rename::RenameError) -> i32 {
+    use reference::rename::RenameError;
+    match e {
+        RenameError::InvalidName(_) => -32602,
+        RenameError::NotFound | RenameError::NotRenameable(_) | RenameError::Unresolvable(_) => {
+            -32803
+        }
     }
 }
 

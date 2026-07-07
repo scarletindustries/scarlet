@@ -111,18 +111,6 @@ impl RenameError {
             }
         }
     }
-
-    /// The JSON-RPC error code this refusal maps to on the LSP wire:
-    /// `InvalidParams` (-32602) for a bad `newName`, `RequestFailed` (-32803)
-    /// for a resolvable-but-refused position.
-    pub fn lsp_code(&self) -> i32 {
-        match self {
-            RenameError::InvalidName(_) => -32602,
-            RenameError::NotFound
-            | RenameError::NotRenameable(_)
-            | RenameError::Unresolvable(_) => -32803,
-        }
-    }
 }
 
 /// Validate a proposed new name against al's identifier grammar (mirrors the
