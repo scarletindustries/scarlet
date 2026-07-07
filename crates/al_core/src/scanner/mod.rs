@@ -1,6 +1,16 @@
-use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::span::Span;
 use crate::token::{self, Kind, Token, Trivia};
+
+/// One level of string-interpolation nesting. `brace_depth == 0` means the
+/// scanner is inside the string body; `> 0` means it is inside a `${ ... }`
+/// expression and counts unmatched `{` so nested braces don't prematurely
+/// close the interpolation.
+#[derive(Clone, Copy)]
+struct InterpFrame {
+    quote: u8,
+    brace_depth: u32,
+}
 
 pub struct Scanner {
     input: Vec<u8>,
@@ -11,7 +21,7 @@ pub struct Scanner {
     pending_trivia: Vec<Trivia>,
     token_start_column: i32,
     token_start_line: i32,
-    interp_stack: Vec<(u8, i32)>,
+    interp_stack: Vec<InterpFrame>,
 }
 
 #[inline]
@@ -31,8 +41,11 @@ pub fn new_scanner(input: impl Into<String>) -> Scanner {
 
 impl Scanner {
     fn add_error(&mut self, message: String) {
-        self.diagnostics
-            .push(diagnostic::error_at(self.line, self.column, message));
+        self.diagnostics.push(Diagnostic::error(
+            Span::point(self.line, self.column),
+            DiagnosticCode::ParseError,
+            message,
+        ));
     }
 
     pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
@@ -44,7 +57,10 @@ impl Scanner {
     }
 
     fn enter_interp_string(&mut self, quote: u8) {
-        self.interp_stack.push((quote, 0));
+        self.interp_stack.push(InterpFrame {
+            quote,
+            brace_depth: 0,
+        });
     }
 
     fn exit_interp_string(&mut self) {
@@ -134,14 +150,11 @@ impl Scanner {
                     while self.pos < self.input_len() {
                         self.incr_pos();
                     }
-                    self.diagnostics.push(
-                        diagnostic::error_at(
-                            self.line,
-                            self.column,
-                            "Unterminated block comment".to_string(),
-                        )
-                        .with_code(DiagnosticCode::UnexpectedEof),
-                    );
+                    self.diagnostics.push(Diagnostic::error(
+                        Span::point(self.line, self.column),
+                        DiagnosticCode::UnexpectedEof,
+                        "Unterminated block comment".to_string(),
+                    ));
                 }
 
                 let text = self.slice(start, self.pos);
@@ -158,7 +171,11 @@ impl Scanner {
     }
 
     pub fn scan_next(&mut self) -> Token {
-        if let Some(&(quote, 0)) = self.interp_stack.last() {
+        if let Some(&InterpFrame {
+            quote,
+            brace_depth: 0,
+        }) = self.interp_stack.last()
+        {
             return self.scan_interp_string_content(quote);
         }
 
@@ -176,14 +193,14 @@ impl Scanner {
 
         if self.in_interp_string() {
             if ch == b'{' {
-                if let Some((_, d)) = self.interp_stack.last_mut() {
-                    *d += 1;
+                if let Some(f) = self.interp_stack.last_mut() {
+                    f.brace_depth += 1;
                 }
                 return self.new_token(Kind::PuncOpenBrace, None);
             }
             if ch == b'}' {
-                if let Some((_, d)) = self.interp_stack.last_mut() {
-                    *d -= 1;
+                if let Some(f) = self.interp_stack.last_mut() {
+                    f.brace_depth -= 1;
                 }
                 return self.new_token(Kind::PuncCloseBrace, None);
             }
@@ -361,25 +378,12 @@ impl Scanner {
     fn scan_number(&mut self) -> Token {
         let start = self.pos - 1;
         let mut has_dot = false;
-        let mut chars_after_dot = 0;
 
         loop {
             let next = self.peek_char();
 
-            if next == b'.' && has_dot {
-                // Back the cursor out of the second `.` and its preceding
-                // digits; `slice(start, pos)` then excludes them naturally.
-                for _ in 0..chars_after_dot + 1 {
-                    self.decr_pos();
-                }
-                break;
-            }
-
             if next.is_ascii_digit() {
                 self.incr_pos();
-                if has_dot {
-                    chars_after_dot += 1;
-                }
             } else if next == b'.' && !has_dot {
                 if !self.byte_at(self.pos + 1).is_ascii_digit() {
                     break;
@@ -419,20 +423,6 @@ impl Scanner {
         self.pos += 1;
     }
 
-    fn decr_pos(&mut self) {
-        self.pos -= 1;
-        // The only caller (`scan_number`) backs out over ASCII digits and `.`,
-        // never a newline. The old newline branch decremented `line` but could
-        // not restore `column` (previous line's length is unknown), silently
-        // corrupting spans; assert the invariant instead.
-        debug_assert_ne!(
-            self.byte_at(self.pos),
-            b'\n',
-            "decr_pos must not cross a newline"
-        );
-        self.column -= 1;
-    }
-
     fn has_interpolation(&self, quote: u8) -> bool {
         let mut pos = self.pos;
         while pos < self.input_len() {
@@ -448,7 +438,10 @@ impl Scanner {
                 continue;
             }
             if ch == b'$' {
-                return true;
+                let n = self.byte_at(pos + 1);
+                if n == b'{' || token::is_name_start(n) {
+                    return true;
+                }
             }
             pos += 1;
         }
@@ -513,8 +506,8 @@ impl Scanner {
 
                 if next == b'{' {
                     self.incr_pos();
-                    if let Some((_, d)) = self.interp_stack.last_mut() {
-                        *d = 1;
+                    if let Some(f) = self.interp_stack.last_mut() {
+                        f.brace_depth = 1;
                     }
                     return self.new_token(Kind::PuncOpenBrace, None);
                 } else if token::is_name_start(next) {
@@ -552,6 +545,7 @@ fn utf8(bytes: Vec<u8>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token::Keyword as Kw;
     use Kind::*;
 
     fn kinds(input: &str) -> Vec<Kind> {
@@ -605,9 +599,9 @@ mod tests {
         #[rustfmt::skip]
         let expected = vec![
             // fn fizzbuzz(n Int) String {
-            KwFunction, Identifier, PuncOpenParen, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
+            Keyword(Kw::Fn), Identifier, PuncOpenParen, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
             // match (n % 3, n % 5) {
-            KwMatch, PuncOpenParen, Identifier, PuncMod, LiteralNumber, PuncComma, Identifier, PuncMod, LiteralNumber, PuncCloseParen, PuncOpenBrace,
+            Keyword(Kw::Match), PuncOpenParen, Identifier, PuncMod, LiteralNumber, PuncComma, Identifier, PuncMod, LiteralNumber, PuncCloseParen, PuncOpenBrace,
             // (0, 0) -> 'FizzBuzz'
             PuncOpenParen, LiteralNumber, PuncComma, LiteralNumber, PuncCloseParen, PuncArrow, LiteralString,
             // (0, _) -> 'Fizz'
@@ -615,17 +609,17 @@ mod tests {
             // (_, 0) -> 'Buzz'
             PuncOpenParen, Identifier, PuncComma, LiteralNumber, PuncCloseParen, PuncArrow, LiteralString,
             // else -> '${n}'
-            KwElse, PuncArrow, InterpStringStart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd,
+            Keyword(Kw::Else), PuncArrow, InterpStringStart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd,
             // } }
             PuncCloseBrace, PuncCloseBrace,
             // fn run(n Int, last Int) Nil {
-            KwFunction, Identifier, PuncOpenParen, Identifier, Identifier, PuncComma, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
+            Keyword(Kw::Fn), Identifier, PuncOpenParen, Identifier, Identifier, PuncComma, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
             // if n > last {
-            KwIf, Identifier, PuncGt, Identifier, PuncOpenBrace,
+            Keyword(Kw::If), Identifier, PuncGt, Identifier, PuncOpenBrace,
             // Nil
             Identifier,
             // } else {
-            PuncCloseBrace, KwElse, PuncOpenBrace,
+            PuncCloseBrace, Keyword(Kw::Else), PuncOpenBrace,
             // println(fizzbuzz(n))
             Identifier, PuncOpenParen, Identifier, PuncOpenParen, Identifier, PuncCloseParen, PuncCloseParen,
             // run(n + 1, last)
@@ -813,7 +807,13 @@ mod tests {
         assert_eq!(
             ks,
             vec![
-                KwFunction, KwIf, KwElse, KwType, Identifier, Identifier, Eof
+                Keyword(Kw::Fn),
+                Keyword(Kw::If),
+                Keyword(Kw::Else),
+                Keyword(Kw::Type),
+                Identifier,
+                Identifier,
+                Eof
             ]
         );
     }
@@ -904,6 +904,50 @@ mod tests {
             .map(|t| t.kind)
             .collect();
         assert_eq!(*ks.last().unwrap(), Eof);
+    }
+
+    #[test]
+    fn test_float_then_range() {
+        // Regression: `1.5..10` used to backtrack over the first `.` and lex
+        // as [1][.][5][..][10]. It must lex as [1.5][..][10].
+        let mut s = new_scanner("1.5..10".to_string());
+        let toks = s.scan_all();
+        assert_eq!(toks[0].kind, LiteralNumber);
+        assert_eq!(toks[0].literal.as_deref(), Some("1.5"));
+        assert_eq!(toks[1].kind, PuncDotdot);
+        assert_eq!(toks[2].kind, LiteralNumber);
+        assert_eq!(toks[2].literal.as_deref(), Some("10"));
+        assert_eq!(toks[3].kind, Eof);
+    }
+
+    #[test]
+    fn test_float_then_method() {
+        let mut s = new_scanner("1.5.foo".to_string());
+        let toks = s.scan_all();
+        assert_eq!(toks[0].kind, LiteralNumber);
+        assert_eq!(toks[0].literal.as_deref(), Some("1.5"));
+        assert_eq!(toks[1].kind, PuncDot);
+        assert_eq!(toks[2].kind, Identifier);
+        assert_eq!(toks[2].literal.as_deref(), Some("foo"));
+        assert_eq!(toks[3].kind, Eof);
+    }
+
+    #[test]
+    fn test_bare_dollar_is_not_interpolation() {
+        // A `$` not followed by `{` or an identifier start is a literal char,
+        // so `has_interpolation` must not classify the string as interpolated.
+        let mut s = new_scanner("'a$5'".to_string());
+        let toks = s.scan_all();
+        assert_eq!(toks[0].kind, LiteralString);
+        assert_eq!(toks[0].literal.as_deref(), Some("a$5"));
+        assert_eq!(toks[1].kind, Eof);
+
+        // Bare `$` at end of string.
+        assert_eq!(kinds("'a$'"), vec![LiteralString, Eof]);
+
+        // But `${` and `$ident` still trigger interpolation.
+        assert_eq!(kinds("'a${x}'")[0], InterpStringStart);
+        assert_eq!(kinds("'a$x'")[0], InterpStringStart);
     }
 
     #[test]

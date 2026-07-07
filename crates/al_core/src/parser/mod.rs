@@ -1,5 +1,5 @@
 use crate::ast;
-use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::scanner::Scanner;
 use crate::span::Span;
 use crate::token::{Keyword, Kind, Token, Trivia, is_type_name};
@@ -438,13 +438,7 @@ impl Parser {
                         ast::Node::Statement(s) if matches!(**s, ast::Statement::ImportDeclaration(_))
                     );
                     if is_import && seen_non_import {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                node.span(),
-                                "Imports must precede all other declarations".to_string(),
-                            )
-                            .with_code(DiagnosticCode::ParseError),
-                        );
+                        self.error_at(node.span(), "Imports must precede all other declarations");
                     }
                     if !is_import {
                         seen_non_import = true;
@@ -857,10 +851,7 @@ impl Parser {
                         self.advance(); // skip the erroneous 'else' token
                     }
                     let msg = "Expected expression after `..` in array literal".to_string();
-                    self.diagnostics.push(
-                        Diagnostic::error(spread_span, msg.clone())
-                            .with_code(DiagnosticCode::ParseError),
-                    );
+                    self.error_at(spread_span, msg.clone());
                     Ok(ast::ArrayElement::SpreadElement(ast::SpreadElement {
                         expression: ast::Expression::ErrorNode(ast::ErrorNode {
                             message: msg,
@@ -1227,13 +1218,7 @@ impl Parser {
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => n,
             other => {
                 let span = other.span();
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        span,
-                        "Range pattern bounds must be number literals".to_string(),
-                    )
-                    .with_code(DiagnosticCode::ParseError),
-                );
+                self.error_at(span, "Range pattern bounds must be number literals");
                 ast::NumberLiteral {
                     value: "0".to_string(),
                     span,
@@ -2145,6 +2130,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostic;
     use crate::scanner::new_scanner;
 
     fn parse(src: &str) -> ParseResult {

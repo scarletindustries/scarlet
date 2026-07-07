@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{ArenaSlice, InferEngine, Ty, TypeBody, TypeEnv, pool};
 use crate::ast;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::span::Span;
 use crate::token::is_type_name;
 
@@ -223,7 +223,7 @@ impl Hydrator {
 }
 
 fn err(span: Span, message: String) -> Diagnostic {
-    Diagnostic::error(span, message)
+    Diagnostic::error(span, DiagnosticCode::TypeError, message)
 }
 
 fn arity_error(span: Span, name: &str, expected: usize, given: usize) -> Diagnostic {

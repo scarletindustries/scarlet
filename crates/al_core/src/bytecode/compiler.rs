@@ -47,7 +47,7 @@ use super::{
     Function, Op, PreludeBindings, Program, Value, enum_name_prefix_hash, op, op_ab, op_arg,
 };
 use crate::ast;
-use crate::diagnostic::{Diagnostic, has_errors};
+use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::frozen::FrozenBuilder;
 use indexmap::IndexMap;
 
@@ -512,7 +512,7 @@ impl Compiler {
     pub(crate) fn seed_static(&mut self, s: &'static crate::static_ir::StaticStdlib) {
         debug_assert!(self.program.code.is_empty());
         self.static_stdlib = Some(s);
-        self.module_table.static_fallback = Some(s);
+        self.module_table.set_static_fallback(s);
         self.prelude = s.prelude.clone();
         self.engine.set_prim_ids(self.prelude.prim_ids());
         self.env.set_next_type_id(s.next_type_id);
@@ -765,9 +765,11 @@ impl Compiler {
         if let Some(mark) = self.scope_marks.pop() {
             // Unwind in reverse bind order so a name shadowed twice in the
             // same scope lands back on its pre-scope entry. `mark` is a length
-            // captured at the matching push, so it never exceeds the log; the
-            // clamp only guards a hypothetical unbalanced edge.
-            let mark = mark.min(self.undo_log.len());
+            // captured at the matching push, so it never exceeds the log.
+            debug_assert!(
+                mark <= self.undo_log.len(),
+                "unbalanced push/pop_local_scope"
+            );
             for (name, prev) in self.undo_log.drain(mark..).rev() {
                 match prev {
                     Some(entry) => {
@@ -795,10 +797,7 @@ impl Compiler {
             .last_mut()
             .and_then(|s| s.insert(name.to_string(), sp));
         if let Some(prev_sp) = prev {
-            self.error(
-                format!("'{name}' is unused; prefix with '_' to ignore"),
-                prev_sp,
-            );
+            self.unused_binding(name, prev_sp);
         }
     }
 
@@ -819,7 +818,7 @@ impl Compiler {
         let mut leftover: Vec<(String, Span)> = scope.into_iter().collect();
         leftover.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
         for (name, sp) in leftover {
-            self.error(format!("'{name}' is unused; prefix with '_' to ignore"), sp);
+            self.unused_binding(&name, sp);
         }
     }
 
@@ -868,11 +867,23 @@ impl Compiler {
     // ========================================================================
 
     pub(super) fn error(&mut self, msg: String, sp: Span) {
-        self.engine.diagnostics.push(Diagnostic::error(sp, msg));
+        self.engine
+            .diagnostics
+            .push(Diagnostic::error(sp, DiagnosticCode::TypeError, msg));
     }
 
     pub(super) fn note(&mut self, msg: String, sp: Span) {
-        self.engine.diagnostics.push(Diagnostic::hint(sp, msg));
+        self.engine
+            .diagnostics
+            .push(Diagnostic::hint(sp, DiagnosticCode::Other, msg));
+    }
+
+    fn unused_binding(&mut self, name: &str, sp: Span) {
+        self.engine.diagnostics.push(Diagnostic::error(
+            sp,
+            DiagnosticCode::UnusedBinding,
+            format!("'{name}' is unused; prefix with '_' to ignore"),
+        ));
     }
 
     /// Probe the doc map for `name`, but only while collecting hover facts.
@@ -1666,19 +1677,13 @@ impl Compiler {
         let (text, child_base, source_path): (String, Option<PathBuf>, Option<PathBuf>) =
             match source {
                 ModuleSource::Embedded(s) => (s.to_string(), None, None),
-                ModuleSource::File(p) => {
-                    let read = self
-                        .module_table
-                        .read_source(&p)
-                        .or_else(|| std::fs::read_to_string(&p).ok());
-                    match read {
-                        Some(t) => (t, p.parent().map(|d| d.to_path_buf()), Some(p)),
-                        None => {
-                            self.error(format!("Failed to read module '{key}'"), at);
-                            return false;
-                        }
+                ModuleSource::File(p) => match self.module_table.read_source(&p) {
+                    Ok(t) => (t, p.parent().map(|d| d.to_path_buf()), Some(p)),
+                    Err(e) => {
+                        self.error(format!("Failed to read module '{key}': {e}"), at);
+                        return false;
                     }
-                }
+                },
             };
 
         let hash = source_hash(&text);
@@ -1708,10 +1713,7 @@ impl Compiler {
                 path,
                 refs,
             },
-            None => ModuleOrigin::Embedded {
-                source_hash: hash,
-                refs,
-            },
+            None => ModuleOrigin::Embedded { refs },
         };
         self.module_table.bump_compile_count();
         self.module_table.insert_cached(
@@ -3630,22 +3632,22 @@ impl Compiler {
             } => self.type_ctor_pattern(name, args, *rest, *span, expected, b),
             ast::Pattern::Or { patterns, .. } => {
                 // Scope the canonical binding set to this or-pattern: `enter_or`
-                // snapshots the surrounding mode and the `initial` boundary and
-                // types the first alternative in `Initial` mode; `exit_or`
-                // restores the surrounding mode so a sibling binding after the
-                // or-pattern is not stranded in leftover `Alternative` mode.
-                let scope = b.enter_or();
+                // pushes a frame whose first alternative establishes the
+                // canonical set; `exit_or` pops it and folds the bound names
+                // into the enclosing frame so a sibling binding after the
+                // or-pattern still sees them for duplicate detection.
+                b.enter_or();
                 let mut ok = true;
                 let mut iter = patterns.iter();
                 if let Some(first) = iter.next() {
                     ok &= self.type_pattern(first, expected, b);
                 }
                 for alt in iter {
-                    b.enter_alternative(&scope);
+                    b.enter_alternative();
                     ok &= self.type_pattern(alt, expected, b);
                     ok &= b.finish_alternative(alt.span(), &mut self.engine);
                 }
-                b.exit_or(scope);
+                b.exit_or();
                 ok
             }
         }

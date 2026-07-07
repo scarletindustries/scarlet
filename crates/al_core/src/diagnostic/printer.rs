@@ -3,22 +3,22 @@ use std::fmt::Write as _;
 use super::editor::{Editor, build_editor_url, detect_editor};
 use super::{Diagnostic, Severity, count_errors};
 
-pub const COLOR_RESET: &str = "\x1b[0m";
-pub const COLOR_BOLD: &str = "\x1b[1m";
-pub const COLOR_DIM: &str = "\x1b[2m";
-pub const COLOR_RED: &str = "\x1b[31m";
-pub const COLOR_CYAN: &str = "\x1b[36m";
-pub const COLOR_BLUE: &str = "\x1b[34m";
-pub const LINK_START: &str = "\x1b]8;;";
-pub const LINK_END: &str = "\x07";
+const COLOR_RESET: &str = "\x1b[0m";
+const COLOR_BOLD: &str = "\x1b[1m";
+const COLOR_DIM: &str = "\x1b[2m";
+const COLOR_RED: &str = "\x1b[31m";
+const COLOR_CYAN: &str = "\x1b[36m";
+const COLOR_BLUE: &str = "\x1b[34m";
+const LINK_START: &str = "\x1b]8;;";
+const LINK_END: &str = "\x07";
 
 /// Environment-derived rendering decisions, computed once per `print_diagnostics`
 /// call so per-diagnostic formatting is a pure function of its inputs.
-pub struct RenderCtx {
-    pub editor: Option<Editor>,
-    pub abs_path: String,
-    pub color: bool,
-    pub links: bool,
+struct RenderCtx {
+    editor: Option<Editor>,
+    abs_path: String,
+    color: bool,
+    links: bool,
 }
 
 fn severity_color(severity: Severity) -> &'static str {
@@ -49,7 +49,7 @@ fn real_path(file_path: &str) -> String {
         .unwrap_or_else(|| file_path.to_string())
 }
 
-pub fn format_diagnostic_with_lines(
+fn format_diagnostic_with_lines(
     d: &Diagnostic,
     lines: &[&str],
     file_path: &str,

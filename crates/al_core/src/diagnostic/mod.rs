@@ -1,10 +1,9 @@
 mod editor;
 mod printer;
 
-pub use editor::{Editor, build_editor_url, detect_editor};
-pub use printer::{RenderCtx, format_diagnostic_with_lines, print_diagnostics};
+pub use printer::print_diagnostics;
 
-use crate::span::{Span, point_span};
+use crate::span::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -16,14 +15,13 @@ pub enum Severity {
 /// react to a *class* of diagnostic (e.g. the REPL detecting incomplete input)
 /// match on this instead of substring-matching `message`, so rewording a
 /// message can never silently change downstream behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCode {
     /// Parser or scanner hit end-of-input while more tokens were required.
     UnexpectedEof,
     ParseError,
     TypeError,
     UnusedBinding,
-    #[default]
     Other,
 }
 
@@ -36,32 +34,23 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn error(span: Span, message: String) -> Diagnostic {
+    pub fn error(span: Span, code: DiagnosticCode, message: String) -> Diagnostic {
         Diagnostic {
             span,
             severity: Severity::Error,
-            code: DiagnosticCode::Other,
+            code,
             message,
         }
     }
 
-    pub fn hint(span: Span, message: String) -> Diagnostic {
+    pub fn hint(span: Span, code: DiagnosticCode, message: String) -> Diagnostic {
         Diagnostic {
             span,
             severity: Severity::Hint,
-            code: DiagnosticCode::Other,
+            code,
             message,
         }
     }
-
-    pub fn with_code(mut self, code: DiagnosticCode) -> Self {
-        self.code = code;
-        self
-    }
-}
-
-pub fn error_at(line: i32, column: i32, message: String) -> Diagnostic {
-    Diagnostic::error(point_span(line, column), message)
 }
 
 pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {

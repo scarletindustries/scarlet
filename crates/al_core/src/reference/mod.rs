@@ -23,11 +23,14 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::module::{ModulePath, path_key};
 use crate::span::Span;
 
 pub mod rename;
+pub mod uri;
+
+pub use uri::{module_uri, path_to_uri};
 
 // ============================================================================
 // EntityKind / ReferenceKind
@@ -784,6 +787,7 @@ impl ReferenceGraph {
                 if !self.has_real_use(def) {
                     out.push(Diagnostic::hint(
                         def.span(),
+                        DiagnosticCode::UnusedBinding,
                         format!("unused import `{}`", def.name),
                     ));
                 }
@@ -804,6 +808,7 @@ impl ReferenceGraph {
             }
             out.push(Diagnostic::hint(
                 def.span(),
+                DiagnosticCode::UnusedBinding,
                 format!("unused {} `{}`", def.entity().noun(), def.name),
             ));
         }
@@ -853,16 +858,16 @@ mod tests {
     fn interner_is_stable_and_bijective() {
         let mut it = ModuleInterner::new();
         let a = it.intern(&mp(&["main"]));
-        let b = it.intern(&mp(&["al", "list"]));
+        let b = it.intern(&mp(&["al", "array"]));
         let a2 = it.intern(&mp(&["main"]));
 
         assert_eq!(a, a2, "same path re-interns to the same id");
         assert_ne!(a, b);
         assert_eq!(it.len(), 2, "distinct paths get distinct ids");
         assert_eq!(it.path(a), Some(&mp(&["main"])));
-        assert_eq!(it.path(b), Some(&mp(&["al", "list"])));
-        assert_eq!(it.lookup(&mp(&["al", "list"])), Some(b));
-        assert_eq!(it.lookup_key("al/list"), Some(b));
+        assert_eq!(it.path(b), Some(&mp(&["al", "array"])));
+        assert_eq!(it.lookup(&mp(&["al", "array"])), Some(b));
+        assert_eq!(it.lookup_key("al/array"), Some(b));
         assert_eq!(it.lookup(&mp(&["nope"])), None);
         assert_eq!(it.path(ModuleId(99)), None);
     }

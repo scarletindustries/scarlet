@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use indexmap::IndexMap;
 
 use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Variant, VariantField};
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::span::Span;
 use crate::type_def::{
     FieldDef, PrimitiveKind, Type, TypeId, prim_names as pn, t_array, t_float, t_int, t_string,
@@ -353,7 +353,7 @@ impl UnifyError {
             }
             UnifyError::RecursiveType => "Infinite type detected".to_string(),
         };
-        Diagnostic::error(span, message)
+        Diagnostic::error(span, DiagnosticCode::TypeError, message)
     }
 }
 
@@ -968,6 +968,10 @@ impl InferEngine {
                     return Err(could_not_unify(fa, fb));
                 }
                 self.unify_children(ea, eb, fa, fb)
+            }
+            (TypeNode::Bound(_), _) | (_, TypeNode::Bound(_)) => {
+                debug_assert!(false, "Bound in live inference (unify)");
+                Err(could_not_unify(fa, fb))
             }
             _ => Err(could_not_unify(fa, fb)),
         }
@@ -1605,7 +1609,8 @@ impl InferEngine {
     // --- Error helpers ---
 
     pub fn error_at_span(&mut self, message: String, s: Span) {
-        self.diagnostics.push(Diagnostic::error(s, message));
+        self.diagnostics
+            .push(Diagnostic::error(s, DiagnosticCode::TypeError, message));
     }
 
     pub fn type_to_str(&mut self, ty: Ty) -> String {
