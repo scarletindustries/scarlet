@@ -215,7 +215,7 @@ mod tests {
     //!   allocations in the heap that traveled with it — shared captures stay
     //!   shared, distinct allocations stay distinct, nothing is rebuilt or
     //!   deduplicated.
-    //! - **Spawn is a copy** (`ProcHeap::spawn_copy`, the spawn-side graph copy
+    //! - **Spawn is a copy** (`ProcHeap::spawn`, the spawn-side graph copy
     //!   entry): sharing in the source graph is sharing in the copy, and the
     //!   copy aliases nothing in the spawner.
     //!
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn seed_copy_preserves_sharing_without_dedup_or_aliasing() {
-        // The spawn-side copy (`ProcHeap::spawn_copy`, the spawn-side graph copy entry
+        // The spawn-side copy (`ProcHeap::spawn`, the spawn-side graph copy entry
         // point) is the one cross-scheduler transport that copies a value
         // graph. Its required properties:
         //
@@ -472,7 +472,7 @@ mod tests {
         let mut src_nodes = Vec::new();
         distinct_heap_nodes(&root, &mut src_nodes);
 
-        let (_child_heap, copy) = spawner.spawn_copy(&root);
+        let (_child_heap, copy) = ProcHeap::spawn(&root);
 
         // The spawner's graph is untouched (Clone-mode copy restores every
         // forwarded header): same objects at the same addresses.

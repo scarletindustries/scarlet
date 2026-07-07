@@ -344,7 +344,7 @@ pub struct VM {
     frames: Vec<CallFrame>,
     /// The *running* process's arena. Swapped in/out with `stack`/`frames` on
     /// every context switch (`suspend_current`/`resume`); between processes it
-    /// is the empty placeholder (`ProcHeap::default()`), which owns nothing.
+    /// is the empty placeholder (`ProcHeap::new()`), which owns nothing.
     ///
     /// Declared AFTER `stack`/`frames`: under reference counting their `Value`s
     /// free into this heap on drop, so the heap must outlive them at teardown
@@ -464,7 +464,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         templates,
         frozen,
         template_cache: HashMap::new(),
-        heap: ProcHeap::default(),
+        heap: ProcHeap::new(),
         stack: Vec::new(),
         frames: Vec::new(),
         label_cache: HashMap::new(),
@@ -618,7 +618,7 @@ impl VM {
                         // Drop the finished process's arena with its
                         // stack/frames; the placeholder owns nothing until
                         // the next `resume`.
-                        self.heap = ProcHeap::default();
+                        self.heap = ProcHeap::new();
                     }
                     self.stack.clear();
                     self.frames.clear();
@@ -1011,7 +1011,7 @@ impl VM {
         // Copy the closure graph into the child's own heap (processes share no
         // heap), but leave captured fds in place — parent and child run on the
         // same scheduler and reference the same per-scheduler socket tables.
-        let (heap, root) = self.heap.spawn_copy(&f);
+        let (heap, root) = ProcHeap::spawn(&f);
         self.runtime
             .live
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1033,7 +1033,7 @@ impl VM {
         self.runtime.ensure_workers();
         for i in 0..self.runtime.scheduler_count() {
             if i == self.scheduler_index {
-                let (heap, root) = self.heap.spawn_copy(&f);
+                let (heap, root) = ProcHeap::spawn(&f);
                 self.runtime
                     .live
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1049,7 +1049,7 @@ impl VM {
     /// Create a process whose initial heap is `heap` — the seeded
     /// heap a cross-scheduler spawn copied the closure graph into. The
     /// closure `f` points into that heap. Every caller has already run
-    /// `check_spawnable` on the source closure (`spawn_copy` preserves the
+    /// `check_spawnable` on the source closure (`ProcHeap::spawn` preserves the
     /// value kind), so `f` is a nullary closure by construction.
     #[allow(clippy::expect_used)]
     fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) {
@@ -1095,7 +1095,7 @@ impl VM {
         // The child's initial heap: a fresh heap holding a deep copy of the
         // closure graph. `root` points into it, so `(heap, root)` is
         // self-contained and `Send` as a unit.
-        let (heap, root) = self.heap.spawn_copy(f);
+        let (heap, root) = ProcHeap::spawn(f);
 
         // Same fd transfer as donation: captured connections move to the
         // child; captured listeners stay put (the child binds its own

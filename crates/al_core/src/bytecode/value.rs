@@ -68,7 +68,7 @@
 //! All `unsafe` in the value representation is confined to this file: header
 //! and payload reads/writes behind typed accessors, and the `Arc<[u8]>`
 //! pack/unpack for binary backings. The only escape hatches are a handful of
-//! `pub(crate) unsafe fn`s that hand layout knowledge to `heap::mimheap` — they
+//! `pub(crate) unsafe fn`s that hand layout knowledge to `heap::proc_heap` — they
 //! never leave the crate:
 //!
 //! - `for_each_child`: object tracing, used by the free-at-zero work list and
@@ -335,9 +335,7 @@ pub trait Arena {
 impl Arena for ProcHeap {
     #[inline]
     fn alloc_words(&mut self, words: usize) -> NonNull<u64> {
-        // SAFETY: `alloc_object` returns a non-null header pointer (mimalloc
-        // aborts internally on OOM).
-        unsafe { NonNull::new_unchecked(self.alloc_object(words)) }
+        self.alloc_object(words)
     }
 }
 
@@ -534,7 +532,7 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
     tail: Value,
 ) -> Value {
     let obj = alloc_obj(a, HeapTag::Seq, 5, false);
-    // SAFETY: freshly allocated 5-word payload.
+    // SAFETY: freshly allocated 5-word payload; header written by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         p.write(len as u64);
@@ -542,23 +540,24 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
         move_child(p.add(2), head);
         move_child(p.add(3), tree);
         move_child(p.add(4), tail);
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 /// Allocate a `SeqLeaf` holding `items`.
 #[inline]
 pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + items.len(), false);
-    // SAFETY: freshly allocated payload of exactly 1 + len words.
+    // SAFETY: freshly allocated payload of exactly 1 + len words; header
+    // written by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         p.write(items.len() as u64);
         for (i, v) in items.iter().enumerate() {
             store_child(p.add(1 + i), v);
         }
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 /// Element count under a seq node: leaf count, or a branch's last cumulative
@@ -602,7 +601,8 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
 ) -> Value {
     let n = children.len();
     let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * n, false);
-    // SAFETY: freshly allocated payload of exactly 2 + 2n words.
+    // SAFETY: freshly allocated payload of exactly 2 + 2n words; header
+    // written by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         p.write(n as u64);
@@ -613,8 +613,8 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
             p.add(2 + i).write(total);
             store_child(p.add(2 + n + i), c);
         }
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 // ---- HAMT nodes --------------------------------------------------------------
@@ -694,13 +694,13 @@ impl<'a> HamtNodeRef<'a> {
 #[inline]
 pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Value) -> Value {
     let obj = alloc_obj(a, HeapTag::HamtEntry, 2, false);
-    // SAFETY: freshly allocated 2-word payload.
+    // SAFETY: freshly allocated 2-word payload; header written by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         move_child(p, key);
         move_child(p.add(1), value);
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 /// Allocate a `HamtCollision` over `pairs` (interleaved `key, value, …`, so
@@ -710,7 +710,8 @@ pub(crate) fn hamt_collision_in<A: Arena + ?Sized>(a: &mut A, hash: u64, pairs: 
     debug_assert!(pairs.len() >= 4 && pairs.len().is_multiple_of(2));
     let count = pairs.len() / 2;
     let obj = alloc_obj(a, HeapTag::HamtCollision, 2 + pairs.len(), false);
-    // SAFETY: freshly allocated payload of exactly 2 + 2*count words.
+    // SAFETY: freshly allocated payload of exactly 2 + 2*count words; header
+    // written by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         p.write(hash);
@@ -718,8 +719,8 @@ pub(crate) fn hamt_collision_in<A: Arena + ?Sized>(a: &mut A, hash: u64, pairs: 
         for (i, v) in pairs.iter().enumerate() {
             store_child(p.add(2 + i), v);
         }
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 /// Allocate a `HamtBranch` whose occupied slots are `bitmap` and whose
@@ -732,15 +733,16 @@ pub(crate) fn hamt_branch_in<A: Arena + ?Sized>(
 ) -> Value {
     debug_assert_eq!(bitmap.count_ones() as usize, children.len());
     let obj = alloc_obj(a, HeapTag::HamtBranch, 1 + children.len(), false);
-    // SAFETY: freshly allocated payload of exactly 1 + n words.
+    // SAFETY: freshly allocated payload of exactly 1 + n words; header written
+    // by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         p.write(bitmap as u64);
         for (i, c) in children.iter().enumerate() {
             store_child(p.add(1 + i), c);
         }
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 /// Decoded `Map` root with the `Hamt` backing: `[backing, size, root]`.
@@ -778,14 +780,14 @@ impl HamtMapRef {
 #[inline]
 pub(crate) fn hamt_map_in<A: Arena + ?Sized>(a: &mut A, size: usize, root: Value) -> Value {
     let obj = alloc_obj(a, HeapTag::Map, 3, false);
-    // SAFETY: freshly allocated 3-word payload.
+    // SAFETY: freshly allocated 3-word payload; header written by `alloc_obj`.
     unsafe {
         let p = obj.as_ptr().add(1);
         p.write(MapBacking::Hamt as u64);
         p.add(1).write(size as u64);
         move_child(p.add(2), root);
+        Value::from_object_ptr(obj)
     }
-    Value::from_object_ptr(obj)
 }
 
 // ---- Value -------------------------------------------------------------------
@@ -856,24 +858,33 @@ impl Value {
     }
 
     /// Reconstitute a value from raw bits WITHOUT taking a reference: the
-    /// resulting `Value` is an un-counted alias. Storing it into an owning slot,
-    /// or letting it drop, will mis-count unless the caller balances it (e.g.
-    /// `store_child`, or `mem::forget`). Fabricating heap-pointer bits that do
-    /// not reference a live object makes later accessor calls undefined; the
-    /// only sound bit sources are `to_bits`/`from_object_ptr`.
+    /// resulting `Value` is an un-counted alias.
+    ///
+    /// # Safety
+    /// `bits` must be either an immediate encoding or the tagged address of a
+    /// live object header with a refcount the caller is transferring ownership
+    /// of. Storing the result into an owning slot, or letting it drop, will
+    /// mis-count unless the caller balances it (e.g. `store_child`, or
+    /// `mem::forget`). Fabricating heap-pointer bits that do not reference a
+    /// live object makes later accessor calls undefined; the only sound bit
+    /// sources are `to_bits`/`from_object_ptr`.
     #[inline(always)]
-    pub fn from_bits(bits: u64) -> Value {
+    pub unsafe fn from_bits(bits: u64) -> Value {
         Value(bits)
     }
 
     /// Box a pointer to an arena object's header word as a heap value, carrying
-    /// the immortality marker derived from the object's header. The object must
-    /// be fully constructed (header written) — true at every call site, which is
-    /// the tail of a constructor or a graph copy. Reading the header here is the
-    /// *only* time immortality is read from memory; thereafter it lives in the
-    /// value word (see [`VALUE_IMMORTAL`]).
+    /// the immortality marker derived from the object's header. Reading the
+    /// header here is the *only* time immortality is read from memory;
+    /// thereafter it lives in the value word (see [`VALUE_IMMORTAL`]).
+    ///
+    /// # Safety
+    /// `obj` must point at a live, fully constructed object header (its header
+    /// word written) — the tail of a constructor or a graph copy. The returned
+    /// `Value` takes ownership of one reference count on a mortal object; the
+    /// caller must not also drop the count it came from.
     #[inline]
-    pub fn from_object_ptr(obj: NonNull<u64>) -> Value {
+    pub unsafe fn from_object_ptr(obj: NonNull<u64>) -> Value {
         let addr = obj.as_ptr() as usize as u64;
         debug_assert!(addr & !PAYLOAD == 0, "arena pointer exceeds 48 bits");
         debug_assert!(addr.is_multiple_of(8), "unaligned arena pointer");
@@ -1024,9 +1035,12 @@ impl Value {
             Value::small_int(i)
         } else {
             let obj = alloc_obj(a, HeapTag::BigInt, 1, false);
-            // SAFETY: freshly allocated 1-word payload.
-            unsafe { obj.as_ptr().add(1).write(i as u64) };
-            Value::from_object_ptr(obj)
+            // SAFETY: freshly allocated 1-word payload; header written by
+            // `alloc_obj`.
+            unsafe {
+                obj.as_ptr().add(1).write(i as u64);
+                Value::from_object_ptr(obj)
+            }
         }
     }
 
@@ -1035,7 +1049,8 @@ impl Value {
         let blen = s.len();
         let payload = 1 + blen.div_ceil(8);
         let obj = alloc_obj(a, HeapTag::Str, payload, false);
-        // SAFETY: payload sized for the length word plus the padded bytes.
+        // SAFETY: payload sized for the length word plus the padded bytes;
+        // header written by `alloc_obj`.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(blen as u64);
@@ -1045,33 +1060,35 @@ impl Value {
                 p.add(payload - 1).write(0);
                 std::ptr::copy_nonoverlapping(s.as_ptr(), p.add(1) as *mut u8, blen);
             }
+            Value::from_object_ptr(obj)
         }
-        Value::from_object_ptr(obj)
     }
 
     /// Allocation: 3 words.
     pub fn range_in<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
         let obj = alloc_obj(a, HeapTag::Range, 2, false);
-        // SAFETY: freshly allocated 2-word payload.
+        // SAFETY: freshly allocated 2-word payload; header written by
+        // `alloc_obj`.
         unsafe {
             obj.as_ptr().add(1).write(start as u64);
             obj.as_ptr().add(2).write(end as u64);
+            Value::from_object_ptr(obj)
         }
-        Value::from_object_ptr(obj)
     }
 
     /// Allocation: `2 + elements.len()` words.
     pub fn tuple_in<A: Arena + ?Sized>(a: &mut A, elements: &[Value]) -> Value {
         let obj = alloc_obj(a, HeapTag::Tuple, 1 + elements.len(), false);
-        // SAFETY: payload sized for the count word plus the elements.
+        // SAFETY: payload sized for the count word plus the elements; header
+        // written by `alloc_obj`.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(elements.len() as u64);
             for (i, v) in elements.iter().enumerate() {
                 store_child(p.add(1 + i), v);
             }
+            Value::from_object_ptr(obj)
         }
-        Value::from_object_ptr(obj)
     }
 
     /// A `Map(String, String)` that reads through to the host process
@@ -1080,15 +1097,19 @@ impl Value {
     /// `std::env` on each lookup.
     pub fn env_map_in<A: Arena + ?Sized>(a: &mut A) -> Value {
         let obj = alloc_obj(a, HeapTag::Map, 1, false);
-        // SAFETY: freshly allocated 1-word payload for the backing tag.
-        unsafe { obj.as_ptr().add(1).write(MapBacking::Env as u64) };
-        Value::from_object_ptr(obj)
+        // SAFETY: freshly allocated 1-word payload for the backing tag; header
+        // written by `alloc_obj`.
+        unsafe {
+            obj.as_ptr().add(1).write(MapBacking::Env as u64);
+            Value::from_object_ptr(obj)
+        }
     }
 
     /// Allocation: `3 + captures.len()` words.
     pub fn closure_in<A: Arena + ?Sized>(a: &mut A, func_idx: i32, captures: &[Value]) -> Value {
         let obj = alloc_obj(a, HeapTag::Closure, 2 + captures.len(), false);
-        // SAFETY: payload sized for func_idx + count + captures.
+        // SAFETY: payload sized for func_idx + count + captures; header written
+        // by `alloc_obj`.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(func_idx as u32 as u64);
@@ -1096,8 +1117,8 @@ impl Value {
             for (i, v) in captures.iter().enumerate() {
                 store_child(p.add(2 + i), v);
             }
+            Value::from_object_ptr(obj)
         }
-        Value::from_object_ptr(obj)
     }
 
     /// Construct an enum value from prebuilt name/label values: `enum_name`
@@ -1127,7 +1148,8 @@ impl Value {
         debug_assert!(enum_name.is_tag(HeapTag::Str) && variant_name.is_tag(HeapTag::Str));
         debug_assert!(labels.is_tag(HeapTag::Tuple));
         let obj = alloc_obj(a, HeapTag::Enum, 6 + payload.len(), false);
-        // SAFETY: payload sized for the 6 fixed words plus the payload values.
+        // SAFETY: payload sized for the 6 fixed words plus the payload values;
+        // header written by `alloc_obj`.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(type_id.0 as u32 as u64);
@@ -1139,8 +1161,8 @@ impl Value {
             for (i, v) in payload.iter().enumerate() {
                 store_child(p.add(6 + i), v);
             }
+            Value::from_object_ptr(obj)
         }
-        Value::from_object_ptr(obj)
     }
 
     /// Convenience constructor that also allocates the name strings and label
@@ -1278,15 +1300,16 @@ impl Value {
         let obj = alloc_obj(a, HeapTag::Binary, 4, true);
         let arc_len = backing.len();
         let data = Arc::into_raw(backing) as *const u8 as usize;
-        // SAFETY: freshly allocated 4-word payload.
+        // SAFETY: freshly allocated 4-word payload; header written by
+        // `alloc_obj`.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(data as u64);
             p.add(1).write(arc_len as u64);
             p.add(2).write(bit_offset);
             p.add(3).write(bit_len);
+            Value::from_object_ptr(obj)
         }
-        Value::from_object_ptr(obj)
     }
 
     /// Array from a slice; see [`seq::from_slice`] for the cost model.
@@ -1728,20 +1751,19 @@ impl MapRef<'_> {
         map_backing(unsafe { payload_word(self.obj, 0) })
     }
 
-    /// Entry count of a `Hamt`-backed map (word 1). Callers must have checked
-    /// `backing() == Hamt`.
+    /// Decoded `[size, root]` of a `Hamt`-backed map. Callers must have checked
+    /// `backing() == Hamt` — an `Env` map holds no such words, and reading them
+    /// would be silent garbage, so debug builds assert.
     #[inline]
-    pub(crate) fn hamt_size(&self) -> usize {
+    pub(crate) fn as_hamt(&self) -> HamtMapRef {
+        debug_assert_eq!(self.backing(), MapBacking::Hamt);
         // SAFETY: a Hamt map always carries `[backing, size, root]`.
-        unsafe { payload_word(self.obj, 1) as usize }
-    }
-
-    /// Trie root of a `Hamt`-backed map (word 2), `Nil` when empty. Callers
-    /// must have checked `backing() == Hamt`.
-    #[inline]
-    pub(crate) fn hamt_root(&self) -> Value {
-        // SAFETY: as `hamt_size`.
-        unsafe { payload_value(self.obj, 2) }
+        unsafe {
+            HamtMapRef {
+                size: payload_word(self.obj, 1) as usize,
+                root: payload_value(self.obj, 2),
+            }
+        }
     }
 }
 
@@ -2012,7 +2034,7 @@ pub(crate) unsafe fn rc_decrement_is_zero(obj: *const u64) -> bool {
 ///
 /// # Safety
 /// `obj` must be a live mortal heap object with no remaining references, not
-/// freed before, allocated through a `MiHeap` so `mi_free` reclaims it.
+/// freed before, allocated through a `ProcHeap` so `mi_free` reclaims it.
 #[inline]
 unsafe fn free_object(obj: *mut u64) {
     unsafe {

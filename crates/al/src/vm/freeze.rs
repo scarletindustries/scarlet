@@ -56,11 +56,10 @@ unsafe impl Send for FrozenValue {}
 unsafe impl Sync for FrozenValue {}
 
 impl FrozenValue {
-    /// Wrap an already-frozen root word. The caller must guarantee the
-    /// `FrozenValue` contract: `v` is an immediate or points into fully
-    /// written frozen segments ([`freeze_global`]'s return, or a word read
-    /// back out of a globals table that was published through it).
-    pub(super) fn new(v: Value) -> FrozenValue {
+    /// Wrap an already-frozen root word. Private: only [`freeze_global`] may
+    /// mint a `FrozenValue`, so the `Send`/`Sync` contract (an immediate, or a
+    /// pointer into fully written frozen segments) holds by construction.
+    fn new(v: Value) -> FrozenValue {
         FrozenValue(v.to_bits())
     }
 
@@ -68,22 +67,21 @@ impl FrozenValue {
     /// share the process-arena object layout, so the word is directly
     /// loadable on any scheduler with no decode and no allocation.
     pub(super) fn value(self) -> Value {
-        Value::from_bits(self.0)
+        // SAFETY: `self.0` was minted by `freeze_global` from a fully published
+        // frozen graph (see the type docs), so it is a live immediate/immortal
+        // encoding that reference counting never touches.
+        unsafe { Value::from_bits(self.0) }
     }
 }
 
-/// Deep-copy `root`'s whole value graph out of `heap` into the frozen area
-/// through `builder`, preserving sharing, and return the frozen root word.
+/// Deep-copy `root`'s whole value graph into the frozen area through `builder`,
+/// preserving sharing, and return the frozen root word.
 ///
 /// This is [`ProcHeap::publish_frozen`] (`rc_publish_graph`): the source graph
 /// is left exactly as it was, immediates and already-frozen pointers come back
 /// unchanged, and `Arc` backings of binaries are bumped, not copied.
-pub(super) fn freeze_global(
-    heap: &mut ProcHeap,
-    builder: &mut FrozenBuilder,
-    root: Value,
-) -> FrozenValue {
-    FrozenValue::new(heap.publish_frozen(builder, root))
+pub(super) fn freeze_global(builder: &mut FrozenBuilder, root: Value) -> FrozenValue {
+    FrozenValue::new(ProcHeap::publish_frozen(builder, root))
 }
 
 #[cfg(test)]
@@ -98,7 +96,6 @@ mod tests {
 
     #[test]
     fn immediates_freeze_to_themselves() {
-        let mut heap = ProcHeap::new();
         let mut b = builder();
         for v in [
             Value::small_int(42),
@@ -106,7 +103,7 @@ mod tests {
             Value::bool(true),
             Value::nil(),
         ] {
-            let fv = freeze_global(&mut heap, &mut b, v.clone());
+            let fv = freeze_global(&mut b, v.clone());
             assert_eq!(fv.value().to_bits(), v.to_bits());
         }
     }
@@ -119,7 +116,7 @@ mod tests {
 
         let mut b = builder();
         let before = b.area().words_used();
-        let fv = freeze_global(&mut heap, &mut b, t.clone());
+        let fv = freeze_global(&mut b, t.clone());
         let loaded = fv.value();
 
         // The load is the published word itself (zero-copy).
@@ -143,11 +140,10 @@ mod tests {
 
     #[test]
     fn frozen_pointers_are_shared_not_recopied() {
-        let mut heap = ProcHeap::new();
         let mut b = builder();
         let s = b.str("constant");
         let used = b.area().words_used();
-        let fv = freeze_global(&mut heap, &mut b, s.clone());
+        let fv = freeze_global(&mut b, s.clone());
         assert_eq!(b.area().words_used(), used, "no copy out of the area");
         assert_eq!(fv.value().to_bits(), s.to_bits());
     }
@@ -162,7 +158,7 @@ mod tests {
         let count_before = Arc::strong_count(&backing);
         // Clone so `bin` (and its box's Arc count) stays live through the
         // assertion; the real VM likewise freezes a clone of the binding.
-        let fv = freeze_global(&mut heap, &mut b, bin.clone());
+        let fv = freeze_global(&mut b, bin.clone());
         let loaded = fv.value();
         let view = loaded.as_binary().expect("frozen binary");
         assert_eq!(view.bit_len(), 8192);

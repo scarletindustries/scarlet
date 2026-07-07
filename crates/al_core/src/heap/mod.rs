@@ -25,7 +25,7 @@
 //!    to an object's header. A `Value` is **not `Copy`**: `Clone` increments
 //!    the object's refcount, `Drop` decrements it and frees at zero.
 //! 2. **Allocation is `mi_malloc`** from the calling thread's default heap, with
-//!    a refcount word prefixed before the header ([`mimheap`]). There is no
+//!    a refcount word prefixed before the header ([`proc_heap`]). There is no
 //!    per-process `mi_heap_t`: a heap is bound to its creating thread, so a
 //!    per-process heap built on the spawner and run on a worker would be
 //!    allocated off-thread (UB). `mi_free` is cross-thread safe, so an object
@@ -48,14 +48,12 @@
 //!
 //! | file           | the one thing it does                                  |
 //! |----------------|--------------------------------------------------------|
-//! | [`mimheap`]    | allocate/free one object via mimalloc; spawn + freeze  |
-//! |                | graph copies                                           |
-//! | [`proc_heap`]  | the per-process allocator handle (`ProcHeap`)          |
+//! | [`proc_heap`]  | the per-process allocator handle (`ProcHeap`):         |
+//! |                | allocate/free via mimalloc; spawn + freeze graph copies|
 //!
 //! The refcount semantics themselves (`Clone`/`Drop`, the free-at-zero work
 //! list, `store_child`/`move_child`) live in [`crate::bytecode::value`].
 
-mod mimheap;
 mod proc_heap;
 
 // The crate-facing surface is deliberately small: the VM owns a `ProcHeap`,
