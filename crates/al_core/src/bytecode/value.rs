@@ -1199,22 +1199,6 @@ impl Value {
         Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
     }
 
-    /// Whole-buffer binary that is the concatenation of two byte windows,
-    /// copied directly into the freshly allocated shared backing: one
-    /// allocation, each source byte copied exactly once (no intermediate
-    /// `Vec`). `head` must be whole bytes (its bit length a multiple of 8);
-    /// `tail` holds the remaining `bit_len` bits, so its final byte may carry
-    /// neighbouring bits from a shared backing past `bit_len` — they are
-    /// masked to zero here. This is `binary.append`'s byte-aligned fast path.
-    pub fn binary_concat_in<A: Arena + ?Sized>(
-        a: &mut A,
-        head: &[u8],
-        tail: &[u8],
-        bit_len: u64,
-    ) -> Value {
-        Value::binary_concat_parts_in(a, &[head, tail], bit_len)
-    }
-
     /// Whole-buffer binary that is the concatenation of N byte windows,
     /// copied directly into the freshly allocated shared backing: one
     /// allocation, each source byte copied exactly once (no intermediate
@@ -1596,21 +1580,6 @@ impl<'a> BinaryRef<'a> {
         // SAFETY: constructed from a tag-checked Binary value, so the Arc
         // words are intact; the clone takes its own strong count.
         unsafe { Arc::clone(&binary_backing_reborrow(self.obj)) }
-    }
-
-    /// The complete logical bytes as a borrowed slice. HOT path: valid only
-    /// when the view is fully byte-aligned (`bit_offset` and `bit_len` both
-    /// multiples of 8), which every socket/file write guarantees by rejecting
-    /// non-aligned binaries first. Returns exactly `bit_len / 8` bytes, no copy.
-    #[inline]
-    pub fn byte_window(&self) -> &'a [u8] {
-        debug_assert!(
-            self.bit_offset().is_multiple_of(8) && self.bit_len().is_multiple_of(8),
-            "byte_window on a non-byte-aligned binary view"
-        );
-        let start = (self.bit_offset() / 8) as usize;
-        let len = (self.bit_len() / 8) as usize;
-        &self.backing()[start..start + len]
     }
 
     /// The complete logical bytes (the first `bit_len / 8` bytes; any partial
@@ -2603,7 +2572,7 @@ mod tests {
         let mut h = test_heap();
         let v = Value::binary_in(&mut h, vec![1u8, 2, 3]);
         let b = v.as_binary().unwrap();
-        assert_eq!(b.byte_window(), &[1u8, 2, 3][..]);
+        assert_eq!(&*b.full_bytes(), &[1u8, 2, 3][..]);
         assert_eq!(b.bit_offset(), 0);
         assert_eq!(b.bit_len(), 24);
 
@@ -2615,16 +2584,16 @@ mod tests {
     #[test]
     fn binary_concat_windows() {
         let mut h = test_heap();
-        let v = Value::binary_concat_in(&mut h, &[0xAB, 0xCD], &[0xEF], 24);
+        let v = Value::binary_concat_parts_in(&mut h, &[&[0xAB, 0xCD], &[0xEF]], 24);
         let b = v.as_binary().unwrap();
-        assert_eq!(b.byte_window(), &[0xAB, 0xCD, 0xEF][..]);
+        assert_eq!(&*b.full_bytes(), &[0xAB, 0xCD, 0xEF][..]);
         assert_eq!(b.bit_offset(), 0);
         // A partial tail byte from a shared backing gets its low bits masked.
-        let v2 = Value::binary_concat_in(&mut h, &[0xAB], &[0xFF], 11);
+        let v2 = Value::binary_concat_parts_in(&mut h, &[&[0xAB], &[0xFF]], 11);
         let b2 = v2.as_binary().unwrap();
         assert_eq!(b2.bit_len(), 11);
         assert_eq!(b2.to_aligned_vec(), vec![0xAB, 0b1110_0000]);
-        let v3 = Value::binary_concat_in(&mut h, &[], &[], 0);
+        let v3 = Value::binary_concat_parts_in(&mut h, &[&[], &[]], 0);
         assert_eq!(v3.as_binary().unwrap().bit_len(), 0);
     }
 
@@ -2638,7 +2607,7 @@ mod tests {
         let slice = Value::binary_view_in(&mut h, whole.as_binary().unwrap().backing_arc(), 8, 16);
         assert_eq!(Arc::strong_count(&backing), 3);
         let s = slice.as_binary().unwrap();
-        assert_eq!(s.byte_window(), &[0xCD, 0xEF][..]);
+        assert_eq!(&*s.full_bytes(), &[0xCD, 0xEF][..]);
         // Logical equality across different views/offsets.
         let same = Value::binary_in(&mut h, vec![0xCD, 0xEF]);
         assert!(s.bits_eq(&same.as_binary().unwrap()));
