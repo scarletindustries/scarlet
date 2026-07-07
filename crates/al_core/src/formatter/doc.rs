@@ -493,6 +493,19 @@ fn fits<'d>(
 mod tests {
     use super::*;
 
+    fn parens(open: &str, arg: &str) -> Doc {
+        group(d![
+            text(open),
+            nest(1, d![line0(), text(arg)]),
+            break_(",", ""),
+            text(")"),
+        ])
+    }
+
+    fn lambda() -> Doc {
+        d![text("fn() "), hard_braces(text("body"))]
+    }
+
     #[test]
     fn group_fits_flat() {
         let d = group(d![text("a"), line(), text("b"), line(), text("c")]);
@@ -544,17 +557,7 @@ mod tests {
     fn trailing_text_breaks_group() {
         // `(aaaa)` alone fits, but the text after it on the same line does
         // not — the group must break rather than overflow the line.
-        let doc = || {
-            d![
-                group(d![
-                    text("("),
-                    nest(1, d![line0(), text("aaaa")]),
-                    break_(",", ""),
-                    text(")"),
-                ]),
-                text(" tail"),
-            ]
-        };
+        let doc = || d![parens("(", "aaaa"), text(" tail")];
         assert_eq!(layout(&doc(), 11), "(aaaa) tail");
         assert_eq!(layout(&doc(), 9), "(\n\taaaa,\n) tail");
     }
@@ -563,21 +566,7 @@ mod tests {
     fn trailing_reluctant_group_breaks_earlier_group() {
         // Two argument lists on one line: when the pair overflows, the first
         // one breaks and the second stays intact — not the other way around.
-        let doc = d![
-            group(d![
-                text("f("),
-                nest(1, d![line0(), text("aaaa")]),
-                break_(",", ""),
-                text(")"),
-            ]),
-            text(" + g"),
-            group(d![
-                text("("),
-                nest(1, d![line0(), text("bbbb")]),
-                break_(",", ""),
-                text(")"),
-            ]),
-        ];
+        let doc = d![parens("f(", "aaaa"), text(" + g"), parens("(", "bbbb")];
         assert_eq!(layout(&doc, 12), "f(\n\taaaa,\n) + g(bbbb)");
     }
 
@@ -585,18 +574,7 @@ mod tests {
     fn trailing_block_keeps_earlier_group_flat() {
         // A block after the args is a natural break point: the args stay
         // flat and the line ends at the block's `{`.
-        let doc = || {
-            d![
-                group(d![
-                    text("f("),
-                    nest(1, d![line0(), text("aaaa")]),
-                    break_(",", ""),
-                    text(")"),
-                ]),
-                text(" "),
-                block(text("body")),
-            ]
-        };
+        let doc = || d![parens("f(", "aaaa"), text(" "), block(text("body"))];
         assert_eq!(layout(&doc(), 30), "f(aaaa) { body }");
         assert_eq!(layout(&doc(), 10), "f(aaaa) {\n\tbody\n}");
     }
@@ -605,7 +583,6 @@ mod tests {
     fn delimited_hug_lets_last_item_hug() {
         // A hard-breaking last item hugs the delimiters: earlier items stay on
         // the head line and the closer follows the item's final line.
-        let lambda = || d![text("fn() "), hard_braces(text("body"))];
         let doc = d![
             text("f"),
             delimited_hug("(", vec![text("a"), lambda()], ")")
@@ -618,7 +595,6 @@ mod tests {
         // When the head line (everything up to the hugged item's `{`) does not
         // fit, fall back to the one-item-per-line layout with the hugged item
         // indented like any other.
-        let lambda = || d![text("fn() "), hard_braces(text("body"))];
         let doc = d![
             text("f"),
             delimited_hug("(", vec![text("aaaaaaaaaa"), lambda()], ")")
@@ -645,7 +621,6 @@ mod tests {
         // A hard-breaking item before the last leaves nothing for the last to
         // hug onto: every item goes on its own line.
         let block_item = || d![text("match x "), hard_braces(text("arm"))];
-        let lambda = || d![text("fn() "), hard_braces(text("body"))];
         let doc = d![
             text("f"),
             delimited_hug("(", vec![block_item(), lambda()], ")")
@@ -661,7 +636,6 @@ mod tests {
         // A hugging list provably renders across multiple lines, so an
         // enclosing group must break around it rather than keep its own
         // breaks flat.
-        let lambda = || d![text("fn() "), hard_braces(text("body"))];
         let call = || d![text("g"), delimited_hug("(", vec![lambda()], ")")];
         let outer = group(d![
             text("["),
@@ -679,15 +653,9 @@ mod tests {
     fn trailing_hugging_group_keeps_earlier_group_flat() {
         // Like a block, a hugging call after the args is a natural end for the
         // line: the earlier args stay flat whether the call hugs or breaks.
-        let lambda = || d![text("fn() "), hard_braces(text("body"))];
         let doc = || {
             d![
-                group(d![
-                    text("f("),
-                    nest(1, d![line0(), text("aaaa")]),
-                    break_(",", ""),
-                    text(")"),
-                ]),
+                parens("f(", "aaaa"),
                 text(" or g"),
                 delimited_hug("(", vec![lambda()], ")"),
             ]
