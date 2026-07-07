@@ -5,11 +5,10 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
 
 mod common;
-use common::{Project, run_al};
+use common::Project;
+use common::net::{connect, shutdown_clean, spawn_al_server, wait_or_kill};
 
 /// `io.write_text` then `io.read_text` round-trips the content: stdout echoes
 /// what was read back, and the bytes are genuinely on disk.
@@ -29,10 +28,8 @@ match io.write_text(path, 'hello-io') {
 }
 "#
     .replace("__PATH__", &data.display().to_string());
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
 
-    let out = run_al("run", &prog);
+    let out = proj.run(&src);
 
     assert!(
         out.success,
@@ -50,118 +47,6 @@ match io.write_text(path, 'hello-io') {
         std::fs::read_to_string(&data).unwrap(),
         "hello-io",
         "file on disk has wrong content"
-    );
-}
-
-/// Reserve an ephemeral localhost port, then release it, returning a port with
-/// no listener. Used ONLY by `connect_refused_is_typed`, where the port must be
-/// genuinely closed. Tests that spawn a server must never reserve-and-release:
-/// in the window between release and the server's re-bind the kernel can hand
-/// the port to a concurrent test's socket, and a client that connects in that
-/// window reaches the wrong listener. Spawned servers bind port 0 and announce
-/// the kernel-assigned port instead — see `spawn_al_server`.
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("reserve a free port");
-    l.local_addr().expect("local_addr").port()
-}
-
-/// Read the spawned server's first stdout line — the `listening <ip>:<port>`
-/// announcement it prints once `net.listen` has bound port 0 — and return the
-/// kernel-assigned port. The line is read byte-at-a-time so nothing past the
-/// newline is consumed, and the pipe is handed back to `child` so
-/// `wait_with_output` still collects the rest of stdout. A reader thread plus
-/// a receive timeout turns a server that wedges before announcing into a test
-/// failure instead of a hung suite.
-fn read_announced_port(child: &mut Child) -> u16 {
-    fn die(child: &mut Child, msg: String) -> ! {
-        child.kill().ok();
-        let mut stderr = Vec::new();
-        if let Some(mut e) = child.stderr.take() {
-            e.read_to_end(&mut stderr).ok();
-        }
-        panic!("{msg}\nserver stderr: {}", String::from_utf8_lossy(&stderr));
-    }
-
-    let mut stdout = child.stdout.take().expect("server stdout is piped");
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = Vec::new();
-        let mut byte = [0u8; 1];
-        loop {
-            match stdout.read(&mut byte) {
-                Ok(n) if n > 0 && byte[0] != b'\n' => line.push(byte[0]),
-                _ => break,
-            }
-        }
-        // The receiver may have timed out and gone; nothing to do then.
-        let _ = tx.send((stdout, line));
-    });
-    let Ok((stdout, line)) = rx.recv_timeout(Duration::from_secs(30)) else {
-        die(child, "server announced no port within 30s".to_string());
-    };
-    child.stdout = Some(stdout);
-
-    let line = String::from_utf8_lossy(&line).into_owned();
-    match line
-        .strip_prefix("listening ")
-        .and_then(|addr| addr.rsplit(':').next())
-        .and_then(|p| p.parse().ok())
-    {
-        Some(port) => port,
-        None => die(
-            child,
-            format!("server did not announce its port; first line: {line:?}"),
-        ),
-    }
-}
-
-/// Connect to the port a spawned server announced. The listener is bound
-/// before the announcement is printed, so a single attempt succeeds — the
-/// kernel completes the handshake from the backlog even before the server
-/// calls accept. The 10s read timeout makes a wedged server fail the test
-/// instead of hanging it.
-fn connect(port: u16) -> TcpStream {
-    let stream = TcpStream::connect(("127.0.0.1", port))
-        .unwrap_or_else(|e| panic!("connect to announced port {port}: {e}"));
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    stream
-}
-
-/// Write `src` to `server.al` in `proj`, spawn `al run` on it with piped
-/// output, and connect a client once the server announces its port. Every
-/// server source binds `127.0.0.1:0` and prints `listening <ip>:<port>` (via
-/// `net.local_addr`) as its first line; parsing that announcement before
-/// connecting means the client can only ever reach the server's own listener —
-/// there is no reserved-port handoff for a concurrent test to race. Returns
-/// the port too, for tests that open further connections.
-fn spawn_al_server(proj: &Project, src: &str) -> (Child, TcpStream, u16) {
-    let prog = proj.dir.join("server.al");
-    std::fs::write(&prog, src).unwrap();
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
-        .arg("run")
-        .arg(&prog)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn al server");
-
-    let port = read_announced_port(&mut child);
-    (child, connect(port), port)
-}
-
-/// Tear down a `spawn_al_server` pair: drop the client connection, kill the
-/// (forever-looping) server, and assert it never reported a serve failure.
-fn shutdown_clean(mut child: Child, stream: TcpStream) {
-    drop(stream);
-    child.kill().ok();
-    let out = child.wait_with_output().expect("await server shutdown");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("serve failed"),
-        "server reported a failure: {stdout}"
     );
 }
 
@@ -283,8 +168,8 @@ match net.listen('127.0.0.1', 0) {
 					socket.write(conn, binary.from_string(' world')) or Nil
 					match socket.read_exact(conn, 11) {
 						Ok(data) -> match binary.to_string(data) {
-							Ok(text) -> println('echoed: ${text}')
-							Err(_e) -> println('not utf8')
+							Some(text) -> println('echoed: ${text}')
+							None -> println('not utf8')
 						}
 						Err(e) -> println('client read failed: ${e}')
 					}
@@ -298,49 +183,17 @@ match net.listen('127.0.0.1', 0) {
 	Err(e) -> println('listen failed: ${e}')
 }
 "#;
-    let prog = proj.dir.join("connect.al");
-    std::fs::write(&prog, src).unwrap();
-
-    let out = Command::new(env!("CARGO_BIN_EXE_al"))
-        .arg("run")
-        .arg(&prog)
-        .output()
-        .expect("run al");
-
+    let out = proj.run(src);
     assert!(
-        out.status.success(),
+        out.success,
         "program failed; stdout: {} stderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        out.stdout, out.stderr
     );
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "echoed: hello world\n",
+        out.stdout, "echoed: hello world\n",
         "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        out.stderr
     );
-}
-
-/// Wait up to `secs` for a self-terminating server `child` to exit, then collect
-/// its output. Unlike `shutdown_clean` (which kills a forever-looping server),
-/// these `read_within` servers are expected to finish on their own once the
-/// deadline fires or the data arrives; the bound just guarantees a wedged read
-/// fails the test instead of hanging the suite. Callers pass a bound far above
-/// the happy-path runtime: under a full parallel `cargo test` the spawned VM
-/// competes with every other test binary for CPU, and a tight bound turns load
-/// into a spurious kill (a non-success exit) on an otherwise correct run.
-fn wait_or_kill(mut child: Child, secs: u64) -> std::process::Output {
-    let deadline = Instant::now() + Duration::from_secs(secs);
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => break,
-        }
-    }
-    // No-op if it already exited; forces the issue if it overran the deadline.
-    child.kill().ok();
-    child.wait_with_output().expect("collect server output")
 }
 
 /// `socket.read_within` against a peer that connects but never sends must hit
@@ -409,8 +262,8 @@ match net.listen('127.0.0.1', 0) {
 		match net.accept(server) {
 			Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
 				Ok(data) -> match binary.to_string(data) {
-					Ok(text) -> println('got: ${text}')
-					Err(_) -> println('not-utf8')
+					Some(text) -> println('got: ${text}')
+					None -> println('not-utf8')
 				}
 				Err(e) -> println('read-failed: ${e}')
 			}
@@ -453,10 +306,8 @@ match io.write_file('__PATH__', <<1:4>>) {
 }
 "#
     .replace("__PATH__", &data.display().to_string());
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
 
-    let out = run_al("run", &prog);
+    let out = proj.run(&src);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert_eq!(
@@ -485,10 +336,8 @@ match io.read_text('__PATH__') {
 }
 "#
     .replace("__PATH__", &missing.display().to_string());
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
 
-    let out = run_al("run", &prog);
+    let out = proj.run(&src);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert_eq!(
@@ -504,7 +353,17 @@ match io.read_text('__PATH__') {
 /// also exercises the non-blocking-connect completion path (`finish_connect`).
 #[test]
 fn connect_refused_is_typed() {
-    let port = free_port();
+    // Reserve an ephemeral localhost port and release it, leaving a port with
+    // no listener. Tests that spawn a server must never do this: in the window
+    // between release and the server's re-bind the kernel can hand the port to
+    // a concurrent test, and a client connecting then reaches the wrong
+    // listener. Spawned servers bind port 0 and announce the kernel-assigned
+    // port instead — see `common::net::spawn_al_server`.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .expect("reserve a free port")
+        .local_addr()
+        .expect("local_addr")
+        .port();
     let proj = Project::new("net_refused");
     let src = r#"import al/net
 import al/net/error.{ConnectionRefused}
@@ -515,10 +374,8 @@ match net.connect('127.0.0.1', __PORT__) {
 }
 "#
     .replace("__PORT__", &port.to_string());
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
 
-    let out = run_al("run", &prog);
+    let out = proj.run(&src);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert_eq!(
@@ -558,10 +415,8 @@ match io.read_text('__PATH__') {
 }
 "#
     .replace("__PATH__", &data.display().to_string());
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
 
-    let out = run_al("run", &prog);
+    let out = proj.run(&src);
 
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     let oks = out.stdout.lines().filter(|&l| l == "ok").count();
@@ -588,9 +443,7 @@ match net.resolve('localhost') {
 	Err(_) -> println('err')
 }
 "#;
-    let prog = proj.dir.join("prog.al");
-    std::fs::write(&prog, src).unwrap();
-    let out = run_al("run", &prog);
+    let out = proj.run(src);
     assert!(out.success, "program should run, stderr: {}", out.stderr);
     assert_eq!(
         out.stdout, "resolved\n",

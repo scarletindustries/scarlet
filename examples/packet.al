@@ -47,8 +47,8 @@ fn decode(wire Binary) Result(Message, String) {
 		<<'AL', _:4, 0:4, 0:16>> -> Ok(Ping)
 		<<'AL', _:4, 1:4, len:16, payload:bytes(len)>> -> {
 			match binary.to_string(payload) {
-				Ok(text) -> Ok(Data(text))
-				Err(_) -> Err('payload is not text')
+				Some(text) -> Ok(Data(text))
+				None -> Err('payload is not text')
 			}
 		}
 		<<'AL', _:4, 2:4, 0:16>> -> Ok(Bye)

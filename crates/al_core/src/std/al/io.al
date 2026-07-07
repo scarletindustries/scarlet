@@ -42,8 +42,8 @@ pub fn write_file(path String, data Binary) Result(Nil, IoError)
 pub fn read_text(path String) Result(String, IoError) {
 	match read_file(path) {
 		Ok(b) -> match binary.to_string(b) {
-			Ok(s) -> Ok(s)
-			Err(Nil) -> Err(InvalidData(path))
+			Some(s) -> Ok(s)
+			None -> Err(InvalidData(path))
 		}
 		Err(e) -> Err(e)
 	}

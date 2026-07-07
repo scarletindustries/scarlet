@@ -17,8 +17,8 @@ const response = binary.from_string('${header}${body}')
 // blank line; clients may pipeline several into one packet.
 fn count_requests(data Binary) Int {
 	match binary.to_string(data) {
-		Ok(text) -> list.length(string.split(text, '\r\n\r\n')) - 1
-		else -> 0
+		Some(text) -> list.length(string.split(text, '\r\n\r\n')) - 1
+		None -> 0
 	}
 }
 

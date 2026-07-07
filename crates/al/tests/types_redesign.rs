@@ -1,5 +1,5 @@
 mod common;
-use common::{check_fails, check_ok, check_rejects, run_outputs};
+use common::{check_ok, check_rejects, run_outputs};
 
 // ===========================================================================
 // `type` keyword — definitions
@@ -48,6 +48,7 @@ fn unlabeled_field_in_def_is_rejected() {
     check_rejects(
         "type Wrap { Wrap(Int) }\n\
          x = Wrap(1)\n",
+        "",
     );
 }
 
@@ -95,7 +96,7 @@ fn nullary_constructor_is_value() {
 
 #[test]
 fn if_without_else_is_error() {
-    check_fails(
+    check_rejects(
         "x = if True { 1 }\n\
          println(x)\n",
         "else",
@@ -108,12 +109,12 @@ fn if_without_else_is_error() {
 
 #[test]
 fn empty_parens_is_parse_error() {
-    check_rejects("x = ()\nprintln(x)\n");
+    check_rejects("x = ()\nprintln(x)\n", "");
 }
 
 #[test]
 fn single_parens_is_parse_error() {
-    check_rejects("x = (5)\nprintln(x)\n");
+    check_rejects("x = (5)\nprintln(x)\n", "");
 }
 
 #[test]
@@ -142,6 +143,7 @@ fn index_without_unwrap_is_option_typed() {
         "xs = [10, 20, 30]\n\
          y = xs[0] + 1\n\
          println(y)\n",
+        "",
     );
 }
 
@@ -208,6 +210,7 @@ fn redefining_prelude_type_is_rejected() {
     check_rejects(
         "type Option(a) { Some(value a) None }\n\
          x = Some(1)\n",
+        "",
     );
 }
 
@@ -216,6 +219,7 @@ fn redefining_prelude_ctor_is_rejected() {
     check_rejects(
         "type X { Ok(value Int) }\n\
          x = Ok(1)\n",
+        "",
     );
 }
 
@@ -240,6 +244,7 @@ fn field_access_partial_is_rejected() {
         "type Named { Person(name String age Int) Org(name String size Int) }\n\
          fn age_of(n Named) Int { n.age }\n\
          println(age_of(Person(name: 'al', age: 18)))\n",
+        "",
     );
 }
 
@@ -248,6 +253,7 @@ fn field_access_on_unbound_var_is_rejected() {
     check_rejects(
         "fn name_of(x) { x.name }\n\
          println(name_of(1))\n",
+        "",
     );
 }
 
@@ -338,7 +344,7 @@ fn nested_option_missing_inner_arm_reports_precise_witness() {
     // Dropping `Some(None)` is genuinely non-exhaustive, and now that the inner
     // `Option`'s variants are known the witness names it exactly instead of
     // collapsing to `Some(_)`.
-    check_fails(
+    check_rejects(
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -354,7 +360,7 @@ fn nested_option_redundant_wildcard_is_rejected() {
     // Before the fix a `Some(_)` arm was *required* to silence a false
     // non-exhaustiveness error; now the explicit inner arms already cover
     // `Some(_)`, so that wildcard is correctly reported as dead code.
-    check_fails(
+    check_rejects(
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -415,6 +421,7 @@ fn unreachable_arm_is_error() {
          \t}\n\
          }\n\
          f(True)\n",
+        "",
     );
 }
 
@@ -428,6 +435,7 @@ fn ctor_pattern_missing_fields_without_spread_is_error() {
          \t}\n\
          }\n\
          f(User(name: 'a', age: 1, email: 'e'))\n",
+        "",
     );
 }
 
@@ -454,6 +462,7 @@ fn or_on_non_option_result_is_rejected() {
     check_rejects(
         "x = 5 or 0\n\
          println(x)\n",
+        "",
     );
 }
 
@@ -479,6 +488,7 @@ fn rigid_tyvar_body_mismatch_is_rejected() {
     check_rejects(
         "fn bad(x a) a { 1 }\n\
          println(bad('s'))\n",
+        "",
     );
 }
 
@@ -488,6 +498,7 @@ fn rigid_tyvar_same_var_unifies_args() {
     check_rejects(
         "fn f(x a, y a) a { x }\n\
          println(f(1, 's'))\n",
+        "",
     );
 }
 
@@ -551,7 +562,7 @@ fn ctor_record_update_overrides_and_projects() {
 fn ctor_record_update_at_most_one_spread() {
     // A constructor record-update accepts a single `..base`; a second spread is
     // rejected.
-    check_fails(
+    check_rejects(
         "type P { P(name String age Int) }\n\
          base = P(name: 'al', age: 18)\n\
          older = P(..base, ..base)\n\
@@ -564,7 +575,7 @@ fn ctor_record_update_at_most_one_spread() {
 fn spread_arg_in_plain_call_rejected() {
     // Spread arguments only make sense in constructor record-update calls; in an
     // ordinary function call they are a placement error.
-    check_fails(
+    check_rejects(
         "fn f(a Int) Int { a }\n\
          println(f(..[1]))\n",
         "Spread arguments are only allowed in constructor record-update calls",
@@ -575,7 +586,7 @@ fn spread_arg_in_plain_call_rejected() {
 fn labelled_arg_in_plain_call_rejected() {
     // Labelled arguments are a constructor-only affordance; passing one to an
     // ordinary function is a placement error.
-    check_fails(
+    check_rejects(
         "fn f(a Int) Int { a }\n\
          println(f(a: 1))\n",
         "Labelled arguments are only allowed in constructor calls",
@@ -620,7 +631,7 @@ fn match_guard_with_constructor() {
 
 #[test]
 fn match_guard_non_exhaustive_errors() {
-    check_fails(
+    check_rejects(
         "fn f(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x < 2 -> 'a'\n\
@@ -632,7 +643,7 @@ fn match_guard_non_exhaustive_errors() {
 
 #[test]
 fn match_guard_type_must_be_bool() {
-    check_fails(
+    check_rejects(
         "fn f(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x -> 'a'\n\
@@ -683,7 +694,7 @@ fn or_pattern_binding_before_or_in_tuple() {
 fn or_pattern_unequal_bindings_still_rejected() {
     // The scoping fix must not relax the core invariant: every alternative of
     // an or-pattern must bind exactly the same names.
-    check_fails(
+    check_rejects(
         "type R { Good(v Int) Bad(v Int) }\n\
          fn h(r R) Int {\n\
          \tmatch r {\n\
@@ -708,7 +719,7 @@ fn array_spread_literal() {
 
 #[test]
 fn array_concat_operator_removed() {
-    check_rejects("xs = [1] ++ [2]\nprintln(xs)\n");
+    check_rejects("xs = [1] ++ [2]\nprintln(xs)\n", "");
 }
 
 #[test]
@@ -743,11 +754,11 @@ fn module_builtins_qualified_and_destructured() {
 
 #[test]
 fn vm_attribute_stdlib_only() {
-    check_fails(
+    check_rejects(
         "@vm(tcp_listen)\nfn listen(p Int) Int\n",
         "'@vm' is only allowed in the standard library",
     );
-    check_fails("@nope\nfn f() Nil { Nil }\n", "Unknown attribute '@nope'");
+    check_rejects("@nope\nfn f() Nil { Nil }\n", "Unknown attribute '@nope'");
 }
 
 // ===========================================================================
@@ -765,11 +776,11 @@ fn bool_is_a_normal_two_ctor_type() {
          println(show(True))\nprintln(show(1 == 2))\n",
         "yes\nno\n",
     );
-    check_fails(
+    check_rejects(
         "fn f(b Bool) Int { match b { True -> 1 } }\nprintln(f(True))\n",
         "not exhaustive",
     );
-    check_fails(
+    check_rejects(
         "type My { True }\n",
         "is defined in the prelude and cannot be redefined",
     );
@@ -777,13 +788,13 @@ fn bool_is_a_normal_two_ctor_type() {
 
 #[test]
 fn lowercase_true_is_just_an_identifier() {
-    check_fails("x = true\n", "Unknown identifier");
+    check_rejects("x = true\n", "Unknown identifier");
 }
 
 #[test]
 fn reserved_set_derived_from_prelude_iface() {
     // Prelude types/ctors are reserved...
-    check_fails(
+    check_rejects(
         "type Option(a) { Just(value a) Nothing }\n",
         "is defined in the prelude and cannot be redefined",
     );
@@ -979,7 +990,7 @@ fn stdlib_decimal() {
          println(decimal.scale(decimal.normalize(b)))\n\
          println(decimal.is_negative(decimal.neg(a)))\n\
          println(decimal.is_zero(decimal.new(0, 5)))\n",
-        "True\n-1\nTrue\n2\n1\nTrue\nTrue\n",
+        "True\nLt\nTrue\n2\n1\nTrue\nTrue\n",
     );
     // parse round-trips through to_string, keeps the written scale, handles
     // signs, and rejects malformed or Int-overflowing input instead of
@@ -1018,7 +1029,7 @@ fn stdlib_binary() {
          println(binary.bit_size(b))\n\
          println(binary.byte_size(b))\n\
          println(b)\n",
-        "Ok(hi)\n16\n2\n<<104, 105>>\n",
+        "Some(hi)\n16\n2\n<<104, 105>>\n",
     );
     run_outputs(
         "import al/binary\n\
@@ -1028,7 +1039,7 @@ fn stdlib_binary() {
          joined = binary.append(binary.from_string('AB'), binary.from_string('C'))\n\
          println(binary.to_string(joined))\n\
          println(binary.bit_size(binary.slice(b, 0, 5) or binary.from_string('')))\n",
-        "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
+        "Some(<<66>>)\nNone\nSome(ABC)\n5\n",
     );
     // Op::BinReadUtf8 — `<<c:utf8, ..>>` decodes one *codepoint*, not one byte.
     // [195, 169] is the UTF-8 encoding of 'é' (U+00E9); the pattern binds the
@@ -1053,14 +1064,14 @@ fn stdlib_binary() {
          println(string.inspect(<<src:bytes(3)>>))\n",
         "<<65, 66, 67>>\n",
     );
-    // binary.to_string Err branches: 0xFF is not valid UTF-8 (byte-aligned but
+    // binary.to_string None branches: 0xFF is not valid UTF-8 (byte-aligned but
     // undecodable), and `<<1:4>>` is bit-unaligned (bit_len % 8 != 0). Both
-    // yield Err(Nil) rather than panicking or lossily decoding.
+    // yield None rather than panicking or lossily decoding.
     run_outputs(
         "import al/binary\n\
          println(binary.to_string(<<255>>))\n\
          println(binary.to_string(<<1:4>>))\n",
-        "Err(Nil)\nErr(Nil)\n",
+        "None\nNone\n",
     );
     // binary.byte_size rounds up: a 4-bit binary occupies 1 byte (div_ceil),
     // not 0. The existing aligned case (16 bits -> 2) cannot catch the rounding.
@@ -1069,14 +1080,14 @@ fn stdlib_binary() {
          println(binary.byte_size(<<1:4>>))\n",
         "1\n",
     );
-    // binary.slice with a negative offset takes the `at < 0` Err branch (a
+    // binary.slice with a negative offset takes the `at < 0` None branch (a
     // different guard than the existing OOB `at + take > bit_len` case).
     run_outputs(
         "import al/binary\n\
          println(binary.slice(binary.from_string('ABC'), 0 - 1, 8))\n",
-        "Err(Nil)\n",
+        "None\n",
     );
-    check_fails(
+    check_rejects(
         "import al/net/socket.{Socket}\n\
          fn f(c Socket) Nil { socket.write(c, 'nope') or Nil }\n",
         "Type mismatch",
@@ -1096,10 +1107,10 @@ fn binary_string_literal_patterns() {
         "import al/binary\n\
          r = match binary.from_string('GET /index.html') {\n\
          \t<<'GET ', ..rest>> -> binary.to_string(rest)\n\
-         \telse -> Err(Nil)\n\
+         \telse -> None\n\
          }\n\
          println(r)\n",
-        "Ok(/index.html)\n",
+        "Some(/index.html)\n",
     );
     // Explicit `:utf8` on a string literal is the same pattern.
     run_outputs(
@@ -1156,10 +1167,10 @@ fn binary_string_literal_patterns() {
         "import al/binary\n\
          r = match binary.from_string('héllo world') {\n\
          \t<<'héllo ', ..rest>> -> binary.to_string(rest)\n\
-         \telse -> Err(Nil)\n\
+         \telse -> None\n\
          }\n\
          println(r)\n",
-        "Ok(world)\n",
+        "Some(world)\n",
     );
     // Consecutive integer literals coalesce into the same single-compare
     // prefix: <<13, 10, ..>> is CRLF.
@@ -1195,7 +1206,7 @@ fn binary_string_literal_patterns() {
     );
     // A string literal with an Int size spec is still a type error (the
     // Utf8 default applies only to bare string segments).
-    check_fails(
+    check_rejects(
         "import al/binary\n\
          r = match binary.from_string('AB') {\n\
          \t<<'AB':16>> -> 1\n\
@@ -1208,8 +1219,8 @@ fn binary_string_literal_patterns() {
 
 #[test]
 fn stdlib_binary_byte_at() {
-    // byte_at : (Binary, Int) -> Int — in-bounds bytes, -1 out of bounds (both
-    // sides), and views (slices) read through their offset.
+    // byte_at : (Binary, Int) -> Option(Int) — in-bounds bytes, None out of
+    // bounds (both sides), and views (slices) read through their offset.
     run_outputs(
         "import al/binary\n\
          b = binary.from_string('AZ')\n\
@@ -1222,7 +1233,7 @@ fn stdlib_binary_byte_at() {
          \telse -> b\n\
          }\n\
          println(binary.byte_at(tail, 0))\n",
-        "65\n90\n-1\n-1\n90\n",
+        "Some(65)\nSome(90)\nNone\nNone\nSome(90)\n",
     );
 }
 
@@ -1442,12 +1453,12 @@ fn ctor_destructure_multi_field_ok() {
 
 #[test]
 fn ctor_destructure_refutable_rejected() {
-    check_fails("Some(x) = Some(1)\nprintln(x)\n", "refutable");
+    check_rejects("Some(x) = Some(1)\nprintln(x)\n", "refutable");
 }
 
 #[test]
 fn ctor_destructure_nested_refutable_rejected() {
-    check_fails(
+    check_rejects(
         "type Box { Box(value Option(Int)) }\n\
          Box(Some(n)) = Box(Some(1))\n\
          println(n)\n",
@@ -1466,7 +1477,7 @@ fn typed_discard_nil_println_ok() {
 
 #[test]
 fn typed_discard_string_int_mismatch() {
-    check_fails(
+    check_rejects(
         "String = 5\n",
         "Type mismatch: expected 'String', got 'Int'",
     );
@@ -1474,12 +1485,12 @@ fn typed_discard_string_int_mismatch() {
 
 #[test]
 fn typed_discard_int_string_mismatch() {
-    check_fails("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'");
+    check_rejects("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'");
 }
 
 #[test]
 fn typed_discard_constructor_is_not_a_type() {
-    check_fails("Some = 1\n", "'Some' is not a type");
+    check_rejects("Some = 1\n", "'Some' is not a type");
 }
 
 // ===========================================================================

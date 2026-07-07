@@ -27,5 +27,11 @@ pub type Result(a, e) {
 	Err(error e)
 }
 
+pub type Order {
+	Lt
+	Eq
+	Gt
+}
+
 @vm(println)
 pub fn println(x a) Nil

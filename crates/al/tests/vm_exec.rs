@@ -270,7 +270,7 @@ fn binary_to_ascii_lower() {
     run_outputs(
         "import al/binary\n\
          println(binary.to_string(binary.to_ascii_lower(binary.from_string('AbC-123'))))\n",
-        "Ok(abc-123)\n",
+        "Some(abc-123)\n",
     );
 }
 
@@ -286,6 +286,6 @@ fn binary_from_int_ascii() {
          println(binary.to_string(binary.from_int_ascii(0, 10)))\n\
          println(binary.to_string(binary.from_int_ascii(0 - 42, 10)))\n\
          println(binary.parse_int(binary.from_int_ascii(4096, 16), 16))\n",
-        "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nSome(4096)\n",
+        "Some(255)\nSome(ff)\nSome(0)\nSome(-42)\nSome(4096)\n",
     );
 }

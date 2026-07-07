@@ -22,6 +22,7 @@
 import al/binary
 import al/float
 import al/int
+import al/option
 import al/string
 
 pub opaque type Decimal {
@@ -129,40 +130,55 @@ pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
 	}
 }
 
-// Numeric comparison across scales: -1, 0, or 1. `compare(new(15, 1),
-// new(1500, 3))` is 0 — built-in `==` would say otherwise, because it
-// compares the representation (units and scale), not the number.
-pub fn compare(a Decimal, b Decimal) Int {
+// Numeric comparison across scales. `compare(new(15, 1), new(1500, 3))` is
+// `Eq` — built-in `==` would say otherwise, because it compares the
+// representation (units and scale), not the number.
+pub fn compare(a Decimal, b Decimal) Order {
 	s = int.max(scale(a), scale(b))
 	ua = units(a) * pow10(s - scale(a))
 	ub = units(b) * pow10(s - scale(b))
 	if ua < ub {
-		0 - 1
+		Lt
 	} else if ua > ub {
-		1
+		Gt
 	} else {
-		0
+		Eq
 	}
 }
 
 pub fn eq(a Decimal, b Decimal) Bool {
-	compare(a, b) == 0
+	match compare(a, b) {
+		Eq -> True
+		else -> False
+	}
 }
 
 pub fn lt(a Decimal, b Decimal) Bool {
-	compare(a, b) < 0
+	match compare(a, b) {
+		Lt -> True
+		else -> False
+	}
 }
 
 pub fn lte(a Decimal, b Decimal) Bool {
-	compare(a, b) <= 0
+	match compare(a, b) {
+		Gt -> False
+		else -> True
+	}
 }
 
 pub fn gt(a Decimal, b Decimal) Bool {
-	compare(a, b) > 0
+	match compare(a, b) {
+		Gt -> True
+		else -> False
+	}
 }
 
 pub fn gte(a Decimal, b Decimal) Bool {
-	compare(a, b) >= 0
+	match compare(a, b) {
+		Lt -> False
+		else -> True
+	}
 }
 
 pub fn min(a Decimal, b Decimal) Decimal {
@@ -201,16 +217,10 @@ pub fn normalize(d Decimal) Decimal {
 // and more than 18 fractional digits.
 pub fn parse(s String) Option(Decimal) {
 	b = binary.from_string(s)
-	first = binary.byte_at(b, 0)
-	if first == 45 {
-		match parse_unsigned(tail(b)) {
-			Some(d) -> Some(neg(d))
-			None -> None
-		}
-	} else if first == 43 {
-		parse_unsigned(tail(b))
-	} else {
-		parse_unsigned(b)
+	match binary.byte_at(b, 0) {
+		Some(45) -> option.map(parse_unsigned(tail(b)), neg)
+		Some(43) -> parse_unsigned(tail(b))
+		else -> parse_unsigned(b)
 	}
 }
 
