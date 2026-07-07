@@ -51,6 +51,7 @@ use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::frozen::FrozenBuilder;
 use indexmap::IndexMap;
+use smallvec::SmallVec;
 
 use crate::module::{
     self, CachedModule, ModuleInterface, ModuleOrigin, ModulePath, ModuleSource, ModuleTable,
@@ -3816,8 +3817,8 @@ impl Compiler {
         args: impl Iterator<Item = (Option<&'a ast::Identifier>, &'a T, Span)>,
         missing: Option<(Span, &str)>,
         diag: bool,
-    ) -> (Vec<Option<&'a T>>, bool) {
-        let mut by_pos: Vec<Option<&'a T>> = vec![None; arity];
+    ) -> (SmallVec<[Option<&'a T>; 4]>, bool) {
+        let mut by_pos: SmallVec<[Option<&'a T>; 4]> = SmallVec::from_elem(None, arity);
         let mut next_positional = 0usize;
         let mut ok = true;
         for (label, val, sp) in args {
