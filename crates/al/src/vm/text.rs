@@ -21,6 +21,7 @@
 
 use al_core::bytecode::Value;
 use al_core::bytecode::bits::copy_bits;
+use smallvec::SmallVec;
 
 use super::{VM, VmError, VmResult, bin_ref, binary, http, str_ref};
 
@@ -178,15 +179,13 @@ impl VM {
         // slots hold valid pointers here; the constructors only allocate —
         // never collect — so the fragment bytes can be read while building.
         let v = if aligned {
-            let parts: Vec<&[u8]> = self.stack[base..]
-                .iter()
-                .map(|v| {
-                    let b = bin_ref(v);
-                    let start = (b.bit_offset() / 8) as usize;
-                    let len = b.bit_len().div_ceil(8) as usize;
-                    &b.backing()[start..start + len]
-                })
-                .collect();
+            let mut parts: SmallVec<[&[u8]; 8]> = SmallVec::with_capacity(n);
+            for v in &self.stack[base..] {
+                let b = bin_ref(v);
+                let start = (b.bit_offset() / 8) as usize;
+                let len = b.bit_len().div_ceil(8) as usize;
+                parts.push(&b.backing()[start..start + len]);
+            }
             Value::binary_concat_parts_in(&mut self.heap, &parts, total_bits)
         } else {
             // Bit-unaligned slow path: OR each fragment's logical bits into a
