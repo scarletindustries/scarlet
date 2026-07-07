@@ -1,13 +1,14 @@
 //! Handler-layer coverage for the LSP server. The reference-graph rewrite's
 //! regressions all hid because the existing `references.rs` suite drives the
-//! `IncrementalSession` query API directly, never the `LspServer` handlers the
-//! editor actually calls. These tests close that gap: they boot a real
-//! `LspServer`, open a document through the same path `textDocument/didOpen`
-//! takes, and assert on the JSON each query *returns* — the seam the handlers
-//! were refactored to expose (`hover_response` / `definition_response` /
-//! `references_response` / `rename_response` / `prepare_rename_response`).
+//! `IncrementalSession` query API directly, never the handlers the editor
+//! actually calls. These tests close that gap: they boot a real `Workspace`
+//! (the LSP server's state, decoupled from stdio), open a document through the
+//! same path `textDocument/didOpen` takes, and assert on the JSON each query
+//! *returns* — the seam the handlers were refactored to expose
+//! (`hover_response` / `definition_response` / `references_response` /
+//! `rename_response` / `prepare_rename_response`).
 
-use al::lsp::{LspServer, new_server};
+use al::lsp::Workspace;
 use serde_json::{Value as Json, json};
 
 mod common;
@@ -27,19 +28,20 @@ fn pos(uri: &str, line: i32, col: i32) -> Json {
     })
 }
 
-/// Boot a server rooted at `p`, open `name` (with contents `src`) as a client
-/// tab, and hand back the server plus the document URI ready to query.
-fn open(p: &Project, name: &str, src: &str) -> (LspServer, String) {
-    let mut s = new_server();
+/// Boot a workspace rooted at `p`, open `name` (with contents `src`) as a
+/// client tab, and hand back the workspace plus the document URI ready to
+/// query.
+fn open(p: &Project, name: &str, src: &str) -> (Workspace, String) {
+    let mut s = Workspace::new();
     s.add_workspace_root(p.dir.clone());
     let uri = uri_of(p, name);
     s.open_document(&uri, src);
     (s, uri)
 }
 
-/// Boot a server over a fresh single-file project (`src` written as `a.al`) and
-/// open it. The `Project` is returned so its temp dir outlives the server.
-fn open_single(tag: &str, src: &str) -> (Project, LspServer, String) {
+/// Boot a workspace over a fresh single-file project (`src` written as `a.al`)
+/// and open it. The `Project` is returned so its temp dir outlives the server.
+fn open_single(tag: &str, src: &str) -> (Project, Workspace, String) {
     let p = Project::new(tag);
     p.write("a.al", src);
     let (s, uri) = open(&p, "a.al", src);
@@ -112,7 +114,7 @@ const TYPED: &str =
 fn hover_markdown_includes_inferred_type() {
     let (_p, mut s, uri) = open_single("hovertype", TYPED);
 
-    let md = |s: &mut LspServer, l: i32, c: i32| -> String {
+    let md = |s: &mut Workspace, l: i32, c: i32| -> String {
         s.hover_response(&pos(&uri, l, c))["contents"]["value"]
             .as_str()
             .unwrap_or("")
@@ -415,7 +417,7 @@ println(y)\n";
 /// Boot a server over a project carrying both `BUG3_HELPER` (as `helper.al`)
 /// and `BUG3_MAIN` (as `main.al`), open `main.al`, and return the server + its
 /// URI ready to query the import declarations.
-fn bug3_project() -> (Project, LspServer, String) {
+fn bug3_project() -> (Project, Workspace, String) {
     let p = Project::new("b3_import");
     p.write("helper.al", BUG3_HELPER);
     p.write("main.al", BUG3_MAIN);
@@ -465,7 +467,7 @@ fn bug3_import_keyword_and_non_final_segment_are_not_clickable() {
     // qualified `q.member` use (it targets the remote member, not the alias).
     // So at each such position all three handlers must decline: goto-def null,
     // prepareRename null, and rename never an edit (null, or refused with Err).
-    let refused = |s: &mut LspServer, l: i32, c: i32| {
+    let refused = |s: &mut Workspace, l: i32, c: i32| {
         assert!(
             s.definition_response(&pos(&uri, l, c)).is_null(),
             "goto-def must be null at import-decl position ({l},{c})"
@@ -593,7 +595,7 @@ fn document_symbol_lists_top_level_fns_not_locals() {
 fn workspace_symbol_query_skips_locals_keeps_decls() {
     let (_p, mut s, uri) = open_single("symsurface_ws", SYMSURFACE_SRC);
 
-    let ws = |s: &mut LspServer, q: &str| -> Vec<String> {
+    let ws = |s: &mut Workspace, q: &str| -> Vec<String> {
         let resp = s.workspace_symbol_response(&json!({ "query": q }));
         resp.as_array()
             .unwrap_or_else(|| panic!("workspace/symbol must be an array, got {resp}"))
@@ -642,13 +644,13 @@ fn workspace_symbol_query_skips_locals_keeps_decls() {
 // layer the editor actually calls:
 //   * `uri_for`'s *cross-module* branch — a `def.defid.module` that is a
 //     different on-disk module, mapped to its file via
-//     `reference::rename::module_uri` (the same-file tests only hit the
+//     `reference::module_uri` (the same-file tests only hit the
 //     `*path == req_mod` -> request-URI branch, and Bug 3 hits the distinct
 //     import-segment path via `import_target_at`); and
 //   * `workspace_edit_json` shaping a `changes` map keyed by 2+ file URIs (the
 //     Bug-4 rename asserts a single-key map).
 // `references.rs` pins both at the `IncrementalSession` layer; these pin the
-// `LspServer` handler JSON. A two-file project: `lib.al` declares `greet`,
+// `Workspace` handler JSON. A two-file project: `lib.al` declares `greet`,
 // `main.al` imports it and calls `lib.greet()`.
 // ============================================================================
 
@@ -658,11 +660,11 @@ const XMOD_MAIN: &str = "import ./lib\nx = lib.greet()\nprintln(x)\n";
 /// Boot a server over a project carrying `lib.al` + `main.al`, open both as
 /// client tabs (lib first, so `main.al` is the last-analysed entry), and return
 /// the server plus both URIs ready to query the cross-module `lib.greet()` use.
-fn xmod_project() -> (Project, LspServer, String, String) {
+fn xmod_project() -> (Project, Workspace, String, String) {
     let p = Project::new("xmod_handler");
     p.write("lib.al", XMOD_LIB);
     p.write("main.al", XMOD_MAIN);
-    let mut s = new_server();
+    let mut s = Workspace::new();
     s.add_workspace_root(p.dir.clone());
     let lib_uri = uri_of(&p, "lib.al");
     let main_uri = uri_of(&p, "main.al");
@@ -690,7 +692,7 @@ fn location_in(arr: &[Json], want: &str) -> (i64, i64) {
 /// `assert_refs_span_lib_and_main` can layer on the exact-span assertions and
 /// the `includeDeclaration: false` re-query.
 fn assert_refs_uris_span_lib_and_main(
-    s: &mut LspServer,
+    s: &mut Workspace,
     query_uri: &str,
     main_uri: &str,
     lib_uri: &str,
@@ -728,7 +730,7 @@ fn assert_refs_uris_span_lib_and_main(
 ///   * re-querying with `includeDeclaration: false` drops the declaration,
 ///     leaving only the main.al use — an array, never empty/null.
 fn assert_refs_span_lib_and_main(
-    s: &mut LspServer,
+    s: &mut Workspace,
     query_uri: &str,
     main_uri: &str,
     lib_uri: &str,
@@ -906,7 +908,7 @@ fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
 /// module is lib.al — a *different* file — so the `include_decl` arm routes it
 /// through `uri_for`'s cross-module branch and the result must carry both files'
 /// URIs. `references.rs::find_references_across_modules` pins this at the
-/// `IncrementalSession` layer; nothing pinned the `LspServer` JSON.
+/// `IncrementalSession` layer; nothing pinned the `Workspace` JSON.
 #[test]
 fn cross_module_find_references_spans_decl_and_use_across_files() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
@@ -969,7 +971,7 @@ fn find_references_from_library_declaration_when_only_library_is_open() {
     let p = Project::new("xmod_lib_only");
     p.write("lib.al", XMOD_LIB);
     p.write("main.al", XMOD_MAIN);
-    let mut s = new_server();
+    let mut s = Workspace::new();
     s.add_workspace_root(p.dir.clone());
     let lib_uri = uri_of(&p, "lib.al");
     let main_uri = uri_of(&p, "main.al");
