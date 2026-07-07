@@ -2641,28 +2641,44 @@ impl Compiler {
                 }
                 ValueKind::Local | ValueKind::ModuleFn => {
                     let ret = self.compile_positional_args(inst_ty, &expr.arguments, expr.span);
+                    let argc = expr.arguments.len() as i32;
                     let general = if is_tail { Op::TailCall } else { Op::Call };
-                    let op = match load {
+                    match load {
                         // Self-recursion: skip PushSelf and emit the fused
                         // self-call op so the VM can read func_idx/captures
                         // straight off the live frame.
                         Some(VarAccess::Self_) => {
-                            if is_tail {
+                            let op = if is_tail {
                                 Op::TailCallSelf
                             } else {
                                 Op::CallSelf
-                            }
+                            };
+                            self.emit_arg(op, argc);
+                        }
+                        // Known top-level fn: `func_idx` is a compile-time
+                        // immediate (no callee value pushed, no runtime tag
+                        // check / heap deref / arity check). Forward refs
+                        // within an SCC and non-fn globals are absent from the
+                        // map and fall through to the dynamic path.
+                        Some(VarAccess::Global(slot))
+                            if let Some(&func_idx) = self.global_to_func.get(&slot) =>
+                        {
+                            let op = if is_tail {
+                                Op::TailCallKnown
+                            } else {
+                                Op::CallKnown
+                            };
+                            self.emit_ab(op, 0, argc as u16, func_idx);
                         }
                         Some(a) => {
                             self.emit_load(&a);
-                            general
+                            self.emit_arg(general, argc);
                         }
                         None => {
                             self.no_runtime_binding(name, None, name_span);
-                            general
+                            self.emit_arg(general, argc);
                         }
-                    };
-                    self.emit_arg(op, expr.arguments.len() as i32);
+                    }
                     ret
                 }
             };
@@ -3367,6 +3383,13 @@ impl Compiler {
         ret_ty: Ty,
         hydrator: &Hydrator,
     ) -> Ty {
+        // Capture the entry-frame slot Pass 3 pre-allocated for this fn while
+        // `locals` still holds it (i.e. before `enter_fn_frame` moves the map
+        // into `outer_scopes`). Paired with the `func_idx` assigned by
+        // `finish_fn_frame` below to feed `global_to_func`.
+        let name_id = self.engine.intern(name);
+        let global_slot = self.locals.get(&name_id).map(|e| e.slot);
+
         let saved = self.enter_fn_frame(Some(name));
         self.rigid_ids = hydrator.rigid_ids().clone();
         for (param, p_ty) in params.iter().zip(param_tys.iter()) {
@@ -3378,6 +3401,12 @@ impl Compiler {
             .unify_at(ret_ty, body_ty, type_defining_span(body));
 
         self.finish_fn_frame(saved, name, params.len());
+        if !self.check_only
+            && let Some(slot) = global_slot
+        {
+            let func_idx = self.program.functions.len() as i32 - 1;
+            self.global_to_func.insert(slot, func_idx);
+        }
         self.engine.mk_fun(&param_tys, ret_ty)
     }
 
@@ -3504,42 +3533,91 @@ impl Compiler {
 
         let mut b = PatternBindings::new();
         let mut fail_jumps = FailJumps::new();
-        for arm in &m.arms {
-            self.push_block_scope();
 
-            b.clear();
-            if !self.type_pattern(&arm.pattern, subject_ty, &mut b) {
-                any_pattern_err = true;
-            }
-            self.bind_pattern_initials(&b);
-
-            fail_jumps.clear();
+        if let Some((variant_count, arm_tags)) = self.switch_tag_plan(subject_ty, &m.arms) {
+            // Type-directed fast path: one indexed jump instead of a per-arm
+            // `MatchEnum; JumpIfFalse` ladder. The plan check has already
+            // proven every arm is a distinct constructor head with only
+            // irrefutable (`_` / `x`) sub-patterns and together they cover
+            // every variant, so no arm can fail and no fallthrough exists.
             self.emit_arg(Op::PushLocal, subject_slot);
-            self.emit_pattern(&arm.pattern, &mut fail_jumps);
-
-            if let Some(guard) = &arm.guard {
-                let guard_ty = self.compile_expr(guard);
-                let bool_ty = self.ty_bool();
-                self.engine
-                    .unify_at(bool_ty, guard_ty, type_defining_span(guard));
-                fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+            let table_base = self.current_addr() + 1;
+            self.emit_ab(Op::SwitchTag, variant_count, 0, table_base);
+            // Jump table: one entry per declared variant, indexed by
+            // `variant_idx`. Each entry is a real `Jump` so peephole's
+            // jump-target scan and `patch_jump` handle it unchanged.
+            let mut table: SmallVec<[i32; 8]> = SmallVec::new();
+            for _ in 0..variant_count {
+                table.push(self.emit_jump(Op::Jump));
             }
 
-            self.in_tail_position = is_tail;
-            let body_ty = self.compile_expr(&arm.body);
-            self.in_tail_position = false;
-            self.engine
-                .unify_at(result_ty, body_ty, type_defining_span(&arm.body));
+            for (arm, &tag) in m.arms.iter().zip(arm_tags.iter()) {
+                self.patch_jump(table[tag as usize]);
+                self.push_block_scope();
 
-            end_jumps.push(self.emit_jump(Op::Jump));
-            self.patch_all(&fail_jumps);
+                b.clear();
+                if !self.type_pattern(&arm.pattern, subject_ty, &mut b) {
+                    any_pattern_err = true;
+                }
+                self.bind_pattern_initials(&b);
 
-            self.pop_block_scope();
+                let ast::Pattern::Constructor { name, args, .. } = &arm.pattern else {
+                    unreachable!("switch_tag_plan admitted a non-constructor arm");
+                };
+                fail_jumps.clear();
+                self.emit_ctor_payload_binds(subject_slot, &name.name, args, &mut fail_jumps);
+                debug_assert!(
+                    fail_jumps.is_empty(),
+                    "switch_tag_plan admitted a refutable sub-pattern",
+                );
+
+                self.in_tail_position = is_tail;
+                let body_ty = self.compile_expr(&arm.body);
+                self.in_tail_position = false;
+                self.engine
+                    .unify_at(result_ty, body_ty, type_defining_span(&arm.body));
+
+                end_jumps.push(self.emit_jump(Op::Jump));
+                self.pop_block_scope();
+            }
+        } else {
+            for arm in &m.arms {
+                self.push_block_scope();
+
+                b.clear();
+                if !self.type_pattern(&arm.pattern, subject_ty, &mut b) {
+                    any_pattern_err = true;
+                }
+                self.bind_pattern_initials(&b);
+
+                fail_jumps.clear();
+                self.emit_arg(Op::PushLocal, subject_slot);
+                self.emit_pattern(&arm.pattern, &mut fail_jumps);
+
+                if let Some(guard) = &arm.guard {
+                    let guard_ty = self.compile_expr(guard);
+                    let bool_ty = self.ty_bool();
+                    self.engine
+                        .unify_at(bool_ty, guard_ty, type_defining_span(guard));
+                    fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
+                }
+
+                self.in_tail_position = is_tail;
+                let body_ty = self.compile_expr(&arm.body);
+                self.in_tail_position = false;
+                self.engine
+                    .unify_at(result_ty, body_ty, type_defining_span(&arm.body));
+
+                end_jumps.push(self.emit_jump(Op::Jump));
+                self.patch_all(&fail_jumps);
+
+                self.pop_block_scope();
+            }
+
+            // Fallthrough is unreachable when the match is exhaustive; emit a
+            // Nil so the VM stack is balanced if it somehow is reached.
+            self.emit_nil();
         }
-
-        // Fallthrough is unreachable when the match is exhaustive; emit a Nil
-        // so the VM stack is balanced if it somehow is reached.
-        self.emit_nil();
 
         self.patch_all(&end_jumps);
 
@@ -3576,6 +3654,85 @@ impl Compiler {
         }
 
         result_ty
+    }
+
+    /// Decide whether a `match` can lower to `SwitchTag` + jump table.
+    ///
+    /// Eligible when the scrutinee's type is a fully-resolved enum (`Con`, not
+    /// `Var`) and the arms are exactly one bare constructor head per variant —
+    /// no guards, no duplicate variants, and every payload sub-pattern is
+    /// irrefutable (`_` or a bare name). That set is exhaustive by
+    /// construction, so the switch has no fallthrough and each arm has no fail
+    /// edge. Returns `(variant_count, arm_variant_idx)`; `None` falls back to
+    /// the per-arm `MatchEnum` ladder.
+    fn switch_tag_plan(
+        &mut self,
+        subject_ty: Ty,
+        arms: &[ast::MatchArm],
+    ) -> Option<(u8, SmallVec<[u16; 8]>)> {
+        if arms.is_empty() {
+            return None;
+        }
+        let mut plan_tid: Option<TypeId> = None;
+        let mut arm_tags: SmallVec<[u16; 8]> = SmallVec::with_capacity(arms.len());
+        for arm in arms {
+            if arm.guard.is_some() {
+                return None;
+            }
+            let ast::Pattern::Constructor { name, args, .. } = &arm.pattern else {
+                return None;
+            };
+            for a in args {
+                let sub = match a {
+                    ast::PatternArg::Positional(p) => p,
+                    ast::PatternArg::Labeled { pattern, .. } => pattern,
+                };
+                if !matches!(sub, ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. }) {
+                    return None;
+                }
+            }
+            let scheme = self.env.lookup(&name.name)?;
+            let ValueKind::Constructor {
+                type_id,
+                variant_idx,
+                ..
+            } = scheme.kind
+            else {
+                return None;
+            };
+            match plan_tid {
+                None => plan_tid = Some(type_id),
+                Some(t) if t != type_id => return None,
+                _ => {}
+            }
+            arm_tags.push(variant_idx);
+        }
+        let tid = plan_tid?;
+        // `Bool` stays an unboxed `Value::Bool`; `try_emit_bool_match` already
+        // lowers it to a single `Eq` and there is no enum header to switch on.
+        if self.prelude.bool.is(tid) {
+            return None;
+        }
+        // Fallback when the scrutinee's type has not resolved to the enum yet
+        // (spec: engine.find yields `Var` → dynamic op).
+        let resolved = self.engine.find(subject_ty);
+        match self.engine.node(resolved) {
+            TypeNode::Con { id, .. } if id == tid => {}
+            _ => return None,
+        }
+        let variant_count = self.env.lookup_type_info_by_id(tid)?.variants()?.len as usize;
+        if variant_count == 0 || variant_count > u8::MAX as usize || arms.len() != variant_count {
+            return None;
+        }
+        let mut seen = [false; u8::MAX as usize + 1];
+        for &vi in &arm_tags {
+            let i = vi as usize;
+            if i >= variant_count || seen[i] {
+                return None;
+            }
+            seen[i] = true;
+        }
+        Some((variant_count as u8, arm_tags))
     }
 
     /// Bind a pattern's freshly-typed names (populated by `type_pattern`):
@@ -4435,7 +4592,7 @@ impl Compiler {
         args: &[ast::PatternArg],
         fail_jumps: &mut FailJumps,
     ) {
-        let Some((type_id, _, arity, field_labels, _)) = self.lookup_ctor(&name.name) else {
+        let Some((type_id, ..)) = self.lookup_ctor(&name.name) else {
             // Typing already reported the error; consume the value and bail.
             self.emit(Op::Pop);
             return;
@@ -4452,13 +4609,31 @@ impl Compiler {
         self.emit(Op::MatchEnum);
         fail_jumps.push(self.emit_jump(Op::JumpIfFalse));
 
+        self.emit_ctor_payload_binds(temp, &name.name, args, fail_jumps);
+    }
+
+    /// Destructure a constructor's payload once its tag is known to match:
+    /// `PushLocal subject; UnwrapEnum` then spill each field to a temp and
+    /// recurse into the sub-pattern. Shared by the dynamic per-arm ladder
+    /// (after `MatchEnum; JumpIfFalse`) and the `SwitchTag` fast path (after
+    /// the indexed jump landed on this arm).
+    fn emit_ctor_payload_binds(
+        &mut self,
+        subject_slot: i32,
+        name: &str,
+        args: &[ast::PatternArg],
+        fail_jumps: &mut FailJumps,
+    ) {
+        let Some((_, _, arity, field_labels, _)) = self.lookup_ctor(name) else {
+            return;
+        };
         if arity == 0 {
             return;
         }
 
         // Typing already emitted reorder diagnostics; suppress duplicates here.
         let (by_pos, _) = self.slot_ctor_args(
-            &name.name,
+            name,
             arity,
             field_labels,
             args.iter().map(|a| match a {
@@ -4473,7 +4648,7 @@ impl Compiler {
             return;
         }
 
-        self.emit_arg(Op::PushLocal, temp);
+        self.emit_arg(Op::PushLocal, subject_slot);
         self.emit(Op::UnwrapEnum);
         // VM pushes payloads in declaration order (last on top); spill them
         // to temps so each can be pattern-matched independently.

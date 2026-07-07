@@ -156,6 +156,8 @@ impl Compiler {
         self.program.functions.truncate(w.functions);
         self.program.constants.truncate(w.constants);
         self.local_count = w.local_count;
+        self.global_to_func
+            .retain(|_, fi| (*fi as usize) < w.functions);
         // Survivors are watermark-preserved entry-frame slots (e.g. `__pre*`,
         // imports). Scope state is fully cleared, so normalise their depth to 0
         // ("pre-existing, outermost"): the next opened scope then treats them as
