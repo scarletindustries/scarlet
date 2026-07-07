@@ -26,7 +26,7 @@
 
 use al_core::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
 
-use super::{VM, VmResult};
+use super::{VM, VmError, VmResult};
 
 impl VM {
     /// `map.new` — push a fresh empty HAMT map.
@@ -103,7 +103,7 @@ impl VM {
     /// are built fresh (the environment); either way only the array spine is
     /// new, so the budget is `seq_build(n)` plus, for the environment, the
     /// strings.
-    fn map_collect(&mut self, op: &str, keys: bool) -> VmResult<()> {
+    fn map_collect(&mut self, op: &'static str, keys: bool) -> VmResult<()> {
         match self.map_backing_at(0, op)? {
             MapBacking::Env => {
                 let entries = env_entries();
@@ -244,15 +244,18 @@ impl VM {
     fn at(&self, d: usize) -> VmResult<Value> {
         self.peek_at(d)
             .cloned()
-            .ok_or_else(|| "Stack underflow. This is likely a compiler bug.".to_string())
+            .ok_or_else(|| VmError::internal("stack underflow"))
     }
 
     /// The backing of the map operand `d` slots below the top, read without
     /// popping.
-    fn map_backing_at(&self, d: usize, op: &str) -> VmResult<MapBacking> {
-        match self.peek_at(d).map(Value::kind) {
-            Some(ValueView::Map(m)) => Ok(m.backing()),
-            _ => Err(format!("{op} requires a Map")),
+    fn map_backing_at(&self, d: usize, op: &'static str) -> VmResult<MapBacking> {
+        match self.peek_at(d) {
+            Some(v) => match v.kind() {
+                ValueView::Map(m) => Ok(m.backing()),
+                _ => Err(VmError::type_mismatch(op, "Map", v)),
+            },
+            None => Err(VmError::internal("stack underflow")),
         }
     }
 

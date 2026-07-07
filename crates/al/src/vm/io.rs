@@ -55,7 +55,7 @@
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, IoSlice, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -117,24 +117,25 @@ impl VM {
 
     pub(super) fn tcp_listen(&mut self) -> VmResult<()> {
         // Socket handle + Ok, or a NetError on bind failure.
-        let port = self.pop_int("net.listen")?;
-        let host_v = self.pop_str("net.listen")?;
-        let res = resolve_listen_addr(str_ref(&host_v), port as u16)
-            .and_then(bind_reuseport)
-            .and_then(|listener| {
-                // Pin the *resolved* address (a port of 0 becomes the
-                // kernel-assigned one) so every other scheduler binds its own
-                // reuseport socket to the same address — that is what makes
-                // the kernel load-balance connections across cores.
-                let addr = listener.local_addr()?;
-                let socket_id = self.alloc_socket_id();
-                self.track_listener(socket_id, listener)?;
-                self.share_listener_addr(socket_id, addr);
-                Ok(Value::socket(SocketValue {
-                    id: socket_id,
-                    is_listener: true,
-                }))
-            });
+        let addr_v = self.pop()?;
+        let (ip, port) = decode_socket_addr(&addr_v, "net.listen_addr")?;
+        let Some(addr) = valid_port(port).map(|p| SocketAddr::new(ip, p)) else {
+            return self.push_invalid_port();
+        };
+        let res = bind_reuseport(addr).and_then(|listener| {
+            // Pin the *resolved* address (a port of 0 becomes the
+            // kernel-assigned one) so every other scheduler binds its own
+            // reuseport socket to the same address — that is what makes
+            // the kernel load-balance connections across cores.
+            let addr = listener.local_addr()?;
+            let socket_id = self.alloc_socket_id();
+            self.track_listener(socket_id, listener)?;
+            self.share_listener_addr(socket_id, addr);
+            Ok(Value::socket(SocketValue {
+                id: socket_id,
+                is_listener: true,
+            }))
+        });
         self.push_net(res);
         Ok(())
     }
@@ -166,11 +167,14 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Adopted Ok(Socket) result or a NetError; the pending
         // path parks and allocates nothing.
-        let port = self.pop_int("net.connect")?;
-        let ip_val = self.pop()?;
+        let addr_v = self.pop()?;
         // The hostname was already resolved off-scheduler by
-        // al/net.connect; decode the typed IpAddress and connect.
-        let addr = std::net::SocketAddr::new(decode_ip(&ip_val)?, port as u16);
+        // al/net.connect; decode the typed SocketAddress and connect.
+        let (ip_addr, port) = decode_socket_addr(&addr_v, "net.connect_addr")?;
+        let Some(addr) = valid_port(port).map(|p| SocketAddr::new(ip_addr, p)) else {
+            self.push_invalid_port()?;
+            return Ok(None);
+        };
 
         match start_connect(&addr) {
             // Local connects can complete immediately.
@@ -412,6 +416,20 @@ impl VM {
         Ok(())
     }
 
+    pub(super) fn ip_parse(&mut self) -> VmResult<()> {
+        // Some(IpAddress) or the frozen None.
+        let s_v = self.pop_str("address.parse")?;
+        let v = match str_ref(&s_v).parse::<std::net::IpAddr>() {
+            Ok(ip) => {
+                let ip_val = self.templates.ip_address(&mut self.heap, ip);
+                self.make_some(ip_val)
+            }
+            Err(_) => self.make_none(),
+        };
+        self.stack.push(v);
+        Ok(())
+    }
+
     pub(super) fn dns_resolve(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
         // Budget for the IP-literal fast path's Ok(IpAddress); the offload
@@ -595,6 +613,16 @@ impl VM {
         Value::binary_view_in(&mut self.heap, backing, off, len)
     }
 
+    /// Push `Err(NetError::InvalidPort)` — a port outside 0..=65535 was handed
+    /// to listen/connect (an `Int` port unchecked-`as u16` would silently wrap).
+    #[cold]
+    fn push_invalid_port(&mut self) -> VmResult<()> {
+        let e = self.stdlib_enum(&stdlib::net::error::INVALID_PORT);
+        let err = self.make_err(e);
+        self.stack.push(err);
+        Ok(())
+    }
+
     /// Push `Ok(v)` or a typed `NetError` built from the socket `io::Error`.
     /// The caller's ensured budget covers `cost::WRAP` plus, on the error
     /// path, `cost::NET_ERR` (it ensured before popping).
@@ -627,13 +655,19 @@ impl VM {
     }
 
     /// Allocate a socket id that is unique across every scheduler: the
-    /// scheduler index lives in the top bits, so sockets can move between
-    /// schedulers (inside spawn seeds) without colliding.
+    /// scheduler index lives in the top byte and the per-scheduler sequence
+    /// in the low 24 bits, so sockets can move between schedulers (inside
+    /// spawn seeds) without colliding. The sequence is masked so it can
+    /// never spill into another scheduler's tag on wrap.
     #[inline]
     fn alloc_socket_id(&mut self) -> i32 {
-        let id = ((self.scheduler_index as i32) << 24) | self.next_socket_id;
-        self.next_socket_id += 1;
-        id
+        debug_assert!(
+            self.scheduler_index < 256,
+            "scheduler index overflows socket-id tag"
+        );
+        let seq = (self.next_socket_id as u32) & 0x00FF_FFFF;
+        self.next_socket_id = self.next_socket_id.wrapping_add(1);
+        (((self.scheduler_index as u32) << 24) | seq) as i32
     }
 
     /// Record a listener's bound address program-wide, keyed by socket id, so
@@ -725,17 +759,45 @@ fn errno_of(e: &std::io::Error) -> Value {
     Value::small_int(e.raw_os_error().unwrap_or(0) as i64)
 }
 
+/// `Some(port as u16)` iff `port` is a valid TCP/UDP port. AL's `Int` is
+/// arbitrary-width; unchecked `as u16` would silently wrap (100000 → 34464).
+#[inline]
+fn valid_port(port: i64) -> Option<u16> {
+    u16::try_from(port).ok()
+}
+
+/// Decode an `al/net/address.SocketAddress` — the record `{ ip IpAddress, port
+/// Int }` — into a `(std::net::IpAddr, i64)`. The port is returned unvalidated
+/// so the caller can surface an out-of-range value as `NetError::InvalidPort`.
+fn decode_socket_addr(v: &Value, op: &'static str) -> VmResult<(std::net::IpAddr, i64)> {
+    let e = v
+        .as_enum()
+        .ok_or_else(|| VmError::type_mismatch(op, "SocketAddress", v))?;
+    let payload = e.payload();
+    let ip = payload
+        .first()
+        .map(decode_ip)
+        .ok_or_else(|| VmError::type_mismatch(op, "SocketAddress", v))??;
+    let port = payload
+        .get(1)
+        .and_then(Value::as_int)
+        .ok_or_else(|| VmError::type_mismatch(op, "SocketAddress", v))?;
+    Ok((ip, port))
+}
+
 /// Decode an `al/net/address.IpAddress` value (`V4(s)` / `V6(s)`) into a
-/// `std::net::IpAddr`. The address rides as a string inside the variant, so this
-/// just parses `payload[0]`; a malformed value can only be a compiler bug.
+/// `std::net::IpAddr`. Values reaching here via the public AL API are always
+/// well-formed — `address.parse` and `net.resolve` are the only supported
+/// constructors — so a parse failure indicates a caller that ignored that
+/// contract and hand-built a variant.
 fn decode_ip(v: &Value) -> VmResult<std::net::IpAddr> {
     let payload = v.as_enum().and_then(|e| e.payload().first().cloned());
     let s = payload.as_ref().and_then(|p| p.as_str());
     match s {
         Some(s) => s
             .parse::<std::net::IpAddr>()
-            .map_err(|_| VmError::internal("net.connect: invalid IP address")),
-        None => Err(VmError::internal("net.connect: malformed IpAddress")),
+            .map_err(|_| VmError::internal("malformed IpAddress: use address.parse")),
+        None => Err(VmError::internal("malformed IpAddress: use address.parse")),
     }
 }
 
@@ -770,17 +832,6 @@ fn start_connect(addr: &std::net::SocketAddr) -> std::io::Result<ConnectStart> {
 /// burst from overflowing the queue (the std default of 128 is shallow for a
 /// server). Each `SO_REUSEPORT` socket gets its own queue of this depth.
 const LISTEN_BACKLOG: i32 = 1024;
-
-/// Resolve a listen `host`/`port` to a concrete socket address. `host` is
-/// normally an IP literal (`0.0.0.0`, `127.0.0.1`); a name resolves through
-/// the system resolver, and the first address is used — matching the previous
-/// `TcpListener::bind((host, port))` behaviour.
-fn resolve_listen_addr(host: &str, port: u16) -> std::io::Result<SocketAddr> {
-    (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::from(ErrorKind::AddrNotAvailable))
-}
 
 /// Bind a non-blocking TCP listener with `SO_REUSEADDR` + `SO_REUSEPORT`, so
 /// every scheduler can hold its own listening socket on the same address. The

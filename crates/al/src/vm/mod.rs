@@ -1186,7 +1186,7 @@ fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {
 /// that build values outside an interpreter; hot paths go through
 /// `VM::make_nil`.
 #[cfg(test)]
-fn nil_value(h: &mut ProcHeap, nil_id: i32) -> Value {
+fn nil_value(h: &mut ProcHeap, nil_id: al_core::TypeId) -> Value {
     Value::enum_with_names_in(h, nil_id, "Nil", "Nil", &[], &[])
 }
 

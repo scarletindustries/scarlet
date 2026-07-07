@@ -20,7 +20,7 @@
 
 use al_core::bytecode::{Value, ValueView, seq};
 
-use super::{VM, VmResult, range_len, value_type_name};
+use super::{VM, VmError, VmResult, range_len, value_type_name};
 
 impl VM {
     pub(super) fn make_array(&mut self, operand: i32) -> VmResult<()> {
@@ -49,17 +49,14 @@ impl VM {
                 self.stack.push(t[idx as usize].clone());
                 Ok(())
             } else {
-                Err(format!(
-                    "Tuple index {} out of bounds (len: {})",
-                    idx,
-                    t.len()
-                ))
+                Err(VmError::IndexOutOfBounds {
+                    idx: idx as i64,
+                    len: t.len() as i64,
+                    what: "tuple",
+                })
             }
         } else {
-            Err(format!(
-                "Expected tuple, got '{}'",
-                value_type_name(&tuple_val)
-            ))
+            Err(VmError::type_mismatch("tuple.index", "Tuple", &tuple_val))
         }
     }
 
@@ -72,11 +69,11 @@ impl VM {
             self.stack.push(v);
             Ok(())
         } else {
-            Err(format!(
-                "Range bounds must be integers, got '{}' and '{}'",
+            Err(VmError::internal(format!(
+                "range bounds must be integers, got '{}' and '{}'",
                 value_type_name(&start_val),
                 value_type_name(&end_val)
-            ))
+            )))
         }
     }
 
@@ -142,31 +139,23 @@ impl VM {
             ValueView::Array(arr) if idx >= 0 => match arr.get(idx as usize) {
                 Some(elem) => elem,
                 None => {
-                    return Err(format!(
-                        "Array index {} out of bounds (len: {}). \
-                         This is likely a compiler bug.",
-                        idx,
+                    return Err(VmError::internal(format!(
+                        "elem_at: array index {idx} out of bounds (len {})",
                         arr.len()
-                    ));
+                    )));
                 }
             },
             ValueView::Range(start, end) if idx >= 0 => match range_elem(start, end, idx) {
                 Some(elem) => self.boxed_int(elem),
                 None => {
-                    return Err(format!(
-                        "Range index {} out of bounds (len: {}). \
-                             This is likely a compiler bug.",
-                        idx,
+                    return Err(VmError::internal(format!(
+                        "elem_at: range index {idx} out of bounds (len {})",
                         range_len(start, end)
-                    ));
+                    )));
                 }
             },
             _ => {
-                return Err(format!(
-                    "Cannot index non-array type '{}'. \
-                     This is likely a compiler bug.",
-                    value_type_name(&arr_val)
-                ));
+                return Err(VmError::type_mismatch("elem_at", "Array", &arr_val));
             }
         };
         self.stack.push(v);
@@ -188,10 +177,7 @@ impl VM {
                 self.push_int(n);
             }
             _ => {
-                return Err(format!(
-                    "Cannot get length of non-array type '{}'",
-                    value_type_name(&arr_val)
-                ));
+                return Err(VmError::type_mismatch("array.len", "Array", &arr_val));
             }
         }
         Ok(())
@@ -203,23 +189,23 @@ impl VM {
         let arr_val = self.pop()?;
 
         let (Some(start), Some(end)) = (start_val.as_int(), end_val.as_int()) else {
-            return Err("Slice indices must be integers".to_string());
+            return Err(VmError::internal("slice indices must be integers"));
         };
         match arr_val.kind() {
             ValueView::Array(arr) => {
-                if start >= 0 && (end as usize) <= arr.len() && start <= end {
+                let len = arr.len() as i64;
+                if start >= 0 && end <= len && start <= end {
                     // take + skip: two persistent splits.
                     let prefix = seq::take(&mut self.heap, &arr_val, end as usize);
                     let sliced = seq::skip(&mut self.heap, &prefix, start as usize);
                     self.stack.push(sliced);
                     Ok(())
                 } else {
-                    Err(format!(
-                        "Slice indices out of bounds: [{}..{}] (array length is {})",
-                        start,
-                        end,
-                        arr.len()
-                    ))
+                    Err(VmError::SliceOutOfBounds {
+                        lo: start,
+                        hi: end,
+                        len,
+                    })
                 }
             }
             ValueView::Range(rs, re) => {
@@ -229,16 +215,14 @@ impl VM {
                     self.stack.push(v);
                     Ok(())
                 } else {
-                    Err(format!(
-                        "Slice indices out of bounds: [{}..{}] (range length is {})",
-                        start, end, len
-                    ))
+                    Err(VmError::SliceOutOfBounds {
+                        lo: start,
+                        hi: end,
+                        len,
+                    })
                 }
             }
-            _ => Err(format!(
-                "Cannot slice non-array type '{}'",
-                value_type_name(&arr_val)
-            )),
+            _ => Err(VmError::type_mismatch("array.slice", "Array", &arr_val)),
         }
     }
 
@@ -274,7 +258,7 @@ impl VM {
         let n_val = self.pop()?;
         let seq_val = self.pop()?;
         let Some(n) = n_val.as_int() else {
-            return Err("Drop count must be an integer".to_string());
+            return Err(VmError::type_mismatch("array.drop", "Int", &n_val));
         };
         let n = n.max(0);
         // Dropping n from a lazy `s..e` Range is the slice [n, len)
@@ -320,19 +304,15 @@ impl VM {
                 self.stack.push(payload[idx as usize].clone());
                 Ok(())
             } else {
-                Err(format!(
-                    "Field index {} out of bounds on {}.{} (len: {})",
-                    idx,
+                Err(VmError::internal(format!(
+                    "field index {idx} out of bounds on {}.{} (len {})",
                     ev.enum_name(),
                     ev.variant_name(),
                     payload.len()
-                ))
+                )))
             }
         } else {
-            Err(format!(
-                "Cannot access field on '{}'",
-                value_type_name(&val)
-            ))
+            Err(VmError::type_mismatch("field access", "record", &val))
         }
     }
 
@@ -361,10 +341,10 @@ impl VM {
                 }
                 Ok(seq::from_slice(&mut self.heap, &elems))
             }
-            _ => Err(format!(
-                "Cannot concatenate non-array type '{}'",
+            _ => Err(VmError::internal(format!(
+                "expected sequence, got '{}'",
                 value_type_name(&v)
-            )),
+            ))),
         }
     }
 }

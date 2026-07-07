@@ -94,7 +94,7 @@ fn test_inspect_basic() {
     let mut h = test_heap();
     assert_eq!(inspect(&Value::small_int(42)), "42");
     assert_eq!(inspect(&Value::bool(true)), "True");
-    let nil = nil_value(&mut h, 1);
+    let nil = nil_value(&mut h, al_core::TypeId(1));
     assert_eq!(inspect(&nil), "Nil");
     let arr = Value::array_in(&mut h, &[Value::small_int(1), Value::small_int(2)]);
     assert_eq!(inspect(&arr), "[1, 2]");
@@ -107,7 +107,10 @@ fn test_values_equal() {
     let mut h = test_heap();
     assert!(values_equal(&Value::small_int(5), &Value::small_int(5)));
     assert!(!values_equal(&Value::small_int(5), &Value::small_int(6)));
-    let (na, nb) = (nil_value(&mut h, 1), nil_value(&mut h, 1));
+    let (na, nb) = (
+        nil_value(&mut h, al_core::TypeId(1)),
+        nil_value(&mut h, al_core::TypeId(1)),
+    );
     assert!(values_equal(&na, &nb));
     let five = Value::str_in(&mut h, "5");
     assert!(!values_equal(&Value::small_int(5), &five));
@@ -352,7 +355,7 @@ fn ev(
     labels: &[&str],
     payload: Vec<Value>,
 ) -> Value {
-    Value::enum_with_names_in(h, type_id, en, vn, labels, &payload)
+    Value::enum_with_names_in(h, al_core::TypeId(type_id), en, vn, labels, &payload)
 }
 
 // A function value renders as `<fn#name>`, the name resolved through

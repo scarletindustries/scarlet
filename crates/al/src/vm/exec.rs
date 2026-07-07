@@ -40,7 +40,7 @@ use al_core::static_ir::VariantTemplate;
 
 use super::poll::monotonic_now_ms;
 use super::{
-    CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmResult,
+    CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult,
     enum_template, f64_str, freeze, inspect, value_type_name,
 };
 
@@ -246,10 +246,7 @@ impl VM {
                     } else if let Some(f) = a.as_float() {
                         self.stack.push(Value::float(-f));
                     } else {
-                        return Err(format!(
-                            "Cannot negate non-numeric value '{}'",
-                            value_type_name(&a)
-                        ));
+                        return Err(VmError::type_mismatch("negate", "Int or Float", &a));
                     }
                 }
 
@@ -351,7 +348,7 @@ impl VM {
                     let callee = self.pop()?;
 
                     let Some(cl) = callee.as_closure() else {
-                        return Err("Cannot call non-function".to_string());
+                        return Err(VmError::internal("call target is not a function"));
                     };
                     let cl_func_idx = cl.func_idx();
                     let func = &self.program.functions[cl_func_idx as usize];
@@ -359,7 +356,9 @@ impl VM {
                         (func.arity, func.locals, func.code_start);
 
                     if arity != func_arity {
-                        return Err(format!("Expected {} arguments, got {}", func_arity, arity));
+                        return Err(VmError::internal(format!(
+                            "call arity mismatch: expected {func_arity}, got {arity}"
+                        )));
                     }
 
                     let args_start = self.stack.len() - arity as usize;
@@ -461,7 +460,7 @@ impl VM {
                 Op::Ret => {
                     let ret_val = self.pop()?;
                     let Some(old_frame) = self.frames.pop() else {
-                        return Err("internal error: return with no active call frame".to_string());
+                        return Err(VmError::internal("return with no active call frame"));
                     };
 
                     self.stack.truncate(old_frame.base_slot);
@@ -515,7 +514,9 @@ impl VM {
                     {
                         Some(v) => v,
                         None => {
-                            return Err(format!("Capture index out of bounds: {}", capture_idx));
+                            return Err(VmError::internal(format!(
+                                "capture index {capture_idx} out of bounds"
+                            )));
                         }
                     };
                     self.stack.push(v);
@@ -566,12 +567,12 @@ impl VM {
                     let labels_val = &self.stack[base + 3];
 
                     let Some(type_id) = type_id_val.as_int() else {
-                        return Err("Enum type id must be int".to_string());
+                        return Err(VmError::internal("enum type id must be int"));
                     };
-                    let type_id = type_id as i32;
+                    let type_id = al_core::TypeId(type_id as i32);
 
                     if enum_name_val.as_str().is_none() {
-                        return Err("Enum name must be string".to_string());
+                        return Err(VmError::internal("enum name must be string"));
                     }
 
                     // The field-label array is a per-ctor-site pooled constant
@@ -583,7 +584,7 @@ impl VM {
                     // constructions reuse the one frozen tuple.
                     let labels_key = match (labels_val.as_array(), labels_val.object_addr()) {
                         (Some(_), Some(addr)) => addr,
-                        _ => return Err("Field labels must be an array".to_string()),
+                        _ => return Err(VmError::internal("field labels must be an array")),
                     };
                     let field_labels = match self.label_cache.get(&labels_key) {
                         Some(cached) => cached.clone(),
@@ -599,7 +600,7 @@ impl VM {
                     };
 
                     if variant_name_val.as_str().is_none() {
-                        return Err("Variant name must be string".to_string());
+                        return Err(VmError::internal("variant name must be string"));
                     }
 
                     // `instr.operand` indexes the constant pool at the
@@ -636,12 +637,12 @@ impl VM {
                     let val = self.pop()?;
 
                     let Some(variant_str) = variant_name.as_str() else {
-                        return Err("Enum/variant names must be strings".to_string());
+                        return Err(VmError::internal("enum/variant names must be strings"));
                     };
                     let Some(type_id) = type_id_val.as_int() else {
-                        return Err("Enum type id must be int".to_string());
+                        return Err(VmError::internal("enum type id must be int"));
                     };
-                    let type_id = type_id as i32;
+                    let type_id = al_core::TypeId(type_id as i32);
 
                     if let Some(ev) = val.as_enum() {
                         self.stack.push(Value::bool(
@@ -658,7 +659,7 @@ impl VM {
                             self.stack.push(p.clone());
                         }
                     } else {
-                        return Err("Cannot unwrap non-enum value".to_string());
+                        return Err(VmError::internal("unwrap on non-enum value"));
                     }
                 }
                 Op::ToString => {
@@ -682,7 +683,7 @@ impl VM {
                     let n = instr.operand as usize;
                     let len = self.stack.len();
                     if n > len {
-                        return Err("Stack underflow. This is likely a compiler bug.".to_string());
+                        return Err(VmError::internal("stack underflow"));
                     }
                     let base = len - n;
                     // The real need is the sum of the operand lengths, summed
@@ -691,7 +692,7 @@ impl VM {
                     for v in &self.stack[base..] {
                         match v.as_str() {
                             Some(s) => total += s.len(),
-                            None => return Err("str_concat requires strings".to_string()),
+                            None => return Err(VmError::internal("str_concat requires strings")),
                         }
                     }
                     let mut out = String::with_capacity(total);
@@ -724,6 +725,7 @@ impl VM {
                 Op::TcpCloseServer => self.tcp_close_server()?,
                 Op::TcpLocalAddr => self.tcp_local_addr()?,
                 Op::DnsResolve => park!(self.dns_resolve(ip, &mut reds)),
+                Op::IpParse => self.ip_parse()?,
                 Op::ProcessSpawn => self.process_spawn(&mut reds)?,
                 Op::SpawnLocal => self.process_spawn_local(&mut reds)?,
                 Op::SpawnOnEach => self.process_spawn_on_each(&mut reds)?,
@@ -818,7 +820,7 @@ impl VM {
     pub(super) fn pop(&mut self) -> VmResult<Value> {
         self.stack
             .pop()
-            .ok_or_else(|| "Stack underflow. This is likely a compiler bug.".to_string())
+            .ok_or_else(|| VmError::internal("stack underflow"))
     }
 
     /// Index of the first of the top `n` operand slots, left in place. The
@@ -828,7 +830,7 @@ impl VM {
     pub(super) fn operand_base(&self, n: usize) -> VmResult<usize> {
         let len = self.stack.len();
         if n > len {
-            return Err("Stack underflow. This is likely a compiler bug.".to_string());
+            return Err(VmError::internal("stack underflow"));
         }
         Ok(len - n)
     }
@@ -836,7 +838,7 @@ impl VM {
     fn peek(&self) -> VmResult<&Value> {
         self.stack
             .last()
-            .ok_or_else(|| "Stack underflow. This is likely a compiler bug.".to_string())
+            .ok_or_else(|| VmError::internal("stack underflow"))
     }
 
     /// The operand `d` slots below the top of the stack (0 = top), or `None`
@@ -868,44 +870,45 @@ impl VM {
     // fields and allocation never moves existing objects.
 
     #[inline]
-    pub(super) fn pop_str(&mut self, op: &str) -> VmResult<Value> {
+    pub(super) fn pop_str(&mut self, op: &'static str) -> VmResult<Value> {
         let v = self.pop()?;
         if v.as_str().is_some() {
             Ok(v)
         } else {
-            Err(format!("{op} requires a String"))
+            Err(VmError::type_mismatch(op, "String", &v))
         }
     }
 
     #[inline]
-    pub(super) fn pop_int(&mut self, op: &str) -> VmResult<i64> {
-        match self.pop()?.as_int() {
+    pub(super) fn pop_int(&mut self, op: &'static str) -> VmResult<i64> {
+        let v = self.pop()?;
+        match v.as_int() {
             Some(n) => Ok(n),
-            None => Err(format!("{op} requires an Int")),
+            None => Err(VmError::type_mismatch(op, "Int", &v)),
         }
     }
 
     /// Pop a numeric value as `f64`. Accepts Int too (coerced), mirroring the
     /// numeric tolerance of the arithmetic loop (`Op::Neg` etc.).
     #[inline]
-    fn pop_float(&mut self, op: &str) -> VmResult<f64> {
+    fn pop_float(&mut self, op: &'static str) -> VmResult<f64> {
         let v = self.pop()?;
         if let Some(f) = v.as_float() {
             Ok(f)
         } else if let Some(n) = v.as_int() {
             Ok(n as f64)
         } else {
-            Err(format!("{op} requires a Float"))
+            Err(VmError::type_mismatch(op, "Float", &v))
         }
     }
 
     #[inline]
-    pub(super) fn pop_binary(&mut self, op: &str) -> VmResult<Value> {
+    pub(super) fn pop_binary(&mut self, op: &'static str) -> VmResult<Value> {
         let v = self.pop()?;
         if v.as_binary().is_some() {
             Ok(v)
         } else {
-            Err(format!("{op} requires a Binary"))
+            Err(VmError::type_mismatch(op, "Binary", &v))
         }
     }
 
@@ -979,14 +982,10 @@ impl VM {
                 out.push_str(sb);
                 let v = Value::str_in(&mut self.heap, &out);
                 self.stack.push(v);
+                Ok(())
             }
-            _ => {
-                debug_assert!(false, "string concat on non-Str");
-                let v = Value::str_in(&mut self.heap, "");
-                self.stack.push(v);
-            }
+            _ => Err(VmError::internal("string concat on non-Str operands")),
         }
-        Ok(())
     }
 
     /// `+` — the one arithmetic op with a non-numeric case: Str + Str
@@ -1065,11 +1064,11 @@ impl VM {
             (ValueView::Int(ai), ValueView::Float(bf)) => Value::float(float_f(ai as f64, bf)),
             (ValueView::Float(af), ValueView::Int(bi)) => Value::float(float_f(af, bi as f64)),
             _ => {
-                return Err(format!(
-                    "Cannot perform arithmetic on '{}' and '{}'. This is likely a compiler bug.",
+                return Err(VmError::internal(format!(
+                    "arithmetic on '{}' and '{}'",
                     value_type_name(&a),
                     value_type_name(&b)
-                ));
+                )));
             }
         };
         self.stack.push(v);
@@ -1153,13 +1152,13 @@ fn expect_string_array(v: &Value) -> VmResult<Vec<Value>> {
                 // The element is the frozen constant-pool `Str` value
                 // itself; storing it is one reference word.
                 if it.as_str().is_none() {
-                    return Err("Field label must be string".to_string());
+                    return Err(VmError::internal("field label must be string"));
                 }
                 out.push(it);
             }
             Ok(out)
         }
-        None => Err("Field labels must be an array".to_string()),
+        None => Err(VmError::internal("field labels must be an array")),
     }
 }
 
@@ -1173,11 +1172,11 @@ fn compare_values(a: Value, b: Value) -> VmResult<std::cmp::Ordering> {
         (ValueView::Float(af), ValueView::Float(bf)) => {
             Ok(af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal))
         }
-        _ => Err(format!(
-            "Cannot compare '{}' with '{}'. This is likely a compiler bug.",
+        _ => Err(VmError::internal(format!(
+            "compare '{}' with '{}'",
             value_type_name(&a),
             value_type_name(&b)
-        )),
+        ))),
     }
 }
 

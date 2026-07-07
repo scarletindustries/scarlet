@@ -13,12 +13,13 @@
 //! a head allocates only the result values (method/target/name/value views,
 //! `Header` records, the headers array), never intermediate copies.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use al_core::bytecode::{BinaryRef, Value};
 use al_core::heap::ProcHeap;
 
-use super::{PreludeTemplates, VmResult, int_to_ascii, parse_int_ascii};
+use super::{PreludeTemplates, VmError, VmResult, int_to_ascii, parse_int_ascii};
 
 /// Total request-head size cap (request line + all header fields), mirrored by
 /// `al/http/h1`'s docs. A head that grows past this without completing is
@@ -69,37 +70,79 @@ fn field_bytes(v: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
     v.as_binary().map(|b| b.full_bytes())
 }
 
-const NOT_HEADERS: &str = "expected an Array(Header). This is likely a compiler bug.";
-
-/// The logical byte window of `bin` as `(backing, base, len)`. Socket buffers
-/// are always byte-aligned views, which share the backing `Arc` zero-copy. A
-/// bit-unaligned buffer (hand-built via `<<>>`) is materialized into an
-/// aligned copy, so views built over the window point into that copy instead
-/// of the original.
-fn byte_window(bin: &BinaryRef<'_>) -> (Arc<[u8]>, usize, usize) {
-    let len = (bin.bit_len() / 8) as usize;
-    if bin.bit_offset().is_multiple_of(8) {
-        (bin.backing_arc(), (bin.bit_offset() / 8) as usize, len)
-    } else {
-        (bin.to_aligned_vec().into(), 0, len)
-    }
+#[cold]
+fn not_headers(op: &'static str) -> VmError {
+    VmError::internal(format!("{op}: expected an Array(Header)"))
 }
 
-/// A zero-copy binary view over `n` bytes at offset `start` of the byte
-/// window `backing[base..]`.
-fn window_view(
-    a: &mut ProcHeap,
-    backing: &Arc<[u8]>,
+/// Walk an `Array(Header)`, invoking `f(name_bytes, value)` for each entry
+/// after validating the array/record/binary shape. `f` returns `Break(b)` to
+/// short-circuit (yielding `Ok(Some(b))`) or `Continue` to keep going
+/// (yielding `Ok(None)` at the end). All "not a headers array" shape errors
+/// are constructed here, so callers only see well-shaped `(name, value)`
+/// pairs.
+fn for_each_header<B>(
+    headers: &Value,
+    op: &'static str,
+    mut f: impl FnMut(&[u8], &Value) -> VmResult<ControlFlow<B>>,
+) -> VmResult<Option<B>> {
+    let arr = headers.as_array().ok_or_else(|| not_headers(op))?;
+    for h in arr.iter() {
+        let (name, value) = header_fields(&h).ok_or_else(|| not_headers(op))?;
+        let name_bytes = field_bytes(&name).ok_or_else(|| not_headers(op))?;
+        if let ControlFlow::Break(b) = f(&name_bytes, &value)? {
+            return Ok(Some(b));
+        }
+    }
+    Ok(None)
+}
+
+/// A byte-aligned window over a `Binary`'s backing storage: `backing[base ..
+/// base+len]` is the logical byte content the AL caller sees. Socket buffers
+/// are always byte-aligned views, which share the backing `Arc` zero-copy; a
+/// bit-unaligned buffer (hand-built via `<<>>`) is materialized into an
+/// aligned copy so views built over the window point into that copy instead
+/// of the original.
+struct ByteWindow {
+    backing: Arc<[u8]>,
     base: usize,
-    start: usize,
-    n: usize,
-) -> Value {
-    Value::binary_view_in(
-        a,
-        Arc::clone(backing),
-        ((base + start) * 8) as u64,
-        (n * 8) as u64,
-    )
+    len: usize,
+}
+
+impl ByteWindow {
+    fn of(bin: &BinaryRef<'_>) -> Self {
+        let len = (bin.bit_len() / 8) as usize;
+        if bin.bit_offset().is_multiple_of(8) {
+            Self {
+                backing: bin.backing_arc(),
+                base: (bin.bit_offset() / 8) as usize,
+                len,
+            }
+        } else {
+            Self {
+                backing: bin.to_aligned_vec().into(),
+                base: 0,
+                len,
+            }
+        }
+    }
+
+    /// The window's logical bytes.
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        &self.backing[self.base..self.base + self.len]
+    }
+
+    /// A zero-copy binary view over `n` bytes at offset `start` of this
+    /// window (offsets are AL-visible, i.e. relative to `base`).
+    fn view(&self, a: &mut ProcHeap, start: usize, n: usize) -> Value {
+        Value::binary_view_in(
+            a,
+            Arc::clone(&self.backing),
+            ((self.base + start) * 8) as u64,
+            (n * 8) as u64,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -114,31 +157,22 @@ pub(super) fn parse_head(
     bin: &BinaryRef<'_>,
     off: i64,
 ) -> Value {
-    let (backing, base, len) = byte_window(bin);
-    parse_head_window(t, a, &backing, base, len, off)
+    parse_head_window(t, a, &ByteWindow::of(bin), off)
 }
 
-/// `backing[base .. base+len]` is the logical byte window of the request
-/// buffer. Every offset below is relative to that window (the AL-visible
-/// binary), so the `consumed` offset and the returned views line up with the
-/// offsets the AL caller passed in.
-fn parse_head_window(
-    t: &PreludeTemplates,
-    a: &mut ProcHeap,
-    backing: &Arc<[u8]>,
-    base: usize,
-    len: usize,
-    off: i64,
-) -> Value {
-    let bytes = &backing[base..base + len];
-    let mut off = (off.max(0) as usize).min(len);
+/// Every offset below is relative to `win` (the AL-visible binary), so the
+/// `consumed` offset and the returned views line up with the offsets the AL
+/// caller passed in.
+fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Value {
+    let bytes = win.bytes();
+    let mut off = (off.max(0) as usize).min(win.len);
 
     // Request line: skip a leading empty line (RFC 7230 §3.5), then split
     // METHOD SP request-target SP HTTP-version at the first CRLF.
     let eol = loop {
         match find_crlf(bytes, off) {
             None => {
-                return if len - off > MAX_HEAD {
+                return if win.len - off > MAX_HEAD {
                     bad(t, a, 414)
                 } else {
                     need_more(t)
@@ -165,30 +199,29 @@ fn parse_head_window(
     let sp1 = off + sp1_rel;
     let sp2 = sp1 + 1 + sp2_rel;
     let version = match &bytes[sp2 + 1..eol] {
-        b"HTTP/1.1" => 1,
-        b"HTTP/1.0" => 0,
+        b"HTTP/1.1" => t.version_http11.clone(),
+        b"HTTP/1.0" => t.version_http10.clone(),
         _ => return bad(t, a, 505),
     };
 
     // Header block: one field per CRLF-terminated line, ended by a blank line.
     // The size cap measures from the request-line start, so the whole head
     // (request line + every field) shares MAX_HEAD.
-    let (headers, consumed) =
-        match parse_header_block(t, a, backing, base, bytes, eol + 2, off, MAX_HEAD, 431) {
-            HeaderBlock::Done(headers, consumed) => (headers, consumed),
-            HeaderBlock::NeedMore => return need_more(t),
-            HeaderBlock::Bad(status) => return bad(t, a, status),
-        };
+    let (headers, consumed) = match parse_header_block(t, a, win, eol + 2, off, MAX_HEAD, 431) {
+        HeaderBlock::Done(headers, consumed) => (headers, consumed),
+        HeaderBlock::NeedMore => return need_more(t),
+        HeaderBlock::Bad(status) => return bad(t, a, status),
+    };
 
-    let method = window_view(a, backing, base, off, sp1 - off);
-    let target = window_view(a, backing, base, sp1 + 1, sp2 - sp1 - 1);
+    let method = win.view(a, off, sp1 - off);
+    let target = win.view(a, sp1 + 1, sp2 - sp1 - 1);
     let headers = Value::array_in(a, &headers);
     t.parsed_done.instantiate(
         a,
         &[
             method,
             target,
-            Value::small_int(version),
+            version,
             headers,
             Value::small_int(consumed as i64),
         ],
@@ -214,18 +247,16 @@ enum HeaderBlock {
 /// measures from the request-line start (MAX_HEAD → 431); a chunked body's
 /// trailer block measures from the block itself. A block that grows past the
 /// cap without completing is rejected rather than buffered forever.
-#[allow(clippy::too_many_arguments)]
 fn parse_header_block(
     t: &PreludeTemplates,
     a: &mut ProcHeap,
-    backing: &Arc<[u8]>,
-    base: usize,
-    bytes: &[u8],
+    win: &ByteWindow,
     start: usize,
     cap_start: usize,
     cap: usize,
     over_cap_status: i64,
 ) -> HeaderBlock {
+    let bytes = win.bytes();
     let len = bytes.len();
     let mut pos = start;
     let mut headers: Vec<Value> = Vec::with_capacity(8);
@@ -262,8 +293,8 @@ fn parse_header_block(
         while vend > vstart && is_ows(bytes[vend - 1]) {
             vend -= 1;
         }
-        let name = window_view(a, backing, base, pos, colon - pos);
-        let value = window_view(a, backing, base, vstart, vend - vstart);
+        let name = win.view(a, pos, colon - pos);
+        let value = win.view(a, vstart, vend - vstart);
         headers.push(t.header.instantiate(a, &[name, value]));
         pos = crlf + 2;
     }
@@ -299,32 +330,24 @@ pub(super) fn framing(
     a: &mut ProcHeap,
     headers_val: &Value,
 ) -> VmResult<Value> {
-    let Some(arr) = headers_val.as_array() else {
-        return Err(format!("h1.framing: {NOT_HEADERS}"));
-    };
     let mut te = 0usize;
     let mut te_value: Option<Value> = None;
     let mut cl = 0usize;
     let mut cl_value: Option<Value> = None;
-    for h in arr.iter() {
-        let Some((name, value)) = header_fields(&h) else {
-            return Err(format!("h1.framing: {NOT_HEADERS}"));
-        };
-        let Some(name_bytes) = field_bytes(&name) else {
-            return Err(format!("h1.framing: {NOT_HEADERS}"));
-        };
+    for_each_header(headers_val, "h1.framing", |name_bytes, value| {
         if name_bytes.eq_ignore_ascii_case(b"transfer-encoding") {
             te += 1;
             if te_value.is_none() {
-                te_value = Some(value);
+                te_value = Some(value.clone());
             }
         } else if name_bytes.eq_ignore_ascii_case(b"content-length") {
             cl += 1;
             if cl_value.is_none() {
-                cl_value = Some(value);
+                cl_value = Some(value.clone());
             }
         }
-    }
+        Ok(ControlFlow::<()>::Continue(()))
+    })?;
     if te > 0 {
         // Transfer-Encoding next to Content-Length is the classic
         // request-smuggling conflict: reject before looking at the coding.
@@ -352,7 +375,7 @@ pub(super) fn framing(
                     let leading_zero = bytes.len() > 1 && bytes[0] == b'0';
                     parse_int_ascii(&bytes, 10).filter(|_| !leading_zero)
                 }
-                None => return Err(format!("h1.framing: {NOT_HEADERS}")),
+                None => return Err(not_headers("h1.framing")),
             };
             match parsed {
                 // A Content-Length always fits the small-int payload (the
@@ -393,22 +416,18 @@ pub(super) fn chunk_decode(
     off: i64,
     max: i64,
 ) -> Value {
-    let (backing, base, len) = byte_window(bin);
-    chunk_decode_window(t, a, &backing, base, len, off, max)
+    chunk_decode_window(t, a, &ByteWindow::of(bin), off, max)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn chunk_decode_window(
     t: &PreludeTemplates,
     a: &mut ProcHeap,
-    backing: &Arc<[u8]>,
-    base: usize,
-    len: usize,
+    win: &ByteWindow,
     off: i64,
     max: i64,
 ) -> Value {
-    let bytes = &backing[base..base + len];
-    let off = (off.max(0) as usize).min(len);
+    let bytes = win.bytes();
+    let off = (off.max(0) as usize).min(win.len);
     let max = max.max(0);
 
     // Structural scan first: walk the chunk framing recording each data range
@@ -425,7 +444,7 @@ fn chunk_decode_window(
         let Some(eol) = find_crlf(bytes, pos) else {
             // No CRLF yet. A line already over the cap can never become valid;
             // otherwise wait for more bytes.
-            return if len - pos > MAX_CHUNK_SIZE_LINE {
+            return if win.len - pos > MAX_CHUNK_SIZE_LINE {
                 chunked_bad(t, a, 400)
             } else {
                 chunked_need_more(t)
@@ -451,9 +470,7 @@ fn chunk_decode_window(
             return match parse_header_block(
                 t,
                 a,
-                backing,
-                base,
-                bytes,
+                win,
                 trailer_start,
                 trailer_start,
                 MAX_TRAILER_BLOCK,
@@ -486,7 +503,7 @@ fn chunk_decode_window(
         let Some(data_end) = data_start.checked_add(size) else {
             return chunked_bad(t, a, 400);
         };
-        if data_end + 2 > len {
+        if data_end + 2 > win.len {
             return chunked_need_more(t);
         }
         if &bytes[data_end..data_end + 2] != b"\r\n" {
@@ -506,23 +523,19 @@ fn chunk_decode_window(
 
 /// The value of the first header whose name matches (ASCII-case-insensitive).
 /// `op` names the caller for error messages.
-fn find_header(headers_val: &Value, name: &BinaryRef<'_>, op: &str) -> VmResult<Option<Value>> {
-    let Some(arr) = headers_val.as_array() else {
-        return Err(format!("{op}: {NOT_HEADERS}"));
-    };
+fn find_header(
+    headers_val: &Value,
+    name: &BinaryRef<'_>,
+    op: &'static str,
+) -> VmResult<Option<Value>> {
     let needle = name.full_bytes();
-    for h in arr.iter() {
-        let Some((hname, hvalue)) = header_fields(&h) else {
-            return Err(format!("{op}: {NOT_HEADERS}"));
-        };
-        let Some(hname_bytes) = field_bytes(&hname) else {
-            return Err(format!("{op}: {NOT_HEADERS}"));
-        };
-        if hname_bytes.eq_ignore_ascii_case(&needle) {
-            return Ok(Some(hvalue));
-        }
-    }
-    Ok(None)
+    for_each_header(headers_val, op, |hname_bytes, hvalue| {
+        Ok(if hname_bytes.eq_ignore_ascii_case(&needle) {
+            ControlFlow::Break(hvalue.clone())
+        } else {
+            ControlFlow::Continue(())
+        })
+    })
 }
 
 /// The value of the first header whose name matches (ASCII-case-insensitive),
@@ -559,29 +572,23 @@ pub(super) fn serialize_head(
     reason: &BinaryRef<'_>,
     headers_val: &Value,
 ) -> VmResult<Value> {
-    let Some(arr) = headers_val.as_array() else {
-        return Err(format!("h1.serialize_head: {NOT_HEADERS}"));
-    };
     let reason_bytes = reason.full_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(64 + reason_bytes.len() + arr.len() * 64);
+    // Capacity hint only — for_each_header owns the real shape check.
+    let est = headers_val.as_array().map_or(0, |arr| arr.len());
+    let mut out: Vec<u8> = Vec::with_capacity(64 + reason_bytes.len() + est * 64);
     out.extend_from_slice(b"HTTP/1.1 ");
     out.extend_from_slice(int_to_ascii(code, 10).as_bytes());
     out.push(b' ');
     out.extend_from_slice(&reason_bytes);
     out.extend_from_slice(b"\r\n");
-    for h in arr.iter() {
-        let Some((name, value)) = header_fields(&h) else {
-            return Err(format!("h1.serialize_head: {NOT_HEADERS}"));
-        };
-        let (Some(name_bytes), Some(value_bytes)) = (field_bytes(&name), field_bytes(&value))
-        else {
-            return Err(format!("h1.serialize_head: {NOT_HEADERS}"));
-        };
-        out.extend_from_slice(&name_bytes);
+    for_each_header(headers_val, "h1.serialize_head", |name_bytes, value| {
+        let value_bytes = field_bytes(value).ok_or_else(|| not_headers("h1.serialize_head"))?;
+        out.extend_from_slice(name_bytes);
         out.extend_from_slice(b": ");
         out.extend_from_slice(&value_bytes);
         out.extend_from_slice(b"\r\n");
-    }
+        Ok(ControlFlow::<()>::Continue(()))
+    })?;
     out.extend_from_slice(b"\r\n");
     Ok(Value::binary_in(a, out))
 }
@@ -655,7 +662,10 @@ mod tests {
         assert_eq!(variant_of(&parsed), "Done");
         assert_eq!(payload_bytes(&parsed, 0), b"GET");
         assert_eq!(payload_bytes(&parsed, 1), b"/path");
-        assert_eq!(payload_int(&parsed, 2), 1);
+        assert_eq!(
+            variant_of(&parsed.as_enum().unwrap().payload()[2]),
+            "Http11"
+        );
         // consumed == whole buffer
         assert_eq!(
             payload_int(&parsed, 4),
