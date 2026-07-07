@@ -304,27 +304,20 @@ fn big_module_src(type_count: i32, tweak: i32) -> String {
 /// five tests never allocate more than 256 ids in a reused range, so none
 /// of that machinery is otherwise exercised.
 ///
-/// DELIVERABLE COUNT (resolved): the spec's "incremental 5/5" target was
-/// written before this regression unit was carved out. This unit's whole
-/// purpose is a *sixth* test that actually raises the overflow flag, which
-/// `unrelated_module_keeps_type_id_base` (<= 256 ids) provably cannot.
-/// incremental.rs is therefore 6/6 and `verify-green-and-bench` expects 6.
-///
 /// DISCRIMINATING BY CONSTRUCTION: `big` is compiled *small* first, so the
 /// sibling `y` is assigned the immediately-following 256-block
 /// (`big0 + 256`). The edit then *grows* `big` past 256 ids: on the reuse
 /// path that spill runs `[big0, big0 + BIG_TYPE_COUNT)` and overlaps y's
-/// `big0 + 256` block — a real id collision. Recovery (Placement B:
-/// `invalidate_all` + `reset_id_bases` + one re-run, inside the same
-/// `check`) re-allocates every module fresh, so `big` keeps `big0` while
+/// `big0 + 256` block — a real id collision. Recovery (`invalidate_all` +
+/// `reset_id_bases` + one re-run, inside the same `check`) re-allocates
+/// every module fresh, so `big` keeps `big0` while
 /// `y` is pushed past big's grown span. Every post-edit signal below is
 /// false if that recovery is removed or unwired: `y` would stay at
 /// `big0 + 256` (so both `y1 != y0` and `y1 >= big1 + BIG_TYPE_COUNT`
 /// fail), and `compile_count` would be 4, not 6 — recovery re-runs
 /// `process_imports`, recompiling big + y a second time within the one
-/// `check`. FLAG-CONSUMER PLACEMENT is single (Placement B), so success +
-/// stable ranges hold after *one* `check`; this never assumes a second
-/// pass (it does not encode the rejected Step-D-in-note_id_usage variant).
+/// `check`. Success + stable ranges hold after *one* `check`; this never
+/// assumes a second pass.
 #[test]
 fn recompile_id_overflow_recovers_with_stable_ranges() {
     let p = Project::new("idoverflow");

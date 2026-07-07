@@ -2,7 +2,7 @@
 // across two schedulers (`AL_SCHEDULERS=2`). With several runnable processes
 // and an idle peer, the yield path donates run-queue processes to the other
 // scheduler, so every worker (stack, frames, captures, heap) is moved whole
-// to another scheduler mid-execution, with its socket fds re-homed. The assertions are purely
+// to another scheduler mid-execution. The assertions are purely
 // semantic — exact output lines, not timing — so a migration bug shows up as
 // corrupted/missing output or a hang, never as flakiness on a loaded machine.
 
@@ -67,7 +67,7 @@ fn fib(n: u64) -> u64 {
 
 /// Shared imports + `fib` source every migration program starts with.
 const FIB_PREAMBLE: &str = r#"import al/experiments/scheduler
-import al/list
+import al/array
 
 fn fib(n) {
 	match n {
@@ -106,7 +106,7 @@ fn cpu_bound_smoke(tag: &str, schedulers: u32, spawns: u64, base: u64, modulo: u
 	println('${{i}} done ${{fib({base} + i % {modulo})}}')
 }}
 
-list.each(1..{end}, fn(i) scheduler.spawn(fn() work(i)))
+array.each(1..{end}, fn(i) scheduler.spawn(fn() work(i)))
 println('main done')
 "#,
         end = spawns + 1
@@ -154,7 +154,7 @@ fn deep_recursive_worker_survives_two_schedulers() {
         "sched2_deep",
         2,
         r#"scheduler.spawn(fn() println('deep ${fib(26)}'))
-list.each(1..6, fn(i) scheduler.spawn(fn() println('light ${i} ${fib(18)}')))
+array.each(1..6, fn(i) scheduler.spawn(fn() println('light ${i} ${fib(18)}')))
 "#,
     );
 

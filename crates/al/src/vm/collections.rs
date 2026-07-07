@@ -6,9 +6,9 @@
 //! - **Arrays are persistent trees** ([`al_core::bytecode::seq`]):
 //!   concat merges border nodes, slice/drop path-copy along the cut,
 //!   push is a path copy — operands always stay valid, structurally
-//!   shared values. There is deliberately no in-place fast path; the
-//!   arena heap has no refcounts, so the O(log n) copy is the one
-//!   write path (`seq_root`).
+//!   shared values. There is no in-place fast path: seq operands must
+//!   stay valid for structural sharing, so a mutate-in-place would need
+//!   proof no alias exists across the seq API (`seq_root`).
 //! - **Ranges stay lazy until they must not.** `s..e` is two words;
 //!   index/len/slice/drop on it are O(1) arithmetic, and only the ops
 //!   that need real elements (concat, push) materialize it into a tree
@@ -316,16 +316,15 @@ impl VM {
 
     /// The sequence root of an Array operand; a Range is materialized into
     /// a fresh tree (its elements never existed in memory before, so this
-    /// is the operation's real cost — budgeted by the caller via
-    /// `peek_seq`'s materialization component). Non-sequences keep the
-    /// producer's error message.
+    /// is the operation's real cost — budgeted by the caller). Non-sequences
+    /// keep the producer's error message.
     ///
     /// An Array operand comes back as-is (persistent trees share, never
     /// clone); every subsequent write the caller performs is a persistent
-    /// path-copy update that never mutates shared structure. There is
-    /// deliberately no refcount==1 in-place fast path: the arena heap has no
-    /// refcounts to inspect, so uniqueness detection cannot exist under it —
-    /// the O(log n) path copy is the one write path.
+    /// path-copy update that never mutates shared structure. There is no
+    /// in-place fast path: seq operands must stay valid for structural
+    /// sharing, so a mutate-in-place would need proof no alias exists
+    /// across the seq API.
     fn seq_root(&mut self, v: Value) -> VmResult<Value> {
         match v.kind() {
             ValueView::Array(_) => Ok(v),

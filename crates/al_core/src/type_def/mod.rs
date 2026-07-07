@@ -57,9 +57,9 @@ impl PrimitiveKind {
     }
 }
 
-/// A labelled field of a constructor variant. Shared between `Type::Named`
-/// (substituted, for downstream consumers) and `environment::TypeInfo`
-/// (template form, holding raw `Var` for type parameters).
+/// A labelled field of a constructor variant in the substituted
+/// `Type::Named` form consumed by exhaustiveness/field-access. The template
+/// form stored in `TypeInfo` is `environment::VariantField`, not this.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldDef {
     pub label: String,

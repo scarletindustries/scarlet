@@ -44,6 +44,7 @@
 //! | [`value`]           | the NaN-boxed [`Value`] word, heap object      |
 //! |                     | layouts, the [`Arena`] trait                   |
 //! | [`seq`]             | the persistent RRB vector backing `Array`      |
+//! | [`hamt`]            | the persistent HAMT backing `Map`              |
 
 mod analysis;
 pub mod bits;

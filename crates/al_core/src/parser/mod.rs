@@ -100,6 +100,10 @@ impl Parser {
     }
 
     fn pop_context(&mut self) {
+        debug_assert!(
+            self.context_stack.len() > 1,
+            "context stack underflow — synchronize double-popped?"
+        );
         if self.context_stack.len() > 1 {
             self.context_stack.pop();
         }
@@ -127,6 +131,15 @@ impl Parser {
         *self.context_stack.last().unwrap_or(&ParseContext::TopLevel)
     }
 
+    /// Single emit path for parser diagnostics at an arbitrary span.
+    fn error_at(&mut self, span: Span, message: impl Into<String>) {
+        self.diagnostics.push(Diagnostic::error(
+            span,
+            DiagnosticCode::ParseError,
+            message.into(),
+        ));
+    }
+
     fn add_error(&mut self, message: String) {
         // Every parse error funnels through here after a failed `eat`; when the
         // parser is stuck on the EOF token the error is by construction an
@@ -137,8 +150,11 @@ impl Parser {
             DiagnosticCode::ParseError
         };
         let sp = self.cur().span;
-        self.diagnostics
-            .push(diagnostic::error_at(sp.start_line, sp.start_column, message).with_code(code));
+        self.diagnostics.push(Diagnostic::error(
+            Span::point(sp.start_line, sp.start_column),
+            code,
+            message,
+        ));
     }
 
     fn current_span(&self) -> Span {
@@ -352,10 +368,10 @@ impl Parser {
     }
 
     // Parses zero or more items separated only by whitespace/newlines until
-    // `close` (or Eof). A comma at a separator position is a hard error: every
-    // construct routed here (constructor fields, type args/params, fn-type
-    // params, import items, attribute args) has self-delimiting items, so the
-    // comma carried no information and the grammar now rejects it outright.
+    // `close` (or Eof). A comma at a separator position is a hard error: the
+    // items are self-delimiting, so the comma carried no information and the
+    // grammar now rejects it outright. Currently used only for constructor
+    // fields.
     fn parse_separated_list<T>(
         &mut self,
         close: Kind,

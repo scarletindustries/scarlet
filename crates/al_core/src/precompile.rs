@@ -62,7 +62,10 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     // This mints new arena nodes, so it must happen on the same engine whose
     // arena `flatten` is about to snapshot. `iface.types` entries alias the
     // same engine pools (they were copied from `env.type_info`), so closing
-    // via `type_info` covers both.
+    // via `type_info` covers Custom bodies (their fields live in the shared
+    // engine.variant_fields arena); an Alias body's target is stored on the
+    // TypeInfo struct itself, so each interface copy is closed separately
+    // below.
     let (program, mut engine) = c.into_parts();
     for ti in type_info.values_mut() {
         close_type_info(&mut engine, ti);

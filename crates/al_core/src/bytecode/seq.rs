@@ -48,11 +48,6 @@ const BITS: usize = 5;
 /// than the optimal packing, bounding extra search steps per level.
 const E_MAX: usize = 2;
 
-/// Fixed-capacity stack buffer for assembling a replacement node image
-/// before copying it into the arena. Every node image is bounded by `B`
-/// slots (`2 * B` during a concat rebalance), so a stack array covers the
-/// worst case with zero heap traffic — this matters because `push_back`/
-/// `push_front` assemble one image per element pushed.
 /// Scratch buffer for assembling a replacement node's slots before handing
 /// them to a builder. Holds owned `Value`s: `extend` clones (incref) and the
 /// buffer's drop decrements — balanced by the builder's `store_child`, so the
@@ -818,8 +813,6 @@ fn execute_plan<A: Arena + ?Sized>(
     );
     out
 }
-
-// ---- worst-case allocation bounds (for the VM's ensure discipline) ----------------
 
 // ---- iteration ----------------------------------------------------------------
 

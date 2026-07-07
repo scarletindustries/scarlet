@@ -17,9 +17,9 @@
 //!   run queue directly instead of going through `Runtime::submit`
 //!   (which would double-count), and why a migrant in transit holds
 //!   `live > 0` — there is no shutdown race while one is in flight.
-//! - **Abort safety.** [`VM::detach_fds`] either succeeds or leaves the
-//!   donor's tables exactly as they were (every fd it had already moved is
-//!   re-inserted), so the donor can simply re-queue the untouched process.
+//! - **Abort safety.** Donation is gated by the read-only
+//!   [`VM::can_donate_fds`] pre-check so [`VM::detach_fds`] runs only when
+//!   it cannot need to abort; `detach_fds` itself is infallible.
 
 use std::collections::HashSet;
 use std::net::TcpStream;

@@ -37,7 +37,7 @@ fn stdlib_option() {
          println(option.is_none(Some(1)))\n",
         "True\nFalse\n",
     );
-    // The arms the existing stdlib_option block misses: map leaves None untouched,
+    // Remaining arms not exercised above: map leaves None untouched,
     // unwrap on Some yields the inner value, is_some is False on None.
     run_outputs(
         "import al/option\n\
@@ -82,8 +82,8 @@ fn stdlib_result() {
          println(result.is_err(Ok(1)))\n",
         "True\nFalse\nTrue\nFalse\n",
     );
-    // Passthrough arms (the ones the existing stdlib_result misses): map leaves
-    // an Err untouched, map_err leaves an Ok untouched.
+    // Remaining arms not exercised above: map leaves an Err untouched,
+    // map_err leaves an Ok untouched.
     run_outputs(
         "import al/result\n\
          println(result.map(Err('e'), fn(x) x + 1))\n\

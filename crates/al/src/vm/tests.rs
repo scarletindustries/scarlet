@@ -1,8 +1,8 @@
 //! Tests for the VM front door: opcode goldens driven through whole
 //! programs (`run_fn`), `inspect` layout pins, `values_equal` semantics,
-//! GC reduction charging and preemption, and the scheduler's timer-wake
-//! and donation-guard edges. The fixture helpers shared with sibling
-//! modules' tests (`halt_test_vm`, `nil_value`) live in `mod.rs`.
+//! and the scheduler's timer-wake and donation-guard edges. The fixture
+//! helpers shared with sibling modules' tests (`halt_test_vm`,
+//! `nil_value`) live in `mod.rs`.
 
 use std::time::Duration;
 
@@ -573,10 +573,7 @@ fn array_slice_range_out_of_bounds_errors() {
     );
 }
 
-// --- GC reduction charging ----------------------
-
-#[allow(dead_code)]
-fn _instruction_is_copy(_: Instruction) {}
+// --- Scheduler: timer wake and donation guard ---
 
 // A placeholder suspended process. wake_due_timers only moves it between the
 // parked store and the run queue; it is never resumed.
