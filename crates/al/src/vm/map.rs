@@ -55,8 +55,7 @@ impl VM {
                 val.map(|s| Value::str_in(&mut self.heap, &s))
             }
             MapBacking::Hamt => {
-                let key = self.peek_at(0).cloned();
-                let hash = key.map_or(0, |k| hash_value(&k));
+                let hash = hash_value(&self.at(0)?);
                 let key = self.pop()?;
                 let map = self.pop()?;
                 // The stored value already lives in the arena; `Some` shares it.
@@ -76,10 +75,10 @@ impl VM {
         let present = match self.map_backing_at(1, "map.has")? {
             MapBacking::Env => self.peek_env_lookup(0).is_some(),
             MapBacking::Hamt => {
-                let key = self.peek_at(0).cloned();
-                let hash = key.as_ref().map_or(0, hash_value);
+                let key = self.at(0)?;
+                let hash = hash_value(&key);
                 let map = self.at(1)?;
-                key.is_some_and(|k| hamt::get(&map, &k, hash).is_some())
+                hamt::get(&map, &key, hash).is_some()
             }
         };
         let _key = self.pop()?;
@@ -173,55 +172,34 @@ impl VM {
 
     /// `map.set(m, key, value) -> Map`. Map at depth 2, key at 1, value on top.
     pub(super) fn map_set(&mut self) -> VmResult<()> {
-        match self.map_backing_at(2, "map.set")? {
-            MapBacking::Hamt => {
-                let key = self.at(1)?;
-                let hash = hash_value(&key);
-                let value = self.pop()?;
-                let key = self.pop()?;
-                let map = self.pop()?;
-                let next = hamt::insert(&mut self.heap, &map, key, value, hash);
-                self.stack.push(next);
-            }
-            MapBacking::Env => {
-                // Materialize the environment into a HAMT, then insert. The new
-                // key/value are already arena values; only the env snapshot's
-                // strings and the trie are fresh.
-                let entries = env_entries();
-                let key = self.at(1)?;
-                let hash = hash_value(&key);
-                let value = self.pop()?;
-                let key = self.pop()?;
-                let _map = self.pop()?;
-                let base = self.build_env_hamt(&entries);
-                let next = hamt::insert(&mut self.heap, &base, key, value, hash);
-                self.stack.push(next);
-            }
-        }
+        let backing = self.map_backing_at(2, "map.set")?;
+        let hash = hash_value(&self.at(1)?);
+        let value = self.pop()?;
+        let key = self.pop()?;
+        let map = self.pop()?;
+        // A write to the environment view has nowhere to go, so materialize the
+        // whole environment into a HAMT and update that instead.
+        let base = match backing {
+            MapBacking::Hamt => map,
+            MapBacking::Env => self.build_env_hamt(&env_entries()),
+        };
+        let next = hamt::insert(&mut self.heap, &base, key, value, hash);
+        self.stack.push(next);
         Ok(())
     }
 
     /// `map.delete(m, key) -> Map`. Map at depth 1, key on top.
     pub(super) fn map_delete(&mut self) -> VmResult<()> {
-        match self.map_backing_at(1, "map.delete")? {
-            MapBacking::Hamt => {
-                let hash = hash_value(&self.at(0)?);
-                let key = self.pop()?;
-                let map = self.pop()?;
-                let next = hamt::remove(&mut self.heap, &map, &key, hash);
-                self.stack.push(next);
-            }
-            MapBacking::Env => {
-                let entries = env_entries();
-                let key = self.at(0)?;
-                let hash = hash_value(&key);
-                let key = self.pop()?;
-                let _map = self.pop()?;
-                let base = self.build_env_hamt(&entries);
-                let next = hamt::remove(&mut self.heap, &base, &key, hash);
-                self.stack.push(next);
-            }
-        }
+        let backing = self.map_backing_at(1, "map.delete")?;
+        let hash = hash_value(&self.at(0)?);
+        let key = self.pop()?;
+        let map = self.pop()?;
+        let base = match backing {
+            MapBacking::Hamt => map,
+            MapBacking::Env => self.build_env_hamt(&env_entries()),
+        };
+        let next = hamt::remove(&mut self.heap, &base, &key, hash);
+        self.stack.push(next);
         Ok(())
     }
 

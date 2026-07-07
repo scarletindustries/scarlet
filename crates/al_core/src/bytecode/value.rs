@@ -2270,16 +2270,20 @@ fn slices_equal(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_equal(x, y))
 }
 
+/// Normalised element count of the half-open range `s..e` (0 for `e <= s`).
+/// Saturating so wide ranges like `i64::MIN..i64::MAX` cap at `i64::MAX`
+/// instead of overflowing. Shared by [`values_equal`], [`hash_value`], and the
+/// VM sequence ops so all Range/Array cross-paths agree on one length.
+#[inline]
+pub fn range_len(s: i64, e: i64) -> i64 {
+    e.saturating_sub(s).max(0)
+}
+
 /// AL structural equality — the semantics of `==`. Lives here (not in the VM)
 /// because it is the partner of [`hash_value`] and both are needed by
 /// [`super::hamt`] to key the persistent map. Ranges and arrays compare by
 /// their elements; maps compare structurally regardless of internal order.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    // `Range`'s normalised empty case (empty ranges are equal regardless of
-    // endpoints) and the range/array cross-equality reuse this inline length.
-    fn range_len(s: i64, e: i64) -> i64 {
-        e.saturating_sub(s).max(0)
-    }
     match (a.kind(), b.kind()) {
         (ValueView::Int(x), ValueView::Int(y)) => x == y,
         (ValueView::Float(x), ValueView::Float(y)) => x == y,

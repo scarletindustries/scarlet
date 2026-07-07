@@ -174,8 +174,10 @@ fn node_insert<A: Arena + ?Sized>(
             } else {
                 // Two distinct keys at this slot: grow a subtree that separates
                 // them by their differing hash bits (or a collision if equal).
-                let new = hamt_entry_in(a, key, value);
-                (split(a, node, hash_value(&ek), new, hash, shift), true)
+                (
+                    split(a, node, hash_value(&ek), key, value, hash, shift),
+                    true,
+                )
             }
         }
         HamtNodeRef::Collision { hash: chash, pairs } => {
@@ -196,8 +198,7 @@ fn node_insert<A: Arena + ?Sized>(
             } else {
                 // The new key shares this branch path with the bucket but has a
                 // different hash: separate them deeper.
-                let new = hamt_entry_in(a, key, value);
-                (split(a, node, chash, new, hash, shift), true)
+                (split(a, node, chash, key, value, hash, shift), true)
             }
         }
         HamtNodeRef::Branch { bitmap, children } => {
@@ -218,43 +219,46 @@ fn node_insert<A: Arena + ?Sized>(
 }
 
 /// Build a subtree at `shift` holding the existing leaf node `left` (hash
-/// `lhash`) and the fresh entry `right` (hash `rhash`), `lhash != rhash`
-/// unless the hashes are fully equal — in which case `left` is an entry and
-/// the two merge into a collision. `right` is always a freshly built
-/// `HamtEntry`.
+/// `lhash`) and a fresh entry `(rkey, rvalue)` (hash `rhash`). If the hashes
+/// are fully equal, `left` is an entry and the two merge into a collision.
 fn split<A: Arena + ?Sized>(
     a: &mut A,
     left: &Value,
     lhash: u64,
-    right: Value,
+    rkey: Value,
+    rvalue: Value,
     rhash: u64,
     shift: u32,
 ) -> Value {
     if shift as usize >= MAX_DEPTH * BITS as usize {
         // Hashes are fully consumed and equal: a collision bucket. `left` is an
-        // entry here (a collision would have absorbed `right` upstream where
-        // its hash matched).
-        return merge_into_collision(a, left, lhash, right);
+        // entry here (a collision would have absorbed the new key upstream
+        // where its hash matched).
+        return merge_into_collision(a, left, lhash, rkey, rvalue);
     }
     let li = slot(lhash, shift);
     let ri = slot(rhash, shift);
     if li == ri {
-        let child = split(a, left, lhash, right, rhash, shift + BITS);
+        let child = split(a, left, lhash, rkey, rvalue, rhash, shift + BITS);
         hamt_branch_in(a, 1u32 << li, &[child])
-    } else if li < ri {
-        hamt_branch_in(a, (1 << li) | (1 << ri), &[left.clone(), right])
     } else {
-        hamt_branch_in(a, (1 << li) | (1 << ri), &[right, left.clone()])
+        let right = hamt_entry_in(a, rkey, rvalue);
+        if li < ri {
+            hamt_branch_in(a, (1 << li) | (1 << ri), &[left.clone(), right])
+        } else {
+            hamt_branch_in(a, (1 << li) | (1 << ri), &[right, left.clone()])
+        }
     }
 }
 
-/// Merge an entry `left` and a fresh entry `right` that share a 64-bit hash
+/// Merge an entry `left` and a fresh `(rkey, rvalue)` that share a 64-bit hash
 /// into a `HamtCollision`.
 fn merge_into_collision<A: Arena + ?Sized>(
     a: &mut A,
     left: &Value,
     hash: u64,
-    right: Value,
+    rkey: Value,
+    rvalue: Value,
 ) -> Value {
     let (lk, lv) = match HamtNodeRef::of(left) {
         HamtNodeRef::Entry { key, value } => (key, value),
@@ -262,11 +266,7 @@ fn merge_into_collision<A: Arena + ?Sized>(
         // keys at its own level via the `chash == hash` arm above.
         _ => unreachable_collision(),
     };
-    let (rk, rv) = match HamtNodeRef::of(&right) {
-        HamtNodeRef::Entry { key, value } => (key, value),
-        _ => unreachable_collision(),
-    };
-    hamt_collision_in(a, hash, &[lk, lv, rk, rv])
+    hamt_collision_in(a, hash, &[lk, lv, rkey, rvalue])
 }
 
 fn unreachable_collision() -> ! {
@@ -339,6 +339,12 @@ fn node_remove<A: Arena + ?Sized>(
             match node_remove(a, &children[i], key, hash, shift + BITS) {
                 Removed::Absent => Removed::Absent,
                 Removed::Node(child) => {
+                    // A single-child branch whose sole child collapsed to a
+                    // leaf collapses too, so the chain of one-child branches
+                    // built by `split` unwinds all the way up on remove.
+                    if children.len() == 1 && is_leaf(&child) {
+                        return Removed::Node(child);
+                    }
                     let mut nc = children.to_vec();
                     nc[i] = child;
                     Removed::Node(hamt_branch_in(a, bitmap, &nc))
@@ -377,7 +383,7 @@ pub fn map_hash(m: MapRef<'_>) -> u64 {
         return 0;
     }
     let mut acc = 0u64;
-    let root = m.hamt_root();
+    let root = m.as_hamt().root;
     for_each_entry(&root, &mut |k, v| {
         // Per-entry hash combines key and value; the cross-entry fold is
         // commutative so insertion order does not matter.
@@ -393,15 +399,14 @@ pub fn maps_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
     match (a.backing(), b.backing()) {
         (MapBacking::Env, MapBacking::Env) => true,
         (MapBacking::Hamt, MapBacking::Hamt) => {
-            if a.hamt_size() != b.hamt_size() {
+            let (a, b) = (a.as_hamt(), b.as_hamt());
+            if a.size != b.size {
                 return false;
             }
-            let broot = b.hamt_root();
             let mut equal = true;
-            let aroot = a.hamt_root();
-            for_each_entry(&aroot, &mut |k, v| {
+            for_each_entry(&a.root, &mut |k, v| {
                 if equal {
-                    equal = match node_get_root(&broot, &k, hash_value(&k)) {
+                    equal = match node_get_root(&b.root, &k, hash_value(&k)) {
                         Some(bv) => values_equal(&v, &bv),
                         None => false,
                     };
@@ -521,6 +526,27 @@ mod tests {
         // The pre-removal version still has everything (persistence).
         assert_eq!(size(&m), 100);
         assert_eq!(lookup(&m, 0), Some(0));
+    }
+
+    #[test]
+    fn remove_collapses_single_child_branch_chain() {
+        let mut h = heap();
+        // Two keys whose hashes share the level-0 slot, so `split` builds at
+        // least one single-child branch on the path between them.
+        let a = 0i64;
+        let sa = slot(hash_value(&key(a)), 0);
+        let b = (1..).find(|&i| slot(hash_value(&key(i)), 0) == sa).unwrap();
+
+        let m0 = empty(&mut h);
+        let m_a = set(&mut h, &m0, a, 1);
+        let m_ab = set(&mut h, &m_a, b, 2);
+        let m_back = remove(&mut h, &m_ab, &key(b), hash_value(&key(b)));
+
+        // After removing `b` the trie must collapse to the same shape as a
+        // fresh single insert of `a`: a leaf at the root, no branch chain.
+        assert!(is_leaf(&HamtMapRef::of(&m_back).root));
+        assert_eq!(size(&m_back), 1);
+        assert_eq!(lookup(&m_back, a), Some(1));
     }
 
     #[test]
