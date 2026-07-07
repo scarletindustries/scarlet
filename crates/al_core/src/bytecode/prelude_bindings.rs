@@ -74,7 +74,7 @@ impl CtorRef {
 /// `id != TypeId::NONE` so a zero binding never falsely matches.
 macro_rules! prelude_bindings {
     (
-        types: [ $( $tf:ident = $tn:ident ),* $(,)? ],
+        types: [ $( $tf:ident = ($tn:ident, $ta:literal) ),* $(,)? ],
         ctors: [ $( $cf:ident = ($cn:ident, $of:ident, $ar:literal) ),* $(,)? ],
     ) => {
         #[derive(Debug, Clone)]
@@ -93,13 +93,20 @@ macro_rules! prelude_bindings {
         }
 
         impl PreludeBindings {
-            pub const TYPE_NAMES: &[&str] = &[$( names::$tn ),*];
+            pub const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
 
             pub fn capture(env: &TypeEnv) -> Result<Self, String> {
-                let ty = |name: &'static str| -> Result<TypeRef, String> {
-                    env.lookup_type_info(name)
-                        .map(|ti| TypeRef { id: ti.id, name })
-                        .ok_or_else(|| format!("prelude: type '{name}' is required"))
+                let ty = |name: &'static str, expected: usize| -> Result<TypeRef, String> {
+                    let ti = env
+                        .lookup_type_info(name)
+                        .ok_or_else(|| format!("prelude: type '{name}' is required"))?;
+                    if ti.arity() != expected {
+                        return Err(format!(
+                            "prelude: type '{name}' must have arity {expected}, found {}",
+                            ti.arity()
+                        ));
+                    }
+                    Ok(TypeRef { id: ti.id, name })
                 };
                 let ctor = |name: &str, of: &TypeRef, arity: u16| -> Result<CtorRef, String> {
                     match env.lookup(name) {
@@ -118,11 +125,24 @@ macro_rules! prelude_bindings {
                         None => Err(format!("prelude: constructor '{name}' is required")),
                     }
                 };
-                $( let $tf = ty(names::$tn)?; )*
+                $( let $tf = ty(names::$tn, $ta)?; )*
                 Ok(PreludeBindings {
                     $( $cf: ctor(names::$cn, &$of, $ar)?, )*
                     $( $tf, )*
                 })
+            }
+
+            /// Nominal ids for the four structural primitives the inference
+            /// engine recognises directly. Single source of truth for
+            /// `InferEngine::set_prim_ids` — adding a fifth primitive is one
+            /// edit here plus one field on `PrimIds`.
+            pub fn prim_ids(&self) -> crate::types::PrimIds {
+                crate::types::PrimIds {
+                    int: self.int.id,
+                    float: self.float.id,
+                    string: self.string.id,
+                    array: self.array.id,
+                }
             }
 
             pub fn type_fields(&self) -> impl Iterator<Item = (&'static str, TypeRef)> {
@@ -137,8 +157,9 @@ macro_rules! prelude_bindings {
 
 prelude_bindings! {
     types: [
-        int = INT, float = FLOAT, string = STRING, bool = BOOL, array = ARRAY,
-        binary = BINARY, nil = NIL, option = OPTION, result = RESULT,
+        int = (INT, 0), float = (FLOAT, 0), string = (STRING, 0), bool = (BOOL, 0),
+        array = (ARRAY, 1), binary = (BINARY, 0), nil = (NIL, 0),
+        option = (OPTION, 1), result = (RESULT, 2),
     ],
     ctors: [
         true_ = (TRUE, bool, 0),
@@ -172,13 +193,27 @@ mod tests {
     /// `register_prelude` would emit if `True` were missing.
     #[test]
     fn ctor_shape_mismatch_message() {
-        // Build an env that defines every prelude type (so type lookups pass)
-        // but no constructors, to exercise the second failure mode.
+        // Build an env that defines every prelude type with the correct arity
+        // (so type lookups pass) but no constructors, to exercise the second
+        // failure mode.
         let mut env = new_env();
-        for n in PreludeBindings::TYPE_NAMES {
-            env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::EMPTY);
+        for &(n, arity) in PreludeBindings::TYPE_NAMES {
+            env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::new(0, arity as u16));
         }
         let err = PreludeBindings::capture(&env).unwrap_err();
         assert_eq!(err, "prelude: constructor 'True' is required");
+    }
+
+    /// A prelude type declared with the wrong number of parameters (e.g.
+    /// `type Array` instead of `type Array(a)`) must fail here, not surface as
+    /// a confused unify error the first time an array literal is typed.
+    #[test]
+    fn type_arity_mismatch_message() {
+        let mut env = new_env();
+        for &(n, _) in PreludeBindings::TYPE_NAMES {
+            env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::EMPTY);
+        }
+        let err = PreludeBindings::capture(&env).unwrap_err();
+        assert_eq!(err, "prelude: type 'Array' must have arity 1, found 0");
     }
 }

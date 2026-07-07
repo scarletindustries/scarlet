@@ -29,18 +29,21 @@ impl Compiler {
         //    visible everywhere without an explicit import.
         let at = Span::DUMMY;
         let path = module::al_prelude();
-        self.load_module(&path, at);
+        if !self.load_module(&path, at) {
+            return;
+        }
         let key = module::path_key(&path);
-        if let Some(iface) = self.module_table.get(&key) {
-            for name in iface.types.keys() {
+        let Some(iface) = self.module_table.get(&key) else {
+            return;
+        };
+        for name in iface.types.keys() {
+            self.reserved.insert(name.clone());
+        }
+        for (name, ev) in &iface.values {
+            if matches!(ev.scheme.kind, ValueKind::Constructor { .. }) {
                 self.reserved.insert(name.clone());
             }
-            for (name, ev) in &iface.values {
-                if matches!(ev.scheme.kind, ValueKind::Constructor { .. }) {
-                    self.reserved.insert(name.clone());
-                }
-                self.env.define(name, ev.scheme);
-            }
+            self.env.define(name, ev.scheme);
         }
 
         // 2. Capture strict bindings. After this, every identity check in the
@@ -50,12 +53,7 @@ impl Compiler {
         match PreludeBindings::capture(&self.env) {
             Ok(b) => {
                 self.prelude = b;
-                self.engine.set_prim_ids(crate::types::PrimIds {
-                    int: self.prelude.int.id,
-                    float: self.prelude.float.id,
-                    string: self.prelude.string.id,
-                    array: self.prelude.array.id,
-                });
+                self.engine.set_prim_ids(self.prelude.prim_ids());
             }
             Err(msg) => self.error(msg, at),
         }
