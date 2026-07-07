@@ -19,7 +19,7 @@
 // magnitudes below 9.2 * 10^18 and scales at or below 18. `parse` rejects
 // inputs that would overflow rather than wrapping.
 
-import al/binary
+import al/binary.{Dec}
 import al/float
 import al/int
 import al/option
@@ -264,7 +264,7 @@ fn tail(b Binary) Binary {
 
 fn parse_unsigned(b Binary) Option(Decimal) {
 	match binary.index_of(b, <<'.'>>, 0) {
-		None -> match binary.parse_int(b, 10) {
+		None -> match binary.parse_int(b, Dec) {
 			Some(n) -> Some(Decimal(n, 0))
 			None -> None
 		}
@@ -278,8 +278,8 @@ fn parse_unsigned(b Binary) Option(Decimal) {
 
 fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 	k = binary.byte_size(frac)
-	match binary.parse_int(whole, 10) {
-		Some(w) if k <= 18 -> match binary.parse_int(frac, 10) {
+	match binary.parse_int(whole, Dec) {
+		Some(w) if k <= 18 -> match binary.parse_int(frac, Dec) {
 			// w * 10^k + f overflows Int exactly when w exceeds
 			// (Int max - f) / 10^k; wrapping would corrupt the value.
 			Some(f) if w <= { 9223372036854775807 - f } / pow10(k) ->

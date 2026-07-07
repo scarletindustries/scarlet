@@ -36,8 +36,15 @@ pub fn index_of(haystack Binary, needle Binary, from Int) Option(Int)
 @vm(binary__byte_at)
 pub fn byte_at(b Binary, i Int) Int
 
+// The bases `parse_int` / `from_int_ascii` accept. A closed sum type, so a
+// caller cannot request base 8 (which used to silently render as base 10).
+pub type Radix {
+	Dec
+	Hex
+}
+
 @vm(binary__parse_int)
-pub fn parse_int(b Binary, radix Int) Option(Int)
+pub fn parse_int(b Binary, radix Radix) Option(Int)
 
 @vm(binary__eq_ignore_ascii_case)
 pub fn eq_ignore_ascii_case(a Binary, b Binary) Bool
@@ -46,4 +53,4 @@ pub fn eq_ignore_ascii_case(a Binary, b Binary) Bool
 pub fn to_ascii_lower(b Binary) Binary
 
 @vm(binary__from_int_ascii)
-pub fn from_int_ascii(n Int, radix Int) Binary
+pub fn from_int_ascii(n Int, radix Radix) Binary

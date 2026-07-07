@@ -1308,10 +1308,10 @@ fn stdlib_binary_ascii_builtins() {
          i = binary.index_of(binary.from_string('abc'), binary.from_string('b'), 0) or 0\n\
          println(i)\n",
     );
-    // parse_int : (Binary, Int) -> Option(Int)
+    // parse_int : (Binary, Radix) -> Option(Int)
     check_ok(
-        "import al/binary\n\
-         n = binary.parse_int(binary.from_string('42'), 10) or 0\n\
+        "import al/binary.{Dec}\n\
+         n = binary.parse_int(binary.from_string('42'), Dec) or 0\n\
          println(n)\n",
     );
     // eq_ignore_ascii_case : (Binary, Binary) -> Bool
@@ -1324,10 +1324,10 @@ fn stdlib_binary_ascii_builtins() {
         "import al/binary\n\
          println(binary.to_string(binary.to_ascii_lower(binary.from_string('AB'))))\n",
     );
-    // from_int_ascii : (Int, Int) -> Binary
+    // from_int_ascii : (Int, Radix) -> Binary
     check_ok(
-        "import al/binary\n\
-         println(binary.to_string(binary.from_int_ascii(255, 16)))\n",
+        "import al/binary.{Hex}\n\
+         println(binary.to_string(binary.from_int_ascii(255, Hex)))\n",
     );
 }
 

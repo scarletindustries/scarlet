@@ -19,6 +19,7 @@ use std::sync::Arc;
 use al_core::bytecode::{BinaryRef, Value};
 use al_core::heap::ProcHeap;
 
+use super::text::Radix;
 use super::{PreludeTemplates, VmError, VmResult, int_to_ascii, parse_int_ascii};
 
 /// Total request-head size cap (request line + all header fields), mirrored by
@@ -373,7 +374,7 @@ pub(super) fn framing(
             let parsed = match field_bytes(&v) {
                 Some(bytes) => {
                     let leading_zero = bytes.len() > 1 && bytes[0] == b'0';
-                    parse_int_ascii(&bytes, 10).filter(|_| !leading_zero)
+                    parse_int_ascii(&bytes, Radix::Dec).filter(|_| !leading_zero)
                 }
                 None => return Err(not_headers("h1.framing")),
             };
@@ -458,7 +459,7 @@ fn chunk_decode_window(
         // everything before the first ';'. The size itself is strict 1*HEXDIG —
         // no sign, no whitespace — and overflow comes back as None.
         let size_end = memchr::memchr(b';', line).unwrap_or(line.len());
-        let Some(size) = parse_int_ascii(&line[..size_end], 16) else {
+        let Some(size) = parse_int_ascii(&line[..size_end], Radix::Hex) else {
             return chunked_bad(t, a, 400);
         };
 
@@ -577,7 +578,7 @@ pub(super) fn serialize_head(
     let est = headers_val.as_array().map_or(0, |arr| arr.len());
     let mut out: Vec<u8> = Vec::with_capacity(64 + reason_bytes.len() + est * 64);
     out.extend_from_slice(b"HTTP/1.1 ");
-    out.extend_from_slice(int_to_ascii(code, 10).as_bytes());
+    out.extend_from_slice(int_to_ascii(code, Radix::Dec).as_bytes());
     out.push(b' ');
     out.extend_from_slice(&reason_bytes);
     out.extend_from_slice(b"\r\n");

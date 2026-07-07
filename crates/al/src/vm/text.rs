@@ -75,7 +75,7 @@ impl VM {
     pub(super) fn int_to_string(&mut self) -> VmResult<()> {
         // i64::MIN renders in 20 bytes; that is the ceiling.
         let n = self.pop_int("int.to_string")?;
-        let digits = int_to_ascii(n, 10);
+        let digits = int_to_ascii(n, Radix::Dec);
         let v = Value::str_in(&mut self.heap, digits.as_str());
         self.stack.push(v);
         Ok(())
@@ -152,12 +152,10 @@ impl VM {
 
     /// `Op::BinConcatN` — pop the top `n` binaries, push their concatenation.
     /// Emitted for multi-segment `<<>>` literals: the bit length is summed
-    /// while all operands are still rooted on the stack, the backing is
-    /// allocated once, and every source byte is copied exactly once — the
-    /// binary mirror of the `StrConcatN` arm, replacing the `BinAppend` chain
-    /// that re-copied the accumulated prefix per segment.
+    /// first, the backing is allocated once, and every source byte is copied
+    /// exactly once — the binary mirror of the `StrConcatN` arm, replacing the
+    /// `BinAppend` chain that re-copied the accumulated prefix per segment.
     pub(super) fn bin_concat_n(&mut self, n: usize) -> VmResult<()> {
-        // One fresh box; the concatenated bytes live off-heap.
         let base = self.operand_base(n)?;
         let mut total_bits = 0u64;
         let mut aligned = true;
@@ -346,14 +344,12 @@ impl VM {
     #[cold]
     #[inline(never)]
     pub(super) fn bin_parse_int(&mut self) -> VmResult<()> {
-        // Some(Int) wrapper, plus a boxed big int for a 19-digit
-        // parse.
-        let radix = self.pop_int("binary.parse_int")?;
+        let radix = self.pop_radix("binary.parse_int")?;
         let b_v = self.pop_binary("binary.parse_int")?;
         let parsed = parse_int_ascii(&bin_ref(&b_v).full_bytes(), radix);
         let v = match parsed {
             Some(n) => {
-                let n = self.int_value(n);
+                let n = self.boxed_int(n);
                 self.make_some(n)
             }
             None => self.make_none(),
@@ -390,19 +386,28 @@ impl VM {
     #[cold]
     #[inline(never)]
     pub(super) fn bin_from_int_ascii(&mut self) -> VmResult<()> {
-        let radix = self.pop_int("binary.from_int_ascii")?;
+        let radix = self.pop_radix("binary.from_int_ascii")?;
         let n = self.pop_int("binary.from_int_ascii")?;
         let v = Value::binary_from_slice_in(&mut self.heap, int_to_ascii(n, radix).as_bytes());
         self.stack.push(v);
         Ok(())
     }
 
+    /// Pop an `al/binary.Radix` enum value. Once past the AL type-checker only
+    /// `Dec`/`Hex` can appear on the stack, so the `_` arm is a broken-invariant
+    /// guard, not a user-reachable error.
+    fn pop_radix(&mut self, op: &'static str) -> VmResult<Radix> {
+        let v = self.pop()?;
+        match v.as_enum().map(|e| e.variant_name()) {
+            Some("Dec") => Ok(Radix::Dec),
+            Some("Hex") => Ok(Radix::Hex),
+            _ => Err(VmError::type_mismatch(op, "Radix", &v)),
+        }
+    }
+
     // --- HTTP protocol builtins ------------------------------------------------
     //
-    // `al/http/h1` and `al/http/headers` hot paths; see `vm::http`. Budgets
-    // are ensured from pre-scans of the rooted operands; the construction
-    // itself happens in `vm::http` — a charge below a correct budget is
-    // always safe.
+    // `al/http/h1` and `al/http/headers` hot paths; see `vm::http`.
 
     #[cold]
     #[inline(never)]
@@ -470,25 +475,41 @@ impl VM {
     }
 }
 
-/// Parse ASCII bytes as an integer in radix 10 or 16 (both hex cases).
-/// Returns `None` for an empty input, any non-digit byte, an unsupported
-/// radix, or on overflow — the multiply/add are checked so a value that
-/// would wrap (e.g. an oversized `Content-Length`) is rejected rather than
-/// silently truncated by AL's wrapping arithmetic.
-pub(super) fn parse_int_ascii(bytes: &[u8], radix: i64) -> Option<i64> {
+/// The two bases the ASCII int helpers support. Mirrors `al/binary.Radix`
+/// exactly, so an unsupported base is unrepresentable on both sides — no
+/// silent base-10 fallback and no `_ => None` arm to keep in sync.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Radix {
+    Dec,
+    Hex,
+}
+
+impl Radix {
+    #[inline]
+    fn base(self) -> i64 {
+        match self {
+            Radix::Dec => 10,
+            Radix::Hex => 16,
+        }
+    }
+}
+
+/// Parse ASCII bytes as an integer in the given [`Radix`] (both hex cases).
+/// Returns `None` for an empty input, any non-digit byte, or on overflow —
+/// the multiply/add are checked so a value that would wrap (e.g. an oversized
+/// `Content-Length`) is rejected rather than silently truncated by AL's
+/// wrapping arithmetic.
+pub(super) fn parse_int_ascii(bytes: &[u8], radix: Radix) -> Option<i64> {
     if bytes.is_empty() {
         return None;
     }
-    let base: i64 = match radix {
-        10 | 16 => radix,
-        _ => return None,
-    };
+    let base = radix.base();
     let mut acc: i64 = 0;
     for &c in bytes {
         let digit = match c {
             b'0'..=b'9' => (c - b'0') as i64,
-            b'a'..=b'f' if base == 16 => (c - b'a' + 10) as i64,
-            b'A'..=b'F' if base == 16 => (c - b'A' + 10) as i64,
+            b'a'..=b'f' if radix == Radix::Hex => (c - b'a' + 10) as i64,
+            b'A'..=b'F' if radix == Radix::Hex => (c - b'A' + 10) as i64,
             _ => return None,
         };
         acc = acc.checked_mul(base)?.checked_add(digit)?;
@@ -515,12 +536,11 @@ impl IntAscii {
     }
 }
 
-/// Render an `Int` as ASCII digits in radix 10 or 16 (lowercase hex),
+/// Render an `Int` as ASCII digits in the given [`Radix`] (lowercase hex),
 /// without a `to_string` round-trip or heap allocation. Handles zero,
-/// negatives, and `i64::MIN` (via `unsigned_abs`). An unsupported radix
-/// falls back to 10.
-pub(super) fn int_to_ascii(n: i64, radix: i64) -> IntAscii {
-    let base: u64 = if radix == 16 { 16 } else { 10 };
+/// negatives, and `i64::MIN` (via `unsigned_abs`).
+pub(super) fn int_to_ascii(n: i64, radix: Radix) -> IntAscii {
+    let base = radix.base() as u64;
     let mut buf = [0u8; 20];
     let mut start = buf.len();
     if n == 0 {

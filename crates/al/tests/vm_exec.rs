@@ -240,13 +240,13 @@ fn binary_index_of() {
 #[test]
 fn binary_parse_int() {
     run_outputs(
-        "import al/binary\n\
-         println(binary.parse_int(binary.from_string('255'), 10))\n\
-         println(binary.parse_int(binary.from_string('ff'), 16))\n\
-         println(binary.parse_int(binary.from_string('FF'), 16))\n\
-         println(binary.parse_int(binary.from_string('99999999999999999999'), 10))\n\
-         println(binary.parse_int(binary.from_string('12x'), 10))\n\
-         println(binary.parse_int(binary.from_string(''), 10))\n",
+        "import al/binary.{Dec, Hex}\n\
+         println(binary.parse_int(binary.from_string('255'), Dec))\n\
+         println(binary.parse_int(binary.from_string('ff'), Hex))\n\
+         println(binary.parse_int(binary.from_string('FF'), Hex))\n\
+         println(binary.parse_int(binary.from_string('99999999999999999999'), Dec))\n\
+         println(binary.parse_int(binary.from_string('12x'), Dec))\n\
+         println(binary.parse_int(binary.from_string(''), Dec))\n",
         "Some(255)\nSome(255)\nSome(255)\nNone\nNone\nNone\n",
     );
 }
@@ -280,12 +280,12 @@ fn binary_to_ascii_lower() {
 #[test]
 fn binary_from_int_ascii() {
     run_outputs(
-        "import al/binary\n\
-         println(binary.to_string(binary.from_int_ascii(255, 10)))\n\
-         println(binary.to_string(binary.from_int_ascii(255, 16)))\n\
-         println(binary.to_string(binary.from_int_ascii(0, 10)))\n\
-         println(binary.to_string(binary.from_int_ascii(0 - 42, 10)))\n\
-         println(binary.parse_int(binary.from_int_ascii(4096, 16), 16))\n",
+        "import al/binary.{Dec, Hex}\n\
+         println(binary.to_string(binary.from_int_ascii(255, Dec)))\n\
+         println(binary.to_string(binary.from_int_ascii(255, Hex)))\n\
+         println(binary.to_string(binary.from_int_ascii(0, Dec)))\n\
+         println(binary.to_string(binary.from_int_ascii(0 - 42, Dec)))\n\
+         println(binary.parse_int(binary.from_int_ascii(4096, Hex), Hex))\n",
         "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nSome(4096)\n",
     );
 }

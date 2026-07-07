@@ -18,7 +18,7 @@ import al/http/headers.{Header, Headers}
 import al/net.{Server}
 import al/net/socket.{Socket}
 import al/net/error.{NetError}
-import al/binary
+import al/binary.{Dec}
 import al/int
 
 // The HTTP/1.1 server core: the typed Request/Response surface a handler sees,
@@ -127,7 +127,7 @@ pub fn text(s String) Response {
 
 fn text_response(code Int, s String) Response {
 	bin = binary.from_string(s)
-	len = binary.from_int_ascii(binary.byte_size(bin), 10)
+	len = binary.from_int_ascii(binary.byte_size(bin), Dec)
 	// Built as a literal: these two names cannot collide, so there is nothing
 	// for headers.set's replace-or-append walk to do.
 	hdrs = [

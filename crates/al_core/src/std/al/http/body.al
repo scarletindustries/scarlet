@@ -1,4 +1,4 @@
-import al/binary
+import al/binary.{Hex}
 import al/int
 import al/net/socket.{Socket}
 import al/net/error.{NetError, UnexpectedEof, MessageTooLarge}
@@ -154,7 +154,7 @@ pub fn drain_chunked(body Body, sock Socket) Result(Nil, NetError) {
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
 			0 -> drain_chunked(next, sock)
 			size -> {
-				header = binary.append(binary.from_int_ascii(size, 16), CRLF)
+				header = binary.append(binary.from_int_ascii(size, Hex), CRLF)
 				match socket.write_parts(sock, [header, data, CRLF]) {
 					Ok(_) -> drain_chunked(next, sock)
 					Err(e) -> Err(e)
@@ -185,7 +185,7 @@ pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, 
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
 			0 -> drain_chunked_with_head(head, next, sock)
 			size -> {
-				header = binary.append(binary.from_int_ascii(size, 16), CRLF)
+				header = binary.append(binary.from_int_ascii(size, Hex), CRLF)
 				match socket.write_parts(sock, [head, header, data, CRLF]) {
 					Ok(_) -> drain_chunked(next, sock)
 					Err(e) -> Err(e)
