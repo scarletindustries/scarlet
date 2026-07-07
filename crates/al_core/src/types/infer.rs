@@ -1217,9 +1217,8 @@ impl InferEngine {
     }
 
     fn generalize_impl(&mut self, ty: Ty, ignore_level: bool, kind: ValueKind) -> Scheme {
-        let mut ids: Vec<i32> = Vec::new();
-        let mut seen: HashSet<i32> = HashSet::new();
-        self.collect_generalizable(ty, ignore_level, &mut ids, &mut seen);
+        let mut ids: IndexSet<i32> = IndexSet::new();
+        self.collect_generalizable(ty, ignore_level, &mut ids);
         self.assign_names(&ids);
         // Close the scheme: rewrite each generalized Var to its Bound index and
         // snapshot its constraint + display name. After this the closed type
@@ -1252,15 +1251,12 @@ impl InferEngine {
     /// Replace every `Var(id)` whose representative is a `Generic` listed in
     /// `ids` with `Bound(idx)` of its position, fully resolving links along
     /// the way.
-    fn close_over(&mut self, ty: Ty, ids: &[i32]) -> Ty {
-        let index: HashMap<i32, u32> = ids
-            .iter()
-            .enumerate()
-            .map(|(ix, &id)| (id, ix as u32))
-            .collect();
+    fn close_over(&mut self, ty: Ty, ids: &IndexSet<i32>) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => match e.root_var(id) {
-                RootVarState::Generic { id: gid, .. } => index.get(&gid).map(|&ix| e.mk_bound(ix)),
+                RootVarState::Generic { id: gid, .. } => {
+                    ids.get_index_of(&gid).map(|ix| e.mk_bound(ix as u32))
+                }
                 RootVarState::Unbound { .. } => None,
             },
             _ => None,
@@ -1350,7 +1346,7 @@ impl InferEngine {
         kids
     }
 
-    fn assign_names(&mut self, quantified: &[i32]) {
+    fn assign_names(&mut self, quantified: &IndexSet<i32>) {
         let mut taken: HashSet<StrId> = HashSet::new();
         for qvar in quantified {
             if let Some(&name) = self.var_names.get(qvar) {
@@ -1378,8 +1374,7 @@ impl InferEngine {
         &mut self,
         ty: Ty,
         ignore_level: bool,
-        quantified: &mut Vec<i32>,
-        seen: &mut HashSet<i32>,
+        quantified: &mut IndexSet<i32>,
     ) {
         let r = self.find(ty);
         match self.node(r) {
@@ -1388,23 +1383,19 @@ impl InferEngine {
                     if ignore_level || level > self.current_level =>
                 {
                     self.vars[id as usize] = TyVarState::Generic { id, constraint };
-                    if seen.insert(id) {
-                        quantified.push(id);
-                    }
+                    quantified.insert(id);
                 }
                 RootVarState::Generic { id: gid, .. } => {
-                    if seen.insert(gid) {
-                        quantified.push(gid);
-                    }
+                    quantified.insert(gid);
                 }
                 _ => {}
             },
-            TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, quantified, seen),
+            TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, quantified),
             TypeNode::Fun { params, ret } => {
-                self.collect_slice(params, ignore_level, quantified, seen);
-                self.collect_generalizable(ret, ignore_level, quantified, seen);
+                self.collect_slice(params, ignore_level, quantified);
+                self.collect_generalizable(ret, ignore_level, quantified);
             }
-            TypeNode::Tuple { elems } => self.collect_slice(elems, ignore_level, quantified, seen),
+            TypeNode::Tuple { elems } => self.collect_slice(elems, ignore_level, quantified),
             TypeNode::Bound(_) => {}
         }
     }
@@ -1413,12 +1404,11 @@ impl InferEngine {
         &mut self,
         sl: ArenaSlice<pool::Children>,
         ignore_level: bool,
-        quantified: &mut Vec<i32>,
-        seen: &mut HashSet<i32>,
+        quantified: &mut IndexSet<i32>,
     ) {
         for i in sl.range() {
             let k = self.children[i];
-            self.collect_generalizable(k, ignore_level, quantified, seen);
+            self.collect_generalizable(k, ignore_level, quantified);
         }
     }
 
