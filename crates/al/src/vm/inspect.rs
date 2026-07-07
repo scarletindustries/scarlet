@@ -107,20 +107,20 @@ fn join_inline(out: &mut String, xs: &[Value], program: &Program) {
 /// Body of an expanded container: one line per element, indented one level
 /// past `n`, closing delimiter back at `n`. The caller has already written
 /// the opening delimiter.
-fn block_body(
+fn block_body<T>(
     out: &mut String,
     close: char,
     n: usize,
-    count: usize,
-    write_line: &mut dyn FnMut(usize, &mut String),
+    items: impl Iterator<Item = T>,
+    mut write_line: impl FnMut(T, &mut String),
 ) {
     out.push('\n');
-    for i in 0..count {
+    for (i, item) in items.enumerate() {
         if i > 0 {
             out.push_str(",\n");
         }
         push_indent(out, n + 1);
-        write_line(i, out);
+        write_line(item, out);
     }
     out.push('\n');
     push_indent(out, n);
@@ -131,20 +131,22 @@ fn block_body(
 /// wrapped six elements per line at indent depth `n`. Streams the flat
 /// attempt into `out` and bails as soon as it exceeds the budget, then
 /// truncates and re-renders wrapped — each leaf is written at most twice.
-fn wrap_six(
+/// `make_iter` is called once per pass so the wrapped retry restarts from
+/// the front without the caller having to buffer elements.
+fn wrap_six<T, I: Iterator<Item = T>>(
     out: &mut String,
     n: usize,
-    count: usize,
-    write_elem: &mut dyn FnMut(usize, &mut String),
+    mut make_iter: impl FnMut() -> I,
+    mut write_elem: impl FnMut(T, &mut String),
 ) {
     let start = out.len();
     out.push('[');
     let mut fits = true;
-    for i in 0..count {
+    for (i, item) in make_iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        write_elem(i, out);
+        write_elem(item, out);
         if out.len() - start > 80 {
             fits = false;
             break;
@@ -159,7 +161,7 @@ fn wrap_six(
     out.truncate(start);
     out.push_str("[\n");
     push_indent(out, n + 1);
-    for i in 0..count {
+    for (i, item) in make_iter().enumerate() {
         if i > 0 {
             if i % 6 == 0 {
                 out.push_str(", \n");
@@ -168,7 +170,7 @@ fn wrap_six(
                 out.push_str(", ");
             }
         }
-        write_elem(i, out);
+        write_elem(item, out);
     }
     out.push('\n');
     push_indent(out, n);
@@ -215,9 +217,14 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
                     out.push(']');
                 }
                 Some(_) if count == 0 => out.push_str("[]"),
-                Some(n) => wrap_six(out, n, count, &mut |i, out| {
-                    let _ = write!(out, "{}", a + i as i64);
-                }),
+                Some(n) => wrap_six(
+                    out,
+                    n,
+                    || 0..count,
+                    |i, out| {
+                        let _ = write!(out, "{}", a + i as i64);
+                    },
+                ),
             }
         }
         ValueView::Nil => out.push_str("Nil"),
@@ -248,10 +255,10 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
                 Some(n) if !payload.iter().all(is_simple_value) => {
                     out.push_str(e.variant_name());
                     out.push_str(" {");
-                    block_body(out, '}', n, payload.len(), &mut |i, out| {
-                        out.push_str(str_ref(&labels[i]));
+                    block_body(out, '}', n, labels.iter().zip(payload), |(l, v), out| {
+                        out.push_str(str_ref(l));
                         out.push_str(": ");
-                        inspect_impl(&payload[i], program, Some(n + 1), out);
+                        inspect_impl(v, program, Some(n + 1), out);
                     });
                 }
                 _ => {
@@ -275,8 +282,8 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
                 Some(n) if !payload.iter().all(is_simple_value) => {
                     out.push_str(e.variant_name());
                     out.push('(');
-                    block_body(out, ')', n, payload.len(), &mut |i, out| {
-                        inspect_impl(&payload[i], program, Some(n + 1), out);
+                    block_body(out, ')', n, payload.iter(), |v, out| {
+                        inspect_impl(v, program, Some(n + 1), out);
                     });
                 }
                 _ => {
@@ -306,36 +313,41 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
                     out.truncate(start);
                 }
                 out.push('(');
-                block_body(out, ')', n, t.len(), &mut |i, out| {
-                    inspect_impl(&t[i], program, Some(n + 1), out);
+                block_body(out, ')', n, t.iter(), |v, out| {
+                    inspect_impl(v, program, Some(n + 1), out);
                 });
             }
         },
-        ValueView::Array(arr) => {
-            // The tree lacks slice APIs (chunks/&[Value]); materialise the
-            // word-sized handles into host memory once so elements can be
-            // indexed below. Only Value words are copied — the rendered text
-            // streams directly into `out`.
-            let arr: Vec<Value> = arr.iter().collect();
-            match indent {
-                None => {
-                    out.push('[');
-                    join_inline(out, &arr, program);
-                    out.push(']');
+        ValueView::Array(arr) => match indent {
+            // Stream elements straight from the persistent tree; the layout
+            // helpers consume iterators, so nothing is collected into host
+            // memory even for the wrap-six retry (it just restarts a fresh
+            // walk).
+            None => {
+                out.push('[');
+                for (i, v) in arr.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    inspect_impl(&v, program, None, out);
                 }
-                Some(_) if arr.is_empty() => out.push_str("[]"),
-                Some(n) if arr.iter().all(is_simple_value) => {
-                    wrap_six(out, n, arr.len(), &mut |i, out| {
-                        inspect_impl(&arr[i], program, None, out);
-                    });
-                }
-                Some(n) => {
-                    out.push('[');
-                    block_body(out, ']', n, arr.len(), &mut |i, out| {
-                        inspect_impl(&arr[i], program, Some(n + 1), out);
-                    });
-                }
+                out.push(']');
             }
-        }
+            Some(_) if arr.is_empty() => out.push_str("[]"),
+            Some(n) if arr.iter().all(|v| is_simple_value(&v)) => {
+                wrap_six(
+                    out,
+                    n,
+                    || arr.iter(),
+                    |v, out| inspect_impl(&v, program, None, out),
+                );
+            }
+            Some(n) => {
+                out.push('[');
+                block_body(out, ']', n, arr.iter(), |v, out| {
+                    inspect_impl(&v, program, Some(n + 1), out);
+                });
+            }
+        },
     }
 }
