@@ -87,7 +87,7 @@ pub(super) struct RootState {
 impl RootState {
     pub(super) fn new() -> Self {
         Self {
-            session: bytecode::IncrementalSession::new(crate::stdlib()),
+            session: bytecode::IncrementalSession::new(&crate::STDLIB),
             xrefs: WorkspaceXrefs::default(),
         }
     }

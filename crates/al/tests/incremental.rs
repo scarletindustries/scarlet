@@ -20,7 +20,7 @@ fn fresh_three_module_session(tag: &str) -> (Project, IncrementalSession) {
     p.write("b.al", B_SRC);
     p.write("a.al", A_SRC);
 
-    let mut s = IncrementalSession::new(al::stdlib());
+    let mut s = IncrementalSession::new(&al::STDLIB);
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success, "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "b + c compile on first check");
@@ -156,7 +156,7 @@ fn unrelated_module_keeps_type_id_base() {
     p.write("y.al", "pub type Y { Y }\npub fn g() Y { Y }\n");
     let entry = "import ./x\nimport ./y\n_a = x.f()\n_b = y.g()\n";
 
-    let mut s = IncrementalSession::new(al::stdlib());
+    let mut s = IncrementalSession::new(&al::STDLIB);
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success, "initial: {:?}", r.diagnostics);
 
@@ -325,7 +325,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     p.write("y.al", "pub type Y { Y }\npub fn g() Y { Y }\n");
     let entry = "import ./big\nimport ./y\n_a = big.f()\n_b = y.g()\n";
 
-    let mut s = IncrementalSession::new(al::stdlib());
+    let mut s = IncrementalSession::new(&al::STDLIB);
 
     // --- initial compile: big is small, so it fits inside its 256-id
     // reservation (fresh, reused = false, no overflow flag) and y is

@@ -3,12 +3,8 @@ use include_dir::{Dir, include_dir};
 static STD: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/std");
 
 pub fn lookup(path: &str) -> Option<&'static str> {
-    let file = if path == "al" {
-        "al.al".to_string()
-    } else {
-        format!("{path}.al")
-    };
-    STD.get_file(&file).and_then(|f| f.contents_utf8())
+    STD.get_file(format!("{path}.al"))
+        .and_then(|f| f.contents_utf8())
 }
 
 /// Every stdlib module path other than the prelude itself, sorted for

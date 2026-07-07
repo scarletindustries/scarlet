@@ -122,7 +122,7 @@ fn eval_input(input: &str, definitions: &[ast::Node]) -> EvalOutcome {
         span: point_span(1, 1),
     });
 
-    let result = bytecode::compile(&combined_ast, None, Some(crate::stdlib()));
+    let result = bytecode::compile(&combined_ast, None, Some(&crate::STDLIB));
 
     if !result.diagnostics.is_empty() {
         diagnostic::print_diagnostics(&result.diagnostics, input, "<repl>");

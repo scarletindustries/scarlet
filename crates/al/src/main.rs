@@ -20,8 +20,7 @@ use std::process;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use al::cli::{help, man};
-use al::stdlib;
-use al::{ast, bytecode, diagnostic, formatter, lsp, parser, repl, scanner, vm};
+use al::{STDLIB, ast, bytecode, diagnostic, formatter, lsp, parser, repl, scanner, vm};
 
 const VERSION: &str = include_str!("../../../VERSION");
 
@@ -125,7 +124,7 @@ fn compile_source(
     // external are permitted and prelude self-redefinition is suppressed.
     let result = match al::module::detect_stdlib_module(path) {
         Some(m) => bytecode::check_as_module(expr, base_dir, m),
-        None => f(expr, base_dir, Some(stdlib())),
+        None => f(expr, base_dir, Some(&STDLIB)),
     };
 
     report(&result.diagnostics, !result.success, file, entrypoint);

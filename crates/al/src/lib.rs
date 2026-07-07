@@ -25,11 +25,6 @@ pub mod vm;
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/stdlib_generated.rs"));
 }
-pub use generated::{NEXT_TYPE_ID, PRELUDE, RESERVED, STDLIB, STDLIB_LOCAL_COUNT, stdlib};
-
-/// The build-time precompiled stdlib as `&'static StaticStdlib`. Zero
-/// construction cost — every field is a `static` array reference.
-#[inline]
-pub fn stdlib() -> &'static StaticStdlib {
-    &STDLIB
-}
+/// `STDLIB` is the build-time precompiled stdlib; `stdlib` is the generated
+/// module of typed template handles. Both are zero-cost `static` data.
+pub use generated::{STDLIB, stdlib};
