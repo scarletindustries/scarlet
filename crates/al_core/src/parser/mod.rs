@@ -16,6 +16,17 @@ pub enum ParseContext {
     MatchArms,
 }
 
+/// Result of `synchronize()`: whether recovery stopped at the start of the
+/// next item inside the current construct, or ran through and consumed the
+/// construct's closing delimiter. Callers must handle `ConsumedCloser` by
+/// popping their own context and skipping the trailing `eat(close)`.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncOutcome {
+    AtItem,
+    ConsumedCloser,
+}
+
 pub struct ParseResult {
     pub ast: ast::BlockExpression,
     pub diagnostics: Vec<Diagnostic>,
@@ -28,7 +39,6 @@ pub struct Parser {
     context_stack: Vec<ParseContext>,
     prev_token_end_line: i32,
     prev_token_end_column: i32,
-    sync_iterations: i32,
     depth: u32,
 }
 
@@ -46,7 +56,6 @@ pub fn new_parser_from_tokens(tokens: Vec<Token>, scanner_diagnostics: Vec<Diagn
         context_stack: vec![ParseContext::TopLevel],
         prev_token_end_line: 0,
         prev_token_end_column: 0,
-        sync_iterations: 0,
         depth: 0,
     }
 }
@@ -100,10 +109,7 @@ impl Parser {
     }
 
     fn pop_context(&mut self) {
-        debug_assert!(
-            self.context_stack.len() > 1,
-            "context stack underflow — synchronize double-popped?"
-        );
+        debug_assert!(self.context_stack.len() > 1, "context stack underflow");
         if self.context_stack.len() > 1 {
             self.context_stack.pop();
         }
@@ -114,7 +120,7 @@ impl Parser {
     // context behind (which would misdirect every later `synchronize()`).
     // Use this for constructs that propagate errors via `?`; constructs that
     // recover in place (block/array/match) still use push/pop directly
-    // because their `synchronize()` may consume the closer and pop early.
+    // because they must act on the SyncOutcome from their `synchronize()`.
     fn with_context<T>(
         &mut self,
         ctx: ParseContext,
@@ -184,13 +190,18 @@ impl Parser {
         self.prev_token_end_column = sp.end_column;
     }
 
-    fn synchronize(&mut self) {
+    // Skips tokens until a plausible resumption point for the current context.
+    // The #[must_use] outcome tells the caller whether recovery consumed the
+    // context's closing delimiter: on `ConsumedCloser` the caller must pop its
+    // own context and skip its trailing `eat(close)`. `synchronize` never
+    // touches the context stack itself — the frame that pushed always pops.
+    fn synchronize(&mut self) -> SyncOutcome {
         let ctx = self.current_context();
-        self.sync_iterations = 0;
+        let mut iterations = 0u32;
 
         while self.kind() != Kind::Eof {
-            self.sync_iterations += 1;
-            if self.sync_iterations > 1000 {
+            iterations += 1;
+            if iterations > 1000 {
                 self.add_error(
                     "Parser recovery failed: too many recovery attempts. This is a bug in the parser."
                         .to_string(),
@@ -198,7 +209,7 @@ impl Parser {
                 while self.kind() != Kind::Eof {
                     self.advance();
                 }
-                return;
+                return SyncOutcome::AtItem;
             }
             let delim: Option<(Kind, &[Kind])> = match ctx {
                 ParseContext::TopLevel => {
@@ -212,15 +223,14 @@ impl Parser {
                             | Kind::PuncAt
                             | Kind::Identifier
                     ) {
-                        return;
+                        return SyncOutcome::AtItem;
                     }
                     None
                 }
                 ParseContext::Block => {
                     if self.kind() == Kind::PuncCloseBrace {
                         self.advance();
-                        self.pop_context();
-                        return;
+                        return SyncOutcome::ConsumedCloser;
                     }
                     if matches!(
                         self.kind(),
@@ -229,7 +239,7 @@ impl Parser {
                             | Kind::Keyword(Keyword::Fn)
                             | Kind::Identifier
                     ) {
-                        return;
+                        return SyncOutcome::AtItem;
                     }
                     None
                 }
@@ -244,32 +254,33 @@ impl Parser {
             if let Some((close, extra_stops)) = delim {
                 if self.kind() == close {
                     self.advance();
-                    self.pop_context();
-                    return;
+                    return SyncOutcome::ConsumedCloser;
                 }
                 if extra_stops.contains(&self.kind()) {
-                    return;
+                    return SyncOutcome::AtItem;
                 }
                 if self.kind() == Kind::PuncComma {
                     self.advance();
-                    return;
+                    return SyncOutcome::AtItem;
                 }
             }
 
             self.advance();
         }
+        SyncOutcome::AtItem
     }
 
     // Shared error-recovery step for top-level and block node loops: record the
     // diagnostic, skip to a synchronization point, and produce an error node
     // standing in for the unparseable region.
-    fn recover_node(&mut self, err: String, span: Span) -> ast::Node {
+    fn recover_node(&mut self, err: String, span: Span) -> (ast::Node, SyncOutcome) {
         self.add_error(err.clone());
-        self.synchronize();
-        ast::Node::Expression(ast::Expression::ErrorNode(ast::ErrorNode {
+        let outcome = self.synchronize();
+        let node = ast::Node::Expression(ast::Expression::ErrorNode(ast::ErrorNode {
             message: err,
             span,
-        }))
+        }));
+        (node, outcome)
     }
 
     fn advance(&mut self) {
@@ -446,7 +457,8 @@ impl Parser {
                     body.push(node)
                 }
                 Err(err) => {
-                    let node = self.recover_node(err, span);
+                    // TopLevel has no closing delimiter, so the outcome is always AtItem.
+                    let (node, _) = self.recover_node(err, span);
                     body.push(node);
                     continue;
                 }
@@ -811,8 +823,15 @@ impl Parser {
             match self.parse_node() {
                 Ok(node) => body.push(node),
                 Err(err) => {
-                    let node = self.recover_node(err, span);
+                    let (node, outcome) = self.recover_node(err, span);
                     body.push(node);
+                    if outcome == SyncOutcome::ConsumedCloser {
+                        self.pop_context();
+                        return Ok(ast::Expression::BlockExpression(ast::BlockExpression {
+                            body,
+                            span: self.span_from(block_span),
+                        }));
+                    }
                     continue;
                 }
             }
@@ -875,9 +894,8 @@ impl Parser {
                 Ok(elem) => elements.push(elem),
                 Err(err) => {
                     self.add_error(err.clone());
-                    self.synchronize();
-                    if self.current_context() != ParseContext::Array {
-                        // synchronize consumed the ] and popped context
+                    if self.synchronize() == SyncOutcome::ConsumedCloser {
+                        self.pop_context();
                         return Ok(ast::Expression::ArrayExpression(ast::ArrayExpression {
                             elements,
                             span: self.span_from(span),
@@ -1083,6 +1101,7 @@ impl Parser {
         self.push_context(ParseContext::MatchArms);
 
         let mut arms: Vec<ast::MatchArm> = Vec::new();
+        let mut closed = false;
 
         'arms: while self.kind() != Kind::PuncCloseBrace && self.kind() != Kind::Eof {
             let pattern = match self.parse_pattern() {
@@ -1090,7 +1109,10 @@ impl Parser {
                 Err(err) => {
                     let err_span = self.current_span();
                     self.add_error(err);
-                    self.synchronize();
+                    if self.synchronize() == SyncOutcome::ConsumedCloser {
+                        closed = true;
+                        break 'arms;
+                    }
                     match self.kind() {
                         Kind::PuncCloseBrace => break,
                         // Recovery stopped at this arm's `->`: fall through with
@@ -1108,7 +1130,10 @@ impl Parser {
                     Ok(e) => Some(e),
                     Err(err) => {
                         self.add_error(err);
-                        self.synchronize();
+                        if self.synchronize() == SyncOutcome::ConsumedCloser {
+                            closed = true;
+                            break 'arms;
+                        }
                         match self.kind() {
                             Kind::PuncCloseBrace => break,
                             Kind::PuncArrow => None,
@@ -1122,7 +1147,10 @@ impl Parser {
 
             if let Err(err) = self.eat(Kind::PuncArrow) {
                 self.add_error(err);
-                self.synchronize();
+                if self.synchronize() == SyncOutcome::ConsumedCloser {
+                    closed = true;
+                    break 'arms;
+                }
                 match self.kind() {
                     Kind::PuncCloseBrace => break,
                     Kind::PuncArrow => self.advance(),
@@ -1135,7 +1163,10 @@ impl Parser {
                 Ok(e) => e,
                 Err(err) => {
                     self.add_error(err.clone());
-                    self.synchronize();
+                    if self.synchronize() == SyncOutcome::ConsumedCloser {
+                        closed = true;
+                        break 'arms;
+                    }
                     if self.kind() == Kind::PuncCloseBrace {
                         break 'arms;
                     }
@@ -1161,7 +1192,9 @@ impl Parser {
         }
 
         self.pop_context();
-        self.eat(Kind::PuncCloseBrace)?;
+        if !closed {
+            self.eat(Kind::PuncCloseBrace)?;
+        }
 
         Ok(ast::Expression::MatchExpression(ast::MatchExpression {
             subject: Box::new(subject),
