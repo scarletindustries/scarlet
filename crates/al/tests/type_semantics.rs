@@ -48,14 +48,10 @@ fn type_alias_is_transparent() {
     );
 }
 
-#[test]
-fn unlabeled_field_in_def_is_rejected() {
-    // Every field in a type definition must carry a label.
-    check_rejects(
-        "type Wrap { Wrap(Int) }\n\
-         x = Wrap(1)\n",
-        "constructor fields must be labeled",
-    );
+reject_case! {
+    /// Every field in a type definition must carry a label.
+    unlabeled_field_in_def_is_rejected:
+        ("type Wrap { Wrap(Int) }\nx = Wrap(1)\n", "constructor fields must be labeled"),
 }
 
 // ===========================================================================
@@ -96,31 +92,12 @@ fn nullary_constructor_is_value() {
     );
 }
 
-// ===========================================================================
-// `if` requires `else`
-// ===========================================================================
-
-#[test]
-fn if_without_else_is_error() {
-    check_rejects(
-        "x = if True { 1 }\n\
-         println(x)\n",
-        "else",
-    );
-}
-
-// ===========================================================================
-// Parentheses are tuples-only
-// ===========================================================================
-
-#[test]
-fn empty_parens_is_parse_error() {
-    check_rejects("x = ()\nprintln(x)\n", "tuples need 2+ elements");
-}
-
-#[test]
-fn single_parens_is_parse_error() {
-    check_rejects("x = (5)\nprintln(x)\n", "single-element parens not allowed");
+reject_case! {
+    // `if` requires `else`
+    if_without_else_is_error: ("x = if True { 1 }\nprintln(x)\n", "else"),
+    // Parentheses are tuples-only
+    empty_parens_is_parse_error: ("x = ()\nprintln(x)\n", "tuples need 2+ elements"),
+    single_parens_is_parse_error: ("x = (5)\nprintln(x)\n", "single-element parens not allowed"),
 }
 
 #[test]
@@ -142,15 +119,10 @@ fn index_returns_option() {
     );
 }
 
-#[test]
-fn index_without_unwrap_is_option_typed() {
-    // `xs[0] + 1` should be rejected because `xs[0]` is `Option(Int)`, not `Int`.
-    check_rejects(
-        "xs = [10, 20, 30]\n\
-         y = xs[0] + 1\n\
-         println(y)\n",
-        "got 'Option(Int)'",
-    );
+reject_case! {
+    /// `xs[0] + 1` should be rejected because `xs[0]` is `Option(Int)`, not `Int`.
+    index_without_unwrap_is_option_typed:
+        ("xs = [10, 20, 30]\ny = xs[0] + 1\nprintln(y)\n", "got 'Option(Int)'"),
 }
 
 #[test]
@@ -304,12 +276,11 @@ fn nested_result_match_is_exhaustive() {
     );
 }
 
-#[test]
-fn nested_option_missing_inner_arm_reports_precise_witness() {
-    // Dropping `Some(None)` is genuinely non-exhaustive, and now that the inner
-    // `Option`'s variants are known the witness names it exactly instead of
-    // collapsing to `Some(_)`.
-    check_rejects(
+reject_case! {
+    /// Dropping `Some(None)` is genuinely non-exhaustive, and now that the inner
+    /// `Option`'s variants are known the witness names it exactly instead of
+    /// collapsing to `Some(_)`.
+    nested_option_missing_inner_arm_reports_precise_witness: (
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -317,15 +288,11 @@ fn nested_option_missing_inner_arm_reports_precise_witness() {
          }\n\
          println(r)\n",
         "Some(None)",
-    );
-}
-
-#[test]
-fn nested_option_redundant_wildcard_is_rejected() {
-    // Before the fix a `Some(_)` arm was *required* to silence a false
-    // non-exhaustiveness error; now the explicit inner arms already cover
-    // `Some(_)`, so that wildcard is correctly reported as dead code.
-    check_rejects(
+    ),
+    /// Before the fix a `Some(_)` arm was *required* to silence a false
+    /// non-exhaustiveness error; now the explicit inner arms already cover
+    /// `Some(_)`, so that wildcard is correctly reported as dead code.
+    nested_option_redundant_wildcard_is_rejected: (
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -335,7 +302,7 @@ fn nested_option_redundant_wildcard_is_rejected() {
          }\n\
          println(r)\n",
         "unreachable",
-    );
+    ),
 }
 
 #[test]
@@ -375,9 +342,8 @@ fn mutual_recursion_functions() {
 // Exhaustiveness — variants and fields
 // ===========================================================================
 
-#[test]
-fn unreachable_arm_is_error() {
-    check_rejects(
+reject_case! {
+    unreachable_arm_is_error: (
         "fn f(b Bool) Int {\n\
          \tmatch b {\n\
          \t\tTrue -> 1\n\
@@ -387,12 +353,8 @@ fn unreachable_arm_is_error() {
          }\n\
          f(True)\n",
         "unreachable",
-    );
-}
-
-#[test]
-fn ctor_pattern_missing_fields_without_spread_is_error() {
-    check_rejects(
+    ),
+    ctor_pattern_missing_fields_without_spread_is_error: (
         "type User { User(name String age Int email String) }\n\
          fn f(u User) String {\n\
          \tmatch u {\n\
@@ -401,7 +363,7 @@ fn ctor_pattern_missing_fields_without_spread_is_error() {
          }\n\
          f(User(name: 'a', age: 1, email: 'e'))\n",
         "missing field(s): age, email",
-    );
+    ),
 }
 
 #[test]
@@ -422,13 +384,9 @@ fn ctor_pattern_with_spread_is_ok() {
 // `or` typing
 // ===========================================================================
 
-#[test]
-fn or_on_non_option_result_is_rejected() {
-    check_rejects(
-        "x = 5 or 0\n\
-         println(x)\n",
-        "'or' requires the left side to be Option(_) or Result(_, _)",
-    );
+reject_case! {
+    or_on_non_option_result_is_rejected:
+        ("x = 5 or 0\nprintln(x)\n", "'or' requires the left side to be Option(_) or Result(_, _)"),
 }
 
 #[test]
@@ -447,24 +405,13 @@ fn or_on_result_unwraps_ok() {
 // Rigid type variables
 // ===========================================================================
 
-#[test]
-fn rigid_tyvar_body_mismatch_is_rejected() {
-    // Body returns concrete `Int` where signature promised `a`.
-    check_rejects(
-        "fn bad(x a) a { 1 }\n\
-         println(bad('s'))\n",
-        "Type mismatch: expected 'a', got 'Int'",
-    );
-}
-
-#[test]
-fn rigid_tyvar_same_var_unifies_args() {
-    // `f` declares both params as `a`, so `f(1, 's')` must be rejected.
-    check_rejects(
-        "fn f(x a, y a) a { x }\n\
-         println(f(1, 's'))\n",
-        "Type mismatch: expected 'Int', got 'String'",
-    );
+reject_case! {
+    /// Body returns concrete `Int` where signature promised `a`.
+    rigid_tyvar_body_mismatch_is_rejected:
+        ("fn bad(x a) a { 1 }\nprintln(bad('s'))\n", "Type mismatch: expected 'a', got 'Int'"),
+    /// `f` declares both params as `a`, so `f(1, 's')` must be rejected.
+    rigid_tyvar_same_var_unifies_args:
+        ("fn f(x a, y a) a { x }\nprintln(f(1, 's'))\n", "Type mismatch: expected 'Int', got 'String'"),
 }
 
 #[test]
@@ -523,39 +470,28 @@ fn ctor_record_update_overrides_and_projects() {
     );
 }
 
-#[test]
-fn ctor_record_update_at_most_one_spread() {
-    // A constructor record-update accepts a single `..base`; a second spread is
-    // rejected.
-    check_rejects(
+reject_case! {
+    /// A constructor record-update accepts a single `..base`; a second spread is
+    /// rejected.
+    ctor_record_update_at_most_one_spread: (
         "type P { P(name String age Int) }\n\
          base = P(name: 'al', age: 18)\n\
          older = P(..base, ..base)\n\
          println(older.age)\n",
         "Constructor call may have at most one spread",
-    );
-}
-
-#[test]
-fn spread_arg_in_plain_call_rejected() {
-    // Spread arguments only make sense in constructor record-update calls; in an
-    // ordinary function call they are a placement error.
-    check_rejects(
-        "fn f(a Int) Int { a }\n\
-         println(f(..[1]))\n",
+    ),
+    /// Spread arguments only make sense in constructor record-update calls; in an
+    /// ordinary function call they are a placement error.
+    spread_arg_in_plain_call_rejected: (
+        "fn f(a Int) Int { a }\nprintln(f(..[1]))\n",
         "Spread arguments are only allowed in constructor record-update calls",
-    );
-}
-
-#[test]
-fn labelled_arg_in_plain_call_rejected() {
-    // Labelled arguments are a constructor-only affordance; passing one to an
-    // ordinary function is a placement error.
-    check_rejects(
-        "fn f(a Int) Int { a }\n\
-         println(f(a: 1))\n",
+    ),
+    /// Labelled arguments are a constructor-only affordance; passing one to an
+    /// ordinary function is a placement error.
+    labelled_arg_in_plain_call_rejected: (
+        "fn f(a Int) Int { a }\nprintln(f(a: 1))\n",
         "Labelled arguments are only allowed in constructor calls",
-    );
+    ),
 }
 
 #[test]
@@ -594,21 +530,16 @@ fn match_guard_with_constructor() {
     );
 }
 
-#[test]
-fn match_guard_non_exhaustive_errors() {
-    check_rejects(
+reject_case! {
+    match_guard_non_exhaustive_errors: (
         "fn f(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x < 2 -> 'a'\n\
          \t}\n\
          }\n",
         "exhaustive",
-    );
-}
-
-#[test]
-fn match_guard_type_must_be_bool() {
-    check_rejects(
+    ),
+    match_guard_type_must_be_bool: (
         "fn f(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x -> 'a'\n\
@@ -616,7 +547,7 @@ fn match_guard_type_must_be_bool() {
          \t}\n\
          }\n",
         "Bool",
-    );
+    ),
 }
 
 #[test]
@@ -655,11 +586,10 @@ fn or_pattern_binding_before_or_in_tuple() {
     );
 }
 
-#[test]
-fn or_pattern_unequal_bindings_still_rejected() {
-    // The scoping fix must not relax the core invariant: every alternative of
-    // an or-pattern must bind exactly the same names.
-    check_rejects(
+reject_case! {
+    /// The scoping fix must not relax the core invariant: every alternative of
+    /// an or-pattern must bind exactly the same names.
+    or_pattern_unequal_bindings_still_rejected: (
         "type R { Good(v Int) Bad(v Int) }\n\
          fn h(r R) Int {\n\
          \tmatch r {\n\
@@ -668,7 +598,7 @@ fn or_pattern_unequal_bindings_still_rejected() {
          }\n\
          println(h(Good(1)))\n",
         "every alternative",
-    );
+    ),
 }
 
 #[test]
@@ -703,9 +633,8 @@ fn array_spread_literal() {
     );
 }
 
-#[test]
-fn array_concat_operator_removed() {
-    check_rejects("xs = [1] ++ [2]\nprintln(xs)\n", "Unexpected '++'");
+reject_case! {
+    array_concat_operator_removed: ("xs = [1] ++ [2]\nprintln(xs)\n", "Unexpected '++'"),
 }
 
 #[test]
@@ -772,9 +701,8 @@ fn bool_is_a_normal_two_ctor_type() {
     );
 }
 
-#[test]
-fn lowercase_true_is_just_an_identifier() {
-    check_rejects("x = true\n", "Unknown identifier");
+reject_case! {
+    lowercase_true_is_just_an_identifier: ("x = true\n", "Unknown identifier"),
 }
 
 #[test]
@@ -952,19 +880,12 @@ fn ctor_destructure_multi_field_ok() {
     );
 }
 
-#[test]
-fn ctor_destructure_refutable_rejected() {
-    check_rejects("Some(x) = Some(1)\nprintln(x)\n", "refutable");
-}
-
-#[test]
-fn ctor_destructure_nested_refutable_rejected() {
-    check_rejects(
-        "type Box { Box(value Option(Int)) }\n\
-         Box(Some(n)) = Box(Some(1))\n\
-         println(n)\n",
+reject_case! {
+    ctor_destructure_refutable_rejected: ("Some(x) = Some(1)\nprintln(x)\n", "refutable"),
+    ctor_destructure_nested_refutable_rejected: (
+        "type Box { Box(value Option(Int)) }\nBox(Some(n)) = Box(Some(1))\nprintln(n)\n",
         "refutable",
-    );
+    ),
 }
 
 // ===========================================================================
@@ -976,20 +897,8 @@ fn typed_discard_nil_println_ok() {
     run_outputs("Nil = println('x')\n", "x\n");
 }
 
-#[test]
-fn typed_discard_string_int_mismatch() {
-    check_rejects(
-        "String = 5\n",
-        "Type mismatch: expected 'String', got 'Int'",
-    );
-}
-
-#[test]
-fn typed_discard_int_string_mismatch() {
-    check_rejects("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'");
-}
-
-#[test]
-fn typed_discard_constructor_is_not_a_type() {
-    check_rejects("Some = 1\n", "'Some' is not a type");
+reject_case! {
+    typed_discard_string_int_mismatch: ("String = 5\n", "Type mismatch: expected 'String', got 'Int'"),
+    typed_discard_int_string_mismatch: ("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'"),
+    typed_discard_constructor_is_not_a_type: ("Some = 1\n", "'Some' is not a type"),
 }
