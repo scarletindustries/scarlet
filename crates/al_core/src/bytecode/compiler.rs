@@ -53,6 +53,11 @@ use crate::frozen::FrozenBuilder;
 use indexmap::IndexMap;
 use smallvec::SmallVec;
 
+/// Jump-placeholder list threaded through pattern emission. Most arms record
+/// only a handful of fail points, so an inline SmallVec avoids a heap alloc
+/// per arm/sub-pattern in the common case.
+type FailJumps = SmallVec<[i32; 8]>;
+
 use crate::module::{
     self, CachedModule, ModuleInterface, ModuleOrigin, ModulePath, ModuleSource, ModuleTable,
     ResolveError, source_hash,
@@ -1173,7 +1178,7 @@ impl Compiler {
         &mut self,
         type_id: TypeId,
         variant_name: &str,
-        fail_jumps: &mut Vec<i32>,
+        fail_jumps: &mut FailJumps,
     ) -> bool {
         if !self.prelude.bool.is(type_id) {
             return false;
@@ -1384,7 +1389,7 @@ impl Compiler {
                 for (i, pattern) in tdb.patterns.iter().enumerate() {
                     self.emit_arg(Op::PushLocal, temp);
                     self.emit_arg(Op::TupleIndex, i as i32);
-                    let mut fails: Vec<i32> = vec![];
+                    let mut fails = FailJumps::new();
                     self.emit_pattern(pattern, &mut fails);
                     if !fails.is_empty() {
                         self.error(
@@ -1473,7 +1478,7 @@ impl Compiler {
 
                 let temp = self.spill_temp();
                 self.emit_arg(Op::PushLocal, temp);
-                let mut fails: Vec<i32> = vec![];
+                let mut fails = FailJumps::new();
                 self.emit_pattern(&pattern, &mut fails);
                 self.patch_all(&fails);
             }
@@ -3471,19 +3476,21 @@ impl Compiler {
         let subject_slot = self.spill_temp();
 
         let result_ty = self.engine.fresh_var();
-        let mut end_jumps: Vec<i32> = vec![];
+        let mut end_jumps: SmallVec<[i32; 8]> = SmallVec::new();
         let mut any_pattern_err = false;
 
+        let mut b = PatternBindings::new();
+        let mut fail_jumps = FailJumps::new();
         for arm in &m.arms {
             self.push_block_scope();
 
-            let mut b = PatternBindings::new();
+            b.clear();
             if !self.type_pattern(&arm.pattern, subject_ty, &mut b) {
                 any_pattern_err = true;
             }
             self.bind_pattern_initials(&b);
 
-            let mut fail_jumps: Vec<i32> = vec![];
+            fail_jumps.clear();
             self.emit_arg(Op::PushLocal, subject_slot);
             self.emit_pattern(&arm.pattern, &mut fail_jumps);
 
@@ -3519,14 +3526,13 @@ impl Compiler {
             let all_pats: Vec<Pat> = m.arms.iter().map(|arm| um.lower(&arm.pattern)).collect();
             // Guarded arms don't contribute to exhaustiveness (the guard may be
             // false) and don't make later arms unreachable.
-            let unguarded: Vec<Pat> = m
+            let unguarded = m
                 .arms
                 .iter()
                 .zip(&all_pats)
                 .filter(|(arm, _)| arm.guard.is_none())
-                .map(|(_, p)| p.clone())
-                .collect();
-            if let Some(missing) = um.find_missing(&unguarded) {
+                .map(|(_, p)| p);
+            if let Some(missing) = um.find_missing(unguarded) {
                 self.error(
                     format!("Match is not exhaustive, missing: {}", missing),
                     m.subject.span(),
@@ -3541,7 +3547,7 @@ impl Compiler {
                     );
                 }
                 if arm.guard.is_none() {
-                    um.push(all_pats[i].clone());
+                    um.push(&all_pats[i]);
                 }
             }
         }
@@ -3925,7 +3931,7 @@ impl Compiler {
     /// the caller to patch. Variable bindings are stored to the local slot
     /// allocated for them by `compile_match` (looked up via `self.locals`), so
     /// `type_pattern` must have run for this arm beforehand.
-    fn emit_pattern(&mut self, pattern: &ast::Pattern, fail_jumps: &mut Vec<i32>) {
+    fn emit_pattern(&mut self, pattern: &ast::Pattern, fail_jumps: &mut FailJumps) {
         match pattern {
             ast::Pattern::Binary { segments, rest, .. } => {
                 self.emit_binary_pattern(segments, rest.as_ref(), fail_jumps);
@@ -4023,10 +4029,10 @@ impl Compiler {
             ast::Pattern::Or { patterns, .. } => {
                 let temp = self.spill_temp();
 
-                let mut matched_jumps: Vec<i32> = vec![];
+                let mut matched_jumps: SmallVec<[i32; 4]> = SmallVec::new();
                 let mut overrides_pushed = false;
                 for (i, alt) in patterns.iter().enumerate() {
-                    let mut alt_fails: Vec<i32> = vec![];
+                    let mut alt_fails = FailJumps::new();
                     self.emit_arg(Op::PushLocal, temp);
                     self.emit_pattern(alt, &mut alt_fails);
                     if i == 0 && patterns.len() > 1 {
@@ -4034,15 +4040,15 @@ impl Compiler {
                         // names; pin them to the slots the first alternative
                         // chose so the arm body reads a slot that every
                         // alternative actually wrote.
-                        let mut names = Vec::new();
-                        Self::pattern_bound_names(alt, &mut names);
-                        let mut map: HashMap<StrId, i32> = HashMap::with_capacity(names.len());
-                        for n in names {
-                            let id = self.engine.intern(&n);
-                            if let Some(e) = self.locals.get(&id) {
-                                map.insert(id, e.slot);
+                        let mut map: HashMap<StrId, i32> = HashMap::new();
+                        alt.for_each_binder(ast::OrAlternatives::First, &mut |bnd| {
+                            if let ast::PatternBinder::Name(ident) = bnd {
+                                let id = self.engine.intern(&ident.name);
+                                if let Some(e) = self.locals.get(&id) {
+                                    map.insert(id, e.slot);
+                                }
                             }
-                        }
+                        });
                         self.or_bind_overrides.push(map);
                         overrides_pushed = true;
                     }
@@ -4087,7 +4093,7 @@ impl Compiler {
         &mut self,
         segments: &[ast::BinSegmentPat],
         rest: Option<&ast::BinaryPatternRest>,
-        fail_jumps: &mut Vec<i32>,
+        fail_jumps: &mut FailJumps,
     ) {
         use BinOperand::{Const, Local};
 
@@ -4301,7 +4307,7 @@ impl Compiler {
         seg: &ast::BinSegmentPat,
         cursor: &mut Option<i64>,
         cursor_temp: i32,
-        fail_jumps: &mut Vec<i32>,
+        fail_jumps: &mut FailJumps,
     ) {
         self.emit_arg(Op::PushLocal, bin_temp);
         self.emit_push_cursor(*cursor, cursor_temp);
@@ -4404,22 +4410,11 @@ impl Compiler {
         (run > 0).then_some((bytes, bit_len, run))
     }
 
-    /// Collect every name a pattern binds, in source order. For an or-pattern
-    /// only the first alternative is walked — typing already enforces that all
-    /// alternatives bind the identical set.
-    fn pattern_bound_names(pattern: &ast::Pattern, out: &mut Vec<String>) {
-        pattern.for_each_binder(ast::OrAlternatives::First, &mut |b| {
-            if let ast::PatternBinder::Name(id) = b {
-                out.push(id.name.clone());
-            }
-        });
-    }
-
     fn emit_ctor_pattern(
         &mut self,
         name: &ast::Identifier,
         args: &[ast::PatternArg],
-        fail_jumps: &mut Vec<i32>,
+        fail_jumps: &mut FailJumps,
     ) {
         let Some((type_id, _, arity, field_labels, _)) = self.lookup_ctor(&name.name) else {
             // Typing already reported the error; consume the value and bail.

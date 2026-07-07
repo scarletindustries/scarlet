@@ -38,6 +38,12 @@ impl PatternBindings {
         }
     }
 
+    /// Reset for reuse across match arms, retaining allocated capacity.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+        self.initial.clear();
+    }
+
     /// Iterate the canonical bindings this pattern introduces, in insertion
     /// order. This is the read-only view the compiler uses to allocate locals
     /// once `type_pattern` has finished.
