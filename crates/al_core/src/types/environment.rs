@@ -151,7 +151,21 @@ enum Overwrite {
 
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    pub scopes: Vec<IndexMap<String, Scheme>>,
+    /// Flat name → scheme map. Nested lexical scopes are implemented via the
+    /// `scope_undo`/`scope_marks` undo log below rather than a stack of
+    /// per-scope `IndexMap`s, so `push_scope`/`pop_scope` allocate nothing for
+    /// the common empty scope and `lookup` is a single hash probe instead of
+    /// O(scope depth). Same pattern as `Compiler::locals`.
+    pub bindings: IndexMap<String, Scheme>,
+    /// For every `define` while at least one scope is open, `(entry index,
+    /// value before this define)`. `pop_scope` replays entries above the top
+    /// mark newest-first: `Some` restores the shadowed value in place; `None`
+    /// pops the entry (which is always the last — new keys are appended, and
+    /// reverse replay removes them in reverse append order, so `pop()` is
+    /// exact and index order is never perturbed).
+    scope_undo: Vec<(usize, Option<Scheme>)>,
+    /// `scope_undo.len()` captured at each `push_scope`.
+    scope_marks: Vec<usize>,
     /// Type lookup by SOURCE name — annotation resolution only, where lexical
     /// shadowing (an entry's `type Parsed` over the stdlib's) is the correct
     /// semantics. Semantic lookups (exhaustiveness, field access, hover
@@ -178,7 +192,12 @@ impl TypeEnv {
 
     pub fn watermark(&self) -> EnvWatermark {
         EnvWatermark {
-            root_scope: self.scopes.first().map(|s| s.len()).unwrap_or(0),
+            // Root-scope binding count: every `None` undo entry is a key that
+            // was appended while a nested scope was open, so subtracting them
+            // yields exactly what `bindings.len()` would be after popping all
+            // scopes — i.e. the persistent root layer `truncate_to` truncates.
+            root_scope: self.bindings.len()
+                - self.scope_undo.iter().filter(|(_, p)| p.is_none()).count(),
             type_info: self.type_info.len(),
             type_info_by_id: self.type_info_by_id.len(),
             definitions: self.definitions.len(),
@@ -189,10 +208,19 @@ impl TypeEnv {
     }
 
     pub fn truncate_to(&mut self, w: &EnvWatermark) {
-        self.scopes.truncate(1);
-        if let Some(root) = self.scopes.first_mut() {
-            root.truncate(w.root_scope);
+        // Discard all nested scopes: unwind the undo log fully so `bindings`
+        // holds exactly the root-scope state, then truncate that by length.
+        self.scope_marks.clear();
+        for (idx, prev) in self.scope_undo.drain(..).rev() {
+            match prev {
+                Some(s) => self.bindings[idx] = s,
+                None => {
+                    debug_assert_eq!(idx + 1, self.bindings.len());
+                    self.bindings.pop();
+                }
+            }
         }
+        self.bindings.truncate(w.root_scope);
         // Undo in-place overwrites first (newest first, so the oldest value of
         // a multiply-overwritten key wins), then truncate by length. A
         // restored entry that itself sits above the truncation point is
@@ -240,7 +268,9 @@ pub struct EnvWatermark {
 
 pub fn new_env() -> TypeEnv {
     TypeEnv {
-        scopes: vec![IndexMap::new()],
+        bindings: IndexMap::new(),
+        scope_undo: Vec::new(),
+        scope_marks: Vec::new(),
         type_info: IndexMap::new(),
         type_info_by_id: IndexMap::new(),
         definitions: IndexMap::new(),
@@ -252,20 +282,29 @@ pub fn new_env() -> TypeEnv {
 
 impl TypeEnv {
     pub fn push_scope(&mut self) {
-        self.scopes.push(IndexMap::new());
+        self.scope_marks.push(self.scope_undo.len());
     }
 
     pub fn pop_scope(&mut self) {
-        debug_assert!(self.scopes.len() > 1, "unbalanced pop_scope");
-        self.scopes.pop();
+        debug_assert!(!self.scope_marks.is_empty(), "unbalanced pop_scope");
+        if let Some(mark) = self.scope_marks.pop() {
+            for (idx, prev) in self.scope_undo.drain(mark..).rev() {
+                match prev {
+                    Some(s) => self.bindings[idx] = s,
+                    None => {
+                        debug_assert_eq!(idx + 1, self.bindings.len());
+                        self.bindings.pop();
+                    }
+                }
+            }
+        }
     }
 
-    #[allow(clippy::expect_used)] // `new_env` seeds one scope; `pop_scope` guards `len > 1`.
     pub fn define(&mut self, name: &str, scheme: Scheme) {
-        self.scopes
-            .last_mut()
-            .expect("TypeEnv.scopes is never empty")
-            .insert(name.to_string(), scheme);
+        let (idx, prev) = self.bindings.insert_full(name.to_string(), scheme);
+        if !self.scope_marks.is_empty() {
+            self.scope_undo.push((idx, prev));
+        }
     }
 
     pub fn define_at(&mut self, name: &str, scheme: Scheme, loc: DefinitionLocation) {
@@ -279,12 +318,7 @@ impl TypeEnv {
     }
 
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(scheme) = scope.get(name) {
-                return Some(scheme);
-            }
-        }
-        None
+        self.bindings.get(name)
     }
 
     pub fn store_doc(&mut self, name: &str, doc: String) {
@@ -332,12 +366,10 @@ impl TypeEnv {
     }
 
     pub fn lookup_definition(&self, name: &str) -> Option<DefinitionLocation> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(scheme) = scope.get(name)
-                && let Some(def) = scheme.def
-            {
-                return Some(def);
-            }
+        if let Some(scheme) = self.bindings.get(name)
+            && let Some(def) = scheme.def
+        {
+            return Some(def);
         }
         self.definitions.get(name).copied()
     }
@@ -420,7 +452,7 @@ impl TypeEnv {
         // upper bound, so `+1` yields "accept dist ≤ max(len,3)/3".
         let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
 
-        for candidate in self.scopes.iter().flat_map(|s| s.keys()) {
+        for candidate in self.bindings.keys() {
             let dist = levenshtein(name, candidate);
             if dist < best_dist {
                 best_dist = dist;
