@@ -160,8 +160,12 @@ impl Compiler {
         // imports). Scope state is fully cleared, so normalise their depth to 0
         // ("pre-existing, outermost"): the next opened scope then treats them as
         // inherited bindings, exactly as the old full-snapshot restore did.
-        self.locals.retain(|_, v| {
-            if v.slot < w.local_count {
+        // The key must also survive the `engine.strings` truncation above: an
+        // aliased selective import can bind a post-watermark `StrId` to a
+        // pre-watermark slot, and a dangling key would collide with whatever
+        // re-interns at that index on the next compile.
+        self.locals.retain(|&k, v| {
+            if v.slot < w.local_count && (k as usize) < w.engine.strings {
                 v.depth = 0;
                 true
             } else {
