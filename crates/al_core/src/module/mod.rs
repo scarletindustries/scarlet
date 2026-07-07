@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 
+use crate::bytecode::Watermark;
 use crate::reference::ModuleReferences;
 use crate::types::{Scheme, TypeInfo};
 
@@ -135,9 +136,51 @@ impl ModuleInterface {
 /// an unrelated earlier module is recompiled — see `ModuleTable::id_base_for`.
 pub const MODULE_TYPE_ID_RANGE: i32 = 256;
 
+/// Round `n` up to the next multiple of `MODULE_TYPE_ID_RANGE`.
+const fn align_to_range(n: i32) -> i32 {
+    n + (MODULE_TYPE_ID_RANGE - n % MODULE_TYPE_ID_RANGE) % MODULE_TYPE_ID_RANGE
+}
+
+/// Where a cached module came from. The variant determines which pieces of
+/// incremental-recompilation bookkeeping exist: only on-disk `File` modules
+/// have a source path to re-hash and a watermark to truncate to; `Embedded`
+/// stdlib compiled from `&'static str` never changes; `Hydrated` stdlib was
+/// deserialised from the precompiled blob and has no source at all.
+///
+/// Reference-graph data (`refs`): every definition declared in the module and
+/// every name occurrence inside it, filled by the typecheck pass. Persisting
+/// it here — alongside `iface`/`dependents` — is what lets a cross-module
+/// reference into this module survive an unrelated recompile, and dropping the
+/// `CachedModule` on invalidation drops its references with it so a rebuilt
+/// workspace graph can never have a dangling reverse edge. `Rc` so
+/// `build_reference_graph` re-inserting an unchanged module into the workspace
+/// graph on every `check` is a refcount bump, not a deep copy. `Hydrated`
+/// modules carry none — their definitions are synthesised lazily from the
+/// hydrated `ModuleInterface` at workspace-graph build time (the stdlib's
+/// precompiled `Scheme.def` already carries the real declaration span).
+#[derive(Debug)]
+pub enum ModuleOrigin {
+    Hydrated,
+    Embedded {
+        source_hash: u64,
+        refs: Rc<ModuleReferences>,
+    },
+    File {
+        /// FNV-1a of the source bytes this interface was built from.
+        source_hash: u64,
+        /// Snapshot of every arena/pool length immediately *before* this
+        /// module's body was analysed. On invalidation the engine truncates
+        /// back to the minimum watermark across the invalidated set, which by
+        /// construction also discards every module compiled after that point.
+        watermark: Watermark,
+        /// Resolved on-disk path; re-hashed by `IncrementalSession` on the
+        /// next check.
+        path: PathBuf,
+        refs: Rc<ModuleReferences>,
+    },
+}
+
 /// A loaded module plus the bookkeeping needed for incremental recompilation.
-/// Stdlib modules hydrated from `static_fallback` get `source_hash = 0` and
-/// `watermark = None`; they are never invalidated.
 ///
 /// The per-module nominal type-id range is deliberately *not* stored here.
 /// `ModuleTable::id_bases` is the single source of truth for it, because that
@@ -147,53 +190,52 @@ pub const MODULE_TYPE_ID_RANGE: i32 = 256;
 #[derive(Debug)]
 pub struct CachedModule {
     pub iface: ModuleInterface,
-    /// FNV-1a of the source bytes this interface was built from.
-    pub source_hash: u64,
-    /// Snapshot of every arena/pool length immediately *before* this module's
-    /// body was analysed. On invalidation the engine truncates back to the
-    /// minimum watermark across the invalidated set, which by construction
-    /// also discards every module compiled after that point.
-    pub watermark: Option<crate::bytecode::Watermark>,
-    /// Resolved on-disk path; used by `IncrementalSession` to re-hash on the
-    /// next check. `None` for embedded/static modules.
-    pub source_path: Option<PathBuf>,
+    pub origin: ModuleOrigin,
     /// Direct importers of this module (reverse edges of the import graph).
     pub dependents: HashSet<String>,
-    /// Reference-graph data collected while this module's body was analysed:
-    /// every definition declared in it and every name occurrence inside it.
-    /// `Some` for from-source modules (filled by the typecheck pass and moved
-    /// here in `compile_module_body`); `None` for static/hydrated stdlib
-    /// modules, whose definitions are synthesised lazily from the hydrated
-    /// `ModuleInterface` at workspace-graph build time (the stdlib's
-    /// precompiled `Scheme.def` already carries the real declaration span, so
-    /// no separate static reference blob is serialised). Persisting it here —
-    /// alongside `iface`/`watermark`/`dependents` — is what lets a cross-module
-    /// reference into this module survive an unrelated recompile, and dropping
-    /// the `CachedModule` on invalidation drops its references with it so a
-    /// rebuilt workspace graph can never have a dangling reverse edge.
-    ///
-    /// `Rc` so `build_reference_graph` re-inserting this unchanged module into
-    /// the workspace graph on every `check` is a refcount bump, not a deep
-    /// copy of its occurrences/definitions.
-    pub module_refs: Option<Rc<ModuleReferences>>,
 }
 
 impl CachedModule {
     fn from_static(iface: ModuleInterface) -> Self {
         CachedModule {
             iface,
-            source_hash: 0,
-            watermark: None,
-            source_path: None,
+            origin: ModuleOrigin::Hydrated,
             dependents: HashSet::new(),
-            module_refs: None,
+        }
+    }
+
+    /// Resolved on-disk path this module was compiled from, if any.
+    pub fn source_path(&self) -> Option<&Path> {
+        match &self.origin {
+            ModuleOrigin::File { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Arena watermark captured before this module's body was analysed.
+    /// `None` for embedded/hydrated modules — they are never invalidated.
+    pub fn watermark(&self) -> Option<Watermark> {
+        match &self.origin {
+            ModuleOrigin::File { watermark, .. } => Some(*watermark),
+            _ => None,
+        }
+    }
+
+    /// Reference-graph data collected while this module's body was analysed.
+    /// `None` for hydrated stdlib modules.
+    pub fn module_refs(&self) -> Option<&Rc<ModuleReferences>> {
+        match &self.origin {
+            ModuleOrigin::Embedded { refs, .. } | ModuleOrigin::File { refs, .. } => Some(refs),
+            ModuleOrigin::Hydrated => None,
         }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct ModuleTable {
-    loaded: HashMap<String, CachedModule>,
+    /// Insertion order is compilation order; `into_loaded` preserves it so the
+    /// precompiled-stdlib emit is deterministic.
+    loaded: IndexMap<String, CachedModule>,
     loading: HashSet<String>,
     /// When the binary carries a static stdlib, `get_or_hydrate` falls through
     /// to `s.lookup_module(key)` on a `loaded` miss and caches the result.
@@ -202,7 +244,7 @@ pub struct ModuleTable {
     /// prefers these over `fs::read_to_string`.
     pub overlays: HashMap<PathBuf, String>,
     /// Per-module `(mtime, len)` of the on-disk source as of the last time
-    /// its content was hashed and found to match `CachedModule::source_hash`.
+    /// its content was hashed and found to match the cached `source_hash`.
     /// `IncrementalSession::check` stat-gates the per-keystroke staleness scan
     /// against this: an unchanged tuple means the bytes are unchanged, so the
     /// full read + FNV hash is skipped. The hash stays the source of truth —
@@ -210,7 +252,7 @@ pub struct ModuleTable {
     stat_cache: HashMap<String, (std::time::SystemTime, u64)>,
     /// Incremented every time a module body is actually compiled (not on cache
     /// hit). Test/telemetry only.
-    pub compile_count: u32,
+    compile_count: u32,
     /// Per-module type-id range starts. Assigned on a module's first compile
     /// and *retained across cache eviction* so a recompile hands out the same
     /// nominal type ids. Only cleared by `reset_id_bases` (overflow fallback).
@@ -221,7 +263,7 @@ pub struct ModuleTable {
     /// Set when a recompiled module allocated past its reserved range and may
     /// have collided with a later module's ids. `IncrementalSession` reacts by
     /// performing a full invalidate on the next `check`.
-    pub id_range_overflow: bool,
+    id_range_overflow: bool,
 }
 
 impl ModuleTable {
@@ -287,11 +329,11 @@ impl ModuleTable {
         std::fs::read_to_string(path).ok()
     }
 
-    /// Iterate cached user modules (those with a `source_path`).
+    /// Iterate cached user modules (those compiled from a file on disk).
     pub fn user_modules(&self) -> impl Iterator<Item = (&String, &CachedModule)> {
         self.loaded
             .iter()
-            .filter(|(_, cm)| cm.source_path.is_some())
+            .filter(|(_, cm)| matches!(cm.origin, ModuleOrigin::File { .. }))
     }
 
     /// Has cached module `key`'s source changed since its interface was built?
@@ -310,12 +352,11 @@ impl ModuleTable {
     /// same-`(mtime, len)` content edit is additionally covered by the LSP
     /// `didChangeWatchedFiles` -> `invalidate_path` path.
     pub fn source_changed(&mut self, key: &str) -> bool {
-        let (path, expected_hash) = match self.loaded.get(key) {
-            Some(cm) => match &cm.source_path {
-                Some(p) => (p.clone(), cm.source_hash),
-                None => return false,
-            },
-            None => return false,
+        let (path, expected_hash) = match self.loaded.get(key).map(|cm| &cm.origin) {
+            Some(ModuleOrigin::File {
+                path, source_hash, ..
+            }) => (path.clone(), *source_hash),
+            _ => return false,
         };
 
         // Unsaved editor buffer: in-memory copy is authoritative and small;
@@ -356,7 +397,10 @@ impl ModuleTable {
     /// from source this session. `None` for static/hydrated stdlib modules
     /// (their definitions are synthesised lazily from the interface).
     pub fn module_refs(&self, key: &str) -> Option<&ModuleReferences> {
-        self.loaded.get(key).and_then(|c| c.module_refs.as_deref())
+        self.loaded
+            .get(key)
+            .and_then(|c| c.module_refs())
+            .map(Rc::as_ref)
     }
 
     /// Return the type-id range start for `key`, allocating a fresh
@@ -372,8 +416,7 @@ impl ModuleTable {
         if let Some(&b) = self.id_bases.get(key) {
             return (b, true);
         }
-        let raw = floor.max(self.id_high_water);
-        let base = raw + (MODULE_TYPE_ID_RANGE - raw % MODULE_TYPE_ID_RANGE) % MODULE_TYPE_ID_RANGE;
+        let base = align_to_range(floor.max(self.id_high_water));
         self.id_bases.insert(key.to_string(), base);
         self.id_high_water = base + MODULE_TYPE_ID_RANGE;
         (base, false)
@@ -391,10 +434,7 @@ impl ModuleTable {
             if reused {
                 self.id_range_overflow = true;
             }
-            let end = base + used;
-            let aligned =
-                end + (MODULE_TYPE_ID_RANGE - end % MODULE_TYPE_ID_RANGE) % MODULE_TYPE_ID_RANGE;
-            self.id_high_water = self.id_high_water.max(aligned);
+            self.id_high_water = self.id_high_water.max(align_to_range(base + used));
         }
     }
 
@@ -419,6 +459,20 @@ impl ModuleTable {
         self.id_bases.get(key).copied()
     }
 
+    /// Number of module bodies actually compiled (test/telemetry only).
+    pub fn compile_count(&self) -> u32 {
+        self.compile_count
+    }
+
+    pub(crate) fn bump_compile_count(&mut self) {
+        self.compile_count += 1;
+    }
+
+    /// Did a recompiled module allocate past its reserved type-id range?
+    pub fn id_range_overflow(&self) -> bool {
+        self.id_range_overflow
+    }
+
     /// Remove `key` and every transitive dependent from the cache and return
     /// the earliest watermark among them (the truncation target).
     ///
@@ -434,7 +488,7 @@ impl ModuleTable {
     /// `ReferenceGraph` is rebuilt from the surviving `loaded` set on every
     /// `IncrementalSession::check`, so an invalidated module's reverse edges
     /// are recomputed from scratch and can never dangle into evicted state.
-    pub fn invalidate(&mut self, key: &str) -> Option<crate::bytecode::Watermark> {
+    pub fn invalidate(&mut self, key: &str) -> Option<Watermark> {
         use std::collections::VecDeque;
         let mut closure: HashSet<String> = HashSet::new();
         let mut q: VecDeque<String> = VecDeque::new();
@@ -451,13 +505,13 @@ impl ModuleTable {
         }
         let min_wm = closure
             .iter()
-            .filter_map(|k| self.loaded.get(k).and_then(|cm| cm.watermark))
+            .filter_map(|k| self.loaded.get(k).and_then(|cm| cm.watermark()))
             .min()?;
         self.loaded.retain(|k, cm| {
             if closure.contains(k) {
                 return false;
             }
-            cm.watermark.is_none_or(|w| w < min_wm)
+            cm.watermark().is_none_or(|w| w < min_wm)
         });
         self.stat_cache.retain(|k, _| self.loaded.contains_key(k));
         Some(min_wm)
@@ -466,9 +520,10 @@ impl ModuleTable {
     /// Evict every user module (those with a watermark) and return the
     /// earliest watermark among them. Used as the overflow fallback when a
     /// recompiled module no longer fits its reserved id range.
-    pub fn invalidate_all(&mut self) -> Option<crate::bytecode::Watermark> {
-        let min_wm = self.loaded.values().filter_map(|cm| cm.watermark).min()?;
-        self.loaded.retain(|_, cm| cm.watermark.is_none());
+    pub fn invalidate_all(&mut self) -> Option<Watermark> {
+        let min_wm = self.loaded.values().filter_map(|cm| cm.watermark()).min()?;
+        self.loaded
+            .retain(|_, cm| !matches!(cm.origin, ModuleOrigin::File { .. }));
         self.stat_cache.retain(|k, _| self.loaded.contains_key(k));
         Some(min_wm)
     }
@@ -501,6 +556,10 @@ pub enum ModuleSource {
 pub enum ResolveError {
     NotFound(String),
     NoBaseDir,
+    /// A bare module name that is neither `al/*` nor `./`/`../`-relative.
+    /// Reserved for a future package manager; distinct from `NotFound` so the
+    /// diagnostic can suggest `use "./name"` instead of "not found".
+    BareName(String),
 }
 
 /// Resolve a module path to its source. `base_dir` is the directory of the
@@ -539,7 +598,7 @@ pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ModuleSourc
     }
 
     // Bare names other than `al` are reserved for a future package manager.
-    Err(ResolveError::NotFound(key))
+    Err(ResolveError::BareName(key))
 }
 
 #[cfg(test)]
@@ -667,10 +726,10 @@ mod tests {
             resolve(&vec![".".into(), "ghost".into()], Some(&base)),
             Err(ResolveError::NotFound(_))
         ));
-        // Bare names (no `al` root, not relative) are reserved -> NotFound.
+        // Bare names (no `al` root, not relative) are reserved -> BareName.
         assert!(matches!(
             resolve(&vec!["somepkg".into()], None),
-            Err(ResolveError::NotFound(_))
+            Err(ResolveError::BareName(_))
         ));
 
         let _ = std::fs::remove_dir_all(&base);
@@ -697,9 +756,9 @@ mod tests {
         assert_eq!(loaded.len(), 1);
     }
 
-    // `source_changed`: false for unknown keys and for static (no-path) modules;
-    // true once the backing file is read once (hash matches -> unchanged) and
-    // then deleted (vanished -> invalidate).
+    // `source_changed`: false for unknown keys and for hydrated (no-path)
+    // modules; for a disk-backed module, false when the bytes match the cached
+    // hash and true once the backing file is deleted.
     #[test]
     fn source_changed_paths() {
         let mut t = ModuleTable::new();
@@ -707,7 +766,7 @@ mod tests {
         // Unknown key.
         assert!(!t.source_changed("unknown"));
 
-        // Static module (from_static -> source_path None) never changes.
+        // Hydrated module never changes.
         t.insert(
             "static".to_string(),
             ModuleInterface::new(vec!["static".to_string()]),
@@ -721,11 +780,16 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         let cm = CachedModule {
             iface: ModuleInterface::new(vec!["m".to_string()]),
-            source_hash: source_hash(body),
-            watermark: None,
-            source_path: Some(path.clone()),
+            origin: ModuleOrigin::File {
+                source_hash: source_hash(body),
+                // `source_changed` never reads the watermark; a zeroed one is
+                // sound (`Watermark` and its parts are `Copy` all-integer PODs)
+                // and keeps this test decoupled from those structs' field sets.
+                watermark: unsafe { std::mem::zeroed() },
+                path: path.clone(),
+                refs: Rc::new(ModuleReferences::new(crate::reference::ModuleId(0))),
+            },
             dependents: HashSet::new(),
-            module_refs: None,
         };
         t.insert_cached("m".to_string(), cm);
         assert!(!t.source_changed("m"), "identical content is unchanged");

@@ -61,7 +61,7 @@ use crate::reference::{
     DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, ReferenceGraph,
 };
 use crate::span::Span;
-use crate::type_def::Type;
+use crate::type_def::{Type, TypeId};
 use crate::types::{
     ArenaSlice, Constraint, DefinitionLocation, EnginePoolWatermark, EntityKind, EnvWatermark,
     Hydrator, InferEngine, MatchFunTypeError, Pat, PatternBindings, Prim, Scheme, StrId, Ty,
@@ -742,7 +742,7 @@ impl IncrementalSession {
     }
 
     pub fn compile_count(&self) -> u32 {
-        self.c.module_table.compile_count
+        self.c.module_table.compile_count()
     }
 
     pub fn reference_graph(&self) -> &crate::reference::ReferenceGraph {
@@ -761,7 +761,7 @@ impl IncrementalSession {
         self.c
             .module_table
             .user_modules()
-            .find(|(_, cm)| cm.source_path.as_deref() == Some(path))
+            .find(|(_, cm)| cm.source_path() == Some(path))
             .map(|(_, cm)| &cm.iface.path)
     }
 
@@ -776,7 +776,7 @@ impl IncrementalSession {
             .c
             .module_table
             .user_modules()
-            .find(|(_, cm)| cm.source_path.as_deref() == Some(path))
+            .find(|(_, cm)| cm.source_path() == Some(path))
             .map(|(k, _)| k.clone());
         if let Some(k) = key
             && let Some(w) = self.c.module_table.invalidate(&k)
@@ -836,7 +836,7 @@ impl IncrementalSession {
         // (non-reused) allocation, so ranges are re-sized to current usage and
         // the overflow flag cannot be re-raised this pass — hence a single
         // pass, not a loop.
-        if self.c.module_table.id_range_overflow
+        if self.c.module_table.id_range_overflow()
             && let Some(w) = self.c.module_table.invalidate_all()
         {
             self.c.module_table.reset_id_bases();
@@ -919,7 +919,7 @@ impl IncrementalSession {
 
     /// The base of the type-id range reserved for module `key`, if one was
     /// allocated. Used by the incremental test harness to assert range reuse.
-    pub fn module_id_base(&self, key: &str) -> Option<i32> {
+    pub fn module_id_base(&self, key: &str) -> Option<TypeId> {
         self.c.module_table.id_base_of(key)
     }
 
@@ -963,7 +963,7 @@ impl Compiler {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        (Program, PreludeBindings, HashSet<String>, i32, i32),
+        (Program, PreludeBindings, HashSet<String>, TypeId, i32),
         InferEngine,
     ) {
         (
@@ -1532,12 +1532,12 @@ impl Compiler {
     /// instead. Caller emits `MakeEnumPayload n` after pushing the args.
     fn emit_construct_header(
         &mut self,
-        type_id: i32,
+        type_id: TypeId,
         type_name: &str,
         variant_name: &str,
         field_labels: ArenaSlice,
     ) {
-        let id_c = self.const_int(type_id as i64);
+        let id_c = self.const_int(type_id.0 as i64);
         self.emit_arg(Op::PushConst, id_c);
         let en_c = self.const_str(type_name);
         self.emit_arg(Op::PushConst, en_c);
@@ -1559,7 +1559,7 @@ impl Compiler {
     /// recompute a hash.
     fn emit_construct_header_for_build(
         &mut self,
-        type_id: i32,
+        type_id: TypeId,
         type_name: &str,
         variant_name: &str,
         field_labels: ArenaSlice,
@@ -1573,8 +1573,8 @@ impl Compiler {
     /// only compares the scrutinee's type id and variant name, so unlike the
     /// construction header it needs neither the enum name nor the field-label
     /// array. The VM pops `variant_name`, then `type_id`, then the scrutinee.
-    fn emit_match_header(&mut self, type_id: i32, variant_name: &str) {
-        let id_c = self.const_int(type_id as i64);
+    fn emit_match_header(&mut self, type_id: TypeId, variant_name: &str) {
+        let id_c = self.const_int(type_id.0 as i64);
         self.emit_arg(Op::PushConst, id_c);
         let vn_c = self.const_str(variant_name);
         self.emit_arg(Op::PushConst, vn_c);
@@ -1593,8 +1593,8 @@ impl Compiler {
     /// `&&`/`||` remain a single branch. Construction: emit `PushTrue`/`PushFalse`
     /// instead of the `MakeEnum` header. Match: emit a `Value::Bool` literal +
     /// `Eq` instead of `MatchEnum`. Returns `true` when it handled `type_id`.
-    fn try_emit_bool_value(&mut self, type_id: i32, variant_name: &str) -> bool {
-        if !self.prelude.is_bool(type_id) {
+    fn try_emit_bool_value(&mut self, type_id: TypeId, variant_name: &str) -> bool {
+        if !self.prelude.bool.is(type_id) {
             return false;
         }
         let is_true = variant_name == super::prelude_bindings::names::TRUE;
@@ -1604,11 +1604,11 @@ impl Compiler {
 
     fn try_emit_bool_match(
         &mut self,
-        type_id: i32,
+        type_id: TypeId,
         variant_name: &str,
         fail_jumps: &mut Vec<i32>,
     ) -> bool {
-        if !self.prelude.is_bool(type_id) {
+        if !self.prelude.bool.is(type_id) {
             return false;
         }
         let is_true = variant_name == super::prelude_bindings::names::TRUE;
@@ -2151,6 +2151,16 @@ impl Compiler {
                 self.error(format!("Unknown module '{p}' (not found)"), at);
                 return false;
             }
+            Err(ResolveError::BareName(p)) => {
+                self.error(
+                    format!(
+                        "Unknown module '{p}' — package imports are not yet supported; \
+                         use a relative path like `./{p}`"
+                    ),
+                    at,
+                );
+                return false;
+            }
             Err(ResolveError::NoBaseDir) => {
                 self.error(
                     "Relative imports are not allowed without a file context (e.g. REPL)"
@@ -2193,26 +2203,30 @@ impl Compiler {
         }
 
         self.module_table.mark_loading(&key);
-        let (iface, imports) = self.compile_module_body(path.clone(), &parsed.ast, child_base);
-        // Watermark is captured *after* this module's own dependencies have
+        let (body, imports) = self.compile_module_body(path.clone(), &parsed.ast, child_base);
+        let refs = Rc::new(body.refs);
+        // The watermark is captured *after* this module's own dependencies have
         // loaded (compile_module_body does that first) but reflects the arena
-        // state immediately *before* this module's body added anything. We
-        // can't observe that point directly post-hoc, so compile_module_body
-        // returns it via the iface side-channel.
-        let watermark = source_path.as_ref().map(|_| iface.watermark);
-        self.module_table.compile_count += 1;
+        // state immediately *before* this module's body added anything. Only
+        // on-disk modules are ever invalidated, so only they carry it.
+        let origin = match source_path {
+            Some(path) => ModuleOrigin::File {
+                source_hash: hash,
+                watermark: body.watermark,
+                path,
+                refs,
+            },
+            None => ModuleOrigin::Embedded {
+                source_hash: hash,
+                refs,
+            },
+        };
+        self.module_table.bump_compile_count();
         self.module_table.insert_cached(
             key.clone(),
             CachedModule {
-                iface: iface.iface,
-                source_hash: hash,
-                watermark,
-                source_path,
-                // Reference-graph data collected while this module's body was
-                // analysed; persisting it alongside `iface`/`watermark` lets a
-                // cross-module reference into this module survive an unrelated
-                // recompile.
-                module_refs: Some(Rc::new(iface.refs)),
+                iface: body.iface,
+                origin,
                 dependents: HashSet::new(),
             },
         );
@@ -2264,7 +2278,7 @@ impl Compiler {
         // Record actual type-id consumption so `id_high_water` tracks real
         // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
         // `id_range_overflow` for the invalidate-all/reset recovery path.
-        let used = self.env.next_type_id() - base;
+        let used = self.env.next_type_id().0 - base.0;
         self.module_table.note_id_usage(base, used, reused);
 
         self.current_module = old_module;
@@ -2339,7 +2353,7 @@ impl Compiler {
                         let resolved = self.engine.find(ty);
                         let is_nil = matches!(
                             self.engine.node(resolved),
-                            TypeNode::Con { id, .. } if id == self.prelude.nil.id
+                            TypeNode::Con { id, .. } if self.prelude.nil.is(id)
                         );
                         let is_var = matches!(self.engine.node(resolved), TypeNode::Var(_));
                         if !is_nil && !is_var {
@@ -2630,7 +2644,7 @@ impl Compiler {
     /// nullary builds the tagged value inline, n-ary synthesises a closure.
     fn emit_ctor_as_value(
         &mut self,
-        type_id: i32,
+        type_id: TypeId,
         type_name: StrId,
         variant: &str,
         labels: ArenaSlice,
@@ -2661,7 +2675,7 @@ impl Compiler {
     /// constructor is referenced as a value.
     fn emit_ctor_closure(
         &mut self,
-        type_id: i32,
+        type_id: TypeId,
         type_name: &str,
         variant_name: &str,
         field_labels: ArenaSlice,
@@ -3246,7 +3260,7 @@ impl Compiler {
         &mut self,
         variant_name: &str,
         type_name: &str,
-        type_id: i32,
+        type_id: TypeId,
         arity: usize,
         field_labels_sl: ArenaSlice,
         inst_ty: Ty,
@@ -3352,6 +3366,7 @@ impl Compiler {
             "net__close" => self.emit(Op::TcpCloseServer),
             "net__local_addr" => self.emit(Op::TcpLocalAddr),
             "net__resolve" => self.emit(Op::DnsResolve),
+            "address__parse" => self.emit(Op::IpParse),
             "socket__read" => self.emit(Op::TcpRead),
             "socket__read_until" => self.emit(Op::TcpReadUntil),
             "socket__write" => self.emit(Op::TcpWrite),
@@ -3636,14 +3651,14 @@ impl Compiler {
         // "Option"/"Result" can never match.
         let lhs_type_id = match self.engine.node(resolved) {
             TypeNode::Con { id, .. } => id,
-            _ => 0,
+            _ => TypeId::NONE,
         };
 
         // The Option and Result paths share the same bytecode shape; they differ
         // only in the expected ICon, the failure constructor, and whether the
         // failure case carries a bindable payload (`err_var`).
         use super::prelude_bindings::names as pn;
-        let (type_id, fail_ctor, err_var) = if self.prelude.is_option(lhs_type_id) {
+        let (type_id, fail_ctor, err_var) = if self.prelude.option.is(lhs_type_id) {
             if let Some(recv) = &expr.receiver {
                 self.error(
                     "'or' on an Option does not bind a value (the failure case carries nothing)"
@@ -3652,7 +3667,7 @@ impl Compiler {
                 );
             }
             (self.prelude.option.id, pn::NONE, None::<Ty>)
-        } else if self.prelude.is_result(lhs_type_id) {
+        } else if self.prelude.result.is(lhs_type_id) {
             let e = self.engine.fresh_var();
             (self.prelude.result.id, pn::ERR, Some(e))
         } else {
@@ -4191,7 +4206,7 @@ impl Compiler {
     }
 
     /// Resolve a constructor name to `(type_id, type_name, arity, field_labels, scheme)`.
-    fn lookup_ctor(&self, name: &str) -> Option<(i32, String, usize, Vec<String>, Scheme)> {
+    fn lookup_ctor(&self, name: &str) -> Option<(TypeId, String, usize, Vec<String>, Scheme)> {
         let scheme = *self.env.lookup(name)?;
         match scheme.kind {
             ValueKind::Constructor {
@@ -5185,7 +5200,7 @@ impl Compiler {
         //    deep copy of its occurrences/definitions every keystroke.
         let mut synth_inputs: Vec<Vec<(String, DefinitionLocation)>> = Vec::new();
         for (_key, cm) in self.module_table.loaded_modules() {
-            match &cm.module_refs {
+            match cm.module_refs() {
                 Some(mr) => graph.insert_module_deferred(Rc::clone(mr)),
                 None => {
                     let defs: Vec<(String, DefinitionLocation)> = cm
