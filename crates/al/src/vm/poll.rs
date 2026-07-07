@@ -295,12 +295,12 @@ impl VM {
     /// with `parked`.
     pub(super) fn park_remove(&mut self, id: u64) -> Option<(Wait, Process)> {
         let (wait, p) = self.parked.remove(&id)?;
-        if let Wait::Io { fd, .. } = &wait {
-            if let Some(waiters) = self.io_waiters.get_mut(fd) {
-                waiters.retain(|w| *w != id);
-                if waiters.is_empty() {
-                    self.io_waiters.remove(fd);
-                }
+        if let Wait::Io { fd, .. } = &wait
+            && let Some(waiters) = self.io_waiters.get_mut(fd)
+        {
+            waiters.retain(|w| *w != id);
+            if waiters.is_empty() {
+                self.io_waiters.remove(fd);
             }
         }
         Some((wait, p))
