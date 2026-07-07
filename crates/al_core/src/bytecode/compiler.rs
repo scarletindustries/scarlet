@@ -3595,9 +3595,19 @@ impl Compiler {
                 };
                 self.engine.unify_at(expected, lit_ty, sp)
             }
-            ast::Pattern::Range { span, .. } => {
+            ast::Pattern::Range { start, end, span } => {
                 let int_t = self.ty_int();
-                self.engine.unify_at(expected, int_t, *span)
+                let mut ok = self.engine.unify_at(expected, int_t, *span);
+                for b in [start, end] {
+                    if b.value.contains('.') {
+                        self.error(
+                            format!("Range pattern bound must be an integer, got '{}'", b.value),
+                            b.span,
+                        );
+                        ok = false;
+                    }
+                }
+                ok
             }
             ast::Pattern::Tuple { elements, span } => {
                 let fresh: Vec<Ty> = (0..elements.len())
