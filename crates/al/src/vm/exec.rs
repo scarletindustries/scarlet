@@ -463,7 +463,7 @@ impl VM {
                     // that `Op::Call` pays. The frame's `captures` is a sentinel
                     // immediate; the callee body never emits `PushCapture` /
                     // `PushSelf` (a top-level fn's own name resolves to
-                    // `Global`, not `Self_`).
+                    // `SelfGlobal`, so self-as-value loads via `PushGlobal`).
                     let target_idx = instr.operand;
                     let arity = i32::from(instr.b);
                     let func = &self.program.functions[target_idx as usize];
@@ -823,10 +823,11 @@ impl VM {
         let variant_name_val = self.stack[base + 2].clone();
         let labels_val = &self.stack[base + 3];
 
-        let Some(type_id) = type_id_val.as_int() else {
+        let Some(packed) = type_id_val.as_int() else {
             return Err(VmError::internal("enum type id must be int"));
         };
-        let type_id = al_core::TypeId(type_id as i32);
+        let type_id = al_core::TypeId(packed as i32);
+        let variant_idx = (packed >> 32) as u16;
 
         if enum_name_val.as_str().is_none() {
             return Err(VmError::internal("enum name must be string"));
@@ -873,6 +874,7 @@ impl VM {
         let v = Value::enum_in(
             &mut self.heap,
             type_id,
+            variant_idx,
             hash,
             enum_name_val,
             variant_name_val,

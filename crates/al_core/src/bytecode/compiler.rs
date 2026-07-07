@@ -281,6 +281,11 @@ enum VarAccess {
     Capture(i32),
     Global(i32),
     Self_,
+    /// Self-reference from a top-level fn's own body: the closure lives at a
+    /// fixed entry-frame slot, so a value load emits `PushGlobal` (safe under a
+    /// `CallKnown` frame whose `captures` is a sentinel), while `compile_call`
+    /// still routes it to `CallSelf`.
+    SelfGlobal(i32),
 }
 
 /// Outcome of resolving a `module.member` property-access shape against the
@@ -877,7 +882,9 @@ impl Compiler {
         match access {
             VarAccess::Local(idx) => self.emit_arg(Op::PushLocal, *idx),
             VarAccess::Capture(idx) => self.emit_arg(Op::PushCapture, *idx),
-            VarAccess::Global(idx) => self.emit_arg(Op::PushGlobal, *idx),
+            VarAccess::Global(idx) | VarAccess::SelfGlobal(idx) => {
+                self.emit_arg(Op::PushGlobal, *idx)
+            }
             VarAccess::Self_ => self.emit(Op::PushSelf),
         }
     }
@@ -899,7 +906,14 @@ impl Compiler {
         for (i, scope) in self.outer_scopes.iter().enumerate().rev() {
             if let Some(entry) = scope.locals.get(&name) {
                 if self.current_binding == Some(name) {
-                    return Some(VarAccess::Self_);
+                    // A top-level fn's self-name resolves to its entry-frame
+                    // slot so a value load emits `PushGlobal`; `PushSelf` would
+                    // read the sentinel `captures` a `CallKnown` frame carries.
+                    return Some(if i == 0 {
+                        VarAccess::SelfGlobal(entry.slot)
+                    } else {
+                        VarAccess::Self_
+                    });
                 }
                 if i == 0 {
                     return Some(VarAccess::Global(entry.slot));
@@ -1147,11 +1161,12 @@ impl Compiler {
     fn emit_construct_header_for_build(
         &mut self,
         type_id: TypeId,
+        variant_idx: u16,
         type_name: &str,
         variant_name: &str,
         field_labels: ArenaSlice<pool::StrSlices>,
     ) -> i32 {
-        self.emit_construct_header(type_id, type_name, variant_name, field_labels);
+        self.emit_construct_header(type_id, variant_idx, type_name, variant_name, field_labels);
         let prefix = enum_name_prefix_hash(type_name, variant_name);
         self.const_int(prefix as i64)
     }
@@ -2214,10 +2229,12 @@ impl Compiler {
             ValueKind::Constructor {
                 type_name,
                 type_id,
+                variant_idx,
                 arity,
                 field_labels,
-                ..
-            } => self.emit_ctor_as_value(type_id, type_name, name, field_labels, arity),
+            } => {
+                self.emit_ctor_as_value(type_id, variant_idx, type_name, name, field_labels, arity)
+            }
             ValueKind::Builtin { .. } => self.error_builtin_as_value(name, sp),
             ValueKind::Local | ValueKind::ModuleFn => match load {
                 Some(a) => self.emit_load(&a),
@@ -2231,6 +2248,7 @@ impl Compiler {
     fn emit_ctor_as_value(
         &mut self,
         type_id: TypeId,
+        variant_idx: u16,
         type_name: StrId,
         variant: &str,
         labels: ArenaSlice<pool::StrSlices>,
@@ -2241,10 +2259,23 @@ impl Compiler {
             if self.try_emit_bool_value(type_id, variant) {
                 return;
             }
-            let ph = self.emit_construct_header_for_build(type_id, &type_name, variant, labels);
+            let ph = self.emit_construct_header_for_build(
+                type_id,
+                variant_idx,
+                &type_name,
+                variant,
+                labels,
+            );
             self.emit_make_enum_payload(0, ph);
         } else {
-            self.emit_ctor_closure(type_id, &type_name, variant, labels, arity as i32);
+            self.emit_ctor_closure(
+                type_id,
+                variant_idx,
+                &type_name,
+                variant,
+                labels,
+                arity as i32,
+            );
         }
     }
 
@@ -2262,6 +2293,7 @@ impl Compiler {
     fn emit_ctor_closure(
         &mut self,
         type_id: TypeId,
+        variant_idx: u16,
         type_name: &str,
         variant_name: &str,
         field_labels: ArenaSlice<pool::StrSlices>,
@@ -2273,8 +2305,13 @@ impl Compiler {
         let jump_over = self.emit_jump(Op::Jump);
         let func_start = self.current_addr();
 
-        let ph =
-            self.emit_construct_header_for_build(type_id, type_name, variant_name, field_labels);
+        let ph = self.emit_construct_header_for_build(
+            type_id,
+            variant_idx,
+            type_name,
+            variant_name,
+            field_labels,
+        );
         for i in 0..arity {
             self.emit_arg(Op::PushLocal, i);
         }
@@ -2621,15 +2658,16 @@ impl Compiler {
                 ValueKind::Constructor {
                     type_name,
                     type_id,
+                    variant_idx,
                     arity,
                     field_labels,
-                    ..
                 } => {
                     let type_name = self.engine.str(type_name).to_string();
                     self.compile_ctor_call(
                         name,
                         &type_name,
                         type_id,
+                        variant_idx,
                         arity as usize,
                         field_labels,
                         inst_ty,
@@ -2650,7 +2688,7 @@ impl Compiler {
                         // Self-recursion: skip PushSelf and emit the fused
                         // self-call op so the VM can read func_idx/captures
                         // straight off the live frame.
-                        Some(VarAccess::Self_) => {
+                        Some(VarAccess::Self_ | VarAccess::SelfGlobal(_)) => {
                             let op = if is_tail {
                                 Op::TailCallSelf
                             } else {
@@ -2857,6 +2895,7 @@ impl Compiler {
         variant_name: &str,
         type_name: &str,
         type_id: TypeId,
+        variant_idx: u16,
         arity: usize,
         field_labels_sl: ArenaSlice<pool::StrSlices>,
         inst_ty: Ty,
@@ -2914,8 +2953,13 @@ impl Compiler {
             return result_ty;
         }
 
-        let ph =
-            self.emit_construct_header_for_build(type_id, type_name, variant_name, field_labels_sl);
+        let ph = self.emit_construct_header_for_build(
+            type_id,
+            variant_idx,
+            type_name,
+            variant_name,
+            field_labels_sl,
+        );
 
         // The spread base was unified with the enum TYPE, not the target
         // variant; for a multi-variant enum the base may be a different variant
@@ -3696,7 +3740,10 @@ impl Compiler {
                     ast::PatternArg::Positional(p) => p,
                     ast::PatternArg::Labeled { pattern, .. } => pattern,
                 };
-                if !matches!(sub, ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. }) {
+                if !matches!(
+                    sub,
+                    ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. }
+                ) {
                     return None;
                 }
             }
