@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::process::ExitCode;
 
 use clap::{Arg, ArgAction, Command};
 
@@ -288,12 +289,18 @@ fn command_help(sub: &Command) -> String {
 }
 
 /// Dispatch help: `None` → full reference, `Some(name)` → that command (falls
-/// back to full reference with a note if the name is unknown).
-pub fn help(cmd: &Command, sub: Option<&str>) {
+/// back to full reference with a note if the name is unknown, exit 2).
+pub fn help(cmd: &Command, sub: Option<&str>) -> ExitCode {
     match sub {
-        None => print!("{}", full_help(cmd)),
+        None => {
+            print!("{}", full_help(cmd));
+            ExitCode::SUCCESS
+        }
         Some(name) => match cmd.get_subcommands().find(|c| c.get_name() == name) {
-            Some(s) => print!("{}", command_help(s)),
+            Some(s) => {
+                print!("{}", command_help(s));
+                ExitCode::SUCCESS
+            }
             None => {
                 let p = Palette::for_stderr();
                 eprintln!(
@@ -301,6 +308,7 @@ pub fn help(cmd: &Command, sub: Option<&str>) {
                     p.error, p.reset, p.bold, p.reset
                 );
                 print!("{}", full_help(cmd));
+                ExitCode::from(2)
             }
         },
     }

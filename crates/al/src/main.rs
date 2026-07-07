@@ -47,7 +47,8 @@ enum Commands {
     Lsp,
     /// Type check a program without running it
     Check { entrypoint: String },
-    /// Format a file and print the result to stdout
+    /// Deprecated alias for `fmt --stdout`
+    #[command(hide = true)]
     Build { entrypoint: String },
     /// Format AL source files
     Fmt(FmtArgs),
@@ -75,10 +76,10 @@ struct FmtArgs {
     #[arg(long)]
     stdout: bool,
     /// Read input from stdin instead of a file
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["check", "path"])]
     stdin: bool,
     /// Check if files are formatted (exit 1 if not)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "stdout")]
     check: bool,
     /// Print debug information about tokens
     #[arg(long)]
@@ -185,7 +186,7 @@ fn read_file_or_die(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| die(e))
 }
 
-fn main() {
+fn main() -> process::ExitCode {
     // clap is the parser and command model only — all help/version/error/man
     // output is rendered by `al::cli`. Intercept the meta flags before clap so
     // they work without satisfying required args (`al run --help`).
@@ -194,7 +195,7 @@ fn main() {
 
     if raw.iter().any(|a| a == "-V" || a == "--version") {
         help::version(&cmd);
-        return;
+        return process::ExitCode::SUCCESS;
     }
 
     let wants_help = raw.iter().any(|a| a == "-h" || a == "--help");
@@ -204,20 +205,19 @@ fn main() {
             .iter()
             .find(|a| !a.starts_with('-') && a.as_str() != "help")
             .map(String::as_str);
-        help::help(&cmd, target);
-        return;
+        return help::help(&cmd, target);
     }
 
     if raw.is_empty() {
         help::home(&cmd);
-        return;
+        return process::ExitCode::SUCCESS;
     }
 
     if raw.first().map(String::as_str) == Some("man") {
         if let Err(e) = man::render(&cmd) {
             die(format!("could not render man page: {e}"));
         }
-        return;
+        return process::ExitCode::SUCCESS;
     }
 
     let cli = match Cli::try_parse() {
@@ -245,14 +245,14 @@ fn main() {
             compile_source(&expr, &file, &entrypoint, bytecode::check);
         }
         Some(Commands::Build { entrypoint }) => {
-            let file = read_file_or_die(&entrypoint);
-            match formatter::format(&file) {
-                formatter::FormatResult::Formatted { output } => println!("{output}"),
-                formatter::FormatResult::ParseFailed { errors } => {
-                    diagnostic::print_diagnostics(&errors, &file, &entrypoint);
-                    process::exit(1);
-                }
-            }
+            eprintln!("warning: `al build` is deprecated; use `al fmt --stdout <file>`");
+            cmd_fmt(FmtArgs {
+                path: Some(entrypoint),
+                stdout: true,
+                stdin: false,
+                check: false,
+                debug: false,
+            });
         }
         Some(Commands::Upgrade { version }) => {
             if let Err(e) = cmd_upgrade(version) {
@@ -266,6 +266,7 @@ fn main() {
             cmd_fmt(args);
         }
     }
+    process::ExitCode::SUCCESS
 }
 
 fn cmd_run(args: RunArgs) {
@@ -409,7 +410,9 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
     };
 
     let asset_name = format!("al-{os_name}-{arch}");
-    let tmp_path = std::env::temp_dir().join(&asset_name);
+    // Download next to the target so `fs::rename` is same-device (temp_dir is
+    // often tmpfs on Linux, which would make the rename fail with EXDEV).
+    let tmp_path = current_exe.with_extension("new");
     let download_url = format!("https://github.com/alii/al/releases/download/{tag}/{asset_name}");
 
     println!("Downloading {tag}...");
@@ -453,8 +456,10 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
             .map_err(|e| format!("chmod failed: {e}"))?;
     }
 
-    fs::rename(&tmp_path, &current_exe)
-        .map_err(|e| format!("cannot replace {}: {e}", current_exe.display()))?;
+    if let Err(e) = fs::rename(&tmp_path, &current_exe) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("cannot replace {}: {e}", current_exe.display()));
+    }
 
     match process::Command::new(&current_exe)
         .arg("--version")
