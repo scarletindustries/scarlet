@@ -121,7 +121,7 @@ struct FnFrame {
     captures: HashMap<String, i32>,
     capture_names: Vec<String>,
     rigid_ids: HashSet<i32>,
-    binding: String,
+    binding: Option<String>,
     tail: bool,
     jump_over: i32,
     func_start: i32,
@@ -181,7 +181,7 @@ pub struct Compiler {
     pub(super) local_count: i32,
     pub(super) captures: HashMap<String, i32>,
     pub(super) capture_names: Vec<String>,
-    pub(super) current_binding: String,
+    pub(super) current_binding: Option<String>,
     /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
     /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
     /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
@@ -339,7 +339,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         local_count: 0,
         captures: HashMap::new(),
         capture_names: vec![],
-        current_binding: String::new(),
+        current_binding: None,
         next_fn_self_name: None,
         in_tail_position: false,
         current_owner: None,
@@ -598,11 +598,13 @@ impl Compiler {
     }
 
     #[inline]
-    pub(super) fn emit_b(&mut self, o: Op, b: u16, operand: i32) {
+    fn emit_make_enum_payload(&mut self, arity: u16, prefix_hash: i32) {
         if self.check_only {
             return;
         }
-        self.program.code.push(op_ab(o, 0, b, operand));
+        self.program
+            .code
+            .push(op_ab(Op::MakeEnumPayload, 0, arity, prefix_hash));
     }
 
     /// Emit a forward jump with a placeholder target and return its address
@@ -784,6 +786,18 @@ impl Compiler {
         self.pop_unused_scope();
     }
 
+    /// Open a lexical block scope: pushes a fresh type-env scope and a local
+    /// undo mark in lockstep. Must be matched by `pop_block_scope`.
+    fn push_block_scope(&mut self) {
+        self.env.push_scope();
+        self.push_local_scope();
+    }
+
+    fn pop_block_scope(&mut self) {
+        self.pop_local_scope();
+        self.env.pop_scope();
+    }
+
     /// Record a let/param/match binding for unused-variable checking. Names
     /// starting with `_` are exempt. If the same name was already tracked in
     /// this scope and never used, that earlier binding is reported now (it's
@@ -847,7 +861,7 @@ impl Compiler {
         // slot is read at call time, not at MakeClosure time.
         for (i, scope) in self.outer_scopes.iter().enumerate().rev() {
             if let Some(entry) = scope.locals.get(name) {
-                if name == self.current_binding {
+                if self.current_binding.as_deref() == Some(name) {
                     return Some(VarAccess::Self_);
                 }
                 if i == 0 {
@@ -1858,8 +1872,7 @@ impl Compiler {
         match expr {
             ast::Expression::BinaryLiteral(bl) => self.compile_binary_literal(bl),
             ast::Expression::BlockExpression(be) => {
-                self.env.push_scope();
-                self.push_local_scope();
+                self.push_block_scope();
                 let mut last_ty = self.ty_nil();
 
                 for (i, node) in be.body.iter().enumerate() {
@@ -1894,8 +1907,7 @@ impl Compiler {
                     self.emit_nil();
                 }
 
-                self.pop_local_scope();
-                self.env.pop_scope();
+                self.pop_block_scope();
                 last_ty
             }
             ast::Expression::NumberLiteral(nl) => {
@@ -2177,7 +2189,7 @@ impl Compiler {
                 return;
             }
             let ph = self.emit_construct_header_for_build(type_id, &type_name, variant, labels);
-            self.emit_b(Op::MakeEnumPayload, 0, ph);
+            self.emit_make_enum_payload(0, ph);
         } else {
             self.emit_ctor_closure(type_id, &type_name, variant, labels, arity as i32);
         }
@@ -2213,7 +2225,7 @@ impl Compiler {
         for i in 0..arity {
             self.emit_arg(Op::PushLocal, i);
         }
-        self.emit_b(Op::MakeEnumPayload, arity as u16, ph);
+        self.emit_make_enum_payload(arity as u16, ph);
         self.emit(Op::Ret);
 
         self.patch_jump(jump_over);
@@ -2857,7 +2869,7 @@ impl Compiler {
             }
         }
 
-        self.emit_b(Op::MakeEnumPayload, arity as u16, ph);
+        self.emit_make_enum_payload(arity as u16, ph);
 
         result_ty
     }
@@ -3125,12 +3137,10 @@ impl Compiler {
             );
             // Best-effort recovery: leave the LHS on the stack and still
             // type-check the body so downstream errors are not cascaded.
-            self.env.push_scope();
-            self.push_local_scope();
+            self.push_block_scope();
             let _ = self.compile_expr(&expr.body);
             self.emit(Op::Pop);
-            self.pop_local_scope();
-            self.env.pop_scope();
+            self.pop_block_scope();
             return self.engine.fresh_var();
         };
 
@@ -3149,8 +3159,7 @@ impl Compiler {
 
         // Failure branch: discard or unwrap-and-bind the payload, then
         // evaluate the recovery body.
-        self.env.push_scope();
-        self.push_local_scope();
+        self.push_block_scope();
         if let Some(e) = err_var {
             self.emit(Op::UnwrapEnum);
             if let Some(recv) = &expr.receiver {
@@ -3164,8 +3173,7 @@ impl Compiler {
             self.emit(Op::Pop);
         }
         let body_ty = self.compile_expr(&expr.body);
-        self.pop_local_scope();
-        self.env.pop_scope();
+        self.pop_block_scope();
         self.engine
             .unify_at(success_var, body_ty, type_defining_span(&expr.body));
         let end = self.emit_jump(Op::Jump);
@@ -3213,11 +3221,9 @@ impl Compiler {
         let end = self.emit_jump(Op::Jump);
 
         self.patch_jump(to_body);
-        self.env.push_scope();
-        self.push_local_scope();
+        self.push_block_scope();
         let body_ty = self.compile_expr(body);
-        self.pop_local_scope();
-        self.env.pop_scope();
+        self.pop_block_scope();
         self.patch_jump(end);
 
         self.engine
@@ -3328,7 +3334,7 @@ impl Compiler {
             capture_names: std::mem::take(&mut self.capture_names),
             rigid_ids: self.rigid_ids.clone(),
             binding: match binding {
-                Some(n) => std::mem::replace(&mut self.current_binding, n.to_string()),
+                Some(n) => self.current_binding.replace(n.to_string()),
                 None => {
                     // A lambda / fn-expression has no self-name UNLESS it is the
                     // RHS of a `name = fn(...)` binding, which stashes that name
@@ -3336,11 +3342,7 @@ impl Compiler {
                     // the enclosing fn's `current_binding` is wrong: a HOF-arg
                     // lambda calling the enclosing fn would mis-resolve to Self_
                     // and emit CallSelf against the lambda's own live frame.
-                    let old = std::mem::take(&mut self.current_binding);
-                    if let Some(n) = self.next_fn_self_name.take() {
-                        self.current_binding = n;
-                    }
-                    old
+                    std::mem::replace(&mut self.current_binding, self.next_fn_self_name.take())
                 }
             },
             tail: std::mem::replace(&mut self.in_tail_position, true),
@@ -3429,8 +3431,7 @@ impl Compiler {
         let mut any_pattern_err = false;
 
         for arm in &m.arms {
-            self.env.push_scope();
-            self.push_local_scope();
+            self.push_block_scope();
 
             let mut b = PatternBindings::new();
             if !self.type_pattern(&arm.pattern, subject_ty, &mut b) {
@@ -3459,8 +3460,7 @@ impl Compiler {
             end_jumps.push(self.emit_jump(Op::Jump));
             self.patch_all(&fail_jumps);
 
-            self.pop_local_scope();
-            self.env.pop_scope();
+            self.pop_block_scope();
         }
 
         // Fallthrough is unreachable when the match is exhaustive; emit a Nil

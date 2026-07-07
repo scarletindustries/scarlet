@@ -672,6 +672,27 @@ fn or_pattern_unequal_bindings_still_rejected() {
 }
 
 #[test]
+fn or_pattern_nested_in_non_first_alternative() {
+    // Regression: the two-state save/restore in `PatternBindings` reset to
+    // Initial mode on entering the inner or, so binding `x` in `(x, 1)` was
+    // rejected as a duplicate of the outer canonical `x`. With the frame stack
+    // the inner or is checked against the outer's canonical set.
+    run_outputs(
+        "fn f(t (Int, (Int, Int))) Int {\n\
+         \tmatch t {\n\
+         \t\t(0, (x, 0)) | (1, (x, 1) | (x, 2)) -> x\n\
+         \t\t_ -> 99\n\
+         \t}\n\
+         }\n\
+         println(f((0, (10, 0))))\n\
+         println(f((1, (20, 1))))\n\
+         println(f((1, (30, 2))))\n\
+         println(f((1, (40, 5))))\n",
+        "10\n20\n30\n99\n",
+    );
+}
+
+#[test]
 fn array_spread_literal() {
     run_outputs(
         "xs = [1, 2]\n\
