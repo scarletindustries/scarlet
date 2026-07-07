@@ -25,6 +25,7 @@
 // Designated unsafe module: the mimalloc FFI lives here, behind a safe API.
 #![allow(unsafe_code)]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
 
@@ -124,17 +125,18 @@ impl ProcHeap {
 // they are freed as its `Value`s (stack, frames, result) drop at death — there
 // is no per-process heap to tear down.
 
+/// `src address → dst object` map for [`walk_graph`]'s DAG-preserving copy.
+type WalkMap = HashMap<usize, NonNull<u64>>;
+/// BFS queue of freshly copied objects whose child slots still need rewriting.
+type WalkQueue = Vec<NonNull<u64>>;
+
 /// Shallow-copy one node of a spawn graph, returning the value to store in the
 /// parent slot. Immediates and immortal (frozen) values pass through unchanged
 /// (frozen objects are shared, never copied). A node already copied (a DAG
 /// join) is shared: its existing copy's refcount is bumped. A first-seen node
 /// is byte-copied (its child slots still point at the *source* graph; the
 /// caller's queue links them later) and queued.
-fn copy_node(
-    src: &Value,
-    map: &mut HashMap<usize, NonNull<u64>>,
-    queue: &mut Vec<NonNull<u64>>,
-) -> Value {
+fn copy_node(src: &Value, map: &mut WalkMap, queue: &mut WalkQueue) -> Value {
     if !src.is_heap() || src.is_immortal() {
         return src.clone();
     }
@@ -173,27 +175,39 @@ fn copy_node(
 /// overflow the stack.
 fn walk_graph(
     root: &Value,
-    mut copy_one: impl FnMut(&Value, &mut HashMap<usize, NonNull<u64>>, &mut Vec<NonNull<u64>>) -> Value,
+    mut copy_one: impl FnMut(&Value, &mut WalkMap, &mut WalkQueue) -> Value,
 ) -> Value {
-    let mut map: HashMap<usize, NonNull<u64>> = HashMap::new();
-    let mut queue: Vec<NonNull<u64>> = Vec::new();
-    let root_copy = copy_one(root, &mut map, &mut queue);
-    let mut i = 0;
-    while i < queue.len() {
-        let d = queue[i];
-        i += 1;
-        // SAFETY: `d` is a freshly copied object whose child slots still hold
-        // verbatim *source* pointer bits (un-counted aliases). Build each
-        // copied child from those bits, then overwrite the slot with
-        // `ptr::write` so the alias is NOT dropped (it owns no count).
-        unsafe {
-            for_each_child(d.as_ptr(), &mut |child: &mut Value| {
-                let copied = copy_one(child, &mut map, &mut queue);
-                std::ptr::write(child as *mut Value, copied);
-            });
-        }
+    thread_local! {
+        /// Per-thread scratch for [`walk_graph`]: the `src → dst` address map
+        /// and BFS queue, cleared and reused per call so a spawn/publish does
+        /// not pay two fresh allocations plus O(nodes) rehash growth.
+        /// `walk_graph` is non-reentrant (its `copy_one` callbacks never
+        /// spawn/publish), so one per-thread pair is sound.
+        static WALK_SCRATCH: RefCell<(WalkMap, WalkQueue)>
+            = RefCell::new((WalkMap::new(), WalkQueue::new()));
     }
-    root_copy
+    WALK_SCRATCH.with(|cell| {
+        let (map, queue) = &mut *cell.borrow_mut();
+        map.clear();
+        queue.clear();
+        let root_copy = copy_one(root, map, queue);
+        let mut i = 0;
+        while i < queue.len() {
+            let d = queue[i];
+            i += 1;
+            // SAFETY: `d` is a freshly copied object whose child slots still hold
+            // verbatim *source* pointer bits (un-counted aliases). Build each
+            // copied child from those bits, then overwrite the slot with
+            // `ptr::write` so the alias is NOT dropped (it owns no count).
+            unsafe {
+                for_each_child(d.as_ptr(), &mut |child: &mut Value| {
+                    let copied = copy_one(child, map, queue);
+                    std::ptr::write(child as *mut Value, copied);
+                });
+            }
+        }
+        root_copy
+    })
 }
 
 /// Deep-copy the value graph reachable from `root` into a fresh process heap,
@@ -216,8 +230,8 @@ fn rc_copy_graph(root: &Value) -> Value {
 fn publish_node(
     src: &Value,
     builder: &mut FrozenBuilder,
-    map: &mut HashMap<usize, NonNull<u64>>,
-    queue: &mut Vec<NonNull<u64>>,
+    map: &mut WalkMap,
+    queue: &mut WalkQueue,
 ) -> Value {
     if !src.is_heap() || src.is_immortal() {
         return src.clone();

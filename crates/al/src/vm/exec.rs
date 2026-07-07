@@ -566,8 +566,18 @@ impl VM {
                     let type_id = al_core::TypeId(type_id as i32);
 
                     if let Some(ev) = val.as_enum() {
+                        // Both operands are frozen constant-pool `Str` values.
+                        // For enums built via `MakeEnumPayload` the stored
+                        // variant-name word IS the interned constant the match
+                        // header pushed, so a raw-bits compare decides the arm
+                        // in O(1). Fall through to a content compare only when
+                        // the enum came through a different frozen builder
+                        // (prelude templates), where the same name interns to a
+                        // distinct address.
                         self.stack.push(Value::bool(
-                            ev.type_id() == type_id && ev.variant_name() == variant_str,
+                            ev.type_id() == type_id
+                                && (ev.variant_name_value().to_bits() == variant_name.to_bits()
+                                    || ev.variant_name() == variant_str),
                         ));
                     } else {
                         self.stack.push(Value::bool(false));
