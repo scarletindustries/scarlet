@@ -88,6 +88,16 @@ No measurable win — and on inspection that's expected, not a bug in the new op
 
 Action item: `bench_heavy.al` needs a companion workload that actually exercises Phase 1 — a mutually-recursive pair (forces `CallKnown`), an exhaustive enum match in the hot loop (forces `SwitchTag`), and a record projection (forces `GetFieldUnchecked`) — before Phase 1's real speedup can be quoted. Le/Ge variants (`LeInt`/`GeInt`/`LeFloat`/`GeFloat`) from spec item 3 were not added — baseline already had `LtInt`/`GtInt`/`EqInt`/`LtFloat`/`GtFloat`, so typed compares are unchanged vs baseline.
 
+`examples/bench_typed.al` (tree sum + is_even/is_odd + record dot-product loop, best-of-5):
+
+| build | real |
+|---|---|
+| pre-Phase-1 (d684d74) | 0.67 s |
+| Phase 1 | 0.61 s |
+| **delta** | **−9%** |
+
+The bulk of remaining time is Point allocation in `dot_loop` — Phase 2 (Perceus reuse) eliminates it.
+
 ## References
 
 - Grossman, Morrisett, Jim, Hicks, Wang, Cheney. *Region-Based Memory Management in Cyclone*. PLDI'02.

@@ -1,0 +1,53 @@
+// Exercises Phase 1 type-directed ops: CallKnown (mutual recursion),
+// SwitchTag (exhaustive enum match), GetFieldUnchecked (record projection).
+
+type Tree {
+	Leaf(value Int)
+	Node(left Tree right Tree)
+}
+
+fn build(depth Int) Tree {
+	if depth == 0 {
+		Leaf(1)
+	} else {
+		Node(build(depth - 1), build(depth - 1))
+	}
+}
+
+fn sum(t Tree) Int {
+	match t {
+		Leaf(v) -> v
+		Node(l, r) -> sum(l) + sum(r)
+	}
+}
+
+fn is_even(n Int) Bool {
+	if n == 0 { True } else { is_odd(n - 1) }
+}
+
+fn is_odd(n Int) Bool {
+	if n == 0 { False } else { is_even(n - 1) }
+}
+
+type Point {
+	Point(x Int y Int z Int)
+}
+
+fn dot(a Point, b Point) Int {
+	a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn dot_loop(n Int, acc Int) Int {
+	if n == 0 {
+		acc
+	} else {
+		p = Point(n, n + 1, n + 2)
+		q = Point(n + 3, n + 4, n + 5)
+		dot_loop(n - 1, acc + dot(p, q))
+	}
+}
+
+t = build(20)
+println(sum(t))
+println(is_even(500000))
+println(dot_loop(1000000, 0))
