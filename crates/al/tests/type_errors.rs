@@ -1,14 +1,14 @@
 mod common;
-use common::{check_fails, check_ok};
+use common::{check_ok, check_rejects};
 
 #[test]
 fn int_plus_string_is_type_error() {
-    check_fails("x = 1 + 'a'\n", "Type mismatch");
+    check_rejects("x = 1 + 'a'\n", "Type mismatch");
 }
 
 #[test]
 fn non_exhaustive_match_is_error() {
-    check_fails(
+    check_rejects(
         "f = fn(x) { match x { True -> 1 } }\nf(False)\n",
         "not exhaustive",
     );
@@ -16,12 +16,12 @@ fn non_exhaustive_match_is_error() {
 
 #[test]
 fn unknown_identifier_is_error() {
-    check_fails("x = foo\n", "Unknown identifier");
+    check_rejects("x = foo\n", "Unknown identifier");
 }
 
 #[test]
 fn if_condition_must_be_bool() {
-    check_fails("if 1 { 2 } else { 3 }\n", "Type mismatch");
+    check_rejects("if 1 { 2 } else { 3 }\n", "Type mismatch");
 }
 
 // An integer literal whose source text overflows i64 was previously coerced
@@ -31,12 +31,12 @@ fn if_condition_must_be_bool() {
 
 #[test]
 fn integer_literal_overflow_is_error() {
-    check_fails("x = 99999999999999999999999999\n", "out of range for Int");
+    check_rejects("x = 99999999999999999999999999\n", "out of range for Int");
 }
 
 #[test]
 fn integer_literal_overflow_in_match_pattern_is_error() {
-    check_fails(
+    check_rejects(
         "match 1 { 99999999999999999999999999 -> 0\n _ -> 1 }\n",
         "out of range for Int",
     );
@@ -44,7 +44,7 @@ fn integer_literal_overflow_in_match_pattern_is_error() {
 
 #[test]
 fn integer_literal_overflow_in_range_pattern_is_error() {
-    check_fails(
+    check_rejects(
         "match 1 { 99999999999999999999999999..0 -> 0\n _ -> 1 }\n",
         "out of range for Int",
     );
@@ -52,7 +52,7 @@ fn integer_literal_overflow_in_range_pattern_is_error() {
 
 #[test]
 fn unused_let_binding_is_error() {
-    check_fails(
+    check_rejects(
         "x = 1\nprintln('done')\n",
         "'x' is unused; prefix with '_' to ignore",
     );
@@ -60,7 +60,7 @@ fn unused_let_binding_is_error() {
 
 #[test]
 fn unused_param_is_error() {
-    check_fails(
+    check_rejects(
         "fn f(a Int, b Int) Int { a }\nprintln(f(1, 2))\n",
         "'b' is unused; prefix with '_' to ignore",
     );
@@ -68,7 +68,7 @@ fn unused_param_is_error() {
 
 #[test]
 fn unused_match_binding_is_error() {
-    check_fails(
+    check_rejects(
         "match Some(1) { Some(x) -> 0\n None -> 0 }\n",
         "'x' is unused; prefix with '_' to ignore",
     );
@@ -96,7 +96,7 @@ fn closure_capture_counts_as_use() {
 
 #[test]
 fn wrong_argument_count_is_error() {
-    check_fails(
+    check_rejects(
         "fn f(a Int, b Int) Int { a + b }\nprintln(f(1))\n",
         "Expected 2 argument(s), got 1",
     );
@@ -104,7 +104,7 @@ fn wrong_argument_count_is_error() {
 
 #[test]
 fn calling_non_function_is_error() {
-    check_fails(
+    check_rejects(
         "x = 5\ny = x(3)\nprintln(y)\n",
         "This value of type 'Int' is not a function and cannot be called",
     );
@@ -117,7 +117,7 @@ fn calling_non_function_is_error() {
 
 #[test]
 fn ctor_missing_field_is_error() {
-    check_fails(
+    check_rejects(
         "type P { P(name String age Int) }\nP(name: 'a')\n",
         "Constructor 'P' is missing field(s): age",
     );
@@ -125,7 +125,7 @@ fn ctor_missing_field_is_error() {
 
 #[test]
 fn ctor_unknown_field_is_error() {
-    check_fails(
+    check_rejects(
         "type P { P(name String age Int) }\nP(name: 'a', bogus: 1)\n",
         "Constructor 'P' has no field 'bogus'. Available: name, age",
     );
@@ -133,7 +133,7 @@ fn ctor_unknown_field_is_error() {
 
 #[test]
 fn ctor_too_many_positional_is_error() {
-    check_fails(
+    check_rejects(
         "type P { P(name String age Int) }\nP('a', 'b', 'c')\n",
         "Constructor 'P' has 2 field(s) but more were supplied",
     );
@@ -141,7 +141,7 @@ fn ctor_too_many_positional_is_error() {
 
 #[test]
 fn ctor_nullary_with_args_is_error() {
-    check_fails(
+    check_rejects(
         "type C { Red Green }\nRed(1)\n",
         "Constructor 'Red' has 0 field(s) but more were supplied",
     );
@@ -149,7 +149,7 @@ fn ctor_nullary_with_args_is_error() {
 
 #[test]
 fn ctor_duplicate_field_is_error() {
-    check_fails(
+    check_rejects(
         "type P { P(name String age Int) }\nP(name: 'a', name: 'b', age: 1)\n",
         "Field 'name' is specified more than once",
     );
@@ -163,7 +163,7 @@ fn ctor_duplicate_field_is_error() {
 // form, so this path is only reachable with a constructor-cased name).
 #[test]
 fn ctor_unknown_in_pattern_is_error() {
-    check_fails(
+    check_rejects(
         "r = match Some(1) { Bogus(x) -> 0\n _ -> 1 }\nprintln(r)\n",
         "Unknown constructor 'Bogus' in pattern",
     );
@@ -173,7 +173,7 @@ fn ctor_unknown_in_pattern_is_error() {
 // sub-patterns is rejected, naming the constructor and the supplied count.
 #[test]
 fn ctor_nullary_with_args_in_pattern_is_error() {
-    check_fails(
+    check_rejects(
         "type C { Red Green }\nfn f(c C) Int { match c { Red(x) -> x\n Green -> 0 } }\nprintln(f(Red))\n",
         "Constructor 'Red' takes no arguments but 1 were given",
     );
@@ -186,7 +186,7 @@ fn ctor_nullary_with_args_in_pattern_is_error() {
 // go through a different path and are *not* subject to this rule.)
 #[test]
 fn unconsumed_block_expr_statement_is_error() {
-    check_fails("r = {\n\t1 + 2\n\t9\n}\nprintln(r)\n", "must be consumed");
+    check_rejects("r = {\n\t1 + 2\n\t9\n}\nprintln(r)\n", "must be consumed");
 }
 
 // The flip side of the rule above: a *Nil*-typed non-last statement (here a
@@ -208,7 +208,7 @@ fn nil_typed_block_expr_statement_is_ok() {
 // accepted, so this fails only on a genuine arity-check regression.
 #[test]
 fn type_arg_arity_mismatch_is_error() {
-    check_fails(
+    check_rejects(
         "fn f(_x Option(Int, String)) Int { 1 }\n",
         "Type 'Option' expects 1 type argument, got 2",
     );
@@ -220,14 +220,14 @@ fn type_arg_arity_mismatch_is_error() {
 // disabled, so an unseen var is an error rather than an implicit fresh one.)
 #[test]
 fn unknown_type_variable_in_ctor_field_is_error() {
-    check_fails("type Box { Box(v t) }\n", "Unknown type variable 't'");
+    check_rejects("type Box { Box(v t) }\n", "Unknown type variable 't'");
 }
 
 // A lowercase name is a type variable and cannot be applied to type arguments
 // the way a nominal type constructor can; `a(Int)` is therefore rejected.
 #[test]
 fn type_variable_cannot_take_arguments_is_error() {
-    check_fails(
+    check_rejects(
         "fn f(x a(Int)) a { x }\n",
         "Type variable 'a' cannot take arguments",
     );
@@ -237,7 +237,7 @@ fn type_variable_cannot_take_arguments_is_error() {
 // distinct names: the second `t` in `Box(t, t)` is a duplicate.
 #[test]
 fn duplicate_type_parameter_is_error() {
-    check_fails(
+    check_rejects(
         "type Box(t, t) { Box(a t) }\n",
         "Duplicate type parameter 't'",
     );
@@ -248,7 +248,7 @@ fn duplicate_type_parameter_is_error() {
 // pass detects it before hydrating the RHS and reports the offending alias.
 #[test]
 fn recursive_type_alias_self_is_error() {
-    check_fails("type A = A\n", "Recursive type alias 'A'");
+    check_rejects("type A = A\n", "Recursive type alias 'A'");
 }
 
 // The mutual case: `A = B`, `B = A` forms a two-node cycle that is likewise
@@ -256,7 +256,7 @@ fn recursive_type_alias_self_is_error() {
 // detector, so this pins the diagnostic class rather than a specific name).
 #[test]
 fn mutually_recursive_type_alias_is_error() {
-    check_fails("type A = B\ntype B = A\n", "Recursive type alias");
+    check_rejects("type A = B\ntype B = A\n", "Recursive type alias");
 }
 
 // HM inference occurs-check: `x(x)` forces `x`'s type to unify with `t -> u`
@@ -264,7 +264,7 @@ fn mutually_recursive_type_alias_is_error() {
 // rather than looping.
 #[test]
 fn infinite_type_self_application_is_error() {
-    check_fails("fn f(x) { x(x) }\n", "Infinite type detected");
+    check_rejects("fn f(x) { x(x) }\n", "Infinite type detected");
 }
 
 // Field/tuple access diagnostics. `tuple.N` numeric indexing and `value.field`
@@ -277,7 +277,7 @@ fn infinite_type_self_application_is_error() {
 // known element count, reported with the actual element count.
 #[test]
 fn tuple_index_out_of_bounds_is_error() {
-    check_fails(
+    check_rejects(
         "t = (1, 2)\nprintln(t.5)\n",
         "Tuple index 5 out of bounds (tuple has 2 elements)",
     );
@@ -287,7 +287,7 @@ fn tuple_index_out_of_bounds_is_error() {
 // receiver (here an `Int`) is rejected naming the offending index.
 #[test]
 fn numeric_index_on_non_tuple_is_error() {
-    check_fails("x = 5\nprintln(x.0)\n", "Cannot index .0 on non-tuple type");
+    check_rejects("x = 5\nprintln(x.0)\n", "Cannot index .0 on non-tuple type");
 }
 
 // `value.field` projects a label that must be present on EVERY variant, since
@@ -296,7 +296,7 @@ fn numeric_index_on_non_tuple_is_error() {
 // variant that lacks it.
 #[test]
 fn field_not_on_every_variant_is_error() {
-    check_fails(
+    check_rejects(
         "type Shape { Circle(r Int) Square(side Int) }\nfn g(s Shape) Int { s.r }\n",
         "Field 'r' is not present on every variant of 'Shape' (missing on 'Square')",
     );
@@ -306,7 +306,7 @@ fn field_not_on_every_variant_is_error() {
 // the receiver type is rendered structurally in the message.
 #[test]
 fn field_access_on_tuple_is_error() {
-    check_fails("t = (1, 2)\nt.x\n", "Type '(Int, Int)' has no field 'x'");
+    check_rejects("t = (1, 2)\nt.x\n", "Type '(Int, Int)' has no field 'x'");
 }
 
 // Projecting a field off a value whose type is still an unresolved inference
@@ -314,7 +314,7 @@ fn field_access_on_tuple_is_error() {
 // to add an annotation.
 #[test]
 fn field_access_on_unknown_type_is_error() {
-    check_fails(
+    check_rejects(
         "fn g(x) { x.name }\n",
         "Cannot access field 'name' on a value of unknown type — add a type annotation",
     );
@@ -326,14 +326,14 @@ fn field_access_on_unknown_type_is_error() {
 // no-suggestion path is covered by `unknown_identifier_is_error` above.)
 #[test]
 fn unknown_identifier_suggests_close_name() {
-    check_fails("println = 1\nfoo = prntln\n", "Did you mean 'println'?");
+    check_rejects("println = 1\nfoo = prntln\n", "Did you mean 'println'?");
 }
 
 // A builtin has a type but no first-class runtime binding, so naming one in
 // value position (rather than calling it) is rejected.
 #[test]
 fn builtin_used_as_value_is_error() {
-    check_fails(
+    check_rejects(
         "x = println\n",
         "'println' is a builtin and cannot be used as a value",
     );
@@ -351,7 +351,7 @@ fn builtin_used_as_value_is_error() {
 // message.)
 #[test]
 fn refutable_tuple_destructuring_binding_is_error() {
-    check_fails(
+    check_rejects(
         "(x, 1) = (1, 2)\nprintln(x)\n",
         "Destructuring binding pattern must be irrefutable",
     );
@@ -369,7 +369,7 @@ fn irrefutable_tuple_destructuring_binding_is_ok() {
 // message names the declaration's kind ("type").
 #[test]
 fn nested_type_declaration_is_error() {
-    check_fails(
+    check_rejects(
         "fn outer() Int {\n\ttype Inner { A }\n\t1\n}\n",
         "type declarations are only allowed at the top level",
     );
@@ -380,7 +380,7 @@ fn nested_type_declaration_is_error() {
 // `Some(5) or v -> 0` is rejected for trying to bind `v`.
 #[test]
 fn or_with_receiver_on_option_is_error() {
-    check_fails(
+    check_rejects(
         "x = Some(5) or v -> 0\nprintln(x)\n",
         "'or' on an Option does not bind a value",
     );
@@ -401,7 +401,7 @@ fn or_without_receiver_on_option_is_ok() {
 // hole, not just a diagnostics gap.
 #[test]
 fn same_named_type_from_another_module_does_not_unify() {
-    check_fails(
+    check_rejects(
         "import al/binary\n\
          import al/http/h1\n\
          type Parsed {\n\

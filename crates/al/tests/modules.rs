@@ -1,8 +1,7 @@
-use al::bytecode::IncrementalSession;
 use al::reference::EntityKind;
 
 mod common;
-use common::{Project, SessionQueryExt, cursor, parse, run_al, run_outputs};
+use common::{Project, SessionQueryExt, checked_with, cursor, run_al, run_outputs};
 
 const UTIL_SRC: &str =
     "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";
@@ -168,10 +167,7 @@ fn query_api_cross_module_goto_def_and_symbols() {
     proj.write("util.al", UTIL_SRC);
     let entry = "import ./util\nprintln(util.quote('hi'))\n";
     proj.write("main.al", entry);
-
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&proj.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let s = checked_with(&proj, entry);
 
     // `util.quote(..)` in the entry resolves to its declaration in util.al.
     let (l, c) = cursor(entry, "quote", 1, 0);
@@ -214,10 +210,7 @@ fn query_api_alias_and_selective_imports_resolve() {
     let entry =
         "import ./util as u\nimport ./util.{quote as q}\nprintln(u.empty())\nprintln(q('x'))\n";
     proj.write("main.al", entry);
-
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&proj.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let s = checked_with(&proj, entry);
 
     // Aliased qualified use `u.empty()` resolves into util.al.
     let (l, c) = cursor(entry, "empty", 1, 0);

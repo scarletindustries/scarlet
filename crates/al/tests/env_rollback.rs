@@ -6,10 +6,8 @@
 //! never restore it, so a *later* check that relied on the prelude binding saw
 //! the imported one instead.
 
-use al::bytecode::IncrementalSession;
-
 mod common;
-use common::{Project, parse};
+use common::{Project, checked_with, recheck};
 
 #[test]
 fn shadowing_import_does_not_corrupt_prelude_across_checks() {
@@ -19,20 +17,15 @@ fn shadowing_import_does_not_corrupt_prelude_across_checks() {
     // `Int`.
     p.write("lib.al", "pub fn println(_x Int) Nil { Nil }\n");
 
-    let mut s = IncrementalSession::new(al::stdlib());
-
     // Check 1: entry selectively imports lib's `println`, shadowing the prelude
     // binding. This overwrites the prelude `println` entry in place in the
     // persistent root scope.
-    let entry1 = "import ./lib.{println}\nprintln(1)\n";
-    let r1 = s.check(&parse(entry1), Some(&p.dir));
-    assert!(r1.success, "check 1 should succeed: {:?}", r1.diagnostics);
+    let mut s = checked_with(&p, "import ./lib.{println}\nprintln(1)\n");
 
     // Check 2: entry no longer imports `println`; it uses the *prelude*
     // `println`, which accepts any type. The rollback must have restored the
     // prelude binding, so calling it with a String must type-check.
-    let entry2 = "println(\"hello\")\n";
-    let r2 = s.check(&parse(entry2), Some(&p.dir));
+    let r2 = recheck(&mut s, &p, "println(\"hello\")\n");
     assert!(
         r2.success,
         "prelude `println` must accept a String after a prior shadowing import \

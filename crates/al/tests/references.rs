@@ -13,7 +13,7 @@ use al::reference::EntityKind;
 use al::span::Span;
 
 mod common;
-use common::{Project, SessionQueryExt, cursor, parse};
+use common::{Project, SessionQueryExt, checked_with, cursor, parse};
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
 const B_SRC: &str = "import ./c\npub fn bridge() Int { c.shared() + 1 }\n";
@@ -32,14 +32,6 @@ fn project() -> Project {
     p.write("b.al", B_SRC);
     p.write("a.al", ENTRY);
     p
-}
-
-/// Fresh session checking `entry` against project `p`, asserting success.
-fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
-    let mut s = IncrementalSession::new(al::stdlib());
-    let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
-    s
 }
 
 fn checked(p: &Project) -> IncrementalSession {

@@ -3,6 +3,8 @@
 // subdirectory so Cargo treats it as a module (`mod common;`) rather than a
 // standalone test target.
 
+pub mod net;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -80,51 +82,26 @@ fn dump(source: &str, out: &AlOutput) -> String {
     )
 }
 
-/// Assert the exit status matches `want_success`, panicking with `what` and
-/// the standard dump otherwise.
-fn assert_status(out: &AlOutput, want_success: bool, what: &str, source: &str) {
+/// The one reject-checker: asserts `out` is a *clean* rejection — failure exit,
+/// a real exit code (never a signal/abort), no Rust panic in the output, and a
+/// diagnostic containing `expected_diag` on either stream. Pass `""` for
+/// `expected_diag` when the test only pins the rejection, not the message.
+fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diag: &str) {
     assert!(
-        out.success == want_success,
-        "{what}:\n{}",
+        !out.success,
+        "expected `al {cmd}` to REJECT:\n{}",
         dump(source, out)
     );
-}
-
-/// Assert `al check` rejects `source` (failure exit, code 1) and that the
-/// combined stdout+stderr contains `expected_substring`.
-pub fn check_fails(source: &str, expected_substring: &str) {
-    let out = run_source("check", source);
-    assert_status(&out, false, "expected `al check` to REJECT", source);
-    assert_eq!(
-        out.code,
-        Some(1),
-        "expected exit code 1 for:\n{}",
-        dump(source, &out)
-    );
-    let combined = out.combined();
     assert!(
-        combined.contains(expected_substring),
-        "expected output to contain {expected_substring:?} for:\n{source}\n--- output ---\n{combined}"
+        out.code.is_some(),
+        "process was killed by a signal instead of rejecting cleanly:\n{}",
+        dump(source, out)
     );
-}
-
-/// Assert `al check` rejects `source` (failure exit). Diagnostic text and the
-/// exact exit code are not pinned.
-pub fn check_rejects(source: &str) {
-    let out = run_source("check", source);
-    assert_status(&out, false, "expected `al check` to REJECT", source);
-}
-
-/// Assert `al check` rejects `source` cleanly: failure exit, no Rust panic in
-/// the output, and a diagnostic containing `expected_diag` on either stream.
-pub fn check_rejects_cleanly(source: &str, expected_diag: &str) {
-    let out = run_source("check", source);
-    assert_status(&out, false, "expected `al check` to REJECT", source);
     let combined = out.combined();
     assert!(
         !combined.contains("panicked"),
-        "compiler panicked instead of rejecting cleanly:\n{}",
-        dump(source, &out)
+        "panicked instead of rejecting cleanly:\n{}",
+        dump(source, out)
     );
     assert!(
         combined.contains(expected_diag),
@@ -132,10 +109,26 @@ pub fn check_rejects_cleanly(source: &str, expected_diag: &str) {
     );
 }
 
+/// Assert `al check` rejects `source` cleanly with a diagnostic containing
+/// `expected_diag`. See [`assert_rejects`] for the full contract.
+pub fn check_rejects(source: &str, expected_diag: &str) {
+    assert_rejects(&run_source("check", source), "check", source, expected_diag);
+}
+
+/// Assert `al run` rejects `source` cleanly with a diagnostic containing
+/// `expected_diag`. See [`assert_rejects`] for the full contract.
+pub fn run_rejects(source: &str, expected_diag: &str) {
+    assert_rejects(&run_source("run", source), "run", source, expected_diag);
+}
+
 /// Assert `al check` accepts `source` (success exit).
 pub fn check_ok(source: &str) {
     let out = run_source("check", source);
-    assert_status(&out, true, "expected `al check` to ACCEPT", source);
+    assert!(
+        out.success,
+        "expected `al check` to ACCEPT:\n{}",
+        dump(source, &out)
+    );
 }
 
 /// Assert `al run` succeeds (exit 0) and its stdout is exactly `expected`.
@@ -211,6 +204,12 @@ impl Project {
         fs::create_dir_all(&dir).unwrap();
         Project { dir }
     }
+    /// Write `src` to `prog.al` inside the project and `al run` it.
+    pub fn run(&self, src: &str) -> AlOutput {
+        let p = self.dir.join("prog.al");
+        std::fs::write(&p, src).unwrap();
+        run_al("run", &p)
+    }
     pub fn write(&self, name: &str, src: &str) {
         let path = self.dir.join(name);
         fs::write(&path, src).unwrap();
@@ -238,10 +237,24 @@ impl Drop for Project {
     }
 }
 
-use al::bytecode::IncrementalSession;
+use al::bytecode::{CompileResult, IncrementalSession};
 use al::module::{self, ModulePath};
 use al::reference::{DefId, Definition, EntityKind, ModuleId, ReferenceGraph};
 use al::span::Span;
+
+/// Fresh session checking `entry` against project `p`, asserting success.
+pub fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
+    let mut s = IncrementalSession::new(al::stdlib());
+    let r = s.check(&parse(entry), Some(&p.dir));
+    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    s
+}
+
+/// Re-check `entry` against project `p` in the existing session, returning the
+/// full result so callers can assert success or failure.
+pub fn recheck(s: &mut IncrementalSession, p: &Project, entry: &str) -> CompileResult {
+    s.check(&parse(entry), Some(&p.dir))
+}
 
 /// A document/workspace symbol projected from a graph `Definition`.
 #[derive(Debug, Clone)]

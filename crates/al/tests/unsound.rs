@@ -1,5 +1,5 @@
 mod common;
-use common::{check_rejects, check_rejects_cleanly, run_al, run_outputs, write_temp};
+use common::{check_rejects, run_outputs, run_rejects};
 
 // ---------------------------------------------------------------------------
 // U1: `x = x` self-reference infers ⊥, generalizes to ∀A.A, runtime slot is None.
@@ -10,6 +10,7 @@ fn u1_self_reference_is_rejected() {
         "x = x\n\
          n Int = x\n\
          println(n + 1)\n",
+        "",
     );
 }
 
@@ -23,6 +24,7 @@ fn u2_if_no_else_is_rejected() {
         "fn smuggle() Option(Int) { if True { 'hello' } }\n\
          n = smuggle() or 0\n\
          println(n + 1)\n",
+        "",
     );
 }
 
@@ -72,6 +74,7 @@ fn u5_generic_type_missing_args_is_rejected() {
          type Holder { Holder(box Box) }\n\
          h = Holder(box: Box(value: 'hello'))\n\
          println(h.box.value + 100)\n",
+        "",
     );
 }
 
@@ -108,6 +111,7 @@ fn u7_or_pattern_disjoint_bindings_is_rejected() {
          \t}\n\
          }\n\
          println(f(1))\n",
+        "",
     );
 }
 
@@ -123,6 +127,7 @@ fn u8_range_pattern_bounds_must_be_int() {
          \t_ -> 'ok'\n\
          }\n\
          println(r)\n",
+        "",
     );
 }
 
@@ -139,6 +144,7 @@ fn u9_array_pattern_non_tail_spread_is_rejected() {
          \t_ -> 0\n\
          }\n\
          println(r)\n",
+        "",
     );
 }
 
@@ -158,6 +164,7 @@ fn u10_spread_prefix_exhaustiveness_is_rejected() {
          \t}\n\
          }\n\
          println(f([True]))\n",
+        "",
     );
 }
 
@@ -172,6 +179,7 @@ fn u12_duplicate_pattern_binding_is_rejected() {
          \t(x, x) -> x\n\
          }\n\
          println(r)\n",
+        "",
     );
 }
 
@@ -184,6 +192,7 @@ fn u13_socket_literal_is_rejected() {
     check_rejects(
         "s = Socket\n\
          println(s)\n",
+        "",
     );
 }
 
@@ -229,7 +238,7 @@ fn u15_tuple_index_then_field_access() {
 // clean "already defined" rejection, never a panic.
 #[test]
 fn u16_duplicate_fn_is_rejected_without_panic() {
-    check_rejects_cleanly("fn a(x) {x}\nfn a() {}\n", "already defined");
+    check_rejects("fn a(x) {x}\nfn a() {}\n", "already defined");
 }
 
 // U17: a bare `@vm` (no op arg) used to panic an `unreachable!()` in analysis
@@ -239,7 +248,7 @@ fn u16_duplicate_fn_is_rejected_without_panic() {
 // unrepresentable: it must be a clean parse error, never a panic.
 #[test]
 fn u17_bare_vm_attr_is_rejected_without_panic() {
-    check_rejects_cleanly("@vm\nfn foo() Int\n", "@vm requires an op");
+    check_rejects("@vm\nfn foo() Int\n", "@vm requires an op");
 }
 
 // U18: the type-decl twin of U16. Duplicate `type` declarations used to desync
@@ -249,7 +258,7 @@ fn u17_bare_vm_attr_is_rejected_without_panic() {
 // + the Pass-0 dedup make it a clean rejection, never a panic/miscompile.
 #[test]
 fn u18_duplicate_type_is_rejected_without_panic() {
-    check_rejects_cleanly(
+    check_rejects(
         "type T = Int\ntype T = String\nx = 1\nprintln(x)\n",
         "already defined",
     );
@@ -266,29 +275,7 @@ fn u19_deep_else_if_chain_is_rejected_without_overflow() {
         source.push_str(" else if 1 < 2 { 0 }");
     }
     source.push_str(" else { 0 }\nprintln(x)\n");
-
-    let path = write_temp(&source);
-    let out = run_al("check", &path);
-    let _ = std::fs::remove_file(&path);
-
-    let stdout = &out.stdout;
-    let stderr = &out.stderr;
-
-    // Not a signal/abort: a clean non-zero exit with a diagnostic, not a crash.
-    assert!(
-        out.code.is_some(),
-        "process was killed by a signal (stack overflow) instead of \
-         rejecting cleanly:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-    assert!(
-        !out.success,
-        "expected the deep `else if` chain to be rejected"
-    );
-    assert!(
-        stdout.contains("too deep") || stderr.contains("too deep"),
-        "expected a 'nesting too deep' diagnostic:\n\
-         --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
+    check_rejects(&source, "too deep");
 }
 
 // U20: arithmetic is TOTAL — `/0`, `%0`, overflow, and non-finite float
@@ -432,7 +419,7 @@ fn u21_exhaustiveness_respects_field_labels() {
     // (a=True, b=False), so the match is genuinely non-exhaustive. The old
     // source-order lowering read arm 1 as (a=True, b=_), making the matrix
     // look complete and letting `f(Pair(a: True, b: False))` return Nil.
-    check_rejects_cleanly(
+    check_rejects(
         "type Pair { a Bool b Bool }\n\
          fn f(p Pair) Int {\n\
          \tmatch p {\n\
@@ -523,44 +510,15 @@ fn u22_module_shadow_preserves_closure_capture() {
 fn u23_oob_and_reversed_slice_are_clean_errors() {
     let cases = [
         (
-            "u23_oob",
             "println([1, 2, 3][0..10])\n",
-            "Slice indices out of bounds: [0..10] (array length is 3)",
+            "Slice indices out of bounds: [0..10] (length 3)",
         ),
         (
-            "u23_reversed",
             "println([1, 2, 3][2..1])\n",
-            "Slice indices out of bounds: [2..1] (array length is 3)",
+            "Slice indices out of bounds: [2..1] (length 3)",
         ),
     ];
-    for (tag, src, want) in cases {
-        let path = write_temp(src);
-        let out = run_al("run", &path);
-        let _ = std::fs::remove_file(&path);
-
-        let stdout = &out.stdout;
-        let stderr = &out.stderr;
-        let combined = out.combined();
-        let code = out.code;
-
-        // A real exit code (not a signal/abort): the process was not killed.
-        assert!(
-            code.is_some(),
-            "{tag}: process was killed by a signal instead of exiting cleanly:\n{src}\n\
-             --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-        );
-        assert!(
-            !out.success,
-            "{tag}: expected the out-of-bounds slice to fail at runtime:\n{src}\n\
-             --- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-        );
-        assert!(
-            !combined.contains("panicked"),
-            "{tag}: VM panicked instead of returning a clean error:\n--- output ---\n{combined}"
-        );
-        assert!(
-            combined.contains(want),
-            "{tag}: expected {want:?} in output:\n{src}\n--- output ---\n{combined}"
-        );
+    for (src, want) in cases {
+        run_rejects(src, want);
     }
 }

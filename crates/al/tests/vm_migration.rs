@@ -7,10 +7,10 @@
 // corrupted/missing output or a hang, never as flakiness on a loaded machine.
 
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 mod common;
 use common::Project;
+use common::net::wait_or_kill;
 
 /// Run `al run <prog>` with `AL_SCHEDULERS=<schedulers>` and capture output.
 /// A generous wall-clock cap turns a scheduler deadlock (e.g. a donated
@@ -21,7 +21,7 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> (String
     let prog = proj.dir.join("prog.al");
     std::fs::write(&prog, src).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_al"))
+    let child = Command::new(env!("CARGO_BIN_EXE_al"))
         .arg("run")
         .arg(&prog)
         .env("AL_SCHEDULERS", schedulers.to_string())
@@ -30,24 +30,11 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> (String
         .spawn()
         .expect("spawn al");
 
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        match child.try_wait().expect("poll al child") {
-            Some(_) => break,
-            None if Instant::now() >= deadline => {
-                child.kill().ok();
-                child.wait().ok();
-                panic!(
-                    "al run did not finish within 120s under AL_SCHEDULERS={schedulers} — scheduler hang"
-                );
-            }
-            None => std::thread::sleep(Duration::from_millis(25)),
-        }
-    }
-    let out = child.wait_with_output().expect("collect al output");
+    let out = wait_or_kill(child, 120);
     assert!(
         out.status.success(),
-        "al run failed under AL_SCHEDULERS={schedulers}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        "al run failed (or hung past 120s) under AL_SCHEDULERS={schedulers}\n\
+         --- stdout ---\n{}\n--- stderr ---\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );

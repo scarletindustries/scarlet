@@ -37,6 +37,15 @@ fn open(p: &Project, name: &str, src: &str) -> (LspServer, String) {
     (s, uri)
 }
 
+/// Boot a server over a fresh single-file project (`src` written as `a.al`) and
+/// open it. The `Project` is returned so its temp dir outlives the server.
+fn open_single(tag: &str, src: &str) -> (Project, LspServer, String) {
+    let p = Project::new(tag);
+    p.write("a.al", src);
+    let (s, uri) = open(&p, "a.al", src);
+    (p, s, uri)
+}
+
 const SRC: &str = "pub fn greet() Int { 7 }\nx = greet()\nprintln(x)\n";
 
 /// The refactored handlers compute and return their response JSON; the thin
@@ -45,9 +54,7 @@ const SRC: &str = "pub fn greet() Int { 7 }\nx = greet()\nprintln(x)\n";
 /// convention (`Json::Null`, wire-equivalent to the old `send_null_response`).
 #[test]
 fn seam_round_trips_position_queries() {
-    let p = Project::new("seam");
-    p.write("a.al", SRC);
-    let (mut s, uri) = open(&p, "a.al", SRC);
+    let (_p, mut s, uri) = open_single("seam", SRC);
 
     // hover on the declaration name -> a markdown block naming the symbol.
     let (l, c) = cursor(SRC, "greet", 1, 1);
@@ -103,9 +110,7 @@ const TYPED: &str =
 /// binder, at a *use* of it, and carry the function type at a call site.
 #[test]
 fn hover_markdown_includes_inferred_type() {
-    let p = Project::new("hovertype");
-    p.write("a.al", TYPED);
-    let (mut s, uri) = open(&p, "a.al", TYPED);
+    let (_p, mut s, uri) = open_single("hovertype", TYPED);
 
     let md = |s: &mut LspServer, l: i32, c: i32| -> String {
         s.hover_response(&pos(&uri, l, c))["contents"]["value"]
@@ -167,9 +172,7 @@ const BUG4_FN_SRC: &str =
 
 #[test]
 fn bug4_prepare_rename_top_level_fn_yields_range_and_placeholder() {
-    let p = Project::new("b4_prepare_fn");
-    p.write("a.al", BUG4_FN_SRC);
-    let (mut s, uri) = open(&p, "a.al", BUG4_FN_SRC);
+    let (_p, mut s, uri) = open_single("b4_prepare_fn", BUG4_FN_SRC);
 
     // Cursor inside the `helper` declaration name.
     let (l, c) = cursor(BUG4_FN_SRC, "helper", 1, 1);
@@ -199,9 +202,7 @@ fn bug4_prepare_rename_local_binding_yields_range() {
     // function-local binding; prepareRename must follow it to the binder — and
     // still must, with an unrelated parse error sitting at the end of the file.
     let src = "pub fn run() Int {\n  total = 41\n  total + 1\n}\nprintln(run())\nbroken @#$\n";
-    let p = Project::new("b4_prepare_local");
-    p.write("a.al", src);
-    let (mut s, uri) = open(&p, "a.al", src);
+    let (_p, mut s, uri) = open_single("b4_prepare_local", src);
 
     // Second occurrence of `total` is its use in `total + 1`.
     let (l, c) = cursor(src, "total", 2, 1);
@@ -220,9 +221,7 @@ fn bug4_prepare_rename_local_binding_yields_range() {
 
 #[test]
 fn bug4_rename_top_level_fn_rewrites_def_and_all_refs() {
-    let p = Project::new("b4_rename_fn");
-    p.write("a.al", BUG4_FN_SRC);
-    let (mut s, uri) = open(&p, "a.al", BUG4_FN_SRC);
+    let (_p, mut s, uri) = open_single("b4_rename_fn", BUG4_FN_SRC);
 
     let (l, c) = cursor(BUG4_FN_SRC, "helper", 1, 1);
     let mut params = pos(&uri, l, c);
@@ -302,9 +301,7 @@ fn start(result: &Json) -> (i64, i64) {
 /// occurrence of `needle`, and assert goto-def resolves to the `binder_nth`
 /// occurrence (the binder's identifier span) in the same file.
 fn assert_goto_def_lands(tag: &str, needle: &str, use_nth: usize, binder_nth: usize) {
-    let p = Project::new(tag);
-    p.write("a.al", BUG2_SRC);
-    let (mut s, uri) = open(&p, "a.al", BUG2_SRC);
+    let (_p, mut s, uri) = open_single(tag, BUG2_SRC);
 
     let (l, c) = cursor(BUG2_SRC, needle, use_nth, 1);
     let def = s.definition_response(&pos(&uri, l, c));
@@ -339,9 +336,7 @@ fn bug2_goto_def_param_use_lands_on_parameter() {
 
 #[test]
 fn bug2_find_refs_on_local_binder_includes_uses() {
-    let p = Project::new("b2_local_refs");
-    p.write("a.al", BUG2_SRC);
-    let (mut s, uri) = open(&p, "a.al", BUG2_SRC);
+    let (_p, mut s, uri) = open_single("b2_local_refs", BUG2_SRC);
 
     // Cursor on the `total` binder; find-refs must surface the use below it.
     let (l, c) = cursor(BUG2_SRC, "total", 1, 1);
@@ -368,9 +363,7 @@ fn bug2_find_refs_on_local_binder_includes_uses() {
 
 #[test]
 fn bug2_shadowed_binding_resolves_inner_then_outer() {
-    let p = Project::new("b2_shadow");
-    p.write("a.al", BUG2_SRC);
-    let (mut s, uri) = open(&p, "a.al", BUG2_SRC);
+    let (_p, mut s, uri) = open_single("b2_shadow", BUG2_SRC);
 
     // `shadow`: outer `x = 1`, then `f = fn(x Int) x + 1` whose body's `x` is
     // the lambda parameter, then `x + f(2)` whose `x` is the outer binding.
@@ -426,10 +419,7 @@ fn bug3_project() -> (Project, LspServer, String) {
     let p = Project::new("b3_import");
     p.write("helper.al", BUG3_HELPER);
     p.write("main.al", BUG3_MAIN);
-    let mut s = new_server();
-    s.add_workspace_root(p.dir.clone());
-    let uri = uri_of(&p, "main.al");
-    s.open_document(&uri, BUG3_MAIN);
+    let (s, uri) = open(&p, "main.al", BUG3_MAIN);
     (p, s, uri)
 }
 
@@ -568,9 +558,7 @@ println(run())\n";
 
 #[test]
 fn document_symbol_lists_top_level_fns_not_locals() {
-    let p = Project::new("symsurface_doc");
-    p.write("a.al", SYMSURFACE_SRC);
-    let (mut s, uri) = open(&p, "a.al", SYMSURFACE_SRC);
+    let (_p, mut s, uri) = open_single("symsurface_doc", SYMSURFACE_SRC);
 
     let resp = s.document_symbol_response(&json!({ "textDocument": { "uri": uri } }));
     let syms = resp
@@ -603,9 +591,7 @@ fn document_symbol_lists_top_level_fns_not_locals() {
 
 #[test]
 fn workspace_symbol_query_skips_locals_keeps_decls() {
-    let p = Project::new("symsurface_ws");
-    p.write("a.al", SYMSURFACE_SRC);
-    let (mut s, uri) = open(&p, "a.al", SYMSURFACE_SRC);
+    let (_p, mut s, uri) = open_single("symsurface_ws", SYMSURFACE_SRC);
 
     let ws = |s: &mut LspServer, q: &str| -> Vec<String> {
         let resp = s.workspace_symbol_response(&json!({ "query": q }));

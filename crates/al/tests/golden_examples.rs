@@ -28,36 +28,25 @@ fn run_file(source: &Path, name: &str) -> String {
             out.code, out.stdout, out.stderr
         );
     }
+    assert!(
+        out.stderr.is_empty(),
+        "example {name} wrote to stderr:\n{}",
+        out.stderr
+    );
     out.stdout
 }
 
-fn run_example(name: &str) -> String {
-    run_file(&examples_dir().join(format!("{name}.al")), name)
-}
-
-fn run_program(name: &str) -> String {
-    run_file(&programs_dir().join(format!("{name}.al")), name)
-}
-
-fn assert_stdout_matches(name: &str, golden: &Path, got: &str) {
-    let want = std::fs::read_to_string(golden)
+/// `al run` `<src_dir>/<name>.al` and diff stdout against
+/// `<golden_dir>/<name>.stdout`.
+fn assert_golden_in(src_dir: &Path, golden_dir: &Path, name: &str) {
+    let got = run_file(&src_dir.join(format!("{name}.al")), name);
+    let golden = golden_dir.join(format!("{name}.stdout"));
+    let want = std::fs::read_to_string(&golden)
         .unwrap_or_else(|e| panic!("missing golden for {name}: {e}"));
     if got != want {
-        let diff = diff_lines(&want, got);
+        let diff = diff_lines(&want, &got);
         panic!("output mismatch for {name}:\n{diff}");
     }
-}
-
-fn assert_golden(name: &str) {
-    let golden = golden_dir().join(format!("{name}.stdout"));
-    let got = run_example(name);
-    assert_stdout_matches(name, &golden, &got);
-}
-
-fn assert_golden_program(name: &str) {
-    let golden = programs_golden_dir().join(format!("{name}.stdout"));
-    let got = run_program(name);
-    assert_stdout_matches(name, &golden, &got);
 }
 
 // Servers and timing-dependent demos have no deterministic output to golden
@@ -106,7 +95,7 @@ macro_rules! golden {
     ($name:ident) => {
         #[test]
         fn $name() {
-            assert_golden(stringify!($name));
+            assert_golden_in(&examples_dir(), &golden_dir(), stringify!($name));
         }
     };
 }
@@ -117,7 +106,7 @@ macro_rules! golden_program {
     ($name:ident) => {
         #[test]
         fn $name() {
-            assert_golden_program(stringify!($name));
+            assert_golden_in(&programs_dir(), &programs_golden_dir(), stringify!($name));
         }
     };
 }
@@ -201,5 +190,5 @@ checks!(check_read_within, "read_within");
 // bench is timing-sensitive; just check it runs without error
 #[test]
 fn bench_runs() {
-    run_example("bench");
+    run_file(&examples_dir().join("bench.al"), "bench");
 }
