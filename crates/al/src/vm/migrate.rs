@@ -166,6 +166,21 @@ impl VM {
         connections
     }
 
+    /// Adopt a bundle of connection fds arriving with a seed or migrant into
+    /// this scheduler's tables — the ONE fd-adoption policy shared by both
+    /// intake paths (`hydrate_seed`, `adopt_migrant`). A poller registration
+    /// failure (e.g. EMFILE) is logged and the process still runs; ops on the
+    /// unwatchable socket surface as `NetError` at use. Adoption is thus
+    /// infallible: an fd-table hiccup during transport never takes the whole
+    /// scheduler down.
+    pub(super) fn adopt_connections(&mut self, connections: DetachedFds) {
+        for (id, c) in connections {
+            if let Err(e) = self.track_connection(id, c) {
+                eprintln!("warning: cannot watch adopted connection {id}: {e}");
+            }
+        }
+    }
+
     /// Adopt a migrated process: take ownership of its fds and queue the
     /// moved process as runnable. Nothing is rebuilt — the process arrives
     /// exactly as it was suspended on the donor.
@@ -178,15 +193,7 @@ impl VM {
     /// The caller must `sync_globals()` before invoking this, exactly as for
     /// seed hydration, so any top-level bindings the migrant reads exist here.
     pub(super) fn adopt_migrant(&mut self, m: Migrant) {
-        // There is no error channel at this layer (exactly as on the detach
-        // side), so a socket the poller refuses is reported to stderr; the
-        // migrant still runs, and ops on that socket fail at use.
-        for (id, c) in m.connections {
-            if let Err(e) = self.track_connection(id, c) {
-                eprintln!("adopt: cannot watch connection: {e}");
-            }
-        }
-
+        self.adopt_connections(m.connections);
         // Only non-main runnable processes are eligible for donation, so the
         // adopted process is never main.
         self.run_queue.push_back(m.process);

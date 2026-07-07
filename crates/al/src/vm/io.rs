@@ -66,7 +66,7 @@ use al_core::static_ir::VariantTemplate;
 
 use super::poll::{EPOCH, Wait, monotonic_now_ms};
 use super::sched::BlockingOp;
-use super::{IO_REDUCTION_COST, Step, VM, VmResult, bin_ref, sched, str_ref};
+use super::{IO_REDUCTION_COST, Step, VM, VmError, VmResult, bin_ref, sched, str_ref};
 use crate::stdlib;
 
 impl VM {
@@ -144,7 +144,7 @@ impl VM {
         // Adopted Ok(Socket) result, a NetError, or the re-pushed
         // listener handle on the park path.
         let sv = self.pop_listener("net.accept")?;
-        let accept_res = self.listener(sv.id)?.accept();
+        let accept_res = self.listener(sv.id).and_then(TcpListener::accept);
         match accept_res {
             Ok((conn, peer)) => {
                 let v = self.adopt_connection(conn, peer);
@@ -206,7 +206,7 @@ impl VM {
         let max = self.pop_int("socket.read")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.read")?;
-        let (max, read_res) = self.socket_read(sv.id, max)?;
+        let (max, read_res) = self.socket_read(sv.id, max);
         match read_res {
             Ok(n) => self.push_read_ok(n),
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -236,7 +236,7 @@ impl VM {
         let max = self.pop_int("socket.read_within")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.read_within")?;
-        let (max, read_res) = self.socket_read(sv.id, max)?;
+        let (max, read_res) = self.socket_read(sv.id, max);
         match read_res {
             // The read happens before the deadline check, so bytes
             // that arrived as the clock ran out are never discarded.
@@ -289,10 +289,10 @@ impl VM {
         }
         let bin = bin_ref(&bin_v);
         let bytes = bin.full_bytes();
-        let conn = connection_mut(&mut self.tcp_connections, sv.id)?;
         // Write what the socket will take. If it fills up mid-way,
         // park and resume this instruction with the remaining bytes.
-        let result = drain_write(conn, std::slice::from_ref(&bytes));
+        let result = connection_mut(&mut self.tcp_connections, sv.id)
+            .and_then(|conn| drain_write(conn, std::slice::from_ref(&bytes)));
         if let Ok(Drain::Park { offset, .. }) = result {
             self.stack.push(sock_val);
             // Resume with a zero-copy view over the unwritten tail;
@@ -313,10 +313,9 @@ impl VM {
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.write_parts")?;
         let Some(parts) = parts_val.as_array() else {
-            return Err(
-                "socket.write_parts requires an Array(Binary). This is likely a compiler bug."
-                    .to_string(),
-            );
+            return Err(VmError::internal(
+                "socket.write_parts requires an Array(Binary)",
+            ));
         };
 
         // Collect the parts, rejecting non-byte-aligned binaries.
@@ -334,10 +333,9 @@ impl VM {
                     bins.push(p);
                 }
                 None => {
-                    return Err(
-                        "socket.write_parts requires an Array(Binary). This is likely a compiler bug."
-                            .to_string(),
-                    );
+                    return Err(VmError::internal(
+                        "socket.write_parts requires an Array(Binary)",
+                    ));
                 }
             }
         }
@@ -348,14 +346,13 @@ impl VM {
             return Ok(None);
         }
 
-        let conn = connection_mut(&mut self.tcp_connections, sv.id)?;
-
         // Logical bytes per part: borrows the backing with no copy
         // when byte-aligned (the common case), re-aligns otherwise.
         // All parts are byte-aligned in length (rejected above).
         let logical: Vec<_> = bins.iter().map(|b| bin_ref(b).full_bytes()).collect();
 
-        let result = drain_write(conn, &logical);
+        let result = connection_mut(&mut self.tcp_connections, sv.id)
+            .and_then(|conn| drain_write(conn, &logical));
         if let Ok(Drain::Park { idx, offset }) = result {
             // Re-run with only the unwritten tail — zero-copy views
             // over the same backings (parts are byte-aligned).
@@ -482,29 +479,30 @@ impl VM {
     }
 
     #[inline]
-    fn pop_listener(&mut self, op: &str) -> VmResult<SocketValue> {
-        match self.pop()?.as_socket() {
+    fn pop_listener(&mut self, op: &'static str) -> VmResult<SocketValue> {
+        let v = self.pop()?;
+        match v.as_socket() {
             Some(s) => Ok(s),
-            None => Err(format!("{op} requires a Server")),
+            None => Err(VmError::type_mismatch(op, "Server", &v)),
         }
     }
 
     /// `Socket` is the AL record `{ conn Connection, peer SocketAddress }`;
     /// the underlying `SocketValue` is the first payload field.
-    fn pop_connection(&mut self, op: &str) -> VmResult<SocketValue> {
+    fn pop_connection(&mut self, op: &'static str) -> VmResult<SocketValue> {
         connection_socket(&self.pop()?, op)
     }
 
     /// Resolve `id` to a listener in this scheduler's table, hydrating from
-    /// the runtime's shared listeners on a local miss.
+    /// the runtime's shared listeners on a local miss. A stale id is a
+    /// user-visible `NetError` (routed through [`VM::push_net`]), never a
+    /// VM halt: closing then using a listener is an ordinary program bug.
     #[inline]
-    fn listener(&mut self, id: i32) -> VmResult<&TcpListener> {
+    fn listener(&mut self, id: i32) -> std::io::Result<&TcpListener> {
         if !self.ensure_listener(id) {
-            return Err("Invalid listener socket".to_string());
+            return Err(stale_socket());
         }
-        self.tcp_listeners
-            .get(&id)
-            .ok_or_else(|| "Invalid listener socket".to_string())
+        self.tcp_listeners.get(&id).ok_or_else(stale_socket)
     }
 
     /// Build an `al/net/error.NetError` from a socket/connect
@@ -565,13 +563,16 @@ impl VM {
     /// Clamp `max` to [1 byte, 8 MiB], size the scratch buffer, and read from
     /// connection `id`; returns the clamped max so a parking caller can re-push it.
     #[inline]
-    fn socket_read(&mut self, id: i32, max: i64) -> VmResult<(usize, std::io::Result<usize>)> {
+    fn socket_read(&mut self, id: i32, max: i64) -> (usize, std::io::Result<usize>) {
         let max = (max.max(1) as usize).min(8 * 1024 * 1024);
         if self.read_scratch.len() < max {
             self.read_scratch.resize(max, 0);
         }
-        let conn = connection_mut(&mut self.tcp_connections, id)?;
-        Ok((max, conn.read(&mut self.read_scratch[..max])))
+        let read_res = match connection_mut(&mut self.tcp_connections, id) {
+            Ok(conn) => conn.read(&mut self.read_scratch[..max]),
+            Err(e) => Err(e),
+        };
+        (max, read_res)
     }
 
     /// Push `Ok(Binary)` over the first `n` bytes just read into the scratch
@@ -667,12 +668,18 @@ impl VM {
         if self.tcp_listeners.contains_key(&id) {
             return true;
         }
-        let addr = sched::lock(&self.runtime.shared_listeners)
+        let Some(addr) = sched::lock(&self.runtime.shared_listeners)
             .get(&id)
-            .copied();
-        match addr.and_then(|a| bind_reuseport(a).ok()) {
-            Some(l) => self.track_listener(id, l).is_ok(),
-            None => false,
+            .copied()
+        else {
+            return false;
+        };
+        match bind_reuseport(addr).and_then(|l| self.track_listener(id, l)) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("warning: cannot bind reuseport listener {id}: {e}");
+                false
+            }
         }
     }
 
@@ -688,7 +695,12 @@ impl VM {
         stream: TcpStream,
         peer: std::net::SocketAddr,
     ) -> Value {
-        let _ = stream.set_nonblocking(true);
+        // A blocking socket in a nonblocking event loop stalls the whole
+        // scheduler on the first read/write; refuse it as `Err(NetError)`.
+        if let Err(e) = stream.set_nonblocking(true) {
+            let err = self.net_error_value(&e);
+            return self.make_err(err);
+        }
         // Small request/response exchanges should not sit in Nagle's buffer
         // waiting for an ACK.
         let _ = stream.set_nodelay(true);
@@ -722,8 +734,8 @@ fn decode_ip(v: &Value) -> VmResult<std::net::IpAddr> {
     match s {
         Some(s) => s
             .parse::<std::net::IpAddr>()
-            .map_err(|_| "net.connect: invalid Ip address. This is likely a compiler bug.".into()),
-        None => Err("net.connect: malformed IpAddress. This is likely a compiler bug.".into()),
+            .map_err(|_| VmError::internal("net.connect: invalid IP address")),
+        None => Err(VmError::internal("net.connect: malformed IpAddress")),
     }
 }
 
@@ -852,20 +864,25 @@ fn drain_write<B: AsRef<[u8]>>(conn: &mut TcpStream, bufs: &[B]) -> std::io::Res
 /// Extract the underlying `SocketValue` from a `Socket` record value without
 /// consuming it. `Socket` is the AL record `{ conn Connection, peer ... }`;
 /// the raw handle is its first payload field.
-fn connection_socket(v: &Value, op: &str) -> VmResult<SocketValue> {
+fn connection_socket(v: &Value, op: &'static str) -> VmResult<SocketValue> {
     if let Some(e) = v.as_enum()
         && let Some(s) = e.payload().first().and_then(Value::as_socket)
     {
         return Ok(s);
     }
-    Err(format!("{op} requires a Socket"))
+    Err(VmError::type_mismatch(op, "Socket", v))
 }
 
 /// Resolve `id` in the connection table. A free function over the field (not
 /// a `&mut self` method) so callers keep split borrows of other VM fields.
+/// A stale id (closed then used) surfaces as an AL `NetError` via
+/// [`VM::push_net`], never a VM halt.
 #[inline]
-fn connection_mut(conns: &mut HashMap<i32, TcpStream>, id: i32) -> VmResult<&mut TcpStream> {
-    conns
-        .get_mut(&id)
-        .ok_or_else(|| "Invalid connection socket".to_string())
+fn connection_mut(conns: &mut HashMap<i32, TcpStream>, id: i32) -> std::io::Result<&mut TcpStream> {
+    conns.get_mut(&id).ok_or_else(stale_socket)
+}
+
+#[cold]
+fn stale_socket() -> std::io::Error {
+    std::io::Error::new(ErrorKind::NotConnected, "socket closed")
 }
