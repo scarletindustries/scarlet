@@ -329,6 +329,57 @@ pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     root_in(a, n, shift, Value::nil(), tree, tail)
 }
 
+/// Bulk build `start..end` as boxed integers. O(n), same tree shape as
+/// [`from_slice`], but the elements are written straight into arena leaves
+/// via a stack buffer (32 at a time) — no n-element host `Vec<Value>` is
+/// materialized first. This is the Range→Array path for the VM's sequence
+/// ops (concat/prepend/append), which would otherwise allocate and fill an
+/// intermediate host Vec only to re-read it here.
+pub fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
+    let n = range_len(start, end) as usize;
+    if n == 0 {
+        return empty_in(a);
+    }
+    let leaf_of = |a: &mut A, lo: i64, hi: i64| -> Value {
+        let mut buf = Buf::new();
+        let mut i = lo;
+        while i < hi {
+            buf.push(Value::int_in(a, i));
+            i += 1;
+        }
+        leaf_from(a, &buf)
+    };
+    if n <= B {
+        let tail = leaf_of(a, start, end);
+        return root_in(a, n, 0, Value::nil(), Value::nil(), tail);
+    }
+    // Keep the trailing 1..=32 elements as the tail; pack the rest.
+    let tail_len = if n.is_multiple_of(B) { B } else { n % B };
+    let body_end = end - tail_len as i64;
+    let mut nodes: Vec<Value> = Vec::with_capacity((n - tail_len) / B);
+    let mut i = start;
+    while i < body_end {
+        let hi = i + B as i64;
+        nodes.push(leaf_of(a, i, hi));
+        i = hi;
+    }
+    let mut shift = 0;
+    // Group in place; see `from_slice` for the invariant.
+    while nodes.len() > 1 {
+        shift += BITS;
+        let len = nodes.len();
+        let new_len = len.div_ceil(B);
+        for k in 0..new_len {
+            let branch = branch_from(a, shift, &nodes[k * B..((k + 1) * B).min(len)]);
+            nodes[k] = branch;
+        }
+        nodes.truncate(new_len);
+    }
+    let tail = leaf_of(a, body_end, end);
+    let tree = nodes.remove(0);
+    root_in(a, n, shift, Value::nil(), tree, tail)
+}
+
 // ---- push/pop at the ends -----------------------------------------------------
 
 /// Append one element. Amortized O(1): the tail buffer absorbs pushes and

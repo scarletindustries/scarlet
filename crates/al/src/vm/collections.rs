@@ -328,16 +328,7 @@ impl VM {
     fn seq_root(&mut self, v: Value) -> VmResult<Value> {
         match v.kind() {
             ValueView::Array(_) => Ok(v),
-            ValueView::Range(s, e) => {
-                let mut elems = Vec::with_capacity(range_len(s, e) as usize);
-                let mut i = s;
-                while i < e {
-                    let elem = self.boxed_int(i);
-                    elems.push(elem);
-                    i += 1;
-                }
-                Ok(seq::from_slice(&mut self.heap, &elems))
-            }
+            ValueView::Range(s, e) => Ok(seq::from_int_range(&mut self.heap, s, e)),
             _ => Err(VmError::internal(format!(
                 "expected sequence, got '{}'",
                 value_type_name(&v)
