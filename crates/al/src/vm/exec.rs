@@ -66,7 +66,7 @@ impl VM {
         // previous process's death-free, scheduler bookkeeping): it must not be
         // billed to the process about to run. Frees during this slice accumulate
         // from here and are charged at its call checkpoints (`charge_reclamation`).
-        al_core::bytecode::take_freed_objects();
+        take_freed_objects();
         loop {
             let addr = code_start + ip;
             let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize) else {
@@ -312,20 +312,20 @@ impl VM {
 
                 Op::Not => {
                     let a = self.pop()?;
-                    self.stack.push(Value::bool(!is_truthy(&a)));
+                    self.stack.push(Value::bool(!is_truthy(&a)?));
                 }
                 Op::Jump => {
                     ip = instr.operand - code_start;
                 }
                 Op::JumpIfFalse => {
                     let cond = self.pop()?;
-                    if !is_truthy(&cond) {
+                    if !is_truthy(&cond)? {
                         ip = instr.operand - code_start;
                     }
                 }
                 Op::JumpIfTrue => {
                     let cond = self.pop()?;
-                    if is_truthy(&cond) {
+                    if is_truthy(&cond)? {
                         ip = instr.operand - code_start;
                     }
                 }
@@ -491,13 +491,15 @@ impl VM {
                 Op::Append => self.seq_append(instr.operand)?,
                 Op::GetField => self.get_field(instr.operand)?,
                 Op::MakeClosure => {
-                    let func_idx = instr.operand;
-                    let cc = self.program.functions[func_idx as usize].capture_count as usize;
+                    let closure_func_idx = instr.operand;
+                    let cc =
+                        self.program.functions[closure_func_idx as usize].capture_count as usize;
                     // The one place captures are materialized: the closure
                     // object holds them inline; later invocations copy the
                     // one-word handle.
                     let base = self.operand_base(cc)?;
-                    let v = Value::closure_in(&mut self.heap, func_idx, &self.stack[base..]);
+                    let v =
+                        Value::closure_in(&mut self.heap, closure_func_idx, &self.stack[base..]);
                     self.stack.truncate(base);
                     self.stack.push(v);
                 }
@@ -595,11 +597,7 @@ impl VM {
                 }
                 Op::StrConcatN => {
                     let n = instr.operand as usize;
-                    let len = self.stack.len();
-                    if n > len {
-                        return Err(VmError::internal("stack underflow"));
-                    }
-                    let base = len - n;
+                    let base = self.operand_base(n)?;
                     let mut total = 0usize;
                     for v in &self.stack[base..] {
                         match v.as_str() {
@@ -837,6 +835,13 @@ impl VM {
         self.stack.len().checked_sub(1 + d).map(|i| &self.stack[i])
     }
 
+    /// [`peek_at`](Self::peek_at) that reports underflow as a compiler-bug
+    /// error, for callers that have already type-checked the operand shape.
+    pub(super) fn peek_at_or(&self, d: usize) -> VmResult<&Value> {
+        self.peek_at(d)
+            .ok_or_else(|| VmError::internal("stack underflow"))
+    }
+
     /// Bill `reds` for reference-counting reclamation done since the last call
     /// checkpoint. Freeing is not free: dropping a large value graph cascades
     /// through thousands of objects, anywhere a last reference goes away. The
@@ -1035,8 +1040,9 @@ impl VM {
     }
 
     /// Polymorphic numeric core for the untyped `+ - * / %` fallbacks: int
-    /// pairs use `int_f`, float (or mixed) pairs use `float_f` after int
-    /// promotion, anything else is a compiler-bug error. Arithmetic is
+    /// pairs use `int_f`, float pairs use `float_f`, anything else is a
+    /// compiler-bug error (HM unifies both operands to one numeric type; a
+    /// mixed pair here means the typechecker is wrong). Arithmetic is
     /// TOTAL — every numeric case yields a value: integer overflow wraps
     /// with two's-complement semantics, and `Value::float` collapses any
     /// non-finite float result (overflow to ±Inf, `0.0/0.0` NaN) to `0.0`.
@@ -1050,8 +1056,6 @@ impl VM {
         let v = match (a.kind(), b.kind()) {
             (ValueView::Int(ai), ValueView::Int(bi)) => self.boxed_int(int_f(ai, bi)),
             (ValueView::Float(af), ValueView::Float(bf)) => Value::float(float_f(af, bf)),
-            (ValueView::Int(ai), ValueView::Float(bf)) => Value::float(float_f(ai as f64, bf)),
-            (ValueView::Float(af), ValueView::Int(bi)) => Value::float(float_f(af, bi as f64)),
             _ => {
                 return Err(VmError::internal(format!(
                     "arithmetic on '{}' and '{}'",
@@ -1155,6 +1159,7 @@ fn compare_values(a: Value, b: Value) -> VmResult<std::cmp::Ordering> {
     }
 }
 
-fn is_truthy(v: &Value) -> bool {
-    v.as_bool().unwrap_or(false)
+fn is_truthy(v: &Value) -> VmResult<bool> {
+    v.as_bool()
+        .ok_or_else(|| VmError::type_mismatch("condition", "Bool", v))
 }

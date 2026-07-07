@@ -1,27 +1,25 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{ArenaSlice, InferEngine, Ty, TypeBody, TypeEnv, pool};
+use super::{ArenaSlice, InferEngine, StrId, Ty, TypeBody, TypeEnv, pool};
 use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::span::Span;
 use crate::token::is_type_name;
 
 /// A successfully-resolved type-name occurrence: the use-site span plus the
-/// canonical identity (owning module + interned name + type id) of the
-/// `TypeInfo` it resolved to. The hydrator has no `Compiler` handle, so it
-/// accumulates these and the `Compiler::hydrate` wrappers drain them
+/// canonical identity (owning module + interned name) of the `TypeInfo` it
+/// resolved to. The hydrator has no `Compiler` handle, so it accumulates these
+/// and the `Compiler::hydrate` wrappers drain them
 /// ([`Hydrator::take_type_refs`]) to record `Reference`s into the reference
 /// graph. Recording-only: it never affects the produced `Ty`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TypeRefHit {
     /// Span of the written type name (the reference occurrence site).
     pub span: Span,
     /// Canonical type name as declared (not the local import alias).
-    pub name: String,
+    pub name: StrId,
     /// Owning module path, interned in `InferEngine.str_slices`.
     pub module: ArenaSlice<pool::StrSlices>,
-    /// Resolved `TypeInfo.id`.
-    pub type_id: crate::type_def::TypeId,
 }
 
 /// The Hydrator converts a syntactic type annotation (`ast::TypeIdentifier`)
@@ -201,9 +199,8 @@ impl Hydrator {
                 // is byte-for-byte unchanged.
                 self.type_refs.push(TypeRefHit {
                     span: name_span,
-                    name: engine.str(ti.name).to_string(),
+                    name: ti.name,
                     module: ti.module,
-                    type_id: ti.id,
                 });
                 match ti.body {
                     TypeBody::Alias { target } => {

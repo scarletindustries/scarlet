@@ -40,15 +40,15 @@ use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 use super::Op;
-use super::compiler::{Compiler, def_loc};
+use super::compiler::Compiler;
 use crate::ast;
 use crate::module::{self, ExportedValue, ModuleInterface};
 use crate::reference::DefId;
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
-    AddedTypeVar, ArenaSlice, EntityKind, Hydrator, NO_STR, Scheme, StrId, Ty, TypeBody, TypeInfo,
-    TypeParam, ValueKind, Variant, VariantField, pool,
+    AddedTypeVar, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, NO_STR, Scheme, StrId, Ty,
+    TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,14 +62,17 @@ enum Decl<'a> {
         is_pub: bool,
         body: &'a ast::Expression,
     },
-    Const(&'a ast::ConstBinding, bool),
+    Const {
+        cb: &'a ast::ConstBinding,
+        is_pub: bool,
+    },
 }
 
 impl<'a> Decl<'a> {
     fn name(&self) -> &'a str {
         match self {
             Decl::Fn { fd, .. } => &fd.identifier.name,
-            Decl::Const(c, _) => &c.identifier.name,
+            Decl::Const { cb, .. } => &cb.identifier.name,
         }
     }
 }
@@ -143,6 +146,16 @@ struct PreparedType {
     name_id: StrId,
     hydrator: Hydrator,
     param_tys: Vec<Ty>,
+}
+
+/// Hydrated shape of one `fn` declaration's signature. Returned by
+/// [`Compiler::hydrate_fn_signature`] so callers destructure by field name
+/// instead of guessing which `Ty` in a positional tuple is the return type.
+struct FnSig {
+    hydrator: Hydrator,
+    param_tys: Vec<Ty>,
+    ret_ty: Ty,
+    fn_ty: Ty,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +255,10 @@ impl Compiler {
                             }
                             ast::Declaration::Const(cb) => {
                                 if !check_duplicate(self, &mut seen_values, &cb.identifier) {
-                                    decls.push(Decl::Const(cb, is_public));
+                                    decls.push(Decl::Const {
+                                        cb,
+                                        is_pub: is_public,
+                                    });
                                 }
                             }
                         }
@@ -311,23 +327,15 @@ impl Compiler {
         // -------------------------------------------------------------------
         for &(fd, is_pub, op) in &vm_fns {
             let name = &fd.identifier.name;
-            let (_, _, _, fn_ty) = self.hydrate_fn_signature(fd);
+            let fn_ty = self.hydrate_fn_signature(fd).fn_ty;
             let mut scheme = self.engine.generalize_top(fn_ty);
             scheme.kind = ValueKind::Builtin { op };
             let m = self.current_module_slice();
-            scheme.def = Some(def_loc(fd.identifier.span, m, EntityKind::Function));
-            self.env.define_at(
-                name,
-                scheme,
-                def_loc(fd.identifier.span, m, EntityKind::Function),
-            );
+            let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
+            scheme.def = Some(dl);
+            self.env.define_at(name, scheme, dl);
             self.env.store_doc_opt(name, &fd.doc);
-            self.emit_def(
-                def_loc(fd.identifier.span, m, EntityKind::Function),
-                name,
-                fd.doc.clone(),
-                is_pub,
-            );
+            self.emit_def(dl, name, fd.doc.clone(), is_pub);
             self.record(name, scheme.ty, fd.identifier.span, fd.doc.clone());
             export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
         }
@@ -341,17 +349,23 @@ impl Compiler {
         for (d, &slot) in decls.iter().zip(&slots) {
             let p = match *d {
                 Decl::Fn { fd, is_pub, body } => {
-                    let (h, param_tys, ret_ty, fn_ty) = self.hydrate_fn_signature(fd);
+                    let FnSig {
+                        hydrator,
+                        param_tys,
+                        ret_ty,
+                        fn_ty,
+                    } = self.hydrate_fn_signature(fd);
                     let m = self.current_module_slice();
+                    let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
                     self.env.define_at(
                         &fd.identifier.name,
                         Scheme {
                             quantified: ArenaSlice::EMPTY,
                             ty: fn_ty,
                             kind: ValueKind::ModuleFn,
-                            def: Some(def_loc(fd.identifier.span, m, EntityKind::Function)),
+                            def: Some(dl),
                         },
-                        def_loc(fd.identifier.span, m, EntityKind::Function),
+                        dl,
                     );
                     Prepared::Fn {
                         fd,
@@ -360,10 +374,10 @@ impl Compiler {
                         body,
                         param_tys,
                         ret_ty,
-                        hydrator: h,
+                        hydrator,
                     }
                 }
-                Decl::Const(cb, is_pub) => Prepared::Const { cb, is_pub, slot },
+                Decl::Const { cb, is_pub } => Prepared::Const { cb, is_pub, slot },
             };
             prepared.push(p);
         }
@@ -404,7 +418,7 @@ impl Compiler {
                         let name = &fd.identifier.name;
                         let m = self.current_module_slice();
                         self.emit_def(
-                            def_loc(fd.identifier.span, m, EntityKind::Function),
+                            DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function),
                             name,
                             fd.doc.clone(),
                             *is_pub,
@@ -436,7 +450,7 @@ impl Compiler {
                         let name = &cb.identifier.name;
                         let m = self.current_module_slice();
                         self.emit_def(
-                            def_loc(cb.identifier.span, m, EntityKind::Constant),
+                            DefinitionLocation::new(cb.identifier.span, m, EntityKind::Constant),
                             name,
                             cb.doc.clone(),
                             *is_pub,
@@ -473,7 +487,7 @@ impl Compiler {
                 } else {
                     EntityKind::Function
                 };
-                scheme.def = Some(def_loc(p.name_span(), m, entity));
+                scheme.def = Some(DefinitionLocation::new(p.name_span(), m, entity));
                 if p.is_const() {
                     scheme.kind = ValueKind::Local;
                 }
@@ -557,7 +571,7 @@ impl Compiler {
         entity: EntityKind,
         is_pub: bool,
     ) {
-        let dl = def_loc(id.span, self.current_module_slice(), entity);
+        let dl = DefinitionLocation::new(id.span, self.current_module_slice(), entity);
         self.env.store_definition(&id.name, dl);
         self.env.store_doc_opt(&id.name, doc);
         self.emit_def(dl, &id.name, doc.clone(), is_pub);
@@ -573,18 +587,20 @@ impl Compiler {
         r
     }
 
-    fn hydrate_fn_signature(
-        &mut self,
-        fd: &ast::FunctionDeclaration,
-    ) -> (Hydrator, Vec<Ty>, Ty, Ty) {
-        let mut h = Hydrator::new();
+    fn hydrate_fn_signature(&mut self, fd: &ast::FunctionDeclaration) -> FnSig {
+        let mut hydrator = Hydrator::new();
         let mut param_tys: Vec<Ty> = Vec::with_capacity(fd.params.len());
         for p in &fd.params {
-            param_tys.push(self.hydrate_opt(&mut h, p.typ.as_ref()));
+            param_tys.push(self.hydrate_opt(&mut hydrator, p.typ.as_ref()));
         }
-        let ret_ty = self.hydrate_opt(&mut h, fd.return_type.as_ref());
+        let ret_ty = self.hydrate_opt(&mut hydrator, fd.return_type.as_ref());
         let fn_ty = self.engine.mk_fun(&param_tys, ret_ty);
-        (h, param_tys, ret_ty, fn_ty)
+        FnSig {
+            hydrator,
+            param_tys,
+            ret_ty,
+            fn_ty,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -710,15 +726,9 @@ impl Compiler {
                     label_ids.push(label);
 
                     let qualified = format!("{}.{}", ctor.identifier.name, f.label.name);
-                    c.env
-                        .definitions
-                        .insert(qualified, def_loc(f.label.span, m, EntityKind::Field));
-                    c.emit_def(
-                        def_loc(f.label.span, m, EntityKind::Field),
-                        &f.label.name,
-                        None,
-                        ctors_public,
-                    );
+                    let field_dl = DefinitionLocation::new(f.label.span, m, EntityKind::Field);
+                    c.env.definitions.insert(qualified, field_dl);
+                    c.emit_def(field_dl, &f.label.name, None, ctors_public);
                 }
 
                 let fields = c.engine.push_variant_fields(&field_defs);
@@ -743,7 +753,11 @@ impl Compiler {
                     arity: ctor.fields.len() as u16,
                     field_labels,
                 };
-                scheme.def = Some(def_loc(ctor.identifier.span, m, EntityKind::Constructor));
+                scheme.def = Some(DefinitionLocation::new(
+                    ctor.identifier.span,
+                    m,
+                    EntityKind::Constructor,
+                ));
 
                 let name = &ctor.identifier.name;
                 c.env.define(name, scheme);
@@ -943,7 +957,7 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
                 }
                 walker.expr(body);
             }
-            Decl::Const(cb, _) => {
+            Decl::Const { cb, .. } => {
                 walker.expr(&cb.init);
             }
         }

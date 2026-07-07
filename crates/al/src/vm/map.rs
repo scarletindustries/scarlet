@@ -55,7 +55,7 @@ impl VM {
                 val.map(|s| Value::str_in(&mut self.heap, &s))
             }
             MapBacking::Hamt => {
-                let hash = hash_value(&self.at(0)?);
+                let hash = hash_value(self.peek_at_or(0)?);
                 let key = self.pop()?;
                 let map = self.pop()?;
                 // The stored value already lives in the arena; `Some` shares it.
@@ -75,9 +75,9 @@ impl VM {
         let present = match self.map_backing_at(1, "map.has")? {
             MapBacking::Env => self.peek_env_lookup(0).is_some(),
             MapBacking::Hamt => {
-                let key = self.at(0)?;
+                let key = self.peek_at_or(0)?.clone();
                 let hash = hash_value(&key);
-                let map = self.at(1)?;
+                let map = self.peek_at_or(1)?.clone();
                 hamt::get(&map, &key, hash).is_some()
             }
         };
@@ -132,7 +132,7 @@ impl VM {
     pub(super) fn map_size(&mut self) -> VmResult<()> {
         let n = match self.map_backing_at(0, "map.size")? {
             MapBacking::Env => env_entries().len() as i64,
-            MapBacking::Hamt => hamt::size(&self.at(0)?) as i64,
+            MapBacking::Hamt => hamt::size(self.peek_at_or(0)?) as i64,
         };
         let _map = self.pop()?;
         self.push_int(n);
@@ -173,7 +173,7 @@ impl VM {
     /// `map.set(m, key, value) -> Map`. Map at depth 2, key at 1, value on top.
     pub(super) fn map_set(&mut self) -> VmResult<()> {
         let backing = self.map_backing_at(2, "map.set")?;
-        let hash = hash_value(&self.at(1)?);
+        let hash = hash_value(self.peek_at_or(1)?);
         let value = self.pop()?;
         let key = self.pop()?;
         let map = self.pop()?;
@@ -191,7 +191,7 @@ impl VM {
     /// `map.delete(m, key) -> Map`. Map at depth 1, key on top.
     pub(super) fn map_delete(&mut self) -> VmResult<()> {
         let backing = self.map_backing_at(1, "map.delete")?;
-        let hash = hash_value(&self.at(0)?);
+        let hash = hash_value(self.peek_at_or(0)?);
         let key = self.pop()?;
         let map = self.pop()?;
         let base = match backing {
@@ -216,24 +216,13 @@ impl VM {
         map
     }
 
-    /// Copy of the operand `d` slots below the top. Used by the map ops after
-    /// [`map_backing_at`] has confirmed the operands are present, so a `None`
-    /// here is a compiler bug, reported rather than panicked.
-    fn at(&self, d: usize) -> VmResult<Value> {
-        self.peek_at(d)
-            .cloned()
-            .ok_or_else(|| VmError::internal("stack underflow"))
-    }
-
     /// The backing of the map operand `d` slots below the top, read without
     /// popping.
     fn map_backing_at(&self, d: usize, op: &'static str) -> VmResult<MapBacking> {
-        match self.peek_at(d) {
-            Some(v) => match v.kind() {
-                ValueView::Map(m) => Ok(m.backing()),
-                _ => Err(VmError::type_mismatch(op, "Map", v)),
-            },
-            None => Err(VmError::internal("stack underflow")),
+        let v = self.peek_at_or(d)?;
+        match v.kind() {
+            ValueView::Map(m) => Ok(m.backing()),
+            _ => Err(VmError::type_mismatch(op, "Map", v)),
         }
     }
 
