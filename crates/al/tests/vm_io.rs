@@ -10,6 +10,26 @@ mod common;
 use common::Project;
 use common::net::spawn_al_server;
 
+/// AL source that binds `127.0.0.1:0`, prints the `listening <addr>` line
+/// `spawn_al_server` waits for, then runs `body` with `server` in scope.
+/// `extra_imports` are added to the base `al/net`+`address`+`result` set.
+fn listening_src(extra_imports: &str, body: &str) -> String {
+    format!(
+        "import al/net
+import al/net/address
+import al/result
+{extra_imports}
+match net.listen('127.0.0.1', 0) {{
+	Ok(server) -> {{
+		println('listening ${{result.map(net.local_addr(server), address.to_string) or '?'}}')
+{body}
+	}}
+	Err(e) -> println('listen-failed: ${{e}}')
+}}
+"
+    )
+}
+
 /// `io.write_text` then `io.read_text` round-trips the content: stdout echoes
 /// what was read back, and the bytes are genuinely on disk.
 #[test]
@@ -60,42 +80,32 @@ match io.write_text(path, 'hello-io') {
 #[test]
 fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
-    let src = r#"import al/net
-import al/net/socket.{Data, Closed}
-import al/net/address
-import al/binary
-import al/result
-
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> {
-		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		match net.accept(server) {
-			Ok(sock) -> {
-				println('peer ${address.to_string(sock.peer)}')
-				match socket.read(sock, 4096) {
-					Ok(Data(data)) -> match socket.write(sock, data) {
-						Ok(_) -> match socket.close(sock) {
-							Ok(_) -> match net.close(server) {
-								Ok(_) -> println('served')
-								Err(e) -> println('close-server-failed: ${e}')
-							}
-							Err(e) -> println('close-failed: ${e}')
-						}
-						Err(e) -> println('write-failed: ${e}')
+    let src = listening_src(
+        "import al/net/socket.{Data, Closed}\nimport al/binary",
+        r#"match net.accept(server) {
+	Ok(sock) -> {
+		println('peer ${address.to_string(sock.peer)}')
+		match socket.read(sock, 4096) {
+			Ok(Data(data)) -> match socket.write(sock, data) {
+				Ok(_) -> match socket.close(sock) {
+					Ok(_) -> match net.close(server) {
+						Ok(_) -> println('served')
+						Err(e) -> println('close-server-failed: ${e}')
 					}
-					Ok(Closed) -> println('peer-closed')
-					Err(e) -> println('read-failed: ${e}')
+					Err(e) -> println('close-failed: ${e}')
 				}
+				Err(e) -> println('write-failed: ${e}')
 			}
-			Err(e) -> println('accept-failed: ${e}')
+			Ok(Closed) -> println('peer-closed')
+			Err(e) -> println('read-failed: ${e}')
 		}
 	}
-	Err(e) -> println('listen-failed: ${e}')
-}
-"#;
+	Err(e) -> println('accept-failed: ${e}')
+}"#,
+    );
 
     // The server blocks on accept(); spawn it and drive it from the client.
-    let srv = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
     stream.write_all(b"ping-over-tcp").expect("client write");
     // Server echoes the bytes then closes the socket, so read_to_end sees the
@@ -198,29 +208,20 @@ match net.listen('127.0.0.1', 0) {
 #[test]
 fn tcp_read_within_times_out() {
     let proj = Project::new("io_read_within_timeout");
-    let src = r#"import al/net
-import al/net/socket
-import al/net/address
-import al/result
-
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> {
-		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		match net.accept(server) {
-			Ok(sock) -> match socket.read_within(sock, 4096, 150) {
-				Ok(_) -> println('unexpected-data')
-				Err(e) -> println('timed-out: ${e}')
-			}
-			Err(e) -> println('accept-failed: ${e}')
-		}
+    let src = listening_src(
+        "import al/net/socket",
+        r#"match net.accept(server) {
+	Ok(sock) -> match socket.read_within(sock, 4096, 150) {
+		Ok(_) -> println('unexpected-data')
+		Err(e) -> println('timed-out: ${e}')
 	}
-	Err(e) -> println('listen-failed: ${e}')
-}
-"#;
+	Err(e) -> println('accept-failed: ${e}')
+}"#,
+    );
 
     // The client connects (so `accept` returns) but never writes. Holding the
     // stream open keeps the socket alive-but-silent across the read window.
-    let srv = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, &src);
     let _stream = srv.connect();
     let stdout = srv.wait_ok(30);
     assert!(
@@ -239,32 +240,22 @@ match net.listen('127.0.0.1', 0) {
 #[test]
 fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
-    let src = r#"import al/net
-import al/net/socket.{Data, Closed}
-import al/net/address
-import al/binary
-import al/result
-
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> {
-		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		match net.accept(server) {
-			Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
-				Ok(Data(data)) -> match binary.to_string(data) {
-					Ok(text) -> println('got: ${text}')
-					Err(_) -> println('not-utf8')
-				}
-				Ok(Closed) -> println('peer-closed')
-				Err(e) -> println('read-failed: ${e}')
-			}
-			Err(e) -> println('accept-failed: ${e}')
+    let src = listening_src(
+        "import al/net/socket.{Data, Closed}\nimport al/binary",
+        r#"match net.accept(server) {
+	Ok(sock) -> match socket.read_within(sock, 4096, 5000) {
+		Ok(Data(data)) -> match binary.to_string(data) {
+			Ok(text) -> println('got: ${text}')
+			Err(_) -> println('not-utf8')
 		}
+		Ok(Closed) -> println('peer-closed')
+		Err(e) -> println('read-failed: ${e}')
 	}
-	Err(e) -> println('listen-failed: ${e}')
-}
-"#;
+	Err(e) -> println('accept-failed: ${e}')
+}"#,
+    );
 
-    let srv = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
     stream.write_all(b"hello").expect("client write");
     let stdout = srv.wait_ok(30);
@@ -501,6 +492,21 @@ fn read_one_response(
     (status_line, headers, body)
 }
 
+/// Read one response and assert it is a 200 whose body is exactly `expected`.
+fn assert_200(stream: &mut TcpStream, buf: &mut Vec<u8>, expected: &[u8], ctx: &str) {
+    let (status, _h, body) = read_one_response(stream, buf);
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "{ctx}: status {status:?}"
+    );
+    assert_eq!(
+        body,
+        expected,
+        "{ctx}: body {:?}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
 /// End-to-end HTTP/1.1 through the pure-AL `al/http` server core: spawn an `al`
 /// server bound to an ephemeral port, drive it with a raw TCP client, and
 /// assert a well-formed 200 with a correct `Content-Length` and body. A second
@@ -510,22 +516,13 @@ fn read_one_response(
 #[test]
 fn http_server_get_and_keepalive() {
     let proj = Project::new("io_http");
-    let src = r#"import al/http
-import al/net
-import al/net/address
-import al/result
-
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> {
-		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		http.serve_on(server, fn(_req) http.text('Hello from al/http!'))
-	}
-	Err(e) -> println('serve failed: ${e}')
-}
-"#;
+    let src = listening_src(
+        "import al/http",
+        "http.serve_on(server, fn(_req) http.text('Hello from al/http!'))",
+    );
 
     // The server blocks in its accept loop; spawn it and drive it from a client.
-    let srv = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
 
     // Two HTTP/1.1 GETs in a single write. Both land in one server-side read,
@@ -537,29 +534,9 @@ match net.listen('127.0.0.1', 0) {
     pipelined.extend_from_slice(request);
     stream.write_all(&pipelined).expect("client write");
 
-    let expected_body: &[u8] = b"Hello from al/http!";
     let mut buf = Vec::new();
     for which in ["first", "second"] {
-        let (status_line, headers, body) = read_one_response(&mut stream, &mut buf);
-        assert!(
-            status_line.starts_with("HTTP/1.1 200"),
-            "{which} response: status line was {status_line:?}"
-        );
-        let cl: usize = headers
-            .get("content-length")
-            .unwrap_or_else(|| panic!("{which} response: no Content-Length header ({headers:?})"))
-            .parse()
-            .expect("Content-Length must be numeric");
-        assert_eq!(
-            cl,
-            expected_body.len(),
-            "{which} response: Content-Length must equal the body length"
-        );
-        assert_eq!(
-            body.as_slice(),
-            expected_body,
-            "{which} response: body bytes mismatch"
-        );
+        assert_200(&mut stream, &mut buf, b"Hello from al/http!", which);
     }
 
     // The server loops forever; tear it down now that both requests answered.
@@ -576,32 +553,20 @@ match net.listen('127.0.0.1', 0) {
 #[test]
 fn http_server_chunked_post_roundtrip() {
     let proj = Project::new("io_http_chunked");
-    let src = r#"import al/http
-import al/http/body
-import al/http/headers
-import al/binary
-import al/net
-import al/net/address
-import al/result
-
-match net.listen('127.0.0.1', 0) {
-	Ok(server) -> {
-		println('listening ${result.map(net.local_addr(server), address.to_string) or '?'}')
-		http.serve_on(server, fn(req) {
-			collected = body.collect(req.body, 1048576) or <<>>
-			echoed = binary.to_string(collected) or '<not-utf8>'
-			trailer = match headers.get(req.trailers, <<'x-checksum'>>) {
-				Some(v) -> binary.to_string(v) or '?'
-				None -> 'none'
-			}
-			http.text('body=[${echoed}] trailer=[${trailer}]')
-		})
+    let src = listening_src(
+        "import al/http\nimport al/http/body\nimport al/http/headers\nimport al/binary",
+        r#"http.serve_on(server, fn(req) {
+	collected = body.collect(req.body, 1048576) or <<>>
+	echoed = binary.to_string(collected) or '<not-utf8>'
+	trailer = match headers.get(req.trailers, <<'x-checksum'>>) {
+		Some(v) -> binary.to_string(v) or '?'
+		None -> 'none'
 	}
-	Err(e) -> println('serve failed: ${e}')
-}
-"#;
+	http.text('body=[${echoed}] trailer=[${trailer}]')
+})"#,
+    );
 
-    let srv = spawn_al_server(&proj, src);
+    let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
 
     // --- Exchange 1: chunked POST with a trailer ---------------------------
@@ -611,30 +576,21 @@ match net.listen('127.0.0.1', 0) {
     stream.write_all(chunked_post).expect("write chunked POST");
 
     let mut buf = Vec::new();
-    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
-    assert!(
-        status.starts_with("HTTP/1.1 200"),
-        "chunked POST status: {status:?}"
-    );
-    assert_eq!(
-        body.as_slice(),
+    assert_200(
+        &mut stream,
+        &mut buf,
         b"body=[hello world] trailer=[abc123]",
-        "decoded body / trailer mismatch: {:?}",
-        String::from_utf8_lossy(&body)
+        "chunked POST",
     );
 
     // --- Exchange 2: the SAME connection must still be in frame ------------
     let get = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     stream.write_all(get).expect("write follow-up GET");
-    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
-    assert!(
-        status.starts_with("HTTP/1.1 200"),
-        "follow-up GET status: {status:?} (connection desynced after chunked body?)"
-    );
-    assert_eq!(
-        body.as_slice(),
+    assert_200(
+        &mut stream,
+        &mut buf,
         b"body=[] trailer=[none]",
-        "follow-up GET body mismatch"
+        "follow-up GET (desync check)",
     );
 
     // --- Exchange 3: chunked POST + GET pipelined in ONE write -------------
@@ -645,19 +601,17 @@ match net.listen('127.0.0.1', 0) {
     pipelined.extend_from_slice(get);
     stream.write_all(&pipelined).expect("write pipelined batch");
 
-    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
-    assert!(status.starts_with("HTTP/1.1 200"), "pipelined POST status");
-    assert_eq!(
-        body.as_slice(),
+    assert_200(
+        &mut stream,
+        &mut buf,
         b"body=[abc] trailer=[none]",
-        "pipelined chunked POST body mismatch"
+        "pipelined chunked POST",
     );
-    let (status, _headers, body) = read_one_response(&mut stream, &mut buf);
-    assert!(status.starts_with("HTTP/1.1 200"), "pipelined GET status");
-    assert_eq!(
-        body.as_slice(),
+    assert_200(
+        &mut stream,
+        &mut buf,
         b"body=[] trailer=[none]",
-        "pipelined GET body mismatch"
+        "pipelined GET",
     );
 
     // --- Malformed chunked body is rejected with 400 -----------------------
