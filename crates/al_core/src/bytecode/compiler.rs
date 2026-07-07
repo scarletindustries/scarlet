@@ -159,14 +159,14 @@ pub struct Compiler {
     /// (index in-bounds and slot bits still match) so `reset_to`'s pool
     /// truncate needs no paired invalidation — a stale entry just misses.
     const_dedup: HashMap<u64, i32>,
-    pub(super) locals: HashMap<String, LocalSlot>,
+    pub(super) locals: HashMap<StrId, LocalSlot>,
     /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
     /// open block scope appends `(name, previous entry)`; `pop_local_scope`
     /// unwinds back to the entering scope's mark, restoring (or removing) each
     /// touched name. Replaces snapshotting the whole `locals` map on every
     /// block/if-arm/match-arm/lambda entry: cost is now O(bindings actually
     /// shadowed) instead of O(scopes × live locals).
-    pub(super) undo_log: Vec<(String, Option<LocalSlot>)>,
+    pub(super) undo_log: Vec<(StrId, Option<LocalSlot>)>,
     /// `undo_log` length captured at each `push_local_scope`; `pop_local_scope`
     /// unwinds the log down to the popped mark.
     pub(super) scope_marks: Vec<usize>,
@@ -177,7 +177,7 @@ pub struct Compiler {
     /// body reading whichever slot the *last* alternative allocated — an
     /// unwritten slot whenever an earlier alternative was the one that matched.
     /// A stack because or-patterns nest.
-    pub(super) or_bind_overrides: Vec<HashMap<String, i32>>,
+    pub(super) or_bind_overrides: Vec<HashMap<StrId, i32>>,
     /// Per-scope unused-binding tracking. Each frame maps a let/param/match
     /// name (that doesn't start with `_`) to its definition span; `mark_used`
     /// removes the entry on first reference. Anything left when the frame is
@@ -185,16 +185,16 @@ pub struct Compiler {
     /// with `scope_marks` (blocks) and `enter_fn_frame`/`finish_fn_frame`
     /// (params), so a use inside a nested closure marks the outer binding by
     /// walking the whole stack.
-    pub(super) unused: Vec<HashMap<String, Span>>,
+    pub(super) unused: Vec<HashMap<StrId, Span>>,
     pub(super) outer_scopes: Vec<Scope>,
     pub(super) local_count: i32,
-    pub(super) captures: HashMap<String, i32>,
-    pub(super) capture_names: Vec<String>,
-    pub(super) current_binding: Option<String>,
+    pub(super) captures: HashMap<StrId, i32>,
+    pub(super) capture_names: Vec<StrId>,
+    pub(super) current_binding: Option<StrId>,
     /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
     /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
     /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
-    pub(super) next_fn_self_name: Option<String>,
+    pub(super) next_fn_self_name: Option<StrId>,
     pub(super) in_tail_position: bool,
     /// The definition whose body is currently being compiled, used as the
     /// `owner` of every reference-graph occurrence emitted while it is set
@@ -546,7 +546,8 @@ impl Compiler {
         self.program.constants = constants;
         self.local_count = s.local_count;
         for slot in 0..s.local_count {
-            self.bind_local(format!("__pre{}", slot), slot);
+            let id = self.engine.intern(&format!("__pre{}", slot));
+            self.bind_local(id, slot);
         }
 
         // Stdlib type-infos: copy eagerly so both the by-name map (annotation
@@ -714,16 +715,17 @@ impl Compiler {
     }
 
     pub(super) fn get_or_create_local(&mut self, name: &str) -> i32 {
+        let id = self.engine.intern(name);
         // A name bound by the first alternative of an in-progress or-pattern
         // must reuse that slot in every later alternative (see
         // `or_bind_overrides`); the shadowing rules below are for *sequential*
         // rebindings, which alternatives are not.
         if let Some(overrides) = self.or_bind_overrides.last()
-            && let Some(&slot) = overrides.get(name)
+            && let Some(&slot) = overrides.get(&id)
         {
             return slot;
         }
-        if let Some(entry) = self.locals.get(name).copied() {
+        if let Some(entry) = self.locals.get(&id).copied() {
             // Reuse only if this slot was bound in the *current* block scope.
             // If it was bound at a strictly shallower depth it is inherited
             // from an enclosing scope, and shadowing must allocate a fresh
@@ -744,7 +746,7 @@ impl Compiler {
             }
         }
         let idx = self.alloc_temp();
-        self.bind_local(name.to_string(), idx);
+        self.bind_local(id, idx);
         idx
     }
 
@@ -752,12 +754,12 @@ impl Compiler {
     /// entry on the undo log so `pop_local_scope` can restore it. Outside any
     /// open block scope there is nothing to unwind, so the log entry is
     /// skipped (the binding is captured by the next scope's mark instead).
-    fn bind_local(&mut self, name: String, slot: i32) {
+    fn bind_local(&mut self, name: StrId, slot: i32) {
         let entry = LocalSlot {
             slot,
             depth: self.scope_marks.len() as u32,
         };
-        let prev = self.locals.insert(name.clone(), entry);
+        let prev = self.locals.insert(name, entry);
         if !self.scope_marks.is_empty() {
             self.undo_log.push((name, prev));
         }
@@ -825,10 +827,8 @@ impl Compiler {
         if name.starts_with('_') {
             return;
         }
-        let prev = self
-            .unused
-            .last_mut()
-            .and_then(|s| s.insert(name.to_string(), sp));
+        let id = self.engine.intern(name);
+        let prev = self.unused.last_mut().and_then(|s| s.insert(id, sp));
         if let Some(prev_sp) = prev {
             self.unused_binding(name, prev_sp);
         }
@@ -836,9 +836,9 @@ impl Compiler {
 
     /// Mark a name as used, searching innermost scope outward so a closure
     /// referencing an enclosing binding clears it there.
-    fn mark_used(&mut self, name: &str) {
+    fn mark_used(&mut self, name: StrId) {
         for scope in self.unused.iter_mut().rev() {
-            if scope.remove(name).is_some() {
+            if scope.remove(&name).is_some() {
                 return;
             }
         }
@@ -848,9 +848,10 @@ impl Compiler {
         let Some(scope) = self.unused.pop() else {
             return;
         };
-        let mut leftover: Vec<(String, Span)> = scope.into_iter().collect();
+        let mut leftover: Vec<(StrId, Span)> = scope.into_iter().collect();
         leftover.sort_by_key(|(_, sp)| (sp.start_line, sp.start_column));
-        for (name, sp) in leftover {
+        for (id, sp) in leftover {
+            let name = self.engine.str(id).to_string();
             self.unused_binding(&name, sp);
         }
     }
@@ -864,12 +865,12 @@ impl Compiler {
         }
     }
 
-    fn resolve_variable(&mut self, name: &str) -> Option<VarAccess> {
+    fn resolve_variable(&mut self, name: StrId) -> Option<VarAccess> {
         self.mark_used(name);
-        if let Some(entry) = self.locals.get(name) {
+        if let Some(entry) = self.locals.get(&name) {
             return Some(VarAccess::Local(entry.slot));
         }
-        if let Some(idx) = self.captures.get(name) {
+        if let Some(idx) = self.captures.get(&name) {
             return Some(VarAccess::Capture(*idx));
         }
         // Search enclosing scopes innermost-first so inner bindings shadow
@@ -879,16 +880,16 @@ impl Compiler {
         // is what makes mutually-recursive top-level fns work — the sibling's
         // slot is read at call time, not at MakeClosure time.
         for (i, scope) in self.outer_scopes.iter().enumerate().rev() {
-            if let Some(entry) = scope.locals.get(name) {
-                if self.current_binding.as_deref() == Some(name) {
+            if let Some(entry) = scope.locals.get(&name) {
+                if self.current_binding == Some(name) {
                     return Some(VarAccess::Self_);
                 }
                 if i == 0 {
                     return Some(VarAccess::Global(entry.slot));
                 }
                 let capture_idx = self.capture_names.len() as i32;
-                self.captures.insert(name.to_string(), capture_idx);
-                self.capture_names.push(name.to_string());
+                self.captures.insert(name, capture_idx);
+                self.capture_names.push(name);
                 return Some(VarAccess::Capture(capture_idx));
             }
         }
@@ -1287,6 +1288,7 @@ impl Compiler {
         match stmt {
             ast::Statement::VariableBinding(vb) => {
                 let name = vb.identifier.name.clone();
+                let name_id = self.engine.intern(&name);
 
                 // At module scope a re-binding gets a fresh slot (see
                 // `get_or_create_local`), so the slot must be allocated *after*
@@ -1298,7 +1300,7 @@ impl Compiler {
                 // binding still reserves its slot up front so a self-recursive
                 // lambda can resolve its own (not-yet-bound) name through the
                 // entry frame.
-                let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name);
+                let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name_id);
                 let idx = if defer_slot {
                     None
                 } else {
@@ -1323,7 +1325,7 @@ impl Compiler {
                 // lambdas and mis-resolves their calls to the enclosing fn as
                 // Self_ (emitting CallSelf against the wrong, live frame).
                 let saved_self = if init_is_fn {
-                    self.next_fn_self_name.replace(name.clone())
+                    self.next_fn_self_name.replace(name_id)
                 } else {
                     self.next_fn_self_name.take()
                 };
@@ -1639,7 +1641,8 @@ impl Compiler {
                     self.env.define(&local_name, ev.scheme);
                 }
                 if let Some(slot) = ev.local_slot {
-                    self.bind_local(local_name.clone(), slot);
+                    let id = self.engine.intern(&local_name);
+                    self.bind_local(id, slot);
                 }
             }
             if let Some(ti) = typ {
@@ -2129,7 +2132,10 @@ impl Compiler {
     /// constructors and builtins have no plain runtime binding.
     fn value_load(&mut self, name: &str, kind: &ValueKind) -> Option<VarAccess> {
         match kind {
-            ValueKind::Local | ValueKind::ModuleFn => self.resolve_variable(name),
+            ValueKind::Local | ValueKind::ModuleFn => {
+                let id = self.engine.intern(name);
+                self.resolve_variable(id)
+            }
             _ => None,
         }
     }
@@ -3352,6 +3358,7 @@ impl Compiler {
     /// body, and open a new type-env scope. Param binding emits no bytecode so
     /// `func_start` here equals the address after params are bound.
     fn enter_fn_frame(&mut self, binding: Option<&str>) -> FnFrame {
+        let binding_id = binding.map(|n| self.engine.intern(n));
         // The enclosing frame's locals already map any preallocated
         // entry-frame slots (analysis.rs Pass 3); moving the map into
         // `outer_scopes` as-is lets a nested lambda resolve the enclosing fn
@@ -3370,8 +3377,8 @@ impl Compiler {
             captures: std::mem::take(&mut self.captures),
             capture_names: std::mem::take(&mut self.capture_names),
             rigid_ids: self.rigid_ids.clone(),
-            binding: match binding {
-                Some(n) => self.current_binding.replace(n.to_string()),
+            binding: match binding_id {
+                Some(id) => self.current_binding.replace(id),
                 None => {
                     // A lambda / fn-expression has no self-name UNLESS it is the
                     // RHS of a `name = fn(...)` binding, which stashes that name
@@ -3447,7 +3454,7 @@ impl Compiler {
         self.local_count = saved.local_count;
         self.captures = saved.captures;
 
-        for cap_name in &captured {
+        for &cap_name in &captured {
             if let Some(access) = self.resolve_variable(cap_name) {
                 self.emit_load(&access);
             }
@@ -4029,10 +4036,13 @@ impl Compiler {
                         // alternative actually wrote.
                         let mut names = Vec::new();
                         Self::pattern_bound_names(alt, &mut names);
-                        let map: HashMap<String, i32> = names
-                            .into_iter()
-                            .filter_map(|n| self.locals.get(&n).map(|e| (n, e.slot)))
-                            .collect();
+                        let mut map: HashMap<StrId, i32> = HashMap::with_capacity(names.len());
+                        for n in names {
+                            let id = self.engine.intern(&n);
+                            if let Some(e) = self.locals.get(&id) {
+                                map.insert(id, e.slot);
+                            }
+                        }
                         self.or_bind_overrides.push(map);
                         overrides_pushed = true;
                     }
