@@ -223,7 +223,11 @@ impl TypeEnv {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+/// Rollback payload for [`TypeEnv::truncate_to`]. Deliberately not `Ord`:
+/// [`Watermark`](crate::bytecode::Watermark)'s ordering key excludes this
+/// field so `EnvWatermark`'s field set can change without silently perturbing
+/// which cached module `.min()` picks during invalidation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnvWatermark {
     pub root_scope: usize,
     pub type_info: usize,
@@ -252,16 +256,16 @@ impl TypeEnv {
     }
 
     pub fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop();
-        }
+        debug_assert!(self.scopes.len() > 1, "unbalanced pop_scope");
+        self.scopes.pop();
     }
 
+    #[allow(clippy::expect_used)] // `new_env` seeds one scope; `pop_scope` guards `len > 1`.
     pub fn define(&mut self, name: &str, scheme: Scheme) {
-        if !self.scopes.is_empty() {
-            let last = self.scopes.len() - 1;
-            self.scopes[last].insert(name.to_string(), scheme);
-        }
+        self.scopes
+            .last_mut()
+            .expect("TypeEnv.scopes is never empty")
+            .insert(name.to_string(), scheme);
     }
 
     pub fn define_at(&mut self, name: &str, scheme: Scheme, loc: DefinitionLocation) {
@@ -343,6 +347,12 @@ impl TypeEnv {
     /// populate `PreludeIds` or wire constructor schemes. The body is filled in
     /// later via `set_type_body` once all heads in the module are visible,
     /// which is what permits recursive and mutually-recursive type bodies.
+    ///
+    /// `name` MUST be the string that `name_id` was interned from
+    /// (`engine.str(name_id) == name`): the by-name and by-id registries are
+    /// kept in lockstep by [`store_type_info`](Self::store_type_info), so a
+    /// mismatch would let by-name and by-id lookups resolve to different
+    /// `TypeInfo`.
     pub fn register_type_head(
         &mut self,
         name: &str,
@@ -405,7 +415,10 @@ impl TypeEnv {
 
     pub fn suggest_name(&self, name: &str) -> Option<String> {
         let mut best: Option<&String> = None;
-        let mut best_dist = 4usize;
+        // Length-proportional threshold (rustc's heuristic): a 2-char typo
+        // shouldn't suggest a 3-edits-away name. `best_dist` is the exclusive
+        // upper bound, so `+1` yields "accept dist ≤ max(len,3)/3".
+        let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
 
         for candidate in self.scopes.iter().flat_map(|s| s.keys()) {
             let dist = levenshtein(name, candidate);
