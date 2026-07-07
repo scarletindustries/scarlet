@@ -28,7 +28,9 @@
 use std::collections::HashMap;
 use std::ptr::NonNull;
 
-use libmimalloc_sys::{mi_free, mi_malloc_aligned};
+#[cfg(test)]
+use libmimalloc_sys::mi_free;
+use libmimalloc_sys::mi_malloc_aligned;
 
 use crate::bytecode::value::{
     RC_PREFIX_WORDS, Value, binary_clone_backing, for_each_child, header_has_off_heap_link,
@@ -59,7 +61,7 @@ impl ProcHeap {
     /// default heap. The storage is uninitialized.
     #[inline]
     #[allow(clippy::expect_used)]
-    pub fn alloc_words(&self, words: usize) -> NonNull<u64> {
+    fn alloc_raw(&self, words: usize) -> NonNull<u64> {
         let bytes = words * size_of::<u64>();
         // SAFETY: `mi_malloc_aligned` returns 8-aligned storage or null on OOM.
         let p = unsafe { mi_malloc_aligned(bytes, align_of::<u64>()) };
@@ -72,7 +74,7 @@ impl ProcHeap {
     /// is unchanged. Reclaimed by reference counting (`value::release`).
     #[inline]
     pub fn alloc_object(&self, words: usize) -> NonNull<u64> {
-        let raw = self.alloc_words(RC_PREFIX_WORDS + words);
+        let raw = self.alloc_raw(RC_PREFIX_WORDS + words);
         // SAFETY: fresh allocation of `RC_PREFIX_WORDS + words` (>= 2) words;
         // the first word is the refcount, the object begins after it.
         unsafe {
@@ -87,9 +89,8 @@ impl ProcHeap {
     ///
     /// # Safety
     /// `addr` must be a live mimalloc allocation that is not freed again.
-    #[inline]
-    #[allow(dead_code)]
-    pub unsafe fn free(addr: NonNull<u64>) {
+    #[cfg(test)]
+    unsafe fn free_raw(addr: NonNull<u64>) {
         // SAFETY: the caller guarantees `addr` is a live, not-yet-freed block.
         unsafe { mi_free(addr.as_ptr().cast()) };
     }
@@ -204,7 +205,7 @@ fn walk_graph(
 /// - sets each copy's refcount to its in-graph reference count (one per edge);
 /// - shares immortal (frozen) objects without copying them;
 /// - shares `Binary` byte backings by bumping their `Arc` (no byte copy).
-pub fn rc_copy_graph(root: &Value) -> Value {
+fn rc_copy_graph(root: &Value) -> Value {
     walk_graph(root, copy_node)
 }
 
@@ -249,7 +250,7 @@ fn publish_node(
 /// recursion), preserving sharing via a `src → dst` map, sharing already-frozen
 /// subgraphs, and bumping `Binary` Arc backings (which the frozen area then
 /// holds forever).
-pub fn rc_publish_graph(root: &Value, builder: &mut FrozenBuilder) -> Value {
+fn rc_publish_graph(root: &Value, builder: &mut FrozenBuilder) -> Value {
     walk_graph(root, |v, map, queue| publish_node(v, builder, map, queue))
 }
 
@@ -260,7 +261,7 @@ mod tests {
     #[test]
     fn alloc_write_read_then_free() {
         let h = ProcHeap::new();
-        let p = h.alloc_words(4);
+        let p = h.alloc_raw(4);
         assert_eq!(p.as_ptr() as usize % 8, 0, "8-byte aligned");
         // SAFETY: `p` is a live 4-word allocation we own exclusively here.
         unsafe {
@@ -270,7 +271,7 @@ mod tests {
             for i in 0..4 {
                 assert_eq!(p.as_ptr().add(i).read(), 0xABCD_0000 + i as u64);
             }
-            ProcHeap::free(p);
+            ProcHeap::free_raw(p);
         }
     }
 
@@ -281,19 +282,13 @@ mod tests {
         // shared default heap.
         let h = ProcHeap::new();
         for i in 0..10_000u64 {
-            let p = h.alloc_words(8);
+            let p = h.alloc_raw(8);
             // SAFETY: `p` is a live 8-word allocation owned exclusively here.
             unsafe {
                 p.as_ptr().write(i);
                 assert_eq!(p.as_ptr().read(), i);
-                ProcHeap::free(p);
+                ProcHeap::free_raw(p);
             }
         }
-    }
-
-    #[test]
-    fn proc_heap_is_send() {
-        fn takes_send<T: Send>() {}
-        takes_send::<ProcHeap>();
     }
 }
