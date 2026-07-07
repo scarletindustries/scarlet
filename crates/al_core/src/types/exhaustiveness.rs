@@ -778,8 +778,8 @@ impl UsefulnessMatrix {
         is_useful(&self.matrix, &pats, &types)
     }
 
-    pub fn push(&mut self, pat: Pat) {
-        let pat = intern_pat(&pat, &mut self.interner);
+    pub fn push(&mut self, pat: &Pat) {
+        let pat = intern_pat(pat, &mut self.interner);
         self.matrix.rows.push(PatStack::one(pat));
     }
 
@@ -787,7 +787,10 @@ impl UsefulnessMatrix {
     /// `None` if they are exhaustive. Independent of `is_useful`/`push` — the
     /// arms passed here (typically the unguarded subset) form their own
     /// matrix; this checker's incremental matrix is not consulted.
-    pub fn find_missing(&mut self, patterns: &[Pat]) -> Option<String> {
+    pub fn find_missing<'a>(
+        &mut self,
+        patterns: impl IntoIterator<Item = &'a Pat>,
+    ) -> Option<String> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
             matrix
@@ -1025,7 +1028,7 @@ mod tests {
     fn or_pattern_useful_if_any_alt_useful() {
         // Or in the test row goes through is_useful's PatOr branch: useful if any alt is.
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(ctor("True", vec![]));
+        m.push(&ctor("True", vec![]));
         let new = Pat::Or {
             patterns: vec![ctor("True", vec![]), ctor("False", vec![])],
         };
@@ -1035,8 +1038,8 @@ mod tests {
     #[test]
     fn or_pattern_not_useful_if_all_covered() {
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(ctor("True", vec![]));
-        m.push(ctor("False", vec![]));
+        m.push(&ctor("True", vec![]));
+        m.push(&ctor("False", vec![]));
         let new = Pat::Or {
             patterns: vec![ctor("True", vec![]), ctor("False", vec![])],
         };
@@ -1046,14 +1049,14 @@ mod tests {
     #[test]
     fn usefulness_redundant_after_wildcard() {
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(Pat::Wildcard);
+        m.push(&Pat::Wildcard);
         assert!(!m.is_useful(&ctor("True", vec![])));
     }
 
     #[test]
     fn usefulness_distinct_ctor() {
         let mut m = UsefulnessMatrix::new(t_bool());
-        m.push(ctor("True", vec![]));
+        m.push(&ctor("True", vec![]));
         assert!(m.is_useful(&ctor("False", vec![])));
     }
 
@@ -1165,7 +1168,7 @@ mod tests {
         let mut m = UsefulnessMatrix::new(t.clone());
         let p1 = pattern_to_pat(&bin_pat(vec![bin_seg(p_var("a"), Some("8"))], false), &t);
         let p2 = pattern_to_pat(&bin_pat(vec![bin_seg(p_var("b"), Some("8"))], false), &t);
-        m.push(p1);
+        m.push(&p1);
         assert!(!m.is_useful(&p2));
     }
 
@@ -1181,7 +1184,7 @@ mod tests {
         };
         let p1 = pattern_to_pat(&bin_pat(vec![bin_seg(lit("1"), None)], false), &t);
         let p2 = pattern_to_pat(&bin_pat(vec![bin_seg(lit("2"), None)], false), &t);
-        m.push(p1);
+        m.push(&p1);
         assert!(m.is_useful(&p2));
     }
 
