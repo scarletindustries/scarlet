@@ -4,4 +4,3 @@
 
 pub mod help;
 pub mod man;
-mod style;

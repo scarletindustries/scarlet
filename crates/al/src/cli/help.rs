@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Arg, ArgAction, Command};
 
-use super::style::Palette;
+use al_core::term::Palette;
 
 const LOGO: [&str; 2] = ["▄▀█ █░░", "█▀█ █▄▄"];
 const LEARN_MORE: &str = "https://al.alistair.sh";
@@ -104,19 +104,19 @@ fn row(out: &mut String, p: &Palette, label: &str, desc: &str, width: usize) {
 }
 
 fn heading(out: &mut String, p: &Palette, text: &str) {
-    let _ = writeln!(out, "\n{}{text}{}", p.heading, p.reset);
+    let _ = writeln!(out, "\n{}{text}{}", p.bold, p.reset);
 }
 
 fn logo_block(out: &mut String, p: &Palette, version: &str, tagline: &str) {
     let _ = writeln!(
         out,
         "  {}{}{}    {}al{} {}{version}{}",
-        p.accent, LOGO[0], p.reset, p.bold, p.reset, p.dim, p.reset
+        p.cyan, LOGO[0], p.reset, p.bold, p.reset, p.dim, p.reset
     );
     let _ = writeln!(
         out,
         "  {}{}{}    {}{tagline}{}",
-        p.accent, LOGO[1], p.reset, p.dim, p.reset
+        p.cyan, LOGO[1], p.reset, p.dim, p.reset
     );
 }
 
