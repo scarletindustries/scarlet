@@ -2817,7 +2817,6 @@ impl Compiler {
         args: &[ast::CallArg],
         call_span: Span,
     ) -> Ty {
-        let field_labels: Vec<String> = self.engine.strs_of(field_labels_sl);
         // The instantiated scheme is `IFun{params, ret}` for arity>0 or `ICon`
         // for arity==0. Extract param/result types.
         let r = self.engine.find(inst_ty);
@@ -2843,7 +2842,7 @@ impl Compiler {
         let (by_pos, _) = self.slot_ctor_args(
             variant_name,
             arity,
-            &field_labels,
+            field_labels_sl,
             args.iter().filter_map(|a| match a {
                 ast::CallArg::Positional(e) => Some((None, e, e.span())),
                 ast::CallArg::Labeled { label, value } => Some((Some(label), value, label.span)),
@@ -2872,7 +2871,7 @@ impl Compiler {
         let ph =
             self.emit_construct_header_for_build(type_id, type_name, variant_name, field_labels_sl);
 
-        for (i, slot_expr) in by_pos.iter().enumerate().take(field_labels.len()) {
+        for (i, slot_expr) in by_pos.iter().enumerate().take(field_labels_sl.len as usize) {
             let expected = param_tys.get(i).copied();
             match slot_expr {
                 Some(e) => {
@@ -3697,7 +3696,10 @@ impl Compiler {
     }
 
     /// Resolve a constructor name to `(type_id, type_name, arity, field_labels, scheme)`.
-    fn lookup_ctor(&self, name: &str) -> Option<(TypeId, String, usize, Vec<String>, Scheme)> {
+    fn lookup_ctor(
+        &self,
+        name: &str,
+    ) -> Option<(TypeId, String, usize, ArenaSlice<pool::StrSlices>, Scheme)> {
         let scheme = *self.env.lookup(name)?;
         match scheme.kind {
             ValueKind::Constructor {
@@ -3710,7 +3712,7 @@ impl Compiler {
                 type_id,
                 self.engine.str(type_name).to_string(),
                 arity as usize,
-                self.engine.strs_of(field_labels),
+                field_labels,
                 scheme,
             )),
             _ => None,
@@ -3758,7 +3760,7 @@ impl Compiler {
                 let (by_pos, args_ok) = self.slot_ctor_args(
                     &name.name,
                     arity,
-                    &field_labels,
+                    field_labels,
                     args.iter().map(|a| match a {
                         ast::PatternArg::Positional(p) => (None, p, p.span()),
                         ast::PatternArg::Labeled { label, pattern } => {
@@ -3810,7 +3812,7 @@ impl Compiler {
         &mut self,
         name: &str,
         arity: usize,
-        field_labels: &[String],
+        field_labels: ArenaSlice<pool::StrSlices>,
         args: impl Iterator<Item = (Option<&'a ast::Identifier>, &'a T, Span)>,
         missing: Option<(Span, &str)>,
         diag: bool,
@@ -3818,7 +3820,6 @@ impl Compiler {
         let mut by_pos: Vec<Option<&'a T>> = vec![None; arity];
         let mut next_positional = 0usize;
         let mut ok = true;
-        let label_at = |i: usize| field_labels.get(i).map(String::as_str).unwrap_or("_");
         for (label, val, sp) in args {
             let (idx, sp) = match label {
                 None => {
@@ -3839,55 +3840,66 @@ impl Compiler {
                     }
                     (i, sp)
                 }
-                Some(l) => match field_labels.iter().position(|fl| fl == &l.name) {
-                    Some(i) => (i, l.span),
-                    None => {
-                        if diag {
-                            self.error(
-                                format!(
-                                    "Constructor '{}' has no field '{}'. Available: {}",
-                                    name,
-                                    l.name,
-                                    field_labels.join(", ")
-                                ),
-                                l.span,
-                            );
+                Some(l) => {
+                    let pos = self
+                        .engine
+                        .str_ids_of(field_labels)
+                        .iter()
+                        .position(|&id| self.engine.str(id) == l.name);
+                    match pos {
+                        Some(i) => (i, l.span),
+                        None => {
+                            if diag {
+                                self.error(
+                                    format!(
+                                        "Constructor '{}' has no field '{}'. Available: {}",
+                                        name,
+                                        l.name,
+                                        self.engine.strs_of(field_labels).join(", ")
+                                    ),
+                                    l.span,
+                                );
+                            }
+                            ok = false;
+                            continue;
                         }
-                        ok = false;
-                        continue;
                     }
-                },
+                }
             };
             if by_pos[idx].is_some() {
                 if diag {
-                    self.error(
-                        format!("Field '{}' is specified more than once", label_at(idx)),
-                        sp,
-                    );
+                    let dup = self
+                        .engine
+                        .str_ids_of(field_labels)
+                        .get(idx)
+                        .map_or("_", |&id| self.engine.str(id))
+                        .to_string();
+                    self.error(format!("Field '{}' is specified more than once", dup), sp);
                 }
                 ok = false;
             }
             by_pos[idx] = Some(val);
         }
-        if let Some((span, hint)) = missing {
-            let absent: Vec<&str> = (0..arity)
-                .filter(|i| by_pos[*i].is_none())
-                .map(&label_at)
-                .collect();
-            if !absent.is_empty() {
-                if diag {
-                    self.error(
-                        format!(
-                            "Constructor '{}' is missing field(s): {}{}",
-                            name,
-                            absent.join(", "),
-                            hint
-                        ),
-                        span,
-                    );
-                }
-                ok = false;
+        if let Some((span, hint)) = missing
+            && by_pos.iter().any(Option::is_none)
+        {
+            if diag {
+                let labels = self.engine.strs_of(field_labels);
+                let absent: Vec<&str> = (0..arity)
+                    .filter(|i| by_pos[*i].is_none())
+                    .map(|i| labels.get(i).map(String::as_str).unwrap_or("_"))
+                    .collect();
+                self.error(
+                    format!(
+                        "Constructor '{}' is missing field(s): {}{}",
+                        name,
+                        absent.join(", "),
+                        hint
+                    ),
+                    span,
+                );
             }
+            ok = false;
         }
         (by_pos, ok)
     }
@@ -4420,7 +4432,7 @@ impl Compiler {
         let (by_pos, _) = self.slot_ctor_args(
             &name.name,
             arity,
-            &field_labels,
+            field_labels,
             args.iter().map(|a| match a {
                 ast::PatternArg::Positional(p) => (None, p, p.span()),
                 ast::PatternArg::Labeled { label, pattern } => (Some(label), pattern, label.span),
