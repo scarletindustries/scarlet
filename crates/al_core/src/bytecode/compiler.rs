@@ -151,6 +151,13 @@ pub struct Compiler {
     /// constructors, so enum names and field labels from compile-time
     /// constants all point at the area's canonical interned allocations.
     frozen: FrozenBuilder,
+    /// `Value::to_bits` → constant-pool index, so `add_constant` returns the
+    /// existing slot for a repeated literal instead of pushing a duplicate.
+    /// `frozen` interns heap constants and immediates encode by value, so
+    /// identical constants have identical bits. Self-validating on lookup
+    /// (index in-bounds and slot bits still match) so `reset_to`'s pool
+    /// truncate needs no paired invalidation — a stale entry just misses.
+    const_dedup: HashMap<u64, i32>,
     pub(super) locals: HashMap<String, LocalSlot>,
     /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
     /// open block scope appends `(name, previous entry)`; `pop_local_scope`
@@ -331,6 +338,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
     Compiler {
         program,
         frozen,
+        const_dedup: HashMap::new(),
         locals: HashMap::new(),
         undo_log: vec![],
         scope_marks: vec![],
@@ -642,8 +650,17 @@ impl Compiler {
         if self.check_only {
             return 0;
         }
+        let bits = v.to_bits();
+        if let Some(&idx) = self.const_dedup.get(&bits)
+            && let Some(slot) = self.program.constants.get(idx as usize)
+            && slot.to_bits() == bits
+        {
+            return idx;
+        }
         self.program.constants.push(v);
-        self.program.constants.len() as i32 - 1
+        let idx = self.program.constants.len() as i32 - 1;
+        self.const_dedup.insert(bits, idx);
+        idx
     }
 
     // Frozen constant-pool helpers: every constant `Value` is built through

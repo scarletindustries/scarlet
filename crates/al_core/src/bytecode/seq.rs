@@ -310,9 +310,18 @@ pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     let (body, tail_items) = items.split_at(n - tail_len);
     let mut nodes: Vec<Value> = body.chunks(B).map(|c| leaf_from(a, c)).collect();
     let mut shift = 0;
+    // Group in place: output i is written to nodes[i], which is strictly before
+    // the read window [i*B, (i+1)*B) for B > 1, so writes never clobber unread
+    // children. Avoids allocating a fresh Vec per tree level.
     while nodes.len() > 1 {
         shift += BITS;
-        nodes = nodes.chunks(B).map(|c| branch_from(a, shift, c)).collect();
+        let len = nodes.len();
+        let new_len = len.div_ceil(B);
+        for i in 0..new_len {
+            let branch = branch_from(a, shift, &nodes[i * B..((i + 1) * B).min(len)]);
+            nodes[i] = branch;
+        }
+        nodes.truncate(new_len);
     }
     let tail = leaf_from(a, tail_items);
     let tree = nodes.remove(0);
