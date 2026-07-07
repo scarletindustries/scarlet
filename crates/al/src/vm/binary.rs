@@ -65,26 +65,25 @@ pub fn from_int(value: i64, num_bits: u64) -> Vec<u8> {
 }
 
 /// Decode `num_bits` starting at bit `at` as an unsigned big-endian integer.
-/// Bits outside `[0, bit_len)` read as zero and a width over 64 wraps into
-/// `i64` (consistent with the language's wrapping integer arithmetic). Total.
-pub fn read_int(bytes: &[u8], bit_len: u64, at: u64, num_bits: u64) -> i64 {
+/// Bits at index `>= end` read as zero and a width over 64 wraps into `i64`
+/// (consistent with the language's wrapping integer arithmetic). Total.
+pub fn read_int(bytes: &[u8], end: u64, at: u64, num_bits: u64) -> i64 {
     // Fast path: byte-aligned start and a width that fits one word — covers
     // the dominant 8/16/32/64-bit segments of byte-aligned binaries with a
     // clamped byte copy instead of a per-bit loop. `bytes` may be a shared
-    // backing extending past `bit_len` (the view's logical end), so bytes and
-    // bits past `bit_len` must read as zero, never copied through.
+    // backing extending past `end` (the view's logical end), so bytes and
+    // bits past `end` must read as zero, never copied through.
     if at.is_multiple_of(8) && (1..=64).contains(&num_bits) {
         let mut buf = [0u8; 8];
-        if at < bit_len {
+        if at < end {
             let start = (at / 8) as usize;
             let want = num_bits.div_ceil(8) as usize;
-            let avail =
-                ((bit_len - at).div_ceil(8) as usize).min(bytes.len().saturating_sub(start));
+            let avail = ((end - at).div_ceil(8) as usize).min(bytes.len().saturating_sub(start));
             let copy = want.min(avail);
             buf[..copy].copy_from_slice(&bytes[start..start + copy]);
-            // Zero the bits of the last copied byte at or past `bit_len`.
-            let rem = ((bit_len - at) % 8) as u8;
-            if rem != 0 && at + 8 * copy as u64 > bit_len {
+            // Zero the bits of the last copied byte at or past `end`.
+            let rem = ((end - at) % 8) as u8;
+            if rem != 0 && at + 8 * copy as u64 > end {
                 buf[copy - 1] &= 0xFFu8 << (8 - rem);
             }
         }
@@ -98,11 +97,7 @@ pub fn read_int(bytes: &[u8], bit_len: u64, at: u64, num_bits: u64) -> i64 {
     let mut v: u64 = 0;
     for i in skip..num_bits {
         let idx = at + i;
-        let bit = if idx < bit_len {
-            get_bit(bytes, idx)
-        } else {
-            0
-        };
+        let bit = if idx < end { get_bit(bytes, idx) } else { 0 };
         v = (v << 1) | bit as u64;
     }
     v as i64
@@ -111,8 +106,8 @@ pub fn read_int(bytes: &[u8], bit_len: u64, at: u64, num_bits: u64) -> i64 {
 /// Decode one UTF-8 codepoint starting at bit `at`. Returns `(codepoint,
 /// bits_consumed)` or `None` if there are too few bits or the bytes are not
 /// valid UTF-8. Total.
-pub fn read_utf8(bytes: &[u8], bit_len: u64, at: u64) -> Option<(u32, u64)> {
-    if at + 8 > bit_len {
+pub fn read_utf8(bytes: &[u8], end: u64, at: u64) -> Option<(u32, u64)> {
+    if at + 8 > end {
         return None;
     }
     let b0 = read_byte(bytes, at);
@@ -128,7 +123,7 @@ pub fn read_utf8(bytes: &[u8], bit_len: u64, at: u64) -> Option<(u32, u64)> {
         return None;
     };
     let nbits = len * 8;
-    if at + nbits > bit_len {
+    if at + nbits > end {
         return None;
     }
     let mut buf = [0u8; 4];
@@ -234,7 +229,7 @@ mod tests {
         assert_eq!(read_int(&b, 72, 8, 64), 0x3456789ABCDEF011u64 as i64);
         // Aligned start, sub-byte width.
         assert_eq!(read_int(&b, 72, 8, 4), 0x3);
-        // Aligned start reading past `bit_len` zero-fills, even though the
+        // Aligned start reading past `end` zero-fills, even though the
         // backing slice has live bytes there (view semantics).
         assert_eq!(read_int(&b, 16, 8, 16), 0x3400);
         assert_eq!(read_int(&b, 12, 0, 16), 0x1230);

@@ -167,7 +167,7 @@ use migrate::Migrant;
 use poll::Wait;
 use sched::{Inbound, Runtime, Seed};
 use templates::{EnumTemplate, PreludeTemplates, enum_template};
-use text::{int_to_ascii, parse_int_ascii};
+use text::{int_to_ascii, parse_uint_ascii};
 
 /// A VM-level failure. The variant distinguishes user-visible runtime
 /// errors (out-of-bounds, type mismatch — surfaced to AL as a panic

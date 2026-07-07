@@ -20,7 +20,7 @@ use al_core::bytecode::{BinaryRef, Value};
 use al_core::heap::ProcHeap;
 
 use super::text::Radix;
-use super::{PreludeTemplates, VmError, VmResult, int_to_ascii, parse_int_ascii};
+use super::{PreludeTemplates, VmError, VmResult, int_to_ascii, parse_uint_ascii};
 
 /// Total request-head size cap (request line + all header fields), mirrored by
 /// `al/http/h1`'s docs. A head that grows past this without completing is
@@ -409,7 +409,7 @@ pub(super) fn framing(
             let parsed = match field_bytes(&v) {
                 Some(bytes) => {
                     let leading_zero = bytes.len() > 1 && bytes[0] == b'0';
-                    parse_int_ascii(&bytes, Radix::Dec)
+                    parse_uint_ascii(&bytes, Radix::Dec)
                         .filter(|&n| !leading_zero && Value::fits_small_int(n))
                 }
                 None => return Err(not_headers("h1.framing")),
@@ -493,7 +493,7 @@ fn chunk_decode_window(
         // everything before the first ';'. The size itself is strict 1*HEXDIG —
         // no sign, no whitespace — and overflow comes back as None.
         let size_end = memchr::memchr(b';', line).unwrap_or(line.len());
-        let Some(size) = parse_int_ascii(&line[..size_end], Radix::Hex) else {
+        let Some(size) = parse_uint_ascii(&line[..size_end], Radix::Hex) else {
             return chunked_bad(t, a, Reject::BadRequest);
         };
 

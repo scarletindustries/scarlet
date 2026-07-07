@@ -946,7 +946,7 @@ impl Compiler {
     /// the `DefId` every occurrence of it targets.
     pub(super) fn defid_of(&mut self, dl: DefinitionLocation) -> DefId {
         let module = self.module_id_of_slice(dl.module);
-        DefId::new(module, def_loc_span(&dl), dl.entity)
+        DefId::new(module, dl.span(), dl.entity)
     }
 
     /// The [`DefId`] to stash in `current_owner` while a top-level
@@ -956,7 +956,7 @@ impl Compiler {
     /// dead-code reachability walk follows.
     pub(super) fn owner_defid(&mut self, name_span: Span, entity: EntityKind) -> DefId {
         let module = self.current_module_slice();
-        self.defid_of(def_loc(name_span, module, entity))
+        self.defid_of(DefinitionLocation::new(name_span, module, entity))
     }
 
     /// Record a resolved name occurrence in the current module's collector,
@@ -1038,7 +1038,12 @@ impl Compiler {
     fn emit_value_def(&mut self, sp: Span, name: &str, doc: Option<String>) {
         if self.collect_hover_facts {
             let m = self.current_module_slice();
-            self.emit_def(def_loc(sp, m, EntityKind::Value), name, doc, false);
+            self.emit_def(
+                DefinitionLocation::new(sp, m, EntityKind::Value),
+                name,
+                doc,
+                false,
+            );
         }
     }
 
@@ -1189,7 +1194,8 @@ impl Compiler {
         let result = h.type_from_ast(t, &self.env, &mut self.engine);
         for hit in h.take_type_refs() {
             let path = self.engine.strs_of(hit.module);
-            self.record_type_use(&path, &hit.name, hit.span, ReferenceKind::Unqualified);
+            let name = self.engine.str(hit.name).to_string();
+            self.record_type_use(&path, &name, hit.span, ReferenceKind::Unqualified);
         }
         match result {
             Ok(ty) => ty,
@@ -1299,7 +1305,7 @@ impl Compiler {
                 self.env.define_at(
                     &name,
                     scheme,
-                    def_loc(vb.identifier.span, m, EntityKind::Value),
+                    DefinitionLocation::new(vb.identifier.span, m, EntityKind::Value),
                 );
                 self.track_binding(&name, vb.identifier.span);
                 if let Some(doc) = &vb.doc {
@@ -1572,7 +1578,7 @@ impl Compiler {
                 // `ModuleAlias`) and out of the symbol outline.
                 if let Some(a) = item.alias.as_ref() {
                     let module = self.current_module_slice();
-                    let alias_dl = def_loc(a.span, module, EntityKind::Value);
+                    let alias_dl = DefinitionLocation::new(a.span, module, EntityKind::Value);
                     self.env.define(
                         &local_name,
                         Scheme {
@@ -3350,8 +3356,11 @@ impl Compiler {
     /// after reserving its slot with `get_or_create_local`.
     fn register_local_binding(&mut self, name: &str, ty: Ty, sp: Span) {
         let m = self.current_module_slice();
-        self.env
-            .define_at(name, mono(ty), def_loc(sp, m, EntityKind::Value));
+        self.env.define_at(
+            name,
+            mono(ty),
+            DefinitionLocation::new(sp, m, EntityKind::Value),
+        );
         self.track_binding(name, sp);
         self.record(name, ty, sp, None);
         self.emit_value_def(sp, name, None);
@@ -4546,33 +4555,6 @@ fn push_literal_bytes(bytes: &mut Vec<u8>, bit_len: &mut u64, new: &[u8]) {
         for &b in new {
             push_literal_bits(bytes, bit_len, b as i64, 8);
         }
-    }
-}
-
-pub(super) fn def_loc(
-    sp: Span,
-    module: ArenaSlice<pool::StrSlices>,
-    entity: EntityKind,
-) -> DefinitionLocation {
-    DefinitionLocation {
-        line: sp.start_line,
-        column: sp.start_column,
-        end_col: sp.end_column,
-        module,
-        entity,
-    }
-}
-
-/// The declaring-name span carried by a [`DefinitionLocation`]. A declaring
-/// identifier is always single-line, so the reconstructed span is exactly the
-/// one [`def_loc`] was handed — keeping a definition's `DefId` equal to the
-/// `DefId` every occurrence of it targets.
-fn def_loc_span(dl: &DefinitionLocation) -> Span {
-    Span {
-        start_line: dl.line,
-        start_column: dl.column,
-        end_line: dl.line,
-        end_column: dl.end_col,
     }
 }
 

@@ -346,7 +346,7 @@ impl VM {
     pub(super) fn bin_parse_int(&mut self) -> VmResult<()> {
         let radix = self.pop_radix("binary.parse_int")?;
         let b_v = self.pop_binary("binary.parse_int")?;
-        let parsed = parse_int_ascii(&bin_ref(&b_v).full_bytes(), radix);
+        let parsed = parse_uint_ascii(&bin_ref(&b_v).full_bytes(), radix);
         let v = match parsed {
             Some(n) => {
                 let n = self.boxed_int(n);
@@ -494,12 +494,13 @@ impl Radix {
     }
 }
 
-/// Parse ASCII bytes as an integer in the given [`Radix`] (both hex cases).
-/// Returns `None` for an empty input, any non-digit byte, or on overflow —
-/// the multiply/add are checked so a value that would wrap (e.g. an oversized
-/// `Content-Length`) is rejected rather than silently truncated by AL's
-/// wrapping arithmetic.
-pub(super) fn parse_int_ascii(bytes: &[u8], radix: Radix) -> Option<i64> {
+/// Parse ASCII bytes as a non-negative integer in the given [`Radix`] (both
+/// hex cases). Digits only, no sign — [`int_to_ascii`] round-trips only for
+/// `n >= 0`. Returns `None` for an empty input, any non-digit byte, or on
+/// overflow — the multiply/add are checked so a value that would wrap (e.g.
+/// an oversized `Content-Length`) is rejected rather than silently truncated
+/// by AL's wrapping arithmetic.
+pub(super) fn parse_uint_ascii(bytes: &[u8], radix: Radix) -> Option<i64> {
     if bytes.is_empty() {
         return None;
     }
@@ -530,9 +531,7 @@ impl IntAscii {
     }
 
     pub(super) fn as_str(&self) -> &str {
-        // The buffer holds only ASCII digits, '-', and hex letters, so
-        // this cannot fail; the fallback is unreachable in practice.
-        std::str::from_utf8(self.as_bytes()).unwrap_or("0")
+        std::str::from_utf8(self.as_bytes()).expect("int_to_ascii writes only ASCII")
     }
 }
 
