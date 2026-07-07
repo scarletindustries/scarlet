@@ -13,7 +13,10 @@ use al::reference::EntityKind;
 use al::span::Span;
 
 mod common;
-use common::{Project, SessionQueryExt, checked_with, cursor, parse};
+use common::{
+    Project, SessionQueryExt, assert_has_msg, assert_has_sym, assert_no_msg, checked_with, cursor,
+    parse, sym_names,
+};
 
 const C_SRC: &str = "pub fn shared() Int { 42 }\n";
 const B_SRC: &str = "import ./c\npub fn bridge() Int { c.shared() + 1 }\n";
@@ -151,32 +154,16 @@ fn document_and_workspace_symbols() {
     let s = checked(&p);
 
     // documentSymbol for module C lists its declaration.
-    let doc = s.document_symbols("./c");
-    assert!(
-        doc.iter()
-            .any(|sym| sym.name == "shared" && sym.kind == EntityKind::Function),
-        "documentSymbol(./c) missing `shared`: {:?}",
-        doc.iter().map(|x| &x.name).collect::<Vec<_>>()
-    );
+    assert_has_sym(&s.document_symbols("./c"), "shared", EntityKind::Function);
 
     // documentSymbol for the entry surfaces the import module-aliases,
     // including the `al/array` stdlib import alias.
     let main = s.document_symbols("main");
-    assert!(
-        main.iter()
-            .any(|sym| sym.name == "array" && sym.kind == EntityKind::ModuleAlias),
-        "entry documentSymbol missing the `al/array` import alias: {:?}",
-        main.iter().map(|x| (&x.name, x.kind)).collect::<Vec<_>>()
-    );
+    assert_has_sym(&main, "array", EntityKind::ModuleAlias);
 
     // workspace/symbol substring search finds the user symbol and is
     // case-insensitive.
-    assert!(
-        s.workspace_symbols("SHAR")
-            .iter()
-            .any(|sym| sym.name == "shared"),
-        "workspace_symbols is not a case-insensitive substring match"
-    );
+    assert_has_sym(&s.workspace_symbols("SHAR"), "shared", EntityKind::Function);
     // Precision: an unrelated query returns nothing.
     assert!(
         s.workspace_symbols("definitely_no_such_symbol").is_empty(),
@@ -245,11 +232,7 @@ fn stdlib_import_path_is_tracked() {
     );
 
     // A *used* stdlib import is not reported unused.
-    let used = unused_msgs(&s);
-    assert!(
-        !used.iter().any(|m| m == "unused import `array`"),
-        "a used stdlib import was wrongly reported unused: {used:?}"
-    );
+    assert_no_msg(&unused_msgs(&s), "unused import `array`");
 
     // The unused-import reachability rule reaches stdlib imports: an import
     // whose alias has no recorded qualified/unqualified use is a Hint.
@@ -257,11 +240,7 @@ fn stdlib_import_path_is_tracked() {
     let unused = "import al/array\nprintln(1)\n";
     p2.write("a.al", unused);
     let s2 = checked_with(&p2, unused);
-    let hints = unused_msgs(&s2);
-    assert!(
-        hints.iter().any(|m| m == "unused import `array`"),
-        "stdlib import not run through the unused-import rule: {hints:?}"
-    );
+    assert_has_msg(&unused_msgs(&s2), "unused import `array`");
 }
 
 #[test]
@@ -275,19 +254,10 @@ fn unused_import_and_dead_private_def_hints() {
     let s = checked_with(&p, entry);
     let msgs = unused_msgs(&s);
 
-    assert!(
-        msgs.iter().any(|m| m.contains("unused import `c`")),
-        "missing unused-import hint: {msgs:?}"
-    );
-    assert!(
-        msgs.iter().any(|m| m == "unused function `deadpriv`"),
-        "missing dead private-def hint: {msgs:?}"
-    );
+    assert_has_msg(&msgs, "unused import `c`");
+    assert_has_msg(&msgs, "unused function `deadpriv`");
     // `println` is a used builtin and must never be reported.
-    assert!(
-        !msgs.iter().any(|m| m.contains("println")),
-        "false-positive on a used builtin: {msgs:?}"
-    );
+    assert_no_msg(&msgs, "println");
 }
 
 #[test]
@@ -369,33 +339,25 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
 
     // documentSymbol lists the top-level fn …
     let doc = s.document_symbols("main");
-    assert!(
-        doc.iter()
-            .any(|sym| sym.name == "calc" && sym.kind == EntityKind::Function),
-        "documentSymbol(main) missing top-level `calc`: {:?}",
-        doc.iter().map(|x| (&x.name, x.kind)).collect::<Vec<_>>()
-    );
+    assert_has_sym(&doc, "calc", EntityKind::Function);
     // … but NOT the local binder, the param, or any other `Value`.
     assert!(
         !doc.iter().any(|sym| sym.kind == EntityKind::Value),
         "documentSymbol must not surface local `Value` binders: {:?}",
-        doc.iter().map(|x| (&x.name, x.kind)).collect::<Vec<_>>()
+        sym_names(&doc)
     );
     assert!(
-        !doc.iter()
-            .any(|sym| sym.name == "scaled" || sym.name == "base"),
+        !doc.iter().any(|s| s.name == "scaled" || s.name == "base"),
         "documentSymbol leaked a local binder/param: {:?}",
-        doc.iter().map(|x| &x.name).collect::<Vec<_>>()
+        sym_names(&doc)
     );
 
     // workspace/symbol over a local binder's name returns nothing.
+    let ws = s.workspace_symbols("scaled");
     assert!(
-        s.workspace_symbols("scaled").is_empty(),
+        ws.is_empty(),
         "workspace_symbols surfaced a local binder: {:?}",
-        s.workspace_symbols("scaled")
-            .iter()
-            .map(|x| &x.name)
-            .collect::<Vec<_>>()
+        sym_names(&ws)
     );
 
     // Resolution on the local is UNAFFECTED — the filter never touches the
@@ -548,14 +510,8 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let s = checked_with(&p, entry);
     let msgs = unused_msgs(&s);
 
-    assert!(
-        msgs.iter().any(|m| m == "unused import `c`"),
-        "the unused `./c` import must be flagged even though `./d` is used: {msgs:?}"
-    );
-    assert!(
-        !msgs.iter().any(|m| m == "unused import `d`"),
-        "the used `./d` import must not be flagged: {msgs:?}"
-    );
+    assert_has_msg(&msgs, "unused import `c`");
+    assert_no_msg(&msgs, "unused import `d`");
 }
 
 // ---------------------------------------------------------------------------

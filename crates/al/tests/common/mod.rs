@@ -143,6 +143,21 @@ pub fn check_rejects(source: &str, expected_diag: &str) -> AlOutput {
     out
 }
 
+/// Expand each `name: (src, msg)` entry to a named `#[test]` fn that asserts
+/// `al check` rejects `src` with a diagnostic containing `msg` (via
+/// [`check_rejects`]). Entries may carry `///` docs or other attributes;
+/// `cargo test <name>` still targets a single case.
+#[macro_export]
+macro_rules! reject_case {
+    ( $( $(#[$m:meta])* $name:ident: ($src:expr, $msg:expr $(,)?) ),* $(,)? ) => {
+        $(
+            $(#[$m])*
+            #[test]
+            fn $name() { $crate::common::check_rejects($src, $msg); }
+        )*
+    };
+}
+
 /// Assert `al run` rejects `source` cleanly with a diagnostic containing
 /// `expected_diag`. Returns the captured output for follow-up assertions.
 /// See [`assert_rejects`] for the full contract.
@@ -309,6 +324,36 @@ pub struct SymbolInfo {
     pub kind: EntityKind,
     pub module: ModulePath,
     pub span: Span,
+}
+
+/// (name, kind) pairs — the debug tail for `assert!`s over a symbol list.
+pub fn sym_names(syms: &[SymbolInfo]) -> Vec<(&str, EntityKind)> {
+    syms.iter().map(|s| (s.name.as_str(), s.kind)).collect()
+}
+
+/// Assert `syms` includes a `name` of `kind`; dumps every (name, kind) on failure.
+pub fn assert_has_sym(syms: &[SymbolInfo], name: &str, kind: EntityKind) {
+    assert!(
+        syms.iter().any(|s| s.name == name && s.kind == kind),
+        "missing symbol `{name}` ({kind:?}) in {:?}",
+        sym_names(syms)
+    );
+}
+
+/// Assert at least one of `msgs` contains `needle`.
+pub fn assert_has_msg(msgs: &[String], needle: &str) {
+    assert!(
+        msgs.iter().any(|m| m.contains(needle)),
+        "expected a message containing `{needle}`: {msgs:?}"
+    );
+}
+
+/// Assert no message in `msgs` contains `needle`.
+pub fn assert_no_msg(msgs: &[String], needle: &str) {
+    assert!(
+        !msgs.iter().any(|m| m.contains(needle)),
+        "unexpected message containing `{needle}`: {msgs:?}"
+    );
 }
 
 fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
