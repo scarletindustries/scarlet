@@ -31,7 +31,7 @@
 //! untouched) and a version's exclusive nodes are freed as it drops.
 
 use super::value::{
-    Arena, HamtMapRef, HamtNodeRef, MapBacking, MapRef, Value, hamt_branch_in, hamt_collision_in,
+    Arena, HamtMapRef, HamtNodeRef, MapRef, Value, hamt_branch_in, hamt_collision_in,
     hamt_entry_in, hamt_map_in, hash_value, values_equal,
 };
 
@@ -270,8 +270,7 @@ fn merge_into_collision<A: Arena + ?Sized>(
 }
 
 fn unreachable_collision() -> ! {
-    debug_assert!(false, "split reached full depth with a non-entry node");
-    std::process::abort()
+    unreachable!("hamt split reached full depth with a non-entry node")
 }
 
 // ---- remove ------------------------------------------------------------------
@@ -376,12 +375,9 @@ fn is_leaf(node: &Value) -> bool {
 
 // ---- structural hash & equality (called from `super::value`) -----------------
 
-/// Order-independent hash of a map's entries (0 for the `Env` view, which
-/// carries none). Folded into [`super::value::hash_value`].
-pub fn map_hash(m: MapRef<'_>) -> u64 {
-    if m.backing() != MapBacking::Hamt {
-        return 0;
-    }
+/// Order-independent hash of a HAMT's entries. The caller has already
+/// dispatched on `MapBacking::Hamt`; folded into [`super::value::hash_value`].
+pub fn hamt_hash(m: MapRef<'_>) -> u64 {
     let mut acc = 0u64;
     let root = m.as_hamt().root;
     for_each_entry(&root, &mut |k, v| {
@@ -392,30 +388,23 @@ pub fn map_hash(m: MapRef<'_>) -> u64 {
     acc
 }
 
-/// Structural map equality. Two `Env` views are always equal; a `Hamt` equals
-/// another `Hamt` with the same entries. Mixed backings are unequal — the
-/// `Env` view is not materialized for comparison.
-pub fn maps_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
-    match (a.backing(), b.backing()) {
-        (MapBacking::Env, MapBacking::Env) => true,
-        (MapBacking::Hamt, MapBacking::Hamt) => {
-            let (a, b) = (a.as_hamt(), b.as_hamt());
-            if a.size != b.size {
-                return false;
-            }
-            let mut equal = true;
-            for_each_entry(&a.root, &mut |k, v| {
-                if equal {
-                    equal = match node_get_root(&b.root, &k, hash_value(&k)) {
-                        Some(bv) => values_equal(&v, &bv),
-                        None => false,
-                    };
-                }
-            });
-            equal
-        }
-        _ => false,
+/// Structural equality of two HAMT-backed maps. The caller has already
+/// dispatched on `MapBacking::Hamt` for both sides.
+pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
+    let (a, b) = (a.as_hamt(), b.as_hamt());
+    if a.size != b.size {
+        return false;
     }
+    let mut equal = true;
+    for_each_entry(&a.root, &mut |k, v| {
+        if equal {
+            equal = match node_get_root(&b.root, &k, hash_value(&k)) {
+                Some(bv) => values_equal(&v, &bv),
+                None => false,
+            };
+        }
+    });
+    equal
 }
 
 /// Lookup against a (possibly empty) root node.

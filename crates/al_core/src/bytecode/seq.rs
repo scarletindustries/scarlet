@@ -122,24 +122,23 @@ fn node_is_leaf(node: &Value) -> bool {
     node.is_tag(HeapTag::SeqLeaf)
 }
 
-/// Elements of a leaf. Unbounded lifetime — callers use it within the
-/// current (non-collecting) operation only.
+/// Elements of a leaf.
 #[inline]
-fn leaf_elems<'x>(leaf: &Value) -> &'x [Value] {
+fn leaf_elems(leaf: &Value) -> &[Value] {
     match SeqNodeRef::of(leaf) {
         SeqNodeRef::Leaf(elems) => elems,
-        SeqNodeRef::Branch { .. } => seq_view_mismatch(),
+        SeqNodeRef::Branch { .. } => view_mismatch("seq"),
     }
 }
 
-/// `(sizes, children)` of a branch. Unbounded lifetimes as [`leaf_elems`].
+/// `(sizes, children)` of a branch.
 #[inline]
-fn branch_parts<'x>(branch: &Value) -> (&'x [u64], &'x [Value]) {
+fn branch_parts(branch: &Value) -> (&[u64], &[Value]) {
     match SeqNodeRef::of(branch) {
         SeqNodeRef::Branch {
             sizes, children, ..
         } => (sizes, children),
-        SeqNodeRef::Leaf(_) => seq_view_mismatch(),
+        SeqNodeRef::Leaf(_) => view_mismatch("seq"),
     }
 }
 
@@ -167,7 +166,7 @@ fn slot_count(node: &Value) -> usize {
 
 /// Direct slots of a node as values (elements or children).
 #[inline]
-fn slots<'x>(node: &Value) -> &'x [Value] {
+fn slots(node: &Value) -> &[Value] {
     match SeqNodeRef::of(node) {
         SeqNodeRef::Leaf(elems) => elems,
         SeqNodeRef::Branch { children, .. } => children,

@@ -421,14 +421,13 @@ unsafe fn str_contents<'a>(obj: *const u64) -> &'a str {
 // the GC/freeze engines copy objects verbatim. The latter keeps every slice
 // in bounds without per-access clamping (debug builds assert it).
 
-/// Release-mode backstop for a seq view applied to the wrong kind of value.
-/// Like [`arena_exhausted`], this is a VM bug, never a user-program
-/// condition; out of line so the tag dispatch in the hot accessors stays
-/// small.
+/// Release-mode backstop for a typed node view applied to the wrong kind of
+/// value. This is a VM bug, never a user-program condition; out of line so the
+/// tag dispatch in the hot accessors stays small.
 #[cold]
 #[inline(never)]
-pub(crate) fn seq_view_mismatch() -> ! {
-    eprintln!("al: internal error: seq view on a non-seq value");
+pub(crate) fn view_mismatch(kind: &'static str) -> ! {
+    eprintln!("al: internal error: {kind} view on wrong heap tag");
     std::process::abort()
 }
 
@@ -445,13 +444,13 @@ impl SeqRootRef {
     #[inline(always)]
     pub(crate) fn new(root: &Value) -> SeqRootRef {
         if !root.is_heap() {
-            seq_view_mismatch();
+            view_mismatch("seq");
         }
         let obj = root.heap_obj();
         // SAFETY: heap values point at live, non-forwarded arena objects.
         let header = unsafe { *obj };
         if header_tag(header) != HeapTag::Seq || header_payload_words(header) < 5 {
-            seq_view_mismatch();
+            view_mismatch("seq");
         }
         // SAFETY: tag checked above; the header declares at least 5 payload
         // words.
@@ -467,9 +466,8 @@ impl SeqRootRef {
     }
 }
 
-/// Decoded `SeqLeaf` / `SeqBranch` node. The lifetime is unbounded — callers
-/// in the `seq` module use a view only within the current (non-collecting)
-/// operation.
+/// Decoded `SeqLeaf` / `SeqBranch` node. The borrowed slices point into the
+/// arena and are tied to the lifetime of the input `Value` handle.
 pub(crate) enum SeqNodeRef<'a> {
     Leaf(&'a [Value]),
     Branch {
@@ -481,9 +479,9 @@ pub(crate) enum SeqNodeRef<'a> {
 
 impl<'a> SeqNodeRef<'a> {
     #[inline(always)]
-    pub(crate) fn of(node: &Value) -> SeqNodeRef<'a> {
+    pub(crate) fn of(node: &'a Value) -> SeqNodeRef<'a> {
         if !node.is_heap() {
-            seq_view_mismatch();
+            view_mismatch("seq");
         }
         let obj = node.heap_obj();
         // SAFETY: heap values point at live, non-forwarded arena objects.
@@ -516,7 +514,7 @@ impl<'a> SeqNodeRef<'a> {
                     }
                 }
             }
-            _ => seq_view_mismatch(),
+            _ => view_mismatch("seq"),
         }
     }
 }
@@ -571,7 +569,7 @@ pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Valu
 #[inline]
 fn seq_node_total(node: &Value) -> u64 {
     if !node.is_heap() {
-        seq_view_mismatch();
+        view_mismatch("seq");
     }
     let obj = node.heap_obj();
     // SAFETY: heap values point at live, non-forwarded arena objects; both
@@ -586,7 +584,7 @@ fn seq_node_total(node: &Value) -> u64 {
                 debug_assert_eq!(2 + 2 * n, header_payload_words(header));
                 payload_word(obj, 1 + n)
             }
-            _ => seq_view_mismatch(),
+            _ => view_mismatch("seq"),
         }
     }
 }
@@ -629,11 +627,6 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
 // As with the `seq` nodes, the algorithm module is fully safe: it reads
 // through [`HamtNodeRef`] and allocates through the builders here.
 
-pub(crate) fn hamt_view_mismatch() -> ! {
-    eprintln!("al: internal error: hamt view on a non-hamt-node value");
-    std::process::abort()
-}
-
 /// Decoded HAMT interior node.
 pub(crate) enum HamtNodeRef<'a> {
     Entry {
@@ -653,9 +646,9 @@ pub(crate) enum HamtNodeRef<'a> {
 
 impl<'a> HamtNodeRef<'a> {
     #[inline]
-    pub(crate) fn of(node: &Value) -> HamtNodeRef<'a> {
+    pub(crate) fn of(node: &'a Value) -> HamtNodeRef<'a> {
         if !node.is_heap() {
-            hamt_view_mismatch();
+            view_mismatch("hamt");
         }
         let obj = node.heap_obj();
         // SAFETY: heap values point at live, non-forwarded arena objects; each
@@ -684,7 +677,7 @@ impl<'a> HamtNodeRef<'a> {
                         children: payload_values(obj, 1, n),
                     }
                 }
-                _ => hamt_view_mismatch(),
+                _ => view_mismatch("hamt"),
             }
         }
     }
@@ -756,7 +749,7 @@ impl HamtMapRef {
     #[inline]
     pub(crate) fn of(map: &Value) -> HamtMapRef {
         if !map.is_heap() {
-            hamt_view_mismatch();
+            view_mismatch("hamt");
         }
         let obj = map.heap_obj();
         // SAFETY: tag + backing checked; a Hamt map always has 3 payload words.
@@ -765,7 +758,7 @@ impl HamtMapRef {
             if header_tag(header) != HeapTag::Map
                 || map_backing(payload_word(obj, 0)) != MapBacking::Hamt
             {
-                hamt_view_mismatch();
+                view_mismatch("hamt");
             }
             HamtMapRef {
                 size: payload_word(obj, 1) as usize,
@@ -1237,20 +1230,7 @@ impl Value {
         let n: usize = parts.iter().map(|p| p.len()).sum();
         debug_assert_eq!(n, bit_len.div_ceil(8) as usize);
         let mut uninit = Arc::new_uninit_slice(n);
-        let Some(dst) = Arc::get_mut(&mut uninit) else {
-            // Unreachable — a freshly created `Arc` is unique — but kept as a
-            // safe fallback rather than a panic.
-            let mut v = Vec::with_capacity(n);
-            for p in parts {
-                v.extend_from_slice(p);
-            }
-            if let Some(mask) = tail_mask(bit_len)
-                && let Some(last) = v.last_mut()
-            {
-                *last &= mask;
-            }
-            return Value::binary_bits_in(a, v, bit_len);
-        };
+        let dst = Arc::get_mut(&mut uninit).expect("freshly allocated Arc is unique");
         // SAFETY: `dst` is exactly `n` bytes (the summed part lengths); the
         // copies are laid back-to-back so they stay in bounds and together
         // initialise every byte, and the tail mask only touches the last
@@ -2329,7 +2309,11 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (ValueView::Socket(asv), ValueView::Socket(bsv)) => {
             asv.id == bsv.id && asv.is_listener == bsv.is_listener
         }
-        (ValueView::Map(am), ValueView::Map(bm)) => super::hamt::maps_equal(am, bm),
+        (ValueView::Map(am), ValueView::Map(bm)) => match (am.backing(), bm.backing()) {
+            (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm),
+            (MapBacking::Env, MapBacking::Env) => true,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -2428,7 +2412,10 @@ pub fn hash_value(v: &Value) -> u64 {
             // order-independent combine, so two equal maps built by different
             // insertion orders hash alike. The `Env` view carries no entries.
             h = fnv1a_combine(h, m.backing() as u64);
-            h = h.wrapping_add(super::hamt::map_hash(m));
+            match m.backing() {
+                MapBacking::Hamt => h = h.wrapping_add(super::hamt::hamt_hash(m)),
+                MapBacking::Env => {}
+            }
         }
     }
     h
