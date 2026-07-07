@@ -178,8 +178,8 @@ fn branch_parts(branch: &Value) -> (&[u64], &[Value]) {
 /// containing element index `idx`, and the cumulative count before that slot.
 /// Starts the scan at the radix guess `idx >> shift`: each child holds at most
 /// `1 << shift` elements, so `sizes[k] <= (k + 1) << shift` and the guess never
-/// overshoots. Strict subtrees hit immediately; relaxed ones walk at most
-/// `E_MAX` extra steps.
+/// overshoots. Strict subtrees hit immediately; relaxed ones walk O(1)
+/// extra steps.
 #[inline]
 fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> (usize, usize) {
     let mut k = (idx >> shift).min(sizes.len() - 1);

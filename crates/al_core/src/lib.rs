@@ -10,7 +10,7 @@
     )
 )]
 // Unsafe code is confined to designated modules (bytecode::value, heap::proc_heap,
-// frozen, plus the scoped allow on bytecode::fetch) — each carries
+// frozen, plus the scoped allows on bytecode::fetch and bytecode::seq) — each carries
 // its own `allow(unsafe_code)` and justification. Everything else is
 // compiler-enforced safe.
 #![deny(unsafe_code)]
