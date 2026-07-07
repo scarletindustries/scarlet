@@ -565,7 +565,7 @@ fn array_slice_range_out_of_bounds_errors() {
         .run()
         .expect_err("slicing a range out of bounds must error");
     assert!(
-        err.contains("Slice indices out of bounds") && err.contains("range length is 5"),
+        matches!(err, super::VmError::SliceOutOfBounds { len: 5, .. }),
         "unexpected error: {err}"
     );
 }
@@ -586,20 +586,12 @@ fn parked_process() -> Process {
     }
 }
 
-// Park `wait` under a fresh id, mirroring scheduler_loop's park arm: a
-// deadline (if any) goes on the timer heap, the (wait, process) pair into the
-// parked store. Returns the allocated wait id.
+// Park `wait` exactly as scheduler_loop's park arm does. Returns the wait id.
 fn park_wait(vm: &mut VM, wait: Wait) -> u64 {
-    let id = vm.next_wait_id;
-    vm.next_wait_id += 1;
-    if let Some(deadline) = wait.deadline {
-        vm.timer_heap.push(Reverse((deadline, id)));
-    }
-    vm.park_insert(id, wait, parked_process());
-    id
+    vm.park(wait, parked_process())
 }
 
-// A deadline-only Wait (no socket interests) is a pure timer: it must not
+// A deadline-only Wait is a pure timer: it must not
 // wake before its instant, and must wake once the instant has passed, while
 // a not-yet-due timer stays parked.
 #[test]
@@ -750,9 +742,9 @@ fn donation_skips_never_spawned_workers() {
     // behind on partial failure.
     let poll = mio::Poll::new().expect("poller must construct");
     let waker = mio::Waker::new(poll.registry(), poll::WAKER_TOKEN).expect("waker must construct");
-    let _ = rt.wakers[1].set(Arc::new(waker));
-    rt.run_lens[1].store(3, Ordering::Relaxed);
-    rt.run_lens[2].store(0, Ordering::Relaxed);
+    let _ = rt.slots[1].waker.set(Arc::new(waker));
+    rt.slots[1].run_len.store(3, Ordering::Relaxed);
+    rt.slots[2].run_len.store(0, Ordering::Relaxed);
 
     assert_eq!(
         rt.pick_underloaded_peer(0, 9),

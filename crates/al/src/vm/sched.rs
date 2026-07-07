@@ -146,6 +146,126 @@ impl BlockingPool {
     }
 }
 
+/// Per-scheduler shared state: everything other schedulers (and the blocking
+/// pool) touch to place work on, wake, or read the load of one scheduler.
+/// Collected into one struct so a scheduler slot cannot be half-initialized
+/// — adding a per-scheduler field means adding it here, not another parallel
+/// `Vec` on `Runtime` that could end up a different length.
+pub(super) struct SchedSlot {
+    /// Work inbox. `submit` hands a seed directly to a chosen idle
+    /// scheduler's inbox so the placement decision is made at submit time
+    /// instead of being raced through a shared queue (where the scheduler
+    /// that is already awake almost always wins); a migrating process is
+    /// handed to a claimed idle peer the same way. Direct handoff is a
+    /// placement preference, not exclusive ownership: a peer with nothing at
+    /// all to run may still take undelivered work out of another scheduler's
+    /// inbox ([`Runtime::steal_inbound`]) — the woken owner then finds an
+    /// empty inbox and re-parks.
+    pub(super) inbox: Mutex<VecDeque<Inbound>>,
+    /// Pinned seeds: work that must run on exactly this scheduler and is never
+    /// stolen ([`Runtime::steal_inbound`] ignores it). This is how the accept
+    /// fan-out ([`super::VM::spawn_on_each`]) keeps one acceptor per core:
+    /// each must bind its own `SO_REUSEPORT` socket, so an acceptor stolen
+    /// onto a core that already has the listener bound would leave its own
+    /// core's socket unbound and starve it of connections. The owner drains
+    /// these like directed work; no other scheduler ever does.
+    pub(super) pinned: Mutex<VecDeque<Seed>>,
+    /// Poller waker. `notify()` wakes this scheduler whether it is parked on
+    /// I/O, on a timer, or waiting for work (the waker is registered with
+    /// this scheduler's `mio::Poll` under [`super::poll::WAKER_TOKEN`]).
+    /// Slot 0 is filled at construction (created by [`Runtime::new`] for the
+    /// calling thread); a worker's slot is filled by `ensure_workers` only
+    /// once its thread has spawned, so the slot is empty exactly when its
+    /// worker never spawned. That makes the slot double as the liveness
+    /// check: donation targeting skips empty slots
+    /// ([`Runtime::pick_underloaded_peer`]), the flag invariant below keeps
+    /// every other placement path away, and a stray notify aimed at an empty
+    /// slot is dropped harmlessly.
+    pub(super) waker: OnceLock<Arc<mio::Waker>>,
+    /// Whether this scheduler is currently parked (idle or waiting on I/O).
+    ///
+    /// Flag lifecycle. A raised flag is a promise: whoever claims it (the
+    /// CAS `true -> false` in `claim_idle_peer`) may push work into this
+    /// scheduler's inbox and notify its poller, and a live thread will take
+    /// the work. The invariants that keep the promise:
+    ///
+    /// - Every flag starts DOWN at construction, when no worker thread
+    ///   exists yet.
+    /// - A worker's flag is first raised inside `ensure_workers`' one-shot
+    ///   critical section — by `ensure_workers` itself after the worker's
+    ///   waker slot is filled, or by the freshly spawned worker parking idle
+    ///   (a new thread can reach its idle wait, and raise its own flag,
+    ///   before its waker slot is set). Either way no claimant can act on
+    ///   the flag before `call_once` returns: every submitter is blocked in
+    ///   `call_once`, the just-spawned workers hold no work and so never
+    ///   submit, donate, or wake anyone during the window, and no other
+    ///   placement source exists yet — and by return every spawned worker's
+    ///   waker slot is filled. So a claimable flag always has a poller to
+    ///   notify and a live thread to wake. Workers are seeded "idle" this
+    ///   way so the first wave of submits hands seeds straight to them
+    ///   instead of hoarding work on the schedulers already running.
+    /// - Thereafter each scheduler owns its flag: it raises it before
+    ///   parking (idle wait or I/O poll) and lowers it on waking. Claimants
+    ///   lower it via the CAS, which makes the parked scheduler invisible to
+    ///   every other placement while a handoff is in flight; a claim must
+    ///   end in a notify (see [`Claim`]) so the scheduler wakes and
+    ///   re-raises it.
+    /// - A worker whose thread failed to spawn keeps its flag down forever,
+    ///   so the flag-gated paths (`submit`, `claim_idle_peer`, `wake_one`)
+    ///   never target it; the flag-blind path, donation to a busy peer,
+    ///   skips it by its empty waker slot instead
+    ///   ([`Runtime::pick_underloaded_peer`]). The seeds it would have taken
+    ///   drain through the other schedulers and the shared injector.
+    pub(super) parked: AtomicBool,
+    /// Published load: how many runnable processes (running + queued) this
+    /// scheduler last reported, plus one for every directed inbound (donated
+    /// migrant or direct-handed seed) still in flight to it. Donation reads
+    /// these to find the least-loaded peer, so queue-length imbalances are
+    /// leveled while every scheduler is busy — an overloaded scheduler must
+    /// not wait for a peer to drain completely before any work moves.
+    ///
+    /// Advisory, not authoritative: each scheduler overwrites its own slot
+    /// (`publish_load`) after every scheduling step — past the inbox drain,
+    /// so an in-flight bump is folded into the owner's next report — and
+    /// again whenever it parks with nothing to run. The park-time republish
+    /// is what corrects the bump for work that never arrives: a
+    /// direct-handed seed stolen out of a parked owner's inbox would
+    /// otherwise leave the +1 in place for as long as the owner sleeps.
+    /// A stale read can only mistune one donation decision, briefly, so
+    /// plain relaxed loads/stores suffice.
+    pub(super) run_len: AtomicUsize,
+    /// Completion queue: a blocking worker pushes a finished job here and
+    /// `notify()`s this scheduler's poller to deliver the result.
+    pub(super) completions: Mutex<VecDeque<Completion>>,
+}
+
+impl SchedSlot {
+    fn new(is_main: bool) -> Self {
+        SchedSlot {
+            inbox: Mutex::new(VecDeque::new()),
+            pinned: Mutex::new(VecDeque::new()),
+            waker: OnceLock::new(),
+            // All flags start down; `ensure_workers` raises a worker's flag
+            // only once its thread exists (see the `parked` field's doc).
+            parked: AtomicBool::new(false),
+            // Scheduler 0 is running the main process; workers start empty.
+            run_len: AtomicUsize::new(usize::from(is_main)),
+            completions: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+/// A claimed idle scheduler: the exclusive right to hand work into slot `i`'s
+/// inbox and wake it, obtained by [`Runtime::claim_idle_peer`]'s CAS lowering
+/// the parked flag. The claimed scheduler is asleep with its flag down —
+/// invisible to every other submitter and donor — so a claim MUST end in a
+/// notify: consume it via [`Runtime::hand`] (push work, then wake) or
+/// [`Runtime::release`] (wake with no work, when a handoff fell through). A
+/// dropped `Claim` is the "sleeps forever, unwakeable" bug the `#[must_use]`
+/// exists to catch.
+#[must_use = "a claimed scheduler must be handed work or released"]
+pub(super) struct Claim(usize);
+
 /// State shared by every scheduler in the program.
 pub(super) struct Runtime {
     /// The shared program; each worker scheduler runs a private clone of it
@@ -169,24 +289,10 @@ pub(super) struct Runtime {
     /// (`VM::ensure_listener`), so the kernel load-balances connections across
     /// per-core sockets instead of every core sharing one accept queue.
     pub shared_listeners: Mutex<HashMap<i32, SocketAddr>>,
-    /// Per-scheduler work inboxes. `submit` hands a seed directly to a
-    /// chosen idle scheduler's inbox so the placement decision is made at
-    /// submit time instead of being raced through a shared queue (where the
-    /// scheduler that is already awake almost always wins); a migrating
-    /// process is handed to a claimed idle peer the same way. Direct
-    /// handoff is a placement preference, not exclusive ownership: a peer
-    /// with nothing at all to run may still take undelivered work out of
-    /// another scheduler's inbox ([`Runtime::steal_inbound`]) — the woken
-    /// owner then finds an empty inbox and re-parks.
-    pub inboxes: Vec<Mutex<VecDeque<Inbound>>>,
-    /// Per-scheduler *pinned* seeds: work that must run on exactly this
-    /// scheduler and is never stolen ([`Runtime::steal_inbound`] ignores it).
-    /// This is how the accept fan-out ([`super::VM::spawn_on_each`]) keeps one
-    /// acceptor per core: each must bind its own `SO_REUSEPORT` socket, so an
-    /// acceptor stolen onto a core that already has the listener bound would
-    /// leave its own core's socket unbound and starve it of connections. The
-    /// owner drains these like directed work; no other scheduler ever does.
-    pub pinned: Vec<Mutex<VecDeque<Seed>>>,
+    /// Per-scheduler shared slots — inbox, pinned queue, waker, parked flag,
+    /// published load, completion queue — indexed by scheduler id. See
+    /// [`SchedSlot`] for the per-field invariants.
+    pub(super) slots: Vec<SchedSlot>,
     /// Overflow queue: seeds submitted while every scheduler was busy. Taken
     /// (one per visit) by whichever scheduler frees up first.
     pub injector: Mutex<VecDeque<Seed>>,
@@ -197,71 +303,6 @@ pub(super) struct Runtime {
     /// Live processes across all schedulers, counting undelivered seeds and the
     /// main process. The program is over when this reaches zero.
     pub live: AtomicUsize,
-    /// One poller-waker slot per scheduler. `notify()` wakes that scheduler
-    /// whether it is parked on I/O, on a timer, or waiting for work (the
-    /// waker is registered with that scheduler's `mio::Poll` under
-    /// [`super::poll::WAKER_TOKEN`]). Slot 0 is filled at construction
-    /// (created by [`Runtime::new`] for the calling thread); a worker's
-    /// slot is filled by `ensure_workers` only once its thread has spawned,
-    /// so a slot is empty exactly when its worker never spawned. That makes
-    /// the slot double as the liveness check: donation targeting skips
-    /// empty slots ([`Runtime::pick_underloaded_peer`]), the flag invariant
-    /// below keeps every other placement path away, and a stray notify
-    /// aimed at an empty slot is dropped harmlessly.
-    pub wakers: Vec<OnceLock<Arc<mio::Waker>>>,
-    /// Which schedulers are currently parked (idle or waiting on I/O).
-    ///
-    /// Flag lifecycle. A raised flag is a promise: whoever claims it (the
-    /// CAS `true -> false` in `submit`/`claim_idle_peer`/`wake_one`) may
-    /// push work into that scheduler's inbox and notify its poller, and a
-    /// live thread will take the work. The invariants that keep the promise:
-    ///
-    /// - Every flag starts DOWN at construction, when no worker thread
-    ///   exists yet.
-    /// - A worker's flag is first raised inside `ensure_workers`' one-shot
-    ///   critical section — by `ensure_workers` itself after the worker's
-    ///   poller slot is filled, or by the freshly spawned worker parking
-    ///   idle (a new thread can reach its idle wait, and raise its own
-    ///   flag, before its poller slot is set). Either way no claimant can
-    ///   act on the flag before `call_once` returns: every submitter is
-    ///   blocked in `call_once`, the just-spawned workers hold no work and
-    ///   so never submit, donate, or wake anyone during the window, and no
-    ///   other placement source exists yet — and by return every spawned
-    ///   worker's poller slot is filled. So a claimable flag always has a
-    ///   poller to notify and a live thread to wake. Workers are seeded
-    ///   "idle" this way so the first wave of submits hands seeds straight
-    ///   to them instead of hoarding work on the schedulers already running.
-    /// - Thereafter each scheduler owns its flag: it raises it before
-    ///   parking (idle wait or I/O poll) and lowers it on waking. Claimants
-    ///   lower it via the CAS, which makes the parked scheduler invisible to
-    ///   every other placement while a handoff is in flight; a claim must
-    ///   end in a notify (see `claim_idle_peer`) so the scheduler wakes and
-    ///   re-raises it.
-    /// - A worker whose thread failed to spawn keeps its flag down forever,
-    ///   so the flag-gated paths (`submit`, `claim_idle_peer`, `wake_one`)
-    ///   never target it; the flag-blind path, donation to a busy peer,
-    ///   skips it by its empty poller slot instead
-    ///   ([`Runtime::pick_underloaded_peer`]). The seeds it would have
-    ///   taken drain through the other schedulers and the shared injector.
-    pub parked_flags: Vec<AtomicBool>,
-    /// Per-scheduler published load: how many runnable processes (running +
-    /// queued) each scheduler last reported, plus one for every directed
-    /// inbound (donated migrant or direct-handed seed) still in flight to it.
-    /// Donation reads these to find the least-loaded peer, so queue-length
-    /// imbalances are leveled while every scheduler is busy — an overloaded
-    /// scheduler must not wait for a peer to drain completely before any
-    /// work moves.
-    ///
-    /// Advisory, not authoritative: each scheduler overwrites its own slot
-    /// (`publish_load`) after every scheduling step — past the inbox drain,
-    /// so an in-flight bump is folded into the owner's next report — and
-    /// again whenever it parks with nothing to run. The park-time republish
-    /// is what corrects the bump for work that never arrives: a
-    /// direct-handed seed stolen out of a parked owner's inbox would
-    /// otherwise leave the +1 in place for as long as the owner sleeps.
-    /// A stale read can only mistune one donation decision, briefly, so
-    /// plain relaxed loads/stores suffice.
-    pub run_lens: Vec<AtomicUsize>,
     /// Worker threads, joined by scheduler 0 at shutdown.
     pub workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// One-shot guard for `ensure_workers`: worker threads spawn exactly
@@ -270,9 +311,6 @@ pub(super) struct Runtime {
     /// Elastic worker pool for blocking syscalls (file I/O, …) that must not
     /// run on a scheduler thread.
     blocking: BlockingPool,
-    /// Per-scheduler completion queues: a blocking worker pushes a finished job
-    /// here and `notify()`s that scheduler's poller to deliver the result.
-    pub completions: Vec<Mutex<VecDeque<Completion>>>,
 }
 
 impl Runtime {
@@ -296,30 +334,20 @@ impl Runtime {
     ) -> std::io::Result<(Arc<Runtime>, mio::Poll)> {
         let poll = mio::Poll::new()?;
         let waker = mio::Waker::new(poll.registry(), super::poll::WAKER_TOKEN)?;
-        let wakers: Vec<OnceLock<Arc<mio::Waker>>> = (0..count).map(|_| OnceLock::new()).collect();
-        let _ = wakers[0].set(Arc::new(waker));
+        let slots: Vec<SchedSlot> = (0..count).map(|i| SchedSlot::new(i == 0)).collect();
+        let _ = slots[0].waker.set(Arc::new(waker));
         let runtime = Arc::new(Runtime {
             program,
             argv,
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),
-            inboxes: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
-            pinned: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
+            slots,
             injector: Mutex::new(VecDeque::new()),
             submit_cursor: AtomicUsize::new(0),
             // The main process is live.
             live: AtomicUsize::new(1),
             blocking: BlockingPool::new(),
-            completions: (0..count).map(|_| Mutex::new(VecDeque::new())).collect(),
-            wakers,
-            // All flags start down; `ensure_workers` raises a worker's flag
-            // only once its thread exists (see the field's lifecycle doc).
-            parked_flags: (0..count).map(|_| AtomicBool::new(false)).collect(),
-            // Scheduler 0 is running the main process; workers start empty.
-            run_lens: (0..count)
-                .map(|i| AtomicUsize::new(usize::from(i == 0)))
-                .collect(),
             workers: Mutex::new(Vec::new()),
             workers_started: Once::new(),
         });
@@ -329,10 +357,10 @@ impl Runtime {
     /// Spawn the worker scheduler threads (indices 1..N), exactly once,
     /// triggered by the first [`Runtime::submit`]. Per worker: create its
     /// poller, spawn the thread, and only on success store the waker in
-    /// its `wakers` slot, record the join handle, and raise its parked
-    /// flag — the order that keeps both invariants (a claimable flag, and a
-    /// filled worker slot, always have a live thread behind them). The slot
-    /// and flag can trail the spawn because nothing can target this worker
+    /// its slot, record the join handle, and raise its parked flag — the
+    /// order that keeps both invariants (a claimable flag, and a filled
+    /// waker slot, always have a live thread behind them). The slot and
+    /// flag can trail the spawn because nothing can target this worker
     /// until `call_once` returns: every concurrent submitter is blocked in
     /// `call_once`, the freshly spawned workers hold no work — there is no
     /// seed anywhere yet — so they cannot submit, donate, or wake anyone
@@ -340,18 +368,18 @@ impl Runtime {
     /// before its slot is set; harmless, since no claimant runs until the
     /// section ends, by which point the slot is filled), and no other
     /// placement source exists yet. The thread itself never reads its own
-    /// `wakers` slot — it holds its poller directly; the slot exists for
+    /// waker slot — it holds its poller directly; the slot exists for
     /// *other* schedulers to notify through.
     ///
     /// A worker whose poller or thread cannot be created is skipped: its
-    /// flag stays down and its poller slot stays empty forever, so no
+    /// flag stays down and its waker slot stays empty forever, so no
     /// placement path targets it — seeds pass over the down flag and drain
     /// through the remaining schedulers and the shared injector, and
     /// donation skips the empty slot ([`Runtime::pick_underloaded_peer`]),
     /// which matters because migrants never enter the injector.
     pub fn ensure_workers(self: &Arc<Self>) {
         self.workers_started.call_once(|| {
-            let count = self.wakers.len();
+            let count = self.slots.len();
             let mut handles = lock(&self.workers);
             for index in 1..count {
                 let (poll, waker) = match mio::Poll::new().and_then(|poll| {
@@ -370,9 +398,9 @@ impl Runtime {
                     .spawn(move || super::worker_main(rt, index, poll));
                 match spawned {
                     Ok(handle) => {
-                        let _ = self.wakers[index].set(waker);
+                        let _ = self.slots[index].waker.set(waker);
                         handles.push(handle);
-                        self.parked_flags[index].store(true, Ordering::Release);
+                        self.slots[index].parked.store(true, Ordering::Release);
                     }
                     Err(e) => {
                         eprintln!("warning: cannot start scheduler {index} ({e})");
@@ -387,7 +415,7 @@ impl Runtime {
     /// successful thread spawn); no placement path targets such a worker,
     /// so dropping the notify is correct — there is no thread to wake.
     fn notify(&self, i: usize) {
-        if let Some(waker) = self.wakers[i].get() {
+        if let Some(waker) = self.slots[i].waker.get() {
             let _ = waker.wake();
         }
     }
@@ -414,10 +442,8 @@ impl Runtime {
 
         // Prefer a parked (idle) scheduler, starting the scan at a rotating
         // offset so back-to-back submissions land on different schedulers.
-        if let Some(i) = self.claim_idle_peer() {
-            self.run_lens[i].fetch_add(1, Ordering::Relaxed);
-            lock(&self.inboxes[i]).push_back(Inbound::Seed(seed));
-            self.notify(i);
+        if let Some(claim) = self.claim_idle_peer() {
+            self.hand(claim, Inbound::Seed(seed));
             return;
         }
 
@@ -433,14 +459,14 @@ impl Runtime {
 
     /// Number of schedulers the runtime was built with (live or not).
     pub fn scheduler_count(&self) -> usize {
-        self.wakers.len()
+        self.slots.len()
     }
 
     /// Whether scheduler `i` has a live thread behind it. Scheduler 0 always
-    /// does; a worker's slot is filled only once its thread spawns, so an
+    /// does; a worker's waker slot is filled only once its thread spawns, so an
     /// empty slot is a worker that never started ([`Runtime::ensure_workers`]).
     pub fn is_live_scheduler(&self, i: usize) -> bool {
-        self.wakers[i].get().is_some()
+        self.slots[i].waker.get().is_some()
     }
 
     /// Submit a seed pinned to a specific scheduler — the placement primitive
@@ -453,50 +479,76 @@ impl Runtime {
     /// target live schedulers ([`Runtime::is_live_scheduler`]).
     pub fn submit_to(self: &Arc<Self>, i: usize, seed: Seed) {
         self.live.fetch_add(1, Ordering::AcqRel);
-        self.run_lens[i].fetch_add(1, Ordering::Relaxed);
-        lock(&self.pinned[i]).push_back(seed);
+        let slot = &self.slots[i];
+        slot.run_len.fetch_add(1, Ordering::Relaxed);
+        lock(&slot.pinned).push_back(seed);
         self.notify(i);
     }
 
-    /// Claim one idle scheduler for a direct handoff: scan `parked_flags`
+    /// Claim one idle scheduler for a direct handoff: scan the parked flags
     /// from a rotating offset (so back-to-back placements fan out across
     /// schedulers) and CAS the first set flag `true -> false` — the
     /// placement scan shared by [`Runtime::submit`] and donors. A claimed
-    /// scheduler is invisible to
-    /// every other submitter and donor (its flag is down), so whatever is
-    /// pushed into its inbox next cannot be raced away by another placement
-    /// decision; it keeps sleeping until notified.
+    /// scheduler is invisible to every other submitter and donor (its flag
+    /// is down), so whatever is pushed into its inbox next cannot be raced
+    /// away by another placement decision; it keeps sleeping until notified.
     ///
-    /// Two protocol invariants for callers:
+    /// The returned [`Claim`] is `#[must_use]`: it must be consumed via
+    /// [`Runtime::hand`] (push work, then wake) or [`Runtime::release`]
+    /// (wake with no work, when a handoff fell through). A dropped `Claim`
+    /// is a scheduler asleep with its flag down — unwakeable by submitters
+    /// until unrelated I/O happens to fire on its poller.
     ///
-    /// - A successful claim MUST be followed by a `notify` of the claimed
-    ///   scheduler's poller — by handing it work ([`Runtime::donate`]) or,
-    ///   when the handoff falls through, by [`Runtime::abort_donation`]. A
-    ///   claimed-but-never-notified scheduler sleeps with its flag down,
-    ///   unwakeable by submitters, until unrelated I/O happens to fire on
-    ///   its poller.
-    /// - Donors claim BEFORE detaching the victim process's fds. The detach
-    ///   has side effects (it moves connection fds out of the donor's
-    ///   tables), so it must not start until a destination is guaranteed;
-    ///   the local eligibility checks, which are cheap and effect-free, run
-    ///   before the claim.
-    pub fn claim_idle_peer(&self) -> Option<usize> {
-        let n = self.parked_flags.len();
+    /// Donors claim BEFORE detaching the victim process's fds. The detach
+    /// has side effects (it moves connection fds out of the donor's tables),
+    /// so it must not start until a destination is guaranteed; the local
+    /// eligibility checks, which are cheap and effect-free, run before the
+    /// claim.
+    pub fn claim_idle_peer(&self) -> Option<Claim> {
+        let n = self.slots.len();
         let start = self.submit_cursor.fetch_add(1, Ordering::Relaxed);
         for off in 0..n {
             let i = (start + off) % n;
-            if self.parked_flags[i]
+            if self.slots[i]
+                .parked
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                return Some(i);
+                return Some(Claim(i));
             }
         }
         None
     }
 
+    /// Complete a [`Claim`] by handing `work` to the claimed scheduler:
+    /// bump its published load, push into its inbox, and wake it. This is
+    /// the only way to deliver work to a claimed idle peer — the claim is
+    /// consumed, so the mandatory notify cannot be forgotten.
+    pub fn hand(&self, c: Claim, work: Inbound) {
+        let slot = &self.slots[c.0];
+        slot.run_len.fetch_add(1, Ordering::Relaxed);
+        lock(&slot.inbox).push_back(work);
+        self.notify(c.0);
+    }
+
+    /// Complete a [`Claim`] with no work: notify the claimed scheduler so
+    /// it wakes, finds nothing, re-parks, and republishes its parked flag.
+    /// Used when a handoff falls through after the claim (fd detach failed)
+    /// and by `wake_one`'s bare wake. Skipping this would leave the peer
+    /// asleep with its flag down — invisible to every future submit/donate.
+    pub fn release(&self, c: Claim) {
+        self.notify(c.0);
+    }
+
+    /// Mark scheduler `me` as parked/unparked so submitters and donors know
+    /// who to wake. Owned by scheduler `me` alone; see [`SchedSlot::parked`]
+    /// for the flag lifecycle.
+    pub fn set_parked(&self, me: usize, parked: bool) {
+        self.slots[me].parked.store(parked, Ordering::Release);
+    }
+
     /// Find the least-loaded peer worth donating to when no scheduler is
-    /// idle: the one whose published load ([`Runtime::run_lens`]) is
+    /// idle: the one whose published load ([`SchedSlot::run_len`]) is
     /// smallest, provided moving one process strictly narrows the imbalance
     /// (`my_load >= peer + 2` — after the move the donor has shed one and
     /// the peer holds one more, so a smaller gap would only swap the
@@ -521,15 +573,15 @@ impl Runtime {
     /// in an inbox no thread drains, recoverable only by an idle
     /// scheduler's steal, which under sustained load never comes.
     pub fn pick_underloaded_peer(&self, me: usize, my_load: usize) -> Option<usize> {
-        let n = self.run_lens.len();
+        let n = self.slots.len();
         let start = self.submit_cursor.fetch_add(1, Ordering::Relaxed);
         let mut best: Option<(usize, usize)> = None;
         for off in 0..n {
             let i = (start + off) % n;
-            if i == me || self.wakers[i].get().is_none() {
+            if i == me || self.slots[i].waker.get().is_none() {
                 continue;
             }
-            let len = self.run_lens[i].load(Ordering::Relaxed);
+            let len = self.slots[i].run_len.load(Ordering::Relaxed);
             if best.is_none_or(|(_, b)| len < b) {
                 best = Some((i, len));
             }
@@ -544,17 +596,18 @@ impl Runtime {
     /// in-flight bumps from `donate`/`submit` are folded into the owner's
     /// own report rather than double-counted — and once more before the
     /// owner parks empty, clearing a bump whose work a peer stole away
-    /// (see the [`Runtime::run_lens`] doc).
+    /// (see the [`SchedSlot::run_len`] doc).
     pub fn publish_load(&self, me: usize, len: usize) {
-        self.run_lens[me].store(len, Ordering::Relaxed);
+        self.slots[me].run_len.store(len, Ordering::Relaxed);
     }
 
-    /// Hand a migrating process to `peer` — an idle scheduler previously
-    /// claimed via [`Runtime::claim_idle_peer`], or a busy one chosen by
-    /// [`Runtime::pick_underloaded_peer`] — and wake it. The wake matters in
-    /// both cases: a claimed peer is asleep, and a busy peer may have parked
-    /// on I/O between being chosen and the push (`notify` is sticky, so the
+    /// Hand a migrating process to a busy `peer` chosen by
+    /// [`Runtime::pick_underloaded_peer`] — the load-leveling path when no
+    /// scheduler is idle. A busy peer may have parked on I/O between being
+    /// chosen and the push, so it is notified (`notify` is sticky, so the
     /// worst case for a peer that stayed busy is one spurious poll wakeup).
+    /// For a claimed idle peer, use [`Runtime::hand`] instead so the
+    /// [`Claim`] is consumed.
     ///
     /// The destination's published load is bumped here, when the migrant
     /// becomes visible to other donors, so a freshly fed peer is not
@@ -573,18 +626,9 @@ impl Runtime {
     /// destination, a migrant could strand in the overflow queue behind
     /// busy schedulers — exactly the imbalance donation exists to fix.
     pub fn donate(&self, peer: usize, m: Migrant) {
-        self.run_lens[peer].fetch_add(1, Ordering::Relaxed);
-        lock(&self.inboxes[peer]).push_back(Inbound::Migrant(m));
-        self.notify(peer);
-    }
-
-    /// A donation fell through after `peer` was already claimed (the victim's
-    /// fd detach failed, e.g. it references a listener fd that cannot be
-    /// dup'd).
-    /// Notify the claimed peer anyway: it wakes, finds nothing, re-parks,
-    /// and republishes its parked flag. Skipping this would leave the peer
-    /// asleep with its flag down — invisible to every future submit/donate.
-    pub fn abort_donation(&self, peer: usize) {
+        let slot = &self.slots[peer];
+        slot.run_len.fetch_add(1, Ordering::Relaxed);
+        lock(&slot.inbox).push_back(Inbound::Migrant(m));
         self.notify(peer);
     }
 
@@ -605,11 +649,9 @@ impl Runtime {
     /// unconditionally (a busy scheduler drains it at every yield); only the
     /// undirected overflow queue is subject to the pickup limit.
     pub fn take_directed(&self, me: usize) -> Vec<Inbound> {
-        let mut out: Vec<Inbound> = lock(&self.pinned[me])
-            .drain(..)
-            .map(Inbound::Seed)
-            .collect();
-        out.extend(lock(&self.inboxes[me]).drain(..));
+        let slot = &self.slots[me];
+        let mut out: Vec<Inbound> = lock(&slot.pinned).drain(..).map(Inbound::Seed).collect();
+        out.extend(lock(&slot.inbox).drain(..));
         out
     }
 
@@ -629,10 +671,10 @@ impl Runtime {
     /// stolen migrant's live count rides with it (counted since its original
     /// submit), so the handoff is race-free wherever it lands.
     pub fn steal_inbound(&self, me: usize) -> Option<Inbound> {
-        let n = self.inboxes.len();
+        let n = self.slots.len();
         for off in 1..n {
             let i = (me + off) % n;
-            if let Some(inbound) = lock(&self.inboxes[i]).pop_front() {
+            if let Some(inbound) = lock(&self.slots[i].inbox).pop_front() {
                 return Some(inbound);
             }
         }
@@ -650,10 +692,10 @@ impl Runtime {
     /// Whether any scheduler other than `me` is idle (parked waiting for
     /// work). Busy schedulers leave injector seeds to idle ones.
     pub fn any_other_idle(&self, me: usize) -> bool {
-        self.parked_flags
+        self.slots
             .iter()
             .enumerate()
-            .any(|(i, flag)| i != me && flag.load(Ordering::Acquire))
+            .any(|(i, s)| i != me && s.parked.load(Ordering::Acquire))
     }
 
     /// Publish a top-level binding's frozen root to the shared global area.
@@ -692,15 +734,15 @@ impl Runtime {
     /// (cleared) by the wake so that back-to-back submissions fan out across
     /// different schedulers instead of all notifying the same one.
     fn wake_one(&self) {
-        if let Some(i) = self.claim_idle_peer() {
-            self.notify(i);
+        if let Some(claim) = self.claim_idle_peer() {
+            self.release(claim);
         }
     }
 
     /// Wake every scheduler (empty waker slots — never-spawned workers —
     /// have no thread to wake and are skipped).
     fn wake_all(&self) {
-        for i in 0..self.wakers.len() {
+        for i in 0..self.slots.len() {
             self.notify(i);
         }
     }
@@ -723,12 +765,12 @@ impl Runtime {
     fn spawn_blocking_worker(self: &Arc<Self>) {
         self.blocking.total.fetch_add(1, Ordering::AcqRel);
         let rt = Arc::clone(self);
-        if std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("al-blocking".into())
             .spawn(move || blocking_worker_main(rt))
-            .is_err()
         {
             // Couldn't spawn: undo the count and let an existing worker take it.
+            eprintln!("warning: cannot spawn blocking worker ({e})");
             self.blocking.total.fetch_sub(1, Ordering::AcqRel);
             self.blocking.cond.notify_one();
         }
@@ -737,7 +779,7 @@ impl Runtime {
     /// Route a finished blocking job back to its scheduler and wake it.
     /// `origin` issued the job, so its thread and poller exist.
     pub fn deliver_completion(&self, origin: usize, c: Completion) {
-        lock(&self.completions[origin]).push_back(c);
+        lock(&self.slots[origin].completions).push_back(c);
         self.notify(origin);
     }
 

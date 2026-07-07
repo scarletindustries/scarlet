@@ -54,7 +54,7 @@
 //!    everything else, and no process rides free.
 //! 3. **Blocking parks the process, never the thread.** An op that would
 //!    block returns [`Step::Parked`] carrying a [`Wait`] — socket
-//!    interests, a deadline, and/or a blocking-pool job. The scheduler
+//!    readiness, a timer, or a blocking-pool job. The scheduler
 //!    shelves the process, arms the OS poller and the timer heap, and runs
 //!    something else; the wake re-runs the instruction or completes the
 //!    pending connect ([`poll::WakeAction`]).
@@ -129,8 +129,10 @@
 //! false on every scheduler, the workers exit, and scheduler 0 hands
 //! main's stashed result back to `run()`'s caller.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::fmt;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Instant;
@@ -166,7 +168,75 @@ use sched::{Inbound, Runtime, Seed};
 use templates::{EnumTemplate, PreludeTemplates, enum_template};
 use text::{int_to_ascii, parse_int_ascii};
 
-type VmResult<T> = Result<T, String>;
+/// A VM-level failure. The variant distinguishes user-visible runtime
+/// errors (out-of-bounds, type mismatch — surfaced to AL as a panic
+/// message) from broken type-system invariants (`Internal`: a compiler
+/// bug, not user error) and infrastructure failures (`Io`: mio poll / fd
+/// exhaustion). The top-level handler ([`VM::run`], [`worker_main`]) acts
+/// on that distinction rather than parsing a string.
+#[derive(Debug)]
+pub enum VmError {
+    /// An operand had the wrong runtime tag for `op`.
+    TypeMismatch {
+        op: &'static str,
+        expected: &'static str,
+        got: String,
+    },
+    /// `[lo..hi]` on a sequence of length `len`.
+    SliceOutOfBounds { lo: i64, hi: i64, len: i64 },
+    /// `what[idx]` on something of length `len`.
+    IndexOutOfBounds {
+        idx: i64,
+        len: i64,
+        what: &'static str,
+    },
+    /// Type-system invariant broken — indicates a compiler bug, not user
+    /// error. The runtime behind an `Internal`-errored run is leaked (see
+    /// [`VM::run`]).
+    Internal(Cow<'static, str>),
+    /// mio poll / fd registration / OS resource failure.
+    Io(std::io::Error),
+}
+
+impl VmError {
+    #[cold]
+    pub(super) fn internal(msg: impl Into<Cow<'static, str>>) -> Self {
+        Self::Internal(msg.into())
+    }
+    #[cold]
+    pub(super) fn type_mismatch(op: &'static str, expected: &'static str, got: &Value) -> Self {
+        Self::TypeMismatch {
+            op,
+            expected,
+            got: value_type_name(got),
+        }
+    }
+}
+
+impl fmt::Display for VmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TypeMismatch { op, expected, got } => {
+                write!(f, "{op}: expected {expected}, got '{got}'")
+            }
+            Self::SliceOutOfBounds { lo, hi, len } => {
+                write!(
+                    f,
+                    "Slice indices out of bounds: [{lo}..{hi}] (length {len})"
+                )
+            }
+            Self::IndexOutOfBounds { idx, len, what } => {
+                write!(f, "{what} index {idx} out of bounds (length {len})")
+            }
+            Self::Internal(s) => {
+                write!(f, "internal VM error (likely a compiler bug): {s}")
+            }
+            Self::Io(e) => write!(f, "scheduler I/O failed: {e}"),
+        }
+    }
+}
+
+pub type VmResult<T> = Result<T, VmError>;
 
 #[derive(Debug, Clone)]
 struct CallFrame {
@@ -241,8 +311,9 @@ const _: () = {
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
 #[inline]
+#[allow(clippy::unwrap_used)]
 fn str_ref(v: &Value) -> &str {
-    v.as_str().unwrap_or_default()
+    v.as_str().expect("type-checked by pop_str")
 }
 
 /// Borrow the binary view of a value `pop_binary` already type-checked.
@@ -309,7 +380,7 @@ pub struct VM {
     /// so the timer heap can refer to a park without owning it.
     parked: HashMap<u64, (Wait, Process)>,
     /// Reverse index from socket id to the wait ids parked on it, kept in
-    /// lockstep with `parked` by `park_insert`/`park_remove`. Lets an I/O
+    /// lockstep with `parked` by `park`/`park_remove`. Lets an I/O
     /// event find its waiters in O(1) instead of scanning every park, and
     /// makes "is anything waiting on I/O" a non-emptiness check. A socket id
     /// maps to multiple waits only transiently (e.g. a reader and a writer
@@ -327,7 +398,7 @@ pub struct VM {
     timer_heap: BinaryHeap<Reverse<(Instant, u64)>>,
     /// This scheduler's OS event queue (kqueue/epoll). Owned by this
     /// scheduler alone; other schedulers reach it only through the waker
-    /// in the runtime's `wakers` slot for `scheduler_index`.
+    /// in the runtime's `slots[scheduler_index].waker`.
     poll: mio::Poll,
     /// Reusable event buffer for `poll` (mio clears it on each `poll()`),
     /// allocated once per VM instead of per poll call — the parked-I/O
@@ -364,8 +435,8 @@ pub fn new_vm(program: Program) -> VmResult<VM> {
 /// entrypoint path followed by the arguments passed after it) to
 /// `process.argv`.
 pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
-    let (runtime, poll) = Runtime::new(Arc::new(program), argv, sched::scheduler_count())
-        .map_err(|e| format!("cannot create OS poller: {e}"))?;
+    let (runtime, poll) =
+        Runtime::new(Arc::new(program), argv, sched::scheduler_count()).map_err(VmError::Io)?;
     Ok(vm_for_runtime(runtime, 0, poll))
 }
 
@@ -373,7 +444,7 @@ pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
 /// via [`new_vm`], workers via [`worker_main`]. `poll` is this scheduler's
 /// own OS poller (created alongside the runtime for scheduler 0, alongside
 /// the worker thread by `ensure_workers`); its waker lives in the runtime's
-/// `wakers` slot so other schedulers can interrupt the wait.
+/// waker slot so other schedulers can interrupt the wait.
 fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
     // Every scheduler runs against a private copy of the program tables
     // (the constants are frozen words pointing into `program.frozen`, which
@@ -570,10 +641,10 @@ impl VM {
                     if !self.parked.is_empty() {
                         self.poll_parked(false)?;
                     }
-                    self.take_directed()?;
+                    self.take_directed();
                     let peer_idle = self.others_idle();
                     if !peer_idle && self.run_queue.len() < YIELD_PICKUP_QUEUE_LIMIT {
-                        self.take_overflow_seed()?;
+                        self.take_overflow_seed();
                     }
                     self.try_donate(peer_idle);
                     if !self.run_queue.is_empty() {
@@ -585,23 +656,13 @@ impl VM {
                         }
                     }
                 }
-                Step::Parked(mut wait) => {
-                    // Allocate this park's id, record its deadline (if any) in
-                    // the timer heap, then stash the suspended process under
-                    // the id. The wait's sockets have been registered with the
-                    // poller since adoption; parking arms nothing.
-                    let id = self.next_wait_id;
-                    self.next_wait_id += 1;
-                    if let Some(deadline) = wait.deadline {
-                        self.timer_heap.push(Reverse((deadline, id)));
-                    }
+                Step::Parked(wait) => {
+                    // Shelve the suspended process under a fresh wait id and
+                    // register its wake conditions (fd index / timer heap /
+                    // blocking pool). The wait's sockets have been registered
+                    // with the poller since adoption; parking arms nothing.
                     let outgoing = self.suspend_current();
-                    // A completion park hands its blocking op to the pool now,
-                    // keyed by this wait id so the worker's result resumes it.
-                    if let Some(op) = wait.offload.take() {
-                        self.runtime.offload(self.scheduler_index, id, op);
-                    }
-                    self.park_insert(id, wait, outgoing);
+                    self.park(wait, outgoing);
                 }
             }
             // Every step may have changed this scheduler's runnable count
@@ -691,31 +752,36 @@ impl VM {
         if !self.can_donate_fds(victim) {
             return;
         }
-        let (peer, claimed) = match busy_peer {
-            Some(peer) => (peer, false),
+        enum Target {
+            Claimed(sched::Claim),
+            Busy(usize),
+        }
+        let target = match busy_peer {
+            Some(peer) => Target::Busy(peer),
             // The idle peer seen by the probe may have been claimed or woken
             // meanwhile; the next yield retries.
             None => match rt.claim_idle_peer() {
-                Some(peer) => (peer, true),
+                Some(claim) => Target::Claimed(claim),
                 None => return,
             },
         };
         let Some(victim) = self.run_queue.pop_back() else {
             // Unreachable (the queue is local and non-empty), but a claimed
             // peer must still be woken so it can re-park.
-            if claimed {
-                rt.abort_donation(peer);
+            if let Target::Claimed(c) = target {
+                rt.release(c);
             }
             return;
         };
         let connections = self.detach_fds(&victim);
-        rt.donate(
-            peer,
-            Migrant {
-                process: victim,
-                connections,
-            },
-        );
+        let m = Migrant {
+            process: victim,
+            connections,
+        };
+        match target {
+            Target::Claimed(c) => rt.hand(c, Inbound::Migrant(m)),
+            Target::Busy(peer) => rt.donate(peer, m),
+        }
     }
 
     /// Get something to run into `stack`/`frames`. Blocks while there is
@@ -732,17 +798,17 @@ impl VM {
             // 2. Remote seeds; then seeds handed to a peer's inbox that the
             //    peer has not taken yet — stealing one here starts it sooner
             //    than waiting for its assigned scheduler to wake.
-            if self.take_inbound()? {
+            if self.take_inbound() {
                 continue;
             }
-            if self.steal_inbound()? {
+            if self.steal_inbound() {
                 continue;
             }
 
             // Nothing runnable here: republish the (zero) load before any
             // park below. A direct-handed seed a peer stole out of this
             // scheduler's inbox leaves `submit`'s in-flight bump in our
-            // `run_lens` slot, and nothing else corrects it while we sleep.
+            // published-load slot, and nothing else corrects it while we sleep.
             self.publish_load();
 
             // 3. Local parked I/O / timers: wait for them, but stay wakeable
@@ -753,7 +819,7 @@ impl VM {
                 // who scanned before the flag was visible may have pushed to
                 // the overflow queue (or straight into our inbox) expecting
                 // someone to pick it up.
-                if self.take_inbound()? {
+                if self.take_inbound() {
                     self.set_parked_flag(false);
                     continue;
                 }
@@ -772,7 +838,7 @@ impl VM {
             // pushed in between; `notify` is sticky so the reverse race is
             // safe).
             self.set_parked_flag(true);
-            if self.take_inbound()? {
+            if self.take_inbound() {
                 self.set_parked_flag(false);
                 continue;
             }
@@ -789,7 +855,7 @@ impl VM {
     /// Move inbound work destined for this scheduler (its inbox, falling back
     /// to the shared overflow queue) into the local run queue. Returns whether
     /// any arrived.
-    fn take_inbound(&mut self) -> VmResult<bool> {
+    fn take_inbound(&mut self) -> bool {
         let batch = self.runtime.take_inbound(self.scheduler_index);
         self.admit(batch)
     }
@@ -798,14 +864,14 @@ impl VM {
     /// migrants and direct-handed seeds) into the local run queue. Called at
     /// every yield — directed work has a chosen destination and must not
     /// wait, unlike overflow seeds. Returns whether any arrived.
-    fn take_directed(&mut self) -> VmResult<bool> {
+    fn take_directed(&mut self) -> bool {
         let batch = self.runtime.take_directed(self.scheduler_index);
         self.admit(batch)
     }
 
     /// Pick up undirected overflow seeds (the shared injector) into the
     /// local run queue. Returns whether any arrived.
-    fn take_overflow_seed(&mut self) -> VmResult<bool> {
+    fn take_overflow_seed(&mut self) -> bool {
         let batch: Vec<Inbound> = self
             .runtime
             .take_overflow()
@@ -822,25 +888,25 @@ impl VM {
     /// published after our last sync; the global area is refreshed before
     /// hydrating either kind. (Publish happens-before submit, submit
     /// happens-before take, so this can never be stale.)
-    fn admit(&mut self, batch: Vec<Inbound>) -> VmResult<bool> {
+    fn admit(&mut self, batch: Vec<Inbound>) -> bool {
         if batch.is_empty() {
-            return Ok(false);
+            return false;
         }
         self.sync_globals();
         for inbound in batch {
             match inbound {
-                Inbound::Seed(seed) => self.hydrate_seed(seed)?,
+                Inbound::Seed(seed) => self.hydrate_seed(seed),
                 Inbound::Migrant(m) => self.adopt_migrant(m),
             }
         }
-        Ok(true)
+        true
     }
 
     /// Steal one undelivered unit of inbound work from a peer scheduler's
     /// inbox. Only called when this scheduler has nothing local to run.
-    fn steal_inbound(&mut self) -> VmResult<bool> {
+    fn steal_inbound(&mut self) -> bool {
         let Some(inbound) = self.runtime.steal_inbound(self.scheduler_index) else {
-            return Ok(false);
+            return false;
         };
         self.admit(vec![inbound])
     }
@@ -894,8 +960,7 @@ impl VM {
     /// Mark this scheduler as parked/unparked so seed submitters know who to
     /// wake.
     fn set_parked_flag(&self, parked: bool) {
-        self.runtime.parked_flags[self.scheduler_index]
-            .store(parked, std::sync::atomic::Ordering::Release);
+        self.runtime.set_parked(self.scheduler_index, parked);
     }
 
     /// Block until another scheduler notifies this one (seed submitted or
@@ -903,7 +968,7 @@ impl VM {
     fn wait_for_notify(&mut self) -> VmResult<()> {
         self.poll
             .poll(&mut self.poll_events, None)
-            .map_err(|e| format!("scheduler wait failed: {e}"))?;
+            .map_err(VmError::Io)?;
         Ok(())
     }
 
@@ -919,7 +984,7 @@ impl VM {
     /// next yield or idle scan.
     fn spawn_process(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
-        let seed = self.build_seed(&f)?;
+        let seed = self.build_seed(&f);
         self.runtime.submit(seed);
         Ok(())
     }
@@ -928,12 +993,10 @@ impl VM {
     /// invariants, so a violation is an internal error rather than a user one.
     fn check_spawnable(&self, f: &Value) -> VmResult<()> {
         let Some(cl) = f.as_closure() else {
-            return Err("spawn requires a function. This is likely a compiler bug.".to_string());
+            return Err(VmError::internal("spawn requires a function"));
         };
         if self.program.functions[cl.func_idx() as usize].arity != 0 {
-            return Err(
-                "spawned functions take no arguments. This is likely a compiler bug.".to_string(),
-            );
+            return Err(VmError::internal("spawned functions take no arguments"));
         }
         Ok(())
     }
@@ -952,7 +1015,8 @@ impl VM {
         self.runtime
             .live
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.spawn_process_with_heap(heap, root)
+        self.spawn_process_with_heap(heap, root);
+        Ok(())
     }
 
     /// Spawn one copy of `f` pinned to every live scheduler — the fan-out that
@@ -973,9 +1037,9 @@ impl VM {
                 self.runtime
                     .live
                     .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                self.spawn_process_with_heap(heap, root)?;
+                self.spawn_process_with_heap(heap, root);
             } else if self.runtime.is_live_scheduler(i) {
-                let seed = self.build_seed(&f)?;
+                let seed = self.build_seed(&f);
                 self.runtime.submit_to(i, seed);
             }
         }
@@ -984,11 +1048,13 @@ impl VM {
 
     /// Create a process whose initial heap is `heap` — the seeded
     /// heap a cross-scheduler spawn copied the closure graph into. The
-    /// closure `f` points into that heap.
-    fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) -> VmResult<()> {
-        let Some(cl) = f.as_closure() else {
-            return Err("spawn requires a function. This is likely a compiler bug.".to_string());
-        };
+    /// closure `f` points into that heap. Every caller has already run
+    /// `check_spawnable` on the source closure (`spawn_copy` preserves the
+    /// value kind), so `f` is a nullary closure by construction.
+    fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) {
+        let cl = f
+            .as_closure()
+            .expect("spawn: caller-checked nullary closure");
         let func = &self.program.functions[cl.func_idx() as usize];
         let (func_idx, code_start, locals) = (cl.func_idx(), func.code_start, func.locals);
 
@@ -1009,7 +1075,6 @@ impl VM {
             frames,
             is_main: false,
         });
-        Ok(())
     }
 
     /// Copy a closure into a seed the child adopts wholesale: a fresh heap
@@ -1019,7 +1084,7 @@ impl VM {
     /// backings are shared zero-copy — only the box is copied, never the bytes.
     /// Captured sockets transfer with it: connections move (this scheduler
     /// loses them), listeners are dup'd so both sides keep accepting.
-    fn build_seed(&mut self, f: &Value) -> VmResult<Seed> {
+    fn build_seed(&mut self, f: &Value) -> Seed {
         // The heap copy knows nothing about fd tables, so the captured
         // sockets are gathered by their own walk and moved/dup'd alongside
         // the values.
@@ -1036,11 +1101,11 @@ impl VM {
         // reuseport socket from the shared address on first accept).
         let connections = self.detach_socket_ids(captured_sockets);
 
-        Ok(Seed {
+        Seed {
             heap,
             root,
             connections,
-        })
+        }
     }
 
     /// Build a runnable process on this scheduler from a seed: adopt its
@@ -1049,13 +1114,9 @@ impl VM {
     /// from the global area (synced in `admit`, the intake gate every arrival
     /// path — inbox drain, overflow pickup, steal — funnels through), so the
     /// seed itself carries none.
-    fn hydrate_seed(&mut self, seed: Seed) -> VmResult<()> {
-        for (id, c) in seed.connections {
-            self.track_connection(id, c)
-                .map_err(|e| format!("cannot watch adopted connection: {e}"))?;
-        }
-
-        self.spawn_process_with_heap(seed.heap, seed.root)
+    fn hydrate_seed(&mut self, seed: Seed) {
+        self.adopt_connections(seed.connections);
+        self.spawn_process_with_heap(seed.heap, seed.root);
     }
 
     /// Pre-side-effect donor guard for process migration: may `victim`'s
@@ -1069,7 +1130,7 @@ impl VM {
     /// - in `pending_connects`: a non-blocking connect on that id is in
     ///   flight on this scheduler and its completion handler will look the
     ///   socket up in this table; or
-    /// - armed in a parked sibling's `Wait.interests`: the sleeper's poller
+    /// - armed in a parked sibling's `Wait::Io` fds: the sleeper's poller
     ///   registration belongs to this scheduler, and moving the fd away would
     ///   silently break the sleeper — its wake/re-arm path resolves the id
     ///   through this scheduler's tables.
@@ -1093,7 +1154,7 @@ impl VM {
             return false;
         }
         // The victim itself is runnable (in run_queue, not parked), so its own
-        // interests cannot appear here — any hit is a sibling's armed fd.
+        // fds cannot appear here — any hit is a sibling's armed fd.
         !ids.iter().any(|id| self.io_waiters.contains_key(id))
     }
 }

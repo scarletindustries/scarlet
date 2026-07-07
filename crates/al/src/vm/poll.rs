@@ -64,19 +64,10 @@ use al_core::bytecode::Value;
 use smallvec::{SmallVec, smallvec};
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
-use super::{Process, VM, VmResult, sched};
+use super::{Process, VM, VmError, VmResult, sched};
 use crate::stdlib;
 
-/// A socket-readiness condition a parked process can wait on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Interest {
-    /// The socket (listener or connection) must become readable.
-    Readable,
-    /// The connection must become writable.
-    Writable,
-}
-
-/// How a parked process resumes once its `Wait` is satisfied.
+/// How a parked I/O wait resumes once one of its sockets is ready.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WakeAction {
     /// Resume wherever the op left `ip`. Covers both the syscall-retry waits
@@ -89,79 +80,70 @@ pub(super) enum WakeAction {
     CompleteConnect(i32),
 }
 
-/// What a parked process is waiting for: any of a set of socket-readiness
-/// interests and/or a deadline. Whichever fires first wakes the process, after
-/// which `action` decides how it resumes.
+/// What a parked process is waiting for. The variants are the exhaustive set
+/// of wake sources — a wait is exactly one of them, so an offload can never
+/// carry socket interests or a deadline, and a pure timer never has fds.
 #[derive(Debug)]
-pub(super) struct Wait {
-    /// `(socket id, condition)` pairs; the process wakes when any one is ready.
-    /// Single-fd parks are overwhelmingly the common case, so this stays inline
-    /// and allocation-free for them.
-    pub(super) interests: SmallVec<[(i32, Interest); 1]>,
-    /// Wake no later than this instant, if set. A `Wait` with no interests and
-    /// a deadline is a pure timer (e.g. `Sleep`).
-    pub(super) deadline: Option<Instant>,
-    /// How the process resumes once woken.
-    action: WakeAction,
-    /// A blocking op to hand to the pool when this park is registered (so the
-    /// job id matches the wait id). The process wakes when its completion is
-    /// delivered; until then it has no interests and no deadline, so only a
-    /// completion can wake it. `None` for ordinary I/O / timer parks.
-    pub(super) offload: Option<BlockingOp>,
+pub(super) enum Wait {
+    /// Socket readiness on any of `fds` (single-fd overwhelmingly dominates,
+    /// hence the inline SmallVec), optionally bounded by a deadline; whichever
+    /// fires first wakes the process, and `action` says how it resumes.
+    Io {
+        fds: SmallVec<[i32; 1]>,
+        deadline: Option<Instant>,
+        action: WakeAction,
+    },
+    /// A pure timer: wake at this instant, resume at the next instruction.
+    Timer(Instant),
+    /// A blocking-pool job. The op is `Some` on the way into [`VM::park`],
+    /// which hands it to the pool keyed by the fresh wait id and stores the
+    /// spent `None` as the wake marker; only the job's completion can wake it.
+    Offload(Option<BlockingOp>),
 }
 
 impl Wait {
     /// Park until socket `id` becomes readable, then re-run the instruction.
     pub(super) fn readable(id: i32) -> Self {
-        Wait {
-            interests: smallvec![(id, Interest::Readable)],
+        Wait::Io {
+            fds: smallvec![id],
             deadline: None,
             action: WakeAction::Rerun,
-            offload: None,
         }
     }
 
     /// Park until socket `id` becomes writable, then re-run the instruction.
     pub(super) fn writable(id: i32) -> Self {
-        Wait {
-            interests: smallvec![(id, Interest::Writable)],
+        Wait::Io {
+            fds: smallvec![id],
             deadline: None,
             action: WakeAction::Rerun,
-            offload: None,
         }
     }
 
     /// Park until the pending connect on socket `id` completes (signalled by
     /// writability); on wake, finish the connect and push its result.
     pub(super) fn connecting(id: i32) -> Self {
-        Wait {
-            interests: smallvec![(id, Interest::Writable)],
+        Wait::Io {
+            fds: smallvec![id],
             deadline: None,
             action: WakeAction::CompleteConnect(id),
-            offload: None,
         }
     }
 
     /// Park until `deadline`, then resume at the next instruction (the result
     /// is already on the stack).
     pub(super) fn until(deadline: Instant) -> Self {
-        Wait {
-            interests: SmallVec::new(),
-            deadline: Some(deadline),
-            action: WakeAction::Rerun,
-            offload: None,
-        }
+        Wait::Timer(deadline)
     }
 
     /// Park until socket `id` becomes readable or `deadline` passes, whichever
     /// comes first, then re-run the instruction (which re-derives whether data
     /// arrived or the read timed out).
     pub(super) fn read_with_deadline(id: i32, deadline: Instant) -> Self {
-        Wait {
-            interests: smallvec![(id, Interest::Readable)],
+        Wait::Io {
+            fds: smallvec![id],
             deadline: Some(deadline),
             action: WakeAction::Rerun,
-            offload: None,
         }
     }
 
@@ -169,11 +151,16 @@ impl Wait {
     /// deadline — only the job's completion can wake it. The op is handed to the
     /// pool when the park is registered, so its job id matches the wait id.
     pub(super) fn offloaded(op: BlockingOp) -> Self {
-        Wait {
-            interests: SmallVec::new(),
-            deadline: None,
-            action: WakeAction::Rerun,
-            offload: Some(op),
+        Wait::Offload(Some(op))
+    }
+
+    /// The instant this wait must wake by, if it has one. Timer-heap entries
+    /// are validated against this to discard stale ones.
+    fn deadline(&self) -> Option<Instant> {
+        match self {
+            Wait::Io { deadline, .. } => *deadline,
+            Wait::Timer(d) => Some(*d),
+            Wait::Offload(_) => None,
         }
     }
 }
@@ -267,19 +254,36 @@ impl VM {
         Ok(())
     }
 
-    /// Stash a suspended process under wait id `id` and index each of its
-    /// socket interests in `io_waiters`, so an I/O event finds its waiters by
-    /// lookup instead of a scan of every park.
-    pub(super) fn park_insert(&mut self, id: u64, wait: Wait, p: Process) {
-        for &(sid, _) in &wait.interests {
-            let waiters = self.io_waiters.entry(sid).or_default();
-            // A wait listing the same socket twice (e.g. readable and
-            // writable) still indexes once.
-            if !waiters.contains(&id) {
-                waiters.push(id);
+    /// Stash a suspended process under a fresh wait id and register every side
+    /// effect its `Wait` implies: I/O fds are indexed in `io_waiters` (so an
+    /// event finds its waiters by lookup, not a scan), a deadline is pushed
+    /// onto the lazy-deletion timer heap, and an offload is dispatched to the
+    /// blocking pool keyed by the same id. Returns the allocated wait id. This
+    /// is the sole entry into `parked`, so those side effects cannot be
+    /// forgotten by a caller.
+    pub(super) fn park(&mut self, mut wait: Wait, p: Process) -> u64 {
+        let id = self.next_wait_id;
+        self.next_wait_id += 1;
+        match &mut wait {
+            Wait::Io { fds, deadline, .. } => {
+                for &sid in fds.iter() {
+                    let waiters = self.io_waiters.entry(sid).or_default();
+                    if !waiters.contains(&id) {
+                        waiters.push(id);
+                    }
+                }
+                if let Some(d) = *deadline {
+                    self.timer_heap.push(Reverse((d, id)));
+                }
+            }
+            Wait::Timer(d) => self.timer_heap.push(Reverse((*d, id))),
+            Wait::Offload(op) => {
+                let op = op.take().expect("offload park carries an op");
+                self.runtime.offload(self.scheduler_index, id, op);
             }
         }
         self.parked.insert(id, (wait, p));
+        id
     }
 
     /// Remove a park, dropping its entries from the socket reverse index.
@@ -287,15 +291,32 @@ impl VM {
     /// with `parked`.
     pub(super) fn park_remove(&mut self, id: u64) -> Option<(Wait, Process)> {
         let (wait, p) = self.parked.remove(&id)?;
-        for &(sid, _) in &wait.interests {
-            if let Some(waiters) = self.io_waiters.get_mut(&sid) {
-                waiters.retain(|w| *w != id);
-                if waiters.is_empty() {
-                    self.io_waiters.remove(&sid);
+        if let Wait::Io { fds, .. } = &wait {
+            for &sid in fds {
+                if let Some(waiters) = self.io_waiters.get_mut(&sid) {
+                    waiters.retain(|w| *w != id);
+                    if waiters.is_empty() {
+                        self.io_waiters.remove(&sid);
+                    }
                 }
             }
         }
         Some((wait, p))
+    }
+
+    /// Wake a parked process with a value built in its own context: swap `p`
+    /// in as current so `build` allocates in its arena with its stack/frames
+    /// as GC roots, push the result, then queue it and restore whatever was
+    /// current before. The one place the "wake-time construction runs in the
+    /// woken process's context" invariant is enforced.
+    fn wake_with(&mut self, p: Process, build: impl FnOnce(&mut Self) -> Value) {
+        let interrupted = self.suspend_current();
+        self.resume(p);
+        let value = build(self);
+        self.stack.push(value);
+        let woken = self.suspend_current();
+        self.run_queue.push_back(woken);
+        self.resume(interrupted);
     }
 
     /// Move parked processes whose I/O is ready or whose timer has expired
@@ -333,7 +354,7 @@ impl VM {
             let Some(&Reverse((deadline, id))) = self.timer_heap.peek() else {
                 break None;
             };
-            if matches!(self.parked.get(&id), Some((w, _)) if w.deadline == Some(deadline)) {
+            if matches!(self.parked.get(&id), Some((w, _)) if w.deadline() == Some(deadline)) {
                 break Some(deadline);
             }
             self.timer_heap.pop();
@@ -358,7 +379,7 @@ impl VM {
     /// slices — is detached around the delivery and restored after.
     pub(super) fn drain_completions(&mut self) -> bool {
         let drained: Vec<Completion> = {
-            let mut q = sched::lock(&self.runtime.completions[self.scheduler_index]);
+            let mut q = sched::lock(&self.runtime.slots[self.scheduler_index].completions);
             if q.is_empty() {
                 return false;
             }
@@ -369,13 +390,7 @@ impl VM {
             let Some((_wait, p)) = self.park_remove(c.job_id) else {
                 continue;
             };
-            let interrupted = self.suspend_current();
-            self.resume(p);
-            let value = self.completion_result(c.result);
-            self.stack.push(value);
-            let woken = self.suspend_current();
-            self.run_queue.push_back(woken);
-            self.resume(interrupted);
+            self.wake_with(p, |vm| vm.completion_result(c.result));
             woke = true;
         }
         woke
@@ -437,7 +452,7 @@ impl VM {
                 break;
             }
             self.timer_heap.pop();
-            if !matches!(self.parked.get(&id), Some((w, _)) if w.deadline == Some(deadline)) {
+            if !matches!(self.parked.get(&id), Some((w, _)) if w.deadline() == Some(deadline)) {
                 // Stale: the park already woke on I/O (or was re-keyed). Drop it.
                 continue;
             }
@@ -462,7 +477,7 @@ impl VM {
         let mut events = std::mem::replace(&mut self.poll_events, mio::Events::with_capacity(0));
         if let Err(e) = self.poll.poll(&mut events, timeout) {
             self.poll_events = events;
-            return Err(format!("scheduler poll failed: {e}"));
+            return Err(VmError::Io(e));
         }
         for ev in events.iter() {
             if ev.token() == WAKER_TOKEN {
@@ -482,24 +497,17 @@ impl VM {
                 let Some((wait, p)) = self.park_remove(wid) else {
                     continue;
                 };
-                match wait.action {
+                match wait {
                     // A finished connect delivers its result directly onto the
                     // woken process's stack; the connect instruction is not
-                    // re-run. The result is built in the woken process's own
-                    // context (its arena, its stack and frames as roots),
-                    // so it is swapped in around the
-                    // construction exactly as `drain_completions` swaps in
-                    // completion targets.
-                    WakeAction::CompleteConnect(sid) => {
-                        let interrupted = self.suspend_current();
-                        self.resume(p);
-                        let result = self.finish_connect(sid);
-                        self.stack.push(result);
-                        let woken_p = self.suspend_current();
-                        self.run_queue.push_back(woken_p);
-                        self.resume(interrupted);
-                    }
-                    WakeAction::Rerun => self.run_queue.push_back(p),
+                    // re-run. `wake_with` swaps the process in so the result
+                    // is built in its own arena with its stack/frames as GC
+                    // roots, exactly as for blocking-pool completions.
+                    Wait::Io {
+                        action: WakeAction::CompleteConnect(sid),
+                        ..
+                    } => self.wake_with(p, |vm| vm.finish_connect(sid)),
+                    _ => self.run_queue.push_back(p),
                 }
                 // The fds' registrations stay armed: they belong to the
                 // sockets, which remain in the tables. An event with no
