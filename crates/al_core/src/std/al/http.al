@@ -16,7 +16,7 @@ import al/http/h1.{
 import al/http/body.{Body, Empty, Whole, Streaming}
 import al/http/headers.{Header, Headers}
 import al/net.{Server}
-import al/net/socket.{Socket}
+import al/net/socket.{Socket, Data, Closed}
 import al/net/error.{NetError}
 import al/binary.{Dec}
 import al/int
@@ -48,7 +48,10 @@ pub type Method {
 
 pub type Request {
 	method Method
-	path Binary
+	// The request-target as it appeared on the wire (RFC 9112 §3.2): usually an
+	// origin-form path plus optional `?query`, but may also be `*` (OPTIONS) or
+	// an absolute URI. Use `path`/`query` to split origin-form.
+	target Binary
 	version Version
 	headers Headers
 	// Trailer fields received after a chunked body. Kept separate from
@@ -65,6 +68,16 @@ pub type Response {
 	body Body
 }
 
+// The parsed request head as one value, threaded through the body-reading
+// helpers instead of four loose positional params (two of which — method and
+// target — are both `Binary` and would silently typecheck if swapped).
+type ReqHead {
+	method Binary
+	target Binary
+	version Version
+	headers Headers
+}
+
 // The outcome of writing one response: whether the connection may stay alive,
 // and if so, the batch of bytes still queued for the next vectored write.
 type Sent {
@@ -79,6 +92,7 @@ type Sent {
 const MAX_BODY = 1048576
 const READ_SIZE = 65536
 const EMPTY = <<>>
+const QUESTION = <<'?'>>
 
 const NAME_CONTENT_TYPE = <<'Content-Type'>>
 const NAME_CONTENT_LENGTH = <<'Content-Length'>>
@@ -102,6 +116,24 @@ fn to_method(m Binary) Method {
 		<<'HEAD'>> -> Head
 		<<'OPTIONS'>> -> Options
 		else -> Other(m)
+	}
+}
+
+// The origin-form path component of the request-target: everything before the
+// first `?`, or the whole target if there is no query. O(1) zero-copy slice.
+pub fn path(r Request) Binary {
+	match binary.index_of(r.target, QUESTION, 0) {
+		Some(i) -> binary.slice_bytes(r.target, 0, i)
+		None -> r.target
+	}
+}
+
+// The query component of the request-target: everything after the first `?`
+// (not including it), or empty if there is no `?`.
+pub fn query(r Request) Binary {
+	match binary.index_of(r.target, QUESTION, 0) {
+		Some(i) -> binary.slice_bytes(r.target, i + 1, binary.byte_size(r.target) - i - 1)
+		None -> EMPTY
 	}
 }
 
@@ -142,19 +174,12 @@ pub fn with_header(r Response, name Binary, value Binary) Response {
 	Response(status: r.status, headers: headers.set(r.headers, name, value), body: r.body)
 }
 
-fn build_request(
-	method Binary,
-	target Binary,
-	version Version,
-	hdrs Headers,
-	trailers Headers,
-	b Body,
-) Request {
+fn build_request(head ReqHead, trailers Headers, b Body) Request {
 	Request(
-		method: to_method(method),
-		path: target,
-		version: version,
-		headers: hdrs,
+		method: to_method(head.method),
+		target: head.target,
+		version: head.version,
+		headers: head.headers,
 		trailers: trailers,
 		body: b,
 	)
@@ -206,11 +231,8 @@ fn serve_conn(
 		NeedMore -> match flush(sock, pending) {
 			Err(e) -> Err(e)
 			Ok(_) -> match socket.read(sock, READ_SIZE) {
-				Ok(more) -> if binary.byte_size(more) == 0 {
-					Ok(Nil)
-				} else {
-					serve_conn(sock, carry(buf, off, more), 0, handler, [])
-				}
+				Ok(Data(more)) -> serve_conn(sock, carry(buf, off, more), 0, handler, [])
+				Ok(Closed) -> Ok(Nil)
 				Err(e) -> Err(e)
 			}
 		}
@@ -219,8 +241,10 @@ fn serve_conn(
 			write_error(sock, status)
 			Ok(Nil)
 		}
-		Done(method, target, version, hdrs, consumed) ->
-			handle(sock, buf, consumed, method, target, version, hdrs, handler, pending)
+		Done(method, target, version, hdrs, consumed) -> {
+			head = ReqHead(method: method, target: target, version: version, headers: hdrs)
+			handle(sock, buf, consumed, head, handler, pending)
+		}
 	}
 }
 
@@ -246,14 +270,11 @@ fn handle(
 	sock Socket,
 	buf Binary,
 	consumed Int,
-	method Binary,
-	target Binary,
-	version Version,
-	hdrs Headers,
+	head ReqHead,
 	handler fn(Request) Response,
 	pending Array(Binary),
 ) Result(Nil, NetError) {
-	match h1.framing(hdrs) {
+	match h1.framing(head.headers) {
 		Invalid(status) -> {
 			flush(sock, pending) or Nil
 			write_error(sock, status)
@@ -264,7 +285,7 @@ fn handle(
 				sock,
 				buf,
 				consumed,
-				build_request(method, target, version, hdrs, [], body.empty()),
+				build_request(head, [], body.empty()),
 				handler,
 				pending,
 			)
@@ -278,13 +299,13 @@ fn handle(
 			// before it sends the body we are about to wait for.
 			match flush(sock, pending) {
 				Err(e) -> Err(e)
-				Ok(_) -> read_body(sock, buf, consumed, n, method, target, version, hdrs, handler)
+				Ok(_) -> read_body(sock, buf, consumed, n, head, handler)
 			}
 		}
 		// Chunked body: same flush-first reasoning as Content-Length.
 		Chunked -> match flush(sock, pending) {
 			Err(e) -> Err(e)
-			Ok(_) -> read_chunked_body(sock, buf, consumed, method, target, version, hdrs, handler)
+			Ok(_) -> read_chunked_body(sock, buf, consumed, head, handler)
 		}
 	}
 }
@@ -301,13 +322,10 @@ fn read_body(
 	buf Binary,
 	consumed Int,
 	n Int,
-	method Binary,
-	target Binary,
-	version Version,
-	hdrs Headers,
+	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
-	match maybe_continue(sock, hdrs) {
+	match maybe_continue(sock, head.headers) {
 		Err(e) -> Err(e)
 		Ok(_) -> {
 			avail = binary.byte_size(buf) - consumed
@@ -326,14 +344,7 @@ fn read_body(
 					} else {
 						0
 					},
-					build_request(
-						method,
-						target,
-						version,
-						hdrs,
-						[],
-						body.from_binary(binary.append(head_bytes, tail)),
-					),
+					build_request(head, [], body.from_binary(binary.append(head_bytes, tail))),
 					handler,
 					[],
 				)
@@ -349,15 +360,12 @@ fn read_chunked_body(
 	sock Socket,
 	buf Binary,
 	off Int,
-	method Binary,
-	target Binary,
-	version Version,
-	hdrs Headers,
+	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
-	match maybe_continue(sock, hdrs) {
+	match maybe_continue(sock, head.headers) {
 		Err(e) -> Err(e)
-		Ok(_) -> chunked_loop(sock, buf, off, method, target, version, hdrs, handler)
+		Ok(_) -> chunked_loop(sock, buf, off, head, handler)
 	}
 }
 
@@ -373,29 +381,14 @@ fn chunked_loop(
 	sock Socket,
 	buf Binary,
 	off Int,
-	method Binary,
-	target Binary,
-	version Version,
-	hdrs Headers,
+	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
 	match h1.chunk_decode(buf, off, MAX_BODY) {
 		ChunkedNeedMore -> match socket.read(sock, READ_SIZE) {
-			Ok(more) -> if binary.byte_size(more) == 0 {
-				// Peer closed mid-body: there is no complete request to answer.
-				Ok(Nil)
-			} else {
-				chunked_loop(
-					sock,
-					binary.append(buf, more),
-					off,
-					method,
-					target,
-					version,
-					hdrs,
-					handler,
-				)
-			}
+			Ok(Data(more)) -> chunked_loop(sock, binary.append(buf, more), off, head, handler)
+			// Peer closed mid-body: there is no complete request to answer.
+			Ok(Closed) -> Ok(Nil)
 			Err(e) -> Err(e)
 		}
 		ChunkedBad(status) -> {
@@ -409,14 +402,7 @@ fn chunked_loop(
 				sock,
 				buf,
 				consumed,
-				build_request(
-					method,
-					target,
-					version,
-					hdrs,
-					trailers,
-					body.from_binary(decoded),
-				),
+				build_request(head, trailers, body.from_binary(decoded)),
 				handler,
 				[],
 			)

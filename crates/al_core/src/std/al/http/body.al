@@ -1,6 +1,6 @@
 import al/binary.{Hex}
 import al/int
-import al/net/socket.{Socket}
+import al/net/socket.{Socket, Data, Closed}
 import al/net/error.{NetError, UnexpectedEof, MessageTooLarge}
 import al/http/headers.{Header}
 
@@ -44,34 +44,17 @@ pub fn from_binary(b Binary) Body {
 // A Content-Length-framed reader over `reader`: yields exactly `n` more bytes
 // across as many chunks as the socket hands back, then Done. `n` is threaded
 // immutably — the socket fd is the real cursor — and capped at 64 KiB per read.
-// A zero-byte read before `n` is reached means the peer closed mid-body, which
-// is an error (UnexpectedEof), not a clean end.
+// A peer close before `n` is reached is an error (UnexpectedEof), not a clean
+// end.
 pub fn content_length(reader Socket, n Int) Body {
 	fn() match n {
 		0 -> Ok(Done([]))
 		else -> match socket.read(reader, int.min(n, READ_SIZE)) {
-			Ok(chunk) -> {
-				got = binary.byte_size(chunk)
-				match got {
-					0 -> Err(UnexpectedEof)
-					else -> Ok(Chunk(chunk, content_length(reader, n - got)))
-				}
-			}
+			Ok(Data(chunk)) ->
+				Ok(Chunk(chunk, content_length(reader, n - binary.byte_size(chunk))))
+			Ok(Closed) -> Err(UnexpectedEof)
 			Err(e) -> Err(e)
 		}
-	}
-}
-
-// A reader that streams `sock` until the peer closes it: each step reads up to
-// 64 KiB, and a zero-byte read is the clean end of the body (Done). Used for
-// responses framed by connection close rather than a known length.
-pub fn eof_reader(sock Socket) Body {
-	fn() match socket.read(sock, READ_SIZE) {
-		Ok(chunk) -> match binary.byte_size(chunk) {
-			0 -> Ok(Done([]))
-			else -> Ok(Chunk(chunk, eof_reader(sock)))
-		}
-		Err(e) -> Err(e)
 	}
 }
 
@@ -110,32 +93,37 @@ pub fn take_buffered(b Body) Result(Buffered, NetError) {
 
 // Pump a whole body out to `sock`: pull a chunk, write it, recurse. The write
 // parks on backpressure, so a slow consumer naturally rate-limits the source —
-// the next chunk is not pulled until the previous one has drained. Returns the
-// trailers carried by Done. Nothing is buffered: memory stays O(chunk).
-pub fn drain(body Body, sock Socket) Result(Array(Header), NetError) {
-	match pull(body) {
-		Ok(Chunk(data, next)) -> match socket.write(sock, data) {
-			Ok(_) -> drain(next, sock)
-			Err(e) -> Err(e)
-		}
-		Ok(Done(trailers)) -> Ok(trailers)
-		Err(e) -> Err(e)
-	}
+// the next chunk is not pulled until the previous one has drained. Nothing is
+// buffered: memory stays O(chunk). Trailers on Done are dropped — a raw
+// (non-chunked) body has no wire representation for them.
+pub fn drain(body Body, sock Socket) Result(Nil, NetError) {
+	drain_prefixed([], body, sock)
 }
 
 // Like `drain`, but `head` (a serialized response head) rides in the same
 // vectored write as the first body chunk: a buffered single-chunk response
 // (http.text) reaches the kernel in exactly ONE syscall, head and body
 // together. Subsequent chunks drain as usual.
-pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Array(Header), NetError) {
+pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Nil, NetError) {
+	drain_prefixed([head], body, sock)
+}
+
+// The single drain worker. `prefix` is whatever bytes must precede the first
+// write — the response head on the first call, `[]` after — so the head rides
+// the same vectored write as the first chunk (or as Done, if the body is
+// empty) without a separate code path per case.
+fn drain_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, NetError) {
 	match pull(body) {
-		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [head, data]) {
-			Ok(_) -> drain(next, sock)
+		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [..prefix, data]) {
+			Ok(_) -> drain_prefixed([], next, sock)
 			Err(e) -> Err(e)
 		}
-		Ok(Done(trailers)) -> match socket.write(sock, head) {
-			Ok(_) -> Ok(trailers)
-			Err(e) -> Err(e)
+		Ok(Done(_)) -> match prefix {
+			[] -> Ok(Nil)
+			else -> match socket.write_parts(sock, prefix) {
+				Ok(_) -> Ok(Nil)
+				Err(e) -> Err(e)
+			}
 		}
 		Err(e) -> Err(e)
 	}
@@ -150,29 +138,7 @@ pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Array(Header)
 // consumer rate-limits the source. Lets an unknown-length body keep the
 // connection alive on HTTP/1.1 instead of framing by close.
 pub fn drain_chunked(body Body, sock Socket) Result(Nil, NetError) {
-	match pull(body) {
-		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
-			0 -> drain_chunked(next, sock)
-			size -> {
-				header = binary.append(binary.from_int_ascii(size, Hex), CRLF)
-				match socket.write_parts(sock, [header, data, CRLF]) {
-					Ok(_) -> drain_chunked(next, sock)
-					Err(e) -> Err(e)
-				}
-			}
-		}
-		Ok(Done(trailers)) -> match trailers {
-			[] -> match socket.write(sock, LAST_CHUNK) {
-				Ok(_) -> Ok(Nil)
-				Err(e) -> Err(e)
-			}
-			else -> match socket.write_parts(sock, [ZERO, CRLF, ..headers.render(trailers), CRLF]) {
-				Ok(_) -> Ok(Nil)
-				Err(e) -> Err(e)
-			}
-		}
-		Err(e) -> Err(e)
-	}
+	drain_chunked_prefixed([], body, sock)
 }
 
 // Like `drain_chunked`, but `head` (a serialized response head) rides in the
@@ -181,26 +147,32 @@ pub fn drain_chunked(body Body, sock Socket) Result(Nil, NetError) {
 // skipped with the head still pending; a body that ends without producing a
 // chunk writes head + terminator together.
 pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, NetError) {
+	drain_chunked_prefixed([head], body, sock)
+}
+
+// The single chunked-drain worker. `prefix` is threaded exactly like
+// `drain_prefixed`: it prepends the first vectored write (head + first chunk,
+// or head + terminator for an empty body) and is `[]` thereafter. Keeping this
+// as one function means the empty-chunk skip and the trailer terminator are
+// implemented once, not once per with_head variant.
+fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
-			0 -> drain_chunked_with_head(head, next, sock)
+			0 -> drain_chunked_prefixed(prefix, next, sock)
 			size -> {
 				header = binary.append(binary.from_int_ascii(size, Hex), CRLF)
-				match socket.write_parts(sock, [head, header, data, CRLF]) {
-					Ok(_) -> drain_chunked(next, sock)
+				match socket.write_parts(sock, [..prefix, header, data, CRLF]) {
+					Ok(_) -> drain_chunked_prefixed([], next, sock)
 					Err(e) -> Err(e)
 				}
 			}
 		}
-		Ok(Done(trailers)) -> match trailers {
-			[] -> match socket.write_parts(sock, [head, LAST_CHUNK]) {
-				Ok(_) -> Ok(Nil)
-				Err(e) -> Err(e)
+		Ok(Done(trailers)) -> {
+			terminator = match trailers {
+				[] -> [LAST_CHUNK]
+				else -> [ZERO, CRLF, ..headers.render(trailers), CRLF]
 			}
-			else -> match socket.write_parts(
-				sock,
-				[head, ZERO, CRLF, ..headers.render(trailers), CRLF],
-			) {
+			match socket.write_parts(sock, [..prefix, ..terminator]) {
 				Ok(_) -> Ok(Nil)
 				Err(e) -> Err(e)
 			}
