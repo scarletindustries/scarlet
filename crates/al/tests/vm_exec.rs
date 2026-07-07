@@ -438,3 +438,241 @@ fn eq_on_string_array_tuple() {
         "True\nFalse\nTrue\nFalse\nTrue\nFalse\n",
     );
 }
+
+// ===========================================================================
+// Type-directed opcodes and their dynamic fallbacks
+//
+// The compiler picks a specialized opcode when `engine.find(ty)` resolves to a
+// concrete type at emit time, and falls back to the tag-dispatching generic op
+// when it stays a `Var`. Each pair below drives the same operation through
+// (a) a program whose operand types resolve, so the typed op is emitted, and
+// (b) a polymorphic wrapper (or a shape the specializer must decline) that
+// keeps the emit-time type unresolved, so the generic fallback is emitted.
+// Both must agree on the result; a bug in either half flips exactly one test.
+// ===========================================================================
+
+// Concrete `Int` ordering lowers to `Op::LtInt`/`GtInt`/`LteInt`/`GteInt`.
+// Each op is pinned in both directions (True then False) so an always-True,
+// always-False, or operand-swapped implementation flips exactly one line.
+#[test]
+fn typed_int_ordering_compares() {
+    run_outputs(
+        "println(1 < 2)\n\
+         println(2 < 1)\n\
+         println(2 > 1)\n\
+         println(1 > 2)\n\
+         println(2 <= 2)\n\
+         println(3 <= 2)\n\
+         println(2 >= 2)\n\
+         println(1 >= 2)\n",
+        "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n",
+    );
+}
+
+// Concrete `Float` ordering lowers to `Op::LtFloat`/`GtFloat`/`LteFloat`/
+// `GteFloat`. Same True/False pinning as the Int case; the `<=`/`>=` lines
+// use equal operands so a strict-compare mislowering fails them.
+#[test]
+fn typed_float_ordering_compares() {
+    run_outputs(
+        "println(1.5 < 2.5)\n\
+         println(2.5 < 1.5)\n\
+         println(2.5 > 1.5)\n\
+         println(1.5 > 2.5)\n\
+         println(2.0 <= 2.0)\n\
+         println(3.0 <= 2.0)\n\
+         println(2.0 >= 2.0)\n\
+         println(1.0 >= 2.0)\n",
+        "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n",
+    );
+}
+
+// A `Numeric`-constrained polymorphic wrapper leaves the operand type as an
+// unbound `Var` at emit time, so `<`/`>`/`<=`/`>=` compile to the *generic*
+// `Op::Lt`/`Gt`/`Lte`/`Gte` and dispatch on the runtime tag. The same four
+// compiled bodies must handle Int and Float callers — exercising the fallback
+// the typed ops above bypass — and agree with them line-for-line.
+#[test]
+fn generic_ordering_compare_dispatches_on_runtime_tag() {
+    run_outputs(
+        "fn lt(a, b) { a < b }\n\
+         fn gt(a, b) { a > b }\n\
+         fn le(a, b) { a <= b }\n\
+         fn ge(a, b) { a >= b }\n\
+         println(lt(1, 2))\n\
+         println(lt(2, 1))\n\
+         println(gt(2, 1))\n\
+         println(gt(1, 2))\n\
+         println(le(2, 2))\n\
+         println(le(3, 2))\n\
+         println(ge(2, 2))\n\
+         println(ge(1, 2))\n\
+         println(lt(1.5, 2.5))\n\
+         println(gt(2.5, 1.5))\n\
+         println(le(2.0, 2.0))\n\
+         println(ge(1.0, 2.0))\n",
+        "True\nFalse\nTrue\nFalse\nTrue\nFalse\nTrue\nFalse\n\
+         True\nTrue\nTrue\nFalse\n",
+    );
+}
+
+// A direct call to a *known top-level* function lowers to `Op::CallKnown`
+// (operand = func_idx, no callee value on the stack). `twice`'s inner
+// `inc(x)` is a non-tail known call; the outer `inc(...)` is a tail known
+// call. Both must dispatch to the right body without the dynamic pop/tag/
+// arity path — a wrong `func_idx` reads the wrong function and mis-computes.
+#[test]
+fn direct_call_to_known_top_level_fn() {
+    run_outputs(
+        "fn inc(x Int) Int { x + 1 }\n\
+         fn twice(x Int) Int { inc(inc(x)) }\n\
+         println(twice(5))\n\
+         println(inc(0 - 3))\n",
+        "7\n-2\n",
+    );
+}
+
+// Mutual tail recursion between two *known top-level* functions lowers to
+// `Op::TailCallKnown`. At n = 200_000 the call chain is even -> odd -> even
+// ... — a non-tail (frame-pushing) lowering overflows the stack, so
+// terminating at all pins that the known-target tail call reuses the frame.
+#[test]
+fn mutual_tail_recursion_between_known_fns() {
+    run_outputs(
+        "fn even(n Int) Bool { if n == 0 { True } else { odd(n - 1) } }\n\
+         fn odd(n Int) Bool { if n == 0 { False } else { even(n - 1) } }\n\
+         println(even(200000))\n\
+         println(odd(200000))\n\
+         println(even(7))\n",
+        "True\nFalse\nFalse\n",
+    );
+}
+
+// A call whose callee is a runtime *value* (parameter `f`) cannot resolve to a
+// known target at emit time and falls back to dynamic `Op::Call`. `apply` is
+// compiled once but dispatches to two different bodies at runtime, so a
+// lowering that baked in either target would fail one line.
+#[test]
+fn indirect_call_through_value_is_dynamic() {
+    run_outputs(
+        "fn inc(x Int) Int { x + 1 }\n\
+         fn dbl(x Int) Int { x * 2 }\n\
+         fn apply(f fn(Int) Int, x Int) Int { f(x) }\n\
+         println(apply(inc, 5))\n\
+         println(apply(dbl, 5))\n",
+        "6\n10\n",
+    );
+}
+
+// Dynamic `Op::TailCall` fallback: `hop`'s tail call `f(acc + 1, n - 1)` goes
+// through a function-typed parameter, not a known top-level name. `count`
+// alternates `hop` (known target, `TailCallKnown`) with `f` (dynamic
+// `TailCall`); at n = 200_000 both halves must reuse the frame or the stack
+// overflows, and the accumulator pins the step count.
+#[test]
+fn indirect_tail_call_through_value_reuses_frame() {
+    run_outputs(
+        "fn hop(f fn(Int, Int) Int, acc Int, n Int) Int {\n\
+         \tif n == 0 { acc } else { f(acc + 1, n - 1) }\n\
+         }\n\
+         fn count(acc Int, n Int) Int { hop(count, acc, n) }\n\
+         println(count(0, 200000))\n",
+        "200000\n",
+    );
+}
+
+// An exhaustive match whose arms are bare constructor patterns lowers to
+// `Op::SwitchTag`: one indexed jump on the scrutinee's `variant_idx` instead
+// of a per-arm tag test. Each variant lands in a body that produces a value
+// only that arm can (3 / 40 / 506), so a mis-indexed jump table fails at
+// least one line.
+#[test]
+fn exhaustive_variant_match_is_jump_table() {
+    run_outputs(
+        "type T {\n\
+         \tA(x Int)\n\
+         \tB(x Int)\n\
+         \tC(x Int y Int)\n\
+         }\n\
+         fn pick(t T) Int {\n\
+         \tmatch t {\n\
+         \t\tA(x) -> x\n\
+         \t\tB(x) -> x * 10\n\
+         \t\tC(x, y) -> x * 100 + y\n\
+         \t}\n\
+         }\n\
+         println(pick(A(3)))\n\
+         println(pick(B(4)))\n\
+         println(pick(C(5, 6)))\n",
+        "3\n40\n506\n",
+    );
+}
+
+// A nested literal in the first arm (`A(0)`) means two arms share a variant
+// tag, so a jump table indexed by `variant_idx` alone can't distinguish them
+// — the compiler must fall back to the sequential per-arm `Op::MatchEnum`
+// path. `A(0)` hits the literal arm (999), any other `A` the catch-all `A(x)`.
+#[test]
+fn variant_match_with_nested_literal_falls_back() {
+    run_outputs(
+        "type T {\n\
+         \tA(x Int)\n\
+         \tB(x Int)\n\
+         }\n\
+         fn pick(t T) Int {\n\
+         \tmatch t {\n\
+         \t\tA(0) -> 999\n\
+         \t\tA(x) -> x\n\
+         \t\tB(x) -> x * 10\n\
+         \t}\n\
+         }\n\
+         println(pick(A(0)))\n\
+         println(pick(A(3)))\n\
+         println(pick(B(4)))\n",
+        "999\n3\n40\n",
+    );
+}
+
+// `.field` on a resolved record type lowers to `Op::GetFieldUnchecked` — the
+// compiler proved the field index, so the tag/bounds checks are dead. Three
+// distinct fields at indices 0/1/2 pin the operand encoding; the record-update
+// `..p` spread projects the two unnamed fields out of the base through the
+// same op, so `q.x`/`q.z` read the base's values and `q.y` the override.
+#[test]
+fn record_field_access_unchecked() {
+    run_outputs(
+        "type P { x Int y Int z Int }\n\
+         p = P(x: 10, y: 20, z: 30)\n\
+         println(p.x)\n\
+         println(p.y)\n\
+         println(p.z)\n\
+         q = P(y: 99, ..p)\n\
+         println(q.x)\n\
+         println(q.y)\n\
+         println(q.z)\n",
+        "10\n20\n30\n10\n99\n30\n",
+    );
+}
+
+// A field present at the same position on *every* variant is read by index
+// alone; the receiver's runtime tag varies across calls (A/B/C) but
+// `GetFieldUnchecked` must not consult it. This is the closest the language
+// admits to a "polymorphic" `.field`: nominal typing means the receiver type
+// is always a resolved `Con` (a `Var` receiver is a compile error), so the
+// checked `Op::GetField` fallback is not reachable from surface syntax — its
+// behaviour is pinned indirectly here by the tag-varying reads matching.
+#[test]
+fn field_access_across_variants_ignores_runtime_tag() {
+    run_outputs(
+        "type S {\n\
+         \tA(v Int w Int)\n\
+         \tB(v Int w Int)\n\
+         \tC(v Int w Int)\n\
+         }\n\
+         fn sum(s S) Int { s.v + s.w }\n\
+         println(sum(A(1, 2)))\n\
+         println(sum(B(10, 20)))\n\
+         println(sum(C(100, 200)))\n",
+        "3\n30\n300\n",
+    );
+}

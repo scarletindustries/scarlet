@@ -542,6 +542,11 @@ impl VM {
                 Op::Drop => self.seq_drop()?,
                 Op::Append => self.seq_append(instr.operand)?,
                 Op::GetField => self.get_field(instr.operand)?,
+                Op::GetFieldUnchecked => {
+                    let val = self.pop()?;
+                    self.stack
+                        .push(val.enum_field_typed(instr.operand as usize));
+                }
                 Op::MakeClosure => {
                     let closure_func_idx = instr.operand;
                     let cc =

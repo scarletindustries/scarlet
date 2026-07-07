@@ -1448,6 +1448,23 @@ impl Value {
             None
         }
     }
+    /// Payload field `idx` of a value the bytecode compiler has statically
+    /// proven to be an enum with at least `idx + 1` fields (the
+    /// `GetFieldUnchecked` opcode) — same contract as [`Value::as_int_typed`]:
+    /// the precondition is debug-asserted, and release-build misuse is
+    /// memory-safe (`nil` fallback) but yields garbage. Direct word read at
+    /// the field's offset — no `EnumRef`, no count read, no bounds check.
+    #[inline(always)]
+    pub fn enum_field_typed(&self, idx: usize) -> Value {
+        debug_assert!(self.as_enum().is_some_and(|e| idx < e.payload().len()));
+        if self.is_tag(HeapTag::Enum) {
+            // SAFETY: tag-checked Enum; payload fields start at word 6
+            // (see `EnumRef::payload`). `idx` is compiler-proven in-bounds.
+            unsafe { payload_value(self.heap_obj(), 6 + idx) }
+        } else {
+            Value::nil()
+        }
+    }
 
     /// Borrowed many-armed view. `BigInt` is folded into `Int` so callers see
     /// a single integer arm.
