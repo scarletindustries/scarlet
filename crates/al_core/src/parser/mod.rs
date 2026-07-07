@@ -1840,6 +1840,7 @@ impl Parser {
         self.eat(Kind::PuncOpenParen)?;
         let (args, rest) = self.parse_pattern_args()?;
         self.eat(Kind::PuncCloseParen)?;
+        let pattern_span = self.span_from(span);
         self.eat(Kind::PuncEquals)?;
         let init = self.parse_expression()?;
         Ok(ast::Statement::CtorDestructuringBinding(
@@ -1847,6 +1848,7 @@ impl Parser {
                 name,
                 args,
                 rest,
+                pattern_span,
                 init,
                 span: self.span_from(span),
             },

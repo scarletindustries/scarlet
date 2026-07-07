@@ -184,6 +184,9 @@ pub struct CtorDestructuringBinding {
     pub name: Identifier,
     pub args: Vec<PatternArg>,
     pub rest: bool,
+    /// Span of just the `Ctor(args)` head, not the `= init` tail — this is what
+    /// diagnostics against the reconstructed pattern should point at.
+    pub pattern_span: Span,
     pub init: Expression,
     pub span: Span,
 }
@@ -196,7 +199,7 @@ impl CtorDestructuringBinding {
             name: self.name.clone(),
             args: self.args.clone(),
             rest: self.rest,
-            span: self.span,
+            span: self.pattern_span,
         }
     }
 }
