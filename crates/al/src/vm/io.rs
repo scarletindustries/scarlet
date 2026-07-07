@@ -80,8 +80,6 @@ impl VM {
 
     pub(super) fn file_read(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Nothing allocates before the park: the path is copied off-heap and
-        // the result graph is budgeted at completion delivery.
         let path_v = self.pop_str("io.read_file")?;
         // Offload to the blocking pool and park so the syscall never stalls
         // this scheduler; the completion delivers the result.
@@ -94,9 +92,6 @@ impl VM {
 
     pub(super) fn file_write(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Budget while the operands are rooted: only the unaligned-binary
-        // reject allocates here — the write itself is offloaded and its
-        // result graph is budgeted at completion delivery.
         let bin_v = self.pop_binary("io.write_file")?;
         let path_v = self.pop_str("io.write_file")?;
         if let Some(v) =
@@ -323,8 +318,6 @@ impl VM {
         };
 
         // Collect the parts, rejecting non-byte-aligned binaries.
-        // The part values stay reachable through `parts_val`
-        // (rooted until the method ends; nothing here collects).
         let mut bins: Vec<Value> = Vec::with_capacity(parts.len());
         let mut unaligned = false;
         for p in parts.iter() {
@@ -432,8 +425,6 @@ impl VM {
 
     pub(super) fn dns_resolve(&mut self, ip: i32, reds: &mut i32) -> VmResult<Option<Step>> {
         *reds -= IO_REDUCTION_COST;
-        // Budget for the IP-literal fast path's Ok(IpAddress); the offload
-        // path parks and its result is budgeted at completion delivery.
         let host_v = self.pop_str("net.resolve")?;
         let host = str_ref(&host_v);
         if let Ok(addr) = host.parse::<std::net::IpAddr>() {
@@ -526,7 +517,7 @@ impl VM {
     /// Build an `al/net/error.NetError` from a socket/connect
     /// `std::io::Error`, mapping the raw OS errno to the matching variant.
     /// Anything without a named variant becomes the typed `Errno(code)`
-    /// residual — never a string. The caller has ensured `cost::NET_ERR`.
+    /// residual — never a string.
     pub(super) fn net_error_value(&mut self, e: &std::io::Error) -> Value {
         let t = match e.raw_os_error() {
             Some(libc::ETIMEDOUT) => &stdlib::net::error::TIMED_OUT,
@@ -551,8 +542,7 @@ impl VM {
     }
 
     /// Build an `al/io.IoError` from a filesystem `std::io::Error`, tagging
-    /// path-bearing variants with `path`. Unnamed kinds become
-    /// `Errno(code)`. The caller has ensured `cost::io_err(path.len())`.
+    /// path-bearing variants with `path`. Unnamed kinds become `Errno(code)`.
     pub(super) fn io_error_value(&mut self, e: &std::io::Error, path: &str) -> Value {
         let t = match e.raw_os_error() {
             Some(libc::ENOENT) => &stdlib::io::NOT_FOUND,
@@ -594,7 +584,7 @@ impl VM {
     }
 
     /// Push `Ok(Binary)` over the first `n` bytes just read into the scratch
-    /// buffer (copied out). The caller ensured `cost::BINARY + cost::WRAP`.
+    /// buffer (copied out).
     #[inline]
     fn push_read_ok(&mut self, n: usize) {
         let data = Value::binary_from_slice_in(&mut self.heap, &self.read_scratch[..n]);
@@ -604,7 +594,7 @@ impl VM {
 
     /// Zero-copy view box over `bin` minus its first `skip` bytes — the
     /// unwritten tail a parked write resumes with. The binary is byte-aligned
-    /// (writes reject unaligned input); the caller ensured `cost::BINARY`.
+    /// (writes reject unaligned input).
     #[inline]
     fn tail_view(&mut self, bin: BinaryRef<'_>, skip: usize) -> Value {
         let backing = bin.backing_arc();
@@ -624,8 +614,6 @@ impl VM {
     }
 
     /// Push `Ok(v)` or a typed `NetError` built from the socket `io::Error`.
-    /// The caller's ensured budget covers `cost::WRAP` plus, on the error
-    /// path, `cost::NET_ERR` (it ensured before popping).
     #[inline]
     fn push_net(&mut self, r: std::io::Result<Value>) {
         let v = match r {
@@ -639,8 +627,7 @@ impl VM {
     }
 
     /// If `bits` is not byte-aligned, the error to push — built from the
-    /// caller's `unaligned` template (`NetError`/`IoError`). The caller's
-    /// ensured budget covers the variant + wrapper.
+    /// caller's `unaligned` template (`NetError`/`IoError`).
     #[inline]
     fn reject_unaligned(
         &mut self,
@@ -722,8 +709,6 @@ impl VM {
     /// poller, and build the AL `Ok(Socket)` result — or `Err(NetError)`
     /// when the poller refuses the fd (a connection that cannot wake its
     /// parks must not be adopted).
-    /// Allocates `cost::ADOPT` (or `cost::NET_ERR`); callers ensure both
-    /// before popping.
     pub(super) fn adopt_connection(
         &mut self,
         stream: TcpStream,

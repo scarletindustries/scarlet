@@ -17,10 +17,6 @@
 //! Stdlib variants outside this fixed set (error values) go through
 //! `VM::stdlib_template`, which builds and memoizes an [`EnumTemplate`]
 //! on first use against the same frozen area.
-//!
-//! Allocation discipline: `instantiate` charges the caller's ensured
-//! budget (`cost::enum_(n)` plus payload-specific terms — see the
-//! constructor docs); nothing here runs a safepoint.
 
 use al_core::bytecode::{Arena, Value, enum_hash_with_payload, enum_name_prefix_hash};
 use al_core::frozen::FrozenBuilder;
@@ -47,9 +43,8 @@ pub(super) struct EnumTemplate {
 }
 
 impl EnumTemplate {
-    /// Build an instance carrying `payload` in `a`. The caller has ensured
-    /// the arena headroom (`cost::enum_(payload.len())`); names and labels
-    /// are frozen references, never copied.
+    /// Build an instance carrying `payload` in `a`. Names and labels are
+    /// frozen references, never copied.
     pub(super) fn instantiate<A: Arena + ?Sized>(&self, a: &mut A, payload: &[Value]) -> Value {
         let hash = enum_hash_with_payload(self.prefix_hash, payload);
         Value::enum_in(
@@ -147,7 +142,7 @@ impl PreludeTemplates {
     }
 
     /// Build an `al/net/address.IpAddress` (`V4`/`V6`) from a
-    /// `std::net::IpAddr`. The caller has ensured `cost::IP_ADDR`.
+    /// `std::net::IpAddr`.
     pub(super) fn ip_address<A: Arena + ?Sized>(&self, a: &mut A, ip: std::net::IpAddr) -> Value {
         let tpl = if ip.is_ipv6() {
             self.ip_v6.clone()
@@ -158,7 +153,7 @@ impl PreludeTemplates {
         tpl.instantiate(a, &[text])
     }
 
-    /// The caller has ensured `cost::SOCK_ADDR`.
+    /// Build an `al/net/address.SocketAddress` from a `std::net::SocketAddr`.
     pub(super) fn socket_address<A: Arena + ?Sized>(
         &self,
         a: &mut A,
@@ -169,8 +164,7 @@ impl PreludeTemplates {
             .instantiate(a, &[ip, Value::small_int(addr.port() as i64)])
     }
 
-    /// The caller has ensured `cost::SOCKET_RECORD` on top of the conn
-    /// handle's own cost.
+    /// Build an `al/net.Socket` record wrapping `conn` with its peer address.
     pub(super) fn make_socket<A: Arena + ?Sized>(
         &self,
         a: &mut A,

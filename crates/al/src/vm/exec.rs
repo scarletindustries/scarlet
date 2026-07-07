@@ -91,8 +91,8 @@ impl VM {
                     self.stack.push(Value::$ctor($body));
                 }};
             }
-            // Integer-result forms: `push_int` budgets + boxes the rare
-            // out-of-range spill itself (operands are immediates).
+            // Integer-result forms: `push_int` boxes the rare out-of-range
+            // spill.
             macro_rules! bin_int {
                 ($acc:ident, |$a:ident, $b:ident| $body:expr) => {{
                     let $b = self.pop()?.$acc();
@@ -207,11 +207,8 @@ impl VM {
                         if slot >= self.globals.len() {
                             self.globals.resize(slot + 1, Value::nil());
                         }
-                        let frozen = freeze::freeze_global(
-                            &mut self.heap,
-                            &mut self.frozen,
-                            self.stack[slot].clone(),
-                        );
+                        let frozen =
+                            freeze::freeze_global(&mut self.frozen, self.stack[slot].clone());
                         self.globals[slot] = frozen.value();
                         self.runtime.publish_global(slot, frozen);
                     }
@@ -591,10 +588,6 @@ impl VM {
                     if val.as_str().is_some() {
                         self.stack.push(val);
                     } else {
-                        // Variable-size op: format into host memory first (a
-                        // Rust String is not a heap value), which fixes the
-                        // real need; `val` is never read past this point, so
-                        // nothing unrooted is consulted across the safepoint.
                         let s = inspect(&val, &self.program);
                         let v = Value::str_in(&mut self.heap, &s);
                         self.stack.push(v);
@@ -607,8 +600,6 @@ impl VM {
                         return Err(VmError::internal("stack underflow"));
                     }
                     let base = len - n;
-                    // The real need is the sum of the operand lengths, summed
-                    // while all n operands are still rooted on the stack.
                     let mut total = 0usize;
                     for v in &self.stack[base..] {
                         match v.as_str() {
@@ -744,9 +735,9 @@ impl VM {
     /// the constant pool at the compile-time `enum_name_prefix_hash`.
     fn make_enum_payload(&mut self, prehash_idx: i32, payload_count: usize) -> VmResult<()> {
         // Names and labels are constant-pool references; only the enum cell and
-        // its payload slots are fresh. The payload stays rooted in place; the
-        // four header words sit at fixed offsets just below it. All are read
-        // before the single truncate that retires the operands.
+        // its payload slots are fresh. The four header words sit at fixed
+        // offsets just below the payload; all operands are read before the
+        // single truncate that retires them.
         let base = self.operand_base(payload_count + 4)?;
         let payload_base = base + 4;
 
@@ -914,9 +905,7 @@ impl VM {
     // --- Prelude value constructors ------------------------------------------
     //
     // `make_nil`/`make_none` copy prebuilt frozen-area values and allocate
-    // nothing. The payload-carrying constructors build one fresh wrapper
-    // enum in the current process arena, against the caller's ensured
-    // budget (`cost::WRAP`).
+    // nothing. The payload-carrying constructors build one fresh wrapper enum.
 
     #[inline]
     pub(super) fn make_nil(&self) -> Value {
@@ -955,8 +944,7 @@ impl VM {
     /// The frozen [`EnumTemplate`] for a stdlib variant, built on first use
     /// (interned names go into the program's frozen area) and memoized by
     /// template identity, so runtime error construction allocates only the
-    /// enum cell itself — never names — exactly as `cost::NET_ERR`/
-    /// `cost::io_err` budget.
+    /// enum cell itself — never names.
     pub(super) fn stdlib_template(&mut self, t: &'static VariantTemplate) -> EnumTemplate {
         let key = t as *const VariantTemplate as usize;
         if let Some(tpl) = self.template_cache.get(&key) {
@@ -967,8 +955,7 @@ impl VM {
         tpl
     }
 
-    /// A nullary stdlib enum instance in the current process arena. The
-    /// caller has ensured `cost::enum_(0)`.
+    /// A nullary stdlib enum instance.
     pub(super) fn stdlib_enum(&mut self, t: &'static VariantTemplate) -> Value {
         let tpl = self.stdlib_template(t);
         tpl.instantiate(&mut self.heap, &[])
@@ -1051,11 +1038,8 @@ impl VM {
     /// pairs use `int_f`, float (or mixed) pairs use `float_f` after int
     /// promotion, anything else is a compiler-bug error. Arithmetic is
     /// TOTAL — every numeric case yields a value: integer overflow wraps
-    /// with two's-complement semantics (the spill into a boxed big int
-    /// budgets itself in `boxed_int`; the operands are immediates, so
-    /// nothing unrooted is held across that safepoint), and `Value::float`
-    /// collapses any non-finite float result (overflow to ±Inf, `0.0/0.0`
-    /// NaN) to `0.0`.
+    /// with two's-complement semantics, and `Value::float` collapses any
+    /// non-finite float result (overflow to ±Inf, `0.0/0.0` NaN) to `0.0`.
     fn arith(
         &mut self,
         a: Value,
@@ -1091,11 +1075,8 @@ impl VM {
         Ok(())
     }
 
-    /// An integer result as a `Value`, ensuring + boxing the rare big-int
-    /// spill itself. ONLY for standalone integer results: `ensure` replaces
-    /// the opcode budget, so this must not run between an opcode's own
-    /// `ensure` and its allocations (use `int_value` under an arm budget
-    /// that includes `cost::BIG_INT` instead).
+    /// Box an i64 into a `Value`. The spill path is `#[cold] #[inline(never)]`
+    /// so heap allocation stays out of hot integer-arithmetic codegen.
     #[inline]
     pub(super) fn boxed_int(&mut self, i: i64) -> Value {
         if Value::fits_small_int(i) {
@@ -1106,24 +1087,13 @@ impl VM {
     }
 
     /// The out-of-range half of [`boxed_int`](Self::boxed_int). Kept out of
-    /// line so the safepoint + allocation never inline into the integer
-    /// arithmetic arms — the dispatch loop's hottest code — where they cost
-    /// registers and i-cache on every op for a case that almost never runs.
+    /// line so the heap allocation never inlines into the integer arithmetic
+    /// arms — the dispatch loop's hottest code — where it costs registers and
+    /// i-cache on every op for a case that almost never runs.
     #[cold]
     #[inline(never)]
     fn spill_int(&mut self, i: i64) -> Value {
         Value::int_in(&mut self.heap, i)
-    }
-
-    /// An integer result under the CURRENT opcode budget (which includes
-    /// `cost::BIG_INT` when the value may spill). Never collects.
-    #[inline]
-    pub(super) fn int_value(&mut self, i: i64) -> Value {
-        if Value::fits_small_int(i) {
-            Value::small_int(i)
-        } else {
-            Value::int_in(&mut self.heap, i)
-        }
     }
 
     /// Push the program's command-line arguments as an `Array(String)`. The

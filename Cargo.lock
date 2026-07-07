@@ -19,6 +19,7 @@ dependencies = [
  "libc",
  "memchr",
  "mio",
+ "percent-encoding",
  "rustyline",
  "serde_json",
  "smallvec",

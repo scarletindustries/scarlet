@@ -13,14 +13,6 @@ use crate::reference;
 use crate::scanner;
 use crate::span::Span;
 
-/// One open editor buffer. The reference graph (built by the incremental
-/// session and carried on every `CompileResult`) is the single source of
-/// truth for hover / goto-def / find-refs / rename / symbols, so the document
-/// only needs its text for re-analysis and overlay mirroring.
-pub struct DocumentState {
-    pub text: String,
-}
-
 /// One dependent-file occurrence of a cross-module definition, captured with
 /// its true file URI so it survives a later analysis that makes a *different*
 /// file the compilation entry.
@@ -92,17 +84,39 @@ impl WorkspaceXrefs {
     }
 }
 
+/// Per-workspace-root state: the persistent compiler session (reused across
+/// `didChange` so unchanged imports stay cached) and its cross-module reverse
+/// edges (see [`WorkspaceXrefs`]). Kept together so a root added/removed at
+/// runtime can never leave one populated without the other.
+struct RootState {
+    session: bytecode::IncrementalSession,
+    xrefs: WorkspaceXrefs,
+}
+
+impl RootState {
+    fn new() -> Self {
+        Self {
+            session: bytecode::IncrementalSession::new(crate::stdlib()),
+            xrefs: WorkspaceXrefs::default(),
+        }
+    }
+}
+
 pub struct LspServer {
     running: bool,
-    documents: HashMap<String, DocumentState>,
+    /// Every known `.al` buffer's text, keyed by URI. The reference graph
+    /// (built by the incremental session and carried on every `CompileResult`)
+    /// is the single source of truth for hover / goto-def / find-refs / rename
+    /// / symbols, so a document only needs its text for re-analysis and overlay
+    /// mirroring.
+    documents: HashMap<String, String>,
     reader: BufReader<io::Stdin>,
     /// Roots reported by the client at `initialize` (and updated by
     /// `didChangeWorkspaceFolders`). Used to bucket files into sessions.
     workspace_roots: Vec<PathBuf>,
-    /// One persistent compiler per workspace root; reused across `didChange`
-    /// so unchanged imports stay cached. Keyed by the matching entry in
+    /// One [`RootState`] per workspace root, keyed by the matching entry in
     /// `workspace_roots`, or an empty path for files opened outside any root.
-    sessions: HashMap<PathBuf, bytecode::IncrementalSession>,
+    roots: HashMap<PathBuf, RootState>,
     /// Latched once the one-time recursive workspace scan has run, so cross-
     /// module references resolve workspace-wide rather than only within the
     /// open file's import closure.
@@ -119,11 +133,6 @@ pub struct LspServer {
     /// file can't flood the Problems panel with errors for files (example
     /// demos, stdlib) the user never opened.
     open: HashSet<String>,
-    /// Per-workspace-root persistent cross-module reverse edges, keyed by the
-    /// same root as `sessions`. Survives re-rooting so find-references / rename
-    /// driven from an imported file's declaration still see its dependent-file
-    /// callers (see [`WorkspaceXrefs`]).
-    xrefs: HashMap<PathBuf, WorkspaceXrefs>,
 }
 
 pub fn new_server() -> LspServer {
@@ -132,11 +141,10 @@ pub fn new_server() -> LspServer {
         documents: HashMap::new(),
         reader: BufReader::new(io::stdin()),
         workspace_roots: Vec::new(),
-        sessions: HashMap::new(),
+        roots: HashMap::new(),
         scanned: false,
         entry_uri: None,
         open: HashSet::new(),
-        xrefs: HashMap::new(),
     }
 }
 
@@ -177,7 +185,10 @@ impl LspServer {
             }
 
             if let Some(rest) = trimmed.strip_prefix("Content-Length:") {
-                content_length = rest.trim().parse::<usize>().unwrap_or(0);
+                content_length = rest
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("bad Content-Length header: {e}"))?;
             }
         }
 
@@ -244,7 +255,14 @@ impl LspServer {
             }
             "workspace/didChangeWatchedFiles" => self.handle_did_change_watched_files(&params),
             _ => {
-                self.log(&format!("Unknown method: {}", method));
+                // An unknown *request* (id present) must be answered or the
+                // client waits forever; an unknown *notification* is just
+                // logged (JSON-RPC forbids replying to a notification).
+                if !matches!(id, Json::Null) {
+                    self.send_error(&id, -32601, &format!("method not found: {method}"));
+                } else {
+                    self.log(&format!("Unknown method: {method}"));
+                }
             }
         }
     }
@@ -295,9 +313,12 @@ impl LspServer {
     fn send_message(&self, content: &str) {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = write!(out, "Content-Length: {}\r\n\r\n", content.len());
-        let _ = out.write_all(content.as_bytes());
-        let _ = out.flush();
+        if let Err(e) = write!(out, "Content-Length: {}\r\n\r\n", content.len())
+            .and_then(|()| out.write_all(content.as_bytes()))
+            .and_then(|()| out.flush())
+        {
+            self.log(&format!("stdout write failed: {e} — client likely gone"));
+        }
     }
 
     fn log(&self, msg: &str) {
@@ -379,7 +400,7 @@ impl LspServer {
                     && let Some(p) = uri_to_path(uri)
                 {
                     self.workspace_roots.retain(|r| r != &p);
-                    self.sessions.remove(&p);
+                    self.roots.remove(&p);
                 }
             }
         }
@@ -413,17 +434,27 @@ impl LspServer {
         let Some(changes) = params.get("changes").and_then(|v| v.as_array()) else {
             return;
         };
-        if self.sessions.is_empty() {
+        if self.roots.is_empty() {
             return;
         }
         for change in changes {
             let Some(uri) = change.get("uri").and_then(|v| v.as_str()) else {
                 continue;
             };
+            let ty = change.get("type").and_then(|v| v.as_i64()).unwrap_or(2);
             if let Some(path) = uri_to_path(uri) {
                 let root = root_for(&self.workspace_roots, &path);
-                if let Some(session) = self.sessions.get_mut(&root) {
-                    session.invalidate_path(&path);
+                if let Some(r) = self.roots.get_mut(&root) {
+                    r.session.invalidate_path(&path);
+                    // Deleted (FileChangeType 3): drop its persisted reverse
+                    // edges now so find-references / rename stop reporting
+                    // occurrences in a file that no longer exists.
+                    if ty == 3 {
+                        r.xrefs.refresh(uri, Vec::new());
+                    }
+                }
+                if ty == 3 {
+                    self.documents.remove(uri);
                 }
             }
         }
@@ -436,11 +467,7 @@ impl LspServer {
         let open: Vec<(String, String)> = self
             .open
             .iter()
-            .filter_map(|uri| {
-                self.documents
-                    .get(uri)
-                    .map(|d| (uri.clone(), d.text.clone()))
-            })
+            .filter_map(|uri| self.documents.get(uri).map(|t| (uri.clone(), t.clone())))
             .collect();
         for (uri, text) in open {
             self.analyze_document(&uri, &text);
@@ -470,12 +497,7 @@ impl LspServer {
     /// `textDocument/didOpen`, also exposed so a handler-layer test can drive
     /// a document into the reference graph / session before querying it.
     pub fn open_document(&mut self, uri: &str, text: &str) {
-        self.documents.insert(
-            uri.to_string(),
-            DocumentState {
-                text: text.to_string(),
-            },
-        );
+        self.documents.insert(uri.to_string(), text.to_string());
         self.open.insert(uri.to_string());
         self.analyze_document(uri, text);
     }
@@ -501,15 +523,22 @@ impl LspServer {
         self.open.remove(&uri);
         // Keep the workspace index complete: a closed tab whose file still
         // exists stays indexed (re-synced to disk) so cross-module references
-        // into it remain resolvable. Only forget files that are truly gone.
-        if let Some(path) = uri_to_path(&uri)
-            && let Ok(text) = std::fs::read_to_string(&path)
+        // into it remain resolvable. Only forget files that are truly gone —
+        // and purge their persisted reverse edges so find-references / rename
+        // stop reporting occurrences in a file that no longer exists.
+        let path = uri_to_path(&uri);
+        if let Some(p) = &path
+            && let Ok(text) = std::fs::read_to_string(p)
         {
-            self.documents
-                .insert(uri.clone(), DocumentState { text: text.clone() });
+            self.documents.insert(uri.clone(), text.clone());
             self.analyze_document(&uri, &text);
         } else {
             self.documents.remove(&uri);
+            if let Some(p) = &path
+                && let Some(r) = self.roots.get_mut(&root_for(&self.workspace_roots, p))
+            {
+                r.xrefs.refresh(&uri, Vec::new());
+            }
         }
     }
 
@@ -519,7 +548,7 @@ impl LspServer {
     /// session keeps every imported/cached module from the last check.
     fn ensure_entry(&mut self, uri: &str) -> bool {
         if self.entry_uri.as_deref() != Some(uri) {
-            let text = self.documents.get(uri).map(|d| d.text.clone());
+            let text = self.documents.get(uri).cloned();
             if let Some(text) = text {
                 self.analyze_document(uri, &text);
             }
@@ -552,7 +581,7 @@ impl LspServer {
             return None;
         }
         let root = root_for(&self.workspace_roots, &path);
-        self.sessions.get(&root)
+        self.roots.get(&root).map(|r| &r.session)
     }
 
     /// The module path the queried file's defs/occurrences are keyed under for
@@ -684,9 +713,9 @@ impl LspServer {
     /// import/alias bindings are not.
     fn dependent_callers(&self, uri: &str, def: reference::DefId) -> impl Iterator<Item = &Xref> {
         uri_to_path(uri)
-            .and_then(|p| self.xrefs.get(&root_for(&self.workspace_roots, &p)))
+            .and_then(|p| self.roots.get(&root_for(&self.workspace_roots, &p)))
             .into_iter()
-            .flat_map(move |wx| wx.callers(def))
+            .flat_map(move |r| r.xrefs.callers(def))
             .filter(|x| x.kind.is_use_site())
     }
 
@@ -942,8 +971,7 @@ impl LspServer {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            self.documents
-                .insert(uri.clone(), DocumentState { text: text.clone() });
+            self.documents.insert(uri.clone(), text.clone());
             self.analyze_text(&uri, &text);
         }
     }
@@ -992,10 +1020,11 @@ impl LspServer {
                     .as_deref()
                     .map(|p| root_for(&self.workspace_roots, p))
                     .unwrap_or_default();
-                let session = self
-                    .sessions
+                let session = &mut self
+                    .roots
                     .entry(root)
-                    .or_insert_with(|| bytecode::IncrementalSession::new(crate::stdlib()));
+                    .or_insert_with(RootState::new)
+                    .session;
                 // Mirror the in-memory buffer into the module overlay so a
                 // dependent file's analyse picks up unsaved edits — but only
                 // while it parses cleanly. A half-typed buffer must not become
@@ -1070,7 +1099,11 @@ impl LspServer {
                     })
                 })
                 .unwrap_or_default();
-            self.xrefs.entry(root).or_default().refresh(uri, found);
+            self.roots
+                .entry(root)
+                .or_insert_with(RootState::new)
+                .xrefs
+                .refresh(uri, found);
         }
 
         // Only the client actually has these files open. The workspace scan
@@ -1092,9 +1125,11 @@ impl LspServer {
 }
 
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    // VSCode sends file:///abs/path. Percent-decoding is overkill for our
-    // own repo paths (no spaces/unicode in src/std/), so a strip suffices.
-    uri.strip_prefix("file://").map(PathBuf::from)
+    let rest = uri.strip_prefix("file://")?;
+    let decoded = percent_encoding::percent_decode_str(rest)
+        .decode_utf8()
+        .ok()?;
+    Some(PathBuf::from(&*decoded))
 }
 
 /// Pick the workspace root that owns `path`. With nested roots (rare but
@@ -1162,16 +1197,7 @@ fn diagnostic_to_json(diag: &diagnostic::Diagnostic) -> Json {
         diagnostic::Severity::Hint => 4,
     };
     json!({
-        "range": {
-            "start": {
-                "line": diag.span.start_line,
-                "character": diag.span.start_column,
-            },
-            "end": {
-                "line": diag.span.end_line,
-                "character": diag.span.end_column,
-            },
-        },
+        "range": range_json(&diag.span),
         "severity": severity,
         "message": diag.message,
     })

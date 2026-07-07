@@ -31,8 +31,7 @@
 //! Invariants this module maintains:
 //!
 //! - **A wait wakes exactly once.** Whichever of its conditions fires
-//!   first removes the park; later events for sibling fds find nothing
-//!   left to wake.
+//!   first (fd readiness or deadline) removes the park.
 //! - **Timer entries are lazily deleted.** A park with a deadline pushes
 //!   one `(deadline, id)` entry and never removes it eagerly; a popped
 //!   entry whose id is gone (or re-keyed) is discarded. The nearest live
@@ -61,7 +60,6 @@ use mio::Token;
 use mio::unix::SourceFd;
 
 use al_core::bytecode::Value;
-use smallvec::{SmallVec, smallvec};
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
 use super::{Process, VM, VmError, VmResult, sched};
@@ -74,10 +72,10 @@ pub(super) enum WakeAction {
     /// (accept/read/write set `ip - 1` to re-run) and `Sleep` (which leaves
     /// `ip` at the next instruction with its result already on the stack).
     Rerun,
-    /// Complete the pending non-blocking connect on this socket id: on wake
+    /// Complete the pending non-blocking connect on the wait's fd: on wake
     /// `VM::finish_connect` builds the result and pushes it directly onto the
     /// process's stack instead of re-running the instruction.
-    CompleteConnect(i32),
+    CompleteConnect,
 }
 
 /// What a parked process is waiting for. The variants are the exhaustive set
@@ -85,11 +83,10 @@ pub(super) enum WakeAction {
 /// carry socket interests or a deadline, and a pure timer never has fds.
 #[derive(Debug)]
 pub(super) enum Wait {
-    /// Socket readiness on any of `fds` (single-fd overwhelmingly dominates,
-    /// hence the inline SmallVec), optionally bounded by a deadline; whichever
+    /// Socket readiness on `fd`, optionally bounded by a deadline; whichever
     /// fires first wakes the process, and `action` says how it resumes.
     Io {
-        fds: SmallVec<[i32; 1]>,
+        fd: i32,
         deadline: Option<Instant>,
         action: WakeAction,
     },
@@ -102,31 +99,36 @@ pub(super) enum Wait {
 }
 
 impl Wait {
-    /// Park until socket `id` becomes readable, then re-run the instruction.
-    pub(super) fn readable(id: i32) -> Self {
+    /// Park until socket `id` becomes ready, then re-run the instruction.
+    /// Interest direction was fixed when the socket was registered with the
+    /// poller; the wait itself only names the fd.
+    pub(super) fn rerun_on(id: i32) -> Self {
         Wait::Io {
-            fds: smallvec![id],
+            fd: id,
             deadline: None,
             action: WakeAction::Rerun,
         }
     }
 
+    /// Park until socket `id` becomes readable, then re-run the instruction.
+    #[inline]
+    pub(super) fn readable(id: i32) -> Self {
+        Self::rerun_on(id)
+    }
+
     /// Park until socket `id` becomes writable, then re-run the instruction.
+    #[inline]
     pub(super) fn writable(id: i32) -> Self {
-        Wait::Io {
-            fds: smallvec![id],
-            deadline: None,
-            action: WakeAction::Rerun,
-        }
+        Self::rerun_on(id)
     }
 
     /// Park until the pending connect on socket `id` completes (signalled by
     /// writability); on wake, finish the connect and push its result.
     pub(super) fn connecting(id: i32) -> Self {
         Wait::Io {
-            fds: smallvec![id],
+            fd: id,
             deadline: None,
-            action: WakeAction::CompleteConnect(id),
+            action: WakeAction::CompleteConnect,
         }
     }
 
@@ -141,7 +143,7 @@ impl Wait {
     /// arrived or the read timed out).
     pub(super) fn read_with_deadline(id: i32, deadline: Instant) -> Self {
         Wait::Io {
-            fds: smallvec![id],
+            fd: id,
             deadline: Some(deadline),
             action: WakeAction::Rerun,
         }
@@ -265,12 +267,10 @@ impl VM {
         let id = self.next_wait_id;
         self.next_wait_id += 1;
         match &mut wait {
-            Wait::Io { fds, deadline, .. } => {
-                for &sid in fds.iter() {
-                    let waiters = self.io_waiters.entry(sid).or_default();
-                    if !waiters.contains(&id) {
-                        waiters.push(id);
-                    }
+            Wait::Io { fd, deadline, .. } => {
+                let waiters = self.io_waiters.entry(*fd).or_default();
+                if !waiters.contains(&id) {
+                    waiters.push(id);
                 }
                 if let Some(d) = *deadline {
                     self.timer_heap.push(Reverse((d, id)));
@@ -295,13 +295,11 @@ impl VM {
     /// with `parked`.
     pub(super) fn park_remove(&mut self, id: u64) -> Option<(Wait, Process)> {
         let (wait, p) = self.parked.remove(&id)?;
-        if let Wait::Io { fds, .. } = &wait {
-            for &sid in fds {
-                if let Some(waiters) = self.io_waiters.get_mut(&sid) {
-                    waiters.retain(|w| *w != id);
-                    if waiters.is_empty() {
-                        self.io_waiters.remove(&sid);
-                    }
+        if let Wait::Io { fd, .. } = &wait {
+            if let Some(waiters) = self.io_waiters.get_mut(fd) {
+                waiters.retain(|w| *w != id);
+                if waiters.is_empty() {
+                    self.io_waiters.remove(fd);
                 }
             }
         }
@@ -377,10 +375,9 @@ impl VM {
     /// Returns whether anything was woken.
     ///
     /// The woken process is made *current* for the construction, so its heap
-    /// is the allocation target and its own stack/frames are the roots if
-    /// `ensure` collects. Whatever was current when the drain ran — a yielded
-    /// process at a `Step::Yield` poll, or the empty placeholder between
-    /// slices — is detached around the delivery and restored after.
+    /// is the allocation target. Whatever was current when the drain ran — a
+    /// yielded process at a `Step::Yield` poll, or the empty placeholder
+    /// between slices — is detached around the delivery and restored after.
     pub(super) fn drain_completions(&mut self) -> bool {
         let drained: Vec<Completion> = {
             let mut q = sched::lock(&self.runtime.slots[self.scheduler_index].completions);
@@ -400,12 +397,9 @@ impl VM {
         woke
     }
 
-    /// Construct a blocking-pool result in the current process's arena — the
+    /// Construct a blocking-pool result in the current process's heap — the
     /// woken process `drain_completions` just installed. A completion carries
-    /// only `Send` raw data (bytes, `io::Error`s), never a `Value`, so there
-    /// is nothing to root across the safepoint: each arm ensures its whole
-    /// result graph up front, then allocates. `make_ok`/`make_err` charge their own
-    /// `cost::WRAP`; the inner construction is charged here.
+    /// only `Send` raw data (bytes, `io::Error`s), never a `Value`.
     fn completion_result(&mut self, result: BlockingResult) -> Value {
         match result {
             BlockingResult::ReadFile { path, result } => match result {
@@ -420,9 +414,6 @@ impl VM {
             },
             BlockingResult::WriteFile { path, result } => match result {
                 Ok(()) => {
-                    // `make_nil` clones a prebuilt template (frozen-area in
-                    // the end state) and allocates nothing; only the wrapper
-                    // needs budget.
                     let nil = self.make_nil();
                     self.make_ok(nil)
                 }
@@ -463,8 +454,8 @@ impl VM {
             let Some((_wait, p)) = self.park_remove(id) else {
                 continue;
             };
-            // The deadline beat the fds; their registrations belong to the
-            // sockets, not this wait, so there is nothing to disarm.
+            // The deadline beat the fd; its registration belongs to the
+            // socket, not this wait, so there is nothing to disarm.
             self.run_queue.push_back(p);
             woke = true;
         }
@@ -491,9 +482,7 @@ impl VM {
             }
             let key = ev.token().0 as i32;
             // The reverse index hands over this socket's waiters directly.
-            // Clone first — `park_remove` edits the index. Each wait wakes at
-            // most once: once removed, a later event for one of its sibling
-            // fds finds nothing left to wake.
+            // Clone first — `park_remove` edits the index.
             let Some(woken) = self.io_waiters.get(&key).cloned() else {
                 continue;
             };
@@ -508,9 +497,10 @@ impl VM {
                     // is built in its own arena with its stack/frames as GC
                     // roots, exactly as for blocking-pool completions.
                     Wait::Io {
-                        action: WakeAction::CompleteConnect(sid),
+                        fd,
+                        action: WakeAction::CompleteConnect,
                         ..
-                    } => self.wake_with(p, |vm| vm.finish_connect(sid)),
+                    } => self.wake_with(p, |vm| vm.finish_connect(fd)),
                     Wait::Io {
                         action: WakeAction::Rerun,
                         ..
@@ -518,8 +508,8 @@ impl VM {
                     | Wait::Timer(_)
                     | Wait::Offload(_) => self.run_queue.push_back(p),
                 }
-                // The fds' registrations stay armed: they belong to the
-                // sockets, which remain in the tables. An event with no
+                // The fd's registration stays armed: it belongs to the
+                // socket, which remains in the tables. An event with no
                 // parked wait behind it lands in this loop and is dropped.
             }
         }

@@ -79,8 +79,6 @@ impl VM {
 
     /// `arr[i]` — `Some(elem)` / `None`, never an error.
     pub(super) fn seq_index(&mut self) -> VmResult<()> {
-        // Worst case: the Some wrapper, plus a boxed big int for
-        // a far-out-of-range Range element.
         let idx_val = self.pop()?;
         let arr_val = self.pop()?;
         let v = match (arr_val.kind(), idx_val.as_int()) {
@@ -91,7 +89,7 @@ impl VM {
             (ValueView::Range(start, end), Some(idx)) if idx >= 0 => {
                 match range_elem(start, end, idx) {
                     Some(elem) => {
-                        let elem = self.int_value(elem);
+                        let elem = self.boxed_int(elem);
                         self.make_some(elem)
                     }
                     None => self.make_none(),
@@ -335,7 +333,7 @@ impl VM {
                 let mut elems = Vec::with_capacity(range_len(s, e).max(0) as usize);
                 let mut i = s;
                 while i < e {
-                    let elem = self.int_value(i);
+                    let elem = self.boxed_int(i);
                     elems.push(elem);
                     i += 1;
                 }
