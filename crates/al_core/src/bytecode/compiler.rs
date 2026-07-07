@@ -3045,16 +3045,22 @@ impl Compiler {
         let field_id = self.engine.intern(field);
         let mut field_ty: Option<Ty> = None;
         let mut field_idx: Option<usize> = None;
-        for v in self.engine.variants_of(variants).to_vec() {
-            let variant_name = self.engine.str(v.name).to_string();
-            let fields = self.engine.variant_fields_of(v.fields).to_vec();
-            match fields.iter().position(|f| f.label == field_id) {
-                Some(i) => {
-                    let substituted = self.engine.substitute_type_vars(
-                        fields[i].ty,
-                        info.type_params,
-                        &type_args,
-                    );
+        // Variant/VariantField are Copy and the pools are append-only, so copy
+        // each entry out by index instead of `to_vec()`ing the slices to
+        // survive the `&mut engine` calls in the loop body.
+        for vi in 0..variants.len as usize {
+            let v = self.engine.variants_of(variants)[vi];
+            let hit = self
+                .engine
+                .variant_fields_of(v.fields)
+                .iter()
+                .enumerate()
+                .find_map(|(i, f)| (f.label == field_id).then_some((i, f.ty)));
+            match hit {
+                Some((i, fty)) => {
+                    let substituted =
+                        self.engine
+                            .substitute_type_vars(fty, info.type_params, &type_args);
                     match field_ty {
                         Some(existing) => {
                             self.engine.unify_at(existing, substituted, field_span);
@@ -3066,7 +3072,7 @@ impl Compiler {
                             return self.field_access_bail(
                                 format!(
                                     "Field '{}' is not at the same position in every variant of '{}' (position {} in '{}', expected {})",
-                                    field, type_name, i, variant_name, prev
+                                    field, type_name, i, self.engine.str(v.name), prev
                                 ),
                                 field_span,
                             );
@@ -3078,7 +3084,9 @@ impl Compiler {
                     return self.field_access_bail(
                         format!(
                             "Field '{}' is not present on every variant of '{}' (missing on '{}')",
-                            field, type_name, variant_name
+                            field,
+                            type_name,
+                            self.engine.str(v.name)
                         ),
                         field_span,
                     );
