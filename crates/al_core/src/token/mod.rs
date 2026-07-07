@@ -3,7 +3,7 @@ mod kind;
 mod trivia;
 mod util;
 
-pub use keywords::{keyword_text, match_keyword};
+pub use keywords::{Keyword, match_keyword};
 pub use kind::Kind;
 pub use trivia::Trivia;
 pub use util::{is_name_continue, is_name_start, is_type_name};

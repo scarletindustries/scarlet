@@ -2,7 +2,7 @@ use crate::ast;
 use crate::diagnostic::{self, Diagnostic, DiagnosticCode};
 use crate::scanner::Scanner;
 use crate::span::Span;
-use crate::token::{Kind, Token, Trivia, is_type_name};
+use crate::token::{Keyword, Kind, Token, Trivia, is_type_name};
 
 type PResult<T> = Result<T, String>;
 
@@ -57,7 +57,7 @@ pub fn new_parser_from_tokens(tokens: Vec<Token>, scanner_diagnostics: Vec<Diagn
 // DO admit lowercase type variables and use `at_loose_type_start` instead.
 fn is_type_start_token(tok: &Token) -> bool {
     match tok.kind {
-        Kind::KwFunction => true,
+        Kind::Keyword(Keyword::Fn) => true,
         Kind::PuncOpenParen => true,
         Kind::Identifier => tok.literal.as_deref().is_some_and(is_type_name),
         _ => false,
@@ -188,11 +188,11 @@ impl Parser {
                 ParseContext::TopLevel => {
                     if matches!(
                         self.kind(),
-                        Kind::KwFunction
-                            | Kind::KwType
-                            | Kind::KwConst
-                            | Kind::KwImport
-                            | Kind::KwPub
+                        Kind::Keyword(Keyword::Fn)
+                            | Kind::Keyword(Keyword::Type)
+                            | Kind::Keyword(Keyword::Const)
+                            | Kind::Keyword(Keyword::Import)
+                            | Kind::Keyword(Keyword::Pub)
                             | Kind::PuncAt
                             | Kind::Identifier
                     ) {
@@ -208,7 +208,10 @@ impl Parser {
                     }
                     if matches!(
                         self.kind(),
-                        Kind::KwIf | Kind::KwMatch | Kind::KwFunction | Kind::Identifier
+                        Kind::Keyword(Keyword::If)
+                            | Kind::Keyword(Keyword::Match)
+                            | Kind::Keyword(Keyword::Fn)
+                            | Kind::Identifier
                     ) {
                         return;
                     }
@@ -458,7 +461,7 @@ impl Parser {
                     self.parse_attributed_declaration(doc, attrs)?,
                 )));
             }
-            Kind::KwConst => {
+            Kind::Keyword(Keyword::Const) => {
                 let doc = self.extract_doc_comment();
                 let decl = self.parse_const_binding(doc)?;
                 return Ok(ast::Node::Statement(Box::new(
@@ -468,10 +471,10 @@ impl Parser {
                     },
                 )));
             }
-            Kind::KwFunction => {
+            Kind::Keyword(Keyword::Fn) => {
                 return self.parse_function();
             }
-            Kind::KwType => {
+            Kind::Keyword(Keyword::Type) => {
                 let doc = self.extract_doc_comment();
                 let decl = self.parse_type_declaration(doc, Vec::new(), false)?;
                 return Ok(ast::Node::Statement(Box::new(
@@ -481,12 +484,12 @@ impl Parser {
                     },
                 )));
             }
-            Kind::KwImport => {
+            Kind::Keyword(Keyword::Import) => {
                 return Ok(ast::Node::Statement(Box::new(
                     self.parse_import_declaration()?,
                 )));
             }
-            Kind::KwPub => {
+            Kind::Keyword(Keyword::Pub) => {
                 let doc = self.extract_doc_comment();
                 return Ok(ast::Node::Statement(Box::new(
                     self.parse_attributed_declaration(doc, Vec::new())?,
@@ -539,8 +542,8 @@ impl Parser {
     fn parse_or_expression(&mut self) -> PResult<ast::Expression> {
         let left = self.parse_binary_expression()?;
 
-        if self.kind() == Kind::KwOr {
-            self.eat(Kind::KwOr)?;
+        if self.kind() == Kind::Keyword(Keyword::Or) {
+            self.eat(Kind::Keyword(Keyword::Or))?;
 
             let mut receiver: Option<ast::Identifier> = None;
 
@@ -767,9 +770,9 @@ impl Parser {
             Kind::PuncOpenBrace => self.parse_block_expression()?,
             Kind::PuncOpenBracket => self.parse_array_expression()?,
             Kind::BinOpen => self.parse_binary_literal()?,
-            Kind::KwIf => self.parse_if_expression()?,
-            Kind::KwMatch => self.parse_match_expression()?,
-            Kind::KwFunction => self.parse_function_expression()?,
+            Kind::Keyword(Keyword::If) => self.parse_if_expression()?,
+            Kind::Keyword(Keyword::Match) => self.parse_match_expression()?,
+            Kind::Keyword(Keyword::Fn) => self.parse_function_expression()?,
             Kind::Error => {
                 let span = self.current_span();
                 self.advance();
@@ -832,9 +835,9 @@ impl Parser {
                 // in an array literal — spreads there always carry a value.
                 if matches!(
                     self.kind(),
-                    Kind::PuncCloseBracket | Kind::PuncComma | Kind::KwElse
+                    Kind::PuncCloseBracket | Kind::PuncComma | Kind::Keyword(Keyword::Else)
                 ) {
-                    if self.kind() == Kind::KwElse {
+                    if self.kind() == Kind::Keyword(Keyword::Else) {
                         self.advance(); // skip the erroneous 'else' token
                     }
                     let msg = "Expected expression after `..` in array literal".to_string();
@@ -1030,19 +1033,19 @@ impl Parser {
 
     fn parse_if_expression_inner(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
-        self.eat(Kind::KwIf)?;
+        self.eat(Kind::Keyword(Keyword::If))?;
 
         let condition = self.parse_expression()?;
         let body = self.parse_braced_body("'if' branch")?;
 
-        if self.kind() != Kind::KwElse {
+        if self.kind() != Kind::Keyword(Keyword::Else) {
             return Err("'if' requires an 'else' branch".to_string());
         }
-        self.eat(Kind::KwElse)?;
+        self.eat(Kind::Keyword(Keyword::Else))?;
         // Recurse through the guarded wrapper so each `else if` re-enters the
         // depth guard — otherwise the chain recurses at constant depth and a
         // long `else if` ladder overflows the native stack (uncatchable).
-        let else_body = if self.kind() == Kind::KwIf {
+        let else_body = if self.kind() == Kind::Keyword(Keyword::If) {
             self.parse_if_expression()?
         } else {
             self.parse_braced_body("'else' branch")?
@@ -1065,7 +1068,7 @@ impl Parser {
 
     fn parse_match_expression(&mut self) -> PResult<ast::Expression> {
         let match_span = self.current_span();
-        self.eat(Kind::KwMatch)?;
+        self.eat(Kind::Keyword(Keyword::Match))?;
 
         let subject = self.parse_expression()?;
 
@@ -1092,8 +1095,8 @@ impl Parser {
                 }
             };
 
-            let guard = if self.kind() == Kind::KwIf {
-                self.eat(Kind::KwIf)?;
+            let guard = if self.kind() == Kind::Keyword(Keyword::If) {
+                self.eat(Kind::Keyword(Keyword::If))?;
                 match self.parse_expression() {
                     Ok(e) => Some(e),
                     Err(err) => {
@@ -1230,8 +1233,8 @@ impl Parser {
     fn parse_pattern_atom_inner(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         match self.kind() {
-            Kind::KwElse => {
-                self.eat(Kind::KwElse)?;
+            Kind::Keyword(Keyword::Else) => {
+                self.eat(Kind::Keyword(Keyword::Else))?;
                 Ok(ast::Pattern::Wildcard { span: start })
             }
             Kind::Identifier => {
@@ -1462,7 +1465,7 @@ impl Parser {
         attributes: Vec<ast::Attribute>,
     ) -> PResult<ast::Declaration> {
         let fn_span = self.current_span();
-        self.eat(Kind::KwFunction)?;
+        self.eat(Kind::Keyword(Keyword::Fn))?;
 
         let identifier = self.eat_identifier("Expected function name")?;
 
@@ -1500,7 +1503,7 @@ impl Parser {
 
     fn parse_function_expression(&mut self) -> PResult<ast::Expression> {
         let fn_span = self.current_span();
-        self.eat(Kind::KwFunction)?;
+        self.eat(Kind::Keyword(Keyword::Fn))?;
 
         let params = self.parse_parameters()?;
         // Lambdas have no return-type slot — body starts immediately after `)`.
@@ -1523,7 +1526,7 @@ impl Parser {
     fn at_loose_type_start(&self) -> bool {
         matches!(
             self.kind(),
-            Kind::Identifier | Kind::KwFunction | Kind::PuncOpenParen
+            Kind::Identifier | Kind::Keyword(Keyword::Fn) | Kind::PuncOpenParen
         )
     }
 
@@ -1578,7 +1581,7 @@ impl Parser {
             });
         }
 
-        if self.kind() == Kind::KwFunction {
+        if self.kind() == Kind::Keyword(Keyword::Fn) {
             return self.parse_function_type();
         }
 
@@ -1603,7 +1606,7 @@ impl Parser {
 
     fn parse_function_type(&mut self) -> PResult<ast::TypeIdentifier> {
         let span = self.current_span();
-        self.eat(Kind::KwFunction)?;
+        self.eat(Kind::Keyword(Keyword::Fn))?;
         let param_types =
             self.parse_comma_list(Kind::PuncOpenParen, Kind::PuncCloseParen, |p| {
                 p.parse_type_identifier()
@@ -1641,7 +1644,7 @@ impl Parser {
         opaque: bool,
     ) -> PResult<ast::Declaration> {
         let start = self.current_span();
-        self.eat(Kind::KwType)?;
+        self.eat(Kind::Keyword(Keyword::Type))?;
 
         let identifier = self.eat_identifier("Expected type name after `type`")?;
         if !is_type_name(&identifier.name) {
@@ -1757,7 +1760,7 @@ impl Parser {
 
     fn parse_const_binding(&mut self, doc: Option<String>) -> PResult<ast::Declaration> {
         let span = self.current_span();
-        self.eat(Kind::KwConst)?;
+        self.eat(Kind::Keyword(Keyword::Const))?;
 
         let identifier = self.eat_identifier("Expected const name")?;
 
@@ -1883,13 +1886,13 @@ impl Parser {
         attrs: Vec<ast::Attribute>,
     ) -> PResult<ast::Statement> {
         let start = attrs.first().map(|a| a.span).unwrap_or(self.current_span());
-        let is_pub = self.kind() == Kind::KwPub;
+        let is_pub = self.kind() == Kind::Keyword(Keyword::Pub);
         if is_pub {
-            self.eat(Kind::KwPub)?;
+            self.eat(Kind::Keyword(Keyword::Pub))?;
         }
-        let opaque = is_pub && self.kind() == Kind::KwOpaque;
+        let opaque = is_pub && self.kind() == Kind::Keyword(Keyword::Opaque);
         if opaque {
-            self.eat(Kind::KwOpaque)?;
+            self.eat(Kind::Keyword(Keyword::Opaque))?;
         }
         let mut decl = self.parse_declaration_inner(doc, attrs, opaque)?;
         let s = decl.span_mut();
@@ -1907,13 +1910,13 @@ impl Parser {
         attrs: Vec<ast::Attribute>,
         opaque: bool,
     ) -> PResult<ast::Declaration> {
-        if opaque && self.kind() != Kind::KwType {
+        if opaque && self.kind() != Kind::Keyword(Keyword::Type) {
             return Err("`opaque` may only be applied to `type` declarations".to_string());
         }
         match self.kind() {
-            Kind::KwFunction => self.parse_function_declaration(doc, attrs),
-            Kind::KwType => self.parse_type_declaration(doc, attrs, opaque),
-            Kind::KwConst => {
+            Kind::Keyword(Keyword::Fn) => self.parse_function_declaration(doc, attrs),
+            Kind::Keyword(Keyword::Type) => self.parse_type_declaration(doc, attrs, opaque),
+            Kind::Keyword(Keyword::Const) => {
                 if !attrs.is_empty() {
                     return Err("Attributes are not allowed on `const` declarations".to_string());
                 }
@@ -1952,7 +1955,7 @@ impl Parser {
 
     fn parse_import_declaration(&mut self) -> PResult<ast::Statement> {
         let import_span = self.current_span();
-        self.eat(Kind::KwImport)?;
+        self.eat(Kind::Keyword(Keyword::Import))?;
 
         let mut path: Vec<String> = Vec::new();
 
@@ -1989,8 +1992,8 @@ impl Parser {
         let mut alias: Option<ast::Identifier> = None;
         let mut items: Vec<ast::ImportItem> = Vec::new();
 
-        if self.kind() == Kind::KwAs {
-            self.eat(Kind::KwAs)?;
+        if self.kind() == Kind::Keyword(Keyword::As) {
+            self.eat(Kind::Keyword(Keyword::As))?;
             alias = Some(self.eat_identifier("Expected alias after `as`")?);
         }
 
@@ -2000,8 +2003,8 @@ impl Parser {
             items = self.parse_comma_list(Kind::PuncOpenBrace, Kind::PuncCloseBrace, |p| {
                 let name = p.eat_identifier("Expected import item")?;
                 let mut item_alias: Option<ast::Identifier> = None;
-                if p.kind() == Kind::KwAs {
-                    p.eat(Kind::KwAs)?;
+                if p.kind() == Kind::Keyword(Keyword::As) {
+                    p.eat(Kind::Keyword(Keyword::As))?;
                     item_alias = Some(p.eat_identifier("Expected alias after `as`")?);
                 }
                 Ok(ast::ImportItem {

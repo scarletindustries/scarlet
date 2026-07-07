@@ -1,30 +1,64 @@
 use super::Kind;
 
 /// The single source of truth for al's keyword set. Adding a keyword means
-/// adding one row here (plus the `Kind::Kw*` variant): `match_keyword`
-/// (scanner), `keyword_text` (display), and every "is this a keyword" check
-/// derive from this table, so the three cannot drift.
-pub const KEYWORDS: &[(Kind, &str)] = &[
-    (Kind::KwFunction, "fn"),
-    (Kind::KwImport, "import"),
-    (Kind::KwType, "type"),
-    (Kind::KwIn, "in"),
-    (Kind::KwMatch, "match"),
-    (Kind::KwConst, "const"),
-    (Kind::KwIf, "if"),
-    (Kind::KwElse, "else"),
-    (Kind::KwOr, "or"),
-    (Kind::KwPub, "pub"),
-    (Kind::KwOpaque, "opaque"),
-    (Kind::KwAs, "as"),
-];
+/// adding one variant here: `text` and `parse` are exhaustive matches, so the
+/// compiler enforces that the scanner spelling and the display spelling stay in
+/// lockstep with the variant list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Keyword {
+    Fn,
+    Import,
+    Type,
+    In,
+    Match,
+    Const,
+    If,
+    Else,
+    Or,
+    Pub,
+    Opaque,
+    As,
+}
 
-#[inline]
-pub fn match_keyword(s: &str) -> Option<Kind> {
-    KEYWORDS.iter().find(|(_, w)| *w == s).map(|(k, _)| *k)
+impl Keyword {
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::Fn => "fn",
+            Self::Import => "import",
+            Self::Type => "type",
+            Self::In => "in",
+            Self::Match => "match",
+            Self::Const => "const",
+            Self::If => "if",
+            Self::Else => "else",
+            Self::Or => "or",
+            Self::Pub => "pub",
+            Self::Opaque => "opaque",
+            Self::As => "as",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        use Keyword::*;
+        Some(match s {
+            "fn" => Fn,
+            "import" => Import,
+            "type" => Type,
+            "in" => In,
+            "match" => Match,
+            "const" => Const,
+            "if" => If,
+            "else" => Else,
+            "or" => Or,
+            "pub" => Pub,
+            "opaque" => Opaque,
+            "as" => As,
+            _ => return None,
+        })
+    }
 }
 
 #[inline]
-pub fn keyword_text(k: Kind) -> Option<&'static str> {
-    KEYWORDS.iter().find(|(kk, _)| *kk == k).map(|(_, w)| *w)
+pub fn match_keyword(s: &str) -> Option<Kind> {
+    Keyword::parse(s).map(Kind::Keyword)
 }

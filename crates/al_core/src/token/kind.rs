@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::keywords::keyword_text;
+use super::keywords::Keyword;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -18,18 +18,7 @@ pub enum Kind {
     BitwiseOr,
     BitwiseXor,
     BitwiseNot,
-    KwConst,
-    KwIf,
-    KwElse,
-    KwFunction,
-    KwImport,
-    KwType,
-    KwIn,
-    KwMatch,
-    KwOr,
-    KwPub,
-    KwOpaque,
-    KwAs,
+    Keyword(Keyword),
     PuncArrow,
     PuncComma,
     PuncColon,
@@ -80,22 +69,7 @@ impl fmt::Display for Kind {
             Kind::BitwiseOr => "|",
             Kind::BitwiseXor => "^",
             Kind::BitwiseNot => "~",
-            // The keyword or-pattern keeps this match exhaustive; the display
-            // text itself comes from `KEYWORDS`, so it cannot drift from what
-            // the scanner accepts.
-            #[allow(clippy::expect_used)]
-            k @ (Kind::KwConst
-            | Kind::KwIf
-            | Kind::KwElse
-            | Kind::KwFunction
-            | Kind::KwImport
-            | Kind::KwType
-            | Kind::KwIn
-            | Kind::KwMatch
-            | Kind::KwOr
-            | Kind::KwPub
-            | Kind::KwOpaque
-            | Kind::KwAs) => keyword_text(*k).expect("every Kw* variant is in KEYWORDS"),
+            Kind::Keyword(kw) => kw.text(),
             Kind::PuncArrow => "->",
             Kind::PuncComma => ",",
             Kind::PuncColon => ":",
