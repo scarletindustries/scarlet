@@ -83,8 +83,11 @@
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use indexmap::{Equivalent, IndexMap};
 
 use crate::bytecode::{Value, enum_hash_with_payload, enum_name_prefix_hash};
 
@@ -157,8 +160,8 @@ impl FrozenArea {
         FrozenBuilder {
             area: Arc::clone(self),
             strs: HashMap::new(),
-            str_arrays: HashMap::new(),
-            label_tuples: HashMap::new(),
+            str_arrays: IndexMap::new(),
+            label_tuples: IndexMap::new(),
         }
     }
 
@@ -239,8 +242,29 @@ impl fmt::Debug for FrozenArea {
 }
 
 /// Intern table for string-aggregate constants, keyed by the aggregate's
-/// string contents.
-type StrAggregateMap = HashMap<Box<[Box<str>]>, Value>;
+/// string contents. An `IndexMap` (not `HashMap`) so lookups can probe with
+/// a borrowed `&[&str]` via [`Equivalent`] — the owned key is only built on
+/// a miss.
+type StrAggregateMap = IndexMap<Box<[Box<str>]>, Value>;
+
+/// Borrowed lookup key for [`StrAggregateMap`]. Hashes identically to the
+/// stored `Box<[Box<str>]>` (both are the slice hash: length prefix, then
+/// each element's `str` hash) and compares by contents, so
+/// [`FrozenBuilder::intern_str_aggregate`] can probe the table without
+/// allocating the owned key first.
+struct BorrowedStrs<'a>(&'a [&'a str]);
+
+impl Hash for BorrowedStrs<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl Equivalent<Box<[Box<str>]>> for BorrowedStrs<'_> {
+    fn equivalent(&self, key: &Box<[Box<str>]>) -> bool {
+        key.iter().map(Box::as_ref).eq(self.0.iter().copied())
+    }
+}
 
 /// Append handle to a [`FrozenArea`]. Hydration threads one through the
 /// compiler as `&mut FrozenBuilder` so write access to the frozen area is
@@ -414,12 +438,12 @@ impl FrozenBuilder {
         map: fn(&mut Self) -> &mut StrAggregateMap,
         construct: fn(&mut Self, &[Value]) -> Value,
     ) -> Value {
-        let key: Box<[Box<str>]> = items.iter().map(|&s| Box::from(s)).collect();
-        if let Some(v) = map(self).get(&key) {
+        if let Some(v) = map(self).get(&BorrowedStrs(items)) {
             return v.clone();
         }
         let elems: Vec<Value> = items.iter().map(|s| self.str(s)).collect();
         let v = construct(self, &elems);
+        let key: Box<[Box<str>]> = items.iter().map(|&s| Box::from(s)).collect();
         map(self).insert(key, v.clone());
         v
     }
