@@ -6,7 +6,12 @@ const TAB_WIDTH: isize = 4;
 #[derive(Debug, Clone)]
 pub enum Doc {
     Nil,
-    Text(Cow<'static, str>),
+    /// Literal text. `width` is the display-column count, precomputed so `fits`
+    /// probes pay O(1) per visit instead of re-decoding UTF-8 on every probe.
+    Text {
+        s: Cow<'static, str>,
+        width: isize,
+    },
     /// Soft break. Flat → `unbroken`; broken → `broken` then newline+indent.
     Break {
         broken: &'static str,
@@ -78,7 +83,11 @@ pub fn nil() -> Doc {
 
 pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     let s = s.into();
-    if s.is_empty() { Doc::Nil } else { Doc::Text(s) }
+    if s.is_empty() {
+        return Doc::Nil;
+    }
+    let width = str_width(&s);
+    Doc::Text { s, width }
 }
 
 /// Soft break: " " when flat, newline when broken.
@@ -143,7 +152,7 @@ pub fn group(d: Doc) -> Doc {
 
 pub fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d {
-        Doc::Text(_) | Doc::Nil => d,
+        Doc::Text { .. } | Doc::Nil => d,
         Doc::Group { doc, .. } => group_as(breaks, *doc),
         _ => {
             let breaks = if contains_hardline(&d) {
@@ -177,7 +186,7 @@ pub fn ends_line(d: &Doc) -> bool {
 /// cached `Breaks` flag rather than being walked again.
 fn contains_hardline(d: &Doc) -> bool {
     match d {
-        Doc::Nil | Doc::Text(_) | Doc::Break { .. } => false,
+        Doc::Nil | Doc::Text { .. } | Doc::Break { .. } => false,
         Doc::HardLine(_) => true,
         Doc::Nest(_, inner) | Doc::NestIfBroken(_, inner) => contains_hardline(inner),
         // A hugged item's hard newlines are real for every group except the
@@ -217,10 +226,18 @@ pub fn join(items: Vec<Doc>, sep: Doc) -> Doc {
     if items.is_empty() {
         return nil();
     }
-    let mut out = Vec::with_capacity(items.len() * 2 - 1);
+    // Peel a Concat separator into its parts so each of the N-1 separators
+    // pushes the (alloc-free) leaf parts directly instead of cloning the
+    // wrapper Vec that `concat` would immediately flatten and drop.
+    let sep_parts: &[Doc] = match &sep {
+        Doc::Concat(v) => v,
+        Doc::Nil => &[],
+        s => std::slice::from_ref(s),
+    };
+    let mut out = Vec::with_capacity(items.len() + (items.len() - 1) * sep_parts.len());
     for (i, it) in items.into_iter().enumerate() {
         if i > 0 {
-            out.push(sep.clone());
+            out.extend_from_slice(sep_parts);
         }
         out.push(it);
     }
@@ -338,9 +355,9 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
     while let Some((indent, mode, d)) = work.pop_front() {
         match d {
             Doc::Nil => {}
-            Doc::Text(s) => {
+            Doc::Text { s, width } => {
                 out.push_str(s);
-                col += str_width(s);
+                col += width;
             }
             Doc::Break { broken, unbroken } => match mode {
                 Mode::Flat => {
@@ -421,6 +438,10 @@ fn emit_newline(out: &mut String, indent: isize) {
 }
 
 fn str_width(s: &str) -> isize {
+    if s.is_ascii() {
+        let tabs = s.bytes().filter(|&b| b == b'\t').count() as isize;
+        return s.len() as isize + tabs * (TAB_WIDTH - 1);
+    }
     let mut w = 0isize;
     for c in s.chars() {
         w += if c == '\t' { TAB_WIDTH } else { 1 };
@@ -462,7 +483,7 @@ fn fits<'d>(
         };
         match d {
             Doc::Nil => {}
-            Doc::Text(s) => remaining -= str_width(s),
+            Doc::Text { width, .. } => remaining -= width,
             Doc::Break { unbroken, .. } => match mode {
                 Mode::Flat => remaining -= unbroken.len() as isize,
                 // An already-broken break ends the line; everything before it fit.
