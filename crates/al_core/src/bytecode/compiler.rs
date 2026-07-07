@@ -193,6 +193,14 @@ pub struct Compiler {
     pub(super) unused: Vec<HashMap<StrId, Span>>,
     pub(super) outer_scopes: Vec<Scope>,
     pub(super) local_count: i32,
+    /// Entry-frame slot → `program.functions` index for every top-level `fn`
+    /// that has already been compiled. Populated by `compile_declared_function`
+    /// after `finish_fn_frame` assigns the `func_idx`; consulted by
+    /// `compile_call` on a `VarAccess::Global` callee to emit `CallKnown`
+    /// (immediate `func_idx`, no callee value pushed) instead of the
+    /// `PushGlobal; Call` dynamic path. A miss (forward ref within an SCC, or a
+    /// non-fn global) falls back to `Call`.
+    pub(super) global_to_func: HashMap<i32, i32>,
     pub(super) captures: HashMap<StrId, i32>,
     pub(super) capture_names: Vec<StrId>,
     pub(super) current_binding: Option<StrId>,
@@ -352,6 +360,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         unused: vec![],
         outer_scopes: vec![],
         local_count: 0,
+        global_to_func: HashMap::new(),
         captures: HashMap::new(),
         capture_names: vec![],
         current_binding: None,
@@ -2889,6 +2898,15 @@ impl Compiler {
         let ph =
             self.emit_construct_header_for_build(type_id, type_name, variant_name, field_labels_sl);
 
+        // The spread base was unified with `result_ty`; when that resolves to a
+        // concrete Con the field indices `i` below are compiler-computed and
+        // provably in-bounds, so the tag/bounds checks in `GetField` are dead.
+        let result_rep = self.engine.find(result_ty);
+        let spread_field_op = match self.engine.node(result_rep) {
+            TypeNode::Con { .. } => Op::GetFieldUnchecked,
+            _ => Op::GetField,
+        };
+
         for (i, slot_expr) in by_pos.iter().enumerate().take(field_labels_sl.len as usize) {
             let expected = param_tys.get(i).copied();
             match slot_expr {
@@ -2901,7 +2919,7 @@ impl Compiler {
                 None => match spread_slot {
                     Some(slot) => {
                         self.emit_arg(Op::PushLocal, slot);
-                        self.emit_arg(Op::GetField, i as i32);
+                        self.emit_arg(spread_field_op, i as i32);
                     }
                     None => {
                         // Missing-field error was already raised; push a
@@ -3112,7 +3130,9 @@ impl Compiler {
         }
 
         let result_ty = field_ty.unwrap_or_else(|| self.engine.fresh_var());
-        self.emit_arg(Op::GetField, field_idx.unwrap_or(0) as i32);
+        // `resolved` matched `TypeNode::Con` above (Var/other bail early), so the
+        // receiver's shape is known and `field_idx` is compiler-computed.
+        self.emit_arg(Op::GetFieldUnchecked, field_idx.unwrap_or(0) as i32);
 
         let qualified = format!("{}.{}", type_name, field);
         let doc = self.doc_if_collecting(&qualified);
