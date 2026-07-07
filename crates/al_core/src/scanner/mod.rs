@@ -195,10 +195,13 @@ impl Scanner {
             // Keyword lookup runs on a borrowed slice of the source, so the
             // common keyword tokens (`if`/`fn`/`match`/...) allocate no String
             // at all. The name is ASCII by construction (is_name_start /
-            // is_name_continue), so from_utf8 never fails.
-            let name = std::str::from_utf8(&self.input[start as usize..end as usize])
-                .expect("identifier bytes are ASCII");
-            if let Some(keyword_kind) = token::match_keyword(name) {
+            // is_name_continue), so from_utf8 never fails; the `ok()` merely
+            // avoids a deny(expect_used) — a non-UTF-8 slice cannot occur.
+            if let Some(keyword_kind) =
+                std::str::from_utf8(&self.input[start as usize..end as usize])
+                    .ok()
+                    .and_then(token::match_keyword)
+            {
                 return self.new_token(keyword_kind, None);
             }
 
