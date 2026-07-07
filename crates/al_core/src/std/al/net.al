@@ -5,8 +5,21 @@ import al/experiments/scheduler
 
 pub type Server
 
+// Bind a listener to an already-resolved address. The port is validated to be
+// in 0..=65535 and the bind never blocks the scheduler (the address is already
+// an IP literal — no name resolution happens here).
 @vm(net__listen)
-pub fn listen(host String, port Int) Result(Server, NetError)
+pub fn listen_addr(addr SocketAddress) Result(Server, NetError)
+
+// Bind a listener to `host:port`. Hostnames are resolved off-scheduler via
+// `resolve` before binding, so a name that requires DNS never stalls the
+// scheduler thread. IP literals resolve synchronously.
+pub fn listen(host String, port Int) Result(Server, NetError) {
+	match resolve(host) {
+		Ok(ip) -> listen_addr(SocketAddress(ip, port))
+		Err(e) -> Err(e)
+	}
+}
 
 @vm(net__accept)
 pub fn accept(s Server) Result(Socket, NetError)
@@ -62,15 +75,16 @@ pub fn resolve(host String) Result(IpAddress, NetError)
 // blocks the scheduler.
 pub fn connect(host String, port Int) Result(Socket, NetError) {
 	match resolve(host) {
-		Ok(ip) -> connect_addr(ip, port)
+		Ok(ip) -> connect_addr(SocketAddress(ip, port))
 		Err(e) -> Err(e)
 	}
 }
 
 // Connect to an already-resolved address. Useful to resolve once and connect
-// many times, or to connect to an `IpAddress` obtained elsewhere.
+// many times, or to connect to an `IpAddress` obtained elsewhere. The port is
+// validated to be in 0..=65535.
 @vm(net__connect)
-pub fn connect_addr(ip IpAddress, port Int) Result(Socket, NetError)
+pub fn connect_addr(addr SocketAddress) Result(Socket, NetError)
 
 @vm(net__local_addr)
 pub fn local_addr(s Server) Result(SocketAddress, NetError)

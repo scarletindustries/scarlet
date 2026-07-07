@@ -226,13 +226,13 @@ pub enum Op {
     /// one byte compare instead of per-byte read/compare ops.
     BinMatchPrefix,
     /// `[bin, at_bits, len_bits] -> Binary` — O(1) sub-view sharing the backing,
-    /// no `Result` wrapper. Emitted by `<<>>` pattern codegen after its own
-    /// bounds check has proven the range valid; `BinSlice` (checked, `Result`)
+    /// no `Option` wrapper. Emitted by `<<>>` pattern codegen after its own
+    /// bounds check has proven the range valid; `BinSlice` (checked, `Option`)
     /// remains the public builtin.
     BinView,
     /// `[haystack, needle, from] -> Option(Int)` — byte-substring search.
     BinIndexOf,
-    /// `[bin, i] -> Int` — byte at index `i`, or -1 when out of range.
+    /// `[bin, i] -> Option(Int)` — byte at index `i`, or `None` when out of range.
     BinByteAt,
     /// `[bin, radix] -> Option(Int)` — ASCII integer parse (radix 10/16),
     /// overflow-checked (returns `None` rather than wrapping).
@@ -293,11 +293,11 @@ pub enum Op {
     TcpConnect,
     TcpRead,
     /// Read with an absolute monotonic-ms deadline:
-    /// `[sock, max, deadline_ms] -> Result(Binary, String)`. Parks until data
+    /// `[sock, max, deadline_ms] -> Result(Binary, NetError)`. Parks until data
     /// arrives, the peer closes, or the deadline passes (then `Err`).
     TcpReadUntil,
     TcpWrite,
-    /// Vectored write: `[sock, Array(Binary)] -> Result(Nil, String)` in one
+    /// Vectored write: `[sock, Array(Binary)] -> Result(Nil, NetError)` in one
     /// writev syscall.
     TcpWriteParts,
     TcpClose,
@@ -307,6 +307,10 @@ pub enum Op {
     /// address. IP literals return immediately; hostnames offload to the
     /// blocking pool so the syscall never stalls the scheduler. (al/net.resolve)
     DnsResolve,
+    /// `[String] -> Option(IpAddress)` — parse an IP literal, `None` on
+    /// anything else. The only supported constructor for `IpAddress`.
+    /// (al/net/address.parse)
+    IpParse,
 
     // Concurrency (experimental, al/experiments/scheduler)
     /// Spawn a lightweight process running the popped closure.

@@ -32,6 +32,8 @@ pub type NetError {
 	MessageTooLarge
 	// A write was handed a binary that is not a whole number of bytes.
 	UnalignedBinary
+	// A port number outside 0..=65535 was passed to listen/connect.
+	InvalidPort
 	// An OS error with no dedicated variant above, carrying its raw errno so it
 	// is still matchable — never a string.
 	Errno(code Int)
