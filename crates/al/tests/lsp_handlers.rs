@@ -28,6 +28,26 @@ fn pos(uri: &str, line: i32, col: i32) -> Json {
     })
 }
 
+/// `textDocument/rename` at (`l`, `c`) with `newName` = `to`, through the seam.
+fn rename_at(
+    s: &mut Workspace,
+    uri: &str,
+    l: i32,
+    c: i32,
+    to: &str,
+) -> Result<Json, impl std::fmt::Debug> {
+    let mut params = pos(uri, l, c);
+    params["newName"] = json!(to);
+    s.rename_response(&params)
+}
+
+/// `textDocument/references` at (`l`, `c`) with `includeDeclaration` set.
+fn refs_at(s: &mut Workspace, uri: &str, l: i32, c: i32, include_decl: bool) -> Json {
+    let mut params = pos(uri, l, c);
+    params["context"] = json!({ "includeDeclaration": include_decl });
+    s.references_response(&params)
+}
+
 /// Boot a workspace rooted at `p`, open `name` (with contents `src`) as a
 /// client tab, and hand back the workspace plus the document URI ready to
 /// query.
@@ -95,11 +115,7 @@ fn seam_round_trips_position_queries() {
     // rename / prepareRename are reachable through the seam and return the
     // declared shapes; their *behaviour* is pinned by the Bug-4 tests.
     let _ = s.prepare_rename_response(&pos(&uri, 0, 7));
-    let _ = s.rename_response(&json!({
-        "textDocument": { "uri": uri },
-        "position": { "line": 0, "character": 7 },
-        "newName": "greet2",
-    }));
+    let _ = rename_at(&mut s, &uri, 0, 7, "greet2");
 }
 
 const TYPED: &str =
@@ -226,11 +242,7 @@ fn bug4_rename_top_level_fn_rewrites_def_and_all_refs() {
     let (_p, mut s, uri) = open_single("b4_rename_fn", BUG4_FN_SRC);
 
     let (l, c) = cursor(BUG4_FN_SRC, "helper", 1, 1);
-    let mut params = pos(&uri, l, c);
-    params["newName"] = json!("renamed");
-
-    let resp = s
-        .rename_response(&params)
+    let resp = rename_at(&mut s, &uri, l, c, "renamed")
         .expect("rename of a user-defined fn must be allowed, not refused");
     let changes = resp
         .get("changes")
@@ -342,11 +354,7 @@ fn bug2_find_refs_on_local_binder_includes_uses() {
 
     // Cursor on the `total` binder; find-refs must surface the use below it.
     let (l, c) = cursor(BUG2_SRC, "total", 1, 1);
-    let refs = s.references_response(&json!({
-        "textDocument": { "uri": uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": true },
-    }));
+    let refs = refs_at(&mut s, &uri, l, c, true);
     let arr = refs
         .as_array()
         .unwrap_or_else(|| panic!("references must be an array, got {refs}"));
@@ -477,9 +485,7 @@ fn bug3_import_keyword_and_non_final_segment_are_not_clickable() {
             "prepareRename must refuse (null) at import-decl position ({l},{c}), \
              not offer the whole-declaration span"
         );
-        let mut params = pos(&uri, l, c);
-        params["newName"] = json!("renamed");
-        if let Ok(edit) = s.rename_response(&params) {
+        if let Ok(edit) = rename_at(s, &uri, l, c, "renamed") {
             assert!(
                 edit.is_null(),
                 "rename at import-decl position ({l},{c}) must not emit a \
@@ -517,9 +523,7 @@ fn bug3_import_keyword_and_non_final_segment_are_not_clickable() {
             s.prepare_rename_response(&pos(&uri, l, c)).is_null(),
             "prepareRename must refuse the final import segment ({l},{c})"
         );
-        let mut params = pos(&uri, l, c);
-        params["newName"] = json!("renamed");
-        if let Ok(edit) = s.rename_response(&params) {
+        if let Ok(edit) = rename_at(&mut s, &uri, l, c, "renamed") {
             assert!(
                 edit.is_null(),
                 "rename must not edit the final import segment ({l},{c}), got {edit}"
@@ -703,11 +707,7 @@ fn assert_refs_uris_span_lib_and_main(
         XMOD_LIB
     };
     let (l, c) = cursor(query_src, "greet", 1, 1);
-    let refs = s.references_response(&json!({
-        "textDocument": { "uri": query_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": true },
-    }));
+    let refs = refs_at(s, query_uri, l, c, true);
     let arr = refs
         .as_array()
         .unwrap_or_else(|| panic!("references must be an array, got {refs}"));
@@ -756,11 +756,7 @@ fn assert_refs_span_lib_and_main(
         "the main.al location must cover the `greet` of `lib.greet()`: {arr:?}"
     );
 
-    let no_decl = s.references_response(&json!({
-        "textDocument": { "uri": query_uri },
-        "position": { "line": l, "character": c },
-        "context": { "includeDeclaration": false },
-    }));
+    let no_decl = refs_at(s, query_uri, l, c, false);
     let arr2 = no_decl
         .as_array()
         .unwrap_or_else(|| panic!("references must be an array, got {no_decl}"));
@@ -890,11 +886,7 @@ fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
     // rewrite both the declaration in lib.al and the use in main.al, so its
     // `changes` map is keyed by two distinct file URIs.
     let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
-    let mut params = pos(&main_uri, l, c);
-    params["newName"] = json!("salute");
-
-    let resp = s
-        .rename_response(&params)
+    let resp = rename_at(&mut s, &main_uri, l, c, "salute")
         .expect("a cross-module rename of a user fn must be allowed, not refused");
     assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
@@ -951,11 +943,7 @@ fn rename_from_library_declaration_rewrites_dependent_callers() {
     // Rename driven from greet's DECLARATION in lib.al. The WorkspaceEdit must
     // rewrite both the declaration in lib.al and the call site in main.al.
     let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
-    let mut params = pos(&lib_uri, l, c);
-    params["newName"] = json!("salute");
-
-    let resp = s
-        .rename_response(&params)
+    let resp = rename_at(&mut s, &lib_uri, l, c, "salute")
         .expect("a rename driven from a library declaration must be allowed");
     assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
