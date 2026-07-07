@@ -344,16 +344,6 @@ impl FrozenBuilder {
         Value::bool(b)
     }
 
-    /// The frozen Nil constant (immediate; see [`FrozenBuilder::int`]).
-    pub fn nil(&mut self) -> Value {
-        Value::nil()
-    }
-
-    /// A frozen Range constant.
-    pub fn range(&mut self, start: i64, end: i64) -> Value {
-        Value::range_in(self, start, end)
-    }
-
     /// A frozen string constant: one canonical `Value` per distinct
     /// contents per program. Enum/variant names and field labels all resolve
     /// through here, so every compile-time occurrence of the same name
@@ -375,29 +365,14 @@ impl FrozenBuilder {
         self.intern_str_aggregate(items, |b| &mut b.str_arrays, Value::array_in)
     }
 
-    /// A frozen array constant over already-built (frozen) elements.
-    pub fn array(&mut self, items: Vec<Value>) -> Value {
-        Value::array_in(self, &items)
-    }
-
     /// A frozen tuple constant over already-built (frozen) elements.
     pub fn tuple(&mut self, items: Vec<Value>) -> Value {
         Value::tuple_in(self, &items)
     }
 
-    /// A frozen binary constant over whole bytes.
-    pub fn binary(&mut self, bytes: Vec<u8>) -> Value {
-        Value::binary_in(self, bytes)
-    }
-
     /// A frozen binary constant of `bit_len` bits.
     pub fn binary_bits(&mut self, bytes: Vec<u8>, bit_len: u64) -> Value {
         Value::binary_bits_in(self, bytes, bit_len)
-    }
-
-    /// A frozen closure constant over already-built captures.
-    pub fn closure(&mut self, func_idx: i32, captures: Vec<Value>) -> Value {
-        Value::closure_in(self, func_idx, &captures)
     }
 
     /// A frozen enum constant. The names and field labels are interned so
