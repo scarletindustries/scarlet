@@ -330,6 +330,9 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
     let mut out = String::new();
     let mut col: isize = 0;
     let mut work: VecDeque<(isize, Mode, &Doc)> = VecDeque::new();
+    // Scratch stack for `fits` — hoisted here so every width probe reuses the
+    // same allocation instead of a fresh Vec per Group.
+    let mut probe: Vec<(isize, Mode, &Doc)> = Vec::new();
     work.push_back((0, Mode::Broken, doc));
 
     while let Some((indent, mode, d)) = work.pop_front() {
@@ -388,7 +391,12 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                     // O(D^2) (one `fits` per nested group, each rescanning its
                     // descendants) to O(D).
                     Mode::Flat
-                } else if fits(max_width - col, (indent, Mode::Flat, inner), &work) {
+                } else if fits(
+                    max_width - col,
+                    (indent, Mode::Flat, inner),
+                    &work,
+                    &mut probe,
+                ) {
                     Mode::Flat
                 } else {
                     Mode::Broken
@@ -436,8 +444,10 @@ fn fits<'d>(
     mut remaining: isize,
     seed: (isize, Mode, &'d Doc),
     rest: &VecDeque<(isize, Mode, &'d Doc)>,
+    probe: &mut Vec<(isize, Mode, &'d Doc)>,
 ) -> bool {
-    let mut probe: Vec<(isize, Mode, &'d Doc)> = vec![seed];
+    probe.clear();
+    probe.push(seed);
     let mut rest = rest.iter();
     loop {
         if remaining < 0 {
