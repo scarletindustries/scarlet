@@ -946,47 +946,81 @@ mod tests {
     }
 
     #[test]
-    fn fn_body_always_breaks() {
-        let out = fmt("fn f(x Int) Int { if x > 0 { 1 } else { 2 } }\n");
-        assert_eq!(out, "fn f(x Int) Int {\n\tif x > 0 { 1 } else { 2 }\n}\n");
-    }
-
-    #[test]
-    fn trivial_if_stays_inline_in_broken_body() {
-        let out = fmt("fn max(a Int, b Int) Int { if a > b { a } else { b } }\n");
-        assert_eq!(
-            out,
-            "fn max(a Int, b Int) Int {\n\tif a > b { a } else { b }\n}\n"
-        );
-    }
-
-    #[test]
-    fn non_trivial_if_branch_breaks() {
-        let out = fmt("fn fu(id Int) Option { if id == 0 { None } else { Some(id) } }\n");
-        assert_eq!(
-            out,
-            "fn fu(id Int) Option {\n\tif id == 0 {\n\t\tNone\n\t} else {\n\t\tSome(id)\n\t}\n}\n"
-        );
-    }
-
-    #[test]
-    fn if_chain_breaks_even_when_branches_trivial() {
-        let out = fmt(
-            "fn c(n Int) String { if n < 0 { 'neg' } else if n == 0 { 'zero' } else { 'pos' } }\n",
-        );
-        assert_eq!(
-            out,
-            "fn c(n Int) String {\n\tif n < 0 {\n\t\t'neg'\n\t} else if n == 0 {\n\t\t'zero'\n\t} else {\n\t\t'pos'\n\t}\n}\n"
-        );
-    }
-
-    #[test]
-    fn fn_body_braced() {
-        let out = fmt("fn perimeter(a Int, b Int, c Int) Int { a + b + c }\n");
-        assert_eq!(
-            out,
-            "fn perimeter(a Int, b Int, c Int) Int {\n\ta + b + c\n}\n"
-        );
+    fn simple_cases() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &str, &str)] = &[
+            ("fn_body_always_breaks",
+             "fn f(x Int) Int { if x > 0 { 1 } else { 2 } }\n",
+             "fn f(x Int) Int {\n\tif x > 0 { 1 } else { 2 }\n}\n"),
+            ("trivial_if_stays_inline_in_broken_body",
+             "fn max(a Int, b Int) Int { if a > b { a } else { b } }\n",
+             "fn max(a Int, b Int) Int {\n\tif a > b { a } else { b }\n}\n"),
+            ("non_trivial_if_branch_breaks",
+             "fn fu(id Int) Option { if id == 0 { None } else { Some(id) } }\n",
+             "fn fu(id Int) Option {\n\tif id == 0 {\n\t\tNone\n\t} else {\n\t\tSome(id)\n\t}\n}\n"),
+            ("if_chain_breaks_even_when_branches_trivial",
+             "fn c(n Int) String { if n < 0 { 'neg' } else if n == 0 { 'zero' } else { 'pos' } }\n",
+             "fn c(n Int) String {\n\tif n < 0 {\n\t\t'neg'\n\t} else if n == 0 {\n\t\t'zero'\n\t} else {\n\t\t'pos'\n\t}\n}\n"),
+            ("fn_body_braced",
+             "fn perimeter(a Int, b Int, c Int) Int { a + b + c }\n",
+             "fn perimeter(a Int, b Int, c Int) Int {\n\ta + b + c\n}\n"),
+            ("type_shorthand_always_breaks",
+             "type Point { Point(x Int y Int) }\n",
+             "type Point {\n\tx Int\n\ty Int\n}\n"),
+            ("type_single_nullary_ctor_explicit",
+             "type Nil { Nil }\n",
+             "type Nil {\n\tNil\n}\n"),
+            ("lambda_braceless",
+             "f = fn(x Int) { x * 2 }\n",
+             "f = fn(x Int) x * 2\n"),
+            ("pub_preserves_blank_line",
+             "pub fn a() Int { 1 }\n\npub fn b() Int { 2 }\n",
+             "pub fn a() Int {\n\t1\n}\n\npub fn b() Int {\n\t2\n}\n"),
+            ("type_multi_variant_explicit",
+             "type Maybe(a) { Just(value A) Nothing }\n",
+             "type Maybe(a) {\n\tJust(value A)\n\tNothing\n}\n"),
+            ("double_quotes_normalise_to_single",
+             "x = \"hello\"\n",
+             "x = 'hello'\n"),
+            ("single_quote_in_content_uses_double",
+             "x = \"it's fine\"\n",
+             "x = \"it's fine\"\n"),
+            ("single_quote_escaped_uses_double",
+             "x = 'it\\'s fine'\n",
+             "x = \"it's fine\"\n"),
+            ("both_quotes_prefers_single_with_escape",
+             "x = \"it's \\\"ok\\\"\"\n",
+             "x = 'it\\'s \"ok\"'\n"),
+            ("vm_attribute_on_own_line",
+             "@vm(tcp_listen) pub fn listen(p Int) Result(Server, String)\n",
+             "@vm(tcp_listen)\npub fn listen(p Int) Result(Server, String)\n"),
+            ("external_type_body_less",
+             "pub type Socket\n",
+             "pub type Socket\n"),
+            ("opaque_type_shorthand_round_trips",
+             "pub opaque type Id {\n\tn Int\n}\n",
+             "pub opaque type Id {\n\tn Int\n}\n"),
+            ("opaque_type_variants_round_trips",
+             "pub opaque type Maybe { Yes No }\n",
+             "pub opaque type Maybe {\n\tYes\n\tNo\n}\n"),
+            ("match_arms_newline_separated_no_commas",
+             "match x { Ok(a) -> a\n Err(e) -> e }\n",
+             "match x {\n\tOk(a) -> a\n\tErr(e) -> e\n}\n"),
+            ("blank_line_preserved",
+             "fn a() Int { 1 }\n\nfn b() Int { 2 }\n",
+             "fn a() Int {\n\t1\n}\n\nfn b() Int {\n\t2\n}\n"),
+            ("excess_blank_lines_collapse",
+             "fn a() Int { 1 }\n\n\n\n\nfn b() Int { 2 }\n",
+             "fn a() Int {\n\t1\n}\n\n\nfn b() Int {\n\t2\n}\n"),
+            ("comment_preserved_above_fn",
+             "// hello\nfn a() Int { 1 }\n",
+             "// hello\nfn a() Int {\n\t1\n}\n"),
+        ];
+        for (name, src, expected) in cases {
+            let out = fmt(src);
+            assert_eq!(out, *expected, "case `{name}`");
+            assert_round_trips(&out);
+        }
     }
 
     #[test]
@@ -1004,90 +1038,12 @@ mod tests {
     }
 
     #[test]
-    fn type_shorthand_always_breaks() {
-        let out = fmt("type Point { Point(x Int y Int) }\n");
-        assert_eq!(out, "type Point {\n\tx Int\n\ty Int\n}\n");
-    }
-
-    #[test]
-    fn type_single_nullary_ctor_explicit() {
-        let out = fmt("type Nil { Nil }\n");
-        assert_eq!(out, "type Nil {\n\tNil\n}\n");
-    }
-
-    #[test]
-    fn lambda_braceless() {
-        let out = fmt("f = fn(x Int) { x * 2 }\n");
-        assert_eq!(out, "f = fn(x Int) x * 2\n");
-    }
-
-    #[test]
-    fn pub_preserves_blank_line() {
-        let out = fmt("pub fn a() Int { 1 }\n\npub fn b() Int { 2 }\n");
-        assert_eq!(
-            out,
-            "pub fn a() Int {\n\t1\n}\n\npub fn b() Int {\n\t2\n}\n"
-        );
-    }
-
-    #[test]
-    fn type_multi_variant_explicit() {
-        let out = fmt("type Maybe(a) { Just(value A) Nothing }\n");
-        assert_eq!(out, "type Maybe(a) {\n\tJust(value A)\n\tNothing\n}\n");
-    }
-
-    #[test]
     fn match_top_level_wildcard_emits_else() {
         let out = fmt("fn f(x Int) String { match x { 1 -> 'one'\n _ -> 'other' } }\n");
         assert!(out.contains("else -> 'other'\n"), "got: {out}");
         let out2 = fmt("fn g(o Option(Int)) String { match o { Some(_) -> 'y'\n else -> 'n' } }\n");
         assert!(out2.contains("Some(_) -> 'y'"), "nested _: {out2}");
         assert!(out2.contains("else -> 'n'\n"), "top else: {out2}");
-    }
-
-    #[test]
-    fn double_quotes_normalise_to_single() {
-        assert_eq!(fmt("x = \"hello\"\n"), "x = 'hello'\n");
-    }
-
-    #[test]
-    fn single_quote_in_content_uses_double() {
-        assert_eq!(fmt("x = \"it's fine\"\n"), "x = \"it's fine\"\n");
-        assert_eq!(fmt("x = 'it\\'s fine'\n"), "x = \"it's fine\"\n");
-    }
-
-    #[test]
-    fn both_quotes_prefers_single_with_escape() {
-        assert_eq!(fmt("x = \"it's \\\"ok\\\"\"\n"), "x = 'it\\'s \"ok\"'\n");
-    }
-
-    #[test]
-    fn vm_attribute_on_own_line() {
-        let out = fmt("@vm(tcp_listen) pub fn listen(p Int) Result(Server, String)\n");
-        assert_eq!(
-            out,
-            "@vm(tcp_listen)\npub fn listen(p Int) Result(Server, String)\n"
-        );
-    }
-
-    #[test]
-    fn external_type_body_less() {
-        let out = fmt("pub type Socket\n");
-        assert_eq!(out, "pub type Socket\n");
-    }
-
-    #[test]
-    fn opaque_type_round_trips() {
-        let out = fmt("pub opaque type Id {\n\tn Int\n}\n");
-        assert_eq!(out, "pub opaque type Id {\n\tn Int\n}\n");
-        let out = fmt("pub opaque type Maybe { Yes No }\n");
-        assert_eq!(out, "pub opaque type Maybe {\n\tYes\n\tNo\n}\n");
-    }
-
-    #[test]
-    fn match_arms_newline_separated_no_commas() {
-        let out = fmt("match x { Ok(a) -> a\n Err(e) -> e }\n");
-        assert_eq!(out, "match x {\n\tOk(a) -> a\n\tErr(e) -> e\n}\n");
     }
 
     #[test]
@@ -1207,18 +1163,6 @@ mod tests {
     }
 
     #[test]
-    fn blank_line_preserved() {
-        let out = fmt("fn a() Int { 1 }\n\nfn b() Int { 2 }\n");
-        assert_eq!(out, "fn a() Int {\n\t1\n}\n\nfn b() Int {\n\t2\n}\n");
-    }
-
-    #[test]
-    fn excess_blank_lines_collapse() {
-        let out = fmt("fn a() Int { 1 }\n\n\n\n\nfn b() Int { 2 }\n");
-        assert_eq!(out, "fn a() Int {\n\t1\n}\n\n\nfn b() Int {\n\t2\n}\n");
-    }
-
-    #[test]
     fn binary_literal_round_trip() {
         let out = fmt("x = <<1, 2:4, n:size(w), s:utf8, body:bytes(len), tail:binary>>\n");
         assert_eq!(
@@ -1290,12 +1234,6 @@ mod tests {
         // the arrow instead of wrapping after it.
         let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> 'zero'\n\t\telse -> 'more'\n\t}\n\telse -> 'none'\n}\n";
         assert_eq!(fmt(src), src);
-    }
-
-    #[test]
-    fn comment_preserved_above_fn() {
-        let out = fmt("// hello\nfn a() Int { 1 }\n");
-        assert_eq!(out, "// hello\nfn a() Int {\n\t1\n}\n");
     }
 
     #[test]
