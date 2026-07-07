@@ -75,6 +75,8 @@ pub(super) struct PreludeTemplates {
     pub(super) ip_v6: EnumTemplate,
     pub(super) socket_address: EnumTemplate,
     pub(super) socket: EnumTemplate,
+    pub(super) read_data: EnumTemplate,
+    pub(super) read_closed: Value,
     // HTTP protocol templates (al/http/h1, al/http/headers), used by the
     // native scanners in `vm::http`.
     pub(super) header: EnumTemplate,
@@ -109,6 +111,12 @@ pub(super) fn enum_template(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Enum
 /// A nullary stdlib enum value pre-built in the frozen area: pushing it is a
 /// word copy, shared by every process for the program lifetime.
 fn frozen_enum_value(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Value {
+    debug_assert!(
+        t.labels.is_empty(),
+        "frozen_enum_value requires a nullary variant: {}::{}",
+        t.type_name,
+        t.variant_name
+    );
     let tpl = enum_template(fb, t);
     tpl.instantiate(fb, &[])
 }
@@ -125,6 +133,8 @@ impl PreludeTemplates {
             ip_v6: enum_template(fb, &stdlib::net::address::V6),
             socket_address: enum_template(fb, &stdlib::net::address::SOCKET_ADDRESS),
             socket: enum_template(fb, &stdlib::net::socket::SOCKET),
+            read_data: enum_template(fb, &stdlib::net::socket::DATA),
+            read_closed: frozen_enum_value(fb, &stdlib::net::socket::CLOSED),
             header: enum_template(fb, &stdlib::http::headers::HEADER),
             version_http10: frozen_enum_value(fb, &stdlib::http::h1::HTTP10),
             version_http11: frozen_enum_value(fb, &stdlib::http::h1::HTTP11),

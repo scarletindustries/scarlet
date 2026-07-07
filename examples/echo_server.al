@@ -2,19 +2,16 @@
 // Run it, then in another terminal: nc 127.0.0.1 7777
 
 import al/net
-import al/net/socket.{Socket}
-import al/binary
+import al/net/socket.{Socket, Data, Closed}
 
 // Echo every byte a client sends until it disconnects
 fn echo(sock Socket) Nil {
 	match socket.read(sock, 65536) {
-		Ok(data) -> if binary.byte_size(data) == 0 {
-			// Zero bytes means the client closed the connection
-			socket.close(sock) or Nil
-		} else {
+		Ok(Data(data)) -> {
 			socket.write(sock, data) or Nil
 			echo(sock)
 		}
+		Ok(Closed) -> socket.close(sock) or Nil
 		Err(_) -> socket.close(sock) or Nil
 	}
 }
