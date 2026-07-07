@@ -1,6 +1,7 @@
 use crate::ast;
 use crate::type_def::Type;
 use indexmap::IndexSet;
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::rc::Rc;
@@ -50,9 +51,11 @@ impl Interner {
 
 /// Bitset over interner ids. Ids are dense and small (one per distinct ctor
 /// name in the match + subject type), so membership is a single word probe.
+/// Built once per `is_useful`/`find_witness_vec` recursion level; the inline
+/// `SmallVec` word keeps the ≤64-id case (the norm) allocation-free.
 #[derive(Debug, Default)]
 struct CtorIdSet {
-    words: Vec<u64>,
+    words: SmallVec<[u64; 1]>,
 }
 
 impl CtorIdSet {
@@ -242,32 +245,71 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct PatternRow {
-    pats: Vec<IPat>,
-    types: Vec<RcType>,
+/// Persistent singly-linked stack. Cloning is an `Rc` refcount bump and the
+/// tail is structurally shared, so `specialize`/`default_matrix` prepend
+/// O(arity) new nodes onto an existing row's tail instead of copying its
+/// O(width) suffix into a fresh `Vec` on every recursion step of `is_useful`.
+#[derive(Debug)]
+struct Stack<T>(Option<Rc<StackNode<T>>>);
+
+#[derive(Debug)]
+struct StackNode<T> {
+    head: T,
+    tail: Stack<T>,
 }
 
-impl PatternRow {
-    /// Build a row whose pats are `head ++ rest_pats` and whose types are
-    /// `ctor_types ++ rest_types` — the splice that `specialize`/`is_useful`
-    /// perform when expanding a constructor in the first column.
-    fn splice(
-        mut head: Vec<IPat>,
-        ctor_types: &[RcType],
-        rest_pats: &[IPat],
-        rest_types: &[RcType],
-    ) -> Self {
-        head.extend_from_slice(rest_pats);
-        let mut types = ctor_types.to_vec();
-        types.extend_from_slice(rest_types);
-        PatternRow { pats: head, types }
+impl<T> Clone for Stack<T> {
+    fn clone(&self) -> Self {
+        Stack(self.0.clone())
     }
 }
 
+impl<T> Default for Stack<T> {
+    fn default() -> Self {
+        Stack(None)
+    }
+}
+
+impl<T> Stack<T> {
+    fn one(head: T) -> Self {
+        Self::cons(head, Stack(None))
+    }
+
+    fn cons(head: T, tail: Self) -> Self {
+        Stack(Some(Rc::new(StackNode { head, tail })))
+    }
+
+    fn split(&self) -> Option<(&T, &Stack<T>)> {
+        self.0.as_deref().map(|n| (&n.head, &n.tail))
+    }
+}
+
+impl<T: Clone> Stack<T> {
+    /// `[items[0], items[1], ..] ++ tail`. O(items.len()) node allocs; the
+    /// tail is shared by refcount.
+    fn prepend(items: &[T], tail: &Self) -> Self {
+        items
+            .iter()
+            .rev()
+            .fold(tail.clone(), |acc, x| Self::cons(x.clone(), acc))
+    }
+
+    /// `[item; n] ++ tail`.
+    fn prepend_n(item: T, n: usize, tail: &Self) -> Self {
+        (0..n).fold(tail.clone(), |acc, _| Self::cons(item.clone(), acc))
+    }
+}
+
+/// A matrix row: the pattern for each remaining column. Column types are the
+/// same for every row in a given matrix (they evolve in lockstep with the
+/// query row), so they are carried once alongside the query in `is_useful` /
+/// `find_witness_vec` rather than duplicated per row.
+type PatStack = Stack<IPat>;
+type TypeStack = Stack<RcType>;
+
 #[derive(Debug, Clone, Default)]
 struct PatternMatrix {
-    rows: Vec<PatternRow>,
+    rows: Vec<PatStack>,
 }
 
 impl PatternMatrix {
@@ -289,7 +331,7 @@ impl PatternMatrix {
         }
         let mut seen = CtorIdSet::default();
         for row in &self.rows {
-            if let Some(first) = row.pats.first() {
+            if let Some((first, _)) = row.split() {
                 collect(first, &mut seen);
             }
         }
@@ -299,39 +341,35 @@ impl PatternMatrix {
     /// Visit every row's first column with Or-patterns recursively flattened,
     /// so `f` only ever sees `Wildcard` or `Ctor` heads. Shared iteration core
     /// for `specialize` and `default_matrix`.
-    fn for_each_head(&self, mut f: impl FnMut(&IPat, &[IPat], &[RcType])) {
-        fn go(p: &IPat, rp: &[IPat], rt: &[RcType], f: &mut impl FnMut(&IPat, &[IPat], &[RcType])) {
+    fn for_each_head(&self, mut f: impl FnMut(&IPat, &PatStack)) {
+        fn go(p: &IPat, rest: &PatStack, f: &mut impl FnMut(&IPat, &PatStack)) {
             match p {
                 IPat::Or { patterns } => {
                     for a in patterns.iter() {
-                        go(a, rp, rt, f);
+                        go(a, rest, f);
                     }
                 }
-                _ => f(p, rp, rt),
+                _ => f(p, rest),
             }
         }
         for row in &self.rows {
-            if let Some((first, rest)) = row.pats.split_first() {
-                go(first, rest, &row.types[1..], &mut f);
+            if let Some((first, rest)) = row.split() {
+                go(first, rest, &mut f);
             }
         }
     }
 
     fn specialize(&self, ctor: &CtorInfo) -> PatternMatrix {
         let mut result = PatternMatrix::default();
-        self.for_each_head(|head, rest_p, rest_t| match head {
-            IPat::Wildcard => result.rows.push(PatternRow::splice(
-                vec![IPat::Wildcard; ctor.arity],
-                &ctor.types,
-                rest_p,
-                rest_t,
-            )),
-            IPat::Ctor { id, args } if *id == ctor.id => result.rows.push(PatternRow::splice(
-                args.to_vec(),
-                &ctor.types,
-                rest_p,
-                rest_t,
-            )),
+        self.for_each_head(|head, rest| match head {
+            IPat::Wildcard => {
+                result
+                    .rows
+                    .push(PatStack::prepend_n(IPat::Wildcard, ctor.arity, rest))
+            }
+            IPat::Ctor { id, args } if *id == ctor.id => {
+                result.rows.push(PatStack::prepend(args, rest))
+            }
             _ => {}
         });
         result
@@ -339,12 +377,9 @@ impl PatternMatrix {
 
     fn default_matrix(&self) -> PatternMatrix {
         let mut result = PatternMatrix::default();
-        self.for_each_head(|head, rest_p, rest_t| {
+        self.for_each_head(|head, rest| {
             if matches!(head, IPat::Wildcard) {
-                result.rows.push(PatternRow {
-                    pats: rest_p.to_vec(),
-                    types: rest_t.to_vec(),
-                });
+                result.rows.push(rest.clone());
             }
         });
         result
@@ -355,41 +390,31 @@ fn is_complete(seen_ctors: &CtorIdSet, type_ctors: &TypeCtors) -> bool {
     !type_ctors.infinite && type_ctors.ctors.iter().all(|c| seen_ctors.contains(c.id))
 }
 
-fn is_useful(m: &PatternMatrix, row: &PatternRow) -> bool {
-    if row.pats.is_empty() {
+fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
+    let Some((first_pat, rest_pats)) = pats.split() else {
         return m.is_empty();
-    }
-
-    if row.types.is_empty() {
+    };
+    let Some((first_type, rest_types)) = types.split() else {
         return true;
-    }
+    };
 
-    let first_type = &row.types[0];
     let type_ctors = get_type_ctors(first_type);
     let seen_ctors = m.first_col_ctors();
 
-    let first_pat = &row.pats[0];
     match first_pat {
         IPat::Wildcard => {
             if is_complete(&seen_ctors, &type_ctors) {
                 for ctor in &type_ctors.ctors {
                     let specialized_m = m.specialize(ctor);
-                    let head = vec![IPat::Wildcard; ctor.arity];
-                    let new_row =
-                        PatternRow::splice(head, &ctor.types, &row.pats[1..], &row.types[1..]);
-                    if is_useful(&specialized_m, &new_row) {
+                    let new_pats = PatStack::prepend_n(IPat::Wildcard, ctor.arity, rest_pats);
+                    let new_types = TypeStack::prepend(&ctor.types, rest_types);
+                    if is_useful(&specialized_m, &new_pats, &new_types) {
                         return true;
                     }
                 }
                 false
             } else {
-                is_useful(
-                    &m.default_matrix(),
-                    &PatternRow {
-                        pats: row.pats[1..].to_vec(),
-                        types: row.types[1..].to_vec(),
-                    },
-                )
+                is_useful(&m.default_matrix(), rest_pats, rest_types)
             }
         }
         IPat::Ctor { id, args } => {
@@ -410,46 +435,28 @@ fn is_useful(m: &PatternMatrix, row: &PatternRow) -> bool {
                 }
             };
             let specialized_m = m.specialize(ctor_info);
-            let new_row = PatternRow::splice(
-                args.to_vec(),
-                &ctor_info.types,
-                &row.pats[1..],
-                &row.types[1..],
-            );
-            is_useful(&specialized_m, &new_row)
+            let new_pats = PatStack::prepend(args, rest_pats);
+            let new_types = TypeStack::prepend(&ctor_info.types, rest_types);
+            is_useful(&specialized_m, &new_pats, &new_types)
         }
-        IPat::Or { patterns } => patterns.iter().any(|p| {
-            let mut pats = Vec::with_capacity(row.pats.len());
-            pats.push(p.clone());
-            pats.extend_from_slice(&row.pats[1..]);
-            is_useful(
-                m,
-                &PatternRow {
-                    pats,
-                    types: row.types.clone(),
-                },
-            )
-        }),
+        IPat::Or { patterns } => patterns
+            .iter()
+            .any(|p| is_useful(m, &PatStack::cons(p.clone(), rest_pats.clone()), types)),
     }
 }
 
-fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<IPat>> {
-    if types.is_empty() {
-        if m.is_empty() {
-            return Some(vec![]);
-        }
-        return None;
-    }
+fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<IPat>> {
+    let Some((first_type, rest_types)) = types.split() else {
+        return if m.is_empty() { Some(vec![]) } else { None };
+    };
 
-    let first_type = &types[0];
     let type_ctors = get_type_ctors(first_type);
     let seen_ctors = m.first_col_ctors();
 
     if is_complete(&seen_ctors, &type_ctors) {
         for ctor in &type_ctors.ctors {
             let specialized_m = m.specialize(ctor);
-            let mut sub_types = ctor.types.clone();
-            sub_types.extend_from_slice(&types[1..]);
+            let sub_types = TypeStack::prepend(&ctor.types, rest_types);
             if let Some(witness_vec) = find_witness_vec(&specialized_m, &sub_types) {
                 let args: Rc<[IPat]> = (0..ctor.arity)
                     .map(|i| witness_vec.get(i).cloned().unwrap_or(IPat::Wildcard))
@@ -465,7 +472,7 @@ fn find_witness_vec(m: &PatternMatrix, types: &[RcType]) -> Option<Vec<IPat>> {
         // FIRST — a wildcard row in the matrix may still constrain later
         // columns, so padding them with `_` (as an early return would) can
         // yield a witness that overlaps an existing arm.
-        let rest = find_witness_vec(&m.default_matrix(), &types[1..])?;
+        let rest = find_witness_vec(&m.default_matrix(), rest_types)?;
         let head = type_ctors
             .ctors
             .iter()
@@ -766,19 +773,14 @@ impl UsefulnessMatrix {
     }
 
     pub fn is_useful(&mut self, pat: &Pat) -> bool {
-        let row = PatternRow {
-            pats: vec![intern_pat(pat, &mut self.interner)],
-            types: vec![self.subject_type.clone()],
-        };
-        is_useful(&self.matrix, &row)
+        let pats = PatStack::one(intern_pat(pat, &mut self.interner));
+        let types = TypeStack::one(self.subject_type.clone());
+        is_useful(&self.matrix, &pats, &types)
     }
 
     pub fn push(&mut self, pat: Pat) {
         let pat = intern_pat(&pat, &mut self.interner);
-        self.matrix.rows.push(PatternRow {
-            pats: vec![pat],
-            types: vec![self.subject_type.clone()],
-        });
+        self.matrix.rows.push(PatStack::one(pat));
     }
 
     /// Return a rendered witness pattern the given arms fail to cover, or
@@ -788,19 +790,15 @@ impl UsefulnessMatrix {
     pub fn find_missing(&mut self, patterns: &[Pat]) -> Option<String> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
-            matrix.rows.push(PatternRow {
-                pats: vec![intern_pat(p, &mut self.interner)],
-                types: vec![self.subject_type.clone()],
-            });
+            matrix
+                .rows
+                .push(PatStack::one(intern_pat(p, &mut self.interner)));
         }
-        let wildcard_row = PatternRow {
-            pats: vec![IPat::Wildcard],
-            types: vec![self.subject_type.clone()],
-        };
-        if !is_useful(&matrix, &wildcard_row) {
+        let types = TypeStack::one(self.subject_type.clone());
+        if !is_useful(&matrix, &PatStack::one(IPat::Wildcard), &types) {
             return None;
         }
-        let witness = find_witness_vec(&matrix, std::slice::from_ref(&self.subject_type))
+        let witness = find_witness_vec(&matrix, &types)
             .and_then(|v| v.into_iter().next())
             .unwrap_or(IPat::Wildcard);
         Some(pat_to_string(&witness, &self.subject_type, &self.interner))
