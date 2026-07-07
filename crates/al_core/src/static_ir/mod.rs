@@ -214,5 +214,3 @@ impl StaticStdlib {
         (code, functions, constants)
     }
 }
-
-pub use crate::bytecode::{Instruction as SInstruction, Op as SOp};

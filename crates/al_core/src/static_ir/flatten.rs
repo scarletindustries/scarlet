@@ -8,8 +8,6 @@
 //! attached. The crate-wide `clippy::panic` deny is for the runtime path.
 #![allow(clippy::panic)]
 
-use std::collections::HashSet;
-
 use indexmap::IndexMap;
 
 use super::*;
@@ -44,6 +42,8 @@ pub struct FlatPools {
     pub code: Vec<Instruction>,
     pub functions: Vec<SFunction>,
     pub constants: Vec<SConst>,
+
+    pub reserved: Vec<String>,
 
     str_intern: IndexMap<String, u32>,
 }
@@ -173,8 +173,12 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
     // The engine's pools are the basis of ours; seed them first so every
     // `StrId`/`ArenaSlice` embedded in the snapshot stays valid. Additional
     // strings (function/module names) intern after.
-    for s in &engine.strings {
-        p.intern(s);
+    // str_pool prefix must equal engine.strings verbatim so embedded StrId
+    // indices stay valid; direct copy makes that structural instead of relying
+    // on engine.strings being dupe-free.
+    p.str_pool = engine.strings.clone();
+    for (i, s) in engine.strings.iter().enumerate() {
+        p.str_intern.entry(s.clone()).or_insert(i as u32);
     }
     p.nodes = engine.nodes.clone();
     p.children = engine.children.clone();
@@ -215,13 +219,10 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
         p.constants.push(c);
     }
 
-    p
-}
+    p.reserved = out.reserved.iter().cloned().collect();
+    p.reserved.sort();
 
-pub fn reserved_sorted(reserved: &HashSet<String>) -> Vec<String> {
-    let mut v: Vec<_> = reserved.iter().cloned().collect();
-    v.sort();
-    v
+    p
 }
 
 #[cfg(test)]
@@ -323,13 +324,12 @@ mod tests {
         // The standalone type-info table covers every entry by name.
         assert_eq!(p.typeinfo_by_name.len(), out.blob.type_info.len());
 
-        // `reserved_sorted` (also build.rs-only) yields the reserved names in
-        // sorted order, losslessly.
-        let reserved = reserved_sorted(&out.reserved);
-        let mut sorted = reserved.clone();
+        // `reserved` (also build.rs-only) is the reserved names in sorted
+        // order, losslessly.
+        let mut sorted = p.reserved.clone();
         sorted.sort();
-        assert_eq!(reserved, sorted, "reserved names must come out sorted");
-        assert_eq!(reserved.len(), out.reserved.len());
-        assert!(reserved.iter().any(|r| r == "Some"));
+        assert_eq!(p.reserved, sorted, "reserved names must come out sorted");
+        assert_eq!(p.reserved.len(), out.reserved.len());
+        assert!(p.reserved.iter().any(|r| r == "Some"));
     }
 }
