@@ -43,6 +43,7 @@
 //! | [`seq`]             | the persistent RRB vector backing `Array`      |
 
 mod analysis;
+pub mod bits;
 pub mod compiler;
 pub mod hamt;
 mod prelude;

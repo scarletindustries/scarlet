@@ -97,6 +97,7 @@ use std::sync::Arc;
 use crate::frozen::FrozenBuilder;
 use crate::heap::ProcHeap;
 
+use super::bits::{copy_bits, get_bit, read_byte, tail_mask};
 pub use super::seq;
 pub use super::seq::SeqIter;
 
@@ -1534,28 +1535,6 @@ pub struct BinaryRef<'a> {
     _life: PhantomData<&'a u64>,
 }
 
-/// Read bit `i` (MSB-first) from a byte buffer. Caller guarantees `i / 8` is
-/// in bounds.
-#[inline]
-fn bit_at(backing: &[u8], i: u64) -> u8 {
-    (backing[(i / 8) as usize] >> (7 - (i % 8))) & 1
-}
-
-/// MSB-first mask selecting the logical bits of a partial trailing byte, or
-/// `None` when `bit_len` is a whole number of bytes. This is the single
-/// definition of "the masked partial tail": [`BinaryRef::to_aligned_vec`],
-/// [`BinaryRef::bits_eq`], and [`hash_value`] all mask through it, which is
-/// what keeps equality and hashing consistent over the same logical bits.
-#[inline]
-fn tail_mask(bit_len: u64) -> Option<u8> {
-    let rem = (bit_len % 8) as u32;
-    if rem == 0 {
-        None
-    } else {
-        Some(0xFFu8 << (8 - rem))
-    }
-}
-
 /// Reconstruct the fat pointer to a `Binary` box's `Arc<[u8]>` backing from
 /// its two raw-parts payload words (`Arc::into_raw` data pointer in word 0,
 /// slice length in word 1). This is the single place that knows that
@@ -1650,25 +1629,11 @@ impl<'a> BinaryRef<'a> {
     /// `bit_len.div_ceil(8)` bytes with the trailing partial byte masked to
     /// zero. COLD path — bit-unaligned views and `binary.append`/`inspect`.
     pub fn to_aligned_vec(&self) -> Vec<u8> {
-        let backing = self.backing();
         let (bit_offset, bit_len) = (self.bit_offset(), self.bit_len());
-        let out_bytes = bit_len.div_ceil(8) as usize;
-        let mut out = vec![0u8; out_bytes];
-        if bit_offset.is_multiple_of(8) {
-            let start = (bit_offset / 8) as usize;
-            let copy = out_bytes.min(backing.len() - start);
-            out[..copy].copy_from_slice(&backing[start..start + copy]);
-        } else {
-            for i in 0..bit_len {
-                let bit = bit_at(backing, bit_offset + i);
-                out[(i / 8) as usize] |= bit << (7 - (i % 8));
-            }
-        }
-        if let Some(mask) = tail_mask(bit_len)
-            && let Some(last) = out.last_mut()
-        {
-            *last &= mask;
-        }
+        let mut out = vec![0u8; bit_len.div_ceil(8) as usize];
+        // `copy_bits` writes exactly `bit_len` bits into a zeroed buffer, so the
+        // trailing padding bits stay zero — no explicit tail mask needed.
+        copy_bits(&mut out, 0, self.backing(), bit_offset, bit_len);
         out
     }
 
@@ -1690,7 +1655,7 @@ impl<'a> BinaryRef<'a> {
             return self.backing()[s..s + n] == prefix.backing()[p..p + n];
         }
         let (sb, pb) = (self.backing(), prefix.backing());
-        (0..prefix.bit_len()).all(|i| bit_at(sb, abs + i) == bit_at(pb, prefix.bit_offset() + i))
+        (0..prefix.bit_len()).all(|i| get_bit(sb, abs + i) == get_bit(pb, prefix.bit_offset() + i))
     }
 
     /// Logical-bit equality: same `bit_len` and identical logical contents,
@@ -1717,7 +1682,7 @@ impl<'a> BinaryRef<'a> {
         }
         let (sb, ob) = (self.backing(), other.backing());
         (0..bit_len)
-            .all(|i| bit_at(sb, self.bit_offset() + i) == bit_at(ob, other.bit_offset() + i))
+            .all(|i| get_bit(sb, self.bit_offset() + i) == get_bit(ob, other.bit_offset() + i))
     }
 }
 
@@ -2255,16 +2220,7 @@ fn fnv1a_bytes_sampled(mut h: u64, len: usize, mut byte_at: impl FnMut(usize) ->
 /// matching [`BinaryRef::to_aligned_vec`].
 #[inline]
 fn logical_byte(backing: &[u8], bit_offset: u64, i: usize) -> u8 {
-    let bit = bit_offset + 8 * i as u64;
-    let idx = (bit / 8) as usize;
-    let shift = (bit % 8) as u32;
-    if shift == 0 {
-        backing[idx]
-    } else {
-        let hi = backing[idx] << shift;
-        let lo = backing.get(idx + 1).map_or(0, |b| b >> (8 - shift));
-        hi | lo
-    }
+    read_byte(backing, bit_offset + 8 * i as u64)
 }
 
 #[inline]

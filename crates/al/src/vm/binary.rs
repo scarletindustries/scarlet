@@ -1,71 +1,30 @@
-//! Bit-granular operations on `HeapValue::Binary`. Bits are addressed MSB-first:
-//! bit `i` lives at byte `i / 8`, position
-//! `7 - (i % 8)`. The trailing low bits of the last byte beyond `bit_len` are
-//! always zero.
+//! Bit-granular operations on `HeapValue::Binary`. Bits are addressed MSB-first
+//! (see [`al_core::bytecode::bits`]); the trailing low bits of the last byte
+//! beyond `bit_len` are always zero.
 
-#[inline]
-fn get_bit(bytes: &[u8], i: u64) -> u8 {
-    let byte = bytes[(i / 8) as usize];
-    (byte >> (7 - (i % 8))) & 1
-}
+#[cfg(test)]
+use al_core::bytecode::bits::copy_bits;
+use al_core::bytecode::bits::{get_bit, read_byte};
 
-#[inline]
-fn set_bit(out: &mut [u8], i: u64, v: u8) {
-    let idx = (i / 8) as usize;
-    let shift = 7 - (i % 8);
-    out[idx] |= (v & 1) << shift;
-}
-
-/// Extract `take` bits starting at bit offset `at`. Caller has already
-/// bounds-checked `at + take <= bit_len`.
+/// Extract `take` bits starting at bit offset `at` into a fresh, offset-0
+/// buffer with a zeroed tail. Test helper.
 #[cfg(test)]
 fn slice(bytes: &[u8], at: u64, take: u64) -> Vec<u8> {
-    let out_bytes = take.div_ceil(8) as usize;
-    let mut out = vec![0u8; out_bytes];
-    if at.is_multiple_of(8) {
-        // Byte-aligned source: memcpy then mask the trailing partial byte.
-        let start = (at / 8) as usize;
-        let copy_len = out_bytes.min(bytes.len() - start);
-        out[..copy_len].copy_from_slice(&bytes[start..start + copy_len]);
-    } else {
-        for i in 0..take {
-            set_bit(&mut out, i, get_bit(bytes, at + i));
-        }
-    }
-    mask_tail(&mut out, take);
+    let mut out = vec![0u8; take.div_ceil(8) as usize];
+    copy_bits(&mut out, 0, bytes, at, take);
     out
 }
 
-/// Concatenate two bitstrings. `a_bits` is the bit length of `a`; the result
-/// has bit length `a_bits + b_bits`.
-pub fn append(a: &[u8], a_bits: u64, b: &[u8], b_bits: u64) -> Vec<u8> {
-    let total = a_bits + b_bits;
-    let out_bytes = total.div_ceil(8) as usize;
-    if a_bits.is_multiple_of(8) {
-        let mut out = Vec::with_capacity(out_bytes);
-        out.extend_from_slice(&a[..(a_bits / 8) as usize]);
-        out.extend_from_slice(&b[..b_bits.div_ceil(8) as usize]);
-        // `b`'s tail is already masked by invariant; nothing more to do.
-        return out;
-    }
-    let mut out = vec![0u8; out_bytes];
-    out[..(a_bits.div_ceil(8) as usize)].copy_from_slice(a);
-    // `a`'s last byte already has its low bits zeroed (invariant), so we can
-    // OR `b`'s bits in without clearing first.
-    for i in 0..b_bits {
-        set_bit(&mut out, a_bits + i, get_bit(b, i));
-    }
-    out
-}
-
+/// Concatenate two bitstrings. Test helper — production concat is
+/// `Op::BinConcatN` (`vm::text::bin_concat_n`), which builds the result
+/// directly in a shared backing without an intermediate `Vec`.
 #[cfg(test)]
-fn mask_tail(out: &mut [u8], bit_len: u64) {
-    let rem = (bit_len % 8) as u8;
-    if rem != 0
-        && let Some(last) = out.last_mut()
-    {
-        *last &= 0xFFu8 << (8 - rem);
-    }
+fn append(a: &[u8], a_bits: u64, b: &[u8], b_bits: u64) -> Vec<u8> {
+    let total = a_bits + b_bits;
+    let mut out = vec![0u8; total.div_ceil(8) as usize];
+    copy_bits(&mut out, 0, a, 0, a_bits);
+    copy_bits(&mut out, a_bits, b, 0, b_bits);
+    out
 }
 
 pub fn inspect(bytes: &[u8], bit_len: u64) -> String {
@@ -132,30 +91,21 @@ pub fn read_int(bytes: &[u8], bit_len: u64, at: u64, num_bits: u64) -> i64 {
         return (u64::from_be_bytes(buf) >> (64 - num_bits)) as i64;
     }
     // Misaligned (or zero/over-64-bit width) fallback: one bit per iteration.
-    let mut v: u128 = 0;
-    for i in 0..num_bits {
+    // Only the low 64 bits of the accumulator survive the `as i64`, so a width
+    // over 64 reads only the last 64 bits — the loop is capped and a hostile
+    // width cannot spin.
+    let skip = num_bits.saturating_sub(64);
+    let mut v: u64 = 0;
+    for i in skip..num_bits {
         let idx = at + i;
         let bit = if idx < bit_len {
             get_bit(bytes, idx)
         } else {
             0
         };
-        v = (v << 1) | bit as u128;
+        v = (v << 1) | bit as u64;
     }
     v as i64
-}
-
-/// Read the 8 bits starting at bit `at` as one byte. Caller has already
-/// bounds-checked `at + 8 <= bit_len`.
-#[inline]
-fn read_byte(bytes: &[u8], at: u64) -> u8 {
-    let idx = (at / 8) as usize;
-    let sh = (at % 8) as u32;
-    if sh == 0 {
-        bytes[idx]
-    } else {
-        (bytes[idx] << sh) | (bytes[idx + 1] >> (8 - sh))
-    }
 }
 
 /// Decode one UTF-8 codepoint starting at bit `at`. Returns `(codepoint,

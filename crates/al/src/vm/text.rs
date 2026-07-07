@@ -20,8 +20,9 @@
 //! so a parse loop walking a buffer allocates only constant-size boxes.
 
 use al_core::bytecode::Value;
+use al_core::bytecode::bits::copy_bits;
 
-use super::{VM, VmResult, bin_ref, binary, http, str_ref};
+use super::{VM, VmError, VmResult, bin_ref, binary, http, str_ref};
 
 impl VM {
     // --- String builtins -------------------------------------------------------
@@ -149,40 +150,9 @@ impl VM {
     }
 
     pub(super) fn bin_append(&mut self) -> VmResult<()> {
-        // One fresh box; the appended bytes live off-heap.
-        let b_v = self.pop_binary("binary.append")?;
-        let a_v = self.pop_binary("binary.append")?;
-        let (a, b) = (bin_ref(&a_v), bin_ref(&b_v));
-        let bits = a.bit_len() + b.bit_len();
-        // Fast path: `a` ends on a byte boundary and `b` starts on one (the
-        // invariant socket buffers and string-derived binaries always
-        // satisfy), so the result is the two byte windows back to back —
-        // built once, directly in the shared backing allocation.
-        let v = if a.bit_offset().is_multiple_of(8)
-            && a.bit_len().is_multiple_of(8)
-            && b.bit_offset().is_multiple_of(8)
-        {
-            let b_start = (b.bit_offset() / 8) as usize;
-            let b_len = b.bit_len().div_ceil(8) as usize;
-            Value::binary_concat_in(
-                &mut self.heap,
-                a.byte_window(),
-                &b.backing()[b_start..b_start + b_len],
-                bits,
-            )
-        } else {
-            // Bit-unaligned slow path: `append` needs offset-0 buffers with
-            // masked tails, so materialise both operands.
-            let out = binary::append(
-                &a.to_aligned_vec(),
-                a.bit_len(),
-                &b.to_aligned_vec(),
-                b.bit_len(),
-            );
-            Value::binary_bits_in(&mut self.heap, out, bits)
-        };
-        self.stack.push(v);
-        Ok(())
+        // `binary.append` is the 2-ary case of `Op::BinConcatN`: same
+        // byte-aligned fast path, same bit-unaligned slow path, one code path.
+        self.bin_concat_n(2)
     }
 
     /// `Op::BinConcatN` — pop the top `n` binaries, push their concatenation.
@@ -198,7 +168,9 @@ impl VM {
         let mut aligned = true;
         for (i, v) in self.stack[base..].iter().enumerate() {
             if v.as_binary().is_none() {
-                return Err("binary construction requires Binary segments".to_string());
+                return Err(VmError::internal(
+                    "binary construction requires Binary segments",
+                ));
             }
             let b = bin_ref(v);
             // The fast path needs every fragment to start on a byte boundary
@@ -231,7 +203,7 @@ impl VM {
             let mut at = 0u64;
             for v in &self.stack[base..] {
                 let b = bin_ref(v);
-                copy_bits_into(&mut out, at, b.backing(), b.bit_offset(), b.bit_len());
+                copy_bits(&mut out, at, b.backing(), b.bit_offset(), b.bit_len());
                 at += b.bit_len();
             }
             Value::binary_bits_in(&mut self.heap, out, total_bits)
@@ -500,26 +472,6 @@ impl VM {
         let v = http::serialize_head(&mut self.heap, code, &bin_ref(&reason_v), &headers)?;
         self.stack.push(v);
         Ok(())
-    }
-}
-
-/// Copy `bits` logical bits of `src` starting at bit `src_at` into `out`
-/// starting at bit `at` (MSB-first addressing, as [`super::binary`]). The
-/// target bits in `out` must currently be zero — the writes OR — which a
-/// fresh zeroed buffer and a strictly advancing cursor guarantee. The
-/// all-byte-aligned span is a memcpy; only ragged edges take the per-bit
-/// loop, so an N-way concat through this is O(total bits).
-fn copy_bits_into(out: &mut [u8], at: u64, src: &[u8], src_at: u64, bits: u64) {
-    let mut done = 0u64;
-    if at.is_multiple_of(8) && src_at.is_multiple_of(8) {
-        let full = (bits / 8) as usize;
-        let (d, s) = ((at / 8) as usize, (src_at / 8) as usize);
-        out[d..d + full].copy_from_slice(&src[s..s + full]);
-        done = (full as u64) * 8;
-    }
-    for i in done..bits {
-        let bit = (src[((src_at + i) / 8) as usize] >> (7 - ((src_at + i) % 8))) & 1;
-        out[((at + i) / 8) as usize] |= bit << (7 - ((at + i) % 8));
     }
 }
 
