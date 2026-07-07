@@ -997,6 +997,7 @@ impl Compiler {
             int: self.prelude.int.id,
             float: self.prelude.float.id,
             string: self.prelude.string.id,
+            array: self.prelude.array.id,
         });
         self.env.set_next_type_id(s.next_type_id);
         // The static type arena IS the live arena's prefix — every `Ty`/

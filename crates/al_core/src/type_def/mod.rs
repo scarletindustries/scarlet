@@ -19,6 +19,16 @@ pub enum PrimitiveKind {
     String,
 }
 
+impl PrimitiveKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Int => prim_names::INT,
+            Self::Float => prim_names::FLOAT,
+            Self::String => prim_names::STRING,
+        }
+    }
+}
+
 /// A labelled field of a constructor variant. Shared between `Type::Named`
 /// (substituted, for downstream consumers) and `environment::TypeInfo`
 /// (template form, holding raw `Var` for type parameters).
@@ -108,11 +118,7 @@ pub fn t_named(
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Primitive { kind } => match kind {
-                PrimitiveKind::Int => write!(f, "Int"),
-                PrimitiveKind::Float => write!(f, "Float"),
-                PrimitiveKind::String => write!(f, "String"),
-            },
+            Type::Primitive { kind } => f.write_str(kind.name()),
             Type::Array { element } => write!(f, "Array({})", element),
             Type::Function { params, ret } => {
                 let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();

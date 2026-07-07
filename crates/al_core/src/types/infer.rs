@@ -21,9 +21,9 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    pub fn allowed_types(&self) -> &'static [&'static str] {
-        const ADDABLE: &[&str] = &[pn::INT, pn::FLOAT, pn::STRING];
-        const NUMERIC: &[&str] = &[pn::INT, pn::FLOAT];
+    pub fn allowed_types(&self) -> &'static [Prim] {
+        const ADDABLE: &[Prim] = &[Prim::Int, Prim::Float, Prim::String];
+        const NUMERIC: &[Prim] = &[Prim::Int, Prim::Float];
         match self {
             Constraint::Addable => ADDABLE,
             Constraint::Numeric => NUMERIC,
@@ -372,13 +372,14 @@ pub struct InferEngine {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Nominal ids for the three primitives whose types the inference engine
-/// mints on its own (integer/float/string literals).
+/// Nominal ids for the primitives the inference engine recognises directly:
+/// int/float/string literals, plus `Array` for structural resolution.
 #[derive(Debug, Clone, Copy)]
 pub struct PrimIds {
     pub int: i32,
     pub float: i32,
     pub string: i32,
+    pub array: i32,
 }
 
 impl Default for PrimIds {
@@ -391,6 +392,7 @@ impl Default for PrimIds {
             int: -1,
             float: -2,
             string: -3,
+            array: -4,
         }
     }
 }
@@ -605,6 +607,20 @@ impl InferEngine {
         self.prim_ids = ids;
     }
 
+    /// Map a nominal type id to the corresponding primitive, if it is one.
+    /// Identity is by id, never name — a user's `type Int { }` is not `Int`.
+    fn as_prim(&self, id: i32) -> Option<Prim> {
+        if id == self.prim_ids.int {
+            Some(Prim::Int)
+        } else if id == self.prim_ids.float {
+            Some(Prim::Float)
+        } else if id == self.prim_ids.string {
+            Some(Prim::String)
+        } else {
+            None
+        }
+    }
+
     // --- Type constructors ---
 
     pub fn mk_con(&mut self, id: i32, name: &str, args: &[Ty]) -> Ty {
@@ -731,13 +747,8 @@ impl InferEngine {
     /// Read-only over the union-find aside from `find`'s path compression.
     pub fn resolved_prim(&mut self, t: Ty) -> Option<Prim> {
         let rep = self.find(t);
-        if let TypeNode::Con { name, .. } = self.node(rep) {
-            match self.str(name) {
-                pn::INT => Some(Prim::Int),
-                pn::FLOAT => Some(Prim::Float),
-                pn::STRING => Some(Prim::String),
-                _ => None,
-            }
+        if let TypeNode::Con { id, .. } = self.node(rep) {
+            self.as_prim(id)
         } else {
             None
         }
@@ -1002,11 +1013,10 @@ impl InferEngine {
                     TyVarState::Link { .. } => {}
                 }
             }
-            TypeNode::Con { name, .. } => {
-                if !constraint.allowed_types().contains(&self.str(name)) {
-                    return Err(could_not_unify(var_ty, resolved));
-                }
-            }
+            TypeNode::Con { id, .. } => match self.as_prim(id) {
+                Some(p) if constraint.allowed_types().contains(&p) => {}
+                _ => return Err(could_not_unify(var_ty, resolved)),
+            },
             _ => return Err(could_not_unify(var_ty, resolved)),
         }
         self.vars[var_id as usize] = TyVarState::Link { ty: resolved };
@@ -1407,19 +1417,21 @@ impl InferEngine {
         // must be `Primitive` so exhaustiveness treats them as infinite-ctor.
         // `Array` similarly resolves structurally so `[h, ..t]` patterns work.
         // `Bool` is NOT here — it is a real two-variant `Named` type and falls
-        // through to the env lookup below.
-        match name {
-            pn::INT => return t_int(),
-            pn::FLOAT => return t_float(),
-            pn::STRING => return t_string(),
-            pn::ARRAY => {
-                let elem = args
-                    .first()
-                    .map(|&a| self.resolve_inner(a, env, path))
-                    .unwrap_or_else(|| t_var("a"));
-                return t_array(elem);
-            }
-            _ => {}
+        // through to the env lookup below. Matched by nominal id, not name: a
+        // user-declared `type Int { }` is a distinct type and must not resolve
+        // as `Primitive`.
+        if id == self.prim_ids.int {
+            return t_int();
+        } else if id == self.prim_ids.float {
+            return t_float();
+        } else if id == self.prim_ids.string {
+            return t_string();
+        } else if id == self.prim_ids.array {
+            let elem = args
+                .first()
+                .map(|&a| self.resolve_inner(a, env, path))
+                .unwrap_or_else(|| t_var("a"));
+            return t_array(elem);
         }
 
         // Resolve the type's variant info by its NOMINAL id — the identity
@@ -1992,7 +2004,8 @@ mod tests {
         let i = e.icon_int();
         assert_eq!(e.resolve(i, None), t_int());
         let s = e.icon_string();
-        let arr = e.mk_con(-7, pn::ARRAY, &[s]);
+        let arr_id = e.prim_ids.array;
+        let arr = e.mk_con(arr_id, pn::ARRAY, &[s]);
         assert_eq!(e.resolve(arr, None), t_array(t_string()));
     }
 

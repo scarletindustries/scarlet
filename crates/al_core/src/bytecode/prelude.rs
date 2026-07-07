@@ -54,6 +54,7 @@ impl Compiler {
                     int: self.prelude.int.id,
                     float: self.prelude.float.id,
                     string: self.prelude.string.id,
+                    array: self.prelude.array.id,
                 });
             }
             Err(msg) => self.error(msg, at),
