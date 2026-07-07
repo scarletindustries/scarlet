@@ -270,8 +270,8 @@ impl ReferenceGraph {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::reference::{Definition, ModuleReferences, Reference, def, mp};
+    use super::{ReferenceKind as K, *};
+    use crate::reference::{Definition, ModuleReferences, Reference, add_ref, def, mp};
     use crate::span::range_span;
     use std::collections::HashMap;
 
@@ -288,7 +288,7 @@ mod tests {
         // Populator-recorded Definition occurrence at the decl site.
         lib_mr.add_reference(
             Some(helper),
-            Reference::new(helper.span, ReferenceKind::Definition, helper),
+            Reference::new(helper.span, K::Definition, helper),
         );
         g.insert_module(lib_mr);
 
@@ -296,19 +296,10 @@ mod tests {
         let mut app_mr = ModuleReferences::new(app);
         app_mr.add_definition(Definition::new(run, "run", None, false));
         // import path occurrence (must NOT be rewritten by a symbol rename)
-        app_mr.add_reference(
-            None,
-            Reference::new(range_span(0, 7, 14), ReferenceKind::Import, helper),
-        );
+        add_ref(&mut app_mr, None, (0, 7, 14), K::Import, helper);
         // two qualified uses of helper
-        app_mr.add_reference(
-            Some(run),
-            Reference::new(range_span(2, 8, 14), ReferenceKind::Qualified, helper),
-        );
-        app_mr.add_reference(
-            Some(run),
-            Reference::new(range_span(3, 8, 14), ReferenceKind::Qualified, helper),
-        );
+        add_ref(&mut app_mr, Some(run), (2, 8, 14), K::Qualified, helper);
+        add_ref(&mut app_mr, Some(run), (3, 8, 14), K::Qualified, helper);
         g.insert_module(app_mr);
 
         (g, lib, app, helper)
@@ -362,10 +353,7 @@ mod tests {
         let foo = def(m, 0, 3, 6, EntityKind::Function);
         let mut mr = ModuleReferences::new(m);
         mr.add_definition(Definition::new(foo, "foo", None, false));
-        mr.add_reference(
-            Some(foo),
-            Reference::new(range_span(5, 4, 7), ReferenceKind::Unqualified, foo),
-        );
+        add_ref(&mut mr, Some(foo), (5, 4, 7), K::Unqualified, foo);
         g.insert_module(mr);
 
         let mut map = HashMap::new();
@@ -398,10 +386,7 @@ mod tests {
         g.insert_module(std_mr);
 
         let mut user_mr = ModuleReferences::new(user);
-        user_mr.add_reference(
-            None,
-            Reference::new(range_span(1, 2, 5), ReferenceKind::Qualified, map_fn),
-        );
+        add_ref(&mut user_mr, None, (1, 2, 5), K::Qualified, map_fn);
         g.insert_module(user_mr);
 
         // prepareRename at the use of a stdlib symbol -> rejected.
