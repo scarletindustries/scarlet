@@ -793,6 +793,16 @@ mod tests {
         UsefulnessMatrix::new(t.clone()).find_missing(pats)
     }
 
+    #[track_caller]
+    fn assert_witness(pats: &[Pat], t: &Type, w: &str) {
+        assert_eq!(check_exhaustiveness(pats, t).as_deref(), Some(w));
+    }
+
+    #[track_caller]
+    fn assert_exhaustive(pats: &[Pat], t: &Type) {
+        assert_eq!(check_exhaustiveness(pats, t), None);
+    }
+
     fn pattern_to_pat(p: &ast::Pattern, t: &Type) -> Pat {
         UsefulnessMatrix::new(t.clone()).lower(p)
     }
@@ -854,39 +864,28 @@ mod tests {
 
     #[test]
     fn bool_missing_false() {
-        let pats = vec![ctor("True", vec![])];
-        let result = check_exhaustiveness(&pats, &t_bool());
-        assert_eq!(result, Some("False".to_string()));
+        assert_witness(&[ctor("True", vec![])], &t_bool(), "False");
     }
 
     #[test]
     fn bool_exhaustive() {
-        let pats = vec![ctor("True", vec![]), ctor("False", vec![])];
-        let result = check_exhaustiveness(&pats, &t_bool());
-        assert_eq!(result, None);
+        assert_exhaustive(&[ctor("True", vec![]), ctor("False", vec![])], &t_bool());
     }
 
     #[test]
     fn bool_wildcard_exhaustive() {
-        let pats = vec![Pat::Wildcard];
-        let result = check_exhaustiveness(&pats, &t_bool());
-        assert_eq!(result, None);
+        assert_exhaustive(&[Pat::Wildcard], &t_bool());
     }
 
     #[test]
     fn enum_missing_third_variant() {
-        let t = enum3();
-        let pats = vec![ctor("A", vec![]), ctor("B", vec![])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("C".to_string()));
+        assert_witness(&[ctor("A", vec![]), ctor("B", vec![])], &enum3(), "C");
     }
 
     #[test]
     fn enum_all_variants_exhaustive() {
-        let t = enum3();
-        let pats = vec![ctor("A", vec![]), ctor("B", vec![]), ctor("C", vec![])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, None);
+        let pats = [ctor("A", vec![]), ctor("B", vec![]), ctor("C", vec![])];
+        assert_exhaustive(&pats, &enum3());
     }
 
     #[test]
@@ -898,8 +897,7 @@ mod tests {
             ctor(&tn, vec![ctor("True", vec![]), ctor("False", vec![])]),
             ctor(&tn, vec![ctor("False", vec![]), ctor("True", vec![])]),
         ];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("(False, False)".to_string()));
+        assert_witness(&pats, &t, "(False, False)");
     }
 
     #[test]
@@ -911,8 +909,7 @@ mod tests {
             ctor(&tn, vec![ctor("True", vec![]), ctor("False", vec![])]),
             ctor(&tn, vec![ctor("False", vec![]), Pat::Wildcard]),
         ];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, None);
+        assert_exhaustive(&pats, &t);
     }
 
     /// `(True, _)` and `(_, True)` miss exactly `(False, False)`. The
@@ -927,8 +924,7 @@ mod tests {
             ctor(&tn, vec![ctor("True", vec![]), Pat::Wildcard]),
             ctor(&tn, vec![Pat::Wildcard, ctor("True", vec![])]),
         ];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("(False, False)".to_string()));
+        assert_witness(&pats, &t, "(False, False)");
     }
 
     /// `[]` ∪ `[True, ..]` miss any list whose head is `False`; the witness's
@@ -940,8 +936,7 @@ mod tests {
             ctor("[]", vec![]),
             ctor("::", vec![ctor("True", vec![]), Pat::Wildcard]),
         ];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("[False]".to_string()));
+        assert_witness(&pats, &t, "[False]");
     }
 
     #[test]
@@ -952,8 +947,7 @@ mod tests {
             ctor("Some", vec![ctor("Some", vec![Pat::Wildcard])]),
             ctor("None", vec![]),
         ];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("Some(None)".to_string()));
+        assert_witness(&pats, &t, "Some(None)");
     }
 
     #[test]
@@ -964,47 +958,46 @@ mod tests {
             ctor("Some", vec![ctor("None", vec![])]),
             ctor("None", vec![]),
         ];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, None);
+        assert_exhaustive(&pats, &t);
     }
 
     #[test]
     fn option_missing_none() {
-        let t = t_option(t_int());
-        let pats = vec![ctor("Some", vec![Pat::Wildcard])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("None".to_string()));
+        assert_witness(
+            &[ctor("Some", vec![Pat::Wildcard])],
+            &t_option(t_int()),
+            "None",
+        );
     }
 
     #[test]
     fn result_missing_err() {
         let t = t_result(t_int(), type_def::t_string());
-        let pats = vec![ctor("Ok", vec![Pat::Wildcard])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("Err(_)".to_string()));
+        assert_witness(&[ctor("Ok", vec![Pat::Wildcard])], &t, "Err(_)");
     }
 
     #[test]
     fn array_missing_empty() {
         let t = type_def::t_array(t_int());
-        let pats = vec![ctor("::", vec![Pat::Wildcard, Pat::Wildcard])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("[]".to_string()));
+        assert_witness(&[ctor("::", vec![Pat::Wildcard, Pat::Wildcard])], &t, "[]");
     }
 
     #[test]
     fn array_missing_nonempty() {
-        let t = type_def::t_array(t_int());
-        let pats = vec![ctor("[]", vec![])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("[_, ..]".to_string()));
+        assert_witness(
+            &[ctor("[]", vec![])],
+            &type_def::t_array(t_int()),
+            "[_, ..]",
+        );
     }
 
     #[test]
     fn int_literal_never_exhaustive() {
-        let pats = vec![ctor("lit:1", vec![]), ctor("lit:2", vec![])];
-        let result = check_exhaustiveness(&pats, &t_int());
-        assert_eq!(result, Some("_".to_string()));
+        assert_witness(
+            &[ctor("lit:1", vec![]), ctor("lit:2", vec![])],
+            &t_int(),
+            "_",
+        );
     }
 
     #[test]
@@ -1053,9 +1046,7 @@ mod tests {
                 ("Node", vec![("left", t_int()), ("right", t_int())]),
             ],
         );
-        let pats = vec![ctor("Leaf", vec![])];
-        let result = check_exhaustiveness(&pats, &t);
-        assert_eq!(result, Some("Node(_, _)".to_string()));
+        assert_witness(&[ctor("Leaf", vec![])], &t, "Node(_, _)");
     }
 
     /// Opaque prelude `Binary` — Named with no variants → infinite in
@@ -1109,16 +1100,14 @@ mod tests {
             ),
             &t,
         );
-        let result = check_exhaustiveness(&[p], &t);
-        assert_eq!(result, Some("_".to_string()));
+        assert_witness(&[p], &t, "_");
     }
 
     #[test]
     fn binary_empty_literal_not_exhaustive() {
         let t = t_binary();
         let p = pattern_to_pat(&bin_pat(vec![], false), &t);
-        let result = check_exhaustiveness(&[p], &t);
-        assert_eq!(result, Some("_".to_string()));
+        assert_witness(&[p], &t, "_");
     }
 
     #[test]
@@ -1126,16 +1115,14 @@ mod tests {
         let t = t_binary();
         let p = pattern_to_pat(&bin_pat(vec![], true), &t);
         assert!(matches!(p, Pat::Wildcard));
-        let result = check_exhaustiveness(&[p], &t);
-        assert_eq!(result, None);
+        assert_exhaustive(&[p], &t);
     }
 
     #[test]
     fn binary_segments_with_rest_not_exhaustive() {
         let t = t_binary();
         let p = pattern_to_pat(&bin_pat(vec![bin_seg(p_var("a"), None)], true), &t);
-        let result = check_exhaustiveness(&[p], &t);
-        assert_eq!(result, Some("_".to_string()));
+        assert_witness(&[p], &t, "_");
     }
 
     #[test]
@@ -1148,8 +1135,7 @@ mod tests {
             ),
             &t,
         );
-        let result = check_exhaustiveness(&[p1, Pat::Wildcard], &t);
-        assert_eq!(result, None);
+        assert_exhaustive(&[p1, Pat::Wildcard], &t);
     }
 
     #[test]
@@ -1242,10 +1228,7 @@ mod tests {
             pair_pat(&[("b", "True")], true),
             pair_pat(&[("a", "False")], true),
         ];
-        assert_eq!(
-            check_exhaustiveness(&unsound, &pair),
-            Some("Pair(True, False)".to_string())
-        );
+        assert_witness(&unsound, &pair, "Pair(True, False)");
 
         // Genuinely exhaustive; the third arm names fields in reverse order.
         // Source-order lowering read it as a duplicate of arm 2 and reported a
@@ -1256,6 +1239,6 @@ mod tests {
             pair_pat(&[("b", "True"), ("a", "False")], false),
             pair_pat(&[("a", "False"), ("b", "False")], false),
         ];
-        assert_eq!(check_exhaustiveness(&exhaustive, &pair), None);
+        assert_exhaustive(&exhaustive, &pair);
     }
 }
