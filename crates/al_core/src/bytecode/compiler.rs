@@ -3427,22 +3427,21 @@ impl Compiler {
     /// ids for any annotated type variables so that `instantiate` inside the
     /// body leaves them intact, and we unify the body's inferred type against
     /// the preregistered shape rather than re-reading the annotations.
+    ///
+    /// `global_slot` is this fn's own entry-frame slot from `Prepared::Fn`.
+    /// It must be threaded from Pass 3 rather than re-derived by name here:
+    /// a later top-level decl may shadow the name, so `self.locals[name]`
+    /// can point at the shadow's slot by the time this runs.
     pub(super) fn compile_declared_function(
         &mut self,
         name: &str,
+        global_slot: i32,
         params: &[ast::FunctionParameter],
         body: &ast::Expression,
         param_tys: Vec<Ty>,
         ret_ty: Ty,
         hydrator: &Hydrator,
     ) -> Ty {
-        // Capture the entry-frame slot Pass 3 pre-allocated for this fn while
-        // `locals` still holds it (i.e. before `enter_fn_frame` moves the map
-        // into `outer_scopes`). Paired with the `func_idx` assigned by
-        // `finish_fn_frame` below to feed `global_to_func`.
-        let name_id = self.engine.intern(name);
-        let global_slot = self.locals.get(&name_id).map(|e| e.slot);
-
         let saved = self.enter_fn_frame(Some(name));
         self.rigid_ids = hydrator.rigid_ids().clone();
         for (param, p_ty) in params.iter().zip(param_tys.iter()) {
@@ -3454,11 +3453,9 @@ impl Compiler {
             .unify_at(ret_ty, body_ty, type_defining_span(body));
 
         self.finish_fn_frame(saved, name, params.len());
-        if !self.check_only
-            && let Some(slot) = global_slot
-        {
+        if !self.check_only {
             let func_idx = self.program.functions.len() as i32 - 1;
-            self.global_to_func.insert(slot, func_idx);
+            self.global_to_func.insert(global_slot, func_idx);
         }
         self.engine.mk_fun(&param_tys, ret_ty)
     }
@@ -3614,6 +3611,7 @@ impl Compiler {
                 }
                 self.bind_pattern_initials(&b);
 
+                #[allow(clippy::unreachable)]
                 let ast::Pattern::Constructor { name, args, .. } = &arm.pattern else {
                     unreachable!("switch_tag_plan admitted a non-constructor arm");
                 };
