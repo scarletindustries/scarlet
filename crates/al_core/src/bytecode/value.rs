@@ -1450,10 +1450,12 @@ impl Value {
     }
     /// Payload field `idx` of a value the bytecode compiler has statically
     /// proven to be an enum with at least `idx + 1` fields (the
-    /// `GetFieldUnchecked` opcode) — same contract as [`Value::as_int_typed`]:
-    /// the precondition is debug-asserted, and release-build misuse is
-    /// memory-safe (`nil` fallback) but yields garbage. Direct word read at
-    /// the field's offset — no `EnumRef`, no count read, no bounds check.
+    /// `GetFieldUnchecked` opcode). Both preconditions are debug-asserted.
+    /// A wrong-tag value falls back to `nil` in release (memory-safe, like
+    /// [`Value::as_int_typed`]'s zero); an out-of-bounds `idx` on a real
+    /// enum is *not* guarded in release — the compiler must never emit one.
+    /// Direct word read at the field's offset — no `EnumRef`, no count
+    /// read, no bounds check.
     #[inline(always)]
     pub fn enum_field_typed(&self, idx: usize) -> Value {
         debug_assert!(self.as_enum().is_some_and(|e| idx < e.payload().len()));
