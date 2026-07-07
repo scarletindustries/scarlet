@@ -312,8 +312,10 @@ impl VM {
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.write_parts")?;
         let Some(parts) = parts_val.as_array() else {
-            return Err(VmError::internal(
-                "socket.write_parts requires an Array(Binary)",
+            return Err(VmError::type_mismatch(
+                "socket.write_parts",
+                "Array(Binary)",
+                &parts_val,
             ));
         };
 
@@ -330,9 +332,7 @@ impl VM {
                     bins.push(p);
                 }
                 None => {
-                    return Err(VmError::internal(
-                        "socket.write_parts requires an Array(Binary)",
-                    ));
+                    return Err(VmError::type_mismatch("socket.write_parts", "Binary", &p));
                 }
             }
         }
@@ -508,9 +508,7 @@ impl VM {
     /// VM halt: closing then using a listener is an ordinary program bug.
     #[inline]
     fn listener(&mut self, id: i32) -> std::io::Result<&TcpListener> {
-        if !self.ensure_listener(id) {
-            return Err(stale_socket());
-        }
+        self.ensure_listener(id)?;
         self.tcp_listeners.get(&id).ok_or_else(stale_socket)
     }
 
@@ -685,23 +683,17 @@ impl VM {
     /// spreads incoming connections across the per-scheduler sockets. Binding
     /// happens here, on first accept, so only a scheduler that actually
     /// accepts ever holds a socket in the reuseport group.
-    fn ensure_listener(&mut self, id: i32) -> bool {
+    fn ensure_listener(&mut self, id: i32) -> std::io::Result<()> {
         if self.tcp_listeners.contains_key(&id) {
-            return true;
+            return Ok(());
         }
         let Some(addr) = sched::lock(&self.runtime.shared_listeners)
             .get(&id)
             .copied()
         else {
-            return false;
+            return Err(stale_socket());
         };
-        match bind_reuseport(addr).and_then(|l| self.track_listener(id, l)) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("warning: cannot bind reuseport listener {id}: {e}");
-                false
-            }
-        }
+        bind_reuseport(addr).and_then(|l| self.track_listener(id, l))
     }
 
     /// Take ownership of a connected stream (from accept or connect):
@@ -870,12 +862,7 @@ fn drain_write<B: AsRef<[u8]>>(conn: &mut TcpStream, bufs: &[B]) -> std::io::Res
             conn.write_vectored(&slices)
         };
         match wrote {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    ErrorKind::WriteZero,
-                    "connection closed",
-                ));
-            }
+            Ok(0) => return Err(std::io::Error::from_raw_os_error(libc::EPIPE)),
             Ok(mut n) => {
                 // Advance (idx, offset) past the bytes the kernel took.
                 while n > 0 && idx < bufs.len() {
