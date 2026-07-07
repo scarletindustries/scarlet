@@ -1958,7 +1958,11 @@ impl Parser {
         // are the resolver's contract (module::resolve matches on "." / "..");
         // do not derive them from Kind's Display.
         while matches!(self.kind(), Kind::PuncDot | Kind::PuncDotdot) {
-            let seg = if self.kind() == Kind::PuncDot { "." } else { ".." };
+            let seg = if self.kind() == Kind::PuncDot {
+                "."
+            } else {
+                ".."
+            };
             path.push(seg.to_string());
             self.advance();
             if self.kind() != Kind::PuncDiv {
