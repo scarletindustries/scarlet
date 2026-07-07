@@ -1,31 +1,136 @@
 mod common;
 use common::{check_rejects, run_outputs, run_rejects};
 
-// ---------------------------------------------------------------------------
-// U1: `x = x` self-reference infers ⊥, generalizes to ∀A.A, runtime slot is None.
-// Post-fix: pre-define is gated to lambda inits only; init `x` is unbound.
-#[test]
-fn u1_self_reference_is_rejected() {
-    check_rejects(
+reject_case! {
+    /// U1: `x = x` self-reference infers ⊥, generalizes to ∀A.A, runtime slot is None.
+    /// Post-fix: pre-define is gated to lambda inits only; init `x` is unbound.
+    u1_self_reference_is_rejected: (
         "x = x\n\
          n Int = x\n\
          println(n + 1)\n",
         "Unknown identifier 'x'",
-    );
-}
+    ),
 
-// ---------------------------------------------------------------------------
-// U2: `if cond { e }` (no else) used to type as Nil but evaluate to `e` when
-// cond was true, exploitable through `Option(T)` widening to smuggle a String
-// as Int. Post-fix: `if` without `else` is a parse/type error.
-#[test]
-fn u2_if_no_else_is_rejected() {
-    check_rejects(
+    /// U2: `if cond { e }` (no else) used to type as Nil but evaluate to `e` when
+    /// cond was true, exploitable through `Option(T)` widening to smuggle a String
+    /// as Int. Post-fix: `if` without `else` is a parse/type error.
+    u2_if_no_else_is_rejected: (
         "fn smuggle() Option(Int) { if True { 'hello' } }\n\
          n = smuggle() or 0\n\
          println(n + 1)\n",
         "'if' requires an 'else' branch",
-    );
+    ),
+
+    /// U5: generic type used without type args silently fills fresh vars per use,
+    /// letting a String flow into an Int position.
+    /// Post-fix: missing type arguments at the field declaration is a type error.
+    u5_generic_type_missing_args_is_rejected: (
+        "type Box(t) { Box(value t) }\n\
+         type Holder { Holder(box Box) }\n\
+         h = Holder(box: Box(value: 'hello'))\n\
+         println(h.box.value + 100)\n",
+        "Type 'Box' expects 1 type argument",
+    ),
+
+    /// U7: or-pattern alternatives may bind disjoint name sets; the body reads an
+    /// uninitialized local when the non-binding alternative matches.
+    /// Post-fix: asymmetric bindings across `|` alternatives are rejected.
+    u7_or_pattern_disjoint_bindings_is_rejected: (
+        "fn f(x Int) Int {\n\
+         \tmatch x {\n\
+         \t\t1 | y -> y + 100\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         }\n\
+         println(f(1))\n",
+        "not bound in the first alternative",
+    ),
+
+    /// U8: range pattern bounds are not unified with Int, so `true..'z'` typechecks
+    /// and crashes the VM comparator.
+    /// Post-fix: non-Int bounds are a type error.
+    u8_range_pattern_bounds_must_be_int: (
+        "r = match 5 {\n\
+         \ttrue..'z' -> 'huh'\n\
+         \t_ -> 'ok'\n\
+         }\n\
+         println(r)\n",
+        "Range pattern bounds must be number literals",
+    ),
+
+    /// U9: array pattern with a spread that is not the final element corrupts the
+    /// stack at runtime.
+    /// Post-fix: non-tail (or multiple) spreads in an array pattern are rejected.
+    u9_array_pattern_non_tail_spread_is_rejected: (
+        "xs = [1, 2, 3]\n\
+         r = match xs {\n\
+         \t[a, ..mid, z] -> a + z\n\
+         \t_ -> 0\n\
+         }\n\
+         println(r)\n",
+        "Spread in array pattern must be the last element",
+    ),
+
+    /// U10: exhaustiveness for `[a, b, ..rest]` drops every prefix element after
+    /// the first, so a non-exhaustive match is accepted and falls through to None
+    /// at runtime for an Int-returning function.
+    /// Post-fix: the missing length-1 case is reported as non-exhaustive.
+    u10_spread_prefix_exhaustiveness_is_rejected: (
+        "fn f(xs Array(Bool)) Int {\n\
+         \tmatch xs {\n\
+         \t\t[True, _, ..rest] -> 1\n\
+         \t\t[False, _, ..rest] -> 2\n\
+         \t\t[] -> 3\n\
+         \t}\n\
+         }\n\
+         println(f([True]))\n",
+        "not exhaustive",
+    ),
+
+    /// U12: duplicate binding name within a single pattern silently shadows, so
+    /// `(x, x)` binds the second element only.
+    /// Post-fix: duplicate names in one pattern are rejected.
+    u12_duplicate_pattern_binding_is_rejected: (
+        "r = match (1, 2) {\n\
+         \t(x, x) -> x\n\
+         }\n\
+         println(r)\n",
+        "bound more than once in this pattern",
+    ),
+
+    /// U13: `Socket` is an opaque builtin type with no constructors. Under the
+    /// types redesign there is no `{}`-init at all; `Socket` referenced as a value
+    /// is an unknown identifier.
+    u13_socket_literal_is_rejected: (
+        "s = Socket\n\
+         println(s)\n",
+        "Unknown identifier 'Socket'",
+    ),
+
+    /// U16: two functions with the same name used to panic the compiler in
+    /// analysis Pass 5 — the name-keyed hydrator map only kept the last decl, so
+    /// the first decl's `hydrators.remove(name).expect(...)` blew up. It must be a
+    /// clean "already defined" rejection, never a panic.
+    u16_duplicate_fn_is_rejected_without_panic:
+        ("fn a(x) {x}\nfn a() {}\n", "already defined"),
+
+    /// U17: a bare `@vm` (no op arg) used to panic an `unreachable!()` in analysis
+    /// Pass 5. The parser keyed body-presence on the `@vm` *name* while the siphon
+    /// keyed removal on the `@vm` *arg*; a zero-arg `@vm` diverged the two, kept a
+    /// body-less fn in `decls`, and blew up. The `FnBody` enum makes that
+    /// unrepresentable: it must be a clean parse error, never a panic.
+    u17_bare_vm_attr_is_rejected_without_panic:
+        ("@vm\nfn foo() Int\n", "@vm requires an op"),
+
+    /// U18: the type-decl twin of U16. Duplicate `type` declarations used to desync
+    /// the name-keyed Pass-1 maps (`type_param_generics` + the shared `hydrators`
+    /// field) against the positional `type_decls` Vec — the exact class of the
+    /// canonical bug, left unfixed for types. The `PreparedType` positional refactor
+    /// + the Pass-0 dedup make it a clean rejection, never a panic/miscompile.
+    u18_duplicate_type_is_rejected_without_panic: (
+        "type T = Int\ntype T = String\nx = 1\nprintln(x)\n",
+        "already defined",
+    ),
 }
 
 // ---------------------------------------------------------------------------
@@ -64,21 +169,6 @@ fn u4_block_scope_preserves_outer_slot() {
 }
 
 // ---------------------------------------------------------------------------
-// U5: generic type used without type args silently fills fresh vars per use,
-// letting a String flow into an Int position.
-// Post-fix: missing type arguments at the field declaration is a type error.
-#[test]
-fn u5_generic_type_missing_args_is_rejected() {
-    check_rejects(
-        "type Box(t) { Box(value t) }\n\
-         type Holder { Holder(box Box) }\n\
-         h = Holder(box: Box(value: 'hello'))\n\
-         println(h.box.value + 100)\n",
-        "Type 'Box' expects 1 type argument",
-    );
-}
-
-// ---------------------------------------------------------------------------
 // U6: bare variant name in a match over an unannotated subject is compiled as
 // a wildcard binding, so every value falls into the first arm.
 // Post-fix: variant ownership is resolved and dispatch is correct.
@@ -94,105 +184,6 @@ fn u6_bare_variant_on_inferred_subject_dispatches() {
          }\n\
          println(f(B))\n",
         "2\n",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// U7: or-pattern alternatives may bind disjoint name sets; the body reads an
-// uninitialized local when the non-binding alternative matches.
-// Post-fix: asymmetric bindings across `|` alternatives are rejected.
-#[test]
-fn u7_or_pattern_disjoint_bindings_is_rejected() {
-    check_rejects(
-        "fn f(x Int) Int {\n\
-         \tmatch x {\n\
-         \t\t1 | y -> y + 100\n\
-         \t\t_ -> 0\n\
-         \t}\n\
-         }\n\
-         println(f(1))\n",
-        "not bound in the first alternative",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// U8: range pattern bounds are not unified with Int, so `true..'z'` typechecks
-// and crashes the VM comparator.
-// Post-fix: non-Int bounds are a type error.
-#[test]
-fn u8_range_pattern_bounds_must_be_int() {
-    check_rejects(
-        "r = match 5 {\n\
-         \ttrue..'z' -> 'huh'\n\
-         \t_ -> 'ok'\n\
-         }\n\
-         println(r)\n",
-        "Range pattern bounds must be number literals",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// U9: array pattern with a spread that is not the final element corrupts the
-// stack at runtime.
-// Post-fix: non-tail (or multiple) spreads in an array pattern are rejected.
-#[test]
-fn u9_array_pattern_non_tail_spread_is_rejected() {
-    check_rejects(
-        "xs = [1, 2, 3]\n\
-         r = match xs {\n\
-         \t[a, ..mid, z] -> a + z\n\
-         \t_ -> 0\n\
-         }\n\
-         println(r)\n",
-        "Spread in array pattern must be the last element",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// U10: exhaustiveness for `[a, b, ..rest]` drops every prefix element after
-// the first, so a non-exhaustive match is accepted and falls through to None
-// at runtime for an Int-returning function.
-// Post-fix: the missing length-1 case is reported as non-exhaustive.
-#[test]
-fn u10_spread_prefix_exhaustiveness_is_rejected() {
-    check_rejects(
-        "fn f(xs Array(Bool)) Int {\n\
-         \tmatch xs {\n\
-         \t\t[True, _, ..rest] -> 1\n\
-         \t\t[False, _, ..rest] -> 2\n\
-         \t\t[] -> 3\n\
-         \t}\n\
-         }\n\
-         println(f([True]))\n",
-        "not exhaustive",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// U12: duplicate binding name within a single pattern silently shadows, so
-// `(x, x)` binds the second element only.
-// Post-fix: duplicate names in one pattern are rejected.
-#[test]
-fn u12_duplicate_pattern_binding_is_rejected() {
-    check_rejects(
-        "r = match (1, 2) {\n\
-         \t(x, x) -> x\n\
-         }\n\
-         println(r)\n",
-        "bound more than once in this pattern",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// U13: `Socket` is an opaque builtin type with no constructors. Under the
-// types redesign there is no `{}`-init at all; `Socket` referenced as a value
-// is an unknown identifier.
-#[test]
-fn u13_socket_literal_is_rejected() {
-    check_rejects(
-        "s = Socket\n\
-         println(s)\n",
-        "Unknown identifier 'Socket'",
     );
 }
 
@@ -229,38 +220,6 @@ fn u15_tuple_index_then_field_access() {
          t = (P(name: 'hi'), 5)\n\
          println(t.0.name)\n",
         "hi\n",
-    );
-}
-
-// U16: two functions with the same name used to panic the compiler in
-// analysis Pass 5 — the name-keyed hydrator map only kept the last decl, so
-// the first decl's `hydrators.remove(name).expect(...)` blew up. It must be a
-// clean "already defined" rejection, never a panic.
-#[test]
-fn u16_duplicate_fn_is_rejected_without_panic() {
-    check_rejects("fn a(x) {x}\nfn a() {}\n", "already defined");
-}
-
-// U17: a bare `@vm` (no op arg) used to panic an `unreachable!()` in analysis
-// Pass 5. The parser keyed body-presence on the `@vm` *name* while the siphon
-// keyed removal on the `@vm` *arg*; a zero-arg `@vm` diverged the two, kept a
-// body-less fn in `decls`, and blew up. The `FnBody` enum makes that
-// unrepresentable: it must be a clean parse error, never a panic.
-#[test]
-fn u17_bare_vm_attr_is_rejected_without_panic() {
-    check_rejects("@vm\nfn foo() Int\n", "@vm requires an op");
-}
-
-// U18: the type-decl twin of U16. Duplicate `type` declarations used to desync
-// the name-keyed Pass-1 maps (`type_param_generics` + the shared `hydrators`
-// field) against the positional `type_decls` Vec — the exact class of the
-// canonical bug, left unfixed for types. The `PreparedType` positional refactor
-// + the Pass-0 dedup make it a clean rejection, never a panic/miscompile.
-#[test]
-fn u18_duplicate_type_is_rejected_without_panic() {
-    check_rejects(
-        "type T = Int\ntype T = String\nx = 1\nprintln(x)\n",
-        "already defined",
     );
 }
 
