@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
 use indexmap::{IndexMap, IndexSet};
+use smallvec::SmallVec;
 
 use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Variant, VariantField};
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -1323,20 +1324,22 @@ impl InferEngine {
     /// Rewrite each child of `sl`, returning `None` when every child came back
     /// unchanged. Iterates the child range by index — the arena is append-only
     /// with stable indices, so no host copy of the slice is needed — and only
-    /// allocates the result Vec once a child actually changes.
+    /// materialises the result buffer once a child actually changes. The buffer
+    /// is a `SmallVec<[Ty; 4]>` so the common arities (Array/Option/Result/
+    /// tuples ≤4/fn params ≤4) never touch the heap on the instantiate hot path.
     fn rewrite_children(
         &mut self,
         sl: ArenaSlice<pool::Children>,
         leaf: &mut impl FnMut(&mut Self, TypeNode) -> Option<Ty>,
-    ) -> Option<Vec<Ty>> {
-        let mut kids: Option<Vec<Ty>> = None;
+    ) -> Option<SmallVec<[Ty; 4]>> {
+        let mut kids: Option<SmallVec<[Ty; 4]>> = None;
         for (off, i) in sl.range().enumerate() {
             let k = self.children[i];
             let (rk, changed) = self.rewrite_node(k, leaf);
             if let Some(kids) = &mut kids {
                 kids.push(rk);
             } else if changed {
-                let mut v = Vec::with_capacity(sl.len as usize);
+                let mut v: SmallVec<[Ty; 4]> = SmallVec::with_capacity(sl.len as usize);
                 let start = sl.start as usize;
                 v.extend_from_slice(&self.children[start..start + off]);
                 v.push(rk);
