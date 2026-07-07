@@ -2263,6 +2263,11 @@ pub fn range_len(s: i64, e: i64) -> i64 {
 /// [`super::hamt`] to key the persistent map. Ranges and arrays compare by
 /// their elements; maps compare structurally regardless of internal order.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
+    // Bit-identical words are always equal: immediates are their value, heap
+    // words name the same object, and a real NaN never enters the box.
+    if a.0 == b.0 {
+        return true;
+    }
     match (a.kind(), b.kind()) {
         (ValueView::Int(x), ValueView::Int(y)) => x == y,
         (ValueView::Float(x), ValueView::Float(y)) => x == y,
