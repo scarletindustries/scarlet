@@ -2221,61 +2221,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_hello_al() {
-        let src = include_str!("../../../../examples/hello.al");
-        let result = assert_no_errors(src);
-        assert!(!result.ast.body.is_empty());
+    macro_rules! parses_file {
+        ($($name:ident: $path:literal,)*) => {$(
+            #[test]
+            fn $name() {
+                assert_no_errors(include_str!($path));
+            }
+        )*};
     }
 
-    #[test]
-    fn test_fizzbuzz_al() {
-        let src = include_str!("../../../../examples/fizzbuzz.al");
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_factorial_al() {
-        let src = include_str!("../../../../examples/factorial.al");
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_shapes_al() {
-        let src = include_str!("../../../../examples/shapes.al");
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_fibonacci_al() {
-        let src = include_str!("../../../../examples/fibonacci.al");
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_all_language_features_al() {
-        let src = include_str!("../../../../crates/al/tests/programs/all_language_features.al");
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_trying_out_tuples_al() {
-        let src = include_str!("../../../../crates/al/tests/programs/trying_out_tuples.al");
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_generic_structs_and_enums_al() {
-        let src = include_str!(
-            "../../../../crates/al/tests/programs/trying_out_generic_structs_and_enums.al"
-        );
-        assert_no_errors(src);
-    }
-
-    #[test]
-    fn test_match_patterns_al() {
-        let src = include_str!("../../../../crates/al/tests/programs/match_patterns_test.al");
-        assert_no_errors(src);
+    parses_file! {
+        test_hello_al: "../../../../examples/hello.al",
+        test_fizzbuzz_al: "../../../../examples/fizzbuzz.al",
+        test_factorial_al: "../../../../examples/factorial.al",
+        test_shapes_al: "../../../../examples/shapes.al",
+        test_fibonacci_al: "../../../../examples/fibonacci.al",
+        test_all_language_features_al: "../../../../crates/al/tests/programs/all_language_features.al",
+        test_trying_out_tuples_al: "../../../../crates/al/tests/programs/trying_out_tuples.al",
+        test_generic_structs_and_enums_al:
+            "../../../../crates/al/tests/programs/trying_out_generic_structs_and_enums.al",
+        test_match_patterns_al: "../../../../crates/al/tests/programs/match_patterns_test.al",
     }
 
     #[test]

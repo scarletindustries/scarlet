@@ -788,7 +788,6 @@ impl UsefulnessMatrix {
 mod tests {
     use super::*;
     use crate::type_def::{self, FieldDef, TypeId, t_int, t_named, t_tuple};
-    use indexmap::IndexMap;
 
     fn check_exhaustiveness(pats: &[Pat], t: &Type) -> Option<String> {
         UsefulnessMatrix::new(t.clone()).find_missing(pats)
@@ -798,13 +797,28 @@ mod tests {
         UsefulnessMatrix::new(t.clone()).lower(p)
     }
 
+    /// Build a `Named` enum type from a `(variant, [(field, ty)])` table.
+    fn t_enum(id: i32, name: &str, variants: Vec<(&str, Vec<(&str, Type)>)>) -> Type {
+        let variants = variants
+            .into_iter()
+            .map(|(v, fs)| {
+                let fs = fs
+                    .into_iter()
+                    .map(|(label, ty)| FieldDef {
+                        label: label.into(),
+                        ty,
+                    })
+                    .collect();
+                (v.to_string(), fs)
+            })
+            .collect();
+        t_named(TypeId(id), name, vec![], variants)
+    }
+
     /// `Bool` is no longer a primitive; build the same `Named` shape the
     /// real prelude produces so the matrix tests exercise the variant path.
     fn t_bool() -> Type {
-        let mut v: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
-        v.insert("True".into(), vec![]);
-        v.insert("False".into(), vec![]);
-        t_named(TypeId(99), "Bool", vec![], v)
+        t_enum(99, "Bool", vec![("True", vec![]), ("False", vec![])])
     }
 
     fn ctor(name: &str, args: Vec<Pat>) -> Pat {
@@ -815,43 +829,27 @@ mod tests {
     }
 
     fn t_option(inner: Type) -> Type {
-        let mut variants: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
-        variants.insert(
-            "Some".to_string(),
-            vec![FieldDef {
-                label: "value".to_string(),
-                ty: inner,
-            }],
-        );
-        variants.insert("None".to_string(), vec![]);
-        t_named(TypeId(1), "Option", vec![], variants)
+        t_enum(
+            1,
+            "Option",
+            vec![("Some", vec![("value", inner)]), ("None", vec![])],
+        )
     }
 
     fn t_result(ok: Type, err: Type) -> Type {
-        let mut variants: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
-        variants.insert(
-            "Ok".to_string(),
-            vec![FieldDef {
-                label: "value".to_string(),
-                ty: ok,
-            }],
-        );
-        variants.insert(
-            "Err".to_string(),
-            vec![FieldDef {
-                label: "error".to_string(),
-                ty: err,
-            }],
-        );
-        t_named(TypeId(2), "Result", vec![], variants)
+        t_enum(
+            2,
+            "Result",
+            vec![("Ok", vec![("value", ok)]), ("Err", vec![("error", err)])],
+        )
     }
 
     fn enum3() -> Type {
-        let mut variants: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
-        variants.insert("A".to_string(), vec![]);
-        variants.insert("B".to_string(), vec![]);
-        variants.insert("C".to_string(), vec![]);
-        t_named(TypeId(10), "Letter", vec![], variants)
+        t_enum(
+            10,
+            "Letter",
+            vec![("A", vec![]), ("B", vec![]), ("C", vec![])],
+        )
     }
 
     #[test]
@@ -1047,22 +1045,14 @@ mod tests {
 
     #[test]
     fn enum_with_payload_witness() {
-        let mut variants: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
-        variants.insert("Leaf".to_string(), vec![]);
-        variants.insert(
-            "Node".to_string(),
+        let t = t_enum(
+            11,
+            "Tree",
             vec![
-                FieldDef {
-                    label: "left".to_string(),
-                    ty: t_int(),
-                },
-                FieldDef {
-                    label: "right".to_string(),
-                    ty: t_int(),
-                },
+                ("Leaf", vec![]),
+                ("Node", vec![("left", t_int()), ("right", t_int())]),
             ],
         );
-        let t = t_named(TypeId(11), "Tree", vec![], variants);
         let pats = vec![ctor("Leaf", vec![])];
         let result = check_exhaustiveness(&pats, &t);
         assert_eq!(result, Some("Node(_, _)".to_string()));
@@ -1071,7 +1061,7 @@ mod tests {
     /// Opaque prelude `Binary` — Named with no variants → infinite in
     /// `get_type_ctors`, mirroring how the real prelude registers it.
     fn t_binary() -> Type {
-        t_named(TypeId(98), "Binary", vec![], IndexMap::new())
+        t_enum(98, "Binary", vec![])
     }
 
     fn bin_seg(value: ast::Pattern, size: Option<&str>) -> ast::BinSegmentPat {
@@ -1225,21 +1215,11 @@ mod tests {
 
     /// `type Pair { a Bool b Bool }` — `a` is declaration index 0, `b` is 1.
     fn pair_bool_bool() -> Type {
-        let mut variants: IndexMap<String, Vec<FieldDef>> = IndexMap::new();
-        variants.insert(
-            "Pair".to_string(),
-            vec![
-                FieldDef {
-                    label: "a".to_string(),
-                    ty: t_bool(),
-                },
-                FieldDef {
-                    label: "b".to_string(),
-                    ty: t_bool(),
-                },
-            ],
-        );
-        t_named(TypeId(50), "Pair", vec![], variants)
+        t_enum(
+            50,
+            "Pair",
+            vec![("Pair", vec![("a", t_bool()), ("b", t_bool())])],
+        )
     }
 
     /// `pattern_to_pat` must slot labeled constructor args into field-
