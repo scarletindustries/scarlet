@@ -6,7 +6,7 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parser;
 use crate::scanner;
 use crate::span::Span;
-use crate::token::{Kind, Trivia, TriviaKind};
+use crate::token::{Kind, Trivia};
 
 pub mod doc;
 use doc::{
@@ -15,13 +15,6 @@ use doc::{
 };
 
 const MAX_WIDTH: isize = 100;
-
-fn is_comment(t: &Trivia) -> bool {
-    matches!(
-        t.kind,
-        TriviaKind::LineComment | TriviaKind::BlockComment | TriviaKind::DocComment
-    )
-}
 
 pub struct FormatResult {
     pub output: String,
@@ -32,7 +25,7 @@ pub struct FormatResult {
 pub fn format_with_debug(input: &str, debug: bool) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
     let scanned_tokens = s.scan_all();
-    let scanner_diagnostics = s.get_diagnostics();
+    let scanner_diagnostics = s.take_diagnostics();
 
     if debug {
         for tok in &scanned_tokens {
@@ -43,7 +36,7 @@ pub fn format_with_debug(input: &str, debug: bool) -> FormatResult {
                 tok.leading_trivia.len()
             );
             for t in &tok.leading_trivia {
-                eprintln!("  Trivia: {:?} \"{}\"", t.kind, t.text.replace('\n', "\\n"));
+                eprintln!("  Trivia: {t:?}");
             }
         }
     }
@@ -54,7 +47,10 @@ pub fn format_with_debug(input: &str, debug: bool) -> FormatResult {
         if tok.kind == Kind::Eof {
             eof_trivia = tok.leading_trivia.clone();
         } else if !tok.leading_trivia.is_empty() {
-            trivia_map.insert((tok.line, tok.column), tok.leading_trivia.clone());
+            trivia_map.insert(
+                (tok.span.start_line, tok.span.start_column),
+                tok.leading_trivia.clone(),
+            );
         }
     }
 
@@ -125,7 +121,7 @@ impl Formatter {
         let mut newlines = 0usize;
         let mut emitted_any = !first;
         for t in trivia {
-            if is_comment(t) {
+            if t.is_comment() {
                 let blanks = if emitted_any {
                     newlines.saturating_sub(1).min(max_blanks)
                 } else {
@@ -134,10 +130,10 @@ impl Formatter {
                 if emitted_any {
                     parts.push(hardlines(1 + blanks));
                 }
-                parts.push(text(t.text.trim_end().to_string()));
+                parts.push(text(t.text().trim_end().to_string()));
                 emitted_any = true;
                 newlines = 0;
-            } else if t.kind == TriviaKind::Newline {
+            } else {
                 newlines += 1;
             }
         }
@@ -158,9 +154,9 @@ impl Formatter {
         };
         let mut parts = Vec::new();
         for t in trivia {
-            if is_comment(t) {
+            if t.is_comment() {
                 parts.push(hardline());
-                parts.push(text(t.text.trim_end().to_string()));
+                parts.push(text(t.text().trim_end().to_string()));
             }
         }
         doc::concat(parts)
@@ -168,7 +164,7 @@ impl Formatter {
 
     fn has_comment_at(&self, s: Span) -> bool {
         self.trivia_at(s)
-            .is_some_and(|tr| tr.iter().any(is_comment))
+            .is_some_and(|tr| tr.iter().any(Trivia::is_comment))
     }
 
     // ------------------------------------------------------------------ program
@@ -222,10 +218,13 @@ impl Formatter {
                 d![text(&*s.ty_name.name), text(" = "), self.expr(&s.init)]
             }
             ast::Statement::CtorDestructuringBinding(s) => {
-                d![self.pattern(&s.pattern), text(" = "), self.expr(&s.init)]
+                d![
+                    self.pattern(&s.as_pattern()),
+                    text(" = "),
+                    self.expr(&s.init)
+                ]
             }
-            ast::Statement::Declaration(dcl) => self.declaration(dcl, false),
-            ast::Statement::PublicDeclaration(dcl) => self.declaration(dcl, true),
+            ast::Statement::Declaration { decl, public } => self.declaration(decl, *public),
             ast::Statement::ImportDeclaration(s) => {
                 let mut out = vec![text("import "), text(s.path.join("/"))];
                 if let Some(a) = &s.alias {
@@ -427,19 +426,19 @@ impl Formatter {
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        E::StringLiteral(sl) => Some(sl.value.as_str()),
-                        _ => None,
+                        ast::InterpPart::Literal(sl) => Some(sl.value.as_str()),
+                        ast::InterpPart::Expr(_) => None,
                     })
                     .collect();
                 let q = pick_quote(&literal);
                 let mut out = String::from(q);
                 for part in &s.parts {
                     match part {
-                        E::StringLiteral(sl) => out.push_str(&escape_string(&sl.value, q)),
-                        other => {
+                        ast::InterpPart::Literal(sl) => out.push_str(&escape_string(&sl.value, q)),
+                        ast::InterpPart::Expr(e) => {
                             out.push_str("${");
                             // Layout sub-expression flat at infinite width.
-                            out.push_str(&doc::layout(&self.expr(other), isize::MAX));
+                            out.push_str(&doc::layout(&self.expr(e), isize::MAX));
                             out.push('}');
                         }
                     }
@@ -451,28 +450,21 @@ impl Formatter {
             E::Identifier(id) => text(&*id.name),
             E::BinaryExpression(b) => group(d![
                 self.expr(&b.left),
-                text(format!(" {}", b.op.kind)),
+                text(format!(" {}", b.op.symbol())),
                 line(),
                 self.expr(&b.right),
             ]),
             E::UnaryExpression(u) => {
-                let op = match u.op.kind {
-                    Kind::PuncExclamationMark => "!",
-                    Kind::PuncMinus => "-",
-                    // The parser only ever produces `!` or `-` as unary operators.
-                    #[allow(clippy::unreachable)]
-                    _ => unreachable!(),
-                };
                 // `- -x` must not collapse into `--x`: the scanner greedily relexes
                 // the `--` as the rejected decrement token, so a valid program would
                 // no longer parse after formatting. Keep the operators apart with a
                 // space whenever the operand's own leading glyph is `-`.
-                let gap = if u.op.kind == Kind::PuncMinus && starts_with_minus(&u.expression) {
+                let gap = if u.op == ast::UnaryOp::Neg && starts_with_minus(&u.expression) {
                     text(" ")
                 } else {
                     nil()
                 };
-                d![text(op), gap, self.expr(&u.expression)]
+                d![text(u.op.symbol()), gap, self.expr(&u.expression)]
             }
             E::BlockExpression(b) => self.block_expr(b),
             E::IfExpression(_) => self.if_chain(e),
@@ -503,7 +495,11 @@ impl Formatter {
                 d![self.expr(&c.callee), parens]
             }
             E::PropertyAccessExpression(p) => {
-                d![self.expr(&p.left), text("."), self.expr(&p.right)]
+                let key = match &p.right {
+                    ast::PropertyKey::Field(id) => text(&*id.name),
+                    ast::PropertyKey::TupleIndex(n) => text(&*n.value),
+                };
+                d![self.expr(&p.left), text("."), key]
             }
             E::ArrayExpression(a) => {
                 let items: Vec<Doc> = a.elements.iter().map(|e| self.array_elem(e)).collect();
@@ -580,10 +576,7 @@ impl Formatter {
     fn array_elem(&self, e: &ast::ArrayElement) -> Doc {
         match e {
             ast::ArrayElement::Expression(e) => self.expr(e),
-            ast::ArrayElement::SpreadElement(se) => match &se.expression {
-                Some(inner) => d![text(".."), self.expr(inner)],
-                None => text(".."),
-            },
+            ast::ArrayElement::SpreadElement(se) => d![text(".."), self.expr(&se.expression)],
         }
     }
 
@@ -812,7 +805,7 @@ impl Formatter {
                 join(ps, text(" | "))
             }
             P::Range { start, end, .. } => {
-                d![self.pattern(start), text(".."), self.pattern(end)]
+                d![text(&*start.value), text(".."), text(&*end.value)]
             }
         }
     }
@@ -907,7 +900,7 @@ fn arg_can_hug(a: &ast::CallArg) -> bool {
 fn starts_with_minus(e: &ast::Expression) -> bool {
     use ast::Expression as E;
     match e {
-        E::UnaryExpression(u) => u.op.kind == Kind::PuncMinus,
+        E::UnaryExpression(u) => u.op == ast::UnaryOp::Neg,
         E::BinaryExpression(b) => starts_with_minus(&b.left),
         E::PropertyAccessExpression(p) => starts_with_minus(&p.left),
         E::ArrayIndexExpression(a) => starts_with_minus(&a.expression),
@@ -1331,7 +1324,7 @@ mod tests {
     fn top_level_items(src: &str) -> usize {
         let mut s = scanner::new_scanner(src.to_string());
         let toks = s.scan_all();
-        let diags = s.get_diagnostics();
+        let diags = s.take_diagnostics();
         let mut p = parser::new_parser_from_tokens(toks, diags);
         p.parse_program().ast.body.len()
     }

@@ -1,5 +1,4 @@
 use crate::span::Span;
-use crate::token;
 
 // ============================================================================
 // Literals and Basic Nodes
@@ -12,8 +11,14 @@ pub struct StringLiteral {
 }
 
 #[derive(Debug, Clone)]
+pub enum InterpPart {
+    Literal(StringLiteral),
+    Expr(Box<Expression>),
+}
+
+#[derive(Debug, Clone)]
 pub struct InterpolatedString {
-    pub parts: Vec<Expression>,
+    pub parts: Vec<InterpPart>,
     pub span: Span,
 }
 
@@ -80,9 +85,56 @@ pub struct TypeIdentifier {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Operator {
-    pub kind: token::Kind,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+}
+
+impl BinaryOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Mod => "%",
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::And => "&&",
+            Self::Or => "||",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
+    Neg,
+}
+
+impl UnaryOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Not => "!",
+            Self::Neg => "-",
+        }
+    }
 }
 
 // ============================================================================
@@ -126,13 +178,27 @@ pub struct TypedDiscard {
 
 /// `Ctor(p1, ..) = expr` at statement position. An irrefutable single-arm
 /// destructure; the compiler lowers it to a one-arm match and exhaustiveness
-/// must accept it (so only single-constructor types qualify). `pattern` is
-/// always `Pattern::Constructor`.
+/// must accept it (so only single-constructor types qualify).
 #[derive(Debug, Clone)]
 pub struct CtorDestructuringBinding {
-    pub pattern: Pattern,
+    pub name: Identifier,
+    pub args: Vec<PatternArg>,
+    pub rest: bool,
     pub init: Expression,
     pub span: Span,
+}
+
+impl CtorDestructuringBinding {
+    /// Re-materialise the constructor pattern for consumers that operate on
+    /// the general [`Pattern`] shape (typing, exhaustiveness, codegen).
+    pub fn as_pattern(&self) -> Pattern {
+        Pattern::Constructor {
+            name: self.name.clone(),
+            args: self.args.clone(),
+            rest: self.rest,
+            span: self.span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,8 +314,10 @@ pub struct ImportDeclaration {
 
 #[derive(Debug, Clone)]
 pub enum Statement {
-    Declaration(Box<Declaration>),
-    PublicDeclaration(Box<Declaration>),
+    Declaration {
+        decl: Box<Declaration>,
+        public: bool,
+    },
     ImportDeclaration(ImportDeclaration),
     TupleDestructuringBinding(TupleDestructuringBinding),
     TypedDiscard(TypedDiscard),
@@ -260,8 +328,7 @@ pub enum Statement {
 impl Statement {
     pub fn span(&self) -> Span {
         match self {
-            Statement::Declaration(d) => d.span(),
-            Statement::PublicDeclaration(d) => d.span(),
+            Statement::Declaration { decl, .. } => decl.span(),
             Statement::ImportDeclaration(x) => x.span,
             Statement::TupleDestructuringBinding(x) => x.span,
             Statement::TypedDiscard(x) => x.span,
@@ -317,14 +384,14 @@ pub struct OrExpression {
 pub struct BinaryExpression {
     pub left: Box<Expression>,
     pub right: Box<Expression>,
-    pub op: Operator,
+    pub op: BinaryOp,
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnaryExpression {
     pub expression: Box<Expression>,
-    pub op: Operator,
+    pub op: UnaryOp,
     pub span: Span,
 }
 
@@ -355,9 +422,24 @@ pub struct RangeExpression {
 }
 
 #[derive(Debug, Clone)]
+pub enum PropertyKey {
+    Field(Identifier),
+    TupleIndex(NumberLiteral),
+}
+
+impl PropertyKey {
+    pub fn span(&self) -> Span {
+        match self {
+            PropertyKey::Field(id) => id.span,
+            PropertyKey::TupleIndex(n) => n.span,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PropertyAccessExpression {
     pub left: Box<Expression>,
-    pub right: Box<Expression>,
+    pub right: PropertyKey,
     pub span: Span,
 }
 
@@ -382,15 +464,7 @@ impl CallArg {
     pub fn span(&self) -> Span {
         match self {
             CallArg::Positional(e) => e.span(),
-            CallArg::Labeled { label, value } => {
-                let end = value.span();
-                Span {
-                    start_line: label.span.start_line,
-                    start_column: label.span.start_column,
-                    end_line: end.end_line,
-                    end_column: end.end_column,
-                }
-            }
+            CallArg::Labeled { label, value } => label.span.cover(value.span()),
             CallArg::Spread(e) => e.span(),
         }
     }
@@ -404,7 +478,7 @@ pub struct BlockExpression {
 
 #[derive(Debug, Clone)]
 pub struct SpreadElement {
-    pub expression: Option<Expression>,
+    pub expression: Expression,
     pub span: Span,
 }
 
@@ -481,8 +555,8 @@ pub enum Pattern {
         span: Span,
     },
     Range {
-        start: Box<Pattern>,
-        end: Box<Pattern>,
+        start: NumberLiteral,
+        end: NumberLiteral,
         span: Span,
     },
 }
@@ -573,7 +647,7 @@ impl Pattern {
         f: &mut dyn FnMut(PatternBinder<'a>),
     ) {
         match self {
-            Pattern::Wildcard { .. } | Pattern::Literal(_) => {}
+            Pattern::Wildcard { .. } | Pattern::Literal(_) | Pattern::Range { .. } => {}
             Pattern::Var { name } => f(PatternBinder::Name(name)),
             Pattern::Constructor { args, .. } => {
                 for arg in args {
@@ -626,10 +700,6 @@ impl Pattern {
                     }
                 }
             },
-            Pattern::Range { start, end, .. } => {
-                start.for_each_binder(or_mode, f);
-                end.for_each_binder(or_mode, f);
-            }
         }
     }
 }
