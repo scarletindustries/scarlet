@@ -87,8 +87,7 @@ impl VM {
     pub(super) fn bin_from_string(&mut self) -> VmResult<()> {
         // The bytes are copied off-heap; only the box is arena.
         let s_v = self.pop_str("binary.from_string")?;
-        let bytes = str_ref(&s_v).as_bytes().to_vec();
-        let v = Value::binary_in(&mut self.heap, bytes);
+        let v = Value::binary_from_slice_in(&mut self.heap, str_ref(&s_v).as_bytes());
         self.stack.push(v);
         Ok(())
     }

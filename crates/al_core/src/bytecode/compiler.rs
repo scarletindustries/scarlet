@@ -3716,7 +3716,7 @@ impl Compiler {
     fn lookup_ctor(
         &self,
         name: &str,
-    ) -> Option<(TypeId, String, usize, ArenaSlice<pool::StrSlices>, Scheme)> {
+    ) -> Option<(TypeId, StrId, usize, ArenaSlice<pool::StrSlices>, Scheme)> {
         let scheme = *self.env.lookup(name)?;
         match scheme.kind {
             ValueKind::Constructor {
@@ -3725,13 +3725,7 @@ impl Compiler {
                 arity,
                 field_labels,
                 ..
-            } => Some((
-                type_id,
-                self.engine.str(type_name).to_string(),
-                arity as usize,
-                field_labels,
-                scheme,
-            )),
+            } => Some((type_id, type_name, arity as usize, field_labels, scheme)),
             _ => None,
         }
     }
@@ -3759,9 +3753,11 @@ impl Compiler {
         };
 
         let inst = self.engine.instantiate(&scheme, &self.rigid_ids);
-        let qualified = format!("{}.{}", type_name, name.name);
-        let doc = self.doc_if_collecting(&qualified);
-        self.record(&qualified, inst, name.span, doc);
+        if self.collect_hover_facts {
+            let qualified = format!("{}.{}", self.engine.str(type_name), name.name);
+            let doc = self.doc_if_collecting(&qualified);
+            self.record(&qualified, inst, name.span, doc);
+        }
         self.record_value_use(scheme.def, name.span, ReferenceKind::Unqualified);
 
         let r = self.engine.find(inst);
