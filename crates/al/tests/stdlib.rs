@@ -23,11 +23,11 @@ fn stdlib_option() {
          println(option.then(None, fn(x) Some(x + 1)))\n",
         "Some(6)\nNone\n",
     );
-    // or_else: Some keeps the original option; None falls back to the supplied one.
+    // or_else: Some keeps the original option; None calls the fallback thunk.
     run_outputs(
         "import al/option\n\
-         println(option.or_else(Some(1), Some(2)))\n\
-         println(option.or_else(None, Some(2)))\n",
+         println(option.or_else(Some(1), fn() Some(2)))\n\
+         println(option.or_else(None, fn() Some(2)))\n",
         "Some(1)\nSome(2)\n",
     );
     // is_none: True on None, False on Some — exercising both match arms.
@@ -139,9 +139,11 @@ run_case! {
          println(int.max(3, 7))\n\
          println(int.min(3, 7))\n\
          println(int.abs(0 - 5))\n\
+         println(int.abs(0 - 9223372036854775807 - 1))\n\
          println(int.clamp(99, 0, 10))\n\
+         println(int.clamp(5, 10, 0))\n\
          println(int.to_string(42))\n",
-        "7\n3\n5\n10\n42\n",
+        "7\n3\n5\n9223372036854775807\n10\n0\n42\n",
     ),
 
     stdlib_bool: (
@@ -421,7 +423,7 @@ fn stdlib_binary_ascii_builtins() {
          i = binary.index_of(binary.from_string('abc'), binary.from_string('b'), 0) or 0\n\
          println(i)\n",
     );
-    // parse_int : (Binary, Radix) -> Option(Int)
+    // parse_int : (Binary, Radix) -> Result(Int, Nil)
     check_ok(
         "import al/binary.{Dec}\n\
          n = binary.parse_int(binary.from_string('42'), Dec) or 0\n\
@@ -459,9 +461,10 @@ fn stdlib_float() {
     run_outputs(
         "import al/float\n\
          println(float.abs(0.0 - 2.5))\n\
+         println(float.abs(-0.0))\n\
          println(float.min(1.5, 3.2))\n\
          println(float.max(1.5, 3.2))\n",
-        "2.5\n1.5\n3.2\n",
+        "2.5\n0.0\n1.5\n3.2\n",
     );
     // VM float operators, each with a discriminating value assertion: `+`
     // (AddFloat), `*` (MulFloat), unary `-` (NegFloat) and `<=`/`>=`

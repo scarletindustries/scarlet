@@ -18,7 +18,7 @@ pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
 }
 
 // Runs f on every element for its side effect; if you want a value out, use map or fold.
-pub fn each(xs Array(a), f fn(a) b) {
+pub fn each(xs Array(a), f fn(a) b) Nil {
 	match xs {
 		[] -> Nil
 		[h, ..t] -> {
@@ -32,9 +32,8 @@ pub fn reverse(xs Array(a)) Array(a) {
 	fold(xs, [], fn(acc, x) [x, ..acc])
 }
 
-pub fn length(xs Array(a)) Int {
-	fold(xs, 0, fn(n, _) n + 1)
-}
+@vm(array__length)
+pub fn length(xs Array(a)) Int
 
 pub fn contains(xs Array(a), target a) Bool {
 	match xs {

@@ -625,6 +625,7 @@ pub fn builtin_op(name: &str) -> Option<Op> {
         "string__contains" => Op::StrContains,
         "string__trim" => Op::StrTrim,
         "int__to_string" => Op::IntToString,
+        "array__length" => Op::ArrayLen,
         "binary__from_string" => Op::BinFromString,
         "binary__to_string" => Op::BinToString,
         "binary__bit_size" => Op::BinBitSize,

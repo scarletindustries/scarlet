@@ -44,7 +44,17 @@ pub type Radix {
 }
 
 @vm(binary__parse_int)
-pub fn parse_int(b Binary, radix Radix) Option(Int)
+fn parse_int_raw(b Binary, radix Radix) Option(Int)
+
+// Parse an ASCII integer in `radix`. A non-digit byte, empty input, or a
+// value that overflows Int is an `Err(Nil)` — a parse is a fallible
+// operation, so it returns Result per the stdlib convention.
+pub fn parse_int(b Binary, radix Radix) Result(Int, Nil) {
+	match parse_int_raw(b, radix) {
+		Some(n) -> Ok(n)
+		None -> Err(Nil)
+	}
+}
 
 @vm(binary__eq_ignore_ascii_case)
 pub fn eq_ignore_ascii_case(a Binary, b Binary) Bool

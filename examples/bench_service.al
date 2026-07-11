@@ -256,14 +256,10 @@ fn verify_session(req Request, t Tables) Option(User) {
 	option.then(headers.get(req.headers, NAME_COOKIE), fn(raw) option.then(
 		cookie_get(raw, <<'session'>>),
 		fn(token) option.then(split_token(token), fn(parts) match parts {
-			(user, sig_bytes) -> option.then(
-				binary.parse_int(sig_bytes, Hex),
-				fn(sig) if sig == sign(user) {
-					find_by_name(t, user)
-				} else {
-					None
-				},
-			)
+			(user, sig_bytes) -> match binary.parse_int(sig_bytes, Hex) {
+				Ok(sig) if sig == sign(user) -> find_by_name(t, user)
+				else -> None
+			}
 		}),
 	))
 }
@@ -322,7 +318,11 @@ const USERS_PREFIX_LEN = 7
 fn handle_user_by_id(path Binary, t Tables) Response {
 	n = binary.byte_size(path)
 	rest = binary.slice_bytes(path, USERS_PREFIX_LEN, n - USERS_PREFIX_LEN)
-	match option.then(binary.parse_int(rest, Dec), fn(id) find_by_id(t, id)) {
+	user = match binary.parse_int(rest, Dec) {
+		Ok(id) -> find_by_id(t, id)
+		Err(Nil) -> None
+	}
+	match user {
 		None -> json(404, '{"error":"no such user"}')
 		Some(u) -> json(200, profile_json(u))
 	}
@@ -353,7 +353,7 @@ fn route(req Request, t Tables) Response {
 fn port_arg() Int {
 	match process.argv() {
 		[_script, p, .._rest] ->
-			option.unwrap(binary.parse_int(binary.from_string(p), Dec), DEFAULT_PORT)
+			binary.parse_int(binary.from_string(p), Dec) or DEFAULT_PORT
 		else -> DEFAULT_PORT
 	}
 }

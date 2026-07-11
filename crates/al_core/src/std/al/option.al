@@ -19,10 +19,10 @@ pub fn unwrap(o Option(a), default a) a {
 	}
 }
 
-pub fn or_else(o Option(a), fallback Option(a)) Option(a) {
+pub fn or_else(o Option(a), fallback fn() Option(a)) Option(a) {
 	match o {
 		Some(_) -> o
-		None -> fallback
+		None -> fallback()
 	}
 }
 

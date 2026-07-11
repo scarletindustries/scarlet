@@ -118,8 +118,8 @@ fn factor(tokens Array(String)) Parsed {
 		}
 		// A number is a literal; any other word is a variable reference.
 		[t, ..rest] -> match binary.parse_int(binary.from_string(t), Dec) {
-			Some(n) -> Ok((Num(n), rest))
-			None -> Ok((Var(t), rest))
+			Ok(n) -> Ok((Num(n), rest))
+			Err(Nil) -> Ok((Var(t), rest))
 		}
 	}
 }

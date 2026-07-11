@@ -196,9 +196,9 @@ run_case! {
     ),
 
     // Op::BinParseInt — ASCII integer parse in radix 10/16. The checked multiply/
-    // add reject an overflowing value as `None` (not a wrapped int — the request-
-    // smuggling defense, since AL arithmetic wraps); a non-digit or empty input is
-    // also `None`. Hex accepts both cases.
+    // add reject an overflowing value as `Err(Nil)` (not a wrapped int — the
+    // request-smuggling defense, since AL arithmetic wraps); a non-digit or empty
+    // input is also `Err(Nil)`. Hex accepts both cases.
     binary_parse_int: (
         "import al/binary.{Dec, Hex}\n\
          println(binary.parse_int(binary.from_string('255'), Dec))\n\
@@ -207,7 +207,7 @@ run_case! {
          println(binary.parse_int(binary.from_string('99999999999999999999'), Dec))\n\
          println(binary.parse_int(binary.from_string('12x'), Dec))\n\
          println(binary.parse_int(binary.from_string(''), Dec))\n",
-        "Some(255)\nSome(255)\nSome(255)\nNone\nNone\nNone\n",
+        "Ok(255)\nOk(255)\nOk(255)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n",
     ),
 
     // Op::BinEqIgnoreAsciiCase — ASCII-case-insensitive byte equality (header-name
@@ -237,7 +237,7 @@ run_case! {
          println(binary.to_string(binary.from_int_ascii(0, Dec)))\n\
          println(binary.to_string(binary.from_int_ascii(0 - 42, Dec)))\n\
          println(binary.parse_int(binary.from_int_ascii(4096, Hex), Hex))\n",
-        "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nSome(4096)\n",
+        "Ok(255)\nOk(ff)\nOk(0)\nOk(-42)\nOk(4096)\n",
     ),
 }
 

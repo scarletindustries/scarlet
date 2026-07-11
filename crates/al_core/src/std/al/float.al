@@ -24,8 +24,9 @@ pub fn min(a Float, b Float) Float {
 	if a < b { a } else { b }
 }
 
+// `<=` so abs(-0.0) is 0.0, matching IEEE abs for both zeros.
 pub fn abs(f Float) Float {
-	if f < 0.0 {
+	if f <= 0.0 {
 		0.0 - f
 	} else {
 		f
