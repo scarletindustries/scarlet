@@ -15,15 +15,20 @@
 //! recursive and order-free, so `analysis.rs` runs its multi-pass declaration
 //! analysis first and hands each body back to this file.
 //!
-//! # Map of the file
+//! # Map of the module
 //!
-//! - **[`Compiler`] + entry points** ([`compile`] / [`check`] /
+//! - **This file** — [`Compiler`] + entry points ([`compile`] / [`check`] /
 //!   [`check_as_module`]): all codegen, scoping, and inference state in one
-//!   struct, documented field by field.
-//! - **The pass itself** (`compile_node` / `compile_expr` and friends): the
-//!   bulk of the file, one method per AST form.
-//! - **Core IR orchestration** ([`Compiler::compile_fn_body`]): the
-//!   `lower → perceus → emit` pipeline hook for function bodies.
+//!   struct, documented field by field; the pass itself (`compile_node` /
+//!   `compile_expr` and friends, one method per AST form); and the Core IR
+//!   orchestration ([`Compiler::compile_fn_body`]), the `lower → perceus →
+//!   emit` pipeline hook for function bodies.
+//! - **`patterns.rs`** — pattern type-checking (no codegen):
+//!   [`Compiler::type_pattern`] plus constructor lookup and argument
+//!   slotting.
+//! - **`bridges.rs`** — the `EmitCtx`/[`ElabCtx`] impls through which the
+//!   compiler-agnostic Core IR passes speak to this compilation.
+//! - **`tests.rs`** — the unit-test modules.
 //!
 //! The LSP/workspace layer that owns a `Compiler` across edits —
 //! [`IncrementalSession`], [`Watermark`]/`reset_to`, and the reference-graph
@@ -52,23 +57,23 @@ use super::session::{RawRef, Watermark};
 use super::{Function, Op, PreludeBindings, Program, TypeRef, Value, op, op_arg};
 use crate::ast;
 use crate::core_ir::CoreFn;
-use crate::core_ir::lower::{SlotError, slot_labeled};
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::frozen::FrozenBuilder;
+use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
-    self, Denotation, ElabCtx, GlobalSlot, OrShape, RTy, ResolvedPool, TempTys, TypedExpr, TypedFn,
-    TypedProgram, WalkStep, Zonker, pool_for,
+    self, Denotation, ElabCtx, FnTable, GlobalSlot, OrShape, RTy, ResolvedPool, TempTys, TypedExpr,
+    TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
 };
 use indexmap::IndexMap;
 use smallvec::SmallVec;
 
 use crate::module::{
-    self, CachedModule, ModuleInterface, ModuleOrigin, ModulePath, ModuleSource, ModuleTable,
-    ResolveError, source_hash,
+    self, CachedModule, ModuleInterface, ModuleKey, ModuleOrigin, ModulePath, ModuleSource,
+    ModuleTable, ResolveError, source_hash,
 };
 use crate::reference::{
-    DefId, Definition, ModuleId, ModuleInterner, ModuleReferences, Reference, ReferenceGraph,
-    ReferenceKind,
+    DefId, Definition, DefinitionKind, ModuleId, ModuleInterner, ModuleReferences, Reference,
+    ReferenceGraph, ReferenceKind,
 };
 use crate::span::Span;
 use crate::type_def::TypeId;
@@ -78,8 +83,13 @@ use crate::types::{
     TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
 };
 
+mod bridges;
+mod patterns;
+#[cfg(test)]
+mod tests;
+
 /// The proof the elaborator demands before it will run. Its own module so
-/// that the private field is unforgeable from the rest of `compiler.rs`.
+/// that the private field is unforgeable from the rest of this module.
 mod clean {
     use crate::diagnostic::{Diagnostic, has_errors};
 
@@ -99,7 +109,7 @@ mod clean {
     /// is the only place in this compiler that calls them. It consumes a
     /// `CleanModule`, and [`CleanModule::mint`] is the only way to make one.
     ///
-    /// (`core_ir::lower::lower_all` itself takes no proof — it does not need
+    /// (`core_ir::lower::lower` itself takes no proof — it does not need
     /// one. Its argument *is* the proof: a `TypedProgram` cannot exist for a
     /// module that failed to typecheck, because the only way to build one runs
     /// through the gate above.)
@@ -244,10 +254,27 @@ struct FnFrame {
 /// `mem::replace` calls to remember at both ends of `compile_module_body`.
 struct ModuleFrame {
     module: ModulePath,
+    module_key: ModuleKey,
     module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
-    imported_qualifiers: HashMap<String, String>,
+    imported_qualifiers: HashMap<String, ModuleKey>,
     base_dir: Option<PathBuf>,
     module_refs: ModuleReferences,
+}
+
+/// Compiler frame state parked by `enter_elab_frame` while a [`DeferredBody`]'s
+/// snapshot is swapped in for its elaboration, and restored wholesale by
+/// `leave_elab_frame`. Mirrors [`ModuleFrame`]: adding a field the elaboration
+/// must see means one line here plus one swap/restore in the enter/leave pair,
+/// not two hand-written `mem::replace` calls to keep paired at both ends of
+/// `elaborate_deferred`.
+struct ElabFrame {
+    outer_scopes: Vec<Scope>,
+    locals: HashMap<StrId, LocalSlot>,
+    captures: HashMap<StrId, i32>,
+    capture_names: Vec<StrId>,
+    rigid_ids: HashSet<i32>,
+    current_binding: Option<StrId>,
+    frame_closures: Vec<ClosureSite>,
 }
 
 pub struct Compiler {
@@ -296,7 +323,7 @@ pub struct Compiler {
     /// fn with `CallKnown` (immediate `func_idx`, no callee value pushed)
     /// instead of the `PushGlobal; Call` dynamic path. A miss (forward ref
     /// within an SCC, or a non-fn global) falls back to `Call`.
-    pub(super) global_to_func: HashMap<i32, i32>,
+    pub(super) global_to_func: HashMap<GlobalSlot, i32>,
     /// This module's own top-level `fn`/`const` declarations, in Pass 5
     /// SCC-visit order (leaves first). Cleared to entry-file scope at
     /// `code_mark`.
@@ -382,6 +409,10 @@ pub struct Compiler {
     /// later modules are added or evicted; ids are reused across recompiles.
     pub(super) ref_interner: ModuleInterner,
     pub(super) current_module: ModulePath,
+    /// `current_module`'s canonical cache key, maintained in lockstep with it
+    /// (swapped by `enter_module_frame`, reset alongside it) so per-module
+    /// bookkeeping never re-derives a key from a possibly-unresolved path.
+    pub(super) current_module_key: ModuleKey,
     /// Memo of `current_module` interned into `engine.str_slices`; invalidated
     /// (set to `None`) whenever `current_module` is swapped in
     /// `enter_module_frame`.
@@ -390,15 +421,15 @@ pub struct Compiler {
     /// `str_slices` pool is append-only within a compile, so a given
     /// `ArenaSlice` always denotes the same path (hence the same id); cleared
     /// in `reset_to`, the single point where the pool is rewound. Lets
-    /// `defid_of`/`record` skip the per-occurrence `strs_of` + `path_key`
+    /// `defid_of`/`record` skip the per-occurrence `strs_of` + key-join
     /// allocations and string-hash probe on the per-keystroke recompile.
     pub(super) defid_module_memo: HashMap<ArenaSlice<pool::StrSlices>, ModuleId>,
-    /// Qualifier name in this file → module key (path.join("/")).
-    pub(super) imported_qualifiers: HashMap<String, String>,
+    /// Qualifier name in this file → the imported module's canonical key.
+    pub(super) imported_qualifiers: HashMap<String, ModuleKey>,
     /// canonical module key -> the import path as the user wrote it. Identity
     /// is the resolved file; diagnostics must still say `./lib`, not
     /// `/private/var/.../lib`.
-    pub(super) module_display: HashMap<String, String>,
+    pub(super) module_display: HashMap<ModuleKey, String>,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) prelude: PreludeBindings,
     /// Names user code may not redefine. Populated from the prelude module's
@@ -424,7 +455,7 @@ pub struct Compiler {
     /// The frame owns its sites, not the compiler: [`Self::enter_fn_frame`]
     /// parks the enclosing frame's list and hands the new frame an empty one,
     /// [`Self::compile_fn_body`] moves the walked frame's list into its
-    /// [`DeferredBody`], and [`Self::elaborate_deferred`] swaps that list back
+    /// [`ParkedBody`], and [`Self::elaborate_deferred`] swaps that list back
     /// in for exactly the elaboration of that body. Entry-frame sites (a lambda
     /// in a toplevel `let` or `const`) accumulate here across the module walk
     /// and are dropped once that module's toplevel has been elaborated, so no
@@ -460,7 +491,7 @@ pub struct Compiler {
     ///
     /// This is the region currently being filled. A function body opens its own
     /// ([`Self::compile_fn_body`], which hands it to that body's
-    /// [`DeferredBody`]) and parks the enclosing one in
+    /// [`ParkedBody`]) and parks the enclosing one in
     /// [`Compiler::walk_tys_stack`], so a nested lambda's types never mix into
     /// the enclosing body's region. What is left when no body is open is the
     /// module toplevel's own region, drained by whoever elaborates that
@@ -497,7 +528,7 @@ pub struct Compiler {
 /// pipeline can consume.
 ///
 /// The elaborator mints a `FuncIdx` for every eta wrapper it needs by pushing
-/// onto `TypedProgram::fns`, and `FuncIdx` is also this compiler's index into
+/// onto its `FnTable`, and `FuncIdx` is also this compiler's index into
 /// `program.functions` (it is what `Atom::Closure` and `CallKnown` carry). So
 /// `fns` is padded up to `program.functions.len()` before the walk starts, and
 /// each wrapper the walk appends past that point gets its `Function` reserved
@@ -509,18 +540,19 @@ struct Elaborated {
     eta_base: usize,
 }
 
-/// One body, all the way through `lower`: the `CoreFn` itself, the arena its
-/// `RTy`s index (`perceus` reads it, `emit` does not), and — for a module
-/// toplevel — the entry-frame slot each module-scope `Let` must be pinned to.
+/// One body, all the way through `lower`: the `CoreFn` itself and the arena
+/// its `RTy`s index (`perceus` reads it, `emit` does not).
 ///
-/// The slots come straight out of `TypedBind::global`, which `ElabCtx::global_slot`
-/// stamped on during elaboration, so a def/use mismatch against the
-/// `PushGlobal <slot>` already baked into every emitted fn body is unspellable:
-/// there is no name-keyed queue left to dequeue at the wrong moment.
+/// A module toplevel's entry-frame slot pinnings ride the IR itself: `lower`
+/// copied `TypedBind::global` — stamped by `ElabCtx::global_slot` during
+/// elaboration — onto each module-scope `Let`'s `CoreBind`, and
+/// [`Compiler::append_toplevel_init`] reads them back off the body via
+/// `CoreExpr::toplevel_globals`. So a def/use mismatch against the
+/// `PushGlobal <slot>` already baked into every emitted fn body is
+/// unspellable: there is no side table to desync from the binds it describes.
 struct LoweredBody {
     core: CoreFn,
     pool: ResolvedPool,
-    toplevel_globals: Vec<(crate::core_ir::LocalId, i32)>,
 }
 
 /// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
@@ -559,6 +591,10 @@ pub(super) struct ClosureSite {
 /// where its jump-over placeholder sits. Types keep moving until the whole SCC
 /// has been inferred and generalized, so `lower` — the pass that reads them —
 /// runs last, off this record.
+///
+/// Built whole in exactly one place, [`Compiler::finish_fn_frame`], from the
+/// walk half ([`ParkedBody`]) plus the frame half that only becomes final
+/// there. No field is ever back-patched.
 struct DeferredBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
@@ -618,16 +654,35 @@ struct DeferredBody {
     capture_env: Vec<(String, Scheme)>,
 }
 
-/// Where [`Compiler::compile_fn_body`] parked the body it just typechecked.
+/// The walk half of a [`DeferredBody`]: everything [`Compiler::compile_fn_body`]
+/// knows about the body it just typechecked, carried by value to the matching
+/// [`Compiler::finish_fn_frame`], which adds the frame half (captures,
+/// `func_idx`, jump-over) and pushes the complete `DeferredBody`.
 ///
 /// There is exactly one outcome, and that is the point: the typecheck walk
 /// cannot emit a function body, because `compile_fn_body` has nothing to hand
-/// [`Compiler::finish_fn_frame`] but an index into `deferred_bodies`. The
-/// phase boundary is a type, not a convention — no `code_start` exists yet for
-/// anyone to spell. `deferred_bodies[idx]` appends the body's code, fills the
-/// `Function` entry and patches the jump-over, in `analyse_module`'s pass 6.
+/// `finish_fn_frame` but this record. The phase boundary is a type, not a
+/// convention — no `code_start` exists yet for anyone to spell. The deferred
+/// body appends its code, fills the `Function` entry and patches the
+/// jump-over, in `analyse_module`'s pass 6.
 struct ParkedBody {
-    idx: usize,
+    name: StrId,
+    param_binds: Vec<(StrId, Ty)>,
+    body: ast::Expression,
+    body_ty: Ty,
+    walk_tys: Vec<WalkStep>,
+    closures: Vec<ClosureSite>,
+    param_slots: i32,
+}
+
+/// A name resolved to a constructor, as `type_ctor_pattern` needs it: the
+/// facts to slot and type the pattern's arguments against. Produced by
+/// `Compiler::lookup_ctor` / `lookup_ctor_qualified`.
+struct CtorLookup {
+    type_name: StrId,
+    arity: usize,
+    field_labels: ArenaSlice<pool::StrSlices>,
+    scheme: Scheme,
 }
 
 /// Which toplevel `append_toplevel_init` is emitting: the entry file's or an
@@ -653,7 +708,7 @@ enum QualifiedMember<'a> {
     /// has already emitted the diagnostic.
     LookupFailed,
     Resolved {
-        module_key: String,
+        module_key: ModuleKey,
         member_name: &'a str,
         member_span: Span,
         scheme: Scheme,
@@ -739,6 +794,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         module_display: HashMap::new(),
         ref_interner,
         current_module: module::main_module(),
+        current_module_key: ModuleKey::main(),
         module_path_slice: None,
         defid_module_memo: HashMap::new(),
         imported_qualifiers: HashMap::new(),
@@ -784,10 +840,7 @@ impl Compiler {
         if *path == self.current_module {
             pick(&self.module_refs, name)
         } else {
-            pick(
-                self.module_table.module_refs(&module::path_key(path))?,
-                name,
-            )
+            pick(self.module_table.module_refs_by_path(path)?, name)
         }
     }
 }
@@ -808,6 +861,9 @@ fn compile_impl(
 ) -> CompileResult {
     let mut c = new_compiler(base_dir, check_only);
     if let Some(m) = as_module.clone() {
+        // `as_module` is always a stdlib path (see `check_as_module`), whose
+        // written form is its canonical identity.
+        c.current_module_key = ModuleKey::for_stdlib(&m);
         c.current_module = m;
     }
 
@@ -899,9 +955,10 @@ fn compile_impl(
     // modules. Fn bodies were already emitted during `analyse_module` and
     // reference sibling decls via `PushGlobal <slot>` where `<slot>` is Pass 3's
     // decl-first allocation; `ElabCtx::global_slot` stamped the corresponding
-    // slot onto each `TypedBind`, `lower` handed the `LocalId → slot` pairs back
-    // as `Lowered::toplevel_globals`, and `emit_toplevel` pins those `Let`s to
-    // the same slots so the entry-frame `StoreLocal`s line up.
+    // slot onto each `TypedBind`, `lower` copied it onto each toplevel `Let`'s
+    // `CoreBind`, and `emit_toplevel` pins those `Let`s to the same slots (read
+    // back via `CoreExpr::toplevel_globals`) so the entry-frame `StoreLocal`s
+    // line up.
     //
     // Elaboration and lowering run under `check_only` too — only the emit half
     // is skipped. A well-typed program the front half cannot handle has to be
@@ -965,6 +1022,17 @@ fn compile_impl(
     }
 }
 
+/// The compiler state `precompile_stdlib` freezes into the static blob:
+/// the compiled program plus the scalars a fresh compiler needs to resume
+/// from it.
+pub(crate) struct CompilerParts {
+    pub(crate) program: Program,
+    pub(crate) prelude: PreludeBindings,
+    pub(crate) reserved: HashSet<String>,
+    pub(crate) next_type_id: TypeId,
+    pub(crate) local_count: i32,
+}
+
 impl Compiler {
     // ========================================================================
     // Precompile accessors (used by `precompile.rs` only)
@@ -981,20 +1049,15 @@ impl Compiler {
     }
     /// Tear down for `precompile_stdlib`: program + scalars, plus the engine
     /// (whose arena `flatten` snapshots).
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        (Program, PreludeBindings, HashSet<String>, TypeId, i32),
-        InferEngine,
-    ) {
+    pub(crate) fn into_parts(self) -> (CompilerParts, InferEngine) {
         (
-            (
-                self.program,
-                self.prelude,
-                self.reserved,
-                self.env.next_type_id(),
-                self.local_count,
-            ),
+            CompilerParts {
+                program: self.program,
+                prelude: self.prelude,
+                reserved: self.reserved,
+                next_type_id: self.env.next_type_id(),
+                local_count: self.local_count,
+            },
             self.engine,
         )
     }
@@ -1050,7 +1113,7 @@ impl Compiler {
 
         // Re-export prelude constructor/@vm schemes (Some/None/Ok/Err/True/...)
         // into root scope.
-        let key = module::path_key(&module::al_prelude());
+        let key = ModuleKey::prelude();
         if let Some(iface) = self.module_table.get_or_hydrate(&key) {
             let pairs: Vec<_> = iface
                 .values
@@ -1231,11 +1294,11 @@ impl Compiler {
     /// closure already captured by reference — and it does not queue the slot
     /// on [`Self::toplevel_binds`]: a declaration's slot reaches the
     /// elaborator on its own [`ToplevelDecl`] record instead.
-    pub(super) fn alloc_decl_slot(&mut self, name: &str) -> i32 {
+    pub(super) fn alloc_decl_slot(&mut self, name: &str) -> GlobalSlot {
         let id = self.engine.intern(name);
         let idx = self.alloc_temp();
         self.bind_local_raw(id, idx);
-        idx
+        GlobalSlot(idx)
     }
 
     /// Take the entry-frame slot [`Self::bind_local`] queued for the next
@@ -1348,11 +1411,11 @@ impl Compiler {
     fn resolve_variable(&mut self, name: StrId) -> Option<Denotation> {
         self.mark_used(name);
         if let Some(entry) = self.locals.get(&name) {
-            return Some(Denotation::slot(entry.slot as u32));
+            return Some(Denotation::slot(entry.slot));
         }
         if let Some(idx) = self.captures.get(&name) {
             debug_assert!(*idx >= 0, "capture index is a Vec index");
-            return Some(Denotation::capture(*idx as u32));
+            return Some(Denotation::capture(*idx));
         }
         // Search enclosing scopes innermost-first so inner bindings shadow
         // outer ones. The bottom of the stack (index 0) is always the entry
@@ -1393,7 +1456,7 @@ impl Compiler {
                 let capture_idx = self.capture_names.len() as i32;
                 self.captures.insert(name, capture_idx);
                 self.capture_names.push(name);
-                return Some(Denotation::capture(capture_idx as u32));
+                return Some(Denotation::capture(capture_idx));
             }
         }
         None
@@ -1402,7 +1465,7 @@ impl Compiler {
     /// A module-scope value at `slot`: a known top-level `fn` if one has been
     /// registered for that slot, an opaque global otherwise.
     fn global_denotation(&self, slot: GlobalSlot) -> Denotation {
-        match self.global_to_func.get(&slot.0) {
+        match self.global_to_func.get(&slot) {
             Some(&func_idx) => Denotation::known_fn(slot, func_idx),
             None => Denotation::global(slot),
         }
@@ -1586,11 +1649,12 @@ impl Compiler {
         name: &str,
         doc: Option<String>,
         is_pub: bool,
+        kind: DefinitionKind,
     ) {
         let defid = self.defid_of(dl);
         let first = self.module_refs.definition(defid).is_none();
         self.module_refs
-            .add_definition(Definition::new(defid, name, doc, is_pub));
+            .add_definition(Definition::new(defid, name, doc, is_pub, kind));
         if first {
             self.module_refs.add_reference(
                 Some(defid),
@@ -1612,6 +1676,7 @@ impl Compiler {
                 name,
                 doc,
                 false,
+                DefinitionKind::Value,
             );
         }
     }
@@ -1931,12 +1996,10 @@ impl Compiler {
         // `canon` is the module's identity — the file it resolved to. Every
         // downstream key (module table, reference interner, qualifier map) must
         // use it, never `imp.path`, which is only how *this* file spelled it.
-        let Some(canon) = self.load_module(&imp.path, imp.span) else {
+        let Some((canon, key)) = self.load_module(&imp.path, imp.span) else {
             return;
         };
-        let key = module::path_key(&canon);
-        self.module_display
-            .insert(key.clone(), module::path_key(&imp.path));
+        self.module_display.insert(key.clone(), imp.path.join("/"));
 
         let qualifier = imp
             .alias
@@ -1948,7 +2011,7 @@ impl Compiler {
                     .rev()
                     .find(|s| s.as_str() != "." && s.as_str() != "..")
                     .cloned()
-                    .unwrap_or_else(|| key.clone())
+                    .unwrap_or_else(|| key.as_str().to_string())
             });
 
         // Reference graph: the qualifier binding is a `ModuleAlias`
@@ -1968,10 +2031,16 @@ impl Compiler {
         let cur_mid = self.ref_interner.intern(&cur_path);
         let imported_mid = self.ref_interner.intern(&canon);
         let alias_defid = DefId::new(cur_mid, alias_span, EntityKind::ModuleAlias);
-        let mut alias_def = Definition::new(alias_defid, qualifier.clone(), None, false);
-        alias_def.decl_span = imp.span;
-        alias_def.imports_module = Some(imported_mid);
-        self.module_refs.add_definition(alias_def);
+        self.module_refs.add_definition(Definition::new(
+            alias_defid,
+            qualifier.clone(),
+            None,
+            false,
+            DefinitionKind::ModuleAlias {
+                decl_span: imp.span,
+                imports_module: Some(imported_mid),
+            },
+        ));
         // The module-name segment points at the *imported* module, so its
         // `Import` occurrence targets a `DefId` owned by that module: goto-def
         // on the `b` in `import a/b` lands on `b`'s file, not the importing
@@ -2050,7 +2119,13 @@ impl Compiler {
                     );
                     let alias_defid = self.defid_of(alias_dl);
                     let canonical = vdef.map(|dl| self.defid_of(dl));
-                    let mut def = Definition::new(alias_defid, local_name.clone(), None, false);
+                    let mut def = Definition::new(
+                        alias_defid,
+                        local_name.clone(),
+                        None,
+                        false,
+                        DefinitionKind::Value,
+                    );
                     // goto-def / hover on Y chains to X's real declaration; rename
                     // and find-references stay on this alias.
                     def.alias_of = canonical;
@@ -2061,7 +2136,7 @@ impl Compiler {
                 }
                 if let Some(slot) = ev.local_slot {
                     let id = self.engine.intern(&local_name);
-                    self.bind_local(id, slot);
+                    self.bind_local(id, slot.0);
                 }
             }
             if let Some(ti) = typ {
@@ -2109,7 +2184,10 @@ impl Compiler {
             self.record_ref(occ, kind, target);
         }
         for (occ, kind, tyname) in type_item_refs {
-            self.record_type_use(&imp.path, &tyname, occ, kind);
+            // The type's declaring module is the *resolved* file: looking it
+            // up under `imp.path` as written would miss the cache for a
+            // relative import and silently record nothing.
+            self.record_type_use(&canon, &tyname, occ, kind);
         }
     }
 
@@ -2124,16 +2202,20 @@ impl Compiler {
     /// How to name a module in a diagnostic: the path the importer wrote
     /// (`./lib`), falling back to the module's own last segment. Never the
     /// canonical key — that is an identity, not a name.
-    pub(super) fn module_name(&self, key: &str) -> String {
-        self.module_display
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(key).to_string())
+    pub(super) fn module_name(&self, key: &ModuleKey) -> String {
+        self.module_display.get(key).cloned().unwrap_or_else(|| {
+            let k = key.as_str();
+            k.rsplit('/').next().unwrap_or(k).to_string()
+        })
     }
 
-    pub(crate) fn load_module(&mut self, path: &ModulePath, at: Span) -> Option<ModulePath> {
-        let source = match module::resolve(path, self.base_dir.as_deref()) {
-            Ok(s) => s,
+    pub(crate) fn load_module(
+        &mut self,
+        path: &ModulePath,
+        at: Span,
+    ) -> Option<(ModulePath, ModuleKey)> {
+        let resolved = match module::resolve(path, self.base_dir.as_deref()) {
+            Ok(r) => r,
             Err(ResolveError::NotFound(p)) => {
                 self.module_error(format!("Unknown module '{p}' (not found)"), at);
                 return None;
@@ -2158,17 +2240,13 @@ impl Compiler {
             }
         };
 
-        // The identity of an on-disk module is the file it resolved to.
-        let canon: ModulePath = match &source {
-            module::ModuleSource::File(p) => module::file_module_path(p),
-            module::ModuleSource::Embedded(_) => path.clone(),
-        };
-        let path = &canon;
-        let key = module::path_key(path);
-        let importer = module::path_key(&self.current_module);
+        // The identity of an on-disk module is the file it resolved to;
+        // `resolve` already minted the canonical path + key from it.
+        let module::ResolvedModule { source, canon, key } = resolved;
+        let importer = self.current_module_key.clone();
         if self.module_table.get_or_hydrate(&key).is_some() {
             self.module_table.record_dependent(&key, &importer);
-            return Some(canon);
+            return Some((canon, key));
         }
         if self.module_table.is_loading(&key) {
             self.module_error(format!("Import cycle detected at module '{key}'"), at);
@@ -2201,8 +2279,13 @@ impl Compiler {
         }
 
         self.module_table.mark_loading(&key);
-        let (body, imports) =
-            self.compile_module_body(path.clone(), &parsed.ast, parsed.doc, child_base);
+        let (body, imports) = self.compile_module_body(
+            canon.clone(),
+            key.clone(),
+            &parsed.ast,
+            parsed.doc,
+            child_base,
+        );
         let refs = Rc::new(body.refs);
         // The watermark is captured *after* this module's own dependencies have
         // loaded (compile_module_body does that first) but reflects the arena
@@ -2230,7 +2313,7 @@ impl Compiler {
             self.module_table.record_dependent(&imp, &key);
         }
         self.module_table.record_dependent(&key, &importer);
-        Some(canon)
+        Some((canon, key))
     }
 
     /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
@@ -2239,10 +2322,16 @@ impl Compiler {
     /// it; `leave_module_frame` moves the result out for the caller to store
     /// on the module's `CachedModule`). `module_path_slice` is a memo of
     /// `current_module`, so it is cleared rather than carried over.
-    fn enter_module_frame(&mut self, path: ModulePath, base_dir: Option<PathBuf>) -> ModuleFrame {
+    fn enter_module_frame(
+        &mut self,
+        path: ModulePath,
+        key: ModuleKey,
+        base_dir: Option<PathBuf>,
+    ) -> ModuleFrame {
         let mid = self.ref_interner.intern(&path);
         ModuleFrame {
             module: std::mem::replace(&mut self.current_module, path),
+            module_key: std::mem::replace(&mut self.current_module_key, key),
             module_path_slice: self.module_path_slice.take(),
             imported_qualifiers: std::mem::take(&mut self.imported_qualifiers),
             base_dir: std::mem::replace(&mut self.base_dir, base_dir),
@@ -2256,12 +2345,14 @@ impl Compiler {
     fn leave_module_frame(&mut self, old: ModuleFrame) -> ModuleReferences {
         let ModuleFrame {
             module,
+            module_key,
             module_path_slice,
             imported_qualifiers,
             base_dir,
             module_refs,
         } = old;
         self.current_module = module;
+        self.current_module_key = module_key;
         self.module_path_slice = module_path_slice;
         self.imported_qualifiers = imported_qualifiers;
         self.base_dir = base_dir;
@@ -2271,19 +2362,20 @@ impl Compiler {
     fn compile_module_body(
         &mut self,
         path: ModulePath,
+        key: ModuleKey,
         block: &ast::BlockExpression,
         doc: Option<String>,
         base_dir: Option<PathBuf>,
-    ) -> (CompiledBody, Vec<String>) {
+    ) -> (CompiledBody, Vec<ModuleKey>) {
         let mut iface = ModuleInterface::new(path.clone());
         iface.doc = doc.clone();
-        let old = self.enter_module_frame(path, base_dir);
+        let old = self.enter_module_frame(path, key.clone(), base_dir);
         // The fresh collector installed above belongs to this module, so its
         // doc goes here rather than on the enclosing module's.
         self.module_refs.set_doc(doc);
 
         self.process_imports(block);
-        let imports: Vec<String> = self.imported_qualifiers.values().cloned().collect();
+        let imports: Vec<ModuleKey> = self.imported_qualifiers.values().cloned().collect();
         // Reserve (or reuse) this module's stable 256-aligned type-id range
         // *before* the watermark is captured, so the captured watermark's
         // `env.next_type_id == base`. On invalidation `reset_to`/`truncate_to`
@@ -2292,12 +2384,10 @@ impl Compiler {
         // ids. Deps have already loaded (and reserved their ranges) via the
         // `process_imports` recursion above, so the floor (current
         // `next_type_id`) already sits past every stdlib + dependency id.
-        // `path` was moved into `self.current_module` above and
-        // `process_imports` save/restores it, so it still holds this module's
-        // own path here — the same key `load_module` caches this module under.
-        let key = module::path_key(&self.current_module);
+        // `key` is the same key `load_module` caches this module under.
         let floor = self.env.next_type_id();
-        let (base, reused) = self.module_table.id_base_for(&key, floor);
+        let reservation = self.module_table.id_base_for(&key, floor);
+        let base = reservation.base();
         self.env.set_next_type_id(base);
         let watermark = self.watermark();
         // `toplevel_binds`/`toplevel_decls` drive the Core toplevel lower
@@ -2315,7 +2405,7 @@ impl Compiler {
         // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
         // `id_range_overflow` for the invalidate-all/reset recovery path.
         let used = self.env.next_type_id().0 - base.0;
-        self.module_table.note_id_usage(base, used, reused);
+        reservation.note_usage(&mut self.module_table, used);
 
         let refs = self.leave_module_frame(old);
         (
@@ -2359,11 +2449,7 @@ impl Compiler {
             "toplevel elaboration left {} module-scope slot(s) unclaimed",
             self.toplevel_binds.len()
         );
-        let LoweredBody {
-            core: top,
-            pool,
-            toplevel_globals: preassigned,
-        } = lowered;
+        let LoweredBody { core: top, pool } = lowered;
         // Perceus runs so *temporaries* passed into calls are moved (rc==1 in
         // the callee → its own reuse fires); `emit_toplevel` suppresses the
         // resulting `Drop`/`Reuse` for the pinned globals, whose last use in
@@ -2372,6 +2458,15 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{top}", self.engine.str(top.name));
         }
+        // The slot pinnings ride the binds themselves, so reading them off the
+        // post-Perceus body hands `emit_toplevel` a `preassigned` that cannot
+        // disagree with the IR it is emitting.
+        let preassigned: Vec<(crate::core_ir::LocalId, i32)> = top
+            .body
+            .toplevel_globals()
+            .into_iter()
+            .map(|(id, slot)| (id, slot.0))
+            .collect();
         let base = self.program.code.len() as i32;
         let mut out = emit::emit_toplevel(&top.body, slot_base, &preassigned, self);
         // A function body links by plain append because its block starts at its
@@ -2396,7 +2491,7 @@ impl Compiler {
     /// its entry-frame init, exactly as `compile_impl` does for `__main__`.
     fn emit_module_init(
         &mut self,
-        key: &str,
+        key: &ModuleKey,
         block: &ast::BlockExpression,
         code_mark: usize,
         slot_base: i32,
@@ -2413,7 +2508,7 @@ impl Compiler {
             return;
         };
         self.frame_closures = sites;
-        let name = self.engine.intern(key);
+        let name = self.engine.intern(key.as_str());
         let nil = self.ty_nil();
         // Elaborated and lowered even under `check_only` (emit is not) so a
         // module toplevel the front half cannot handle is a diagnostic rather
@@ -2434,10 +2529,10 @@ impl Compiler {
     /// binding) its slot in the entry frame.
     fn lookup_module_member(
         &mut self,
-        module_key: &str,
+        module_key: &ModuleKey,
         member: &str,
         member_span: Span,
-    ) -> Option<(Scheme, Option<i32>)> {
+    ) -> Option<(Scheme, Option<GlobalSlot>)> {
         let Some(iface) = self.module_table.get_or_hydrate(module_key) else {
             self.module_error(format!("Module '{module_key}' is not loaded"), member_span);
             return None;
@@ -3327,7 +3422,7 @@ impl Compiler {
                 self.record(member_name, ty, member_span, None);
                 self.check_named_value(
                     member_name,
-                    Some(&module_key),
+                    Some(module_key.as_str()),
                     member_span,
                     scheme.kind,
                     has_binding,
@@ -3668,8 +3763,7 @@ impl Compiler {
             .zip(param_tys)
             .map(|(p, &ty)| (self.engine.intern(&p.identifier.name), ty))
             .collect();
-        let idx = self.deferred_bodies.len();
-        self.deferred_bodies.push(DeferredBody {
+        let parked = ParkedBody {
             name,
             param_binds,
             body: body.clone(),
@@ -3681,18 +3775,8 @@ impl Compiler {
             // its own list back.
             closures: std::mem::take(&mut self.frame_closures),
             param_slots,
-            // Filled by the matching `finish_fn_frame`, which is the point
-            // the frame's captures and `Function` slot become final.
-            func_idx: usize::MAX,
-            jump_over: 0,
-            captures: HashMap::new(),
-            capture_names: Vec::new(),
-            rigid_ids: HashSet::new(),
-            binding: None,
-            outer_scopes: Vec::new(),
-            capture_env: Vec::new(),
-        });
-        (body_ty, ParkedBody { idx })
+        };
+        (body_ty, parked)
     }
 
     /// Elaborate one already-typechecked body, lower the whole `TypedProgram`
@@ -3706,7 +3790,7 @@ impl Compiler {
     /// `emit` consume. Consuming a [`CleanModule`] here therefore closes the
     /// whole pipeline to a module that reported an error: not by convention,
     /// but because a poisoned module cannot produce the value the passes take.
-    /// (`lower_all` needs no proof of its own for exactly that reason.)
+    /// (`lower` needs no proof of its own for exactly that reason.)
     ///
     /// `at` says where the elaborated function belongs in the program it is
     /// lowered as part of: `Some(func_idx)` for a function body, whose reserved
@@ -3726,16 +3810,12 @@ impl Compiler {
         &mut self,
         _clean: CleanModule,
         at: Option<usize>,
-        build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut Vec<TypedFn>) -> TypedFn,
+        build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut FnTable) -> TypedFn,
     ) -> LoweredBody {
         let Elaborated { program, eta_base } = self.elaborate(at, build);
-        let crate::core_ir::lower::Lowered {
-            program: core,
-            toplevel_globals,
-        } = crate::core_ir::lower::lower_all(&program);
         let crate::core_ir::CoreProgram {
             mut fns, toplevel, ..
-        } = core;
+        } = crate::core_ir::lower::lower(&program);
         let wrappers = fns.split_off(eta_base);
         self.materialize_eta_wrappers(&program.pool, eta_base, wrappers);
         let core = match at {
@@ -3750,7 +3830,6 @@ impl Compiler {
         LoweredBody {
             core,
             pool: program.pool,
-            toplevel_globals,
         }
     }
 
@@ -3759,13 +3838,13 @@ impl Compiler {
     ///
     /// `TypedProgram::fns` is `FuncIdx`-indexed and so is `program.functions`,
     /// so the two must agree: `fns` is padded up to `program.functions.len()`
-    /// before the walk (`eta_wrapper` mints `FuncIdx(fns.len())`), and each
-    /// wrapper appended past that point gets its `Function` reserved here, in
-    /// order. Nothing else may push a `Function` while the walk runs.
+    /// before the walk (`FnTable::push` mints each `FuncIdx` in append order),
+    /// and each wrapper appended past that point gets its `Function` reserved
+    /// here, in order. Nothing else may push a `Function` while the walk runs.
     fn elaborate(
         &mut self,
         at: Option<usize>,
-        build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut Vec<TypedFn>) -> TypedFn,
+        build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut FnTable) -> TypedFn,
     ) -> Elaborated {
         let eta_base = self.program.functions.len();
         let mut pool = pool_for(&self.engine);
@@ -3775,8 +3854,8 @@ impl Compiler {
         let nil_ty = self.ty_nil();
         let nil = ElabCtx::resolve_rty(self, &mut pool, nil_ty);
         // The `fns` entries an earlier body already owns. Never lowered into
-        // anything the caller reads — they exist so `eta_wrapper`'s
-        // `FuncIdx(fns.len())` lands on the `Function` reserved for it below.
+        // anything the caller reads — they exist so the next `FnTable::push`
+        // lands on the `Function` reserved for it below.
         let filler = || TypedFn {
             name: crate::types::NO_STR,
             params: Vec::new(),
@@ -3784,7 +3863,10 @@ impl Compiler {
             body: TypedExpr::Nil { ty: nil },
             binds: 0,
         };
-        let mut fns: Vec<TypedFn> = std::iter::repeat_with(filler).take(eta_base).collect();
+        let mut fns = FnTable::new();
+        for _ in 0..eta_base {
+            fns.push(filler());
+        }
 
         let code_before = self.program.code.len();
         let built = build(self, &mut pool, &mut fns);
@@ -3798,7 +3880,7 @@ impl Compiler {
             self.program.functions.len(),
             eta_base,
             "nothing may reserve a `Function` while the elaborator walks: \
-             `FuncIdx(fns.len())` would stop naming it"
+             the `FuncIdx` the next `FnTable::push` mints would stop naming it"
         );
         for w in &fns[eta_base..] {
             let arity = w.params.len() as i32;
@@ -3821,7 +3903,7 @@ impl Compiler {
         };
         Elaborated {
             program: TypedProgram {
-                fns,
+                fns: fns.into_vec(),
                 toplevel,
                 // `lower` copies this verbatim into `CoreProgram::consts` and
                 // nothing downstream of here reads it: the elaborator pooled
@@ -3870,10 +3952,9 @@ impl Compiler {
     ///
     /// Runs in pass 6, after the whole module has been walked; the only caller
     /// is [`Self::elaborate_deferred`]. `func_idx` is the placeholder
-    /// `Function` the walk reserved and this fills in. Returns the address the
-    /// body's code starts at, or `None` when no code was emitted —
-    /// `check_only`, or an elaborator bug that has just been reported as an
-    /// internal error.
+    /// `Function` the walk reserved and this fills in. Under `check_only` the
+    /// pipeline stops after `lower` — nothing is emitted and the `Function`
+    /// stays unfilled; the caller closes it out.
     ///
     /// The `CleanModule` is the caller's proof that this body typechecked (that
     /// nothing in the module failed to): a poisoned body has no types to
@@ -3889,7 +3970,7 @@ impl Compiler {
         walk_tys: &[WalkStep],
         param_slots: i32,
         func_idx: usize,
-    ) -> Option<i32> {
+    ) {
         use crate::core_ir::{emit, perceus};
         // The eta-wrappers the elaborator minted are written by the helper,
         // ahead of this body.
@@ -3898,7 +3979,7 @@ impl Compiler {
                 typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, walk_tys)
             });
         if self.check_only {
-            return None;
+            return;
         }
         let core = perceus::perceus(&pool, core);
         if std::env::var("CORE_DBG").is_ok() {
@@ -3925,7 +4006,6 @@ impl Compiler {
         f.locals = param_slots.max(out.locals);
         f.code_start = base;
         f.code_len = end - base - 1;
-        Some(base)
     }
 
     /// Open the elaboration phase boundary: every function body walked until
@@ -4049,57 +4129,84 @@ impl Compiler {
         }
     }
 
-    fn elaborate_deferred(&mut self, d: DeferredBody, clean: CleanModule) {
-        // `resolve_name` reads the frame: a captured name must land on the
-        // `Denotation::capture` index the walk assigned it, a module-scope decl
-        // must still look like a global, and the frame's self-name must resolve
-        // to the same self-closure/self-toplevel-fn shape. The last of those is not
-        // answered by `captures` — `resolve_variable` short-circuits on
-        // `current_binding` while scanning `outer_scopes` — so the whole chain
-        // is restored, not just the module scope.
-        let outer_scopes = std::mem::replace(&mut self.outer_scopes, d.outer_scopes);
-        let locals = std::mem::take(&mut self.locals);
-        let captures = std::mem::replace(&mut self.captures, d.captures);
-        let capture_names = std::mem::replace(&mut self.capture_names, d.capture_names);
-        let rigid_ids = std::mem::replace(&mut self.rigid_ids, d.rigid_ids);
-        let binding = std::mem::replace(&mut self.current_binding, d.binding);
-        // The lambdas this body wrote. `ElabCtx::closure` only ever asks about
-        // a node in the body it is elaborating, so this is the whole universe
-        // of answers for the call below — and the enclosing frame's sites (or
-        // the module toplevel's, still waiting to be elaborated) are safe from
-        // being read by it.
-        let closures = std::mem::replace(&mut self.frame_closures, d.closures);
-        self.env.push_scope();
-        for (name, scheme) in &d.capture_env {
-            self.env.define(name, *scheme);
-        }
-
-        let (func_idx, param_slots) = (d.func_idx, d.param_slots);
-        let emitted = self.elaborate_body(
+    fn elaborate_deferred(&mut self, mut d: DeferredBody, clean: CleanModule) {
+        let saved = self.enter_elab_frame(&mut d);
+        self.elaborate_body(
             clean,
             d.name,
             &d.param_binds,
             &d.body,
             d.body_ty,
             &d.walk_tys,
-            param_slots,
-            func_idx,
+            d.param_slots,
+            d.func_idx,
         );
-
-        self.env.pop_scope();
-        self.current_binding = binding;
-        self.rigid_ids = rigid_ids;
-        self.capture_names = capture_names;
-        self.captures = captures;
-        self.locals = locals;
-        self.outer_scopes = outer_scopes;
-        self.frame_closures = closures;
-        // `check_only` stops the pipeline before `emit`, or `lower` reported an
-        // internal error and produced nothing. Either way the reserved
+        self.leave_elab_frame(saved);
+        // `check_only` stops the pipeline before `emit`, so the reserved
         // `Function` still has to be closed out.
-        if emitted.is_none() {
-            self.close_empty_deferred(func_idx, param_slots);
+        if self.check_only {
+            self.close_empty_deferred(d.func_idx, d.param_slots);
         }
+    }
+
+    /// Swap a [`DeferredBody`]'s frame snapshot into the compiler for its
+    /// elaboration, parking the current state in the returned [`ElabFrame`].
+    ///
+    /// `resolve_name` reads the frame: a captured name must land on the
+    /// `Denotation::capture` index the walk assigned it, a module-scope decl
+    /// must still look like a global, and the frame's self-name must resolve
+    /// to the same self-closure/self-toplevel-fn shape. The last of those is not
+    /// answered by `captures` — `resolve_variable` short-circuits on
+    /// `current_binding` while scanning `outer_scopes` — so the whole chain
+    /// is restored, not just the module scope.
+    fn enter_elab_frame(&mut self, d: &mut DeferredBody) -> ElabFrame {
+        self.env.push_scope();
+        for (name, scheme) in &d.capture_env {
+            self.env.define(name, *scheme);
+        }
+        ElabFrame {
+            outer_scopes: std::mem::replace(
+                &mut self.outer_scopes,
+                std::mem::take(&mut d.outer_scopes),
+            ),
+            locals: std::mem::take(&mut self.locals),
+            captures: std::mem::replace(&mut self.captures, std::mem::take(&mut d.captures)),
+            capture_names: std::mem::replace(
+                &mut self.capture_names,
+                std::mem::take(&mut d.capture_names),
+            ),
+            rigid_ids: std::mem::replace(&mut self.rigid_ids, std::mem::take(&mut d.rigid_ids)),
+            current_binding: std::mem::replace(&mut self.current_binding, d.binding.take()),
+            // The lambdas this body wrote. `ElabCtx::closure` only ever asks
+            // about a node in the body it is elaborating, so this is the whole
+            // universe of answers for the elaboration — and the enclosing
+            // frame's sites (or the module toplevel's, still waiting to be
+            // elaborated) are safe from being read by it.
+            frame_closures: std::mem::replace(
+                &mut self.frame_closures,
+                std::mem::take(&mut d.closures),
+            ),
+        }
+    }
+
+    fn leave_elab_frame(&mut self, saved: ElabFrame) {
+        self.env.pop_scope();
+        let ElabFrame {
+            outer_scopes,
+            locals,
+            captures,
+            capture_names,
+            rigid_ids,
+            current_binding,
+            frame_closures,
+        } = saved;
+        self.outer_scopes = outer_scopes;
+        self.locals = locals;
+        self.captures = captures;
+        self.capture_names = capture_names;
+        self.rigid_ids = rigid_ids;
+        self.current_binding = current_binding;
+        self.frame_closures = frame_closures;
     }
 
     /// Give a parked body that never elaborated the same shape the inline path
@@ -4188,7 +4295,7 @@ impl Compiler {
     pub(super) fn compile_declared_function(
         &mut self,
         name: &str,
-        global_slot: i32,
+        global_slot: GlobalSlot,
         params: &[ast::FunctionParameter],
         body: &ast::Expression,
         param_tys: Vec<Ty>,
@@ -4286,8 +4393,9 @@ impl Compiler {
         self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
     }
 
-    /// Close out a function body: reserve its `Function` slot, snapshot the
-    /// frame state its parked body will need, and restore the enclosing frame
+    /// Close out a function body: reserve its `Function` slot, combine the
+    /// walk half ([`ParkedBody`]) with the frame state that just became final
+    /// into the complete [`DeferredBody`], and restore the enclosing frame
     /// and type-env. Returns the assigned `func_idx` and captured-name set so
     /// `compile_function_common` can record a [`ClosureSite`] in the enclosing
     /// frame.
@@ -4316,47 +4424,60 @@ impl Compiler {
         self.pop_unused_scope();
 
         let captured = std::mem::replace(&mut self.capture_names, saved.capture_names);
-        {
-            // Reserve the body's `Function` slot now, so the `func_idx` that
-            // the `ClosureSite` and `global_to_func` are about to record is the one
-            // the elaborated body fills in. `locals`, `code_start` and
-            // `code_len` are the only fields pass 6 can still move.
-            let ParkedBody { idx } = parked;
-            self.program.functions.push(Function {
-                name: name.into(),
-                arity: arity as i32,
-                locals: 0,
-                capture_count: captured.len() as i32,
-                code_start: 0,
-                code_len: 0,
-            });
-            let func_idx = self.program.functions.len() - 1;
-            // Read after `env.pop_scope()`: a captured name is by
-            // definition bound in an *enclosing* frame's scope, which is
-            // still open here but gone by elaboration time.
-            let capture_env = captured
-                .iter()
-                .chain(frame_binding.iter())
-                .filter_map(|&n| {
-                    let s = self.engine.str(n).to_string();
-                    self.env.lookup(&s).map(|&sc| (s, sc))
-                })
-                .collect();
+        // Reserve the body's `Function` slot now, so the `func_idx` that
+        // the `ClosureSite` and `global_to_func` are about to record is the one
+        // the elaborated body fills in. `locals`, `code_start` and
+        // `code_len` are the only fields pass 6 can still move.
+        self.program.functions.push(Function {
+            name: name.into(),
+            arity: arity as i32,
+            locals: 0,
+            capture_count: captured.len() as i32,
+            code_start: 0,
+            code_len: 0,
+        });
+        let func_idx = self.program.functions.len() - 1;
+        // Read after `env.pop_scope()`: a captured name is by
+        // definition bound in an *enclosing* frame's scope, which is
+        // still open here but gone by elaboration time.
+        let capture_env = captured
+            .iter()
+            .chain(frame_binding.iter())
+            .filter_map(|&n| {
+                let s = self.engine.str(n).to_string();
+                self.env.lookup(&s).map(|&sc| (s, sc))
+            })
+            .collect();
+        let ParkedBody {
+            name: body_name,
+            param_binds,
+            body,
+            body_ty,
+            walk_tys,
+            closures,
+            param_slots,
+        } = parked;
+        self.deferred_bodies.push(DeferredBody {
+            name: body_name,
+            param_binds,
+            body,
+            body_ty,
+            walk_tys,
+            closures,
+            param_slots,
+            func_idx,
+            jump_over: saved.jump_over,
+            captures: frame_captures,
+            capture_names: captured.clone(),
+            rigid_ids: frame_rigids,
+            binding: frame_binding,
             // Read before the `outer_scopes.pop()` below: this is the exact
             // scope chain `resolve_variable` walked, and nothing mutates an
             // outer frame's map while an inner frame is open.
-            let outer_scopes = self.outer_scopes.clone();
-            let d = &mut self.deferred_bodies[idx];
-            d.func_idx = func_idx;
-            d.jump_over = saved.jump_over;
-            d.captures = frame_captures;
-            d.capture_names = captured.clone();
-            d.rigid_ids = frame_rigids;
-            d.binding = frame_binding;
-            d.outer_scopes = outer_scopes;
-            d.capture_env = capture_env;
-        }
-        let func_idx = self.program.functions.len() as i32 - 1;
+            outer_scopes: self.outer_scopes.clone(),
+            capture_env,
+        });
+        let func_idx = func_idx as i32;
 
         // `enter_fn_frame` pushed the enclosing frame's locals; move them back.
         if let Some(scope) = self.outer_scopes.pop() {
@@ -4475,424 +4596,6 @@ impl Compiler {
         }
     }
 
-    // ========================================================================
-    // Pattern type-checking (no codegen)
-    // ========================================================================
-
-    /// Type-check a pattern against `expected`, recording bound names in `b`.
-    /// Emits no bytecode. Returns `false` if any unification or binding step
-    /// failed; the caller propagates this so that exhaustiveness/usefulness
-    /// checks (which assume well-typed patterns) can be skipped.
-    fn type_pattern(&mut self, pat: &ast::Pattern, expected: Ty, b: &mut PatternBindings) -> bool {
-        match pat {
-            ast::Pattern::Binary {
-                segments,
-                rest,
-                span,
-            } => {
-                let bin_ty = self.ty_binary();
-                let mut ok = self.engine.unify_at(expected, bin_ty, *span);
-                for seg in segments {
-                    // A string-literal Utf8 segment (`<<'GET ', ..>>`) matches
-                    // its encoded bytes as a prefix; it binds nothing and has
-                    // no value type to check. Other Int / Utf8 segments bind an
-                    // integer (a value or a codepoint); Binary segments bind a
-                    // sub-binary. Size expressions are operands, not bindings,
-                    // and are checked by `type_pattern_sizes` once every name
-                    // this pattern binds is in scope.
-                    if seg.utf8_literal().is_some() {
-                        continue;
-                    }
-                    let seg_val_ty = match seg.kind {
-                        ast::BinKind::Int | ast::BinKind::Utf8 => self.ty_int(),
-                        ast::BinKind::Binary => self.ty_binary(),
-                    };
-                    ok &= self.type_pattern(&seg.value, seg_val_ty, b);
-                }
-                if let Some(r) = rest
-                    && let Some(id) = &r.binding
-                {
-                    let rest_ty = self.ty_binary();
-                    ok &= b.bind(&id.name, rest_ty, id.span, &mut self.engine);
-                }
-                ok
-            }
-            ast::Pattern::Wildcard { .. } => true,
-            ast::Pattern::Var { name } => b.bind(&name.name, expected, name.span, &mut self.engine),
-            ast::Pattern::Literal(lit) => {
-                let (lit_ty, sp) = match lit {
-                    // `const_number` is what raises the out-of-range / malformed
-                    // diagnostic; the pooled `Value` itself is Core's business.
-                    ast::PatternLiteral::Number(n) => {
-                        let v = self.const_number(n);
-                        let ty = if v.is_float() {
-                            self.engine.icon_float()
-                        } else {
-                            self.ty_int()
-                        };
-                        (ty, n.span)
-                    }
-                    ast::PatternLiteral::String(s) => (self.ty_string(), s.span),
-                };
-                self.engine.unify_at(expected, lit_ty, sp)
-            }
-            ast::Pattern::Range { start, end, span } => {
-                let int_t = self.ty_int();
-                let mut ok = self.engine.unify_at(expected, int_t, *span);
-                for b in [start, end] {
-                    if b.value.contains('.') {
-                        self.error(
-                            format!("Range pattern bound must be an integer, got '{}'", b.value),
-                            b.span,
-                        );
-                        ok = false;
-                    } else {
-                        // Raises the out-of-range diagnostic for the bound.
-                        let _ = self.const_number(b);
-                    }
-                }
-                ok
-            }
-            ast::Pattern::Tuple { elements, span } => {
-                let fresh: Vec<Ty> = (0..elements.len())
-                    .map(|_| self.engine.fresh_var())
-                    .collect();
-                let tup = self.engine.mk_tuple(&fresh);
-                let mut ok = self.engine.unify_at(expected, tup, *span);
-                for (elem, &ety) in elements.iter().zip(fresh.iter()) {
-                    ok &= self.type_pattern(elem, ety, b);
-                }
-                ok
-            }
-            ast::Pattern::Array { elements, span } => {
-                let elem_var = self.engine.fresh_var();
-                let arr_ty = self.ty_array(elem_var);
-                let mut ok = self.engine.unify_at(expected, arr_ty, *span);
-
-                let mut seen_spread = false;
-                for (i, e) in elements.iter().enumerate() {
-                    match e {
-                        ast::ArrayPatternElement::Pattern(p) => {
-                            ok &= self.type_pattern(p, elem_var, b);
-                        }
-                        ast::ArrayPatternElement::Spread { binding, span: ssp } => {
-                            if seen_spread {
-                                self.error(
-                                    "Array pattern may contain at most one spread".to_string(),
-                                    *ssp,
-                                );
-                                ok = false;
-                            } else if i != elements.len() - 1 {
-                                self.error(
-                                    "Spread in array pattern must be the last element".to_string(),
-                                    *ssp,
-                                );
-                                ok = false;
-                            }
-                            seen_spread = true;
-                            if let Some(id) = binding {
-                                let rest_ty = self.ty_array(elem_var);
-                                ok &= b.bind(&id.name, rest_ty, id.span, &mut self.engine);
-                            }
-                        }
-                    }
-                }
-                ok
-            }
-            ast::Pattern::Constructor {
-                qualifier,
-                name,
-                args,
-                rest,
-                span,
-            } => self.type_ctor_pattern(
-                CtorHead {
-                    qualifier: qualifier.as_ref(),
-                    name,
-                },
-                args,
-                *rest,
-                *span,
-                expected,
-                b,
-            ),
-            ast::Pattern::Or { patterns, .. } => {
-                // Scope the canonical binding set to this or-pattern: `enter_or`
-                // pushes a frame whose first alternative establishes the
-                // canonical set; `exit_or` pops it and folds the bound names
-                // into the enclosing frame so a sibling binding after the
-                // or-pattern still sees them for duplicate detection.
-                b.enter_or();
-                let mut ok = true;
-                let mut iter = patterns.iter();
-                if let Some(first) = iter.next() {
-                    ok &= self.type_pattern(first, expected, b);
-                }
-                for alt in iter {
-                    b.enter_alternative();
-                    ok &= self.type_pattern(alt, expected, b);
-                    ok &= b.finish_alternative(alt.span(), &mut self.engine);
-                }
-                b.exit_or();
-                ok
-            }
-        }
-    }
-
-    /// Resolve a constructor name to `(type_id, type_name, arity, field_labels, scheme)`.
-    fn lookup_ctor(
-        &self,
-        name: &str,
-    ) -> Option<(TypeId, StrId, usize, ArenaSlice<pool::StrSlices>, Scheme)> {
-        let scheme = *self.env.lookup(name)?;
-        match scheme.kind {
-            ValueKind::Constructor {
-                type_id,
-                type_name,
-                arity,
-                field_labels,
-                ..
-            } => Some((type_id, type_name, arity as usize, field_labels, scheme)),
-            _ => None,
-        }
-    }
-
-    /// `io.NotFound` — the same constructor `import al/io.{NotFound}` would
-    /// bring into scope, reached through the module qualifier instead. Returns
-    /// `None` when the qualifier is unknown, the member is missing, or it is
-    /// not a constructor; the caller renders the diagnostic.
-    ///
-    /// A private (or `opaque`-hidden) constructor is reported here, so
-    /// `match e { id.Id(n) -> n }` gives the same error `id.Id(1)` already
-    /// gives as an expression.
-    fn lookup_ctor_qualified(
-        &mut self,
-        qual: &str,
-        name: &str,
-        span: Span,
-    ) -> Option<(TypeId, StrId, usize, ArenaSlice<pool::StrSlices>, Scheme)> {
-        // Every failure below must report. A silent `None` leaves the module
-        // error-free, so `CleanModule` is minted and the elaborator — which has
-        // no diagnostics to fall back on — aborts on a program `al check`
-        // accepted.
-        let Some(key) = self.imported_qualifiers.get(qual).cloned() else {
-            self.error(
-                format!("Unknown module qualifier '{qual}' — did you `import` it?"),
-                span,
-            );
-            return None;
-        };
-        let Some(iface) = self.module_table.get_or_hydrate(&key) else {
-            let module = self.module_name(&key);
-            self.error(format!("Module '{module}' is not loaded"), span);
-            return None;
-        };
-        let Some(ev) = iface.values.get(name) else {
-            let private = iface.private_names.contains(name);
-            let module = self.module_name(&key);
-            let msg = if private {
-                format!("Constructor '{name}' is private in module '{module}'")
-            } else {
-                format!("Module '{module}' has no constructor '{name}'")
-            };
-            self.error(msg, span);
-            return None;
-        };
-        let scheme = ev.scheme;
-        match scheme.kind {
-            ValueKind::Constructor {
-                type_id,
-                type_name,
-                arity,
-                field_labels,
-                ..
-            } => Some((type_id, type_name, arity as usize, field_labels, scheme)),
-            _ => {
-                let module = self.module_name(&key);
-                self.error(
-                    format!(
-                        "'{module}.{name}' is not a constructor and cannot be used in a pattern"
-                    ),
-                    span,
-                );
-                None
-            }
-        }
-    }
-
-    fn type_ctor_pattern(
-        &mut self,
-        head: CtorHead<'_>,
-        args: &[ast::PatternArg],
-        rest: bool,
-        span: Span,
-        expected: Ty,
-        b: &mut PatternBindings,
-    ) -> bool {
-        let CtorHead { qualifier, name } = head;
-        let found = match qualifier {
-            // `lookup_ctor_qualified` reports its own diagnostic: it knows
-            // whether the member is missing, private, or not a constructor.
-            Some(q) => match self.lookup_ctor_qualified(&q.name, &name.name, name.span) {
-                Some(f) => f,
-                None => return false,
-            },
-            None => match self.lookup_ctor(&name.name) {
-                Some(f) => f,
-                None => {
-                    let msg = if self.env.lookup(&name.name).is_some() {
-                        format!(
-                            "'{}' is not a constructor and cannot be used in a pattern",
-                            name.name
-                        )
-                    } else {
-                        format!("Unknown constructor '{}' in pattern", name.name)
-                    };
-                    self.error(msg, name.span);
-                    return false;
-                }
-            },
-        };
-        let (_, type_name, arity, field_labels, scheme) = found;
-
-        let inst = self.engine.instantiate(&scheme, &self.rigid_ids);
-        if self.collect_hover_facts {
-            let qualified = format!("{}.{}", self.engine.str(type_name), name.name);
-            let doc = self.doc_if_collecting(&qualified);
-            self.record(&qualified, inst, name.span, doc);
-        }
-        self.record_value_use(scheme.def, name.span, ReferenceKind::Unqualified);
-
-        let r = self.engine.find(inst);
-        match self.engine.node(r) {
-            TypeNode::Fun { params, ret } => {
-                let params: Vec<Ty> = self.engine.children_of(params).to_vec();
-                // Bidirectional pivot: unify the constructor's return type with
-                // the expected subject type FIRST so that the param types share
-                // type-variable cells with the subject and recursing into args
-                // refines the subject's type.
-                let mut ok = self.engine.unify_at(expected, ret, span);
-
-                let (by_pos, args_ok) = self.slot_ctor_args(
-                    &name.name,
-                    arity,
-                    field_labels,
-                    args.iter().map(|a| match a {
-                        ast::PatternArg::Positional(p) => (None, p, p.span()),
-                        ast::PatternArg::Labeled { label, pattern } => {
-                            (Some(label), pattern, label.span)
-                        }
-                    }),
-                    if rest {
-                        None
-                    } else {
-                        Some((span, ". Use '..' to ignore them"))
-                    },
-                );
-                ok &= args_ok;
-                for (i, sub) in by_pos.iter().enumerate() {
-                    if let Some(p) = sub {
-                        let field_ty = params
-                            .get(i)
-                            .cloned()
-                            .unwrap_or_else(|| self.engine.fresh_var());
-                        ok &= self.type_pattern(p, field_ty, b);
-                    }
-                }
-                ok
-            }
-            _ => {
-                let mut ok = self.engine.unify_at(expected, r, span);
-                if !args.is_empty() {
-                    self.error(
-                        format!(
-                            "Constructor '{}' takes no arguments but {} were given",
-                            name.name,
-                            args.len()
-                        ),
-                        span,
-                    );
-                    ok = false;
-                }
-                ok
-            }
-        }
-    }
-
-    /// Slot positional + labelled constructor args into field-declaration
-    /// order with [`slot_labeled`], rendering its too-many-positional /
-    /// unknown-label / duplicate-field errors as diagnostics, plus a
-    /// missing-fields diagnostic when `missing` is `Some((span, hint))`.
-    /// Shared by ctor calls and patterns.
-    fn slot_ctor_args<'a, T>(
-        &mut self,
-        name: &str,
-        arity: usize,
-        field_labels: ArenaSlice<pool::StrSlices>,
-        args: impl Iterator<Item = (Option<&'a ast::Identifier>, &'a T, Span)>,
-        missing: Option<(Span, &str)>,
-    ) -> (SmallVec<[Option<&'a T>; 4]>, bool) {
-        // Interning up front releases the `&mut engine` borrow before the
-        // `str_ids_of` slice is taken. Each item carries its own span, so the
-        // errors `slot_labeled` hands back point at the offending argument
-        // without re-indexing this sequence.
-        type Item<'a, T> = (Option<StrId>, (&'a T, Span));
-        let items: SmallVec<[Item<'a, T>; 4]> = args
-            .map(|(l, v, sp)| (l.map(|l| self.engine.intern(&l.name)), (v, sp)))
-            .collect();
-        let field_ids: SmallVec<[StrId; 4]> =
-            SmallVec::from_slice(self.engine.str_ids_of(field_labels));
-        let (by_pos, errors) = slot_labeled(&field_ids, arity, items);
-        let mut ok = errors.is_empty();
-        for e in errors {
-            match e {
-                SlotError::ExtraPositional((_, span)) => self.error(
-                    format!(
-                        "Constructor '{}' has {} field(s) but more were supplied",
-                        name, arity
-                    ),
-                    span,
-                ),
-                SlotError::UnknownLabel(label, (_, span)) => self.error(
-                    format!(
-                        "Constructor '{}' has no field '{}'. Available: {}",
-                        name,
-                        self.engine.str(label),
-                        self.engine.strs_of(field_labels).join(", ")
-                    ),
-                    span,
-                ),
-                SlotError::Duplicate((_, span), field) => {
-                    let dup = field_ids
-                        .get(field)
-                        .map_or("_", |&id| self.engine.str(id))
-                        .to_string();
-                    self.error(format!("Field '{}' is specified more than once", dup), span);
-                }
-            }
-        }
-        if let Some((span, hint)) = missing
-            && by_pos.iter().any(Option::is_none)
-        {
-            let labels = self.engine.strs_of(field_labels);
-            let absent: Vec<&str> = (0..arity)
-                .filter(|i| by_pos[*i].is_none())
-                .map(|i| labels.get(i).map(String::as_str).unwrap_or("_"))
-                .collect();
-            self.error(
-                format!(
-                    "Constructor '{}' is missing field(s): {}{}",
-                    name,
-                    absent.join(", "),
-                    hint
-                ),
-                span,
-            );
-            ok = false;
-        }
-        (by_pos.into_iter().map(|s| s.map(|(v, _)| v)).collect(), ok)
-    }
-
     /// Single source of truth turning a numeric literal's source text into a
     /// constant `Value`. On i64 overflow / malformed input it emits a real
     /// diagnostic via [`Compiler::error`] and then returns a kind-preserving
@@ -4999,720 +4702,5 @@ fn number_literal_value(s: &str, frozen: &mut FrozenBuilder) -> Result<Value, Nu
         s.parse()
             .map(|i| frozen.int(i))
             .map_err(|_| NumLitError::IntOutOfRange)
-    }
-}
-
-// --- Compile-time bit-string building for `<<>>` literal pattern prefixes ---
-
-// ============================================================================
-// Core IR ↔ Compiler bridges
-// ============================================================================
-//
-// The Core IR passes (`lower`, `emit`) are compiler-agnostic and speak to the
-// enclosing compilation through these two traits, so `Compiler` provides the
-// concrete impls here rather than exposing its fields to `core_ir`.
-
-impl crate::core_ir::emit::EmitCtx for Compiler {
-    fn resolve_str(&self, id: StrId) -> &str {
-        self.engine.str(id)
-    }
-    fn intern_int(&mut self, i: i64) -> i32 {
-        self.const_int(i)
-    }
-    fn intern_str(&mut self, s: &str) -> i32 {
-        self.const_str(s)
-    }
-    fn intern_labels(&mut self, tid: TypeId, variant_idx: u16) -> i32 {
-        let Some(vs) = self
-            .env
-            .lookup_type_info_by_id(tid)
-            .and_then(|ti| ti.variants())
-        else {
-            return 0;
-        };
-        let variant = self.engine.variants_of(vs)[variant_idx as usize];
-        let labels: Vec<String> = self
-            .engine
-            .variant_fields_of(variant.fields)
-            .iter()
-            .map(|f| self.engine.str(f.label).to_string())
-            .collect();
-        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let v = self.frozen.str_array(&refs);
-        self.add_constant(v)
-    }
-    fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
-        let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
-        // `Bool` is unboxed at the VM level so its scrutinee has no tag word;
-        // >255 variants overflow the `SwitchTag.a` byte.
-        if tid == self.prelude.bool.id || n > 255 {
-            None
-        } else {
-            Some(n as u8)
-        }
-    }
-    fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool> {
-        if !self.prelude.bool.is(tid) {
-            return None;
-        }
-        Some(variant_idx == self.prelude.true_.variant_idx)
-    }
-}
-
-impl ElabCtx for Compiler {
-    /// The one bridge from a live inference `Ty` into the program's `RTy` pool.
-    /// Total: `zonk_or_opaque` encodes a variable inference never solved as a
-    /// fresh `Bound` rather than failing, because "undetermined" and "rigidly
-    /// polymorphic" are the same operational fact downstream.
-    ///
-    /// A `Zonker` memoises only within one call, and the elaborator asks for a
-    /// type per *node*: without a cache across calls the five `Int`s of `1 + 2
-    /// * 3` become five structurally identical pool nodes, and every consumer
-    /// that keys off an `RTy` (a `Drop` shape, a golden snapshot's `:tN`) stops
-    /// seeing that they are one type. Only a *fully solved* type is cached —
-    /// `Zonker::zonk` fails on an unsolved variable, and one that is unsolved
-    /// now may be solved by a later body, so its opaque `Bound` must not be
-    /// remembered. `rty_cache` is keyed by union-find root and belongs to the
-    /// pool `elaborate` opened, which clears it.
-    fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
-        let root = self.engine.find(t);
-        if let Some(&r) = self.rty_cache.get(&root) {
-            return r;
-        }
-        match Zonker::new(&self.engine).zonk(pool, root) {
-            Ok(r) => {
-                self.rty_cache.insert(root, r);
-                r
-            }
-            Err(_) => Zonker::new(&self.engine).zonk_or_opaque(pool, root),
-        }
-    }
-    fn intern(&mut self, s: &str) -> StrId {
-        self.engine.intern(s)
-    }
-    fn str(&self, id: StrId) -> &str {
-        self.engine.str(id)
-    }
-    // `program.constants` is `ConstId`-addressed, so pooling during an
-    // elaboration moves no address, and the elaborator writes no code at all.
-    fn add_const(&mut self, v: Value) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.add_constant(v) as u32)
-    }
-    fn number_const(&mut self, lit: &ast::NumberLiteral) -> (crate::core_ir::ConstId, Ty) {
-        let v = self.const_number(lit);
-        let ty = if v.is_float() {
-            self.ty_nullary(NullaryPrim::Float, self.prelude.float)
-        } else {
-            self.ty_int()
-        };
-        (crate::core_ir::ConstId(self.add_constant(v) as u32), ty)
-    }
-    fn string_const(&mut self, s: &str) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.const_str(s) as u32)
-    }
-    fn int_const(&mut self, i: i64) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.const_int(i) as u32)
-    }
-    fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.const_binary(bytes, bit_len) as u32)
-    }
-    fn resolve_name(&mut self, name: &str) -> Option<(Ty, Denotation)> {
-        let scheme = self.env.lookup(name)?;
-        let kind = scheme.kind;
-        let ty = self.engine.instantiate(scheme, &self.rigid_ids);
-        let id = self.engine.intern(name);
-        // Always consulted, even for a constructor or a builtin: it is what
-        // marks the name used for the unused-binding diagnostic, and what
-        // records a capture when a nested frame reads an enclosing local.
-        // `Denotation::from_kind` then discards the place for the two kinds
-        // that have no runtime binding.
-        let place = self.resolve_variable(id);
-        let den = match (Denotation::from_kind(kind, id), place) {
-            (Some(fixed), _) => fixed,
-            (None, Some(place)) => place,
-            // `analyse_module` unwinds `self.locals` before the `__main__`
-            // elaboration runs, so a decl's own name is only findable on its
-            // `ToplevelDecl`. Reached for an intra-SCC forward ref (a dependee
-            // is already bound in the elaborator's own scope and never gets
-            // here).
-            (None, None) if self.outer_scopes.is_empty() => self
-                .decl_denotation(id)
-                .unwrap_or_else(Denotation::self_closure),
-            (None, None) => Denotation::self_closure(),
-        };
-        Some((ty, den))
-    }
-    fn resolve_qualified(&mut self, qual: &str, member: &str) -> Option<(Ty, Denotation)> {
-        let key = self.imported_qualifiers.get(qual)?.clone();
-        let iface = self.module_table.get(&key)?;
-        let ev = iface.values.get(member)?;
-        let scheme = ev.scheme;
-        let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
-        let local_slot = ev.local_slot;
-        let sid = self.engine.intern(member);
-        // `@vm` builtins and re-exported constructors have no `local_slot`;
-        // their `ValueKind` alone denotes them. Anything else without a slot
-        // gets a placeholder rather than bailing (a `None` here makes the
-        // elaborator fall back to evaluating the *qualifier* as a value →
-        // unbound identifier).
-        let den = match Denotation::from_kind(scheme.kind, sid) {
-            Some(fixed) => fixed,
-            None => match local_slot {
-                Some(slot) => self.global_denotation(GlobalSlot(slot)),
-                None => Denotation::self_closure(),
-            },
-        };
-        Some((ty, den))
-    }
-    fn ctor_field(&mut self, receiver: Ty, field: &str) -> Option<(u32, Ty)> {
-        let resolved = self.engine.find(receiver);
-        let (type_id, type_args) = match self.engine.node(resolved) {
-            TypeNode::Con { id, args, .. } => (id, self.engine.children_of(args).to_vec()),
-            _ => return None,
-        };
-        let info = self.env.lookup_type_info_by_id(type_id)?;
-        let field_id = self.engine.intern(field);
-        let (idx, fty) = self
-            .field_in_variants(info, &type_args, field_id, None)
-            .ok()?;
-        Some((idx as u32, fty))
-    }
-    /// Read the labels off the *type*, by `VariantRef`, rather than off the
-    /// constructor's scheme by name. `mod.Ctor(..)` resolves through
-    /// `resolve_qualified` and its bare name is not in `env`, so a name lookup
-    /// answered `None` for a call the check walk had accepted.
-    fn ctor_labels(&mut self, v: crate::core_ir::VariantRef) -> Option<Vec<StrId>> {
-        let info = self.env.lookup_type_info_by_id(v.type_id)?;
-        let variants = info.variants()?;
-        let variant = *self
-            .engine
-            .variants_of(variants)
-            .get(v.variant_idx as usize)?;
-        Some(
-            self.engine
-                .variant_fields_of(variant.fields)
-                .iter()
-                .map(|f| f.label)
-                .collect(),
-        )
-    }
-    fn closure(&mut self, span: Span) -> Option<(crate::core_ir::FuncIdx, Vec<StrId>)> {
-        // The frame's own lambdas, a handful at most: a linear scan over the
-        // list the frame owns, not a probe into a table keyed by a span that
-        // any module could have minted.
-        self.frame_closures
-            .iter()
-            .find(|s| s.at == span)
-            .map(|s| (s.func_idx, s.captures.clone()))
-    }
-    fn fn_of_global(&self, slot: GlobalSlot) -> Option<crate::core_ir::FuncIdx> {
-        self.global_to_func.get(&slot.0).copied()
-    }
-    fn next_global_slot(&mut self) -> Option<GlobalSlot> {
-        self.take_global_slot()
-    }
-    fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
-        // A fn body's outermost block is elaborated by the same code path as a
-        // module toplevel, and it is not one: its node indices address its own
-        // body, not the module's. Only a module toplevel runs with no
-        // enclosing frame — the same guard `take_global_slot` uses.
-        if !self.outer_scopes.is_empty() {
-            return Vec::new();
-        }
-        self.toplevel_decls
-            .iter()
-            .map(|d| (d.node, d.slot))
-            .collect()
-    }
-    fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape> {
-        use crate::core_ir::VariantRef;
-        let resolved = self.engine.find(lhs_ty);
-        let TypeNode::Con { id, .. } = self.engine.node(resolved) else {
-            return None;
-        };
-        let (tref, ok, fail, err_has_payload) = if self.prelude.option.is(id) {
-            (
-                self.prelude.option,
-                self.prelude.some,
-                self.prelude.none,
-                false,
-            )
-        } else if self.prelude.result.is(id) {
-            (self.prelude.result, self.prelude.ok, self.prelude.err, true)
-        } else {
-            return None;
-        };
-        let tn = self.engine.intern(tref.name);
-        use super::prelude_bindings::names as pn;
-        let (okn, failn) = if err_has_payload {
-            (pn::OK, pn::ERR)
-        } else {
-            (pn::SOME, pn::NONE)
-        };
-        Some(OrShape {
-            fail: VariantRef {
-                type_id: fail.type_id,
-                variant_idx: fail.variant_idx,
-                type_name: tn,
-                variant_name: self.engine.intern(failn),
-            },
-            ok: VariantRef {
-                type_id: ok.type_id,
-                variant_idx: ok.variant_idx,
-                type_name: tn,
-                variant_name: self.engine.intern(okn),
-            },
-            err_has_payload,
-        })
-    }
-    fn ty_nil(&mut self) -> Ty {
-        Compiler::ty_nil(self)
-    }
-    fn ty_bool(&mut self) -> Ty {
-        Compiler::ty_bool(self)
-    }
-    fn ty_int(&mut self) -> Ty {
-        Compiler::ty_int(self)
-    }
-    fn ty_string(&mut self) -> Ty {
-        Compiler::ty_string(self)
-    }
-    fn ty_binary(&mut self) -> Ty {
-        Compiler::ty_binary(self)
-    }
-}
-
-#[cfg(test)]
-mod bug2_local_binders_as_definitions {
-    //! Local binders — `name = ..` bindings, fn/lambda parameters, pattern
-    //! binders (match arms, tuple/array/ctor destructure), and `or`-receivers —
-    //! must be registered as graph `Definition`s, not merely typed in the env.
-    //! Without the `Definition` record `ReferenceGraph::definition(target)`
-    //! returns `None`, so goto-def / find-refs / hover (the handler path, which
-    //! goes through `definition_at` / `references_to`) are dead on every local.
-    //! Emission is gated on `collect_hover_facts`, so this is LSP-only and the
-    //! `al run` / `al check` graph stays untouched.
-
-    use super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
-
-    /// Compile `src` as the entry module on the LSP path (`collect_hover_facts`
-    /// on, so local-def emission fires) and hand back the populated collector.
-    fn collect(src: &str) -> Compiler {
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        let block = pr.ast;
-        let mut c = new_compiler(None, true);
-        c.collect_hover_facts = true;
-        c.register_prelude();
-        assert!(
-            !crate::diagnostic::has_errors(&c.engine.diagnostics),
-            "prelude failed to load: {:?}",
-            c.engine.diagnostics,
-        );
-        c.process_imports(&block);
-        c.env.push_scope();
-        c.analyse_module(&block, None);
-        c.env.pop_scope();
-        assert!(
-            !crate::diagnostic::has_errors(&c.engine.diagnostics),
-            "snippet failed to compile: {:?}",
-            c.engine.diagnostics,
-        );
-        c
-    }
-
-    /// The single `DefId` declared under `name` in the entry collector.
-    fn sole_def(c: &Compiler, name: &str) -> DefId {
-        let defs = c.module_refs.defs_named(name);
-        assert_eq!(
-            defs.len(),
-            1,
-            "expected exactly one `{name}` def, got {defs:?}"
-        );
-        defs[0]
-    }
-
-    /// Whether any recorded occurrence is an unqualified *use* of `target`.
-    fn has_use(c: &Compiler, target: DefId) -> bool {
-        c.module_refs
-            .occurrences()
-            .iter()
-            .any(|o| o.target == target && o.kind == ReferenceKind::Unqualified)
-    }
-
-    #[test]
-    fn every_local_binder_kind_is_a_graph_definition() {
-        let c = collect(
-            "fn ident(p Int) Int {\n\
-            \x20 v = p\n\
-            \x20 v\n\
-            }\n\
-            \n\
-            fn matcher(o Option(Int)) Int {\n\
-            \x20 match o {\n\
-            \x20   Some(inner) -> inner\n\
-            \x20   None -> 0\n\
-            \x20 }\n\
-            }\n\
-            \n\
-            fn recover(r Result(Int, Int)) Int {\n\
-            \x20 r or e -> e\n\
-            }\n",
-        );
-
-        // p: bind_param, v: var binding, inner: pattern binder, e: or-receiver.
-        for name in ["p", "v", "inner", "e"] {
-            let d = sole_def(&c, name);
-            assert_eq!(d.entity, EntityKind::Value, "`{name}` is not a Value def");
-            assert!(
-                c.module_refs.definition(d).is_some(),
-                "`{name}` binder was not registered as a graph Definition",
-            );
-            // The use site already recorded an Unqualified occurrence targeting
-            // this binder; with the Definition present the goto-def / find-refs
-            // chain (occurrence -> target -> definition()) now closes.
-            assert!(has_use(&c, d), "no recorded use targets `{name}`");
-        }
-    }
-
-    #[test]
-    fn goto_def_on_a_local_use_resolves_to_a_real_definition() {
-        // Mirrors the handler path: resolve_position(use) -> target, then
-        // definition(target) — the latter returned `None` before the fix.
-        let c = collect("fn f(p Int) Int {\n  v = p\n  v\n}\n");
-        let v = sole_def(&c, "v");
-
-        let target = c
-            .module_refs
-            .resolve_position(2, 2)
-            .expect("cursor on the `v` use resolves to a target");
-        assert_eq!(target, v);
-        assert!(
-            c.module_refs.definition(target).is_some(),
-            "use resolved to a target with no Definition record",
-        );
-    }
-
-    #[test]
-    fn shadowing_keeps_inner_and_outer_as_distinct_definitions() {
-        // Two sequential `x` binders -> two distinct DefIds (distinct identifier
-        // spans). `define_at` overwrites the env, so the RHS of `x = x` (compiled
-        // before the second binder lands) sees the outer and the trailing `x`
-        // the inner.
-        let c = collect("fn f(s Int) Int {\n  x = s\n  x = x\n  x\n}\n");
-        let mut defs = c.module_refs.defs_named("x").to_vec();
-        assert_eq!(defs.len(), 2, "expected outer + inner `x`, got {defs:?}");
-        defs.sort_by_key(|d| d.span.start_line);
-        let (outer, inner) = (defs[0], defs[1]);
-        assert_ne!(outer, inner);
-        assert!(c.module_refs.definition(outer).is_some());
-        assert!(c.module_refs.definition(inner).is_some());
-
-        // RHS use on line 2 targets the OUTER binder; the trailing `x` on line 3
-        // targets the INNER one.
-        assert_eq!(c.module_refs.resolve_position(2, 6), Some(outer));
-        assert_eq!(c.module_refs.resolve_position(3, 2), Some(inner));
-    }
-}
-
-/// Perceus drop/reuse assertions on emitted bytecode: validate the
-/// `lower → perceus → emit` pipeline output.
-#[cfg(test)]
-mod perceus_drop {
-    use super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
-
-    /// Compile `src` for real (codegen on) and return the emitted instruction
-    /// stream, so tests can assert on generated ops.
-    fn emitted(src: &str) -> Vec<super::super::Instruction> {
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
-        assert!(
-            !crate::diagnostic::has_errors(&r.diagnostics),
-            "snippet failed to compile: {:?}",
-            r.diagnostics,
-        );
-        r.program.code
-    }
-
-    #[test]
-    fn drop_slot_emitted_at_heap_local_last_use() {
-        // `p` is a `(Int, Int)` tuple → heap-shaped. It is read twice; the
-        // second read is its last use, so the Core perceus pass must insert
-        // `Drop 0` immediately after that read's `Let` (`PushLocal 0;
-        // TupleIndex; StoreLocal`). Int local `n` gets no Drop.
-        let code = emitted(
-            "fn f(p (Int, Int), n Int) Int {\n\
-            \x20 a = p.0\n\
-            \x20 b = p.1\n\
-            \x20 a + b + n\n\
-            }\n\
-            f((1, 2), 3)\n",
-        );
-        let drops: Vec<_> = code.iter().filter(|i| i.op == Op::Drop).collect();
-        assert_eq!(drops.len(), 1, "expected one DropSlot, got {drops:?}");
-        assert_eq!(drops[0].operand, 0, "DropSlot targets param slot 0 (`p`)");
-        // Drop sits right after the last read of `p` (the second `TupleIndex`
-        // let), before any use of `a`/`b`/`n`.
-        let pos = code.iter().position(|i| i.op == Op::Drop).unwrap();
-        let last_read = code[..pos]
-            .iter()
-            .rposition(|i| i.op == Op::PushLocal && i.operand == 0)
-            .unwrap();
-        assert!(
-            code[last_read + 1..pos]
-                .iter()
-                .all(|i| matches!(i.op, Op::TupleIndex | Op::StoreLocal)),
-            "Drop is placed on the spine right after `p.1`'s let",
-        );
-        assert!(
-            !code[pos..]
-                .iter()
-                .take_while(|i| i.op != Op::Ret)
-                .any(|i| i.op == Op::PushLocal && i.operand == 0),
-            "no read of `p` after its Drop",
-        );
-        assert!(!code.iter().any(|i| i.op == Op::Drop && i.operand == 1));
-    }
-
-    #[test]
-    fn drop_slot_not_emitted_for_unboxed_prim() {
-        let code = emitted("fn g(x Int) Int { x + x }\ng(1)\n");
-        assert!(
-            !code.iter().any(|i| i.op == Op::Drop),
-            "Int local must not receive a DropSlot",
-        );
-    }
-
-    #[test]
-    fn reuse_paired_for_match_destructure_then_construct() {
-        // Canonical Perceus shape: destructure a Cons, construct a same-arity
-        // Cons in the arm body. Core perceus pairs the scrutinee's dropped
-        // cell with the arm's constructor — `Reuse slot; MakeEnumPayload a=1`.
-        let code = emitted(
-            "type List {\n\tLNil\n\tLCons(head Int, tail List)\n}\n\
-             fn lmap(xs List, f fn(Int) Int) List {\n\
-             \x20 match xs {\n\
-             \x20   LNil -> LNil\n\
-             \x20   LCons(h, t) -> LCons(f(h), lmap(t, f))\n\
-             \x20 }\n\
-             }\n\
-             lmap(LNil, fn(x) { x })\n",
-        );
-        let reuse_at = code
-            .iter()
-            .position(|i| i.op == Op::Reuse)
-            .expect("Op::Reuse emitted for LCons arm");
-        let ctor = code[reuse_at + 1];
-        assert_eq!(ctor.op, Op::MakeEnumPayload);
-        assert_eq!(ctor.a, 1, "constructor's a-byte set for in-place reuse");
-        assert_eq!(ctor.b, 2, "reuse paired with the 2-arity Cons, not LNil");
-        let nil_ctors: Vec<_> = code
-            .iter()
-            .filter(|i| i.op == Op::MakeEnumPayload && i.b == 0)
-            .collect();
-        assert!(
-            nil_ctors.iter().all(|i| i.a == 0),
-            "0-arity constructor must allocate fresh (a=0)",
-        );
-    }
-
-    #[test]
-    fn reuse_candidate_scoped_per_match_arm() {
-        // Arm 1 destructures a 2-field variant but constructs nothing. Arm 2
-        // (0-field variant) constructs a 2-field value. Reuse pairing is
-        // arm-scoped: arm 1's dropped cell must not be consumed by arm 2's
-        // constructor — at runtime the slot holds a 0-field cell in arm 2 and
-        // the debug shape assert in `reuse_or_alloc` would fire.
-        let code = emitted(
-            "type T {\n\tA(x Int, y Int)\n\tB\n}\n\
-             fn f(v T) T {\n\
-             \x20 match v {\n\
-             \x20   A(_x, _y) -> B\n\
-             \x20   B -> A(1, 2)\n\
-             \x20 }\n\
-             }\n\
-             f(B)\n",
-        );
-        assert!(
-            !code.iter().any(|i| i.op == Op::Reuse),
-            "arm 1's Enum/2 candidate must not leak to arm 2's Enum/2 constructor",
-        );
-    }
-}
-
-/// A module the typechecker rejected must never reach the elaborator.
-///
-/// `CleanModule` is what makes that true, and it is the whole reason `lower`,
-/// `perceus` and `emit` need no poison arm: their input is a `TypedProgram`,
-/// and only `typed_ir::elaborate_body`/`elaborate_toplevel` can build one.
-/// `Elab` aborts whenever `resolve_name` returns `None`, or the check walk's
-/// recorded types run out under it — exactly what a subtree inference never
-/// resolved looks like — so without the gate an ordinary type error would reach
-/// `typed_ir::elaborator_bug` and abort the compiler.
-#[cfg(test)]
-mod clean_module_gate {
-    use super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
-
-    fn diagnose(src: &str) -> Vec<Diagnostic> {
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        compile(&ast::Expression::BlockExpression(pr.ast), None, None).diagnostics
-    }
-
-    fn codes(ds: &[Diagnostic]) -> Vec<DiagnosticCode> {
-        ds.iter()
-            .filter(|d| d.severity == crate::diagnostic::Severity::Error)
-            .map(|d| d.code)
-            .collect()
-    }
-
-    /// One ill-typed fn beside a well-typed sibling: the type error is the only
-    /// error. The sibling is parked and closed out empty; neither body is
-    /// elaborated, because the proof cannot be minted for the module. Reaching
-    /// the elaborator here would abort the process in `typed_ir::elaborator_bug`, so this
-    /// test also pins that a type error never aborts the compiler.
-    #[test]
-    fn a_type_error_is_the_only_diagnostic() {
-        let ds = diagnose(
-            "fn bad(x Int) Int {\n\
-             \x20 x + \"not an int\"\n\
-             }\n\
-             fn good(y Int) Int {\n\
-             \x20 y + 1\n\
-             }\n\
-             good(1)\n",
-        );
-        let codes = codes(&ds);
-        assert_eq!(
-            codes,
-            vec![DiagnosticCode::TypeError],
-            "exactly the one type error, no cascade: {ds:#?}"
-        );
-    }
-
-    /// The gate is the diagnostics list, not the shape of the offending node:
-    /// an unbound name poisons the module for the elaborator just as a mismatch
-    /// does, and `resolve_name` returning `None` must not be reported twice —
-    /// nor reach `typed_ir::elaborator_bug`.
-    #[test]
-    fn an_unbound_name_is_reported_once() {
-        let ds = diagnose("fn f() Int { nope() }\nf()\n");
-        assert_eq!(
-            codes(&ds).len(),
-            1,
-            "an unbound identifier is one diagnostic, not two: {ds:#?}"
-        );
-    }
-
-    /// `Expression::ErrorNode` is the only form in the language with nothing to
-    /// elaborate, and the typechecker used to type it as a fresh var and say
-    /// nothing — leaving the elaborator to report a compiler bug for a plain
-    /// syntax error. The check walk denies it the `CleanModule` proof instead,
-    /// so the elaborator never sees one.
-    #[test]
-    fn an_error_node_denies_the_proof() {
-        let mut s = new_scanner("x = 1 +\n".to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet must fail to parse"
-        );
-        let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
-        assert!(!r.success, "an unparseable program must not compile");
-        assert!(
-            codes(&r.diagnostics).contains(&DiagnosticCode::ParseError),
-            "the check walk restates the parse error: {:#?}",
-            r.diagnostics
-        );
-    }
-
-    /// And the clean module still elaborates: the gate is not a mute button.
-    #[test]
-    fn a_clean_module_reaches_the_core_pipeline() {
-        let mut s = new_scanner("fn f(x Int) Int { x + 1 }\nf(1)\n".to_string());
-        let pr = new_parser(&mut s).parse_program();
-        let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
-        assert!(r.success, "{:#?}", r.diagnostics);
-        assert!(
-            !r.core.fns.is_empty(),
-            "a diagnostics-clean module must produce Core"
-        );
-    }
-}
-
-#[cfg(test)]
-mod toplevel_slot_queue {
-    use super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
-
-    /// `toplevel_binds` is positional, so only the walk the toplevel
-    /// elaboration mirrors — a module's own statement list — may fill it.
-    /// Depth alone does not identify that walk: a bare-expression program runs
-    /// with `scope_marks` empty, so an arm's pattern binding would sit at
-    /// "module depth" with no module statement behind it, and the next `let`
-    /// the elaborator saw would be pinned to the pattern's slot.
-    #[test]
-    fn only_the_module_statement_walk_queues_a_slot() {
-        let mut c = new_compiler(None, true);
-        c.push_block_scope();
-        let a = c.engine.intern("a");
-        c.bind_local(a, 7);
-        assert!(
-            c.toplevel_binds.is_empty(),
-            "a binding made outside the module statement walk was queued"
-        );
-
-        c.walking_module_statements = true;
-        let b = c.engine.intern("b");
-        c.bind_local(b, 8);
-        assert_eq!(c.toplevel_binds.pop_front(), Some(GlobalSlot(8)));
-    }
-
-    /// The bare-expression entry point (`bytecode::compile` on a non-block).
-    /// Its outermost block is an arm body, which the elaborator treats as a
-    /// module toplevel and lets drain the queue; the arm's own pattern bindings
-    /// must never have reached it.
-    #[test]
-    fn a_bare_match_expression_compiles_without_stealing_a_pattern_slot() {
-        let src = "match Some(1) { Some(v) -> { w = v + 1\n v + w }\n None -> 0 }";
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "{:?}",
-            pr.diagnostics
-        );
-        let [ast::Node::Expression(expr)] = &pr.ast.body[..] else {
-            panic!("expected a single bare expression");
-        };
-        let r = compile(expr, None, None);
-        assert!(
-            !crate::diagnostic::has_errors(&r.diagnostics),
-            "{:?}",
-            r.diagnostics
-        );
     }
 }
