@@ -1,5 +1,3 @@
-use std::fmt;
-
 /// Non-token source between tokens. The scanner drops horizontal whitespace
 /// entirely (no consumer reads it), so only these four shapes exist. A
 /// `Newline` carries no text — it is counted, never printed — so making it a
@@ -13,22 +11,12 @@ pub enum Trivia {
 }
 
 impl Trivia {
+    /// The comment's source text, or `None` for a `Newline`.
     #[inline]
-    pub fn is_comment(&self) -> bool {
-        !matches!(self, Trivia::Newline)
-    }
-
-    #[inline]
-    pub fn text(&self) -> &str {
+    pub fn comment_text(&self) -> Option<&str> {
         match self {
-            Trivia::Newline => "",
-            Trivia::LineComment(s) | Trivia::BlockComment(s) | Trivia::DocComment(s) => s,
+            Trivia::Newline => None,
+            Trivia::LineComment(s) | Trivia::BlockComment(s) | Trivia::DocComment(s) => Some(s),
         }
-    }
-}
-
-impl fmt::Display for Trivia {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.text())
     }
 }

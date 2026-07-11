@@ -7,7 +7,7 @@ use crate::token::{Keyword, Kind, Token, Trivia, is_type_name};
 type PResult<T> = Result<T, String>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseContext {
+enum ParseContext {
     TopLevel,
     Block,
     FunctionParams,
@@ -25,6 +25,20 @@ pub enum ParseContext {
 enum SyncOutcome {
     AtItem,
     ConsumedCloser,
+}
+
+/// Where [`Parser::recover_in_arm`] left the parser after a failed pattern,
+/// guard, `->`, or body inside a `match` arm. `ConsumedCloser` means recovery
+/// ate the match's `}` (the caller must stop and skip its own `eat`);
+/// `AtCloseBrace`/`AtArrow` mean recovery stopped just before that token;
+/// `Resume` means it stopped at the start of a plausible next arm.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmRecovery {
+    ConsumedCloser,
+    AtCloseBrace,
+    AtArrow,
+    Resume,
 }
 
 /// A parsed source file: its top-level body, the module doc comment (a `/** */`
@@ -76,10 +90,10 @@ pub fn new_parser_from_tokens(tokens: Vec<Token>, scanner_diagnostics: Vec<Diagn
 // meaningless in let/const annotations. Function param and return positions
 // DO admit lowercase type variables and use `at_loose_type_start` instead.
 fn is_type_start_token(tok: &Token) -> bool {
-    match tok.kind {
+    match &tok.kind {
         Kind::Keyword(Keyword::Fn) => true,
         Kind::PuncOpenParen => true,
-        Kind::Identifier => tok.literal.as_deref().is_some_and(is_type_name),
+        Kind::Identifier(name) => is_type_name(name),
         _ => false,
     }
 }
@@ -192,7 +206,7 @@ impl Parser {
     }
 
     fn kind(&self) -> Kind {
-        self.tokens[self.index].kind
+        self.tokens[self.index].kind.clone()
     }
 
     fn save_token_end(&mut self) {
@@ -232,7 +246,7 @@ impl Parser {
                             | Kind::Keyword(Keyword::Import)
                             | Kind::Keyword(Keyword::Pub)
                             | Kind::PuncAt
-                            | Kind::Identifier
+                            | Kind::Identifier(_)
                     ) {
                         return SyncOutcome::AtItem;
                     }
@@ -248,7 +262,7 @@ impl Parser {
                         Kind::Keyword(Keyword::If)
                             | Kind::Keyword(Keyword::Match)
                             | Kind::Keyword(Keyword::Fn)
-                            | Kind::Identifier
+                            | Kind::Identifier(_)
                     ) {
                         return SyncOutcome::AtItem;
                     }
@@ -281,6 +295,21 @@ impl Parser {
         SyncOutcome::AtItem
     }
 
+    // Shared error-recovery step inside a `match` arm (failed pattern, guard,
+    // `->`, or body): record the diagnostic, synchronize, and classify where
+    // recovery landed so each call site is a small match on the variant.
+    fn recover_in_arm(&mut self, err: String) -> ArmRecovery {
+        self.add_error(err);
+        if self.synchronize() == SyncOutcome::ConsumedCloser {
+            return ArmRecovery::ConsumedCloser;
+        }
+        match self.kind() {
+            Kind::PuncCloseBrace => ArmRecovery::AtCloseBrace,
+            Kind::PuncArrow => ArmRecovery::AtArrow,
+            _ => ArmRecovery::Resume,
+        }
+    }
+
     // Shared error-recovery step for top-level and block node loops: record the
     // diagnostic, skip to a synchronization point, and produce an error node
     // standing in for the unparseable region.
@@ -301,54 +330,71 @@ impl Parser {
         }
     }
 
-    // Moves the consumed token out of the buffer instead of cloning it. The
-    // parser only ever scans forward (index never decreases; lookahead reads
-    // index+1), so a vacated slot is never read again — replacing it with a
-    // cheap allocation-free sentinel is sound and keeps `eat` zero-alloc.
-    fn eat(&mut self, kind: Kind) -> PResult<Token> {
+    fn eat(&mut self, kind: Kind) -> PResult<()> {
         if self.tokens[self.index].kind == kind {
             self.save_token_end();
-            let old = std::mem::replace(
-                &mut self.tokens[self.index],
-                Token {
-                    kind: Kind::Eof,
-                    literal: None,
-                    span: Span::DUMMY,
-                    leading_trivia: Vec::new(),
-                },
-            );
             self.index += 1;
-            return Ok(old);
+            return Ok(());
         }
 
         Err(format!("Expected '{}', got '{}'", kind, self.cur()))
     }
 
-    fn eat_msg(&mut self, kind: Kind, message: &str) -> PResult<Token> {
-        match self.eat(kind) {
-            Ok(t) => Ok(t),
-            Err(_) => Err(format!("{}, got '{}'", message, self.cur())),
+    // Consumes the current token and returns its text when `extract` matches
+    // its kind. Text-bearing kinds carry their text as a payload, so a matched
+    // token always has text — there is no "identifier without a literal" state
+    // to defend against.
+    fn eat_payload(
+        &mut self,
+        message: &str,
+        extract: impl FnOnce(&Kind) -> Option<String>,
+    ) -> PResult<String> {
+        match extract(&self.tokens[self.index].kind) {
+            Some(text) => {
+                self.save_token_end();
+                self.index += 1;
+                Ok(text)
+            }
+            None => Err(format!("{}, got '{}'", message, self.cur())),
         }
     }
 
-    fn eat_token_literal(&mut self, kind: Kind, message: &str) -> PResult<String> {
-        let eaten = self.eat_msg(kind, message)?;
+    fn eat_name(&mut self, message: &str) -> PResult<String> {
+        self.eat_payload(message, |k| match k {
+            Kind::Identifier(name) => Some(name.to_string()),
+            _ => None,
+        })
+    }
 
-        if let Some(unwrapped) = eaten.literal {
-            return Ok(unwrapped);
-        }
+    fn eat_number(&mut self, message: &str) -> PResult<String> {
+        self.eat_payload(message, |k| match k {
+            Kind::LiteralNumber(text) => Some(text.to_string()),
+            _ => None,
+        })
+    }
 
-        Err(format!("Expected {}", message))
+    fn eat_string(&mut self, message: &str) -> PResult<String> {
+        self.eat_payload(message, |k| match k {
+            Kind::LiteralString(text) => Some(text.to_string()),
+            _ => None,
+        })
+    }
+
+    fn eat_interp_part(&mut self, message: &str) -> PResult<String> {
+        self.eat_payload(message, |k| match k {
+            Kind::InterpStringPart(text) => Some(text.to_string()),
+            _ => None,
+        })
     }
 
     fn eat_identifier(&mut self, message: &str) -> PResult<ast::Identifier> {
         let span = self.current_span();
-        let name = self.eat_token_literal(Kind::Identifier, message)?;
+        let name = self.eat_name(message)?;
         Ok(ast::Identifier { name, span })
     }
 
     fn peek_next(&self) -> Option<Kind> {
-        self.tokens.get(self.index + 1).map(|t| t.kind)
+        self.tokens.get(self.index + 1).map(|t| t.kind.clone())
     }
 
     fn has_newline_before_current(&self) -> bool {
@@ -414,17 +460,13 @@ impl Parser {
         Ok(items)
     }
 
-    // Parses zero or more items separated only by whitespace/newlines until
-    // `close` (or Eof). A comma at a separator position is a hard error: the
-    // items are self-delimiting, so the comma carried no information and the
-    // grammar now rejects it outright. Currently used only for constructor
-    // fields.
     /// Items inside a type body: one per line. `noun` names them in the error.
     ///
     /// A newline is the separator, not merely permitted whitespace — the
     /// formatter has always emitted one per line, so accepting
     /// `type User { age Int username String }` only let source drift from what
-    /// `al fmt` produces.
+    /// `al fmt` produces. A comma at a separator position is a hard error: the
+    /// items are self-delimiting, so the comma carries no information.
     fn parse_line_separated_list<T>(
         &mut self,
         close: Kind,
@@ -611,32 +653,26 @@ impl Parser {
                     )));
                 }
             }
-            Kind::Identifier => {
-                if let Some(name) = &self.cur().literal
-                    && self.is_binding_ahead()
-                {
-                    if is_type_name(name) {
-                        // Uppercase ident with a depth-0 `=` ahead. Only commit
-                        // to the statement forms when the token immediately
-                        // after the name is `=` (TypedDiscard) or `(` (ctor
-                        // destructure); anything else (e.g. `Foo.Bar = ..`)
-                        // falls through to expression parsing.
-                        match self.peek_next() {
-                            Some(Kind::PuncEquals) => {
-                                return Ok(ast::Node::Statement(Box::new(
-                                    self.parse_typed_discard()?,
-                                )));
-                            }
-                            Some(Kind::PuncOpenParen) => {
-                                return Ok(ast::Node::Statement(Box::new(
-                                    self.parse_ctor_destructuring()?,
-                                )));
-                            }
-                            _ => {}
+            Kind::Identifier(name) if self.is_binding_ahead() => {
+                if is_type_name(&name) {
+                    // Uppercase ident with a depth-0 `=` ahead. Only commit
+                    // to the statement forms when the token immediately
+                    // after the name is `=` (TypedDiscard) or `(` (ctor
+                    // destructure); anything else (e.g. `Foo.Bar = ..`)
+                    // falls through to expression parsing.
+                    match self.peek_next() {
+                        Some(Kind::PuncEquals) => {
+                            return Ok(ast::Node::Statement(Box::new(self.parse_typed_discard()?)));
                         }
-                    } else {
-                        return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
+                        Some(Kind::PuncOpenParen) => {
+                            return Ok(ast::Node::Statement(Box::new(
+                                self.parse_ctor_destructuring()?,
+                            )));
+                        }
+                        _ => {}
                     }
+                } else {
+                    return Ok(ast::Node::Statement(Box::new(self.parse_binding()?)));
                 }
             }
             _ => {}
@@ -656,7 +692,9 @@ impl Parser {
 
             let mut receiver: Option<ast::Identifier> = None;
 
-            if self.kind() == Kind::Identifier && self.peek_next() == Some(Kind::PuncArrow) {
+            if matches!(self.kind(), Kind::Identifier(_))
+                && self.peek_next() == Some(Kind::PuncArrow)
+            {
                 receiver = Some(self.eat_identifier("Expected identifier for or receiver")?);
                 self.eat(Kind::PuncArrow)?;
             }
@@ -722,9 +760,10 @@ impl Parser {
             }
         };
         let mut left = next(self)?;
-        while let Some(&(tok, op)) = Self::PRECEDENCE[lvl]
+        while let Some((tok, op)) = Self::PRECEDENCE[lvl]
             .iter()
             .find(|(k, _)| *k == self.kind())
+            .map(|(k, op)| (k.clone(), *op))
         {
             // A `-` on a fresh line is the start of a new unary expression, not
             // a continuation of an additive chain (P4). Only level 4 has
@@ -849,8 +888,7 @@ impl Parser {
                 p.eat(Kind::PuncDotdot)?;
                 let expr = p.parse_expression()?;
                 Ok(ast::CallArg::Spread(expr))
-            } else if p.kind() == Kind::Identifier
-                && p.cur().literal.as_deref().is_some_and(|n| !is_type_name(n))
+            } else if matches!(&p.cur().kind, Kind::Identifier(n) if !is_type_name(n))
                 && p.peek_next() == Some(Kind::PuncColon)
             {
                 let label = p.eat_identifier("Expected argument label")?;
@@ -869,10 +907,10 @@ impl Parser {
 
     fn parse_primary_expression_inner(&mut self) -> PResult<ast::Expression> {
         let expr = match self.kind() {
-            Kind::LiteralString => self.parse_string_expression()?,
+            Kind::LiteralString(_) => self.parse_string_expression()?,
             Kind::InterpStringStart => self.parse_interpolated_string()?,
-            Kind::LiteralNumber => self.parse_number_expression()?,
-            Kind::Identifier => {
+            Kind::LiteralNumber(_) => self.parse_number_expression()?,
+            Kind::Identifier(_) => {
                 ast::Expression::Identifier(self.eat_identifier("Expected identifier")?)
             }
             Kind::PuncOpenParen => self.parse_tuple()?,
@@ -882,7 +920,7 @@ impl Parser {
             Kind::Keyword(Keyword::If) => self.parse_if_expression()?,
             Kind::Keyword(Keyword::Match) => self.parse_match_expression()?,
             Kind::Keyword(Keyword::Fn) => self.parse_function_expression()?,
-            Kind::Error => {
+            Kind::Error(_) => {
                 let span = self.current_span();
                 self.advance();
                 ast::Expression::ErrorNode(ast::ErrorNode {
@@ -1023,16 +1061,10 @@ impl Parser {
         let segments = self.parse_comma_list(Kind::BinOpen, Kind::BinClose, |p| {
             let seg_start = p.current_span();
             let value = p.parse_expression()?;
-            let (size, unit, mut kind) = p.parse_bin_size_spec()?;
-            if size.is_none()
-                && kind == ast::BinKind::Int
-                && matches!(
-                    value,
-                    ast::Expression::StringLiteral(_) | ast::Expression::InterpolatedString(_)
-                )
-            {
-                kind = ast::BinKind::Utf8;
-            }
+            let (size, unit, kind) = p.parse_bin_size_spec(matches!(
+                value,
+                ast::Expression::StringLiteral(_) | ast::Expression::InterpolatedString(_)
+            ))?;
             Ok(ast::BinSegment {
                 value,
                 size,
@@ -1055,25 +1087,31 @@ impl Parser {
     //   :utf8       -> string literal: its UTF-8 bytes; otherwise one
     //                  codepoint (pattern) / whole string (expr), Utf8
     // Absent spec -> default 8-bit Int (size left None; codegen supplies 8),
-    // except string-literal segments which default to Utf8 (callers patch).
+    // except string segments (`value_is_string`) which default to Utf8: a bare
+    // string means its UTF-8 bytes, not a single 8-bit Int.
     fn parse_bin_size_spec(
         &mut self,
+        value_is_string: bool,
     ) -> PResult<(Option<ast::Expression>, ast::BinUnit, ast::BinKind)> {
         if self.kind() != Kind::PuncColon {
-            return Ok((None, ast::BinUnit::Bits, ast::BinKind::Int));
+            let kind = if value_is_string {
+                ast::BinKind::Utf8
+            } else {
+                ast::BinKind::Int
+            };
+            return Ok((None, ast::BinUnit::Bits, kind));
         }
         self.eat(Kind::PuncColon)?;
 
-        if self.kind() == Kind::LiteralNumber {
+        if matches!(self.kind(), Kind::LiteralNumber(_)) {
             let span = self.current_span();
-            let value = self.eat_token_literal(Kind::LiteralNumber, "Expected bit width")?;
+            let value = self.eat_number("Expected bit width")?;
             let n = ast::Expression::NumberLiteral(ast::NumberLiteral { value, span });
             return Ok((Some(n), ast::BinUnit::Bits, ast::BinKind::Int));
         }
 
-        if self.kind() == Kind::Identifier {
-            let kw = self.cur().literal.clone().unwrap_or_default();
-            match kw.as_str() {
+        if let Kind::Identifier(kw) = self.kind() {
+            match kw.as_ref() {
                 "binary" => {
                     self.advance();
                     return Ok((None, ast::BinUnit::Bytes, ast::BinKind::Binary));
@@ -1195,18 +1233,17 @@ impl Parser {
                 Ok(p) => p,
                 Err(err) => {
                     let err_span = self.current_span();
-                    self.add_error(err);
-                    if self.synchronize() == SyncOutcome::ConsumedCloser {
-                        closed = true;
-                        break 'arms;
-                    }
-                    match self.kind() {
-                        Kind::PuncCloseBrace => break,
+                    match self.recover_in_arm(err) {
+                        ArmRecovery::ConsumedCloser => {
+                            closed = true;
+                            break 'arms;
+                        }
+                        ArmRecovery::AtCloseBrace => break,
                         // Recovery stopped at this arm's `->`: fall through with
                         // a placeholder so the body still parses and the loop
                         // advances instead of re-erroring on the same token.
-                        Kind::PuncArrow => ast::Pattern::Wildcard { span: err_span },
-                        _ => continue,
+                        ArmRecovery::AtArrow => ast::Pattern::Wildcard { span: err_span },
+                        ArmRecovery::Resume => continue,
                     }
                 }
             };
@@ -1215,53 +1252,48 @@ impl Parser {
                 self.eat(Kind::Keyword(Keyword::If))?;
                 match self.parse_expression() {
                     Ok(e) => Some(e),
-                    Err(err) => {
-                        self.add_error(err);
-                        if self.synchronize() == SyncOutcome::ConsumedCloser {
+                    Err(err) => match self.recover_in_arm(err) {
+                        ArmRecovery::ConsumedCloser => {
                             closed = true;
                             break 'arms;
                         }
-                        match self.kind() {
-                            Kind::PuncCloseBrace => break,
-                            Kind::PuncArrow => None,
-                            _ => continue,
-                        }
-                    }
+                        ArmRecovery::AtCloseBrace => break,
+                        ArmRecovery::AtArrow => None,
+                        ArmRecovery::Resume => continue,
+                    },
                 }
             } else {
                 None
             };
 
             if let Err(err) = self.eat(Kind::PuncArrow) {
-                self.add_error(err);
-                if self.synchronize() == SyncOutcome::ConsumedCloser {
-                    closed = true;
-                    break 'arms;
-                }
-                match self.kind() {
-                    Kind::PuncCloseBrace => break,
-                    Kind::PuncArrow => self.advance(),
-                    _ => continue,
+                match self.recover_in_arm(err) {
+                    ArmRecovery::ConsumedCloser => {
+                        closed = true;
+                        break 'arms;
+                    }
+                    ArmRecovery::AtCloseBrace => break,
+                    ArmRecovery::AtArrow => self.advance(),
+                    ArmRecovery::Resume => continue,
                 }
             }
 
             let body_span = self.current_span();
             let body = match self.parse_expression() {
                 Ok(e) => e,
-                Err(err) => {
-                    self.add_error(err.clone());
-                    if self.synchronize() == SyncOutcome::ConsumedCloser {
+                Err(err) => match self.recover_in_arm(err.clone()) {
+                    ArmRecovery::ConsumedCloser => {
                         closed = true;
                         break 'arms;
                     }
-                    if self.kind() == Kind::PuncCloseBrace {
-                        break 'arms;
+                    ArmRecovery::AtCloseBrace => break 'arms,
+                    ArmRecovery::AtArrow | ArmRecovery::Resume => {
+                        ast::Expression::ErrorNode(ast::ErrorNode {
+                            message: err,
+                            span: body_span,
+                        })
                     }
-                    ast::Expression::ErrorNode(ast::ErrorNode {
-                        message: err,
-                        span: body_span,
-                    })
-                }
+                },
             };
 
             arms.push(ast::MatchArm {
@@ -1356,9 +1388,7 @@ impl Parser {
     fn peek_is_type_name(&self) -> bool {
         self.tokens
             .get(self.index + 1)
-            .filter(|t| t.kind == Kind::Identifier)
-            .and_then(|t| t.literal.as_deref())
-            .is_some_and(is_type_name)
+            .is_some_and(|t| matches!(&t.kind, Kind::Identifier(n) if is_type_name(n)))
     }
 
     /// The shared tail of a constructor pattern: the optional argument list.
@@ -1402,9 +1432,9 @@ impl Parser {
                 self.eat(Kind::Keyword(Keyword::Else))?;
                 Ok(ast::Pattern::Wildcard { span: start })
             }
-            Kind::Identifier => {
+            Kind::Identifier(_) => {
                 let id_span = self.current_span();
-                let name = self.eat_token_literal(Kind::Identifier, "Expected pattern")?;
+                let name = self.eat_name("Expected pattern")?;
                 if name == "_" {
                     return Ok(ast::Pattern::Wildcard { span: id_span });
                 }
@@ -1421,8 +1451,7 @@ impl Parser {
                         span: id_span,
                     };
                     let member_span = self.current_span();
-                    let member =
-                        self.eat_token_literal(Kind::Identifier, "Expected constructor name")?;
+                    let member = self.eat_name("Expected constructor name")?;
                     return self.finish_ctor_pattern(Some(q), member, member_span, start);
                 }
                 if is_type_name(&name) {
@@ -1435,17 +1464,16 @@ impl Parser {
                     },
                 })
             }
-            Kind::LiteralNumber => {
+            Kind::LiteralNumber(_) => {
                 let span = self.current_span();
-                let value = self.eat_token_literal(Kind::LiteralNumber, "Expected number")?;
+                let value = self.eat_number("Expected number")?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::Number(
                     ast::NumberLiteral { value, span },
                 )))
             }
             Kind::PuncMinus => {
                 self.eat(Kind::PuncMinus)?;
-                let value =
-                    self.eat_token_literal(Kind::LiteralNumber, "Expected number after `-`")?;
+                let value = self.eat_number("Expected number after `-`")?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::Number(
                     ast::NumberLiteral {
                         value: format!("-{value}"),
@@ -1453,9 +1481,9 @@ impl Parser {
                     },
                 )))
             }
-            Kind::LiteralString => {
+            Kind::LiteralString(_) => {
                 let span = self.current_span();
-                let value = self.eat_token_literal(Kind::LiteralString, "Expected string")?;
+                let value = self.eat_string("Expected string")?;
                 Ok(ast::Pattern::Literal(ast::PatternLiteral::String(
                     ast::StringLiteral { value, span },
                 )))
@@ -1480,7 +1508,7 @@ impl Parser {
                             let spread_span = p.current_span();
                             p.eat(Kind::PuncDotdot)?;
                             let mut binding: Option<ast::Identifier> = None;
-                            if p.kind() == Kind::Identifier {
+                            if matches!(p.kind(), Kind::Identifier(_)) {
                                 binding = Some(p.eat_identifier("Expected binding after `..`")?);
                             }
                             Ok(ast::ArrayPatternElement::Spread {
@@ -1517,7 +1545,7 @@ impl Parser {
             if self.kind() == Kind::PuncDotdot {
                 let rest_span = self.current_span();
                 self.eat(Kind::PuncDotdot)?;
-                let binding = if self.kind() == Kind::Identifier {
+                let binding = if matches!(self.kind(), Kind::Identifier(_)) {
                     Some(self.eat_identifier("Expected binding after `..`")?)
                 } else {
                     None
@@ -1536,15 +1564,12 @@ impl Parser {
 
             let seg_start = self.current_span();
             let value = self.parse_pattern_atom()?;
-            let (size, unit, mut kind) = self.parse_bin_size_spec()?;
             // A bare string-literal segment matches its UTF-8 bytes as a
             // prefix (`<<'GET ', ..rest>>`), not a single 8-bit Int.
-            if size.is_none()
-                && kind == ast::BinKind::Int
-                && matches!(value, ast::Pattern::Literal(ast::PatternLiteral::String(_)))
-            {
-                kind = ast::BinKind::Utf8;
-            }
+            let (size, unit, kind) = self.parse_bin_size_spec(matches!(
+                value,
+                ast::Pattern::Literal(ast::PatternLiteral::String(_))
+            ))?;
             segments.push(ast::BinSegmentPat {
                 value,
                 size,
@@ -1579,12 +1604,7 @@ impl Parser {
                 break;
             }
 
-            if self.kind() == Kind::Identifier
-                && self
-                    .cur()
-                    .literal
-                    .as_deref()
-                    .is_some_and(|n| !is_type_name(n))
+            if matches!(&self.cur().kind, Kind::Identifier(n) if !is_type_name(n))
                 && self.peek_next() == Some(Kind::PuncColon)
             {
                 let label = self.eat_identifier("Expected pattern label")?;
@@ -1611,7 +1631,7 @@ impl Parser {
     // ------------------------------------------------------------------------
 
     fn parse_function(&mut self) -> PResult<ast::Node> {
-        if self.peek_next() == Some(Kind::Identifier) {
+        if matches!(self.peek_next(), Some(Kind::Identifier(_))) {
             let doc = self.extract_doc_comment();
             let decl = self.parse_function_declaration(doc, Vec::new())?;
             return Ok(ast::Node::Statement(Box::new(
@@ -1645,11 +1665,17 @@ impl Parser {
             if self.kind() == Kind::PuncOpenBrace {
                 return Err("@vm functions cannot have a body".to_string());
             }
-            let op = vm_attr
-                .args
-                .first()
-                .cloned()
-                .ok_or_else(|| "@vm requires an op name, e.g. @vm(add)".to_string())?;
+            // Arity is enforced here, once: everything downstream
+            // (`analyse_module`'s Pass 0, `builtin_op`) assumes `FnBody::Vm`
+            // carries exactly the op key.
+            let op = match vm_attr.args.as_slice() {
+                [op] => op.clone(),
+                _ => {
+                    return Err(
+                        "@vm takes exactly one argument: the VM op key, e.g. @vm(add)".to_string(),
+                    );
+                }
+            };
             ast::FnBody::Vm(op)
         } else {
             ast::FnBody::Block(self.parse_braced_body("Function body")?)
@@ -1691,7 +1717,7 @@ impl Parser {
     fn at_loose_type_start(&self) -> bool {
         matches!(
             self.kind(),
-            Kind::Identifier | Kind::Keyword(Keyword::Fn) | Kind::PuncOpenParen
+            Kind::Identifier(_) | Kind::Keyword(Keyword::Fn) | Kind::PuncOpenParen
         )
     }
 
@@ -1751,7 +1777,7 @@ impl Parser {
         }
 
         let span = self.current_span();
-        let name = self.eat_token_literal(Kind::Identifier, "Expected type name")?;
+        let name = self.eat_name("Expected type name")?;
 
         let mut type_args: Vec<ast::TypeIdentifier> = Vec::new();
         if self.kind() == Kind::PuncOpenParen && !self.has_newline_before_current() {
@@ -1834,9 +1860,7 @@ impl Parser {
         } else {
             self.eat(Kind::PuncOpenBrace)?;
             let variants = self.with_context(ParseContext::TypeDef, |p| {
-                if p.kind() == Kind::Identifier
-                    && p.cur().literal.as_deref().is_some_and(|s| !is_type_name(s))
-                {
+                if matches!(&p.cur().kind, Kind::Identifier(s) if !is_type_name(s)) {
                     // Single-constructor shorthand: `type T { field Type ... }`
                     // desugars to `type T { T(field Type ...) }`. Fields are
                     // separated by newlines/spaces; commas are rejected.
@@ -1879,7 +1903,7 @@ impl Parser {
     fn parse_constructor(&mut self) -> PResult<ast::Constructor> {
         let doc = self.extract_doc_comment();
         let start = self.current_span();
-        let name = self.eat_token_literal(Kind::Identifier, "Expected constructor name")?;
+        let name = self.eat_name("Expected constructor name")?;
         if !is_type_name(&name) {
             return Err(format!(
                 "Constructor name '{name}' must start with an uppercase letter"
@@ -1946,6 +1970,11 @@ impl Parser {
         }))
     }
 
+    // Scan from the current `(` to its matching `)` and check whether an `=`
+    // follows on the same line. The same-line requirement mirrors
+    // `is_binding_ahead`'s depth-0 newline rule: `(a, b)` followed by a
+    // fresh-line `=` is a tuple expression plus a separate (erroring) node,
+    // exactly like the identifier case.
     fn is_tuple_destructuring(&self) -> bool {
         let mut depth = 0;
         let mut i = self.index;
@@ -1957,10 +1986,12 @@ impl Parser {
             } else if tok.kind == Kind::PuncCloseParen {
                 depth -= 1;
                 if depth == 0 {
-                    if i + 1 < self.tokens.len() && self.tokens[i + 1].kind == Kind::PuncEquals {
-                        return true;
-                    }
-                    return false;
+                    return i + 1 < self.tokens.len()
+                        && self.tokens[i + 1].kind == Kind::PuncEquals
+                        && !self.tokens[i + 1]
+                            .leading_trivia
+                            .iter()
+                            .any(|t| matches!(t, Trivia::Newline));
                 }
             } else if tok.kind == Kind::Eof {
                 return false;
@@ -2025,7 +2056,7 @@ impl Parser {
     fn parse_binding(&mut self) -> PResult<ast::Statement> {
         let doc = self.extract_doc_comment();
         let span = self.current_span();
-        let name = self.eat_token_literal(Kind::Identifier, "Expected identifier")?;
+        let name = self.eat_name("Expected identifier")?;
 
         let mut typ: Option<ast::TypeIdentifier> = None;
         if self.is_type_start() {
@@ -2142,14 +2173,13 @@ impl Parser {
 
         // Track the span of the final module-name segment; the last write wins.
         let mut path_span = self.current_span();
-        let first =
-            self.eat_token_literal(Kind::Identifier, "Expected module name after `import`")?;
+        let first = self.eat_name("Expected module name after `import`")?;
         path.push(first);
 
         while self.kind() == Kind::PuncDiv {
             self.eat(Kind::PuncDiv)?;
             path_span = self.current_span();
-            let seg = self.eat_token_literal(Kind::Identifier, "Expected module name after `/`")?;
+            let seg = self.eat_name("Expected module name after `/`")?;
             path.push(seg);
         }
 
@@ -2193,8 +2223,8 @@ impl Parser {
 
         let span = self.current_span();
 
-        if self.kind() == Kind::LiteralNumber {
-            let num_str = self.eat_token_literal(Kind::LiteralNumber, "Expected tuple index")?;
+        if matches!(self.kind(), Kind::LiteralNumber(_)) {
+            let num_str = self.eat_number("Expected tuple index")?;
             let mut result = left;
             for part in num_str.split('.') {
                 result = ast::Expression::PropertyAccessExpression(ast::PropertyAccessExpression {
@@ -2209,7 +2239,7 @@ impl Parser {
             return Ok(result);
         }
 
-        let property = self.eat_token_literal(Kind::Identifier, "Expected property name")?;
+        let property = self.eat_name("Expected property name")?;
 
         Ok(ast::Expression::PropertyAccessExpression(
             ast::PropertyAccessExpression {
@@ -2226,7 +2256,7 @@ impl Parser {
     fn parse_string_expression(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
         Ok(ast::Expression::StringLiteral(ast::StringLiteral {
-            value: self.eat_token_literal(Kind::LiteralString, "Expected string")?,
+            value: self.eat_string("Expected string")?,
             span,
         }))
     }
@@ -2239,10 +2269,9 @@ impl Parser {
 
         loop {
             match self.kind() {
-                Kind::InterpStringPart => {
+                Kind::InterpStringPart(_) => {
                     let part_span = self.current_span();
-                    let value =
-                        self.eat_token_literal(Kind::InterpStringPart, "Expected string part")?;
+                    let value = self.eat_interp_part("Expected string part")?;
                     parts.push(ast::InterpPart::Literal(ast::StringLiteral {
                         value,
                         span: part_span,
@@ -2258,7 +2287,7 @@ impl Parser {
                     parts.push(ast::InterpPart::Expr(Box::new(expr)));
                     self.eat(Kind::PuncCloseBrace)?;
                 }
-                Kind::Identifier => {
+                Kind::Identifier(_) => {
                     let ident = self.eat_identifier("Expected identifier")?;
                     parts.push(ast::InterpPart::Expr(Box::new(
                         ast::Expression::Identifier(ident),
@@ -2284,7 +2313,7 @@ impl Parser {
     fn parse_number_expression(&mut self) -> PResult<ast::Expression> {
         let span = self.current_span();
         Ok(ast::Expression::NumberLiteral(ast::NumberLiteral {
-            value: self.eat_token_literal(Kind::LiteralNumber, "Expected number")?,
+            value: self.eat_number("Expected number")?,
             span,
         }))
     }
@@ -2607,6 +2636,20 @@ mod tests {
     }
 
     #[test]
+    fn test_newline_before_equals_is_not_a_binding() {
+        // A depth-0 newline before `=` ends the statement: the left-hand side
+        // parses as an expression and the stray `=` errors. The tuple form
+        // follows the same rule as the identifier form.
+        let r = parse("x\n= 1");
+        assert!(!r.diagnostics.is_empty(), "expected an error for stray `=`");
+        assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
+
+        let r = parse("(a, b)\n= (1, 2)");
+        assert!(!r.diagnostics.is_empty(), "expected an error for stray `=`");
+        assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
+    }
+
+    #[test]
     fn test_postfix() {
         assert_no_errors("a.b.c");
         assert_no_errors("x = arr[0]");
@@ -2698,6 +2741,16 @@ mod tests {
         assert_has_error(
             "@vm(add)\nfn f(a Int) Int { a }",
             "@vm functions cannot have a body",
+        );
+        // `@vm` carries exactly one arg — the op key. Enforced at parse time
+        // so `FnBody::Vm` always holds it.
+        assert_has_error(
+            "@vm\nfn f(a Int) Int",
+            "@vm takes exactly one argument: the VM op key",
+        );
+        assert_has_error(
+            "@vm(add, sub)\nfn f(a Int) Int",
+            "@vm takes exactly one argument: the VM op key",
         );
         // `opaque` requires a body and only modifies `type`.
         assert_has_error(

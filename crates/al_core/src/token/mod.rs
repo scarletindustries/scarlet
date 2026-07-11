@@ -14,19 +14,14 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: Kind,
-    pub literal: Option<String>,
     pub span: Span,
     pub leading_trivia: Vec<Trivia>,
 }
 
+/// Displays the token's source text (see [`Kind`]'s `Display`). Unquoted:
+/// error sites that want quotes add their own.
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(lit) = &self.literal {
-            if self.kind == Kind::LiteralString {
-                return write!(f, "'{}'", lit);
-            }
-            return write!(f, "{}", lit);
-        }
         write!(f, "{}", self.kind)
     }
 }

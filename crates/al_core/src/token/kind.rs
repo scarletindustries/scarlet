@@ -1,16 +1,21 @@
 use std::fmt;
+use std::rc::Rc;
 
 use super::keywords::Keyword;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Token kind. Text-bearing tokens carry their text as a payload, so an
+/// identifier without a name (or a name without an identifier) cannot be
+/// constructed. `Rc<str>` keeps `Kind` cheap to clone; equality and hashing
+/// compare the text itself.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
     Eof,
-    Error,
-    Identifier,
-    LiteralNumber,
-    LiteralString,
+    Error(Rc<str>),
+    Identifier(Rc<str>),
+    LiteralNumber(Rc<str>),
+    LiteralString(Rc<str>),
     InterpStringStart,
-    InterpStringPart,
+    InterpStringPart(Rc<str>),
     InterpStringEnd,
     LogicalAnd,
     LogicalOr,
@@ -52,16 +57,19 @@ pub enum Kind {
     PuncMod,
 }
 
+/// Displays the source text of the token: the payload for text-bearing kinds,
+/// the fixed spelling otherwise. No quoting — error sites that want quotes
+/// add their own.
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Kind::Eof => "EOF",
-            Kind::Error => "<error>",
-            Kind::Identifier => "identifier",
-            Kind::LiteralNumber => "number",
-            Kind::LiteralString => "string",
+            Kind::Error(s)
+            | Kind::Identifier(s)
+            | Kind::LiteralNumber(s)
+            | Kind::LiteralString(s)
+            | Kind::InterpStringPart(s) => s.as_ref(),
             Kind::InterpStringStart => "interpolated string start",
-            Kind::InterpStringPart => "interpolated string part",
             Kind::InterpStringEnd => "interpolated string end",
             Kind::LogicalAnd => "&&",
             Kind::LogicalOr => "||",
