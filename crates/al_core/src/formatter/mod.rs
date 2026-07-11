@@ -21,14 +21,40 @@ const MAX_WIDTH: isize = 100;
 const FIELDS_PER_LINE: usize = 4;
 
 pub enum FormatResult {
-    Formatted { output: String },
-    ParseFailed { errors: Vec<Diagnostic> },
+    Formatted {
+        output: String,
+    },
+    ParseFailed {
+        errors: Vec<Diagnostic>,
+    },
+    /// A formatter bug: laying out the program dropped a comment that was
+    /// present in the input. No output is produced — callers must leave the
+    /// source untouched. `comment` is (one of) the lost comment(s), for the
+    /// bug report.
+    CommentsLost {
+        comment: String,
+    },
 }
 
 pub fn format(input: &str) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
     let scanned_tokens = s.scan_all();
     let scanner_diagnostics = s.take_diagnostics();
+
+    // Every comment in the input, with how often it occurs, so the layout can
+    // be checked afterwards: a comment the formatter fails to re-emit must
+    // make `format` a no-op, never silent data loss. Texts are trimmed the
+    // same way `trivia_doc`/`comments_before` trim them before emission.
+    let mut expected_comments: HashMap<String, usize> = HashMap::new();
+    for tok in &scanned_tokens {
+        for t in &tok.leading_trivia {
+            if let Some(c) = t.comment_text() {
+                *expected_comments
+                    .entry(c.trim_end().to_string())
+                    .or_default() += 1;
+            }
+        }
+    }
 
     let mut trivia_map: HashMap<(i32, i32), Vec<Trivia>> = HashMap::new();
     let mut eof_trivia: Vec<Trivia> = Vec::new();
@@ -64,6 +90,19 @@ pub fn format(input: &str) -> FormatResult {
     }
     output.push('\n');
 
+    // Postcondition: every input comment made it into the output. Comments
+    // are emitted verbatim (modulo trailing-whitespace trim), so each text
+    // must appear at least as often as it was scanned. A miss means some
+    // formatter path failed to query trivia — refuse to produce output so
+    // the bug is a no-op instead of deleting the user's comment in place.
+    for (comment, &count) in &expected_comments {
+        if output.matches(comment.as_str()).count() < count {
+            return FormatResult::CommentsLost {
+                comment: comment.clone(),
+            };
+        }
+    }
+
     FormatResult::Formatted { output }
 }
 
@@ -80,7 +119,11 @@ impl Formatter {
             .map(|v| v.as_slice())
     }
 
-    fn trivia_at_end(&self, s: Span) -> Option<&[Trivia]> {
+    /// Trivia attached to the closing `}` of `s` — the comments sitting after
+    /// a block's last node. The trivia map is keyed by a token's *start*
+    /// position, so `s` must end in a one-column `}` token: `end_column - 1`
+    /// is then exactly the brace's start column.
+    fn closing_brace_trivia(&self, s: Span) -> Option<&[Trivia]> {
         self.trivia_map
             .get(&(s.end_line, s.end_column - 1))
             .map(|v| v.as_slice())
@@ -101,7 +144,7 @@ impl Formatter {
         let mut newlines = 0usize;
         let mut emitted_any = !first;
         for t in trivia {
-            if t.is_comment() {
+            if let Some(c) = t.comment_text() {
                 let blanks = if emitted_any {
                     newlines.saturating_sub(1).min(max_blanks)
                 } else {
@@ -110,7 +153,7 @@ impl Formatter {
                 if emitted_any {
                     parts.push(hardlines(1 + blanks));
                 }
-                parts.push(text(t.text().trim_end().to_string()));
+                parts.push(text(c.trim_end().to_string()));
                 emitted_any = true;
                 newlines = 0;
             } else {
@@ -129,14 +172,36 @@ impl Formatter {
     }
 
     fn trailing_comments(&self, s: Span) -> Doc {
-        let Some(trivia) = self.trivia_at_end(s) else {
+        let Some(trivia) = self.closing_brace_trivia(s) else {
             return nil();
         };
         let mut parts = Vec::new();
         for t in trivia {
-            if t.is_comment() {
+            if let Some(c) = t.comment_text() {
                 parts.push(hardline());
-                parts.push(text(t.text().trim_end().to_string()));
+                parts.push(text(c.trim_end().to_string()));
+            }
+        }
+        doc::concat(parts)
+    }
+
+    /// Comments attached to the token starting `s`, each followed by a
+    /// hardline so it sits on its own line directly above the node. Nil when
+    /// the token carries no comment, so flat layouts stay flat. Unlike
+    /// `leading_trivia` this never emits a separating newline of its own —
+    /// the caller's layout provides the separation — and blank lines between
+    /// comments are dropped rather than preserved. For nodes inside delimited
+    /// lists (call arguments, array/tuple elements, `<<>>` segments) and the
+    /// tokens of an `if`/`else` chain.
+    fn comments_before(&self, s: Span) -> Doc {
+        let Some(trivia) = self.trivia_at(s) else {
+            return nil();
+        };
+        let mut parts = Vec::new();
+        for t in trivia {
+            if let Some(c) = t.comment_text() {
+                parts.push(text(c.trim_end().to_string()));
+                parts.push(hardline());
             }
         }
         doc::concat(parts)
@@ -144,7 +209,7 @@ impl Formatter {
 
     fn has_comment_at(&self, s: Span) -> bool {
         self.trivia_at(s)
-            .is_some_and(|tr| tr.iter().any(Trivia::is_comment))
+            .is_some_and(|tr| tr.iter().any(|t| t.comment_text().is_some()))
     }
 
     // ------------------------------------------------------------------ program
@@ -547,6 +612,7 @@ impl Formatter {
                                 | ast::Expression::InterpolatedString(_)
                         );
                         d![
+                            self.comments_before(s.span),
                             self.expr(&s.value),
                             self.bin_size_spec(s.kind, &s.size, is_string)
                         ]
@@ -555,7 +621,11 @@ impl Formatter {
                 delimited("<<", segs, ">>")
             }
             E::TupleExpression(t) => {
-                let items: Vec<Doc> = t.elements.iter().map(|e| self.expr(e)).collect();
+                let items: Vec<Doc> = t
+                    .elements
+                    .iter()
+                    .map(|e| d![self.comments_before(e.span()), self.expr(e)])
+                    .collect();
                 delimited("(", items, ")")
             }
             E::ArrayIndexExpression(a) => {
@@ -579,13 +649,15 @@ impl Formatter {
     }
 
     fn call_arg(&self, a: &ast::CallArg) -> Doc {
-        match a {
+        let comments = self.comments_before(a.span());
+        let arg = match a {
             ast::CallArg::Positional(e) => self.expr(e),
             ast::CallArg::Labeled { label, value } => {
                 d![text(label.name.clone()), text(": "), self.expr(value)]
             }
             ast::CallArg::Spread(e) => d![text(".."), self.expr(e)],
-        }
+        };
+        d![comments, arg]
     }
 
     /// Render the `:spec` suffix of a `<<>>` segment, inverting
@@ -606,15 +678,25 @@ impl Formatter {
             (ast::BinKind::Int, Some(e)) => d![text(":size("), self.expr(e), text(")")],
             (ast::BinKind::Binary, None) => text(":binary"),
             (ast::BinKind::Binary, Some(e)) => d![text(":bytes("), self.expr(e), text(")")],
-            (ast::BinKind::Utf8, _) if value_is_string => nil(),
-            (ast::BinKind::Utf8, _) => text(":utf8"),
+            (ast::BinKind::Utf8, None) if value_is_string => nil(),
+            (ast::BinKind::Utf8, None) => text(":utf8"),
+            // `parse_bin_size_spec` returns Utf8 only for a bare `:utf8`, with
+            // no size — a sized Utf8 segment cannot be constructed.
+            #[allow(clippy::unreachable)]
+            (ast::BinKind::Utf8, Some(_)) => unreachable!("parser never sizes a utf8 segment"),
         }
     }
 
     fn array_elem(&self, e: &ast::ArrayElement) -> Doc {
         match e {
-            ast::ArrayElement::Expression(e) => self.expr(e),
-            ast::ArrayElement::SpreadElement(se) => d![text(".."), self.expr(&se.expression)],
+            ast::ArrayElement::Expression(e) => {
+                d![self.comments_before(e.span()), self.expr(e)]
+            }
+            ast::ArrayElement::SpreadElement(se) => d![
+                self.comments_before(se.span),
+                text(".."),
+                self.expr(&se.expression)
+            ],
         }
     }
 
@@ -646,10 +728,12 @@ impl Formatter {
         // chain reads symmetrically.
         let mut bodies: Vec<&ast::Expression> = Vec::new();
         let mut conds: Vec<&ast::Expression> = Vec::new();
+        let mut if_spans: Vec<Span> = Vec::new();
         let mut cur = e;
         loop {
             match cur {
                 ast::Expression::IfExpression(i) => {
+                    if_spans.push(i.span);
                     conds.push(&i.condition);
                     bodies.push(&i.body);
                     cur = &i.else_body;
@@ -667,8 +751,13 @@ impl Formatter {
         // reads symmetrically, the way `match` always does.
         let is_chain = conds.len() > 1;
         let cond_comment = conds.iter().any(|c| self.has_comment_at(c.span()));
-        let trivial =
-            !is_chain && !cond_comment && bodies.iter().all(|b| self.is_trivial_branch(b));
+        // A comment between a condition (or `else`) and its branch's `{`
+        // attaches to the `{` token — a branch carrying one cannot stay flat.
+        let brace_comment = bodies.iter().any(|b| self.has_comment_at(b.span()));
+        let trivial = !is_chain
+            && !cond_comment
+            && !brace_comment
+            && bodies.iter().all(|b| self.is_trivial_branch(b));
         let body = |b: &ast::Expression| {
             if trivial {
                 self.body_as_block(b)
@@ -678,10 +767,34 @@ impl Formatter {
         };
         let mut clauses: Vec<Doc> = Vec::new();
         for (i, c) in conds.iter().enumerate() {
-            let kw = if i == 0 { "if " } else { "else if " };
-            clauses.push(d![text(kw), self.expr(c), text(" "), body(bodies[i])]);
+            // A comment between `else` and `if` attaches to the nested `if`
+            // token, which starts that IfExpression's span. The chain head's
+            // own leading trivia (i == 0) is emitted by the enclosing
+            // statement list, never here.
+            let kw = if i == 0 {
+                text("if ")
+            } else {
+                d![
+                    text("else "),
+                    self.comments_before(if_spans[i]),
+                    text("if ")
+                ]
+            };
+            clauses.push(d![
+                kw,
+                self.comments_before(c.span()),
+                self.expr(c),
+                text(" "),
+                self.comments_before(bodies[i].span()),
+                body(bodies[i]),
+            ]);
         }
-        clauses.push(d![text("else "), body(bodies[conds.len()])]);
+        let last = bodies[conds.len()];
+        clauses.push(d![
+            text("else "),
+            self.comments_before(last.span()),
+            body(last)
+        ]);
         if trivial {
             group(join(clauses, line()))
         } else {
@@ -798,6 +911,7 @@ impl Formatter {
                             ast::Pattern::Literal(ast::PatternLiteral::String(_))
                         );
                         d![
+                            self.comments_before(s.span),
                             self.pattern(&s.value),
                             self.bin_size_spec(s.kind, &s.size, is_string)
                         ]
@@ -966,10 +1080,14 @@ fn starts_with_minus(e: &ast::Expression) -> bool {
 mod tests {
     use super::*;
 
+    #[track_caller]
     fn fmt(src: &str) -> String {
         match format(src) {
             FormatResult::Formatted { output } => output,
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+            FormatResult::CommentsLost { comment } => {
+                panic!("formatter lost the comment `{comment}` in:\n{src}")
+            }
         }
     }
 
@@ -981,6 +1099,9 @@ mod tests {
             }
             FormatResult::ParseFailed { .. } => {
                 panic!("formatted output does not re-parse:\n{out}")
+            }
+            FormatResult::CommentsLost { comment } => {
+                panic!("re-format lost the comment `{comment}`:\n{out}")
             }
         }
     }
@@ -1002,6 +1123,9 @@ mod tests {
                 FormatResult::Formatted { output } => output,
                 // Source itself does not parse — outside the formatter's remit.
                 FormatResult::ParseFailed { .. } => continue,
+                FormatResult::CommentsLost { comment } => {
+                    panic!("formatting {name} lost the comment `{comment}`")
+                }
             };
             match format(&once) {
                 FormatResult::Formatted { output } => {
@@ -1009,6 +1133,9 @@ mod tests {
                 }
                 FormatResult::ParseFailed { .. } => {
                     panic!("formatted output of {name} does not re-parse:\n{once}")
+                }
+                FormatResult::CommentsLost { comment } => {
+                    panic!("re-formatting {name} lost the comment `{comment}`")
                 }
             }
         }
@@ -1406,6 +1533,91 @@ mod tests {
         let out = fmt(src);
         assert!(out.contains("// why b matters"), "comment deleted:\n{out}");
         assert_round_trips(&out);
+    }
+
+    #[test]
+    fn call_argument_comments_survive() {
+        let src = "f(\n\t// why a\n\ta,\n\tb,\n)\n";
+        let out = fmt(src);
+        assert!(out.contains("// why a"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn labeled_and_final_call_argument_comments_survive() {
+        let out = fmt("f(\n\ta,\n\t// why b\n\tlabel: b,\n)\n");
+        assert!(out.contains("// why b"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn array_element_comments_survive() {
+        let out = fmt("x = [\n\t// first\n\t1,\n\t2,\n]\n");
+        assert!(out.contains("// first"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn array_spread_comments_survive() {
+        let out = fmt("x = [\n\t1,\n\t// the rest\n\t..rest,\n]\n");
+        assert!(out.contains("// the rest"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn tuple_element_comments_survive() {
+        let out = fmt("x = (\n\t// left\n\t1,\n\t2,\n)\n");
+        assert!(out.contains("// left"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn binary_segment_comments_survive() {
+        let out = fmt("x = <<\n\t// version byte\n\t1,\n\t2,\n>>\n");
+        assert!(out.contains("// version byte"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn if_condition_comments_survive() {
+        let out = fmt("if // check sign\nx > 0 {\n\t1\n} else {\n\t2\n}\n");
+        assert!(out.contains("// check sign"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn else_if_gap_comments_survive() {
+        // A comment between `else` and `if` attaches to the nested `if` token.
+        let out = fmt("if a {\n\t1\n} else // why\nif b {\n\t2\n} else {\n\t3\n}\n");
+        assert!(out.contains("// why"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn else_brace_gap_comments_survive() {
+        // A comment between `else` and its `{` attaches to the brace token.
+        let out = fmt("if a {\n\t1\n} else // fallback\n{\n\t2\n}\n");
+        assert!(out.contains("// fallback"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    /// A comment the formatter has no emission site for (before the `else`
+    /// keyword itself — its token has no span in the AST) must make `format`
+    /// refuse to produce output, never silently delete the comment.
+    #[test]
+    fn unemittable_comment_is_a_noop_not_a_deletion() {
+        let src = "if a {\n\t1\n}\n// stranded before else\nelse {\n\t2\n}\n";
+        match format(src) {
+            FormatResult::CommentsLost { comment } => {
+                assert_eq!(comment, "// stranded before else")
+            }
+            // If a future change learns to emit this comment too, it must
+            // actually be present in the output.
+            FormatResult::Formatted { output } => {
+                assert!(output.contains("// stranded before else"), "{output}")
+            }
+            FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+        }
     }
 
     #[test]

@@ -175,12 +175,7 @@ fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnosti
 fn dump_tokens(src: &str) {
     let mut s = scanner::new_scanner(src.to_string());
     for tok in s.scan_all() {
-        eprintln!(
-            "Token: {:?} \"{}\" trivia: {}",
-            tok.kind,
-            tok.literal.as_deref().unwrap_or(""),
-            tok.leading_trivia.len()
-        );
+        eprintln!("Token: {:?} trivia: {}", tok.kind, tok.leading_trivia.len());
         for t in &tok.leading_trivia {
             eprintln!("  Trivia: {t:?}");
         }
@@ -338,6 +333,16 @@ fn cmd_fmt(args: FmtArgs) {
                 }
                 process::exit(1);
             }
+            formatter::FormatResult::CommentsLost { comment } => {
+                // Formatter bug: pass the input through untouched so no
+                // comment is ever deleted, and fail loudly.
+                eprintln!(
+                    "formatter bug: formatting would delete the comment `{comment}`; input left unchanged"
+                );
+                print!("{content}");
+                let _ = io::stdout().flush();
+                process::exit(1);
+            }
         }
         return;
     }
@@ -373,6 +378,14 @@ fn cmd_fmt(args: FmtArgs) {
                 for d in &errors {
                     eprintln!("{}", render_fmt_diagnostic(file.display(), d));
                 }
+                has_errors = true;
+            }
+            formatter::FormatResult::CommentsLost { comment } => {
+                eprintln!(
+                    "Error formatting {}: formatter bug: formatting would delete the comment \
+                     `{comment}`; file left unchanged",
+                    file.display()
+                );
                 has_errors = true;
             }
             formatter::FormatResult::Formatted { output } => {
