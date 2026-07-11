@@ -240,6 +240,24 @@ fn stdlib_decimal() {
          println(option.map(decimal.div(decimal.from_int(1234), decimal.from_int(1), 0 - 2), decimal.to_string))\n",
         "1200\n1230\n0\nSome(1200)\n",
     );
+    // Dropping more than 18 digits (scale - places >= 19): 10^k would wrap,
+    // so the quotient regime is {-1, 0, 1} and is computed without it. The
+    // half boundary is reachable only at k == 19 (5 * 10^18); div is None
+    // when places < -18 or the rescale exponent exceeds 18.
+    run_outputs(
+        "import al/decimal.{HalfUp, Up}\n\
+         import al/option\n\
+         println(decimal.to_string(decimal.round(decimal.new(123456789012345678, 18), 0 - 1)))\n\
+         println(option.map(decimal.div(decimal.new(9000000000000000000, 18), decimal.from_int(1), 0 - 1), decimal.to_string))\n\
+         println(decimal.to_string(decimal.round(decimal.new(1234, 0), 0 - 19)))\n\
+         println(decimal.to_string(decimal.round(decimal.new(19, 1), 0 - 18)))\n\
+         println(decimal.to_string(decimal.round_with(decimal.new(1, 18), 0 - 1, Up)))\n\
+         println(decimal.to_string(decimal.round_with(decimal.new(5000000000000000000, 18), 0 - 1, HalfUp)))\n\
+         println(decimal.to_string(decimal.round(decimal.new(5000000000000000000, 18), 0 - 1)))\n\
+         println(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19))\n\
+         println(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21))\n",
+        "0\nSome(10)\n0\n0\n10\n10\n0\nNone\nNone\n",
+    );
     // Float bridges are explicitly lossy conveniences; from_float is None
     // instead of wrapping when units would leave Int range.
     run_outputs(

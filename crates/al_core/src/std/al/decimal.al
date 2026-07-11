@@ -97,22 +97,29 @@ pub fn mul(a Decimal, b Decimal) Decimal {
 	Decimal(units(a) * units(b), scale(a) + scale(b))
 }
 
-// Quotient at the given scale, rounding half-to-even. None when `b` is zero.
-// A negative `places` rounds the quotient to a multiple of 10^|places| at
-// scale 0: `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
+// Quotient at the given scale, rounding half-to-even. None when `b` is zero,
+// when `places` is below -18 (the result could not be scaled back up, as in
+// `from_float`), or when the rescale exponent `places + scale(b) - scale(a)`
+// exceeds 18 (10^19 no longer fits in Int). A negative `places` rounds the
+// quotient to a multiple of 10^|places| at scale 0:
+// `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
 pub fn div(a Decimal, b Decimal, places Int) Option(Decimal) {
 	div_with(a, b, places, HalfEven)
 }
 
 pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Option(Decimal) {
-	if is_zero(b) {
+	e = places + scale(b) - scale(a)
+	if is_zero(b) || places < 0 - 18 || e > 18 {
 		None
 	} else {
-		e = places + scale(b) - scale(a)
 		q = if e >= 0 {
 			div_units(units(a) * pow10(e), units(b), mode)
-		} else {
+		} else if e >= 0 - 18 {
 			div_units(units(a), units(b) * pow10(0 - e), mode)
+		} else if units(b) < 0 {
+			div_round_huge(0 - units(a), 0 - units(b), 0 - e, mode)
+		} else {
+			div_round_huge(units(a), units(b), 0 - e, mode)
 		}
 		Some(at_places(q, places))
 	}
@@ -121,16 +128,21 @@ pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Option(Decimal)
 // Change the scale, rounding half-to-even when digits are dropped and
 // zero-padding when the scale grows: `round(new(2345, 3), 2)` is 2.34.
 // A negative `places` rounds to a multiple of 10^|places| at scale 0:
-// `round(new(1250, 0), 0 - 2)` is 1200.
+// `round(new(1250, 0), 0 - 2)` is 1200. Below `places` of -18 the only
+// representable result is 0; a nonzero one (a ±10^|places| step, reachable
+// only from magnitudes at or above 5 * 10^18) wraps like any overflow.
 pub fn round(d Decimal, places Int) Decimal {
 	round_with(d, places, HalfEven)
 }
 
 pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
-	if places >= scale(d) {
-		Decimal(units(d) * pow10(places - scale(d)), places)
+	k = scale(d) - places
+	if k <= 0 {
+		Decimal(units(d) * pow10(0 - k), places)
+	} else if k <= 18 {
+		at_places(div_round(units(d), pow10(k), mode), places)
 	} else {
-		at_places(div_round(units(d), pow10(scale(d) - places), mode), places)
+		at_places(div_round_huge(units(d), 1, k, mode), places)
 	}
 }
 
@@ -365,6 +377,45 @@ fn div_round(n Int, d Int, mode Rounding) Int {
 				q
 			} else {
 				step_away(q, n)
+			}
+		}
+	}
+}
+
+// `n / (d * 10^k)` rounded per `mode`, for positive `d` and `k >= 19` —
+// exponents where materializing 10^k would wrap. The divisor exceeds every
+// representable |n|, so the truncated quotient is 0 and all of `n` is
+// remainder; only the direction of the rounding step is left to decide. The
+// half boundary `d * 5 * 10^(k-1)` sits inside Int range only at d == 1,
+// k == 19; everywhere else the remainder is below it and the Half modes
+// keep the quotient at 0.
+fn div_round_huge(n Int, d Int, k Int, mode Rounding) Int {
+	if n == 0 {
+		0
+	} else {
+		on_half = d == 1 && k == 19
+		match mode {
+			Down -> 0
+			Up -> step_away(0, n)
+			Floor -> if n < 0 {
+				0 - 1
+			} else {
+				0
+			}
+			Ceiling -> if n < 0 {
+				0
+			} else {
+				1
+			}
+			HalfUp -> if on_half && int.abs(n) >= 5 * pow10(18) {
+				step_away(0, n)
+			} else {
+				0
+			}
+			HalfEven -> if on_half && int.abs(n) > 5 * pow10(18) {
+				step_away(0, n)
+			} else {
+				0
 			}
 		}
 	}
