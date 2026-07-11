@@ -28,7 +28,9 @@ use super::compiler::{CompileResult, Compiler, new_compiler};
 use crate::ast;
 use crate::diagnostic::has_errors;
 use crate::module::{self, ModulePath};
-use crate::reference::{Definition, ModuleId, ModuleReferences, ReferenceGraph};
+use crate::reference::{
+    Definition, DefinitionKind, EntityKind, ModuleId, ModuleReferences, ReferenceGraph,
+};
 use crate::span::Span;
 use crate::type_def::{Type, TypeId};
 use crate::types::{DefinitionLocation, EnginePoolWatermark, EnvWatermark, Ty};
@@ -133,6 +135,17 @@ impl PartialOrd for Watermark {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
+}
+
+/// One definition synthesised for a static/hydrated stdlib module, lifted from
+/// its interface's exported values (see
+/// [`Compiler::synth_refs_from_interface`]).
+struct SynthDef {
+    name: String,
+    location: DefinitionLocation,
+    doc: Option<String>,
+    /// Function parameter names / constructor field labels, for hover.
+    param_names: Vec<String>,
 }
 
 impl Compiler {
@@ -287,6 +300,7 @@ impl Compiler {
         self.module_refs = ModuleReferences::new(main_id);
         self.imported_qualifiers.clear();
         self.current_module = module::main_module();
+        self.current_module_key = module::ModuleKey::main();
         self.module_path_slice = None;
         // The `str_slices` pool was just rewound, so an `ArenaSlice` may now
         // denote a different path than it did last compile — drop the memo.
@@ -347,20 +361,46 @@ impl Compiler {
     /// `SModule::doc`).
     fn synth_refs_from_interface(
         &mut self,
-        defs: &[(String, DefinitionLocation, Option<String>, Vec<String>)],
+        defs: &[SynthDef],
         doc: Option<&str>,
     ) -> Option<ModuleReferences> {
         // The container must be keyed by the same `ModuleId` the use side
         // bakes into the occurrence target (`defid_of`), so that
         // `definition()`'s `modules.get(&target.module)` lands here.
-        let mid = self.defid_of(defs.first()?.1).module;
+        let mid = self.defid_of(defs.first()?.location).module;
         let mut mr = ModuleReferences::new(mid);
         mr.set_doc(doc.map(str::to_string));
-        for (name, dl, decl_doc, param_names) in defs {
-            let defid = self.defid_of(*dl);
-            let mut d = Definition::new(defid, name.clone(), decl_doc.clone(), true);
-            d.param_names = param_names.clone();
-            mr.add_definition(d);
+        for sd in defs {
+            let defid = self.defid_of(sd.location);
+            // A hydrated interface exports functions, constants, and
+            // constructors; the payload follows the exported entity. A
+            // constructor's declaring-type `DefId` is not serialised, so its
+            // `ctor_of` edge is absent — harmless, since the dead-code pass
+            // that walks it only ever reports the entry module.
+            let kind = match defid.entity {
+                EntityKind::Function => DefinitionKind::Function {
+                    param_names: sd.param_names.clone(),
+                },
+                EntityKind::Constructor => DefinitionKind::Constructor {
+                    ctor_of: None,
+                    param_names: sd.param_names.clone(),
+                },
+                EntityKind::Constant => DefinitionKind::Constant,
+                EntityKind::Value => DefinitionKind::Value,
+                EntityKind::Type => DefinitionKind::Type,
+                EntityKind::Field => DefinitionKind::Field,
+                EntityKind::ModuleAlias => DefinitionKind::ModuleAlias {
+                    decl_span: defid.span,
+                    imports_module: None,
+                },
+            };
+            mr.add_definition(Definition::new(
+                defid,
+                sd.name.clone(),
+                sd.doc.clone(),
+                true,
+                kind,
+            ));
         }
         Some(mr)
     }
@@ -406,10 +446,7 @@ impl Compiler {
         //    incremental `check`. The persisted refs are shared via `Rc`, so
         //    re-inserting an unchanged module is a refcount bump rather than a
         //    deep copy of its occurrences/definitions every keystroke.
-        /// name, decl location, doc, parameter names
-        type SynthDef = (String, DefinitionLocation, Option<String>, Vec<String>);
-        type SynthInput = (Vec<SynthDef>, Option<String>);
-        let mut synth_inputs: Vec<SynthInput> = Vec::new();
+        let mut synth_inputs: Vec<(Vec<SynthDef>, Option<String>)> = Vec::new();
         for (_key, cm) in self.module_table.loaded_modules() {
             match cm.module_refs() {
                 Some(mr) => graph.insert_module_deferred(Rc::clone(mr)),
@@ -419,8 +456,11 @@ impl Compiler {
                         .values
                         .iter()
                         .filter_map(|(name, ev)| {
-                            ev.scheme.def.map(|dl| {
-                                (name.clone(), dl, ev.doc.clone(), ev.param_names.clone())
+                            ev.scheme.def.map(|dl| SynthDef {
+                                name: name.clone(),
+                                location: dl,
+                                doc: ev.doc.clone(),
+                                param_names: ev.param_names.clone(),
                             })
                         })
                         .collect();
@@ -616,13 +656,13 @@ impl IncrementalSession {
         //    touched. (Keys are collected first so the staleness scan can take
         //    `&mut module_table` for its stat cache without overlapping the
         //    `user_modules()` borrow.)
-        let candidates: Vec<String> = self
+        let candidates: Vec<module::ModuleKey> = self
             .c
             .module_table
             .user_modules()
             .map(|(k, _)| k.clone())
             .collect();
-        let dirty: Vec<String> = candidates
+        let dirty: Vec<module::ModuleKey> = candidates
             .into_iter()
             .filter(|k| self.c.module_table.source_changed(k))
             .collect();
@@ -722,19 +762,25 @@ impl IncrementalSession {
         }
     }
 
-    /// Resolve a `ModulePath` key / file URI to its interned `ModuleId`,
-    /// falling back to the entry (`main`) module so a single-open-file LSP
-    /// caller can omit the path.
-    fn module_for(&self, module_or_uri: &str) -> Option<ModuleId> {
-        self.graph.module_id_by_key(module_or_uri).or_else(|| {
-            self.graph
-                .module_id_by_key(&module::path_key(&module::main_module()))
-        })
+    /// Resolve a `ModulePath` key to its interned `ModuleId`. `None` means
+    /// the entry (`main`) module, so a single-open-file LSP caller can omit
+    /// the key. A key that names no interned module resolves to `None` — it
+    /// must not silently fall back to the entry module, or a stale URI would
+    /// answer queries with another file's facts.
+    fn module_for(&self, module_key: Option<&str>) -> Option<ModuleId> {
+        match module_key {
+            // The LSP hands us a string; wrap it lookup-not-mint. A string
+            // that names no interned module resolves to `None`.
+            Some(key) => self
+                .graph
+                .module_id_by_key(&module::ModuleKey::from_lookup_str(key)),
+            None => self.graph.module_id_by_key(&module::ModuleKey::main()),
+        }
     }
 
     /// The base of the type-id range reserved for module `key`, if one was
     /// allocated. Used by the incremental test harness to assert range reuse.
-    pub fn module_id_base(&self, key: &str) -> Option<TypeId> {
+    pub fn module_id_base(&self, key: &module::ModuleKey) -> Option<TypeId> {
         self.c.module_table.id_base_of(key)
     }
 
@@ -745,11 +791,11 @@ impl IncrementalSession {
     /// rather than whichever was recorded first.
     pub fn hover(
         &self,
-        module_or_uri: &str,
+        module_key: Option<&str>,
         line: i32,
         col: i32,
     ) -> Option<(String, Type, Option<String>)> {
-        let m = self.module_for(module_or_uri)?;
+        let m = self.module_for(module_key)?;
         let f = self
             .type_facts
             .iter()

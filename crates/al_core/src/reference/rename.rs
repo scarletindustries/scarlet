@@ -30,7 +30,7 @@ use crate::module::ModulePath;
 use crate::span::Span;
 use crate::token;
 
-use super::uri::module_uri;
+use super::uri::{ModuleUriError, module_uri};
 use super::{DefId, EntityKind, ModuleId, ReferenceGraph, ReferenceKind};
 
 /// A single text replacement within one file. `span` is in the compiler's
@@ -83,8 +83,9 @@ pub enum RenameError {
     InvalidName(String),
     /// One or more modules holding occurrences could not be mapped to a file
     /// URI, so applying the rename would silently corrupt or partially apply.
-    /// Refusing is safer than a partial rewrite.
-    Unresolvable(Vec<ModulePath>),
+    /// Refusing is safer than a partial rewrite. Each entry carries *why* the
+    /// module has no URI.
+    Unresolvable(Vec<(ModulePath, ModuleUriError)>),
 }
 
 impl RenameError {
@@ -105,7 +106,7 @@ impl RenameError {
             RenameError::Unresolvable(mods) => {
                 let list = mods
                     .iter()
-                    .map(|m| m.join("/"))
+                    .map(|(m, why)| format!("{} ({why})", m.join("/")))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("cannot locate the source file for: {list}")
@@ -184,7 +185,7 @@ impl ReferenceGraph {
         uri_of: F,
     ) -> Result<WorkspaceEdit, RenameError>
     where
-        F: Fn(ModuleId) -> Option<String>,
+        F: Fn(ModuleId) -> Result<String, ModuleUriError>,
     {
         if !is_valid_identifier(new_name) {
             return Err(RenameError::InvalidName(new_name.to_string()));
@@ -208,28 +209,26 @@ impl ReferenceGraph {
         // Resolve every involved module to a URI up front; refuse the whole
         // rename if any can't be located (a partial rewrite is worse than no
         // rewrite).
-        let mut resolved: BTreeMap<ModuleId, Option<String>> = BTreeMap::new();
+        let mut uris: BTreeMap<ModuleId, String> = BTreeMap::new();
+        let mut unresolved: Vec<(ModuleId, ModuleUriError)> = Vec::new();
         for (m, _) in &sites {
-            resolved.entry(*m).or_insert_with(|| uri_of(*m));
+            if uris.contains_key(m) || unresolved.iter().any(|(u, _)| u == m) {
+                continue;
+            }
+            match uri_of(*m) {
+                Ok(u) => {
+                    uris.insert(*m, u);
+                }
+                Err(e) => unresolved.push((*m, e)),
+            }
         }
-        let unresolved: Vec<ModuleId> = resolved
-            .iter()
-            .filter_map(|(m, u)| u.is_none().then_some(*m))
-            .collect();
         if !unresolved.is_empty() {
             let mods = unresolved
                 .into_iter()
-                .filter_map(|m| self.module_path(m).cloned())
+                .filter_map(|(m, e)| self.module_path(m).cloned().map(|p| (p, e)))
                 .collect();
             return Err(RenameError::Unresolvable(mods));
         }
-
-        // Past the check above every entry is Some, so the build loop can
-        // index unconditionally.
-        let uris: BTreeMap<ModuleId, String> = resolved
-            .into_iter()
-            .filter_map(|(m, u)| u.map(|u| (m, u)))
-            .collect();
 
         let mut changes: BTreeMap<String, Vec<TextEdit>> = BTreeMap::new();
         for (m, span) in sites {
@@ -261,7 +260,7 @@ impl ReferenceGraph {
             if let Some((eid, euri)) = entry
                 && m == eid
             {
-                return Some(euri.to_string());
+                return Ok(euri.to_string());
             }
             module_uri(self, m, base_dir)
         })
@@ -271,8 +270,7 @@ impl ReferenceGraph {
 #[cfg(test)]
 mod tests {
     use super::{ReferenceKind as K, *};
-    use crate::reference::{Definition, ModuleReferences, Reference, add_ref, def, mp};
-    use crate::span::range_span;
+    use crate::reference::{Definition, ModuleReferences, Reference, add_ref, def, mp, stub_kind};
     use std::collections::HashMap;
 
     /// lib defines `helper` (pub); app imports it and uses it twice plus its
@@ -284,7 +282,13 @@ mod tests {
 
         let helper = def(lib, 0, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
-        lib_mr.add_definition(Definition::new(helper, "helper", None, true));
+        lib_mr.add_definition(Definition::new(
+            helper,
+            "helper",
+            None,
+            true,
+            stub_kind(helper),
+        ));
         // Populator-recorded Definition occurrence at the decl site.
         lib_mr.add_reference(
             Some(helper),
@@ -294,7 +298,7 @@ mod tests {
 
         let run = def(app, 0, 3, 6, EntityKind::Function);
         let mut app_mr = ModuleReferences::new(app);
-        app_mr.add_definition(Definition::new(run, "run", None, false));
+        app_mr.add_definition(Definition::new(run, "run", None, false, stub_kind(run)));
         // import path occurrence (must NOT be rewritten by a symbol rename)
         add_ref(&mut app_mr, None, (0, 7, 14), K::Import, helper);
         // two qualified uses of helper
@@ -307,8 +311,12 @@ mod tests {
 
     fn resolver<'a>(
         map: &'a HashMap<ModuleId, &'a str>,
-    ) -> impl Fn(ModuleId) -> Option<String> + 'a {
-        move |m| map.get(&m).map(|s| s.to_string())
+    ) -> impl Fn(ModuleId) -> Result<String, ModuleUriError> + 'a {
+        move |m| {
+            map.get(&m)
+                .map(|s| s.to_string())
+                .ok_or(ModuleUriError::NoPath)
+        }
     }
 
     #[test]
@@ -329,18 +337,20 @@ mod tests {
         // dedupe to one edit).
         let lib_edits = &we.changes["file:///proj/sub/lib.al"];
         assert_eq!(lib_edits.len(), 1);
-        assert_eq!(lib_edits[0].span, range_span(0, 3, 9));
+        assert_eq!(lib_edits[0].span, Span::single_line(0, 3, 9));
         assert_eq!(lib_edits[0].new_text, "renamed");
 
         // app: the two qualified uses, in source order. The Import occurrence
         // is NOT rewritten.
         let app_edits = &we.changes["file:///proj/main.al"];
         assert_eq!(app_edits.len(), 2);
-        assert_eq!(app_edits[0].span, range_span(2, 8, 14));
-        assert_eq!(app_edits[1].span, range_span(3, 8, 14));
+        assert_eq!(app_edits[0].span, Span::single_line(2, 8, 14));
+        assert_eq!(app_edits[1].span, Span::single_line(3, 8, 14));
         assert!(app_edits.iter().all(|e| e.new_text == "renamed"));
         assert!(
-            !app_edits.iter().any(|e| e.span == range_span(0, 7, 14)),
+            !app_edits
+                .iter()
+                .any(|e| e.span == Span::single_line(0, 7, 14)),
             "import-path span must never be rewritten"
         );
     }
@@ -352,7 +362,7 @@ mod tests {
         let m = g.intern_module(&mp(&["main"]));
         let foo = def(m, 0, 3, 6, EntityKind::Function);
         let mut mr = ModuleReferences::new(m);
-        mr.add_definition(Definition::new(foo, "foo", None, false));
+        mr.add_definition(Definition::new(foo, "foo", None, false, stub_kind(foo)));
         add_ref(&mut mr, Some(foo), (5, 4, 7), K::Unqualified, foo);
         g.insert_module(mr);
 
@@ -361,8 +371,8 @@ mod tests {
         let we = g.rename_with(foo, "bar", resolver(&map)).expect("ok");
         let edits = &we.changes["file:///main.al"];
         assert_eq!(edits.len(), 2, "declaration + the one use");
-        assert_eq!(edits[0].span, range_span(0, 3, 6));
-        assert_eq!(edits[1].span, range_span(5, 4, 7));
+        assert_eq!(edits[0].span, Span::single_line(0, 3, 6));
+        assert_eq!(edits[1].span, Span::single_line(5, 4, 7));
     }
 
     #[test]
@@ -371,7 +381,7 @@ mod tests {
         // Cursor inside the first qualified use at app line 2, col 10.
         let p = g.prepare_rename(app, 2, 10).expect("prepare ok");
         assert_eq!(p.def, helper);
-        assert_eq!(p.range, range_span(2, 8, 14));
+        assert_eq!(p.range, Span::single_line(2, 8, 14));
         assert_eq!(p.placeholder, "helper");
     }
 
@@ -382,7 +392,13 @@ mod tests {
         let user = g.intern_module(&mp(&["main"]));
         let map_fn = def(std_mod, 0, 4, 7, EntityKind::Function);
         let mut std_mr = ModuleReferences::new(std_mod);
-        std_mr.add_definition(Definition::new(map_fn, "map", None, true));
+        std_mr.add_definition(Definition::new(
+            map_fn,
+            "map",
+            None,
+            true,
+            stub_kind(map_fn),
+        ));
         g.insert_module(std_mr);
 
         let mut user_mr = ModuleReferences::new(user);
@@ -418,7 +434,7 @@ mod tests {
         let m = g.intern_module(&mp(&["main"]));
         let alias = def(m, 0, 7, 10, EntityKind::ModuleAlias);
         let mut mr = ModuleReferences::new(m);
-        mr.add_definition(Definition::new(alias, "lib", None, false));
+        mr.add_definition(Definition::new(alias, "lib", None, false, stub_kind(alias)));
         g.insert_module(mr);
 
         // Cursor on the alias binding — the wide `ModuleAlias` definition span
@@ -473,7 +489,7 @@ mod tests {
             .unwrap_err();
         match err {
             RenameError::Unresolvable(mods) => {
-                assert_eq!(mods, vec![mp(&["main"])]);
+                assert_eq!(mods, vec![(mp(&["main"]), ModuleUriError::NoPath)]);
             }
             other => panic!("expected Unresolvable, got {other:?}"),
         }
@@ -484,7 +500,7 @@ mod tests {
         let (g, _lib, _app, _helper) = workspace();
         let ghost = def(ModuleId(999), 0, 0, 1, EntityKind::Function);
         assert_eq!(
-            g.rename_with(ghost, "x", |_| Some("file:///x".to_string())),
+            g.rename_with(ghost, "x", |_| Ok("file:///x".to_string())),
             Err(RenameError::NotFound)
         );
     }
@@ -501,7 +517,7 @@ mod tests {
             .expect("entry-pinned rename ok");
         assert_eq!(we.changes.len(), 1);
         let edits = &we.changes["file:///proj/main.al"];
-        assert_eq!(edits[0].span, range_span(0, 3, 6));
+        assert_eq!(edits[0].span, Span::single_line(0, 3, 6));
         assert_eq!(edits[0].new_text, "go");
     }
 

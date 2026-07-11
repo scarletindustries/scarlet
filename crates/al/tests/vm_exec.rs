@@ -614,7 +614,8 @@ run_case! {
 // subprocess and so cannot touch it.
 // ===========================================================================
 
-use al::{ProcHeap, bytecode, vm};
+use al::heap::ProcHeap;
+use al::{bytecode, vm};
 use std::sync::Mutex;
 
 // `lower`+`emit` must select the typed `*Int` ops exactly as the direct

@@ -6,7 +6,6 @@
 
 use serde_json::{Value as Json, json};
 
-use crate::module;
 use crate::reference;
 use crate::span::Span;
 
@@ -31,9 +30,11 @@ impl Workspace {
         // for in-repo stdlib files (no session) — the response then falls back
         // to the graph's identity alone.
         let typed = query_module(&uri).and_then(|m| {
-            let key = module::path_key(&m);
+            // The session's lookup-string boundary: the graph's module path
+            // joined into its key form (matches `ModuleKey`'s representation).
+            let key = m.join("/");
             self.session_for(&uri)
-                .and_then(|s| s.hover(&key, line, col))
+                .and_then(|s| s.hover(Some(&key), line, col))
         });
         // A position naming a *module* — the final segment of `import a/b`, or
         // the `b` of `b.add(..)` — hovers as that module plus its doc comment.
@@ -57,7 +58,7 @@ impl Workspace {
             && let Some(def) = graph.definition_at(mid, line, col)
         {
             let signature = match &typed {
-                Some((_, ty, _)) => format!("{} {}", def.name, labelled(ty, &def.param_names)),
+                Some((_, ty, _)) => format!("{} {}", def.name, labelled(ty, def.param_names())),
                 None => def.name.clone(),
             };
             let mut value = format!("```al\n{}\n```\n\n*{}*", signature, def.entity().noun());
@@ -90,7 +91,7 @@ impl Workspace {
             let req_path = uri_to_path(&uri);
             return match req_path
                 .as_deref()
-                .and_then(|p| reference::module_uri(graph, import_mod, p.parent()))
+                .and_then(|p| reference::module_uri(graph, import_mod, p.parent()).ok())
             {
                 Some(u) => json!({
                     "uri": u,

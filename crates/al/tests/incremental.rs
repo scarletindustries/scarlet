@@ -199,7 +199,7 @@ fn query_api_resolves_across_the_module_chain() {
     assert_eq!(m.last().map(String::as_str), Some("b"));
 
     // hover surfaces the name + an inferred type at the same position.
-    let (hn, _, _) = s.hover("main", l, c).expect("hover at b.b()");
+    let (hn, _, _) = s.hover(Some("main"), l, c).expect("hover at b.b()");
     assert_eq!(hn, "b");
 
     // documentSymbol / workspace symbol see the chain's declarations.
@@ -302,7 +302,8 @@ fn big_module_src(type_count: i32, tweak: i32) -> String {
 }
 
 /// Sixth incremental test — the end-to-end regression for the type-id
-/// overflow machinery (`note_id_usage`'s `reused && used > 256` branch,
+/// overflow machinery (`IdRangeReservation::note_usage`'s
+/// `reused && used > 256` branch,
 /// the `id_range_overflow` flag, and the `invalidate_all` +
 /// `reset_id_bases` recovery inside `IncrementalSession::check`). The other
 /// five tests never allocate more than 256 ids in a reused range, so none

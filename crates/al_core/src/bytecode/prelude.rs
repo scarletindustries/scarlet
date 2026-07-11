@@ -57,7 +57,7 @@ impl Compiler {
                 self.prelude = b;
                 self.engine.set_prim_ids(self.prelude.prim_ids());
             }
-            Err(e) => self.error(e.to_string(), at),
+            Err(msg) => self.error(msg, at),
         }
     }
 }

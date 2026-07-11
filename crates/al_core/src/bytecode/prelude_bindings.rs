@@ -30,8 +30,6 @@ pub mod names {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRef {
-    /// Compare via [`TypeRef::is`], never `==`: a pre-capture binding holds
-    /// `TypeId::NONE` and a bare comparison has no guard against it.
     pub id: TypeId,
     pub name: &'static str,
 }
@@ -53,11 +51,7 @@ impl TypeRef {
     }
 }
 
-// Deliberately no PartialEq: like `TypeRef`, equality on a pre-capture
-// (all-`TypeId::NONE`) binding would falsely match. If ctor identity checks
-// are ever needed, add a guarded `fn is(&self, type_id: TypeId, variant_idx:
-// u16) -> bool` that requires `type_id != TypeId::NONE`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CtorRef {
     pub type_id: TypeId,
     pub variant_idx: u16,
@@ -70,50 +64,6 @@ impl CtorRef {
         variant_idx: 0,
         arity: 0,
     };
-}
-
-/// Why [`PreludeBindings::capture`] rejected the loaded prelude. Each variant
-/// names the exact `al.al` drift; `Display` renders the message the compiler
-/// reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreludeCaptureError {
-    MissingType(&'static str),
-    TypeArity {
-        name: &'static str,
-        expected: usize,
-        found: usize,
-    },
-    MissingCtor(String),
-    CtorShape {
-        name: String,
-        of: &'static str,
-        arity: u16,
-    },
-}
-
-impl std::fmt::Display for PreludeCaptureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PreludeCaptureError::MissingType(name) => {
-                write!(f, "prelude: type '{name}' is required")
-            }
-            PreludeCaptureError::TypeArity {
-                name,
-                expected,
-                found,
-            } => write!(
-                f,
-                "prelude: type '{name}' must have arity {expected}, found {found}"
-            ),
-            PreludeCaptureError::MissingCtor(name) => {
-                write!(f, "prelude: constructor '{name}' is required")
-            }
-            PreludeCaptureError::CtorShape { name, of, arity } => write!(
-                f,
-                "prelude: '{name}' must be a {arity}-arity constructor of '{of}'"
-            ),
-        }
-    }
 }
 
 /// Declares every `PreludeBindings` field exactly once. Expands to the struct,
@@ -145,21 +95,20 @@ macro_rules! prelude_bindings {
         impl PreludeBindings {
             pub const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
 
-            pub fn capture(env: &TypeEnv) -> Result<Self, PreludeCaptureError> {
-                let ty = |name: &'static str, expected: usize| -> Result<TypeRef, PreludeCaptureError> {
+            pub fn capture(env: &TypeEnv) -> Result<Self, String> {
+                let ty = |name: &'static str, expected: usize| -> Result<TypeRef, String> {
                     let ti = env
                         .lookup_type_info(name)
-                        .ok_or(PreludeCaptureError::MissingType(name))?;
+                        .ok_or_else(|| format!("prelude: type '{name}' is required"))?;
                     if ti.arity() != expected {
-                        return Err(PreludeCaptureError::TypeArity {
-                            name,
-                            expected,
-                            found: ti.arity(),
-                        });
+                        return Err(format!(
+                            "prelude: type '{name}' must have arity {expected}, found {}",
+                            ti.arity()
+                        ));
                     }
                     Ok(TypeRef { id: ti.id, name })
                 };
-                let ctor = |name: &str, of: &TypeRef, arity: u16| -> Result<CtorRef, PreludeCaptureError> {
+                let ctor = |name: &str, of: &TypeRef, arity: u16| -> Result<CtorRef, String> {
                     match env.lookup(name) {
                         Some(Scheme {
                             kind: ValueKind::Constructor { type_id, variant_idx, arity: a, .. },
@@ -169,12 +118,11 @@ macro_rules! prelude_bindings {
                             variant_idx: *variant_idx,
                             arity: *a,
                         }),
-                        Some(_) => Err(PreludeCaptureError::CtorShape {
-                            name: name.to_string(),
-                            of: of.name,
-                            arity,
-                        }),
-                        None => Err(PreludeCaptureError::MissingCtor(name.to_string())),
+                        Some(_) => Err(format!(
+                            "prelude: '{name}' must be a {arity}-arity constructor of '{}'",
+                            of.name
+                        )),
+                        None => Err(format!("prelude: constructor '{name}' is required")),
                     }
                 };
                 $( let $tf = ty(names::$tn, $ta)?; )*
@@ -233,8 +181,10 @@ mod tests {
     fn capture_on_empty_env_reports_missing_type() {
         let env = new_env();
         let err = PreludeBindings::capture(&env).unwrap_err();
-        assert_eq!(err, PreludeCaptureError::MissingType(names::INT));
-        assert_eq!(err.to_string(), "prelude: type 'Int' is required");
+        assert!(
+            err.contains("prelude: type 'Int' is required"),
+            "got: {err}"
+        );
     }
 
     /// Broken `al.al` (e.g. `True` deleted) must surface as a clean compile
@@ -251,8 +201,7 @@ mod tests {
             env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::new(0, arity as u16));
         }
         let err = PreludeBindings::capture(&env).unwrap_err();
-        assert_eq!(err, PreludeCaptureError::MissingCtor("True".to_string()));
-        assert_eq!(err.to_string(), "prelude: constructor 'True' is required");
+        assert_eq!(err, "prelude: constructor 'True' is required");
     }
 
     /// A prelude type declared with the wrong number of parameters (e.g.
@@ -265,17 +214,6 @@ mod tests {
             env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::EMPTY);
         }
         let err = PreludeBindings::capture(&env).unwrap_err();
-        assert_eq!(
-            err,
-            PreludeCaptureError::TypeArity {
-                name: names::ARRAY,
-                expected: 1,
-                found: 0
-            }
-        );
-        assert_eq!(
-            err.to_string(),
-            "prelude: type 'Array' must have arity 1, found 0"
-        );
+        assert_eq!(err, "prelude: type 'Array' must have arity 1, found 0");
     }
 }

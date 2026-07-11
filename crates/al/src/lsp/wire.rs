@@ -153,7 +153,7 @@ pub(super) fn uri_for(
         }
         return None;
     }
-    reference::module_uri(graph, module, req_path.parent())
+    reference::module_uri(graph, module, req_path.parent()).ok()
 }
 
 /// Shape a pure `WorkspaceEdit` (computed in `al_core`, which has no

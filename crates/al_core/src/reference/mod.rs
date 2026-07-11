@@ -24,13 +24,13 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::module::{ModulePath, path_key};
+use crate::module::{ModuleKey, ModulePath};
 use crate::span::Span;
 
 pub mod rename;
 pub mod uri;
 
-pub use uri::{module_uri, path_to_uri};
+pub use uri::{ModuleUriError, module_uri, path_to_uri};
 
 // ============================================================================
 // EntityKind / ReferenceKind
@@ -148,6 +148,13 @@ pub struct ModuleInterner {
     by_key: HashMap<String, ModuleId>,
 }
 
+/// The interner's private hash key for a path: its segments joined with `/`.
+/// Must agree with [`crate::module::ModuleKey`]'s representation —
+/// `lookup_key` compares a `ModuleKey`'s string against these entries.
+fn join_key(path: &ModulePath) -> String {
+    path.join("/")
+}
+
 impl ModuleInterner {
     pub fn new() -> Self {
         Self::default()
@@ -155,7 +162,7 @@ impl ModuleInterner {
 
     /// Intern `path`, returning its stable id (creating one on first sight).
     pub fn intern(&mut self, path: &ModulePath) -> ModuleId {
-        let key = path_key(path);
+        let key = join_key(path);
         if let Some(&id) = self.by_key.get(&key) {
             return id;
         }
@@ -167,7 +174,7 @@ impl ModuleInterner {
 
     /// Look up an already-interned path by value.
     pub fn lookup(&self, path: &ModulePath) -> Option<ModuleId> {
-        self.by_key.get(&path_key(path)).copied()
+        self.by_key.get(&join_key(path)).copied()
     }
 
     /// Look up by the `a/b/c` path key directly (what `ModuleTable` keys on).
@@ -216,8 +223,71 @@ impl DefId {
     }
 }
 
+/// Kind-specific payload of a [`Definition`]. One variant per [`EntityKind`],
+/// carrying exactly the data that kind — and only that kind — owns, so a
+/// function cannot exist without its parameter names and a constant can never
+/// carry a `ctor_of` edge. The flat-`Option` predecessor let any field be set
+/// on any kind (and let a mistyped `DefId` silently drop the payload).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionKind {
+    /// A `let`/parameter/match binder — a local value.
+    Value,
+    Function {
+        /// The parameter names, for rendering `fn(path String)` in hover.
+        /// Documentation only — see `module::ExportedValue::param_names`.
+        param_names: Vec<String>,
+    },
+    Constant,
+    Constructor {
+        /// The `DefId` of the type that declares this constructor.
+        ///
+        /// Reachability follows it, so using `Config(..)` keeps `type Config`
+        /// alive. Without it, a type whose only mention is its own constructor
+        /// — every single-constructor `type Config { name String }` — was
+        /// reported unused. It is NOT an occurrence: `find-references` on the
+        /// type must not list the constructor's declaration, and renaming one
+        /// must not rename the other. `None` only for a definition synthesised
+        /// from a hydrated stdlib interface, which carries no type `DefId`.
+        ctor_of: Option<DefId>,
+        /// The constructor's field labels, mirrored for hover (they also live
+        /// in `ValueKind::Constructor.field_labels`).
+        param_names: Vec<String>,
+    },
+    Type,
+    ModuleAlias {
+        /// Span of the whole `import ...` declaration this alias binds — the
+        /// boundary that tells an item's binding occurrence (inside it) from a
+        /// real use (outside it). Equals `defid.span` for a non-aliased
+        /// import; for `import a/b as c.{item}` `defid.span` is only the `c`
+        /// identifier while `decl_span` still covers the full statement.
+        decl_span: Span,
+        /// The module this alias imports — the alias→imported-module edge that
+        /// lets a `Qualified` occurrence resolving into that module keep this
+        /// import alive.
+        imports_module: Option<ModuleId>,
+    },
+    Field,
+}
+
+impl DefinitionKind {
+    /// The [`EntityKind`] this payload belongs to; must agree with the
+    /// `DefId.entity` of the definition carrying it.
+    pub fn entity(&self) -> EntityKind {
+        match self {
+            DefinitionKind::Value => EntityKind::Value,
+            DefinitionKind::Function { .. } => EntityKind::Function,
+            DefinitionKind::Constant => EntityKind::Constant,
+            DefinitionKind::Constructor { .. } => EntityKind::Constructor,
+            DefinitionKind::Type => EntityKind::Type,
+            DefinitionKind::ModuleAlias { .. } => EntityKind::ModuleAlias,
+            DefinitionKind::Field => EntityKind::Field,
+        }
+    }
+}
+
 /// A declared name: its canonical id, the source name as written, the span of
-/// the declaring identifier, its doc comment, visibility, and entity kind.
+/// the declaring identifier, its doc comment, visibility, and the kind-specific
+/// payload ([`DefinitionKind`]).
 ///
 /// `alias_of` links an import-alias binding (the `Y` of `import a.{X as Y}`) to
 /// the canonical definition it stands for (`X`). It is the goto-def/hover
@@ -229,45 +299,31 @@ pub struct Definition {
     pub defid: DefId,
     pub name: String,
     pub doc: Option<String>,
-    /// A function's parameter names, for rendering `fn(path String)` in hover.
-    /// Documentation only — see `module::ExportedValue::param_names`.
-    pub param_names: Vec<String>,
-    /// For a constructor: the `DefId` of the type that declares it.
-    ///
-    /// Reachability follows it, so using `Config(..)` keeps `type Config`
-    /// alive. Without it, a type whose only mention is its own constructor —
-    /// every single-constructor `type Config { name String }` — was reported
-    /// unused. It is NOT an occurrence: `find-references` on the type must not
-    /// list the constructor's declaration, and renaming one must not rename
-    /// the other.
-    pub ctor_of: Option<DefId>,
+    pub kind: DefinitionKind,
     pub is_pub: bool,
     pub alias_of: Option<DefId>,
-    /// For [`EntityKind::ModuleAlias`]: span of the whole `import ...`
-    /// declaration this alias binds — the boundary that tells an item's
-    /// binding occurrence (inside it) from a real use (outside it). Equals
-    /// `defid.span` for a non-aliased import; for `import a/b as c.{item}`
-    /// `defid.span` is only the `c` identifier while `decl_span` still covers
-    /// the full statement. Defaults to `defid.span` for every non-import.
-    pub decl_span: Span,
-    /// For [`EntityKind::ModuleAlias`]: the module this alias imports — the
-    /// alias→imported-module edge that lets a `Qualified` occurrence resolving
-    /// into that module keep this import alive. `None` for every non-import.
-    pub imports_module: Option<ModuleId>,
 }
 
 impl Definition {
-    pub fn new(defid: DefId, name: impl Into<String>, doc: Option<String>, is_pub: bool) -> Self {
+    pub fn new(
+        defid: DefId,
+        name: impl Into<String>,
+        doc: Option<String>,
+        is_pub: bool,
+        kind: DefinitionKind,
+    ) -> Self {
+        debug_assert_eq!(
+            kind.entity(),
+            defid.entity,
+            "DefinitionKind payload must match the DefId's EntityKind"
+        );
         Definition {
             defid,
             name: name.into(),
             doc,
-            param_names: Vec::new(),
-            ctor_of: None,
+            kind,
             is_pub,
             alias_of: None,
-            decl_span: defid.span,
-            imports_module: None,
         }
     }
 
@@ -279,6 +335,44 @@ impl Definition {
     /// What kind of entity this definition is; lives on the [`DefId`].
     pub fn entity(&self) -> EntityKind {
         self.defid.entity
+    }
+
+    /// A function's parameter names / a constructor's field labels, for
+    /// rendering `fn(path String)` in hover. Empty for every other kind.
+    pub fn param_names(&self) -> &[String] {
+        match &self.kind {
+            DefinitionKind::Function { param_names }
+            | DefinitionKind::Constructor { param_names, .. } => param_names,
+            _ => &[],
+        }
+    }
+
+    /// For a constructor: the declaring type's `DefId` (see
+    /// [`DefinitionKind::Constructor`]). `None` for every other kind.
+    pub fn ctor_of(&self) -> Option<DefId> {
+        match self.kind {
+            DefinitionKind::Constructor { ctor_of, .. } => ctor_of,
+            _ => None,
+        }
+    }
+
+    /// The full extent of the declaration: the whole `import ...` statement
+    /// for a module alias (see [`DefinitionKind::ModuleAlias`]), the declaring
+    /// identifier for everything else.
+    pub fn decl_span(&self) -> Span {
+        match self.kind {
+            DefinitionKind::ModuleAlias { decl_span, .. } => decl_span,
+            _ => self.defid.span,
+        }
+    }
+
+    /// For a module alias: the module it imports (see
+    /// [`DefinitionKind::ModuleAlias`]). `None` for every other kind.
+    pub fn imports_module(&self) -> Option<ModuleId> {
+        match self.kind {
+            DefinitionKind::ModuleAlias { imports_module, .. } => imports_module,
+            _ => None,
+        }
     }
 
     /// Whether this definition belongs on a symbol surface
@@ -321,19 +415,25 @@ pub struct ResolvedRef {
     pub kind: ReferenceKind,
 }
 
+/// One recorded occurrence: the [`Reference`] plus the definition it is
+/// lexically nested in (`owner` — the enclosing `fn`/`const`/`type`, `None`
+/// for a bare top-level expression). The owner is the definition→definition
+/// edge channel the workspace reachability hook walks for dead-code analysis;
+/// it is deliberately *not* a field of `Reference`, which stays exactly
+/// `{ span, kind, target }`.
+#[derive(Debug, Clone, Copy)]
+pub struct Occurrence {
+    pub owner: Option<DefId>,
+    pub reference: Reference,
+}
+
 // ============================================================================
 // ModuleReferences — per-module storage
 // ============================================================================
 
 /// Everything the reference graph knows about one module: its declared
-/// definitions and every name occurrence inside it.
-///
-/// `occurrence_owner` is index-aligned with `occurrences`: it records the
-/// definition each occurrence is lexically nested in (the enclosing `fn`/
-/// `const`/`type`, `None` for a bare top-level expression). It is the
-/// definition→definition edge channel the workspace reachability hook walks
-/// for dead-code analysis; it is deliberately *not* a field of `Reference`,
-/// which stays exactly `{ span, kind, target }`.
+/// definitions and every name occurrence inside it (each [`Occurrence`]
+/// carrying its reference plus the definition it is nested in).
 #[derive(Debug, Clone)]
 pub struct ModuleReferences {
     module: ModuleId,
@@ -342,8 +442,7 @@ pub struct ModuleReferences {
     /// `q.member` qualifier.
     doc: Option<String>,
     definitions: IndexMap<DefId, Definition>,
-    occurrences: Vec<Reference>,
-    occurrence_owner: Vec<Option<DefId>>,
+    occurrences: Vec<Occurrence>,
     /// Declared name → the defs declared under it in this module.
     name_to_defs: HashMap<String, Vec<DefId>>,
     /// Source line → every occurrence/definition span touching that line,
@@ -383,7 +482,6 @@ impl ModuleReferences {
             doc: None,
             definitions: IndexMap::new(),
             occurrences: Vec::new(),
-            occurrence_owner: Vec::new(),
             name_to_defs: HashMap::new(),
             line_index: OnceCell::new(),
         }
@@ -415,8 +513,7 @@ impl ModuleReferences {
     /// Record an occurrence. `owner` is the definition this occurrence is
     /// nested within, used for dead-code reachability.
     pub fn add_reference(&mut self, owner: Option<DefId>, reference: Reference) {
-        self.occurrences.push(reference);
-        self.occurrence_owner.push(owner);
+        self.occurrences.push(Occurrence { owner, reference });
         self.line_index.take();
     }
 
@@ -424,25 +521,11 @@ impl ModuleReferences {
         self.definitions.values()
     }
 
-    /// Record that the constructor `id` is declared by the type `ty`.
-    pub fn set_ctor_of(&mut self, id: DefId, ty: DefId) {
-        if let Some(d) = self.definitions.get_mut(&id) {
-            d.ctor_of = Some(ty);
-        }
-    }
-
-    /// Attach a function's parameter names to its definition, for hover.
-    pub fn set_param_names(&mut self, id: DefId, names: Vec<String>) {
-        if let Some(d) = self.definitions.get_mut(&id) {
-            d.param_names = names;
-        }
-    }
-
     pub fn definition(&self, id: DefId) -> Option<&Definition> {
         self.definitions.get(&id)
     }
 
-    pub fn occurrences(&self) -> &[Reference] {
+    pub fn occurrences(&self) -> &[Occurrence] {
         &self.occurrences
     }
 
@@ -492,7 +575,7 @@ impl ModuleReferences {
         let occurrences = self
             .occurrences
             .iter()
-            .map(|o| (o.span, o.target, o.kind))
+            .map(|o| (o.reference.span, o.reference.target, o.reference.kind))
             .enumerate()
             .map(|(i, (span, target, kind))| (span, target, kind, (0u8, i as u32)));
         let definitions = self
@@ -552,8 +635,8 @@ impl ReferenceGraph {
         self.interner.lookup(path)
     }
 
-    pub fn module_id_by_key(&self, key: &str) -> Option<ModuleId> {
-        self.interner.lookup_key(key)
+    pub fn module_id_by_key(&self, key: &ModuleKey) -> Option<ModuleId> {
+        self.interner.lookup_key(key.as_str())
     }
 
     pub fn module_path(&self, id: ModuleId) -> Option<&ModulePath> {
@@ -606,12 +689,12 @@ impl ReferenceGraph {
         for (&module, mr) in &self.modules {
             for occ in mr.occurrences() {
                 refs_by_def
-                    .entry(occ.target)
+                    .entry(occ.reference.target)
                     .or_default()
                     .push(ResolvedRef {
                         module,
-                        span: occ.span,
-                        kind: occ.kind,
+                        span: occ.reference.span,
+                        kind: occ.reference.kind,
                     });
             }
         }
@@ -670,7 +753,7 @@ impl ReferenceGraph {
         let hit = self.modules.get(&module)?.cursor_hit(line, col)?;
         match hit.kind {
             ReferenceKind::Import => Some(hit.target.module),
-            ReferenceKind::Qualifier => self.definition(hit.target)?.imports_module,
+            ReferenceKind::Qualifier => self.definition(hit.target)?.imports_module(),
             _ => None,
         }
     }
@@ -713,8 +796,7 @@ impl ReferenceGraph {
         self.modules.values().flat_map(|mr| {
             mr.occurrences
                 .iter()
-                .zip(mr.occurrence_owner.iter())
-                .filter_map(|(occ, owner)| owner.map(|o| (o, occ.target)))
+                .filter_map(|occ| occ.owner.map(|o| (o, occ.reference.target)))
         })
     }
 
@@ -734,7 +816,7 @@ impl ReferenceGraph {
         // find-references on the type would list the constructor's declaration.
         for mr in self.modules.values() {
             for d in mr.definitions.values() {
-                if let Some(ty) = d.ctor_of {
+                if let Some(ty) = d.ctor_of() {
                     adj.entry(d.defid).or_default().push(ty);
                 }
             }
@@ -782,9 +864,9 @@ impl ReferenceGraph {
             Some(mr) => mr
                 .occurrences
                 .iter()
-                .zip(mr.occurrence_owner.iter())
-                .filter_map(|(occ, owner)| {
-                    (owner.is_none() && occ.kind.is_use_site()).then_some(occ.target)
+                .filter_map(|occ| {
+                    (occ.owner.is_none() && occ.reference.kind.is_use_site())
+                        .then_some(occ.reference.target)
                 })
                 .collect(),
             None => Vec::new(),
@@ -833,22 +915,23 @@ impl ReferenceGraph {
         let Some(mr) = self.modules.get(&def.defid.module) else {
             return false;
         };
-        let decl_span = def.decl_span;
+        let decl_span = def.decl_span();
         // Targets introduced by this import: occurrences nested inside the
         // declaration that resolve somewhere other than the alias itself.
         let imported: HashSet<DefId> = mr
             .occurrences()
             .iter()
-            .filter(|o| o.target != def.defid && o.span.within(&decl_span))
-            .map(|o| o.target)
+            .map(|o| o.reference)
+            .filter(|r| r.target != def.defid && r.span.within(&decl_span))
+            .map(|r| r.target)
             .collect();
         // Selective `import a/b.{item}`: used iff one of those imported targets
         // has a qualified/unqualified occurrence *outside* the declaration — a
         // real use in code, not the binding occurrence itself. al imports bind
         // only within the importing module, so the use is intra-module.
         let selective_item_used = !imported.is_empty()
-            && mr.occurrences().iter().any(|o| {
-                imported.contains(&o.target) && o.kind.is_use_site() && !o.span.within(&decl_span)
+            && mr.occurrences().iter().map(|o| o.reference).any(|r| {
+                imported.contains(&r.target) && r.kind.is_use_site() && !r.span.within(&decl_span)
             });
         if selective_item_used {
             return true;
@@ -857,11 +940,11 @@ impl ReferenceGraph {
         // declaration keeps this import alive iff it resolves into the module
         // this alias imports. (Only `Qualified` — selective items are
         // `Unqualified` and handled above.)
-        match def.imports_module {
-            Some(imported_mid) => mr.occurrences().iter().any(|o| {
-                o.kind == ReferenceKind::Qualified
-                    && o.target.module == imported_mid
-                    && !o.span.within(&decl_span)
+        match def.imports_module() {
+            Some(imported_mid) => mr.occurrences().iter().map(|o| o.reference).any(|r| {
+                r.kind == ReferenceKind::Qualified
+                    && r.target.module == imported_mid
+                    && !r.span.within(&decl_span)
             }),
             None => false,
         }
@@ -943,7 +1026,30 @@ fn mp(parts: &[&str]) -> ModulePath {
 
 #[cfg(test)]
 fn def(module: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId {
-    DefId::new(module, crate::span::range_span(line, c0, c1), kind)
+    DefId::new(module, crate::span::Span::single_line(line, c0, c1), kind)
+}
+
+/// Test-only default payload for `defid`'s entity: empty parameter names, no
+/// `ctor_of`/`imports_module` edges, `decl_span` equal to the declaring span.
+#[cfg(test)]
+pub(crate) fn stub_kind(defid: DefId) -> DefinitionKind {
+    match defid.entity {
+        EntityKind::Value => DefinitionKind::Value,
+        EntityKind::Function => DefinitionKind::Function {
+            param_names: Vec::new(),
+        },
+        EntityKind::Constant => DefinitionKind::Constant,
+        EntityKind::Constructor => DefinitionKind::Constructor {
+            ctor_of: None,
+            param_names: Vec::new(),
+        },
+        EntityKind::Type => DefinitionKind::Type,
+        EntityKind::ModuleAlias => DefinitionKind::ModuleAlias {
+            decl_span: defid.span,
+            imports_module: None,
+        },
+        EntityKind::Field => DefinitionKind::Field,
+    }
 }
 
 #[cfg(test)]
@@ -956,7 +1062,7 @@ fn add_ref(
 ) {
     mr.add_reference(
         owner,
-        Reference::new(crate::span::range_span(line, c0, c1), kind, target),
+        Reference::new(crate::span::Span::single_line(line, c0, c1), kind, target),
     );
 }
 
@@ -964,7 +1070,6 @@ fn add_ref(
 mod tests {
     use super::{ReferenceKind as K, *};
     use crate::diagnostic::Severity;
-    use crate::span::{point_span, range_span};
 
     fn main_graph() -> (ReferenceGraph, ModuleId, ModuleReferences) {
         let mut g = ReferenceGraph::new();
@@ -1018,22 +1123,22 @@ mod tests {
 
     #[test]
     fn span_containment_is_half_open() {
-        let s = range_span(5, 2, 6); // columns [2, 6) on line 5
+        let s = Span::single_line(5, 2, 6); // columns [2, 6) on line 5
         assert!(!s.contains(5, 1));
         assert!(s.contains(5, 2));
         assert!(s.contains(5, 5));
         assert!(!s.contains(5, 6), "end column is exclusive");
         assert!(!s.contains(4, 3));
 
-        let p = point_span(7, 9);
+        let p = Span::point(7, 9);
         assert!(p.contains(7, 9));
         assert!(!p.contains(7, 10));
     }
 
     #[test]
     fn span_width_orders_tightest_first() {
-        let narrow = range_span(1, 0, 3);
-        let wide = range_span(1, 0, 30);
+        let narrow = Span::single_line(1, 0, 3);
+        let wide = Span::single_line(1, 0, 30);
         let multiline = Span {
             start_line: 1,
             start_column: 0,
@@ -1052,7 +1157,13 @@ mod tests {
         let mut mr = ModuleReferences::new(m);
 
         let foo = def(m, 1, 3, 6, EntityKind::Function);
-        mr.add_definition(Definition::new(foo, "foo", Some("the foo".into()), true));
+        mr.add_definition(Definition::new(
+            foo,
+            "foo",
+            Some("the foo".into()),
+            true,
+            stub_kind(foo),
+        ));
 
         // two uses of foo inside some other (owner) definition
         let owner = def(m, 10, 3, 7, EntityKind::Function);
@@ -1070,7 +1181,13 @@ mod tests {
         let mut mr = ModuleReferences::new(m);
 
         let target = def(m, 1, 0, 3, EntityKind::Function);
-        mr.add_definition(Definition::new(target, "fn", None, false));
+        mr.add_definition(Definition::new(
+            target,
+            "fn",
+            None,
+            false,
+            stub_kind(target),
+        ));
 
         // A wide occurrence and a tighter one overlapping the same point.
         let wide = def(m, 9, 0, 1, EntityKind::Value);
@@ -1097,13 +1214,19 @@ mod tests {
         // lib defines `helper` (pub) at line 1.
         let helper = def(lib, 1, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
-        lib_mr.add_definition(Definition::new(helper, "helper", Some("doc".into()), true));
+        lib_mr.add_definition(Definition::new(
+            helper,
+            "helper",
+            Some("doc".into()),
+            true,
+            stub_kind(helper),
+        ));
         g.insert_module(lib_mr);
 
         // app uses `helper` twice (qualified), inside app's `run`.
         let run = def(app, 1, 3, 6, EntityKind::Function);
         let mut app_mr = ModuleReferences::new(app);
-        app_mr.add_definition(Definition::new(run, "run", None, true));
+        app_mr.add_definition(Definition::new(run, "run", None, true, stub_kind(run)));
         add_ref(&mut app_mr, Some(run), (2, 4, 14), K::Qualified, helper);
         add_ref(&mut app_mr, Some(run), (3, 4, 14), K::Qualified, helper);
         g.insert_module(app_mr);
@@ -1162,7 +1285,13 @@ mod tests {
         let lib = g.intern_module(&mp(&["lib"]));
         let helper = def(lib, 1, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
-        lib_mr.add_definition(Definition::new(helper, "helper", Some("doc".into()), true));
+        lib_mr.add_definition(Definition::new(
+            helper,
+            "helper",
+            Some("doc".into()),
+            true,
+            stub_kind(helper),
+        ));
         g.insert_module_deferred(Rc::new(lib_mr));
         g.rebuild();
 
@@ -1186,8 +1315,8 @@ mod tests {
 
         let a = def(m, 1, 0, 1, EntityKind::Function);
         let b = def(m, 2, 0, 1, EntityKind::Function);
-        mr.add_definition(Definition::new(a, "a", None, true));
-        mr.add_definition(Definition::new(b, "b", None, false));
+        mr.add_definition(Definition::new(a, "a", None, true, stub_kind(a)));
+        mr.add_definition(Definition::new(b, "b", None, false, stub_kind(b)));
 
         // Owned by `a` -> contributes an a->b edge.
         add_ref(&mut mr, Some(a), (1, 5, 6), K::Unqualified, b);
@@ -1241,7 +1370,7 @@ mod tests {
         is_pub: bool,
     ) -> DefId {
         let d = def(m, line, 3, 3 + name.len() as i32, kind);
-        mr.add_definition(Definition::new(d, name, None, is_pub));
+        mr.add_definition(Definition::new(d, name, None, is_pub, stub_kind(d)));
         d
     }
 
@@ -1355,7 +1484,7 @@ mod tests {
         let build = |with_use: bool| {
             let mut mr = ModuleReferences::new(m);
             let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
-            mr.add_definition(Definition::new(alias, "b", None, false));
+            mr.add_definition(Definition::new(alias, "b", None, false, stub_kind(alias)));
             let remote_used = def(lib, 1, 3, 7, EntityKind::Function);
             // The `Import` occurrence covers only the `b` path segment; the
             // `used` item-binding occurrence sits inside the declaration span.
@@ -1409,9 +1538,16 @@ mod tests {
 
         let build = |with_use: bool| {
             let mut mr = ModuleReferences::new(m);
-            let mut alias_def = Definition::new(alias, "u", None, false);
-            alias_def.decl_span = range_span(1, 0, 26);
-            alias_def.imports_module = Some(lib);
+            let alias_def = Definition::new(
+                alias,
+                "u",
+                None,
+                false,
+                DefinitionKind::ModuleAlias {
+                    decl_span: Span::single_line(1, 0, 26),
+                    imports_module: Some(lib),
+                },
+            );
             mr.add_definition(alias_def);
             let remote_empty = def(lib, 2, 7, 12, EntityKind::Function);
             // `Import` path segment (`util`) -> the imported module; `Alias`
@@ -1547,7 +1683,7 @@ mod tests {
         // `a/b` defines pub `foo` (+ its emit_def self-occurrence).
         let foo = def(lib, 1, 3, 6, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
-        lib_mr.add_definition(Definition::new(foo, "foo", None, true));
+        lib_mr.add_definition(Definition::new(foo, "foo", None, true, stub_kind(foo)));
         lib_mr.add_reference(None, Reference::new(foo.span, K::Definition, foo));
         g.insert_module(lib_mr);
 
@@ -1558,8 +1694,16 @@ mod tests {
         // main: `import a/b` then `pub fn run() { b.foo() }`. The
         // alias→imported-module edge is stored on the `Definition`.
         let alias = def(m, 1, 3, 4, EntityKind::ModuleAlias);
-        let mut alias_def = Definition::new(alias, "b", None, false);
-        alias_def.imports_module = Some(lib);
+        let alias_def = Definition::new(
+            alias,
+            "b",
+            None,
+            false,
+            DefinitionKind::ModuleAlias {
+                decl_span: alias.span,
+                imports_module: Some(lib),
+            },
+        );
         mr.add_definition(alias_def);
         mr.add_reference(None, Reference::new(alias.span, K::Definition, alias));
         add_ref(&mut mr, None, (1, 7, 8), K::Import, import_seg);
@@ -1578,8 +1722,16 @@ mod tests {
         // (the check is still live, not just disabled).
         let mut mr2 = ModuleReferences::new(m);
         let alias2 = def(m, 1, 3, 4, EntityKind::ModuleAlias);
-        let mut alias_def2 = Definition::new(alias2, "b", None, false);
-        alias_def2.imports_module = Some(lib);
+        let alias_def2 = Definition::new(
+            alias2,
+            "b",
+            None,
+            false,
+            DefinitionKind::ModuleAlias {
+                decl_span: alias2.span,
+                imports_module: Some(lib),
+            },
+        );
         mr2.add_definition(alias_def2);
         mr2.add_reference(None, Reference::new(alias2.span, K::Definition, alias2));
         add_ref(&mut mr2, None, (1, 7, 8), K::Import, import_seg);
@@ -1604,11 +1756,11 @@ mod tests {
         // `a/c` defines pub `used`; `a/b` defines pub `foo` (never used here).
         let used = def(lib_c, 1, 3, 7, EntityKind::Function);
         let mut c_mr = ModuleReferences::new(lib_c);
-        c_mr.add_definition(Definition::new(used, "used", None, true));
+        c_mr.add_definition(Definition::new(used, "used", None, true, stub_kind(used)));
         g.insert_module(c_mr);
         let foo = def(lib_b, 1, 3, 6, EntityKind::Function);
         let mut b_mr = ModuleReferences::new(lib_b);
-        b_mr.add_definition(Definition::new(foo, "foo", None, true));
+        b_mr.add_definition(Definition::new(foo, "foo", None, true, stub_kind(foo)));
         g.insert_module(b_mr);
 
         // main:
@@ -1616,8 +1768,16 @@ mod tests {
         //   import a/c   (line 2, used via c.used())
         //   pub fn run() { c.used() }
         let alias_b = def(m, 1, 7, 8, EntityKind::ModuleAlias);
-        let mut def_b = Definition::new(alias_b, "b", None, false);
-        def_b.imports_module = Some(lib_b);
+        let def_b = Definition::new(
+            alias_b,
+            "b",
+            None,
+            false,
+            DefinitionKind::ModuleAlias {
+                decl_span: alias_b.span,
+                imports_module: Some(lib_b),
+            },
+        );
         mr.add_definition(def_b);
         add_ref(
             &mut mr,
@@ -1627,8 +1787,16 @@ mod tests {
             def(lib_b, 1, 7, 8, EntityKind::ModuleAlias),
         );
         let alias_c = def(m, 2, 7, 8, EntityKind::ModuleAlias);
-        let mut def_c = Definition::new(alias_c, "c", None, false);
-        def_c.imports_module = Some(lib_c);
+        let def_c = Definition::new(
+            alias_c,
+            "c",
+            None,
+            false,
+            DefinitionKind::ModuleAlias {
+                decl_span: alias_c.span,
+                imports_module: Some(lib_c),
+            },
+        );
         mr.add_definition(def_c);
         add_ref(
             &mut mr,

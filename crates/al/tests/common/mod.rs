@@ -524,24 +524,21 @@ pub fn assert_no_msg(msgs: &[String], needle: &str) {
     );
 }
 
-/// A module's identity is the file it resolved to, so the canonical key of an
-/// on-disk module is an absolute path. Accept either that key directly, or a
-/// path to the source file (what the LSP passes, via a URI).
 /// The canonical key of an on-disk module: its identity. A module is the file
 /// it resolved to, so tests that address one by name must go through here.
-pub fn module_key(dir: &std::path::Path, file: &str) -> String {
-    module::path_key(&module::file_module_path(&dir.join(file)))
+pub fn module_key(dir: &std::path::Path, file: &str) -> module::ModuleKey {
+    module::ModuleKey::for_file(&dir.join(file))
 }
 
 fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
-    // 1. The canonical key, exactly.
-    if let Some(id) = g.module_id_by_key(module_or_uri) {
+    // 1. The canonical key, exactly (lookup-not-mint, like the LSP boundary).
+    if let Some(id) = g.module_id_by_key(&module::ModuleKey::from_lookup_str(module_or_uri)) {
         return Some(id);
     }
     // 2. A path to the source file — what the LSP passes, via a URI.
     let p = std::path::Path::new(module_or_uri);
     if p.is_file()
-        && let Some(id) = g.module_id_by_key(&module::path_key(&module::file_module_path(p)))
+        && let Some(id) = g.module_id_by_key(&module::ModuleKey::for_file(p))
     {
         return Some(id);
     }
@@ -564,7 +561,7 @@ fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
             many.len()
         ),
     }
-    g.module_id_by_key(&module::path_key(&module::main_module()))
+    g.module_id_by_key(&module::ModuleKey::main())
 }
 
 fn symbol_of(g: &ReferenceGraph, d: &Definition) -> Option<SymbolInfo> {
@@ -614,9 +611,10 @@ impl SessionQueryExt for IncrementalSession {
             .and_then(|mr| {
                 mr.occurrences()
                     .iter()
-                    .filter(|o| o.span.contains(line, col))
-                    .min_by_key(|o| o.span.width())
-                    .map(|o| o.span)
+                    .map(|o| o.reference)
+                    .filter(|r| r.span.contains(line, col))
+                    .min_by_key(|r| r.span.width())
+                    .map(|r| r.span)
             })
             .unwrap_or(id.span);
         Some((id, cursor))

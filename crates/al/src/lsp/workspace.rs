@@ -442,8 +442,9 @@ impl Workspace {
                     g.module_refs(entry_id).map_or_else(Vec::new, |mr| {
                         mr.occurrences()
                             .iter()
-                            .filter(|o| o.target.module != entry_id && o.kind.is_use_site())
-                            .map(|o| (o.target, o.span, o.kind))
+                            .map(|o| o.reference)
+                            .filter(|r| r.target.module != entry_id && r.kind.is_use_site())
+                            .map(|r| (r.target, r.span, r.kind))
                             .collect()
                     })
                 })

@@ -17,7 +17,7 @@
 use al::bytecode::IncrementalSession;
 
 mod common;
-use common::{Project, parse};
+use common::{Project, module_key, parse};
 
 // ── Seam 2: the frozen blob ────────────────────────────────────────────────
 
@@ -120,7 +120,7 @@ fn hover_is_stable_across_many_rewinds() {
         assert!(r.success, "check {i}: {:?}", r.diagnostics);
         // `v` on line 2 (0-based), inside `const v`.
         let (name, ty, _) = s
-            .hover("main", 1, 6)
+            .hover(Some("main"), 1, 6)
             .unwrap_or_else(|| panic!("no hover fact on check {i}"));
         let rendered = format!("{name}: {ty}");
         match &seen {
@@ -188,7 +188,15 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
 
     let mut s = IncrementalSession::new(&al::STDLIB);
     assert!(s.check(&parse(entry), Some(&p.dir)).success);
-    let base_before = s.module_id_base("./lib");
+    // The id-base table is keyed by the module's canonical identity (the
+    // resolved file), never the `./lib` spelling — a written-path lookup
+    // here would always be `None` and the assertion below vacuous.
+    let lib = module_key(&p.dir, "lib.al");
+    let base_before = s.module_id_base(&lib);
+    assert!(
+        base_before.is_some(),
+        "lib.al was compiled, so it has a range"
+    );
 
     p.write(
         "lib.al",
@@ -204,7 +212,7 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
     assert!(r.success, "after revert: {:?}", r.diagnostics);
     assert_eq!(
         base_before,
-        s.module_id_base("./lib"),
+        s.module_id_base(&lib),
         "type-id block was not reused; the rewind was not exact"
     );
 }

@@ -4,28 +4,26 @@
 //! Separate from `rename` because every LSP handler that returns a location
 //! (goto-def, find-references, workspace-index) needs this, not just rename.
 
+use std::fmt;
 use std::path::Path;
 
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
-use crate::module::{ModuleSource, resolve};
+use crate::module::{ModuleSource, ResolveError, resolve};
 
 use super::{ModuleId, ReferenceGraph};
 
-/// Characters that must be percent-encoded in the path component of a
-/// `file://` URI (RFC 3986 non-`pchar`). Leaves `/` and the unreserved set
-/// alone so ordinary repo paths encode to themselves.
-const URI_PATH: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'?')
-    .add(b'`')
-    .add(b'{')
-    .add(b'}');
+/// Percent-encode every byte outside the RFC 3986 unreserved set
+/// (`[A-Za-z0-9-._~]`) except `/`, matching what VS Code's
+/// `URI.file(path).toString()` produces — so a graph-derived URI compares
+/// byte-equal to the client's own key for the same file, whatever the path
+/// contains.
+const URI_PATH: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'/');
 
 /// Translate an absolute file path to a `file://` URI. Round-trips with the
 /// LSP's `uri_to_path`: the path component is percent-encoded so a workspace
@@ -37,20 +35,51 @@ pub fn path_to_uri(p: &Path) -> String {
     )
 }
 
+/// Why a [`ModuleId`] has no `file://` URI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModuleUriError {
+    /// The precompiled stdlib — embedded source, no file on disk.
+    Embedded,
+    /// The id was never interned into this graph (no path to resolve).
+    NoPath,
+    /// `module::resolve` could not locate the module's source file (e.g. the
+    /// bare entry module — the caller supplies that URI directly via the
+    /// `entry` override).
+    Resolve(ResolveError),
+}
+
+impl fmt::Display for ModuleUriError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ModuleUriError::Embedded => write!(f, "precompiled stdlib module"),
+            ModuleUriError::NoPath => write!(f, "module is not in the reference graph"),
+            ModuleUriError::Resolve(ResolveError::NotFound(p)) => write!(f, "not found: {p}"),
+            ModuleUriError::Resolve(ResolveError::NoBaseDir) => {
+                write!(f, "no base directory to resolve against")
+            }
+            ModuleUriError::Resolve(ResolveError::BareName(n)) => {
+                write!(f, "bare module name `{n}` has no source file")
+            }
+        }
+    }
+}
+
 /// Map a [`ModuleId`] to a file URI via [`crate::module::resolve`] (the
-/// spec-mandated translation). Returns `None` for the precompiled stdlib
-/// (`Embedded`, not editable) and for paths that don't resolve from
-/// `base_dir` (e.g. the bare entry module — the caller supplies that URI
-/// directly via the `entry` override).
+/// spec-mandated translation). The error says *why* there is no URI — see
+/// [`ModuleUriError`]; LSP location responders that only need presence call
+/// `.ok()`, while rename reports the reason per module.
 pub fn module_uri(
     graph: &ReferenceGraph,
     module: ModuleId,
     base_dir: Option<&Path>,
-) -> Option<String> {
-    let path = graph.module_path(module)?;
+) -> Result<String, ModuleUriError> {
+    let path = graph.module_path(module).ok_or(ModuleUriError::NoPath)?;
     match resolve(path, base_dir) {
-        Ok(ModuleSource::File(p)) => Some(path_to_uri(&p)),
-        Ok(ModuleSource::Embedded(_)) | Err(_) => None,
+        Ok(r) => match r.source {
+            ModuleSource::File(p) => Ok(path_to_uri(&p)),
+            ModuleSource::Embedded(_) => Err(ModuleUriError::Embedded),
+        },
+        Err(e) => Err(ModuleUriError::Resolve(e)),
     }
 }
 
@@ -69,17 +98,31 @@ mod tests {
             path_to_uri(Path::new("/plain/foo.al")),
             "file:///plain/foo.al"
         );
+        // Everything outside [A-Za-z0-9-._~/] is encoded, matching VS Code's
+        // URI.file().toString().
+        assert_eq!(
+            path_to_uri(Path::new("/a+b/c:d(e)'!.al")),
+            "file:///a%2Bb/c%3Ad%28e%29%27%21.al"
+        );
     }
 
     #[test]
-    fn module_uri_stdlib_is_embedded_none() {
+    fn module_uri_stdlib_is_embedded_error() {
         let mut g = ReferenceGraph::new();
         let std_mod = g.intern_module(&mp(&["al", "array"]));
         // al/array resolves to embedded stdlib source -> not an editable file.
-        assert_eq!(module_uri(&g, std_mod, None), None);
-        // a bare non-al module is reserved/unresolvable -> None.
+        assert_eq!(module_uri(&g, std_mod, None), Err(ModuleUriError::Embedded));
+        // a bare non-al module is reserved/unresolvable.
         let bare = g.intern_module(&mp(&["whatever"]));
-        assert_eq!(module_uri(&g, bare, None), None);
+        assert!(matches!(
+            module_uri(&g, bare, None),
+            Err(ModuleUriError::Resolve(_))
+        ));
+        // an id that was never interned has no path at all.
+        assert_eq!(
+            module_uri(&g, ModuleId(99), None),
+            Err(ModuleUriError::NoPath)
+        );
     }
 
     #[test]
