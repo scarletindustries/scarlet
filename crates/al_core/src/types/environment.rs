@@ -255,7 +255,7 @@ impl TypeEnv {
 /// [`Watermark`](crate::bytecode::Watermark)'s ordering key excludes this
 /// field so `EnvWatermark`'s field set can change without silently perturbing
 /// which cached module `.min()` picks during invalidation.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvWatermark {
     pub root_scope: usize,
     pub type_info: usize,
@@ -264,6 +264,24 @@ pub struct EnvWatermark {
     pub docs: usize,
     pub journal: usize,
     pub next_type_id: TypeId,
+}
+
+/// The empty-env watermark. Hand-written rather than derived so
+/// `next_type_id` matches [`new_env`]'s starting id of 1 — `TypeId` has no
+/// `Default` precisely because a derive would silently manufacture the
+/// `TypeId::NONE` sentinel here.
+impl Default for EnvWatermark {
+    fn default() -> Self {
+        EnvWatermark {
+            root_scope: 0,
+            type_info: 0,
+            type_info_by_id: 0,
+            definitions: 0,
+            docs: 0,
+            journal: 0,
+            next_type_id: TypeId(1),
+        }
+    }
 }
 
 pub fn new_env() -> TypeEnv {
@@ -414,30 +432,33 @@ impl TypeEnv {
         id
     }
 
-    /// Pass 2/4: attach a hydrated body to a previously-registered head.
+    /// Pass 2/4: attach a hydrated body to a previously-registered head,
+    /// addressed by the nominal id [`register_type_head`](Self::register_type_head)
+    /// returned. Resolution goes through the by-id registry — the by-name map
+    /// is shadowable, so mutating through it could attach a body to whatever
+    /// same-named type was analysed most recently. Any by-name entry that
+    /// still refers to this id is mirrored (same journal discipline).
     /// Panics if the head was never registered, since that indicates a bug in
     /// the analysis pass ordering rather than a user error: Pass 1 registers a
     /// head for every type decl before any body is attached here.
     #[allow(clippy::panic)]
-    pub fn set_type_body(&mut self, name: &str, body: TypeBody) {
+    pub fn set_type_body(&mut self, id: TypeId, body: TypeBody) {
         let entry = self
-            .type_info
-            .get_mut(name)
-            .unwrap_or_else(|| panic!("set_type_body: '{name}' head not registered"));
+            .type_info_by_id
+            .get_mut(&id)
+            .unwrap_or_else(|| panic!("set_type_body: type id {id} head not registered"));
         // Journal the pre-body value: the head may be a pre-watermark entry
         // (an overwritten one already journaled by `store_type_info`, in which
         // case this preserves the chain head→body→restore ordering).
         let old = *entry;
         entry.body = body;
-        let updated = *entry;
-        self.journal
-            .push(Overwrite::TypeInfo(name.to_string(), old));
-        // Mirror into the by-id registry (same journal discipline).
-        if let Some(old_by_id) = self.type_info_by_id.get(&old.id) {
+        self.journal.push(Overwrite::TypeInfoById(id, old));
+        for (name, by_name) in self.type_info.iter_mut().filter(|(_, ti)| ti.id == id) {
+            let old_by_name = *by_name;
+            by_name.body = body;
             self.journal
-                .push(Overwrite::TypeInfoById(old.id, *old_by_id));
+                .push(Overwrite::TypeInfo(name.clone(), old_by_name));
         }
-        self.type_info_by_id.insert(updated.id, updated);
     }
 
     pub fn lookup_type_info(&self, name: &str) -> Option<TypeInfo> {
@@ -472,8 +493,12 @@ impl TypeEnv {
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
+    // Char-based, not byte-based, so distances are in the same unit as
+    // `suggest_name`'s `chars().count()` threshold (rustc's heuristic is
+    // char-based). Byte-wise DP would count a multi-byte char substitution
+    // as several edits and overshoot the threshold.
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
     if a.is_empty() {
         return b.len();
     }

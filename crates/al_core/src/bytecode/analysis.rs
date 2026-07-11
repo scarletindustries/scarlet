@@ -58,7 +58,7 @@ use super::Op;
 use super::compiler::{Compiler, ToplevelDecl};
 use crate::ast;
 use crate::module::{self, ExportedValue, ModuleInterface};
-use crate::reference::DefId;
+use crate::reference::{DefId, DefinitionKind};
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
@@ -117,7 +117,12 @@ enum Prepared<'a> {
     Fn {
         fd: &'a ast::FunctionDeclaration,
         is_pub: bool,
-        slot: i32,
+        slot: GlobalSlot,
+        /// The declaration's identity, built once here and reused verbatim by
+        /// Pass 5's `emit_def`/`defid_of` and by the post-generalisation
+        /// `scheme.def` — so the walk cannot emit the definition under one
+        /// location and the scheme under a subtly different one.
+        dl: DefinitionLocation,
         body: &'a ast::Expression,
         param_tys: Vec<Ty>,
         ret_ty: Ty,
@@ -126,7 +131,9 @@ enum Prepared<'a> {
     Const {
         cb: &'a ast::ConstBinding,
         is_pub: bool,
-        slot: i32,
+        slot: GlobalSlot,
+        /// See `Prepared::Fn::dl`.
+        dl: DefinitionLocation,
     },
 }
 
@@ -157,20 +164,19 @@ impl<'a> Prepared<'a> {
             Prepared::Const { cb, .. } => &cb.identifier.name,
         }
     }
-    fn name_span(&self) -> Span {
-        match self {
-            Prepared::Fn { fd, .. } => fd.identifier.span,
-            Prepared::Const { cb, .. } => cb.identifier.span,
-        }
-    }
     fn is_pub(&self) -> bool {
         match self {
             Prepared::Fn { is_pub, .. } | Prepared::Const { is_pub, .. } => *is_pub,
         }
     }
-    fn slot(&self) -> i32 {
+    fn slot(&self) -> GlobalSlot {
         match self {
             Prepared::Fn { slot, .. } | Prepared::Const { slot, .. } => *slot,
+        }
+    }
+    fn dl(&self) -> DefinitionLocation {
+        match self {
+            Prepared::Fn { dl, .. } | Prepared::Const { dl, .. } => *dl,
         }
     }
     fn is_const(&self) -> bool {
@@ -194,6 +200,9 @@ struct PreparedType {
     name_id: StrId,
     hydrator: Hydrator,
     param_tys: Vec<Ty>,
+    /// The `TypeParam` slice registered on the type head — needed by Pass 3.5
+    /// to `close_body` each stored field template at registration.
+    type_params: ArenaSlice<pool::TypeParams>,
 }
 
 /// Hydrated shape of one `fn` declaration's signature. Returned by
@@ -343,6 +352,7 @@ impl Compiler {
                     name_id: NO_STR,
                     hydrator: Hydrator::new(),
                     param_tys: Vec::new(),
+                    type_params: ArenaSlice::EMPTY,
                 });
                 continue;
             }
@@ -352,16 +362,16 @@ impl Compiler {
             let type_id =
                 self.env
                     .register_type_head(&td.identifier.name, name_id, module, type_params);
-            self.store_and_emit_def(&td.identifier, &td.doc, EntityKind::Type, *is_public);
+            self.store_and_emit_def(&td.identifier, &td.doc, DefinitionKind::Type, *is_public);
             if matches!(td.body, ast::TypeBody::External) {
-                self.env
-                    .set_type_body(&td.identifier.name, TypeBody::External);
+                self.env.set_type_body(type_id, TypeBody::External);
             }
             prepared_types.push(PreparedType {
                 type_id,
                 name_id,
                 hydrator: h,
                 param_tys,
+                type_params,
             });
         }
 
@@ -391,20 +401,21 @@ impl Compiler {
             scheme.def = Some(dl);
             self.env.define_at(name, scheme, dl);
             self.env.store_doc_opt(name, &fd.doc);
-            self.emit_def(dl, name, fd.doc.clone(), is_pub);
-            let defid = self.defid_of(dl);
-            let names = fd
+            let params: Vec<String> = fd
                 .params
                 .iter()
                 .map(|p| p.identifier.name.clone())
                 .collect();
-            self.module_refs.set_param_names(defid, names);
+            self.emit_def(
+                dl,
+                name,
+                fd.doc.clone(),
+                is_pub,
+                DefinitionKind::Function {
+                    param_names: params.clone(),
+                },
+            );
             self.record(name, scheme.ty, fd.identifier.span, fd.doc.clone());
-            let params = fd
-                .params
-                .iter()
-                .map(|p| p.identifier.name.clone())
-                .collect();
             export_value(
                 iface.as_deref_mut(),
                 name,
@@ -416,18 +427,14 @@ impl Compiler {
             );
         }
 
-        // Not `get_or_create_local`: a decl's slot is published to the toplevel
-        // elaboration by `toplevel_decls` (recorded in SCC order in Pass 5,
-        // below), not by the module-scope bind queue `bind_local` feeds. Only
-        // `let`/destructuring binds — which have no `Decl` to hang a slot on —
-        // go through that queue.
-        let slots: Vec<i32> = decls
-            .iter()
-            .map(|d| self.alloc_decl_slot(d.name()))
-            .collect();
-
+        // Slot allocation is not `get_or_create_local`: a decl's slot is
+        // published to the toplevel elaboration by `toplevel_decls` (recorded
+        // in SCC order in Pass 5, below), not by the module-scope bind queue
+        // `bind_local` feeds. Only `let`/destructuring binds — which have no
+        // `Decl` to hang a slot on — go through that queue.
         let mut prepared: Vec<Prepared> = Vec::with_capacity(decls.len());
-        for (d, &slot) in decls.iter().zip(&slots) {
+        for d in &decls {
+            let slot = self.alloc_decl_slot(d.name());
             let p = match *d {
                 Decl::Fn {
                     fd, is_pub, body, ..
@@ -454,13 +461,23 @@ impl Compiler {
                         fd,
                         is_pub,
                         slot,
+                        dl,
                         body,
                         param_tys,
                         ret_ty,
                         hydrator,
                     }
                 }
-                Decl::Const { cb, is_pub, .. } => Prepared::Const { cb, is_pub, slot },
+                Decl::Const { cb, is_pub, .. } => {
+                    let m = self.current_module_slice();
+                    let dl = DefinitionLocation::new(cb.identifier.span, m, EntityKind::Constant);
+                    Prepared::Const {
+                        cb,
+                        is_pub,
+                        slot,
+                        dl,
+                    }
+                }
             };
             prepared.push(p);
         }
@@ -524,30 +541,33 @@ impl Compiler {
                 self.toplevel_decls.push(ToplevelDecl {
                     node: decls[idx].node(),
                     name: name_id,
-                    slot: GlobalSlot(slots[idx]),
+                    slot: prepared[idx].slot(),
                 });
                 match &prepared[idx] {
                     Prepared::Fn {
                         fd,
                         is_pub,
                         slot,
+                        dl,
                         body,
                         param_tys,
                         ret_ty,
                         hydrator,
                     } => {
                         let name = &fd.identifier.name;
-                        let m = self.current_module_slice();
-                        let dl =
-                            DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
-                        self.emit_def(dl, name, fd.doc.clone(), *is_pub);
-                        let defid = self.defid_of(dl);
+                        let dl = *dl;
                         let names = fd
                             .params
                             .iter()
                             .map(|p| p.identifier.name.clone())
                             .collect();
-                        self.module_refs.set_param_names(defid, names);
+                        self.emit_def(
+                            dl,
+                            name,
+                            fd.doc.clone(),
+                            *is_pub,
+                            DefinitionKind::Function { param_names: names },
+                        );
                         // Attribute every reference emitted while this body is
                         // compiled to the fn's own `DefId` so the dead-code
                         // reachability walk follows def→def edges. The owner
@@ -578,15 +598,9 @@ impl Compiler {
                         // carry either.
                         inferred.push((idx, fn_ty));
                     }
-                    Prepared::Const { cb, is_pub, .. } => {
+                    Prepared::Const { cb, is_pub, dl, .. } => {
                         let name = &cb.identifier.name;
-                        let m = self.current_module_slice();
-                        self.emit_def(
-                            DefinitionLocation::new(cb.identifier.span, m, EntityKind::Constant),
-                            name,
-                            cb.doc.clone(),
-                            *is_pub,
-                        );
+                        self.emit_def(*dl, name, cb.doc.clone(), *is_pub, DefinitionKind::Constant);
                         let owner = self.owner_defid(cb.identifier.span, EntityKind::Constant);
                         let final_ty = self.with_owner(owner, |c| {
                             let mut h = Hydrator::new();
@@ -608,16 +622,10 @@ impl Compiler {
 
             self.engine.leave_level();
 
-            let m = self.current_module_slice();
             for (idx, ty) in inferred {
                 let mut scheme = self.engine.generalize_top(ty);
                 let p = &prepared[idx];
-                let entity = if p.is_const() {
-                    EntityKind::Constant
-                } else {
-                    EntityKind::Function
-                };
-                scheme.def = Some(DefinitionLocation::new(p.name_span(), m, entity));
+                scheme.def = Some(p.dl());
                 if p.is_const() {
                     scheme.kind = ValueKind::Local;
                 }
@@ -710,18 +718,19 @@ impl Compiler {
     }
 
     /// Record a named declaration: store its definition location and doc in
-    /// the env, and emit the matching graph definition.
+    /// the env, and emit the matching graph definition. The entity is derived
+    /// from `kind`, so the graph record and its payload cannot disagree.
     fn store_and_emit_def(
         &mut self,
         id: &ast::Identifier,
         doc: &Option<String>,
-        entity: EntityKind,
+        kind: DefinitionKind,
         is_pub: bool,
     ) {
-        let dl = DefinitionLocation::new(id.span, self.current_module_slice(), entity);
+        let dl = DefinitionLocation::new(id.span, self.current_module_slice(), kind.entity());
         self.env.store_definition(&id.name, dl);
         self.env.store_doc_opt(&id.name, doc);
-        self.emit_def(dl, &id.name, doc.clone(), is_pub);
+        self.emit_def(dl, &id.name, doc.clone(), is_pub, kind);
     }
 
     /// Run `f` with `current_owner` set to `owner`, restoring the previous
@@ -813,14 +822,20 @@ impl Compiler {
             let (mut h, type_params, _) = self.hydrate_type_params(&td.type_params);
             let name_id = self.engine.intern(&td.identifier.name);
             let module = self.current_module_slice();
-            self.env
-                .register_type_head(&td.identifier.name, name_id, module, type_params);
+            let type_id =
+                self.env
+                    .register_type_head(&td.identifier.name, name_id, module, type_params);
             h.disallow_new_type_variables();
             let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
             let target = self.with_owner(owner, |c| c.hydrate(&mut h, rhs));
-            self.env
-                .set_type_body(&td.identifier.name, TypeBody::Alias { target });
-            self.store_and_emit_def(&td.identifier, &td.doc, EntityKind::Type, is_pub);
+            // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`): the
+            // body outlives incremental rewinds, which clear the engine's
+            // `vars` table (see `InferEngine::truncate_to`), and the exported
+            // interface copies this `TypeInfo` by value, so it must be closed
+            // before `export_type` runs in Pass 3.5.
+            let target = self.engine.close_body(target, type_params);
+            self.env.set_type_body(type_id, TypeBody::Alias { target });
+            self.store_and_emit_def(&td.identifier, &td.doc, DefinitionKind::Type, is_pub);
         }
     }
 
@@ -848,6 +863,7 @@ impl Compiler {
             name_id: type_name_id,
             hydrator: mut h,
             param_tys: param_generics,
+            type_params,
         } = pt;
         h.disallow_new_type_variables();
 
@@ -869,13 +885,28 @@ impl Compiler {
                     let ity = c.hydrate(&mut h, &f.typ);
                     let label = c.engine.intern(&f.label.name);
                     field_itys.push(ity);
-                    field_defs.push(VariantField { label, ty: ity });
+                    // The stored template is CLOSED (`Var(param_id)` →
+                    // `Bound(idx)`) so it never references the engine's
+                    // transient `vars` table — a `TypeInfo` body outlives
+                    // incremental rewinds, which clear `vars` (see
+                    // `InferEngine::truncate_to`). The ctor scheme below
+                    // still generalizes over the open `ity`.
+                    field_defs.push(VariantField {
+                        label,
+                        ty: c.engine.close_body(ity, type_params),
+                    });
                     label_ids.push(label);
 
                     let qualified = format!("{}.{}", ctor.identifier.name, f.label.name);
                     let field_dl = DefinitionLocation::new(f.label.span, m, EntityKind::Field);
                     c.env.definitions.insert(qualified, field_dl);
-                    c.emit_def(field_dl, &f.label.name, None, ctors_public);
+                    c.emit_def(
+                        field_dl,
+                        &f.label.name,
+                        None,
+                        ctors_public,
+                        DefinitionKind::Field,
+                    );
                 }
 
                 let fields = c.engine.push_variant_fields(&field_defs);
@@ -900,63 +931,56 @@ impl Compiler {
                     arity: ctor.fields.len() as u16,
                     field_labels,
                 };
-                scheme.def = Some(DefinitionLocation::new(
-                    ctor.identifier.span,
-                    m,
-                    EntityKind::Constructor,
-                ));
+                // The constructor's one identity: `scheme.def` and the
+                // reference-graph `DefId` below both read it, so goto-def and
+                // find-references can never disagree on where the ctor lives.
+                let ctor_dl =
+                    DefinitionLocation::new(ctor.identifier.span, m, EntityKind::Constructor);
+                scheme.def = Some(ctor_dl);
 
                 let name = &ctor.identifier.name;
                 c.env.define(name, scheme);
+                // A constructor's field labels ARE semantic — they live in
+                // `ValueKind::Constructor.field_labels`. Mirror them into the
+                // reference graph and the export so hover can render
+                // `NotFound fn(path String) IoError` without reaching back
+                // into the engine's string pool.
+                let labels = c.engine.strs_of(field_labels);
+                // `Config(name: 'x')` names the constructor, never the type, so
+                // reachability needs the `ctor_of` edge or every
+                // single-constructor type reads as unused.
+                let type_dl = DefinitionLocation::new(td.identifier.span, m, EntityKind::Type);
+                let type_defid = c.defid_of(type_dl);
                 c.store_and_emit_def(
                     &ctor.identifier,
                     &ctor.doc,
-                    EntityKind::Constructor,
+                    DefinitionKind::Constructor {
+                        ctor_of: Some(type_defid),
+                        param_names: labels.clone(),
+                    },
                     ctors_public,
                 );
-                let dl = DefinitionLocation::new(
-                    ctor.identifier.span,
-                    c.current_module_slice(),
-                    EntityKind::Constructor,
+                // Unconditional: `export_value` routes a non-`pub` name into
+                // `iface.private_names`, so a ctor that is private — its type
+                // opaque *or* the type itself non-`pub` — gives importers a
+                // "'X' is private" error instead of "no member 'X'", exactly
+                // as fns and consts do.
+                export_value(
+                    iface.as_deref_mut(),
+                    name,
+                    ctors_public,
+                    scheme,
+                    None,
+                    labels,
+                    ctor.doc.clone(),
                 );
-                let defid = c.defid_of(dl);
-                let labels = c.engine.strs_of(field_labels);
-                c.module_refs.set_param_names(defid, labels);
-                // `Config(name: 'x')` names the constructor, never the type, so
-                // reachability needs this edge or every single-constructor type
-                // reads as unused.
-                let type_dl = DefinitionLocation::new(
-                    td.identifier.span,
-                    c.current_module_slice(),
-                    EntityKind::Type,
-                );
-                let type_defid = c.defid_of(type_dl);
-                c.module_refs.set_ctor_of(defid, type_defid);
-                if is_public {
-                    // Opaque ctors are recorded as private so importers get a
-                    // "constructor is private" hint instead of "unknown name".
-                    // A constructor's field labels ARE semantic — they live in
-                    // `ValueKind::Constructor.field_labels`. Mirror them here so
-                    // hover can render `NotFound fn(path String) IoError`
-                    // without reaching back into the engine's string pool.
-                    let labels = c.engine.strs_of(field_labels);
-                    export_value(
-                        iface.as_deref_mut(),
-                        name,
-                        ctors_public,
-                        scheme,
-                        None,
-                        labels,
-                        ctor.doc.clone(),
-                    );
-                }
             }
         });
 
         // Write the now-complete variant slice back into the env.
         let variants = self.engine.push_variants(&variants);
         self.env
-            .set_type_body(type_name, TypeBody::Custom { variants });
+            .set_type_body(type_id, TypeBody::Custom { variants });
 
         let ti = self.env.lookup_type_info(type_name);
         export_type(iface.as_deref_mut(), type_name, is_public, ti);
@@ -975,8 +999,9 @@ enum AttrTarget {
 
 impl Compiler {
     /// Reject unknown attributes, attributes on the wrong target, and any
-    /// attribute outside the embedded stdlib. Arity is checked here so the
-    /// later passes can assume `@vm` always carries exactly one arg.
+    /// attribute outside the embedded stdlib. Arity is NOT checked here: the
+    /// parser rejects a `@vm` fn with anything but exactly one arg, so Pass 0
+    /// can assume `FnBody::Vm` always carries the op key.
     fn validate_attributes(&mut self, attrs: &[ast::Attribute], in_stdlib: bool, on: AttrTarget) {
         for a in attrs {
             match a.name.name.as_str() {
@@ -989,12 +1014,6 @@ impl Compiler {
                     }
                     if !matches!(on, AttrTarget::Fn) {
                         self.error("'@vm' may only be used on functions".to_string(), a.span);
-                    }
-                    if a.args.len() != 1 {
-                        self.error(
-                            "'@vm' takes exactly one argument: the VM op key".to_string(),
-                            a.span,
-                        );
                     }
                 }
                 other => {
@@ -1016,7 +1035,7 @@ fn export_value(
     name: &str,
     is_pub: bool,
     scheme: Scheme,
-    slot: Option<i32>,
+    slot: Option<GlobalSlot>,
     param_names: Vec<String>,
     doc: Option<String>,
 ) {
@@ -1052,9 +1071,11 @@ fn export_type(
 
 /// Records a top-level name, emitting a diagnostic if it was already defined.
 /// Returns `true` when the name is a duplicate so the caller can drop the
-/// redundant declaration — keeping it would emit redundant codegen and a
-/// second, confusing definition after the diagnostic. (Downstream passes carry
-/// per-declaration state positionally and do not assume one decl per name.)
+/// redundant declaration. Dropping it is load-bearing, not just diagnostic
+/// hygiene: the per-decl state the later passes carry is positional, but the
+/// call graph (`build_call_graph_sccs`) and the alias toposort
+/// (`register_aliases`) key their graph nodes by name — a second decl with
+/// the same name would alias the first's node and desync SCC scheduling.
 fn check_duplicate<'a>(
     c: &mut Compiler,
     seen: &mut HashMap<&'a str, Span>,
@@ -1119,7 +1140,14 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
 
     for d in decls {
         let n = graph.add_node(());
-        node_of.insert(d.name(), n);
+        // Pass 0's `check_duplicate` dropped same-named decls, so names are
+        // unique here; a collision would alias two decls onto one node.
+        let prev = node_of.insert(d.name(), n);
+        debug_assert!(
+            prev.is_none(),
+            "duplicate decl '{}' reached the call graph",
+            d.name()
+        );
     }
 
     for d in decls {

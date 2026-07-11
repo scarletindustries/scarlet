@@ -40,6 +40,21 @@ impl Constraint {
         }
     }
 
+    /// Greatest lower bound of two constraints: the constraint admitting
+    /// exactly the types both admit, or `None` when their allowed sets are
+    /// disjoint. Exhaustive over variant pairs, so adding a `Constraint`
+    /// variant fails to compile here until its intersections are spelled out
+    /// — unlike the old "smaller allowed set wins" heuristic, which was only
+    /// correct while the lattice was a chain.
+    pub fn intersect(self, other: Constraint) -> Option<Constraint> {
+        match (self, other) {
+            (Constraint::Addable, Constraint::Addable) => Some(Constraint::Addable),
+            (Constraint::Numeric, Constraint::Numeric)
+            | (Constraint::Numeric, Constraint::Addable)
+            | (Constraint::Addable, Constraint::Numeric) => Some(Constraint::Numeric),
+        }
+    }
+
     /// Whether a rigid generic carrying `generic` already satisfies *this*
     /// requirement. True iff every concrete type the generic admits is also
     /// admitted here (the generic's allowed set ⊆ this constraint's), so a
@@ -59,13 +74,10 @@ impl Constraint {
 
 /// A concrete primitive type the inference engine has resolved a `Ty` to.
 /// Used by codegen to pick type-specialized opcodes; unbound/constrained
-/// vars and every other constructor map to `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Prim {
-    Int,
-    Float,
-    String,
-}
+/// vars and every other constructor map to `None`. This is the one
+/// primitive-kind enum, `type_def::PrimitiveKind`, under the short name the
+/// codegen paths use — not a parallel definition to keep in sync.
+pub use crate::type_def::PrimitiveKind as Prim;
 
 // ============================================================================
 // Ty / TypeNode — arena-based type representation
@@ -580,8 +592,10 @@ impl InferEngine {
 
     fn push_children(&mut self, kids: &[Ty]) -> ArenaSlice<pool::Children> {
         let start = self.children.len() as u32;
+        let len = u16::try_from(kids.len())
+            .expect("type has too many children for the arena (max 65535)");
         self.children.extend_from_slice(kids);
-        ArenaSlice::new(start, kids.len() as u16)
+        ArenaSlice::new(start, len)
     }
 
     pub fn intern(&mut self, s: &str) -> StrId {
@@ -600,8 +614,10 @@ impl InferEngine {
 
     fn pool_slice<T: Copy, P>(pool: &mut Vec<T>, items: &[T]) -> ArenaSlice<P> {
         let start = pool.len() as u32;
+        let len = u16::try_from(items.len())
+            .expect("type has too many children for the arena (max 65535)");
         pool.extend_from_slice(items);
-        ArenaSlice::new(start, items.len() as u16)
+        ArenaSlice::new(start, len)
     }
     side_pool!(quants: QuantVar, pool::Quants => push_quants, quants_of);
     side_pool!(str_slices: StrId, pool::StrSlices => push_str_ids, str_ids_of);
@@ -620,11 +636,13 @@ impl InferEngine {
     /// Intern each string and push the ids as a contiguous slice.
     pub fn intern_slice<S: AsRef<str>>(&mut self, ss: &[S]) -> ArenaSlice<pool::StrSlices> {
         let start = self.str_slices.len() as u32;
+        let len =
+            u16::try_from(ss.len()).expect("type has too many children for the arena (max 65535)");
         for s in ss {
             let id = self.intern(s.as_ref());
             self.str_slices.push(id);
         }
-        ArenaSlice::new(start, ss.len() as u16)
+        ArenaSlice::new(start, len)
     }
 
     /// Snapshot every append-only pool length so a later `truncate_to` can
@@ -645,6 +663,13 @@ impl InferEngine {
         }
     }
 
+    /// INVARIANT: no `TypeInfo` body (variant field template or alias target)
+    /// may reference `vars` across a rewind — `self.vars.clear()` below wipes
+    /// every entry, so a surviving body holding an open `Var(param_id)` would
+    /// make a later `find`/`find_ref` index a cleared (or re-minted) slot.
+    /// All bodies are therefore closed to `Bound(idx)` form at registration:
+    /// `close_body` in `bytecode/analysis.rs` (file modules) and
+    /// `precompile.rs` (the static stdlib blob).
     pub fn truncate_to(&mut self, w: &EnginePoolWatermark) {
         self.nodes.truncate(w.nodes);
         let n = w.nodes as Ty;
@@ -1172,15 +1197,8 @@ impl InferEngine {
                         constraint: other_constraint,
                     } => {
                         if let Some(other_c) = other_constraint {
-                            let allowed_a = constraint.allowed_types();
-                            let allowed_b = other_c.allowed_types();
-                            if !allowed_a.iter().any(|t| allowed_b.contains(t)) {
+                            let Some(winner) = constraint.intersect(other_c) else {
                                 return Err(could_not_unify(var_ty, resolved));
-                            }
-                            let winner = if allowed_a.len() <= allowed_b.len() {
-                                constraint
-                            } else {
-                                other_c
                             };
                             self.vars[other_id as usize] = TyVarState::Unbound {
                                 level: other_level.min(level),
@@ -2046,11 +2064,10 @@ mod tests {
 
     #[test]
     fn unify_at_pushes_diagnostic() {
-        use crate::span::point_span;
         let mut e = new_engine();
         let i = e.icon_int();
         let s = e.icon_string();
-        assert!(!e.unify_at(i, s, point_span(1, 1)));
+        assert!(!e.unify_at(i, s, Span::point(1, 1)));
         assert_eq!(e.diagnostics.len(), 1);
         assert!(e.diagnostics[0].message.contains("Type mismatch"));
     }

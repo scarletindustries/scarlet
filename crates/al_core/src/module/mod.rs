@@ -7,24 +7,79 @@ use indexmap::IndexMap;
 use crate::bytecode::Watermark;
 use crate::reference::ModuleReferences;
 use crate::type_def::TypeId;
+use crate::typed_ir::GlobalSlot;
 use crate::types::{Scheme, TypeInfo};
 
 pub mod stdlib;
 
 pub type ModulePath = Vec<String>;
 
-/// A module's cache key. Unique **only** because a resolved on-disk module's
-/// [`ModulePath`] is its canonical file path (see [`file_module_path`]).
+/// A module's canonical cache key. Unique because a resolved on-disk module's
+/// identity is its canonical file path (see [`file_module_path`]).
 ///
 /// Keying on the import *as written* was a wrong-answer bug: `./b` from two
 /// different directories both key as `"b"`, so the second import silently
-/// received the first module. Never build a key from an unresolved path.
-pub fn path_key(path: &ModulePath) -> String {
-    path.join("/")
+/// received the first module. That is why this is a type and not a `String`:
+/// a `ModuleKey` can only be minted from a canonical identity — a resolved
+/// on-disk file, a stdlib path (whose written form *is* its identity), the
+/// prelude, or the entry `main` module — so keying [`ModuleTable`] or an id
+/// range with an unresolved written path no longer typechecks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModuleKey(String);
+
+impl ModuleKey {
+    /// The one place segments become a key. Private: callers outside this
+    /// module must go through a canonicalizing constructor below, so a key
+    /// can never be built from a path as the user wrote it.
+    fn of(path: &ModulePath) -> Self {
+        ModuleKey(path.join("/"))
+    }
+
+    /// Key of the on-disk module at `p` (see [`file_module_path`]).
+    pub fn for_file(p: &Path) -> Self {
+        Self::of(&file_module_path(p))
+    }
+
+    /// Key of a stdlib module addressed by its written `al/...` path — the
+    /// one written form that *is* canonical (there is no on-disk identity to
+    /// resolve to; [`resolve`]'s embedded branch mints from it verbatim).
+    pub fn for_stdlib(path: &ModulePath) -> Self {
+        debug_assert!(is_stdlib(path), "not a stdlib path: {path:?}");
+        Self::of(path)
+    }
+
+    /// Key of the prelude module ([`al_prelude`]).
+    pub fn prelude() -> Self {
+        Self::of(&al_prelude())
+    }
+
+    /// Key of the entry module ([`main_module`]).
+    pub fn main() -> Self {
+        Self::of(&main_module())
+    }
+
+    /// Escape hatch for the LSP string boundary (`module_or_uri` parameters):
+    /// wraps the caller's string verbatim, with no canonicalization. This is
+    /// lookup-not-mint — it exists so an externally supplied string can
+    /// *address* entries keyed by real `ModuleKey`s; never insert into a
+    /// cache under a key built here.
+    pub fn from_lookup_str(s: &str) -> Self {
+        ModuleKey(s.to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ModuleKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The identity of an on-disk module: the segments of its canonicalized path,
-/// `.al` stripped. `path_key` joins them back into an absolute path, so the
+/// `.al` stripped. [`ModuleKey`] joins them back into an absolute path, so the
 /// key is globally unique; the last segment is still the module's name, so
 /// `path.last()` reads `util` and not a temp directory.
 ///
@@ -171,7 +226,7 @@ pub fn collect_al_files(dir: &Path, out: &mut Vec<PathBuf>) {
 #[derive(Debug, Clone)]
 pub struct ExportedValue {
     pub scheme: Scheme,
-    pub local_slot: Option<i32>,
+    pub local_slot: Option<GlobalSlot>,
     /// A function's parameter names, in order. Empty for anything else.
     ///
     /// Documentation, not semantics: al rejects labelled arguments outside a
@@ -227,6 +282,46 @@ const fn align_to_range(n: i32) -> i32 {
     n + (MODULE_TYPE_ID_RANGE - n % MODULE_TYPE_ID_RANGE) % MODULE_TYPE_ID_RANGE
 }
 
+/// Proof that [`ModuleTable::id_base_for`] reserved a type-id range. Carries
+/// the range start together with whether an existing assignment was reused,
+/// so the pair can never be mismatched across the gap between reserving the
+/// range and recording its usage: [`Self::note_usage`] consumes the token.
+#[must_use = "hand the reservation back via note_usage once ids are allocated"]
+pub struct IdRangeReservation {
+    base: TypeId,
+    /// `true` when an existing assignment was reused. A fresh allocation is
+    /// always at `id_high_water`, so a first-compile overflow (deps allocate
+    /// before importer) only spills into unallocated space and `note_usage`
+    /// simply pushes `id_high_water` past it; a reused-range overflow may
+    /// collide with a sibling's already-assigned block and so raises
+    /// `id_range_overflow`.
+    reused: bool,
+}
+
+impl IdRangeReservation {
+    /// Start of the reserved range: the module's first nominal type id.
+    pub fn base(&self) -> TypeId {
+        self.base
+    }
+
+    /// Record that the module allocated `used` type ids from this range. On a
+    /// reused range, allocating past `MODULE_TYPE_ID_RANGE` may collide with a
+    /// sibling's already-assigned block, so the overflow flag is raised; on a
+    /// fresh range the spillover is into unallocated space. Either way the
+    /// high-water mark is bumped past actual usage so the next fresh
+    /// allocation skips the spillover.
+    pub fn note_usage(self, table: &mut ModuleTable, used: i32) {
+        if used > MODULE_TYPE_ID_RANGE {
+            if self.reused {
+                table.id_range_overflow = true;
+            }
+            table.id_high_water = table
+                .id_high_water
+                .max(TypeId(align_to_range(self.base.0 + used)));
+        }
+    }
+}
+
 /// Where a cached module came from. The variant determines which pieces of
 /// incremental-recompilation bookkeeping exist: only on-disk `File` modules
 /// have a source path to re-hash and a watermark to truncate to; `Embedded`
@@ -277,7 +372,7 @@ pub struct CachedModule {
     pub iface: ModuleInterface,
     pub origin: ModuleOrigin,
     /// Direct importers of this module (reverse edges of the import graph).
-    pub dependents: HashSet<String>,
+    pub dependents: HashSet<ModuleKey>,
 }
 
 impl CachedModule {
@@ -316,12 +411,12 @@ impl CachedModule {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ModuleTable {
     /// Insertion order is compilation order; `into_loaded` preserves it so the
     /// precompiled-stdlib emit is deterministic.
-    loaded: IndexMap<String, CachedModule>,
-    loading: HashSet<String>,
+    loaded: IndexMap<ModuleKey, CachedModule>,
+    loading: HashSet<ModuleKey>,
     /// When the binary carries a static stdlib, `get_or_hydrate` falls through
     /// to `s.lookup_module(key)` on a `loaded` miss and caches the result.
     static_fallback: Option<&'static crate::static_ir::StaticStdlib>,
@@ -334,14 +429,14 @@ pub struct ModuleTable {
     /// against this: an unchanged tuple means the bytes are unchanged, so the
     /// full read + FNV hash is skipped. The hash stays the source of truth —
     /// a stat miss falls through to read + hash and then refreshes the tuple.
-    stat_cache: HashMap<String, (std::time::SystemTime, u64)>,
+    stat_cache: HashMap<ModuleKey, (std::time::SystemTime, u64)>,
     /// Incremented every time a module body is actually compiled (not on cache
     /// hit). Test/telemetry only.
     compile_count: u32,
     /// Per-module type-id range starts. Assigned on a module's first compile
     /// and *retained across cache eviction* so a recompile hands out the same
     /// nominal type ids. Only cleared by `reset_id_bases` (overflow fallback).
-    id_bases: HashMap<String, TypeId>,
+    id_bases: HashMap<ModuleKey, TypeId>,
     /// Lowest type id not covered by any allocated `id_base` range; the next
     /// fresh `id_base_for` rounds up from `max(floor, id_high_water)`.
     id_high_water: TypeId,
@@ -351,58 +446,80 @@ pub struct ModuleTable {
     id_range_overflow: bool,
 }
 
+/// Hand-written (`TypeId` deliberately has no `Default`): `id_high_water`
+/// starts at the `NONE` sentinel — no id range reserved yet, the same state
+/// [`reset_id_bases`](ModuleTable::reset_id_bases) restores.
+impl Default for ModuleTable {
+    fn default() -> Self {
+        ModuleTable {
+            loaded: IndexMap::new(),
+            loading: HashSet::new(),
+            static_fallback: None,
+            overlays: HashMap::new(),
+            stat_cache: HashMap::new(),
+            compile_count: 0,
+            id_bases: HashMap::new(),
+            id_high_water: TypeId::NONE,
+            id_range_overflow: false,
+        }
+    }
+}
+
 impl ModuleTable {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn into_loaded(self) -> IndexMap<String, ModuleInterface> {
-        self.loaded.into_iter().map(|(k, v)| (k, v.iface)).collect()
+        self.loaded
+            .into_iter()
+            .map(|(k, v)| (k.0, v.iface))
+            .collect()
     }
 
-    pub fn is_loading(&self, key: &str) -> bool {
+    pub fn is_loading(&self, key: &ModuleKey) -> bool {
         self.loading.contains(key)
     }
 
-    pub fn mark_loading(&mut self, key: &str) {
-        self.loading.insert(key.to_string());
+    pub fn mark_loading(&mut self, key: &ModuleKey) {
+        self.loading.insert(key.clone());
     }
 
     pub fn unmark_all_loading(&mut self) {
         self.loading.clear();
     }
 
-    pub fn insert_hydrated(&mut self, key: String, iface: ModuleInterface) {
+    pub fn insert_hydrated(&mut self, key: ModuleKey, iface: ModuleInterface) {
         self.loading.remove(&key);
         self.loaded.insert(key, CachedModule::hydrated(iface));
     }
 
-    pub fn insert_cached(&mut self, key: String, cm: CachedModule) {
+    pub fn insert_cached(&mut self, key: ModuleKey, cm: CachedModule) {
         self.loading.remove(&key);
         self.loaded.insert(key, cm);
     }
 
-    pub fn get(&self, key: &str) -> Option<&ModuleInterface> {
+    pub fn get(&self, key: &ModuleKey) -> Option<&ModuleInterface> {
         self.loaded.get(key).map(|c| &c.iface)
     }
 
     /// `get`, falling through to `static_fallback` and caching the hydrate.
-    pub fn get_or_hydrate(&mut self, key: &str) -> Option<&ModuleInterface> {
+    pub fn get_or_hydrate(&mut self, key: &ModuleKey) -> Option<&ModuleInterface> {
         if !self.loaded.contains_key(key)
             && let Some(s) = self.static_fallback
-            && let Some(iface) = s.lookup_module(key)
+            && let Some(iface) = s.lookup_module(key.as_str())
         {
             self.loaded
-                .insert(key.to_string(), CachedModule::hydrated(iface));
+                .insert(key.clone(), CachedModule::hydrated(iface));
         }
         self.loaded.get(key).map(|c| &c.iface)
     }
 
     /// Record that `importer` directly depends on `importee` so a change to
     /// `importee` cascades to `importer` on invalidate.
-    pub fn record_dependent(&mut self, importee: &str, importer: &str) {
+    pub fn record_dependent(&mut self, importee: &ModuleKey, importer: &ModuleKey) {
         if let Some(cm) = self.loaded.get_mut(importee) {
-            cm.dependents.insert(importer.to_string());
+            cm.dependents.insert(importer.clone());
         }
     }
 
@@ -427,7 +544,7 @@ impl ModuleTable {
     }
 
     /// Iterate cached user modules (those compiled from a file on disk).
-    pub fn user_modules(&self) -> impl Iterator<Item = (&String, &CachedModule)> {
+    pub fn user_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
         self.loaded
             .iter()
             .filter(|(_, cm)| matches!(cm.origin, ModuleOrigin::File { .. }))
@@ -448,7 +565,7 @@ impl ModuleTable {
     /// content-preserving `touch` doesn't re-read forever, and the rare
     /// same-`(mtime, len)` content edit is additionally covered by the LSP
     /// `didChangeWatchedFiles` -> `invalidate_path` path.
-    pub fn source_changed(&mut self, key: &str) -> bool {
+    pub fn source_changed(&mut self, key: &ModuleKey) -> bool {
         let (path, expected_hash) = match self.loaded.get(key).map(|cm| &cm.origin) {
             Some(ModuleOrigin::File {
                 path, source_hash, ..
@@ -474,7 +591,7 @@ impl ModuleTable {
             Ok(t) => {
                 let changed = source_hash(&t) != expected_hash;
                 if !changed && let Some(s) = stat {
-                    self.stat_cache.insert(key.to_string(), s);
+                    self.stat_cache.insert(key.clone(), s);
                 }
                 changed
             }
@@ -487,54 +604,41 @@ impl ModuleTable {
 
     /// Iterate every cached module — user *and* hydrated stdlib. Used to merge
     /// all surviving modules' references into the workspace `ReferenceGraph`.
-    pub fn loaded_modules(&self) -> impl Iterator<Item = (&String, &CachedModule)> {
+    pub fn loaded_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
         self.loaded.iter()
     }
 
-    /// The persisted per-module reference data for `key`, if it was compiled
-    /// from source this session. `None` for static/hydrated stdlib modules
-    /// (their definitions are synthesised lazily from the interface).
-    pub fn module_refs(&self, key: &str) -> Option<&ModuleReferences> {
+    /// The persisted per-module reference data for the module whose canonical
+    /// path is `path` (e.g. an interface's `path`), if it was compiled from
+    /// source this session. `None` for static/hydrated stdlib modules (their
+    /// definitions are synthesised lazily from the interface). Lookup-not-mint:
+    /// a non-canonical path simply misses.
+    pub fn module_refs_by_path(&self, path: &ModulePath) -> Option<&ModuleReferences> {
         self.loaded
-            .get(key)
+            .get(&ModuleKey::of(path))
             .and_then(|c| c.module_refs())
             .map(Rc::as_ref)
     }
 
-    /// Return the type-id range start for `key`, allocating a fresh
+    /// Reserve (or re-find) the type-id range for `key`, allocating a fresh
     /// 256-aligned range on first request. `floor` is the caller's current
     /// `next_type_id` so the first user module's range sits past every stdlib
-    /// id. The second tuple element is `true` when an existing assignment was
-    /// reused — a fresh allocation is always at `id_high_water`, so a
-    /// first-compile overflow (deps allocate before importer) only spills into
-    /// unallocated space and `note_id_usage` simply pushes `id_high_water`
-    /// past it; a reused-range overflow may collide with a sibling's already-
-    /// assigned block and so raises `id_range_overflow`.
-    pub fn id_base_for(&mut self, key: &str, floor: TypeId) -> (TypeId, bool) {
+    /// id. Returns a token carrying the range start plus whether an existing
+    /// assignment was reused; once the module's body has allocated its ids,
+    /// hand the token back via [`IdRangeReservation::note_usage`].
+    pub fn id_base_for(&mut self, key: &ModuleKey, floor: TypeId) -> IdRangeReservation {
         if let Some(&b) = self.id_bases.get(key) {
-            return (b, true);
+            return IdRangeReservation {
+                base: b,
+                reused: true,
+            };
         }
         let base = TypeId(align_to_range(floor.0.max(self.id_high_water.0)));
-        self.id_bases.insert(key.to_string(), base);
+        self.id_bases.insert(key.clone(), base);
         self.id_high_water = TypeId(base.0 + MODULE_TYPE_ID_RANGE);
-        (base, false)
-    }
-
-    /// Record that a module at `base` allocated `used` type ids. On a reused
-    /// range, allocating past `MODULE_TYPE_ID_RANGE` may collide with a
-    /// sibling's already-assigned block, so the overflow flag is raised; on a
-    /// fresh range the spillover is into unallocated space (the importer's
-    /// base is always `id_high_water` at the time of allocation, deps having
-    /// allocated first). Either way the high-water mark is bumped past actual
-    /// usage so the next fresh allocation skips the spillover.
-    pub fn note_id_usage(&mut self, base: TypeId, used: i32, reused: bool) {
-        if used > MODULE_TYPE_ID_RANGE {
-            if reused {
-                self.id_range_overflow = true;
-            }
-            self.id_high_water = self
-                .id_high_water
-                .max(TypeId(align_to_range(base.0 + used)));
+        IdRangeReservation {
+            base,
+            reused: false,
         }
     }
 
@@ -555,7 +659,7 @@ impl ModuleTable {
     }
 
     /// Look up a previously assigned id_base without allocating.
-    pub fn id_base_of(&self, key: &str) -> Option<TypeId> {
+    pub fn id_base_of(&self, key: &ModuleKey) -> Option<TypeId> {
         self.id_bases.get(key).copied()
     }
 
@@ -588,11 +692,11 @@ impl ModuleTable {
     /// `ReferenceGraph` is rebuilt from the surviving `loaded` set on every
     /// `IncrementalSession::check`, so an invalidated module's reverse edges
     /// are recomputed from scratch and can never dangle into evicted state.
-    pub fn invalidate(&mut self, key: &str) -> Option<Watermark> {
+    pub fn invalidate(&mut self, key: &ModuleKey) -> Option<Watermark> {
         use std::collections::VecDeque;
-        let mut closure: HashSet<String> = HashSet::new();
-        let mut q: VecDeque<String> = VecDeque::new();
-        q.push_back(key.to_string());
+        let mut closure: HashSet<ModuleKey> = HashSet::new();
+        let mut q: VecDeque<ModuleKey> = VecDeque::new();
+        q.push_back(key.clone());
         while let Some(k) = q.pop_front() {
             if !closure.insert(k.clone()) {
                 continue;
@@ -652,7 +756,7 @@ pub enum ModuleSource {
     File(PathBuf),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     NotFound(String),
     NoBaseDir,
@@ -662,16 +766,33 @@ pub enum ResolveError {
     BareName(String),
 }
 
-/// Resolve a module path to its source. `base_dir` is the directory of the
-/// importing file, used for `./` and `../` relative imports.
-pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ModuleSource, ResolveError> {
-    let key = path_key(path);
+/// A resolved import: where the module's source lives, plus its canonical
+/// identity — the segments every downstream consumer (module cache, reference
+/// interner, qualifier map) must key on, never the path as written.
+#[derive(Debug, Clone)]
+pub struct ResolvedModule {
+    pub source: ModuleSource,
+    /// Canonical identity segments: [`file_module_path`] of the file an
+    /// on-disk module resolved to; the `al/...` path itself for embedded
+    /// stdlib (its written form *is* its identity).
+    pub canon: ModulePath,
+    pub key: ModuleKey,
+}
 
+/// Resolve a module path as written to its source and canonical identity.
+/// `base_dir` is the directory of the importing file, used for `./` and `../`
+/// relative imports.
+pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
     // Already resolved: a canonical file identity, independent of `base_dir`.
     if is_resolved_file(path) {
+        let key = ModuleKey::of(path);
         let p = PathBuf::from(format!("{key}.al"));
         return if p.is_file() {
-            Ok(ModuleSource::File(p))
+            Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                canon: path.clone(),
+                key,
+            })
         } else {
             Err(ResolveError::NotFound(p.display().to_string()))
         };
@@ -679,9 +800,14 @@ pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ModuleSourc
 
     // Stdlib: any path rooted at `al`.
     if is_stdlib(path) {
-        return match stdlib::lookup(&key) {
-            Some(src) => Ok(ModuleSource::Embedded(src)),
-            None => Err(ResolveError::NotFound(key)),
+        let key = ModuleKey::of(path);
+        return match stdlib::lookup(key.as_str()) {
+            Some(src) => Ok(ResolvedModule {
+                source: ModuleSource::Embedded(src),
+                canon: path.clone(),
+                key,
+            }),
+            None => Err(ResolveError::NotFound(key.0)),
         };
     }
 
@@ -700,15 +826,27 @@ pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ModuleSourc
                 other => p.push(other),
             }
         }
-        p.set_extension("al");
+        // Append `.al` rather than `set_extension`, which *replaces* anything
+        // after a dot in the module name (`./b.v2` would look up `b.al`);
+        // appending is the inverse of `file_module_path`'s
+        // `strip_suffix(".al")`, so the name round-trips.
+        if let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            p.set_file_name(format!("{name}.al"));
+        }
         if p.is_file() {
-            return Ok(ModuleSource::File(p));
+            let canon = file_module_path(&p);
+            let key = ModuleKey::of(&canon);
+            return Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                canon,
+                key,
+            });
         }
         return Err(ResolveError::NotFound(p.display().to_string()));
     }
 
     // Bare names other than `al` are reserved for a future package manager.
-    Err(ResolveError::BareName(key))
+    Err(ResolveError::BareName(path.join("/")))
 }
 
 #[cfg(test)]
@@ -800,11 +938,15 @@ mod tests {
     // dir (with `.`/`..` navigation), and errors clearly otherwise.
     #[test]
     fn resolve_stdlib_relative_and_errors() {
-        // Embedded stdlib.
-        assert!(matches!(
-            resolve(&vec!["al".into(), "array".into()], None),
-            Ok(ModuleSource::Embedded(_))
-        ));
+        // Embedded stdlib: source, canonical path, and key all line up.
+        match resolve(&vec!["al".into(), "array".into()], None) {
+            Ok(r) => {
+                assert!(matches!(r.source, ModuleSource::Embedded(_)));
+                assert_eq!(r.canon, vec!["al".to_string(), "array".to_string()]);
+                assert_eq!(r.key.as_str(), "al/array");
+            }
+            other => panic!("expected al/array to resolve embedded, got {other:?}"),
+        }
         assert!(matches!(
             resolve(&vec!["al".into(), "no_such_mod".into()], None),
             Err(ResolveError::NotFound(_))
@@ -819,17 +961,38 @@ mod tests {
         let base = unique_dir("resolve");
         std::fs::write(base.join("foo.al"), "").unwrap();
         std::fs::write(base.join("bar.al"), "").unwrap();
+        std::fs::write(base.join("b.v2.al"), "").unwrap();
         std::fs::create_dir_all(base.join("sub")).unwrap();
 
-        // `./foo` from base.
+        // `./foo` from base; the canonical key comes from the resolved file.
         match resolve(&vec![".".into(), "foo".into()], Some(&base)) {
-            Ok(ModuleSource::File(p)) => assert_eq!(p, base.join("foo.al")),
+            Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                canon,
+                key,
+            }) => {
+                assert_eq!(p, base.join("foo.al"));
+                assert_eq!(canon, file_module_path(&base.join("foo.al")));
+                assert_eq!(key, ModuleKey::for_file(&base.join("foo.al")));
+            }
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
         }
         // `../bar` from base/sub climbs to base/bar.al.
         match resolve(&vec!["..".into(), "bar".into()], Some(&base.join("sub"))) {
-            Ok(ModuleSource::File(p)) => assert_eq!(p, base.join("bar.al")),
+            Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                ..
+            }) => assert_eq!(p, base.join("bar.al")),
             other => panic!("expected ../bar to resolve, got {other:?}"),
+        }
+        // A dot in the module name is part of the name: `./b.v2` resolves to
+        // `b.v2.al` (appending `.al`), not `b.al` (replacing the suffix).
+        match resolve(&vec![".".into(), "b.v2".into()], Some(&base)) {
+            Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                ..
+            }) => assert_eq!(p, base.join("b.v2.al")),
+            other => panic!("expected ./b.v2 to resolve to b.v2.al, got {other:?}"),
         }
         // A relative path to a non-existent file is NotFound.
         assert!(matches!(
@@ -849,17 +1012,15 @@ mod tests {
     #[test]
     fn module_table_loading_and_insert_lifecycle() {
         let mut t = ModuleTable::new();
-        assert!(!t.is_loading("foo"));
-        t.mark_loading("foo");
-        assert!(t.is_loading("foo"));
+        let foo = ModuleKey::of(&vec!["foo".to_string()]);
+        assert!(!t.is_loading(&foo));
+        t.mark_loading(&foo);
+        assert!(t.is_loading(&foo));
 
-        t.insert_hydrated(
-            "foo".to_string(),
-            ModuleInterface::new(vec!["foo".to_string()]),
-        );
+        t.insert_hydrated(foo.clone(), ModuleInterface::new(vec!["foo".to_string()]));
         // insert_hydrated clears the loading mark and makes the interface visible.
-        assert!(!t.is_loading("foo"));
-        assert!(t.get("foo").is_some());
+        assert!(!t.is_loading(&foo));
+        assert!(t.get(&foo).is_some());
 
         let loaded = t.into_loaded();
         assert!(loaded.contains_key("foo"));
@@ -874,14 +1035,15 @@ mod tests {
         let mut t = ModuleTable::new();
 
         // Unknown key.
-        assert!(!t.source_changed("unknown"));
+        assert!(!t.source_changed(&ModuleKey::of(&vec!["unknown".to_string()])));
 
         // Hydrated module never changes.
+        let stat = ModuleKey::of(&vec!["static".to_string()]);
         t.insert_hydrated(
-            "static".to_string(),
+            stat.clone(),
             ModuleInterface::new(vec!["static".to_string()]),
         );
-        assert!(!t.source_changed("static"));
+        assert!(!t.source_changed(&stat));
 
         // A disk-backed module: unchanged then vanished.
         let dir = unique_dir("srcchanged");
@@ -898,11 +1060,12 @@ mod tests {
             },
             dependents: HashSet::new(),
         };
-        t.insert_cached("m".to_string(), cm);
-        assert!(!t.source_changed("m"), "identical content is unchanged");
+        let m = ModuleKey::of(&vec!["m".to_string()]);
+        t.insert_cached(m.clone(), cm);
+        assert!(!t.source_changed(&m), "identical content is unchanged");
 
         std::fs::remove_file(&path).unwrap();
-        assert!(t.source_changed("m"), "a vanished file invalidates");
+        assert!(t.source_changed(&m), "a vanished file invalidates");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

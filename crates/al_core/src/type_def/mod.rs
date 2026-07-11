@@ -14,13 +14,11 @@ pub struct TypeId(pub i32);
 impl TypeId {
     /// Sentinel meaning "no nominal type". Never a real id: allocation starts
     /// at 1. Used for pre-prelude placeholders and "not a Con" fallbacks.
+    /// Deliberately NOT `Default`: a derived `Default` on a struct embedding a
+    /// `TypeId` would silently manufacture this sentinel. (A `NonZeroI32`
+    /// niche — making `Option<TypeId>` free and the sentinel unrepresentable —
+    /// is the eventual replacement, deferred as too broad for now.)
     pub const NONE: TypeId = TypeId(0);
-}
-
-impl Default for TypeId {
-    fn default() -> Self {
-        TypeId::NONE
-    }
 }
 
 impl fmt::Display for TypeId {
