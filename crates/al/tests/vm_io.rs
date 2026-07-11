@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 mod common;
-use common::Project;
 use common::net::spawn_al_server;
+use common::{Project, wait_or_kill};
 
 /// AL source that binds `127.0.0.1:0`, prints the `listening <addr>` line
 /// `spawn_al_server` waits for, then runs `body` with `server` in scope.
@@ -631,4 +631,144 @@ fn http_server_chunked_post_roundtrip() {
 
     drop(bad_stream);
     srv.shutdown_clean(stream);
+}
+
+/// Run `src` under a forced scheduler count, bounded: a wedge is a red test,
+/// never a hung suite.
+fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Option<i32>, String) {
+    let proj = Project::new(tag);
+    let prog = proj.dir.join("prog.al");
+    std::fs::write(&prog, src).unwrap();
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_al"))
+        .arg("run")
+        .arg(&prog)
+        .env("AL_SCHEDULERS", schedulers.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn al");
+    let out = wait_or_kill(child, secs);
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// `net.accept` from a process on a scheduler that did NOT run `net.listen`.
+///
+/// This deadlocked: each scheduler used to bind its own `SO_REUSEPORT` socket
+/// lazily on first accept, and a connection routed to a socket nobody accepts
+/// from sits in its backlog forever (on macOS it is worse — the LAST binder
+/// receives every connection). The listener is now one shared kernel socket,
+/// so the state "queued where nobody accepts" is not constructible.
+///
+/// The hang bound makes a regression a red test instead of a wedged suite.
+/// (Against the old design the wedge was probabilistic — placement noise, and
+/// donation of a busy acceptor to an idle scheduler, could rescue a run — so
+/// the *deterministic* discriminator is the unit test
+/// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`,
+/// whose fd-equality assertion fails against a lazily-bound second socket by
+/// construction.)
+#[test]
+fn accept_on_a_scheduler_that_did_not_listen() {
+    let src = r#"import al/scheduler
+import al/net
+import al/net/socket
+import al/binary
+
+fn burn(n Int) Int {
+	if n < 2 {
+		1
+	} else {
+		burn(n - 1) + burn(n - 2)
+	}
+}
+
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> match net.local_addr(server) {
+		Ok(addr) -> {
+			scheduler.spawn(fn() {
+				match net.accept(server) {
+					Ok(c) -> {
+						socket.write(c, binary.from_string('pong')) or Nil
+						socket.close(c) or Nil
+					}
+					Err(e) -> println('accept failed: ${e}')
+				}
+			})
+			println('warm ${burn(25)}')
+			match net.connect('127.0.0.1', addr.port) {
+				Ok(c) -> match socket.read_exact(c, 4) {
+					Ok(_) -> println('got pong')
+					Err(e) -> println('read failed: ${e}')
+				}
+				Err(e) -> println('connect failed: ${e}')
+			}
+		}
+		Err(e) -> println('addr failed: ${e}')
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#;
+    for schedulers in [2u32, 4, 8] {
+        let (code, out) = run_with_schedulers("accept_foreign", src, schedulers, 25);
+        assert!(
+            code.is_some(),
+            "wedged at AL_SCHEDULERS={schedulers} (accept never saw the connection)"
+        );
+        assert!(
+            out.contains("got pong"),
+            "AL_SCHEDULERS={schedulers}:\n{out}"
+        );
+    }
+}
+
+/// `net.close` on a listener must fail accepts parked on OTHER schedulers,
+/// not leave them parked forever. The old close retired only the calling
+/// scheduler's socket; every peer kept a live one and its parked acceptors
+/// were never woken — the program hung.
+#[test]
+fn closing_a_listener_wakes_a_foreign_parked_acceptor() {
+    let src = r#"import al/scheduler
+import al/net
+import al/net/socket
+
+fn burn(n Int) Int {
+	if n < 2 {
+		1
+	} else {
+		burn(n - 1) + burn(n - 2)
+	}
+}
+
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> {
+		scheduler.spawn(fn() {
+			match net.accept(server) {
+				Ok(_) -> println('unexpected accept')
+				Err(_) -> println('accept ended')
+			}
+		})
+		println('warm ${burn(25)}')
+		net.close(server) or Nil
+		println('closed')
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#;
+    let (code, out) = run_with_schedulers("close_foreign", src, 2, 25);
+    assert!(
+        code.is_some(),
+        "close left a foreign acceptor parked forever:\n{out}"
+    );
+    assert!(out.contains("closed"), "{out}");
+    assert!(
+        out.contains("accept ended"),
+        "the parked accept must fail, not hang:\n{out}"
+    );
 }

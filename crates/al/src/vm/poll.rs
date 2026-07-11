@@ -19,14 +19,19 @@
 //! wait behind it costs nothing in steady state; its events are dropped
 //! by the drain.
 //!
-//! Edge-triggering loses no wakeups because of one VM invariant: **an I/O
-//! park is only ever created by an immediately-preceding `WouldBlock`
-//! syscall, and a woken process re-runs that syscall.** The syscall is the
-//! readiness probe — a dropped edge event's readiness is either consumed
-//! by a successful retry or re-announced by the kernel at the next
-//! transition out of the empty/full state the `WouldBlock` proved. (This
-//! is the classic "retry until `WouldBlock`" edge-trigger contract; it is
-//! why no per-fd readiness cache is needed.)
+//! Edge-triggering loses no wakeups because of PARK-AFTER-PROBE: **for
+//! every fd, a park on it is immediately preceded, on this same OS thread,
+//! by a syscall on it that returned `WouldBlock`, with no `Poll::poll` on
+//! this thread's poller in between — and this poller is drained only by
+//! this thread.** The kernel's ready list is the latch: an edge that fires
+//! after the probe sits in this poller until the drain, which runs strictly
+//! after the park is registered. That sequencing is the whole proof. (It is
+//! NOT the case that a dropped edge is "re-announced at the next
+//! transition" — kernels re-sample level at report time, so a dropped
+//! event's readiness may never be announced again. Do not add a
+//! `poll_parked` call between a `WouldBlock` and its park, and do not let
+//! any other thread drain this poller: either edit re-opens the classic
+//! lost-wakeup, which Go/Tokio need a per-fd readiness latch to close.)
 //!
 //! Invariants this module maintains:
 //!
@@ -219,12 +224,16 @@ impl VM {
         let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
     }
 
-    /// Adopt a listener into this scheduler's table and watch it for
-    /// incoming connections. An id already present keeps its existing entry
-    /// and registration — the incoming fd is a dup of the same underlying
-    /// socket and is dropped (replacing the entry would close an fd the
-    /// poller still watches).
-    pub(super) fn track_listener(&mut self, id: i32, listener: TcpListener) -> io::Result<()> {
+    /// Register the shared listener with this scheduler's poller and remember
+    /// the clone. Idempotent per scheduler: an id already present keeps its
+    /// existing entry — it is the same `Arc`, the same fd, the same
+    /// registration. Each scheduler's poller holds its own independent
+    /// readiness for the shared fd, so an accept parked here wakes here.
+    pub(super) fn track_listener(
+        &mut self,
+        id: i32,
+        listener: std::sync::Arc<TcpListener>,
+    ) -> io::Result<()> {
         if self.tcp_listeners.contains_key(&id) {
             return Ok(());
         }
@@ -328,12 +337,18 @@ impl VM {
     /// nearest timer deadline, or a `notify()` from another scheduler all end
     /// it — then returns so the caller can re-check for remote work.
     pub(super) fn poll_parked(&mut self, block: bool) -> VmResult<()> {
+        // Before the parked-empty early-out: retiring a listener matters even
+        // with nothing parked locally (this scheduler's registration and Arc
+        // clone must go so the shared fd can actually close).
+        let retired_woke = self.process_retired_listeners();
         if self.parked.is_empty() {
             return Ok(());
         }
 
-        // Deliver any finished blocking-pool jobs, then wake due timers.
-        let mut woke = self.drain_completions();
+        // Deliver any finished blocking-pool jobs, then wake due timers. A
+        // retire wake counts: it put a runnable process on `run_queue`, and a
+        // blocking wait here would strand it behind an idle poller.
+        let mut woke = retired_woke | self.drain_completions();
         woke |= self.wake_due_timers();
 
         // The reverse index is non-empty exactly when some park has a socket

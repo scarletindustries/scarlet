@@ -30,9 +30,9 @@ use al_core::bytecode::{SocketValue, Value};
 use super::{Process, VM};
 
 /// Connection fds re-homed out of a scheduler's tables, ready to travel with a
-/// [`Migrant`] or `Seed`. Listeners are not included: they are a shared,
-/// addr-keyed resource each scheduler re-materializes on demand
-/// (`VM::ensure_listener`), never moved.
+/// [`Migrant`] or `Seed`. Listeners are not included: the listener socket is
+/// program-wide (`Runtime.shared_listeners`) and every scheduler registers the
+/// same fd on demand (`VM::ensure_listener`) — there is nothing to move.
 pub(super) type DetachedFds = Vec<(i32, TcpStream)>;
 
 /// A process in flight between schedulers: the suspended [`Process`] moved
@@ -42,9 +42,8 @@ pub(super) struct Migrant {
     /// The suspended process, moved whole — stack, frames, heap untouched.
     pub process: Process,
     /// Connections the process references (moved — the donor loses them).
-    /// Listeners do not travel: the destination binds its own reuseport socket
-    /// from the shared address on first accept (`VM::ensure_listener`), and the
-    /// donor keeps its own entry.
+    /// Listeners do not travel: the destination registers the shared socket's
+    /// fd with its own poller on first accept (`VM::ensure_listener`).
     pub connections: DetachedFds,
 }
 
@@ -127,8 +126,10 @@ impl VM {
     ///
     /// This check is read-only and runs strictly before any side effect of
     /// donation (peer claim, fd detach, socket-table mutation), so an
-    /// abort here costs nothing. Listener ids never need guarding: listeners
-    /// are dup'd on transfer, the donor keeps its entry and any registration.
+    /// abort here costs nothing. Listener ids never need guarding: the
+    /// listener socket is shared program-wide (`Runtime.shared_listeners`),
+    /// so a moved process re-resolves the same fd on the destination and the
+    /// donor's leftover registration is just an armed fd with no waiter.
     pub(super) fn can_donate_fds(&self, victim: &Process) -> bool {
         let mut ids = Vec::new();
         for_each_process_socket(victim, &mut |s| {
@@ -160,9 +161,9 @@ impl VM {
     /// ([`VM::detach_fds`]). A connection belongs to exactly one scheduler, so
     /// it is removed here (with a defensive poller delete first — a runnable
     /// process has nothing armed, so it is normally a no-op) and travels to the
-    /// destination. Listeners among `ids` are left untouched: each scheduler
-    /// binds its own reuseport socket from the shared address on first accept,
-    /// so a captured listener needs no transfer and the donor keeps accepting.
+    /// destination. Listeners among `ids` are left untouched: the listener
+    /// socket is shared program-wide, and the destination registers the same
+    /// fd on first accept, so a captured listener needs no transfer.
     /// An id with no connection entry is either a listener or dangling (an
     /// earlier spawn moved it away) and is skipped.
     pub(super) fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
@@ -508,7 +509,7 @@ mod tests {
         let bind_addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(bind_addr).expect("connect");
         let (_server, _) = listener.accept().expect("accept");
-        donor.tcp_listeners.insert(1, listener);
+        donor.tcp_listeners.insert(1, std::sync::Arc::new(listener));
         donor.tcp_connections.insert(2, client);
 
         let socket = |id, is_listener| Value::socket(SocketValue { id, is_listener });
@@ -531,9 +532,9 @@ mod tests {
 
         let connections = donor.detach_fds(&p);
 
-        // The listener does not travel: the donor keeps its own entry and
-        // every scheduler binds its own reuseport socket from the shared
-        // address on first accept.
+        // The listener does not travel: the donor keeps its clone of the
+        // shared socket, and any other scheduler registers the same fd on
+        // first accept.
         assert!(donor.tcp_listeners.contains_key(&1));
         // The connection moved exactly once; the donor lost it. The dangling
         // id 3 was skipped entirely.

@@ -187,9 +187,8 @@ fn build_request(head ReqHead, trailers Headers, b Body) Request {
 
 // Listen on host:port and serve each accepted connection on its own process.
 // One slow or hostile connection parks only its own process. The accept loop
-// runs on every core in parallel (net.serve), each core binding its own
-// SO_REUSEPORT socket, and each connection is handled on the core that
-// accepted it.
+// runs on every core in parallel (net.serve), all draining one shared accept
+// queue, and each connection is handled on the core that accepted it.
 pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, NetError) {
 	net.serve(host, port, fn(sock) drive(sock, handler))
 }

@@ -18,7 +18,7 @@
 //! process finishing) wakes them via [`mio::Waker::wake`].
 
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 
@@ -42,8 +42,9 @@ pub(super) struct Seed {
     /// The spawned closure, as a pointer into the child heap.
     pub root: Value,
     /// Connections the closure captured (moved — the spawner loses them).
-    /// Listeners do not travel: each scheduler binds its own reuseport socket
-    /// from the shared address on first accept (`VM::ensure_listener`).
+    /// Listeners do not travel: the socket is shared program-wide, and the
+    /// destination registers the same fd on first accept
+    /// (`VM::ensure_listener`).
     pub connections: DetachedFds,
     /// The child's allocator handle. A zero-sized marker (allocation goes to
     /// mimalloc's per-thread default heap); field order is not load-bearing,
@@ -160,13 +161,18 @@ pub(super) struct SchedSlot {
     /// inbox ([`Runtime::steal_inbound`]) — the woken owner then finds an
     /// empty inbox and re-parks.
     pub(super) inbox: Mutex<VecDeque<Inbound>>,
-    /// Pinned seeds: work that must run on exactly this scheduler and is never
-    /// stolen ([`Runtime::steal_inbound`] ignores it). This is how the accept
-    /// fan-out ([`super::VM::spawn_on_each`]) keeps one acceptor per core:
-    /// each must bind its own `SO_REUSEPORT` socket, so an acceptor stolen
-    /// onto a core that already has the listener bound would leave its own
-    /// core's socket unbound and starve it of connections. The owner drains
-    /// these like directed work; no other scheduler ever does.
+    /// Listener ids retired by `net.close` on some scheduler, drained by
+    /// this slot's owner. See [`Runtime::retire_listener`] for the sequence.
+    pub(super) retired_listeners: Mutex<Vec<i32>>,
+    /// Fast-path gate for `retired_listeners`: the owner checks this relaxed
+    /// flag every poll cycle instead of taking the lock.
+    pub(super) retired_pending: AtomicBool,
+    /// Pinned seeds: work that runs on exactly this scheduler and is never
+    /// stolen ([`Runtime::steal_inbound`] ignores it). Used by the accept
+    /// fan-out ([`super::VM::spawn_on_each`]) to spread acceptors one per
+    /// core. Since a listener is one shared kernel socket, pinning is a
+    /// locality preference, not a correctness requirement: any scheduler's
+    /// acceptor drains the same accept queue.
     pub(super) pinned: Mutex<VecDeque<Seed>>,
     /// Poller waker. `notify()` wakes this scheduler whether it is parked on
     /// I/O, on a timer, or waiting for work (the waker is registered with
@@ -241,6 +247,8 @@ impl SchedSlot {
     fn new(is_main: bool) -> Self {
         SchedSlot {
             inbox: Mutex::new(VecDeque::new()),
+            retired_listeners: Mutex::new(Vec::new()),
+            retired_pending: AtomicBool::new(false),
             pinned: Mutex::new(VecDeque::new()),
             waker: OnceLock::new(),
             // All flags start down; `ensure_workers` raises a worker's flag
@@ -281,12 +289,19 @@ pub(super) struct Runtime {
     /// Bumped on every publish; lets schedulers skip syncing when nothing
     /// changed.
     pub globals_version: AtomicU64,
-    /// Bound addresses of every live listener, keyed by socket id. A listener
-    /// is a shared, addr-keyed resource: each scheduler that needs to accept
-    /// on one binds its own `SO_REUSEPORT` socket to this address
-    /// (`VM::ensure_listener`), so the kernel load-balances connections across
-    /// per-core sockets instead of every core sharing one accept queue.
-    pub shared_listeners: Mutex<HashMap<i32, SocketAddr>>,
+    /// Every live listener, keyed by socket id — the socket itself, shared.
+    ///
+    /// One kernel socket per `Server`, for the whole program: a scheduler
+    /// that accepts on it registers this same fd with its own poller
+    /// (`VM::ensure_listener`), and the kernel's single accept queue hands
+    /// each connection to exactly one accepter. The field's previous type,
+    /// `HashMap<i32, SocketAddr>`, WAS a deadlock: storing an address made
+    /// `ensure_listener` re-bind a second `SO_REUSEPORT` socket on whichever
+    /// scheduler accepted, and a connection routed to a socket nobody
+    /// accepts on sits in its backlog forever (and on macOS `SO_REUSEPORT`
+    /// does not balance at all — the last binder takes every connection).
+    /// One id, one socket: misdelivery is not a constructible state.
+    pub shared_listeners: Mutex<HashMap<i32, Arc<TcpListener>>>,
     /// Per-scheduler shared slots — inbox, pinned queue, waker, parked flag,
     /// published load, completion queue — indexed by scheduler id. See
     /// [`SchedSlot`] for the per-field invariants.
@@ -421,6 +436,40 @@ impl Runtime {
         }
     }
 
+    /// Retire listener `id` program-wide: drop it from `shared_listeners`
+    /// (so a re-run accept resolves to a stale-socket `NetError`), then queue
+    /// the id on every live scheduler and wake them. Each owner deregisters
+    /// the fd from its own poller, drops its `Arc` clone, and fails its
+    /// parked accepts ([`super::VM::process_retired_listeners`]) — the fd
+    /// itself closes only when the last clone drops, so no poller ever holds
+    /// a registration for a closed fd.
+    ///
+    /// Asynchronous by design: `net.close` returns before every peer has
+    /// drained, so the port is released within a scheduling slice, not
+    /// instantly — a `net.listen` on the same port racing that window can see
+    /// `AddrInUse`, and an accept already woken by real readiness can still
+    /// hand out a connection that completed before the close. Both windows
+    /// are one slice; the caller drains its own queue synchronously.
+    pub(super) fn retire_listener(&self, from: usize, id: i32) {
+        if super::lock(&self.shared_listeners).remove(&id).is_none() {
+            return; // already retired (double close): peers were queued then
+        }
+        for (i, slot) in self.slots.iter().enumerate() {
+            // A never-spawned worker has no thread to drain the queue (and
+            // never held a clone); skip it or the Vec grows forever.
+            if !self.is_live_scheduler(i) {
+                continue;
+            }
+            super::lock(&slot.retired_listeners).push(id);
+            slot.retired_pending.store(true, Ordering::Release);
+            // The caller drains its own queue synchronously right after
+            // this call; a self-notify would only cost a spurious wakeup.
+            if i != from {
+                self.notify(i);
+            }
+        }
+    }
+
     /// Submit a seed: hand it directly to an idle scheduler when one exists,
     /// otherwise push it onto the shared overflow queue for whichever busy
     /// scheduler frees up first.
@@ -471,13 +520,13 @@ impl Runtime {
     }
 
     /// Submit a seed pinned to a specific scheduler — the placement primitive
-    /// behind [`super::VM::spawn_on_each`]'s accept fan-out, where each
-    /// scheduler must run an acceptor against its own reuseport socket. Unlike
+    /// behind [`super::VM::spawn_on_each`]'s accept fan-out. Unlike
     /// [`Runtime::submit`] there is no idle-peer scan (the target is chosen by
     /// the caller) and the seed goes to the pinned queue, so it is never stolen
-    /// onto another core — an acceptor must bind *this* core's socket or the
-    /// core gets no connections. Callers must `ensure_workers` first and only
-    /// target live schedulers ([`Runtime::is_live_scheduler`]).
+    /// onto another core. The pin is a locality preference — every acceptor
+    /// drains the listener's single shared accept queue, so placement can not
+    /// starve a core of connections. Callers must `ensure_workers` first and
+    /// only target live schedulers ([`Runtime::is_live_scheduler`]).
     pub fn submit_to(&self, i: usize, seed: Seed) {
         self.process_started();
         let slot = &self.slots[i];

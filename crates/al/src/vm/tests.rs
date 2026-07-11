@@ -642,7 +642,7 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
 // The pre-side-effect donation guard: a victim referencing a connection id
 // that is mid-connect (`pending_connects`) or armed by a parked sibling's
 // `Wait` must not be donated; quiescent connections and listeners (which
-// are dup'd, never moved) are always donatable.
+// are shared program-wide, never moved) are always donatable.
 #[test]
 fn donation_fd_guard_blocks_entangled_connections() {
     let mut vm = halt_test_vm();
@@ -658,7 +658,9 @@ fn donation_fd_guard_blocks_entangled_connections() {
     assert!(vm.can_donate_fds(&victim(sock(7, false))));
 
     // Listener ids never need guarding, even while armed by a parked
-    // accept — listeners are dup'd on transfer, not moved.
+    // accept — the listener socket is shared program-wide, so a moved
+    // process resolves the same fd wherever it lands and the parked accept
+    // still wakes on the donor (armed fd, no waiter: dropped by design).
     park_wait(&mut vm, Wait::readable(3));
     assert!(vm.can_donate_fds(&victim(sock(3, true))));
 

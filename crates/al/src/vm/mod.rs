@@ -364,7 +364,10 @@ pub struct VM {
     /// word.
     label_cache: HashMap<usize, Value>,
     next_socket_id: i32,
-    tcp_listeners: HashMap<i32, TcpListener>,
+    /// This scheduler's clones of shared listeners — "registered with MY
+    /// poller", not "I bound this". The socket itself lives in
+    /// `Runtime.shared_listeners`; the fd closes when the last clone drops.
+    tcp_listeners: HashMap<i32, Arc<TcpListener>>,
     tcp_connections: HashMap<i32, TcpStream>,
     /// Outbound connections whose non-blocking connect is still in flight,
     /// keyed by their already-allocated socket id.
@@ -646,9 +649,12 @@ impl VM {
                     // - a peer idle or trailing this scheduler's queue depth:
                     //   donate a queued process to it (migration) instead of
                     //   letting work wait many slices here.
-                    if !self.parked.is_empty() {
-                        self.poll_parked(false)?;
-                    }
+                    // Unconditional: `poll_parked` early-outs when nothing
+                    // is parked, but only AFTER draining this scheduler's
+                    // retired-listener queue — a busy scheduler that skipped
+                    // it here would keep a closed listener's fd registered
+                    // (and the port bound) until it next idled.
+                    self.poll_parked(false)?;
                     self.take_directed();
                     let peer_idle = self.others_idle();
                     if !peer_idle && self.run_queue.len() < YIELD_PICKUP_QUEUE_LIMIT {
@@ -977,6 +983,10 @@ impl VM {
         self.poll
             .poll(&mut self.poll_events, None)
             .map_err(VmError::Io)?;
+        // A retire notify wakes an idle scheduler with no seed to run; its
+        // registration and Arc clone must still be dropped here, or the
+        // shared fd never closes.
+        let _ = self.process_retired_listeners();
         Ok(())
     }
 
@@ -1026,16 +1036,16 @@ impl VM {
     }
 
     /// Spawn one copy of `f` pinned to every live scheduler — the fan-out that
-    /// turns a single accept loop into one acceptor per core. Each copy, when
-    /// it first accepts, binds this scheduler's own `SO_REUSEPORT` socket from
-    /// the shared address, so the kernel load-balances connections across the
-    /// per-core sockets. The current scheduler runs its copy locally; every
+    /// turns a single accept loop into one acceptor per core. All copies drain
+    /// the same shared accept queue (a listener is one kernel socket), so the
+    /// spread is a locality preference: connections get accepted on the core
+    /// that will run them. The current scheduler runs its copy locally; every
     /// other live scheduler gets one pinned to its inbox.
     fn spawn_on_each(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
         // Summon the worker threads so every scheduler slot is live before we
-        // place a copy on it (a never-spawned worker is skipped — it binds no
-        // socket, so the kernel never routes connections to a coreless queue).
+        // place a copy on it. A never-spawned worker is skipped — safe, since
+        // any live acceptor drains the shared queue.
         self.runtime.ensure_workers();
         for i in 0..self.runtime.scheduler_count() {
             if i == self.scheduler_index {
@@ -1088,7 +1098,9 @@ impl VM {
     /// handing the seed to another OS thread is a plain move. `Binary` `Arc`
     /// backings are shared zero-copy — only the box is copied, never the bytes.
     /// Captured sockets transfer with it: connections move (this scheduler
-    /// loses them), listeners are dup'd so both sides keep accepting.
+    /// loses them); a listener id needs no transfer at all — the socket is
+    /// shared in `Runtime.shared_listeners`, and the destination registers
+    /// the same fd with its own poller on first accept.
     fn build_seed(&mut self, f: &Value) -> Seed {
         // The heap copy knows nothing about fd tables, so the captured
         // sockets are gathered by their own walk and moved/dup'd alongside

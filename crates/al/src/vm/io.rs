@@ -39,11 +39,11 @@
 //!   `tcp_connections`, `pending_connects`). Socket ids are unique across
 //!   schedulers — the scheduler index rides in the id's top bits — so a
 //!   socket value can migrate inside a spawn seed without colliding.
-//! - Listeners are bound with `SO_REUSEPORT` and shared by address, not by
-//!   fd (`share_listener_addr`): a listener bound at top level may be
-//!   accepted on from any scheduler, each binding its own reuseport socket to
-//!   the shared address on first accept (`ensure_listener`), so the kernel
-//!   load-balances incoming connections across the per-core sockets.
+//! - A listener is ONE kernel socket, program-wide, owned by
+//!   `Runtime.shared_listeners`: any scheduler that accepts registers the
+//!   same fd with its own poller (`ensure_listener`), and every acceptor
+//!   drains the socket's single accept queue. Nothing re-binds — `net.close`
+//!   retires the id everywhere (`Runtime::retire_listener`).
 //! - Connections are adopted into the accepting scheduler's table
 //!   (`adopt_connection`) and move between tables only via migration's fd
 //!   re-homing ([`super::migrate`]).
@@ -117,15 +117,16 @@ impl VM {
         let Some(addr) = valid_port(port).map(|p| SocketAddr::new(ip, p)) else {
             return self.push_invalid_port();
         };
-        let res = bind_reuseport(addr).and_then(|listener| {
-            // Pin the *resolved* address (a port of 0 becomes the
-            // kernel-assigned one) so every other scheduler binds its own
-            // reuseport socket to the same address — that is what makes
-            // the kernel load-balance connections across cores.
-            let addr = listener.local_addr()?;
+        let res = bind_listener(addr).and_then(|listener| {
+            // The one and only bind for this Server. The socket is shared:
+            // `Runtime.shared_listeners` owns it, and any scheduler that
+            // accepts registers this same fd with its own poller. One id,
+            // one kernel socket, one accept queue — a connection can never
+            // be queued on a socket nobody accepts from.
+            let listener = std::sync::Arc::new(listener);
             let socket_id = self.alloc_socket_id();
-            self.track_listener(socket_id, listener)?;
-            self.share_listener_addr(socket_id, addr);
+            self.track_listener(socket_id, listener.clone())?;
+            lock(&self.runtime.shared_listeners).insert(socket_id, listener);
             Ok(Value::socket(SocketValue {
                 id: socket_id,
                 is_listener: true,
@@ -389,15 +390,53 @@ impl VM {
     pub(super) fn tcp_close_server(&mut self) -> VmResult<()> {
         // Ok(Nil) only.
         let sv = self.pop_listener("net.close")?;
-        if let Some(listener) = self.tcp_listeners.remove(&sv.id) {
-            self.poller_deregister(listener.as_raw_fd());
-        }
-        // Closing a server retires it everywhere.
-        lock(&self.runtime.shared_listeners).remove(&sv.id);
+        // Retire program-wide (see `Runtime::retire_listener` for the full
+        // sequence), then drain our own queue synchronously so a local parked
+        // accept fails before `net.close` even returns.
+        self.runtime.retire_listener(self.scheduler_index, sv.id);
+        self.process_retired_listeners();
         let nil = self.make_nil();
         let v = self.make_ok(nil);
         self.stack.push(v);
         Ok(())
+    }
+
+    /// Drain this scheduler's retired-listener queue: deregister each fd
+    /// from this poller, drop this scheduler's `Arc` clone, and wake every
+    /// accept parked on the id. A woken accept re-runs, misses the shared
+    /// map, and surfaces `NetError` — the same path a stale id always took —
+    /// so `accept_loop` exits and `Runtime::live` drains instead of hanging.
+    ///
+    /// Returns whether anything was woken: the caller must not enter a
+    /// blocking poll wait over a process this just made runnable. The flag
+    /// check keeps the steady-state cost of the hot-path call sites to one
+    /// relaxed load; closes are rare.
+    pub(super) fn process_retired_listeners(&mut self) -> bool {
+        let slot = &self.runtime.slots[self.scheduler_index];
+        if !slot
+            .retired_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return false;
+        }
+        let retired: Vec<i32> = std::mem::take(&mut *lock(&slot.retired_listeners));
+        let mut woke = false;
+        for id in retired {
+            if let Some(listener) = self.tcp_listeners.remove(&id) {
+                self.poller_deregister(listener.as_raw_fd());
+            }
+            // Every wait on the id dies with it, so take the whole entry.
+            let Some(waiters) = self.io_waiters.remove(&id) else {
+                continue;
+            };
+            for wid in waiters {
+                if let Some((_, p)) = self.park_remove(wid) {
+                    self.run_queue.push_back(p);
+                    woke = true;
+                }
+            }
+        }
+        woke
     }
 
     pub(super) fn tcp_local_addr(&mut self) -> VmResult<()> {
@@ -511,7 +550,10 @@ impl VM {
     #[inline]
     fn listener(&mut self, id: i32) -> std::io::Result<&TcpListener> {
         self.ensure_listener(id)?;
-        self.tcp_listeners.get(&id).ok_or_else(stale_socket)
+        self.tcp_listeners
+            .get(&id)
+            .map(|l| l.as_ref())
+            .ok_or_else(stale_socket)
     }
 
     /// Build an `al/net/error.NetError` from a socket/connect
@@ -667,42 +709,40 @@ impl VM {
         (((self.scheduler_index as u32) << 24) | seq) as i32
     }
 
-    /// Record a listener's bound address program-wide, keyed by socket id, so
-    /// any scheduler that needs to accept on it can bind its own reuseport
-    /// socket to the same address ([`VM::ensure_listener`]).
-    fn share_listener_addr(&mut self, id: i32, addr: SocketAddr) {
-        lock(&self.runtime.shared_listeners).insert(id, addr);
-    }
-
-    /// The bound address of listener `id`: this scheduler's own socket if it
-    /// holds one, otherwise the address shared at listen time. Reading the
-    /// shared address never binds a socket — only an actual accept does — so a
-    /// process that merely queries the address does not leave an unaccepted
-    /// reuseport queue behind.
+    /// The bound address of listener `id` — read off the shared socket (or
+    /// this scheduler's clone of it, same fd either way).
     fn listener_addr(&self, id: i32) -> std::io::Result<SocketAddr> {
         if let Some(l) = self.tcp_listeners.get(&id) {
             return l.local_addr();
         }
         lock(&self.runtime.shared_listeners)
             .get(&id)
-            .copied()
-            .ok_or_else(stale_socket)
+            .ok_or_else(stale_socket)?
+            .local_addr()
     }
 
-    /// Resolve `id` to a listener in this scheduler's table, binding this
-    /// scheduler's own `SO_REUSEPORT` socket to the shared address on a local
-    /// miss. Each scheduler thus accepts from its own kernel queue; the kernel
-    /// spreads incoming connections across the per-scheduler sockets. Binding
-    /// happens here, on first accept, so only a scheduler that actually
-    /// accepts ever holds a socket in the reuseport group.
+    /// Make listener `id` accept-able from this scheduler: clone the shared
+    /// socket and register the SAME fd with this scheduler's poller. This
+    /// function cannot construct a socket — `bind_listener` has exactly one
+    /// call site (`tcp_listen`) — so one id can never denote two kernel
+    /// sockets. (Its predecessor re-*bound* a second `SO_REUSEPORT` socket
+    /// here, and a connection routed to the unaccepted twin deadlocked the
+    /// program.) A miss means the listener was closed or never existed:
+    /// stale-socket, surfaced as an ordinary `NetError`.
+    ///
+    /// The registration is the load-bearing half: the socket is global but
+    /// each `mio::Poll` is thread-confined, so an accept parked here is woken
+    /// only by THIS poller seeing the fd — each poller gets its own
+    /// independent readiness edge for a shared fd (measured on both epoll and
+    /// kqueue).
     fn ensure_listener(&mut self, id: i32) -> std::io::Result<()> {
         if self.tcp_listeners.contains_key(&id) {
             return Ok(());
         }
-        let Some(addr) = lock(&self.runtime.shared_listeners).get(&id).copied() else {
+        let Some(l) = lock(&self.runtime.shared_listeners).get(&id).cloned() else {
             return Err(stale_socket());
         };
-        bind_reuseport(addr).and_then(|l| self.track_listener(id, l))
+        self.track_listener(id, l)
     }
 
     /// Take ownership of a connected stream (from accept or connect):
@@ -813,22 +853,24 @@ fn start_connect(addr: &std::net::SocketAddr) -> std::io::Result<ConnectStart> {
 }
 
 /// `listen(2)` backlog: the depth of the kernel's completed-connection queue
-/// per listening socket before new connections are dropped. The platform caps
-/// this at `somaxconn`; a deeper request than the default keeps a connection
-/// burst from overflowing the queue (the std default of 128 is shallow for a
-/// server). Each `SO_REUSEPORT` socket gets its own queue of this depth.
+/// before new connections are dropped. The platform caps this at `somaxconn`;
+/// a deeper request than the default keeps a connection burst from
+/// overflowing the queue (the std default of 128 is shallow for a server).
 const LISTEN_BACKLOG: i32 = 1024;
 
-/// Bind a non-blocking TCP listener with `SO_REUSEADDR` + `SO_REUSEPORT`, so
-/// every scheduler can hold its own listening socket on the same address. The
-/// kernel then load-balances incoming connections across the per-scheduler
-/// sockets: each core accepts from its own queue with no shared accept lock
-/// and no cross-core handoff. Non-blocking so accept parks the calling process
-/// rather than stalling the scheduler.
-fn bind_reuseport(addr: SocketAddr) -> std::io::Result<TcpListener> {
+/// Bind THE non-blocking TCP listener for a `Server` — one socket, shared by
+/// every scheduler that accepts on it. Exactly one call site (`tcp_listen`).
+///
+/// Deliberately no `SO_REUSEPORT`: a second bind to the same address is
+/// `EADDRINUSE`, so a regression that reintroduces a per-scheduler lazy bind
+/// fails loudly instead of silently splitting the accept queue. (The old
+/// per-scheduler reuseport group deadlocked whenever a member had no
+/// acceptor — and on macOS `SO_REUSEPORT` never balanced anyway: the last
+/// binder received every connection.) Non-blocking so accept parks the
+/// calling process rather than stalling the scheduler.
+fn bind_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
-    socket.set_reuse_port(true)?;
     socket.bind(&addr.into())?;
     socket.listen(LISTEN_BACKLOG)?;
     socket.set_nonblocking(true)?;
@@ -919,4 +961,200 @@ fn stale_socket() -> std::io::Error {
     // Built from the raw errno so `net_error_value` (which routes on
     // `raw_os_error`) maps use-after-close to `NotConnected`, not `Errno(0)`.
     std::io::Error::from_raw_os_error(libc::ENOTCONN)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The listener-identity invariant, at the unit level: one `Server` id
+    //! denotes one kernel socket, on every scheduler, for the program's
+    //! whole lifetime — and retiring it reaches every scheduler.
+    //!
+    //! The end-to-end deadlock regression (accept on a scheduler that did
+    //! not listen) lives in `tests/vm_io.rs`; these pin the mechanism.
+
+    use std::net::SocketAddr;
+    use std::os::fd::AsRawFd;
+    use std::sync::Arc;
+
+    use super::super::{sched, vm_for_runtime};
+    use super::*;
+    use al_core::bytecode::{Function, Instruction, Op, Program};
+
+    fn halt_program() -> Program {
+        Program {
+            constants: Vec::new(),
+            functions: vec![Function {
+                name: "main".into(),
+                arity: 0,
+                locals: 0,
+                capture_count: 0,
+                code_start: 0,
+                code_len: 1,
+            }],
+            code: vec![Instruction {
+                op: Op::Halt,
+                a: 0,
+                b: 0,
+                operand: 0,
+            }],
+            entry: 0,
+            frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+        }
+    }
+
+    /// `ensure_listener` on a scheduler that did not listen registers the
+    /// SAME kernel socket — never a second one. This is the fd-level form of
+    /// the invariant; the old code bound a fresh `SO_REUSEPORT` socket here
+    /// and deadlocked whenever a connection landed on the unaccepted twin.
+    #[test]
+    fn a_foreign_scheduler_registers_the_same_kernel_socket() {
+        let (rt, poll0) = sched::Runtime::new(Arc::new(halt_program()), Vec::new(), 2)
+            .expect("runtime must construct");
+        let mut vm0 = vm_for_runtime(Arc::clone(&rt), 0, poll0);
+        let mut vm1 = vm_for_runtime(
+            Arc::clone(&rt),
+            1,
+            mio::Poll::new().expect("poller must construct"),
+        );
+
+        // Mirror `tcp_listen`'s ownership steps (minus the AL value plumbing).
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = Arc::new(bind_listener(addr).expect("bind"));
+        let id = vm0.alloc_socket_id();
+        vm0.track_listener(id, Arc::clone(&listener))
+            .expect("track");
+        super::super::lock(&rt.shared_listeners).insert(id, listener);
+
+        vm1.ensure_listener(id).expect("foreign registration");
+        assert_eq!(
+            vm0.tcp_listeners[&id].as_raw_fd(),
+            vm1.tcp_listeners[&id].as_raw_fd(),
+            "one Server id must denote one kernel socket on every scheduler"
+        );
+    }
+
+    /// Retiring a listener empties every scheduler's table and makes a later
+    /// `ensure_listener` a stale-socket error — it can never re-create the
+    /// socket, because it cannot bind.
+    #[test]
+    fn retiring_a_listener_reaches_every_scheduler_and_cannot_revive() {
+        let (rt, poll0) = sched::Runtime::new(Arc::new(halt_program()), Vec::new(), 2)
+            .expect("runtime must construct");
+        let mut vm0 = vm_for_runtime(Arc::clone(&rt), 0, poll0);
+        let mut vm1 = vm_for_runtime(
+            Arc::clone(&rt),
+            1,
+            mio::Poll::new().expect("poller must construct"),
+        );
+
+        // `retire_listener` queues only on live schedulers (a never-spawned
+        // worker has no thread to drain the queue); mark slot 1 live the way
+        // `ensure_workers` would, by filling its waker.
+        let waker =
+            mio::Waker::new(vm1.poll.registry(), super::super::poll::WAKER_TOKEN).expect("waker");
+        let _ = rt.slots[1].waker.set(Arc::new(waker));
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = Arc::new(bind_listener(addr).expect("bind"));
+        let id = vm0.alloc_socket_id();
+        vm0.track_listener(id, Arc::clone(&listener))
+            .expect("track");
+        super::super::lock(&rt.shared_listeners).insert(id, listener);
+        vm1.ensure_listener(id).expect("foreign registration");
+
+        rt.retire_listener(usize::MAX, id);
+        vm0.process_retired_listeners();
+        vm1.process_retired_listeners();
+
+        assert!(!vm0.tcp_listeners.contains_key(&id));
+        assert!(!vm1.tcp_listeners.contains_key(&id));
+        assert!(
+            vm1.ensure_listener(id).is_err(),
+            "a retired id must resolve to stale-socket, never to a new bind"
+        );
+    }
+
+    /// A retire wake must not be followed by a blocking poll wait: the woken
+    /// accept sits in `run_queue`, and with a second park keeping `parked`
+    /// non-empty, a blocking `poll_parked` that ignored the wake would strand
+    /// it behind an idle poller — a hang, found in review of this very fix.
+    #[test]
+    fn a_retire_wake_prevents_a_blocking_poll_wait() {
+        use super::super::poll::Wait;
+        use super::super::{Process, halt_test_vm};
+        use al_core::heap::ProcHeap;
+        use std::time::{Duration, Instant};
+
+        let mut vm = halt_test_vm();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = Arc::new(bind_listener(addr).expect("bind"));
+        let id = vm.alloc_socket_id();
+        vm.track_listener(id, Arc::clone(&listener)).expect("track");
+        super::super::lock(&vm.runtime.shared_listeners).insert(id, listener);
+
+        let parked = || Process {
+            heap: ProcHeap,
+            stack: Vec::new(),
+            frames: Vec::new(),
+            is_main: false,
+        };
+        // The accept park that retire will wake…
+        vm.park(Wait::readable(id), parked());
+        // …and a far-future timer park that keeps `parked` non-empty, so the
+        // blocking branch is reachable.
+        vm.park(
+            Wait::Timer(Instant::now() + Duration::from_secs(30)),
+            parked(),
+        );
+
+        // `from` = a foreign index, so the notify for slot 0 fires as it
+        // would from a real cross-scheduler close.
+        vm.runtime.retire_listener(usize::MAX, id);
+
+        let t0 = Instant::now();
+        vm.poll_parked(true).expect("poll");
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "blocking poll ignored the retire wake and slept toward the timer"
+        );
+        assert_eq!(
+            vm.run_queue.len(),
+            1,
+            "the retired accept must be runnable, not parked"
+        );
+    }
+
+    /// The kernel assumption the shared-listener design rests on, pinned into
+    /// CI: one listening fd registered in two pollers delivers an independent
+    /// readiness edge to each (holds on both epoll and kqueue).
+    #[test]
+    fn one_fd_in_two_pollers_wakes_both() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = bind_listener(addr).expect("bind");
+        let bound = listener.local_addr().expect("addr");
+        let fd = listener.as_raw_fd();
+
+        let mut p1 = mio::Poll::new().expect("poll 1");
+        let mut p2 = mio::Poll::new().expect("poll 2");
+        for p in [&p1, &p2] {
+            p.registry()
+                .register(
+                    &mut mio::unix::SourceFd(&fd),
+                    mio::Token(7),
+                    mio::Interest::READABLE,
+                )
+                .expect("register");
+        }
+
+        let _conn = std::net::TcpStream::connect(bound).expect("connect");
+
+        let saw = |p: &mut mio::Poll| {
+            let mut evs = mio::Events::with_capacity(4);
+            p.poll(&mut evs, Some(std::time::Duration::from_secs(5)))
+                .expect("poll");
+            evs.iter().any(|e| e.token() == mio::Token(7))
+        };
+        assert!(saw(&mut p1), "poller 1 must see the shared fd's readiness");
+        assert!(saw(&mut p2), "poller 2 must see the shared fd's readiness");
+    }
 }

@@ -26,12 +26,12 @@ pub fn accept(s Server) Result(Socket, NetError)
 
 // Listen on host:port and serve connections across every CPU core in parallel.
 //
-// Each core binds its own SO_REUSEPORT socket to the same address, so the
-// kernel load-balances incoming connections across cores — there is no shared
-// accept lock and no single-core accept bottleneck. Every accepted connection
-// is handled on the core that accepted it (the connection's socket never moves
-// between cores), and `handler` runs once per connection in its own
-// lightweight process.
+// One listening socket, one accept queue, an acceptor process on every core:
+// the kernel hands each connection to exactly one accepter, so no core can be
+// starved and no connection can be routed where nobody accepts. Every accepted
+// connection is handled on the core that accepted it (the connection's socket
+// never moves between cores), and `handler` runs once per connection in its
+// own lightweight process.
 //
 // Returns once the listeners are bound and the acceptors are running; the
 // acceptors keep the program alive. A bind failure is reported as `Err`.
@@ -55,8 +55,9 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 }
 
 // The per-core accept loop: accept a connection, hand it to its own process on
-// this same core (so the socket stays local), then loop. One copy of this runs
-// on every core, each draining its own kernel accept queue.
+// this same core (so the connection's socket stays local), then loop. One copy
+// runs on every core, all draining the listener's single shared accept queue —
+// spreading the accepts is a locality preference, not a correctness need.
 //
 // A per-connection accept error (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the
