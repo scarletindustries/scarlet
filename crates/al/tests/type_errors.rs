@@ -133,6 +133,19 @@ reject_case! {
     /// the way a nominal type constructor can; `a(Int)` is therefore rejected.
     type_variable_cannot_take_arguments_is_error:
         ("fn f(x a(Int)) a { x }\n", "Type variable 'a' cannot take arguments"),
+    /// A function type in a constructor field must spell out its return type:
+    /// with `permit_new` disabled there is no inference context, so `fn(Int)`
+    /// previously minted an unconstrained fresh var that typechecked against
+    /// anything and panicked the VM at call time.
+    fn_type_without_return_in_ctor_field_is_error: (
+        "type F { F(g fn(Int)) }\n",
+        "Function type in a type definition must declare a return type",
+    ),
+    /// Same rule on an alias RHS, which also hydrates with `permit_new` disabled.
+    fn_type_without_return_in_alias_is_error: (
+        "type Callback = fn(Int)\n",
+        "Function type in a type definition must declare a return type",
+    ),
 
     /// Type-declaration analysis diagnostics. A type's parameter list must have
     /// distinct names: the second `t` in `Box(t, t)` is a duplicate.

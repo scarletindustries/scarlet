@@ -137,7 +137,21 @@ impl Hydrator {
                 }
                 let ret = match &ft.return_type {
                     Some(r) => self.type_from_ast(r, env, engine)?,
-                    None => engine.fresh_var(),
+                    // An omitted return type means "infer it" — but constructor
+                    // fields and alias RHS (`permit_new` disabled) have no
+                    // inference context, so a fresh var there would escape
+                    // unconstrained and defeat soundness.
+                    None => {
+                        if self.permit_new {
+                            engine.fresh_var()
+                        } else {
+                            return Err(err(
+                                t.span,
+                                "Function type in a type definition must declare a return type"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                 };
                 Ok(engine.mk_fun(&params, ret))
             }
