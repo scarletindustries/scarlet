@@ -36,7 +36,9 @@ pub fn has(m Map(k, v), key k) Bool
 @vm(map__keys)
 pub fn keys(m Map(k, v)) Array(k)
 
-// Every value in the map, in the same order as `keys`.
+// Every value in the map, in the backing's own iteration order. Not
+// guaranteed to pair up with a separate `keys` call — for keys and values
+// that belong together, take one `to_list` snapshot.
 @vm(map__values)
 pub fn values(m Map(k, v)) Array(v)
 
@@ -44,7 +46,9 @@ pub fn values(m Map(k, v)) Array(v)
 @vm(map__size)
 pub fn size(m Map(k, v)) Int
 
-// Every entry as a `(key, value)` tuple, in the same order as `keys`.
+// Every entry as a `(key, value)` tuple, in the backing's own iteration
+// order. Each tuple pairs a key with its own value — the one snapshot that
+// keeps keys and values together, even for a live-backed map.
 @vm(map__to_list)
 pub fn to_list(m Map(k, v)) Array((k, v))
 

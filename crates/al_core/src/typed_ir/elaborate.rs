@@ -48,7 +48,7 @@
 //!   with no elaboration at all: `compile_expr` restates the parse error, so no
 //!   clean module contains one.
 //! * **Types that make the question unaskable.** `&&`/`||` are not
-//!   [`ArithOp`](crate::bytecode::ArithOp)s, so `specialize_binop` cannot be
+//!   [`ValueBinop`](crate::bytecode::ValueBinop)s, so `specialize_binop` cannot be
 //!   handed an operator that has no opcode. A [`CtorPat`] has exactly one field
 //!   type per declared label or it is not a `CtorPat`, so a constructor's
 //!   payload cannot be built with a field type missing. Both were poison sites;
@@ -74,7 +74,7 @@ use super::{
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::ast;
-use crate::bytecode::{ArithOp, BinopKind, Op, ShortCircuitOp, Value, specialize_binop};
+use crate::bytecode::{BinopKind, Op, ShortCircuitOp, Value, ValueBinop, specialize_binop};
 use crate::core_ir::lower::slot_labeled;
 use crate::core_ir::{ConstId, FuncIdx, VariantRef};
 use crate::span::Span;
@@ -638,7 +638,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 BinopKind::ShortCircuit(sc) => self.short_circuit(be, sc, result),
                 // Not control flow: its own type is its type, and `result` only
                 // agrees with it.
-                BinopKind::Arith(op) => self.binary(be, op, own),
+                BinopKind::Value(op) => self.binary(be, op, own),
             },
 
             E::NumberLiteral(n) => {
@@ -785,11 +785,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         eta_wrapper(self.fns, name, self.eta_param, target, &f)
     }
 
-    /// An operator that denotes an opcode. `op` is an [`ArithOp`], so `&&`/`||`
+    /// An operator that denotes an opcode. `op` is a [`ValueBinop`], so `&&`/`||`
     /// — which branch, and whose right operand may never be evaluated — cannot
     /// arrive here: [`BinopKind::of`] routes them to [`Self::short_circuit`].
     /// That is what lets `specialize_binop` return an `Op` and not an option.
-    fn binary(&mut self, be: &ast::BinaryExpression, op: ArithOp, own: Ty) -> TypedExpr {
+    fn binary(&mut self, be: &ast::BinaryExpression, op: ValueBinop, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
         let lhs = self.expr(&be.left);
         let rhs = self.expr(&be.right);

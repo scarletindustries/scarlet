@@ -31,5 +31,7 @@ pub fn spawn_local(f fn() Nil) Nil
 @vm(scheduler__spawn_on_each)
 pub fn spawn_on_each(f fn() Nil) Nil
 
+// Park only the calling process for `ms` milliseconds — every other process
+// keeps running. `ms <= 0` returns immediately.
 @vm(scheduler__sleep)
 pub fn sleep(ms Int) Nil

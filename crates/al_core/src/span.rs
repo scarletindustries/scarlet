@@ -101,11 +101,3 @@ impl Span {
         }
     }
 }
-
-pub fn point_span(line: i32, column: i32) -> Span {
-    Span::point(line, column)
-}
-
-pub fn range_span(line: i32, start_column: i32, end_column: i32) -> Span {
-    Span::single_line(line, start_column, end_column)
-}

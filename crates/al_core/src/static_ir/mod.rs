@@ -43,7 +43,6 @@ pub struct Slice {
 }
 
 impl Slice {
-    pub const EMPTY: Slice = Slice { start: 0, len: 0 };
     #[inline]
     pub fn range(self) -> std::ops::Range<usize> {
         self.start as usize..self.start as usize + self.len as usize
@@ -74,7 +73,8 @@ pub struct SModule {
     pub values: Slice,
     pub private_names: Slice,
     pub path: Slice,
-    /// one. The only doc text the blob carries — declaration docs are absent.
+    /// `str_pool` index of the module-level (`//!`) doc comment, if there is
+    /// one. Declaration docs travel on [`SExport::doc`].
     pub doc: Option<u32>,
 }
 

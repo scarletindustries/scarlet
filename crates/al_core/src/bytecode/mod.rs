@@ -60,7 +60,7 @@ mod session;
 pub mod value;
 use std::sync::Arc;
 
-pub use binop::{ArithOp, BinopKind, ShortCircuitOp, specialize_binop};
+pub use binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use session::{HoverFact, IncrementalSession, Watermark};

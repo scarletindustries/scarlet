@@ -81,8 +81,9 @@ pub type ChunkBody {
 // One native pass over the bytes; the returned method/target/header
 // names/values are zero-copy views into `buf`. Obs-fold and whitespace before
 // the field colon are rejected (400) — both are request-smuggling vectors —
-// and a head larger than 64 KiB is rejected (431, or 414 when the request
-// line itself never ends) rather than buffered forever.
+// a version other than HTTP/1.0 or HTTP/1.1 is rejected (505), and a head
+// larger than 64 KiB is rejected (431, or 414 when the request line itself
+// never ends) rather than buffered forever.
 @vm(http__parse_head)
 pub fn parse_request(buf Binary, off Int) Parsed
 

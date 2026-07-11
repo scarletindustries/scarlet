@@ -16,7 +16,7 @@ use crate::types::Prim;
 /// [`BinopKind::of`], which routes the two short-circuiting forms to
 /// [`ShortCircuitOp`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArithOp {
+pub enum ValueBinop {
     Add,
     Sub,
     Mul,
@@ -40,10 +40,10 @@ pub enum ShortCircuitOp {
 }
 
 /// Which of the two a source [`BinaryOp`] is. Total, and the sole constructor
-/// of [`ArithOp`]: a caller that has one has already proven it is not `&&`/`||`.
+/// of [`ValueBinop`]: a caller that has one has already proven it is not `&&`/`||`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinopKind {
-    Arith(ArithOp),
+    Value(ValueBinop),
     ShortCircuit(ShortCircuitOp),
 }
 
@@ -53,17 +53,17 @@ impl BinopKind {
         match op {
             B::And => BinopKind::ShortCircuit(ShortCircuitOp::And),
             B::Or => BinopKind::ShortCircuit(ShortCircuitOp::Or),
-            B::Add => BinopKind::Arith(ArithOp::Add),
-            B::Sub => BinopKind::Arith(ArithOp::Sub),
-            B::Mul => BinopKind::Arith(ArithOp::Mul),
-            B::Div => BinopKind::Arith(ArithOp::Div),
-            B::Mod => BinopKind::Arith(ArithOp::Mod),
-            B::Eq => BinopKind::Arith(ArithOp::Eq),
-            B::Ne => BinopKind::Arith(ArithOp::Ne),
-            B::Lt => BinopKind::Arith(ArithOp::Lt),
-            B::Le => BinopKind::Arith(ArithOp::Le),
-            B::Gt => BinopKind::Arith(ArithOp::Gt),
-            B::Ge => BinopKind::Arith(ArithOp::Ge),
+            B::Add => BinopKind::Value(ValueBinop::Add),
+            B::Sub => BinopKind::Value(ValueBinop::Sub),
+            B::Mul => BinopKind::Value(ValueBinop::Mul),
+            B::Div => BinopKind::Value(ValueBinop::Div),
+            B::Mod => BinopKind::Value(ValueBinop::Mod),
+            B::Eq => BinopKind::Value(ValueBinop::Eq),
+            B::Ne => BinopKind::Value(ValueBinop::Ne),
+            B::Lt => BinopKind::Value(ValueBinop::Lt),
+            B::Le => BinopKind::Value(ValueBinop::Le),
+            B::Gt => BinopKind::Value(ValueBinop::Gt),
+            B::Ge => BinopKind::Value(ValueBinop::Ge),
         }
     }
 }
@@ -74,41 +74,41 @@ impl BinopKind {
 /// elaboration is the only caller — it is the sole bytecode emit route — so this
 /// is where a new specialization belongs.
 ///
-/// Total: every `(ArithOp, Option<Prim>)` names an opcode.
-pub fn specialize_binop(op: ArithOp, prim: Option<Prim>) -> Op {
-    use ArithOp as A;
+/// Total: every `(ValueBinop, Option<Prim>)` names an opcode.
+pub fn specialize_binop(op: ValueBinop, prim: Option<Prim>) -> Op {
+    use ValueBinop as V;
     match (op, prim) {
-        (A::Add, Some(Prim::Int)) => Op::AddInt,
-        (A::Add, Some(Prim::Float)) => Op::AddFloat,
-        (A::Add, Some(Prim::String)) => Op::AddStr,
-        (A::Add, _) => Op::Add,
-        (A::Sub, Some(Prim::Int)) => Op::SubInt,
-        (A::Sub, Some(Prim::Float)) => Op::SubFloat,
-        (A::Sub, _) => Op::Sub,
-        (A::Mul, Some(Prim::Int)) => Op::MulInt,
-        (A::Mul, Some(Prim::Float)) => Op::MulFloat,
-        (A::Mul, _) => Op::Mul,
-        (A::Div, Some(Prim::Int)) => Op::DivInt,
-        (A::Div, Some(Prim::Float)) => Op::DivFloat,
-        (A::Div, _) => Op::Div,
-        (A::Mod, Some(Prim::Int)) => Op::ModInt,
-        (A::Mod, _) => Op::Mod,
-        (A::Eq, Some(Prim::Int)) => Op::EqInt,
-        (A::Eq, _) => Op::Eq,
-        (A::Ne, Some(Prim::Int)) => Op::NeqInt,
-        (A::Ne, _) => Op::Neq,
-        (A::Lt, Some(Prim::Int)) => Op::LtInt,
-        (A::Lt, Some(Prim::Float)) => Op::LtFloat,
-        (A::Lt, _) => Op::Lt,
-        (A::Le, Some(Prim::Int)) => Op::LteInt,
-        (A::Le, Some(Prim::Float)) => Op::LteFloat,
-        (A::Le, _) => Op::Lte,
-        (A::Gt, Some(Prim::Int)) => Op::GtInt,
-        (A::Gt, Some(Prim::Float)) => Op::GtFloat,
-        (A::Gt, _) => Op::Gt,
-        (A::Ge, Some(Prim::Int)) => Op::GteInt,
-        (A::Ge, Some(Prim::Float)) => Op::GteFloat,
-        (A::Ge, _) => Op::Gte,
+        (V::Add, Some(Prim::Int)) => Op::AddInt,
+        (V::Add, Some(Prim::Float)) => Op::AddFloat,
+        (V::Add, Some(Prim::String)) => Op::AddStr,
+        (V::Add, _) => Op::Add,
+        (V::Sub, Some(Prim::Int)) => Op::SubInt,
+        (V::Sub, Some(Prim::Float)) => Op::SubFloat,
+        (V::Sub, _) => Op::Sub,
+        (V::Mul, Some(Prim::Int)) => Op::MulInt,
+        (V::Mul, Some(Prim::Float)) => Op::MulFloat,
+        (V::Mul, _) => Op::Mul,
+        (V::Div, Some(Prim::Int)) => Op::DivInt,
+        (V::Div, Some(Prim::Float)) => Op::DivFloat,
+        (V::Div, _) => Op::Div,
+        (V::Mod, Some(Prim::Int)) => Op::ModInt,
+        (V::Mod, _) => Op::Mod,
+        (V::Eq, Some(Prim::Int)) => Op::EqInt,
+        (V::Eq, _) => Op::Eq,
+        (V::Ne, Some(Prim::Int)) => Op::NeqInt,
+        (V::Ne, _) => Op::Neq,
+        (V::Lt, Some(Prim::Int)) => Op::LtInt,
+        (V::Lt, Some(Prim::Float)) => Op::LtFloat,
+        (V::Lt, _) => Op::Lt,
+        (V::Le, Some(Prim::Int)) => Op::LteInt,
+        (V::Le, Some(Prim::Float)) => Op::LteFloat,
+        (V::Le, _) => Op::Lte,
+        (V::Gt, Some(Prim::Int)) => Op::GtInt,
+        (V::Gt, Some(Prim::Float)) => Op::GtFloat,
+        (V::Gt, _) => Op::Gt,
+        (V::Ge, Some(Prim::Int)) => Op::GteInt,
+        (V::Ge, Some(Prim::Float)) => Op::GteFloat,
+        (V::Ge, _) => Op::Gte,
     }
 }
 
@@ -117,7 +117,7 @@ mod tests {
     use super::*;
 
     /// The classification is total and the two short-circuiting operators are
-    /// the only ones that leave the `Arith` side — so `specialize_binop` can
+    /// the only ones that leave the `Value` side — so `specialize_binop` can
     /// never be reached with an operator that has no opcode.
     #[test]
     fn every_binary_op_classifies_and_only_and_or_short_circuit() {
@@ -140,7 +140,7 @@ mod tests {
         for op in all {
             match BinopKind::of(op) {
                 BinopKind::ShortCircuit(_) => assert!(matches!(op, B::And | B::Or)),
-                BinopKind::Arith(a) => {
+                BinopKind::Value(a) => {
                     assert!(!matches!(op, B::And | B::Or));
                     // Total over every prim, including "unresolved".
                     for prim in [None, Some(Prim::Int), Some(Prim::Float), Some(Prim::String)] {

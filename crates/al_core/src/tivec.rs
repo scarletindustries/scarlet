@@ -30,9 +30,10 @@ pub trait Idx: Copy + Eq + Ord + Hash + fmt::Debug {
 
 /// `Vec<T>` that can only be subscripted by `I`.
 ///
-/// The `PhantomData<fn(I) -> I>` makes the parameter invariant-free (neither
-/// borrowing nor owning an `I`), so `TiVec` inherits `Send`/`Sync`/auto-traits
-/// from `T` alone.
+/// The `PhantomData<fn(I) -> I>` makes `TiVec` invariant in `I` — irrelevant
+/// for the concrete newtype indices used here — while neither borrowing nor
+/// owning an `I`, so `TiVec` inherits `Send`/`Sync`/auto-traits from `T`
+/// alone.
 pub struct TiVec<I: Idx, T> {
     raw: Vec<T>,
     _idx: PhantomData<fn(I) -> I>,

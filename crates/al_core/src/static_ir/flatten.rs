@@ -114,15 +114,7 @@ impl FlatPools {
         for (n, ev) in &iface.values {
             let scheme = self.push_scheme(ev.scheme);
             let name = self.intern(n);
-            let p_start = self.str_slice_pool.len() as u32;
-            for p in &ev.param_names {
-                let id = self.intern(p);
-                self.str_slice_pool.push(id);
-            }
-            let param_names = Slice {
-                start: p_start,
-                len: ev.param_names.len() as u32,
-            };
+            let param_names = self.push_str_slice(ev.param_names.iter().cloned());
             let doc = ev.doc.as_deref().map(|d| self.intern(d));
             self.sexport_pool.push(SExport {
                 name,
@@ -348,8 +340,8 @@ mod tests {
             );
         }
 
-        // The module doc is the one piece of doc text the blob carries — it is
-        // what hover shows for `al/scheduler`, which is never recompiled.
+        // The module doc is what hover shows for `al/scheduler`, which is
+        // never recompiled; declaration docs travel on `SExport::doc`.
         for (k, iface) in &out.blob.interfaces {
             let (_, m) = p.modules.iter().find(|(mk, _)| mk == k).unwrap();
             let flat = m.doc.map(|i| p.str_pool[i as usize].as_str());
