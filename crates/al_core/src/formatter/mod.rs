@@ -815,10 +815,20 @@ impl Formatter {
                 }
             }
             P::Constructor {
-                name, args, rest, ..
+                qualifier,
+                name,
+                args,
+                rest,
+                ..
             } => {
+                // Dropping the qualifier changes the program: `io.NotFound`
+                // resolves through the module, `NotFound` needs an import.
+                let head = match qualifier {
+                    Some(q) => format!("{}.{}", q.name, name.name),
+                    None => name.name.clone(),
+                };
                 if args.is_empty() && !*rest {
-                    return text(name.name.clone());
+                    return text(head);
                 }
                 let mut items: Vec<Doc> = args
                     .iter()
@@ -833,12 +843,9 @@ impl Formatter {
                     items.push(text(".."));
                     // No trailing comma: the parser rejects `..,` (rest must be
                     // the last arg), so a wrapped pattern must end `..\n)`.
-                    return d![
-                        text(name.name.clone()),
-                        delimited_no_trailing("(", items, ")")
-                    ];
+                    return d![text(head), delimited_no_trailing("(", items, ")")];
                 }
-                d![text(name.name.clone()), delimited("(", items, ")")]
+                d![text(head), delimited("(", items, ")")]
             }
             P::Or { patterns, .. } => {
                 let ps: Vec<Doc> = patterns.iter().map(|p| self.pattern(p)).collect();
@@ -1376,6 +1383,28 @@ mod tests {
     fn deeply_nested_unary_minus_keeps_spaces() {
         let out = fmt("x = - - -y\n");
         assert_eq!(out, "x = - - -y\n");
+        assert_round_trips(&out);
+    }
+
+    /// Dropping a pattern's module qualifier changes the program:
+    /// `io.NotFound` resolves through the module, `NotFound` needs an import.
+    #[test]
+    fn a_qualified_constructor_pattern_keeps_its_qualifier() {
+        let src = "match e {\n\tio.NotFound(path) -> path\n\tio.Denied -> 'no'\n\telse -> ''\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("io.NotFound(path)"), "{out}");
+        assert!(out.contains("io.Denied"), "{out}");
+        assert_round_trips(&out);
+    }
+
+    /// A comment between the fields of a single-constructor shorthand used to
+    /// be deleted outright: that branch emitted a bare `hardline()` where the
+    /// constructor branch calls `leading_trivia`.
+    #[test]
+    fn shorthand_fields_keep_their_comments() {
+        let src = "type R {\n\ta Int\n\t// why b matters\n\tb String\n}\n";
+        let out = fmt(src);
+        assert!(out.contains("// why b matters"), "comment deleted:\n{out}");
         assert_round_trips(&out);
     }
 

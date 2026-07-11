@@ -1181,6 +1181,7 @@ mod tests {
     /// A nullary constructor pattern such as `True`.
     fn p_ctor0(name: &str) -> ast::Pattern {
         ast::Pattern::Constructor {
+            qualifier: None,
             name: ast::Identifier {
                 name: name.to_string(),
                 span: crate::span::Span::DUMMY,
@@ -1194,6 +1195,7 @@ mod tests {
     /// `Name(label: pat, ...)` with all-labeled args and an optional `..` rest.
     fn p_ctor_labeled(name: &str, fields: Vec<(&str, ast::Pattern)>, rest: bool) -> ast::Pattern {
         ast::Pattern::Constructor {
+            qualifier: None,
             name: ast::Identifier {
                 name: name.to_string(),
                 span: crate::span::Span::DUMMY,

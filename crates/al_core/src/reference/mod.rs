@@ -232,6 +232,15 @@ pub struct Definition {
     /// A function's parameter names, for rendering `fn(path String)` in hover.
     /// Documentation only — see `module::ExportedValue::param_names`.
     pub param_names: Vec<String>,
+    /// For a constructor: the `DefId` of the type that declares it.
+    ///
+    /// Reachability follows it, so using `Config(..)` keeps `type Config`
+    /// alive. Without it, a type whose only mention is its own constructor —
+    /// every single-constructor `type Config { name String }` — was reported
+    /// unused. It is NOT an occurrence: `find-references` on the type must not
+    /// list the constructor's declaration, and renaming one must not rename
+    /// the other.
+    pub ctor_of: Option<DefId>,
     pub is_pub: bool,
     pub alias_of: Option<DefId>,
     /// For [`EntityKind::ModuleAlias`]: span of the whole `import ...`
@@ -254,6 +263,7 @@ impl Definition {
             name: name.into(),
             doc,
             param_names: Vec::new(),
+            ctor_of: None,
             is_pub,
             alias_of: None,
             decl_span: defid.span,
@@ -412,6 +422,13 @@ impl ModuleReferences {
 
     pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
         self.definitions.values()
+    }
+
+    /// Record that the constructor `id` is declared by the type `ty`.
+    pub fn set_ctor_of(&mut self, id: DefId, ty: DefId) {
+        if let Some(d) = self.definitions.get_mut(&id) {
+            d.ctor_of = Some(ty);
+        }
     }
 
     /// Attach a function's parameter names to its definition, for hover.
@@ -709,6 +726,18 @@ impl ReferenceGraph {
         let mut adj: HashMap<DefId, Vec<DefId>> = HashMap::new();
         for (from, to) in self.edges() {
             adj.entry(from).or_default().push(to);
+        }
+        // A constructor keeps its type alive: `Config(name: 'x')` mentions the
+        // constructor, never the type, and `type Config { name String }` names
+        // both with one identifier. This is a structural edge, not a use —
+        // `edges()` is built from occurrences and must stay that way, or
+        // find-references on the type would list the constructor's declaration.
+        for mr in self.modules.values() {
+            for d in mr.definitions.values() {
+                if let Some(ty) = d.ctor_of {
+                    adj.entry(d.defid).or_default().push(ty);
+                }
+            }
         }
         let mut seen: HashSet<DefId> = HashSet::new();
         let mut queue: VecDeque<DefId> = VecDeque::new();

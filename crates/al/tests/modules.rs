@@ -369,3 +369,107 @@ fn same_named_modules_do_not_share_types() {
     );
     run_project_outputs(&proj, "run", "main.al", "1\nx\n");
 }
+
+// ── Qualified constructor patterns ─────────────────────────────────────────
+//
+// `match e { io.NotFound(path) -> … }` reaches a constructor through the module
+// it came from, so a program need not import the name to match on it — and two
+// modules exporting a `NotFound` cannot collide. The *expression* form
+// (`io.NotFound(x)`) already worked; only patterns lacked the qualifier.
+
+const COLOR_SRC: &str = "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n";
+
+#[test]
+fn a_qualified_constructor_pattern_matches() {
+    let proj = Project::new("qual_pat");
+    proj.write("color.al", COLOR_SRC);
+    proj.write(
+        "main.al",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(3)))\nprintln(v(color.Red))\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "3\n0\n");
+}
+
+/// The imported name and the qualified spelling denote the *same* constructor,
+/// so they may be mixed, and exhaustiveness counts them together.
+#[test]
+fn qualified_and_imported_constructors_are_the_same_constructor() {
+    let proj = Project::new("qual_pat_mixed");
+    proj.write("color.al", COLOR_SRC);
+    proj.write(
+        "main.al",
+        "import ./color.{Red}\nimport ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tRed -> 0\n\t\tcolor.Green(s) -> s\n\t}\n}\nprintln(v(color.Green(9)))\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "9\n");
+}
+
+/// Exhaustiveness resolves a constructor against the scrutinee's own variants,
+/// so a qualified arm must count as covering — and a missing one must not.
+#[test]
+fn a_qualified_pattern_is_seen_by_exhaustiveness() {
+    let proj = Project::new("qual_pat_exh");
+    proj.write("color.al", COLOR_SRC);
+    proj.write(
+        "main.al",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t}\n}\nprintln(v(color.Red))\n",
+    );
+    project_rejects(&proj, "check", "main.al", &["not exhaustive", "Green"]);
+}
+
+/// Labelled arguments and `..` work through a qualifier, as they do bare.
+#[test]
+fn a_qualified_pattern_takes_labels_and_rest() {
+    let proj = Project::new("qual_pat_args");
+    proj.write("color.al", COLOR_SRC);
+    proj.write(
+        "lab.al",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(shade: s) -> s\n\t}\n}\nprintln(v(color.Green(5)))\n",
+    );
+    run_project_outputs(&proj, "run", "lab.al", "5\n");
+    proj.write(
+        "rest.al",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Red -> 0\n\t\tcolor.Green(..) -> 1\n\t}\n}\nprintln(v(color.Green(5)))\n",
+    );
+    run_project_outputs(&proj, "run", "rest.al", "1\n");
+}
+
+/// An `opaque` type's constructor is not reachable by qualifier, exactly as it
+/// is not reachable as an expression (`id.Id(1)`).
+#[test]
+fn a_qualified_pattern_cannot_reach_an_opaque_constructor() {
+    let proj = Project::new("qual_pat_opaque");
+    proj.write(
+        "id.al",
+        "pub opaque type Id {\n\tId(n Int)\n}\n\npub fn make(n Int) Id {\n\tId(n)\n}\n",
+    );
+    proj.write(
+        "main.al",
+        "import ./id\n\nfn get(i Id) Int {\n\tmatch i {\n\t\tid.Id(n) -> n\n\t}\n}\nprintln(get(id.make(7)))\n",
+    );
+    project_rejects(&proj, "check", "main.al", &["private"]);
+}
+
+/// Every failure must produce a diagnostic. A silent `None` leaves the module
+/// error-free, `CleanModule` is minted, and the elaborator aborts on a program
+/// `al check` accepted — which is exactly what an unknown qualifier used to do.
+#[test]
+fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
+    let proj = Project::new("qual_pat_bad");
+    proj.write("color.al", COLOR_SRC);
+    proj.write(
+        "unknown_qual.al",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tnope.Red -> 0\n\t\telse -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+    );
+    project_rejects(
+        &proj,
+        "check",
+        "unknown_qual.al",
+        &["Unknown module qualifier"],
+    );
+
+    proj.write(
+        "unknown_member.al",
+        "import ./color\n\nfn v(c Color) Int {\n\tmatch c {\n\t\tcolor.Purple -> 0\n\t\telse -> 1\n\t}\n}\nprintln(v(color.Red))\n",
+    );
+    project_rejects(&proj, "check", "unknown_member.al", &["has no constructor"]);
+}

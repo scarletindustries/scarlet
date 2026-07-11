@@ -153,6 +153,10 @@ pub trait PatCtx {
     /// bindings never exist, and the body's names then resolve to whatever
     /// stale frame slots the check walk left behind.
     fn resolve_ctor_pat(&mut self, name: &str, scrut: RTy) -> CtorPat;
+    /// `io.NotFound(path)` — resolved through the module qualifier rather than
+    /// the enclosing scope. The typechecker has already accepted it, so a
+    /// failure here is a compiler bug, exactly as for the bare form.
+    fn resolve_ctor_pat_qualified(&mut self, qual: &str, name: &str, scrut: RTy) -> CtorPat;
 
     /// `i`th element type of the tuple type `t`.
     fn tuple_elem_ty(&mut self, t: RTy, i: usize) -> RTy;
@@ -285,7 +289,12 @@ impl<C: PatCtx> PatElab<'_, C> {
                 ty: scrut,
                 value: self.cx.string_const(&s.value),
             },
-            ast::Pattern::Constructor { name, args, .. } => self.ctor(&name.name, args, scrut),
+            ast::Pattern::Constructor {
+                qualifier,
+                name,
+                args,
+                ..
+            } => self.ctor(qualifier.as_ref(), &name.name, args, scrut),
             ast::Pattern::Tuple { elements, .. } => {
                 let elems = elements
                     .iter()
@@ -316,8 +325,17 @@ impl<C: PatCtx> PatElab<'_, C> {
     /// slot index *is* a field index. Every slot is filled: one no source arg
     /// reached (a labelled subset, or `..`) becomes a `Wild` carrying that
     /// field's type, which is what gives `fields.len() == arity`.
-    fn ctor(&mut self, name: &str, args: &[ast::PatternArg], scrut: RTy) -> TypedPat {
-        let info = self.cx.resolve_ctor_pat(name, scrut);
+    fn ctor(
+        &mut self,
+        qualifier: Option<&ast::Identifier>,
+        name: &str,
+        args: &[ast::PatternArg],
+        scrut: RTy,
+    ) -> TypedPat {
+        let info = match qualifier {
+            Some(q) => self.cx.resolve_ctor_pat_qualified(&q.name, name, scrut),
+            None => self.cx.resolve_ctor_pat(name, scrut),
+        };
         let supplied = args
             .iter()
             .map(|a| match a {
@@ -613,6 +631,11 @@ mod tests {
         /// Mirrors `Elab`'s impl: an unresolved head and a width desync are both
         /// compiler bugs, and both abort. `arity` comes from the declaration's
         /// label list, as `ValueKind::Constructor`'s does.
+        fn resolve_ctor_pat_qualified(&mut self, _q: &str, name: &str, scrut: RTy) -> CtorPat {
+            // The stub has no module table; a qualifier resolves like a bare name.
+            self.resolve_ctor_pat(name, scrut)
+        }
+
         fn resolve_ctor_pat(&mut self, name: &str, _scrut: RTy) -> CtorPat {
             let Some((idx, labels, tys)) = self.ctors.get(name).cloned() else {
                 elaborator_bug("unresolved constructor pattern", Span::DUMMY)
@@ -672,6 +695,7 @@ mod tests {
 
     fn ctor_pat(name: &str, args: Vec<ast::PatternArg>, rest: bool) -> ast::Pattern {
         ast::Pattern::Constructor {
+            qualifier: None,
             name: ident(name),
             args,
             rest,

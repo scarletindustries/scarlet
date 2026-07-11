@@ -922,6 +922,16 @@ impl Compiler {
                 let defid = c.defid_of(dl);
                 let labels = c.engine.strs_of(field_labels);
                 c.module_refs.set_param_names(defid, labels);
+                // `Config(name: 'x')` names the constructor, never the type, so
+                // reachability needs this edge or every single-constructor type
+                // reads as unused.
+                let type_dl = DefinitionLocation::new(
+                    td.identifier.span,
+                    c.current_module_slice(),
+                    EntityKind::Type,
+                );
+                let type_defid = c.defid_of(type_dl);
+                c.module_refs.set_ctor_of(defid, type_defid);
                 if is_public {
                     // Opaque ctors are recorded as private so importers get a
                     // "constructor is private" hint instead of "unknown name".

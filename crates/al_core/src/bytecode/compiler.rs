@@ -792,6 +792,13 @@ impl Compiler {
     }
 }
 
+/// The head of a constructor pattern: `NotFound`, or `io.NotFound` reached
+/// through a module qualifier. One thing, so it travels as one argument.
+struct CtorHead<'a> {
+    qualifier: Option<&'a ast::Identifier>,
+    name: &'a ast::Identifier,
+}
+
 fn compile_impl(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
@@ -4593,11 +4600,22 @@ impl Compiler {
                 ok
             }
             ast::Pattern::Constructor {
+                qualifier,
                 name,
                 args,
                 rest,
                 span,
-            } => self.type_ctor_pattern(name, args, *rest, *span, expected, b),
+            } => self.type_ctor_pattern(
+                CtorHead {
+                    qualifier: qualifier.as_ref(),
+                    name,
+                },
+                args,
+                *rest,
+                *span,
+                expected,
+                b,
+            ),
             ast::Pattern::Or { patterns, .. } => {
                 // Scope the canonical binding set to this or-pattern: `enter_or`
                 // pushes a frame whose first alternative establishes the
@@ -4639,27 +4657,103 @@ impl Compiler {
         }
     }
 
+    /// `io.NotFound` — the same constructor `import al/io.{NotFound}` would
+    /// bring into scope, reached through the module qualifier instead. Returns
+    /// `None` when the qualifier is unknown, the member is missing, or it is
+    /// not a constructor; the caller renders the diagnostic.
+    ///
+    /// A private (or `opaque`-hidden) constructor is reported here, so
+    /// `match e { id.Id(n) -> n }` gives the same error `id.Id(1)` already
+    /// gives as an expression.
+    fn lookup_ctor_qualified(
+        &mut self,
+        qual: &str,
+        name: &str,
+        span: Span,
+    ) -> Option<(TypeId, StrId, usize, ArenaSlice<pool::StrSlices>, Scheme)> {
+        // Every failure below must report. A silent `None` leaves the module
+        // error-free, so `CleanModule` is minted and the elaborator — which has
+        // no diagnostics to fall back on — aborts on a program `al check`
+        // accepted.
+        let Some(key) = self.imported_qualifiers.get(qual).cloned() else {
+            self.error(
+                format!("Unknown module qualifier '{qual}' — did you `import` it?"),
+                span,
+            );
+            return None;
+        };
+        let Some(iface) = self.module_table.get_or_hydrate(&key) else {
+            let module = self.module_name(&key);
+            self.error(format!("Module '{module}' is not loaded"), span);
+            return None;
+        };
+        let Some(ev) = iface.values.get(name) else {
+            let private = iface.private_names.contains(name);
+            let module = self.module_name(&key);
+            let msg = if private {
+                format!("Constructor '{name}' is private in module '{module}'")
+            } else {
+                format!("Module '{module}' has no constructor '{name}'")
+            };
+            self.error(msg, span);
+            return None;
+        };
+        let scheme = ev.scheme;
+        match scheme.kind {
+            ValueKind::Constructor {
+                type_id,
+                type_name,
+                arity,
+                field_labels,
+                ..
+            } => Some((type_id, type_name, arity as usize, field_labels, scheme)),
+            _ => {
+                let module = self.module_name(&key);
+                self.error(
+                    format!(
+                        "'{module}.{name}' is not a constructor and cannot be used in a pattern"
+                    ),
+                    span,
+                );
+                None
+            }
+        }
+    }
+
     fn type_ctor_pattern(
         &mut self,
-        name: &ast::Identifier,
+        head: CtorHead<'_>,
         args: &[ast::PatternArg],
         rest: bool,
         span: Span,
         expected: Ty,
         b: &mut PatternBindings,
     ) -> bool {
-        let Some((_, type_name, arity, field_labels, scheme)) = self.lookup_ctor(&name.name) else {
-            let msg = if self.env.lookup(&name.name).is_some() {
-                format!(
-                    "'{}' is not a constructor and cannot be used in a pattern",
-                    name.name
-                )
-            } else {
-                format!("Unknown constructor '{}' in pattern", name.name)
-            };
-            self.error(msg, name.span);
-            return false;
+        let CtorHead { qualifier, name } = head;
+        let found = match qualifier {
+            // `lookup_ctor_qualified` reports its own diagnostic: it knows
+            // whether the member is missing, private, or not a constructor.
+            Some(q) => match self.lookup_ctor_qualified(&q.name, &name.name, name.span) {
+                Some(f) => f,
+                None => return false,
+            },
+            None => match self.lookup_ctor(&name.name) {
+                Some(f) => f,
+                None => {
+                    let msg = if self.env.lookup(&name.name).is_some() {
+                        format!(
+                            "'{}' is not a constructor and cannot be used in a pattern",
+                            name.name
+                        )
+                    } else {
+                        format!("Unknown constructor '{}' in pattern", name.name)
+                    };
+                    self.error(msg, name.span);
+                    return false;
+                }
+            },
         };
+        let (_, type_name, arity, field_labels, scheme) = found;
 
         let inst = self.engine.instantiate(&scheme, &self.rigid_ids);
         if self.collect_hover_facts {

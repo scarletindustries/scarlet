@@ -1351,6 +1351,50 @@ impl Parser {
         self.with_recursion_guard(Self::parse_pattern_atom_inner)
     }
 
+    /// Is the token *after* the current one an uppercase (type/constructor)
+    /// name? Used to tell `io.NotFound` from any other dotted form.
+    fn peek_is_type_name(&self) -> bool {
+        self.tokens
+            .get(self.index + 1)
+            .filter(|t| t.kind == Kind::Identifier)
+            .and_then(|t| t.literal.as_deref())
+            .is_some_and(is_type_name)
+    }
+
+    /// The shared tail of a constructor pattern: the optional argument list.
+    fn finish_ctor_pattern(
+        &mut self,
+        qualifier: Option<ast::Identifier>,
+        name: String,
+        name_span: Span,
+        start: Span,
+    ) -> PResult<ast::Pattern> {
+        if !is_type_name(&name) {
+            return Err(format!(
+                "Constructor name '{name}' must start with an uppercase letter"
+            ));
+        }
+        let mut args: Vec<ast::PatternArg> = Vec::new();
+        let mut rest = false;
+        if self.kind() == Kind::PuncOpenParen && !self.has_newline_before_current() {
+            self.eat(Kind::PuncOpenParen)?;
+            let (parsed_args, parsed_rest) = self.parse_pattern_args()?;
+            args = parsed_args;
+            rest = parsed_rest;
+            self.eat(Kind::PuncCloseParen)?;
+        }
+        Ok(ast::Pattern::Constructor {
+            qualifier,
+            name: ast::Identifier {
+                name,
+                span: name_span,
+            },
+            args,
+            rest,
+            span: self.span_from(start),
+        })
+    }
+
     fn parse_pattern_atom_inner(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         match self.kind() {
@@ -1364,25 +1408,25 @@ impl Parser {
                 if name == "_" {
                     return Ok(ast::Pattern::Wildcard { span: id_span });
                 }
+                // `io.NotFound(path)` — a constructor reached through a module
+                // qualifier, so the constructor need not be imported by name.
+                // Only a lowercase qualifier followed by an uppercase member is
+                // one; `p.field` is not a pattern, so there is nothing to
+                // disambiguate against.
+                if !is_type_name(&name) && self.kind() == Kind::PuncDot && self.peek_is_type_name()
+                {
+                    self.eat(Kind::PuncDot)?;
+                    let q = ast::Identifier {
+                        name,
+                        span: id_span,
+                    };
+                    let member_span = self.current_span();
+                    let member =
+                        self.eat_token_literal(Kind::Identifier, "Expected constructor name")?;
+                    return self.finish_ctor_pattern(Some(q), member, member_span, start);
+                }
                 if is_type_name(&name) {
-                    let mut args: Vec<ast::PatternArg> = Vec::new();
-                    let mut rest = false;
-                    if self.kind() == Kind::PuncOpenParen && !self.has_newline_before_current() {
-                        self.eat(Kind::PuncOpenParen)?;
-                        let (parsed_args, parsed_rest) = self.parse_pattern_args()?;
-                        args = parsed_args;
-                        rest = parsed_rest;
-                        self.eat(Kind::PuncCloseParen)?;
-                    }
-                    return Ok(ast::Pattern::Constructor {
-                        name: ast::Identifier {
-                            name,
-                            span: id_span,
-                        },
-                        args,
-                        rest,
-                        span: self.span_from(start),
-                    });
+                    return self.finish_ctor_pattern(None, name, id_span, start);
                 }
                 Ok(ast::Pattern::Var {
                     name: ast::Identifier {
@@ -2630,7 +2674,10 @@ mod tests {
         // Recovery from a bad pattern/guard/arrow that synchronizes to the
         // arm's `->` must consume it and parse the body, not loop forever
         // re-erroring on the same token.
-        assert_single_error("match x { net.V6(ip) -> 1 }", "Expected '->', got '.'");
+        // `qual.Ctor(..)` is a qualified constructor pattern, and parses. A
+        // lowercase member cannot be a constructor, so it still needs recovery.
+        assert_no_errors("match x { net.V6(ip) -> 1 }");
+        assert_single_error("match x { net.v6(ip) -> 1 }", "Expected '->', got '.'");
         assert_single_error("match x { a if + -> 1 }", "Unexpected '+'");
         assert_single_error("match x { -> 1 }", "Unexpected '->' in pattern");
         // Constructor fields on one line need commas; a newline separates too.

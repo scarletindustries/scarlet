@@ -820,3 +820,36 @@ fn a_local_shadows_an_import_qualifier() {
     // `b.x` reads the parameter's field; `b.add` still reaches the module.
     common::run_project_outputs(&p, "run", "a.al", "42\n");
 }
+
+/// `Config(name: 'x')` names the *constructor*, never the type — and a
+/// single-constructor `type Config { name String }` declares both with one
+/// identifier. Reachability therefore never reached the type, and every such
+/// declaration was reported `unused type`. A constructor keeps its type alive.
+#[test]
+fn a_used_constructor_keeps_its_type_alive() {
+    let p = Project::new("unused_ctor_type");
+    let entry = "type Config {\n\tname String\n}\n\npub const config = Config(name: 'x')\nprintln(config.name)\n";
+    p.write("a.al", entry);
+    let s = checked_with(&p, entry);
+    assert_no_msg(&unused_msgs(&s), "unused type `Config`");
+}
+
+/// The edge is structural, not a use: a type nothing constructs is still dead.
+#[test]
+fn a_type_nobody_constructs_is_still_unused() {
+    let p = Project::new("unused_ghost_type");
+    let entry = "type Ghost {\n\tn Int\n}\n\nprintln(1)\n";
+    p.write("a.al", entry);
+    let s = checked_with(&p, entry);
+    assert_has_msg(&unused_msgs(&s), "unused type `Ghost`");
+}
+
+/// A multi-constructor type is alive when *any* of its constructors is used.
+#[test]
+fn one_used_constructor_is_enough_to_keep_the_type() {
+    let p = Project::new("unused_one_ctor");
+    let entry = "type Color {\n\tRed\n\tGreen\n}\n\nc = Red\nprintln(c)\n";
+    p.write("a.al", entry);
+    let s = checked_with(&p, entry);
+    assert_no_msg(&unused_msgs(&s), "unused type `Color`");
+}

@@ -1497,8 +1497,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     self.irrefutable(sub, b.id, lets);
                 }
             }
-            ast::Pattern::Constructor { name, args, .. } => {
-                let Some(cp) = self.ctor_at(&name.name, src_ty, name.span) else {
+            ast::Pattern::Constructor {
+                qualifier,
+                name,
+                args,
+                ..
+            } => {
+                let resolved = match qualifier {
+                    Some(q) => self
+                        .ctx
+                        .resolve_qualified(&q.name, &name.name)
+                        .and_then(|(ty, den)| self.ctor_of(ty, den, src_ty, name.span)),
+                    None => self.ctor_at(&name.name, src_ty, name.span),
+                };
+                let Some(cp) = resolved else {
                     elaborator_bug("unresolved constructor pattern", name.span)
                 };
                 let by_pos = self.slot_pattern_args(&cp, args);
@@ -1595,6 +1607,18 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         match self.ctor_at(name, scrut, span) {
             Some(cp) => cp,
             None => elaborator_bug("unresolved constructor pattern", span),
+        }
+    }
+
+    fn resolve_ctor_pat_qualified(&mut self, qual: &str, name: &str, scrut: RTy) -> CtorPat {
+        let span = self.pat_span;
+        let resolved = self
+            .ctx
+            .resolve_qualified(qual, name)
+            .and_then(|(ty, den)| self.ctor_of(ty, den, scrut, span));
+        match resolved {
+            Some(cp) => cp,
+            None => elaborator_bug("unresolved qualified constructor pattern", span),
         }
     }
 

@@ -217,6 +217,7 @@ impl CtorDestructuringBinding {
     /// the general [`Pattern`] shape (typing, exhaustiveness, codegen).
     pub fn as_pattern(&self) -> Pattern {
         Pattern::Constructor {
+            qualifier: None,
             name: self.name.clone(),
             args: self.args.clone(),
             rest: self.rest,
@@ -539,6 +540,11 @@ pub enum Pattern {
         name: Identifier,
     },
     Constructor {
+        /// `io` in `io.NotFound(path)` — the module qualifier the constructor
+        /// was reached through. `None` for a constructor in scope, whether
+        /// declared locally or brought in by `import al/io.{NotFound}`; both
+        /// spellings denote the same constructor.
+        qualifier: Option<Identifier>,
         name: Identifier,
         args: Vec<PatternArg>,
         rest: bool,
