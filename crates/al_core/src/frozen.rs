@@ -405,7 +405,10 @@ impl FrozenBuilder {
         self.intern_str_aggregate(items, |b| &mut b.str_arrays, Value::array_in)
     }
 
-    /// A frozen tuple constant over already-built (frozen) elements.
+    /// A frozen tuple constant over already-built (frozen) elements. A mortal
+    /// heap element would violate the area's no-process-heap-pointers
+    /// invariant; the constructors debug-assert every stored child is
+    /// immortal.
     pub fn tuple(&mut self, items: Vec<Value>) -> Value {
         Value::tuple_in(self, &items)
     }
@@ -418,7 +421,8 @@ impl FrozenBuilder {
     /// A frozen enum constant. The names and field labels are interned so
     /// they point at the area's canonical allocations; the hash is computed
     /// exactly the way the VM computes it at construction so equality keeps
-    /// working.
+    /// working. `payload` values must already be frozen (debug-asserted by
+    /// the constructors, as for [`FrozenBuilder::tuple`]).
     pub fn enum_(
         &mut self,
         type_id: crate::type_def::TypeId,

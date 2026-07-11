@@ -63,6 +63,17 @@ thread_local! {
 #[derive(Default)]
 pub struct ProcHeap;
 
+/// OOM abort for [`ProcHeap::alloc_raw`], keeping the `Arena::alloc_words`
+/// contract infallible: report the failed layout through the global
+/// allocation-error hook (which aborts) instead of unwinding.
+#[cold]
+#[inline(never)]
+fn alloc_failed(bytes: usize) -> ! {
+    let layout = std::alloc::Layout::from_size_align(bytes, align_of::<u64>())
+        .unwrap_or_else(|_| std::alloc::Layout::new::<u64>());
+    std::alloc::handle_alloc_error(layout)
+}
+
 impl ProcHeap {
     /// A fresh allocator handle for a new process.
     pub fn new() -> ProcHeap {
@@ -72,14 +83,17 @@ impl ProcHeap {
     // ---- allocation -------------------------------------------------------
 
     /// Allocate `words` 8-byte words, 8-byte aligned, from the calling thread's
-    /// default heap. The storage is uninitialized.
+    /// default heap. The storage is uninitialized. Infallible by the `Arena`
+    /// contract: OOM aborts via [`std::alloc::handle_alloc_error`].
     #[inline]
-    #[allow(clippy::expect_used)]
     fn alloc_raw(&self, words: usize) -> NonNull<u64> {
         let bytes = words * size_of::<u64>();
         // SAFETY: `mi_malloc_aligned` returns 8-aligned storage or null on OOM.
         let p = unsafe { mi_malloc_aligned(bytes, align_of::<u64>()) };
-        NonNull::new(p.cast::<u64>()).expect("mi_malloc_aligned returned null")
+        match NonNull::new(p.cast::<u64>()) {
+            Some(p) => p,
+            None => alloc_failed(bytes),
+        }
     }
 
     /// Allocate storage for one reference-counted object of `words` (header +

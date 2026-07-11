@@ -601,10 +601,75 @@ mod tests {
         assert!(!values_equal(&a, &c));
     }
 
-    // NOTE: the `HamtCollision` path (two distinct keys whose full 64-bit
-    // `hash_value` are equal) is not unit-tested here: `insert`/`get` require
-    // the passed `hash` to be `hash_value(key)`, and no deterministic pair of
-    // small-int keys collides, so a faithful collision cannot be constructed
-    // through the public API. The path is short and exercised only by genuine
-    // 64-bit hash collisions in the field.
+    // ---- collision-bucket tests ------------------------------------------
+    //
+    // The `HamtCollision` path needs two distinct keys sharing a full 64-bit
+    // hash. No deterministic pair of small-int keys collides for real, so
+    // these tests stage the collision by injecting the same `hash` for
+    // different keys — faithful because `insert`/`get`/`remove` only ever see
+    // the hash the caller passes.
+
+    /// `set`, but with an injected hash instead of `hash_value(k)`.
+    fn set_h(h: &mut ProcHeap, m: &Value, k: i64, v: i64, hash: u64) -> Value {
+        insert(h, m, key(k), key(v), hash)
+    }
+
+    /// `lookup`, but with an injected hash instead of `hash_value(k)`.
+    fn lookup_h(m: &Value, k: i64, hash: u64) -> Option<i64> {
+        get(m, &key(k), hash).and_then(|v| v.as_int())
+    }
+
+    /// A two-key map whose keys collide on `hash_value(&key(1))`.
+    fn collision_pair(h: &mut ProcHeap) -> (Value, u64) {
+        let hash = hash_value(&key(1));
+        let m = empty(h);
+        let m = set_h(h, &m, 1, 10, hash);
+        let m = set_h(h, &m, 2, 20, hash);
+        (m, hash)
+    }
+
+    #[test]
+    fn colliding_keys_are_both_found() {
+        let mut h = heap();
+        let (m, hash) = collision_pair(&mut h);
+        assert_eq!(size(&m), 2);
+        assert_eq!(lookup_h(&m, 1, hash), Some(10));
+        assert_eq!(lookup_h(&m, 2, hash), Some(20));
+        assert_eq!(lookup_h(&m, 3, hash), None);
+    }
+
+    #[test]
+    fn colliding_overwrite_keeps_size_and_updates_value() {
+        let mut h = heap();
+        let (m, hash) = collision_pair(&mut h);
+        let m = set_h(&mut h, &m, 2, 99, hash);
+        assert_eq!(size(&m), 2);
+        assert_eq!(lookup_h(&m, 1, hash), Some(10));
+        assert_eq!(lookup_h(&m, 2, hash), Some(99));
+    }
+
+    #[test]
+    fn third_colliding_key_appends_to_the_bucket() {
+        let mut h = heap();
+        let (m, hash) = collision_pair(&mut h);
+        let m = set_h(&mut h, &m, 3, 30, hash);
+        assert_eq!(size(&m), 3);
+        assert_eq!(lookup_h(&m, 1, hash), Some(10));
+        assert_eq!(lookup_h(&m, 2, hash), Some(20));
+        assert_eq!(lookup_h(&m, 3, hash), Some(30));
+    }
+
+    #[test]
+    fn removing_to_one_entry_collapses_the_bucket() {
+        let mut h = heap();
+        let (m, hash) = collision_pair(&mut h);
+        let m = remove(&mut h, &m, &key(1), hash);
+        assert_eq!(size(&m), 1);
+        assert_eq!(lookup_h(&m, 1, hash), None);
+        assert_eq!(lookup_h(&m, 2, hash), Some(20));
+        // The two-key bucket collapsed to a plain entry, and the single-child
+        // branch chain `split` built above it unwound with it.
+        let root = HamtMapRef::of(&m).root;
+        assert!(matches!(HamtNodeRef::of(&root), HamtNodeRef::Entry { .. }));
+    }
 }

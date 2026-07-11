@@ -211,16 +211,13 @@ pub enum MapBacking {
     Hamt = 1,
 }
 
-/// Decode a [`MapBacking`] discriminant word. Panics only on a corrupt heap
-/// (an unknown discriminant), which correct construction never produces.
+/// Decode a [`MapBacking`] discriminant word. Aborts on a corrupt heap (an
+/// unknown discriminant), which correct construction never produces.
 fn map_backing(word: u64) -> MapBacking {
     match word {
         0 => MapBacking::Env,
         1 => MapBacking::Hamt,
-        _ => {
-            debug_assert!(false, "unknown MapBacking discriminant {word}");
-            MapBacking::Env
-        }
+        _ => view_mismatch("map-backing"),
     }
 }
 
@@ -269,10 +266,7 @@ pub fn header_tag(word: u64) -> HeapTag {
         11 => HeapTag::HamtBranch,
         12 => HeapTag::HamtEntry,
         13 => HeapTag::HamtCollision,
-        other => {
-            debug_assert!(false, "corrupt heap tag {other}");
-            HeapTag::BigInt
-        }
+        _ => view_mismatch("heap-tag"),
     }
 }
 
@@ -501,13 +495,32 @@ unsafe fn str_contents<'a>(obj: *const u64) -> &'a str {
 // in bounds without per-access clamping (debug builds assert it).
 
 /// Release-mode backstop for a typed node view applied to the wrong kind of
-/// value. This is a VM bug, never a user-program condition; out of line so the
-/// tag dispatch in the hot accessors stays small.
+/// value, or a header/discriminant decoder hitting a corrupt word. This is a
+/// VM bug (or heap corruption), never a user-program condition; out of line so
+/// the tag dispatch in the hot accessors stays small.
 #[cold]
 #[inline(never)]
 pub(crate) fn view_mismatch(kind: &'static str) -> ! {
     eprintln!("al: internal error: {kind} view on wrong heap tag");
     std::process::abort()
+}
+
+/// Debug guard for construction through an immortal arena (the frozen
+/// builder): every child stored into a frozen object must itself be an
+/// immediate or immortal — a mortal process-heap pointer frozen into a
+/// constant would outlive its owning heap, violating the frozen area's
+/// no-process-heap-pointers invariant. Called by the child-storing
+/// constructors when [`Arena::marks_immortal`] is true; a no-op in release
+/// builds.
+#[cold]
+#[inline(never)]
+fn debug_assert_frozen_children<'a>(children: impl IntoIterator<Item = &'a Value>) {
+    for child in children {
+        debug_assert!(
+            !child.is_heap() || child.is_immortal(),
+            "mortal value frozen into a constant"
+        );
+    }
 }
 
 /// Decoded `Seq` root: payload `[len | shift | head | tree | tail]`.
@@ -608,6 +621,9 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
     tree: Value,
     tail: Value,
 ) -> Value {
+    if a.marks_immortal() {
+        debug_assert_frozen_children([&head, &tree, &tail]);
+    }
     let obj = alloc_obj(a, HeapTag::Seq, 5, false);
     // SAFETY: freshly allocated 5-word payload; header written by `alloc_obj`.
     unsafe {
@@ -624,6 +640,9 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
 /// Allocate a `SeqLeaf` holding `items`.
 #[inline]
 pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
+    if a.marks_immortal() {
+        debug_assert_frozen_children(items);
+    }
     let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + items.len(), false);
     // SAFETY: freshly allocated payload of exactly 1 + len words; header
     // written by `alloc_obj`.
@@ -676,6 +695,9 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
     shift: usize,
     children: &[Value],
 ) -> Value {
+    if a.marks_immortal() {
+        debug_assert_frozen_children(children);
+    }
     let n = children.len();
     let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * n, false);
     // SAFETY: freshly allocated payload of exactly 2 + 2n words; header
@@ -765,6 +787,9 @@ impl<'a> HamtNodeRef<'a> {
 /// Allocate a `HamtEntry` `[key, value]`.
 #[inline]
 pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Value) -> Value {
+    if a.marks_immortal() {
+        debug_assert_frozen_children([&key, &value]);
+    }
     let obj = alloc_obj(a, HeapTag::HamtEntry, 2, false);
     // SAFETY: freshly allocated 2-word payload; header written by `alloc_obj`.
     unsafe {
@@ -780,6 +805,9 @@ pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Val
 #[inline]
 pub(crate) fn hamt_collision_in<A: Arena + ?Sized>(a: &mut A, hash: u64, pairs: &[Value]) -> Value {
     debug_assert!(pairs.len() >= 4 && pairs.len().is_multiple_of(2));
+    if a.marks_immortal() {
+        debug_assert_frozen_children(pairs);
+    }
     let count = pairs.len() / 2;
     let obj = alloc_obj(a, HeapTag::HamtCollision, 2 + pairs.len(), false);
     // SAFETY: freshly allocated payload of exactly 2 + 2*count words; header
@@ -804,6 +832,9 @@ pub(crate) fn hamt_branch_in<A: Arena + ?Sized>(
     children: &[Value],
 ) -> Value {
     debug_assert_eq!(bitmap.count_ones() as usize, children.len());
+    if a.marks_immortal() {
+        debug_assert_frozen_children(children);
+    }
     let obj = alloc_obj(a, HeapTag::HamtBranch, 1 + children.len(), false);
     // SAFETY: freshly allocated payload of exactly 1 + n words; header written
     // by `alloc_obj`.
@@ -851,6 +882,9 @@ impl HamtMapRef {
 /// is `Nil` for an empty map, else a trie node.
 #[inline]
 pub(crate) fn hamt_map_in<A: Arena + ?Sized>(a: &mut A, size: usize, root: Value) -> Value {
+    if a.marks_immortal() {
+        debug_assert_frozen_children([&root]);
+    }
     let obj = alloc_obj(a, HeapTag::Map, 3, false);
     // SAFETY: freshly allocated 3-word payload; header written by `alloc_obj`.
     unsafe {
@@ -1268,10 +1302,12 @@ impl Value {
         }
     }
 
-    /// As [`Value::tuple_in`], overwriting `reuse` in place when it names a
-    /// cell (see [`reuse_or_alloc`] for the Perceus contract).
+    /// Allocate a fresh `Tuple` over `elements`.
     /// Allocation: `2 + elements.len()` words.
     pub fn tuple_in<A: Arena + ?Sized>(a: &mut A, elements: &[Value]) -> Value {
+        if a.marks_immortal() {
+            debug_assert_frozen_children(elements);
+        }
         let obj = alloc_obj(a, HeapTag::Tuple, 1 + elements.len(), false);
         // SAFETY: payload sized for the count word plus the elements; header
         // written by `alloc_obj`.
@@ -1299,10 +1335,12 @@ impl Value {
         }
     }
 
-    /// As [`Value::closure_in`], overwriting `reuse` in place when it names a
-    /// cell (see [`reuse_or_alloc`] for the Perceus contract).
+    /// Allocate a fresh `Closure` capturing `captures`.
     /// Allocation: `3 + captures.len()` words.
     pub fn closure_in<A: Arena + ?Sized>(a: &mut A, func_idx: i32, captures: &[Value]) -> Value {
+        if a.marks_immortal() {
+            debug_assert_frozen_children(captures);
+        }
         let obj = alloc_obj(a, HeapTag::Closure, 2 + captures.len(), false);
         // SAFETY: payload sized for func_idx + count + captures; header written
         // by `alloc_obj`.
@@ -1373,6 +1411,13 @@ impl Value {
     ) -> Value {
         debug_assert!(enum_name.is_tag(HeapTag::Str) && variant_name.is_tag(HeapTag::Str));
         debug_assert!(labels.is_tag(HeapTag::Tuple));
+        if a.marks_immortal() {
+            debug_assert_frozen_children(
+                [&enum_name, &variant_name, &labels]
+                    .into_iter()
+                    .chain(payload),
+            );
+        }
         let obj = reuse_or_alloc(a, reuse, HeapTag::Enum, 6 + payload.len());
         // SAFETY: payload sized for the 6 fixed words plus the payload values;
         // header written by `reuse_or_alloc`.

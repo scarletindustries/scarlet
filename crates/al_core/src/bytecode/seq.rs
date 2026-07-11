@@ -226,20 +226,16 @@ pub fn empty_in<A: Arena + ?Sized>(a: &mut A) -> Value {
     root_in(a, 0, 0, Value::nil(), Value::nil(), Value::nil())
 }
 
-/// Bulk build: a strict (fully packed) tree plus a tail. O(n).
-pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
-    let n = items.len();
-    if n == 0 {
-        return empty_in(a);
-    }
-    if n <= B {
-        let tail = leaf_from(a, items);
-        return root_in(a, n, 0, Value::nil(), Value::nil(), tail);
-    }
-    // Keep the trailing 1..=32 elements as the tail; pack the rest.
-    let tail_len = if n.is_multiple_of(B) { B } else { n % B };
-    let (body, tail_items) = items.split_at(n - tail_len);
-    let mut nodes: Vec<Value> = body.chunks(B).map(|c| leaf_from(a, c)).collect();
+/// Trailing 1..=B elements the bulk builders keep as the tail buffer; the
+/// remaining body (a whole number of leaves) is packed into the strict tree.
+/// Only meaningful for `n > B`.
+fn bulk_tail_len(n: usize) -> usize {
+    if n.is_multiple_of(B) { B } else { n % B }
+}
+
+/// Pack a non-empty list of completed same-height nodes into a strict tree,
+/// one level per iteration, returning the root and its shift.
+fn pack_tree<A: Arena + ?Sized>(a: &mut A, mut nodes: Vec<Value>) -> (Value, usize) {
     let mut shift = 0;
     // Group in place: output i is written to nodes[i], which is strictly before
     // the read window [i*B, (i+1)*B) for B > 1, so writes never clobber unread
@@ -254,8 +250,23 @@ pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
         }
         nodes.truncate(new_len);
     }
+    (nodes.remove(0), shift)
+}
+
+/// Bulk build: a strict (fully packed) tree plus a tail. O(n).
+pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
+    let n = items.len();
+    if n == 0 {
+        return empty_in(a);
+    }
+    if n <= B {
+        let tail = leaf_from(a, items);
+        return root_in(a, n, 0, Value::nil(), Value::nil(), tail);
+    }
+    let (body, tail_items) = items.split_at(n - bulk_tail_len(n));
+    let nodes: Vec<Value> = body.chunks(B).map(|c| leaf_from(a, c)).collect();
+    let (tree, shift) = pack_tree(a, nodes);
     let tail = leaf_from(a, tail_items);
-    let tree = nodes.remove(0);
     root_in(a, n, shift, Value::nil(), tree, tail)
 }
 
@@ -283,8 +294,7 @@ pub fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Val
         let tail = leaf_of(a, start, end);
         return root_in(a, n, 0, Value::nil(), Value::nil(), tail);
     }
-    // Keep the trailing 1..=32 elements as the tail; pack the rest.
-    let tail_len = if n.is_multiple_of(B) { B } else { n % B };
+    let tail_len = bulk_tail_len(n);
     let body_end = end - tail_len as i64;
     let mut nodes: Vec<Value> = Vec::with_capacity((n - tail_len) / B);
     let mut i = start;
@@ -293,20 +303,8 @@ pub fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Val
         nodes.push(leaf_of(a, i, hi));
         i = hi;
     }
-    let mut shift = 0;
-    // Group in place; see `from_slice` for the invariant.
-    while nodes.len() > 1 {
-        shift += BITS;
-        let len = nodes.len();
-        let new_len = len.div_ceil(B);
-        for k in 0..new_len {
-            let branch = branch_from(a, shift, &nodes[k * B..((k + 1) * B).min(len)]);
-            nodes[k] = branch;
-        }
-        nodes.truncate(new_len);
-    }
+    let (tree, shift) = pack_tree(a, nodes);
     let tail = leaf_of(a, body_end, end);
-    let tree = nodes.remove(0);
     root_in(a, n, shift, Value::nil(), tree, tail)
 }
 
@@ -850,8 +848,10 @@ fn execute_plan<A: Arena + ?Sized>(
 // ---- iteration ----------------------------------------------------------------
 
 /// Element iterator over an array, front to back: head buffer, in-order tree
-/// walk, tail buffer. Holds raw pointers into the arena — see
-/// [`SeqRef::iter`] for the (no collection while live) rooting caveat.
+/// walk, tail buffer. Self-contained: every node it walks is held as an owned
+/// `Value` (the sections array, the branch stack, the current leaf), so the
+/// nodes stay alive via their reference counts for as long as the iterator
+/// does — no raw pointers, no rooting requirement on the caller.
 pub struct SeqIter {
     /// Root sections still to be walked, in element order.
     sections: [Value; 3],
