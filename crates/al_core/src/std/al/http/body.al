@@ -8,6 +8,10 @@ import al/http/headers.{Header}
 // full body arrives in a handful of pulls, small enough that a slow consumer
 // never has more than one chunk of memory pinned.
 const READ_SIZE = 65536
+// Per-read bound for the Content-Length reader: a peer that accepts the
+// request but then stalls mid-body for this long forfeits the connection
+// (TimedOut), instead of pinning the reading process forever.
+pub const BODY_READ_TIMEOUT_MS = 30000
 const CRLF = <<'\r\n'>>
 const ZERO = <<'0'>>
 // 0-size chunk + empty trailer block: the terminator for a trailer-free body.
@@ -45,11 +49,12 @@ pub fn from_binary(b Binary) Body {
 // across as many chunks as the socket hands back, then Done. `n` is threaded
 // immutably — the socket fd is the real cursor — and capped at 64 KiB per read.
 // A peer close before `n` is reached is an error (UnexpectedEof), not a clean
-// end.
+// end, and each read is bounded by BODY_READ_TIMEOUT_MS so a stalled peer
+// errs with TimedOut instead of parking the reader forever.
 pub fn content_length(reader Socket, n Int) Body {
 	fn() match n {
 		0 -> Ok(Done([]))
-		else -> match socket.read(reader, int.min(n, READ_SIZE)) {
+		else -> match socket.read_within(reader, int.min(n, READ_SIZE), BODY_READ_TIMEOUT_MS) {
 			Ok(Data(chunk)) -> Ok(Chunk(chunk, content_length(reader, n - binary.byte_size(chunk))))
 			Ok(Closed) -> Err(UnexpectedEof)
 			Err(e) -> Err(e)
@@ -124,6 +129,33 @@ fn drain_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, NetE
 				Err(e) -> Err(e)
 			}
 		}
+		Err(e) -> Err(e)
+	}
+}
+
+// Like `drain`, but bounded by a byte budget: writes at most `limit` bytes
+// and returns the total the body yielded. A chunk that would push past the
+// budget is NOT written — the count comes back greater than `limit` so the
+// caller (who already advertised the length on the wire) can detect the lie
+// without a single unpromised byte having been sent.
+pub fn drain_counted(body Body, sock Socket, limit Int) Result(Int, NetError) {
+	drain_counted_from(body, sock, limit, 0)
+}
+
+fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Int, NetError) {
+	match pull(body) {
+		Ok(Chunk(data, next)) -> {
+			total = written + binary.byte_size(data)
+			if total > limit {
+				Ok(total)
+			} else {
+				match socket.write(sock, data) {
+					Ok(_) -> drain_counted_from(next, sock, limit, total)
+					Err(e) -> Err(e)
+				}
+			}
+		}
+		Ok(Done(_)) -> Ok(written)
 		Err(e) -> Err(e)
 	}
 }

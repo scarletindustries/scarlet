@@ -1,4 +1,4 @@
-import al/http/headers.{Header}
+import al/http/headers.{Headers}
 import al/http/status
 
 // Sans-IO HTTP/1.1 message parsing, framing, and response-head serialization.
@@ -42,7 +42,7 @@ pub type Parsed {
 		method Binary
 		target Binary
 		version Version
-		headers Array(Header)
+		headers Headers
 		consumed Int
 	)
 	NeedMore
@@ -68,7 +68,7 @@ pub type Framing {
 // decoded body, any trailer fields, and the offset just past the final CRLF —
 // the start of the next pipelined request.
 pub type ChunkBody {
-	ChunkedDone(body Binary, trailers Array(Header), consumed Int)
+	ChunkedDone(body Binary, trailers Headers, consumed Int)
 	ChunkedNeedMore
 	ChunkedBad(status Int)
 }
@@ -96,7 +96,7 @@ pub fn parse_request(buf Binary, off Int) Parsed
 // digits / overflows Int / carries a redundant leading zero ("007"), are all
 // rejected (400).
 @vm(http__framing)
-pub fn framing(hs Array(Header)) Framing
+pub fn framing(hs Headers) Framing
 
 // Decode a chunked transfer-encoded body from `buf` starting at `off`,
 // refusing to decode more than `max` body bytes (413). Each chunk is
@@ -118,9 +118,9 @@ pub fn chunk_decode(buf Binary, off Int, max Int) ChunkBody
 // that terminates the head. Native single-buffer assembly so the head can be
 // the first part of one vectored write alongside the body.
 @vm(http__serialize_head)
-fn serialize_head_with(code Int, reason Binary, hs Array(Header)) Binary
+fn serialize_head_with(code Int, reason Binary, hs Headers) Binary
 
-pub fn serialize_head(code Int, hs Array(Header)) Binary {
+pub fn serialize_head(code Int, hs Headers) Binary {
 	serialize_head_with(code, status.reason_phrase(code), hs)
 }
 
@@ -128,7 +128,7 @@ pub fn serialize_head(code Int, hs Array(Header)) Binary {
 // close unless `Connection: keep-alive`; HTTP/1.1 defaults to keep-alive
 // unless `Connection: close`. `Connection` is a token list (RFC 9110 §7.6.1),
 // so `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
-pub fn should_close(version Version, hs Array(Header)) Bool {
+pub fn should_close(version Version, hs Headers) Bool {
 	match version {
 		Http11 -> headers.contains_token(hs, CONNECTION, CLOSE)
 		Http10 -> !headers.contains_token(hs, CONNECTION, KEEP_ALIVE)
@@ -137,6 +137,6 @@ pub fn should_close(version Version, hs Array(Header)) Bool {
 
 // Whether the client asked the server to send an interim 100 response before
 // it streams the request body (`Expect: 100-continue`).
-pub fn want_100_continue(hs Array(Header)) Bool {
+pub fn want_100_continue(hs Headers) Bool {
 	headers.contains_token(hs, EXPECT, CONTINUE_100)
 }

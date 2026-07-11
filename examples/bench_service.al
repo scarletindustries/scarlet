@@ -19,7 +19,7 @@
 //   POST /logout      expires the cookie
 //   GET  /users/<id>  numeric path segment, map lookup, 404 on miss
 
-import al/http.{Request, Response, Get, Post}
+import al/http.{Request, Response, Fixed, Get, Post}
 import al/http/headers.{Header}
 import al/http/body
 import al/binary.{Dec, Hex}
@@ -206,7 +206,6 @@ fn skip_spaces(b Binary, i Int, n Int) Int {
 // ---------------------------------------------------------------------------
 
 const NAME_CONTENT_TYPE = <<'Content-Type'>>
-const NAME_CONTENT_LENGTH = <<'Content-Length'>>
 const NAME_SET_COOKIE = <<'Set-Cookie'>>
 const NAME_COOKIE = <<'Cookie'>>
 const VAL_JSON = <<'application/json'>>
@@ -214,14 +213,10 @@ const VAL_TEXT = <<'text/plain; charset=utf-8'>>
 
 fn respond(code Int, content_type Binary, s String) Response {
 	bin = binary.from_string(s)
-	len = binary.from_int_ascii(binary.byte_size(bin), Dec)
 	Response(
 		status: code,
-		headers: [
-			Header(name: NAME_CONTENT_TYPE, value: content_type),
-			Header(name: NAME_CONTENT_LENGTH, value: len),
-		],
-		body: body.from_binary(bin),
+		headers: [Header(name: NAME_CONTENT_TYPE, value: content_type)],
+		body: Fixed(binary.byte_size(bin), body.from_binary(bin)),
 	)
 }
 
@@ -352,8 +347,7 @@ fn route(req Request, t Tables) Response {
 
 fn port_arg() Int {
 	match process.argv() {
-		[_script, p, .._rest] ->
-			binary.parse_int(binary.from_string(p), Dec) or DEFAULT_PORT
+		[_script, p, .._rest] -> binary.parse_int(binary.from_string(p), Dec) or DEFAULT_PORT
 		else -> DEFAULT_PORT
 	}
 }
