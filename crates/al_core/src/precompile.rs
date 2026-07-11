@@ -63,9 +63,13 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
-use crate::bytecode::{PreludeBindings, Program, compiler::Compiler, new_compiler};
+use crate::bytecode::{
+    PreludeBindings, Program,
+    compiler::{Compiler, CompilerParts},
+    new_compiler,
+};
 use crate::diagnostic::{self, has_errors};
-use crate::module::{self, ModuleInterface, stdlib};
+use crate::module::{ModuleInterface, stdlib};
 use crate::span::Span;
 use crate::types::{InferEngine, TypeBody, TypeInfo};
 
@@ -101,7 +105,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     let at = Span::DUMMY;
     for path in stdlib::all_modules() {
         c.load_module(&path, at);
-        bail_on_errors(&c, &module::path_key(&path))?;
+        bail_on_errors(&c, &path.join("/"))?;
     }
 
     let mut interfaces: IndexMap<String, ModuleInterface> =
@@ -116,7 +120,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     // engine.variant_fields arena); an Alias body's target is stored on the
     // TypeInfo struct itself, so each interface copy is closed separately
     // below.
-    let (program, mut engine) = c.into_parts();
+    let (parts, mut engine) = c.into_parts();
     for ti in type_info.values_mut() {
         close_type_info(&mut engine, ti);
     }
@@ -128,20 +132,28 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
         }
     }
 
+    let CompilerParts {
+        program,
+        prelude,
+        reserved,
+        next_type_id,
+        local_count,
+    } = parts;
     let out = PrecompileOutput {
-        prelude: program.1.clone(),
-        reserved: program.2.clone(),
-        next_type_id: program.3,
+        prelude,
+        reserved,
+        next_type_id,
         blob: PrecompiledBlob {
             interfaces,
             type_info,
-            local_count: program.4,
-            program: program.0,
+            local_count,
+            program,
         },
     };
     Ok((out, engine))
 }
 
+#[allow(clippy::panic)] // build-time only: freezing a placeholder body must fail the build
 fn close_type_info(engine: &mut InferEngine, ti: &mut TypeInfo) {
     match ti.body {
         TypeBody::Custom { variants } => {
@@ -160,7 +172,14 @@ fn close_type_info(engine: &mut InferEngine, ti: &mut TypeInfo) {
                 target: engine.close_body(target, ti.type_params),
             };
         }
-        TypeBody::Unresolved | TypeBody::External => {}
+        // External bodies have nothing to close; an Unresolved body reaching
+        // the freeze means a stdlib type declaration never got its body filled
+        // in — freezing it would bake the placeholder into `.rodata`.
+        TypeBody::External => {}
+        TypeBody::Unresolved => panic!(
+            "type body still unresolved at stdlib freeze: {}",
+            engine.str(ti.name)
+        ),
     }
 }
 

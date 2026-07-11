@@ -29,10 +29,9 @@ impl Compiler {
         //    visible everywhere without an explicit import.
         let at = Span::DUMMY;
         let path = module::al_prelude();
-        let Some(canon) = self.load_module(&path, at) else {
+        let Some((_, key)) = self.load_module(&path, at) else {
             return;
         };
-        let key = module::path_key(&canon);
         #[allow(clippy::expect_used)]
         let iface = self
             .module_table
@@ -57,7 +56,7 @@ impl Compiler {
                 self.prelude = b;
                 self.engine.set_prim_ids(self.prelude.prim_ids());
             }
-            Err(msg) => self.error(msg, at),
+            Err(e) => self.error(e.to_string(), at),
         }
     }
 }
