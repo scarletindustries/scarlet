@@ -119,8 +119,10 @@ fn examples_block(o: &mut String, p: &Palette, exs: &[&str]) {
 fn footer(o: &mut String, p: &Palette, lead: &str, more: &str) {
     let _ = writeln!(
         o,
-        "\n  {}{lead}{}  {more}{}{LEARN_MORE}{}\n",
-        p.dim, p.reset, p.link_open, p.link_close
+        "\n  {}{lead}{}  {more}{}\n",
+        p.dim,
+        p.reset,
+        p.hyperlink(LEARN_MORE, LEARN_MORE)
     );
 }
 

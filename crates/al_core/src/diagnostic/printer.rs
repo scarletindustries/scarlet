@@ -4,16 +4,19 @@ use super::editor::{Editor, build_editor_url, detect_editor};
 use super::{Diagnostic, Severity, count_errors};
 use crate::term::Palette;
 
-const LINK_START: &str = "\x1b]8;;";
-const LINK_END: &str = "\x07";
+/// A detected editor plus the canonical path to link to. Only constructed
+/// when every precondition holds (color on, editor found, file exists), so
+/// holding one is proof the link can be emitted.
+struct LinkTarget {
+    editor: Editor,
+    abs_path: String,
+}
 
 /// Environment-derived rendering decisions, computed once per `print_diagnostics`
 /// call so per-diagnostic formatting is a pure function of its inputs.
 struct RenderCtx {
-    editor: Option<Editor>,
-    abs_path: String,
     palette: Palette,
-    links: bool,
+    link: Option<LinkTarget>,
 }
 
 fn severity_label(severity: Severity) -> &'static str {
@@ -55,12 +58,12 @@ fn format_diagnostic_with_lines(
     let display_line = d.span.start_line + 1;
     let display_col = d.span.start_column + 1;
     let location = format!("{file_path}:{display_line}:{display_col}");
-    let loc = match (ctx.links, ctx.editor) {
-        (true, Some(ed)) => {
-            let url = build_editor_url(ed, &ctx.abs_path, display_line, display_col);
-            format!("{LINK_START}{url}{LINK_END}{location}{LINK_START}{LINK_END}")
+    let loc = match &ctx.link {
+        Some(link) => {
+            let url = build_editor_url(link.editor, &link.abs_path, display_line, display_col);
+            ctx.palette.hyperlink(&url, &location)
         }
-        _ => location,
+        None => location,
     };
 
     let _ = writeln!(
@@ -85,11 +88,20 @@ fn format_diagnostic_with_lines(
         caret_padding.push(if ch == '\t' { '\t' } else { ' ' });
     }
 
+    // Caret count must be in chars, not bytes: `caret_padding` above is one
+    // char per source char, so byte-counting overshoots on multibyte lines.
     let caret_len =
         if d.span.end_line == d.span.start_line && d.span.end_column > d.span.start_column {
-            (d.span.end_column - d.span.start_column) as usize
+            source_line
+                .get(col..d.span.end_column as usize)
+                .map(|s| s.chars().count())
+                .unwrap_or(1)
         } else {
-            source_line.len().saturating_sub(col).max(1)
+            source_line
+                .get(col..)
+                .map(|s| s.chars().count())
+                .unwrap_or(1)
+                .max(1)
         };
     let carets = "^".repeat(caret_len);
     let _ = write!(
@@ -105,15 +117,19 @@ pub fn print_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &s
     let lines: Vec<&str> = source.lines().collect();
 
     let palette = Palette::for_stderr();
-    let editor = detect_editor();
-    let abs_path = real_path(file_path);
-    let links = palette.enabled() && editor.is_some() && std::path::Path::new(&abs_path).exists();
-    let ctx = RenderCtx {
-        editor,
-        abs_path,
-        palette,
-        links,
+    // Cheap gates first: only detect an editor (which may fork `ps`) when a
+    // link could actually be rendered.
+    let link = if palette.enabled() {
+        let abs_path = real_path(file_path);
+        if std::path::Path::new(&abs_path).exists() {
+            detect_editor().map(|editor| LinkTarget { editor, abs_path })
+        } else {
+            None
+        }
+    } else {
+        None
     };
+    let ctx = RenderCtx { palette, link };
 
     let mut output: Vec<String> = Vec::new();
     for d in diagnostics {

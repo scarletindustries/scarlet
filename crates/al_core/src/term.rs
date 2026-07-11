@@ -16,7 +16,8 @@ pub fn color_enabled(s: &impl IsTerminal) -> bool {
 
 /// Resolved ANSI palette. Every field is either a real escape sequence or an
 /// empty string, decided once based on the environment so call sites can
-/// interpolate unconditionally.
+/// interpolate unconditionally. The private `enabled` field means a `Palette`
+/// can only be built here, so it can never lie about whether color is on.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub reset: &'static str,
@@ -26,8 +27,9 @@ pub struct Palette {
     pub cyan: &'static str,
     pub blue: &'static str,
     pub error: &'static str,
-    pub link_open: &'static str,
-    pub link_close: &'static str,
+    link_open: &'static str,
+    link_close: &'static str,
+    enabled: bool,
 }
 
 const ON: Palette = Palette {
@@ -40,6 +42,7 @@ const ON: Palette = Palette {
     error: "\x1b[1;31m",
     link_open: "\x1b[4;36m",
     link_close: "\x1b[0m",
+    enabled: true,
 };
 
 const OFF: Palette = Palette {
@@ -52,7 +55,12 @@ const OFF: Palette = Palette {
     error: "",
     link_open: "",
     link_close: "",
+    enabled: false,
 };
+
+/// OSC 8 hyperlink open/close sequences (terminated with BEL).
+const OSC8_OPEN: &str = "\x1b]8;;";
+const OSC8_CLOSE: &str = "\x07";
 
 impl Palette {
     pub fn for_stream(s: &impl IsTerminal) -> Self {
@@ -68,6 +76,20 @@ impl Palette {
     }
 
     pub fn enabled(&self) -> bool {
-        !self.reset.is_empty()
+        self.enabled
+    }
+
+    /// Render `text` as an OSC 8 terminal hyperlink to `url`, styled with the
+    /// palette's link colors. When the palette is disabled, returns `text`
+    /// unchanged so piped output stays free of escape sequences.
+    pub fn hyperlink(&self, url: &str, text: &str) -> String {
+        if self.enabled {
+            format!(
+                "{OSC8_OPEN}{url}{OSC8_CLOSE}{}{text}{}{OSC8_OPEN}{OSC8_CLOSE}",
+                self.link_open, self.link_close
+            )
+        } else {
+            text.to_string()
+        }
     }
 }
