@@ -39,16 +39,17 @@ pub mod elaborate_pat;
 pub mod eta;
 pub mod resolve;
 pub mod rty;
+pub(crate) mod slots;
 pub mod zonk;
 
 pub use elaborate::{
     Elab, ElabCtx, OrShape, WalkStep, elaborate_body, elaborate_toplevel, elaborator_bug,
 };
-pub use elaborate_pat::{CtorPat, PatCtx, elaborate_arms, elaborate_pattern, pat_binds};
-pub use eta::{FnRTy, eta_wrapper};
+pub use elaborate_pat::{CtorPat, PatCtx, elaborate_arms, elaborate_pattern};
+pub use eta::{FnRTy, FnTable, eta_wrapper};
 pub use resolve::{CallForm, Denotation, EtaTarget, ValueForm};
 pub use rty::{RSlice, RTy, ResolvedNode, ResolvedPool};
-pub use zonk::{UnsolvedVar, Zonker, pool_for, zonk};
+pub use zonk::{UnsolvedVar, Zonker, pool_for};
 
 use crate::bytecode::{Op, Value};
 use crate::core_ir::{ConstId, FuncIdx, VariantRef};
@@ -101,15 +102,18 @@ pub enum ValueRef {
     /// `import mod.{x}` binding) — `PushLocal slot`. Unlike every other
     /// variant this index is minted outside the IR and is anchored to no
     /// [`BindingId`]; it exists only because import bindings are materialised
-    /// by the module walk rather than by the elaborator.
-    Slot(u32),
+    /// by the module walk rather than by the elaborator. `i32` end-to-end:
+    /// the walk allocates slots as `i32` and `Op` immediates are `i32`, so
+    /// there is no width change anywhere on the path.
+    Slot(i32),
     /// [`GlobalSlot`] in the entry frame — `PushGlobal slot`, the same slot the
     /// defining [`TypedBind::global`] carries. A top-level `fn` referenced as a
     /// *value* loads this way even inside itself; self-*calls* are
     /// [`TypedCallee::SelfRec`].
     Global(GlobalSlot),
-    /// `PushCapture idx` — a value captured from the enclosing frame.
-    Capture(u32),
+    /// `PushCapture idx` — a value captured from the enclosing frame. `i32`
+    /// for the same reason as [`ValueRef::Slot`].
+    Capture(i32),
     /// `PushSelf` — the current closure itself.
     SelfClosure,
 }
@@ -453,21 +457,6 @@ impl TypedExpr {
             | TypedExpr::Match { ty, .. } => *ty,
         }
     }
-
-    /// Whether this node is a control-flow join — an `if`/`match`/short-circuit
-    /// that `lower` must seal as its own tree and bind with a `LetJoin` when it
-    /// appears in operand position.
-    pub fn is_join(&self) -> bool {
-        matches!(
-            self,
-            TypedExpr::If { .. }
-                | TypedExpr::Match { .. }
-                | TypedExpr::And { .. }
-                | TypedExpr::Or { .. }
-                | TypedExpr::Let { .. }
-                | TypedExpr::Seq { .. }
-        )
-    }
 }
 
 /// One typechecked function. Parameter `i` is bound as `BindingId(i)`, so
@@ -631,24 +620,6 @@ impl TempTys {
     }
 }
 
-impl TypedProgram {
-    pub fn func(&self, idx: FuncIdx) -> Option<&TypedFn> {
-        usize::try_from(idx).ok().and_then(|i| self.fns.get(i))
-    }
-
-    pub fn ty(&self, t: RTy) -> ResolvedNode {
-        self.pool.node(t)
-    }
-
-    /// The `Value` a [`ConstId`] names. `CoreProgram::consts` as `lower` hands
-    /// it back *is* this vector — neither appended to nor reordered. Only
-    /// `Compiler::core.consts`, assigned wholesale from `Program::constants`
-    /// after emit, may be a superset, and then this vector is its prefix.
-    pub fn const_value(&self, id: ConstId) -> Option<&Value> {
-        self.consts.get(id.0 as usize)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,7 +669,7 @@ mod tests {
 
     impl ElabCtx for PreludeCtx {
         fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
-            Zonker::new(&self.eng).zonk_or_opaque(pool, t)
+            Zonker::new(&self.eng).zonk_or_opaque(pool, t).0
         }
         fn ty_int(&mut self) -> Ty {
             let id = self.eng.prim_ids().int;
@@ -727,7 +698,7 @@ mod tests {
         never!(fn int_const(&mut self, _: i64) -> ConstId);
         never!(fn binary_const(&mut self, _: Vec<u8>, _: u64) -> ConstId);
         never!(fn resolve_name(&mut self, _: &str) -> Option<(Ty, Denotation)>);
-        never!(fn resolve_qualified(&mut self, _: &str, _: &str) -> Option<(Ty, Denotation)>);
+        never!(fn resolve_qualified(&mut self, _: &str, _: &str, _: Span) -> Option<(Ty, Denotation)>);
         never!(fn ctor_field(&mut self, _: Ty, _: &str) -> Option<(u32, Ty)>);
         never!(fn ctor_labels(&mut self, _: crate::core_ir::VariantRef) -> Option<Vec<StrId>>);
         never!(fn closure(&mut self, _: Span) -> Option<(FuncIdx, Vec<StrId>)>);
@@ -837,22 +808,22 @@ mod tests {
             temps,
         };
 
-        let out = lower::lower_all(&p);
+        let out = lower::lower(&p);
         assert_eq!(
-            out.program.consts.len(),
+            out.consts.len(),
             consts.len(),
             "lower has no pool to intern into: it hands back what it was given"
         );
         assert_eq!(
-            bits(&out.program.consts),
+            bits(&out.consts),
             bits(&consts),
             "every ConstId the elaborator minted must name the same Value after \
              lowering, or PushConst operands baked into TypedExpr::Const would \
              have to be renumbered"
         );
         assert_eq!(
-            p.const_value(ConstId(1)).map(Value::to_bits),
-            Some(out.program.consts[1].to_bits())
+            p.consts.get(ConstId(1).0 as usize).map(Value::to_bits),
+            Some(out.consts[1].to_bits())
         );
     }
 
@@ -924,9 +895,9 @@ mod tests {
             temps,
         };
 
-        let out = lower::lower_all(&p);
+        let out = lower::lower(&p);
         assert_eq!(
-            bits(&out.program.consts),
+            bits(&out.consts),
             bits(&consts),
             "the array arm's length check reads TypedPat::Array's pooled `len`; \
              lower neither appends to nor reorders the pool it was handed"

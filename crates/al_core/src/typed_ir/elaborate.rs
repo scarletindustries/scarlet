@@ -66,16 +66,16 @@ use std::collections::HashMap;
 use smallvec::SmallVec;
 
 use super::elaborate_pat::{CtorPat, PatCtx, elaborate_arms};
-use super::eta::{FnRTy, eta_wrapper};
+use super::eta::{FnRTy, FnTable, eta_wrapper};
 use super::resolve::{CallForm, Denotation, EtaTarget, ValueForm};
 use super::rty::{RTy, ResolvedNode, ResolvedPool};
+use super::slots::slot_labeled;
 use super::{
     BindingId, GlobalSlot, TypedArm, TypedArrayElem, TypedBinSeg, TypedBind, TypedCallee,
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::ast;
 use crate::bytecode::{BinopKind, Op, ShortCircuitOp, Value, ValueBinop, specialize_binop};
-use crate::core_ir::lower::slot_labeled;
 use crate::core_ir::{ConstId, FuncIdx, VariantRef};
 use crate::span::Span;
 use crate::types::{NO_STR, Prim, StrId, Ty};
@@ -161,8 +161,15 @@ pub trait ElabCtx {
     /// hands back the pair of loads, not a raw slot the elaborator has to
     /// reinterpret.
     fn resolve_name(&mut self, name: &str) -> Option<(Ty, Denotation)>;
-    /// Resolve a `qualifier.member` name.
-    fn resolve_qualified(&mut self, qual: &str, member: &str) -> Option<(Ty, Denotation)>;
+    /// Resolve a `qualifier.member` name. `span` is the member's, for the
+    /// internal-error report should the module's interface turn out to be
+    /// missing the runtime binding the check walk resolved.
+    fn resolve_qualified(
+        &mut self,
+        qual: &str,
+        member: &str,
+        span: Span,
+    ) -> Option<(Ty, Denotation)>;
     /// Field index for `.field` on a receiver of `receiver` type — the
     /// across-all-variants check the check walk already ran.
     fn ctor_field(&mut self, receiver: Ty, field: &str) -> Option<(u32, Ty)>;
@@ -261,7 +268,7 @@ pub enum WalkStep {
 pub fn elaborate_body<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
-    fns: &mut Vec<TypedFn>,
+    fns: &mut FnTable,
     name: StrId,
     params: &[(StrId, Ty)],
     body: &ast::Expression,
@@ -279,7 +286,7 @@ pub fn elaborate_body<C: ElabCtx>(
 pub fn elaborate_toplevel<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
-    fns: &mut Vec<TypedFn>,
+    fns: &mut FnTable,
     name: StrId,
     block: &ast::BlockExpression,
     ret_ty: Ty,
@@ -296,7 +303,7 @@ pub fn elaborate_toplevel<C: ElabCtx>(
 fn elaborate_fn<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
-    fns: &mut Vec<TypedFn>,
+    fns: &mut FnTable,
     name: StrId,
     params: &[(StrId, Ty)],
     ret_ty: Ty,
@@ -338,7 +345,7 @@ pub struct Elab<'a, C: ElabCtx> {
     pool: &'a mut ResolvedPool,
     /// The program's function table. Eta wrappers are appended here; nothing is
     /// ever appended to a `Program`'s instruction stream mid-walk.
-    fns: &'a mut Vec<TypedFn>,
+    fns: &'a mut FnTable,
     /// What the check walk saw in this body, in the order it saw it: the type of
     /// every expression it entered, and every `name.field` verdict it reached.
     /// Read strictly in order — never indexed by span, never searched.
@@ -397,7 +404,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     fn new(
         ctx: &'a mut C,
         pool: &'a mut ResolvedPool,
-        fns: &'a mut Vec<TypedFn>,
+        fns: &'a mut FnTable,
         walk_tys: &'a [WalkStep],
     ) -> Self {
         let anon = NO_STR;
@@ -554,13 +561,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    /// Mint a bind for a source name, pinning it to the entry-frame slot the
-    /// module walk allocated when it is a module-scope binding. Def and use
-    /// then carry the same [`GlobalSlot`], so nothing downstream maps a name
-    /// back to a slot.
-    /// A bind for a module-scope `let`/destructured name: it takes the next
-    /// entry-frame slot the check walk queued. A declaration does not go
-    /// through here — its slot rides on its [`ElabCtx::toplevel_decls`] record.
+    /// A bind for a module-scope `let`: it takes the next entry-frame slot the
+    /// check walk queued, so def and use carry the same [`GlobalSlot`] and
+    /// nothing downstream maps a name back to a slot. A destructured name
+    /// takes its slot in [`Self::irrefutable`] instead, and a declaration's
+    /// rides on its [`ElabCtx::toplevel_decls`] record.
     fn scoped_bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
         let mut b = self.new_bind(name, ty);
         if self.module_scope {
@@ -982,7 +987,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         else {
             elaborator_bug("qualified member on a non-`name.field` shape", at)
         };
-        let Some((mty, den)) = self.ctx.resolve_qualified(&qual.name, &member.name) else {
+        let Some((mty, den)) = self
+            .ctx
+            .resolve_qualified(&qual.name, &member.name, member.span)
+        else {
             elaborator_bug("qualified member the check walk resolved", at)
         };
         let sid = self.ctx.intern(&member.name);
@@ -1076,7 +1084,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         };
         let sig = self.resolve(fn_ty);
         match den.as_callee(sig) {
-            CallForm::Ctor(_) => Callee::Ctor { ty: fn_ty, den },
+            CallForm::Ctor => Callee::Ctor { ty: fn_ty, den },
             CallForm::Callee(c) => Callee::Value(c),
         }
     }
@@ -1139,7 +1147,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             }
         }
 
-        let (by_pos, _) = slot_labeled(cp.labels(), arity, supplied);
+        let (by_pos, errors) = slot_labeled(cp.labels(), arity, supplied);
+        // The check walk slotted these same args with the same `slot_labeled`
+        // and reported every error it returned; a clean module reslots with
+        // none. An error here means the two walks disagree about the call.
+        if !errors.is_empty() {
+            elaborator_bug("constructor arguments the check walk mis-slotted", at)
+        }
         // Exactly `arity` slots and exactly `arity` field types: the zip pairs
         // each unfilled slot with the type of the field it projects.
         let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
@@ -1147,19 +1161,22 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         for (i, (slot, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
             match slot {
                 Some(v) => fields.push(v),
-                None => match spread {
-                    Some(base) => {
-                        fields.push(TypedExpr::Field {
-                            ty: fty,
-                            recv: Box::new(self.var(base.id)),
-                            idx: i as u32,
-                            checked: true,
-                        });
-                    }
-                    // A missing arg with no `..base` is an arity error the check
-                    // walk already reported. Keep the shape balanced.
-                    None => fields.push(self.nil_expr()),
-                },
+                None => {
+                    // A slot no argument filled reads from `..base`. With no
+                    // spread it is an arity error the check walk reports, so a
+                    // clean module cannot reach here — filling the slot with a
+                    // guessed `Nil` would hand Perceus a non-heap type for a
+                    // possibly-heap field.
+                    let Some(base) = spread else {
+                        elaborator_bug("constructor field with no argument and no spread", at)
+                    };
+                    fields.push(TypedExpr::Field {
+                        ty: fty,
+                        recv: Box::new(self.var(base.id)),
+                        idx: i as u32,
+                        checked: true,
+                    });
+                }
             }
         }
         let ctor = TypedExpr::Ctor {
@@ -1280,7 +1297,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         // of their initialisers (`x = { y = 1; y }`) restores `false` here, so
         // its `y` stays a frame local.
         let outer = std::mem::replace(&mut self.module_scope, is_top);
-        let e = self.block_nodes(&seq, &be.body, result_ty);
+        let e = self.block_nodes(&seq, &be.body, result_ty, be.span);
         self.module_scope = outer;
         self.names.truncate(mark);
         e
@@ -1321,7 +1338,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// module toplevel is one spine node per declaration and real modules run
     /// to thousands. `lower`, which consumes the spine, is iterative for the
     /// same reason.
-    fn block_nodes(&mut self, seq: &[Step], body: &[ast::Node], result_ty: Ty) -> TypedExpr {
+    fn block_nodes(
+        &mut self,
+        seq: &[Step],
+        body: &[ast::Node],
+        result_ty: Ty,
+        span: Span,
+    ) -> TypedExpr {
         let mut spine: Vec<Frame> = Vec::with_capacity(seq.len());
         let mut steps = seq.iter().peekable();
         let tail = loop {
@@ -1330,7 +1353,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 break self.nil_expr();
             };
             let Some(node) = body.get(idx) else {
-                break self.nil_expr();
+                // Every schedule index is bounds-checked by `decl_schedule` or
+                // ranges over `body` itself; a miss means the schedule was
+                // built against a different block.
+                elaborator_bug("block schedule index out of range", span)
             };
             match node {
                 ast::Node::Expression(e) if steps.peek().is_none() => {
@@ -1470,16 +1496,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 // A module-scope destructured name is additionally a global,
                 // just like a top-level `let`: fn bodies read it via
                 // `PushGlobal <slot>`.
-                let global = if self.module_scope {
-                    self.ctx.next_global_slot()
-                } else {
-                    None
+                let Some((b, _)) = lets.iter_mut().find(|(b, _)| b.id == src) else {
+                    elaborator_bug("destructured name with no projection bind", name.span)
                 };
-                if let Some((b, _)) = lets.iter_mut().find(|(b, _)| b.id == src) {
-                    if self.module_scope {
-                        b.name = sid;
-                    }
-                    b.global = global;
+                if self.module_scope {
+                    b.name = sid;
+                    b.global = self.ctx.next_global_slot();
                 }
             }
             ast::Pattern::Tuple { elements, span } => {
@@ -1506,14 +1528,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let resolved = match qualifier {
                     Some(q) => self
                         .ctx
-                        .resolve_qualified(&q.name, &name.name)
+                        .resolve_qualified(&q.name, &name.name, name.span)
                         .and_then(|(ty, den)| self.ctor_of(ty, den, src_ty, name.span)),
                     None => self.ctor_at(&name.name, src_ty, name.span),
                 };
                 let Some(cp) = resolved else {
                     elaborator_bug("unresolved constructor pattern", name.span)
                 };
-                let by_pos = self.slot_pattern_args(&cp, args);
+                let by_pos = self.slot_pattern_args(&cp, args, name.span);
                 let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
                 for (i, (sub, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
                     let Some(sub) = sub else { continue };
@@ -1536,10 +1558,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     /// Slot a constructor pattern's positional/labeled args into declared-field
     /// order, so a slot index is the field index, not the source-arg index.
+    /// The check walk slotted the same args and reported every error, so a
+    /// slot error on a clean module is a desync between the two walks.
     fn slot_pattern_args<'p>(
         &mut self,
         cp: &CtorPat,
         args: &'p [ast::PatternArg],
+        span: Span,
     ) -> SmallVec<[Option<&'p ast::Pattern>; 4]> {
         let mut supplied: SmallVec<[(Option<StrId>, &ast::Pattern); 4]> =
             SmallVec::with_capacity(args.len());
@@ -1552,7 +1577,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 }
             }
         }
-        slot_labeled(cp.labels(), cp.arity(), supplied).0
+        let (by_pos, errors) = slot_labeled(cp.labels(), cp.arity(), supplied);
+        if !errors.is_empty() {
+            elaborator_bug("constructor pattern arg desync", span)
+        }
+        by_pos
     }
 }
 
@@ -1614,7 +1643,7 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         let span = self.pat_span;
         let resolved = self
             .ctx
-            .resolve_qualified(qual, name)
+            .resolve_qualified(qual, name, span)
             .and_then(|(ty, den)| self.ctor_of(ty, den, scrut, span));
         match resolved {
             Some(cp) => cp,

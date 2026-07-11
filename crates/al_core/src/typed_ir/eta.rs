@@ -17,9 +17,9 @@
 //! `crates/al/tests/type_semantics.rs::a_branch_after_an_eta_wrapper_jumps_to_the_right_place`,
 //! and it is a bug this module makes unspellable rather than merely fixed:
 //!
-//! * [`eta_wrapper`] is handed `&mut Vec<TypedFn>` and nothing else mutable.
-//!   There is no `Program`, no `code`, no address, and no `&mut Compiler` in
-//!   its signature, so it *cannot* write an instruction.
+//! * [`eta_wrapper`] is handed `&mut FnTable` and nothing else mutable. There
+//!   is no `Program`, no `code`, no address, and no `&mut Compiler` in its
+//!   signature, so it *cannot* write an instruction.
 //! * What it hands back is a zero-capture [`TypedExpr::Closure`] carrying a
 //!   [`FuncIdx`] — an index into [`TypedProgram::fns`], not a code address.
 //!   Nothing resolves that index until the emit loop walks `fns`, by which
@@ -44,6 +44,57 @@ use super::resolve::EtaTarget;
 use super::{
     BindingId, RTy, ResolvedNode, ResolvedPool, TypedCallee, TypedExpr, TypedFn, ValueRef,
 };
+
+/// The program's function table under construction: [`TypedProgram::fns`]
+/// before it is finished, and the only minter of the [`FuncIdx`] a
+/// [`TypedExpr::Closure`] over an appended function carries.
+///
+/// [`FnTable::push`] is the only way to append, and it returns the index of
+/// the slot the function actually landed in. A caller therefore cannot number
+/// a wrapper against one table while appending it to another, and cannot
+/// insert a function without learning its index — the mismatch the old
+/// `&mut Vec<TypedFn>` seam left to a doc warning is now unspellable.
+///
+/// The table derefs to `[TypedFn]` for reading and for *replacing* an entry
+/// in place (the compiler fills a body into the placeholder slot it
+/// reserved); a slice cannot grow, so no index is ever minted outside `push`.
+///
+/// [`TypedProgram::fns`]: super::TypedProgram::fns
+#[derive(Debug, Default)]
+pub struct FnTable(Vec<TypedFn>);
+
+impl FnTable {
+    pub fn new() -> FnTable {
+        FnTable(Vec::new())
+    }
+
+    /// Append `f` and return the [`FuncIdx`] that now names it.
+    pub fn push(&mut self, f: TypedFn) -> FuncIdx {
+        let idx = self.0.len() as FuncIdx;
+        self.0.push(f);
+        idx
+    }
+
+    /// The finished table, for [`TypedProgram::fns`].
+    ///
+    /// [`TypedProgram::fns`]: super::TypedProgram::fns
+    pub fn into_vec(self) -> Vec<TypedFn> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for FnTable {
+    type Target = [TypedFn];
+    fn deref(&self) -> &[TypedFn] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for FnTable {
+    fn deref_mut(&mut self) -> &mut [TypedFn] {
+        &mut self.0
+    }
+}
 
 /// An [`RTy`] known to be `fn(params...) ret`.
 ///
@@ -94,14 +145,8 @@ impl FnRTy {
 /// `name` names the wrapper (it is the source name of the constructor or
 /// builtin, so a stack trace reads `W`, not `__eta__`). `param_name` names
 /// every parameter; the wrapper's body addresses them by [`BindingId`], so this
-/// is only ever displayed.
-///
-/// The `func_idx` the returned closure carries is `fns.len()` at entry, so
-/// `fns` must *be* the program's whole function table — index `i` of it is
-/// `FuncIdx(i)` for every other producer of a `FuncIdx` too (a lambda's
-/// `TypedExpr::Closure`, a `TypedCallee::Known`). A caller that hands over a
-/// vector numbered from zero while lambdas and known fns are numbered from
-/// some other table will get a wrapper that names the wrong function.
+/// is only ever displayed. The returned closure's `func_idx` is whatever
+/// [`FnTable::push`] minted for the wrapper.
 ///
 /// # Panics
 ///
@@ -116,7 +161,7 @@ impl FnRTy {
 /// A nullary constructor never reaches here: it is a construction, not a
 /// wrapper, and `resolve` classifies it as [`super::ValueForm::Ctor`].
 pub fn eta_wrapper(
-    fns: &mut Vec<TypedFn>,
+    fns: &mut FnTable,
     name: StrId,
     param_name: StrId,
     target: EtaTarget,
@@ -160,8 +205,7 @@ pub fn eta_wrapper(
     };
 
     let binds = params.len() as u32;
-    let func_idx = fns.len() as FuncIdx;
-    fns.push(TypedFn {
+    let func_idx = fns.push(TypedFn {
         name,
         params,
         ret,
@@ -228,7 +272,7 @@ mod tests {
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
-        let mut fns: Vec<TypedFn> = Vec::new();
+        let mut fns = FnTable::new();
         let value = eta_wrapper(
             &mut fns,
             NAME,
@@ -276,7 +320,7 @@ mod tests {
         let ty = p.mk_fun(&[int, int], int);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
-        let mut fns: Vec<TypedFn> = Vec::new();
+        let mut fns = FnTable::new();
         let value = eta_wrapper(
             &mut fns,
             NAME,
@@ -326,7 +370,7 @@ mod tests {
         let ctor_ty = FnRTy::of(&p, cty).expect("a Fun node");
         let add_ty = FnRTy::of(&p, aty).expect("a Fun node");
 
-        let mut fns: Vec<TypedFn> = Vec::new();
+        let mut fns = FnTable::new();
         let first = eta_wrapper(
             &mut fns,
             NAME,
@@ -355,10 +399,9 @@ mod tests {
         assert_eq!(fns[idx(&second) as usize].binds, 2);
     }
 
-    /// The index is `fns.len()`, not a count of wrappers: a wrapper synthesised
-    /// into a table that already holds other functions names its own slot in
-    /// *that* table. This is the invariant a caller violates by handing over a
-    /// fresh vector while numbering lambdas and known fns from another one.
+    /// The index is the slot pushed, not a count of wrappers: a wrapper
+    /// synthesised into a table that already holds other functions names its
+    /// own slot in *that* table.
     #[test]
     fn a_wrapper_names_its_slot_in_the_table_it_was_appended_to() {
         let mut p = pool();
@@ -378,7 +421,9 @@ mod tests {
             },
             binds: 0,
         };
-        let mut fns: Vec<TypedFn> = vec![existing(100), existing(101)];
+        let mut fns = FnTable::new();
+        fns.push(existing(100));
+        fns.push(existing(101));
 
         let value = eta_wrapper(
             &mut fns,
@@ -411,7 +456,7 @@ mod tests {
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
-        let mut fns: Vec<TypedFn> = Vec::new();
+        let mut fns = FnTable::new();
         eta_wrapper(
             &mut fns,
             NAME,

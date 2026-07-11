@@ -89,9 +89,11 @@ pub enum EtaTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallForm {
     Callee(TypedCallee),
-    /// A saturated constructor call: `TypedExpr::Ctor { variant, args }`, not a
-    /// call at all.
-    Ctor(VariantRef),
+    /// A constructor call: `TypedExpr::Ctor { variant, args }`, not a call at
+    /// all. Deliberately payload-free — the elaborator's `ctor_of` re-derives
+    /// the variant through [`Denotation::as_ctor`] and owns label reordering
+    /// and the arity check, so no call path can bypass it.
+    Ctor,
 }
 
 impl Denotation {
@@ -101,7 +103,7 @@ impl Denotation {
     }
 
     /// A raw frame slot the module walk assigned — see [`ValueRef::Slot`].
-    pub fn slot(slot: u32) -> Self {
+    pub fn slot(slot: i32) -> Self {
         Denotation(Den::Value(ValueRef::Slot(slot)))
     }
 
@@ -110,7 +112,7 @@ impl Denotation {
         Denotation(Den::Value(ValueRef::Global(slot)))
     }
 
-    pub fn capture(idx: u32) -> Self {
+    pub fn capture(idx: i32) -> Self {
         Denotation(Den::Value(ValueRef::Capture(idx)))
     }
 
@@ -207,18 +209,8 @@ impl Denotation {
                 ty: fn_ty,
                 place,
             }))),
-            Den::Ctor { variant, .. } => CallForm::Ctor(variant),
+            Den::Ctor { .. } => CallForm::Ctor,
             Den::Builtin { op } => CallForm::Callee(TypedCallee::Builtin(op)),
-        }
-    }
-
-    /// The declared arity of a constructor, for the saturation check the
-    /// elaborator does before it decides between [`CallForm::Ctor`] and an eta
-    /// wrapper.
-    pub fn ctor_arity(&self) -> Option<u16> {
-        match self.0 {
-            Den::Ctor { arity, .. } => Some(arity),
-            _ => None,
         }
     }
 
@@ -323,7 +315,7 @@ mod tests {
     fn a_nullary_ctor_is_a_construction_not_a_load() {
         let d = Denotation::ctor(variant(), 0);
         assert_eq!(d.as_value(), ValueForm::Ctor(variant()));
-        assert_eq!(d.as_callee(TY), CallForm::Ctor(variant()));
+        assert_eq!(d.as_callee(TY), CallForm::Ctor);
     }
 
     #[test]
@@ -336,8 +328,8 @@ mod tests {
                 arity: 2
             })
         );
-        assert_eq!(d.as_callee(TY), CallForm::Ctor(variant()));
-        assert_eq!(d.ctor_arity(), Some(2));
+        assert_eq!(d.as_callee(TY), CallForm::Ctor);
+        assert_eq!(d.as_ctor().map(|(_, a)| a), Some(2));
     }
 
     #[test]
@@ -351,7 +343,7 @@ mod tests {
             d.as_value(),
             ValueForm::Eta(EtaTarget::Builtin { op: Op::Add })
         );
-        assert_eq!(d.ctor_arity(), None);
+        assert_eq!(d.as_ctor().map(|(_, a)| a), None);
     }
 
     /// A constructor's frame resolution is meaningless (`resolve_name` finds no

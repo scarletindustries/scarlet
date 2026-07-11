@@ -40,14 +40,12 @@ use crate::ast;
 use crate::bytecode::Op;
 use crate::core_ir::ConstId;
 use crate::core_ir::VariantRef;
-use crate::core_ir::lower::slot_labeled;
 use crate::span::Span;
 use crate::types::StrId;
 
 use super::rty::RTy;
-use super::{
-    BindingId, PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug,
-};
+use super::slots::slot_labeled;
+use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
 
 /// Everything a constructor *pattern* head needs, resolved against the
 /// scrutinee's type. Produced by [`PatCtx::resolve_ctor_pat`], which is where
@@ -293,8 +291,9 @@ impl<C: PatCtx> PatElab<'_, C> {
                 qualifier,
                 name,
                 args,
+                span,
                 ..
-            } => self.ctor(qualifier.as_ref(), &name.name, args, scrut),
+            } => self.ctor(qualifier.as_ref(), &name.name, args, scrut, *span),
             ast::Pattern::Tuple { elements, .. } => {
                 let elems = elements
                     .iter()
@@ -306,7 +305,7 @@ impl<C: PatCtx> PatElab<'_, C> {
                     .collect();
                 TypedPat::Tuple { ty: scrut, elems }
             }
-            ast::Pattern::Array { elements, .. } => self.array(elements, scrut),
+            ast::Pattern::Array { elements, span } => self.array(elements, scrut, *span),
             ast::Pattern::Binary { segments, rest, .. } => self.bin(segments, rest.as_ref(), scrut),
             ast::Pattern::Or { patterns, .. } => {
                 let alts = patterns.iter().map(|a| self.pat(a, scrut)).collect();
@@ -331,6 +330,7 @@ impl<C: PatCtx> PatElab<'_, C> {
         name: &str,
         args: &[ast::PatternArg],
         scrut: RTy,
+        span: Span,
     ) -> TypedPat {
         let info = match qualifier {
             Some(q) => self.cx.resolve_ctor_pat_qualified(&q.name, name, scrut),
@@ -345,7 +345,14 @@ impl<C: PatCtx> PatElab<'_, C> {
                 }
             })
             .collect::<Vec<_>>();
-        let (by_pos, _errors) = slot_labeled(info.labels(), info.arity(), supplied);
+        let (by_pos, errors) = slot_labeled(info.labels(), info.arity(), supplied);
+        // The check walk slotted these same args with the same `slot_labeled`
+        // and reported every error it returned. An error on a clean module
+        // means the two walks disagree; dropping the mis-slotted sub-pattern
+        // would leave its binds unminted and the arm matching too much.
+        if !errors.is_empty() {
+            elaborator_bug("constructor pattern arg desync", span)
+        }
 
         // `slot_labeled` returns exactly `arity` slots and `field_tys` is
         // exactly `arity` long, so the zip pairs every slot with its own field
@@ -365,27 +372,34 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
     }
 
-    fn array(&mut self, elements: &[ast::ArrayPatternElement], scrut: RTy) -> TypedPat {
+    /// The parser only accepts `..rest` as the final element; anything after
+    /// one — which would otherwise be silently dropped, matching a shorter
+    /// prefix than the source wrote — is a desync and aborts.
+    fn array(&mut self, elements: &[ast::ArrayPatternElement], scrut: RTy, span: Span) -> TypedPat {
         let elem_ty = self.cx.array_elem_ty(scrut);
-        let spread = elements
+        let pre = elements
             .iter()
-            .position(|e| matches!(e, ast::ArrayPatternElement::Spread { .. }));
-        let pre = spread.unwrap_or(elements.len());
-        let mut prefix = Vec::with_capacity(pre);
-        for e in elements.iter().take(pre) {
-            if let ast::ArrayPatternElement::Pattern(ep) = e {
-                prefix.push(self.pat(ep, elem_ty));
-            }
+            .position(|e| matches!(e, ast::ArrayPatternElement::Spread { .. }))
+            .unwrap_or(elements.len());
+        let (prefix_elems, rest_elems) = elements.split_at(pre);
+        let mut prefix = Vec::with_capacity(prefix_elems.len());
+        for e in prefix_elems {
+            let ast::ArrayPatternElement::Pattern(ep) = e else {
+                elaborator_bug("array spread not last", span)
+            };
+            prefix.push(self.pat(ep, elem_ty));
         }
         // The `..rest` binding is the scrutinee's own array type: it is the
         // suffix of the same array.
-        let rest = match spread.and_then(|i| elements.get(i)) {
-            None => PatRest::None,
-            Some(ast::ArrayPatternElement::Spread { binding: None, .. }) => PatRest::Discard,
-            Some(ast::ArrayPatternElement::Spread {
-                binding: Some(id), ..
-            }) => PatRest::Bind(self.bind(&id.name, scrut)),
-            Some(ast::ArrayPatternElement::Pattern(_)) => PatRest::None,
+        let rest = match rest_elems {
+            [] => PatRest::None,
+            [ast::ArrayPatternElement::Spread { binding: None, .. }] => PatRest::Discard,
+            [
+                ast::ArrayPatternElement::Spread {
+                    binding: Some(id), ..
+                },
+            ] => PatRest::Bind(self.bind(&id.name, scrut)),
+            _ => elaborator_bug("array spread not last", span),
         };
         // `lower` compares `ArrayLen(scrut)` against the prefix length and
         // `SeqDrop`s by it; it has no pool, so the constant is minted here.
@@ -492,23 +506,13 @@ impl<C: PatCtx> PatElab<'_, C> {
     }
 }
 
-/// Number of distinct [`BindingId`]s a pattern introduces. A convenience for
-/// callers sizing a dense `BindingId → LocalId` map.
-pub fn pat_bind_count(p: &TypedPat) -> usize {
-    pat_binds(p).len()
-}
-
-/// The highest [`BindingId`] a pattern mentions, if any.
-pub fn max_bind(p: &TypedPat) -> Option<BindingId> {
-    pat_binds(p).into_iter().map(|b| b.id).max()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::bytecode::Value;
     use crate::span::Span;
     use crate::type_def::TypeId;
+    use crate::typed_ir::BindingId;
     use crate::typed_ir::rty::ResolvedPool;
     use crate::types::PrimIds;
 
@@ -813,6 +817,62 @@ mod tests {
             &ctor_pat("Bad", vec![pos(var("x")), pos(var("y"))], false),
             user,
         );
+    }
+
+    /// An arg `slot_labeled` cannot place — here an unknown label — is a slot
+    /// error the check walk reported, so a clean module cannot produce one.
+    /// It must abort rather than drop the sub-pattern: dropping it leaves its
+    /// binds unminted and the arm matching more than the source wrote.
+    #[test]
+    #[should_panic(expected = "constructor pattern arg desync")]
+    fn a_mis_slotted_pattern_arg_aborts_rather_than_dropping_it() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let user = cx.user();
+        cx.ctor("W", 0, &["a"], &[int]);
+        let _ = elaborate_pattern(
+            &mut cx,
+            &ctor_pat("W", vec![lab("nope", var("x"))], false),
+            user,
+        );
+    }
+
+    /// So is an arg past the declared arity.
+    #[test]
+    #[should_panic(expected = "constructor pattern arg desync")]
+    fn an_extra_positional_pattern_arg_aborts() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let user = cx.user();
+        cx.ctor("W", 0, &["a"], &[int]);
+        let _ = elaborate_pattern(
+            &mut cx,
+            &ctor_pat("W", vec![pos(var("x")), pos(var("y"))], false),
+            user,
+        );
+    }
+
+    /// An element after `..rest` — which the parser does not produce — must
+    /// abort, not be silently dropped: dropping it matches a shorter prefix
+    /// than the source pattern wrote.
+    #[test]
+    #[should_panic(expected = "array spread not last")]
+    fn an_element_after_the_spread_aborts_rather_than_vanishing() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let arr = cx.arr(int);
+        let p = ast::Pattern::Array {
+            elements: vec![
+                ast::ArrayPatternElement::Pattern(var("x")),
+                ast::ArrayPatternElement::Spread {
+                    binding: Some(ident("rest")),
+                    span: Span::DUMMY,
+                },
+                ast::ArrayPatternElement::Pattern(var("y")),
+            ],
+            span: Span::DUMMY,
+        };
+        let _ = elaborate_pattern(&mut cx, &p, arr);
     }
 
     /// The invariant the type carries: `arity`, `labels` and `field_tys` all
@@ -1198,23 +1258,6 @@ mod tests {
         };
         assert_eq!(elems[0].ty(), int);
         assert_eq!(elems[1].ty(), user);
-        assert_eq!(pat_bind_count(&TypedPat::Tuple { ty: tup, elems }), 2);
-    }
-
-    #[test]
-    fn max_bind_reports_the_last_id_minted() {
-        let mut cx = Ctx::new();
-        let int = cx.int;
-        let tup = cx.pool.mk_tuple(&[int, int]);
-        let p = elaborate_pattern(
-            &mut cx,
-            &ast::Pattern::Tuple {
-                elements: vec![var("a"), var("b")],
-                span: Span::DUMMY,
-            },
-            tup,
-        );
-        assert_eq!(max_bind(&p), Some(BindingId(1)));
-        assert_eq!(max_bind(&TypedPat::Wild { ty: int }), None);
+        assert_eq!(pat_binds(&TypedPat::Tuple { ty: tup, elems }).len(), 2);
     }
 }

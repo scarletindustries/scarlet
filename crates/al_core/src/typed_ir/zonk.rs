@@ -12,8 +12,12 @@
 //!
 //! * A **rigid** variable (`TyVarState::Generic`) is honest polymorphism. It
 //!   became rigid because `generalize`/`generalize_top` quantified it, and it
-//!   maps onto [`ResolvedNode::Bound`] via the quantifier list of the `Scheme`
-//!   that quantified it ([`QuantVar::origin_id`] is exactly that link).
+//!   maps onto [`ResolvedNode::Bound`], numbered in order of first appearance
+//!   within one [`Zonker`]. There is deliberately no scheme-scoped numbering
+//!   mode: no consumer ever zonks a `Scheme`'s closed type against its live
+//!   variables and needs the indices to line up — the compiler resolves each
+//!   node through its own `Zonker` and memoises by union-find root — so a
+//!   `for_scheme` constructor would be API with no caller.
 //! * An **unbound** variable is a type inference never determined. `zonk`
 //!   refuses it: [`UnsolvedVar`] names the offending `Ty` and var id.
 //!
@@ -48,9 +52,9 @@ use std::convert::Infallible;
 use smallvec::SmallVec;
 
 use super::rty::{RTy, ResolvedPool};
-use crate::types::{InferEngine, Scheme, Ty, TypeNode};
+use crate::types::{InferEngine, Ty, TypeNode};
 
-/// A variable that inference never solved, reported by [`zonk`].
+/// A variable that inference never solved, reported by [`Zonker::zonk`].
 ///
 /// `ty` is the arena index of the variable's representative (so `eng.node(ty)`
 /// is `TypeNode::Var(var_id)`), not the type the caller passed in — that type
@@ -129,12 +133,9 @@ impl Unknown for Opaque {
 }
 
 /// Copies inference types into a [`ResolvedPool`], memoising per resolved `Ty`
-/// so a spine shared by many expressions is allocated once.
-///
-/// The memo and the quantifier map are two halves of the same scope: a
-/// `Bound(i)` index is meaningful only relative to one `Scheme`, so caching a
-/// node that contains one is only sound while that scheme is current. Hence
-/// [`Zonker::enter_scheme`] clears both together.
+/// so a spine shared by many expressions is allocated once. Rigid variables
+/// are numbered in order of first appearance, one numbering per `Zonker` (see
+/// the module docs for why there is no scheme-scoped mode).
 pub struct Zonker<'e> {
     eng: &'e InferEngine,
     /// Nodes with no invented variable in them, keyed by the *representative*
@@ -145,17 +146,15 @@ pub struct Zonker<'e> {
     /// variable. Kept apart so [`Zonker::zonk`] — whose whole job is to refuse
     /// exactly those — never reads one back as a success.
     opaque_memo: HashMap<Ty, RTy>,
-    /// Rigid var id (`QuantVar::origin_id`) → its `Bound` index.
+    /// Rigid var id (`QuantVar::origin_id`) or unsolved var id → the `Bound`
+    /// index minted for it, so one variable is one type however often it
+    /// appears.
     quants: HashMap<i32, u32>,
-    /// Next index handed to a rigid variable the current scheme did not
-    /// quantify — a `let`-generalized body-local binder, whose `Bound` index
-    /// no scheme fixes but which is polymorphic all the same.
+    /// Next `Bound` index to mint.
     next_bound: u32,
 }
 
 impl<'e> Zonker<'e> {
-    /// A zonker with no quantifier scope: every rigid variable is numbered in
-    /// order of first appearance.
     pub fn new(eng: &'e InferEngine) -> Self {
         Zonker {
             eng,
@@ -166,37 +165,7 @@ impl<'e> Zonker<'e> {
         }
     }
 
-    /// A zonker whose rigid variables are numbered by `scheme`'s quantifier
-    /// list, so `scheme.ty`'s `Bound(i)`s and the body's rigid vars agree.
-    pub fn for_scheme(eng: &'e InferEngine, scheme: &Scheme) -> Self {
-        let mut z = Zonker::new(eng);
-        z.enter_scheme(scheme);
-        z
-    }
-
-    /// Re-scope onto `scheme`. Drops the memo: cached nodes may embed `Bound`
-    /// indices from the previous scheme, and those indices do not survive the
-    /// move.
-    pub fn enter_scheme(&mut self, scheme: &Scheme) {
-        self.memo.clear();
-        self.opaque_memo.clear();
-        self.quants.clear();
-        let qs = self.eng.quants_of(scheme.quantified);
-        for (i, q) in qs.iter().enumerate() {
-            if let Some(origin) = q.origin_id {
-                self.quants.insert(origin, i as u32);
-            }
-        }
-        // Off the quantifier *count*, not the map: a scheme that crossed
-        // engines (every precompiled stdlib scheme) has `origin_id: None`
-        // throughout, yet its closed `ty` still spells `Bound(0..n)`. Seeding
-        // from `quants.len()` would mint `Bound(0)` for the first body-local
-        // rigid var and silently alias the scheme's own first parameter.
-        self.next_bound = qs.len() as u32;
-    }
-
-    /// The `Bound` index of a rigid variable, minting one if the current
-    /// scheme did not quantify it.
+    /// The `Bound` index of a variable, minting one on first appearance.
     fn bound_index(&mut self, origin: i32) -> u32 {
         if let Some(i) = self.quants.get(&origin) {
             return *i;
@@ -217,9 +186,15 @@ impl<'e> Zonker<'e> {
     /// opaque `Bound`: undetermined and rigidly polymorphic are the same
     /// operational fact — unknown representation, dispatch dynamically. Total,
     /// which is why a body's scratch types can use it (see the module docs).
-    pub fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
+    ///
+    /// The `bool` is true when an opaque `Bound` was invented anywhere in the
+    /// spine — i.e. when a strict [`zonk`](Self::zonk) of the same type would
+    /// have failed. A caller memoising results across zonkers needs it: a type
+    /// unsolved now may be solved by a later body, so an invented node must
+    /// not be remembered as that type's final answer.
+    pub fn zonk_or_opaque(&mut self, pool: &mut ResolvedPool, t: Ty) -> (RTy, bool) {
         match self.resolve::<Opaque>(pool, t) {
-            Ok((r, _)) => r,
+            Ok(r) => r,
             // `Opaque::Err` is uninhabited: the compiler, not a comment, is
             // what rules this out.
             Err(never) => match never {},
@@ -303,22 +278,6 @@ impl<'e> Zonker<'e> {
         }
         Ok((out, invented))
     }
-
-    /// The resolved node `t` denotes, without copying it.
-    pub fn peek(&self, t: Ty) -> TypeNode {
-        self.eng.node(self.eng.find_ref(t))
-    }
-}
-
-/// Resolve `t` against `eng` and copy it into `pool`.
-///
-/// Rigid variables are numbered in order of first appearance. When the caller
-/// holds the `Scheme` that quantified them — and therefore cares that
-/// `Bound(i)` lines up with `quantified[i]` — it should drive a
-/// [`Zonker::for_scheme`] instead, which also amortises the memo across the
-/// many types of one function body.
-pub fn zonk(eng: &InferEngine, pool: &mut ResolvedPool, t: Ty) -> Result<RTy, UnsolvedVar> {
-    Zonker::new(eng).zonk(pool, t)
 }
 
 /// A pool sized for the engine that will feed it. Convenience so callers do
@@ -332,7 +291,7 @@ mod tests {
     use super::*;
     use crate::type_def::TypeId;
     use crate::typed_ir::rty::ResolvedNode;
-    use crate::types::{NO_STR, Prim, PrimIds, QuantVar, ValueKind, new_engine};
+    use crate::types::{Prim, PrimIds, new_engine};
 
     /// Structural, not textual: the node the pool actually holds is a rigid
     /// `Bound`, which is the only thing an undetermined type may become.
@@ -358,7 +317,7 @@ mod tests {
         let arr = e.mk_con(TypeId(4), "Array", &[int]);
         let f = e.mk_fun(&[arr], int);
         let mut pool = pool_for(&e);
-        let r = zonk(&e, &mut pool, f).expect("concrete");
+        let r = Zonker::new(&e).zonk(&mut pool, f).expect("concrete");
         assert_eq!(pool.arity(r), crate::core_ir::Arity(1));
         let p0 = pool.fun_params(r)[0];
         assert_eq!(pool.con_args(p0).len(), 1);
@@ -376,7 +335,7 @@ mod tests {
         // find_ref agrees with find, and leaves the engine alone.
         assert_eq!(e.find_ref(v), e.find(v));
         let mut pool = pool_for(&e);
-        let r = zonk(&e, &mut pool, v).expect("solved");
+        let r = Zonker::new(&e).zonk(&mut pool, v).expect("solved");
         assert_eq!(pool.prim_of(r), Some(Prim::Int));
     }
 
@@ -413,104 +372,28 @@ mod tests {
         assert_eq!(pool.len(), 1);
     }
 
+    /// Rigid variables are numbered in order of first appearance, memoised per
+    /// variable: one variable is one `Bound` however often it appears, and two
+    /// variables are two.
     #[test]
-    fn a_generalized_var_becomes_its_schemes_bound_index() {
+    fn rigid_vars_are_numbered_in_order_of_first_appearance() {
         let mut e = engine();
-        // fn(a, b) b  —  quantified [a, b]
+        // fn(a, b) b  —  generalized, so both vars are rigid.
         let a = e.fresh_var();
         let b = e.fresh_var();
         let f = e.mk_fun(&[a, b], b);
-        let scheme = e.generalize_top(f);
+        let _scheme = e.generalize_top(f);
         let mut pool = pool_for(&e);
-        let mut z = Zonker::for_scheme(&e, &scheme);
-        // The *live* vars still resolve to Generic roots; they must land on the
-        // same Bound indices the scheme's closed type uses.
+        let mut z = Zonker::new(&e);
         let ra = z.zonk(&mut pool, a).expect("rigid");
         let rb = z.zonk(&mut pool, b).expect("rigid");
         assert_eq!(pool.node(ra), ResolvedNode::Bound(0));
         assert_eq!(pool.node(rb), ResolvedNode::Bound(1));
-        // And the scheme's own closed type (which spells `Bound` directly)
-        // agrees with them.
-        let rs = z.zonk(&mut pool, scheme.ty).expect("closed");
-        assert_eq!(pool.node(pool.fun_params(rs)[0]), ResolvedNode::Bound(0));
-        assert_eq!(pool.node(pool.fun_ret(rs).unwrap()), ResolvedNode::Bound(1));
+        // Stable on re-zonk: the index is memoised per variable.
+        assert_eq!(z.zonk(&mut pool, a).expect("rigid"), ra);
         // A rigid var is polymorphic, not missing: no heap cell is assumed.
         assert!(!pool.is_heap(ra));
         assert!(is_bound(pool.node(ra)));
-    }
-
-    #[test]
-    fn a_body_local_rigid_var_gets_a_fresh_index() {
-        let mut e = engine();
-        // The enclosing fn quantifies exactly one var...
-        let a = e.fresh_var();
-        let f = e.mk_fun(&[a], a);
-        let scheme = e.generalize_top(f);
-        // ...while `let xs = []` inside the body generalizes its own element
-        // var (compiler.rs's `generalize(final_ty)` at every `let`). That var
-        // is rigid but not in the fn's quantifier list.
-        e.enter_level();
-        let elem = e.fresh_var();
-        let arr = e.mk_con(TypeId(4), "Array", &[elem]);
-        e.leave_level();
-        let _local = e.generalize(arr);
-
-        let mut pool = pool_for(&e);
-        let mut z = Zonker::for_scheme(&e, &scheme);
-        let ra = z.zonk(&mut pool, a).expect("rigid");
-        let rarr = z.zonk(&mut pool, arr).expect("rigid element");
-        assert_eq!(pool.node(ra), ResolvedNode::Bound(0));
-        assert_eq!(
-            pool.node(pool.con_arg(rarr, 0).unwrap()),
-            ResolvedNode::Bound(1),
-            "a body-local rigid var must not collide with the scheme's"
-        );
-    }
-
-    /// A scheme that crossed engines — every precompiled stdlib scheme, which
-    /// `al/build.rs` emits with `origin_id = None` on every quantifier — still
-    /// spells `Bound(0..n)` in its closed type. Fresh indices must start past
-    /// them, or a body-local type silently becomes the scheme's parameter.
-    #[test]
-    fn a_crossed_engine_schemes_bound_indices_are_never_reused() {
-        let mut e = engine();
-        // fn(a, b) b, closed, with no origin on either quantifier.
-        let b0 = e.mk_bound(0);
-        let b1 = e.mk_bound(1);
-        let f = e.mk_fun(&[b0, b1], b1);
-        let q = QuantVar {
-            constraint: None,
-            name: NO_STR,
-            origin_id: None,
-        };
-        let scheme = Scheme {
-            quantified: e.push_quants(&[q, q]),
-            ty: f,
-            kind: ValueKind::Local,
-            def: None,
-        };
-        // A body-local `let`-generalized rigid var, and an unsolved var.
-        e.enter_level();
-        let local = e.fresh_var();
-        e.leave_level();
-        let _ = e.generalize(local);
-        let unsolved = e.fresh_var();
-
-        let mut pool = pool_for(&e);
-        let mut z = Zonker::for_scheme(&e, &scheme);
-        let rs = z.zonk(&mut pool, scheme.ty).expect("closed");
-        assert_eq!(pool.node(pool.fun_params(rs)[0]), ResolvedNode::Bound(0));
-        assert_eq!(pool.node(pool.fun_params(rs)[1]), ResolvedNode::Bound(1));
-
-        let rl = z.zonk(&mut pool, local).expect("rigid");
-        assert_eq!(
-            pool.node(rl),
-            ResolvedNode::Bound(2),
-            "a body-local rigid var must not alias an unmapped quantifier"
-        );
-        let ro = z.zonk_or_opaque(&mut pool, unsolved);
-        assert_eq!(pool.node(ro), ResolvedNode::Bound(3));
-        assert_ne!(rl, ro);
     }
 
     /// The opaque walk keeps the spine it was handed: `Array(?v)` stays an
@@ -521,12 +404,22 @@ mod tests {
         let mut e = engine();
         let v = e.fresh_var();
         let arr = e.mk_con(TypeId(4), "Array", &[v]);
+        let int = e.mk_con(TypeId(1), "Int", &[]);
         let mut pool = pool_for(&e);
         let mut z = Zonker::new(&e);
-        let r = z.zonk_or_opaque(&mut pool, arr);
+        let (r, invented) = z.zonk_or_opaque(&mut pool, arr);
+        assert!(
+            invented,
+            "an opaque Bound anywhere in the spine must be reported"
+        );
         assert!(matches!(pool.node(r), ResolvedNode::Con { .. }));
         assert!(pool.is_heap(r));
         assert!(is_bound(pool.node(pool.con_arg(r, 0).expect("Array(_)"))));
+
+        // A fully solved type reports no invention: a strict zonk of it would
+        // have succeeded, so a caller may cache the node.
+        let (_, invented) = z.zonk_or_opaque(&mut pool, int);
+        assert!(!invented);
     }
 
     #[test]
@@ -535,7 +428,7 @@ mod tests {
         let v = e.fresh_var();
         let arr = e.mk_con(TypeId(4), "Array", &[v]);
         let mut pool = pool_for(&e);
-        let err = zonk(&e, &mut pool, arr).expect_err("unsolved");
+        let err = Zonker::new(&e).zonk(&mut pool, arr).expect_err("unsolved");
         // The failure names the buried variable, not the spine it was under.
         assert_eq!(err.ty, e.find_ref(v));
         assert_ne!(err.ty, arr);
@@ -562,10 +455,10 @@ mod tests {
         e.unify(callee_arg, empty).expect("well typed");
         e.leave_level();
         let f = e.mk_fun(&[n], n);
-        let scheme = e.generalize_top(f);
+        let _scheme = e.generalize_top(f);
 
         let mut pool = pool_for(&e);
-        let mut z = Zonker::for_scheme(&e, &scheme);
+        let mut z = Zonker::new(&e);
         // The parameter generalized; the element type did not.
         assert!(z.zonk(&mut pool, n).is_ok());
         let err = z
@@ -575,7 +468,11 @@ mod tests {
 
         // ...and the elaborator's policy for it: an undetermined type is
         // operationally the same as a polymorphic one.
-        let opaque = z.zonk_or_opaque(&mut pool, empty);
+        let (opaque, invented) = z.zonk_or_opaque(&mut pool, empty);
+        assert!(
+            invented,
+            "the strict failure above is what the bool reports"
+        );
         assert!(is_bound(
             pool.node(pool.con_arg(opaque, 0).expect("Array(_)"))
         ));
@@ -600,7 +497,7 @@ mod tests {
         let outer = e.mk_con(TypeId(4), "Array", &[inner]);
         let mut pool = pool_for(&e);
         let mut z = Zonker::new(&e);
-        let r = z.zonk_or_opaque(&mut pool, outer);
+        let (r, _) = z.zonk_or_opaque(&mut pool, outer);
         let t = pool.con_arg(r, 0).expect("Array(_)");
         assert!(matches!(pool.node(t), ResolvedNode::Tuple { elems } if elems.len == 2));
         assert!(is_bound(pool.node(pool.tuple_elem(t, 0).unwrap())));
@@ -610,26 +507,9 @@ mod tests {
         );
         assert!(pool.is_heap(r));
         // Two unrelated unknowns are two types, not one.
-        let ru = z.zonk_or_opaque(&mut pool, u);
-        let rw = z.zonk_or_opaque(&mut pool, w);
+        let (ru, _) = z.zonk_or_opaque(&mut pool, u);
+        let (rw, _) = z.zonk_or_opaque(&mut pool, w);
         assert_eq!(ru, pool.tuple_elem(t, 0).unwrap());
         assert_ne!(pool.node(ru), pool.node(rw));
-    }
-
-    #[test]
-    fn entering_a_scheme_drops_the_previous_bound_numbering() {
-        let mut e = engine();
-        let a = e.fresh_var();
-        let b = e.fresh_var();
-        let f = e.mk_fun(&[a, b], b);
-        let s1 = e.generalize_top(f);
-        let s2 = e.generalize_top(b);
-        let mut pool = pool_for(&e);
-        let mut z = Zonker::for_scheme(&e, &s1);
-        let in_s1 = z.zonk(&mut pool, b).expect("rigid");
-        assert_eq!(pool.node(in_s1), ResolvedNode::Bound(1));
-        z.enter_scheme(&s2);
-        let in_s2 = z.zonk(&mut pool, b).expect("rigid");
-        assert_eq!(pool.node(in_s2), ResolvedNode::Bound(0));
     }
 }
