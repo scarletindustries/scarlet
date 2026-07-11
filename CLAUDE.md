@@ -4,7 +4,7 @@ Before committing, `cargo fmt` and `cargo clippy --all-targets` should both be c
 
 Be sparse when adding comments in the code. Do not add unnecessary comments. Do add comments when explaining larger, more complicated code paths. Especially in things like the parser and compiler or vm.
 
-The AST is defined in `src/ast/mod.rs`. When changing AST shape, also update `src/parser/mod.rs` (construction), `src/printer/mod.rs` (display), and `src/bytecode/compiler.rs` (typecheck + codegen).
+The AST is defined in `src/ast/mod.rs`. When changing AST shape, also update `src/parser/mod.rs` (construction), `src/formatter/mod.rs` (rendering — a field the formatter drops silently rewrites the user's program), `src/bytecode/compiler.rs` (typecheck), and `src/typed_ir/elaborate*.rs` (which lowers it).
 
 The HM type inferencer lives in `src/types/infer.rs`. Type definitions are in `src/type_def/mod.rs`. Exhaustiveness checking is in `src/types/exhaustiveness.rs`.
 

@@ -17,6 +17,7 @@
 pub use al_core::*;
 
 pub mod cli;
+pub mod dis;
 pub mod lsp;
 pub mod repl;
 pub mod vm;
