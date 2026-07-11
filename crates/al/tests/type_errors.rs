@@ -161,6 +161,23 @@ reject_case! {
     mutually_recursive_type_alias_is_error: ("type A = B\ntype B = A\n", "Recursive type alias"),
 }
 
+ok_case! {
+    /// The declared-return rule applies only to type definitions. A binding
+    /// annotation with an omitted fn return is sound — the fresh return var
+    /// unifies with the initializer's type — and must stay accepted.
+    /// (Regression: the rule was briefly keyed on `permit_new`, which binding
+    /// annotations also disable, rejecting this program.)
+    fn_type_without_return_in_binding_annotation_is_ok:
+        ("x fn(Int) = fn(a Int) { a }\nprintln(x(1))\n"),
+}
+
+/// Runtime counterpart of the case above: the inferred return flows through
+/// unification end-to-end, so the program runs and prints the right value.
+#[test]
+fn fn_type_without_return_in_binding_annotation_runs() {
+    common::run_outputs("f fn(Int) = fn(x Int) { x * 2 }\nprintln(f(3))\n", "6\n");
+}
+
 // A cycle among some aliases must not stop the remaining, acyclic aliases from
 // being registered. Previously the toposort's cycle branch returned early and
 // dropped every alias in the module, so `Good` below surfaced as

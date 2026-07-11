@@ -826,6 +826,7 @@ impl Compiler {
                 self.env
                     .register_type_head(&td.identifier.name, name_id, module, type_params);
             h.disallow_new_type_variables();
+            h.require_declared_fn_return();
             let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
             let target = self.with_owner(owner, |c| c.hydrate(&mut h, rhs));
             // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`): the
@@ -866,6 +867,7 @@ impl Compiler {
             type_params,
         } = pt;
         h.disallow_new_type_variables();
+        h.require_declared_fn_return();
 
         let type_name = &td.identifier.name;
         let m = self.current_module_slice();

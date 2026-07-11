@@ -35,13 +35,18 @@ pub struct TypeRefHit {
 ///   - Variables it mints are recorded as *rigid* so that `instantiate` will
 ///     not replace them with fresh unbound vars while checking the annotated
 ///     body — the body must be polymorphic in exactly those names.
-///   - When `permit_new` is disabled (constructor fields, alias RHS) an
-///     unseen lowercase name is an error rather than an implicit fresh var.
+///   - When `permit_new` is disabled (constructor fields, alias RHS, binding
+///     annotations) an unseen lowercase name is an error rather than an
+///     implicit fresh var.
+///   - When `require_fn_return` is set (type-definition bodies only) a
+///     function type must spell out its return type; elsewhere an omitted
+///     return hydrates to a fresh var that inference constrains.
 #[derive(Debug)]
 pub struct Hydrator {
     created: HashMap<String, (Ty, i32)>,
     rigid_ids: HashSet<i32>,
     permit_new: bool,
+    require_fn_return: bool,
     type_refs: Vec<TypeRefHit>,
 }
 
@@ -68,12 +73,23 @@ impl Hydrator {
             created: HashMap::new(),
             rigid_ids: HashSet::new(),
             permit_new: true,
+            require_fn_return: false,
             type_refs: Vec::new(),
         }
     }
 
     pub fn disallow_new_type_variables(&mut self) {
         self.permit_new = false;
+    }
+
+    /// Require every function type in the annotation to declare its return
+    /// type. Set only for type-definition bodies (constructor fields, alias
+    /// RHS): there a fresh return var has no inference context to constrain
+    /// it, so it would be generalized into the stored scheme and escape
+    /// unconstrained. Binding annotations keep the fresh var — it unifies
+    /// with the initializer's type, so it is sound there.
+    pub fn require_declared_fn_return(&mut self) {
+        self.require_fn_return = true;
     }
 
     /// Drain the type-name occurrences resolved since the last call. The
@@ -137,12 +153,12 @@ impl Hydrator {
                 }
                 let ret = match &ft.return_type {
                     Some(r) => self.type_from_ast(r, env, engine)?,
-                    // An omitted return type means "infer it" — but constructor
-                    // fields and alias RHS (`permit_new` disabled) have no
-                    // inference context, so a fresh var there would escape
-                    // unconstrained and defeat soundness.
+                    // An omitted return type means "infer it" — but type
+                    // definitions (`require_fn_return` set: constructor fields
+                    // and alias RHS) have no inference context, so a fresh var
+                    // there would escape unconstrained and defeat soundness.
                     None => {
-                        if self.permit_new {
+                        if !self.require_fn_return {
                             engine.fresh_var()
                         } else {
                             return Err(err(
