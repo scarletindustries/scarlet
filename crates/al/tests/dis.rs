@@ -124,3 +124,31 @@ fn the_full_dump_carries_a_constant_pool() {
     assert!(text.contains("c0 = "), "no constant rendered");
     let _ = Op::PushConst; // the op the pool exists for
 }
+
+/// Two literals of the same big int must share one pool entry. The dedup used
+/// to key on `Value::to_bits()` — a *pointer* for a boxed int (outside ±2^47)
+/// — so every use site pooled a fresh copy: 92% of a compiled program's
+/// constant pool was duplicate enum-variant hashes.
+///
+/// The value must not collide with a stdlib constant: a hydrated constant
+/// points into the *static* frozen area and a fresh literal into the
+/// program's builder, so those two are (acceptably) distinct allocations —
+/// one duplicate per value that appears on both sides, bounded by distinct
+/// values rather than use sites.
+#[test]
+fn a_big_int_constant_is_pooled_once() {
+    let p = program_of("a = 4611686018427387905\nb = 4611686018427387905\nprintln(a == b)\n");
+    let hits = p
+        .constants
+        .iter()
+        .filter(|c| c.as_int() == Some(4611686018427387905))
+        .count();
+    assert_eq!(hits, 1, "one value, one pool entry");
+    // And the whole pool is small now: the stdlib's worth of constants, not
+    // one entry per constructor *use site*.
+    assert!(
+        p.constants.len() < 600,
+        "pool regressed to per-use-site duplicates: {} entries",
+        p.constants.len()
+    );
+}

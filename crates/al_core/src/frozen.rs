@@ -160,6 +160,7 @@ impl FrozenArea {
         FrozenBuilder {
             area: Arc::clone(self),
             strs: HashMap::new(),
+            ints: HashMap::new(),
             str_arrays: IndexMap::new(),
             label_tuples: IndexMap::new(),
         }
@@ -297,6 +298,13 @@ pub struct FrozenBuilder {
     area: Arc<FrozenArea>,
     /// Canonical frozen `Str` constant per distinct contents.
     strs: HashMap<Box<str>, Value>,
+    /// Boxed-Int interning. A small int is an immediate and dedups by bits;
+    /// a big one (outside ±2^47) is a frozen allocation, and the constant
+    /// pool's dedup keys on `to_bits()` — a *pointer* for boxed values — so
+    /// without this map every use of the same big int pooled a fresh copy.
+    /// Enum-variant prefix hashes are big ints minted at every `Ok(..)` /
+    /// `Err(..)` construction site, which made the pool mostly duplicates.
+    ints: HashMap<i64, Value>,
     /// Canonical frozen all-string array constant (enum field-label list
     /// pool entries) per distinct contents.
     str_arrays: StrAggregateMap,
@@ -354,7 +362,16 @@ impl FrozenBuilder {
     /// allocation); the method exists so constant construction uniformly
     /// goes through the builder.
     pub fn int(&mut self, i: i64) -> Value {
-        Value::int_in(self, i)
+        if let Some(v) = self.ints.get(&i) {
+            return v.clone();
+        }
+        let v = Value::int_in(self, i);
+        // Only a boxed int (outside the NaN-box small range) needs interning;
+        // an immediate already dedups by bits in the pool.
+        if !(-(1i64 << 47)..(1i64 << 47)).contains(&i) {
+            self.ints.insert(i, v.clone());
+        }
+        v
     }
 
     /// A frozen Float constant (immediate; see [`FrozenBuilder::int`]).
