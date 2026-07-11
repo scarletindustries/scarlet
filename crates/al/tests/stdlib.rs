@@ -227,12 +227,28 @@ fn stdlib_decimal() {
          println(option.map(decimal.parse('92233720368547758.07'), decimal.units))\n",
         "Some(19.99)\nSome(-0.05)\nSome(1.50)\nSome(42)\nNone\nNone\nNone\nNone\nNone\nNone\nSome(9223372036854775807)\n",
     );
-    // Float bridges are explicitly lossy conveniences.
+    // Negative `places` rounds to a multiple of 10^|places| at scale 0, in
+    // round and div alike.
     run_outputs(
         "import al/decimal\n\
+         import al/option\n\
+         println(decimal.to_string(decimal.round(decimal.new(1250, 0), 0 - 2)))\n\
+         println(decimal.to_string(decimal.round(decimal.new(12345, 1), 0 - 1)))\n\
+         println(decimal.scale(decimal.round(decimal.new(1250, 0), 0 - 2)))\n\
+         println(option.map(decimal.div(decimal.from_int(1234), decimal.from_int(1), 0 - 2), decimal.to_string))\n",
+        "1200\n1230\n0\nSome(1200)\n",
+    );
+    // Float bridges are explicitly lossy conveniences; from_float is None
+    // instead of wrapping when units would leave Int range.
+    run_outputs(
+        "import al/decimal\n\
+         import al/option\n\
          println(decimal.to_float(decimal.new(25, 1)))\n\
-         println(decimal.to_string(decimal.from_float(2.5, 2)))\n",
-        "2.5\n2.50\n",
+         println(option.map(decimal.from_float(2.5, 2), decimal.to_string))\n\
+         println(decimal.from_float(10000000000000000000.0, 2))\n\
+         println(decimal.from_float(0.5, 19))\n\
+         println(option.map(decimal.from_float(149.0, 0 - 1), decimal.to_string))\n",
+        "2.5\nSome(2.50)\nNone\nNone\nSome(150)\n",
     );
 }
 

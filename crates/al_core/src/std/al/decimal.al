@@ -2,9 +2,8 @@
 //
 // A `Decimal` is `units * 10^(-scale)`: `new(1999, 2)` is 19.99. The scale is
 // carried through arithmetic automatically — addition aligns scales,
-// multiplication adds them — so no precision is ever lost silently. The only
-// operations that discard digits are `div` and `round`, which take an explicit
-// target scale and rounding mode.
+// multiplication adds them. The only operations that discard digits are `div`
+// and `round`, which take an explicit target scale and rounding mode.
 //
 // The type is opaque: values can only be built through the functions here, so
 // downstream code can wrap it in its own opaque type for nominal safety:
@@ -16,8 +15,10 @@
 //   }
 //
 // `units` follows the language's Int semantics (64-bit, wrapping), so keep
-// magnitudes below 9.2 * 10^18 and scales at or below 18. `parse` rejects
-// inputs that would overflow rather than wrapping.
+// magnitudes below 9.2 * 10^18 and scales at or below 18. Aligning scales in
+// `add`, `sub`, and `compare` multiplies units by 10^(scale difference), so
+// that product must also fit in 64 bits or it wraps. `parse` rejects inputs
+// that would overflow rather than wrapping, and `from_float` is None on them.
 
 import al/binary.{Dec}
 import al/float
@@ -97,6 +98,8 @@ pub fn mul(a Decimal, b Decimal) Decimal {
 }
 
 // Quotient at the given scale, rounding half-to-even. None when `b` is zero.
+// A negative `places` rounds the quotient to a multiple of 10^|places| at
+// scale 0: `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
 pub fn div(a Decimal, b Decimal, places Int) Option(Decimal) {
 	div_with(a, b, places, HalfEven)
 }
@@ -105,28 +108,29 @@ pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Option(Decimal)
 	if is_zero(b) {
 		None
 	} else {
-		t = int.max(places, 0)
-		e = t + scale(b) - scale(a)
-		if e >= 0 {
-			Some(Decimal(div_units(units(a) * pow10(e), units(b), mode), t))
+		e = places + scale(b) - scale(a)
+		q = if e >= 0 {
+			div_units(units(a) * pow10(e), units(b), mode)
 		} else {
-			Some(Decimal(div_units(units(a), units(b) * pow10(0 - e), mode), t))
+			div_units(units(a), units(b) * pow10(0 - e), mode)
 		}
+		Some(at_places(q, places))
 	}
 }
 
 // Change the scale, rounding half-to-even when digits are dropped and
-// zero-padding when the scale grows: `round(parse('2.345'), 2)` is 2.34.
+// zero-padding when the scale grows: `round(new(2345, 3), 2)` is 2.34.
+// A negative `places` rounds to a multiple of 10^|places| at scale 0:
+// `round(new(1250, 0), 0 - 2)` is 1200.
 pub fn round(d Decimal, places Int) Decimal {
 	round_with(d, places, HalfEven)
 }
 
 pub fn round_with(d Decimal, places Int, mode Rounding) Decimal {
-	t = int.max(places, 0)
-	if t >= scale(d) {
-		Decimal(units(d) * pow10(t - scale(d)), t)
+	if places >= scale(d) {
+		Decimal(units(d) * pow10(places - scale(d)), places)
 	} else {
-		Decimal(div_round(units(d), pow10(scale(d) - t), mode), t)
+		at_places(div_round(units(d), pow10(scale(d) - places), mode), places)
 	}
 }
 
@@ -243,11 +247,39 @@ pub fn to_float(d Decimal) Float {
 	float.from_int(units(d)) / float.from_int(pow10(scale(d)))
 }
 
-// `f` rounded to the nearest value at the given scale. Floats are
-// approximate, so prefer `parse` or `new` when exactness matters.
-pub fn from_float(f Float, places Int) Decimal {
-	t = int.max(places, 0)
-	Decimal(float.round(f * float.from_int(pow10(t))), t)
+// `f` rounded to the nearest value at the given scale; None when the
+// resulting `units` would leave 64-bit Int range, or when |places| exceeds
+// 18 (10^19 no longer fits in `units`). A negative `places` rounds to a
+// multiple of 10^|places| at scale 0. Floats are approximate, so prefer
+// `parse` or `new` when exactness matters.
+pub fn from_float(f Float, places Int) Option(Decimal) {
+	if places > 18 || places < 0 - 18 {
+		None
+	} else {
+		k = int.max(0 - places, 0)
+		scaled = if places < 0 {
+			f / float.from_int(pow10(k))
+		} else {
+			f * float.from_int(pow10(places))
+		}
+		// 9.2 * 10^18 sits safely below Int max, so rounding `scaled` (and,
+		// for negative `places`, scaling back up by 10^k) cannot wrap.
+		if float.abs(scaled) < 9200000000000000000.0 / float.from_int(pow10(k)) {
+			Some(at_places(float.round(scaled), places))
+		} else {
+			None
+		}
+	}
+}
+
+// A rounded coefficient `q` placed at the target `places`: a negative
+// `places` multiplies the magnitude back out to scale 0.
+fn at_places(q Int, places Int) Decimal {
+	if places < 0 {
+		Decimal(q * pow10(0 - places), 0)
+	} else {
+		Decimal(q, places)
+	}
 }
 
 fn pow10(n Int) Int {
