@@ -28,9 +28,13 @@ pub fn path_key(path: &ModulePath) -> String {
 /// key is globally unique; the last segment is still the module's name, so
 /// `path.last()` reads `util` and not a temp directory.
 ///
-/// An absolute path's first segment is empty (`"/a/b" -> ["", "a", "b"]`),
-/// which is what [`is_resolved_file`] tests and what keeps it distinct from a
-/// stdlib path (`["al", "io"]`) or a written relative one (`[".", "b"]`).
+/// The first segment marks it as resolved and keeps it distinct from a
+/// stdlib path (`["al", "io"]`) or a written relative one (`[".", "b"]`):
+/// on Unix an absolute path yields an empty first segment
+/// (`"/a/b" -> ["", "a", "b"]`); on Windows it is the drive/UNC prefix
+/// (`"C:\a\b" -> ["C:", "a", "b"]`). The prefix MUST be kept — dropping it
+/// would merge `C:\proj\b.al` with `D:\proj\b.al`, the same
+/// different-files-one-key collision this identity exists to prevent.
 pub fn file_module_path(p: &Path) -> ModulePath {
     // Absolute and lexically normalised — deliberately NOT `canonicalize()`,
     // which resolves symlinks. On macOS a temp dir is `/var/...` but canonical
@@ -49,7 +53,9 @@ pub fn file_module_path(p: &Path) -> ModulePath {
                 }
             }
             std::path::Component::Normal(seg) => out.push(seg.to_string_lossy().into_owned()),
-            std::path::Component::Prefix(_) => {}
+            std::path::Component::Prefix(pre) => {
+                out.push(pre.as_os_str().to_string_lossy().into_owned());
+            }
         }
     }
     if let Some(last) = out.last_mut()
@@ -61,9 +67,13 @@ pub fn file_module_path(p: &Path) -> ModulePath {
 }
 
 /// `true` for a [`file_module_path`] — the identity of an already-resolved
-/// on-disk module, as opposed to an import path as the user wrote it.
+/// on-disk module, as opposed to an import path as the user wrote it. The
+/// marker is the first segment: empty (Unix root), ending in `:` (a Windows
+/// drive prefix, `C:` / `\\?\C:`), or starting with `\\` (UNC / device).
+/// A written import's first segment (`.`, `..`, a name) never matches any.
 pub fn is_resolved_file(path: &ModulePath) -> bool {
-    path.first().is_some_and(|s| s.is_empty())
+    path.first()
+        .is_some_and(|s| s.is_empty() || s.ends_with(':') || s.starts_with(r"\\"))
 }
 
 /// `true` for the standard library / prelude / `@vm` intrinsics: any module
