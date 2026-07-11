@@ -39,6 +39,10 @@ pub(super) const SEED_BATCH: usize = 1;
 /// points only into it (or into the frozen area), so handing a seed to
 /// another scheduler is a plain move.
 pub(super) struct Seed {
+    /// The child's process id, minted at `build_seed` so the detached
+    /// connections below can be stamped with their new controlling process
+    /// before they travel.
+    pub pid: u64,
     /// The spawned closure, as a pointer into the child heap.
     pub root: Value,
     /// Connections the closure captured (moved — the spawner loses them).
@@ -302,6 +306,8 @@ pub(super) struct Runtime {
     /// does not balance at all — the last binder takes every connection).
     /// One id, one socket: misdelivery is not a constructible state.
     pub shared_listeners: Mutex<HashMap<i32, Arc<TcpListener>>>,
+    /// Process-id allocator; see [`Runtime::alloc_pid`].
+    next_pid: AtomicU64,
     /// Per-scheduler shared slots — inbox, pinned queue, waker, parked flag,
     /// published load, completion queue — indexed by scheduler id. See
     /// [`SchedSlot`] for the per-field invariants.
@@ -358,6 +364,7 @@ impl Runtime {
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),
+            next_pid: AtomicU64::new(1),
             slots,
             injector: Mutex::new(VecDeque::new()),
             submit_cursor: AtomicUsize::new(0),
@@ -434,6 +441,12 @@ impl Runtime {
         if let Some(waker) = self.slots[i].waker.get() {
             let _ = waker.wake();
         }
+    }
+
+    /// Allocate a program-unique process id. Ids are never reused; a u64
+    /// does not wrap in any real program's lifetime.
+    pub(super) fn alloc_pid(&self) -> u64 {
+        self.next_pid.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Retire listener `id` program-wide: drop it from `shared_listeners`

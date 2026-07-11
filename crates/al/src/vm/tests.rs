@@ -555,6 +555,7 @@ fn parked_process() -> Process {
         stack: Vec::new(),
         frames: Vec::new(),
         is_main: false,
+        pid: 0,
     }
 }
 
@@ -652,6 +653,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
         stack: vec![v],
         frames: Vec::new(),
         is_main: false,
+        pid: 0,
     };
 
     // A quiescent connection is donatable.
@@ -686,6 +688,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
             captures: closure,
         }],
         is_main: false,
+        pid: 0,
     };
     assert!(!vm.can_donate_fds(&framed));
 

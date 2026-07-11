@@ -377,10 +377,7 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         // Ok(Nil) only.
         let sv = self.pop_connection("socket.close")?;
-        if let Some(conn) = self.tcp_connections.remove(&sv.id) {
-            // Deregister before dropping; ignore "wasn't registered".
-            self.poller_deregister(conn.as_raw_fd());
-        }
+        drop(self.evict_connection(sv.id));
         let nil = self.make_nil();
         let v = self.make_ok(nil);
         self.stack.push(v);
@@ -425,15 +422,41 @@ impl VM {
             if let Some(listener) = self.tcp_listeners.remove(&id) {
                 self.poller_deregister(listener.as_raw_fd());
             }
-            // Every wait on the id dies with it, so take the whole entry.
-            let Some(waiters) = self.io_waiters.remove(&id) else {
-                continue;
-            };
-            for wid in waiters {
-                if let Some((_, p)) = self.park_remove(wid) {
-                    self.run_queue.push_back(p);
-                    woke = true;
-                }
+            woke |= self.fail_io_waiters(id);
+        }
+        woke
+    }
+
+    /// Take connection `id` out of this scheduler's world: remove it from
+    /// the table, drop its poller registration, and fail every park waiting
+    /// on it. The ONE eviction path — `socket.close` drops the returned
+    /// connection, owner-death release drops it, and `detach_socket_ids`
+    /// keeps it (the fd travels to another scheduler, owner and all).
+    pub(super) fn evict_connection(&mut self, id: i32) -> Option<super::Conn> {
+        let conn = self.tcp_connections.remove(&id);
+        if let Some(c) = &conn {
+            self.poller_deregister(c.stream.as_raw_fd());
+        }
+        self.fail_io_waiters(id);
+        conn
+    }
+
+    /// Fail every park waiting on socket `id`: the socket is gone (closed,
+    /// retired, or its fd re-homed to another scheduler), so each waiter is
+    /// made runnable and its re-run resolves to the stale-socket `NetError` —
+    /// the same result a use-after-close always produced. Without this, a
+    /// sibling parked on the id stays parked forever and the program hangs.
+    /// Returns whether anything was woken (a caller about to enter a blocking
+    /// poll wait must know).
+    pub(super) fn fail_io_waiters(&mut self, id: i32) -> bool {
+        let Some(waiters) = self.io_waiters.remove(&id) else {
+            return false;
+        };
+        let mut woke = false;
+        for wid in waiters {
+            if let Some((_, p)) = self.park_remove(wid) {
+                self.run_queue.push_back(p);
+                woke = true;
             }
         }
         woke
@@ -765,7 +788,10 @@ impl VM {
         // waiting for an ACK.
         let _ = stream.set_nodelay(true);
         let id = self.alloc_socket_id();
-        if let Err(e) = self.track_connection(id, stream) {
+        // The adopting process controls the connection (BEAM's rule): when it
+        // ends, the connection closes. Ownership never moves implicitly.
+        let owner = self.current_pid;
+        if let Err(e) = self.track_connection(id, stream, owner) {
             let err = self.net_error_value(&e);
             return self.make_err(err);
         }
@@ -952,8 +978,14 @@ fn connection_socket(v: &Value, op: &'static str) -> VmResult<SocketValue> {
 /// A stale id (closed then used) surfaces as an AL `NetError` via
 /// [`VM::push_net`], never a VM halt.
 #[inline]
-fn connection_mut(conns: &mut HashMap<i32, TcpStream>, id: i32) -> std::io::Result<&mut TcpStream> {
-    conns.get_mut(&id).ok_or_else(stale_socket)
+fn connection_mut(
+    conns: &mut HashMap<i32, super::Conn>,
+    id: i32,
+) -> std::io::Result<&mut TcpStream> {
+    conns
+        .get_mut(&id)
+        .map(|c| &mut c.stream)
+        .ok_or_else(stale_socket)
 }
 
 #[cold]
@@ -1097,6 +1129,7 @@ mod tests {
             stack: Vec::new(),
             frames: Vec::new(),
             is_main: false,
+            pid: 0,
         };
         // The accept park that retire will wake…
         vm.park(Wait::readable(id), parked());

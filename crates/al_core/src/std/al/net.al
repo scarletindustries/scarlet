@@ -66,7 +66,15 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 	match accept(server) {
 		Ok(sock) -> {
-			scheduler.spawn_local(fn() handler(sock))
+			// Close after the handler returns, explicitly: the connection
+			// belongs to this acceptor process (its creator), which loops
+			// forever — a handler that forgot to close would otherwise leak
+			// the socket for the server's whole life. Double-closing a
+			// handler that did close is a harmless Err, swallowed here.
+			scheduler.spawn_local(fn() {
+				handler(sock)
+				socket.close(sock) or Nil
+			})
 			accept_loop(server, handler)
 		}
 		Err(ConnectionAborted) -> accept_loop(server, handler)

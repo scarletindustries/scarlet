@@ -23,7 +23,6 @@
 
 use std::collections::HashSet;
 use std::net::TcpStream;
-use std::os::fd::AsRawFd;
 
 use al_core::bytecode::{SocketValue, Value};
 
@@ -33,7 +32,7 @@ use super::{Process, VM};
 /// [`Migrant`] or `Seed`. Listeners are not included: the listener socket is
 /// program-wide (`Runtime.shared_listeners`) and every scheduler registers the
 /// same fd on demand (`VM::ensure_listener`) — there is nothing to move.
-pub(super) type DetachedFds = Vec<(i32, TcpStream)>;
+pub(super) type DetachedFds = Vec<(i32, TcpStream, u64)>;
 
 /// A process in flight between schedulers: the suspended [`Process`] moved
 /// as-is, alongside the socket fds it references, re-homed out of the donor's
@@ -153,7 +152,22 @@ impl VM {
     /// donor's per-scheduler tables, for donation: the process itself moves
     /// whole; only its connections need detaching so they can travel with it.
     pub(super) fn detach_fds(&mut self, p: &Process) -> DetachedFds {
-        self.detach_socket_ids(process_socket_ids(p))
+        // Referenced connections travel because the process can still use
+        // them; OWNED connections travel because the process's death must be
+        // able to close them, and death is handled by the scheduler the
+        // process ends on. A connection this process owns but no longer
+        // references (it connected, used, and dropped the value) would
+        // otherwise strand open on the donor forever.
+        let mut ids = process_socket_ids(p);
+        ids.extend(
+            self.tcp_connections
+                .iter()
+                .filter(|&(_, conn)| conn.owner == p.pid)
+                .map(|(&id, _)| id),
+        );
+        ids.sort_unstable();
+        ids.dedup();
+        self.detach_socket_ids(ids)
     }
 
     /// Move the connections among `ids` out of this scheduler's table — the
@@ -167,13 +181,16 @@ impl VM {
     /// An id with no connection entry is either a listener or dangling (an
     /// earlier spawn moved it away) and is skipped.
     pub(super) fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
-        let mut connections: Vec<(i32, TcpStream)> = Vec::new();
+        let mut connections: DetachedFds = Vec::new();
         for id in ids {
-            if let Some(c) = self.tcp_connections.remove(&id) {
-                // The fd is leaving this scheduler; drop any poller
-                // registration before it goes (defensive — see doc comment).
-                self.poller_deregister(c.as_raw_fd());
-                connections.push((id, c));
+            // `evict_connection` also fails anything parked on the id:
+            // donation is guarded by `can_donate_fds` so nothing is armed on
+            // that path, but `build_seed` (scheduler.spawn) is not — a
+            // sibling parked on a captured id would otherwise be unwakeable
+            // forever, with its readiness delivered to a poller that no
+            // longer owns the fd.
+            if let Some(conn) = self.evict_connection(id) {
+                connections.push((id, conn.stream, conn.owner));
             }
         }
         connections
@@ -186,9 +203,11 @@ impl VM {
     /// unwatchable socket surface as `NetError` at use. Adoption is thus
     /// infallible: an fd-table hiccup during transport never takes the whole
     /// scheduler down.
+    /// Adopt a bundle of connections, each keeping the owner it arrived
+    /// with — ownership travels with the fd and never changes hands here.
     pub(super) fn adopt_connections(&mut self, connections: DetachedFds) {
-        for (id, c) in connections {
-            if let Err(e) = self.track_connection(id, c) {
+        for (id, c, owner) in connections {
+            if let Err(e) = self.track_connection(id, c, owner) {
                 eprintln!("warning: cannot watch adopted connection {id}: {e}");
             }
         }
@@ -295,6 +314,7 @@ mod tests {
             stack,
             frames,
             is_main: false,
+            pid: 0,
         };
 
         let mut donor = halt_test_vm();
@@ -397,6 +417,7 @@ mod tests {
                 },
             ],
             is_main: false,
+            pid: 0,
         };
 
         let mut donor = halt_test_vm();
@@ -510,7 +531,13 @@ mod tests {
         let client = TcpStream::connect(bind_addr).expect("connect");
         let (_server, _) = listener.accept().expect("accept");
         donor.tcp_listeners.insert(1, std::sync::Arc::new(listener));
-        donor.tcp_connections.insert(2, client);
+        donor.tcp_connections.insert(
+            2,
+            super::super::Conn {
+                stream: client,
+                owner: 7,
+            },
+        );
 
         let socket = |id, is_listener| Value::socket(SocketValue { id, is_listener });
         // Id 2 appears on the stack AND in a frame's closure captures: the
@@ -528,6 +555,7 @@ mod tests {
                 captures,
             }],
             is_main: false,
+            pid: 0,
         };
 
         let connections = donor.detach_fds(&p);

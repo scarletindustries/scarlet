@@ -246,13 +246,24 @@ impl VM {
     /// readability and writability — the interests its reads and writes can
     /// park on. On registration failure the connection is dropped (closed),
     /// never tabled: a socket that cannot wake its parks must not exist.
-    pub(super) fn track_connection(&mut self, id: i32, conn: TcpStream) -> io::Result<()> {
+    pub(super) fn track_connection(
+        &mut self,
+        id: i32,
+        conn: TcpStream,
+        owner: u64,
+    ) -> io::Result<()> {
         self.poller_register(
             conn.as_raw_fd(),
             id,
             mio::Interest::READABLE | mio::Interest::WRITABLE,
         )?;
-        self.tcp_connections.insert(id, conn);
+        self.tcp_connections.insert(
+            id,
+            super::Conn {
+                stream: conn,
+                owner,
+            },
+        );
         Ok(())
     }
 

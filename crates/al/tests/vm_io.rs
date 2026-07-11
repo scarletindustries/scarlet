@@ -772,3 +772,184 @@ match net.listen('127.0.0.1', 0) {
         "the parked accept must fail, not hang:\n{out}"
     );
 }
+
+/// A process's connections close when it ends — the BEAM controlling-process
+/// rule. The child connects and returns WITHOUT `socket.close`; the parent's
+/// read on the peer side must see EOF, not park forever on a leaked fd.
+#[test]
+fn a_connection_closes_when_its_owner_ends() {
+    let src = r#"import al/scheduler
+import al/net
+import al/net/socket
+
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> match net.local_addr(server) {
+		Ok(addr) -> {
+			scheduler.spawn_local(fn() {
+				match net.connect('127.0.0.1', addr.port) {
+					Ok(_) -> println('child connected')
+					Err(e) -> println('connect failed: ${e}')
+				}
+			})
+			match net.accept(server) {
+				Ok(peer) -> match socket.read_exact(peer, 1) {
+					Ok(_) -> println('unexpected data')
+					Err(_) -> println('peer closed')
+				}
+				Err(e) -> println('accept failed: ${e}')
+			}
+		}
+		Err(e) -> println('addr failed: ${e}')
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#;
+    let (code, out) = run_with_schedulers("owner_death", src, 1, 25);
+    assert!(
+        code.is_some(),
+        "leaked fd left the peer read parked:\n{out}"
+    );
+    assert!(out.contains("peer closed"), "{out}");
+}
+
+/// `socket.close` must fail a sibling parked reading the same connection —
+/// the connection-level twin of close-wakes-a-parked-acceptor. The reader is
+/// woken, re-runs, misses the table, and gets the stale-socket `NetError`.
+#[test]
+fn closing_a_connection_wakes_a_parked_reader() {
+    let src = r#"import al/scheduler
+import al/net
+import al/net/socket
+
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> match net.local_addr(server) {
+		Ok(addr) -> {
+			scheduler.spawn_local(fn() {
+				match net.accept(server) {
+					Ok(_) -> Nil
+					Err(_) -> Nil
+				}
+			})
+			match net.connect('127.0.0.1', addr.port) {
+				Ok(conn) -> {
+					scheduler.spawn_local(fn() {
+						match socket.read_exact(conn, 1) {
+							Ok(_) -> println('unexpected data')
+							Err(_) -> println('reader failed')
+						}
+					})
+					scheduler.sleep(50)
+					socket.close(conn) or Nil
+					println('closed')
+				}
+				Err(e) -> println('connect failed: ${e}')
+			}
+		}
+		Err(e) -> println('addr failed: ${e}')
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#;
+    let (code, out) = run_with_schedulers("close_reader", src, 1, 25);
+    assert!(
+        code.is_some(),
+        "close left the reader parked forever:\n{out}"
+    );
+    assert!(out.contains("closed"), "{out}");
+    assert!(
+        out.contains("reader failed"),
+        "the parked read must fail:\n{out}"
+    );
+}
+
+/// A sibling's exit must NOT close a socket it did not create. Ownership
+/// never moves implicitly: an implicit transfer-on-capture was tried and
+/// reverted — it made this exact split reader/writer program's fate depend
+/// on spawn order (the last-spawned sibling's early exit closed the socket
+/// under the live reader).
+#[test]
+fn a_siblings_exit_does_not_close_a_foreign_socket() {
+    let src = r#"import al/scheduler
+import al/net
+import al/net/socket
+import al/binary
+
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> match net.local_addr(server) {
+		Ok(addr) -> {
+			scheduler.spawn_local(fn() {
+				match net.accept(server) {
+					Ok(peer) -> {
+						scheduler.sleep(150)
+						socket.write(peer, binary.from_string('x')) or Nil
+					}
+					Err(_) -> Nil
+				}
+			})
+			match net.connect('127.0.0.1', addr.port) {
+				Ok(conn) -> {
+					scheduler.spawn_local(fn() {
+						socket.write(conn, binary.from_string('w')) or Nil
+						println('writer done')
+					})
+					match socket.read_exact(conn, 1) {
+						Ok(_) -> println('reader got byte')
+						Err(e) -> println('reader failed: ${e}')
+					}
+				}
+				Err(e) -> println('connect failed: ${e}')
+			}
+		}
+		Err(e) -> println('addr failed: ${e}')
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#;
+    let (code, out) = run_with_schedulers("sibling_exit", src, 1, 25);
+    assert!(code.is_some(), "wedged:\n{out}");
+    assert!(out.contains("writer done"), "{out}");
+    assert!(
+        out.contains("reader got byte"),
+        "the writer's exit closed the reader's socket:\n{out}"
+    );
+}
+
+/// `net.serve_on` closes a connection when the handler returns, explicitly —
+/// a handler that forgets `socket.close` must not leak the socket for the
+/// server's whole life (its owner, the acceptor, loops forever). The client
+/// sees the handler's data, then EOF.
+#[test]
+fn the_accept_loop_closes_a_forgetful_handlers_socket() {
+    use std::io::Read;
+    let proj = Project::new("serve_forgetful");
+    let server = spawn_al_server(
+        &proj,
+        r#"import al/net
+import al/net/socket
+import al/binary
+
+match net.listen('127.0.0.1', 0) {
+	Ok(server) -> match net.local_addr(server) {
+		Ok(addr) -> {
+			println('listening ${addr.port}')
+			net.serve_on(server, fn(sock) {
+				socket.write(sock, binary.from_string('hi')) or Nil
+			})
+		}
+		Err(e) -> println('addr failed: ${e}')
+	}
+	Err(e) -> println('listen failed: ${e}')
+}
+"#,
+    );
+    let mut conn = std::net::TcpStream::connect(("127.0.0.1", server.port)).expect("connect");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut buf = [0u8; 2];
+    conn.read_exact(&mut buf).expect("handler's bytes");
+    assert_eq!(&buf, b"hi");
+    // EOF, not a hang: the accept loop closed the socket after the handler.
+    let mut rest = Vec::new();
+    let n = conn.read_to_end(&mut rest).expect("clean EOF");
+    assert_eq!(n, 0, "expected EOF after the handler returned");
+}

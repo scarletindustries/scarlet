@@ -301,6 +301,26 @@ struct Process {
     frames: Vec<CallFrame>,
     is_main: bool,
     heap: ProcHeap,
+    /// Program-unique process id ([`sched::Runtime::next_pid`]); travels with
+    /// the process across schedulers. Connections record their owning pid
+    /// ([`VM::conn_owner`]) so a process's connections close when it ends —
+    /// the BEAM controlling-process rule.
+    pid: u64,
+}
+
+/// A tabled TCP connection: the stream plus its controlling process.
+///
+/// Ownership lives ON the entry (not in a parallel map) so the two can never
+/// disagree, and it NEVER moves implicitly: the process that adopted the
+/// connection controls it, full stop — BEAM's rule, where only an explicit
+/// `controlling_process` call transfers. (An implicit transfer-on-capture was
+/// tried and reverted in review: it made a split reader/writer program's
+/// fate depend on spawn order, and missed toplevel-bound sockets entirely,
+/// because a global is not a capture.) When a connection crosses schedulers
+/// its owner travels with it.
+struct Conn {
+    stream: TcpStream,
+    owner: u64,
 }
 
 /// Lock a mutex, recovering the data if a holder thread died (the VM never
@@ -368,7 +388,7 @@ pub struct VM {
     /// poller", not "I bound this". The socket itself lives in
     /// `Runtime.shared_listeners`; the fd closes when the last clone drops.
     tcp_listeners: HashMap<i32, Arc<TcpListener>>,
-    tcp_connections: HashMap<i32, TcpStream>,
+    tcp_connections: HashMap<i32, Conn>,
     /// Outbound connections whose non-blocking connect is still in flight,
     /// keyed by their already-allocated socket id.
     pending_connects: HashMap<i32, socket2::Socket>,
@@ -377,6 +397,8 @@ pub struct VM {
     read_scratch: Vec<u8>,
     /// Whether the currently-running process is the main (root) process.
     current_is_main: bool,
+    /// The running process's id ([`Process::pid`]).
+    current_pid: u64,
     /// The main process's result, stashed at its `Step::Done` if it finishes
     /// while other processes are still running. The value points into main's
     /// arena, so the (value, heap) pair travels together (idea 6 above):
@@ -484,6 +506,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         pending_connects: HashMap::new(),
         read_scratch: Vec::new(),
         current_is_main: false,
+        current_pid: 0,
         main_result: None,
         run_queue: VecDeque::new(),
         parked: HashMap::new(),
@@ -559,6 +582,7 @@ impl VM {
             .extend(std::iter::repeat_n(Value::small_int(0), locals as usize));
 
         self.current_is_main = true;
+        self.current_pid = self.runtime.alloc_pid();
         let mut result = self.scheduler_loop();
 
         // Shutdown: by the time scheduler 0's loop returns Ok, the global
@@ -615,6 +639,8 @@ impl VM {
 
             match self.execute_slice()? {
                 Step::Done => {
+                    // The ended process's connections die with it.
+                    self.release_connections_of(self.current_pid);
                     // The finished process's result is its top-of-stack.
                     if self.current_is_main {
                         // Main's result points into main's arena: stash the
@@ -696,6 +722,7 @@ impl VM {
             stack: std::mem::take(&mut self.stack),
             frames: std::mem::take(&mut self.frames),
             is_main: std::mem::take(&mut self.current_is_main),
+            pid: self.current_pid,
         }
     }
 
@@ -705,6 +732,7 @@ impl VM {
         self.stack = p.stack;
         self.frames = p.frames;
         self.current_is_main = p.is_main;
+        self.current_pid = p.pid;
     }
 
     /// Donation policy, run at most once per yield: give the coldest queued
@@ -1031,6 +1059,10 @@ impl VM {
         // same scheduler and reference the same per-scheduler socket tables.
         let (heap, root) = ProcHeap::spawn(&f);
         self.runtime.process_started();
+        // No ownership change: the connection still belongs to the process
+        // that adopted it — ownership never moves implicitly. A handler that
+        // should close the socket when it finishes must do so explicitly
+        // (`net.al`'s accept loop does exactly that).
         self.spawn_process_with_heap(heap, root);
         Ok(())
     }
@@ -1060,13 +1092,44 @@ impl VM {
         Ok(())
     }
 
+    /// Close every connection the just-ended process `pid` controls — the
+    /// BEAM rule: a socket lives as long as its controlling process. Anything
+    /// parked on one fails with the stale-socket `NetError` instead of
+    /// sleeping forever; a process that returns without `socket.close` no
+    /// longer leaks its fd, and its peer sees EOF.
+    ///
+    /// O(live connections on this scheduler) per process death, behind an
+    /// emptiness gate so compute-only programs pay one branch. A pid→ids
+    /// index would remove the scan if a profile ever asks for it.
+    fn release_connections_of(&mut self, pid: u64) {
+        if self.tcp_connections.is_empty() {
+            return;
+        }
+        let dead: Vec<i32> = self
+            .tcp_connections
+            .iter()
+            .filter(|&(_, conn)| conn.owner == pid)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in dead {
+            drop(self.evict_connection(id));
+        }
+    }
+
     /// Create a process whose initial heap is `heap` — the seeded
     /// heap a cross-scheduler spawn copied the closure graph into. The
     /// closure `f` points into that heap. Every caller has already run
     /// `check_spawnable` on the source closure (`ProcHeap::spawn` preserves the
     /// value kind), so `f` is a nullary closure by construction.
     #[allow(clippy::expect_used)]
-    fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) {
+    fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) -> u64 {
+        let pid = self.runtime.alloc_pid();
+        self.spawn_process_with_heap_as(pid, heap, f);
+        pid
+    }
+
+    #[allow(clippy::expect_used)]
+    fn spawn_process_with_heap_as(&mut self, pid: u64, heap: ProcHeap, f: Value) {
         let cl = f
             .as_closure()
             .expect("spawn: caller-checked nullary closure");
@@ -1089,6 +1152,7 @@ impl VM {
             stack,
             frames,
             is_main: false,
+            pid,
         });
     }
 
@@ -1114,11 +1178,20 @@ impl VM {
         let (heap, root) = ProcHeap::spawn(f);
 
         // Same fd transfer as donation: captured connections move to the
-        // child; captured listeners stay put (the child binds its own
-        // reuseport socket from the shared address on first accept).
-        let connections = self.detach_socket_ids(captured_sockets);
+        // child; captured listeners stay put (the shared socket needs no
+        // transfer). The move IS the ownership handoff — once the fd leaves
+        // this scheduler the child is the only process that can use it, so
+        // it becomes the controlling process. (This is the one place
+        // ownership changes hands, and it follows the fd's forced move, not
+        // a capture heuristic.)
+        let pid = self.runtime.alloc_pid();
+        let mut connections = self.detach_socket_ids(captured_sockets);
+        for (_, _, owner) in &mut connections {
+            *owner = pid;
+        }
 
         Seed {
+            pid,
             heap,
             root,
             connections,
@@ -1132,8 +1205,8 @@ impl VM {
     /// path — inbox drain, overflow pickup, steal — funnels through), so the
     /// seed itself carries none.
     fn hydrate_seed(&mut self, seed: Seed) {
+        self.spawn_process_with_heap_as(seed.pid, seed.heap, seed.root);
         self.adopt_connections(seed.connections);
-        self.spawn_process_with_heap(seed.heap, seed.root);
     }
 }
 
