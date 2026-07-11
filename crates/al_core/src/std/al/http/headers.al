@@ -59,7 +59,11 @@ pub fn contains_token(h Headers, name Binary, token Binary) Bool {
 		[] -> False
 		[field, ..rest] -> {
 			hit = binary.eq_ignore_ascii_case(field.name, name) && has_token(field.value, token)
-			if hit { True } else { contains_token(rest, name, token) }
+			if hit {
+				True
+			} else {
+				contains_token(rest, name, token)
+			}
 		}
 	}
 }
@@ -85,11 +89,19 @@ fn value_has_token(v Binary, from Int, len Int, token Binary) Bool {
 }
 
 fn skip_ows(v Binary, i Int, hi Int) Int {
-	if i < hi && is_ows(binary.byte_at(v, i)) { skip_ows(v, i + 1, hi) } else { i }
+	if i < hi && is_ows(binary.byte_at(v, i)) {
+		skip_ows(v, i + 1, hi)
+	} else {
+		i
+	}
 }
 
 fn trim_ows(v Binary, lo Int, i Int) Int {
-	if i > lo && is_ows(binary.byte_at(v, i - 1)) { trim_ows(v, lo, i - 1) } else { i }
+	if i > lo && is_ows(binary.byte_at(v, i - 1)) {
+		trim_ows(v, lo, i - 1)
+	} else {
+		i
+	}
 }
 
 fn is_ows(b Int) Bool {

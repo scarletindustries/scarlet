@@ -20,7 +20,7 @@
     harness runs and kills it externally).
 */
 
-import al/experiments/scheduler
+import al/scheduler
 import al/array
 
 fn liveliness() {

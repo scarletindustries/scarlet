@@ -3,7 +3,7 @@
 
 type Tree {
 	Leaf(value Int)
-	Node(left Tree right Tree)
+	Node(left Tree, right Tree)
 }
 
 fn build(depth Int) Tree {
@@ -22,15 +22,25 @@ fn sum(t Tree) Int {
 }
 
 fn is_even(n Int) Bool {
-	if n == 0 { True } else { is_odd(n - 1) }
+	if n == 0 {
+		True
+	} else {
+		is_odd(n - 1)
+	}
 }
 
 fn is_odd(n Int) Bool {
-	if n == 0 { False } else { is_even(n - 1) }
+	if n == 0 {
+		False
+	} else {
+		is_even(n - 1)
+	}
 }
 
 type Point {
-	Point(x Int y Int z Int)
+	x Int
+	y Int
+	z Int
 }
 
 fn dot(a Point, b Point) Int {

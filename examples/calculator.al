@@ -16,10 +16,10 @@ import al/string
 type Expr {
 	Num(value Int)
 	Var(name String)
-	Add(left Expr right Expr)
-	Sub(left Expr right Expr)
-	Mul(left Expr right Expr)
-	Div(left Expr right Expr)
+	Add(left Expr, right Expr)
+	Sub(left Expr, right Expr)
+	Mul(left Expr, right Expr)
+	Div(left Expr, right Expr)
 }
 
 // Print an expression with parentheses around every operation.

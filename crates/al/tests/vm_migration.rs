@@ -67,7 +67,7 @@ fn fib(n: u64) -> u64 {
 }
 
 /// Shared imports + `fib` source every migration program starts with.
-const FIB_PREAMBLE: &str = r#"import al/experiments/scheduler
+const FIB_PREAMBLE: &str = r#"import al/scheduler
 import al/array
 
 fn fib(n) {

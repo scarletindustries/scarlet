@@ -17,6 +17,7 @@
 
 pub mod ast;
 pub mod bytecode;
+pub mod core_ir;
 pub mod diagnostic;
 pub mod formatter;
 pub mod frozen;
@@ -29,8 +30,10 @@ pub mod scanner;
 pub mod span;
 pub mod static_ir;
 pub mod term;
+pub mod tivec;
 pub mod token;
 pub mod type_def;
+pub mod typed_ir;
 pub mod types;
 
 pub use bytecode::{CtorRef, PreludeBindings, TypeRef};

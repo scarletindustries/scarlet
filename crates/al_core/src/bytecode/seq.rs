@@ -39,7 +39,6 @@
 
 use super::value::*;
 use smallvec::SmallVec;
-use std::mem::MaybeUninit;
 
 /// Branching factor.
 const B: usize = 32;
@@ -50,85 +49,16 @@ const BITS: usize = 5;
 /// than the optimal packing, bounding extra search steps per level.
 const E_MAX: usize = 2;
 
-/// Stack-resident scratch buffer for assembling a replacement node's slots
-/// before handing them to a builder. Holds owned `Value`s: `extend` clones
-/// (incref) and the buffer's drop decrements — balanced by the builder's
-/// `store_child`, so the reference counts come out exactly right. Every node
-/// image is <= `2 * B` slots (the fixed capacity), so path copying never
-/// touches the host allocator.
-struct Buf {
-    items: [MaybeUninit<Value>; 2 * B],
-    len: usize,
-}
-
-impl Buf {
-    #[inline]
-    fn new() -> Buf {
-        Buf {
-            items: [const { MaybeUninit::uninit() }; 2 * B],
-            len: 0,
-        }
-    }
-
-    #[inline]
-    fn push(&mut self, v: Value) {
-        debug_assert!(self.len < 2 * B);
-        self.items[self.len].write(v);
-        self.len += 1;
-    }
-
-    #[inline]
-    fn extend(&mut self, vs: &[Value]) {
-        debug_assert!(self.len + vs.len() <= 2 * B);
-        for v in vs {
-            self.items[self.len].write(v.clone());
-            self.len += 1;
-        }
-    }
-}
-
-// The `unsafe` below is the module's only unsafe: initialized-prefix slice
-// bookkeeping for a stack scratch buffer. It touches no arena layout — that
-// lives entirely in `value.rs`.
-#[allow(unsafe_code)]
-impl Drop for Buf {
-    #[inline]
-    fn drop(&mut self) {
-        // SAFETY: exactly the first `len` slots were initialized via
-        // `push`/`extend`; each is dropped once here and never read again.
-        for slot in &mut self.items[..self.len] {
-            unsafe { slot.assume_init_drop() };
-        }
-    }
-}
-
-#[allow(unsafe_code)]
-impl std::ops::Deref for Buf {
-    type Target = [Value];
-    #[inline]
-    fn deref(&self) -> &[Value] {
-        // SAFETY: the first `len` slots are initialized `Value`s and
-        // `MaybeUninit<Value>` has the same layout as `Value`.
-        unsafe { std::slice::from_raw_parts(self.items.as_ptr().cast::<Value>(), self.len) }
-    }
-}
-
-#[allow(unsafe_code)]
-impl std::ops::DerefMut for Buf {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut [Value] {
-        // SAFETY: as for `Deref`; unique borrow of `self` gives unique access.
-        unsafe { std::slice::from_raw_parts_mut(self.items.as_mut_ptr().cast::<Value>(), self.len) }
-    }
-}
+/// Scratch buffer for assembling a replacement node's slots before handing them
+/// to a builder. Every node image is <= `2 * B` slots. See [`super::scratch`].
+type Buf = super::scratch::Buf<{ 2 * B }>;
 
 // ---- node accessors -------------------------------------------------------
 //
 // All layout knowledge lives in `value.rs`: nodes are read through the typed
 // `SeqRootRef` / `SeqNodeRef` views and allocated through the
-// `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders. The only `unsafe`
-// in this module is `Buf`'s initialized-prefix bookkeeping above; the RRB
-// algorithm itself is written entirely in safe code.
+// `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders. This module
+// contains no `unsafe`; the RRB algorithm is written entirely in safe code.
 
 /// `(len, shift, head, tree, tail)` of a root. `head`/`tree`/`tail` are
 /// node values or nil; `shift` is the tree height (0 = leaf or nil).

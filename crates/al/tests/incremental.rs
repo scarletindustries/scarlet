@@ -6,7 +6,7 @@ use al::module::MODULE_TYPE_ID_RANGE;
 use al::reference::EntityKind;
 
 mod common;
-use common::{Project, SessionQueryExt, cursor, parse};
+use common::{Project, SessionQueryExt, cursor, module_key, parse};
 
 const A_SRC: &str = "import ./b\nprintln(b.b())\n";
 const B_SRC: &str = "import ./c\npub fn b() Int { c.val() + 1 }\n";
@@ -160,8 +160,12 @@ fn unrelated_module_keeps_type_id_base() {
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success, "initial: {:?}", r.diagnostics);
 
-    let x0 = s.module_id_base("./x").expect("x has an id_base");
-    let y0 = s.module_id_base("./y").expect("y has an id_base");
+    let x0 = s
+        .module_id_base(&module_key(&p.dir, "x.al"))
+        .expect("x has an id_base");
+    let y0 = s
+        .module_id_base(&module_key(&p.dir, "y.al"))
+        .expect("y has an id_base");
     assert_eq!(x0.0 % MODULE_TYPE_ID_RANGE, 0, "id_base is range-aligned");
     assert_ne!(x0, y0, "distinct modules get distinct ranges");
 
@@ -174,12 +178,12 @@ fn unrelated_module_keeps_type_id_base() {
     assert!(r.success, "after x edit: {:?}", r.diagnostics);
 
     assert_eq!(
-        s.module_id_base("./x"),
+        s.module_id_base(&module_key(&p.dir, "x.al")),
         Some(x0),
         "x reuses its original id_base on recompile"
     );
     assert_eq!(
-        s.module_id_base("./y"),
+        s.module_id_base(&module_key(&p.dir, "y.al")),
         Some(y0),
         "y keeps its id_base even though it was compiled after x"
     );
@@ -335,8 +339,14 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     assert!(r.success, "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "big + y compile on first check");
 
-    let big0 = s.module_id_base("./big").expect("big has an id_base").0;
-    let y0 = s.module_id_base("./y").expect("y has an id_base").0;
+    let big0 = s
+        .module_id_base(&module_key(&p.dir, "big.al"))
+        .expect("big has an id_base")
+        .0;
+    let y0 = s
+        .module_id_base(&module_key(&p.dir, "y.al"))
+        .expect("y has an id_base")
+        .0;
     assert_eq!(
         big0 % MODULE_TYPE_ID_RANGE,
         0,
@@ -377,10 +387,13 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     );
 
     let big1 = s
-        .module_id_base("./big")
+        .module_id_base(&module_key(&p.dir, "big.al"))
         .expect("big id_base after recovery")
         .0;
-    let y1 = s.module_id_base("./y").expect("y id_base after recovery").0;
+    let y1 = s
+        .module_id_base(&module_key(&p.dir, "y.al"))
+        .expect("y id_base after recovery")
+        .0;
     assert_eq!(
         big1 % MODULE_TYPE_ID_RANGE,
         0,
@@ -425,12 +438,12 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
         "only y recompiles on the unrelated edit; big is a cache hit"
     );
     assert_eq!(
-        s.module_id_base("./big").map(|t| t.0),
+        s.module_id_base(&module_key(&p.dir, "big.al")).map(|t| t.0),
         Some(big0),
         "big id_base remains stable after a later unrelated edit"
     );
     assert_eq!(
-        s.module_id_base("./y").map(|t| t.0),
+        s.module_id_base(&module_key(&p.dir, "y.al")).map(|t| t.0),
         Some(y1),
         "y keeps its post-recovery id_base after a later unrelated edit"
     );

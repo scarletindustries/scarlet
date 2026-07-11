@@ -34,10 +34,23 @@ use libmimalloc_sys::mi_free;
 use libmimalloc_sys::mi_malloc_aligned;
 
 use crate::bytecode::value::{
-    RC_PREFIX_WORDS, Value, binary_clone_backing, for_each_child, header_has_off_heap_link,
+    Arena, RC_PREFIX_WORDS, Value, binary_clone_backing, for_each_child, header_has_off_heap_link,
     header_total_words, mark_immortal, rc_increment,
 };
 use crate::frozen::FrozenBuilder;
+
+#[cfg(feature = "alloc-counter")]
+thread_local! {
+    /// Test hook: running count of [`ProcHeap::alloc_object`] calls on THIS
+    /// thread. Thread-local (not a process-global atomic) so each Rust test —
+    /// which the default libtest harness runs on its own thread — reads and
+    /// resets an isolated counter; a global would race with the many
+    /// `value`/`hamt` unit tests that allocate in parallel and make exact
+    /// net-allocation assertions (the point of the Perceus reuse tests)
+    /// impossible. The reuse tests drive the VM in-process without spawning
+    /// worker schedulers, so all counted allocations happen on the test thread.
+    static ALLOC_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// A process's allocator handle: a zero-sized marker over mimalloc's per-thread
 /// default heap. See the module docs for why there is no per-process
@@ -75,6 +88,8 @@ impl ProcHeap {
     /// is unchanged. Reclaimed by reference counting (`value::release`).
     #[inline]
     pub fn alloc_object(&self, words: usize) -> NonNull<u64> {
+        #[cfg(feature = "alloc-counter")]
+        ALLOC_COUNT.set(ALLOC_COUNT.get().wrapping_add(1));
         let raw = self.alloc_raw(RC_PREFIX_WORDS + words);
         // SAFETY: fresh allocation of `RC_PREFIX_WORDS + words` (>= 2) words;
         // the first word is the refcount, the object begins after it.
@@ -82,6 +97,24 @@ impl ProcHeap {
             raw.write(1); // refcount = 1 (the constructing handle)
             raw.add(RC_PREFIX_WORDS)
         }
+    }
+
+    // ---- test instrumentation --------------------------------------------
+
+    /// Number of [`alloc_object`](Self::alloc_object) calls on the current
+    /// thread since its last [`reset_alloc_count`](Self::reset_alloc_count).
+    /// Used by reuse tests to assert net allocations (e.g. `list.map` on a
+    /// uniquely-owned list must allocate zero fresh cells).
+    #[cfg(feature = "alloc-counter")]
+    pub fn alloc_count() -> usize {
+        ALLOC_COUNT.get()
+    }
+
+    /// Reset this thread's [`alloc_count`](Self::alloc_count) to zero. Call
+    /// immediately before the code span whose allocations a test is measuring.
+    #[cfg(feature = "alloc-counter")]
+    pub fn reset_alloc_count() {
+        ALLOC_COUNT.set(0);
     }
 
     /// Free a single object's allocation. mimalloc recovers the owning heap
@@ -130,32 +163,52 @@ type WalkMap = HashMap<usize, NonNull<u64>>;
 /// BFS queue of freshly copied objects whose child slots still need rewriting.
 type WalkQueue = Vec<NonNull<u64>>;
 
-/// Shallow-copy one node of a spawn graph, returning the value to store in the
+/// Shallow-copy one node into `arena`, returning the value to store in the
 /// parent slot. Immediates and immortal (frozen) values pass through unchanged
 /// (frozen objects are shared, never copied). A node already copied (a DAG
-/// join) is shared: its existing copy's refcount is bumped. A first-seen node
-/// is byte-copied (its child slots still point at the *source* graph; the
-/// caller's queue links them later) and queued.
-fn copy_node(src: &Value, map: &mut WalkMap, queue: &mut WalkQueue) -> Value {
+/// join) is shared — bumping the existing copy's refcount unless the copy is
+/// frozen, as frozen objects carry no count. A first-seen node is byte-copied
+/// (its child slots still point at the *source* graph; the caller's queue links
+/// them later) and queued.
+///
+/// The destination discipline is the arena's own: [`Arena::marks_immortal`]
+/// says whether its allocations are frozen (no refcount prefix, never counted)
+/// or mortal (refcount prefix, born at 1). Taking the allocator as an `Arena`
+/// rather than a bare closure plus a flag makes the two impossible to mismatch,
+/// and each caller still monomorphizes to exactly the code it needs.
+#[inline]
+fn copy_node_into<A: Arena>(
+    src: &Value,
+    map: &mut WalkMap,
+    queue: &mut WalkQueue,
+    arena: &mut A,
+) -> Value {
     if !src.is_heap() || src.is_immortal() {
         return src.clone();
     }
+    let immortal = arena.marks_immortal();
     let src_obj = src.heap_obj();
     let src_addr = src_obj as usize;
     if let Some(&d) = map.get(&src_addr) {
-        // SAFETY: `d` is a live mortal object this copy already created.
+        // SAFETY: `d` is a live object this walk already created.
         return unsafe {
-            rc_increment(d.as_ptr());
+            if !immortal {
+                rc_increment(d.as_ptr());
+            }
             Value::from_object_ptr(d)
         };
     }
     // SAFETY: `src` is a live heap object; its header gives its total size.
     let words = unsafe { header_total_words(*src_obj) };
-    let d = ProcHeap.alloc_object(words); // refcount = 1 (this first reference)
+    let d = arena.alloc_words(words); // mortal: refcount = 1 (this first reference)
     // SAFETY: `d` has `words` header+payload words; copy the image verbatim,
-    // then share the off-heap Arc backing if this is a Binary box.
+    // then share the off-heap Arc backing if this is a Binary box (which the
+    // frozen area, if that is the destination, then holds for the program's life).
     unsafe {
         std::ptr::copy_nonoverlapping(src_obj, d.as_ptr(), words);
+        if immortal {
+            mark_immortal(d.as_ptr());
+        }
         if header_has_off_heap_link(*d.as_ptr()) {
             binary_clone_backing(d.as_ptr());
         }
@@ -220,52 +273,19 @@ fn walk_graph(
 /// - shares immortal (frozen) objects without copying them;
 /// - shares `Binary` byte backings by bumping their `Arc` (no byte copy).
 fn rc_copy_graph(root: &Value) -> Value {
-    walk_graph(root, copy_node)
-}
-
-/// Publish-side counterpart of [`copy_node`]: copy one node into the frozen
-/// `builder`. Frozen copies carry NO refcount prefix and are marked immortal
-/// (reference counting never touches them); already-frozen children and
-/// immediates pass through shared.
-fn publish_node(
-    src: &Value,
-    builder: &mut FrozenBuilder,
-    map: &mut WalkMap,
-    queue: &mut WalkQueue,
-) -> Value {
-    if !src.is_heap() || src.is_immortal() {
-        return src.clone();
-    }
-    let src_obj = src.heap_obj();
-    let src_addr = src_obj as usize;
-    if let Some(&d) = map.get(&src_addr) {
-        // SAFETY: `d` is a live frozen object this publish already created;
-        // shared, frozen objects have no count.
-        return unsafe { Value::from_object_ptr(d) };
-    }
-    // SAFETY: `src` is a live heap object; copy its image into the frozen area.
-    let words = unsafe { header_total_words(*src_obj) };
-    let d = builder.alloc(words);
-    unsafe {
-        std::ptr::copy_nonoverlapping(src_obj, d.as_ptr(), words);
-        mark_immortal(d.as_ptr());
-        if header_has_off_heap_link(*d.as_ptr()) {
-            binary_clone_backing(d.as_ptr()); // frozen holds the Arc for the program's life
-        }
-    }
-    map.insert(src_addr, d);
-    queue.push(d);
-    // SAFETY: `d` is a fully written, immortal-marked object header.
-    unsafe { Value::from_object_ptr(d) }
+    walk_graph(root, |v, map, queue| {
+        copy_node_into(v, map, queue, &mut ProcHeap)
+    })
 }
 
 /// Deep-copy the graph reachable from `root` into the frozen `builder`,
 /// returning the frozen root. A single pass with an explicit queue (no native
 /// recursion), preserving sharing via a `src → dst` map, sharing already-frozen
 /// subgraphs, and bumping `Binary` Arc backings (which the frozen area then
-/// holds forever).
+/// holds forever). Frozen copies carry NO refcount prefix and are marked
+/// immortal, so reference counting never touches them.
 fn rc_publish_graph(root: &Value, builder: &mut FrozenBuilder) -> Value {
-    walk_graph(root, |v, map, queue| publish_node(v, builder, map, queue))
+    walk_graph(root, |v, map, queue| copy_node_into(v, map, queue, builder))
 }
 
 #[cfg(test)]
@@ -286,6 +306,26 @@ mod tests {
                 assert_eq!(p.as_ptr().add(i).read(), 0xABCD_0000 + i as u64);
             }
             ProcHeap::free_raw(p);
+        }
+    }
+
+    #[cfg(feature = "alloc-counter")]
+    #[test]
+    fn alloc_counter_tracks_alloc_object() {
+        ProcHeap::reset_alloc_count();
+        let base = ProcHeap::alloc_count();
+        assert_eq!(base, 0);
+        let h = ProcHeap::new();
+        let a = h.alloc_object(3);
+        let b = h.alloc_object(5);
+        assert_eq!(ProcHeap::alloc_count(), 2);
+        ProcHeap::reset_alloc_count();
+        assert_eq!(ProcHeap::alloc_count(), 0);
+        // SAFETY: `a`/`b` are live allocations; back up over the RC prefix to
+        // the block start before freeing.
+        unsafe {
+            ProcHeap::free_raw(a.sub(RC_PREFIX_WORDS));
+            ProcHeap::free_raw(b.sub(RC_PREFIX_WORDS));
         }
     }
 

@@ -88,6 +88,12 @@ impl EntityKind {
 pub enum ReferenceKind {
     /// `module.member` — qualified through an import alias.
     Qualified,
+    /// The `module` half of a `module.member` access: the identifier that
+    /// names an import alias rather than a value. Targets the `ModuleAlias`
+    /// definition so hover / goto-def on the qualifier can reach the imported
+    /// module. Not a use site — the alias's liveness is decided by the
+    /// `Qualified` occurrence on the member (see [`Definition::imports_module`]).
+    Qualifier,
     /// A bare `name` resolved through the local/value environment.
     Unqualified,
     /// The module path in an `import a/b` declaration.
@@ -104,10 +110,22 @@ impl ReferenceKind {
     /// Whether this occurrence is a real *use* in code — a qualified or
     /// unqualified name that evaluates the target — as opposed to a binding
     /// occurrence that merely declares it (`Import` path, `Alias` binding,
-    /// `Definition` self-occurrence). Drives find-references, the xref
-    /// reverse index, and the unused/dead-code use check.
+    /// `Definition` self-occurrence) or names a module (`Qualifier`). Drives
+    /// find-references, the xref reverse index, and the unused/dead-code use
+    /// check.
     pub fn is_use_site(self) -> bool {
         matches!(self, ReferenceKind::Qualified | ReferenceKind::Unqualified)
+    }
+
+    /// Whether find-references should list this occurrence. A superset of
+    /// [`is_use_site`](Self::is_use_site): the `b` of `b.add(..)` is a genuine
+    /// textual reference to the import alias `b`, so it belongs in the result
+    /// even though it is not a *use* for liveness purposes (a `Qualifier` never
+    /// evaluates its target — see [`ReferenceKind::Qualifier`]). Binding
+    /// occurrences (`Import`/`Alias`/`Definition`) stay out: the declaration is
+    /// added separately, under `includeDeclaration`.
+    pub fn is_reference_site(self) -> bool {
+        self.is_use_site() || matches!(self, ReferenceKind::Qualifier)
     }
 }
 
@@ -211,6 +229,9 @@ pub struct Definition {
     pub defid: DefId,
     pub name: String,
     pub doc: Option<String>,
+    /// A function's parameter names, for rendering `fn(path String)` in hover.
+    /// Documentation only — see `module::ExportedValue::param_names`.
+    pub param_names: Vec<String>,
     pub is_pub: bool,
     pub alias_of: Option<DefId>,
     /// For [`EntityKind::ModuleAlias`]: span of the whole `import ...`
@@ -232,6 +253,7 @@ impl Definition {
             defid,
             name: name.into(),
             doc,
+            param_names: Vec::new(),
             is_pub,
             alias_of: None,
             decl_span: defid.span,
@@ -305,6 +327,10 @@ pub struct ResolvedRef {
 #[derive(Debug, Clone)]
 pub struct ModuleReferences {
     module: ModuleId,
+    /// The module's own doc comment (the `/** */` at line 0 of its source),
+    /// verbatim. Rendered by LSP hover on an import path segment or a
+    /// `q.member` qualifier.
+    doc: Option<String>,
     definitions: IndexMap<DefId, Definition>,
     occurrences: Vec<Reference>,
     occurrence_owner: Vec<Option<DefId>>,
@@ -344,6 +370,7 @@ impl ModuleReferences {
     pub fn new(module: ModuleId) -> Self {
         ModuleReferences {
             module,
+            doc: None,
             definitions: IndexMap::new(),
             occurrences: Vec::new(),
             occurrence_owner: Vec::new(),
@@ -354,6 +381,14 @@ impl ModuleReferences {
 
     pub fn module(&self) -> ModuleId {
         self.module
+    }
+
+    pub fn set_doc(&mut self, doc: Option<String>) {
+        self.doc = doc;
+    }
+
+    pub fn doc(&self) -> Option<&str> {
+        self.doc.as_deref()
     }
 
     /// Register a declared name. Re-declaring the same `DefId` overwrites the
@@ -377,6 +412,13 @@ impl ModuleReferences {
 
     pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
         self.definitions.values()
+    }
+
+    /// Attach a function's parameter names to its definition, for hover.
+    pub fn set_param_names(&mut self, id: DefId, names: Vec<String>) {
+        if let Some(d) = self.definitions.get_mut(&id) {
+            d.param_names = names;
+        }
     }
 
     pub fn definition(&self, id: DefId) -> Option<&Definition> {
@@ -501,6 +543,15 @@ impl ReferenceGraph {
         self.interner.path(id)
     }
 
+    /// Every interned module, in interning order.
+    pub fn modules(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
+        self.interner
+            .paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (ModuleId(i as u32), p))
+    }
+
     // --- Mutation ---
 
     /// Install (or replace) a module's references and rebuild the workspace
@@ -580,6 +631,31 @@ impl ReferenceGraph {
     pub fn definition_at(&self, module: ModuleId, line: i32, col: i32) -> Option<&Definition> {
         let target = self.modules.get(&module)?.resolve_position(line, col)?;
         self.definition(self.canonical(target))
+    }
+
+    /// The doc comment of `module` — the `/** */` at line 0 of its source.
+    pub fn module_doc(&self, module: ModuleId) -> Option<&str> {
+        self.modules.get(&module)?.doc()
+    }
+
+    /// The *module* a position names, if any: the final path segment of an
+    /// `import a/b` (an [`ReferenceKind::Import`] occurrence, whose target is
+    /// owned by the imported module), or the `q` of a `q.member` access (a
+    /// [`ReferenceKind::Qualifier`] occurrence targeting the `ModuleAlias`
+    /// binding, which records the module it imports).
+    ///
+    /// Every other position inside an `import` declaration — the keyword, a
+    /// non-final path segment, the `as` alias binding — falls only under the
+    /// alias `Definition`'s whole-declaration span, resolves as
+    /// [`ReferenceKind::Definition`]/[`ReferenceKind::Alias`], and yields
+    /// `None` so those stay non-navigable.
+    pub fn module_named_at(&self, module: ModuleId, line: i32, col: i32) -> Option<ModuleId> {
+        let hit = self.modules.get(&module)?.cursor_hit(line, col)?;
+        match hit.kind {
+            ReferenceKind::Import => Some(hit.target.module),
+            ReferenceKind::Qualifier => self.definition(hit.target)?.imports_module,
+            _ => None,
+        }
     }
 
     /// The raw `DefId` a position resolves to, without crossing to the owning

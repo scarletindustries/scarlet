@@ -382,6 +382,8 @@ fn make_pair(x a, y b) Pair(a, b) {
 auto_pair = make_pair(100, 'hundred')
 println('auto_pair: ${auto_pair.first}, ${auto_pair.second}')
 
-xo = Some(0)
+const my_some = Some
+
+xo = my_some(0)
 
 xo

@@ -1,16 +1,18 @@
-// Monotonic time.
-//
-// monotonic() returns an Instant representing "now" on a clock that only ever
-// moves forward — it is unaffected by wall-clock adjustments (NTP steps, leap
-// seconds, the user changing the system time) — so it is the right primitive
-// for measuring durations, computing deadlines, and timing out I/O.
-//
-// Instant is opaque: it can only be obtained from monotonic() and only moved
-// with add_ms / compared with since_ms, so a wall-clock ms count or a bare
-// duration cannot be passed where an absolute monotonic deadline is expected.
+/**
+ * Monotonic time.
+ *
+ * monotonic() returns an Instant representing "now" on a clock that only ever
+ * moves forward — it is unaffected by wall-clock adjustments (NTP steps, leap
+ * seconds, the user changing the system time) — so it is the right primitive
+ * for measuring durations, computing deadlines, and timing out I/O.
+ *
+ * Instant is opaque: it can only be obtained from monotonic() and only moved
+ * with add_ms / compared with since_ms, so a wall-clock ms count or a bare
+ * duration cannot be passed where an absolute monotonic deadline is expected.
+ */
 
 pub opaque type Instant {
-	Instant(ms Int)
+	ms Int
 }
 
 @vm(time__monotonic)

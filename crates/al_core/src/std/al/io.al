@@ -28,8 +28,7 @@ pub type IoError {
 	FileTooLarge(path String)
 	// A write was handed a binary that is not a whole number of bytes.
 	UnalignedBinary
-	// An OS error with no dedicated variant above, carrying its raw errno so it
-	// is still matchable — never a string.
+	// An OS error with no dedicated variant above, carrying its raw errno.
 	Errno(code Int)
 }
 

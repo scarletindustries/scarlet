@@ -7,7 +7,7 @@ import al/string
 
 type Tree(t) {
 	Leaf
-	Node(left Tree(t) value t right Tree(t))
+	Node(left Tree(t), value t, right Tree(t))
 }
 
 // Smaller values go left, larger go right, duplicates are dropped.

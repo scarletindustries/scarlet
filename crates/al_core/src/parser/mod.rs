@@ -27,8 +27,13 @@ enum SyncOutcome {
     ConsumedCloser,
 }
 
+/// A parsed source file: its top-level body, the module doc comment (a `/** */`
+/// block that is the very first thing in the file — see
+/// [`Parser::take_module_doc`]), and everything the scanner/parser complained
+/// about.
 pub struct ParseResult {
     pub ast: ast::BlockExpression,
+    pub doc: Option<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -40,6 +45,11 @@ pub struct Parser {
     prev_token_end_line: i32,
     prev_token_end_column: i32,
     depth: u32,
+    /// Index of the token whose leading trivia gave up the module doc comment
+    /// (always the first token, when the file opens with one). Set by
+    /// [`Parser::take_module_doc`] so [`Parser::extract_doc_comment`] skips
+    /// that comment instead of re-attaching it to the first declaration.
+    module_doc_token: Option<usize>,
 }
 
 pub fn new_parser(s: &mut Scanner) -> Parser {
@@ -57,6 +67,7 @@ pub fn new_parser_from_tokens(tokens: Vec<Token>, scanner_diagnostics: Vec<Diagn
         prev_token_end_line: 0,
         prev_token_end_column: 0,
         depth: 0,
+        module_doc_token: None,
     }
 }
 
@@ -347,13 +358,38 @@ impl Parser {
             .any(|t| matches!(t, Trivia::Newline))
     }
 
+    /// The doc comment attached to the declaration about to be parsed: the
+    /// first `/** */` in the current token's leading trivia. When that token
+    /// also donated the *module* doc (`module_doc_token`), the first one is
+    /// already spoken for, so the declaration takes the next one — a file that
+    /// opens with a module doc and a decl doc back to back keeps both.
     fn extract_doc_comment(&self) -> Option<String> {
-        for trivia in &self.cur().leading_trivia {
-            if let Trivia::DocComment(text) = trivia {
-                return Some(text.clone());
-            }
-        }
-        None
+        let taken = usize::from(self.module_doc_token == Some(self.index));
+        self.cur()
+            .leading_trivia
+            .iter()
+            .filter_map(|t| match t {
+                Trivia::DocComment(text) => Some(text),
+                _ => None,
+            })
+            .nth(taken)
+            .cloned()
+    }
+
+    /// The module doc comment: a `/** */` block that begins on line 0, i.e. is
+    /// the very first thing in the file. Trivia carries no span, but the
+    /// scanner emits a `Newline` for every line break and drops only
+    /// horizontal whitespace — so "no `Newline` (and nothing else) precedes it
+    /// in the first token's leading trivia" is exactly "starts on line 0".
+    /// Records the donating token so `extract_doc_comment` cannot hand the
+    /// same comment to the first declaration as well.
+    fn take_module_doc(&mut self) -> Option<String> {
+        let doc = match self.cur().leading_trivia.first() {
+            Some(Trivia::DocComment(text)) => text.clone(),
+            _ => return None,
+        };
+        self.module_doc_token = Some(self.index);
+        Some(doc)
     }
 
     // Parses `open` then zero or more comma-separated items then `close`.
@@ -383,7 +419,49 @@ impl Parser {
     // items are self-delimiting, so the comma carried no information and the
     // grammar now rejects it outright. Currently used only for constructor
     // fields.
-    fn parse_separated_list<T>(
+    /// Items inside a type body: one per line. `noun` names them in the error.
+    ///
+    /// A newline is the separator, not merely permitted whitespace — the
+    /// formatter has always emitted one per line, so accepting
+    /// `type User { age Int username String }` only let source drift from what
+    /// `al fmt` produces.
+    fn parse_line_separated_list<T>(
+        &mut self,
+        close: Kind,
+        noun: &str,
+        mut item: impl FnMut(&mut Self) -> PResult<T>,
+    ) -> PResult<Vec<T>> {
+        let mut items = Vec::new();
+        let mut prev_end_line: Option<i32> = None;
+        while self.kind() != close && self.kind() != Kind::Eof {
+            if self.kind() == Kind::PuncComma {
+                return Err(format!(
+                    "unexpected `,` — each {noun} goes on its own line, not comma-separated"
+                ));
+            }
+            if prev_end_line == Some(self.current_span().start_line) {
+                return Err(format!("each {noun} must be on its own line"));
+            }
+            items.push(item(self)?);
+            prev_end_line = Some(self.prev_token_end_line);
+        }
+        Ok(items)
+    }
+
+    /// Constructor fields. Adjacent fields must be *separated*, and a newline
+    /// separates as well as a comma does:
+    ///
+    /// ```text
+    /// Normie(username String, age Int)     // one line: comma
+    /// Done(                                // broken: the newline is enough
+    ///     method Binary
+    ///     target Binary
+    /// )
+    /// ```
+    ///
+    /// Only a same-line list without commas is rejected: nothing marks where
+    /// one field ends, and the reader is left counting words.
+    fn parse_field_list<T>(
         &mut self,
         close: Kind,
         mut item: impl FnMut(&mut Self) -> PResult<T>,
@@ -392,11 +470,18 @@ impl Parser {
         while self.kind() != close && self.kind() != Kind::Eof {
             items.push(item(self)?);
             if self.kind() == Kind::PuncComma {
-                return Err(
-                    "unexpected `,` — items here are separated by spaces or newlines, not commas"
-                        .to_string(),
-                );
+                self.eat(Kind::PuncComma)?;
+                continue;
             }
+            if self.kind() == close {
+                break;
+            }
+            if self.current_span().start_line > self.prev_token_end_line {
+                continue; // a newline separates
+            }
+            return Err(
+                "fields on one line are separated by commas: `Name(a Int, b String)`".to_string(),
+            );
         }
         Ok(items)
     }
@@ -437,6 +522,7 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> ParseResult {
         let program_span = self.current_span();
+        let doc = self.take_module_doc();
         let mut body: Vec<ast::Node> = Vec::new();
         let mut seen_non_import = false;
 
@@ -470,6 +556,7 @@ impl Parser {
                 body,
                 span: self.span_from(program_span),
             },
+            doc,
             diagnostics: std::mem::take(&mut self.diagnostics),
         }
     }
@@ -1709,9 +1796,10 @@ impl Parser {
                     // Single-constructor shorthand: `type T { field Type ... }`
                     // desugars to `type T { T(field Type ...) }`. Fields are
                     // separated by newlines/spaces; commas are rejected.
-                    let fields = p.parse_separated_list(Kind::PuncCloseBrace, |q| {
-                        q.parse_constructor_field()
-                    })?;
+                    let fields =
+                        p.parse_line_separated_list(Kind::PuncCloseBrace, "field", |q| {
+                            q.parse_constructor_field()
+                        })?;
                     Ok(vec![ast::Constructor {
                         doc: None,
                         identifier: identifier.clone(),
@@ -1719,11 +1807,9 @@ impl Parser {
                         span: identifier.span,
                     }])
                 } else {
-                    let mut variants = Vec::new();
-                    while p.kind() != Kind::PuncCloseBrace && p.kind() != Kind::Eof {
-                        variants.push(p.parse_constructor()?);
-                    }
-                    Ok(variants)
+                    p.parse_line_separated_list(Kind::PuncCloseBrace, "constructor", |q| {
+                        q.parse_constructor()
+                    })
                 }
             })?;
             self.eat(Kind::PuncCloseBrace)?;
@@ -1759,7 +1845,7 @@ impl Parser {
         if self.kind() == Kind::PuncOpenParen {
             self.eat(Kind::PuncOpenParen)?;
             fields =
-                self.parse_separated_list(Kind::PuncCloseParen, |p| p.parse_constructor_field())?;
+                self.parse_field_list(Kind::PuncCloseParen, |p| p.parse_constructor_field())?;
             self.eat(Kind::PuncCloseParen)?;
         }
         Ok(ast::Constructor {
@@ -2188,6 +2274,78 @@ mod tests {
         result
     }
 
+    /// The `doc` of the program's first declaration, whatever kind it is.
+    fn first_decl_doc(r: &ParseResult) -> Option<String> {
+        match r.ast.body.first().expect("a first declaration") {
+            ast::Node::Statement(s) => match s.as_ref() {
+                ast::Statement::Declaration { decl, .. } => match decl.as_ref() {
+                    ast::Declaration::Function(f) => f.doc.clone(),
+                    ast::Declaration::Const(c) => c.doc.clone(),
+                    ast::Declaration::Type(t) => t.doc.clone(),
+                },
+                other => panic!("expected a declaration, got {other:?}"),
+            },
+            other => panic!("expected a statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_comment_at_line_zero_is_the_module_doc() {
+        let r = assert_no_errors("/** Module prose. */\npub fn f() Int { 1 }\n");
+        assert_eq!(r.doc.as_deref(), Some("/** Module prose. */"));
+        assert_eq!(
+            first_decl_doc(&r),
+            None,
+            "the line-0 doc belongs to the module, not to `f`"
+        );
+    }
+
+    #[test]
+    fn doc_comment_below_line_zero_attaches_to_its_declaration() {
+        let r = assert_no_errors("\n/** Docs f. */\npub fn f() Int { 1 }\n");
+        assert_eq!(r.doc, None, "a doc on line 1 is not the module doc");
+        assert_eq!(first_decl_doc(&r).as_deref(), Some("/** Docs f. */"));
+    }
+
+    #[test]
+    fn line_comment_before_a_doc_comment_leaves_no_module_doc() {
+        // A `//` comment forces a newline, so the `/** */` no longer begins on
+        // line 0 and stays the declaration's doc.
+        let r = assert_no_errors("// header\n/** Docs f. */\npub fn f() Int { 1 }\n");
+        assert_eq!(r.doc, None);
+        assert_eq!(first_decl_doc(&r).as_deref(), Some("/** Docs f. */"));
+    }
+
+    #[test]
+    fn file_without_a_module_doc_has_none() {
+        let r = assert_no_errors("pub fn f() Int { 1 }\n");
+        assert_eq!(r.doc, None);
+        assert_eq!(first_decl_doc(&r), None);
+    }
+
+    #[test]
+    fn module_doc_and_first_declaration_doc_coexist() {
+        // Both comments sit in the same token's leading trivia; the module
+        // takes the first and `f` still gets the second.
+        let r = assert_no_errors("/** Module. */\n/** Docs f. */\npub fn f() Int { 1 }\n");
+        assert_eq!(r.doc.as_deref(), Some("/** Module. */"));
+        assert_eq!(first_decl_doc(&r).as_deref(), Some("/** Docs f. */"));
+    }
+
+    #[test]
+    fn unterminated_line_zero_doc_is_not_the_module_doc() {
+        // The scanner swallows the rest of the file into the comment; treating
+        // that as documentation would put the whole source on the hover card.
+        let r = parse("/** Module prose\npub fn f() Int { 1 }\n");
+        assert_eq!(r.doc, None);
+    }
+
+    #[test]
+    fn module_doc_survives_an_import_only_prefix() {
+        let r = assert_no_errors("/** Module. */\nimport al/string\npub fn f() Int { 1 }\n");
+        assert_eq!(r.doc.as_deref(), Some("/** Module. */"));
+    }
+
     fn assert_has_error(src: &str, snippet: &str) {
         let result = parse(src);
         assert!(
@@ -2349,10 +2507,10 @@ mod tests {
 
     #[test]
     fn test_type_decl() {
-        assert_no_errors("type Point { Point(x Int y Int) }");
+        assert_no_errors("type Point { Point(x Int, y Int) }");
         assert_no_errors("type Box(t) { Box(value t) }");
-        assert_no_errors("type Color { Red\n Green\n Blue }");
-        assert_no_errors("type Option(t) { Some(value t)\n None }");
+        assert_no_errors("type Color {\n\tRed\n\n\tGreen\n\n\tBlue\n}");
+        assert_no_errors("type Option(t) {\n\tSome(value t)\n\n\tNone\n}");
         assert_no_errors("type IntList = Array(Int)");
     }
 
@@ -2365,7 +2523,7 @@ mod tests {
 
     #[test]
     fn test_type_decl_shorthand() {
-        assert_no_errors("type User { name String age Int }");
+        assert_no_errors("type User {\n\tname String\n\tage Int\n}");
         assert_no_errors("type Box(A) { value A }");
         assert_no_errors("type User {\n  name String\n  age Int\n}");
         assert_has_error("type Foo { bar }", "Expected type");
@@ -2475,10 +2633,12 @@ mod tests {
         assert_single_error("match x { net.V6(ip) -> 1 }", "Expected '->', got '.'");
         assert_single_error("match x { a if + -> 1 }", "Unexpected '+'");
         assert_single_error("match x { -> 1 }", "Unexpected '->' in pattern");
-        // Constructor fields are space/newline separated, never comma separated.
+        // Constructor fields on one line need commas; a newline separates too.
+        assert_no_errors("type P {\n\tP(a Int, b Int)\n}\n");
+        assert_no_errors("type P {\n\tP(\n\t\ta Int\n\t\tb Int\n\t)\n}\n");
         assert_has_error(
-            "type P { P(a Int, b Int) }",
-            "separated by spaces or newlines, not commas",
+            "type P {\n\tP(a Int b Int)\n}\n",
+            "fields on one line are separated by commas",
         );
         // The two-element forms remain valid.
         assert_no_errors("fn f(x (Int, Int)) Int { 1 }");

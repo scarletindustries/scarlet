@@ -7,8 +7,8 @@ import al/string
 
 type Shape {
 	Circle(r Float)
-	Rect(w Float h Float)
-	Triangle(b Float h Float)
+	Rect(w Float, h Float)
+	Triangle(b Float, h Float)
 }
 
 const pi = 3.141592653589793

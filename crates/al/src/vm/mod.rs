@@ -980,7 +980,7 @@ impl VM {
         Ok(())
     }
 
-    // --- Lightweight processes (al/experiments/scheduler) --------------------
+    // --- Lightweight processes (al/scheduler) --------------------
 
     /// `scheduler.spawn(f)`: start a new process running the closure `f`.
     ///

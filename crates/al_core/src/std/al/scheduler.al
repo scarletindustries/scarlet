@@ -1,13 +1,15 @@
-// Experimental lightweight processes.
-//
-// spawn(f) starts a new process running f. Processes are cheap (a few hundred
-// bytes, about a microsecond to start) — spawn freely, one per connection or
-// task. The runtime schedules them across every CPU core, preemptively, with
-// a reduction budget; blocking I/O parks only the calling process, never the
-// whole program. Processes share no mutable state: values are immutable, and
-// anything that crosses between processes behaves as a copy.
-//
-// The program exits when every process has finished.
+/**
+ * Lightweight processes.
+ *
+ * spawn(f) starts a new process running f. Processes are cheap (a few hundred
+ * bytes, about a microsecond to start) — spawn freely, one per connection or
+ * task. The runtime schedules them across every CPU core, preemptively, with
+ * a reduction budget; blocking I/O parks only the calling process, never the
+ * whole program. Processes share no mutable state: values are immutable, and
+ * anything that crosses between processes behaves as a copy.
+ *
+ * The program exits when every process has finished.
+ */
 
 // The closure returns `Nil`, not a generic `a`: a spawned process has nowhere
 // to send a result — its return value is dropped — so a closure that produces a

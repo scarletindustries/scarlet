@@ -133,13 +133,12 @@ reject_case! {
     ),
 }
 
-// ---------------------------------------------------------------------------
-// U3: the `error` keyword is gone; `Err(x)` is an ordinary constructor and
-// must typecheck as such. A function returning `Result(Int, E)` whose body
-// returns `Err(...)` typechecks; the `or` handler observes the error.
-#[test]
-fn u3_err_constructor_typechecks() {
-    run_outputs(
+run_case! {
+    // ---------------------------------------------------------------------------
+    // U3: the `error` keyword is gone; `Err(x)` is an ordinary constructor and
+    // must typecheck as such. A function returning `Result(Int, E)` whose body
+    // returns `Err(...)` typechecks; the `or` handler observes the error.
+    u3_err_constructor_typechecks: (
         "type E { E(msg String) }\n\
          fn f() Result(Int, E) {\n\
          \tErr(E(msg: 'boom'))\n\
@@ -147,16 +146,13 @@ fn u3_err_constructor_typechecks() {
          r = f() or _e -> 99\n\
          println(r)\n",
         "99\n",
-    );
-}
+    ),
 
-// ---------------------------------------------------------------------------
-// U4: type-env is block-scoped but the local-slot map is function-scoped, so
-// an inner `x = 'hi'` overwrites the outer slot while the outer type stays Int.
-// Post-fix: inner binding gets a fresh slot; outer `x` remains 1.
-#[test]
-fn u4_block_scope_preserves_outer_slot() {
-    run_outputs(
+    // ---------------------------------------------------------------------------
+    // U4: type-env is block-scoped but the local-slot map is function-scoped, so
+    // an inner `x = 'hi'` overwrites the outer slot while the outer type stays Int.
+    // Post-fix: inner binding gets a fresh slot; outer `x` remains 1.
+    u4_block_scope_preserves_outer_slot: (
         "x = 1\n\
          r = {\n\
          \tx = 'hi'\n\
@@ -165,17 +161,14 @@ fn u4_block_scope_preserves_outer_slot() {
          println(r)\n\
          println(x + 100)\n",
         "hi\n101\n",
-    );
-}
+    ),
 
-// ---------------------------------------------------------------------------
-// U6: bare variant name in a match over an unannotated subject is compiled as
-// a wildcard binding, so every value falls into the first arm.
-// Post-fix: variant ownership is resolved and dispatch is correct.
-#[test]
-fn u6_bare_variant_on_inferred_subject_dispatches() {
-    run_outputs(
-        "type E { A B }\n\
+    // ---------------------------------------------------------------------------
+    // U6: bare variant name in a match over an unannotated subject is compiled as
+    // a wildcard binding, so every value falls into the first arm.
+    // Post-fix: variant ownership is resolved and dispatch is correct.
+    u6_bare_variant_on_inferred_subject_dispatches: (
+        "type E {\n\tA\n\tB\n}\n\
          fn f(e) {\n\
          \tmatch e {\n\
          \t\tA -> 1\n\
@@ -184,17 +177,14 @@ fn u6_bare_variant_on_inferred_subject_dispatches() {
          }\n\
          println(f(B))\n",
         "2\n",
-    );
-}
+    ),
 
-// ---------------------------------------------------------------------------
-// U14: generic type payload types are not substituted before exhaustiveness,
-// so a fully exhaustive match over `Maybe(Bool)` is wrongly rejected.
-// Post-fix: payloads are substituted; the program checks and runs.
-#[test]
-fn u14_generic_enum_exhaustiveness_substitutes_payload() {
-    run_outputs(
-        "type Maybe(t) { Just(value t) Nothing }\n\
+    // ---------------------------------------------------------------------------
+    // U14: generic type payload types are not substituted before exhaustiveness,
+    // so a fully exhaustive match over `Maybe(Bool)` is wrongly rejected.
+    // Post-fix: payloads are substituted; the program checks and runs.
+    u14_generic_enum_exhaustiveness_substitutes_payload: (
+        "type Maybe(t) {\n\tJust(value t)\n\tNothing\n}\n\
          fn f(m Maybe(Bool)) Int {\n\
          \tmatch m {\n\
          \t\tJust(True) -> 1\n\
@@ -206,21 +196,18 @@ fn u14_generic_enum_exhaustiveness_substitutes_payload() {
          println(f(Just(False)))\n\
          println(f(Nothing))\n",
         "1\n2\n3\n",
-    );
-}
+    ),
 
-// ---------------------------------------------------------------------------
-// U15: the scanner greedily consumes `.` after a digit, so `t.0.name` lexes
-// as `t` `.` `0.` `name` and produces cascading parse/type errors.
-// Post-fix: `.` is only consumed when followed by a digit; field access works.
-#[test]
-fn u15_tuple_index_then_field_access() {
-    run_outputs(
+    // ---------------------------------------------------------------------------
+    // U15: the scanner greedily consumes `.` after a digit, so `t.0.name` lexes
+    // as `t` `.` `0.` `name` and produces cascading parse/type errors.
+    // Post-fix: `.` is only consumed when followed by a digit; field access works.
+    u15_tuple_index_then_field_access: (
         "type P { P(name String) }\n\
          t = (P(name: 'hi'), 5)\n\
          println(t.0.name)\n",
         "hi\n",
-    );
+    ),
 }
 
 // U19: a long `else if` ladder used to recurse `parse_if_expression` at
@@ -305,21 +292,20 @@ fn u20_arithmetic_is_total_vm_never_exits() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// U20b: the GENERIC polymorphic-fallback numeric ops, distinct from U20's
-// type-specialized path. An unannotated `fn op(a, b)` is generalized (HM
-// let-polymorphism) to a single body compiled once with the operand still a
-// constrained var, so codegen takes the `(g, _) => g` arm and emits the
-// generic opcode (`Op::Add`/`Sub`/`Mul`/`Div`/`Mod`, `Op::Lt`/`Gt`/`Lte`/
-// `Gte`) instead of an `AddInt`/`AddFloat`/`LtInt`/... variant. That one body
-// then serves both Int and Float at runtime via tag dispatch in `binary_op`/
-// `float_op`/`compare`; calling each fn at BOTH types is what proves the
-// generic op is live — a specialized body could not serve the other type. The
-// generic arithmetic path must stay TOTAL exactly like the specialized one:
-// x / 0 = 0, x % 0 = x, overflow wraps two's-complement, float / 0.0 = 0.0.
-#[test]
-fn u20b_generic_polymorphic_numeric_ops_are_total() {
-    run_outputs(
+run_case! {
+    // ---------------------------------------------------------------------------
+    // U20b: the GENERIC polymorphic-fallback numeric ops, distinct from U20's
+    // type-specialized path. An unannotated `fn op(a, b)` is generalized (HM
+    // let-polymorphism) to a single body compiled once with the operand still a
+    // constrained var, so codegen takes the `(g, _) => g` arm and emits the
+    // generic opcode (`Op::Add`/`Sub`/`Mul`/`Div`/`Mod`, `Op::Lt`/`Gt`/`Lte`/
+    // `Gte`) instead of an `AddInt`/`AddFloat`/`LtInt`/... variant. That one body
+    // then serves both Int and Float at runtime via tag dispatch in `binary_op`/
+    // `float_op`/`compare`; calling each fn at BOTH types is what proves the
+    // generic op is live — a specialized body could not serve the other type. The
+    // generic arithmetic path must stay TOTAL exactly like the specialized one:
+    // x / 0 = 0, x % 0 = x, overflow wraps two's-complement, float / 0.0 = 0.0.
+    u20b_generic_polymorphic_numeric_ops_are_total: (
         "fn subtract(a, b) { a - b }\n\
          fn multiply(a, b) { a * b }\n\
          fn divide(a, b) { a / b }\n\
@@ -358,7 +344,7 @@ fn u20b_generic_polymorphic_numeric_ops_are_total() {
         // smaller/greater/at_most/at_least at Int then Float
         "7\n1.5\n42\n3.0\n3\n3.5\n0\n0.0\n3\n4.0\n-9223372036854775808\n2\n7\n\
          True\nFalse\nTrue\nFalse\nTrue\nFalse\nFalse\nTrue\n",
-    );
+    ),
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +365,7 @@ fn u21_exhaustiveness_respects_field_labels() {
     // source-order lowering read arm 1 as (a=True, b=_), making the matrix
     // look complete and letting `f(Pair(a: True, b: False))` return Nil.
     check_rejects(
-        "type Pair { a Bool b Bool }\n\
+        "type Pair {\n\ta Bool\n\tb Bool\n}\n\
          fn f(p Pair) Int {\n\
          \tmatch p {\n\
          \t\tPair(b: True, ..) -> 1\n\
@@ -396,7 +382,7 @@ fn u21_exhaustiveness_respects_field_labels() {
     // bogus "missing: Pair(False, True)". It must now be accepted and dispatch
     // correctly: the reversed arm covers (a=False, b=True), so f returns 3.
     run_outputs(
-        "type Pair { a Bool b Bool }\n\
+        "type Pair {\n\ta Bool\n\tb Bool\n}\n\
          fn f(p Pair) Int {\n\
          \tmatch p {\n\
          \t\tPair(a: True, b: True) -> 1\n\

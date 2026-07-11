@@ -2,8 +2,7 @@ use al::reference::EntityKind;
 
 mod common;
 use common::{
-    Project, SessionQueryExt, checked_with, cursor, project_rejects, run_al, run_outputs,
-    run_project_outputs,
+    Project, SessionQueryExt, checked_with, cursor, project_rejects, run_al, run_project_outputs,
 };
 
 const UTIL_SRC: &str =
@@ -117,12 +116,11 @@ fn unknown_module() {
     project_rejects(&proj, "run", "main.al", &["not found", "Unknown module"]);
 }
 
-#[test]
-fn stdlib_net_socket_type() {
-    run_outputs(
+run_case! {
+    stdlib_net_socket_type: (
         "import al/net/socket.{Socket}\nfn id(s Socket) Socket { s }\nprintln('ok')\n",
         "ok\n",
-    );
+    ),
 }
 
 #[test]
@@ -150,8 +148,9 @@ fn query_api_cross_module_goto_def_and_symbols() {
     assert!(span.end_column > span.start_column, "real decl span");
 
     // documentSymbol over util.al lists both exported functions.
+    let util_path = proj.dir.join("util.al");
     let mut names: Vec<String> = s
-        .document_symbols("./util")
+        .document_symbols(&util_path.to_string_lossy())
         .into_iter()
         .filter(|x| x.kind == EntityKind::Function)
         .map(|x| x.name)
@@ -257,4 +256,116 @@ fn qualified_import_unknown_member_is_error() {
         "main.al",
         &["Module './lib' has no member 'nope'"],
     );
+}
+
+/// A lambda's body is walked while the import qualifier is still in scope, but
+/// elaborated after a same-named top-level `let` has entered the value env.
+/// The qualified/field decision belongs to the check walk, which recorded it; an
+/// elaborator that re-probed the live env would decide `util.empty()` is a field
+/// access, enter an expression the walk never entered, and abort.
+#[test]
+fn lambda_body_keeps_the_walks_qualifier_verdict() {
+    let proj = Project::new("qual_pinned");
+    proj.write("util.al", "pub fn empty() String { 'E' }\n");
+    proj.write(
+        "main.al",
+        "import ./util\nf = fn() { util.empty() }\nutil = 5\nprintln(f())\nprintln(util)\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "E\n5\n");
+}
+
+/// The other side of the same coin: the shadowing `let` binds a value with a
+/// field of the member's name, so after it `one.go` really is a field read while
+/// inside the earlier-walked lambda it is still module `one`'s `go`.
+#[test]
+fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
+    let proj = Project::new("qual_shadow");
+    proj.write("one.al", "pub const go = 7\n");
+    proj.write(
+        "main.al",
+        "import ./one\ntype Box {\n\tgo Int\n}\ng = fn() { one.go }\none = Box(9)\nprintln(g())\nprintln(one.go)\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "7\n9\n");
+}
+
+// ── Module identity ────────────────────────────────────────────────────────
+//
+// A module IS the file it resolved to. These pin that, because the compiler
+// used to key its module cache on the import *as written*: `./b` from any
+// directory keyed as `"b"`, so the first `b.al` loaded won program-wide.
+// Nothing failed loudly — the wrong module was simply used.
+
+/// `sub/mid.al` imports `./b`, which must be `sub/b.al`, not the root's.
+/// This printed `ROOT ROOT` before the fix.
+#[test]
+fn same_named_modules_in_different_directories_are_distinct() {
+    let proj = Project::new("mod_identity");
+    std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
+    proj.write("b.al", "pub fn who() String {\n\t'ROOT'\n}\n");
+    proj.write("sub/b.al", "pub fn who() String {\n\t'SUB'\n}\n");
+    proj.write(
+        "sub/mid.al",
+        "import ./b\n\npub fn go() String {\n\tb.who()\n}\n",
+    );
+    proj.write(
+        "main.al",
+        "import ./b\nimport ./sub/mid\n\nprintln(b.who())\nprintln(mid.go())\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "ROOT\nSUB\n");
+}
+
+/// The same file reached by two different spellings (`./b` from the root and
+/// `../b` from `sub/`) is ONE module: it must compile once and share state.
+#[test]
+fn one_file_reached_two_ways_is_one_module() {
+    let proj = Project::new("mod_identity_alias");
+    std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
+    proj.write("b.al", "pub fn who() String {\n\t'ROOT'\n}\n");
+    proj.write(
+        "sub/mid.al",
+        "import ../b\n\npub fn go() String {\n\tb.who()\n}\n",
+    );
+    proj.write(
+        "main.al",
+        "import ./b\nimport ./sub/mid\n\nprintln(b.who())\nprintln(mid.go())\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "ROOT\nROOT\n");
+}
+
+/// A missing relative import must not be satisfied by a same-named file in
+/// another directory. This is the shape the LSP silently accepted.
+#[test]
+fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
+    let proj = Project::new("mod_identity_missing");
+    std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
+    proj.write("sub/b.al", "pub fn who() String {\n\t'SUB'\n}\n");
+    // `./b` from the root: `sub/b.al` must NOT satisfy it.
+    proj.write("main.al", "import ./b\n\nprintln(b.who())\n");
+    project_rejects(&proj, "check", "main.al", &["Unknown module"]);
+}
+
+/// A type defined in `sub/b.al` and one in `b.al` are different types, even
+/// though both modules are spelled `./b`. Sharing a cache entry would have
+/// unified them.
+#[test]
+fn same_named_modules_do_not_share_types() {
+    let proj = Project::new("mod_identity_types");
+    std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
+    proj.write(
+        "b.al",
+        "pub type T {\n\tT(n Int)\n}\n\npub fn make() T {\n\tT(1)\n}\n\npub fn get(t T) Int {\n\tt.n\n}\n",
+    );
+    proj.write(
+        "sub/b.al",
+        "pub type T {\n\tT(s String)\n}\n\npub fn make() T {\n\tT('x')\n}\n\npub fn get(t T) String {\n\tt.s\n}\n",
+    );
+    proj.write(
+        "sub/mid.al",
+        "import ./b\n\npub fn go() String {\n\tb.get(b.make())\n}\n",
+    );
+    proj.write(
+        "main.al",
+        "import ./b\nimport ./sub/mid\n\nprintln(b.get(b.make()))\nprintln(mid.go())\n",
+    );
+    run_project_outputs(&proj, "run", "main.al", "1\nx\n");
 }

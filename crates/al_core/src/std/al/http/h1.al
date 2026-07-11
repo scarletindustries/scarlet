@@ -38,7 +38,13 @@ pub type Version {
 // `Done` threads the consumed-offset so the connection loop can resume parsing
 // the next pipelined request from exactly where this one ended.
 pub type Parsed {
-	Done(method Binary target Binary version Version headers Array(Header) consumed Int)
+	Done(
+		method Binary
+		target Binary
+		version Version
+		headers Array(Header)
+		consumed Int
+	)
 	NeedMore
 	Bad(status Int)
 }
@@ -62,7 +68,7 @@ pub type Framing {
 // decoded body, any trailer fields, and the offset just past the final CRLF —
 // the start of the next pipelined request.
 pub type ChunkBody {
-	ChunkedDone(body Binary trailers Array(Header) consumed Int)
+	ChunkedDone(body Binary, trailers Array(Header), consumed Int)
 	ChunkedNeedMore
 	ChunkedBad(status Int)
 }

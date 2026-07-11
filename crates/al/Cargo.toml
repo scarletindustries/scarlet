@@ -23,8 +23,10 @@ ureq = "2"
 al_core = { path = "../al_core" }
 
 [dev-dependencies]
+al_core = { path = "../al_core", features = ["alloc-counter"] }
 serde_json = "1"
 
 [[bin]]
 name = "al"
 path = "src/main.rs"
+

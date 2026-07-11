@@ -1,0 +1,18 @@
+fn s0(%0:t0) -> :t1
+  let %1:t1 = c0
+  let %2:t2 = LtInt(%0, %1)
+  if %2 :t1
+    let %3:t1 = c0
+    ret SubInt(%3, %0)
+  else
+    ret %0
+
+toplevel:
+  let %0:t3 = closure fn#160()
+  let %1:t1 = c0
+  let %2:t1 = c1
+  let %3:t1 = SubInt(%1, %2)
+  ret call %0(%3)
+where
+  c0 = Int(0)
+  c1 = Int(5)

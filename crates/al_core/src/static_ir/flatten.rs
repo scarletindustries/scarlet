@@ -114,17 +114,37 @@ impl FlatPools {
         for (n, ev) in &iface.values {
             let scheme = self.push_scheme(ev.scheme);
             let name = self.intern(n);
+            let p_start = self.str_slice_pool.len() as u32;
+            for p in &ev.param_names {
+                let id = self.intern(p);
+                self.str_slice_pool.push(id);
+            }
+            let param_names = Slice {
+                start: p_start,
+                len: ev.param_names.len() as u32,
+            };
+            let doc = ev.doc.as_deref().map(|d| self.intern(d));
             self.sexport_pool.push(SExport {
                 name,
                 scheme,
                 local_slot: ev.local_slot,
+                param_names,
+                doc,
             });
         }
         let values = Slice {
             start: v_start,
             len: iface.values.len() as u32,
         };
-        let private_names = self.push_str_slice(iface.private_names.iter().cloned());
+        // `private_names` is a `HashSet` with a randomly-seeded hasher, so its
+        // iteration order differs run to run. Interning it in that order would
+        // permute `str_pool` and shift every `StrId` frozen into `.rodata` —
+        // an irreproducible build. Sort, as `flatten` already does for
+        // `reserved`.
+        let mut private: Vec<String> = iface.private_names.iter().cloned().collect();
+        private.sort();
+        let private_names = self.push_str_slice(private);
+        let doc = iface.doc.as_deref().map(|d| self.intern(d));
         self.modules.push((
             key.to_string(),
             SModule {
@@ -132,6 +152,7 @@ impl FlatPools {
                 values,
                 private_names,
                 path,
+                doc,
             },
         ));
     }
@@ -326,6 +347,21 @@ mod tests {
                 "module '{k}' missing from flattened pools"
             );
         }
+
+        // The module doc is the one piece of doc text the blob carries — it is
+        // what hover shows for `al/scheduler`, which is never recompiled.
+        for (k, iface) in &out.blob.interfaces {
+            let (_, m) = p.modules.iter().find(|(mk, _)| mk == k).unwrap();
+            let flat = m.doc.map(|i| p.str_pool[i as usize].as_str());
+            assert_eq!(flat, iface.doc.as_deref(), "module doc lost for '{k}'");
+        }
+        let (_, sched) = p
+            .modules
+            .iter()
+            .find(|(k, _)| k == "al/scheduler")
+            .expect("al/scheduler is precompiled");
+        let doc = p.str_pool[sched.doc.expect("al/scheduler has a module doc") as usize].as_str();
+        assert!(doc.contains("Lightweight processes."));
 
         // The standalone type-info table covers every entry by name.
         assert_eq!(p.typeinfo_by_name.len(), out.blob.type_info.len());

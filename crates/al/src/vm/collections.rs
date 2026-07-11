@@ -1,7 +1,7 @@
 //! The aggregate-value opcodes: arrays (persistent vectors), tuples,
 //! lazy integer ranges, and enum/record field access.
 //!
-//! Three ideas shape every method here:
+//! Two ideas shape every method here:
 //!
 //! - **Arrays are persistent trees** ([`al_core::bytecode::seq`]):
 //!   concat merges border nodes, slice/drop path-copy along the cut,
@@ -13,10 +13,6 @@
 //!   index/len/slice/drop on it are O(1) arithmetic, and only the ops
 //!   that need real elements (concat, push) materialize it into a tree
 //!   — that materialization is the op's real cost.
-//!
-//! [`VM::seq_index_or_else`] is the one method that branches: in-bounds
-//! pushes the element and falls through, out-of-bounds jumps to the
-//! recovery body — which is why it alone takes the interpreter's `ip`.
 
 use al_core::bytecode::{Value, ValueView, seq};
 
@@ -77,55 +73,56 @@ impl VM {
         }
     }
 
+    /// The element of an Array/Range operand at `idx`, or `None` when the
+    /// index is out of bounds, negative, or the operand is not a sequence.
+    /// Callers decide what a miss means (`None` vs an internal error).
+    #[inline]
+    fn seq_elem(&mut self, v: &Value, idx: i64) -> Option<Value> {
+        if idx < 0 {
+            return None;
+        }
+        match v.kind() {
+            ValueView::Array(arr) => arr.get(idx as usize),
+            ValueView::Range(start, end) => {
+                let elem = range_elem(start, end, idx)?;
+                Some(self.boxed_int(elem))
+            }
+            _ => None,
+        }
+    }
+
     /// `arr[i]` — `Some(elem)` / `None`, never an error.
     pub(super) fn seq_index(&mut self) -> VmResult<()> {
         let idx_val = self.pop()?;
         let arr_val = self.pop()?;
-        let v = match (arr_val.kind(), idx_val.as_int()) {
-            (ValueView::Array(arr), Some(idx)) if idx >= 0 => match arr.get(idx as usize) {
-                Some(elem) => self.make_some(elem),
-                None => self.make_none(),
-            },
-            (ValueView::Range(start, end), Some(idx)) if idx >= 0 => {
-                match range_elem(start, end, idx) {
-                    Some(elem) => {
-                        let elem = self.boxed_int(elem);
-                        self.make_some(elem)
-                    }
-                    None => self.make_none(),
-                }
-            }
-            _ => self.make_none(),
+        let elem = idx_val
+            .as_int()
+            .and_then(|idx| self.seq_elem(&arr_val, idx));
+        let v = match elem {
+            Some(elem) => self.make_some(elem),
+            None => self.make_none(),
         };
         self.stack.push(v);
         Ok(())
     }
 
-    /// Fused `arr[i] or default`. In-bounds: push the element and
-    /// fall through (the compiler emits `Jump end` next, skipping
-    /// the recovery body). Out-of-bounds: jump to `operand`, the
-    /// recovery body. Never builds an `Option` box.
-    pub(super) fn seq_index_or_else(
-        &mut self,
-        operand: i32,
-        ip: &mut i32,
-        code_start: i32,
-    ) -> VmResult<()> {
+    /// `arr[idx] or default` fused: no `Option` box is built. The default is
+    /// already on the stack (`lower` only fuses a pure atom), and is released
+    /// by its `Value` drop when the index hits.
+    pub(super) fn seq_index_or(&mut self, operand: i32) -> VmResult<()> {
+        // `operand >= 0` is a `ConstId`; `-1` means `lower` pushed the default
+        // because it was not a constant (`a[i] or False`, `a[i] or x`).
+        let dflt = if operand < 0 {
+            self.pop()?
+        } else {
+            self.program.constants[operand as usize].clone()
+        };
         let idx_val = self.pop()?;
         let arr_val = self.pop()?;
-        match (arr_val.kind(), idx_val.as_int()) {
-            (ValueView::Array(arr), Some(idx)) if idx >= 0 => match arr.get(idx as usize) {
-                Some(elem) => self.stack.push(elem),
-                None => *ip = operand - code_start,
-            },
-            (ValueView::Range(start, end), Some(idx)) if idx >= 0 => {
-                match range_elem(start, end, idx) {
-                    Some(elem) => self.push_int(elem),
-                    None => *ip = operand - code_start,
-                }
-            }
-            _ => *ip = operand - code_start,
-        }
+        let elem = idx_val
+            .as_int()
+            .and_then(|idx| self.seq_elem(&arr_val, idx));
+        self.stack.push(elem.unwrap_or(dflt));
         Ok(())
     }
 
@@ -133,31 +130,13 @@ impl VM {
     pub(super) fn elem_at(&mut self, operand: i32) -> VmResult<()> {
         let arr_val = self.pop()?;
         let idx = operand as i64;
-        let v = match arr_val.kind() {
-            ValueView::Array(arr) if idx >= 0 => match arr.get(idx as usize) {
-                Some(elem) => elem,
-                None => {
-                    return Err(VmError::internal(format!(
-                        "elem_at: array index {idx} out of bounds (len {})",
-                        arr.len()
-                    )));
-                }
-            },
-            ValueView::Range(start, end) if idx >= 0 => match range_elem(start, end, idx) {
-                Some(elem) => self.boxed_int(elem),
-                None => {
-                    return Err(VmError::internal(format!(
-                        "elem_at: range index {idx} out of bounds (len {})",
-                        range_len(start, end)
-                    )));
-                }
-            },
-            _ => {
-                return Err(VmError::type_mismatch("elem_at", "Array", &arr_val));
+        match self.seq_elem(&arr_val, idx) {
+            Some(v) => {
+                self.stack.push(v);
+                Ok(())
             }
-        };
-        self.stack.push(v);
-        Ok(())
+            None => Err(elem_at_miss(&arr_val, idx)),
+        }
     }
 
     pub(super) fn seq_len(&mut self) -> VmResult<()> {
@@ -191,34 +170,18 @@ impl VM {
         };
         match arr_val.kind() {
             ValueView::Array(arr) => {
-                let len = arr.len() as i64;
-                if start >= 0 && end <= len && start <= end {
-                    // take + skip: two persistent splits.
-                    let prefix = seq::take(&mut self.heap, &arr_val, end as usize);
-                    let sliced = seq::skip(&mut self.heap, &prefix, start as usize);
-                    self.stack.push(sliced);
-                    Ok(())
-                } else {
-                    Err(VmError::SliceOutOfBounds {
-                        lo: start,
-                        hi: end,
-                        len,
-                    })
-                }
+                check_slice_bounds(start, end, arr.len() as i64)?;
+                // take + skip: two persistent splits.
+                let prefix = seq::take(&mut self.heap, &arr_val, end as usize);
+                let sliced = seq::skip(&mut self.heap, &prefix, start as usize);
+                self.stack.push(sliced);
+                Ok(())
             }
             ValueView::Range(rs, re) => {
-                let len = range_len(rs, re);
-                if start >= 0 && end <= len && start <= end {
-                    let v = Value::range_in(&mut self.heap, rs + start, rs + end);
-                    self.stack.push(v);
-                    Ok(())
-                } else {
-                    Err(VmError::SliceOutOfBounds {
-                        lo: start,
-                        hi: end,
-                        len,
-                    })
-                }
+                check_slice_bounds(start, end, range_len(rs, re))?;
+                let v = Value::range_in(&mut self.heap, rs + start, rs + end);
+                self.stack.push(v);
+                Ok(())
             }
             _ => Err(VmError::type_mismatch("array.slice", "Array", &arr_val)),
         }
@@ -340,4 +303,35 @@ impl VM {
 #[inline]
 fn range_elem(start: i64, end: i64, idx: i64) -> Option<i64> {
     start.checked_add(idx).filter(|e| *e < end)
+}
+
+#[inline]
+fn check_slice_bounds(start: i64, end: i64, len: i64) -> VmResult<()> {
+    if start >= 0 && end <= len && start <= end {
+        Ok(())
+    } else {
+        Err(VmError::SliceOutOfBounds {
+            lo: start,
+            hi: end,
+            len,
+        })
+    }
+}
+
+/// Why `seq_elem` missed — only recomputes the length once the fetch has
+/// already failed, so the in-bounds path never pays for it.
+#[cold]
+#[inline(never)]
+fn elem_at_miss(v: &Value, idx: i64) -> VmError {
+    match v.kind() {
+        ValueView::Array(arr) => VmError::internal(format!(
+            "elem_at: array index {idx} out of bounds (len {})",
+            arr.len()
+        )),
+        ValueView::Range(start, end) => VmError::internal(format!(
+            "elem_at: range index {idx} out of bounds (len {})",
+            range_len(start, end)
+        )),
+        _ => VmError::type_mismatch("elem_at", "Array", v),
+    }
 }

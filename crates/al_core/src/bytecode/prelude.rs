@@ -29,15 +29,15 @@ impl Compiler {
         //    visible everywhere without an explicit import.
         let at = Span::DUMMY;
         let path = module::al_prelude();
-        if !self.load_module(&path, at) {
+        let Some(canon) = self.load_module(&path, at) else {
             return;
-        }
-        let key = module::path_key(&path);
+        };
+        let key = module::path_key(&canon);
         #[allow(clippy::expect_used)]
         let iface = self
             .module_table
             .get(&key)
-            .expect("load_module returned true so prelude must be in module_table");
+            .expect("load_module succeeded so prelude must be in module_table");
         for name in iface.types.keys() {
             self.reserved.insert(name.clone());
         }

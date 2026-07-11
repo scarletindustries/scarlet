@@ -526,7 +526,7 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
 //   - a record field projection (`bx.label`).
 // ---------------------------------------------------------------------------
 
-const NAV_SRC: &str = "type Color { Red Green Blue }\n\
+const NAV_SRC: &str = "type Color {\n\tRed\n\tGreen\n\tBlue\n}\n\
 type Box { label String }\n\
 const LIMIT = 3\n\
 fn pick(c Color) Int { if c == Green { 1 } else { 0 } }\n\
@@ -652,7 +652,7 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
     // in the type declaration and the match arm — never at a value position —
     // so this pins `type_ctor_pattern`'s `record_value_use` call directly.
     let p = Project::new("ctor_pattern_ref");
-    let src = "type Side { Left Right }\n\
+    let src = "type Side {\n\tLeft\n\tRight\n}\n\
                fn f(x Side) Int { match x { Left -> 1 Right -> 2 } }\n\
                println(f(Right))\n";
     p.write("a.al", src);
@@ -775,4 +775,48 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
         "re-check of shadowing entry failed: {:?}",
         r3.diagnostics
     );
+}
+
+/// The unused-import rule keys off the `Qualified` *member* occurrence, not the
+/// `Qualifier`: `c.shared()` keeps `import ./c` alive, while an import whose
+/// alias is never mentioned is still reported. (Find-all-references does list
+/// the qualifier — see `lsp_handlers::find_refs_on_module_alias_lists_the_qualifier`.)
+#[test]
+fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
+    let p = Project::new("qualifier_liveness");
+    p.write("c.al", C_SRC);
+    p.write("d.al", C_SRC);
+    let entry = "import ./c\nimport ./d\nprintln(c.shared())\n";
+    p.write("a.al", entry);
+
+    let msgs = unused_msgs(&checked_with(&p, entry));
+    assert_no_msg(&msgs, "unused import `c`");
+    assert_msg_eq(&msgs, "unused import `d`");
+}
+
+/// A local binding shadows an import's qualifier. Before this was gated, the
+/// member lookup keyed off `imported_qualifiers` before consulting scope, so
+/// `b.x` on a parameter named `b` was rejected as "Module './b' has no member
+/// 'x'" — a valid program that would not compile. Not an LSP concern: this is
+/// name resolution.
+#[test]
+fn a_local_shadows_an_import_qualifier() {
+    let p = Project::new("shadow_qualifier");
+    p.write("b.al", "pub fn add(a, b) {\n\ta + b\n}\n");
+    p.write(
+        "a.al",
+        "import ./b\n\
+         \n\
+         type Point {\n\
+         \tPoint(x Int, y Int)\n\
+         }\n\
+         \n\
+         fn f(b Point) Int {\n\
+         \tb.x\n\
+         }\n\
+         \n\
+         println(f(Point(41, 1)) + b.add(1, 0))\n",
+    );
+    // `b.x` reads the parameter's field; `b.add` still reaches the module.
+    common::run_project_outputs(&p, "run", "a.al", "42\n");
 }

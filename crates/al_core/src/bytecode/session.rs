@@ -6,8 +6,12 @@
 //! - **Reference-graph scaffolding** (`RawRef` → [`HoverFact`]): every name
 //!   occurrence is buffered with its live `Ty` during the pass and lowered
 //!   into the workspace `ReferenceGraph` once all unifications have settled.
-//! - **Incremental recompilation** ([`Watermark`] / `reset_to`): a snapshot
-//!   is six lengths, a rollback is six truncations.
+//! - **Incremental recompilation** ([`Watermark`] / `reset_to`): a snapshot is
+//!   the length of every append-only arena a later phase can still hold an
+//!   index into, and a rollback truncates each one back to it. The rule that
+//!   makes this sound: *an index must never outlive the arena that minted it*.
+//!   [`Compiler::reset_to`] destructures [`Watermark`] exhaustively so a new
+//!   arena cannot be added to the snapshot without its rewind being written.
 //! - **[`IncrementalSession`]**: owns a `Compiler` across edits, invalidates
 //!   cached modules, answers hover/goto-def/find-refs/rename from the
 //!   reference graph.
@@ -74,6 +78,11 @@ pub struct HoverFact {
 /// boundaries so an `IncrementalSession` can roll back exactly to that point.
 /// Ordered so `min()` over a set of watermarks picks the earliest-compiled
 /// one; see [`ord_key`](Self::ord_key) for the comparison key.
+///
+/// Every field is the length of an arena that some *surviving* structure holds
+/// indices into. Adding one obliges you to rewind it in
+/// [`Compiler::reset_to`], which destructures this struct exhaustively for
+/// exactly that reason.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Watermark {
     pub engine: EnginePoolWatermark,
@@ -94,13 +103,18 @@ impl Watermark {
     /// keeping it out means `EnvWatermark`'s field set can grow or reorder
     /// without any risk of perturbing this ordering.
     fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, usize, i32) {
-        (
-            self.engine,
-            self.code,
-            self.functions,
-            self.constants,
-            self.local_count,
-        )
+        // Exhaustive destructure (no `..`): a new arena length added to
+        // `Watermark` must be consciously placed in — or excluded from — the
+        // ordering, not silently dropped out of it.
+        let Watermark {
+            engine,
+            env: _,
+            code,
+            functions,
+            constants,
+            local_count,
+        } = *self;
+        (engine, code, functions, constants, local_count)
     }
 }
 
@@ -137,9 +151,33 @@ impl Compiler {
     /// the compiler is exactly as it was when `w` was captured. `module_table`
     /// is left untouched: the caller (`IncrementalSession`) decides which
     /// cached modules survive via `ModuleTable::invalidate`.
+    ///
+    /// The invariant this function exists to maintain: **no index outlives the
+    /// arena that minted it.** Every structure that survives the rewind must
+    /// either be truncated to `w`, filtered to entries whose indices are still
+    /// in bounds, or cleared outright. The `Watermark` destructure below is
+    /// deliberately exhaustive — adding an arena length to the snapshot (a
+    /// `NodeId` counter, a resolved-type pool) fails to compile here until its
+    /// rewind is written, so the dangling-index class cannot return by
+    /// omission.
+    ///
+    /// `w` must not be *below* the watermark captured right after
+    /// `seed_static`: the arena prefix under that mark is memcpy'd out of the
+    /// precompiled stdlib blob and every `Ty`/`StrId`/`ArenaSlice` frozen into
+    /// the binary's `.rodata` indexes into it. `IncrementalSession::rewind_to`
+    /// is the clamp that guarantees this.
     pub fn reset_to(&mut self, w: &Watermark) {
-        self.engine.truncate_to(&w.engine);
-        self.env.truncate_to(&w.env);
+        let Watermark {
+            engine,
+            env,
+            code,
+            functions,
+            constants,
+            local_count,
+        } = *w;
+
+        self.engine.truncate_to(&engine);
+        self.env.truncate_to(&env);
         // The rewind above leaves only the persistent root scope, which holds
         // the immutable prelude seed (plus cached-module state below the
         // watermark). Layer a fresh, throwaway scope on top for this compile's
@@ -152,12 +190,12 @@ impl Compiler {
         // Keeping imports in this discard-and-rebuild layer means they never
         // mutate the root scope, so the rollback stays exact.
         self.env.push_scope();
-        self.program.code.truncate(w.code);
-        self.program.functions.truncate(w.functions);
-        self.program.constants.truncate(w.constants);
-        self.local_count = w.local_count;
+        self.program.code.truncate(code);
+        self.program.functions.truncate(functions);
+        self.program.constants.truncate(constants);
+        self.local_count = local_count;
         self.global_to_func
-            .retain(|_, fi| (*fi as usize) < w.functions);
+            .retain(|_, fi| (*fi as usize) < functions);
         // Survivors are watermark-preserved entry-frame slots (e.g. `__pre*`,
         // imports). Scope state is fully cleared, so normalise their depth to 0
         // ("pre-existing, outermost"): the next opened scope then treats them as
@@ -167,7 +205,7 @@ impl Compiler {
         // pre-watermark slot, and a dangling key would collide with whatever
         // re-interns at that index on the next compile.
         self.locals.retain(|&k, v| {
-            if v.slot < w.local_count && (k as usize) < w.engine.strings {
+            if v.slot < local_count && (k as usize) < engine.strings {
                 v.depth = 0;
                 true
             } else {
@@ -175,16 +213,69 @@ impl Compiler {
             }
         });
 
+        // Lowered Core IR does not survive a rewind at all — none of it.
+        //
+        // A `CoreFn` is bound to two arenas, and *neither* can be rewound by a
+        // length. Its `ConstId`s index `core.consts`, which is not append-only:
+        // nothing pushes to it incrementally, it is assigned wholesale
+        // (`core.consts = program.constants.clone()`) at the end of each
+        // successful non-check compile, so truncating it to any length — least
+        // of all some other pool's length — leaves a stale prefix no live
+        // `ConstId` was ever minted against. And its types index the
+        // post-inference `ResolvedPool`, which is *compile-local*: the
+        // elaborator builds a fresh one per compile and it dies after emit, so
+        // an `RTy` from the previous compile denotes a node in an arena that no
+        // longer exists — there is no pool on the `Compiler` to truncate it
+        // against, and hence no `core_fns` watermark that would mean anything.
+        //
+        // Clearing is the only honest rewind. It is also free: `core.fns` is
+        // written only by a non-`check_only` compile (`compile_fn_body` returns
+        // before the push under `check_only`), and the sole caller of this
+        // function, `IncrementalSession`, is check-only — so what is being
+        // cleared is, in every configuration that can reach here, already empty.
+        // The exhaustive destructure below is the guard: give `CoreProgram` a
+        // field — an owned `ResolvedPool`, a side table — and this stops
+        // compiling until its rewind is written.
+        let crate::core_ir::CoreProgram {
+            fns,
+            consts,
+            toplevel,
+        } = &mut self.core;
+        fns.clear();
+        consts.clear();
+        *toplevel = crate::core_ir::CoreProgram::default().toplevel;
+
+        // Recorded expression types index into the engine's node arena, which
+        // the `truncate_to` above just rewound. Every entry is re-recorded by
+        // the next compile's typecheck walk before the elaborator reads it, so
+        // drop them all rather than leave dangling `Ty` indices behind. The
+        // resting state is one empty region and nothing parked; a parked one
+        // could only survive a function body's walk unwinding.
+        self.walk_tys.clear();
+        self.walk_tys_stack.clear();
+        // Same story, two arenas deeper: a `ClosureSite` holds a `func_idx` into
+        // `program.functions` and `StrId`s into `engine.strings`, both truncated
+        // above. A compile hands every site it records to the body that owns it
+        // and drops the rest at its toplevel, so this is only ever clearing the
+        // leftovers of the `check` path, which elaborates no entry toplevel.
+        self.frame_closures.clear();
+        // A `ToplevelDecl` holds a `StrId` into the truncated `engine.strings`,
+        // and `toplevel_binds` is *positional*: a survivor from the last compile
+        // would hand the next module-scope bind someone else's slot, silently.
+        // Both are per-compile channels between the check walk and the toplevel
+        // elaboration, so neither may outlive a rewind.
+        self.toplevel_decls.clear();
+        self.toplevel_binds.clear();
+        self.walking_module_statements = false;
+
         self.undo_log.clear();
         self.scope_marks.clear();
-        self.or_bind_overrides.clear();
         self.unused.clear();
         self.outer_scopes.clear();
         self.captures.clear();
         self.capture_names.clear();
         self.current_binding = None;
         self.next_fn_self_name = None;
-        self.in_tail_position = false;
         self.current_owner = None;
         self.rigid_ids.clear();
         self.recorded.clear();
@@ -225,6 +316,7 @@ impl Compiler {
                 },
                 diagnostics: self.engine.diagnostics.clone(),
                 references,
+                core: crate::core_ir::CoreProgram::default(),
                 success,
             },
             facts,
@@ -248,18 +340,27 @@ impl Compiler {
     /// otherwise-empty graph rebuild. Types are intentionally not synthesised:
     /// `TypeInfo` has no declaration span, so type goto-def into the stdlib is
     /// served by the populated path, not this fallback.
+    ///
+    /// The interface's module doc rides along: a hydrated module never runs
+    /// `compile_module_body`, so this is the only place `ReferenceGraph::
+    /// module_doc` can learn an `al/*` module's prose (the blob carries it in
+    /// `SModule::doc`).
     fn synth_refs_from_interface(
         &mut self,
-        defs: &[(String, DefinitionLocation)],
+        defs: &[(String, DefinitionLocation, Option<String>, Vec<String>)],
+        doc: Option<&str>,
     ) -> Option<ModuleReferences> {
         // The container must be keyed by the same `ModuleId` the use side
         // bakes into the occurrence target (`defid_of`), so that
         // `definition()`'s `modules.get(&target.module)` lands here.
         let mid = self.defid_of(defs.first()?.1).module;
         let mut mr = ModuleReferences::new(mid);
-        for (name, dl) in defs {
+        mr.set_doc(doc.map(str::to_string));
+        for (name, dl, decl_doc, param_names) in defs {
             let defid = self.defid_of(*dl);
-            mr.add_definition(Definition::new(defid, name.clone(), None, true));
+            let mut d = Definition::new(defid, name.clone(), decl_doc.clone(), true);
+            d.param_names = param_names.clone();
+            mr.add_definition(d);
         }
         Some(mr)
     }
@@ -305,19 +406,26 @@ impl Compiler {
         //    incremental `check`. The persisted refs are shared via `Rc`, so
         //    re-inserting an unchanged module is a refcount bump rather than a
         //    deep copy of its occurrences/definitions every keystroke.
-        let mut synth_inputs: Vec<Vec<(String, DefinitionLocation)>> = Vec::new();
+        /// name, decl location, doc, parameter names
+        type SynthDef = (String, DefinitionLocation, Option<String>, Vec<String>);
+        type SynthInput = (Vec<SynthDef>, Option<String>);
+        let mut synth_inputs: Vec<SynthInput> = Vec::new();
         for (_key, cm) in self.module_table.loaded_modules() {
             match cm.module_refs() {
                 Some(mr) => graph.insert_module_deferred(Rc::clone(mr)),
                 None => {
-                    let defs: Vec<(String, DefinitionLocation)> = cm
+                    let defs: Vec<SynthDef> = cm
                         .iface
                         .values
                         .iter()
-                        .filter_map(|(name, ev)| ev.scheme.def.map(|dl| (name.clone(), dl)))
+                        .filter_map(|(name, ev)| {
+                            ev.scheme.def.map(|dl| {
+                                (name.clone(), dl, ev.doc.clone(), ev.param_names.clone())
+                            })
+                        })
                         .collect();
                     if !defs.is_empty() {
-                        synth_inputs.push(defs);
+                        synth_inputs.push((defs, cm.iface.doc.clone()));
                     }
                 }
             }
@@ -326,8 +434,8 @@ impl Compiler {
         // `&mut self` borrow that cannot overlap the `module_table` iteration
         // above — so the synthesised `DefId` is bit-identical to the one a
         // cross-module use of the same name records as its occurrence target.
-        for defs in &synth_inputs {
-            if let Some(synth) = self.synth_refs_from_interface(defs) {
+        for (defs, doc) in &synth_inputs {
+            if let Some(synth) = self.synth_refs_from_interface(defs, doc.as_deref()) {
                 graph.insert_module_deferred(Rc::new(synth));
             }
         }
@@ -437,6 +545,18 @@ impl IncrementalSession {
         self.c.module_table.compile_count()
     }
 
+    /// The one rewind path. `seed` — the watermark captured immediately after
+    /// `seed_static` — is a hard floor: everything below it is the precompiled
+    /// stdlib blob, memcpy'd out of `.rodata` by `InferEngine::seed_arena` and
+    /// `StaticStdlib::hydrate_program`. Every `Ty`, `StrId` and `ArenaSlice`
+    /// baked into a static `Scheme`/`TypeInfo` indexes into that prefix, and
+    /// those indices are frozen in the binary — they cannot be re-minted, so
+    /// truncating past `seed` would dangle every one of them at once. Clamping
+    /// here (rather than at each caller) means a new rewind site cannot forget.
+    fn rewind_to(&mut self, w: Watermark) {
+        self.c.reset_to(&w.max(self.seed));
+    }
+
     pub fn reference_graph(&self) -> &ReferenceGraph {
         self.graph.as_ref()
     }
@@ -511,10 +631,9 @@ impl IncrementalSession {
                 floor = floor.min(w);
             }
         }
-        floor = floor.max(self.seed);
-
-        // 3. Truncate to the surviving boundary and recompile.
-        self.c.reset_to(&floor);
+        // 3. Truncate to the surviving boundary and recompile. `rewind_to`
+        //    clamps to the seed, so the stdlib prefix is never crossed.
+        self.rewind_to(floor);
         self.c.base_dir = base_dir.map(|p| p.to_path_buf());
 
         self.compile_entry(expr);
@@ -532,8 +651,7 @@ impl IncrementalSession {
             && let Some(w) = self.c.module_table.invalidate_all()
         {
             self.c.module_table.reset_id_bases();
-            let floor = w.max(self.seed);
-            self.c.reset_to(&floor);
+            self.rewind_to(w);
             self.last_entry = None;
             self.compile_entry(expr);
         }
@@ -571,6 +689,12 @@ impl IncrementalSession {
             // restores the stdlib value on the next check.
             let pre_import = self.c.env.watermark();
             self.c.process_imports(block);
+            // As `compile_impl`/`compile_module_body`: the imports just compiled
+            // left their own module-scope binds on these per-compile channels,
+            // and the queue is positional, so a shadowing entry-file bind must
+            // not dequeue an import's slot.
+            self.c.toplevel_binds.clear();
+            self.c.toplevel_decls.clear();
             // Must precede the `last_entry` watermark capture below so the
             // seed reflects the bumped id position.
             self.c.bump_type_ids_past_reserved();
@@ -584,10 +708,17 @@ impl IncrementalSession {
             wm.env.type_info = pre_import.type_info;
             wm.env.journal = pre_import.journal;
             self.last_entry = Some(wm);
+            self.c.env.push_scope();
             self.c.analyse_module(block, None);
+            self.c.env.pop_scope();
         } else {
             self.last_entry = Some(self.c.watermark());
+            // A bare-expression entry can still contain lambdas, and no body
+            // may lower or emit during the typecheck walk. `analyse_module`
+            // brackets its own walk; this path has to bracket its own.
+            self.c.begin_deferred_elaboration();
             self.c.compile_expr(expr);
+            self.c.end_deferred_elaboration();
         }
     }
 
@@ -625,5 +756,93 @@ impl IncrementalSession {
             .filter(|f| f.module == m && f.span.contains(line, col))
             .min_by_key(|f| f.span.width())?;
         Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::bytecode::Value;
+    use crate::bytecode::compiler::new_compiler;
+    use crate::core_ir::{Atom, ConstId, CoreExpr, CoreFn};
+    use crate::typed_ir::RTy;
+
+    /// The resolved-type pool is compile-local, so a `CoreFn` cannot outlive
+    /// the compile that lowered it.
+    ///
+    /// `CoreFn.ret_ty` (and every `CoreBind.ty`) is an `RTy` into a
+    /// `ResolvedPool` the elaborator builds fresh per compile and drops after
+    /// emit. There is no such pool on the `Compiler`, so there is no length to
+    /// rewind an `RTy` against: a `core.fns` prefix that survived a rewind
+    /// would hold indices into an arena that no longer exists, and the next
+    /// compile's pool would silently reinterpret them. Hence `reset_to` clears
+    /// `core.fns` outright rather than truncating it to a watermark — and
+    /// `Watermark` carries no `core_fns` field for it to be truncated to.
+    #[test]
+    fn reset_to_clears_lowered_core_fns_because_the_pool_is_compile_local() {
+        let mut c = new_compiler(None, false);
+        let name = c.engine.intern("f");
+        let lowered = |name| CoreFn {
+            name,
+            params: Vec::new(),
+            body: CoreExpr::Tail(Atom::Const(ConstId(0))),
+            ret_ty: RTy(0),
+        };
+
+        // A body lowered *below* the watermark: a length-based rewind would
+        // preserve it, which is exactly the bug.
+        c.core.fns.push(lowered(name));
+        let w = c.watermark();
+        c.core.fns.push(lowered(name));
+
+        c.reset_to(&w);
+
+        assert!(
+            c.core.fns.is_empty(),
+            "core.fns must be cleared, not truncated: {} lowered bodies survived \
+             the rewind holding RTys into a pool that no longer exists",
+            c.core.fns.len()
+        );
+    }
+
+    /// `core.consts` is not an append-only arena and has no watermark: it is
+    /// assigned wholesale (`core.consts = program.constants.clone()`) at the end
+    /// of each successful non-check compile. Rewinding it to *another* pool's
+    /// length leaves a stale prefix that no surviving `ConstId` was minted
+    /// against, so `reset_to` must clear it outright.
+    ///
+    /// Only reachable from a non-`check_only` compiler — the configuration the
+    /// `core_fns` watermark exists to support — hence a unit test rather than an
+    /// `IncrementalSession` one.
+    #[test]
+    fn reset_to_clears_core_consts_rather_than_truncating_to_another_pool() {
+        let mut c = new_compiler(None, false);
+
+        // A watermark captured while `program.constants` is short. Anchored to
+        // whatever `new_compiler` already seeded rather than a literal, so this
+        // test keeps testing the rewind if that seed ever grows.
+        let base = c.program.constants.len();
+        c.program.constants.push(Value::bool(true));
+        let w = c.watermark();
+        assert_eq!(w.constants, base + 1);
+
+        // ...then a compile grows `program.constants` and clones it wholesale
+        // into `core.consts`, exactly as the non-check compile path does.
+        c.program.constants.push(Value::bool(false));
+        c.program.constants.push(Value::nil());
+        c.core.consts = c.program.constants.clone();
+
+        c.reset_to(&w);
+
+        assert_eq!(
+            c.program.constants.len(),
+            base + 1,
+            "program.constants rewinds to its own watermark"
+        );
+        assert!(
+            c.core.consts.is_empty(),
+            "core.consts must be cleared, not truncated to program.constants.len() \
+             ({} entries survived) — a stale prefix is indexed by no live ConstId",
+            c.core.consts.len()
+        );
     }
 }

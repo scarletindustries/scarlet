@@ -46,12 +46,7 @@ fn main() {
 
     emit_prelude(&mut src, &pre.prelude);
     emit_stdlib_templates(&mut src, &pre, &engine);
-    emit_static_slice(
-        &mut src,
-        "RESERVED",
-        "&str",
-        pools.reserved.iter().map(|s| q(s)),
-    );
+    emit_strs(&mut src, "RESERVED", &pools.reserved);
     writeln!(
         src,
         "pub const NEXT_TYPE_ID: TypeId = {};",
@@ -155,6 +150,14 @@ fn emit_static_slice<I: Iterator<Item = String>>(out: &mut String, name: &str, t
         writeln!(out, "    {it},").unwrap();
     }
     writeln!(out, "];").unwrap();
+}
+
+fn emit_nums<T: std::fmt::Display>(out: &mut String, name: &str, ty: &str, items: &[T]) {
+    emit_static_slice(out, name, ty, items.iter().map(T::to_string));
+}
+
+fn emit_strs<S: AsRef<str>>(out: &mut String, name: &str, items: &[S]) {
+    emit_static_slice(out, name, "&str", items.iter().map(|s| q(s.as_ref())));
 }
 
 /// `PascalCase` → `SCREAMING_SNAKE` for generated const identifiers.
@@ -270,34 +273,14 @@ fn opt_constraint(c: Option<al_core::types::Constraint>) -> String {
 }
 
 fn emit_pools(out: &mut String, p: &FlatPools) {
-    emit_static_slice(out, "STR_POOL", "&str", p.str_pool.iter().map(|s| q(s)));
-    emit_static_slice(
-        out,
-        "STR_SLICE_POOL",
-        "u32",
-        p.str_slice_pool.iter().map(|i| i.to_string()),
-    );
-    emit_static_slice(
-        out,
-        "BYTE_POOL",
-        "u8",
-        p.byte_pool.iter().map(|b| b.to_string()),
-    );
+    emit_strs(out, "STR_POOL", &p.str_pool);
+    emit_nums(out, "STR_SLICE_POOL", "u32", &p.str_slice_pool);
+    emit_nums(out, "BYTE_POOL", "u8", &p.byte_pool);
 
     emit_static_slice(out, "NODES", "TypeNode", p.nodes.iter().map(typenode));
-    emit_static_slice(
-        out,
-        "CHILDREN",
-        "u32",
-        p.children.iter().map(|i| i.to_string()),
-    );
+    emit_nums(out, "CHILDREN", "u32", &p.children);
     emit_static_slice(out, "QUANTS", "QuantVar", p.quants.iter().map(quantvar));
-    emit_static_slice(
-        out,
-        "STR_SLICES",
-        "u32",
-        p.str_slices.iter().map(|i| i.to_string()),
-    );
+    emit_nums(out, "STR_SLICES", "u32", &p.str_slices);
     emit_static_slice(
         out,
         "TYPE_PARAMS",
@@ -343,9 +326,12 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         out,
         "SEXPORT_POOL",
         "SExport",
-        p.sexport_pool
-            .iter()
-            .map(|e| lit!(SExport: name = e.name, scheme = e.scheme, local_slot = format_args!("{:?}", e.local_slot))),
+        p.sexport_pool.iter().map(|e| {
+            lit!(SExport: name = e.name, scheme = e.scheme,
+                local_slot = format_args!("{:?}", e.local_slot),
+                param_names = slice(e.param_names),
+                doc = format_args!("{:?}", e.doc))
+        }),
     );
     emit_static_slice(
         out,
@@ -353,12 +339,13 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "(&str, SModule)",
         p.modules.iter().map(|(k, m)| {
             format!(
-                "({}, SModule {{ types: {}, values: {}, private_names: {}, path: {} }})",
+                "({}, SModule {{ types: {}, values: {}, private_names: {}, path: {}, doc: {:?} }})",
                 q(k),
                 slice(m.types),
                 slice(m.values),
                 slice(m.private_names),
-                slice(m.path)
+                slice(m.path),
+                m.doc
             )
         }),
     );

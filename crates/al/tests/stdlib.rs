@@ -133,9 +133,8 @@ fn stdlib_array() {
     );
 }
 
-#[test]
-fn stdlib_int() {
-    run_outputs(
+run_case! {
+    stdlib_int: (
         "import al/int\n\
          println(int.max(3, 7))\n\
          println(int.min(3, 7))\n\
@@ -143,17 +142,14 @@ fn stdlib_int() {
          println(int.clamp(99, 0, 10))\n\
          println(int.to_string(42))\n",
         "7\n3\n5\n10\n42\n",
-    );
-}
+    ),
 
-#[test]
-fn stdlib_bool() {
-    run_outputs(
+    stdlib_bool: (
         "import al/bool\n\
          println(bool.negate(True))\n\
          println(bool.to_string(False))\n",
         "False\nFalse\n",
-    );
+    ),
 }
 
 #[test]

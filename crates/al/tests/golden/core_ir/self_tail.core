@@ -1,0 +1,20 @@
+fn s0(%0:t0, %1:t1) -> :t1
+  match %0 :t1
+    | c0 ->
+      ret %1
+    | _ ->
+      let %2:t2 = c1
+      let %3:t0 = SubInt(%0, %2)
+      let %4:t2 = c1
+      let %5:t1 = AddInt(%1, %4)
+      ret call self(%3, %5)
+
+toplevel:
+  let %0:t3 = closure fn#160()
+  let %1:t2 = c2
+  let %2:t2 = c0
+  ret call %0(%1, %2)
+where
+  c0 = Int(0)
+  c1 = Int(1)
+  c2 = Int(3)

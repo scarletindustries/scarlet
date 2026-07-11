@@ -20,6 +20,35 @@
 //! - [`super::text`] — string/binary builtins, HTTP scanners
 //! - [`super::io`] — files, sockets, DNS, sleep, spawn (the parking ops)
 //!
+//! Dispatch is *replicated*, not shared. A single `loop { fetch; match }`
+//! compiles to one indirect branch for the whole instruction stream, and a
+//! branch predictor with one entry for every opcode transition in the program
+//! mispredicts on nearly every instruction. So selected arms end in their own
+//! copy of fetch-and-switch (the `dispatch!` macro) — the direct-threaded
+//! structure, written by hand rather than left to an optimizer's
+//! tail-duplication heuristic.
+//!
+//! Two independent choices govern it, and they are not the same set.
+//!
+//! *Which arms carry a copy* (the `dispatch!()` tails below): only those whose
+//! dynamic successor is near-deterministic. A private fetch-and-switch buys a
+//! private branch-target entry, which is worth its I-cache footprint exactly
+//! when that entry predicts. `Ret` is always followed by `StoreLocal`;
+//! `TailCallSelf` by the callee's entry test; the `*IntLC` superinstructions
+//! by one of two things. Those predict. `PushLocal` and `StoreLocal`, by
+//! contrast, are followed by a wide spread of opcodes (measured top successor
+//! ~1/3 and ~1/2 of executions) — a private entry there mispredicts anyway and
+//! only costs code. Replicating the four *most executed* arms measured
+//! *slower* on both benchmarks than replicating these seven.
+//!
+//! *Which opcodes the copy decodes* (the arms of `dispatch!` itself): the
+//! small register-shaped ones. Fat bodies — calls, the collection and text
+//! families — are not arms of it: they leave `ip` on their instruction and
+//! fall out to the shared loop head, which re-fetches and runs the full match.
+//! The wasted fetch is free relative to the work those bodies are about to do,
+//! and inlining them into every copy bloats the loop's hot code enough to cost
+//! more than the extra branch sites recover.
+//!
 //! Allocation is reference-counted, so an arm simply pops its operands and
 //! builds its result: nothing moves, so there is no rooting rule and no
 //! pre-allocation reservation. Popped operands are owned `Value`s and drop
@@ -32,6 +61,7 @@
 //! (a lazy range equals the array of its elements) and the hash
 //! fast-reject on enums.
 
+use al_core::bytecode::value::ReuseAddr;
 use al_core::bytecode::{
     Op, Value, ValueView, enum_hash_with_payload, freed_objects_pending, take_freed_objects,
     values_equal,
@@ -68,6 +98,389 @@ impl VM {
         // billed to the process about to run. Frees during this slice accumulate
         // from here and are charged at its call checkpoints (`charge_reclamation`).
         take_freed_objects();
+
+        // Dispatch helpers. Defined before the loop so their free
+        // `self`/`ip`/`base_slot`/`code_start`/`func_idx`/`reds` resolve to
+        // these locals by macro_rules definition-site hygiene. The fetched
+        // instruction is threaded in as `$instr` because every dispatch site
+        // fetches its own (see `dispatch!`). Each expands to exactly the
+        // hand-written arm body, so codegen is byte-identical.
+        macro_rules! bin {
+            ($acc:ident, $ctor:ident, |$a:ident, $b:ident| $body:expr) => {{
+                let $b = self.pop()?.$acc();
+                let $a = self.pop()?.$acc();
+                self.stack.push(Value::$ctor($body));
+            }};
+        }
+        macro_rules! un {
+            ($acc:ident, $ctor:ident, |$a:ident| $body:expr) => {{
+                let $a = self.pop()?.$acc();
+                self.stack.push(Value::$ctor($body));
+            }};
+        }
+        // Integer-result forms: `push_int` boxes the rare out-of-range
+        // spill.
+        macro_rules! bin_int {
+            ($acc:ident, |$a:ident, $b:ident| $body:expr) => {{
+                let $b = self.pop()?.$acc();
+                let $a = self.pop()?.$acc();
+                self.push_int($body);
+            }};
+        }
+        macro_rules! un_int {
+            ($acc:ident, |$a:ident| $body:expr) => {{
+                let $a = self.pop()?.$acc();
+                self.push_int($body);
+            }};
+        }
+        macro_rules! lc_arith {
+            ($instr:ident, |$a:ident, $b:ident| $body:expr) => {{
+                let $a = self.stack[base_slot + $instr.a as usize].as_int_typed();
+                let $b = self.program.constants[$instr.b as usize].as_int_typed();
+                self.push_int($body);
+            }};
+        }
+        macro_rules! lc_jump {
+            ($instr:ident, |$a:ident, $b:ident| $cond:expr) => {{
+                let $a = self.stack[base_slot + $instr.a as usize].as_int_typed();
+                let $b = self.program.constants[$instr.b as usize].as_int_typed();
+                if $cond {
+                    ip = $instr.operand;
+                }
+            }};
+        }
+        // Parking-op arm body: a `Some(step)` return means the process
+        // parked and the slice is over.
+        macro_rules! park {
+            ($call:expr) => {{
+                if let Some(step) = $call? {
+                    return Ok(step);
+                }
+            }};
+        }
+        // Frame-entry body shared by `Call`/`TailCall` and
+        // `CallKnown`/`TailCallKnown`: install the callee frame (collapse
+        // in place for a tail call, else push a child), zero-fill the
+        // non-argument locals, and re-hoist the loop's cached frame
+        // fields. `$captures` is expanded into exactly one of the two
+        // branches at runtime, so a moved value is moved once.
+        macro_rules! enter_frame {
+            ($target_idx:expr, $arity:expr, $func_locals:expr, $func_code_start:expr, $captures:expr, $tail:expr) => {{
+                let target_idx = $target_idx;
+                let arity = $arity;
+                let func_locals = $func_locals;
+                let func_code_start = $func_code_start;
+                let args_start = self.stack.len() - arity as usize;
+
+                if $tail {
+                    self.collapse_tail_frame(base_slot, args_start);
+                    let f = self.frame_mut();
+                    f.func_idx = target_idx;
+                    f.code_start = func_code_start;
+                    f.ip = 0;
+                    f.captures = $captures;
+                } else {
+                    self.frame_mut().ip = ip;
+                    self.frames.push(CallFrame {
+                        func_idx: target_idx,
+                        code_start: func_code_start,
+                        ip: 0,
+                        base_slot: args_start,
+                        captures: $captures,
+                    });
+                    base_slot = args_start;
+                }
+
+                for _ in arity..func_locals {
+                    self.stack.push(Value::small_int(0));
+                }
+
+                ip = 0;
+                code_start = func_code_start;
+                func_idx = target_idx;
+            }};
+        }
+        // Preemption checkpoint at a function application: one reduction,
+        // plus whatever collection work accrued since the last checkpoint
+        // (GC charges reductions so GC-heavy processes yield fairly). The
+        // debt is zero on every call that did not collect, so it is paid
+        // behind a test: draining unconditionally puts a store and
+        // saturating-sub chain on every call, which measured ~1.5x on a
+        // tail-recursive loop. `reds` is at least 1 here (a non-positive
+        // value yielded at the last checkpoint), so the plain decrement
+        // cannot wrap. The callee frame is fully consistent at every use
+        // site, so preemption is a plain return — resume re-hoists from
+        // the frame.
+        macro_rules! checkpoint {
+            () => {{
+                reds -= 1;
+                self.charge_reclamation(&mut reds);
+                if reds <= 0 {
+                    return Ok(Step::Yield);
+                }
+            }};
+        }
+
+        // ---- Hot-opcode bodies ------------------------------------------
+        //
+        // Written once, expanded at both dispatch levels (see `dispatch!`).
+        // Everything else is written inline in the full match below, which is
+        // the only place a cold opcode is ever decoded.
+        macro_rules! push_const {
+            ($instr:ident) => {{
+                self.stack
+                    .push(self.program.constants[$instr.operand as usize].clone());
+            }};
+        }
+        macro_rules! push_local {
+            ($instr:ident) => {{
+                let slot = base_slot + $instr.operand as usize;
+                self.stack.push(self.stack[slot].clone());
+            }};
+        }
+        // The entry frame's slots ARE the program's globals, so a store there
+        // freezes and publishes (`publish_toplevel`, out of line: it runs a
+        // handful of times per program, never in a function body).
+        macro_rules! store_local {
+            ($instr:ident) => {{
+                let slot = base_slot + $instr.operand as usize;
+                let v = self.pop()?;
+                self.stack[slot] = v;
+                if base_slot == 0 && self.current_is_main {
+                    self.publish_toplevel(slot);
+                }
+            }};
+        }
+        // Jump operands are frame-relative: the compiler emits them as offsets
+        // into the executing function's own code block, which is exactly what
+        // `ip` is, so a branch is an assignment and never touches `code_start`.
+        macro_rules! jump {
+            ($instr:ident) => {{
+                ip = $instr.operand;
+            }};
+        }
+        macro_rules! jump_if_false {
+            ($instr:ident) => {{
+                let cond = self.pop()?;
+                if !is_truthy(&cond)? {
+                    ip = $instr.operand;
+                }
+            }};
+        }
+        // Self-recursion fast path: callee is the live frame's function, so we
+        // skip the closure pop, the `Value::Closure` tag match, and the arity
+        // check (statically guaranteed by `compile_call`). `func_idx`/
+        // `code_start` are already the target's, so the only frame work is slot
+        // bookkeeping.
+        macro_rules! call_self {
+            ($instr:ident) => {{
+                let arity = $instr.operand;
+                let func = &self.program.functions[func_idx as usize];
+                let func_locals = func.locals;
+                let args_start = self.stack.len() - arity as usize;
+
+                if $instr.op == Op::TailCallSelf {
+                    // Reuse the frame in place. Captures are already the
+                    // current frame's — self-recursion cannot change the
+                    // closed-over environment — so no `captures.clone()`.
+                    // Non-argument locals are PRESERVED across the collapse
+                    // so a Perceus `Drop` at end-of-body can hand its
+                    // hollowed cell to a `Reuse` at start-of-body next
+                    // iteration (loop-carried reuse); the zero-fill below
+                    // is therefore skipped — the surviving slots already
+                    // occupy `[base+arity, base+locals)`.
+                    self.collapse_tail_frame_self(
+                        base_slot,
+                        args_start,
+                        arity as usize,
+                        func_locals as usize,
+                    );
+                    let f = self.frame_mut();
+                    f.ip = 0;
+                } else {
+                    // Push a child frame. A self-call from inside a
+                    // capture-carrying closure must see the same captures,
+                    // so the child takes a new reference to the current
+                    // frame's closure handle.
+                    let captures = self.frame().captures.clone();
+                    self.frame_mut().ip = ip;
+                    self.frames.push(CallFrame {
+                        func_idx,
+                        code_start,
+                        ip: 0,
+                        base_slot: args_start,
+                        captures,
+                    });
+                    base_slot = args_start;
+                    for _ in arity..func_locals {
+                        self.stack.push(Value::small_int(0));
+                    }
+                }
+                ip = 0;
+
+                checkpoint!();
+            }};
+        }
+        // Known top-level target: `func_idx` is an immediate operand and the
+        // callee is provably capture-free, so there is no callee value on the
+        // stack — we skip the pop, the closure tag check, the heap `func_idx()`
+        // read, and the arity check that `Op::Call` pays. The frame's
+        // `captures` is a sentinel immediate; the callee body never emits
+        // `PushCapture` / `PushSelf` (a top-level fn's own name resolves to
+        // `SelfGlobal`, so self-as-value loads via `PushGlobal`).
+        macro_rules! call_known {
+            ($instr:ident) => {{
+                let target_idx = $instr.operand;
+                let arity = i32::from($instr.b);
+                let func = &self.program.functions[target_idx as usize];
+                let (func_locals, func_code_start) = (func.locals, func.code_start);
+                debug_assert_eq!(func.capture_count, 0);
+                debug_assert_eq!(func.arity, arity);
+
+                enter_frame!(
+                    target_idx,
+                    arity,
+                    func_locals,
+                    func_code_start,
+                    Value::small_int(0),
+                    $instr.op == Op::TailCallKnown
+                );
+                checkpoint!();
+            }};
+        }
+        macro_rules! ret {
+            () => {{
+                let ret_val = self.pop()?;
+                let Some(old_frame) = self.frames.pop() else {
+                    return Err(VmError::internal("return with no active call frame"));
+                };
+
+                self.stack.truncate(old_frame.base_slot);
+
+                self.stack.push(ret_val);
+
+                match self.frames.last() {
+                    None => break,
+                    Some(f) => {
+                        ip = f.ip;
+                        code_start = f.code_start;
+                        base_slot = f.base_slot;
+                        func_idx = f.func_idx;
+                    }
+                }
+            }};
+        }
+
+        // ---- Replicated dispatch ----------------------------------------
+        //
+        // One copy of fetch-and-switch, expanded at the tail of the seven arms
+        // listed in the module docs — the arms with a predictable successor.
+        // Each expansion is a distinct indirect branch, so the predictor gets
+        // a branch-target entry per *site* rather than one entry shared by the
+        // whole instruction stream. An entry only earns its footprint where it
+        // predicts, which is why the tails sit on `Ret`, the calls and the
+        // `*IntLC` superinstructions and not on the two most-executed arms.
+        //
+        // The arms below are the small register-shaped opcodes. An opcode not
+        // listed leaves `ip` on its instruction and falls out to the shared
+        // loop head, which re-fetches and runs the full match; those bodies
+        // are calls and family handlers, so the extra fetch is free relative
+        // to the work they are about to do.
+        macro_rules! dispatch {
+            () => {{
+                let addr = code_start + ip;
+                let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize)
+                else {
+                    break;
+                };
+                match instr.op {
+                    Op::PushLocal => {
+                        ip += 1;
+                        push_local!(instr);
+                        continue;
+                    }
+                    Op::AddInt => {
+                        ip += 1;
+                        bin_int!(as_int_typed, |a, b| a.wrapping_add(b));
+                        continue;
+                    }
+                    Op::SubInt => {
+                        ip += 1;
+                        bin_int!(as_int_typed, |a, b| a.wrapping_sub(b));
+                        continue;
+                    }
+                    Op::AddIntLC => {
+                        ip += 1;
+                        lc_arith!(instr, |a, b| a.wrapping_add(b));
+                        continue;
+                    }
+                    Op::SubIntLC => {
+                        ip += 1;
+                        lc_arith!(instr, |a, b| a.wrapping_sub(b));
+                        continue;
+                    }
+                    Op::JumpGeIntLC => {
+                        ip += 1;
+                        lc_jump!(instr, |a, b| a >= b);
+                        continue;
+                    }
+                    Op::JumpNeIntLC => {
+                        ip += 1;
+                        lc_jump!(instr, |a, b| a != b);
+                        continue;
+                    }
+                    Op::Jump => {
+                        jump!(instr);
+                        continue;
+                    }
+                    Op::StoreLocal => {
+                        ip += 1;
+                        store_local!(instr);
+                        continue;
+                    }
+                    Op::Ret => {
+                        ret!();
+                        continue;
+                    }
+                    Op::PushConst => {
+                        ip += 1;
+                        push_const!(instr);
+                        continue;
+                    }
+                    Op::LtInt => {
+                        ip += 1;
+                        bin!(as_int_typed, bool, |a, b| a < b);
+                        continue;
+                    }
+                    Op::EqInt => {
+                        ip += 1;
+                        bin!(as_int_typed, bool, |a, b| a == b);
+                        continue;
+                    }
+                    Op::JumpIfFalse => {
+                        ip += 1;
+                        jump_if_false!(instr);
+                        continue;
+                    }
+                    // Perceus `Drop` sits between the loads and the call in
+                    // every reuse-shaped body, so it is the one non-arithmetic
+                    // opcode worth its place here.
+                    Op::Drop => {
+                        ip += 1;
+                        let slot = base_slot + instr.operand as usize;
+                        let v = &mut self.stack[slot];
+                        if v.is_unique() {
+                            v.hollow_for_reuse();
+                        } else {
+                            *v = Value::small_int(0);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }};
+        }
+
         loop {
             let addr = code_start + ip;
             let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize) else {
@@ -75,145 +488,16 @@ impl VM {
             };
             ip += 1;
 
-            // Typed-op dispatch helpers. Defined here (after `instr`) so the
-            // free `self`/`instr`/`ip`/`base_slot`/`code_start` resolve by
-            // macro_rules definition-site hygiene. Each expands to exactly the
-            // hand-written arm body, so codegen is byte-identical.
-            macro_rules! bin {
-                ($acc:ident, $ctor:ident, |$a:ident, $b:ident| $body:expr) => {{
-                    let $b = self.pop()?.$acc();
-                    let $a = self.pop()?.$acc();
-                    self.stack.push(Value::$ctor($body));
-                }};
-            }
-            macro_rules! un {
-                ($acc:ident, $ctor:ident, |$a:ident| $body:expr) => {{
-                    let $a = self.pop()?.$acc();
-                    self.stack.push(Value::$ctor($body));
-                }};
-            }
-            // Integer-result forms: `push_int` boxes the rare out-of-range
-            // spill.
-            macro_rules! bin_int {
-                ($acc:ident, |$a:ident, $b:ident| $body:expr) => {{
-                    let $b = self.pop()?.$acc();
-                    let $a = self.pop()?.$acc();
-                    self.push_int($body);
-                }};
-            }
-            macro_rules! un_int {
-                ($acc:ident, |$a:ident| $body:expr) => {{
-                    let $a = self.pop()?.$acc();
-                    self.push_int($body);
-                }};
-            }
-            macro_rules! lc_arith {
-                (|$a:ident, $b:ident| $body:expr) => {{
-                    let $a = self.stack[base_slot + instr.a as usize].as_int_typed();
-                    let $b = self.program.constants[instr.b as usize].as_int_typed();
-                    self.push_int($body);
-                }};
-            }
-            macro_rules! lc_jump {
-                (|$a:ident, $b:ident| $cond:expr) => {{
-                    let $a = self.stack[base_slot + instr.a as usize].as_int_typed();
-                    let $b = self.program.constants[instr.b as usize].as_int_typed();
-                    if $cond {
-                        ip = instr.operand - code_start;
-                    }
-                }};
-            }
-            // Parking-op arm body: a `Some(step)` return means the process
-            // parked and the slice is over.
-            macro_rules! park {
-                ($call:expr) => {{
-                    if let Some(step) = $call? {
-                        return Ok(step);
-                    }
-                }};
-            }
-
             match instr.op {
-                Op::PushConst => {
-                    self.stack
-                        .push(self.program.constants[instr.operand as usize].clone());
-                }
-                Op::PushLocal => {
-                    let slot = base_slot + instr.operand as usize;
-                    self.stack.push(self.stack[slot].clone());
-                }
+                Op::PushConst => push_const!(instr),
+                Op::PushLocal => push_local!(instr),
                 Op::PushGlobal => {
                     // Top-level bindings live in the global (literal) area,
                     // shared by every process on this scheduler.
                     let slot = instr.operand as usize;
                     self.stack.push(self.globals[slot].clone());
                 }
-                Op::StoreLocal => {
-                    let slot = base_slot + instr.operand as usize;
-                    let v = self.pop()?;
-                    self.stack[slot] = v;
-                    // Top-level bindings (the main process's entry frame) are
-                    // the program's globals: freeze the binding's graph into
-                    // the program-wide frozen area (the graph copy
-                    // with the frozen builder as destination) and mirror the
-                    // frozen root into the global area. The table holds only
-                    // frozen words — never arena pointers — so it is not a GC
-                    // root and `PushGlobal` is a zero-copy word push on every
-                    // scheduler.
-                    //
-                    // Why `base_slot == 0 && current_is_main` singles out the
-                    // entry frame: spawned processes also run their seed frame
-                    // at base_slot 0, hence the is_main guard. Within main no
-                    // other frame can sit at base_slot 0. A callee's base is
-                    // the operand-stack depth at call time, and main's stack
-                    // never drains below the entry frame's locals: `Ret`
-                    // truncates only to the returning frame's own base, the
-                    // entry frame exits via `Halt`, and the compiler marks
-                    // tail position only inside function bodies, so a
-                    // module-scope call is never a frame-collapsing
-                    // `TailCall`. Those locals are never zero — `__main__`
-                    // opens with the precompiled stdlib's binding stores (the
-                    // `__pre*` slots seeded by `Compiler::seed_static`) — so
-                    // even a zero-arity call at operand depth zero gets a
-                    // base_slot of at least the stdlib binding count. Without
-                    // that floor, such a call would land a callee at
-                    // base_slot 0 and this arm would silently freeze and
-                    // publish the callee's locals as globals.
-                    //
-                    // The publish below is unconditional — there is no
-                    // per-slot "already published" filter — so a slot that
-                    // is stored more than once is frozen and published more
-                    // than once. The contract readers rely on is therefore
-                    // not at-most-once publication but publish-before-read:
-                    // all of a slot's stores happen inside the single
-                    // top-level statement that owns it, before any closure
-                    // that could `PushGlobal` it exists (`PushGlobal` is
-                    // emitted only for entry-frame slots referenced from
-                    // nested functions), so every reader observes exactly
-                    // one stable published value per slot. Two compiler
-                    // facts uphold that. Sequential rebindings never
-                    // re-store: `get_or_create_local` gives every
-                    // module-scope binding — including a shadowing rebinding
-                    // of an existing name — a fresh entry-frame slot rather
-                    // than reusing the old one. And the slots that are
-                    // stored repeatedly — binary-pattern cursor temps (one
-                    // store per dynamic segment) and or-pattern alternative
-                    // bindings (re-stored when a later alternative re-binds
-                    // the same name) — finish all their stores while the
-                    // owning statement is still executing. A re-store does
-                    // re-freeze the slot's graph into the never-collected
-                    // frozen area; that waste is bounded by the owning
-                    // statement.
-                    if base_slot == 0 && self.current_is_main {
-                        if slot >= self.globals.len() {
-                            self.globals.resize(slot + 1, Value::nil());
-                        }
-                        let frozen =
-                            freeze::freeze_global(&mut self.frozen, self.stack[slot].clone());
-                        self.globals[slot] = frozen.value();
-                        self.runtime.publish_global(slot, frozen);
-                    }
-                }
+                Op::StoreLocal => store_local!(instr),
                 Op::PushNil => {
                     self.stack.push(self.make_nil());
                 }
@@ -315,30 +599,28 @@ impl VM {
                     let a = self.pop()?;
                     self.stack.push(Value::bool(!is_truthy(&a)?));
                 }
-                Op::Jump => {
-                    ip = instr.operand - code_start;
-                }
-                Op::JumpIfFalse => {
-                    let cond = self.pop()?;
-                    if !is_truthy(&cond)? {
-                        ip = instr.operand - code_start;
-                    }
-                }
-                Op::JumpIfTrue => {
-                    let cond = self.pop()?;
-                    if is_truthy(&cond)? {
-                        ip = instr.operand - code_start;
-                    }
-                }
-
+                Op::Jump => jump!(instr),
+                Op::JumpIfFalse => jump_if_false!(instr),
                 // ---- Superinstructions --------------------------------------
                 // Peephole-fused (PushLocal a; PushConst b; <op>) sequences;
                 // operands packed into Instruction.{a,b}. Zero stack traffic
                 // for the compare+branch forms.
-                Op::AddIntLC => lc_arith!(|a, b| a.wrapping_add(b)),
-                Op::SubIntLC => lc_arith!(|a, b| a.wrapping_sub(b)),
-                Op::JumpGeIntLC => lc_jump!(|a, b| a >= b),
-                Op::JumpNeIntLC => lc_jump!(|a, b| a != b),
+                Op::AddIntLC => {
+                    lc_arith!(instr, |a, b| a.wrapping_add(b));
+                    dispatch!()
+                }
+                Op::SubIntLC => {
+                    lc_arith!(instr, |a, b| a.wrapping_sub(b));
+                    dispatch!()
+                }
+                Op::JumpGeIntLC => {
+                    lc_jump!(instr, |a, b| a >= b);
+                    dispatch!()
+                }
+                Op::JumpNeIntLC => {
+                    lc_jump!(instr, |a, b| a != b);
+                    dispatch!()
+                }
                 Op::Nop => {}
 
                 Op::Call | Op::TailCall => {
@@ -359,172 +641,29 @@ impl VM {
                         )));
                     }
 
-                    let args_start = self.stack.len() - arity as usize;
-
                     // The callee value itself becomes the frame's `captures`
                     // handle — one word copied, no captures clone.
-                    if instr.op == Op::TailCall {
-                        self.collapse_tail_frame(base_slot, args_start);
-                        let f = self.frame_mut();
-                        f.func_idx = cl_func_idx;
-                        f.code_start = func_code_start;
-                        f.ip = 0;
-                        f.captures = callee;
-                    } else {
-                        self.frame_mut().ip = ip;
-                        self.frames.push(CallFrame {
-                            func_idx: cl_func_idx,
-                            code_start: func_code_start,
-                            ip: 0,
-                            base_slot: args_start,
-                            captures: callee,
-                        });
-                        base_slot = args_start;
-                    }
-
-                    for _ in arity..func_locals {
-                        self.stack.push(Value::small_int(0));
-                    }
-
-                    ip = 0;
-                    code_start = func_code_start;
-                    func_idx = cl_func_idx;
-
-                    // One function application = one reduction, plus whatever
-                    // collection work accrued since the last checkpoint (GC
-                    // charges reductions so GC-heavy processes yield fairly).
-                    // The debt is zero on every call that did not collect, so
-                    // it is paid behind a test: draining unconditionally puts
-                    // a store and saturating-sub chain on every call, which
-                    // measured ~1.5x on a tail-recursive loop. `reds` is at
-                    // least 1 here (a non-positive value yielded at the last
-                    // checkpoint), so the plain decrement cannot wrap.
-                    // The callee frame is fully consistent here, so preemption
-                    // is a plain return — resume re-hoists from the frame.
-                    reds -= 1;
-                    self.charge_reclamation(&mut reds);
-                    if reds <= 0 {
-                        return Ok(Step::Yield);
-                    }
+                    enter_frame!(
+                        cl_func_idx,
+                        arity,
+                        func_locals,
+                        func_code_start,
+                        callee,
+                        instr.op == Op::TailCall
+                    );
+                    checkpoint!();
                 }
                 Op::CallSelf | Op::TailCallSelf => {
-                    // Self-recursion fast path: callee is the live frame's
-                    // function, so we skip the closure pop, the `Value::Closure`
-                    // tag match, and the arity check (statically guaranteed by
-                    // `compile_call`). `func_idx`/`code_start` are already the
-                    // target's, so the only frame work is slot bookkeeping.
-                    let arity = instr.operand;
-                    let func = &self.program.functions[func_idx as usize];
-                    let func_locals = func.locals;
-                    let args_start = self.stack.len() - arity as usize;
-
-                    if instr.op == Op::TailCallSelf {
-                        // Reuse the frame in place. Captures are already the
-                        // current frame's — self-recursion cannot change the
-                        // closed-over environment — so no `captures.clone()`.
-                        self.collapse_tail_frame(base_slot, args_start);
-                        let f = self.frame_mut();
-                        f.ip = 0;
-                    } else {
-                        // Push a child frame. A self-call from inside a
-                        // capture-carrying closure must see the same captures,
-                        // so the child takes a new reference to the current
-                        // frame's closure handle.
-                        let captures = self.frame().captures.clone();
-                        self.frame_mut().ip = ip;
-                        self.frames.push(CallFrame {
-                            func_idx,
-                            code_start,
-                            ip: 0,
-                            base_slot: args_start,
-                            captures,
-                        });
-                        base_slot = args_start;
-                    }
-
-                    for _ in arity..func_locals {
-                        self.stack.push(Value::small_int(0));
-                    }
-                    ip = 0;
-
-                    // Same checkpoint shape as `Call`: one reduction, GC debt
-                    // drained only when a collection actually charged some.
-                    reds -= 1;
-                    self.charge_reclamation(&mut reds);
-                    if reds <= 0 {
-                        return Ok(Step::Yield);
-                    }
+                    call_self!(instr);
+                    dispatch!()
                 }
                 Op::CallKnown | Op::TailCallKnown => {
-                    // Known top-level target: `func_idx` is an immediate operand
-                    // and the callee is provably capture-free, so there is no
-                    // callee value on the stack — we skip the pop, the closure
-                    // tag check, the heap `func_idx()` read, and the arity check
-                    // that `Op::Call` pays. The frame's `captures` is a sentinel
-                    // immediate; the callee body never emits `PushCapture` /
-                    // `PushSelf` (a top-level fn's own name resolves to
-                    // `SelfGlobal`, so self-as-value loads via `PushGlobal`).
-                    let target_idx = instr.operand;
-                    let arity = i32::from(instr.b);
-                    let func = &self.program.functions[target_idx as usize];
-                    let (func_locals, func_code_start) = (func.locals, func.code_start);
-                    debug_assert_eq!(func.capture_count, 0);
-                    debug_assert_eq!(func.arity, arity);
-
-                    let args_start = self.stack.len() - arity as usize;
-
-                    if instr.op == Op::TailCallKnown {
-                        self.collapse_tail_frame(base_slot, args_start);
-                        let f = self.frame_mut();
-                        f.func_idx = target_idx;
-                        f.code_start = func_code_start;
-                        f.ip = 0;
-                        f.captures = Value::small_int(0);
-                    } else {
-                        self.frame_mut().ip = ip;
-                        self.frames.push(CallFrame {
-                            func_idx: target_idx,
-                            code_start: func_code_start,
-                            ip: 0,
-                            base_slot: args_start,
-                            captures: Value::small_int(0),
-                        });
-                        base_slot = args_start;
-                    }
-
-                    for _ in arity..func_locals {
-                        self.stack.push(Value::small_int(0));
-                    }
-
-                    ip = 0;
-                    code_start = func_code_start;
-                    func_idx = target_idx;
-
-                    reds -= 1;
-                    self.charge_reclamation(&mut reds);
-                    if reds <= 0 {
-                        return Ok(Step::Yield);
-                    }
+                    call_known!(instr);
+                    dispatch!()
                 }
                 Op::Ret => {
-                    let ret_val = self.pop()?;
-                    let Some(old_frame) = self.frames.pop() else {
-                        return Err(VmError::internal("return with no active call frame"));
-                    };
-
-                    self.stack.truncate(old_frame.base_slot);
-
-                    self.stack.push(ret_val);
-
-                    match self.frames.last() {
-                        None => break,
-                        Some(f) => {
-                            ip = f.ip;
-                            code_start = f.code_start;
-                            base_slot = f.base_slot;
-                            func_idx = f.func_idx;
-                        }
-                    }
+                    ret!();
+                    dispatch!()
                 }
                 // Aggregate values (arrays, tuples, ranges, field access):
                 // one method per op (see `vm::collections`).
@@ -533,13 +672,13 @@ impl VM {
                 Op::TupleIndex => self.tuple_index(instr.operand)?,
                 Op::MakeRange => self.make_range()?,
                 Op::Index => self.seq_index()?,
-                Op::IndexOrElse => self.seq_index_or_else(instr.operand, &mut ip, code_start)?,
+                Op::IndexOr => self.seq_index_or(instr.operand)?,
                 Op::ElemAt => self.elem_at(instr.operand)?,
                 Op::ArrayLen => self.seq_len()?,
                 Op::ArraySlice => self.seq_slice()?,
                 Op::ArrayConcat => self.seq_concat()?,
                 Op::Prepend => self.seq_prepend(instr.operand)?,
-                Op::Drop => self.seq_drop()?,
+                Op::SeqDrop => self.seq_drop()?,
                 Op::Append => self.seq_append(instr.operand)?,
                 Op::GetField => self.get_field(instr.operand)?,
                 Op::GetFieldUnchecked => {
@@ -547,19 +686,7 @@ impl VM {
                     self.stack
                         .push(val.enum_field_typed(instr.operand as usize));
                 }
-                Op::MakeClosure => {
-                    let closure_func_idx = instr.operand;
-                    let cc =
-                        self.program.functions[closure_func_idx as usize].capture_count as usize;
-                    // The one place captures are materialized: the closure
-                    // object holds them inline; later invocations copy the
-                    // one-word handle.
-                    let base = self.operand_base(cc)?;
-                    let v =
-                        Value::closure_in(&mut self.heap, closure_func_idx, &self.stack[base..]);
-                    self.stack.truncate(base);
-                    self.stack.push(v);
-                }
+                Op::MakeClosure => self.make_closure(instr.operand)?,
                 Op::PushCapture => {
                     let capture_idx = instr.operand as usize;
                     let v = match self
@@ -607,7 +734,9 @@ impl VM {
                 Op::MapSet => self.map_set()?,
                 Op::MapDelete => self.map_delete()?,
                 Op::MapToList => self.map_to_list()?,
-                Op::MakeEnumPayload => self.make_enum_payload(instr.operand, instr.b as usize)?,
+                Op::MakeEnumPayload => {
+                    self.make_enum_payload(instr.operand, instr.b as usize, instr.a != 0)?
+                }
                 Op::MatchEnum => {
                     let variant_name = self.pop()?;
                     let type_id_val = self.pop()?;
@@ -660,7 +789,11 @@ impl VM {
                     };
                     let idx = ev.variant_idx() as i32;
                     debug_assert!((idx as u32) < instr.a as u32);
-                    ip = self.program.code[(instr.operand + idx) as usize].operand - code_start;
+                    // `operand` is the table base, frame-relative like every
+                    // other target, so indexing `program.code` needs
+                    // `code_start` added back. The table's entries are ordinary
+                    // `Jump`s, so their operands are frame-relative too.
+                    ip = self.program.code[(code_start + instr.operand + idx) as usize].operand;
                 }
                 Op::ToString => {
                     let val = self.pop()?;
@@ -786,6 +919,45 @@ impl VM {
                     let v = Value::str_in(&mut self.heap, &s);
                     self.stack.push(v);
                 }
+                // Perceus drop-guided reuse (frame-limited, ICFP'22).
+                Op::Drop => {
+                    // Last use of this local in the frame. If the frame holds
+                    // the ONLY reference (rc==1), keep the allocation in the
+                    // slot for a following `Reuse` but release its children
+                    // NOW: reuse only propagates down a recursive chain (the
+                    // canonical `map`) when the parent cons stops holding the
+                    // tail before the recursive call sees it. The slot IS the
+                    // per-frame reuse table; the hollowed cell is released by
+                    // a following `Reuse` (takes ownership) or by `Ret`'s
+                    // truncate. Otherwise the value is shared (or non-heap):
+                    // release the frame's reference now by overwriting the
+                    // slot, so `Reuse` sees no candidate and allocates fresh.
+                    let slot = base_slot + instr.operand as usize;
+                    let v = &mut self.stack[slot];
+                    if v.is_unique() {
+                        v.hollow_for_reuse();
+                    } else {
+                        *v = Value::small_int(0);
+                    }
+                }
+                Op::Reuse => {
+                    // Take the candidate cell the preceding `Drop` left in
+                    // the slot: still uniquely owned (rc==1) if reusable, else
+                    // cleared. Push the cell as the address for the following
+                    // constructor to overwrite in place — ownership transfers
+                    // via the stack so rc stays 1 and the constructor releases
+                    // the old children before writing new payload. Otherwise
+                    // push nil and the constructor falls through to a fresh
+                    // allocation; the non-reusable `cell` drops as a no-op
+                    // (`Drop` already released the frame's reference).
+                    let slot = base_slot + instr.operand as usize;
+                    let cell = std::mem::replace(&mut self.stack[slot], Value::small_int(0));
+                    if cell.is_unique() {
+                        self.stack.push(cell);
+                    } else {
+                        self.stack.push(Value::nil());
+                    }
+                }
             }
         }
 
@@ -806,11 +978,122 @@ impl VM {
         self.stack.drain(base..args_start);
     }
 
+    /// Collapse the active frame for a *self*-tail-call: swap the `arity` new
+    /// argument words at `[args_start, len)` down into the parameter slots
+    /// `[base, base+arity)`, then truncate to `[base, base+locals)` — dropping
+    /// the temporaries in `[base+locals, args_start)` and the swapped-out old
+    /// params now sitting at the tail.
+    ///
+    /// The non-argument locals `[base+arity, base+locals)` are left in place.
+    /// Those slots ARE the per-frame reuse table: `Op::Drop` at end-of-body
+    /// parked hollowed cells there for `Op::Reuse` at start-of-body to
+    /// consume on the next iteration (loop-carried reuse across
+    /// `TailCallSelf` — see `core_ir::perceus`). Perceus has already dropped
+    /// every dead heap local before the tail edge, so the surviving slots
+    /// hold either a hollowed reuse cell or an immediate zero; carrying them
+    /// forward costs nothing, and the caller skips the zero-fill.
+    #[inline]
+    fn collapse_tail_frame_self(
+        &mut self,
+        base: usize,
+        args_start: usize,
+        arity: usize,
+        locals: usize,
+    ) {
+        debug_assert!(arity <= locals);
+        debug_assert!(base + locals <= args_start);
+        debug_assert_eq!(args_start + arity, self.stack.len());
+        for i in 0..arity {
+            self.stack.swap(base + i, args_start + i);
+        }
+        self.stack.truncate(base + locals);
+    }
+
+    /// `Op::StoreLocal` into the main process's entry frame: freeze the
+    /// binding's graph into the program-wide frozen area (the graph copy with
+    /// the frozen builder as destination) and mirror the frozen root into the
+    /// global area. The table holds only frozen words — never arena pointers —
+    /// so it is not a GC root and `PushGlobal` is a zero-copy word push on
+    /// every scheduler.
+    ///
+    /// Why `base_slot == 0 && current_is_main` singles out the entry frame:
+    /// spawned processes also run their seed frame at base_slot 0, hence the
+    /// is_main guard. Within main no other frame can sit at base_slot 0. A
+    /// callee's base is the operand-stack depth at call time, and main's stack
+    /// never drains below the entry frame's locals: `Ret` truncates only to the
+    /// returning frame's own base, the entry frame exits via `Halt`, and the
+    /// compiler marks tail position only inside function bodies, so a
+    /// module-scope call is never a frame-collapsing `TailCall`. Those locals
+    /// are never zero — `__main__` opens with the precompiled stdlib's binding
+    /// stores (the `__pre*` slots seeded by `Compiler::seed_static`) — so even a
+    /// zero-arity call at operand depth zero gets a base_slot of at least the
+    /// stdlib binding count. Without that floor, such a call would land a callee
+    /// at base_slot 0 and `StoreLocal` would silently freeze and publish the
+    /// callee's locals as globals.
+    ///
+    /// The publish is unconditional — there is no per-slot "already published"
+    /// filter — so a slot that is stored more than once is frozen and published
+    /// more than once. The contract readers rely on is therefore not
+    /// at-most-once publication but publish-before-read: all of a slot's stores
+    /// happen inside the single top-level statement that owns it, before any
+    /// closure that could `PushGlobal` it exists (`PushGlobal` is emitted only
+    /// for entry-frame slots referenced from nested functions), so every reader
+    /// observes exactly one stable published value per slot. Two compiler facts
+    /// uphold that. Sequential rebindings never re-store: `get_or_create_local`
+    /// gives every module-scope binding — including a shadowing rebinding of an
+    /// existing name — a fresh entry-frame slot rather than reusing the old one.
+    /// And the slots that are stored repeatedly — binary-pattern cursor temps
+    /// (one store per dynamic segment) and or-pattern alternative bindings
+    /// (re-stored when a later alternative re-binds the same name) — finish all
+    /// their stores while the owning statement is still executing. A re-store
+    /// does re-freeze the slot's graph into the never-collected frozen area;
+    /// that waste is bounded by the owning statement.
+    ///
+    /// Out of line and `#[cold]` for the same reason as [`spill_int`](Self::spill_int):
+    /// only the entry frame ever takes this path, and `StoreLocal` is replicated
+    /// into every hot dispatch site.
+    #[cold]
+    #[inline(never)]
+    fn publish_toplevel(&mut self, slot: usize) {
+        if slot >= self.globals.len() {
+            self.globals.resize(slot + 1, Value::nil());
+        }
+        let frozen = freeze::freeze_global(&mut self.frozen, self.stack[slot].clone());
+        self.globals[slot] = frozen.value();
+        self.runtime.publish_global(slot, frozen);
+    }
+
+    /// `Op::MakeClosure`: build a closure over `func_idx` from `capture_count`
+    /// capture words on top of the stack. When `with_reuse`, an `Op::Reuse`
+    /// token sits on top of the captures: pop it first and — if it names a
+    /// live cell — overwrite that allocation in place.
+    fn make_closure(&mut self, func_idx: i32) -> VmResult<()> {
+        let cc = self.program.functions[func_idx as usize].capture_count as usize;
+        let base = self.operand_base(cc)?;
+        let v = Value::closure_in(&mut self.heap, func_idx, &self.stack[base..]);
+        self.stack.truncate(base);
+        self.stack.push(v);
+        Ok(())
+    }
+
     /// `Op::MakeEnumPayload`: build a tagged enum value from the four header
     /// words (`type_id`, enum name, variant name, field-label array) plus
     /// `payload_count` payload words on top of the stack. `prehash_idx` indexes
-    /// the constant pool at the compile-time `enum_name_prefix_hash`.
-    fn make_enum_payload(&mut self, prehash_idx: i32, payload_count: usize) -> VmResult<()> {
+    /// the constant pool at the compile-time `enum_name_prefix_hash`. When
+    /// `with_reuse`, an `Op::Reuse` token sits on top of the payload words:
+    /// pop it first and — if it names a live cell — overwrite that allocation
+    /// in place instead of allocating fresh.
+    fn make_enum_payload(
+        &mut self,
+        prehash_idx: i32,
+        payload_count: usize,
+        with_reuse: bool,
+    ) -> VmResult<()> {
+        let reuse = if with_reuse {
+            self.take_reuse_addr()?
+        } else {
+            ReuseAddr::none()
+        };
         // Names and labels are constant-pool references; only the enum cell and
         // its payload slots are fresh. The four header words sit at fixed
         // offsets just below the payload; all operands are read before the
@@ -871,8 +1154,9 @@ impl VM {
         let hash = enum_hash_with_payload(name_prefix_hash, &self.stack[payload_base..]);
         // `enum_name`/`variant_name` are frozen constant-pool `Str` values —
         // stored as single reference words, never copied per construction.
-        let v = Value::enum_in(
+        let v = Value::enum_reuse_in(
             &mut self.heap,
+            reuse,
             type_id,
             variant_idx,
             hash,
@@ -890,6 +1174,16 @@ impl VM {
         self.stack
             .pop()
             .ok_or_else(|| VmError::internal("stack underflow"))
+    }
+
+    /// Pop and decode the Perceus reuse token an `Op::Reuse` pushed on top of
+    /// a constructor's operands: `Some(addr)` when the compiler-paired cell was
+    /// uniquely owned (rc==1 — ownership transfers to the raw address, which
+    /// the constructor will overwrite in place), `None` when it wasn't
+    /// (allocate fresh; the popped nil drops as a no-op).
+    #[inline]
+    pub(super) fn take_reuse_addr(&mut self) -> VmResult<ReuseAddr> {
+        Ok(self.pop()?.into_reuse_addr())
     }
 
     /// Index of the first of the top `n` operand slots, left in place. The
@@ -1181,7 +1475,6 @@ impl VM {
     /// Push the program's command-line arguments as an `Array(String)`. The
     /// args live on the shared runtime; the Arc is cloned so the per-arg
     /// allocation can borrow the heap mutably while the source list is read.
-    #[cold]
     #[inline(never)]
     pub(super) fn argv(&mut self) -> VmResult<()> {
         let runtime = self.runtime.clone();

@@ -1,0 +1,35 @@
+fn s0(%0:t0) -> :t1
+  match %0 :t1
+    | 6400.0(%1, %2) ->
+      drop %0 [Enum:2]
+      drop %2
+      ret %1
+    | 6400.1() ->
+      drop %0 [Enum:0]
+      ret c0
+
+fn s1(%0:t1) -> :t2
+  letj %6:t0 =
+    if %0 :t0
+      let %1:t2 = c1
+      let %2:t3 = ctor 6400.1()
+      let %3:t4 = ctor 6400.0(%1, %2)
+      let %4:t0 = call fn#160(%3)
+      let %5:t0 = call fn#160(%3)
+      ret AddInt(%4, %5)
+    else
+      ret c0
+  drop %0
+  let %7:t0 = %6
+  let %8:t2 = c1
+  ret AddInt(%8, %7)
+
+toplevel:
+  let %0:t4 = closure fn#160()
+  drop %0
+  let %1:t5 = closure fn#161()
+  let %2:t3 = ctor 261.0()
+  ret call %1(%2)
+where
+  c0 = Int(0)
+  c1 = Int(1)

@@ -9,25 +9,61 @@
 //!   PushLocal s; PushConst k; EqInt; JumpIfFalse t → JumpNeIntLC{a:s, b:k, operand:t}
 //!
 //! The first slot of each window is overwritten with the fused op and the
-//! remaining slots become `Nop`, so absolute jump targets (which the compiler
-//! emits as `code_start + ip` and the VM reads back as `operand - code_start`)
-//! stay valid without relocation. A window whose interior — every slot after
-//! the head — is itself a jump target is left unfused: a branch landing on a
-//! Nop would skip the fused effect entirely.
+//! remaining slots become `Nop`, so jump targets stay valid without relocation:
+//! nothing moves.
+//!
+//! Jump operands are **frame-relative** — the VM computes an instruction's
+//! target as `code_start + operand`, where `code_start` belongs to the frame
+//! executing it. So resolving an operand to a `program.code` index needs the
+//! owning frame, and `program.functions` is the only place that says which
+//! frame owns which instruction. `base_of` records that per instruction: a
+//! function body's own `code_start`, and the entry frame's `code_start` (0)
+//! for everything spliced around those bodies.
+//!
+//! Two rules follow. A window whose interior — every slot after the head — is
+//! a jump target is left unfused: a branch landing on a `Nop` would skip the
+//! fused effect entirely. And a window may not straddle two frames' regions:
+//! its slots' operands would live in different address spaces, and the fused
+//! op inherits the last slot's operand.
 
-use super::{Instruction, Op, op, op_ab};
+use super::{Function, Instruction, Op, op, op_ab};
 
-pub(super) fn fuse(code: &mut [Instruction]) {
+pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usize) {
     let len = code.len();
-    // Absolute addresses anything branches to. Only the head of a fused window
-    // may be a target; landing mid-window after fusion would be incorrect.
-    // Targets are dense indices into `code`, so a bitmap beats a HashSet.
+
+    // `base_of[i]` is the `code_start` a jump operand at `code[i]` resolves
+    // against. Function bodies are disjoint regions carved out of the entry
+    // frame's stream; the entry frame's own `code_start` is 0 (it runs the
+    // module-init code that precedes every body), which is the default.
+    //
+    // `functions` may hold more than one entry frame: seeding the precompiled
+    // stdlib copies that compile's whole `functions` vec, whose last element is
+    // its own `__main__` spanning the entire prelude stream. Filling in
+    // descending `code_len` order makes a containing region lose to every
+    // region nested inside it, whatever the iteration order — so a stale entry
+    // frame can never stamp its base over a body's.
+    let mut base_of = vec![0i32; len];
+    let mut order: Vec<usize> = (0..functions.len())
+        .filter(|&i| i != entry && functions[i].code_len > 0 && functions[i].code_start >= 0)
+        .collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(functions[i].code_len));
+    for i in order {
+        let f = &functions[i];
+        let lo = (f.code_start as usize).min(len);
+        let hi = (lo + f.code_len as usize).min(len);
+        base_of[lo..hi].fill(f.code_start);
+    }
+
+    // Absolute `code` indices anything branches to. Only the head of a fused
+    // window may be a target; landing mid-window after fusion would be
+    // incorrect. Targets are dense indices into `code`, so a bitmap beats a
+    // HashSet.
     let mut is_target = vec![false; len];
-    for instr in code.iter() {
+    for (i, instr) in code.iter().enumerate() {
         if instr.op.has_jump_target() {
-            let t = instr.operand as usize;
-            if t < len {
-                is_target[t] = true;
+            let t = base_of[i] as i64 + instr.operand as i64;
+            if t >= 0 && (t as usize) < len {
+                is_target[t as usize] = true;
             }
         }
     }
@@ -37,12 +73,15 @@ pub(super) fn fuse(code: &mut [Instruction]) {
     while i + 2 < len {
         let i0 = code[i];
         let i1 = code[i + 1];
+        let base = base_of[i];
         if i0.op != Op::PushLocal
             || i1.op != Op::PushConst
             || i0.operand as u32 > u8::MAX as u32
             || i1.operand as u32 > u16::MAX as u32
             || is_target[i + 1]
             || is_target[i + 2]
+            || base_of[i + 1] != base
+            || base_of[i + 2] != base
         {
             i += 1;
             continue;
@@ -51,7 +90,7 @@ pub(super) fn fuse(code: &mut [Instruction]) {
         let i2 = code[i + 2];
 
         // 4-wide: PushLocal; PushConst; {Lt,Eq}Int; JumpIfFalse
-        if i + 3 < len && !is_target[i + 3] {
+        if i + 3 < len && !is_target[i + 3] && base_of[i + 3] == base {
             let i3 = code[i + 3];
             if i3.op == Op::JumpIfFalse {
                 let fused = match i2.op {
@@ -60,6 +99,8 @@ pub(super) fn fuse(code: &mut [Instruction]) {
                     _ => None,
                 };
                 if let Some(f) = fused {
+                    // `i3.operand` is already relative to `base`, which is the
+                    // fused instruction's frame too.
                     code[i] = op_ab(f, slot, konst, i3.operand);
                     code[i + 1] = nop;
                     code[i + 2] = nop;
@@ -85,5 +126,75 @@ pub(super) fn fuse(code: &mut [Instruction]) {
         }
 
         i += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::op_arg;
+
+    /// A function body at `code_start = 8` holding a 4-wide fusable window at
+    /// 8..12, plus a *stale* entry frame spanning the whole stream — exactly
+    /// the shape `seed_static` produces, where the hydrated stdlib's own
+    /// `__main__` trails every prelude body in `functions`. That frame's base
+    /// must not overwrite the body's, or every operand inside the body resolves
+    /// against 0 instead of 8.
+    fn body_and_stale_entry(jump_operand: i32) -> (Vec<Instruction>, Vec<Function>) {
+        let f = |name: &str, code_start, code_len| Function {
+            name: name.into(),
+            arity: 0,
+            locals: 0,
+            capture_count: 0,
+            code_start,
+            code_len,
+        };
+        let mut code = vec![op(Op::Nop); 8];
+        code.extend([
+            // body of `f` starts here (code_start = 8)
+            op_arg(Op::PushLocal, 0),
+            op_arg(Op::PushConst, 0),
+            op(Op::LtInt),
+            op_arg(Op::JumpIfFalse, 4), // → 8 + 4 = 12
+            op(Op::Nop),
+            op_arg(Op::Jump, jump_operand),
+            op(Op::Nop),
+            op(Op::Nop),
+        ]);
+        let functions = vec![
+            f("f", 8, 8),
+            // the precompiled stdlib's own entry frame, still in `functions`
+            f("__main__", 0, 16),
+            // this compile's entry frame
+            f("__main__", 0, 16),
+        ];
+        (code, functions)
+    }
+
+    #[test]
+    fn stale_entry_frame_does_not_clobber_body_bases() {
+        // `Jump` operand 2 → target `8 + 2 = 10`, the window's interior. Read
+        // against a base of 0 it would point at `code[2]` and the interior
+        // would look unreachable.
+        let (mut code, functions) = body_and_stale_entry(2);
+        fuse(&mut code, &functions, 2);
+        assert_eq!(
+            code[8].op,
+            Op::PushLocal,
+            "window whose interior is a branch target must stay unfused"
+        );
+        assert_eq!(code[10].op, Op::LtInt);
+    }
+
+    #[test]
+    fn body_window_still_fuses_when_no_interior_target() {
+        // `Jump` operand 6 → target `8 + 6 = 14`, outside the window.
+        let (mut code, functions) = body_and_stale_entry(6);
+        fuse(&mut code, &functions, 2);
+        assert_eq!(code[8].op, Op::JumpGeIntLC);
+        assert_eq!(code[8].operand, 4, "fused operand stays frame-relative");
+        assert_eq!(code[9].op, Op::Nop);
+        assert_eq!(code[10].op, Op::Nop);
+        assert_eq!(code[11].op, Op::Nop);
     }
 }

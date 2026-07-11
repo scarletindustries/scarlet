@@ -47,17 +47,20 @@
 //! | [`hamt`]            | the persistent HAMT backing `Map`              |
 
 mod analysis;
+pub mod binop;
 pub mod bits;
 pub mod compiler;
 pub mod hamt;
 mod peephole;
 mod prelude;
 pub mod prelude_bindings;
+mod scratch;
 pub mod seq;
 mod session;
 pub mod value;
 use std::sync::Arc;
 
+pub use binop::{ArithOp, BinopKind, ShortCircuitOp, specialize_binop};
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use session::{HoverFact, IncrementalSession, Watermark};
@@ -131,7 +134,6 @@ pub enum Op {
     // Control flow
     Jump,
     JumpIfFalse,
-    JumpIfTrue,
     Call,
     TailCall,
     /// Self-recursive call: `func_idx` is read from the live frame, skipping
@@ -163,24 +165,30 @@ pub enum Op {
 
     // Data structures
     MakeArray,
+    /// `[e0, .., e_{n-1}] -> tuple`. `operand` = n.
+    ///
+    /// No reuse variant: `lower` pairs `Drop`/`Reuse` tokens only for
+    /// user-declared constructors, so a tuple never receives one.
     MakeTuple,
     TupleIndex,
     MakeRange,
     Index,
+    /// `[arr, idx, default] -> elem|default` — `arr[idx] or default` where the
+    /// default is a pure atom (a constant or a local read), so evaluating it
+    /// eagerly is free and observationally identical.
+    ///
+    /// Exists because `Index` must build a `Some` box to honour its `Option`
+    /// return, which an immediately-following `or` then destructures and
+    /// throws away: one heap cell per index, measured. A lazier jumping form
+    /// would also cover `or { <expression> }`, at the cost of an `ip` rewrite
+    /// in the middle of an opcode; `lower` simply declines to fuse those.
+    IndexOr,
     /// `[arr] -> arr[operand]` — unchecked element fetch, index as an
     /// immediate operand, no `Option` wrapper. Emitted by array-destructuring
     /// patterns *after* a length check has proven the index in-bounds, so it
     /// skips the `Some(_)` box/unbox round-trip that `Index; UnwrapEnum` pays
     /// per element on every stdlib list traversal.
     ElemAt,
-    /// `[arr, idx] -> elem` — fused safe-index-with-fallback. The single
-    /// idiomatic `arr[i] or default` otherwise compiles to `Index`
-    /// (`Some(elem)`/`None` box: 2 heap allocs + a hash per element) followed
-    /// by `Dup; <2×PushConst None header>; MatchEnum; JumpIfFalse; UnwrapEnum`
-    /// only to immediately discard the box. This fetches the element directly:
-    /// in-bounds pushes `elem` and falls through; out-of-bounds jumps to
-    /// `operand` (the recovery body), never materializing the `Option`.
-    IndexOrElse,
     ArrayLen,
     ArraySlice,
     ArrayConcat,
@@ -190,7 +198,7 @@ pub enum Op {
     Prepend,
     /// `[seq, n] -> seq[n..]` — structure-shared tail. The consumer half of
     /// the old O(n²); replaces `ArraySlice` in `[h, ..rest]` patterns.
-    Drop,
+    SeqDrop,
     /// `[seq, e] -> seq` with `e` pushed on the back. Totality for
     /// `[..spread, x]`; no stdlib use today.
     Append,
@@ -201,6 +209,10 @@ pub enum Op {
     GetFieldUnchecked,
 
     // Tagged values (enums / custom types)
+    /// `[type_id, enum_name, variant_name, labels, p0, .., p_{b-1}, reuse?] ->
+    /// enum`. `b` = payload arity, `operand` = prehash constant idx. `a` = 1
+    /// when a Perceus reuse token sits on top of the payloads (see
+    /// `MakeTuple`); `a` = 0 is the ordinary alloc path.
     MakeEnumPayload,
     MatchEnum,
     UnwrapEnum,
@@ -212,9 +224,39 @@ pub enum Op {
     SwitchTag,
 
     // Closures
+    /// `[cap0, .., cap_{cc-1}, reuse?] -> closure`. `operand` = func_idx.
+    /// `a` = 1 when a Perceus reuse token sits on top of the captures (see
+    /// `MakeTuple`); `a` = 0 is the ordinary alloc path.
     MakeClosure,
     PushCapture,
     PushSelf,
+
+    // Perceus drop-guided reuse (frame-limited, ICFP'22). The compiler emits
+    // `Drop slot` at a heap value's last use and, when a same-shape constructor
+    // dominates in the same frame, `Reuse slot` before that constructor's
+    // alloc so the dying cell is overwritten in place instead of alloc+free.
+    /// `[]` — operand = local slot. Last use of `stack[base+slot]` in this
+    /// frame: release the frame's reference. If the value is uniquely owned
+    /// (rc==1), do NOT free — the cell stays in the slot as a reusable
+    /// allocation for a following same-shape `Reuse` (the slot itself is the
+    /// per-frame reuse table). If shared or non-heap, the reference is
+    /// dropped normally and the slot is cleared. Push nothing.
+    Drop,
+    /// `[] -> cell|nil` — operand = local slot. If the preceding `Drop` held a
+    /// reusable cell (rc==1) in the slot, push it (ownership transfers) for
+    /// the following `MakeEnumPayload` to overwrite in place; otherwise push
+    /// nil and the constructor allocates fresh. `MakeEnumPayload` is the only
+    /// consumer: `lower` pairs tokens for user-declared constructors, never
+    /// for tuples or closures.
+    ///
+    /// A token DOES survive an intervening `Call`. "Frame-limited" (Lorenzen &
+    /// Leijen, ICFP'22) means the *callee* never sees the parked cell — it
+    /// lives in this frame's slot — not that a call clears the token. The
+    /// canonical `map xs f = match xs { Cons(h, t) -> Cons(f h, map t f) }`
+    /// reuses `xs`'s cell across both `f h` and `map t f`; clearing at calls
+    /// would silently delete every reuse in the language. See
+    /// `core_ir::perceus`'s module docs, which are authoritative.
+    Reuse,
 
     // String operations
     ToString,
@@ -308,7 +350,7 @@ pub enum Op {
     StackDepth,
     Halt,
 
-    // I/O operations (experimental)
+    // I/O operations
     FileRead,
     FileWrite,
     TcpListen,
@@ -335,7 +377,7 @@ pub enum Op {
     /// (al/net/address.parse)
     IpParse,
 
-    // Concurrency (experimental, al/experiments/scheduler)
+    // Concurrency (al/scheduler)
     /// Spawn a lightweight process running the popped closure.
     ProcessSpawn,
     /// Spawn the popped closure pinned to the current scheduler — the child
@@ -387,21 +429,171 @@ pub enum Op {
 }
 
 impl Op {
-    /// True when this op's `operand` is an absolute instruction index that
-    /// jump-patching / peephole must remap. Keep this the ONE authority —
-    /// `emit_jump` debug-asserts against it so a new jump op forgotten here
-    /// trips in debug rather than silently miscompiling under fusion.
+    /// True when this op's `operand` is an instruction index — absolute in
+    /// [`Program::code`], function-relative inside a block `core_ir::emit`
+    /// has just produced — rather than a constant id, slot, count, or
+    /// function index. Jump-patching, peephole fusion and
+    /// `core_ir::emit::relocate` all key off this, so it is the ONE authority
+    /// on which operands are addresses.
+    ///
+    /// The match is exhaustive on purpose: a new opcode does not compile until
+    /// its operand is classified here, rather than defaulting to "not an
+    /// address" and silently surviving relocation unshifted.
     pub const fn has_jump_target(self) -> bool {
-        matches!(
-            self,
-            Op::Jump
-                | Op::JumpIfFalse
-                | Op::JumpIfTrue
-                | Op::JumpGeIntLC
-                | Op::JumpNeIntLC
-                | Op::IndexOrElse
-                | Op::SwitchTag
-        )
+        match self {
+            // `SwitchTag`'s operand is the jump-table base; the table's own
+            // entries are ordinary `Jump`s, covered by the first arm.
+            Op::Jump | Op::JumpIfFalse | Op::JumpGeIntLC | Op::JumpNeIntLC | Op::SwitchTag => true,
+
+            Op::PushConst
+            | Op::PushLocal
+            | Op::PushGlobal
+            | Op::StoreLocal
+            | Op::PushNil
+            | Op::PushTrue
+            | Op::PushFalse
+            | Op::Pop
+            | Op::Dup
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Neg
+            | Op::AddInt
+            | Op::SubInt
+            | Op::MulInt
+            | Op::DivInt
+            | Op::ModInt
+            | Op::NegInt
+            | Op::AddFloat
+            | Op::SubFloat
+            | Op::MulFloat
+            | Op::DivFloat
+            | Op::NegFloat
+            | Op::AddStr
+            | Op::Eq
+            | Op::Neq
+            | Op::Lt
+            | Op::Gt
+            | Op::Lte
+            | Op::Gte
+            | Op::LtInt
+            | Op::GtInt
+            | Op::LteInt
+            | Op::GteInt
+            | Op::EqInt
+            | Op::NeqInt
+            | Op::LtFloat
+            | Op::GtFloat
+            | Op::LteFloat
+            | Op::GteFloat
+            | Op::Not
+            | Op::Call
+            | Op::TailCall
+            | Op::CallSelf
+            | Op::TailCallSelf
+            | Op::CallKnown
+            | Op::TailCallKnown
+            | Op::Ret
+            | Op::SubIntLC
+            | Op::AddIntLC
+            | Op::Nop
+            | Op::MakeArray
+            | Op::MakeTuple
+            | Op::TupleIndex
+            | Op::MakeRange
+            | Op::Index
+            | Op::IndexOr
+            | Op::ElemAt
+            | Op::ArrayLen
+            | Op::ArraySlice
+            | Op::ArrayConcat
+            | Op::Prepend
+            | Op::SeqDrop
+            | Op::Append
+            | Op::GetField
+            | Op::GetFieldUnchecked
+            | Op::MakeEnumPayload
+            | Op::MatchEnum
+            | Op::UnwrapEnum
+            | Op::MakeClosure
+            | Op::PushCapture
+            | Op::PushSelf
+            | Op::Drop
+            | Op::Reuse
+            | Op::ToString
+            | Op::StrConcatN
+            | Op::StrSplit
+            | Op::StrLen
+            | Op::StrContains
+            | Op::StrTrim
+            | Op::IntToString
+            | Op::BinFromString
+            | Op::BinToString
+            | Op::BinBitSize
+            | Op::BinByteSize
+            | Op::BinSlice
+            | Op::BinAppend
+            | Op::BinConcatN
+            | Op::BinFromInt
+            | Op::BinReadInt
+            | Op::BinTake
+            | Op::BinReadUtf8
+            | Op::BinMatchPrefix
+            | Op::BinView
+            | Op::BinIndexOf
+            | Op::BinByteAt
+            | Op::BinParseInt
+            | Op::BinEqIgnoreAsciiCase
+            | Op::BinToAsciiLower
+            | Op::BinFromIntAscii
+            | Op::HttpParseHead
+            | Op::HttpFraming
+            | Op::HttpChunkDecode
+            | Op::HttpHeaderGet
+            | Op::HttpHeaderHas
+            | Op::HttpSerializeHead
+            | Op::FloatFloor
+            | Op::FloatCeil
+            | Op::FloatRound
+            | Op::FloatTruncate
+            | Op::FloatFromInt
+            | Op::FloatToString
+            | Op::Print
+            | Op::StackDepth
+            | Op::Halt
+            | Op::FileRead
+            | Op::FileWrite
+            | Op::TcpListen
+            | Op::TcpAccept
+            | Op::TcpConnect
+            | Op::TcpRead
+            | Op::TcpReadUntil
+            | Op::TcpWrite
+            | Op::TcpWriteParts
+            | Op::TcpClose
+            | Op::TcpCloseServer
+            | Op::TcpLocalAddr
+            | Op::DnsResolve
+            | Op::IpParse
+            | Op::ProcessSpawn
+            | Op::SpawnLocal
+            | Op::SpawnOnEach
+            | Op::Sleep
+            | Op::Monotonic
+            | Op::Argv
+            | Op::EnvMap
+            | Op::MapGet
+            | Op::MapHas
+            | Op::MapKeys
+            | Op::MapValues
+            | Op::MapSize
+            | Op::MapNew
+            | Op::MapSet
+            | Op::MapDelete
+            | Op::MapToList => false,
+        }
     }
 }
 

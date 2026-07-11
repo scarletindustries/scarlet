@@ -841,13 +841,17 @@ impl InferEngine {
 
     // --- Union-find: find with path compression ---
 
+    /// The representative of `t`, without path compression.
+    ///
+    /// Same answer as [`find`](Self::find) — the two are the same chase — but
+    /// it takes `&self`, so a read-only consumer (the `zonk` bridge into
+    /// `typed_ir::ResolvedPool`) can resolve types while holding the engine
+    /// immutably. `find` is this plus the rewrite pass, so their results
+    /// cannot drift.
     // The chase loop has two independent let-else exits (non-Var node, or a
     // root var); a single while-let cannot express both.
     #[allow(clippy::while_let_loop)]
-    pub fn find(&mut self, t: Ty) -> Ty {
-        // Two-pass iterative: chase links to the representative, then rewrite
-        // every traversed link to point directly at it. Avoids O(chain) native
-        // recursion on first traversal of a long chain.
+    pub fn find_ref(&self, t: Ty) -> Ty {
         let mut root = t;
         loop {
             let TypeNode::Var(id) = self.node(root) else {
@@ -858,6 +862,37 @@ impl InferEngine {
             };
             root = ty;
         }
+        root
+    }
+
+    /// `Some(gid)` when `t`'s representative is a rigid `Generic` variable —
+    /// `gid` being the originating var id `Scheme`'s `QuantVar::origin_id`
+    /// records, so a caller holding the scheme can map the variable onto its
+    /// `Bound` index. `None` for an `Unbound` root and for every non-`Var`
+    /// node: the two are different facts, and only the caller knows whether an
+    /// `Unbound` here is a bug.
+    pub fn root_generic_id(&self, t: Ty) -> Option<i32> {
+        let TypeNode::Var(id) = self.node(self.find_ref(t)) else {
+            return None;
+        };
+        match self.vars[id as usize] {
+            TyVarState::Generic { id, .. } => Some(id),
+            TyVarState::Unbound { .. } | TyVarState::Link { .. } => None,
+        }
+    }
+
+    /// The nominal ids of `Int`/`Float`/`String`/`Array`, as registered by
+    /// `set_prim_ids`. Handed to a `ResolvedPool` so it answers `prim_of` by
+    /// id, exactly as the engine does.
+    pub fn prim_ids(&self) -> PrimIds {
+        self.prim_ids
+    }
+
+    pub fn find(&mut self, t: Ty) -> Ty {
+        // Two-pass iterative: chase links to the representative, then rewrite
+        // every traversed link to point directly at it. Avoids O(chain) native
+        // recursion on first traversal of a long chain.
+        let root = self.find_ref(t);
         let mut cur = t;
         while cur != root {
             let TypeNode::Var(id) = self.node(cur) else {

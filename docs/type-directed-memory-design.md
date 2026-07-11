@@ -98,6 +98,17 @@ Action item: `bench_heavy.al` needs a companion workload that actually exercises
 
 The bulk of remaining time is Point allocation in `dot_loop` — Phase 2 (Perceus reuse) eliminates it.
 
+### Phase 2 — dot_loop reuse
+
+`dot_loop(1_000_000, 0)` allocates two `Point(x y z)` per iteration — 2M heap objects that are constructed, read once by `dot`, and immediately dead. hyperfine, 10 runs, 2 warmup, macOS arm64, both rows measured back-to-back on the same machine (Phase-1 binary preserved as `target/release/al_phase1_baseline`):
+
+| build | `bench_typed.al` mean ± σ | `dot_loop` only mean ± σ |
+|---|---|---|
+| Phase 1 (62c8795) | 660.0 ms ± 12.0 | 208.4 ms ± 2.9 |
+| Phase 2 | 701.5 ms ± 16.4 | 223.9 ms ± 4.5 |
+
+Phase 2 is currently **+7 %** on `dot_loop`, not the drop this section anticipated. Drop-guided reuse as landed pairs a *drop that dominates a later same-shape constructor within one straight-line frame* — today that means the match-scrutinee pattern (`match xs { Cons(h, t) -> Cons(..) }`). `dot_loop`'s body is the inverse order — construct `p`/`q`, then last-use — so no drop dominates a constructor and no `Op::Reuse` is emitted. The cross-iteration pairing originally assumed here (iteration *N*'s dead `p` feeding iteration *N+1*'s `Point(..)`) does not survive `TailCallSelf`: `collapse_tail_frame` drains the local slots, so the held cell is freed before the next body runs. Until reuse tokens are threaded through the tail-call frame collapse (or `dot_loop` is rewritten as a `match` over a boxed accumulator), Phase 2 pays `Op::Drop` and per-read `Nop`-hole dispatch on the heap locals with no compensating reuse; the +7 % is that overhead. `dot_loop` alone is ~31 % of Phase-1 wall time, which remains the ceiling once pairing covers this shape.
+
 ## References
 
 - Grossman, Morrisett, Jim, Hicks, Wang, Cheney. *Region-Based Memory Management in Cyclone*. PLDI'02.

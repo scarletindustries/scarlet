@@ -143,7 +143,7 @@ fn tcp_echo_server_roundtrip() {
 #[test]
 fn tcp_connect_and_vectored_echo() {
     let proj = Project::new("io_connect");
-    let src = r#"import al/experiments/scheduler
+    let src = r#"import al/scheduler
 import al/net
 import al/net/socket
 import al/binary
@@ -372,7 +372,7 @@ fn file_read_offloads_to_blocking_pool() {
     let data = proj.dir.join("data.txt");
     std::fs::write(&data, "payload").unwrap();
     let src = r#"import al/io
-import al/experiments/scheduler
+import al/scheduler
 
 fn reader() fn() Nil {
 	fn() match io.read_text('__PATH__') {
@@ -408,7 +408,7 @@ match io.read_text('__PATH__') {
 fn dns_resolve_runs_on_pool() {
     let proj = Project::new("dns_resolve");
     let src = r#"import al/net
-import al/experiments/scheduler
+import al/scheduler
 
 scheduler.spawn(fn() Nil)
 match net.resolve('localhost') {

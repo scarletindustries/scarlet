@@ -1000,3 +1000,277 @@ fn position_query_reroot_stages_diagnostics_for_open_file() {
         [main_uri.as_str()]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Module doc comments: hover + goto-def on a module name.
+// ---------------------------------------------------------------------------
+
+/// The `/** */` at line 0 is `b.al`'s *module* doc, not `add`'s.
+const MODDOC_B: &str = "/**\n * Adds numbers together.\n */\npub fn add(a, b) {\n  a + b\n}\n";
+
+const MODDOC_A: &str = "import ./b\n\nprintln(b.add(10, 20))\n";
+
+/// The `examples/a.al` + `examples/b.al` demo pair, opened as `a.al`.
+fn moddoc_project() -> (Project, Workspace, String) {
+    let p = Project::new("moddoc");
+    p.write("b.al", MODDOC_B);
+    p.write("a.al", MODDOC_A);
+    let (s, uri) = open(&p, "a.al", MODDOC_A);
+    (p, s, uri)
+}
+
+fn hover_md(s: &mut Workspace, uri: &str, l: i32, c: i32) -> String {
+    s.hover_response(&pos(uri, l, c))["contents"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn hover_on_module_alias_shows_the_module_doc() {
+    let (_p, mut s, uri) = moddoc_project();
+
+    // The `b` of `b.add(10, 20)` — a `Qualifier` occurrence on the import.
+    let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
+    let md = hover_md(&mut s, &uri, l, c);
+    assert!(
+        md.contains("Adds numbers together."),
+        "hover on the `b` qualifier must render b.al's module doc, got {md:?}"
+    );
+    assert!(md.contains("*module*"), "…and name it a module: {md:?}");
+
+    // The `b` of the `import ./b` line itself.
+    let (l, c) = cursor(MODDOC_A, "./b", 1, 2);
+    let md = hover_md(&mut s, &uri, l, c);
+    assert!(
+        md.contains("Adds numbers together."),
+        "hover on the import path segment must render the module doc, got {md:?}"
+    );
+
+    // The member `add` still hovers as the function, not as the module.
+    let (l, c) = cursor(MODDOC_A, "add", 1, 0);
+    let md = hover_md(&mut s, &uri, l, c);
+    assert!(
+        !md.contains("*module*"),
+        "hover on the member must not render the module: {md:?}"
+    );
+}
+
+#[test]
+fn goto_def_on_module_alias_opens_the_module_file() {
+    let (_p, mut s, uri) = moddoc_project();
+
+    // cmd+click the `b` of `b.add(10, 20)` -> b.al at 0:0, the same
+    // destination the `b` of `import ./b` already resolves to.
+    let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
+    let def = s.definition_response(&pos(&uri, l, c));
+    let target = def["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("goto-def on a module alias must open a file, got {def}"));
+    assert!(
+        target.ends_with("b.al"),
+        "`b.add(..)` must jump to b.al, got {target}"
+    );
+    assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
+    assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));
+
+    // The `import` keyword still resolves to nothing (the alias `Definition`
+    // spans the whole declaration; jumping there would be a self-jump).
+    let (l, c) = cursor(MODDOC_A, "import", 1, 1);
+    assert!(
+        s.definition_response(&pos(&uri, l, c)).is_null(),
+        "goto-def on the `import` keyword must stay null"
+    );
+}
+
+/// A `/** */` at line 0 of the *entry* file is the module's doc, so the first
+/// declaration below it must not inherit it in the editor either.
+#[test]
+fn module_doc_is_not_attached_to_the_first_declaration() {
+    let src = "/** Module prose. */\npub fn greet() Int { 7 }\nprintln(greet())\n";
+    let (_p, mut s, uri) = open_single("moddoc_first", src);
+
+    let (l, c) = cursor(src, "greet", 1, 1);
+    let md = hover_md(&mut s, &uri, l, c);
+    assert!(md.contains("greet"), "hover names the function: {md:?}");
+    assert!(
+        !md.contains("Module prose."),
+        "the line-0 doc is the module's, not `greet`'s: {md:?}"
+    );
+}
+
+/// A local binding shadows the import alias: the `b` of `b.x` names the
+/// `Point`, not module `b`. Goto-def must land on the binder, and hover must
+/// not claim the position is a module.
+const SHADOW_A: &str = "import ./b\n\
+type Point {\n\
+\x20 Point(x Int)\n\
+}\n\
+pub fn get(b Point) Int {\n\
+\x20 b.x\n\
+}\n\
+p = Point(41)\n\
+println(get(p) + b.add(0, 1))\n";
+
+#[test]
+fn qualifier_occurrence_respects_a_shadowing_local() {
+    let p = Project::new("shadow_qualifier");
+    p.write("b.al", MODDOC_B);
+    p.write("a.al", SHADOW_A);
+    let (mut s, uri) = open(&p, "a.al", SHADOW_A);
+
+    // The `b` of `b.x` inside `get` — a parameter, not the module alias.
+    let (l, c) = cursor(SHADOW_A, "b.x", 1, 0);
+    let def = s.definition_response(&pos(&uri, l, c));
+    let target = def["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("goto-def on a shadowed name must resolve, got {def}"));
+    assert!(
+        target.ends_with("a.al"),
+        "the shadowed `b` must resolve to the local parameter in a.al, got {target}"
+    );
+    let (param_l, param_c) = cursor(SHADOW_A, "b Point", 1, 0);
+    assert_eq!(def["range"]["start"]["line"].as_i64(), Some(param_l as i64));
+    assert_eq!(
+        def["range"]["start"]["character"].as_i64(),
+        Some(param_c as i64)
+    );
+
+    let md = hover_md(&mut s, &uri, l, c);
+    assert!(
+        !md.contains("*module*"),
+        "a shadowed `b` is not a module qualifier: {md:?}"
+    );
+
+    // …while the genuinely-qualified `b.add` at top level still is one.
+    let (l, c) = cursor(SHADOW_A, "b.add", 1, 0);
+    let md = hover_md(&mut s, &uri, l, c);
+    assert!(
+        md.contains("*module*") && md.contains("Adds numbers together."),
+        "the unshadowed `b` still names module b: {md:?}"
+    );
+}
+
+/// Find-all-references on a module alias lists the qualifier occurrences: the
+/// `b` of `b.add(..)` is a reference to the import, even though it is not the
+/// *use site* the unused-import rule keys off.
+#[test]
+fn find_refs_on_module_alias_lists_the_qualifier() {
+    let (_p, mut s, uri) = moddoc_project();
+
+    let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
+    let refs = refs_at(&mut s, &uri, l, c, false);
+    let items = refs
+        .as_array()
+        .unwrap_or_else(|| panic!("references on a module alias must be an array, got {refs}"));
+    assert_eq!(
+        items.len(),
+        1,
+        "the sole reference to alias `b` is the qualifier of `b.add`: {items:?}"
+    );
+    assert_eq!(items[0]["range"]["start"]["line"].as_i64(), Some(l as i64));
+    assert_eq!(
+        items[0]["range"]["start"]["character"].as_i64(),
+        Some(c as i64)
+    );
+
+    // With the declaration included, the `import ./b` line joins in.
+    let with_decl = refs_at(&mut s, &uri, l, c, true);
+    assert_eq!(with_decl.as_array().map(Vec::len), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Stdlib module docs: carried through the precompiled blob.
+// ---------------------------------------------------------------------------
+
+/// `al/scheduler` is seeded from the static blob and never re-compiled, so its
+/// module doc reaches hover only via `SModule::doc` ->
+/// `ModuleInterface::doc` -> `synth_refs_from_interface`.
+#[test]
+fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
+    let src = "import al/scheduler as s\n\ns.spawn(fn() { Nil })\n";
+    let (_p, mut w, uri) = open_single("stdlib_moddoc", src);
+
+    let (l, c) = cursor(src, "s.spawn", 1, 0);
+    let md = hover_md(&mut w, &uri, l, c);
+    assert!(
+        md.contains("*module*"),
+        "the `s` of `s.spawn(..)` names a module: {md:?}"
+    );
+    assert!(
+        md.contains("Lightweight processes."),
+        "hover must render al/scheduler's module doc: {md:?}"
+    );
+}
+
+// ── Parameter labels and declaration docs in hover ─────────────────────────
+//
+// A function's parameter names are documentation: al rejects labelled
+// arguments outside a constructor call, so a name never reaches a call site
+// and must not live in `Type::Function` (unification would then have to decide
+// whether `fn(path String)` equals `fn(p String)` — either the label is dead
+// weight, or renaming a parameter breaks callers). They ride beside the type,
+// on `Definition::param_names`, and are rendered only at the hover boundary.
+//
+// Constructor field labels *are* semantic and already live in the type; hover
+// mirrors them so `NotFound` reads the same way.
+
+#[test]
+fn hover_shows_a_functions_parameter_names() {
+    let src = "fn greet(name String, greeting String) String {\n\tgreeting + name\n}\n\nprintln(greet('al', 'hi '))\n";
+    let (_p, mut s, uri) = open_single("hover_params", src);
+    let md = hover_md(&mut s, &uri, 0, 4); // the `greet` declaration
+    assert!(
+        md.contains("fn(name String, greeting String) String"),
+        "hover must label the parameters, got:\n{md}"
+    );
+}
+
+/// The stdlib is hydrated from the precompiled blob, never compiled from
+/// source, so this only passes if `SExport` carries the names.
+#[test]
+fn hover_shows_parameter_names_across_the_stdlib_blob() {
+    let src = "import al/io\n\nprintln(io.read_text('x') or e -> '')\n";
+    let (_p, mut s, uri) = open_single("hover_blob", src);
+    let md = hover_md(&mut s, &uri, 2, 12); // inside `read_text`
+    assert!(
+        md.contains("fn(path String)"),
+        "stdlib fn must carry its parameter name through the blob, got:\n{md}"
+    );
+}
+
+/// A constructor's labels come from `ValueKind::Constructor.field_labels` —
+/// already in the type, mirrored onto the definition for rendering.
+#[test]
+fn hover_shows_a_constructors_field_labels() {
+    let src = "import al/io.{NotFound}\n\nfn f(e IoError) String {\n\tmatch e {\n\t\tNotFound(p) -> p\n\t\telse -> ''\n\t}\n}\nprintln(1)\n";
+    let (_p, mut s, uri) = open_single("hover_ctor", src);
+    let md = hover_md(&mut s, &uri, 4, 4); // the `NotFound` pattern
+    assert!(
+        md.contains("fn(path String) IoError"),
+        "constructor must show its field label, got:\n{md}"
+    );
+}
+
+/// Declaration doc comments never crossed a module boundary before: the blob
+/// carried only the *module* doc. Now `ExportedValue::doc` rides along.
+#[test]
+fn hover_shows_a_declaration_doc_from_another_module() {
+    let p = Project::new("hover_xmod_doc");
+    p.write(
+        "lib.al",
+        "/** Text helpers. */\n\n/** Join `parts` with `sep`. */\npub fn join(parts Array(String), sep String) String {\n\t'x'\n}\n",
+    );
+    let src = "import ./lib\n\nprintln(lib.join(['a'], ','))\n";
+    p.write("main.al", src);
+    let (mut s, uri) = open(&p, "main.al", src);
+    let md = hover_md(&mut s, &uri, 2, 12); // inside `join`
+    assert!(
+        md.contains("fn(parts Array(String), sep String)"),
+        "labels must cross the module boundary, got:\n{md}"
+    );
+    assert!(
+        md.contains("Join `parts` with `sep`."),
+        "declaration doc must cross the module boundary, got:\n{md}"
+    );
+}

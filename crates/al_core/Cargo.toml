@@ -3,6 +3,18 @@ name = "al_core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Instruments `ProcHeap::alloc_object` with a per-thread counter so tests can
+# assert net allocations (Perceus reuse). Enabled only from `al`'s
+# [dev-dependencies]; with `resolver = "2"` that keeps it out of `cargo build`,
+# so the release binary carries no counter.
+#
+# It has to be a feature rather than `cfg(test)`: the tests that read it are
+# `al`'s integration tests, where `al_core` is a plain dependency and its
+# `cfg(test)` is false. They cannot move into `al_core` either — the VM they
+# drive lives in `al`.
+alloc-counter = []
+
 [dependencies]
 indexmap = { workspace = true }
 smallvec = "1.15"

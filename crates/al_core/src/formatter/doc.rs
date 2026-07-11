@@ -333,6 +333,65 @@ pub fn block(body: Doc) -> Doc {
     )
 }
 
+/// Always broken one-per-line, with **no** separators — the newline is the
+/// separator. Used for a constructor field list that is too long to read flat.
+pub fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+    if items.is_empty() {
+        return d![text(open), text(close)];
+    }
+    let mut parts = Vec::new();
+    for (i, it) in items.into_iter().enumerate() {
+        if i > 0 {
+            parts.push(hardline());
+        }
+        parts.push(it);
+    }
+    d![
+        text(open),
+        nest(1, d![hardline(), concat(parts)]),
+        hardline(),
+        text(close)
+    ]
+}
+
+/// Comma-separated when the list fits on one line; one per line with **no**
+/// commas when it breaks. A newline already separates the items, so a comma
+/// there is noise — and the parser accepts either.
+pub fn delimited_commas_when_flat(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+    delimited_with(open, items, close, break_("", ", "), line0())
+}
+
+/// A delimited list always broken one-per-line, with a trailing comma:
+///
+/// ```text
+/// (
+///     a Int,
+///     b String,
+/// )
+/// ```
+///
+/// Used when the author already broke the list — width is not the only reason
+/// to keep it broken.
+pub fn hard_list(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
+    if items.is_empty() {
+        return d![text(open), text(close)];
+    }
+    let mut parts = Vec::new();
+    for (i, it) in items.into_iter().enumerate() {
+        if i > 0 {
+            parts.push(hardline());
+        }
+        parts.push(it);
+        parts.push(text(","));
+    }
+    d![
+        text(open),
+        nest(1, d![hardline(), concat(parts)]),
+        hardline(),
+        text(close)
+    ]
+}
+
 /// `{ body }` always broken across lines with the body indented.
 pub fn hard_braces(body: Doc) -> Doc {
     d![

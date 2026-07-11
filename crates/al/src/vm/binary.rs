@@ -2,30 +2,7 @@
 //! (see [`al_core::bytecode::bits`]); the trailing low bits of the last byte
 //! beyond `bit_len` are always zero.
 
-#[cfg(test)]
-use al_core::bytecode::bits::copy_bits;
 use al_core::bytecode::bits::{get_bit, read_byte};
-
-/// Extract `take` bits starting at bit offset `at` into a fresh, offset-0
-/// buffer with a zeroed tail. Test helper.
-#[cfg(test)]
-fn slice(bytes: &[u8], at: u64, take: u64) -> Vec<u8> {
-    let mut out = vec![0u8; take.div_ceil(8) as usize];
-    copy_bits(&mut out, 0, bytes, at, take);
-    out
-}
-
-/// Concatenate two bitstrings. Test helper — production concat is
-/// `Op::BinConcatN` (`vm::text::bin_concat_n`), which builds the result
-/// directly in a shared backing without an intermediate `Vec`.
-#[cfg(test)]
-fn append(a: &[u8], a_bits: u64, b: &[u8], b_bits: u64) -> Vec<u8> {
-    let total = a_bits + b_bits;
-    let mut out = vec![0u8; total.div_ceil(8) as usize];
-    copy_bits(&mut out, 0, a, 0, a_bits);
-    copy_bits(&mut out, a_bits, b, 0, b_bits);
-    out
-}
 
 pub fn inspect(bytes: &[u8], bit_len: u64) -> String {
     let full = (bit_len / 8) as usize;
@@ -146,49 +123,7 @@ pub fn read_utf8(bytes: &[u8], end: u64, at: u64) -> Option<(u32, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn slice_byte_aligned() {
-        let s = slice(&[0xAB, 0xCD, 0xEF], 8, 16);
-        assert_eq!(s, vec![0xCD, 0xEF]);
-    }
-
-    #[test]
-    fn slice_unaligned() {
-        // bytes = 1010_1011 1100_1101, take 8 bits from bit 4 → 1011_1100
-        let s = slice(&[0xAB, 0xCD], 4, 8);
-        assert_eq!(s, vec![0xBC]);
-    }
-
-    #[test]
-    fn slice_partial_tail_masked() {
-        // take 3 bits from bit 0 of 1111_1111 → 1110_0000
-        let s = slice(&[0xFF], 0, 3);
-        assert_eq!(s, vec![0b1110_0000]);
-    }
-
-    #[test]
-    fn append_aligned() {
-        let out = append(&[0xAB], 8, &[0xCD], 8);
-        assert_eq!(out, vec![0xAB, 0xCD]);
-    }
-
-    #[test]
-    fn append_unaligned() {
-        // 4 bits 1010 ++ 8 bits 1100_1101 = 12 bits 1010_1100_1101
-        let out = append(&[0b1010_0000], 4, &[0xCD], 8);
-        assert_eq!(out, vec![0b1010_1100, 0b1101_0000]);
-    }
-
-    #[test]
-    fn append_then_slice_roundtrip() {
-        let a = [0b1011_0000];
-        let b = [0xFF, 0b1000_0000];
-        let joined = append(&a, 4, &b, 9); // 13 bits
-        // slice back the original pieces
-        assert_eq!(slice(&joined, 0, 4), vec![0b1011_0000]);
-        assert_eq!(slice(&joined, 4, 9), vec![0xFF, 0b1000_0000]);
-    }
+    use al_core::bytecode::bits::copy_bits;
 
     #[test]
     fn inspect_aligned_and_partial() {
@@ -205,7 +140,9 @@ mod tests {
         assert_eq!(from_int(0x1234, 16), vec![0x12, 0x34]);
         assert_eq!(from_int(7, 0), Vec::<u8>::new());
         // `<<1:4, 2:4>>` packs to a single 18 byte.
-        let packed = append(&from_int(1, 4), 4, &from_int(2, 4), 4);
+        let mut packed = vec![0u8; 1];
+        copy_bits(&mut packed, 0, &from_int(1, 4), 0, 4);
+        copy_bits(&mut packed, 4, &from_int(2, 4), 0, 4);
         assert_eq!(packed, vec![18]);
     }
 
@@ -279,8 +216,10 @@ mod tests {
     fn read_utf8_unaligned() {
         let s = "aé€".as_bytes();
         let s_bits = (s.len() as u64) * 8;
-        let shifted = append(&[0u8], 4, s, s_bits);
+        // Shift the string 4 bits right so every codepoint starts misaligned.
         let bits = 4 + s_bits;
+        let mut shifted = vec![0u8; bits.div_ceil(8) as usize];
+        copy_bits(&mut shifted, 4, s, 0, s_bits);
         let (c0, n0) = read_utf8(&shifted, bits, 4).unwrap();
         assert_eq!((c0, n0), ('a' as u32, 8));
         let (c1, n1) = read_utf8(&shifted, bits, 4 + n0).unwrap();

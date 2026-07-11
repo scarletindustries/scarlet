@@ -1,0 +1,23 @@
+fn s0() -> :t0
+  let %0:t0 = c0
+  let %1:t1 = ctor 6400.0(%0)
+  let %2:t2 = ctor 263.0(%1)
+  drop %1 [Enum:1]
+  match %2 :t0
+    | 263.1() ->
+      drop %2 [Enum:0]
+      ret c1
+    | 263.0(%3) ->
+      drop %2 [Enum:1]
+      let %4:t3 = GetFieldUnchecked(%3)
+      drop %3
+      let %5:t0 = c2
+      ret AddInt(%4, %5)
+
+toplevel:
+  let %0:t2 = closure fn#160()
+  ret call %0()
+where
+  c0 = Int(3)
+  c1 = Int(0)
+  c2 = Int(1)

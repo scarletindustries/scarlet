@@ -6,7 +6,7 @@
 pub mod net;
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
@@ -51,13 +51,65 @@ impl AlOutput {
 }
 
 /// Spawn `al <subcommand> <path>` and capture its output.
+/// Ceiling on any `al` subprocess a test spawns. Generous: under a full
+/// parallel `cargo test` on a loaded machine the child competes with every
+/// other test binary, so a tight bound turns load into a spurious kill. The
+/// point is only that a wedged child fails one test instead of hanging the
+/// suite — and, worse, outliving the run to hold a socket and the target lock.
+pub const CHILD_TIMEOUT_SECS: u64 = 120;
+
+/// Kills its child on drop. A test that panics, early-returns, or is unwound
+/// still reaps the `al` it spawned. (A `SIGKILL`ed *parent* runs no `Drop`, so
+/// this is not total — but it covers every in-process failure path.)
+pub struct ChildGuard(pub Option<Child>);
+
+impl ChildGuard {
+    pub fn new(child: Child) -> Self {
+        ChildGuard(Some(child))
+    }
+    /// Take the child back, cancelling the kill-on-drop.
+    pub fn release(mut self) -> Child {
+        self.0.take().expect("child already taken")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.0.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// `al <subcommand> <path>`, bounded by [`CHILD_TIMEOUT_SECS`].
+///
+/// Not `Command::output()`: that waits forever. A program that blocks — a
+/// server example, a `net.connect` to a listener that never accepted because
+/// of a miscompile — would otherwise wedge the whole test binary, and killing
+/// the runner leaves the `al` child alive holding its port.
 pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
     let bin = env!("CARGO_BIN_EXE_al");
-    let out = Command::new(bin)
+    let child = Command::new(bin)
         .arg(subcommand)
         .arg(path)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("spawn al");
+    let out = wait_or_kill(child, CHILD_TIMEOUT_SECS);
+    // No exit code ⇒ the child died by signal: either `wait_or_kill` reaped a
+    // wedge, or the VM crashed. Both are bugs, and both would otherwise read
+    // as "produced no output" and surface as a baffling diff.
+    assert!(
+        out.status.code().is_some(),
+        "`al {subcommand} {}` died by signal (wedged past {CHILD_TIMEOUT_SECS}s, or crashed)\n\
+         stdout: {}\nstderr: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     AlOutput {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -67,13 +119,43 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
 }
 
 /// Wait up to `secs` for a self-terminating `child` to exit, then collect its
-/// output. Callers here expect the child to finish on its own; the bound just
-/// guarantees a wedge fails the test instead of hanging the suite. Callers
-/// pass a bound far above the happy-path runtime: under a full parallel
-/// `cargo test` the spawned VM competes with every other test binary for CPU,
-/// and a tight bound turns load into a spurious kill on an otherwise correct
-/// run.
+/// output. The bound guarantees a wedge fails one test instead of hanging the
+/// suite; it is far above the happy-path runtime, because under a full parallel
+/// `cargo test` the spawned VM competes with every other test binary for CPU
+/// and a tight bound turns load into a spurious kill.
+///
+/// The pipes MUST be drained while we wait, not after.
+///
+/// A pipe holds ~64 KiB. A child that writes more than that blocks in `write`
+/// until someone reads, so a parent that polls `try_wait` without reading is
+/// deadlocked against its own child — each waiting for the other. `al check` on
+/// a 60k-term `else if` chain renders a 1.1 MB diagnostic and hits this
+/// instantly: the check itself takes 0.09s, but the poll ran to the deadline.
+/// `Command::output()` avoids it by reading both streams concurrently; anything
+/// that replaces `output()` with a timeout must do the same.
 pub fn wait_or_kill(mut child: Child, secs: u64) -> Output {
+    let drain = |s: Option<_>| -> Option<std::thread::JoinHandle<Vec<u8>>> {
+        s.map(|mut r: Box<dyn std::io::Read + Send>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = r.read_to_end(&mut buf);
+                buf
+            })
+        })
+    };
+    let out_t = drain(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+    let err_t = drain(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+
     let deadline = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < deadline {
         match child.try_wait() {
@@ -83,8 +165,18 @@ pub fn wait_or_kill(mut child: Child, secs: u64) -> Output {
         }
     }
     // No-op if it already exited; forces the issue if it overran the deadline.
+    // Killing also closes the pipes, so the drain threads see EOF and join.
     child.kill().ok();
-    child.wait_with_output().expect("collect child output")
+    let status = child.wait().expect("wait for child");
+    Output {
+        status,
+        stdout: out_t
+            .map(|t| t.join().unwrap_or_default())
+            .unwrap_or_default(),
+        stderr: err_t
+            .map(|t| t.join().unwrap_or_default())
+            .unwrap_or_default(),
+    }
 }
 
 /// Write `source` to a temp file, run `al <cmd>` on it, and remove the file.
@@ -158,6 +250,20 @@ macro_rules! reject_case {
     };
 }
 
+/// Expand each `name: (src, msg)` entry to a named `#[test]` fn that asserts
+/// `al run` rejects `src` with a diagnostic containing `msg` (via
+/// [`run_rejects`]). The `reject_case!` sibling for runtime rejections.
+#[macro_export]
+macro_rules! run_reject_case {
+    ( $( $(#[$m:meta])* $name:ident: ($src:expr, $msg:expr $(,)?) ),* $(,)? ) => {
+        $(
+            $(#[$m])*
+            #[test]
+            fn $name() { $crate::common::run_rejects($src, $msg); }
+        )*
+    };
+}
+
 /// Assert `al run` rejects `source` cleanly with a diagnostic containing
 /// `expected_diag`. Returns the captured output for follow-up assertions.
 /// See [`assert_rejects`] for the full contract.
@@ -180,6 +286,20 @@ pub fn run_project_outputs(proj: &Project, cmd: &str, entry: &str, expected: &st
     let r = run_al(cmd, &proj.dir.join(entry));
     assert!(r.success, "stdout: {}\nstderr: {}", r.stdout, r.stderr);
     assert_eq!(r.stdout, expected, "stderr: {}", r.stderr);
+}
+
+/// Expand each `name: (src)` entry to a named `#[test]` fn that asserts
+/// `al check` accepts `src` (via [`check_ok`]). The accepting counterpart of
+/// `reject_case!`.
+#[macro_export]
+macro_rules! ok_case {
+    ( $( $(#[$m:meta])* $name:ident: ($src:expr $(,)?) ),* $(,)? ) => {
+        $(
+            $(#[$m])*
+            #[test]
+            fn $name() { $crate::common::check_ok($src); }
+        )*
+    };
 }
 
 /// Assert `al check` accepts `source` (success exit).
@@ -208,6 +328,21 @@ pub fn run_outputs(source: &str, expected: &str) {
     );
 }
 
+/// Expand each `name: (src, expected)` entry to a named `#[test]` fn that
+/// asserts `al run` on `src` succeeds with exactly `expected` on stdout (via
+/// [`run_outputs`]). Entries may carry `///` docs or other attributes;
+/// `cargo test <name>` still targets a single case.
+#[macro_export]
+macro_rules! run_case {
+    ( $( $(#[$m:meta])* $name:ident: ($src:expr, $expected:expr $(,)?) ),* $(,)? ) => {
+        $(
+            $(#[$m])*
+            #[test]
+            fn $name() { $crate::common::run_outputs($src, $expected); }
+        )*
+    };
+}
+
 /// Parse `src` as a whole program, asserting it is diagnostic-free, and wrap
 /// the resulting block as the `Expression` that `IncrementalSession` and the
 /// reference-graph query API consume.
@@ -221,6 +356,31 @@ pub fn parse(src: &str) -> ast::Expression {
         r.diagnostics
     );
     ast::Expression::BlockExpression(r.ast)
+}
+
+/// Line-by-line diff of a golden `want` against the produced `got`, for the
+/// panic message of a snapshot mismatch. Lines are debug-printed so trailing
+/// whitespace is visible; a side that ran out of lines shows `<missing>`.
+pub fn diff_lines(want: &str, got: &str) -> String {
+    let w: Vec<_> = want.lines().collect();
+    let g: Vec<_> = got.lines().collect();
+    let mut out = String::new();
+    for i in 0..w.len().max(g.len()) {
+        let wl = w.get(i).copied().unwrap_or("<missing>");
+        let gl = g.get(i).copied().unwrap_or("<missing>");
+        if wl != gl {
+            out.push_str(&format!(
+                "  line {}: - want {wl:?}\n           + got  {gl:?}\n",
+                i + 1
+            ));
+        }
+    }
+    // Equal line counts and no differing line: the strings still differ, so it
+    // is a trailing newline — which `lines()` does not surface.
+    if out.is_empty() {
+        out.push_str("  (line content matches but trailing newline differs)\n");
+    }
+    out
 }
 
 /// 0-based `(line, col)` of the `nth` (1-based) occurrence of `needle`,
@@ -364,9 +524,47 @@ pub fn assert_no_msg(msgs: &[String], needle: &str) {
     );
 }
 
+/// A module's identity is the file it resolved to, so the canonical key of an
+/// on-disk module is an absolute path. Accept either that key directly, or a
+/// path to the source file (what the LSP passes, via a URI).
+/// The canonical key of an on-disk module: its identity. A module is the file
+/// it resolved to, so tests that address one by name must go through here.
+pub fn module_key(dir: &std::path::Path, file: &str) -> String {
+    module::path_key(&module::file_module_path(&dir.join(file)))
+}
+
 fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
-    g.module_id_by_key(module_or_uri)
-        .or_else(|| g.module_id_by_key(&module::path_key(&module::main_module())))
+    // 1. The canonical key, exactly.
+    if let Some(id) = g.module_id_by_key(module_or_uri) {
+        return Some(id);
+    }
+    // 2. A path to the source file — what the LSP passes, via a URI.
+    let p = std::path::Path::new(module_or_uri);
+    if p.is_file()
+        && let Some(id) = g.module_id_by_key(&module::path_key(&module::file_module_path(p)))
+    {
+        return Some(id);
+    }
+    // 3. Test ergonomics only: a written name (`./c`, `b`). A module's name is
+    // NOT its identity — two `b.al`s in different directories are different
+    // modules — so this matches the last path segment and *panics* on
+    // ambiguity rather than silently picking one, which is the bug this whole
+    // resolution rework exists to kill.
+    let want = module_or_uri.rsplit('/').next().unwrap_or(module_or_uri);
+    let hits: Vec<ModuleId> = g
+        .modules()
+        .filter(|(_, path)| path.last().map(String::as_str) == Some(want))
+        .map(|(id, _)| id)
+        .collect();
+    match hits.as_slice() {
+        [one] => return Some(*one),
+        [] => {}
+        many => panic!(
+            "module name {module_or_uri:?} is ambiguous across {} modules;              pass the source path instead",
+            many.len()
+        ),
+    }
+    g.module_id_by_key(&module::path_key(&module::main_module()))
 }
 
 fn symbol_of(g: &ReferenceGraph, d: &Definition) -> Option<SymbolInfo> {

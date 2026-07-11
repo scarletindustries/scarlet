@@ -1,0 +1,32 @@
+fn s0(%0:t0) -> :t1
+  match %0 :t1
+    | 6400.0(%1, %2) ->
+      drop %0 [Enum:2]
+      drop %2
+      ret %1
+    | 6400.1() ->
+      drop %0 [Enum:0]
+      ret c0
+
+fn s1(%0:t2) -> :t1
+  let %1:t0 = TupleIndex(%0)
+  let %2:t3 = TupleIndex#1(%0)
+  drop %0
+  let %3:t1 = call fn#160(%1)
+  drop %1
+  let %4:t1 = call fn#160(%2)
+  drop %2
+  ret AddInt(%3, %4)
+
+toplevel:
+  let %0:t3 = closure fn#160()
+  drop %0
+  let %1:t4 = closure fn#161()
+  let %2:t5 = ctor 6400.1()
+  let %3:t5 = ctor 6400.1()
+  let %4:t6 = MakeTuple#2(%2, %3)
+  drop %2 [Enum:0]
+  drop %3 [Enum:0]
+  ret call %1(%4)
+where
+  c0 = Int(0)

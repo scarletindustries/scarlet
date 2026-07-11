@@ -11,8 +11,8 @@ use crate::reference;
 use crate::span::Span;
 
 use super::wire::{
-    clean_doc_comment, doc_uri, import_target_at, query_module, range_json, symbol_kind, uri_for,
-    uri_to_path, workspace_edit_json,
+    clean_doc_comment, doc_uri, query_module, range_json, symbol_kind, uri_for, uri_to_path,
+    workspace_edit_json,
 };
 use super::workspace::Workspace;
 
@@ -35,11 +35,29 @@ impl Workspace {
             self.session_for(&uri)
                 .and_then(|s| s.hover(&key, line, col))
         });
+        // A position naming a *module* — the final segment of `import a/b`, or
+        // the `b` of `b.add(..)` — hovers as that module plus its doc comment.
+        // Checked before the definition lookup: an import path segment resolves
+        // to no `Definition` at all, and a qualifier resolves to the alias
+        // binding, whose own doc is empty.
+        if let Some((graph, mid)) = self.graph_module(&uri)
+            && let Some(target) = graph.module_named_at(mid, line, col)
+        {
+            let path = graph
+                .module_path(target)
+                .map_or(String::new(), |p| p.join("/"));
+            let mut value = format!("```al\nimport {path}\n```\n\n*module*");
+            if let Some(d) = graph.module_doc(target) {
+                value.push_str("\n\n---\n\n");
+                value.push_str(&clean_doc_comment(d));
+            }
+            return json!({ "contents": { "kind": "markdown", "value": value } });
+        }
         if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(def) = graph.definition_at(mid, line, col)
         {
             let signature = match &typed {
-                Some((_, ty, _)) => format!("{} {}", def.name, ty),
+                Some((_, ty, _)) => format!("{} {}", def.name, labelled(ty, &def.param_names)),
                 None => def.name.clone(),
             };
             let mut value = format!("```al\n{}\n```\n\n*{}*", signature, def.entity().noun());
@@ -61,13 +79,14 @@ impl Workspace {
         let Some((graph, mid)) = self.graph_module(&uri) else {
             return Json::Null;
         };
-        // The final module-name segment of an `import a/b` resolves to the
-        // *imported* module's file. Its `Import` occurrence carries that
-        // module's id; `module::resolve` maps `./x` to its on-disk file and an
-        // embedded `al/*` module to nothing (null) — it never fabricates a
-        // location. Without this the cursor would resolve to the importing
-        // alias's own binding, a no-op self-jump.
-        if let Some(import_mod) = import_target_at(graph, mid, line, col) {
+        // A position naming a module — the final segment of `import a/b`, or
+        // the `b` of `b.add(..)` — resolves to that module's file at 0:0.
+        // `module::resolve` maps `./x` to its on-disk file and an embedded
+        // `al/*` module to nothing (null); it never fabricates a location.
+        // Without this the cursor would resolve to the importing alias's own
+        // binding, whose span is the whole `import` declaration — a no-op
+        // self-jump.
+        if let Some(import_mod) = graph.module_named_at(mid, line, col) {
             let req_path = uri_to_path(&uri);
             return match req_path
                 .as_deref()
@@ -135,8 +154,9 @@ impl Workspace {
                 // The declaration's own self-occurrence (and import/alias
                 // bindings) are excluded here; the declaration is added solely
                 // via the `include_decl` branch below so `includeDeclaration =
-                // false` is actually honored.
-                if !rr.kind.is_use_site() {
+                // false` is actually honored. `Qualifier` occurrences — the `b`
+                // of `b.add(..)` — are references to the alias and do belong.
+                if !rr.kind.is_reference_site() {
                     continue;
                 }
                 if let Some(u) = uri_for(graph, &uri, rr.module) {
@@ -296,4 +316,26 @@ impl Workspace {
         }
         Json::Array(out)
     }
+}
+
+/// A function type rendered with its parameter names: `fn(path String) Result(…)`.
+///
+/// The names are documentation carried alongside the type (`Definition::
+/// param_names`), never inside it — al rejects labelled arguments outside a
+/// constructor call, so a parameter's name is not part of a function's identity.
+/// Falls back to the bare `Display` when the arity does not match, which is the
+/// case for every non-function and for a value whose names were never recorded.
+fn labelled(ty: &crate::type_def::Type, names: &[String]) -> String {
+    let crate::type_def::Type::Function { params, ret } = ty else {
+        return ty.to_string();
+    };
+    if names.len() != params.len() {
+        return ty.to_string();
+    }
+    let ps: Vec<String> = names
+        .iter()
+        .zip(params)
+        .map(|(n, t)| format!("{n} {t}"))
+        .collect();
+    format!("fn({}) {}", ps.join(", "), ret)
 }

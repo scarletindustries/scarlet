@@ -8,7 +8,7 @@
 import al/net
 import al/net/socket.{Socket, Data, Closed}
 import al/time
-import al/experiments/scheduler
+import al/scheduler
 
 // Echo bytes until the client closes or stays idle past the 30s deadline.
 fn echo(sock Socket) Nil {

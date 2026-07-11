@@ -10,11 +10,15 @@ use crate::token::{Kind, Trivia};
 
 pub mod doc;
 use doc::{
-    Breaks, Doc, block, delimited, delimited_hug, delimited_no_trailing, delimited_ws, group,
-    group_as, hard_braces, hardline, hardlines, join, line, nest, nil, text,
+    Breaks, Doc, block, delimited, delimited_commas_when_flat, delimited_hug,
+    delimited_no_trailing, group, group_as, hard_braces, hard_list, hard_list_bare, hardline,
+    hardlines, join, line, nest, nil, text,
 };
 
 const MAX_WIDTH: isize = 100;
+
+/// A constructor with this many fields always breaks one-per-line.
+const FIELDS_PER_LINE: usize = 4;
 
 pub enum FormatResult {
     Formatted { output: String },
@@ -276,11 +280,24 @@ impl Formatter {
         d![attrs, prefix, body]
     }
 
+    /// A parameter list the author broke after `(` stays broken.
+    ///
+    /// Width alone is the wrong signal here: a four-parameter signature can sit
+    /// at 96 columns and still read worse than one-per-line. Prettier applies
+    /// the same rule to object literals — the newline is the author's, and
+    /// reflowing it discards information the formatter cannot recover.
+    fn params_broken_by_author(&self, header_line: i32, params: &[ast::FunctionParameter]) -> bool {
+        params
+            .first()
+            .is_some_and(|p| p.identifier.span.start_line > header_line)
+    }
+
     fn fn_header(
         &self,
         name: Option<&str>,
         params: &[ast::FunctionParameter],
         ret: &Option<ast::TypeIdentifier>,
+        header_line: i32,
     ) -> Doc {
         let head = match name {
             Some(n) => text(format!("fn {n}")),
@@ -297,11 +314,21 @@ impl Formatter {
             Some(t) => d![text(" "), self.type_(t)],
             None => nil(),
         };
-        d![head, delimited("(", ps, ")"), r]
+        let list = if self.params_broken_by_author(header_line, params) {
+            hard_list("(", ps, ")")
+        } else {
+            delimited("(", ps, ")")
+        };
+        d![head, list, r]
     }
 
     fn fn_decl(&self, f: &ast::FunctionDeclaration) -> Doc {
-        let header = self.fn_header(Some(&f.identifier.name), &f.params, &f.return_type);
+        let header = self.fn_header(
+            Some(&f.identifier.name),
+            &f.params,
+            &f.return_type,
+            f.identifier.span.start_line,
+        );
         match &f.body {
             ast::FnBody::Block(b) => d![header, text(" "), self.fn_body(b)],
             ast::FnBody::Vm(_) => header,
@@ -310,7 +337,7 @@ impl Formatter {
 
     fn fn_expr(&self, f: &ast::FunctionExpression) -> Doc {
         d![
-            self.fn_header(None, &f.params, &None),
+            self.fn_header(None, &f.params, &None, f.span.start_line),
             text(" "),
             self.lambda_body(&f.body),
         ]
@@ -375,9 +402,10 @@ impl Formatter {
                     let c = &ctors[0];
                     let mut parts = Vec::new();
                     for (i, f) in c.fields.iter().enumerate() {
-                        if i > 0 {
-                            parts.push(hardline());
-                        }
+                        // `leading_trivia` emits the separating hardline *and*
+                        // any comment above the field. Emitting the hardline by
+                        // hand instead silently deleted every such comment.
+                        parts.push(self.leading_trivia(f.span, i == 0, 1));
                         parts.push(d![
                             text(f.label.name.clone()),
                             text(" "),
@@ -405,10 +433,17 @@ impl Formatter {
             .iter()
             .map(|f| d![text(f.label.name.clone()), text(" "), self.type_(&f.typ)])
             .collect();
-        d![
-            text(c.identifier.name.clone()),
-            delimited_ws("(", fields, ")")
-        ]
+        // Four or more fields always go one per line. Width alone is the wrong
+        // signal: `Done(method Binary, target Binary, version Version, headers
+        // Array(Header), consumed Int)` is 92 columns — legal under MAX_WIDTH,
+        // and still unreadable. A broken list needs no commas; the newline
+        // separates, and the parser accepts either.
+        let list = if fields.len() >= FIELDS_PER_LINE {
+            hard_list_bare("(", fields, ")")
+        } else {
+            delimited_commas_when_flat("(", fields, ")")
+        };
+        d![text(c.identifier.name.clone()), list]
     }
 
     // ----------------------------------------------------------------- expressions
@@ -992,7 +1027,7 @@ mod tests {
              "fn perimeter(a Int, b Int, c Int) Int { a + b + c }\n",
              "fn perimeter(a Int, b Int, c Int) Int {\n\ta + b + c\n}\n"),
             ("type_shorthand_always_breaks",
-             "type Point { Point(x Int y Int) }\n",
+             "type Point { Point(x Int, y Int) }\n",
              "type Point {\n\tx Int\n\ty Int\n}\n"),
             ("type_single_nullary_ctor_explicit",
              "type Nil { Nil }\n",
@@ -1004,7 +1039,7 @@ mod tests {
              "pub fn a() Int { 1 }\n\npub fn b() Int { 2 }\n",
              "pub fn a() Int {\n\t1\n}\n\npub fn b() Int {\n\t2\n}\n"),
             ("type_multi_variant_explicit",
-             "type Maybe(a) { Just(value A) Nothing }\n",
+             "type Maybe(a) {\n\tJust(value A)\n\tNothing\n}\n",
              "type Maybe(a) {\n\tJust(value A)\n\tNothing\n}\n"),
             ("double_quotes_normalise_to_single",
              "x = \"hello\"\n",
@@ -1028,7 +1063,7 @@ mod tests {
              "pub opaque type Id {\n\tn Int\n}\n",
              "pub opaque type Id {\n\tn Int\n}\n"),
             ("opaque_type_variants_round_trips",
-             "pub opaque type Maybe { Yes No }\n",
+             "pub opaque type Maybe {\n\tYes\n\tNo\n}\n",
              "pub opaque type Maybe {\n\tYes\n\tNo\n}\n"),
             ("match_arms_newline_separated_no_commas",
              "match x { Ok(a) -> a\n Err(e) -> e }\n",

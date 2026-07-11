@@ -332,6 +332,7 @@ impl Workspace {
         let parser::ParseResult {
             ast: parsed_ast,
             diagnostics: parse_diagnostics,
+            ..
         } = p.parse_program();
 
         let mut lsp_diagnostics: Vec<Json> = Vec::new();

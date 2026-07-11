@@ -55,6 +55,11 @@ pub struct SExport {
     pub name: u32,
     pub scheme: u32,
     pub local_slot: Option<i32>,
+    /// `str_slice_pool` range of `str_pool` indices: the function's parameter
+    /// names, in order.
+    pub param_names: Slice,
+    /// `str_pool` index of the declaration's doc comment, if it has one.
+    pub doc: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +74,8 @@ pub struct SModule {
     pub values: Slice,
     pub private_names: Slice,
     pub path: Slice,
+    /// one. The only doc text the blob carries — declaration docs are absent.
+    pub doc: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -154,12 +161,18 @@ impl StaticStdlib {
                 ExportedValue {
                     scheme: self.schemes[e.scheme as usize],
                     local_slot: e.local_slot,
+                    param_names: self.str_slice_pool[e.param_names.range()]
+                        .iter()
+                        .map(|&i| self.s(i))
+                        .collect(),
+                    doc: e.doc.map(|i| self.s(i)),
                 },
             );
         }
         for &i in &self.str_slice_pool[m.private_names.range()] {
             iface.private_names.insert(self.s(i));
         }
+        iface.doc = m.doc.map(|i| self.s(i));
         iface
     }
 

@@ -125,12 +125,14 @@ impl Scanner {
 
             if ch == b'/' && self.byte_at(self.pos + 1) == b'*' {
                 let start = self.pos;
+                let start_line = self.line;
+                let start_column = self.column;
                 self.incr_pos(); // skip /
                 self.incr_pos(); // skip *
 
                 // Doc comment if next char is * but NOT followed by /
                 // i.e., /** but not /**/
-                let is_doc = self.pos < self.input_len()
+                let opens_doc = self.pos < self.input_len()
                     && self.peek_char() == b'*'
                     && self.byte_at(self.pos + 1) != b'/';
 
@@ -150,15 +152,21 @@ impl Scanner {
                     while self.pos < self.input_len() {
                         self.incr_pos();
                     }
+                    // Anchor at the opening `/*`: the cursor is now at EOF, and
+                    // a caret past the end of the file points at nothing.
                     self.diagnostics.push(Diagnostic::error(
-                        Span::point(self.line, self.column),
+                        Span::point(start_line, start_column),
                         DiagnosticCode::UnexpectedEof,
                         "Unterminated block comment".to_string(),
                     ));
                 }
 
                 let text = self.slice(start, self.pos);
-                self.pending_trivia.push(if is_doc {
+                // Only a *closed* `/** … */` is a doc comment. An unterminated
+                // one has swallowed the rest of the file; treating its text as
+                // documentation would attach the whole source to the next
+                // declaration (or, at line 0, to the module itself).
+                self.pending_trivia.push(if opens_doc && closed {
                     Trivia::DocComment(text)
                 } else {
                     Trivia::BlockComment(text)
@@ -816,6 +824,31 @@ mod tests {
         assert_eq!(trivia.len(), 2);
         assert_eq!(trivia[0], Trivia::LineComment("// hi".to_string()));
         assert_eq!(trivia[1], Trivia::Newline);
+    }
+
+    #[test]
+    fn unterminated_doc_comment_is_not_a_doc_comment() {
+        let (toks, diags) = scan("/** Module prose\npub fn f() Int { 1 }\n");
+        assert_eq!(toks[0].kind, Eof, "the whole file is swallowed as trivia");
+        let trivia = &toks[0].leading_trivia;
+        assert!(
+            !trivia.iter().any(|t| matches!(t, Trivia::DocComment(_))),
+            "an unterminated `/**` must not donate a doc comment: {trivia:?}"
+        );
+        assert!(matches!(trivia[0], Trivia::BlockComment(_)));
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn unterminated_block_comment_reports_at_the_opening_delimiter() {
+        let (_, diags) = scan("x = 1\n  /** oops\nmore text\n");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Unterminated block comment");
+        // Line 1, column 2: the `/` of the `/**`, not EOF on line 3.
+        assert_eq!(
+            (diags[0].span.start_line, diags[0].span.start_column),
+            (1, 2)
+        );
     }
 
     #[test]

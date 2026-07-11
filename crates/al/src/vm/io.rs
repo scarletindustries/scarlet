@@ -443,19 +443,16 @@ impl VM {
         )))))
     }
 
-    #[cold]
     #[inline(never)]
     pub(super) fn process_spawn(&mut self, reds: &mut i32) -> VmResult<()> {
         self.spawn_op(reds, Self::spawn_process)
     }
 
-    #[cold]
     #[inline(never)]
     pub(super) fn process_spawn_local(&mut self, reds: &mut i32) -> VmResult<()> {
         self.spawn_op(reds, Self::spawn_local)
     }
 
-    #[cold]
     #[inline(never)]
     pub(super) fn process_spawn_on_each(&mut self, reds: &mut i32) -> VmResult<()> {
         self.spawn_op(reds, Self::spawn_on_each)

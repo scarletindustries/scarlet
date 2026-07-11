@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 mod common;
-use common::run_al;
+use common::{diff_lines, run_al};
 
 fn examples_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples")
@@ -62,130 +62,85 @@ fn assert_example_checks(name: &str) {
     }
 }
 
-fn diff_lines(want: &str, got: &str) -> String {
-    let w: Vec<_> = want.lines().collect();
-    let g: Vec<_> = got.lines().collect();
-    let mut out = String::new();
-    let n = w.len().max(g.len());
-    for i in 0..n {
-        let wl = w.get(i).copied().unwrap_or("<missing>");
-        let gl = g.get(i).copied().unwrap_or("<missing>");
-        if wl != gl {
-            out.push_str(&format!(
-                "  line {}: want {:?}\n           got  {:?}\n",
-                i + 1,
-                wl,
-                gl
-            ));
-        }
-    }
-    if out.is_empty() {
-        out.push_str(&format!(
-            "  (line content matches but lengths differ: want {} lines, got {} lines)\n",
-            w.len(),
-            g.len()
-        ));
-    }
-    out
-}
-
 // Golden test for a showcase example: runs examples/<name>.al and compares
 // stdout to tests/golden/<name>.stdout.
 macro_rules! golden {
-    ($name:ident) => {
-        #[test]
-        fn $name() {
-            assert_golden_in(&examples_dir(), &golden_dir(), stringify!($name));
-        }
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                assert_golden_in(&examples_dir(), &golden_dir(), stringify!($name));
+            }
+        )*
     };
 }
 
 // Golden test for an internal regression program: runs tests/programs/<name>.al
 // and compares stdout to tests/golden/programs/<name>.stdout.
 macro_rules! golden_program {
-    ($name:ident) => {
-        #[test]
-        fn $name() {
-            assert_golden_in(&programs_dir(), &programs_golden_dir(), stringify!($name));
-        }
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                assert_golden_in(&programs_dir(), &programs_golden_dir(), stringify!($name));
+            }
+        )*
     };
 }
 
 // Type-check-only test for examples whose output is not deterministic
 // (servers, scheduler demos).
 macro_rules! checks {
-    ($test_name:ident, $example:literal) => {
-        #[test]
-        fn $test_name() {
-            assert_example_checks($example);
-        }
+    ($($test_name:ident => $example:literal),* $(,)?) => {
+        $(
+            #[test]
+            fn $test_name() {
+                assert_example_checks($example);
+            }
+        )*
     };
 }
 
 // Core language — must pass for parity
-golden!(hello);
-golden!(factorial);
-golden!(fibonacci);
-golden!(fizzbuzz);
-golden!(collatz);
-golden!(gcd);
-golden!(power);
-golden!(bigint);
-golden!(primes);
-golden!(leap_year);
-golden!(temperature);
-golden!(triangle);
-golden!(roman);
-golden!(grades);
-golden!(age);
-golden!(shapes);
-golden!(tco);
-golden!(tco_mutual);
-golden!(doc_comment);
+golden! {
+    hello, factorial, fibonacci, fizzbuzz, collatz, gcd, power, bigint, primes,
+    leap_year, temperature, triangle, roman, grades, age, shapes, tco,
+    tco_mutual, doc_comment,
+}
 
 // Stdlib-gated
-golden!(string_split);
-golden!(password);
-golden!(bench_list);
+golden! { string_split, password, bench_list }
 
 // Data structures and algorithms
-golden!(calculator);
-golden!(tree);
-golden!(life);
-golden!(mergesort);
-golden!(wordcount);
-golden!(maps);
-golden!(money);
+golden! { calculator, tree, life, mergesort, wordcount, maps, money }
 
 // Binaries and wire protocols
-golden!(packet);
+golden! { packet }
 
 // Internal regression programs (crates/al/tests/programs/), formerly in examples/.
-golden_program!(basic);
-golden_program!(program_type);
-golden_program!(conrad_fib);
+golden_program! { basic, program_type, conrad_fib }
 
 // HTTP/1.1 protocol surface: parsing, framing, smuggling rejects, header
 // lookup, serialization. Locks the native (VM-builtin) scanners behind
 // al/http/h1 to the sans-IO contract the AL reference parser defined.
-golden_program!(http_parse);
+golden_program! { http_parse }
 
 // Type system / generics / inference regression programs
-golden_program!(awesome_inference);
-golden_program!(generic_test);
-golden_program!(enum_equality_test);
-golden_program!(match_patterns_test);
-golden_program!(trying_out_tuples);
-golden_program!(trying_out_generic_structs_and_enums);
-golden_program!(all_language_features);
+golden_program! {
+    awesome_inference, generic_test, enum_equality_test, match_patterns_test,
+    trying_out_tuples, trying_out_generic_structs_and_enums,
+    all_language_features,
+}
 
 // Servers and timing demos: output is not deterministic, so no golden file.
 // They must still type check.
-checks!(check_http_hello, "http_hello");
-checks!(check_http_server, "http_server");
-checks!(check_echo_server, "echo_server");
-checks!(check_processes, "processes");
-checks!(check_read_within, "read_within");
+checks! {
+    check_http_hello => "http_hello",
+    check_http_server => "http_server",
+    check_echo_server => "echo_server",
+    check_processes => "processes",
+    check_read_within => "read_within",
+}
 
 // bench is timing-sensitive; just check it runs without error
 #[test]

@@ -1034,7 +1034,7 @@ match packet {
       "Every value in AL is immutable, so processes cannot share mutable state and there is nothing to lock. The program exits when every process has finished.",
       {
         id: "processes",
-        code: `import al/experiments/scheduler
+        code: `import al/scheduler
 
 const greeting = 'hello from'
 
@@ -1060,7 +1060,7 @@ println('main: done spawning, waiting at exit')
 //   hello from worker 3
 //   hello from worker 4`,
       },
-      "Processes live in `al/experiments/scheduler` because the API is young and will grow. Message passing between processes is the next planned piece.",
+      "Processes live in `al/scheduler`. Message passing between processes is the next planned piece.",
     ],
   },
 
@@ -1078,7 +1078,7 @@ println('main: done spawning, waiting at exit')
         code: `import al/net
 import al/net/socket.{Socket}
 import al/binary
-import al/experiments/scheduler
+import al/scheduler
 
 // Echo every byte a client sends until it disconnects
 fn echo(sock Socket) Nil {
@@ -1172,7 +1172,7 @@ http.serve('0.0.0.0', 8080, handler) or e -> {
       "If you want to see what AL looks like at the level below `al/http`, here is a server written straight on sockets. It answers pipelined requests and serves each connection in its own process. This is `examples/http_server.al` in the repository:",
       {
         id: "http-full",
-        code: `import al/experiments/scheduler
+        code: `import al/scheduler
 import al/net.{Server}
 import al/net/socket.{Socket}
 import al/string
@@ -1275,7 +1275,7 @@ al/net/address   to_string, ip_to_string
 al/http      serve, text, ok, not_found, with_header
 al/http/h1   sans-IO HTTP/1.1 parser
 al/http/body al/http/headers al/http/status
-al/experiments/scheduler   spawn, sleep`,
+al/scheduler   spawn, sleep`,
       },
       "Anything missing from this list does not exist yet. The source for all of it is in `crates/al_core/src/std/al/` in the repository, and it reads like the examples on this page.",
     ],

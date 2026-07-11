@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::net::TcpStream;
 use std::os::fd::AsRawFd;
 
-use al_core::bytecode::{MapBacking, SocketValue, Value, ValueView, hamt};
+use al_core::bytecode::{SocketValue, Value};
 
 use super::{Process, VM};
 
@@ -56,63 +56,26 @@ pub(super) struct Migrant {
 // regains a field that cannot move across threads, donation must not build.
 const _: () = al_core::assert_send::<Migrant>();
 
-/// Visit every immediate child `Value` of `v` — the shared descent step for
-/// recursive walks over a value graph. Leaves are matched exhaustively so a
-/// future value kind must decide its child set here instead of being skipped
-/// silently — this walk is what keeps migration's fd re-homing sound.
-fn for_each_child_value(v: &Value, visit: &mut impl FnMut(&Value)) {
-    match v.kind() {
-        ValueView::Array(seq) => {
-            for e in seq.iter() {
-                visit(&e);
-            }
-        }
-        ValueView::Tuple(t) => {
-            for e in t {
-                visit(e);
-            }
-        }
-        ValueView::Closure(c) => {
-            for e in c.captures() {
-                visit(e);
-            }
-        }
-        ValueView::Enum(e) => {
-            for p in e.payload() {
-                visit(p);
-            }
-        }
-        ValueView::Map(m) => match m.backing() {
-            MapBacking::Env => {}
-            MapBacking::Hamt => {
-                for (k, val) in hamt::collect_entries(v) {
-                    visit(&k);
-                    visit(&val);
-                }
-            }
-        },
-        // Leaves whose payload holds no `Value` words.
-        ValueView::Socket(_)
-        | ValueView::Int(_)
-        | ValueView::Float(_)
-        | ValueView::Bool(_)
-        | ValueView::Nil
-        | ValueView::Str(_)
-        | ValueView::Range(..)
-        | ValueView::Binary(_) => {}
-    }
-}
-
 /// Visit every socket reachable from `v` — the one fd-walk shared by every
 /// path that pairs a value graph with the per-scheduler socket tables:
 /// seeding a spawn (`VM::build_seed`), detaching a migrant's fds
 /// ([`process_socket_ids`]), and the donor-side guard (`VM::can_donate_fds`,
 /// which filters to connections).
+///
+/// The descent is `Value::for_each_child_ref` — the same layout table the
+/// reference-counting engine traces with, so a future value kind decides its
+/// child set in exactly one place instead of being skipped silently here.
+/// This walk is what keeps migration's fd re-homing sound.
+///
+/// It descends into immortal (frozen) subgraphs too: a toplevel binding is
+/// published verbatim (`freeze::freeze_global`), and a socket is an immediate,
+/// so a frozen tuple can carry one. Pruning on `Value::is_immortal` would drop
+/// those fds on the floor.
 pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
-    if let ValueView::Socket(s) = v.kind() {
+    if let Some(s) = v.as_socket() {
         visit(s);
     }
-    for_each_child_value(v, &mut |c| for_each_socket(c, visit));
+    v.for_each_child_ref(|c| for_each_socket(c, visit));
 }
 
 /// Visit every socket reachable from the process's stack or any frame's
@@ -385,18 +348,18 @@ mod tests {
     /// referenced many times but collected once, so comparing the source's
     /// count with the copy's pins "sharing preserved exactly": duplicating a
     /// shared object inflates the copy's count, deduplicating
-    /// equal-but-distinct objects deflates it. The walk follows the
-    /// `ValueView` arms, so it counts the objects user values reach (a
-    /// `Seq`'s interior nodes are hidden behind its root) — the same
-    /// granularity on both sides, which is all the comparison needs. No
-    /// address is ever compared *across* the two graphs.
+    /// equal-but-distinct objects deflates it. The walk descends through
+    /// interior nodes too (a `Seq`'s leaves, a HAMT's branches), so it counts
+    /// every arena object in the graph — the same granularity on both sides,
+    /// which is all the comparison needs. No address is ever compared *across*
+    /// the two graphs.
     fn distinct_heap_nodes(v: &Value, out: &mut Vec<usize>) {
         let Some(a) = v.object_addr() else { return };
         if out.contains(&a) {
             return;
         }
         out.push(a);
-        for_each_child_value(v, &mut |c| distinct_heap_nodes(c, out));
+        v.for_each_child_ref(|c| distinct_heap_nodes(c, out));
     }
 
     #[test]

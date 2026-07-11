@@ -130,25 +130,6 @@ pub(super) fn query_module(uri: &str) -> Option<ModulePath> {
     Some(module::detect_stdlib_module(&p).unwrap_or_else(module::main_module))
 }
 
-/// The id of the module imported by the `import a/b` declaration whose final
-/// module-name segment the cursor sits on, or `None` when it is anywhere else.
-/// The `Import` occurrence (recorded at that segment) carries the imported
-/// module as its target's owning module; the tightest covering occurrence
-/// wins, mirroring `ReferenceGraph::resolve_position`.
-pub(super) fn import_target_at(
-    graph: &reference::ReferenceGraph,
-    module: reference::ModuleId,
-    line: i32,
-    col: i32,
-) -> Option<reference::ModuleId> {
-    let mr = graph.module_refs(module)?;
-    mr.occurrences()
-        .iter()
-        .filter(|o| o.kind == reference::ReferenceKind::Import && o.span.contains(line, col))
-        .min_by_key(|o| o.span.width())
-        .map(|o| o.target.module)
-}
-
 /// Translate a graph `ModuleId` back to a file URI, relative to the
 /// requesting file (mirror of `uri_to_path`). The requesting file's own
 /// module maps to its request URI (the entry module is bare and `resolve`
@@ -207,26 +188,85 @@ pub(super) fn range_json(span: &Span) -> Json {
     })
 }
 
+/// Strip a `/** … */` block's delimiters and leading `*` gutter, leaving the
+/// author's line structure intact. The lines are joined with a single `\n`, not
+/// a blank line: markdown already folds soft-wrapped lines into one paragraph,
+/// treats a blank line as a paragraph break, and keeps a 4-space-indented run
+/// as a code block. Inserting a blank line between every line would instead
+/// render each source line as its own paragraph and shred indented examples.
 pub(super) fn clean_doc_comment(doc: &str) -> String {
-    let content = doc
-        .trim()
-        .trim_start_matches("/*")
-        .trim_end_matches("*/")
-        .trim();
+    let doc = doc.trim();
+    let mut content = doc.strip_prefix("/*").unwrap_or(doc);
+    if let Some(rest) = content.strip_suffix("*/") {
+        // A `**/` closer leaves its gutter `*` behind. Strip the run only when
+        // it abuts the delimiter, so a line of markdown `***` before a newline
+        // survives.
+        content = rest.trim_end_matches('*');
+    }
+    let content = content.trim();
 
-    let lines: Vec<&str> = content.split('\n').collect();
     let mut cleaned: Vec<String> = Vec::new();
+    for line in content.split('\n') {
+        // Only the gutter is trimmed; indentation after `* ` is the author's
+        // (a code block depends on it).
+        let gutter = line.trim_start_matches([' ', '\t']);
+        let rest = match gutter.strip_prefix('*') {
+            Some(r) => r.strip_prefix(' ').unwrap_or(r),
+            None => gutter,
+        };
+        cleaned.push(rest.trim_end().to_string());
+    }
+    // `/**` and `*/` each contribute an empty gutter line of their own.
+    while cleaned.last().is_some_and(String::is_empty) {
+        cleaned.pop();
+    }
+    let start = cleaned.iter().position(|l| !l.is_empty()).unwrap_or(0);
+    cleaned[start..].join("\n")
+}
 
-    for line in lines {
-        let trimmed = line.trim_start_matches([' ', '\t']);
-        if let Some(rest) = trimmed.strip_prefix("* ") {
-            cleaned.push(rest.to_string());
-        } else if let Some(rest) = trimmed.strip_prefix('*') {
-            cleaned.push(rest.trim_start_matches(' ').to_string());
-        } else {
-            cleaned.push(trimmed.to_string());
-        }
+#[cfg(test)]
+mod tests {
+    use super::clean_doc_comment;
+
+    #[test]
+    fn soft_wrapped_lines_stay_one_paragraph() {
+        let got = clean_doc_comment("/**\n * One line\n * and its continuation.\n */");
+        assert_eq!(got, "One line\nand its continuation.");
     }
 
-    cleaned.join("\n\n")
+    #[test]
+    fn a_blank_line_separates_paragraphs() {
+        let got = clean_doc_comment("/**\n * Title.\n *\n * Body.\n */");
+        assert_eq!(got, "Title.\n\nBody.");
+    }
+
+    /// Indentation after the `*` gutter is the author's: a 4-space run is a
+    /// markdown code block and must survive verbatim.
+    #[test]
+    fn indented_code_block_survives() {
+        let got = clean_doc_comment("/**\n * Example:\n *\n *     new(15, 1)\n */");
+        assert_eq!(got, "Example:\n\n    new(15, 1)");
+    }
+
+    #[test]
+    fn single_line_doc_is_unchanged() {
+        assert_eq!(
+            clean_doc_comment("/** Sum of `a` and `b`. */"),
+            "Sum of `a` and `b`."
+        );
+    }
+
+    /// A `**/` closer leaves a gutter `*` behind the `*/` the naive strip
+    /// removes.
+    #[test]
+    fn double_star_closer_leaves_no_stray_gutter() {
+        assert_eq!(clean_doc_comment("/** Doc. **/"), "Doc.");
+        assert_eq!(clean_doc_comment("/**\n * Doc.\n **/"), "Doc.");
+    }
+
+    /// …but a markdown thematic break on its own line is content, not a gutter.
+    #[test]
+    fn trailing_markdown_rule_survives() {
+        assert_eq!(clean_doc_comment("/**\n * a\n * ***\n*/"), "a\n***");
+    }
 }

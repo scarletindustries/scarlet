@@ -24,7 +24,7 @@ const LAST_CHUNK = <<'0\r\n\r\n'>>
 // continuation in `Chunk` is a `Body`, and a `Body` yields a `Pull`. Splitting
 // them would force an import cycle, which the compiler rejects.
 pub type Pull {
-	Chunk(data Binary next Body)
+	Chunk(data Binary, next Body)
 	Done(trailers Array(Header))
 }
 
@@ -50,8 +50,7 @@ pub fn content_length(reader Socket, n Int) Body {
 	fn() match n {
 		0 -> Ok(Done([]))
 		else -> match socket.read(reader, int.min(n, READ_SIZE)) {
-			Ok(Data(chunk)) ->
-				Ok(Chunk(chunk, content_length(reader, n - binary.byte_size(chunk))))
+			Ok(Data(chunk)) -> Ok(Chunk(chunk, content_length(reader, n - binary.byte_size(chunk))))
 			Ok(Closed) -> Err(UnexpectedEof)
 			Err(e) -> Err(e)
 		}
@@ -70,7 +69,7 @@ pub type Buffered {
 	// The whole body was one in-memory chunk (http.text and friends).
 	Whole(data Binary)
 	// A real stream: the chunks pulled while finding that out, plus the rest.
-	Streaming(first Binary second Binary rest Body)
+	Streaming(first Binary, second Binary, rest Body)
 }
 
 // Dissect a body without writing it anywhere. A body that is already a single

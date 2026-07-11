@@ -1,0 +1,23 @@
+fn s0(%0:t0) -> :t0
+  let %1:t1 = c0
+  let %2:t0 = ModInt(%0, %1)
+  match %2 :t0
+    | c1 ->
+      let %3:t1 = c0
+      ret DivInt(%0, %3)
+    | _ ->
+      let %4:t1 = c2
+      let %5:t1 = MulInt(%4, %0)
+      let %6:t1 = c3
+      ret AddInt(%5, %6)
+
+toplevel:
+  let %0:t2 = closure fn#160()
+  let %1:t1 = c4
+  ret call %0(%1)
+where
+  c0 = Int(2)
+  c1 = Int(0)
+  c2 = Int(3)
+  c3 = Int(1)
+  c4 = Int(7)

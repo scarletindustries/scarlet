@@ -30,7 +30,6 @@ use super::{VM, VmError, VmResult};
 
 impl VM {
     /// `map.new` — push a fresh empty HAMT map.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_new(&mut self) -> VmResult<()> {
         let v = hamt::empty(&mut self.heap);
@@ -40,7 +39,6 @@ impl VM {
 
     /// `process.env` — push the environment-backed map. Allocates only the
     /// two-word handle; no environment data is copied.
-    #[cold]
     #[inline(never)]
     pub(super) fn env_map(&mut self) -> VmResult<()> {
         let v = Value::env_map_in(&mut self.heap);
@@ -49,7 +47,6 @@ impl VM {
     }
 
     /// `map.get(m, key) -> Option(v)`. Map at depth 1, key on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_get(&mut self) -> VmResult<()> {
         let found = match self.map_backing_at(1, "map.get")? {
@@ -77,7 +74,6 @@ impl VM {
     }
 
     /// `map.has(m, key) -> Bool`. Map at depth 1, key on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_has(&mut self) -> VmResult<()> {
         let present = match self.map_backing_at(1, "map.has")? {
@@ -96,21 +92,18 @@ impl VM {
     }
 
     /// `map.keys(m) -> Array(k)`. Map on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_keys(&mut self) -> VmResult<()> {
         self.map_collect("map.keys", Proj::Keys)
     }
 
     /// `map.values(m) -> Array(v)`. Map on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_values(&mut self) -> VmResult<()> {
         self.map_collect("map.values", Proj::Values)
     }
 
     /// `map.to_list(m) -> Array((k, v))`. Map on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_to_list(&mut self) -> VmResult<()> {
         self.map_collect("map.to_list", Proj::Pairs)
@@ -157,7 +150,6 @@ impl VM {
     }
 
     /// `map.size(m) -> Int`. Map on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_size(&mut self) -> VmResult<()> {
         let n = match self.map_backing_at(0, "map.size")? {
@@ -170,7 +162,6 @@ impl VM {
     }
 
     /// `map.set(m, key, value) -> Map`. Map at depth 2, key at 1, value on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_set(&mut self) -> VmResult<()> {
         let backing = self.map_backing_at(2, "map.set")?;
@@ -190,7 +181,6 @@ impl VM {
     }
 
     /// `map.delete(m, key) -> Map`. Map at depth 1, key on top.
-    #[cold]
     #[inline(never)]
     pub(super) fn map_delete(&mut self) -> VmResult<()> {
         let backing = self.map_backing_at(1, "map.delete")?;

@@ -1,5 +1,26 @@
 use crate::span::Span;
 
+/// Generates the delegating `span()` / `span_mut()` accessors for a node enum
+/// whose variants each wrap a single struct with a `span: Span` field. The
+/// variant list is the one place to touch when a variant is added.
+macro_rules! impl_span {
+    ($enum:ident: $($variant:ident),+ $(,)?) => {
+        impl $enum {
+            pub fn span(&self) -> Span {
+                match self {
+                    $($enum::$variant(x) => x.span,)+
+                }
+            }
+
+            pub fn span_mut(&mut self) -> &mut Span {
+                match self {
+                    $($enum::$variant(x) => &mut x.span,)+
+                }
+            }
+        }
+    };
+}
+
 // ============================================================================
 // Literals and Basic Nodes
 // ============================================================================
@@ -253,23 +274,7 @@ pub enum Declaration {
     Type(TypeDeclaration),
 }
 
-impl Declaration {
-    pub fn span(&self) -> Span {
-        match self {
-            Declaration::Const(x) => x.span,
-            Declaration::Function(x) => x.span,
-            Declaration::Type(x) => x.span,
-        }
-    }
-
-    pub fn span_mut(&mut self) -> &mut Span {
-        match self {
-            Declaration::Const(x) => &mut x.span,
-            Declaration::Function(x) => &mut x.span,
-            Declaration::Type(x) => &mut x.span,
-        }
-    }
-}
+impl_span!(Declaration: Const, Function, Type);
 
 #[derive(Debug, Clone)]
 pub enum TypeBody {
@@ -594,6 +599,19 @@ pub struct BinSegmentPat {
     pub span: Span,
 }
 
+impl BinSegmentPat {
+    /// The string of a `<<'literal'>>` (Utf8 string-literal) pattern segment.
+    pub fn utf8_literal(&self) -> Option<&str> {
+        if self.kind != BinKind::Utf8 {
+            return None;
+        }
+        match &self.value {
+            Pattern::Literal(PatternLiteral::String(s)) => Some(&s.value),
+            _ => None,
+        }
+    }
+}
+
 /// Trailing `..rest` in a `<<>>` pattern, capturing the remaining bytes.
 #[derive(Debug, Clone)]
 pub struct BinaryPatternRest {
@@ -734,31 +752,12 @@ pub enum Expression {
     UnaryExpression(UnaryExpression),
 }
 
-impl Expression {
-    pub fn span(&self) -> Span {
-        match self {
-            Expression::ArrayExpression(x) => x.span,
-            Expression::ArrayIndexExpression(x) => x.span,
-            Expression::BinaryExpression(x) => x.span,
-            Expression::BinaryLiteral(x) => x.span,
-            Expression::BlockExpression(x) => x.span,
-            Expression::ErrorNode(x) => x.span,
-            Expression::FunctionCallExpression(x) => x.span,
-            Expression::FunctionExpression(x) => x.span,
-            Expression::Identifier(x) => x.span,
-            Expression::IfExpression(x) => x.span,
-            Expression::InterpolatedString(x) => x.span,
-            Expression::MatchExpression(x) => x.span,
-            Expression::NumberLiteral(x) => x.span,
-            Expression::OrExpression(x) => x.span,
-            Expression::PropertyAccessExpression(x) => x.span,
-            Expression::RangeExpression(x) => x.span,
-            Expression::StringLiteral(x) => x.span,
-            Expression::TupleExpression(x) => x.span,
-            Expression::UnaryExpression(x) => x.span,
-        }
-    }
-}
+impl_span!(
+    Expression: ArrayExpression, ArrayIndexExpression, BinaryExpression, BinaryLiteral,
+    BlockExpression, ErrorNode, FunctionCallExpression, FunctionExpression, Identifier,
+    IfExpression, InterpolatedString, MatchExpression, NumberLiteral, OrExpression,
+    PropertyAccessExpression, RangeExpression, StringLiteral, TupleExpression, UnaryExpression,
+);
 
 #[derive(Debug, Clone)]
 pub enum Node {

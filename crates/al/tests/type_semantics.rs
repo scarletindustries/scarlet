@@ -11,21 +11,17 @@ use common::{check_ok, check_rejects, run_outputs};
 // `type` keyword — definitions
 // ===========================================================================
 
-#[test]
-fn type_keyword_single_variant() {
-    run_outputs(
-        "type User { User(name String age Int) }\n\
+run_case! {
+    type_keyword_single_variant: (
+        "type User { User(name String, age Int) }\n\
          u = User(name: 'al', age: 18)\n\
          println(u.name)\n\
          println(u.age)\n",
         "al\n18\n",
-    );
-}
+    ),
 
-#[test]
-fn type_keyword_multi_variant() {
-    run_outputs(
-        "type Shape { Circle(r Int) Rect(w Int h Int) }\n\
+    type_keyword_multi_variant: (
+        "type Shape {\n\tCircle(r Int)\n\tRect(w Int, h Int)\n}\n\
          fn area(s Shape) Int {\n\
          \tmatch s {\n\
          \t\tCircle(r) -> 3 * r * r\n\
@@ -35,17 +31,14 @@ fn type_keyword_multi_variant() {
          println(area(Circle(10)))\n\
          println(area(Rect(4, 5)))\n",
         "300\n20\n",
-    );
-}
+    ),
 
-#[test]
-fn type_alias_is_transparent() {
-    run_outputs(
+    type_alias_is_transparent: (
         "type Id = Int\n\
          fn next(i Id) Id { i + 1 }\n\
          println(next(41))\n",
         "42\n",
-    );
+    ),
 }
 
 reject_case! {
@@ -58,18 +51,14 @@ reject_case! {
 // Constructors are functions
 // ===========================================================================
 
-#[test]
-fn some_call_is_ordinary_call() {
-    run_outputs(
+run_case! {
+    some_call_is_ordinary_call: (
         "x = Some(5)\n\
          println(x or 0)\n",
         "5\n",
-    );
-}
+    ),
 
-#[test]
-fn constructor_is_first_class() {
-    run_outputs(
+    constructor_is_first_class: (
         "fn map(f fn(a) b, xs Array(a)) Array(b) {\n\
          \tmatch xs {\n\
          \t\t[] -> []\n\
@@ -80,16 +69,13 @@ fn constructor_is_first_class() {
          println(ys[0] or None)\n\
          println(ys[2] or None)\n",
         "Some(1)\nSome(3)\n",
-    );
-}
+    ),
 
-#[test]
-fn nullary_constructor_is_value() {
-    run_outputs(
+    nullary_constructor_is_value: (
         "x = None\n\
          println(x or 7)\n",
         "7\n",
-    );
+    ),
 }
 
 reject_case! {
@@ -100,23 +86,21 @@ reject_case! {
     single_parens_is_parse_error: ("x = (5)\nprintln(x)\n", "single-element parens not allowed"),
 }
 
-#[test]
-fn block_is_grouping() {
-    run_outputs("println({1 + 2} * 3)\n", "9\n");
+run_case! {
+    block_is_grouping: ("println({1 + 2} * 3)\n", "9\n"),
 }
 
 // ===========================================================================
 // Array index returns Option
 // ===========================================================================
 
-#[test]
-fn index_returns_option() {
-    run_outputs(
+run_case! {
+    index_returns_option: (
         "xs = [10, 20, 30]\n\
          println(xs[0] or -1)\n\
          println(xs[9] or -1)\n",
         "10\n-1\n",
-    );
+    ),
 }
 
 reject_case! {
@@ -127,8 +111,8 @@ reject_case! {
 
 #[test]
 fn index_negative_returns_none() {
-    // A negative index hits the `idx >= 0` guard in `Op::Index` /
-    // `Op::IndexOrElse`, a path distinct from the positive out-of-bounds case
+    // A negative index hits the `idx >= 0` guard in `Op::Index`, a path
+    // distinct from the positive out-of-bounds case
     // (`xs[9]`): instead of `arr.get` returning `None`, the guard itself
     // rejects the access. Both `-1` and a large negative magnitude yield the
     // `None` Option, while a valid in-bounds index still boxes `Some`.
@@ -183,34 +167,31 @@ fn range_as_value_materializes() {
 // `.field` totality
 // ===========================================================================
 
-#[test]
-fn field_access_total_across_variants() {
-    run_outputs(
-        "type Named { Person(name String age Int) Org(name String size Int) }\n\
+run_case! {
+    field_access_total_across_variants: (
+        "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn name_of(n Named) String { n.name }\n\
          println(name_of(Person(name: 'al', age: 18)))\n\
          println(name_of(Org(name: 'anthropic', size: 1000)))\n",
         "al\nanthropic\n",
-    );
+    ),
 }
 
 // ===========================================================================
 // Recursive and mutually-recursive types/functions
 // ===========================================================================
 
-#[test]
-fn recursive_type_compiles() {
-    check_ok(
-        "type Tree(a) { Leaf Node(l Tree(a) v a r Tree(a)) }\n\
+ok_case! {
+    recursive_type_compiles: (
+        "type Tree(a) {\n\tLeaf\n\tNode(l Tree(a), v a, r Tree(a))\n}\n\
          t Tree(Int) = Node(l: Leaf, v: 1, r: Leaf)\n\
          t\n",
-    );
+    ),
 }
 
-#[test]
-fn recursive_type_runs() {
-    run_outputs(
-        "type Tree(a) { Leaf Node(l Tree(a) v a r Tree(a)) }\n\
+run_case! {
+    recursive_type_runs: (
+        "type Tree(a) {\n\tLeaf\n\tNode(l Tree(a), v a, r Tree(a))\n}\n\
          fn size(t Tree(a)) Int {\n\
          \tmatch t {\n\
          \t\tLeaf -> 0\n\
@@ -220,7 +201,7 @@ fn recursive_type_runs() {
          t = Node(l: Node(l: Leaf, v: 1, r: Leaf), v: 2, r: Leaf)\n\
          println(size(t))\n",
         "2\n",
-    );
+    ),
 }
 
 // ===========================================================================
@@ -235,9 +216,8 @@ fn recursive_type_runs() {
 // still cut off.
 // ===========================================================================
 
-#[test]
-fn nested_option_match_is_exhaustive() {
-    check_ok(
+ok_case! {
+    nested_option_match_is_exhaustive: (
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -245,12 +225,11 @@ fn nested_option_match_is_exhaustive() {
          \tNone -> 'n'\n\
          }\n\
          println(r)\n",
-    );
+    ),
 }
 
-#[test]
-fn nested_option_match_runs() {
-    run_outputs(
+run_case! {
+    nested_option_match_runs: (
         "x = Some(Some(5))\n\
          r = match x {\n\
          \tSome(Some(n)) -> 'ss ${n}'\n\
@@ -259,12 +238,11 @@ fn nested_option_match_runs() {
          }\n\
          println(r)\n",
         "ss 5\n",
-    );
+    ),
 }
 
-#[test]
-fn nested_result_match_is_exhaustive() {
-    check_ok(
+ok_case! {
+    nested_result_match_is_exhaustive: (
         "fn classify(x Result(Result(Int, String), String)) String {\n\
          \tmatch x {\n\
          \t\tOk(Ok(n)) -> 'ok ${n}'\n\
@@ -273,7 +251,7 @@ fn nested_result_match_is_exhaustive() {
          \t}\n\
          }\n\
          println(classify(Ok(Ok(1))))\n",
-    );
+    ),
 }
 
 reject_case! {
@@ -312,7 +290,7 @@ fn non_uniform_recursive_type_resolution_terminates() {
     // A match on it still type-checks: the recursive position is cut off to an
     // infinite-constructor type, so the wildcard arm is required and accepted.
     check_ok(
-        "type Nest(t) { More(inner Nest((t, t))) Done }\n\
+        "type Nest(t) {\n\tMore(inner Nest((t, t)))\n\tDone\n}\n\
          fn f(n Nest(Int)) Int {\n\
          \tmatch n {\n\
          \t\tMore(_) -> 1\n\
@@ -323,9 +301,8 @@ fn non_uniform_recursive_type_resolution_terminates() {
     );
 }
 
-#[test]
-fn mutual_recursion_functions() {
-    run_outputs(
+run_case! {
+    mutual_recursion_functions: (
         "fn is_even(n Int) Bool {\n\
          \tif n == 0 { True } else { is_odd(n - 1) }\n\
          }\n\
@@ -335,7 +312,7 @@ fn mutual_recursion_functions() {
          println(is_even(10))\n\
          println(is_odd(7))\n",
         "True\nTrue\n",
-    );
+    ),
 }
 
 // ===========================================================================
@@ -355,7 +332,7 @@ reject_case! {
         "unreachable",
     ),
     ctor_pattern_missing_fields_without_spread_is_error: (
-        "type User { User(name String age Int email String) }\n\
+        "type User { User(name String, age Int, email String) }\n\
          fn f(u User) String {\n\
          \tmatch u {\n\
          \t\tUser(name: n) -> n\n\
@@ -366,10 +343,9 @@ reject_case! {
     ),
 }
 
-#[test]
-fn ctor_pattern_with_spread_is_ok() {
-    run_outputs(
-        "type User { User(name String age Int email String) }\n\
+run_case! {
+    ctor_pattern_with_spread_is_ok: (
+        "type User { User(name String, age Int, email String) }\n\
          fn f(u User) String {\n\
          \tmatch u {\n\
          \t\tUser(name: n, ..) -> n\n\
@@ -377,7 +353,7 @@ fn ctor_pattern_with_spread_is_ok() {
          }\n\
          println(f(User(name: 'alice', age: 30, email: 'a@b')))\n",
         "alice\n",
-    );
+    ),
 }
 
 // ===========================================================================
@@ -389,16 +365,15 @@ reject_case! {
         ("x = 5 or 0\nprintln(x)\n", "'or' requires the left side to be Option(_) or Result(_, _)"),
 }
 
-#[test]
-fn or_on_result_unwraps_ok() {
-    run_outputs(
+run_case! {
+    or_on_result_unwraps_ok: (
         "fn f(b Bool) Result(Int, String) {\n\
          \tif b { Ok(42) } else { Err('nope') }\n\
          }\n\
          println(f(True) or -1)\n\
          println(f(False) or -1)\n",
         "42\n-1\n",
-    );
+    ),
 }
 
 // ===========================================================================
@@ -414,38 +389,33 @@ reject_case! {
         ("fn f(x a, y a) a { x }\nprintln(f(1, 's'))\n", "Type mismatch: expected 'Int', got 'String'"),
 }
 
-#[test]
-fn rigid_tyvar_same_var_accepts_same_type() {
-    run_outputs(
+run_case! {
+    rigid_tyvar_same_var_accepts_same_type: (
         "fn f(x a, _y a) a { x }\n\
          println(f(1, 2))\n",
         "1\n",
-    );
+    ),
 }
 
 // ===========================================================================
 // Positional vs labeled construction
 // ===========================================================================
 
-#[test]
-fn positional_construction() {
-    run_outputs(
-        "type Pair { Pair(fst Int snd Int) }\n\
+run_case! {
+    positional_construction: (
+        "type Pair { Pair(fst Int, snd Int) }\n\
          p = Pair(1, 2)\n\
          println(p.fst + p.snd)\n",
         "3\n",
-    );
-}
+    ),
 
-#[test]
-fn labeled_construction_reordered() {
-    run_outputs(
-        "type Pair { Pair(fst Int snd Int) }\n\
+    labeled_construction_reordered: (
+        "type Pair { Pair(fst Int, snd Int) }\n\
          p = Pair(snd: 2, fst: 1)\n\
          println(p.fst)\n\
          println(p.snd)\n",
         "1\n2\n",
-    );
+    ),
 }
 
 // ===========================================================================
@@ -460,7 +430,7 @@ fn ctor_record_update_overrides_and_projects() {
     // (al), `age` is overridden (19), and the original `base.age` is unchanged
     // (18) — proving record-update builds a fresh value rather than mutating.
     run_outputs(
-        "type P { P(name String age Int) }\n\
+        "type P { P(name String, age Int) }\n\
          base = P(name: 'al', age: 18)\n\
          older = P(..base, age: 19)\n\
          println(older.name)\n\
@@ -474,7 +444,7 @@ reject_case! {
     /// A constructor record-update accepts a single `..base`; a second spread is
     /// rejected.
     ctor_record_update_at_most_one_spread: (
-        "type P { P(name String age Int) }\n\
+        "type P { P(name String, age Int) }\n\
          base = P(name: 'al', age: 18)\n\
          older = P(..base, ..base)\n\
          println(older.age)\n",
@@ -494,9 +464,8 @@ reject_case! {
     ),
 }
 
-#[test]
-fn match_guard_basic() {
-    run_outputs(
+run_case! {
+    match_guard_basic: (
         "fn classify(n Int) String {\n\
          \tmatch n {\n\
          \t\tx if x < 0 -> 'neg'\n\
@@ -510,12 +479,9 @@ fn match_guard_basic() {
          println(classify(3))\n\
          println(classify(99))\n",
         "neg\nzero\nsmall\nbig\n",
-    );
-}
+    ),
 
-#[test]
-fn match_guard_with_constructor() {
-    run_outputs(
+    match_guard_with_constructor: (
         "fn pos(o Option(Int)) Int {\n\
          \tmatch o {\n\
          \t\tSome(n) if n > 0 -> n\n\
@@ -527,7 +493,7 @@ fn match_guard_with_constructor() {
          println(pos(Some(-3)))\n\
          println(pos(None))\n",
         "5\n0\n0\n",
-    );
+    ),
 }
 
 reject_case! {
@@ -590,7 +556,7 @@ reject_case! {
     /// The scoping fix must not relax the core invariant: every alternative of
     /// an or-pattern must bind exactly the same names.
     or_pattern_unequal_bindings_still_rejected: (
-        "type R { Good(v Int) Bad(v Int) }\n\
+        "type R {\n\tGood(v Int)\n\tBad(v Int)\n}\n\
          fn h(r R) Int {\n\
          \tmatch r {\n\
          \t\tGood(x) | Bad(z) -> 0\n\
@@ -622,15 +588,14 @@ fn or_pattern_nested_in_non_first_alternative() {
     );
 }
 
-#[test]
-fn array_spread_literal() {
-    run_outputs(
+run_case! {
+    array_spread_literal: (
         "xs = [1, 2]\n\
          ys = [4, 5]\n\
          zs = [..xs, 3, ..ys, 6]\n\
          println(zs)\n",
         "[1, 2, 3, 4, 5, 6]\n",
-    );
+    ),
 }
 
 reject_case! {
@@ -644,7 +609,7 @@ fn nested_ctor_pattern_exhaustive() {
     // and `Ok(Nil)` was reported as non-exhaustive.
     check_ok("match Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n");
     check_ok(
-        "type T { A B }\n\
+        "type T {\n\tA\n\tB\n}\n\
          match Ok(A) { Ok(A) -> println('a') Ok(B) -> println('b') Err(e) -> println(e) }\n",
     );
 }
@@ -709,7 +674,7 @@ reject_case! {
 fn reserved_set_derived_from_prelude_iface() {
     // Prelude types/ctors are reserved...
     check_rejects(
-        "type Option(a) { Just(value a) Nothing }\n",
+        "type Option(a) {\n\tJust(value a)\n\tNothing\n}\n",
         "is defined in the prelude and cannot be redefined",
     );
     // ...but `@vm` functions are not.
@@ -859,25 +824,37 @@ fn binary_literal_and_pattern_e2e() {
 // `Ctor(..) = expr` — irrefutable constructor destructure (single-arm match)
 // ===========================================================================
 
-#[test]
-fn ctor_destructure_single_variant_ok() {
-    run_outputs(
+run_case! {
+    ctor_destructure_single_variant_ok: (
         "type Box { Box(value Int) }\n\
          Box(n) = Box(42)\n\
          println(n)\n",
         "42\n",
-    );
-}
+    ),
 
-#[test]
-fn ctor_destructure_multi_field_ok() {
-    run_outputs(
-        "type Pair { Pair(a Int b String) }\n\
+    ctor_destructure_multi_field_ok: (
+        "type Pair { Pair(a Int, b String) }\n\
          Pair(x, y) = Pair(7, 'hi')\n\
          println(x)\n\
          println(y)\n",
         "7\nhi\n",
-    );
+    ),
+
+    // Labels bind by declared field order, not by argument position.
+    ctor_destructure_labeled_out_of_order: (
+        "type Point { Point(x Int, y Int) }\n\
+         Point(y: b, x: a) = Point(1, 2)\n\
+         println(a)\n\
+         println(b)\n",
+        "1\n2\n",
+    ),
+
+    ctor_destructure_labeled_with_rest: (
+        "type T { T(a Int, b Int, c Int) }\n\
+         T(c: z, ..) = T(10, 20, 30)\n\
+         println(z)\n",
+        "30\n",
+    ),
 }
 
 reject_case! {
@@ -892,13 +869,106 @@ reject_case! {
 // `TypeName = expr` — typed discard (assert expr's type, drop the value)
 // ===========================================================================
 
-#[test]
-fn typed_discard_nil_println_ok() {
-    run_outputs("Nil = println('x')\n", "x\n");
+run_case! {
+    typed_discard_nil_println_ok: ("Nil = println('x')\n", "x\n"),
 }
 
 reject_case! {
     typed_discard_string_int_mismatch: ("String = 5\n", "Type mismatch: expected 'String', got 'Int'"),
     typed_discard_int_string_mismatch: ("Int = 'a'\n", "Type mismatch: expected 'Int', got 'String'"),
     typed_discard_constructor_is_not_a_type: ("Some = 1\n", "'Some' is not a type"),
+}
+
+// `lower` synthesises an eta-wrapper into `program.code` when a constructor is
+// used as a first-class value, so the body's own code lands after it. `emit`
+// bakes absolute jump targets, and it used to be handed the address captured
+// *before* lowering — every taken jump in the body then pointed
+// `eta_wrapper.len()` instructions too low, into the wrapper. The `else` arm is
+// the one that jumps; the `then` arm falls through and hid this for both
+// branches of the suite.
+#[test]
+fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
+    let src = "import al/array\n\
+               type W { W(v Int) }\n\
+               fn pick(xs Array(Int)) Int {\n\
+               \tws = array.map(xs, W)\n\
+               \tif array.length(ws) > 2 { 111 } else { 222 }\n\
+               }\n\
+               println(pick([1]))\n\
+               println(pick([1, 2, 3]))\n";
+    run_outputs(src, "222\n111\n");
+}
+
+// ===========================================================================
+// Inferred (unannotated) types must reach `lower`
+//
+// `lower` used to re-derive types by re-instantiating each constructor's and
+// module function's scheme, so a match on an *inferred* scrutinee saw
+// `Option(?a)` where the typechecker had `Option(User)`. An unresolved `?a` is
+// not a `Con`, so the field lookup found nothing and lowering aborted — on
+// programs `al check` had accepted. Both shapes work with an annotated
+// scrutinee, which is what hid this.
+// ===========================================================================
+
+#[test]
+fn field_access_through_a_constructor_inferred_scrutinee() {
+    let src = "type User { User(id Int, name String) }\n\
+               fn f() Int {\n\
+               \tmatch Some(User(7, 'al')) {\n\
+               \t\tNone -> 0\n\
+               \t\tSome(u) -> u.id\n\
+               \t}\n\
+               }\n\
+               println(f())\n";
+    check_ok(src);
+    run_outputs(src, "7\n");
+}
+
+#[test]
+fn field_access_through_a_module_fn_inferred_scrutinee() {
+    let src = "import al/map\n\
+               type User { User(id Int, name String) }\n\
+               fn f(m Map(Binary, User)) Int {\n\
+               \tmatch map.get(m, <<'a'>>) {\n\
+               \t\tNone -> 0\n\
+               \t\tSome(u) -> u.id\n\
+               \t}\n\
+               }\n\
+               println(f(map.set(map.new(), <<'a'>>, User(7, 'al'))))\n";
+    check_ok(src);
+    run_outputs(src, "7\n");
+}
+
+/// An inferred scrutinee's payload is a heap value, so binding it makes the arm
+/// responsible for releasing it. Without the payload's real type Perceus saw
+/// "not heap" and emitted no `Drop`, holding the `Boxed` to the end of the
+/// frame. The `drop` itself is pinned by the `inferred_scrutinee_drops_heap_payload`
+/// Core IR golden; this pins that the program still computes the right answer.
+#[test]
+fn inferred_scrutinee_with_a_heap_payload_runs() {
+    let src = "type Boxed { Boxed(n Int) }\n\
+               fn f() Int {\n\
+               \tmatch Some(Boxed(3)) {\n\
+               \t\tNone -> 0\n\
+               \t\tSome(b) -> {\n\
+               \t\t\tx = b.n\n\
+               \t\t\tx + 1\n\
+               \t\t}\n\
+               \t}\n\
+               }\n\
+               println(f())\n";
+    run_outputs(src, "4\n");
+}
+
+/// The `Err` payload bound by `expr or e -> body` is the LHS type's second
+/// argument, not a fresh variable — a heap error value has to be droppable, and
+/// its fields have to be reachable.
+#[test]
+fn or_receiver_binds_a_heap_error_payload() {
+    let src = "type Boxed { Boxed(n Int) }\n\
+               fn bad() Result(Int, Boxed) { Err(Boxed(9)) }\n\
+               fn f() Int { bad() or e -> e.n }\n\
+               println(f())\n";
+    check_ok(src);
+    run_outputs(src, "9\n");
 }

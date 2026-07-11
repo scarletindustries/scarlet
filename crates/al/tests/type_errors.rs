@@ -1,5 +1,5 @@
 mod common;
-use common::{check_ok, check_rejects};
+use common::check_rejects;
 
 reject_case! {
     int_plus_string_is_type_error: ("x = 1 + 'a'\n", "Type mismatch"),
@@ -31,19 +31,12 @@ reject_case! {
     ),
 }
 
-#[test]
-fn underscore_prefix_suppresses_unused_error() {
-    check_ok("_x = 1\nprintln('done')\n");
-}
+ok_case! {
+    underscore_prefix_suppresses_unused_error: ("_x = 1\nprintln('done')\n"),
 
-#[test]
-fn used_let_binding_is_ok() {
-    check_ok("x = 1\nprintln(x)\n");
-}
+    used_let_binding_is_ok: ("x = 1\nprintln(x)\n"),
 
-#[test]
-fn closure_capture_counts_as_use() {
-    check_ok("x = 1\nf = fn() { x }\nprintln(f())\n");
+    closure_capture_counts_as_use: ("x = 1\nf = fn() { x }\nprintln(f())\n"),
 }
 
 reject_case! {
@@ -63,23 +56,23 @@ reject_case! {
     // disagree with the constructor's fields. Each pin names the specific field /
     // arity / available-list so a wrong-field or wrong-count regression would fail.
     ctor_missing_field_is_error: (
-        "type P { P(name String age Int) }\nP(name: 'a')\n",
+        "type P { P(name String, age Int) }\nP(name: 'a')\n",
         "Constructor 'P' is missing field(s): age",
     ),
     ctor_unknown_field_is_error: (
-        "type P { P(name String age Int) }\nP(name: 'a', bogus: 1)\n",
+        "type P { P(name String, age Int) }\nP(name: 'a', bogus: 1)\n",
         "Constructor 'P' has no field 'bogus'. Available: name, age",
     ),
     ctor_too_many_positional_is_error: (
-        "type P { P(name String age Int) }\nP('a', 'b', 'c')\n",
+        "type P { P(name String, age Int) }\nP('a', 'b', 'c')\n",
         "Constructor 'P' has 2 field(s) but more were supplied",
     ),
     ctor_nullary_with_args_is_error: (
-        "type C { Red Green }\nRed(1)\n",
+        "type C {\n\tRed\n\tGreen\n}\nRed(1)\n",
         "Constructor 'Red' has 0 field(s) but more were supplied",
     ),
     ctor_duplicate_field_is_error: (
-        "type P { P(name String age Int) }\nP(name: 'a', name: 'b', age: 1)\n",
+        "type P { P(name String, age Int) }\nP(name: 'a', name: 'b', age: 1)\n",
         "Field 'name' is specified more than once",
     ),
 
@@ -96,7 +89,7 @@ reject_case! {
     /// A nullary constructor (its instantiated type is not a function) given argument
     /// sub-patterns is rejected, naming the constructor and the supplied count.
     ctor_nullary_with_args_in_pattern_is_error: (
-        "type C { Red Green }\nfn f(c C) Int { match c { Red(x) -> x\n Green -> 0 } }\nprintln(f(Red))\n",
+        "type C {\n\tRed\n\tGreen\n}\nfn f(c C) Int { match c { Red(x) -> x\n Green -> 0 } }\nprintln(f(Red))\n",
         "Constructor 'Red' takes no arguments but 1 were given",
     ),
 
@@ -109,13 +102,12 @@ reject_case! {
         ("r = {\n\t1 + 2\n\t9\n}\nprintln(r)\n", "must be consumed"),
 }
 
-// The flip side of the rule above: a *Nil*-typed non-last statement (here a
-// `println` call) is allowed, since there is no value to drop. This pins the
-// `is_nil` guard so the consumption check can't start over-firing on ordinary
-// side-effecting statements.
-#[test]
-fn nil_typed_block_expr_statement_is_ok() {
-    check_ok("r = {\n\tprintln(1)\n\t9\n}\nprintln(r)\n");
+ok_case! {
+    // The flip side of the rule above: a *Nil*-typed non-last statement (here a
+    // `println` call) is allowed, since there is no value to drop. This pins the
+    // `is_nil` guard so the consumption check can't start over-firing on ordinary
+    // side-effecting statements.
+    nil_typed_block_expr_statement_is_ok: ("r = {\n\tprintln(1)\n\t9\n}\nprintln(r)\n"),
 }
 
 reject_case! {
@@ -205,11 +197,11 @@ reject_case! {
     /// `Square`, so the projection is rejected naming the field, type, and the
     /// variant that lacks it.
     field_not_on_every_variant_is_error: (
-        "type Shape { Circle(r Int) Square(side Int) }\nfn g(s Shape) Int { s.r }\n",
+        "type Shape {\n\tCircle(r Int)\n\tSquare(side Int)\n}\nfn g(s Shape) Int { s.r }\n",
         "Field 'r' is not present on every variant of 'Shape' (missing on 'Square')",
     ),
     field_access_partial_is_rejected: (
-        "type Named { Person(name String age Int) Org(name String size Int) }\n\
+        "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn age_of(n Named) Int { n.age }\n\
          println(age_of(Person(name: 'al', age: 18)))\n",
         "Field 'age' is not present on every variant of 'Named' (missing on 'Org')",
@@ -253,11 +245,10 @@ reject_case! {
     ),
 }
 
-// Positive control: an all-binders tuple pattern is irrefutable and accepted,
-// so the check above fires on refutability, not on tuple destructuring itself.
-#[test]
-fn irrefutable_tuple_destructuring_binding_is_ok() {
-    check_ok("(x, y) = (1, 2)\nprintln(x + y)\n");
+ok_case! {
+    // Positive control: an all-binders tuple pattern is irrefutable and accepted,
+    // so the check above fires on refutability, not on tuple destructuring itself.
+    irrefutable_tuple_destructuring_binding_is_ok: ("(x, y) = (1, 2)\nprintln(x + y)\n"),
 }
 
 reject_case! {
@@ -275,12 +266,11 @@ reject_case! {
         ("x = Some(5) or v -> 0\nprintln(x)\n", "'or' on an Option does not bind a value"),
 }
 
-// Positive control: the same `or` on the same `Option` without a receiver is
-// accepted, so the diagnostic above fires on the value-binding receiver, not
-// on `or` over an `Option`.
-#[test]
-fn or_without_receiver_on_option_is_ok() {
-    check_ok("x = Some(5) or 0\nprintln(x)\n");
+ok_case! {
+    // Positive control: the same `or` on the same `Option` without a receiver is
+    // accepted, so the diagnostic above fires on the value-binding receiver, not
+    // on `or` over an `Option`.
+    or_without_receiver_on_option_is_ok: ("x = Some(5) or 0\nprintln(x)\n"),
 }
 
 reject_case! {
@@ -304,11 +294,10 @@ reject_case! {
     ),
 }
 
-// And the local type keeps working on its own terms next to the import: each
-// `Parsed` answers for its own constructors and exhaustiveness.
-#[test]
-fn same_named_local_and_stdlib_types_coexist() {
-    check_ok(
+ok_case! {
+    // And the local type keeps working on its own terms next to the import: each
+    // `Parsed` answers for its own constructors and exhaustiveness.
+    same_named_local_and_stdlib_types_coexist: (
         "import al/binary\n\
          import al/http/h1.{Done, NeedMore, Bad}\n\
          type Parsed {\n\
@@ -327,5 +316,43 @@ fn same_named_local_and_stdlib_types_coexist() {
          \tBad(s) -> s\n\
          }\n\
          println(remote + local_value(LocalDone(41)))\n",
+    ),
+}
+
+/// Constructor arguments are typechecked in *declared-field* order, whatever
+/// order the labels are written in, so the diagnostics come out in field order.
+/// The check walk records its types in source order (the elaborator spills the
+/// arguments into `Let`s in source order), and it would be easy to let the
+/// recording order drag the checking order along with it.
+#[test]
+fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
+    let out = common::run_source(
+        "check",
+        "type P {\n\tx Int\n\ty Int\n}\np = P(y: 'why', x: 'ex')\n",
+    );
+    let text = out.combined();
+    let x_at = text
+        .find("5:20")
+        .expect("expected a diagnostic on `x: 'ex'`");
+    let y_at = text
+        .find("5:10")
+        .expect("expected a diagnostic on `y: 'why'`");
+    assert!(
+        x_at < y_at,
+        "expected the `x` field's diagnostic before the `y` field's:\n{text}"
+    );
+}
+
+/// A `..base` spread unifies the constructor's result type — and with it its
+/// type parameters — before any argument is checked, so a function-literal
+/// argument still gets a concrete parameter type pushed into it.
+#[test]
+fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
+    common::run_outputs(
+        "type Pair(a) {\n\tfst a\n\tsnd fn(a) a\n}\n\
+         p = Pair(1, fn(x) { x + 1 })\n\
+         q = Pair(snd: fn(x) { x * 2 }, ..p)\n\
+         println(q.snd(q.fst))\n",
+        "2\n",
     );
 }

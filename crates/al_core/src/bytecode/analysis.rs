@@ -16,7 +16,9 @@
 //! |      | signatures                                                    |
 //! | 3.5  | hydrate constructor bodies; define ctor values                |
 //! | 4    | build the fn/const call graph; Tarjan SCC                     |
-//! | 5    | infer + compile each SCC, callees first; generalize per SCC   |
+//! | 5    | infer each SCC, callees first; generalize per SCC; then walk  |
+//! |      | the non-declaration nodes                                     |
+//! | 6    | elaborate every parked body to Core IR and bytecode           |
 //!
 //! Pass 5 hands each body to `compiler.rs` (`compile_declared_function` /
 //! `compile_expr_with_hint`). Members of one SCC are inferred at a single
@@ -24,6 +26,19 @@
 //! together afterwards, so mutual recursion typechecks monomorphically
 //! inside the group and polymorphically outside it. Non-declaration nodes
 //! (let bindings, bare expressions) run last, in source order.
+//!
+//! Pass 6 is a *phase boundary*, not a step of pass 5. The whole of pass 5 is
+//! bracketed by one `begin_deferred_elaboration`/`end_deferred_elaboration`
+//! pair, so no body — declared fn, nested lambda, or a lambda bound by a
+//! toplevel `let` — is lowered or emitted while the module is being
+//! typechecked. Pass 6 is the single loop that drains them.
+//!
+//! Two things make that boundary worth having. Types: the fused pipeline
+//! lowered a body while the SCC around it was still being inferred, handing
+//! `lower` a var that `generalize_top` or a later sibling was about to move.
+//! Shape: with emit hoisted out of the walk, the walk's product is the module
+//! as a whole, which is what `lower(p: &TypedProgram) -> CoreProgram` consumes
+//! — a per-SCC drain could only ever have fed it one SCC at a time.
 //!
 //! # Invariant: per-decl data is positional, never name-keyed
 //!
@@ -40,12 +55,13 @@ use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 use super::Op;
-use super::compiler::Compiler;
+use super::compiler::{Compiler, ToplevelDecl};
 use crate::ast;
 use crate::module::{self, ExportedValue, ModuleInterface};
 use crate::reference::DefId;
 use crate::span::Span;
 use crate::type_def::TypeId;
+use crate::typed_ir::GlobalSlot;
 use crate::types::{
     AddedTypeVar, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, NO_STR, Scheme, StrId, Ty,
     TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
@@ -61,10 +77,14 @@ enum Decl<'a> {
         fd: &'a ast::FunctionDeclaration,
         is_pub: bool,
         body: &'a ast::Expression,
+        /// Index of this declaration in the module block's `body`.
+        node: usize,
     },
     Const {
         cb: &'a ast::ConstBinding,
         is_pub: bool,
+        /// Index of this declaration in the module block's `body`.
+        node: usize,
     },
 }
 
@@ -73,6 +93,14 @@ impl<'a> Decl<'a> {
         match self {
             Decl::Fn { fd, .. } => &fd.identifier.name,
             Decl::Const { cb, .. } => &cb.identifier.name,
+        }
+    }
+
+    /// The declaration's position in the module block's `body`. This — not its
+    /// name — is what the toplevel elaboration schedules on.
+    fn node(&self) -> usize {
+        match *self {
+            Decl::Fn { node, .. } | Decl::Const { node, .. } => node,
         }
     }
 }
@@ -103,6 +131,26 @@ enum Prepared<'a> {
 }
 
 impl<'a> Prepared<'a> {
+    /// A function's parameter names, in declaration order; empty otherwise.
+    /// Documentation only — see `ExportedValue::param_names`.
+    fn param_names(&self) -> Vec<String> {
+        match self {
+            Prepared::Fn { fd, .. } => fd
+                .params
+                .iter()
+                .map(|p| p.identifier.name.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn doc(&self) -> Option<String> {
+        match self {
+            Prepared::Fn { fd, .. } => fd.doc.clone(),
+            Prepared::Const { cb, .. } => cb.doc.clone(),
+        }
+    }
+
     fn name(&self) -> &'a str {
         match self {
             Prepared::Fn { fd, .. } => &fd.identifier.name,
@@ -182,12 +230,18 @@ impl Compiler {
     /// Analyse a module body. When `iface` is `Some` the module is being
     /// compiled as an import and its `pub` items are recorded into the
     /// interface; when `None` it is the entry module.
+    ///
+    /// The caller owns the enclosing `env` scope: this walk defines value
+    /// schemes (constructors, fns, consts) into whatever scope is current on
+    /// entry and does *not* pop it, so the entry-file caller can keep those
+    /// schemes visible across the subsequent Core `lower_body` on `__main__`
+    /// (which re-resolves ctor names via `LowerCtx::resolve_name`). Import
+    /// callers bracket the call with their own `push_scope`/`pop_scope`.
     pub(super) fn analyse_module(
         &mut self,
         block: &ast::BlockExpression,
         mut iface: Option<&mut ModuleInterface>,
     ) {
-        self.env.push_scope();
         self.push_local_scope();
 
         // -------------------------------------------------------------------
@@ -204,7 +258,7 @@ impl Compiler {
 
         let in_stdlib = self.current_module.first().map(String::as_str) == Some("al");
 
-        for node in &block.body {
+        for (node_idx, node) in block.body.iter().enumerate() {
             match node {
                 ast::Node::Statement(stmt) => match stmt.as_ref() {
                     ast::Statement::Declaration { decl, public } => {
@@ -249,6 +303,7 @@ impl Compiler {
                                             fd,
                                             is_pub: is_public,
                                             body,
+                                            node: node_idx,
                                         }),
                                     }
                                 }
@@ -258,6 +313,7 @@ impl Compiler {
                                     decls.push(Decl::Const {
                                         cb,
                                         is_pub: is_public,
+                                        node: node_idx,
                                     });
                                 }
                             }
@@ -336,19 +392,46 @@ impl Compiler {
             self.env.define_at(name, scheme, dl);
             self.env.store_doc_opt(name, &fd.doc);
             self.emit_def(dl, name, fd.doc.clone(), is_pub);
+            let defid = self.defid_of(dl);
+            let names = fd
+                .params
+                .iter()
+                .map(|p| p.identifier.name.clone())
+                .collect();
+            self.module_refs.set_param_names(defid, names);
             self.record(name, scheme.ty, fd.identifier.span, fd.doc.clone());
-            export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
+            let params = fd
+                .params
+                .iter()
+                .map(|p| p.identifier.name.clone())
+                .collect();
+            export_value(
+                iface.as_deref_mut(),
+                name,
+                is_pub,
+                scheme,
+                None,
+                params,
+                fd.doc.clone(),
+            );
         }
 
+        // Not `get_or_create_local`: a decl's slot is published to the toplevel
+        // elaboration by `toplevel_decls` (recorded in SCC order in Pass 5,
+        // below), not by the module-scope bind queue `bind_local` feeds. Only
+        // `let`/destructuring binds — which have no `Decl` to hang a slot on —
+        // go through that queue.
         let slots: Vec<i32> = decls
             .iter()
-            .map(|d| self.get_or_create_local(d.name()))
+            .map(|d| self.alloc_decl_slot(d.name()))
             .collect();
 
         let mut prepared: Vec<Prepared> = Vec::with_capacity(decls.len());
         for (d, &slot) in decls.iter().zip(&slots) {
             let p = match *d {
-                Decl::Fn { fd, is_pub, body } => {
+                Decl::Fn {
+                    fd, is_pub, body, ..
+                } => {
                     let FnSig {
                         hydrator,
                         param_tys,
@@ -377,7 +460,7 @@ impl Compiler {
                         hydrator,
                     }
                 }
-                Decl::Const { cb, is_pub } => Prepared::Const { cb, is_pub, slot },
+                Decl::Const { cb, is_pub, .. } => Prepared::Const { cb, is_pub, slot },
             };
             prepared.push(p);
         }
@@ -399,12 +482,50 @@ impl Compiler {
         // an index into `prepared`, so the per-decl data is reached
         // positionally and the match is exhaustive — no name lookups, no
         // "this can't happen" fallbacks.
+        //
+        // THE PHASE BOUNDARY. Everything from here to `end_deferred_elaboration`
+        // below is the typecheck/elaborate walk: it infers types, reserves
+        // `Function` slots and records capture shapes, and emits *no* body
+        // bytecode. Every body it walks — declared fn, nested lambda, a lambda
+        // bound by a toplevel `let` — is parked in `deferred_bodies`. The Core
+        // pipeline (`lower` → `perceus` → `emit`) then runs once, in one loop,
+        // over the parked bodies after the whole module has been walked. That
+        // is the shape `lower(p: &TypedProgram) -> CoreProgram` needs: a
+        // whole-module IR handed to a lowering that runs strictly after
+        // inference, never inside it.
+        //
+        // Draining per-SCC (as this used to) was already enough for *types* —
+        // an SCC's types are final once it has been generalized — but it left
+        // `emit` interleaved with the walk, so `lower` could never be handed
+        // the module as a whole. Draining once, at the end, is strictly more
+        // resolved: a later SCC never touches an earlier one's vars.
+        //
+        // A parked body's frame/scope snapshot (`DeferredBody::outer_scopes` /
+        // `capture_env`) is *not* enough on its own, though: `resolve_name`
+        // re-reads `self.env` at drain time for a free name's `Ty` and
+        // `ValueKind`, and a toplevel `let` overwrites a same-scope binding in
+        // place. `pin_deferred_env` below freezes the env the decl walk saw so
+        // a later `let` cannot re-point a name a decl body already resolved.
         // -------------------------------------------------------------------
+        self.begin_deferred_elaboration();
         for scc in &sccs {
             self.engine.enter_level();
             let mut inferred: Vec<(usize, Ty)> = Vec::with_capacity(scc.len());
 
             for &idx in scc {
+                // Publish this decl to the toplevel elaboration: the body node
+                // it occupies, and the entry-frame slot Pass 3 gave it. Pushed
+                // in SCC-visit order, so the elaborated toplevel spine
+                // initialises dependencies first (mirrors this loop's own
+                // `StoreLocal` order) and a forward-referenced `const` is
+                // stored before it is read. Overwritten per module, cleared to
+                // the entry file's own decls at `code_mark`.
+                let name_id = self.engine.intern(prepared[idx].name());
+                self.toplevel_decls.push(ToplevelDecl {
+                    node: decls[idx].node(),
+                    name: name_id,
+                    slot: GlobalSlot(slots[idx]),
+                });
                 match &prepared[idx] {
                     Prepared::Fn {
                         fd,
@@ -417,12 +538,16 @@ impl Compiler {
                     } => {
                         let name = &fd.identifier.name;
                         let m = self.current_module_slice();
-                        self.emit_def(
-                            DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function),
-                            name,
-                            fd.doc.clone(),
-                            *is_pub,
-                        );
+                        let dl =
+                            DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
+                        self.emit_def(dl, name, fd.doc.clone(), *is_pub);
+                        let defid = self.defid_of(dl);
+                        let names = fd
+                            .params
+                            .iter()
+                            .map(|p| p.identifier.name.clone())
+                            .collect();
+                        self.module_refs.set_param_names(defid, names);
                         // Attribute every reference emitted while this body is
                         // compiled to the fn's own `DefId` so the dead-code
                         // reachability walk follows def→def edges. The owner
@@ -443,11 +568,17 @@ impl Compiler {
 
                         self.env.store_doc_opt(name, &fd.doc);
                         self.record(name, fn_ty, fd.identifier.span, fd.doc.clone());
-                        self.emit_arg(Op::StoreLocal, *slot);
-
+                        // Nothing recorded for the toplevel spine to read back:
+                        // `compile_declared_function` keyed this body under the
+                        // very slot the spine stores it into, and the elaborator
+                        // asks `ElabCtx::fn_of_global` with the `GlobalSlot` it
+                        // stamped on that decl's own `TypedBind`. A top-level fn
+                        // captures nothing — sibling refs are `PushGlobal`, not
+                        // by-value captures — so there is no capture list to
+                        // carry either.
                         inferred.push((idx, fn_ty));
                     }
-                    Prepared::Const { cb, is_pub, slot } => {
+                    Prepared::Const { cb, is_pub, .. } => {
                         let name = &cb.identifier.name;
                         let m = self.current_module_slice();
                         self.emit_def(
@@ -470,8 +601,6 @@ impl Compiler {
                         });
                         self.env.store_doc_opt(name, &cb.doc);
                         self.record(name, final_ty, cb.identifier.span, cb.doc.clone());
-                        self.emit_arg(Op::StoreLocal, *slot);
-
                         inferred.push((idx, final_ty));
                     }
                 }
@@ -505,27 +634,44 @@ impl Compiler {
                     p.is_pub(),
                     s,
                     Some(p.slot()),
+                    p.param_names(),
+                    p.doc(),
                 );
             }
         }
 
         // -------------------------------------------------------------------
         // Other nodes (let bindings, bare expressions) — linear walk.
+        //
+        // The decl bodies parked above have not lowered yet, and a `let` here
+        // may shadow a name one of them resolved (`println = 5` after a decl
+        // that calls `println`). Freeze the env they were walked against; the
+        // drain restores it around them.
         // -------------------------------------------------------------------
-        let last_idx = other_nodes.len().saturating_sub(1);
-        for (i, node) in other_nodes.iter().enumerate() {
-            let is_last = i == last_idx && iface.is_none();
+        if !other_nodes.is_empty() {
+            self.pin_deferred_env();
+        }
+        // The only walk allowed to fill the positional `toplevel_binds` queue:
+        // the toplevel elaboration drains it against exactly these nodes, in
+        // this order. Nested walks (a lambda body, a deferred decl) re-enter
+        // `compile_node` from here, but they push `outer_scopes`/`scope_marks`,
+        // which `bind_local` also checks.
+        let outer_walk = std::mem::replace(&mut self.walking_module_statements, true);
+        for node in &other_nodes {
             let _ty = self.compile_node(node);
-            if !is_last && matches!(node, ast::Node::Expression(_)) {
-                self.emit(Op::Pop);
-            }
         }
-        if iface.is_none() && !matches!(other_nodes.last(), Some(ast::Node::Expression(_))) {
-            self.emit(Op::PushNil);
-        }
+        self.walking_module_statements = outer_walk;
+
+        // End of the walk; start of the Core pipeline. Types are final —
+        // `lower` reads `find()`-resolved types, and every var any SCC was ever
+        // going to solve is solved. What none of them solved is now `Generic`,
+        // which matters to `zonk` (a `Generic` root is quantifiable, an
+        // `Unbound` one is an error) and to nothing else downstream: `lower`,
+        // `perceus` and `emit` never read `root_var`. Do not read this as an
+        // opcode win — the opcode mix is unchanged on the T0 corpus.
+        self.end_deferred_elaboration();
 
         self.pop_local_scope();
-        self.env.pop_scope();
     }
 
     fn hydrate_type_params(
@@ -768,10 +914,31 @@ impl Compiler {
                     EntityKind::Constructor,
                     ctors_public,
                 );
+                let dl = DefinitionLocation::new(
+                    ctor.identifier.span,
+                    c.current_module_slice(),
+                    EntityKind::Constructor,
+                );
+                let defid = c.defid_of(dl);
+                let labels = c.engine.strs_of(field_labels);
+                c.module_refs.set_param_names(defid, labels);
                 if is_public {
                     // Opaque ctors are recorded as private so importers get a
                     // "constructor is private" hint instead of "unknown name".
-                    export_value(iface.as_deref_mut(), name, ctors_public, scheme, None);
+                    // A constructor's field labels ARE semantic — they live in
+                    // `ValueKind::Constructor.field_labels`. Mirror them here so
+                    // hover can render `NotFound fn(path String) IoError`
+                    // without reaching back into the engine's string pool.
+                    let labels = c.engine.strs_of(field_labels);
+                    export_value(
+                        iface.as_deref_mut(),
+                        name,
+                        ctors_public,
+                        scheme,
+                        None,
+                        labels,
+                        ctor.doc.clone(),
+                    );
                 }
             }
         });
@@ -840,12 +1007,16 @@ fn export_value(
     is_pub: bool,
     scheme: Scheme,
     slot: Option<i32>,
+    param_names: Vec<String>,
+    doc: Option<String>,
 ) {
     let Some(iface) = iface else { return };
     if is_pub {
         let ev = ExportedValue {
             scheme,
             local_slot: slot,
+            param_names,
+            doc,
         };
         iface.values.insert(name.to_string(), ev);
     } else {

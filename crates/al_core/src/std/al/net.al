@@ -1,7 +1,7 @@
 import al/net/address.{SocketAddress, IpAddress}
 import al/net/socket.{Socket}
 import al/net/error.{NetError, ConnectionAborted, ConnectionReset, Errno}
-import al/experiments/scheduler
+import al/scheduler
 
 pub type Server
 

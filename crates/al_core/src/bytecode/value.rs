@@ -71,8 +71,11 @@
 //! `pub(crate) unsafe fn`s that hand layout knowledge to `heap::proc_heap` — they
 //! never leave the crate:
 //!
-//! - `for_each_child`: object tracing, used by the free-at-zero work list and
-//!   by the spawn/freeze graph copies (`rc_copy_graph`/`rc_publish_graph`).
+//! - `for_each_child_slot`: the one layout table for object tracing. Its
+//!   `&mut` face `for_each_child` (free-at-zero work list, spawn/freeze graph
+//!   copies — `rc_copy_graph`/`rc_publish_graph`) demands exclusive ownership
+//!   of the object; the safe shared face [`Value::for_each_child_ref`] does
+//!   not, and is the only one that may walk immortal objects.
 //! - `binary_clone_backing` / `binary_drop_backing`: the `Binary` backing
 //!   `Arc`'s ownership — bumped when a binary is copied into a child/frozen
 //!   graph, released when the box is freed.
@@ -368,6 +371,82 @@ fn alloc_obj<A: Arena + ?Sized>(
     }
     // SAFETY: freshly allocated, in bounds.
     unsafe { obj.as_ptr().write(header) };
+    obj
+}
+
+/// A Perceus reuse address: a uniquely-owned mortal cell (rc==1) whose
+/// allocation a following constructor will overwrite in place, or `None` for
+/// the fresh-allocate fallback. Opaque so the only way to obtain a `Some` is
+/// [`Value::into_reuse_addr`], which upholds the pointer/rc invariant — the
+/// `*_reuse_in` constructors are therefore safe to call from the
+/// `#![deny(unsafe_code)]` VM crate.
+///
+/// Owns the cell's rc==1 count while held. NOT `Drop`: an unconsumed
+/// `Some(addr)` would leak the cell — every `ReuseAddr` is passed straight to
+/// a constructor, which either overwrites it (reuse) or ignores it (`None`).
+#[derive(Debug)]
+pub struct ReuseAddr(Option<NonNull<u64>>);
+
+impl ReuseAddr {
+    /// The fresh-allocate fallback (no cell to reuse).
+    #[inline(always)]
+    pub const fn none() -> ReuseAddr {
+        ReuseAddr(None)
+    }
+}
+
+/// Allocate a fresh object, or — Perceus reuse — overwrite `reuse` in place.
+///
+/// A reused cell is a mortal allocation the compiler paired with this
+/// constructor: `Op::Reuse` transferred the frame's uniquely-owned (rc==1)
+/// value onto the operand stack, and the VM handler consumed it via
+/// [`Value::into_reuse_addr`], which forwarded the cell's address here with
+/// its refcount still 1. This writes the new header and leaves rc at 1 (the
+/// constructing handle inherits the count), so the caller writes payload
+/// exactly as it would for a fresh `alloc_obj`.
+///
+/// The cell's old children need no release here: the only producer of a
+/// `Some` address is `Op::Drop` → [`Value::hollow_for_reuse`], which released
+/// them and overwrote every child slot with an immediate at the drop point.
+/// (That is what makes reuse propagate down a recursive chain at all.) A
+/// second `for_each_child` walk would therefore only re-visit sentinels — pure
+/// cost on the hottest constructor path. Debug builds assert the invariant.
+///
+/// `ReuseAddr::none()` is the fresh-allocation path and is identical to
+/// `alloc_obj(a, tag, payload_words, false)`.
+#[inline]
+fn reuse_or_alloc<A: Arena + ?Sized>(
+    a: &mut A,
+    reuse: ReuseAddr,
+    tag: HeapTag,
+    payload_words: usize,
+) -> NonNull<u64> {
+    let Some(obj) = reuse.0 else {
+        return alloc_obj(a, tag, payload_words, false);
+    };
+    // SAFETY: `ReuseAddr(Some(_))` is only produced by `into_reuse_addr` from
+    // a uniquely-owned mortal heap value, so `obj` is a live mortal header at
+    // rc==1. The compiler's frame-limited same-shape pairing guarantees its
+    // allocation is `1 + payload_words` words, and `hollow_for_reuse` already
+    // released its children, so overwriting the header and the payload words
+    // is the whole job.
+    unsafe {
+        debug_assert!(!a.marks_immortal(), "Perceus reuse into a frozen arena");
+        debug_assert_eq!(
+            header_total_words(*obj.as_ptr()),
+            1 + payload_words,
+            "Perceus reuse shape mismatch"
+        );
+        debug_assert_eq!(*rc_slot(obj.as_ptr()), 1, "Perceus reuse of a shared cell");
+        #[cfg(debug_assertions)]
+        for_each_child(obj.as_ptr(), &mut |child: &mut Value| {
+            debug_assert!(
+                !child.is_heap() || child.is_immortal(),
+                "Perceus reuse of a cell holding a live mortal child"
+            );
+        });
+        obj.as_ptr().write(pack_header(tag, payload_words, false));
+    }
     obj
 }
 
@@ -901,6 +980,31 @@ impl Value {
         }
     }
 
+    /// Visit every immediate child `Value` of `self` — the safe, read-only
+    /// face of the layout table `for_each_child_slot` holds, for callers
+    /// that walk a value graph without touching it. Non-heap values have no
+    /// children. Interior nodes (a `Seq`'s leaves and branches, a HAMT's
+    /// branches and entries) are descended through transparently, so the
+    /// visited children include ones that [`Value::kind`] hides behind a
+    /// root; a caller that recurses here sees every `Value` in the graph.
+    ///
+    /// The callback receives a shared reference, so the walk is sound on
+    /// objects nothing owns exclusively — immortal frozen objects shared by
+    /// every scheduler thread, in particular — and the callback may recurse
+    /// into other arena objects (the arena never moves and this walk never
+    /// writes).
+    #[inline]
+    pub fn for_each_child_ref(&self, mut f: impl FnMut(&Value)) {
+        if !self.is_heap() {
+            return;
+        }
+        // SAFETY: a heap value points at a live arena object header, and the
+        // slot pointers are only ever reborrowed as `&Value` — never `&mut` —
+        // so the walk cannot conflict with a shared reference (an
+        // `EnumRef::payload`, a `ClosureRef::captures`) into the same slot.
+        unsafe { for_each_child_slot(self.heap_obj(), &mut |p: *mut Value| f(&*p)) }
+    }
+
     #[inline(always)]
     pub(crate) fn heap_obj(&self) -> *const u64 {
         debug_assert!(self.is_heap());
@@ -934,6 +1038,72 @@ impl Value {
     #[inline(always)]
     pub fn is_immortal(&self) -> bool {
         self.is_heap() && (self.0 & VALUE_IMMORTAL != 0)
+    }
+
+    /// Whether this heap value is uniquely owned — its refcount is exactly 1 —
+    /// so a Perceus reuse may overwrite its allocation in place. Immediates and
+    /// immortal (frozen) values return `false`: they carry no refcount slot and
+    /// are never eligible for reuse.
+    #[inline(always)]
+    pub fn is_unique(&self) -> bool {
+        if !self.is_heap() || self.is_immortal() {
+            return false;
+        }
+        // SAFETY: a mortal heap object carries a refcount slot one word before
+        // its header (`rc_slot`); the count is initialized at allocation.
+        unsafe { *rc_slot(self.heap_obj()) == 1 }
+    }
+
+    /// Perceus `Op::Drop` on a uniquely-owned cell: release every child in
+    /// place (each decref runs its own free-at-zero traversal) and overwrite
+    /// its slot with a non-heap sentinel, leaving the allocation "hollow" —
+    /// header intact, rc still 1, no live children. A following same-shape
+    /// constructor overwrites it via [`reuse_or_alloc`], whose second
+    /// `for_each_child` release is then a no-op on the sentinels. Hollowing at
+    /// the drop point (not at the constructor) is what makes reuse propagate:
+    /// the recursive `map(t, f)` receives `t` at rc==1 only because the parent
+    /// cons released its child ref *before* the call. No-op on shared /
+    /// immortal / immediate values (caller releases those normally).
+    pub fn hollow_for_reuse(&mut self) {
+        if !self.is_unique() {
+            return;
+        }
+        // SAFETY: rc==1 makes this the sole owner, so mutating the payload
+        // in place is sound. `for_each_child` visits exactly the child-typed
+        // words per the header's tag; assigning through the `&mut Value` view
+        // drops the old child (one decref) and writes an immediate.
+        //
+        // Immediates and frozen children own nothing, so there is no reference
+        // to give back — and the paired constructor rewrites every child word
+        // of a same-shape cell regardless. Skipping their stores keeps the
+        // hollow of an all-scalar record (the `dot_loop` bench shape: three
+        // `Int` fields plus three immortal name words) down to the walk itself.
+        unsafe {
+            for_each_child(self.heap_obj() as *mut u64, &mut |c: &mut Value| {
+                if c.is_heap() && !c.is_immortal() {
+                    *c = Value::small_int(0);
+                }
+            });
+        }
+    }
+
+    /// Consume a Perceus reuse token pushed by `Op::Reuse`. The token is
+    /// either a uniquely-owned mortal heap value (rc==1) — its cell is to be
+    /// overwritten in place — or `nil` (allocate fresh). On reuse the value's
+    /// one reference count transfers to the returned [`ReuseAddr`]: the caller
+    /// passes it to a `*_reuse_in` constructor, whose result inherits the
+    /// count. On `none` the token drops as a no-op (nil / immortal).
+    #[inline(always)]
+    pub fn into_reuse_addr(self) -> ReuseAddr {
+        if !self.is_heap() || self.is_immortal() {
+            return ReuseAddr::none();
+        }
+        debug_assert!(self.is_unique(), "reuse token must be uniquely owned");
+        let addr = NonNull::new(self.heap_obj() as *mut u64);
+        // Ownership of the rc==1 count now lives in the raw address; don't
+        // let `Drop` decrement it.
+        std::mem::forget(self);
+        ReuseAddr(addr)
     }
 
     // ---- classifiers ----------------------------------------------------------
@@ -1098,6 +1268,8 @@ impl Value {
         }
     }
 
+    /// As [`Value::tuple_in`], overwriting `reuse` in place when it names a
+    /// cell (see [`reuse_or_alloc`] for the Perceus contract).
     /// Allocation: `2 + elements.len()` words.
     pub fn tuple_in<A: Arena + ?Sized>(a: &mut A, elements: &[Value]) -> Value {
         let obj = alloc_obj(a, HeapTag::Tuple, 1 + elements.len(), false);
@@ -1127,6 +1299,8 @@ impl Value {
         }
     }
 
+    /// As [`Value::closure_in`], overwriting `reuse` in place when it names a
+    /// cell (see [`reuse_or_alloc`] for the Perceus contract).
     /// Allocation: `3 + captures.len()` words.
     pub fn closure_in<A: Arena + ?Sized>(a: &mut A, func_idx: i32, captures: &[Value]) -> Value {
         let obj = alloc_obj(a, HeapTag::Closure, 2 + captures.len(), false);
@@ -1159,6 +1333,7 @@ impl Value {
     /// (the VM path) or go through [`Value::enum_with_names_in`], which
     /// computes it.
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     pub fn enum_in<A: Arena + ?Sized>(
         a: &mut A,
         type_id: TypeId,
@@ -1169,11 +1344,38 @@ impl Value {
         labels: Value,
         payload: &[Value],
     ) -> Value {
+        Value::enum_reuse_in(
+            a,
+            ReuseAddr::none(),
+            type_id,
+            variant_idx,
+            hash,
+            enum_name,
+            variant_name,
+            labels,
+            payload,
+        )
+    }
+
+    /// As [`Value::enum_in`], overwriting `reuse` in place when it names a
+    /// cell (see [`reuse_or_alloc`] for the Perceus contract).
+    #[allow(clippy::too_many_arguments)]
+    pub fn enum_reuse_in<A: Arena + ?Sized>(
+        a: &mut A,
+        reuse: ReuseAddr,
+        type_id: TypeId,
+        variant_idx: u16,
+        hash: u64,
+        enum_name: Value,
+        variant_name: Value,
+        labels: Value,
+        payload: &[Value],
+    ) -> Value {
         debug_assert!(enum_name.is_tag(HeapTag::Str) && variant_name.is_tag(HeapTag::Str));
         debug_assert!(labels.is_tag(HeapTag::Tuple));
-        let obj = alloc_obj(a, HeapTag::Enum, 6 + payload.len(), false);
+        let obj = reuse_or_alloc(a, reuse, HeapTag::Enum, 6 + payload.len());
         // SAFETY: payload sized for the 6 fixed words plus the payload values;
-        // header written by `alloc_obj`.
+        // header written by `reuse_or_alloc`.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write((type_id.0 as u32 as u64) | ((variant_idx as u64) << 32));
@@ -1873,26 +2075,34 @@ impl<'a> SeqRef<'a> {
 
 // ---- object tracing -------------------------------------------------------------
 
-/// Visit every payload slot of `obj` that holds a `Value`, in place. This is
-/// the layout knowledge the reference-counting engine traces with: raw payload
-/// words (lengths, hashes, Arc parts) are skipped; child `Value`s are visited
-/// as `&mut`. Used by the free-at-zero work list (to release children) and by
-/// the spawn/freeze graph copies (to rewrite copied child slots).
+/// The sole layout table for object tracing: yield a raw pointer to every
+/// payload slot of `obj` that holds a `Value`. Raw payload words (lengths,
+/// hashes, Arc parts) are skipped. Callers turn the slot pointer into whatever
+/// reference they are entitled to — [`for_each_child`] takes `&mut` (the
+/// free-at-zero work list, the spawn/freeze copies), [`Value::for_each_child_ref`]
+/// takes `&` (read-only graph walks).
+///
+/// Generic (not `dyn`) in the callback and `#[inline]`: this walk sits under
+/// every free-at-zero traversal and every Perceus hollow, so the tag `match`
+/// and the per-child call must fold into the caller. An indirect call per
+/// visited word cost ~9% of `bench_typed`.
 ///
 /// # Safety
 ///
-/// `obj` must point at a live arena object header, and the callback must only
-/// rewrite the visited slot (no reads of other arena state mid-walk).
-pub(crate) unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)) {
+/// `obj` must point at a live arena object header. The slot pointers are only
+/// valid for the duration of the walk; forming a `&mut Value` from one
+/// additionally requires that no other reference to that slot is live.
+#[inline]
+pub(crate) unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, f: &mut F) {
     // SAFETY (whole body): the header declares the payload length; every slot
     // index below stays within it per the layouts in the module docs.
     unsafe {
         let h = *obj;
         debug_assert!(header_marks_object(h));
         let p = obj.add(1);
-        let visit = |start: usize, n: usize, f: &mut dyn FnMut(&mut Value)| {
+        let visit = |start: usize, n: usize, f: &mut F| {
             for i in start..start + n {
-                f(&mut *(p.add(i) as *mut Value));
+                f(p.add(i) as *mut Value);
             }
         };
         match header_tag(h) {
@@ -1937,6 +2147,24 @@ pub(crate) unsafe fn for_each_child(obj: *mut u64, f: &mut dyn FnMut(&mut Value)
             }
         }
     }
+}
+
+/// Visit every child `Value` of `obj` as `&mut`, in place — the mutating face
+/// of [`for_each_child_slot`]. Used by the free-at-zero work list (to release
+/// children) and by the spawn/freeze graph copies (to rewrite copied slots).
+///
+/// # Safety
+///
+/// `obj` must point at a live arena object header that the caller owns
+/// exclusively (a private mortal object, never a shared immortal one), and the
+/// callback must only rewrite the visited slot — no reads of other arena state
+/// mid-walk, since the visited slot is uniquely borrowed for the call.
+#[inline]
+pub(crate) unsafe fn for_each_child<F: FnMut(&mut Value)>(obj: *mut u64, f: &mut F) {
+    // SAFETY: forwarded from this function's own contract; the slot pointers
+    // the core yields are in-bounds payload words of a live object, and the
+    // caller's exclusive ownership makes the `&mut` unique.
+    unsafe { for_each_child_slot(obj as *const u64, &mut |p: *mut Value| f(&mut *p)) }
 }
 
 /// Bump the backing `Arc` of the `Binary` box at `obj` by one strong count.
@@ -2150,6 +2378,14 @@ pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
 /// long cons list) cannot overflow the native stack the way recursive `Drop`
 /// would. Immediates and immortal (frozen) values are no-ops. Takes raw bits
 /// (not a `Value`) so it never constructs another droppable value.
+///
+/// This is the single hottest function in the VM: every `Value` drop, every
+/// overwritten stack slot, every Perceus `Op::Drop` and every hollowed child
+/// goes through it, and the overwhelming majority are immediates or frozen
+/// constants. So the two bit tests and the decrement inline into the caller,
+/// and only the free-at-zero traversal — which needs the thread-local work list
+/// — stays behind an out-of-line `#[cold]` call.
+#[inline]
 pub(crate) fn release_bits(bits: u64) {
     // Mortal-heap test, pure bit math: bail for immediates (not heap) and for
     // immortal/frozen values (marker set). Crucially this NEVER reads the
@@ -2163,13 +2399,81 @@ pub(crate) fn release_bits(bits: u64) {
     if !unsafe { rc_decrement_is_zero(obj) } {
         return;
     }
+    // SAFETY: the count just reached zero, so this frame is the sole owner.
+    unsafe { release_at_zero(obj) };
+}
+
+/// Free `obj` — whose refcount just hit zero — and everything it transitively
+/// owns. Out-of-line and `#[cold]`: keeping the thread-local `DROP_STACK`
+/// access out of [`release_bits`] is what lets its fast path inline.
+///
+/// Freeing one object drives *at most one* child to zero in the overwhelmingly
+/// common cases (a value with no heap children; a list/chain spine; a tree node
+/// whose children outlive it because a `Drop` released the parent first). Those
+/// need no work list at all: the loop below just walks the chain. Only when a
+/// single object orphans a *second* child — the branching free of a whole tree
+/// — does it fall back to [`release_pending`] and the thread-local stack, which
+/// is what keeps the traversal iterative rather than recursive.
+///
+/// # Safety
+/// `obj` must be a live mortal heap object at count 0, not yet freed.
+#[cold]
+#[inline(never)]
+unsafe fn release_at_zero(mut obj: *mut u64) {
+    debug_assert!(
+        DROP_STACK.with(|cell| cell.borrow().is_empty()),
+        "drop stack must be empty between releases"
+    );
+    loop {
+        // The first child driven to zero continues the chain in this frame;
+        // any further ones spill onto the work list.
+        let mut next: *mut u64 = std::ptr::null_mut();
+        let mut spilled = false;
+        // SAFETY: `obj` is a mortal heap object at count 0 awaiting free; its
+        // child slots stay live until `free_object`.
+        unsafe {
+            for_each_child(obj, &mut |child: &mut Value| {
+                if !child.is_heap() || child.is_immortal() {
+                    return;
+                }
+                let c = child.heap_obj() as *mut u64;
+                if !rc_decrement_is_zero(c) {
+                    return;
+                }
+                if next.is_null() {
+                    next = c;
+                } else {
+                    spilled = true;
+                    DROP_STACK.with(|cell| cell.borrow_mut().push(c));
+                }
+            });
+            free_object(obj);
+        }
+        if spilled {
+            // SAFETY: `next` is non-null whenever `spilled` (it is set by the
+            // first zero-child, the spill by a later one) and names a mortal
+            // object at count 0, as does every pointer already on the stack.
+            return unsafe { release_pending(next) };
+        }
+        if next.is_null() {
+            return;
+        }
+        obj = next;
+    }
+}
+
+/// Drain the thread-local work list, starting from `seed`. Reached only from
+/// [`release_at_zero`]'s branching case.
+///
+/// # Safety
+/// `seed` and every pointer already on `DROP_STACK` must be a live mortal heap
+/// object at count 0, not yet freed.
+#[cold]
+#[inline(never)]
+unsafe fn release_pending(seed: *mut u64) {
     DROP_STACK.with(|cell| {
         let mut stack = cell.borrow_mut();
-        debug_assert!(
-            stack.is_empty(),
-            "drop stack must be empty between releases"
-        );
-        stack.push(obj);
+        stack.push(seed);
         while let Some(obj) = stack.pop() {
             // SAFETY: every queued pointer is a mortal heap object at count 0
             // awaiting free; its child slots stay live until we free it.
@@ -2721,6 +3025,60 @@ mod tests {
         let hb = pack_header(HeapTag::Binary, 5, true);
         assert!(header_has_off_heap_link(hb));
         assert_eq!(header_tag(hb), HeapTag::Binary);
+    }
+
+    /// The Perceus in-place contract, at the `reuse_or_alloc` level: hollowing
+    /// a uniquely-owned cell releases its children, and a same-shape rebuild
+    /// then overwrites that exact allocation with rc still 1.
+    ///
+    /// Exercised through the *enum* constructor because that is the only
+    /// reachable reuse path: `lower` pairs `Drop`/`Reuse` tokens for
+    /// user-declared constructors, never for tuples or closures.
+    #[test]
+    fn perceus_reuse_overwrites_in_place_and_releases_old_children() {
+        let mut h = test_heap();
+        let a = Value::str_in(&mut h, "old-a");
+        let b = Value::str_in(&mut h, "old-b");
+        let mut old =
+            Value::enum_with_names_in(&mut h, TypeId(0), 0, "E", "V", &["x", "y"], &[a, b]);
+        let addr = old.object_addr().unwrap();
+        assert!(old.is_unique());
+
+        let _ = take_freed_objects(); // reset the counter
+        old.hollow_for_reuse();
+        let freed = take_freed_objects();
+        assert!(
+            freed >= 2,
+            "hollowing must release the payload children, freed {freed}"
+        );
+
+        // `Op::Reuse` pops the hollowed cell; a same-shape constructor builds
+        // in place, inheriting its rc==1.
+        let en = Value::str_in(&mut h, "E");
+        let vn = Value::str_in(&mut h, "V");
+        let labels = Value::tuple_in(&mut h, &[]);
+        let payload = [Value::small_int(7), Value::small_int(8)];
+        let reuse = old.into_reuse_addr();
+        let new = Value::enum_reuse_in(&mut h, reuse, TypeId(0), 0, 0, en, vn, labels, &payload);
+        assert_eq!(new.object_addr().unwrap(), addr, "same allocation reused");
+        assert!(new.is_unique(), "rc stays 1 across reuse");
+
+        // A nil token falls back to a fresh allocation.
+        let en2 = Value::str_in(&mut h, "E");
+        let vn2 = Value::str_in(&mut h, "V");
+        let labels2 = Value::tuple_in(&mut h, &[]);
+        let fresh = Value::enum_reuse_in(
+            &mut h,
+            Value::nil().into_reuse_addr(),
+            TypeId(0),
+            0,
+            0,
+            en2,
+            vn2,
+            labels2,
+            &payload,
+        );
+        assert_ne!(fresh.object_addr().unwrap(), addr);
     }
 
     #[test]

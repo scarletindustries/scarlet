@@ -13,8 +13,57 @@ pub mod stdlib;
 
 pub type ModulePath = Vec<String>;
 
+/// A module's cache key. Unique **only** because a resolved on-disk module's
+/// [`ModulePath`] is its canonical file path (see [`file_module_path`]).
+///
+/// Keying on the import *as written* was a wrong-answer bug: `./b` from two
+/// different directories both key as `"b"`, so the second import silently
+/// received the first module. Never build a key from an unresolved path.
 pub fn path_key(path: &ModulePath) -> String {
     path.join("/")
+}
+
+/// The identity of an on-disk module: the segments of its canonicalized path,
+/// `.al` stripped. `path_key` joins them back into an absolute path, so the
+/// key is globally unique; the last segment is still the module's name, so
+/// `path.last()` reads `util` and not a temp directory.
+///
+/// An absolute path's first segment is empty (`"/a/b" -> ["", "a", "b"]`),
+/// which is what [`is_resolved_file`] tests and what keeps it distinct from a
+/// stdlib path (`["al", "io"]`) or a written relative one (`[".", "b"]`).
+pub fn file_module_path(p: &Path) -> ModulePath {
+    // Absolute and lexically normalised — deliberately NOT `canonicalize()`,
+    // which resolves symlinks. On macOS a temp dir is `/var/...` but canonical
+    // `/private/var/...`, so canonicalising here made the LSP hand the editor
+    // two different URIs for one project: the entry as opened, its imports as
+    // resolved. Identity must agree with the path the editor is using.
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut out: Vec<String> = Vec::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::RootDir => out.push(String::new()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if out.len() > 1 {
+                    out.pop();
+                }
+            }
+            std::path::Component::Normal(seg) => out.push(seg.to_string_lossy().into_owned()),
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    if let Some(last) = out.last_mut()
+        && let Some(stem) = last.strip_suffix(".al")
+    {
+        *last = stem.to_string();
+    }
+    out
+}
+
+/// `true` for a [`file_module_path`] — the identity of an already-resolved
+/// on-disk module, as opposed to an import path as the user wrote it.
+pub fn is_resolved_file(path: &ModulePath) -> bool {
+    path.first().is_some_and(|s| s.is_empty())
 }
 
 /// `true` for the standard library / prelude / `@vm` intrinsics: any module
@@ -113,6 +162,19 @@ pub fn collect_al_files(dir: &Path, out: &mut Vec<PathBuf>) {
 pub struct ExportedValue {
     pub scheme: Scheme,
     pub local_slot: Option<i32>,
+    /// A function's parameter names, in order. Empty for anything else.
+    ///
+    /// Documentation, not semantics: al rejects labelled arguments outside a
+    /// constructor call, so a parameter's name never reaches a call site.
+    /// Putting it in `TypeNode::Fun` would force unification to decide whether
+    /// `fn(path String)` equals `fn(p String)` — and either the label is dead
+    /// weight in every unification, or renaming a parameter breaks callers.
+    /// Constructor field labels *are* semantic, and live in the type
+    /// (`ValueKind::Constructor { field_labels }`). These do not.
+    pub param_names: Vec<String>,
+    /// The declaration's own doc comment. Carried across module boundaries so
+    /// hovering `io.read_text` in another file shows its prose.
+    pub doc: Option<String>,
 }
 
 /// What an importer sees of a compiled module: its `pub` types and values,
@@ -124,6 +186,12 @@ pub struct ModuleInterface {
     pub types: IndexMap<String, TypeInfo>,
     pub values: IndexMap<String, ExportedValue>,
     pub private_names: HashSet<String>,
+    /// The module's own doc comment: the `/** */` block at line 0 of its
+    /// source. `None` for a module without one. Unlike every other doc in the
+    /// language, this one is carried through the precompiled stdlib blob
+    /// (`SModule::doc`) and re-seeded onto the reference graph by
+    /// `synth_refs_from_interface`, so hovering `al/scheduler` shows its prose.
+    pub doc: Option<String>,
 }
 
 impl ModuleInterface {
@@ -133,6 +201,7 @@ impl ModuleInterface {
             types: IndexMap::new(),
             values: IndexMap::new(),
             private_names: HashSet::new(),
+            doc: None,
         }
     }
 }
@@ -587,6 +656,16 @@ pub enum ResolveError {
 /// importing file, used for `./` and `../` relative imports.
 pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ModuleSource, ResolveError> {
     let key = path_key(path);
+
+    // Already resolved: a canonical file identity, independent of `base_dir`.
+    if is_resolved_file(path) {
+        let p = PathBuf::from(format!("{key}.al"));
+        return if p.is_file() {
+            Ok(ModuleSource::File(p))
+        } else {
+            Err(ResolveError::NotFound(p.display().to_string()))
+        };
+    }
 
     // Stdlib: any path rooted at `al`.
     if is_stdlib(path) {
