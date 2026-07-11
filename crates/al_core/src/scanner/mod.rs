@@ -10,6 +10,10 @@ use crate::token::{self, Kind, Token, Trivia};
 struct InterpFrame {
     quote: u8,
     brace_depth: u32,
+    // Position of the opening quote, so an unterminated interpolation
+    // abandoned at EOF can be diagnosed at the string it belongs to.
+    start_line: i32,
+    start_column: i32,
 }
 
 pub struct Scanner {
@@ -57,9 +61,13 @@ impl Scanner {
     }
 
     fn enter_interp_string(&mut self, quote: u8) {
+        // Called while the opening quote's token is being scanned, so the
+        // token-start fields still point at the quote itself.
         self.interp_stack.push(InterpFrame {
             quote,
             brace_depth: 0,
+            start_line: self.token_start_line,
+            start_column: self.token_start_column,
         });
     }
 
@@ -113,9 +121,24 @@ impl Scanner {
                 continue;
             }
 
+            // CRLF line endings: `\r\n` is one logical newline (the `\n`
+            // drives incr_pos line accounting); a lone `\r` is whitespace.
+            if ch == b'\r' {
+                self.incr_pos();
+                if self.peek_char() == b'\n' {
+                    self.incr_pos();
+                    self.pending_trivia.push(Trivia::Newline);
+                }
+                continue;
+            }
+
             if ch == b'/' && self.byte_at(self.pos + 1) == b'/' {
                 let start = self.pos;
-                while self.pos < self.input_len() && self.peek_char() != b'\n' {
+                while self.pos < self.input_len() {
+                    let c = self.peek_char();
+                    if c == b'\n' || c == b'\r' {
+                        break;
+                    }
                     self.incr_pos();
                 }
                 let text = self.slice(start, self.pos);
@@ -182,6 +205,7 @@ impl Scanner {
         if let Some(&InterpFrame {
             quote,
             brace_depth: 0,
+            ..
         }) = self.interp_stack.last()
         {
             return self.scan_interp_string_content(quote);
@@ -193,7 +217,18 @@ impl Scanner {
         self.token_start_line = self.line;
 
         if self.pos >= self.input_len() {
-            return self.new_token(Kind::Eof, None);
+            // EOF inside `${ ... }` abandons the enclosing string(s): each
+            // frame still on the stack is an unterminated string literal,
+            // diagnosed at its opening quote (the cursor is past the end of
+            // the file, so anchoring here would point at nothing).
+            while let Some(frame) = self.interp_stack.pop() {
+                self.diagnostics.push(Diagnostic::error(
+                    Span::point(frame.start_line, frame.start_column),
+                    DiagnosticCode::UnexpectedEof,
+                    "Unterminated string literal".to_string(),
+                ));
+            }
+            return self.new_token(Kind::Eof);
         }
 
         let ch = self.peek_char();
@@ -204,13 +239,13 @@ impl Scanner {
                 if let Some(f) = self.interp_stack.last_mut() {
                     f.brace_depth += 1;
                 }
-                return self.new_token(Kind::PuncOpenBrace, None);
+                return self.new_token(Kind::PuncOpenBrace);
             }
             if ch == b'}' {
                 if let Some(f) = self.interp_stack.last_mut() {
                     f.brace_depth -= 1;
                 }
-                return self.new_token(Kind::PuncCloseBrace, None);
+                return self.new_token(Kind::PuncCloseBrace);
             }
         }
 
@@ -227,22 +262,22 @@ impl Scanner {
                     .ok()
                     .and_then(token::match_keyword)
             {
-                return self.new_token(keyword_kind, None);
+                return self.new_token(keyword_kind);
             }
 
             let text = self.slice(start, end);
-            return self.new_token(Kind::Identifier, Some(text));
+            return self.new_token(Kind::Identifier(text.into()));
         }
 
         if ch == b'-' && self.peek_char() == b'>' {
             self.incr_pos();
-            return self.new_token(Kind::PuncArrow, None);
+            return self.new_token(Kind::PuncArrow);
         }
 
         // Must do this check before checking for numbers
         if ch == b'.' && self.peek_char() == b'.' {
             self.incr_pos();
-            return self.new_token(Kind::PuncDotdot, None);
+            return self.new_token(Kind::PuncDotdot);
         }
 
         if ch.is_ascii_digit() {
@@ -263,9 +298,9 @@ impl Scanner {
             loop {
                 let next = self.peek_char();
 
-                if next == 0 || next == b'\n' {
+                if next == 0 || next == b'\n' || next == b'\r' {
                     self.add_error("Unterminated string literal".to_string());
-                    return self.new_token(Kind::Error, Some(utf8(result)));
+                    return self.new_token(Kind::Error(utf8(result).into()));
                 }
 
                 if next == b'$' {
@@ -276,7 +311,7 @@ impl Scanner {
                         self.line = start_line;
                         self.diagnostics.truncate(diag_len);
                         self.enter_interp_string(ch);
-                        return self.new_token(Kind::InterpStringStart, None);
+                        return self.new_token(Kind::InterpStringStart);
                     }
                 }
 
@@ -287,66 +322,69 @@ impl Scanner {
                 }
 
                 if next == b'\\' {
-                    let b = self.scan_escape_sequence();
-                    result.push(b);
+                    // None leaves the terminator unconsumed; the check at the
+                    // top of the loop then reports the unterminated string.
+                    if let Some(b) = self.scan_escape_sequence() {
+                        result.push(b);
+                    }
                 } else {
                     result.push(next);
                 }
             }
-            return self.new_token(Kind::LiteralString, Some(utf8(result)));
+            return self.new_token(Kind::LiteralString(utf8(result).into()));
         }
 
         if ch == b'&' && self.peek_char() == b'&' {
             self.incr_pos();
-            return self.new_token(Kind::LogicalAnd, None);
+            return self.new_token(Kind::LogicalAnd);
         }
 
         match ch {
-            b',' => self.new_token(Kind::PuncComma, None),
-            b'(' => self.new_token(Kind::PuncOpenParen, None),
-            b')' => self.new_token(Kind::PuncCloseParen, None),
-            b'{' => self.new_token(Kind::PuncOpenBrace, None),
-            b'}' => self.new_token(Kind::PuncCloseBrace, None),
-            b'[' => self.new_token(Kind::PuncOpenBracket, None),
-            b']' => self.new_token(Kind::PuncCloseBracket, None),
-            b';' => self.new_token(Kind::PuncSemicolon, None),
-            b'.' => self.new_token(Kind::PuncDot, None),
+            b',' => self.new_token(Kind::PuncComma),
+            b'(' => self.new_token(Kind::PuncOpenParen),
+            b')' => self.new_token(Kind::PuncCloseParen),
+            b'{' => self.new_token(Kind::PuncOpenBrace),
+            b'}' => self.new_token(Kind::PuncCloseBrace),
+            b'[' => self.new_token(Kind::PuncOpenBracket),
+            b']' => self.new_token(Kind::PuncCloseBracket),
+            b';' => self.new_token(Kind::PuncSemicolon),
+            b'.' => self.new_token(Kind::PuncDot),
             b'+' => self.punc2(b'+', Kind::PuncPlusplus, Kind::PuncPlus),
             b'-' => self.punc2(b'-', Kind::PuncMinusminus, Kind::PuncMinus),
-            b'*' => self.new_token(Kind::PuncMul, None),
-            b'%' => self.new_token(Kind::PuncMod, None),
+            b'*' => self.new_token(Kind::PuncMul),
+            b'%' => self.new_token(Kind::PuncMod),
             b'!' => self.punc2(b'=', Kind::PuncNotEqual, Kind::PuncExclamationMark),
-            b'?' => self.new_token(Kind::PuncQuestionMark, None),
-            b'@' => self.new_token(Kind::PuncAt, None),
-            b':' => self.new_token(Kind::PuncColon, None),
+            b'?' => self.new_token(Kind::PuncQuestionMark),
+            b'@' => self.new_token(Kind::PuncAt),
+            b':' => self.new_token(Kind::PuncColon),
             b'>' => match self.peek_char() {
                 b'=' => {
                     self.incr_pos();
-                    self.new_token(Kind::PuncGte, None)
+                    self.new_token(Kind::PuncGte)
                 }
                 b'>' => {
                     self.incr_pos();
-                    self.new_token(Kind::BinClose, None)
+                    self.new_token(Kind::BinClose)
                 }
-                _ => self.new_token(Kind::PuncGt, None),
+                _ => self.new_token(Kind::PuncGt),
             },
             b'<' => match self.peek_char() {
                 b'=' => {
                     self.incr_pos();
-                    self.new_token(Kind::PuncLte, None)
+                    self.new_token(Kind::PuncLte)
                 }
                 b'<' => {
                     self.incr_pos();
-                    self.new_token(Kind::BinOpen, None)
+                    self.new_token(Kind::BinOpen)
                 }
-                _ => self.new_token(Kind::PuncLt, None),
+                _ => self.new_token(Kind::PuncLt),
             },
-            b'/' => self.new_token(Kind::PuncDiv, None),
+            b'/' => self.new_token(Kind::PuncDiv),
             b'|' => self.punc2(b'|', Kind::LogicalOr, Kind::BitwiseOr),
             b'=' => self.punc2(b'=', Kind::PuncEqualsComparator, Kind::PuncEquals),
             _ => {
                 self.add_error(format!("Unexpected character '{}'", ch as char));
-                self.new_token(Kind::Error, Some((ch as char).to_string()))
+                self.new_token(Kind::Error((ch as char).to_string().into()))
             }
         }
     }
@@ -367,10 +405,9 @@ impl Scanner {
         result
     }
 
-    fn new_token(&mut self, kind: Kind, literal: Option<String>) -> Token {
+    fn new_token(&mut self, kind: Kind) -> Token {
         Token {
             kind,
-            literal,
             span: Span {
                 start_line: self.token_start_line,
                 start_column: self.token_start_column,
@@ -396,7 +433,7 @@ impl Scanner {
     fn scan_identifier(&mut self) -> Token {
         let (start, end) = self.scan_name();
         let text = self.slice(start, end);
-        self.new_token(Kind::Identifier, Some(text))
+        self.new_token(Kind::Identifier(text.into()))
     }
 
     fn scan_number(&mut self) -> Token {
@@ -420,15 +457,15 @@ impl Scanner {
         }
 
         let text = self.slice(start, self.pos);
-        self.new_token(Kind::LiteralNumber, Some(text))
+        self.new_token(Kind::LiteralNumber(text.into()))
     }
 
     fn punc2(&mut self, follow: u8, two: Kind, one: Kind) -> Token {
         if self.peek_char() == follow {
             self.incr_pos();
-            self.new_token(two, None)
+            self.new_token(two)
         } else {
-            self.new_token(one, None)
+            self.new_token(one)
         }
     }
 
@@ -451,11 +488,18 @@ impl Scanner {
     // the byte directly instead of allocating a String per escape. An unknown
     // escape recovers by yielding the escaped byte itself (preserving any
     // following raw UTF-8 continuation bytes) after reporting a diagnostic.
-    fn scan_escape_sequence(&mut self) -> u8 {
+    //
+    // Returns None — WITHOUT consuming — when the backslash sits at EOF or a
+    // line ending, so the caller's unterminated-string check still sees the
+    // terminator instead of the escape swallowing it.
+    fn scan_escape_sequence(&mut self) -> Option<u8> {
         let peeked = self.peek_char();
+        if peeked == 0 || peeked == b'\n' || peeked == b'\r' {
+            return None;
+        }
         self.incr_pos();
 
-        match peeked {
+        Some(match peeked {
             b'n' => b'\n',
             b't' => b'\t',
             b'r' => b'\r',
@@ -468,7 +512,7 @@ impl Scanner {
                 self.add_error(format!("Unknown escape sequence '\\{}'", peeked as char));
                 peeked
             }
-        }
+        })
     }
 
     fn scan_interp_string_content(&mut self, quote: u8) -> Token {
@@ -480,24 +524,24 @@ impl Scanner {
         loop {
             let ch = self.peek_char();
 
-            if ch == 0 || ch == b'\n' {
+            if ch == 0 || ch == b'\n' || ch == b'\r' {
                 self.add_error("Unterminated string literal".to_string());
                 self.exit_interp_string();
-                return self.new_token(Kind::Error, Some(utf8(result)));
+                return self.new_token(Kind::Error(utf8(result).into()));
             }
 
             if ch == quote {
                 if !result.is_empty() {
-                    return self.new_token(Kind::InterpStringPart, Some(utf8(result)));
+                    return self.new_token(Kind::InterpStringPart(utf8(result).into()));
                 }
                 self.incr_pos();
                 self.exit_interp_string();
-                return self.new_token(Kind::InterpStringEnd, None);
+                return self.new_token(Kind::InterpStringEnd);
             }
 
             if ch == b'$' {
                 if !result.is_empty() {
-                    return self.new_token(Kind::InterpStringPart, Some(utf8(result)));
+                    return self.new_token(Kind::InterpStringPart(utf8(result).into()));
                 }
 
                 self.incr_pos();
@@ -508,7 +552,7 @@ impl Scanner {
                     if let Some(f) = self.interp_stack.last_mut() {
                         f.brace_depth = 1;
                     }
-                    return self.new_token(Kind::PuncOpenBrace, None);
+                    return self.new_token(Kind::PuncOpenBrace);
                 } else if token::is_name_start(next) {
                     self.incr_pos();
                     return self.scan_identifier();
@@ -521,8 +565,11 @@ impl Scanner {
             self.incr_pos();
 
             if ch == b'\\' {
-                let b = self.scan_escape_sequence();
-                result.push(b);
+                // None leaves the terminator unconsumed; the check at the
+                // top of the loop then reports the unterminated string.
+                if let Some(b) = self.scan_escape_sequence() {
+                    result.push(b);
+                }
             } else {
                 result.push(ch);
             }
@@ -553,10 +600,25 @@ mod tests {
         (toks, s.take_diagnostics())
     }
 
+    fn ident(s: &str) -> Kind {
+        Identifier(s.into())
+    }
+
+    fn num(s: &str) -> Kind {
+        LiteralNumber(s.into())
+    }
+
+    fn lit(s: &str) -> Kind {
+        LiteralString(s.into())
+    }
+
+    fn part(s: &str) -> Kind {
+        InterpStringPart(s.into())
+    }
+
     #[track_caller]
-    fn assert_tok(toks: &[Token], i: usize, kind: Kind, lit: Option<&str>) {
-        assert_eq!(toks[i].kind, kind, "token {i} kind");
-        assert_eq!(toks[i].literal.as_deref(), lit, "token {i} literal");
+    fn assert_tok(toks: &[Token], i: usize, kind: Kind) {
+        assert_eq!(toks[i].kind, kind, "token {i}");
     }
 
     fn kinds(input: &str) -> Vec<Kind> {
@@ -568,7 +630,10 @@ mod tests {
         let (toks, diags) = scan(input);
         assert!(diags.is_empty(), "scanner produced diagnostics: {diags:?}");
         let kinds: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
-        assert!(!kinds.contains(&Error), "found error token");
+        assert!(
+            !kinds.iter().any(|k| matches!(k, Error(_))),
+            "found error token"
+        );
         kinds
     }
 
@@ -580,16 +645,16 @@ mod tests {
         #[rustfmt::skip]
         let expected = vec![
             // println('hello, world')
-            Identifier, PuncOpenParen, LiteralString, PuncCloseParen,
+            ident("println"), PuncOpenParen, lit("hello, world"), PuncCloseParen,
             // name = 'AL'
-            Identifier, PuncEquals, LiteralString,
+            ident("name"), PuncEquals, lit("AL"),
             // println('hello from ${name}')
-            Identifier, PuncOpenParen,
-            InterpStringStart, InterpStringPart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd,
+            ident("println"), PuncOpenParen,
+            InterpStringStart, part("hello from "), PuncOpenBrace, ident("name"), PuncCloseBrace, InterpStringEnd,
             PuncCloseParen,
             // println('2 + 2 = ${2 + 2}')
-            Identifier, PuncOpenParen,
-            InterpStringStart, InterpStringPart, PuncOpenBrace, LiteralNumber, PuncPlus, LiteralNumber, PuncCloseBrace, InterpStringEnd,
+            ident("println"), PuncOpenParen,
+            InterpStringStart, part("2 + 2 = "), PuncOpenBrace, num("2"), PuncPlus, num("2"), PuncCloseBrace, InterpStringEnd,
             PuncCloseParen,
             Eof,
         ];
@@ -605,35 +670,35 @@ mod tests {
         #[rustfmt::skip]
         let expected = vec![
             // fn fizzbuzz(n Int) String {
-            Keyword(Kw::Fn), Identifier, PuncOpenParen, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
+            Keyword(Kw::Fn), ident("fizzbuzz"), PuncOpenParen, ident("n"), ident("Int"), PuncCloseParen, ident("String"), PuncOpenBrace,
             // match (n % 3, n % 5) {
-            Keyword(Kw::Match), PuncOpenParen, Identifier, PuncMod, LiteralNumber, PuncComma, Identifier, PuncMod, LiteralNumber, PuncCloseParen, PuncOpenBrace,
+            Keyword(Kw::Match), PuncOpenParen, ident("n"), PuncMod, num("3"), PuncComma, ident("n"), PuncMod, num("5"), PuncCloseParen, PuncOpenBrace,
             // (0, 0) -> 'FizzBuzz'
-            PuncOpenParen, LiteralNumber, PuncComma, LiteralNumber, PuncCloseParen, PuncArrow, LiteralString,
+            PuncOpenParen, num("0"), PuncComma, num("0"), PuncCloseParen, PuncArrow, lit("FizzBuzz"),
             // (0, _) -> 'Fizz'
-            PuncOpenParen, LiteralNumber, PuncComma, Identifier, PuncCloseParen, PuncArrow, LiteralString,
+            PuncOpenParen, num("0"), PuncComma, ident("_"), PuncCloseParen, PuncArrow, lit("Fizz"),
             // (_, 0) -> 'Buzz'
-            PuncOpenParen, Identifier, PuncComma, LiteralNumber, PuncCloseParen, PuncArrow, LiteralString,
+            PuncOpenParen, ident("_"), PuncComma, num("0"), PuncCloseParen, PuncArrow, lit("Buzz"),
             // else -> '${n}'
-            Keyword(Kw::Else), PuncArrow, InterpStringStart, PuncOpenBrace, Identifier, PuncCloseBrace, InterpStringEnd,
+            Keyword(Kw::Else), PuncArrow, InterpStringStart, PuncOpenBrace, ident("n"), PuncCloseBrace, InterpStringEnd,
             // } }
             PuncCloseBrace, PuncCloseBrace,
             // fn run(n Int, last Int) Nil {
-            Keyword(Kw::Fn), Identifier, PuncOpenParen, Identifier, Identifier, PuncComma, Identifier, Identifier, PuncCloseParen, Identifier, PuncOpenBrace,
+            Keyword(Kw::Fn), ident("run"), PuncOpenParen, ident("n"), ident("Int"), PuncComma, ident("last"), ident("Int"), PuncCloseParen, ident("Nil"), PuncOpenBrace,
             // if n > last {
-            Keyword(Kw::If), Identifier, PuncGt, Identifier, PuncOpenBrace,
+            Keyword(Kw::If), ident("n"), PuncGt, ident("last"), PuncOpenBrace,
             // Nil
-            Identifier,
+            ident("Nil"),
             // } else {
             PuncCloseBrace, Keyword(Kw::Else), PuncOpenBrace,
             // println(fizzbuzz(n))
-            Identifier, PuncOpenParen, Identifier, PuncOpenParen, Identifier, PuncCloseParen, PuncCloseParen,
+            ident("println"), PuncOpenParen, ident("fizzbuzz"), PuncOpenParen, ident("n"), PuncCloseParen, PuncCloseParen,
             // run(n + 1, last)
-            Identifier, PuncOpenParen, Identifier, PuncPlus, LiteralNumber, PuncComma, Identifier, PuncCloseParen,
+            ident("run"), PuncOpenParen, ident("n"), PuncPlus, num("1"), PuncComma, ident("last"), PuncCloseParen,
             // } }
             PuncCloseBrace, PuncCloseBrace,
             // run(1, 20)
-            Identifier, PuncOpenParen, LiteralNumber, PuncComma, LiteralNumber, PuncCloseParen,
+            ident("run"), PuncOpenParen, num("1"), PuncComma, num("20"), PuncCloseParen,
             Eof,
         ];
 
@@ -649,10 +714,10 @@ mod tests {
             vec![
                 InterpStringStart,
                 PuncOpenBrace,
-                Identifier,
+                ident("a"),
                 PuncCloseBrace,
                 PuncOpenBrace,
-                Identifier,
+                ident("b"),
                 PuncCloseBrace,
                 InterpStringEnd,
                 Eof,
@@ -667,7 +732,7 @@ mod tests {
                 InterpStringStart,
                 PuncOpenBrace,
                 PuncOpenBrace,
-                Identifier,
+                ident("a"),
                 PuncCloseBrace,
                 PuncCloseBrace,
                 InterpStringEnd,
@@ -681,17 +746,17 @@ mod tests {
             ks,
             vec![
                 InterpStringStart,
-                InterpStringPart,
+                part("a"),
                 PuncOpenBrace,
                 InterpStringStart,
-                InterpStringPart,
+                part("b"),
                 PuncOpenBrace,
-                Identifier,
+                ident("c"),
                 PuncCloseBrace,
-                InterpStringPart,
+                part("d"),
                 InterpStringEnd,
                 PuncCloseBrace,
-                InterpStringPart,
+                part("e"),
                 InterpStringEnd,
                 Eof,
             ]
@@ -747,11 +812,11 @@ mod tests {
     fn test_gt_lt_do_not_overconsume() {
         // Regression: V scanner had a bug where > and < always consumed the next char.
         let ks = kinds("a>b");
-        assert_eq!(ks, vec![Identifier, PuncGt, Identifier, Eof]);
+        assert_eq!(ks, vec![ident("a"), PuncGt, ident("b"), Eof]);
         let ks = kinds("a<b");
-        assert_eq!(ks, vec![Identifier, PuncLt, Identifier, Eof]);
+        assert_eq!(ks, vec![ident("a"), PuncLt, ident("b"), Eof]);
         let ks = kinds("a>=b");
-        assert_eq!(ks, vec![Identifier, PuncGte, Identifier, Eof]);
+        assert_eq!(ks, vec![ident("a"), PuncGte, ident("b"), Eof]);
     }
 
     #[test]
@@ -759,14 +824,7 @@ mod tests {
         let ks = kinds("<<1, 2>>");
         assert_eq!(
             ks,
-            vec![
-                BinOpen,
-                LiteralNumber,
-                PuncComma,
-                LiteralNumber,
-                BinClose,
-                Eof
-            ]
+            vec![BinOpen, num("1"), PuncComma, num("2"), BinClose, Eof]
         );
         let ks = kinds("<<>>");
         assert_eq!(ks, vec![BinOpen, BinClose, Eof]);
@@ -774,7 +832,7 @@ mod tests {
         let ks = kinds("<< a < b >>");
         assert_eq!(
             ks,
-            vec![BinOpen, Identifier, PuncLt, Identifier, BinClose, Eof]
+            vec![BinOpen, ident("a"), PuncLt, ident("b"), BinClose, Eof]
         );
         // Maximal munch: <<= is << then =, not < then <=.
         let ks = kinds("<<= >>=");
@@ -784,19 +842,19 @@ mod tests {
     #[test]
     fn test_numbers() {
         let (toks, _) = scan("123 4.56 1..5");
-        assert_tok(&toks, 0, LiteralNumber, Some("123"));
-        assert_tok(&toks, 1, LiteralNumber, Some("4.56"));
-        // 1..5 → number(1), dotdot, number(5)
-        assert_tok(&toks, 2, LiteralNumber, Some("1"));
-        assert_tok(&toks, 3, PuncDotdot, None);
-        assert_tok(&toks, 4, LiteralNumber, Some("5"));
+        assert_tok(&toks, 0, num("123"));
+        assert_tok(&toks, 1, num("4.56"));
+        // 1..5 -> number(1), dotdot, number(5)
+        assert_tok(&toks, 2, num("1"));
+        assert_tok(&toks, 3, PuncDotdot);
+        assert_tok(&toks, 4, num("5"));
     }
 
     #[test]
     fn test_string_literals() {
         let (toks, _) = scan("'hello' 'a\\nb'");
-        assert_tok(&toks, 0, LiteralString, Some("hello"));
-        assert_tok(&toks, 1, LiteralString, Some("a\nb"));
+        assert_tok(&toks, 0, lit("hello"));
+        assert_tok(&toks, 1, lit("a\nb"));
     }
 
     #[test]
@@ -809,8 +867,8 @@ mod tests {
                 Keyword(Kw::If),
                 Keyword(Kw::Else),
                 Keyword(Kw::Type),
-                Identifier,
-                Identifier,
+                ident("foo"),
+                ident("_bar"),
                 Eof
             ]
         );
@@ -819,7 +877,7 @@ mod tests {
     #[test]
     fn test_trivia_attached_to_next_token() {
         let (toks, _) = scan("  // hi\nfoo");
-        assert_eq!(toks[0].kind, Identifier);
+        assert_eq!(toks[0].kind, ident("foo"));
         let trivia = &toks[0].leading_trivia;
         assert_eq!(trivia.len(), 2);
         assert_eq!(trivia[0], Trivia::LineComment("// hi".to_string()));
@@ -854,21 +912,21 @@ mod tests {
     #[test]
     fn test_single_ampersand_is_error() {
         let (toks, diags) = scan("&");
-        assert_eq!(toks[0].kind, Error);
+        assert_eq!(toks[0].kind, Error("&".into()));
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn test_double_quotes_accepted() {
         let (toks, diags) = scan("\"hello\"");
-        assert_tok(&toks, 0, LiteralString, Some("hello"));
+        assert_tok(&toks, 0, lit("hello"));
         assert!(diags.is_empty());
     }
 
     #[test]
     fn test_double_quote_with_single_inside() {
         let (toks, _) = scan("\"it's fine\"");
-        assert_tok(&toks, 0, LiteralString, Some("it's fine"));
+        assert_tok(&toks, 0, lit("it's fine"));
     }
 
     #[test]
@@ -882,7 +940,7 @@ mod tests {
     fn test_mixed_quote_nesting() {
         let ks = kinds_clean("\"outer ${'inner'}\"");
         assert!(ks.contains(&InterpStringStart));
-        assert!(ks.contains(&LiteralString));
+        assert!(ks.contains(&lit("inner")));
         assert!(ks.contains(&InterpStringEnd));
     }
 
@@ -892,7 +950,7 @@ mod tests {
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         // completing scan_all without abort/hang IS the proof
         assert_eq!(*ks.last().unwrap(), Eof);
-        assert!(ks.contains(&Error));
+        assert!(ks.iter().any(|k| matches!(k, Error(_))));
         assert!(!diags.is_empty());
     }
 
@@ -901,7 +959,7 @@ mod tests {
         let (toks, diags) = scan("x := \"\\");
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert_eq!(*ks.last().unwrap(), Eof);
-        assert!(ks.contains(&Error));
+        assert!(ks.iter().any(|k| matches!(k, Error(_))));
         assert!(
             diags
                 .iter()
@@ -920,19 +978,19 @@ mod tests {
         // Regression: `1.5..10` used to backtrack over the first `.` and lex
         // as [1][.][5][..][10]. It must lex as [1.5][..][10].
         let (toks, _) = scan("1.5..10");
-        assert_tok(&toks, 0, LiteralNumber, Some("1.5"));
-        assert_tok(&toks, 1, PuncDotdot, None);
-        assert_tok(&toks, 2, LiteralNumber, Some("10"));
-        assert_tok(&toks, 3, Eof, None);
+        assert_tok(&toks, 0, num("1.5"));
+        assert_tok(&toks, 1, PuncDotdot);
+        assert_tok(&toks, 2, num("10"));
+        assert_tok(&toks, 3, Eof);
     }
 
     #[test]
     fn test_float_then_method() {
         let (toks, _) = scan("1.5.foo");
-        assert_tok(&toks, 0, LiteralNumber, Some("1.5"));
-        assert_tok(&toks, 1, PuncDot, None);
-        assert_tok(&toks, 2, Identifier, Some("foo"));
-        assert_tok(&toks, 3, Eof, None);
+        assert_tok(&toks, 0, num("1.5"));
+        assert_tok(&toks, 1, PuncDot);
+        assert_tok(&toks, 2, ident("foo"));
+        assert_tok(&toks, 3, Eof);
     }
 
     #[test]
@@ -940,15 +998,130 @@ mod tests {
         // A `$` not followed by `{` or an identifier start is a literal char,
         // so the scanner must not classify the string as interpolated.
         let (toks, _) = scan("'a$5'");
-        assert_tok(&toks, 0, LiteralString, Some("a$5"));
-        assert_tok(&toks, 1, Eof, None);
+        assert_tok(&toks, 0, lit("a$5"));
+        assert_tok(&toks, 1, Eof);
 
         // Bare `$` at end of string.
-        assert_eq!(kinds("'a$'"), vec![LiteralString, Eof]);
+        assert_eq!(kinds("'a$'"), vec![lit("a$"), Eof]);
 
         // But `${` and `$ident` still trigger interpolation.
         assert_eq!(kinds("'a${x}'")[0], InterpStringStart);
         assert_eq!(kinds("'a$x'")[0], InterpStringStart);
+    }
+
+    #[test]
+    fn test_backslash_at_newline_is_unterminated_not_unknown_escape() {
+        // The `\` must not consume the newline: the string is reported as
+        // unterminated (once, at the line end) and the next line still lexes.
+        let (toks, diags) = scan("x = 'abc\\\ny = 1");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("Unterminated string literal")),
+            "diagnostics: {diags:?}"
+        );
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Unknown escape")),
+            "the newline must not be treated as an escape body: {diags:?}"
+        );
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
+        // `y = 1` after the broken string survives as ordinary tokens.
+        assert!(ks.ends_with(&[ident("y"), PuncEquals, num("1"), Eof]));
+    }
+
+    #[test]
+    fn test_backslash_at_eof_single_unterminated_error() {
+        let (toks, diags) = scan("x = '\\");
+        assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
+        assert!(diags[0].message.contains("Unterminated string literal"));
+    }
+
+    #[test]
+    fn test_crlf_sources_scan_clean() {
+        let ks = kinds_clean("a = 1\r\nb = 2\r\n");
+        assert_eq!(
+            ks,
+            vec![
+                ident("a"),
+                PuncEquals,
+                num("1"),
+                ident("b"),
+                PuncEquals,
+                num("2"),
+                Eof
+            ]
+        );
+
+        // \r\n collapses to a single Newline trivia on the next token.
+        let (toks, _) = scan("a\r\nb");
+        assert_eq!(toks[1].leading_trivia, vec![Trivia::Newline]);
+
+        // A lone \r is plain whitespace, not a newline and not an error.
+        let (toks, diags) = scan("a \r b");
+        assert!(diags.is_empty(), "diagnostics: {diags:?}");
+        assert!(toks[1].leading_trivia.is_empty());
+
+        // Line comments end before the \r so their text stays clean.
+        let (toks, _) = scan("// hi\r\nfoo");
+        assert_eq!(
+            toks[0].leading_trivia[0],
+            Trivia::LineComment("// hi".to_string())
+        );
+
+        // CRLF line accounting matches LF: `b` starts on line 1.
+        let (toks, _) = scan("a\r\nb");
+        assert_eq!(toks[1].span.start_line, 1);
+    }
+
+    #[test]
+    fn test_string_cannot_swallow_half_a_crlf() {
+        // An unterminated string ends at the \r; the \r\n then scans as one
+        // newline instead of leaving a stray \n or \r token behind.
+        let (toks, diags) = scan("x = 'abc\r\ny = 1");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("Unterminated string literal")),
+            "diagnostics: {diags:?}"
+        );
+        let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
+        assert!(!ks.contains(&PuncDiv), "no stray tokens from the CRLF");
+        assert!(ks.ends_with(&[ident("y"), PuncEquals, num("1"), Eof]));
+    }
+
+    #[test]
+    fn test_unterminated_interpolation_reports_at_opening_quote() {
+        // EOF inside `${...}` used to abandon the interp frame silently:
+        // `x = '${abc` produced no diagnostic at all while `x = 'abc` did.
+        let (toks, diags) = scan("x = '${abc");
+        assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
+        let unterminated: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("Unterminated string literal"))
+            .collect();
+        assert_eq!(unterminated.len(), 1, "diagnostics: {diags:?}");
+        // Anchored at the opening quote (line 0, column 4), not at EOF.
+        assert_eq!(
+            (
+                unterminated[0].span.start_line,
+                unterminated[0].span.start_column
+            ),
+            (0, 4)
+        );
+    }
+
+    #[test]
+    fn test_nested_unterminated_interpolation_one_error_per_string() {
+        // Two abandoned frames -> two errors, each at its own opening quote.
+        let (_, diags) = scan("'${\"${a");
+        let cols: Vec<i32> = diags
+            .iter()
+            .filter(|d| d.message.contains("Unterminated string literal"))
+            .map(|d| d.span.start_column)
+            .collect();
+        assert_eq!(cols.len(), 2, "diagnostics: {diags:?}");
+        assert!(cols.contains(&0) && cols.contains(&3), "cols: {cols:?}");
     }
 
     #[test]
@@ -958,7 +1131,7 @@ mod tests {
         let (toks, diags) = scan("x = \"a\\qb\"");
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert_eq!(*ks.last().unwrap(), Eof);
-        assert!(ks.contains(&LiteralString));
+        assert!(ks.contains(&lit("aqb")));
         assert!(
             diags
                 .iter()
