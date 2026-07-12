@@ -311,14 +311,15 @@ impl ReferenceGraph {
 mod tests {
     use super::{ReferenceKind as K, *};
     use crate::reference::{
-        Definition, DefinitionKind, ModuleReferences, Reference, add_ref, def, mp, stub_kind,
+        Definition, DefinitionKind, ModuleReferences, Reference, ReferenceGraphBuilder, add_ref,
+        def, mp, stub_kind,
     };
     use std::collections::HashMap;
 
     /// lib defines `helper` (pub); app imports it and uses it twice plus its
     /// own private `run`. Returns the graph and the key ids.
     fn workspace() -> (ReferenceGraph, ModuleId, ModuleId, DefId) {
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let lib = g.intern_module(&mp(&["sub", "lib"]));
         let app = g.intern_module(&mp(&["main"]));
 
@@ -356,7 +357,7 @@ mod tests {
         add_ref(&mut app_mr, Some(run), (3, 8, 14), K::Qualified, helper);
         g.insert_module(app_mr);
 
-        (g, lib, app, helper)
+        (g.finish(), lib, app, helper)
     }
 
     fn resolver<'a>(
@@ -408,7 +409,7 @@ mod tests {
     #[test]
     fn declaration_rewritten_without_explicit_definition_occurrence() {
         // No Definition occurrence recorded; the decl must still be renamed.
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let m = g.intern_module(&mp(&["main"]));
         let foo = def(m, 0, 3, 6, EntityKind::Function);
         let mut mr = ModuleReferences::new(m);
@@ -422,6 +423,7 @@ mod tests {
         ));
         add_ref(&mut mr, Some(foo), (5, 4, 7), K::Unqualified, foo);
         g.insert_module(mr);
+        let g = g.finish();
 
         let mut map = HashMap::new();
         map.insert(m, "file:///main.al");
@@ -444,7 +446,7 @@ mod tests {
 
     #[test]
     fn prepare_rename_rejects_stdlib() {
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let std_mod = g.intern_module(&mp(&["al", "array"]));
         let user = g.intern_module(&mp(&["main"]));
         let map_fn = def(std_mod, 0, 4, 7, EntityKind::Function);
@@ -462,6 +464,7 @@ mod tests {
         let mut user_mr = ModuleReferences::new(user);
         add_ref(&mut user_mr, None, (1, 2, 5), K::Qualified, map_fn);
         g.insert_module(user_mr);
+        let g = g.finish();
 
         // prepareRename at the use of a stdlib symbol -> rejected.
         let err = g.prepare_rename(user, 1, 3).unwrap_err();
@@ -488,7 +491,7 @@ mod tests {
 
     #[test]
     fn prepare_rename_and_rename_reject_module_alias() {
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let m = g.intern_module(&mp(&["main"]));
         let alias = def(m, 0, 7, 10, EntityKind::ModuleAlias);
         let mut mr = ModuleReferences::new(m);
@@ -501,6 +504,7 @@ mod tests {
             stub_kind(alias),
         ));
         g.insert_module(mr);
+        let g = g.finish();
 
         // Cursor on the alias binding — the wide `ModuleAlias` definition span
         // resolves here, and core must refuse it (previously the LSP layer had
@@ -592,7 +596,7 @@ mod tests {
     /// use (targets the Type) and a constructor-call use (targets the
     /// Constructor).
     fn record_shorthand() -> (ReferenceGraph, ModuleId, DefId, DefId) {
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let m = g.intern_module(&mp(&["main"]));
         let ty = def(m, 0, 5, 11, EntityKind::Type);
         let ctor = def(m, 0, 5, 11, EntityKind::Constructor);
@@ -619,7 +623,7 @@ mod tests {
         add_ref(&mut mr, None, (3, 10, 16), K::Unqualified, ty);
         add_ref(&mut mr, None, (5, 8, 14), K::Unqualified, ctor);
         g.insert_module(mr);
-        (g, m, ty, ctor)
+        (g.finish(), m, ty, ctor)
     }
 
     #[test]
@@ -653,7 +657,7 @@ mod tests {
     fn multi_constructor_type_rename_keeps_ctors_separate() {
         // `type Shape { A B }`: the constructors have their own spans, so
         // renaming the type must NOT drag them along, and vice versa.
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let m = g.intern_module(&mp(&["main"]));
         let ty = def(m, 0, 5, 10, EntityKind::Type);
         let a = def(m, 1, 2, 3, EntityKind::Constructor);
@@ -683,6 +687,7 @@ mod tests {
         add_ref(&mut mr, None, (4, 8, 9), K::Unqualified, a);
         add_ref(&mut mr, None, (6, 10, 15), K::Unqualified, ty);
         g.insert_module(mr);
+        let g = g.finish();
 
         let mut map = HashMap::new();
         map.insert(m, "file:///main.al");

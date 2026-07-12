@@ -192,13 +192,20 @@ impl ModuleInterner {
         self.paths.get(id.0 as usize)
     }
 
+    /// Every interned module in id order. Infallible by construction — it
+    /// walks the dense id-indexed store directly — so a caller mirroring the
+    /// first-seen id assignment cannot skip an id (and thereby renumber every
+    /// later one) the way a fallible per-id lookup could.
+    pub fn iter(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
+        self.paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (ModuleId(i as u32), p))
+    }
+
     /// Every interned path in id order: the `i`th item is `ModuleId(i)`'s.
-    /// Infallible by construction — it walks the dense id-indexed store
-    /// directly — so a caller mirroring the first-seen id assignment cannot
-    /// skip an id (and thereby renumber every later one) the way a fallible
-    /// per-id lookup could.
     pub fn paths(&self) -> impl Iterator<Item = &ModulePath> {
-        self.paths.iter()
+        self.iter().map(|(_, p)| p)
     }
 
     pub fn len(&self) -> usize {
@@ -629,14 +636,84 @@ impl ModuleReferences {
 // ReferenceGraph — workspace scope
 // ============================================================================
 
+/// Accumulates the workspace module set — interned module paths plus each
+/// module's [`ModuleReferences`] — and seals it into an immutable
+/// [`ReferenceGraph`] via [`finish`](Self::finish), which computes the
+/// workspace reverse index exactly once, from the final module set.
+///
+/// The graph exposes no mutation, so "index out of sync with the module set"
+/// is unrepresentable: there is no rebuild step to forget and no way to
+/// insert a module after the index was computed. Eviction is by omission —
+/// each `check` builds a fresh graph from the live module set, so an evicted
+/// module can never leave a dangling reverse edge.
+#[derive(Debug, Default)]
+pub struct ReferenceGraphBuilder {
+    interner: ModuleInterner,
+    modules: IndexMap<ModuleId, Rc<ModuleReferences>>,
+}
+
+impl ReferenceGraphBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Intern `path`, returning its stable id (creating one on first sight).
+    pub fn intern_module(&mut self, path: &ModulePath) -> ModuleId {
+        self.interner.intern(path)
+    }
+
+    /// Install (or replace) a module's references.
+    ///
+    /// Takes an `Rc`: an unchanged module's persisted refs are re-inserted on
+    /// every `check` (see `build_reference_graph`), so the caller hands over a
+    /// shared pointer and this is an O(1) refcount bump rather than an
+    /// O(module occurrences+defs) deep clone.
+    pub fn insert(&mut self, refs: Rc<ModuleReferences>) {
+        self.modules.insert(refs.module(), refs);
+    }
+
+    /// Test-only sugar over [`Self::insert`] for freshly built refs.
+    #[cfg(test)]
+    pub(crate) fn insert_module(&mut self, refs: ModuleReferences) {
+        self.insert(Rc::new(refs));
+    }
+
+    /// Compute the workspace reverse index from the final module set and seal
+    /// the graph. O(total occurrences); correctness over cleverness — building
+    /// the whole index from the whole set trivially guarantees no stale edge
+    /// survives a module eviction, and doing it once here costs O(total
+    /// occurrences) instead of O(modules x total occurrences) repeated full
+    /// scans had each insert re-indexed.
+    pub fn finish(self) -> ReferenceGraph {
+        let mut refs_by_def: HashMap<DefId, Vec<ResolvedRef>> = HashMap::new();
+        for (&module, mr) in &self.modules {
+            for occ in mr.occurrences() {
+                refs_by_def
+                    .entry(occ.reference.target)
+                    .or_default()
+                    .push(ResolvedRef {
+                        module,
+                        span: occ.reference.span,
+                        kind: occ.reference.kind,
+                    });
+            }
+        }
+        ReferenceGraph {
+            interner: self.interner,
+            modules: self.modules,
+            refs_by_def,
+        }
+    }
+}
+
 /// The workspace-wide reference graph: the module-path interner, every
 /// module's [`ModuleReferences`], and the derived workspace reverse index
 /// (`DefId` → every occurrence across *all* modules) used by find-references,
 /// rename, and the unused/dead-code diagnostics.
 ///
-/// Derived indexes are rebuilt wholesale from the live module set whenever the
-/// set changes ([`rebuild`](Self::rebuild)), so an evicted module can never
-/// leave a dangling reverse edge.
+/// Immutable once built — construction goes through [`ReferenceGraphBuilder`],
+/// whose `finish` computes the reverse index from the final module set, so the
+/// index can never be stale.
 #[derive(Debug, Default)]
 pub struct ReferenceGraph {
     interner: ModuleInterner,
@@ -648,15 +725,12 @@ pub struct ReferenceGraph {
 }
 
 impl ReferenceGraph {
+    /// The empty graph (placeholder until a real one is built).
     pub fn new() -> Self {
         Self::default()
     }
 
     // --- Module identity ---
-
-    pub fn intern_module(&mut self, path: &ModulePath) -> ModuleId {
-        self.interner.intern(path)
-    }
 
     pub fn module_id(&self, path: &ModulePath) -> Option<ModuleId> {
         self.interner.lookup(path)
@@ -672,60 +746,11 @@ impl ReferenceGraph {
 
     /// Every interned module, in interning order.
     pub fn modules(&self) -> impl Iterator<Item = (ModuleId, &ModulePath)> {
-        self.interner
-            .paths
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (ModuleId(i as u32), p))
-    }
-
-    // --- Mutation ---
-
-    /// Install (or replace) a module's references and rebuild the workspace
-    /// reverse index.
-    #[cfg(test)]
-    pub fn insert_module(&mut self, refs: ModuleReferences) {
-        self.insert_module_deferred(Rc::new(refs));
-        self.rebuild();
-    }
-
-    /// Install (or replace) a module's references *without* rebuilding the
-    /// reverse index. For bulk population (see `Compiler::build_reference_graph`)
-    /// where every loaded module is inserted back-to-back: insert them all, then
-    /// call [`Self::rebuild`] exactly once. `rebuild` is a pure function of the
-    /// live module set, so the deferred path yields a byte-identical graph in
-    /// O(total occurrences) instead of O(modules x total occurrences) repeated
-    /// full scans on every incremental `check`.
-    ///
-    /// Takes an `Rc`: an unchanged module's persisted refs are re-inserted on
-    /// every `check`, so the caller hands over a shared pointer and this is an
-    /// O(1) refcount bump rather than an O(module occurrences+defs) deep clone.
-    pub(crate) fn insert_module_deferred(&mut self, refs: Rc<ModuleReferences>) {
-        self.modules.insert(refs.module(), refs);
+        self.interner.iter()
     }
 
     pub fn module_refs(&self, id: ModuleId) -> Option<&ModuleReferences> {
         self.modules.get(&id).map(|m| &**m)
-    }
-
-    /// Recompute the workspace reverse index from the live module set. O(total
-    /// occurrences); correctness over cleverness — a full rebuild trivially
-    /// guarantees no stale edge survives a module eviction.
-    pub fn rebuild(&mut self) {
-        let mut refs_by_def: HashMap<DefId, Vec<ResolvedRef>> = HashMap::new();
-        for (&module, mr) in &self.modules {
-            for occ in mr.occurrences() {
-                refs_by_def
-                    .entry(occ.reference.target)
-                    .or_default()
-                    .push(ResolvedRef {
-                        module,
-                        span: occ.reference.span,
-                        kind: occ.reference.kind,
-                    });
-            }
-        }
-        self.refs_by_def = refs_by_def;
     }
 
     // --- Query API ---
@@ -862,8 +887,8 @@ fn add_ref(
 }
 
 #[cfg(test)]
-fn main_graph() -> (ReferenceGraph, ModuleId, ModuleReferences) {
-    let mut g = ReferenceGraph::new();
+fn main_graph() -> (ReferenceGraphBuilder, ModuleId, ModuleReferences) {
+    let mut g = ReferenceGraphBuilder::new();
     let m = g.intern_module(&mp(&["main"]));
     let mr = ModuleReferences::new(m);
     (g, m, mr)
@@ -1029,7 +1054,7 @@ mod tests {
     // ---- ReferenceGraph: cross-module reverse index + queries ----
 
     fn two_module_graph() -> (ReferenceGraph, ModuleId, ModuleId, DefId) {
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let lib = g.intern_module(&mp(&["lib"]));
         let app = g.intern_module(&mp(&["app"]));
 
@@ -1061,7 +1086,7 @@ mod tests {
         add_ref(&mut app_mr, Some(run), (3, 4, 14), K::Qualified, helper);
         g.insert_module(app_mr);
 
-        (g, lib, app, helper)
+        (g.finish(), lib, app, helper)
     }
 
     #[test]
@@ -1106,12 +1131,12 @@ mod tests {
     #[test]
     fn omitting_a_referencing_module_leaves_no_dangling_reverse_edges() {
         // Production never eagerly removes a module: `build_reference_graph`
-        // rebuilds a fresh graph from the live set via `insert_module_deferred`
-        // + one `rebuild`, so a module is "evicted" purely by omission. Build
-        // from only `lib`, omitting the `app` that referenced `helper`; since
-        // `rebuild` is a pure function of the live module set, no reverse edge
-        // into `helper` can survive.
-        let mut g = ReferenceGraph::new();
+        // builds a fresh graph from the live set via `ReferenceGraphBuilder`,
+        // so a module is "evicted" purely by omission. Build from only `lib`,
+        // omitting the `app` that referenced `helper`; since `finish` computes
+        // the index as a pure function of the final module set, no reverse
+        // edge into `helper` can survive.
+        let mut g = ReferenceGraphBuilder::new();
         let lib = g.intern_module(&mp(&["lib"]));
         let helper = def(lib, 1, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
@@ -1123,8 +1148,8 @@ mod tests {
             true,
             stub_kind(helper),
         ));
-        g.insert_module_deferred(Rc::new(lib_mr));
-        g.rebuild();
+        g.insert(Rc::new(lib_mr));
+        let g = g.finish();
 
         assert_eq!(
             g.references_to(helper).len(),
@@ -1150,6 +1175,7 @@ mod tests {
         let func = add_def(&mut mr, m, "compute", 1, EntityKind::Function, true);
         let local = add_def(&mut mr, m, "tmp", 2, EntityKind::Value, false);
         g.insert_module(mr);
+        let g = g.finish();
 
         // The predicate: only the local `Value` is unlistable.
         assert!(

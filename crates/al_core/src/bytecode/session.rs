@@ -29,6 +29,7 @@ use crate::diagnostic::has_errors;
 use crate::module::{self, ModulePath};
 use crate::reference::{
     Definition, DefinitionKind, EntityKind, ModuleId, ModuleReferences, ReferenceGraph,
+    ReferenceGraphBuilder,
 };
 use crate::span::Span;
 use crate::tivec::Idx;
@@ -424,29 +425,30 @@ impl Compiler {
         self.ref_interner.intern(&module::main_module());
 
         // 2. Mirror the persistent interner's first-seen id assignment into the
-        //    graph: interning in id order reproduces identical ids, so the
+        //    builder: interning in id order reproduces identical ids, so the
         //    graph's `ModuleId`s match the ones already baked into every
         //    persisted / freshly-collected `DefId`. `paths()` walks the dense
         //    id-indexed store directly, so no id can be skipped — a skip would
         //    silently renumber every later module.
-        let mut graph = ReferenceGraph::new();
+        let mut graph = ReferenceGraphBuilder::new();
         for p in self.ref_interner.paths() {
             graph.intern_module(p);
         }
 
         // 3. Every cached module's references; for static/hydrated stdlib
         //    modules (no collected refs) synthesise definitions from the
-        //    interface so cross-module goto-def into `al/*` resolves. Insert
-        //    deferred: a single `rebuild()` (step 5) is a pure function of the
-        //    final module set, so M back-to-back inserts cost O(total
-        //    occurrences) once instead of M full workspace rescans on every
-        //    incremental `check`. The persisted refs are shared via `Rc`, so
-        //    re-inserting an unchanged module is a refcount bump rather than a
-        //    deep copy of its occurrences/definitions every keystroke.
+        //    interface so cross-module goto-def into `al/*` resolves. The
+        //    reverse index is computed once by `finish()` (step 5) as a pure
+        //    function of the final module set, so M back-to-back inserts cost
+        //    O(total occurrences) once instead of M full workspace rescans on
+        //    every incremental `check`. The persisted refs are shared via
+        //    `Rc`, so re-inserting an unchanged module is a refcount bump
+        //    rather than a deep copy of its occurrences/definitions every
+        //    keystroke.
         let mut synth_inputs: Vec<(Vec<SynthDef>, Option<String>)> = Vec::new();
         for (_key, cm) in self.module_table.loaded_modules() {
             match cm.module_refs() {
-                Some(mr) => graph.insert_module_deferred(Rc::clone(mr)),
+                Some(mr) => graph.insert(Rc::clone(mr)),
                 None => {
                     let defs: Vec<SynthDef> = cm
                         .iface
@@ -473,18 +475,17 @@ impl Compiler {
         // cross-module use of the same name records as its occurrence target.
         for (defs, doc) in &synth_inputs {
             if let Some(synth) = self.synth_refs_from_interface(defs, doc.as_deref()) {
-                graph.insert_module_deferred(Rc::new(synth));
+                graph.insert(Rc::new(synth));
             }
         }
 
         // 4. The entry/open file's freshly-collected references. This is the
         //    one unavoidable copy — the edited buffer's own refs, O(edited
         //    file) — since the collector is reused for the next check.
-        graph.insert_module_deferred(Rc::new(self.module_refs.clone()));
+        graph.insert(Rc::new(self.module_refs.clone()));
 
         // 5. Materialise the workspace reverse index exactly once.
-        graph.rebuild();
-        graph
+        graph.finish()
     }
 
     /// Build the workspace [`ReferenceGraph`] and resolve the buffered

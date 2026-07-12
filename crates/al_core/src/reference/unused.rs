@@ -292,6 +292,7 @@ mod tests {
         // Unowned top-level occurrence -> no edge.
         add_ref(&mut mr, None, (9, 0, 1), K::Unqualified, b);
         g.insert_module(mr);
+        let g = g.finish();
 
         let edges: Vec<(DefId, DefId)> = g.edges().collect();
         assert_eq!(edges, vec![(a, b)]);
@@ -316,6 +317,7 @@ mod tests {
         add_ref(&mut mr, Some(b), (4, 4, 8), K::Unqualified, deep);
         add_ref(&mut mr, Some(loopy), (8, 4, 9), K::Unqualified, loopy);
         g.insert_module(mr);
+        let g = g.finish();
 
         let r = g.reachable(Vec::new());
         assert!(
@@ -339,6 +341,7 @@ mod tests {
         // pub `api` calls private `used`; nobody calls `dead`.
         add_ref(&mut mr, Some(api), (2, 4, 8), K::Unqualified, used);
         g.insert_module(mr);
+        let g = g.finish();
 
         let d = sole_unused(&g, m);
         assert_eq!(d.severity, Severity::Hint);
@@ -354,6 +357,7 @@ mod tests {
         // `helper` is only called by the executed top-level body (owner None).
         add_ref(&mut mr, None, (9, 0, 6), K::Unqualified, helper);
         g.insert_module(mr);
+        let g = g.finish();
 
         let d = sole_unused(&g, m);
         assert_eq!(d.message, "unused function `dead`");
@@ -367,6 +371,7 @@ mod tests {
         // `spin` references only itself — a self edge never makes it reachable.
         add_ref(&mut mr, Some(spin), (2, 4, 8), K::Unqualified, spin);
         g.insert_module(mr);
+        let g = g.finish();
 
         assert_eq!(sole_unused(&g, m).message, "unused function `spin`");
     }
@@ -384,6 +389,7 @@ mod tests {
         let mut lm = ModuleReferences::new(lib);
         add_def(&mut lm, lib, "secret", 1, EntityKind::Function, false);
         g.insert_module(lm);
+        let g = g.finish();
 
         assert!(g.unused_diagnostics(entry).is_empty());
     }
@@ -396,6 +402,7 @@ mod tests {
         // `fmt` is used through a qualified access; `io` never is.
         add_ref(&mut mr, None, (5, 4, 12), K::Qualified, used_imp);
         g.insert_module(mr);
+        let g = g.finish();
 
         let d = sole_unused(&g, m);
         assert_eq!(d.message, "unused import `io`");
@@ -410,6 +417,7 @@ mod tests {
         add_ref(&mut mr, None, (1, 7, 11), K::Import, imp);
         add_ref(&mut mr, None, (1, 7, 11), K::Definition, imp);
         g.insert_module(mr);
+        let g = g.finish();
 
         assert_eq!(sole_unused(&g, m).message, "unused import `util`");
     }
@@ -428,10 +436,9 @@ mod tests {
         // covers only the final module-name segment (`b`), too narrow to
         // contain the binding — modelled here to prove that narrowing does
         // not regress unused detection.
-        let (mut g, m, _) = main_graph();
-        let lib = g.intern_module(&mp(&["a", "b"]));
-
         let build = |with_use: bool| {
+            let (mut g, m, _) = main_graph();
+            let lib = g.intern_module(&mp(&["a", "b"]));
             let mut mr = ModuleReferences::new(m);
             let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
             mr.add_definition(Definition::new(
@@ -459,10 +466,11 @@ mod tests {
                     remote_used,
                 );
             }
-            mr
+            g.insert_module(mr);
+            (g.finish(), m)
         };
 
-        g.insert_module(build(true));
+        let (g, m) = build(true);
         assert!(
             g.unused_diagnostics(m).is_empty(),
             "an import whose unqualified item is used must not be flagged"
@@ -470,7 +478,7 @@ mod tests {
 
         // Drop the use: the same import is now genuinely unused again, so
         // the check is still live (we didn't just disable it).
-        g.insert_module(build(false));
+        let (g, m) = build(false);
         assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
@@ -486,14 +494,13 @@ mod tests {
         //
         //   import ./util as u.{empty}
         //   0      ^9   ^13 ^17^20   ^25
-        let (mut g, m, _) = main_graph();
-        let lib = g.intern_module(&mp(&["util"]));
-
-        // The alias `defid.span` covers only the `as u` name; `decl_span`
-        // covers the whole `import ...` statement.
-        let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
-
         let build = |with_use: bool| {
+            let (mut g, m, _) = main_graph();
+            let lib = g.intern_module(&mp(&["util"]));
+
+            // The alias `defid.span` covers only the `as u` name; `decl_span`
+            // covers the whole `import ...` statement.
+            let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
             let mut mr = ModuleReferences::new(m);
             let alias_def = Definition::new(
                 alias.module,
@@ -525,10 +532,11 @@ mod tests {
                 // declaration.
                 add_ref(&mut mr, None, (2, 8, 13), K::Unqualified, remote_empty);
             }
-            mr
+            g.insert_module(mr);
+            (g.finish(), m, alias)
         };
 
-        g.insert_module(build(true));
+        let (g, m, _) = build(true);
         assert!(
             g.unused_diagnostics(m).is_empty(),
             "a used item from an aliased selective import must not be flagged"
@@ -536,7 +544,7 @@ mod tests {
 
         // Drop the use: the same import is now genuinely unused, so the check
         // is still live (the widened boundary did not just disable it).
-        g.insert_module(build(false));
+        let (g, m, alias) = build(false);
         let d = sole_unused(&g, m);
         assert_eq!(d.message, "unused import `u`");
         assert_eq!(d.span, alias.span);
@@ -549,6 +557,7 @@ mod tests {
         add_def(&mut mr, m, "Color", 9, EntityKind::Type, false);
         add_def(&mut mr, m, "MAX", 2, EntityKind::Constant, false);
         g.insert_module(mr);
+        let g = g.finish();
 
         let d = g.unused_diagnostics(m);
         let msgs: Vec<&str> = d.iter().map(|x| x.message.as_str()).collect();
@@ -561,6 +570,7 @@ mod tests {
         // `Value` is the unused-binding checker's job, never a dead-code hint.
         add_def(&mut mr, m, "x", 1, EntityKind::Value, false);
         g.insert_module(mr);
+        let g = g.finish();
         assert!(g.unused_diagnostics(m).is_empty());
     }
 
@@ -579,6 +589,7 @@ mod tests {
         // entry top-level body calls `lib.run` qualified.
         add_ref(&mut em, None, (5, 0, 7), K::Qualified, run);
         g.insert_module(em);
+        let g = g.finish();
 
         assert!(g.unused_diagnostics(entry).is_empty());
         // `helper` is reachable via the pub `run` root, not dead.
@@ -590,12 +601,13 @@ mod tests {
         let (mut g, m, mut mr) = main_graph();
         add_def(&mut mr, m, "dead", 1, EntityKind::Function, false);
         g.insert_module(mr);
+        // Interned but never populated (checked below): empty.
+        let bare = g.intern_module(&mp(&["bare"]));
+        let g = g.finish();
 
         assert_eq!(g.unused_diagnostics_for(&mp(&["main"])).len(), 1);
         // Never-interned path: empty, no panic.
         assert!(g.unused_diagnostics_for(&mp(&["ghost"])).is_empty());
-        // Interned but never populated: empty.
-        let bare = g.intern_module(&mp(&["bare"]));
         assert!(g.unused_diagnostics(bare).is_empty());
     }
 
@@ -620,6 +632,7 @@ mod tests {
         // pub `api` calls private `used`; nobody calls `dead`.
         add_ref(&mut mr, Some(api), (2, 4, 8), K::Unqualified, used);
         g.insert_module(mr);
+        let g = g.finish();
 
         let d = sole_unused(&g, m);
         assert_eq!(d.message, "unused function `dead`");
@@ -668,25 +681,24 @@ mod tests {
     /// it again.
     #[test]
     fn unused_diag_plain_qualified_import_recovers_use() {
-        let (mut g, m, _) = main_graph();
-        let lib = g.intern_module(&mp(&["a", "b"]));
-
-        // `a/b` defines pub `foo` (+ its emit_def self-occurrence).
-        let foo = def(lib, 1, 3, 6, EntityKind::Function);
-        let mut lib_mr = ModuleReferences::new(lib);
-        lib_mr.add_definition(Definition::new(
-            foo.module,
-            foo.span,
-            "foo",
-            None,
-            true,
-            stub_kind(foo),
-        ));
-        lib_mr.add_reference(None, Reference::new(foo.span, K::Definition, foo));
-        g.insert_module(lib_mr);
-
         let build = |with_use: bool| {
-            let mut mr = ModuleReferences::new(m);
+            let (mut g, m, mut mr) = main_graph();
+            let lib = g.intern_module(&mp(&["a", "b"]));
+
+            // `a/b` defines pub `foo` (+ its emit_def self-occurrence).
+            let foo = def(lib, 1, 3, 6, EntityKind::Function);
+            let mut lib_mr = ModuleReferences::new(lib);
+            lib_mr.add_definition(Definition::new(
+                foo.module,
+                foo.span,
+                "foo",
+                None,
+                true,
+                stub_kind(foo),
+            ));
+            lib_mr.add_reference(None, Reference::new(foo.span, K::Definition, foo));
+            g.insert_module(lib_mr);
+
             // main: `import a/b` then `pub fn run() { b.foo() }`.
             let alias = add_plain_import(&mut mr, m, "b", 1, lib);
             let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
@@ -697,9 +709,10 @@ mod tests {
                 add_ref(&mut mr, Some(run), (3, 16, 17), K::Qualifier, alias);
                 add_ref(&mut mr, Some(run), (3, 18, 21), K::Qualified, foo);
             }
-            mr
+            g.insert_module(mr);
+            (g.finish(), m)
         };
-        g.insert_module(build(true));
+        let (g, m) = build(true);
 
         assert!(
             g.unused_diagnostics(m).is_empty(),
@@ -708,7 +721,7 @@ mod tests {
 
         // Drop the use: the import is genuinely unused again and IS flagged
         // (the check is still live, not just disabled).
-        g.insert_module(build(false));
+        let (g, m) = build(false);
         assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
@@ -756,6 +769,7 @@ mod tests {
         add_ref(&mut mr, Some(run), (3, 16, 17), K::Qualifier, alias_c);
         add_ref(&mut mr, Some(run), (3, 18, 24), K::Qualified, used);
         g.insert_module(mr);
+        let g = g.finish();
 
         assert_eq!(
             sole_unused(&g, m).message,
@@ -797,6 +811,7 @@ mod tests {
         add_ref(&mut mr, Some(run), (4, 16, 18), K::Qualifier, alias_bb);
         add_ref(&mut mr, Some(run), (4, 19, 22), K::Qualified, foo);
         g.insert_module(mr);
+        let g = g.finish();
 
         let d = sole_unused(&g, m);
         assert_eq!(
@@ -834,6 +849,7 @@ mod tests {
         add_ref(&mut mr, Some(run), (4, 8, 9), K::Qualifier, alias);
         add_ref(&mut mr, Some(run), (4, 10, 14), K::Qualified, ctor);
         g.insert_module(mr);
+        let g = g.finish();
 
         assert!(
             g.unused_diagnostics(m).is_empty(),

@@ -90,7 +90,7 @@ pub fn module_uri(graph: &ReferenceGraph, module: ModuleId) -> Result<String, Mo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::mp;
+    use crate::reference::{ReferenceGraphBuilder, mp};
 
     #[test]
     fn path_to_uri_percent_encodes() {
@@ -112,12 +112,13 @@ mod tests {
 
     #[test]
     fn module_uri_stdlib_is_embedded_error() {
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         let std_mod = g.intern_module(&mp(&["al", "array"]));
+        // a bare non-al module is reserved/unresolvable (checked below).
+        let bare = g.intern_module(&mp(&["whatever"]));
+        let g = g.finish();
         // al/array resolves to embedded stdlib source -> not an editable file.
         assert_eq!(module_uri(&g, std_mod), Err(ModuleUriError::Embedded));
-        // a bare non-al module is reserved/unresolvable.
-        let bare = g.intern_module(&mp(&["whatever"]));
         assert!(matches!(
             module_uri(&g, bare),
             Err(ModuleUriError::Resolve(_))
@@ -133,11 +134,12 @@ mod tests {
         let file = dir.join("helpers.al");
         std::fs::write(&file, "pub fn x() { 1 }\n").expect("write temp module");
 
-        let mut g = ReferenceGraph::new();
+        let mut g = ReferenceGraphBuilder::new();
         // Graph module paths are canonical file identities; one resolves
         // straight back to its on-disk file.
         let canon = crate::module::file_module_path(&file);
         let m = g.intern_module(&canon);
+        let g = g.finish();
         let uri = module_uri(&g, m).expect("canonical module resolves");
         assert!(uri.starts_with("file://"));
         assert!(uri.ends_with("helpers.al"));
