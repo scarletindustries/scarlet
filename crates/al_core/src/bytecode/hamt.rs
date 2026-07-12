@@ -31,8 +31,8 @@
 //! untouched) and a version's exclusive nodes are freed as it drops.
 
 use super::value::{
-    Arena, HamtMapRef, HamtNodeRef, MapRef, Value, hamt_branch_in, hamt_collision_in,
-    hamt_entry_in, hamt_map_in, hash_value, map_entry_hash, values_equal,
+    Arena, EqPending, HamtMapRef, HamtNodeRef, MapRef, Value, eq_defer, hamt_branch_in,
+    hamt_collision_in, hamt_entry_in, hamt_map_in, hash_value, map_entry_hash, values_equal,
 };
 
 /// Hash bits consumed per trie level (32-way branching).
@@ -439,8 +439,11 @@ pub fn hamt_matches(m: MapRef<'_>, size: usize, mut f: impl FnMut(Value, Value) 
 }
 
 /// Structural equality of two HAMT-backed maps. The caller has already
-/// dispatched on `MapBacking::Hamt` for both sides.
-pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
+/// dispatched on `MapBacking::Hamt` for both sides. Entry values are deferred
+/// onto the caller's `values_equal` worklist (`pending`) rather than compared
+/// by a nested `values_equal` call, so maps nested through their values do not
+/// stack native frames per level.
+pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>, pending: &mut EqPending) -> bool {
     let (a, b) = (a.as_hamt(), b.as_hamt());
     if a.size != b.size {
         return false;
@@ -448,7 +451,7 @@ pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>) -> bool {
     try_for_each_entry(
         &a.root,
         &mut |k, v| match node_get_root(&b.root, &k, hash_value(&k)) {
-            Some(bv) => values_equal(&v, &bv),
+            Some(bv) => eq_defer(pending, &v, &bv),
             None => false,
         },
     )

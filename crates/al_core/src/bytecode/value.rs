@@ -97,6 +97,8 @@ use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use crate::frozen::FrozenBuilder;
 use crate::heap::ProcHeap;
 use crate::type_def::TypeId;
@@ -2702,11 +2704,60 @@ fn hash_sequence(len: usize, elem_hashes: impl Iterator<Item = u64>) -> u64 {
     h
 }
 
-/// Push the pairwise elements of two equal-length slices onto the equality
-/// worklist; unequal lengths decide `false` without visiting any element.
-fn push_pairs(pending: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
-    a.len() == b.len() && {
-        pending.extend(a.iter().cloned().zip(b.iter().cloned()));
+/// Equality worklist. Inline capacity covers ordinary nesting (a few tuple /
+/// enum levels) so the common comparison never touches the host allocator —
+/// `values_equal` runs on every map probe, so a malloc per comparison would be
+/// a real cost.
+pub(super) type EqPending = SmallVec<[(Value, Value); 16]>;
+
+/// Decide a pair without descending: bit-identical words and same-kind scalar
+/// views resolve here. `None` means the pair needs the worklist (heap
+/// composites, and cross-kind pairs like Range vs Array).
+#[inline]
+fn decide_flat(x: &Value, y: &Value) -> Option<bool> {
+    // Bit-identical words are always equal: immediates are their value, heap
+    // words name the same object, and a real NaN never enters the box.
+    if x.0 == y.0 {
+        return Some(true);
+    }
+    match (x.kind(), y.kind()) {
+        (ValueView::Int(a), ValueView::Int(b)) => Some(a == b),
+        (ValueView::Float(a), ValueView::Float(b)) => Some(a == b),
+        (ValueView::Bool(a), ValueView::Bool(b)) => Some(a == b),
+        (ValueView::Str(a), ValueView::Str(b)) => Some(a == b),
+        (ValueView::Nil, ValueView::Nil) => Some(true),
+        _ => None,
+    }
+}
+
+/// One child pair of the value being compared: decide it in place when it is
+/// flat, otherwise defer it to the worklist. Shared by every composite arm of
+/// [`pair_equal`] and by [`super::hamt::hamts_equal`] so map entry values join
+/// the same worklist instead of recursing.
+#[inline]
+pub(super) fn eq_defer(pending: &mut EqPending, x: &Value, y: &Value) -> bool {
+    match decide_flat(x, y) {
+        Some(eq) => eq,
+        None => {
+            pending.push((x.clone(), y.clone()));
+            true
+        }
+    }
+}
+
+/// Stream the pairwise elements of two equal-length slices: scalar pairs are
+/// decided in place (a mismatch returns `false` immediately, without visiting
+/// the rest), and only pairs that need descent go onto the worklist. Unequal
+/// lengths decide `false` without visiting any element. The deferred pairs are
+/// reversed in place so the driver's `pop` compares them left-to-right, which
+/// keeps `pending` at O(depth) for chain shapes (a composite head is compared
+/// and released before the tail is descended) instead of accumulating one
+/// deferred head per level.
+fn push_pairs(pending: &mut EqPending, a: &[Value], b: &[Value]) -> bool {
+    let start = pending.len();
+    let all = a.len() == b.len() && a.iter().zip(b).all(|(x, y)| eq_defer(pending, x, y));
+    all && {
+        pending[start..].reverse();
         true
     }
 }
@@ -2728,11 +2779,14 @@ pub fn range_len(s: i64, e: i64) -> i64 {
 /// equals a HAMT holding exactly the environment's entries.
 ///
 /// Iterative, like `release_at_zero`: child pairs (enum payloads, tuple
-/// elements, closure captures, array elements) go onto an explicit worklist
-/// instead of the native stack, so arbitrarily deep values — a 100k-deep
-/// user-defined cons list — cannot overflow it.
+/// elements, closure captures, array elements, map entry values) go onto an
+/// explicit worklist instead of the native stack, so arbitrarily deep values —
+/// a 100k-deep user-defined cons list, or a value nested 100k deep through map
+/// values — cannot overflow it. (Map *keys* are compared by fresh
+/// `values_equal` calls inside the HAMT probe, but each such call is itself
+/// iterative, so keys do not stack native frames per nesting level either.)
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    let mut pending: Vec<(Value, Value)> = Vec::new();
+    let mut pending = EqPending::new();
     if !pair_equal(a, b, &mut pending) {
         return false;
     }
@@ -2746,30 +2800,33 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 
 /// One step of [`values_equal`]: decide the pair outright, or push its child
 /// pairs onto `pending` for the driver loop to compare.
-fn pair_equal(a: &Value, b: &Value, pending: &mut Vec<(Value, Value)>) -> bool {
-    // Bit-identical words are always equal: immediates are their value, heap
-    // words name the same object, and a real NaN never enters the box.
-    if a.0 == b.0 {
-        return true;
+fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
+    if let Some(eq) = decide_flat(a, b) {
+        return eq;
     }
     match (a.kind(), b.kind()) {
-        (ValueView::Int(x), ValueView::Int(y)) => x == y,
-        (ValueView::Float(x), ValueView::Float(y)) => x == y,
-        (ValueView::Bool(x), ValueView::Bool(y)) => x == y,
-        (ValueView::Str(x), ValueView::Str(y)) => x == y,
         (ValueView::Enum(ae), ValueView::Enum(be)) => {
             ae.hash() == be.hash()
                 && ae.type_id() == be.type_id()
                 && ae.variant_name() == be.variant_name()
                 && push_pairs(pending, ae.payload(), be.payload())
         }
-        (ValueView::Nil, ValueView::Nil) => true,
         (ValueView::Closure(x), ValueView::Closure(y)) => {
             x.func_idx() == y.func_idx() && push_pairs(pending, x.captures(), y.captures())
         }
         (ValueView::Array(aa), ValueView::Array(ba)) => {
-            aa.len() == ba.len() && {
-                pending.extend(aa.iter().zip(ba.iter()));
+            // Streamed like push_pairs: a scalar mismatch stops the walk at
+            // that element, and an all-scalar array never grows the worklist.
+            // Deferred pairs are reversed so the driver compares them
+            // left-to-right (see push_pairs).
+            let start = pending.len();
+            let all = aa.len() == ba.len()
+                && aa
+                    .iter()
+                    .zip(ba.iter())
+                    .all(|(x, y)| eq_defer(pending, &x, &y));
+            all && {
+                pending[start..].reverse();
                 true
             }
         }
@@ -2801,7 +2858,7 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut Vec<(Value, Value)>) -> bool {
             asv.id == bsv.id && asv.is_listener == bsv.is_listener
         }
         (ValueView::Map(am), ValueView::Map(bm)) => match (am.backing(), bm.backing()) {
-            (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm),
+            (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm, pending),
             // Two `Env` views read through to the same live process
             // environment.
             (MapBacking::Env, MapBacking::Env) => true,
@@ -3301,6 +3358,33 @@ mod tests {
         // A chain differing only at the innermost element is unequal (the
         // cached hash already differs at the root).
         let c = deep(&mut h, -1);
+        assert!(!values_equal(&a, &c));
+    }
+
+    /// Guards the map arm of the worklist rewrite: entry values are deferred
+    /// onto the shared worklist, so a value nested ~100k deep through map
+    /// values (`{k: {k: …}}`) compares without stacking native frames per
+    /// nesting level.
+    #[test]
+    fn values_equal_deep_map_nesting_is_iterative() {
+        use crate::bytecode::hamt;
+
+        let mut h = test_heap();
+        let deep = |h: &mut ProcHeap, innermost: i64| {
+            let mut v = Value::small_int(innermost);
+            for _ in 0..100_000 {
+                let k = Value::str_in(h, "k");
+                let kh = hash_value(&k);
+                let empty = hamt::empty(h);
+                v = hamt::insert(h, &empty, k, v, kh);
+            }
+            v
+        };
+        let a = deep(&mut h, 1);
+        let b = deep(&mut h, 1);
+        assert!(values_equal(&a, &b), "equal deep map nests compare equal");
+        // Nests differing only at the innermost value are unequal.
+        let c = deep(&mut h, 2);
         assert!(!values_equal(&a, &c));
     }
 
