@@ -9,11 +9,19 @@ pub fn min(a Int, b Int) Int {
 	if a < b { a } else { b }
 }
 
+pub fn min_value() Int {
+	0 - 9223372036854775807 - 1
+}
+
+pub fn max_value() Int {
+	9223372036854775807
+}
+
 // Total: `abs` of Int min (whose negation does not fit in an Int) saturates
 // to Int max rather than wrapping back to a negative value.
 pub fn abs(n Int) Int {
-	if n == 0 - 9223372036854775807 - 1 {
-		9223372036854775807
+	if n == min_value() {
+		max_value()
 	} else if n < 0 {
 		0 - n
 	} else {

@@ -194,15 +194,16 @@ fn stdlib_decimal() {
          println(decimal.to_string(decimal.round(x, 5)))\n",
         "2.34\n0.12\n0.14\n2.35\n-2.35\n2.34\n2.34500\n",
     );
-    // Division takes an explicit result scale and is None on a zero divisor.
+    // Division takes an explicit result scale and is Err(DividedByZero) on a
+    // zero divisor.
     run_outputs(
         "import al/decimal\n\
-         import al/option\n\
+         import al/result\n\
          bill = decimal.new(10000, 2)\n\
-         println(option.map(decimal.div(bill, decimal.from_int(3), 2), decimal.to_string))\n\
-         println(option.map(decimal.div(decimal.from_int(1), decimal.from_int(8), 4), decimal.to_string))\n\
+         println(result.map(decimal.div(bill, decimal.from_int(3), 2), decimal.to_string))\n\
+         println(result.map(decimal.div(decimal.from_int(1), decimal.from_int(8), 4), decimal.to_string))\n\
          println(decimal.div(bill, decimal.from_int(0), 2))\n",
-        "Some(33.33)\nSome(0.1250)\nNone\n",
+        "Ok(33.33)\nOk(0.1250)\nErr(DividedByZero)\n",
     );
     // Half-tie rounding with divisor units near Int max: `2 * r` would wrap
     // for remainders at or above 2^62, silently rounding toward zero. The
@@ -211,9 +212,9 @@ fn stdlib_decimal() {
     // both signs, remainders near d, and exact ties.
     run_outputs(
         "import al/decimal.{HalfUp, HalfEven}\n\
-         import al/option\n\
+         import al/result\n\
          big = decimal.from_int(9000000000000000000)\n\
-         show = fn(q) { option.map(q, decimal.to_string) }\n\
+         show = fn(q) { result.map(q, decimal.to_string) }\n\
          println(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, HalfUp)))\n\
          println(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, HalfUp)))\n\
          println(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, HalfEven)))\n\
@@ -223,7 +224,7 @@ fn stdlib_decimal() {
          println(show(decimal.div_with(decimal.from_int(8999999999999999999), big, 0, HalfEven)))\n\
          println(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfUp)))\n\
          println(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfEven)))\n",
-        "Some(1)\nSome(1)\nSome(1)\nSome(1)\nSome(0)\nSome(-1)\nSome(1)\nSome(1)\nSome(0)\n",
+        "Ok(1)\nOk(1)\nOk(1)\nOk(1)\nOk(0)\nOk(-1)\nOk(1)\nOk(1)\nOk(0)\n",
     );
     // Numeric comparison is scale-blind (1.5 == 1.500) even though the
     // representation differs; normalize strips the trailing zeros.
@@ -245,40 +246,41 @@ fn stdlib_decimal() {
     // wrapping. -0.05 exercises the sign-on-zero-whole-part case.
     run_outputs(
         "import al/decimal\n\
-         import al/option\n\
-         println(option.map(decimal.parse('19.99'), decimal.to_string))\n\
-         println(option.map(decimal.parse('-0.05'), decimal.to_string))\n\
-         println(option.map(decimal.parse('+1.50'), decimal.to_string))\n\
-         println(option.map(decimal.parse('42'), decimal.to_string))\n\
+         import al/result\n\
+         println(result.map(decimal.parse('19.99'), decimal.to_string))\n\
+         println(result.map(decimal.parse('-0.05'), decimal.to_string))\n\
+         println(result.map(decimal.parse('+1.50'), decimal.to_string))\n\
+         println(result.map(decimal.parse('42'), decimal.to_string))\n\
          println(decimal.parse('1.'))\n\
          println(decimal.parse('.5'))\n\
          println(decimal.parse('1.2.3'))\n\
          println(decimal.parse(''))\n\
          println(decimal.parse('-'))\n\
          println(decimal.parse('9223372036854775807.99'))\n\
-         println(option.map(decimal.parse('92233720368547758.07'), decimal.units))\n",
-        "Some(19.99)\nSome(-0.05)\nSome(1.50)\nSome(42)\nNone\nNone\nNone\nNone\nNone\nNone\nSome(9223372036854775807)\n",
+         println(result.map(decimal.parse('92233720368547758.07'), decimal.units))\n",
+        "Ok(19.99)\nOk(-0.05)\nOk(1.50)\nOk(42)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(9223372036854775807)\n",
     );
     // Negative `places` rounds to a multiple of 10^|places| at scale 0, in
     // round and div alike.
     run_outputs(
         "import al/decimal\n\
-         import al/option\n\
+         import al/result\n\
          println(decimal.to_string(decimal.round(decimal.new(1250, 0), 0 - 2)))\n\
          println(decimal.to_string(decimal.round(decimal.new(12345, 1), 0 - 1)))\n\
          println(decimal.scale(decimal.round(decimal.new(1250, 0), 0 - 2)))\n\
-         println(option.map(decimal.div(decimal.from_int(1234), decimal.from_int(1), 0 - 2), decimal.to_string))\n",
-        "1200\n1230\n0\nSome(1200)\n",
+         println(result.map(decimal.div(decimal.from_int(1234), decimal.from_int(1), 0 - 2), decimal.to_string))\n",
+        "1200\n1230\n0\nOk(1200)\n",
     );
     // Dropping more than 18 digits (scale - places >= 19): 10^k would wrap,
     // so the quotient regime is {-1, 0, 1} and is computed without it. The
-    // half boundary is reachable only at k == 19 (5 * 10^18); div is None
-    // when places < -18 or the rescale exponent exceeds 18.
+    // half boundary is reachable only at k == 19 (5 * 10^18); div is
+    // Err(ScaleOutOfRange) when places < -18 or the rescale exponent
+    // exceeds 18.
     run_outputs(
         "import al/decimal.{HalfUp, Up}\n\
-         import al/option\n\
+         import al/result\n\
          println(decimal.to_string(decimal.round(decimal.new(123456789012345678, 18), 0 - 1)))\n\
-         println(option.map(decimal.div(decimal.new(9000000000000000000, 18), decimal.from_int(1), 0 - 1), decimal.to_string))\n\
+         println(result.map(decimal.div(decimal.new(9000000000000000000, 18), decimal.from_int(1), 0 - 1), decimal.to_string))\n\
          println(decimal.to_string(decimal.round(decimal.new(1234, 0), 0 - 19)))\n\
          println(decimal.to_string(decimal.round(decimal.new(19, 1), 0 - 18)))\n\
          println(decimal.to_string(decimal.round_with(decimal.new(1, 18), 0 - 1, Up)))\n\
@@ -286,19 +288,19 @@ fn stdlib_decimal() {
          println(decimal.to_string(decimal.round(decimal.new(5000000000000000000, 18), 0 - 1)))\n\
          println(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19))\n\
          println(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21))\n",
-        "0\nSome(10)\n0\n0\n10\n10\n0\nNone\nNone\n",
+        "0\nOk(10)\n0\n0\n10\n10\n0\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\n",
     );
-    // Float bridges are explicitly lossy conveniences; from_float is None
+    // Float bridges are explicitly lossy conveniences; from_float is Err(Nil)
     // instead of wrapping when units would leave Int range.
     run_outputs(
         "import al/decimal\n\
-         import al/option\n\
+         import al/result\n\
          println(decimal.to_float(decimal.new(25, 1)))\n\
-         println(option.map(decimal.from_float(2.5, 2), decimal.to_string))\n\
+         println(result.map(decimal.from_float(2.5, 2), decimal.to_string))\n\
          println(decimal.from_float(10000000000000000000.0, 2))\n\
          println(decimal.from_float(0.5, 19))\n\
-         println(option.map(decimal.from_float(149.0, 0 - 1), decimal.to_string))\n",
-        "2.5\nSome(2.50)\nNone\nNone\nSome(150)\n",
+         println(result.map(decimal.from_float(149.0, 0 - 1), decimal.to_string))\n",
+        "2.5\nOk(2.50)\nErr(Nil)\nErr(Nil)\nOk(150)\n",
     );
 }
 

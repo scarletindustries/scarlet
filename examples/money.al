@@ -8,7 +8,7 @@
 
 import al/decimal.{Decimal, Down}
 import al/array
-import al/option
+import al/result
 
 type Usd {
 	amount Decimal
@@ -48,7 +48,7 @@ fn tax(u Usd, rate Decimal) Usd {
 // the first shares. Dividing and multiplying back would either lose or
 // invent money; this is the standard allocation fix.
 fn split(total Usd, n Int) Array(Usd) {
-	base = option.unwrap(
+	base = result.unwrap(
 		decimal.div_with(amount(total), decimal.from_int(n), 2, Down),
 		decimal.from_int(0),
 	)
@@ -77,7 +77,7 @@ fn line_total(i Item) Usd {
 }
 
 fn d(s String) Decimal {
-	option.unwrap(decimal.parse(s), decimal.from_int(0))
+	result.unwrap(decimal.parse(s), decimal.from_int(0))
 }
 
 // The classic float trap, avoided.

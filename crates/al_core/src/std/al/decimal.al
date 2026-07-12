@@ -17,8 +17,8 @@
 // `units` follows the language's Int semantics (64-bit, wrapping), so keep
 // magnitudes below 9.2 * 10^18 and scales at or below 18. Aligning scales in
 // `add`, `sub`, and `compare` multiplies units by 10^(scale difference), so
-// that product must also fit in 64 bits or it wraps. `parse` rejects inputs
-// that would overflow rather than wrapping, and `from_float` is None on them.
+// that product must also fit in 64 bits or it wraps. `parse` and `from_float`
+// return `Err(Nil)` on inputs that would overflow rather than wrapping.
 
 import al/binary.{Dec}
 import al/float
@@ -97,20 +97,28 @@ pub fn mul(a Decimal, b Decimal) Decimal {
 	Decimal(units(a) * units(b), scale(a) + scale(b))
 }
 
-// Quotient at the given scale, rounding half-to-even. None when `b` is zero,
-// when `places` is below -18 (the result could not be scaled back up, as in
-// `from_float`), or when the rescale exponent `places + scale(b) - scale(a)`
-// exceeds 18 (10^19 no longer fits in Int). A negative `places` rounds the
-// quotient to a multiple of 10^|places| at scale 0:
+// Why `div` failed. `DividedByZero` is a zero divisor. `ScaleOutOfRange` is a
+// `places` below -18 (the result could not be scaled back up, as in
+// `from_float`) or a rescale exponent `places + scale(b) - scale(a)` above 18
+// (10^19 no longer fits in Int).
+pub type DivError {
+	DividedByZero
+	ScaleOutOfRange
+}
+
+// Quotient at the given scale, rounding half-to-even. A negative `places`
+// rounds the quotient to a multiple of 10^|places| at scale 0:
 // `div(from_int(1234), from_int(1), 0 - 2)` is 1200.
-pub fn div(a Decimal, b Decimal, places Int) Option(Decimal) {
+pub fn div(a Decimal, b Decimal, places Int) Result(Decimal, DivError) {
 	div_with(a, b, places, HalfEven)
 }
 
-pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Option(Decimal) {
+pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Result(Decimal, DivError) {
 	e = places + scale(b) - scale(a)
-	if is_zero(b) || places < 0 - 18 || e > 18 {
-		None
+	if is_zero(b) {
+		Err(DividedByZero)
+	} else if places < 0 - 18 || e > 18 {
+		Err(ScaleOutOfRange)
 	} else {
 		q = if e >= 0 {
 			div_units(units(a) * pow10(e), units(b), mode)
@@ -121,7 +129,7 @@ pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Option(Decimal)
 		} else {
 			div_round_huge(units(a), units(b), 0 - e, mode)
 		}
-		Some(at_places(q, places))
+		Ok(at_places(q, places))
 	}
 }
 
@@ -231,15 +239,19 @@ pub fn normalize(d Decimal) Decimal {
 // '42', '-19.99', '+0.05'. The scale is the number of fractional digits.
 // Rejects anything else — including '.5', '1.', values that would overflow,
 // and more than 18 fractional digits.
-pub fn parse(s String) Option(Decimal) {
+pub fn parse(s String) Result(Decimal, Nil) {
 	b = binary.from_string(s)
 	first = binary.byte_at(b, 0)
-	if first == 45 {
+	parsed = if first == 45 {
 		option.map(parse_unsigned(tail(b)), neg)
 	} else if first == 43 {
 		parse_unsigned(tail(b))
 	} else {
 		parse_unsigned(b)
+	}
+	match parsed {
+		Some(d) -> Ok(d)
+		None -> Err(Nil)
 	}
 }
 
@@ -259,14 +271,14 @@ pub fn to_float(d Decimal) Float {
 	float.from_int(units(d)) / float.from_int(pow10(scale(d)))
 }
 
-// `f` rounded to the nearest value at the given scale; None when the
+// `f` rounded to the nearest value at the given scale; `Err(Nil)` when the
 // resulting `units` would leave 64-bit Int range, or when |places| exceeds
 // 18 (10^19 no longer fits in `units`). A negative `places` rounds to a
 // multiple of 10^|places| at scale 0. Floats are approximate, so prefer
 // `parse` or `new` when exactness matters.
-pub fn from_float(f Float, places Int) Option(Decimal) {
+pub fn from_float(f Float, places Int) Result(Decimal, Nil) {
 	if places > 18 || places < 0 - 18 {
-		None
+		Err(Nil)
 	} else {
 		k = int.max(0 - places, 0)
 		scaled = if places < 0 {
@@ -277,9 +289,9 @@ pub fn from_float(f Float, places Int) Option(Decimal) {
 		// 9.2 * 10^18 sits safely below Int max, so rounding `scaled` (and,
 		// for negative `places`, scaling back up by 10^k) cannot wrap.
 		if float.abs(scaled) < 9200000000000000000.0 / float.from_int(pow10(k)) {
-			Some(at_places(float.round(scaled), places))
+			Ok(at_places(float.round(scaled), places))
 		} else {
-			None
+			Err(Nil)
 		}
 	}
 }
@@ -326,7 +338,7 @@ fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 		Ok(w) if k <= 18 -> match binary.parse_int(frac, Dec) {
 			// w * 10^k + f overflows Int exactly when w exceeds
 			// (Int max - f) / 10^k; wrapping would corrupt the value.
-			Ok(f) if w <= { 9223372036854775807 - f } / pow10(k) ->
+			Ok(f) if w <= { int.max_value() - f } / pow10(k) ->
 				Some(Decimal(w * pow10(k) + f, k))
 			else -> None
 		}
