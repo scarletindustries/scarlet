@@ -35,6 +35,10 @@ pub fn listen(host String, port Int) Result(Server, NetError) {
 	}
 }
 
+// Take the next incoming connection off the listener's queue, parking the
+// calling process until one arrives. After the `Server` is closed, this — and
+// every later accept on it — returns `Err(NotConnected)`; a hand-rolled accept
+// loop should treat that variant as clean shutdown, not an error.
 @vm(net__accept)
 pub fn accept(s Server) Result(Socket, NetError)
 
@@ -68,7 +72,7 @@ pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Server, NetEr
 // Returns `Nil`: once the listener is bound the acceptors cannot fail here —
 // the only fallible step is the bind, which the caller has already done.
 pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
-	scheduler.spawn_on_each(fn() accept_loop(server, handler))
+	scheduler.spawn_per_core(fn() accept_loop(server, handler))
 }
 
 // The per-core accept loop: accept a connection, hand it to its own process on
@@ -142,8 +146,14 @@ pub fn connect(host String, port Int) Result(Socket, NetError) {
 @vm(net__connect)
 pub fn connect_addr(addr SocketAddress) Result(Socket, NetError)
 
+// The address the listener is actually bound to. This is how the kernel-
+// assigned port is read back after binding port 0.
 @vm(net__local_addr)
 pub fn local_addr(s Server) Result(SocketAddress, NetError)
 
+// Shut the listener down. Closing a `Server` wakes every process parked in
+// `accept` and makes that call — and every later `accept` — return
+// `Err(NotConnected)`, which is the clean-shutdown signal the `serve`
+// acceptors (and any hand-rolled accept loop) exit on.
 @vm(net__close)
 pub fn close(s Server) Result(Nil, NetError)

@@ -28,8 +28,8 @@ pub fn spawn_local(f fn() Nil) Nil
 // Spawn one copy of `f` on every core. Each copy runs independently with no
 // shared state. Used to fan an accept loop out across all cores, so each core
 // accepts and serves connections from its own kernel queue.
-@vm(scheduler__spawn_on_each)
-pub fn spawn_on_each(f fn() Nil) Nil
+@vm(scheduler__spawn_per_core)
+pub fn spawn_per_core(f fn() Nil) Nil
 
 // Park only the calling process for `ms` milliseconds — every other process
 // keeps running. `ms <= 0` returns immediately.
