@@ -950,7 +950,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             }
             Atom::Closure { func_idx, captures } => {
                 self.push_args(captures, defs);
-                self.push(op_ab(Op::MakeClosure, 0, 0, *func_idx));
+                self.push(op_ab(Op::MakeClosure, 0, 0, func_idx.to_operand()));
                 if tail {
                     self.push(op(Op::Ret));
                 }
@@ -991,7 +991,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 } else {
                     Op::CallKnown
                 };
-                self.push(op_ab(o, 0, argc as u16, func_idx));
+                self.push(op_ab(o, 0, argc as u16, func_idx.to_operand()));
             }
             Callee::Self_ => {
                 let o = if tail { Op::TailCallSelf } else { Op::CallSelf };
@@ -1198,8 +1198,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ConstId;
     use super::super::testkit::{ctx, func, vref};
+    use super::super::{ConstId, FuncIdx};
     use super::*;
     use crate::typed_ir::RTy;
 
@@ -1252,7 +1252,7 @@ mod tests {
         let body = CoreExpr::Let {
             bind: bind(1),
             rhs: Atom::Call {
-                callee: Callee::Known(7),
+                callee: Callee::Known(FuncIdx(7)),
                 args: vec![LocalId(0)],
             },
             body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(1)))),

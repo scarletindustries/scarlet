@@ -579,7 +579,7 @@ impl Lower {
                 ValueRef::Slot(slot) => Atom::PrimOp {
                     op: Op::PushLocal,
                     args: vec![],
-                    imm: slot,
+                    imm: slot.0,
                 },
                 ValueRef::Global(slot) => Atom::PrimOp {
                     op: Op::PushGlobal,
@@ -589,7 +589,7 @@ impl Lower {
                 ValueRef::Capture(idx) => Atom::PrimOp {
                     op: Op::PushCapture,
                     args: vec![],
-                    imm: idx,
+                    imm: idx.0,
                 },
                 ValueRef::SelfClosure => Atom::prim(Op::PushSelf, vec![]),
             },

@@ -48,7 +48,7 @@ pub use elaborate::{
 pub use elaborate_pat::{CtorPat, PatCtx, elaborate_arms, elaborate_pattern};
 pub use eta::{FnRTy, FnTable, eta_wrapper};
 pub use resolve::{CallForm, Denotation, EtaTarget, ValueForm};
-pub use rty::{RSlice, RTy, ResolvedNode, ResolvedPool};
+pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub use zonk::{UnsolvedVar, Zonker, pool_for};
 
 use crate::bytecode::{Op, Value};
@@ -77,6 +77,20 @@ impl std::fmt::Display for BindingId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GlobalSlot(pub i32);
 
+/// A slot in the *current* frame: what `PushLocal` addresses. Minted by the
+/// compiler walk's slot allocation (`get_or_create_local`) and unwrapped only
+/// at `PushLocal` emission — a different runtime index space from both
+/// [`GlobalSlot`] (the entry frame) and [`CaptureIdx`] (the closure's capture
+/// array), so handing one where another is wanted is a type error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FrameSlot(pub i32);
+
+/// An index into the current closure's capture array: what `PushCapture`
+/// addresses. Minted where the compiler walk assigns a capture its position in
+/// `capture_names`, and unwrapped only at `PushCapture` emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CaptureIdx(pub i32);
+
 /// A name bound to a value, with the type the checker gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedBind {
@@ -102,18 +116,15 @@ pub enum ValueRef {
     /// `import mod.{x}` binding) — `PushLocal slot`. Unlike every other
     /// variant this index is minted outside the IR and is anchored to no
     /// [`BindingId`]; it exists only because import bindings are materialised
-    /// by the module walk rather than by the elaborator. `i32` end-to-end:
-    /// the walk allocates slots as `i32` and `Op` immediates are `i32`, so
-    /// there is no width change anywhere on the path.
-    Slot(i32),
+    /// by the module walk rather than by the elaborator.
+    Slot(FrameSlot),
     /// [`GlobalSlot`] in the entry frame — `PushGlobal slot`, the same slot the
     /// defining [`TypedBind::global`] carries. A top-level `fn` referenced as a
     /// *value* loads this way even inside itself; self-*calls* are
     /// [`TypedCallee::SelfRec`].
     Global(GlobalSlot),
-    /// `PushCapture idx` — a value captured from the enclosing frame. `i32`
-    /// for the same reason as [`ValueRef::Slot`].
-    Capture(i32),
+    /// `PushCapture idx` — a value captured from the enclosing frame.
+    Capture(CaptureIdx),
     /// `PushSelf` — the current closure itself.
     SelfClosure,
 }
@@ -848,7 +859,7 @@ mod tests {
         // bodies are `ConstId(1)` and `ConstId(2)`.
         let scrut = TypedExpr::Var {
             ty: arr_ty,
-            place: ValueRef::Slot(0),
+            place: ValueRef::Slot(FrameSlot(0)),
         };
         let arms = vec![
             TypedArm {

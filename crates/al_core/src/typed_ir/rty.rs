@@ -20,9 +20,32 @@
 //! The pool is compile-local: it is built by the elaborator and consumed by
 //! `lower`/`perceus`/`emit`, all of which run within one compilation.
 
-use crate::core_ir::Arity;
 use crate::type_def::TypeId;
 use crate::types::{Prim, PrimIds, StrId};
+
+/// How many arguments a function type, constructor, or eta wrapper takes.
+///
+/// Its own type because it is compared against things that look just like it:
+/// `eta_wrapper` asserts a constructor's *declared* field count equals the
+/// arity of its *instantiated* function type, and a payload of the wrong width
+/// is a silently corrupt heap value, not a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Arity(pub u16);
+
+impl Arity {
+    /// The arity of a parameter/field list. The one constructor that is not a
+    /// literal, so a `len()` cast lives here rather than at each call site.
+    #[inline]
+    pub fn of<T>(items: &[T]) -> Self {
+        Arity(u16::try_from(items.len()).expect("constructor arity exceeds u16"))
+    }
+}
+
+impl std::fmt::Display for Arity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Index into [`ResolvedPool::nodes`]. Meaningful only relative to the pool
 /// that minted it, exactly as `Ty` is to its engine — but the two indices are

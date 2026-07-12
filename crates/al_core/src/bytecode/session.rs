@@ -32,6 +32,7 @@ use crate::reference::{
     Definition, DefinitionKind, EntityKind, ModuleId, ModuleReferences, ReferenceGraph,
 };
 use crate::span::Span;
+use crate::tivec::Idx;
 use crate::type_def::{Type, TypeId};
 use crate::types::{DefinitionLocation, EnginePoolWatermark, EnvWatermark, Ty};
 
@@ -207,8 +208,7 @@ impl Compiler {
         self.program.functions.truncate(functions);
         self.program.constants.truncate(constants);
         self.local_count = local_count;
-        self.global_to_func
-            .retain(|_, fi| (*fi as usize) < functions);
+        self.global_to_func.retain(|_, fi| fi.index() < functions);
         // Survivors are watermark-preserved entry-frame slots (e.g. `__pre*`,
         // imports). Scope state is fully cleared, so normalise their depth to 0
         // ("pre-existing, outermost"): the next opened scope then treats them as

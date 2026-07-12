@@ -33,7 +33,9 @@ use crate::bytecode::Op;
 use crate::core_ir::{FuncIdx, VariantRef};
 use crate::types::{StrId, ValueKind};
 
-use super::{BindingId, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
+use super::{
+    Arity, BindingId, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef,
+};
 
 /// How a statically-known function is *called*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +59,7 @@ enum Den {
     /// chosen together by the smart constructors.
     Fn { place: ValueRef, target: FnTarget },
     /// A data constructor.
-    Ctor { variant: VariantRef, arity: u16 },
+    Ctor { variant: VariantRef, arity: Arity },
     /// A `@vm` builtin: the call *is* the opcode.
     Builtin { op: Op },
 }
@@ -80,7 +82,7 @@ pub enum ValueForm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EtaTarget {
     /// Arity comes from the declaration, not from the (instantiated) type.
-    Ctor { variant: VariantRef, arity: u16 },
+    Ctor { variant: VariantRef, arity: Arity },
     /// Arity is the wrapped type's `ResolvedPool::arity`.
     Builtin { op: Op },
 }
@@ -103,7 +105,7 @@ impl Denotation {
     }
 
     /// A raw frame slot the module walk assigned — see [`ValueRef::Slot`].
-    pub fn slot(slot: i32) -> Self {
+    pub fn slot(slot: FrameSlot) -> Self {
         Denotation(Den::Value(ValueRef::Slot(slot)))
     }
 
@@ -112,7 +114,7 @@ impl Denotation {
         Denotation(Den::Value(ValueRef::Global(slot)))
     }
 
-    pub fn capture(idx: i32) -> Self {
+    pub fn capture(idx: CaptureIdx) -> Self {
         Denotation(Den::Value(ValueRef::Capture(idx)))
     }
 
@@ -144,7 +146,7 @@ impl Denotation {
         })
     }
 
-    pub fn ctor(variant: VariantRef, arity: u16) -> Self {
+    pub fn ctor(variant: VariantRef, arity: Arity) -> Self {
         Denotation(Den::Ctor { variant, arity })
     }
 
@@ -176,7 +178,7 @@ impl Denotation {
                     type_name,
                     variant_name: name,
                 },
-                arity,
+                Arity(arity),
             )),
             ValueKind::Builtin { op } => Some(Denotation::builtin(op)),
             ValueKind::Local | ValueKind::ModuleFn => None,
@@ -187,7 +189,10 @@ impl Denotation {
     pub fn as_value(&self) -> ValueForm {
         match self.0 {
             Den::Value(place) | Den::Fn { place, .. } => ValueForm::Ref(place),
-            Den::Ctor { variant, arity: 0 } => ValueForm::Ctor(variant),
+            Den::Ctor {
+                variant,
+                arity: Arity(0),
+            } => ValueForm::Ctor(variant),
             Den::Ctor { variant, arity } => ValueForm::Eta(EtaTarget::Ctor { variant, arity }),
             Den::Builtin { op } => ValueForm::Eta(EtaTarget::Builtin { op }),
         }
@@ -218,7 +223,7 @@ impl Denotation {
     /// use site. `None` for anything that is not a constructor.
     pub fn as_ctor(&self) -> Option<(VariantRef, u16)> {
         match self.0 {
-            Den::Ctor { variant, arity } => Some((variant, arity)),
+            Den::Ctor { variant, arity } => Some((variant, arity.0)),
             _ => None,
         }
     }
@@ -274,12 +279,15 @@ mod tests {
 
     #[test]
     fn a_known_toplevel_fn_calls_by_index_and_loads_by_slot() {
-        let d = Denotation::known_fn(GlobalSlot(2), 9);
+        let d = Denotation::known_fn(GlobalSlot(2), FuncIdx(9));
         assert_eq!(
             d.as_value(),
             ValueForm::Ref(ValueRef::Global(GlobalSlot(2)))
         );
-        assert_eq!(d.as_callee(TY), CallForm::Callee(TypedCallee::Known(9)));
+        assert_eq!(
+            d.as_callee(TY),
+            CallForm::Callee(TypedCallee::Known(FuncIdx(9)))
+        );
     }
 
     /// A module-scope *value* (a `const`, an import re-exported as a value) has
@@ -301,31 +309,34 @@ mod tests {
     /// is left is a slot the walk minted (a selective `import mod.{x}`).
     #[test]
     fn a_walk_frame_slot_is_the_escape_hatch() {
-        let d = Denotation::slot(6);
-        assert_eq!(d.as_value(), ValueForm::Ref(ValueRef::Slot(6)));
+        let d = Denotation::slot(FrameSlot(6));
+        assert_eq!(d.as_value(), ValueForm::Ref(ValueRef::Slot(FrameSlot(6))));
     }
 
     #[test]
     fn a_capture_loads_by_index() {
-        let d = Denotation::capture(3);
-        assert_eq!(d.as_value(), ValueForm::Ref(ValueRef::Capture(3)));
+        let d = Denotation::capture(CaptureIdx(3));
+        assert_eq!(
+            d.as_value(),
+            ValueForm::Ref(ValueRef::Capture(CaptureIdx(3)))
+        );
     }
 
     #[test]
     fn a_nullary_ctor_is_a_construction_not_a_load() {
-        let d = Denotation::ctor(variant(), 0);
+        let d = Denotation::ctor(variant(), Arity(0));
         assert_eq!(d.as_value(), ValueForm::Ctor(variant()));
         assert_eq!(d.as_callee(TY), CallForm::Ctor);
     }
 
     #[test]
     fn a_ctor_as_a_value_asks_for_an_eta_wrapper() {
-        let d = Denotation::ctor(variant(), 2);
+        let d = Denotation::ctor(variant(), Arity(2));
         assert_eq!(
             d.as_value(),
             ValueForm::Eta(EtaTarget::Ctor {
                 variant: variant(),
-                arity: 2
+                arity: Arity(2)
             })
         );
         assert_eq!(d.as_callee(TY), CallForm::Ctor);

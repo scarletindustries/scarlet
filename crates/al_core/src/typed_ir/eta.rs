@@ -37,12 +37,13 @@
 //! [`TypedProgram::fns`]: super::TypedProgram::fns
 //! [`VariantRef`]: crate::core_ir::VariantRef
 
-use crate::core_ir::{Arity, FuncIdx};
+use crate::core_ir::FuncIdx;
+use crate::tivec::Idx;
 use crate::types::StrId;
 
 use super::resolve::EtaTarget;
 use super::{
-    BindingId, RTy, ResolvedNode, ResolvedPool, TypedCallee, TypedExpr, TypedFn, ValueRef,
+    Arity, BindingId, RTy, ResolvedNode, ResolvedPool, TypedCallee, TypedExpr, TypedFn, ValueRef,
 };
 
 /// The program's function table under construction: [`TypedProgram::fns`]
@@ -70,7 +71,7 @@ impl FnTable {
 
     /// Append `f` and return the [`FuncIdx`] that now names it.
     pub fn push(&mut self, f: TypedFn) -> FuncIdx {
-        let idx = self.0.len() as FuncIdx;
+        let idx = FuncIdx::from_usize(self.0.len());
         self.0.push(f);
         idx
     }
@@ -187,7 +188,7 @@ pub fn eta_wrapper(
             // A wrapper built from a type that disagrees would construct a
             // payload of the wrong width and corrupt the heap silently.
             assert_eq!(
-                Arity(arity),
+                arity,
                 fn_ty.arity(),
                 "a constructor's scheme has one parameter per declared field"
             );
@@ -279,7 +280,7 @@ mod tests {
             PARAM,
             EtaTarget::Ctor {
                 variant: variant(),
-                arity: 1,
+                arity: Arity(1),
             },
             &fn_ty,
         );
@@ -288,7 +289,7 @@ mod tests {
             value,
             TypedExpr::Closure {
                 ty: fn_ty.ty(),
-                func_idx: 0,
+                func_idx: FuncIdx(0),
                 captures: Vec::new(),
             }
         );
@@ -333,7 +334,7 @@ mod tests {
             value,
             TypedExpr::Closure {
                 ty: fn_ty.ty(),
-                func_idx: 0,
+                func_idx: FuncIdx(0),
                 captures: Vec::new(),
             }
         );
@@ -377,7 +378,7 @@ mod tests {
             PARAM,
             EtaTarget::Ctor {
                 variant: variant(),
-                arity: 1,
+                arity: Arity(1),
             },
             &ctor_ty,
         );
@@ -393,10 +394,10 @@ mod tests {
             TypedExpr::Closure { func_idx, .. } => *func_idx,
             _ => panic!("eta_wrapper returns a Closure"),
         };
-        assert_eq!(idx(&first), 0);
-        assert_eq!(idx(&second), 1);
+        assert_eq!(idx(&first), FuncIdx(0));
+        assert_eq!(idx(&second), FuncIdx(1));
         assert_eq!(fns.len(), 2);
-        assert_eq!(fns[idx(&second) as usize].binds, 2);
+        assert_eq!(fns[idx(&second).index()].binds, 2);
     }
 
     /// The index is the slot pushed, not a count of wrappers: a wrapper
@@ -431,7 +432,7 @@ mod tests {
             PARAM,
             EtaTarget::Ctor {
                 variant: variant(),
-                arity: 1,
+                arity: Arity(1),
             },
             &fn_ty,
         );
@@ -439,9 +440,9 @@ mod tests {
         let TypedExpr::Closure { func_idx, .. } = value else {
             panic!("eta_wrapper returns a Closure");
         };
-        assert_eq!(func_idx, 2);
+        assert_eq!(func_idx, FuncIdx(2));
         assert_eq!(fns.len(), 3);
-        assert_eq!(fns[func_idx as usize].name, NAME);
+        assert_eq!(fns[func_idx.index()].name, NAME);
     }
 
     /// The declared field count is authoritative, and the check that the
@@ -463,7 +464,7 @@ mod tests {
             PARAM,
             EtaTarget::Ctor {
                 variant: variant(),
-                arity: 2,
+                arity: Arity(2),
             },
             &fn_ty,
         );

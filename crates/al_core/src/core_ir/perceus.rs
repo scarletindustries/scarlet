@@ -677,8 +677,8 @@ fn ctor_shape(a: &Atom) -> Option<ReuseShape> {
 mod tests {
     use super::*;
     use crate::bytecode::Op;
-    use crate::core_ir::ConstId;
     use crate::core_ir::testkit::{bind, ctor, func, local, variant};
+    use crate::core_ir::{ConstId, FuncIdx};
     use crate::type_def::TypeId;
     use crate::types::{NO_STR, PrimIds};
 
@@ -881,7 +881,7 @@ mod tests {
                 body: Box::new(CoreExpr::Let {
                     bind: bind(4, int),
                     rhs: Atom::Call {
-                        callee: Callee::Known(7),
+                        callee: Callee::Known(FuncIdx(7)),
                         args: vec![local(2), local(3)],
                     },
                     body: Box::new(CoreExpr::If {
@@ -957,7 +957,7 @@ mod tests {
                 CoreExpr::Let {
                     bind: bind(0, t),
                     rhs: Atom::Call {
-                        callee: Callee::Known(0),
+                        callee: Callee::Known(FuncIdx(0)),
                         args: vec![],
                     },
                     body: Box::new(CoreExpr::Tail(ctor(&[]))),
@@ -996,7 +996,7 @@ mod tests {
                     cond: local(1),
                     then: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
                     els: Box::new(CoreExpr::Tail(Atom::Call {
-                        callee: Callee::Known(0),
+                        callee: Callee::Known(FuncIdx(0)),
                         args: vec![],
                     })),
                     ty: t,

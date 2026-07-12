@@ -59,10 +59,11 @@ use crate::ast;
 use crate::core_ir::CoreFn;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::frozen::FrozenBuilder;
+use crate::tivec::Idx;
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
-    self, Denotation, ElabCtx, FnTable, GlobalSlot, OrShape, RTy, ResolvedPool, TempTys, TypedExpr,
-    TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
+    self, CaptureIdx, Denotation, ElabCtx, FnTable, FrameSlot, GlobalSlot, OrShape, RTy,
+    ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
 };
 use indexmap::IndexMap;
 use smallvec::SmallVec;
@@ -323,7 +324,7 @@ pub struct Compiler {
     /// fn with `CallKnown` (immediate `func_idx`, no callee value pushed)
     /// instead of the `PushGlobal; Call` dynamic path. A miss (forward ref
     /// within an SCC, or a non-fn global) falls back to `Call`.
-    pub(super) global_to_func: HashMap<GlobalSlot, i32>,
+    pub(super) global_to_func: HashMap<GlobalSlot, crate::core_ir::FuncIdx>,
     /// This module's own top-level `fn`/`const` declarations, in Pass 5
     /// SCC-visit order (leaves first). Cleared to entry-file scope at
     /// `code_mark`.
@@ -620,7 +621,7 @@ struct DeferredBody {
     /// `finish_fn_frame` in *both* modes: a [`ClosureSite`] and `global_to_func`
     /// record it, and `lower` bakes it into `Atom::Closure`/`CallKnown`, all
     /// of which happen under `check_only` too.
-    func_idx: usize,
+    func_idx: crate::core_ir::FuncIdx,
     /// Address of `enter_fn_frame`'s jump-over. Patched by
     /// `end_deferred_elaboration` once *every* body parked in the region has
     /// been emitted, so the enclosing stream skips the whole run.
@@ -1431,11 +1432,11 @@ impl Compiler {
     fn resolve_variable(&mut self, name: StrId) -> Option<Denotation> {
         self.mark_used(name);
         if let Some(entry) = self.locals.get(&name) {
-            return Some(Denotation::slot(entry.slot));
+            return Some(Denotation::slot(FrameSlot(entry.slot)));
         }
         if let Some(idx) = self.captures.get(&name) {
             debug_assert!(*idx >= 0, "capture index is a Vec index");
-            return Some(Denotation::capture(*idx));
+            return Some(Denotation::capture(CaptureIdx(*idx)));
         }
         // Search enclosing scopes innermost-first so inner bindings shadow
         // outer ones. The bottom of the stack (index 0) is always the entry
@@ -1476,7 +1477,7 @@ impl Compiler {
                 let capture_idx = self.capture_names.len() as i32;
                 self.captures.insert(name, capture_idx);
                 self.capture_names.push(name);
-                return Some(Denotation::capture(capture_idx));
+                return Some(Denotation::capture(CaptureIdx(capture_idx)));
             }
         }
         None
@@ -3836,7 +3837,7 @@ impl Compiler {
     fn elaborate_then_materialize(
         &mut self,
         _clean: CleanModule,
-        at: Option<usize>,
+        at: Option<crate::core_ir::FuncIdx>,
         build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut FnTable) -> TypedFn,
     ) -> LoweredBody {
         let Elaborated { program, eta_base } = self.elaborate(at, build);
@@ -3846,7 +3847,7 @@ impl Compiler {
         let wrappers = fns.split_off(eta_base);
         self.materialize_eta_wrappers(&program.pool, eta_base, wrappers);
         let core = match at {
-            Some(func_idx) => fns.swap_remove(func_idx),
+            Some(func_idx) => fns.swap_remove(func_idx.index()),
             None => CoreFn {
                 name: program.toplevel.name,
                 params: Vec::new(),
@@ -3870,7 +3871,7 @@ impl Compiler {
     /// here, in order. Nothing else may push a `Function` while the walk runs.
     fn elaborate(
         &mut self,
-        at: Option<usize>,
+        at: Option<crate::core_ir::FuncIdx>,
         build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut FnTable) -> TypedFn,
     ) -> Elaborated {
         let eta_base = self.program.functions.len();
@@ -3923,7 +3924,7 @@ impl Compiler {
 
         let toplevel = match at {
             Some(func_idx) => {
-                fns[func_idx] = built;
+                fns[func_idx.index()] = built;
                 filler()
             }
             None => built,
@@ -3996,7 +3997,7 @@ impl Compiler {
         body_ty: Ty,
         walk_tys: &[WalkStep],
         param_slots: i32,
-        func_idx: usize,
+        func_idx: crate::core_ir::FuncIdx,
     ) {
         use crate::core_ir::{emit, perceus};
         // The eta-wrappers the elaborator minted are written by the helper,
@@ -4029,7 +4030,7 @@ impl Compiler {
         // could not fill.
         self.program.code.push(op(Op::Ret));
         let end = self.current_addr();
-        let f = &mut self.program.functions[func_idx];
+        let f = &mut self.program.functions[func_idx.index()];
         f.locals = param_slots.max(out.locals);
         f.code_start = base;
         f.code_len = end - base - 1;
@@ -4240,10 +4241,10 @@ impl Compiler {
     /// gives an ill-typed one: a bare `Ret` and a zero-length `Function`. The
     /// jump-over is patched with the rest of the region's, in
     /// [`Self::end_deferred_elaboration`].
-    fn close_empty_deferred(&mut self, func_idx: usize, param_slots: i32) {
+    fn close_empty_deferred(&mut self, func_idx: crate::core_ir::FuncIdx, param_slots: i32) {
         let base = self.current_addr();
         self.program.code.push(op(Op::Ret));
-        let f = &mut self.program.functions[func_idx];
+        let f = &mut self.program.functions[func_idx.index()];
         f.locals = param_slots;
         f.code_start = base;
         f.code_len = 0;
@@ -4435,7 +4436,7 @@ impl Compiler {
         name: &str,
         arity: usize,
         parked: ParkedBody,
-    ) -> (i32, Vec<StrId>) {
+    ) -> (crate::core_ir::FuncIdx, Vec<StrId>) {
         // The frame's own name/rigids/captures, taken before the enclosing
         // frame's are moved back over them: a parked body needs them at
         // elaboration time to resolve its captures and self-reference exactly
@@ -4463,7 +4464,7 @@ impl Compiler {
             code_start: 0,
             code_len: 0,
         });
-        let func_idx = self.program.functions.len() - 1;
+        let func_idx = crate::core_ir::FuncIdx::from_usize(self.program.functions.len() - 1);
         // Read after `env.pop_scope()`: a captured name is by
         // definition bound in an *enclosing* frame's scope, which is
         // still open here but gone by elaboration time.
@@ -4504,7 +4505,6 @@ impl Compiler {
             outer_scopes: self.outer_scopes.clone(),
             capture_env,
         });
-        let func_idx = func_idx as i32;
 
         // `enter_fn_frame` pushed the enclosing frame's locals; move them back.
         if let Some(scope) = self.outer_scopes.pop() {

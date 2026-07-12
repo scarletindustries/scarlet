@@ -26,8 +26,7 @@ use crate::types::StrId;
 // error rather than a wrong-but-plausible instruction.
 //
 // `GlobalSlot` (the entry-frame stack space) lives in `typed_ir`, where it is
-// minted; the frame-local slot space is `bytecode::compiler`'s. `FuncIdx` is
-// still an alias — see its doc.
+// minted; the frame-local slot space is `bytecode::compiler`'s.
 
 newtype_index!(
     /// Dense per-function local index. Minted by `lower` in evaluation order so
@@ -43,13 +42,24 @@ newtype_index!(
     pub struct ConstId("c")
 );
 
-/// Index into `CoreProgram.fns` / `Program.functions`. Matches the `i32`
-/// immediate `Op::CallKnown` carries so `emit` is a straight copy.
-///
-/// Still an alias, not a [`newtype_index!`]: it is the one operand space whose
-/// producers (`typed_ir::eta`, `typed_ir::resolve`, `bytecode::compiler`'s
-/// `global_to_func` / `closure_info`) sit outside this module.
-pub type FuncIdx = i32;
+newtype_index!(
+    /// Index into `CoreProgram.fns` / `Program.functions` / `TypedProgram::fns`
+    /// — one numbering, shared by all three. Minted only where the `Function`
+    /// slot it names is reserved (`FnTable::push`, the compiler's
+    /// `finish_fn_frame`); everything downstream carries it opaquely until
+    /// [`FuncIdx::to_operand`] writes it into a `CallKnown`/`MakeClosure`
+    /// immediate.
+    pub struct FuncIdx("fn#")
+);
+
+impl FuncIdx {
+    /// The call/closure-operand encoding: the `i32` immediate `Op::CallKnown`
+    /// and `Op::MakeClosure` carry.
+    #[inline]
+    pub fn to_operand(self) -> i32 {
+        self.0 as i32
+    }
+}
 
 newtype_index!(
     /// A **function-relative** instruction offset: an index into the block one
@@ -75,30 +85,6 @@ impl CodeAddr {
     #[inline]
     pub fn next(self) -> CodeAddr {
         CodeAddr(self.0 + 1)
-    }
-}
-
-/// How many arguments a function type, constructor, or eta wrapper takes.
-///
-/// Its own type because it is compared against things that look just like it:
-/// `eta_wrapper` asserts a constructor's *declared* field count equals the
-/// arity of its *instantiated* function type, and a payload of the wrong width
-/// is a silently corrupt heap value, not a crash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Arity(pub u16);
-
-impl Arity {
-    /// The arity of a parameter/field list. The one constructor that is not a
-    /// literal, so a `len()` cast lives here rather than at each call site.
-    #[inline]
-    pub fn of<T>(items: &[T]) -> Self {
-        Arity(u16::try_from(items.len()).expect("constructor arity exceeds u16"))
-    }
-}
-
-impl fmt::Display for Arity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 
@@ -415,7 +401,7 @@ impl fmt::Display for CoreBind {
 impl fmt::Display for Callee {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Callee::Known(i) => write!(f, "fn#{i}"),
+            Callee::Known(i) => write!(f, "{i}"),
             Callee::Self_ => f.write_str("self"),
             Callee::Local(l) => write!(f, "{l}"),
         }
@@ -460,7 +446,7 @@ impl fmt::Display for Atom {
                 f.write_str(")")
             }
             Atom::Closure { func_idx, captures } => {
-                write!(f, "closure fn#{func_idx}(")?;
+                write!(f, "closure {func_idx}(")?;
                 write_locals(f, captures)?;
                 f.write_str(")")
             }
@@ -694,7 +680,7 @@ mod tests {
         );
         assert_eq!(
             Atom::Closure {
-                func_idx: 5,
+                func_idx: FuncIdx(5),
                 captures: vec![LocalId(1)],
             }
             .to_string(),
@@ -720,7 +706,7 @@ mod tests {
         );
         assert_eq!(
             Atom::Call {
-                callee: Callee::Known(9),
+                callee: Callee::Known(FuncIdx(9)),
                 args: vec![LocalId(0)],
             }
             .to_string(),

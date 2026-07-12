@@ -318,7 +318,7 @@ mod tests {
         let f = e.mk_fun(&[arr], int);
         let mut pool = pool_for(&e);
         let r = Zonker::new(&e).zonk(&mut pool, f).expect("concrete");
-        assert_eq!(pool.arity(r), crate::core_ir::Arity(1));
+        assert_eq!(pool.arity(r), crate::typed_ir::Arity(1));
         let p0 = pool.fun_params(r)[0];
         assert_eq!(pool.con_args(p0).len(), 1);
         assert_eq!(pool.prim_of(pool.con_arg(p0, 0).unwrap()), Some(Prim::Int));
