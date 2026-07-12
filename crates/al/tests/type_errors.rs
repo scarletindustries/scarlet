@@ -194,12 +194,12 @@ fn recursive_type_alias_cycle_does_not_drop_other_aliases() {
 
 // A duplicate-named constructor is reported once and DROPPED, exactly like a
 // duplicate fn/const: the first registration survives. Previously the second
-// `Dup` was still registered, shadowing the first — `Dup(a: 1)` then resolved
-// to the nullary duplicate and produced a bogus arity error on top of the
-// duplicate-definition diagnostic.
+// `Dup` was still registered, shadowing the first — `Dup(1)` then resolved
+// to the nullary duplicate and produced a bogus "has 0 field(s)" arity error
+// on top of the duplicate-definition diagnostic.
 #[test]
 fn duplicate_constructor_is_dropped_not_double_defined() {
-    let src = "type T {\n\tDup(a Int)\n\tDup\n}\nprintln(Dup(a: 1))\n";
+    let src = "type T {\n\tDup(a Int)\n\tDup\n}\nprintln(Dup(1))\n";
     let out = check_rejects(src, "'Dup' is already defined");
     let combined = out.combined();
     assert_eq!(
