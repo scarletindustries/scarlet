@@ -274,8 +274,9 @@ fn stdlib_decimal() {
     // Dropping more than 18 digits (scale - places >= 19): 10^k would wrap,
     // so the quotient regime is {-1, 0, 1} and is computed without it. The
     // half boundary is reachable only at k == 19 (5 * 10^18); div is
-    // Err(ScaleOutOfRange) when places < -18 or the rescale exponent
-    // exceeds 18.
+    // Err(ScaleOutOfRange) when |places| exceeds 18 or the rescale exponent
+    // exceeds 18 — including places > 18 with a small rescale exponent
+    // (scale(a) > scale(b)), which would otherwise mint a scale-19+ Decimal.
     run_outputs(
         "import al/decimal.{HalfUp, Up}\n\
          import al/result\n\
@@ -287,8 +288,9 @@ fn stdlib_decimal() {
          println(decimal.to_string(decimal.round_with(decimal.new(5000000000000000000, 18), 0 - 1, HalfUp)))\n\
          println(decimal.to_string(decimal.round(decimal.new(5000000000000000000, 18), 0 - 1)))\n\
          println(decimal.div(decimal.from_int(1), decimal.from_int(1), 0 - 19))\n\
-         println(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21))\n",
-        "0\nOk(10)\n0\n0\n10\n10\n0\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\n",
+         println(decimal.div(decimal.from_int(1), decimal.new(1, 18), 21))\n\
+         println(decimal.div(decimal.new(1, 12), decimal.from_int(1), 21))\n",
+        "0\nOk(10)\n0\n0\n10\n10\n0\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\n",
     );
     // Float bridges are explicitly lossy conveniences; from_float is Err(Nil)
     // instead of wrapping when units would leave Int range.

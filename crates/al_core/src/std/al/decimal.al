@@ -98,9 +98,9 @@ pub fn mul(a Decimal, b Decimal) Decimal {
 }
 
 // Why `div` failed. `DividedByZero` is a zero divisor. `ScaleOutOfRange` is a
-// `places` below -18 (the result could not be scaled back up, as in
-// `from_float`) or a rescale exponent `places + scale(b) - scale(a)` above 18
-// (10^19 no longer fits in Int).
+// `places` whose magnitude exceeds 18 (the result must stay within the type's
+// |scale| <= 18 contract, as in `from_float`) or a rescale exponent
+// `places + scale(b) - scale(a)` above 18 (10^19 no longer fits in Int).
 pub type DivError {
 	DividedByZero
 	ScaleOutOfRange
@@ -117,7 +117,7 @@ pub fn div_with(a Decimal, b Decimal, places Int, mode Rounding) Result(Decimal,
 	e = places + scale(b) - scale(a)
 	if is_zero(b) {
 		Err(DividedByZero)
-	} else if places < 0 - 18 || e > 18 {
+	} else if places > 18 || places < 0 - 18 || e > 18 {
 		Err(ScaleOutOfRange)
 	} else {
 		q = if e >= 0 {
@@ -338,7 +338,7 @@ fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 		Ok(w) if k <= 18 -> match binary.parse_int(frac, Dec) {
 			// w * 10^k + f overflows Int exactly when w exceeds
 			// (Int max - f) / 10^k; wrapping would corrupt the value.
-			Ok(f) if w <= { int.max_value() - f } / pow10(k) ->
+			Ok(f) if w <= { int.max_value - f } / pow10(k) ->
 				Some(Decimal(w * pow10(k) + f, k))
 			else -> None
 		}
