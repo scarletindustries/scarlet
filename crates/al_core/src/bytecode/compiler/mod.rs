@@ -3355,9 +3355,12 @@ impl Compiler {
         };
 
         // Partition the arguments into a spread base (at most one) and a map
-        // of explicitly-supplied fields keyed by their declared position.
-        let mut spread: Option<&ast::Expression> = None;
-        for arg in args {
+        // of explicitly-supplied fields keyed by their declared position. Each
+        // expression is paired with its source-argument index so a slotted
+        // value structurally remembers which `args[i]` it came from — the
+        // walk sub-regions below are spliced back by that index.
+        let mut spread: Option<(usize, &ast::Expression)> = None;
+        for (i, arg) in args.iter().enumerate() {
             if let ast::CallArg::Spread(e) = arg {
                 if spread.is_some() {
                     self.error(
@@ -3365,18 +3368,25 @@ impl Compiler {
                         e.span(),
                     );
                 }
-                spread = Some(e);
+                spread = Some((i, e));
             }
         }
+        let indexed: Vec<(Option<&ast::Identifier>, (usize, &ast::Expression), Span)> = args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| match a {
+                ast::CallArg::Positional(e) => Some((None, (i, e), e.span())),
+                ast::CallArg::Labeled { label, value } => {
+                    Some((Some(label), (i, value), label.span))
+                }
+                ast::CallArg::Spread(_) => None,
+            })
+            .collect();
         let (by_pos, _) = self.slot_ctor_args(
             variant_name,
             arity,
             field_labels_sl,
-            args.iter().filter_map(|a| match a {
-                ast::CallArg::Positional(e) => Some((None, e, e.span())),
-                ast::CallArg::Labeled { label, value } => Some((Some(label), value, label.span)),
-                ast::CallArg::Spread(_) => None,
-            }),
+            indexed.iter().map(|&(l, ref pair, sp)| (l, pair, sp)),
             if spread.is_some() {
                 None
             } else {
@@ -3411,7 +3421,9 @@ impl Compiler {
             .all(|a| matches!(a, ast::CallArg::Positional(_)))
         {
             for (i, slot_expr) in slots.iter().enumerate() {
-                let Some(value) = *slot_expr else { continue };
+                let Some(&(_, value)) = *slot_expr else {
+                    continue;
+                };
                 let expected = param_tys.get(i).copied();
                 let ty = self.compile_expr_with_hint(value, expected);
                 if let Some(p) = expected {
@@ -3422,36 +3434,26 @@ impl Compiler {
         }
 
         let mut regions: Vec<Vec<WalkStep>> = vec![Vec::new(); args.len()];
-        let arg_index = |value: &ast::Expression| {
-            args.iter().position(|a| match a {
-                ast::CallArg::Positional(e) | ast::CallArg::Spread(e) => std::ptr::eq(e, value),
-                ast::CallArg::Labeled { value: v, .. } => std::ptr::eq(v, value),
-            })
-        };
 
         // Record-update: the base is unified with the constructor's result
         // type; the per-field projection is Core's job.
-        if let Some(e) = spread {
+        if let Some((ai, e)) = spread {
             self.open_walk_region();
             let base_ty = self.compile_expr(e);
-            let region = self.close_walk_region();
+            regions[ai] = self.close_walk_region();
             self.engine.unify_at(result_ty, base_ty, e.span());
-            if let Some(ai) = arg_index(e) {
-                regions[ai] = region;
-            }
         }
 
         for (i, slot_expr) in slots.iter().enumerate() {
-            let Some(value) = *slot_expr else { continue };
+            let Some(&(ai, value)) = *slot_expr else {
+                continue;
+            };
             let expected = param_tys.get(i).copied();
             self.open_walk_region();
             let ty = self.compile_expr_with_hint(value, expected);
-            let region = self.close_walk_region();
+            regions[ai] = self.close_walk_region();
             if let Some(p) = expected {
                 self.engine.unify_at(p, ty, value.span());
-            }
-            if let Some(ai) = arg_index(value) {
-                regions[ai] = region;
             }
         }
 

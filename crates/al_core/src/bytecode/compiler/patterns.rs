@@ -72,16 +72,20 @@ impl Compiler {
             ast::Pattern::Range { start, end, span } => {
                 let int_t = self.ty_int();
                 let mut ok = self.engine.unify_at(expected, int_t, *span);
-                for b in [start, end] {
-                    if b.value.contains('.') {
+                for bound in [start, end] {
+                    // `const_number` raises the out-of-range / malformed
+                    // diagnostic itself; float classification comes from the
+                    // parsed value, same as the `Literal` arm above.
+                    let v = self.const_number(bound);
+                    if v.is_float() {
                         self.error(
-                            format!("Range pattern bound must be an integer, got '{}'", b.value),
-                            b.span,
+                            format!(
+                                "Range pattern bound must be an integer, got '{}'",
+                                bound.value
+                            ),
+                            bound.span,
                         );
                         ok = false;
-                    } else {
-                        // Raises the out-of-range diagnostic for the bound.
-                        let _ = self.const_number(b);
                     }
                 }
                 ok
