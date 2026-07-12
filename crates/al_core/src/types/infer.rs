@@ -499,6 +499,26 @@ pub struct PrimIds {
     pub array: TypeId,
 }
 
+impl PrimIds {
+    /// Map a nominal type id to the corresponding primitive, if it is one.
+    /// Identity is by id, never name — a user's `type Int { }` is not `Int`.
+    ///
+    /// The single source of this mapping: `InferEngine::as_prim` and
+    /// `ResolvedPool::as_prim` both delegate here, so the two sides of the
+    /// `Ty`/`RTy` divide cannot disagree about what counts as a primitive.
+    pub fn prim_of(self, id: TypeId) -> Option<Prim> {
+        if id == self.int {
+            Some(Prim::Int)
+        } else if id == self.float {
+            Some(Prim::Float)
+        } else if id == self.string {
+            Some(Prim::String)
+        } else {
+            None
+        }
+    }
+}
+
 impl Default for PrimIds {
     fn default() -> Self {
         // Engine-only tests mint primitives before any prelude exists; these
@@ -731,18 +751,9 @@ impl InferEngine {
         self.nullary_cache = NullaryCache::default();
     }
 
-    /// Map a nominal type id to the corresponding primitive, if it is one.
-    /// Identity is by id, never name — a user's `type Int { }` is not `Int`.
+    /// [`PrimIds::prim_of`] against this engine's ids.
     fn as_prim(&self, id: TypeId) -> Option<Prim> {
-        if id == self.prim_ids.int {
-            Some(Prim::Int)
-        } else if id == self.prim_ids.float {
-            Some(Prim::Float)
-        } else if id == self.prim_ids.string {
-            Some(Prim::String)
-        } else {
-            None
-        }
+        self.prim_ids.prim_of(id)
     }
 
     // --- Type constructors ---

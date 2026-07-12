@@ -9,7 +9,7 @@
 //!
 //! Every node this produces carries an [`RTy`] drawn from the [`ResolvedPool`]
 //! the caller owns. The only bridge from a live inference `Ty` into that pool
-//! is [`ElabCtx::resolve_rty`] (a [`super::zonk::Zonker`]). Past that bridge the
+//! is [`PreludeTys::resolve_rty`] (a [`super::zonk::Zonker`]). Past that bridge the
 //! elaborator never consults the union-find: `Int + Int` selects `AddInt`
 //! because [`ResolvedPool::prim_of`] says `Int`, and a constructor's field types
 //! come from substituting the use site's type arguments into the constructor's
@@ -65,7 +65,7 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use super::elaborate_pat::{CtorPat, PatCtx, elaborate_arms};
+use super::elaborate_pat::{CtorPat, PatCtx, elaborate_arms, seg_bits, slot_pattern_args};
 use super::eta::{FnRTy, FnTable, eta_wrapper};
 use super::resolve::{CallForm, Denotation, EtaTarget, ValueForm};
 use super::rty::{RTy, ResolvedNode, ResolvedPool};
@@ -128,19 +128,33 @@ pub fn elaborator_bug(why: &'static str, span: Span) -> ! {
     )
 }
 
-/// Services the elaborator needs from the enclosing compilation: the same seam
-/// `core_ir::lower::LowerCtx` is today, minus everything that existed only to
-/// serve ANF, plus [`Self::resolve_rty`].
+/// The prelude types a caller can name without a source expression to read
+/// them off, plus the one bridge that resolves them into a pool.
 ///
-/// There is deliberately no `engine()`. The elaborator runs inside the check
-/// phase, but everything it *decides* it decides against the pool; the engine
-/// appears only behind [`Self::resolve_rty`], which is where an unsolved
-/// variable becomes an honest opaque type rather than a silent `false`.
-pub trait ElabCtx {
+/// Split from [`ElabCtx`] because [`super::TempTys::intern`] needs exactly
+/// this and nothing else: it runs before any body is elaborated, so a context
+/// that can answer these five questions is enough to build the temp arena —
+/// no constant pool, no name resolution, no walk replay.
+pub trait PreludeTys {
     /// Resolve a live inference `Ty` into `pool`. Total: an undetermined type is
     /// operationally a polymorphic one (`Zonker::zonk_or_opaque`).
     fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy;
 
+    fn ty_bool(&mut self) -> Ty;
+    fn ty_int(&mut self) -> Ty;
+    fn ty_string(&mut self) -> Ty;
+    fn ty_binary(&mut self) -> Ty;
+}
+
+/// Services the elaborator needs from the enclosing compilation: the same seam
+/// `core_ir::lower::LowerCtx` is today, minus everything that existed only to
+/// serve ANF, plus [`PreludeTys::resolve_rty`].
+///
+/// There is deliberately no `engine()`. The elaborator runs inside the check
+/// phase, but everything it *decides* it decides against the pool; the engine
+/// appears only behind [`PreludeTys::resolve_rty`], which is where an unsolved
+/// variable becomes an honest opaque type rather than a silent `false`.
+pub trait ElabCtx: PreludeTys {
     fn intern(&mut self, s: &str) -> StrId;
     fn str(&self, id: StrId) -> &str;
 
@@ -148,7 +162,7 @@ pub trait ElabCtx {
     /// `emit` will use verbatim.
     fn add_const(&mut self, v: Value) -> ConstId;
     /// Parse-and-pool a numeric literal.
-    fn number_const(&mut self, lit: &ast::NumberLiteral) -> (ConstId, Ty);
+    fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId;
     /// Pool a string literal.
     fn string_const(&mut self, s: &str) -> ConstId;
     /// Pool an integer literal.
@@ -229,10 +243,6 @@ pub trait ElabCtx {
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape>;
 
     fn ty_nil(&mut self) -> Ty;
-    fn ty_bool(&mut self) -> Ty;
-    fn ty_int(&mut self) -> Ty;
-    fn ty_string(&mut self) -> Ty;
-    fn ty_binary(&mut self) -> Ty;
 }
 
 /// One step of the check walk, recorded in entry order and replayed positionally
@@ -648,7 +658,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
             E::NumberLiteral(n) => {
                 let ty = self.resolve(own);
-                let (value, _) = self.ctx.number_const(n);
+                let value = self.ctx.number_const(n);
                 TypedExpr::Const { ty, value }
             }
             E::StringLiteral(s) => {
@@ -906,53 +916,23 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let segs = bl
             .segments
             .iter()
-            .map(|seg| match &seg.spec {
-                ast::BinSpec::Int { bits } => TypedBinSeg::Int {
-                    value: self.expr(&seg.value),
-                    bits: self.seg_int_bits(bits.as_ref()),
-                },
-                ast::BinSpec::Binary { bytes } => TypedBinSeg::Binary {
-                    value: self.expr(&seg.value),
-                    bits: bytes.as_ref().map(|sz| self.seg_bytes_bits(sz)),
-                },
-                ast::BinSpec::Utf8 => TypedBinSeg::Utf8 {
-                    value: self.expr(&seg.value),
-                },
+            .map(|seg| {
+                // Value before width, matching the check walk's visit order
+                // (patterns visit width first — see `PatElab::bin_seg`).
+                let value = self.expr(&seg.value);
+                let bits = seg_bits(self, &seg.spec);
+                match &seg.spec {
+                    ast::BinSpec::Int { .. } => TypedBinSeg::Int {
+                        value,
+                        // `seg_bits` is total for `Int`: sizeless defaults to 8.
+                        bits: bits.expect("Int segment width"),
+                    },
+                    ast::BinSpec::Binary { .. } => TypedBinSeg::Binary { value, bits },
+                    ast::BinSpec::Utf8 => TypedBinSeg::Utf8 { value },
+                }
             })
             .collect();
         TypedExpr::BinLit { ty, segs }
-    }
-
-    /// An `Int` segment's width in bits: the `:N` / `:size(..)` expression,
-    /// or the default 8.
-    fn seg_int_bits(&mut self, bits: Option<&ast::Expression>) -> TypedExpr {
-        match bits {
-            None => TypedExpr::Const {
-                ty: self.int_rty(),
-                value: self.ctx.int_const(8),
-            },
-            Some(e) => self.expr(e),
-        }
-    }
-
-    /// A `Binary` segment's `:bytes(..)` size scaled to bits.
-    ///
-    /// The scale is `Op::Mul`, not `Op::MulInt`. It is a synthesised node, not
-    /// one the checker specialised, and today's lowering emits exactly this —
-    /// changing it would move the opcode histogram for no semantic gain.
-    fn seg_bytes_bits(&mut self, bytes: &ast::Expression) -> TypedExpr {
-        let int_r = self.int_rty();
-        let v = self.expr(bytes);
-        let eight = TypedExpr::Const {
-            ty: int_r,
-            value: self.ctx.int_const(8),
-        };
-        TypedExpr::Binary {
-            ty: int_r,
-            op: Op::Mul,
-            lhs: Box::new(v),
-            rhs: Box::new(eight),
-        }
     }
 
     /// `qualifier.member` as a module reference, or `None` when it is an
@@ -1035,11 +1015,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     .iter()
                     .map(|a| match a {
                         ast::CallArg::Positional(e) => self.expr(e),
-                        // Labeled/spread on a non-ctor callee is a type error
-                        // the check walk already reported; elaborate the value
-                        // anyway so the arity still balances.
-                        ast::CallArg::Labeled { value, .. } => self.expr(value),
-                        ast::CallArg::Spread(e) => self.expr(e),
+                        // The check walk admits labels and spreads only on
+                        // constructor calls, and this callee is not one.
+                        ast::CallArg::Labeled { .. } | ast::CallArg::Spread(_) => elaborator_bug(
+                            "labeled or spread argument on a non-constructor callee",
+                            fc.span,
+                        ),
                     })
                     .collect();
                 TypedExpr::Call { ty, callee, args }
@@ -1215,13 +1196,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 None => self.anon,
             };
             let err_bind = self.new_bind(name, ety);
+            // The receiver is in scope for the recovery body and nothing else.
+            let mark = self.names.len();
             if oe.receiver.is_some() {
                 self.bind_name(name, err_bind.id);
             }
             let body = self.expr_as(&oe.body, result_ty);
-            if oe.receiver.is_some() {
-                self.names.pop();
-            }
+            self.names.truncate(mark);
             (vec![TypedPat::Bind(err_bind)], body)
         } else {
             (vec![], self.expr_as(&oe.body, result_ty))
@@ -1479,14 +1460,18 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             ast::Pattern::Var { name } => {
                 let sid = self.ctx.intern(&name.name);
                 self.bind_name(sid, src);
-                // `src` is the projection's own bind — each caller mints one
-                // per field, and no other name reaches it — so adopting the
-                // name here pins exactly one bind per source name, and `lower`
-                // gives it a slot of its own rather than collapsing it.
+                // Binding the name to `src` is all a local needs: names
+                // resolve through `self.names` by `BindingId`, never by the
+                // bind's recorded name, so shadowing works even though the
+                // projection bind stays anonymous and `lower` is free to
+                // collapse it into its initialiser.
                 //
-                // A module-scope destructured name is additionally a global,
-                // just like a top-level `let`: fn bodies read it via
-                // `PushGlobal <slot>`.
+                // A module-scope destructured name adopts the source name and
+                // a global slot, just like a top-level `let`: fn bodies read
+                // it via `PushGlobal <slot>`, and `lower` pins a global bind
+                // to a slot of its own. `src` is the projection's own bind —
+                // each caller mints one per field, and no other name reaches
+                // it — so the adoption pins exactly one bind per source name.
                 let Some((b, _)) = lets.iter_mut().find(|(b, _)| b.id == src) else {
                     elaborator_bug("destructured name with no projection bind", name.span)
                 };
@@ -1526,7 +1511,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let Some(cp) = resolved else {
                     elaborator_bug("unresolved constructor pattern", name.span)
                 };
-                let by_pos = self.slot_pattern_args(&cp, args, name.span);
+                let by_pos = slot_pattern_args(self, cp.labels(), cp.arity(), args, name.span);
                 let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
                 for (i, (sub, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
                     let Some(sub) = sub else { continue };
@@ -1545,34 +1530,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             // literal, range, binary or or-pattern in binding position.
             other => elaborator_bug("irrefutable pattern", other.span()),
         }
-    }
-
-    /// Slot a constructor pattern's positional/labeled args into declared-field
-    /// order, so a slot index is the field index, not the source-arg index.
-    /// The check walk slotted the same args and reported every error, so a
-    /// slot error on a clean module is a desync between the two walks.
-    fn slot_pattern_args<'p>(
-        &mut self,
-        cp: &CtorPat,
-        args: &'p [ast::PatternArg],
-        span: Span,
-    ) -> SmallVec<[Option<&'p ast::Pattern>; 4]> {
-        let mut supplied: SmallVec<[(Option<StrId>, &ast::Pattern); 4]> =
-            SmallVec::with_capacity(args.len());
-        for a in args {
-            match a {
-                ast::PatternArg::Positional(p) => supplied.push((None, p)),
-                ast::PatternArg::Labeled { label, pattern } => {
-                    let sid = self.ctx.intern(&label.name);
-                    supplied.push((Some(sid), pattern));
-                }
-            }
-        }
-        let (by_pos, errors) = slot_labeled(cp.labels(), cp.arity(), supplied);
-        if !errors.is_empty() {
-            elaborator_bug("constructor pattern arg desync", span)
-        }
-        by_pos
     }
 }
 
@@ -1597,9 +1554,8 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         self.names.truncate(mark);
     }
 
-    fn number_const(&mut self, lit: &ast::NumberLiteral) -> (ConstId, RTy) {
-        let (c, t) = self.ctx.number_const(lit);
-        (c, self.resolve(t))
+    fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId {
+        self.ctx.number_const(lit)
     }
 
     fn string_const(&mut self, s: &str) -> ConstId {

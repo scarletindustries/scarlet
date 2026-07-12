@@ -14,8 +14,9 @@
 //! * `Bound(i)` is an *honestly* polymorphic type — a rigid quantified
 //!   variable. `fn id(x) { x }` must dispatch dynamically, and `is_heap`
 //!   answering `false` for it is correct, not a miss.
-//! * A surviving inference variable is always a compiler bug, and it cannot
-//!   reach here: the only bridge into this arena is `zonk`, which fails.
+//! * A surviving inference variable cannot reach here: the only bridge into
+//!   this arena is `zonk_or_opaque`, which encodes it as its own `Bound` and
+//!   reports that it did so.
 //!
 //! The pool is compile-local: it is built by the elaborator and consumed by
 //! `lower`/`perceus`/`emit`, all of which run within one compilation.
@@ -220,17 +221,9 @@ impl ResolvedPool {
         }
     }
 
-    /// Nominal id → primitive, by id and never by name.
+    /// [`PrimIds::prim_of`] against this pool's ids.
     fn as_prim(&self, id: TypeId) -> Option<Prim> {
-        if id == self.prims.int {
-            Some(Prim::Int)
-        } else if id == self.prims.float {
-            Some(Prim::Float)
-        } else if id == self.prims.string {
-            Some(Prim::String)
-        } else {
-            None
-        }
+        self.prims.prim_of(id)
     }
 
     /// The primitive `t` denotes, if any. Total: a `Bound` is not a primitive,

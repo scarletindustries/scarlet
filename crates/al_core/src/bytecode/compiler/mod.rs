@@ -62,8 +62,8 @@ use crate::frozen::{FrozenBuilder, FrozenConst};
 use crate::tivec::Idx;
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
-    self, CaptureIdx, Denotation, ElabCtx, FnTable, FrameSlot, GlobalSlot, OrShape, RTy,
-    ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
+    self, CaptureIdx, Denotation, ElabCtx, FnTable, FrameSlot, GlobalSlot, OrShape, PreludeTys,
+    RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
 };
 use indexmap::IndexMap;
 use smallvec::SmallVec;
@@ -584,6 +584,20 @@ const WALK_TY_PENDING: Ty = u32::MAX;
 /// index the engine's node arena out of bounds.
 fn walk_region_is_filled(region: &[WalkStep]) -> bool {
     !region.contains(&WalkStep::Ty(WALK_TY_PENDING))
+}
+
+/// A `close_walk_region` with no matching `open_walk_region` — a broken walk
+/// invariant. Aborts, in release as well as debug: restoring the wrong region
+/// would silently hand a body another body's types — the desync
+/// [`WalkStep`] exists to make impossible.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn walk_region_underflow() -> ! {
+    panic!(
+        "internal compiler error: close_walk_region without matching open_walk_region. \
+         Please report this as a compiler bug."
+    )
 }
 
 /// A `fn(...) {...}` expression the walk closed over: the `Function` its body
@@ -2672,10 +2686,9 @@ impl Compiler {
     /// Close the region [`Self::open_walk_region`] opened, returning it and
     /// restoring the enclosing body's.
     fn close_walk_region(&mut self) -> Vec<WalkStep> {
-        let outer = self
-            .walk_tys_stack
-            .pop()
-            .expect("close_walk_region without matching open_walk_region");
+        let Some(outer) = self.walk_tys_stack.pop() else {
+            walk_region_underflow();
+        };
         let region = std::mem::replace(&mut self.walk_tys, outer);
         debug_assert!(
             walk_region_is_filled(&region),
@@ -3901,7 +3914,7 @@ impl Compiler {
         self.rty_cache.clear();
         let temps = TempTys::intern(self, &mut pool);
         let nil_ty = self.ty_nil();
-        let nil = ElabCtx::resolve_rty(self, &mut pool, nil_ty);
+        let nil = PreludeTys::resolve_rty(self, &mut pool, nil_ty);
         // The `fns` entries an earlier body already owns. Never lowered into
         // anything the caller reads — they exist so the next `FnTable::push`
         // lands on the `Function` reserved for it below.
@@ -4079,8 +4092,8 @@ impl Compiler {
     /// What this buys, precisely: after `generalize_top`, a body var that
     /// inference never solved has a `Generic` root rather than an `Unbound`
     /// one, so `lower` can never observe a var that is about to be quantified
-    /// out from under it. That is the precondition for a *total* `zonk` — it
-    /// maps `Generic` to a bound index instead of failing with `UnsolvedVar`.
+    /// out from under it. That is what keeps zonking honest — a `Generic`
+    /// root maps to a bound index instead of an invented opaque `Bound`.
     /// It is not, measurably, an opcode win: on the T0 workload set the opcode
     /// mix is unchanged (0 typed ops recovered), because `compile_binary`
     /// already unifies both operands during the walk. The cases the reorder

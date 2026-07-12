@@ -6,6 +6,7 @@
 //! rather than exposing its fields to `core_ir`.
 
 use super::*;
+use crate::typed_ir::PreludeTys;
 
 impl crate::core_ir::emit::EmitCtx for Compiler {
     fn resolve_str(&self, id: StrId) -> &str {
@@ -23,7 +24,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
             .lookup_type_info_by_id(tid)
             .and_then(|ti| ti.variants())
         else {
-            unreachable!("emit asked for labels of a type with no variants: {tid:?}");
+            labels_of_variantless_type(tid);
         };
         let variant = self.engine.variants_of(vs)[variant_idx as usize];
         let labels: Vec<String> = self
@@ -54,7 +55,21 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
     }
 }
 
-impl ElabCtx for Compiler {
+/// `emit` asked for the variant labels of a type that has no variants — a
+/// broken emit invariant. Aborts, in release as well as debug: any constant
+/// returned instead (the old fallback was pool index 0) silently ships the
+/// wrong labels. Mirrors `emit`'s `unbound_local`.
+#[allow(clippy::unreachable)]
+#[cold]
+#[inline(never)]
+fn labels_of_variantless_type(tid: TypeId) -> ! {
+    unreachable!(
+        "internal compiler error: emit asked for labels of a type with no variants: {tid:?}. \
+         Please report this as a compiler bug."
+    )
+}
+
+impl PreludeTys for Compiler {
     /// The one bridge from a live inference `Ty` into the program's `RTy` pool.
     /// Total: `zonk_or_opaque` encodes a variable inference never solved as a
     /// fresh `Bound` rather than failing, because "undetermined" and "rigidly
@@ -80,6 +95,21 @@ impl ElabCtx for Compiler {
         }
         r
     }
+    fn ty_bool(&mut self) -> Ty {
+        Compiler::ty_bool(self)
+    }
+    fn ty_int(&mut self) -> Ty {
+        Compiler::ty_int(self)
+    }
+    fn ty_string(&mut self) -> Ty {
+        Compiler::ty_string(self)
+    }
+    fn ty_binary(&mut self) -> Ty {
+        Compiler::ty_binary(self)
+    }
+}
+
+impl ElabCtx for Compiler {
     fn intern(&mut self, s: &str) -> StrId {
         self.engine.intern(s)
     }
@@ -91,14 +121,9 @@ impl ElabCtx for Compiler {
     fn add_const(&mut self, v: Value) -> crate::core_ir::ConstId {
         crate::core_ir::ConstId(self.add_constant(v) as u32)
     }
-    fn number_const(&mut self, lit: &ast::NumberLiteral) -> (crate::core_ir::ConstId, Ty) {
+    fn number_const(&mut self, lit: &ast::NumberLiteral) -> crate::core_ir::ConstId {
         let v = self.const_number(lit);
-        let ty = if v.is_float() {
-            self.ty_nullary(NullaryPrim::Float, self.prelude.float)
-        } else {
-            self.ty_int()
-        };
-        (crate::core_ir::ConstId(self.add_constant(v) as u32), ty)
+        crate::core_ir::ConstId(self.add_constant(v) as u32)
     }
     fn string_const(&mut self, s: &str) -> crate::core_ir::ConstId {
         crate::core_ir::ConstId(self.const_str(s) as u32)
@@ -267,17 +292,5 @@ impl ElabCtx for Compiler {
     }
     fn ty_nil(&mut self) -> Ty {
         Compiler::ty_nil(self)
-    }
-    fn ty_bool(&mut self) -> Ty {
-        Compiler::ty_bool(self)
-    }
-    fn ty_int(&mut self) -> Ty {
-        Compiler::ty_int(self)
-    }
-    fn ty_string(&mut self) -> Ty {
-        Compiler::ty_string(self)
-    }
-    fn ty_binary(&mut self) -> Ty {
-        Compiler::ty_binary(self)
     }
 }

@@ -43,13 +43,14 @@ pub(crate) mod slots;
 pub mod zonk;
 
 pub use elaborate::{
-    Elab, ElabCtx, OrShape, WalkStep, elaborate_body, elaborate_toplevel, elaborator_bug,
+    Elab, ElabCtx, OrShape, PreludeTys, WalkStep, elaborate_body, elaborate_toplevel,
+    elaborator_bug,
 };
 pub use elaborate_pat::{CtorPat, PatCtx, elaborate_arms, elaborate_pattern};
 pub use eta::{FnRTy, FnTable, eta_wrapper};
 pub use resolve::{CallForm, Denotation, EtaTarget, ValueForm};
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
-pub use zonk::{UnsolvedVar, Zonker, pool_for};
+pub use zonk::{Zonker, pool_for};
 
 use crate::bytecode::{Op, Value};
 use crate::core_ir::{ConstId, FuncIdx, VariantRef};
@@ -602,7 +603,7 @@ impl TempTys {
     /// elaborated.
     ///
     /// Each comes from the enclosing compilation's *real* prelude type through
-    /// the same [`ElabCtx::resolve_rty`] bridge every other node crosses —
+    /// the same [`PreludeTys::resolve_rty`] bridge every other node crosses —
     /// nothing here is a synthetic node invented to stand in for one. That
     /// matters because `perceus` reads these: `Bool` and `Binary` are nominal
     /// non-primitives (not in `PrimIds`), so [`ResolvedPool::is_heap`] answers
@@ -611,7 +612,7 @@ impl TempTys {
     /// `int_pair` has no prelude `Ty` to resolve — it is `Op::BinReadUtf8`'s
     /// result, a shape the VM has but the source language never spells — so it
     /// is built structurally from the `Int` node just resolved.
-    pub fn intern<C: ElabCtx>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
+    pub fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
         let t = ctx.ty_int();
         let int = ctx.resolve_rty(pool, t);
         let t = ctx.ty_bool();
@@ -634,25 +635,21 @@ impl TempTys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast;
     use crate::core_ir::lower;
-    use crate::span::Span;
     use crate::type_def::TypeId;
     use crate::types::{InferEngine, NO_STR, NullaryPrim, Prim, PrimIds, Ty, new_engine};
 
     /// The prelude registers its type heads with 1-based ids and records only
-    /// `Int`/`Float`/`String`/`Array` as [`PrimIds`]; `Bool`, `Binary` and
-    /// `Nil` are ordinary nominal types whose ids fall outside that set.
+    /// `Int`/`Float`/`String`/`Array` as [`PrimIds`]; `Bool` and `Binary` are
+    /// ordinary nominal types whose ids fall outside that set.
     const BOOL_ID: TypeId = TypeId(5);
     const BINARY_ID: TypeId = TypeId(6);
-    const NIL_ID: TypeId = TypeId(7);
 
-    /// An [`ElabCtx`] over a real [`InferEngine`], seeded the way the prelude
-    /// seeds one, so [`TempTys::intern`] can be driven for what it actually
-    /// produces rather than for what a hand-built struct literal restates.
-    ///
-    /// Only the five methods `intern` calls are implemented; every other
-    /// method is unreachable from it, and says so.
+    /// A [`PreludeTys`] over a real [`InferEngine`], seeded the way the
+    /// prelude seeds one, so [`TempTys::intern`] can be driven for what it
+    /// actually produces rather than for what a hand-built struct literal
+    /// restates. `PreludeTys` is exactly the seam `intern` needs, so nothing
+    /// here stubs a method it cannot reach.
     struct PreludeCtx {
         eng: InferEngine,
     }
@@ -670,15 +667,7 @@ mod tests {
         }
     }
 
-    macro_rules! never {
-        ($($sig:tt)*) => {
-            $($sig)* {
-                unreachable!("TempTys::intern calls only resolve_rty and the ty_* accessors")
-            }
-        };
-    }
-
-    impl ElabCtx for PreludeCtx {
+    impl PreludeTys for PreludeCtx {
         fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
             Zonker::new(&self.eng).zonk_or_opaque(pool, t).0
         }
@@ -697,25 +686,6 @@ mod tests {
             self.eng
                 .nullary_con(NullaryPrim::Binary, BINARY_ID, "Binary")
         }
-        fn ty_nil(&mut self) -> Ty {
-            self.eng.nullary_con(NullaryPrim::Nil, NIL_ID, "Nil")
-        }
-
-        never!(fn intern(&mut self, _: &str) -> StrId);
-        never!(fn str(&self, _: StrId) -> &str);
-        never!(fn add_const(&mut self, _: Value) -> ConstId);
-        never!(fn number_const(&mut self, _: &ast::NumberLiteral) -> (ConstId, Ty));
-        never!(fn string_const(&mut self, _: &str) -> ConstId);
-        never!(fn int_const(&mut self, _: i64) -> ConstId);
-        never!(fn binary_const(&mut self, _: Vec<u8>, _: u64) -> ConstId);
-        never!(fn resolve_name(&mut self, _: &str) -> Option<(Ty, Denotation)>);
-        never!(fn resolve_qualified(&mut self, _: &str, _: &str, _: Span) -> Option<(Ty, Denotation)>);
-        never!(fn ctor_field(&mut self, _: Ty, _: &str) -> Option<(u32, Ty)>);
-        never!(fn ctor_labels(&mut self, _: crate::core_ir::VariantRef) -> Option<Vec<StrId>>);
-        never!(fn closure(&mut self, _: Span) -> Option<(FuncIdx, Vec<StrId>)>);
-        never!(fn fn_of_global(&self, _: GlobalSlot) -> Option<FuncIdx>);
-        never!(fn next_global_slot(&mut self) -> Option<GlobalSlot>);
-        never!(fn or_shape(&mut self, _: Ty) -> Option<OrShape>);
     }
 
     /// [`TempTys::intern`]'s contract, behaviourally: the nodes it hands

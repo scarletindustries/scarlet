@@ -44,7 +44,7 @@ use crate::span::Span;
 use crate::types::StrId;
 
 use super::rty::RTy;
-use super::slots::slot_labeled;
+use super::slots::{Slots, slot_labeled};
 use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
 
 /// Everything a constructor *pattern* head needs, resolved against the
@@ -136,7 +136,7 @@ pub trait PatCtx {
     /// Drop every name bound since `mark`.
     fn scope_reset(&mut self, mark: usize);
 
-    fn number_const(&mut self, lit: &ast::NumberLiteral) -> (ConstId, RTy);
+    fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId;
     fn string_const(&mut self, s: &str) -> ConstId;
     fn int_const(&mut self, i: i64) -> ConstId;
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId;
@@ -190,6 +190,33 @@ pub fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) ->
         bound: HashMap::new(),
     }
     .pat(p, scrut)
+}
+
+/// Slot a constructor's positional/labeled pattern args into declared-field
+/// order, so a slot index *is* a field index, not a source-arg index. Shared
+/// by refutable patterns ([`PatElab::ctor`]) and irrefutable destructuring
+/// (`Elab::irrefutable`).
+///
+/// The check walk slotted these same args with the same [`slot_labeled`] and
+/// reported every error it returned. An error on a clean module means the two
+/// walks disagree; dropping the mis-slotted sub-pattern would leave its binds
+/// unminted and the arm matching too much, so it aborts.
+pub fn slot_pattern_args<'p, C: PatCtx>(
+    cx: &mut C,
+    labels: &[StrId],
+    arity: usize,
+    args: &'p [ast::PatternArg],
+    span: Span,
+) -> Slots<&'p ast::Pattern> {
+    let supplied = args.iter().map(|a| match a {
+        ast::PatternArg::Positional(p) => (None, p),
+        ast::PatternArg::Labeled { label, pattern } => (Some(cx.intern(&label.name)), pattern),
+    });
+    let (by_pos, errors) = slot_labeled(labels, arity, supplied);
+    if !errors.is_empty() {
+        elaborator_bug("constructor pattern arg desync", span)
+    }
+    by_pos
 }
 
 /// Every [`TypedBind`] `p` introduces, in left-to-right order, each listed
@@ -280,7 +307,7 @@ impl<C: PatCtx> PatElab<'_, C> {
             ast::Pattern::Wildcard { .. } => TypedPat::Wild { ty: scrut },
             ast::Pattern::Var { name } => TypedPat::Bind(self.bind(&name.name, scrut)),
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => {
-                let (value, _) = self.cx.number_const(n);
+                let value = self.cx.number_const(n);
                 TypedPat::Lit { ty: scrut, value }
             }
             ast::Pattern::Literal(ast::PatternLiteral::String(s)) => TypedPat::Lit {
@@ -315,8 +342,8 @@ impl<C: PatCtx> PatElab<'_, C> {
                 TypedPat::Or { ty: scrut, alts }
             }
             ast::Pattern::Range { start, end, .. } => {
-                let (lo, _) = self.cx.number_const(start);
-                let (hi, _) = self.cx.number_const(end);
+                let lo = self.cx.number_const(start);
+                let hi = self.cx.number_const(end);
                 TypedPat::Range { ty: scrut, lo, hi }
             }
         }
@@ -339,23 +366,7 @@ impl<C: PatCtx> PatElab<'_, C> {
             Some(q) => self.cx.resolve_ctor_pat_qualified(&q.name, name, scrut),
             None => self.cx.resolve_ctor_pat(name, scrut),
         };
-        let supplied = args
-            .iter()
-            .map(|a| match a {
-                ast::PatternArg::Positional(p) => (None, p),
-                ast::PatternArg::Labeled { label, pattern } => {
-                    (Some(self.cx.intern(&label.name)), pattern)
-                }
-            })
-            .collect::<Vec<_>>();
-        let (by_pos, errors) = slot_labeled(info.labels(), info.arity(), supplied);
-        // The check walk slotted these same args with the same `slot_labeled`
-        // and reported every error it returned. An error on a clean module
-        // means the two walks disagree; dropping the mis-slotted sub-pattern
-        // would leave its binds unminted and the arm matching too much.
-        if !errors.is_empty() {
-            elaborator_bug("constructor pattern arg desync", span)
-        }
+        let by_pos = slot_pattern_args(&mut *self.cx, info.labels(), info.arity(), args, span);
 
         // `slot_labeled` returns exactly `arity` slots and `field_tys` is
         // exactly `arity` long, so the zip pairs every slot with its own field
@@ -450,6 +461,9 @@ impl<C: PatCtx> PatElab<'_, C> {
             let bits = self.cx.int_const(width);
             return TypedBinPatSeg::Utf8Literal { bytes, bits };
         }
+        // Width before value, matching the check walk's visit order
+        // (expressions visit the value first — see `Elab::binary_literal`).
+        let bits = seg_bits(&mut *self.cx, &seg.spec);
         match &seg.spec {
             ast::BinSpec::Utf8 => {
                 // `BinReadUtf8` yields the codepoint as an `Int`.
@@ -458,52 +472,54 @@ impl<C: PatCtx> PatElab<'_, C> {
                     value: self.pat(&seg.value, int_t),
                 }
             }
-            ast::BinSpec::Binary { bytes } => {
-                // A sizeless `:binary` consumes the remainder; `lower` knows
-                // that from `bits: None` rather than from a missing AST node.
-                let bits = bytes.as_ref().map(|sz| self.seg_bytes_bits(sz));
+            ast::BinSpec::Binary { .. } => {
                 let value = self.pat(&seg.value, scrut);
                 TypedBinPatSeg::Binary { bits, value }
             }
-            ast::BinSpec::Int { bits } => {
-                let bits = self.seg_int_bits(bits.as_ref());
+            ast::BinSpec::Int { .. } => {
+                // `seg_bits` is total for `Int`: sizeless defaults to 8.
+                let bits = bits.expect("Int segment width");
                 let int_t = self.cx.ty_int();
                 let value = self.pat(&seg.value, int_t);
                 TypedBinPatSeg::Int { bits, value }
             }
         }
     }
+}
 
-    /// An `Int` segment's width *in bits*: the `:N` / `:size(..)` expression,
-    /// or the default 8. `lower` reads a plain `Int` expression and never
-    /// re-derives the default.
-    fn seg_int_bits(&mut self, bits: Option<&ast::Expression>) -> TypedExpr {
-        let ty = self.cx.ty_int();
-        match bits {
-            None => {
-                let value = self.cx.int_const(8);
-                TypedExpr::Const { ty, value }
-            }
-            Some(e) => self.cx.expr(e),
+/// The bits-width rule for `<<..>>` segments, shared by expression
+/// ([`super::elaborate`]'s `binary_literal`) and pattern elaboration so the
+/// two cannot drift: an `Int`'s `:N` / `:size(..)` expression, or the default
+/// 8 when sizeless; a `Binary`'s `:bytes(..)` size scaled to bits. `None` is
+/// a spec with no width expression — a sizeless `:binary` consumes the
+/// remainder (`lower` knows that from `bits: None` rather than from a missing
+/// AST node), and a `:utf8` width is data-dependent. `lower` reads the result
+/// as a plain `Int` expression and never re-derives the default or the unit.
+///
+/// The `:bytes` scale is the generic `Op::Mul`, not `MulInt`: it is a
+/// synthesised node, not one the checker specialised, and today's lowering
+/// emits exactly this — specialising it is a typed-opcode change and belongs
+/// with the rest of them, not here.
+pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> Option<TypedExpr> {
+    match spec {
+        ast::BinSpec::Int { bits: Some(e) } => Some(cx.expr(e)),
+        ast::BinSpec::Int { bits: None } => {
+            let ty = cx.ty_int();
+            let value = cx.int_const(8);
+            Some(TypedExpr::Const { ty, value })
         }
-    }
-
-    /// A `Binary` segment's `:bytes(..)` size scaled to bits, so `lower`
-    /// never re-derives the unit.
-    ///
-    /// The multiply is the generic `Op::Mul`, matching what `lower` emits
-    /// today; specialising it to `MulInt` is a typed-opcode change and belongs
-    /// with the rest of them, not here.
-    fn seg_bytes_bits(&mut self, bytes: &ast::Expression) -> TypedExpr {
-        let ty = self.cx.ty_int();
-        let v = self.cx.expr(bytes);
-        let eight = self.cx.int_const(8);
-        TypedExpr::Binary {
-            ty,
-            op: Op::Mul,
-            lhs: Box::new(v),
-            rhs: Box::new(TypedExpr::Const { ty, value: eight }),
+        ast::BinSpec::Binary { bytes: Some(e) } => {
+            let ty = cx.ty_int();
+            let v = cx.expr(e);
+            let eight = cx.int_const(8);
+            Some(TypedExpr::Binary {
+                ty,
+                op: Op::Mul,
+                lhs: Box::new(v),
+                rhs: Box::new(TypedExpr::Const { ty, value: eight }),
+            })
         }
+        ast::BinSpec::Binary { bytes: None } | ast::BinSpec::Utf8 => None,
     }
 }
 
@@ -607,9 +623,9 @@ mod tests {
             self.scope.truncate(mark);
         }
 
-        fn number_const(&mut self, lit: &ast::NumberLiteral) -> (ConstId, RTy) {
+        fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId {
             let v: i64 = lit.value.parse().unwrap_or(0);
-            (self.int_const(v), self.int)
+            self.int_const(v)
         }
 
         fn string_const(&mut self, s: &str) -> ConstId {
