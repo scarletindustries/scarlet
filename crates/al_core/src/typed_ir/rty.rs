@@ -37,6 +37,7 @@ impl Arity {
     /// The arity of a parameter/field list. The one constructor that is not a
     /// literal, so a `len()` cast lives here rather than at each call site.
     #[inline]
+    #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
     pub fn of<T>(items: &[T]) -> Self {
         Arity(u16::try_from(items.len()).expect("constructor arity exceeds u16"))
     }
@@ -275,9 +276,9 @@ mod tests {
     #[test]
     fn primitives_are_not_heap() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let float = p.mk_con(TypeId(2), 0, &[]);
-        let string = p.mk_con(TypeId(3), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let float = p.mk_con(TypeId(2), StrId(0), &[]);
+        let string = p.mk_con(TypeId(3), StrId(0), &[]);
         assert_eq!(p.prim_of(int), Some(Prim::Int));
         assert_eq!(p.prim_of(float), Some(Prim::Float));
         assert_eq!(p.prim_of(string), Some(Prim::String));
@@ -291,8 +292,8 @@ mod tests {
     #[test]
     fn user_types_tuples_and_functions_are_heap() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let user = p.mk_con(TypeId(9), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let user = p.mk_con(TypeId(9), StrId(0), &[]);
         let tup = p.mk_tuple(&[int, int]);
         let fun = p.mk_fun(&[int], int);
         assert!(p.is_heap(user));
@@ -313,8 +314,8 @@ mod tests {
     #[test]
     fn children_slices_do_not_alias() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let str_ = p.mk_con(TypeId(3), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let str_ = p.mk_con(TypeId(3), StrId(0), &[]);
         let a = p.mk_tuple(&[int, str_]);
         let b = p.mk_tuple(&[str_, int]);
         assert_eq!(p.tuple_elems(a), &[int, str_]);
@@ -328,9 +329,9 @@ mod tests {
     #[test]
     fn con_args_and_fun_shape() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let nil = p.mk_con(TypeId(7), 0, &[]);
-        let res = p.mk_con(TypeId(8), 0, &[int, nil]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let nil = p.mk_con(TypeId(7), StrId(0), &[]);
+        let res = p.mk_con(TypeId(8), StrId(0), &[int, nil]);
         assert_eq!(p.con_arg(res, 0), Some(int));
         assert_eq!(p.con_arg(res, 1), Some(nil));
         assert_eq!(p.con_arg(res, 2), None);

@@ -71,7 +71,24 @@ pub fn new_parser(s: &mut Scanner) -> Parser {
     new_parser_from_tokens(tokens, diags)
 }
 
-pub fn new_parser_from_tokens(tokens: Vec<Token>, scanner_diagnostics: Vec<Diagnostic>) -> Parser {
+pub fn new_parser_from_tokens(
+    mut tokens: Vec<Token>,
+    scanner_diagnostics: Vec<Diagnostic>,
+) -> Parser {
+    // The parser's advance() refuses to move past the last token and every
+    // loop exits on Eof, so the token stream must end with one. The scanner
+    // always appends it; enforce the invariant here so a hand-built stream
+    // that forgot the terminator cannot send the parser out of bounds.
+    if tokens.last().map(|t| &t.kind) != Some(&Kind::Eof) {
+        let span = tokens.last().map_or(Span::DUMMY, |t| {
+            Span::point(t.span.end_line, t.span.end_column)
+        });
+        tokens.push(Token {
+            kind: Kind::Eof,
+            span,
+            leading_trivia: Vec::new(),
+        });
+    }
     Parser {
         tokens,
         index: 0,
@@ -561,7 +578,10 @@ impl Parser {
         false
     }
 
-    pub fn parse_program(&mut self) -> ParseResult {
+    // Takes `self` by value: parsing moves the diagnostics into the result,
+    // so a parser cannot be run twice (the second run would silently report
+    // an empty program with no diagnostics).
+    pub fn parse_program(mut self) -> ParseResult {
         let program_span = self.current_span();
         let doc = self.take_module_doc();
         let mut body: Vec<ast::Node> = Vec::new();
@@ -592,13 +612,11 @@ impl Parser {
             }
         }
 
+        let span = self.span_from(program_span);
         ParseResult {
-            ast: ast::BlockExpression {
-                body,
-                span: self.span_from(program_span),
-            },
+            ast: ast::BlockExpression { body, span },
             doc,
-            diagnostics: std::mem::take(&mut self.diagnostics),
+            diagnostics: self.diagnostics,
         }
     }
 
@@ -2081,7 +2099,10 @@ impl Parser {
         if opaque {
             self.eat(Kind::Keyword(Keyword::Opaque))?;
         }
-        let mut decl = self.parse_declaration_inner(doc, attrs, opaque)?;
+        // Callers reach here with `pub` and/or at least one attribute, so the
+        // error message can always name what actually preceded the junk.
+        let preceded_by = if is_pub { "`pub`" } else { "attributes" };
+        let mut decl = self.parse_declaration_inner(doc, attrs, opaque, preceded_by)?;
         let s = decl.span_mut();
         s.start_line = start.start_line;
         s.start_column = start.start_column;
@@ -2096,6 +2117,7 @@ impl Parser {
         doc: Option<String>,
         attrs: Vec<ast::Attribute>,
         opaque: bool,
+        preceded_by: &str,
     ) -> PResult<ast::Declaration> {
         if opaque && self.kind() != Kind::Keyword(Keyword::Type) {
             return Err("`opaque` may only be applied to `type` declarations".to_string());
@@ -2110,7 +2132,7 @@ impl Parser {
                 self.parse_const_binding(doc)
             }
             other => Err(format!(
-                "Expected `fn`, `type`, or `const` after `pub`, got '{other}'"
+                "Expected `fn`, `type`, or `const` after {preceded_by}, got '{other}'"
             )),
         }
     }
@@ -2317,8 +2339,7 @@ mod tests {
 
     fn parse(src: &str) -> ParseResult {
         let mut s = new_scanner(src.to_string());
-        let mut p = new_parser(&mut s);
-        p.parse_program()
+        new_parser(&mut s).parse_program()
     }
 
     fn assert_no_errors(src: &str) -> ParseResult {
@@ -2762,6 +2783,12 @@ mod tests {
         );
         // `pub` must be followed by a declaration keyword.
         assert_has_error("pub x = 1", "after `pub`");
+        // Attributes must be followed by a declaration keyword; the message
+        // must not mention `pub` the user never wrote.
+        assert_has_error(
+            "@vm(add)\njunk",
+            "Expected `fn`, `type`, or `const` after attributes",
+        );
         // A relative import segment must be followed by `/`.
         assert_has_error("import .foo", "Expected `/` after relative import segment");
     }

@@ -149,6 +149,7 @@ pub struct ReuseShape {
 }
 
 impl ReuseShape {
+    #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
     pub fn enum_(arity: usize) -> Self {
         ReuseShape {
             tag: HeapTag::Enum,

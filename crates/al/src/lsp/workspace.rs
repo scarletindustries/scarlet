@@ -329,7 +329,7 @@ impl Workspace {
         eprintln!("[AL LSP] Analyzing: {uri}");
 
         let mut sc = scanner::new_scanner(text.to_string());
-        let mut p = parser::new_parser(&mut sc);
+        let p = parser::new_parser(&mut sc);
         let parser::ParseResult {
             ast: parsed_ast,
             diagnostics: parse_diagnostics,

@@ -19,10 +19,7 @@ pub enum Kind {
     InterpStringEnd,
     LogicalAnd,
     LogicalOr,
-    BitwiseAnd,
     BitwiseOr,
-    BitwiseXor,
-    BitwiseNot,
     Keyword(Keyword),
     PuncArrow,
     PuncComma,
@@ -75,10 +72,7 @@ impl fmt::Display for Kind {
             Kind::InterpStringEnd => "interpolated string end",
             Kind::LogicalAnd => "&&",
             Kind::LogicalOr => "||",
-            Kind::BitwiseAnd => "&",
             Kind::BitwiseOr => "|",
-            Kind::BitwiseXor => "^",
-            Kind::BitwiseNot => "~",
             Kind::Keyword(kw) => kw.text(),
             Kind::PuncArrow => "->",
             Kind::PuncComma => ",",
@@ -113,5 +107,126 @@ impl fmt::Display for Kind {
             Kind::PuncMod => "%",
         };
         f.write_str(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Kind;
+
+    /// Every `Kind` whose `Display` output is its fixed source spelling.
+    /// Kept in step with an exhaustive match over `Kind`, so adding a
+    /// variant fails to compile until it is classified below — and
+    /// classifying it as fixed-spelling means adding it to this list.
+    fn fixed_spelling_kinds() -> Vec<Kind> {
+        let mut kinds = vec![
+            Kind::LogicalAnd,
+            Kind::LogicalOr,
+            Kind::BitwiseOr,
+            Kind::PuncArrow,
+            Kind::PuncComma,
+            Kind::PuncColon,
+            Kind::PuncSemicolon,
+            Kind::PuncDot,
+            Kind::PuncDotdot,
+            Kind::PuncOpenParen,
+            Kind::PuncCloseParen,
+            Kind::PuncOpenBrace,
+            Kind::PuncCloseBrace,
+            Kind::PuncOpenBracket,
+            Kind::PuncCloseBracket,
+            Kind::BinOpen,
+            Kind::BinClose,
+            Kind::PuncQuestionMark,
+            Kind::PuncExclamationMark,
+            Kind::PuncAt,
+            Kind::PuncEquals,
+            Kind::PuncEqualsComparator,
+            Kind::PuncNotEqual,
+            Kind::PuncGt,
+            Kind::PuncLt,
+            Kind::PuncGte,
+            Kind::PuncLte,
+            Kind::PuncPlus,
+            Kind::PuncPlusplus,
+            Kind::PuncMinus,
+            Kind::PuncMinusminus,
+            Kind::PuncMul,
+            Kind::PuncDiv,
+            Kind::PuncMod,
+        ];
+        kinds.extend(super::Keyword::ALL.into_iter().map(Kind::Keyword));
+
+        for kind in &kinds {
+            match kind {
+                // No fixed source spelling: payload-bearing or positional.
+                Kind::Eof
+                | Kind::Error(_)
+                | Kind::Identifier(_)
+                | Kind::LiteralNumber(_)
+                | Kind::LiteralString(_)
+                | Kind::InterpStringStart
+                | Kind::InterpStringPart(_)
+                | Kind::InterpStringEnd => {
+                    unreachable!("{kind:?} must not be in the fixed-spelling list")
+                }
+                // Fixed spelling: must appear in the list above.
+                Kind::LogicalAnd
+                | Kind::LogicalOr
+                | Kind::BitwiseOr
+                | Kind::Keyword(_)
+                | Kind::PuncArrow
+                | Kind::PuncComma
+                | Kind::PuncColon
+                | Kind::PuncSemicolon
+                | Kind::PuncDot
+                | Kind::PuncDotdot
+                | Kind::PuncOpenParen
+                | Kind::PuncCloseParen
+                | Kind::PuncOpenBrace
+                | Kind::PuncCloseBrace
+                | Kind::PuncOpenBracket
+                | Kind::PuncCloseBracket
+                | Kind::BinOpen
+                | Kind::BinClose
+                | Kind::PuncQuestionMark
+                | Kind::PuncExclamationMark
+                | Kind::PuncAt
+                | Kind::PuncEquals
+                | Kind::PuncEqualsComparator
+                | Kind::PuncNotEqual
+                | Kind::PuncGt
+                | Kind::PuncLt
+                | Kind::PuncGte
+                | Kind::PuncLte
+                | Kind::PuncPlus
+                | Kind::PuncPlusplus
+                | Kind::PuncMinus
+                | Kind::PuncMinusminus
+                | Kind::PuncMul
+                | Kind::PuncDiv
+                | Kind::PuncMod => {}
+            }
+        }
+        kinds
+    }
+
+    /// Mirrors `keyword_roundtrip` in `keywords.rs`: the fixed spellings in
+    /// `Kind`'s `Display` are hand-maintained separately from the scanner's
+    /// dispatch, so scan each spelling with the real scanner and require the
+    /// exact same kind back.
+    #[test]
+    fn fixed_spelling_roundtrip() {
+        for kind in fixed_spelling_kinds() {
+            let src = kind.to_string();
+            let mut s = crate::scanner::new_scanner(src.clone());
+            let (tokens, diagnostics) = s.scan_all();
+            assert!(
+                diagnostics.is_empty(),
+                "scanning {src:?} diagnosed: {diagnostics:?}"
+            );
+            let scanned: Vec<Kind> = tokens.into_iter().map(|t| t.kind).collect();
+            assert_eq!(scanned, [kind, Kind::Eof], "scanning {src:?}");
+        }
     }
 }

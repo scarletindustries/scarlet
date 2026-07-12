@@ -646,6 +646,7 @@ impl InferEngine {
         i
     }
 
+    #[allow(clippy::expect_used)] // a >65535-child type is a compiler bug, not user error
     fn push_children(&mut self, kids: &[Ty]) -> ArenaSlice<pool::Children> {
         let start = self.children.len() as u32;
         let len = u16::try_from(kids.len())
@@ -668,6 +669,7 @@ impl InferEngine {
 
     // --- Side-pool primitives ---
 
+    #[allow(clippy::expect_used)] // a >65535-item slice is a compiler bug, not user error
     fn pool_slice<T: Copy, P>(pool: &mut Vec<T>, items: &[T]) -> ArenaSlice<P> {
         let start = pool.len() as u32;
         let len = u16::try_from(items.len())
@@ -690,6 +692,7 @@ impl InferEngine {
             .collect()
     }
     /// Intern each string and push the ids as a contiguous slice.
+    #[allow(clippy::expect_used)] // a >65535-item slice is a compiler bug, not user error
     pub fn intern_slice<S: AsRef<str>>(&mut self, ss: &[S]) -> ArenaSlice<pool::StrSlices> {
         let start = self.str_slices.len() as u32;
         let len =

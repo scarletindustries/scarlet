@@ -659,6 +659,7 @@ impl Compiler {
         // `ModuleInterface.values` is an `IndexMap`, so insertion order is
         // the order importers observe.
         for (p, s) in prepared.iter().zip(final_schemes) {
+            #[allow(clippy::panic)] // the loop above generalizes every prepared decl
             let s = s.unwrap_or_else(|| panic!("decl '{}' was never generalized", p.name()));
             export_value(
                 iface.as_deref_mut(),

@@ -879,7 +879,7 @@ mod tests {
                    Some(x) = Some(1)\n\
                    Nil = println('hi')\n";
         let mut sc = scanner::new_scanner(src.to_string());
-        let mut p = parser::new_parser(&mut sc);
+        let p = parser::new_parser(&mut sc);
         let r = p.parse_program();
         assert!(
             r.diagnostics.is_empty(),
