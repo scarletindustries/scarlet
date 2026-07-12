@@ -10,7 +10,7 @@ fn s0(%0:t0, %1:t1) -> :t1
       ret call self(%3, %5)
 
 toplevel:
-  let %0:t3 = closure fn#160()
+  let %0:t3@g0 = closure fn#0()
   let %1:t2 = c2
   let %2:t2 = c0
   ret call %0(%1, %2)

@@ -1,9 +1,9 @@
 toplevel:
   let %0:t0 = c0
   let %1:t0 = c1
-  let %2:t0 = AddInt(%0, %1)
+  let %2:t0@g0 = AddInt(%0, %1)
   let %3:t0 = c2
-  let %4:t0 = MulInt(%2, %3)
+  let %4:t0@g1 = MulInt(%2, %3)
   ret SubInt(%4, %2)
 where
   c0 = Int(1)

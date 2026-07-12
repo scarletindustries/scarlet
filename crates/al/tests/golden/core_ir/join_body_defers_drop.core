@@ -14,8 +14,8 @@ fn s1(%0:t1) -> :t2
       let %1:t2 = c1
       let %2:t3 = ctor 6400.1()
       let %3:t4 = ctor 6400.0(%1, %2)
-      let %4:t0 = call fn#160(%3)
-      let %5:t0 = call fn#160(%3)
+      let %4:t0 = call fn#0(%3)
+      let %5:t0 = call fn#0(%3)
       ret AddInt(%4, %5)
     else
       ret c0
@@ -25,9 +25,9 @@ fn s1(%0:t1) -> :t2
   ret AddInt(%8, %7)
 
 toplevel:
-  let %0:t4 = closure fn#160()
+  let %0:t4@g0 = closure fn#0()
   drop %0
-  let %1:t5 = closure fn#161()
+  let %1:t5@g1 = closure fn#1()
   let %2:t3 = ctor 261.0()
   ret call %1(%2)
 where

@@ -120,7 +120,7 @@ reject_case! {
     /// body-less fn in `decls`, and blew up. The `FnBody` enum makes that
     /// unrepresentable: it must be a clean parse error, never a panic.
     u17_bare_vm_attr_is_rejected_without_panic:
-        ("@vm\nfn foo() Int\n", "@vm requires an op"),
+        ("@vm\nfn foo() Int\n", "@vm takes exactly one argument"),
 
     /// U18: the type-decl twin of U16. Duplicate `type` declarations used to desync
     /// the name-keyed Pass-1 maps (`type_param_generics` + the shared `hydrators`

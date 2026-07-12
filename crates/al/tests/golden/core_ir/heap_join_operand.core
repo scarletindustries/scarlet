@@ -17,12 +17,12 @@ fn s1(%0:t0) -> :t1
     else
       ret ctor 6400.1()
   drop %0
-  ret call fn#160(%3)
+  ret call fn#0(%3)
 
 toplevel:
-  let %0:t5 = closure fn#160()
+  let %0:t5@g0 = closure fn#0()
   drop %0
-  let %1:t2 = closure fn#161()
+  let %1:t2@g1 = closure fn#1()
   let %2:t6 = ctor 261.0()
   ret call %1(%2)
 where

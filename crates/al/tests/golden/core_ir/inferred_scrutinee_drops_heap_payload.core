@@ -15,7 +15,7 @@ fn s0() -> :t0
       ret AddInt(%4, %5)
 
 toplevel:
-  let %0:t2 = closure fn#160()
+  let %0:t2@g0 = closure fn#0()
   ret call %0()
 where
   c0 = Int(3)

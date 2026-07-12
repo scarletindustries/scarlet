@@ -49,6 +49,11 @@ fn lower(source: &str) -> String {
     let mut out = apply_renumber(&raw, b':', ":t", &renumber(&raw, b':'));
     out = apply_renumber(&out, b'c', "c", &const_map);
     out = apply_renumber(&out, b's', "s", &renumber(&raw, b's'));
+    // Function indices and global slots are absolute program offsets shared
+    // with the whole stdlib, so adding one stdlib function used to shift
+    // every `fn#N`/`@gN` in every golden. Dense-renumber them like the rest.
+    out = renumber_prefixed(&out, "fn#");
+    out = renumber_prefixed(&out, "@g");
     if !const_map.is_empty() {
         let mut rows: Vec<(usize, usize)> = const_map.iter().map(|(&o, &n)| (n, o)).collect();
         rows.sort_unstable();
@@ -62,6 +67,33 @@ fn lower(source: &str) -> String {
             out.push_str(&format!("  c{new} = {v}\n"));
         }
     }
+    out
+}
+
+/// Renumber every `<prefix><digits>` token in `s` densely by first
+/// appearance, keeping the prefix. For multi-byte sigils (`fn#`, `@g`) the
+/// single-byte `renumber`/`apply_renumber` pair cannot be used.
+fn renumber_prefixed(s: &str, prefix: &str) -> String {
+    let mut map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find(prefix) {
+        let after = &rest[pos + prefix.len()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            out.push_str(&rest[..pos + prefix.len()]);
+            rest = after;
+            continue;
+        }
+        let orig: usize = digits.parse().expect("digits");
+        let next = map.len();
+        let new = *map.entry(orig).or_insert(next);
+        out.push_str(&rest[..pos]);
+        out.push_str(prefix);
+        out.push_str(&new.to_string());
+        rest = &after[digits.len()..];
+    }
+    out.push_str(rest);
     out
 }
 

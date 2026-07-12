@@ -10,7 +10,7 @@ fn s0(%0:t0) -> :t1
       ret MulInt(%4, %5)
 
 toplevel:
-  let %0:t3 = closure fn#160()
+  let %0:t3@g0 = closure fn#0()
   let %1:t2 = c1
   let %2:t2 = c2
   let %3:t4 = ctor 6400.1(%1, %2)
