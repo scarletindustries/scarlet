@@ -57,9 +57,10 @@ impl DefinitionLocation {
 #[derive(Debug, Clone, Copy)]
 pub struct TypeParam {
     pub name: StrId,
-    /// Engine-local var id. `-1` for types loaded from a `StaticStdlib`, where
-    /// `close_body` has rewritten body refs to `Bound(idx)` so the id is never
-    /// consulted.
+    /// Engine-local var id. For types loaded from a `StaticStdlib` it is the
+    /// build-time engine's original var id — dangling in the live engine, but
+    /// never matched: `close_body` rewrote every body ref to `Bound(idx)`
+    /// before flattening, and inference only compares live `Var` ids.
     pub id: i32,
 }
 

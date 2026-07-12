@@ -16,7 +16,6 @@
 
 use std::fmt;
 use std::hash::Hash;
-use std::iter::FromIterator;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
@@ -145,24 +144,6 @@ impl<I: Idx, T> Index<I> for TiVec<I, T> {
 impl<I: Idx, T> IndexMut<I> for TiVec<I, T> {
     fn index_mut(&mut self, i: I) -> &mut T {
         &mut self.raw[i.index()]
-    }
-}
-
-impl<I: Idx, T> From<Vec<T>> for TiVec<I, T> {
-    fn from(raw: Vec<T>) -> Self {
-        TiVec {
-            raw,
-            _idx: PhantomData,
-        }
-    }
-}
-
-impl<I: Idx, T> FromIterator<T> for TiVec<I, T> {
-    fn from_iter<It: IntoIterator<Item = T>>(it: It) -> Self {
-        TiVec {
-            raw: it.into_iter().collect(),
-            _idx: PhantomData,
-        }
     }
 }
 

@@ -22,11 +22,11 @@ pub fn set_bit(bytes: &mut [u8], i: u64, bit: u8) {
     bytes[idx] = (bytes[idx] & !(1 << shift)) | ((bit & 1) << shift);
 }
 
-/// Read the 8 bits starting at bit `at` as one byte, MSB-first. Bits past the
-/// end of `bytes` read as **zero** — the second source byte is fetched with
-/// `.get()`, never a panicking index — so a read whose window straddles the
-/// buffer end is well-defined. Callers that need strict bounds mask the
-/// result through [`tail_mask`].
+/// Read the 8 bits starting at bit `at` as one byte, MSB-first. Any bit at or
+/// past the end of `bytes` reads as **zero** — both source bytes are fetched
+/// with `.get()`, never a panicking index — so a read whose window straddles
+/// or lies entirely past the buffer end is well-defined. Callers that need
+/// strict bounds mask the result through [`tail_mask`].
 #[inline]
 pub fn read_byte(bytes: &[u8], at: u64) -> u8 {
     let idx = (at / 8) as usize;

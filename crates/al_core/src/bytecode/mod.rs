@@ -38,6 +38,8 @@
 //! |                     | [`Program`]                                    |
 //! | [`compiler`]        | AST → `Program`: HM inference fused with       |
 //! |                     | bytecode emission                              |
+//! | [`binop`]           | binary-operator kind classification +          |
+//! |                     | post-unification specialization to typed ops   |
 //! | `session`           | LSP layer: `IncrementalSession`, `Watermark`   |
 //! |                     | rollback, reference-graph finalization         |
 //! | `peephole`          | superinstruction fusion over the emitted code  |
@@ -50,6 +52,10 @@
 //! |                     | layouts, the [`Arena`] trait                   |
 //! | [`seq`]             | the persistent RRB vector backing `Array`      |
 //! | [`hamt`]            | the persistent HAMT backing `Map`              |
+//! | [`bits`]            | MSB-first bit-granular primitives over `[u8]`, |
+//! |                     | the single definition of bit addressing        |
+//! | `scratch`           | stack-resident `Buf<N>` for assembling         |
+//! |                     | replacement node images                        |
 
 mod analysis;
 pub mod binop;
@@ -825,7 +831,7 @@ pub fn builtin_op(name: &str) -> Option<Op> {
         "float__to_string" => Op::FloatToString,
         "scheduler__spawn" => Op::ProcessSpawn,
         "scheduler__spawn_local" => Op::SpawnLocal,
-        "scheduler__spawn_on_each" => Op::SpawnOnEach,
+        "scheduler__spawn_per_core" => Op::SpawnOnEach,
         "scheduler__sleep" => Op::Sleep,
         "time__monotonic" => Op::Monotonic,
         "process__argv" => Op::Argv,

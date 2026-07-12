@@ -590,7 +590,7 @@ pub struct ArenaSeed<'a> {
     pub variants: &'a [Variant],
 }
 
-pub fn next_letter(uid: &mut u64) -> String {
+fn next_letter(uid: &mut u64) -> String {
     let alphabet_len: u64 = 26;
     let offset = b'a';
     let mut chars: Vec<char> = Vec::new();

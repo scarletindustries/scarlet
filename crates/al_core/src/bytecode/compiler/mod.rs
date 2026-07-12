@@ -472,7 +472,7 @@ pub struct Compiler {
     /// [`Self::compile_fn_body`] routes through the `lower→perceus→emit`
     /// pipeline pushes its post-perceus [`crate::core_ir::CoreFn`] into
     /// `core.fns`, and [`compile_impl`] lowers the module toplevel into
-    /// `core.toplevel`. Moved into [`CompileResult::core`] at the end of
+    /// `core.toplevel`. Moved into [`Emitted::core`] at the end of
     /// [`compile_impl`].
     pub(super) core: crate::core_ir::CoreProgram,
     /// The `fn(...) {...}` expressions written *directly inside the frame being

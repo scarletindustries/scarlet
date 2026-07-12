@@ -774,7 +774,7 @@ fn rebalance<A: Arena + ?Sized>(
                 // backstop so a violated invariant degrades to a slightly
                 // overfull level rather than an infinite loop.
                 debug_assert!(
-                    i < plan_len,
+                    false,
                     "rebalance: no sparse node despite plan_len > optimal + E_MAX"
                 );
                 break;

@@ -190,7 +190,7 @@ impl StaticStdlib {
             .collect()
     }
 
-    pub fn hydrate_module(&self, m: &SModule) -> ModuleInterface {
+    fn hydrate_module(&self, m: &SModule) -> ModuleInterface {
         let mut iface = ModuleInterface::new(self.modpath(m.path));
         for te in &self.stypeexport_pool[m.types.range()] {
             iface

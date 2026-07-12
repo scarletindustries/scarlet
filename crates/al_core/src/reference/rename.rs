@@ -47,9 +47,13 @@ pub struct WorkspaceEdit {
     pub changes: BTreeMap<String, Vec<TextEdit>>,
 }
 
-/// Result of `textDocument/prepareRename`: the canonical definition being
-/// renamed, the exact source range of the identifier under the cursor (what
-/// the editor highlights), and the current name as the rename placeholder.
+/// Result of `textDocument/prepareRename`: the definition the cursor's
+/// reference targets, the exact source range of the identifier under the
+/// cursor (what the editor highlights), and the current name as the rename
+/// placeholder. `def` is the hit's target as-is, deliberately *not* chased
+/// through [`ReferenceGraph::canonical`] / the `alias_of` edge on
+/// [`super::DefinitionKind::Value`]: renaming the `Y` of `import a.{X as Y}` stays
+/// anchored on the alias `Y`, so `X` is never rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRename {
     pub def: DefId,
