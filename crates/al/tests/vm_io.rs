@@ -633,6 +633,67 @@ fn http_server_chunked_post_roundtrip() {
     srv.shutdown_clean(stream);
 }
 
+/// Connection-close semantics end-to-end through the `al/http` server:
+/// an HTTP/1.1 request with `Connection: close` gets a response that
+/// advertises `Connection: close` back (RFC 9112 §9.6) and the server then
+/// closes the socket; an HTTP/1.0 request with `Connection: close, keep-alive`
+/// closes too — the `close` token wins over `keep-alive` whenever present
+/// (RFC 9112 §9.3), so the response must not echo `keep-alive`.
+#[test]
+fn http_server_connection_close_semantics() {
+    let proj = Project::new("io_http_close");
+    let src = listening_src(
+        "import al/http",
+        "http.serve_on(server, fn(_req) http.text('bye'))",
+    );
+    let srv = spawn_al_server(&proj, &src);
+    let mut tmp = [0u8; 64];
+
+    // --- HTTP/1.1 + Connection: close --------------------------------------
+    let mut stream = srv.connect();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .expect("write 1.1 close request");
+    let mut buf = Vec::new();
+    let (status, headers, body) = read_one_response(&mut stream, &mut buf);
+    assert!(status.starts_with("HTTP/1.1 200"), "status {status:?}");
+    assert_eq!(body, b"bye");
+    assert_eq!(
+        headers.get("connection").map(String::as_str),
+        Some("close"),
+        "a closing HTTP/1.1 response must advertise Connection: close"
+    );
+    let n = stream
+        .read(&mut tmp)
+        .expect("read after 1.1 close response");
+    assert_eq!(n, 0, "server must close after Connection: close");
+
+    // --- HTTP/1.0 + Connection: close, keep-alive ---------------------------
+    let mut stream2 = srv.connect();
+    stream2
+        .write_all(b"GET / HTTP/1.0\r\nHost: x\r\nConnection: close, keep-alive\r\n\r\n")
+        .expect("write 1.0 close+keep-alive request");
+    let mut buf2 = Vec::new();
+    let (status2, headers2, body2) = read_one_response(&mut stream2, &mut buf2);
+    assert!(status2.starts_with("HTTP/1.1 200"), "status {status2:?}");
+    assert_eq!(body2, b"bye");
+    assert_ne!(
+        headers2.get("connection").map(String::as_str),
+        Some("keep-alive"),
+        "close wins over keep-alive; the response must not promise reuse"
+    );
+    let n2 = stream2
+        .read(&mut tmp)
+        .expect("read after 1.0 close response");
+    assert_eq!(
+        n2, 0,
+        "close token must win over keep-alive on HTTP/1.0 (RFC 9112 §9.3)"
+    );
+
+    drop(stream2);
+    srv.shutdown_clean(stream);
+}
+
 /// Run `src` under a forced scheduler count, bounded: a wedge is a red test,
 /// never a hung suite.
 fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Option<i32>, String) {

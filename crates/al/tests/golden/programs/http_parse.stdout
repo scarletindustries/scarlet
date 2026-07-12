@@ -72,7 +72,16 @@ http11 default: close=False want100=False
 http11 close: close=True want100=False
 http10 keep-alive: close=False want100=False
 http10 default: close=True want100=False
+http10 close beats keep-alive: close=True want100=False
 expect 100: close=False want100=True
+
+== token list lookup ==
+a in a,,b: True
+b in a,,b: True
+empty token in a,,b: False
+empty token in empty value: False
+empty token after trailing comma: False
+gzip with trailing comma: True
 
 == response head serialization ==
 Ok(

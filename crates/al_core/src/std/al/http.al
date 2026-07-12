@@ -587,7 +587,10 @@ fn strip_framing(hs Headers) Headers {
 // (the client sent Connection: keep-alive) the response must say so
 // explicitly — a 1.0 client that never sees `Connection: keep-alive` echoed
 // back assumes the response is close-delimited and hangs or drops the
-// connection. HTTP/1.1 defaults to keep-alive; nothing to add.
+// connection. HTTP/1.1 defaults to keep-alive, so the inverse applies: when
+// the driver has decided to close, the final response advertises
+// `Connection: close` (RFC 9112 §9.6) so the client stops reusing the
+// connection instead of discovering the close on its next request.
 fn conn_headers(version Version, close_after Bool, hs Headers) Headers {
 	match version {
 		Http10 -> if close_after {
@@ -595,7 +598,11 @@ fn conn_headers(version Version, close_after Bool, hs Headers) Headers {
 		} else {
 			headers.set(hs, NAME_CONNECTION, VAL_KEEP_ALIVE)
 		}
-		Http11 -> hs
+		Http11 -> if close_after {
+			headers.set(hs, NAME_CONNECTION, VAL_CLOSE)
+		} else {
+			hs
+		}
 	}
 }
 

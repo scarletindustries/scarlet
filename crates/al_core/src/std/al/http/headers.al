@@ -114,8 +114,12 @@ fn token_bytes_from(name Binary, i Int, len Int) Bool {
 // -. (45-46) and ^_` (94-96). One flat test: `valid` walks every name byte on
 // every response, so the per-byte cost is a single call frame.
 fn is_token_byte(b Int) Bool {
-	b >= 97 && b <= 122 || b >= 65 && b <= 90 || b >= 48 && b <= 57 ||
-	b == 33 || b >= 35 && b <= 39 || b == 42 || b == 43 || b == 45 || b == 46 ||
+	b >= 97 && b <= 122 || b >= 65 && b <= 90 || b >= 48 && b <= 57 || b == 33 ||
+	b >= 35 && b <= 39 ||
+	b == 42 ||
+	b == 43 ||
+	b == 45 ||
+	b == 46 ||
 	b >= 94 && b <= 96 ||
 	b == 124 ||
 	b == 126
@@ -168,7 +172,10 @@ fn value_has_token(v Binary, from Int, len Int, token Binary) Bool {
 	}
 	lo = skip_ows(v, from, to)
 	hi = trim_ows(v, lo, to)
-	if binary.eq_ignore_ascii_case(binary.slice_bytes(v, lo, hi - lo), token) {
+	// Empty list elements (`a,,b`, a trailing comma, an empty value) are
+	// ignored per RFC 9110 — without the hi > lo guard an empty element would
+	// "match" an empty token.
+	if hi > lo && binary.eq_ignore_ascii_case(binary.slice_bytes(v, lo, hi - lo), token) {
 		True
 	} else if to < len {
 		value_has_token(v, to + 1, len, token)

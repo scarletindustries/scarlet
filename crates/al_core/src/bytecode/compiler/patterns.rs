@@ -173,21 +173,7 @@ impl Compiler {
 
     /// Resolve a constructor name in scope to a [`CtorLookup`].
     fn lookup_ctor(&self, name: &str) -> Option<CtorLookup> {
-        let scheme = *self.env.lookup(name)?;
-        match scheme.kind {
-            ValueKind::Constructor {
-                type_name,
-                arity,
-                field_labels,
-                ..
-            } => Some(CtorLookup {
-                type_name,
-                arity: arity as usize,
-                field_labels,
-                scheme,
-            }),
-            _ => None,
-        }
+        CtorLookup::from_scheme(*self.env.lookup(name)?)
     }
 
     /// `io.NotFound` — the same constructor `import al/io.{NotFound}` would
@@ -226,20 +212,9 @@ impl Compiler {
             self.error(msg, span);
             return None;
         };
-        let scheme = ev.scheme;
-        match scheme.kind {
-            ValueKind::Constructor {
-                type_name,
-                arity,
-                field_labels,
-                ..
-            } => Some(CtorLookup {
-                type_name,
-                arity: arity as usize,
-                field_labels,
-                scheme,
-            }),
-            _ => {
+        match CtorLookup::from_scheme(ev.scheme) {
+            Some(ctor) => Some(ctor),
+            None => {
                 let module = self.module_name(&key);
                 self.error(
                     format!(
@@ -298,7 +273,17 @@ impl Compiler {
             let doc = self.doc_if_collecting(&qualified);
             self.record(&qualified, inst, name.span, doc);
         }
-        self.record_value_use(scheme.def, name.span, ReferenceKind::Unqualified);
+        // Mirror the expression path: a qualified pattern (`io.NotFound(x)`)
+        // records a `Qualified` member occurrence plus a `Qualifier` occurrence
+        // on the module alias, so unused-import liveness and rename see modules
+        // referenced only from patterns.
+        match qualifier {
+            Some(q) => {
+                self.record_value_use(scheme.def, name.span, ReferenceKind::Qualified);
+                self.record_qualifier_use(q);
+            }
+            None => self.record_value_use(scheme.def, name.span, ReferenceKind::Unqualified),
+        }
 
         let r = self.engine.find(inst);
         match self.engine.node(r) {

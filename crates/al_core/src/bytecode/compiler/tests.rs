@@ -433,3 +433,106 @@ mod toplevel_slot_queue {
         );
     }
 }
+
+#[cfg(test)]
+mod qualified_ctor_pattern_occurrences {
+    //! A qualified constructor pattern (`io.NotFound(p)`) must record the same
+    //! occurrence pair as the expression path: a `Qualified` use of the
+    //! constructor plus a `Qualifier` occurrence on the module alias. Recording
+    //! it `Unqualified` with no alias occurrence made unused-import liveness
+    //! and rename blind to modules referenced only from patterns.
+
+    use super::super::*;
+    use crate::parser::new_parser;
+    use crate::scanner::new_scanner;
+
+    #[test]
+    fn qualified_ctor_pattern_records_qualified_plus_qualifier() {
+        let src = "import al/io\n\
+            x = match io.read_text(\"nope\") {\n\
+            \x20 Ok(s) -> s\n\
+            \x20 Err(io.NotFound(p)) -> p\n\
+            \x20 Err(_) -> \"other\"\n\
+            }\n\
+            println(x)\n";
+        let mut s = new_scanner(src.to_string());
+        let pr = new_parser(&mut s).parse_program();
+        assert!(
+            !crate::diagnostic::has_errors(&pr.diagnostics),
+            "snippet failed to parse: {:?}",
+            pr.diagnostics,
+        );
+        let block = pr.ast;
+        let mut c = new_compiler(None, true);
+        c.collect_hover_facts = true;
+        c.register_prelude();
+        c.process_imports(&block);
+        c.env.push_scope();
+        c.analyse_module(&block, None);
+        c.env.pop_scope();
+        assert!(
+            !crate::diagnostic::has_errors(&c.engine.diagnostics),
+            "snippet failed to compile: {:?}",
+            c.engine.diagnostics,
+        );
+
+        // The qualified pattern head sits on 0-based line 3. The `Err` ctor
+        // and the arm body's `p` use on the same line are ordinary
+        // `Unqualified` occurrences and not part of the pair under test; the
+        // call's own Qualified/Qualifier pair is on line 1, outside the filter.
+        let on_pattern: Vec<Reference> = c
+            .module_refs
+            .occurrences()
+            .iter()
+            .map(|o| o.reference)
+            .filter(|r| r.span.start_line == 3)
+            .collect();
+
+        let qualified: Vec<_> = on_pattern
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Qualified)
+            .collect();
+        assert_eq!(
+            qualified.len(),
+            1,
+            "expected exactly one Qualified occurrence (the ctor), got {on_pattern:?}"
+        );
+        assert_eq!(
+            qualified[0].target.entity,
+            EntityKind::Constructor,
+            "the Qualified occurrence targets the constructor"
+        );
+
+        let alias = c
+            .module_refs
+            .defs_named("io")
+            .iter()
+            .find(|d| d.entity == EntityKind::ModuleAlias)
+            .copied()
+            .expect("`import al/io` registers a ModuleAlias def");
+        let qualifiers: Vec<_> = on_pattern
+            .iter()
+            .filter(|r| r.kind == ReferenceKind::Qualifier)
+            .collect();
+        assert_eq!(
+            qualifiers.len(),
+            1,
+            "expected exactly one Qualifier occurrence (the alias), got {on_pattern:?}"
+        );
+        assert_eq!(
+            qualifiers[0].target, alias,
+            "the Qualifier occurrence targets the `io` module alias"
+        );
+
+        // The old bug recorded the ctor as an Unqualified use; make sure that
+        // shape is gone rather than merely joined by the correct pair. (The
+        // unqualified `Err` ctor on the same line legitimately records
+        // Unqualified — only the qualified ctor's def is checked.)
+        assert!(
+            !on_pattern
+                .iter()
+                .any(|r| r.kind == ReferenceKind::Unqualified && r.target == qualified[0].target),
+            "no Unqualified occurrence may target the qualified ctor: {on_pattern:?}"
+        );
+    }
+}

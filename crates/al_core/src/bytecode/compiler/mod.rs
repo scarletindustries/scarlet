@@ -685,6 +685,26 @@ struct CtorLookup {
     scheme: Scheme,
 }
 
+impl CtorLookup {
+    /// The lookup for `scheme` when it names a constructor; `None` otherwise.
+    fn from_scheme(scheme: Scheme) -> Option<Self> {
+        match scheme.kind {
+            ValueKind::Constructor {
+                type_name,
+                arity,
+                field_labels,
+                ..
+            } => Some(CtorLookup {
+                type_name,
+                arity: arity as usize,
+                field_labels,
+                scheme,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Which toplevel `append_toplevel_init` is emitting: the entry file's or an
 /// imported module's. They differ only in what happens to the toplevel's tail
 /// value and Core body.
@@ -1620,6 +1640,27 @@ impl Compiler {
         if let Some(dl) = def {
             let target = self.defid_of(dl);
             self.record_ref(occ, kind, target);
+        }
+    }
+
+    /// Record a `Qualifier` occurrence for the module alias a qualified member
+    /// use was reached through. The qualifier names the import, not a value:
+    /// the occurrence targets the `ModuleAlias` binding so hover and goto-def
+    /// on the `b` of `b.add(..)` reach module `b`. Non-use-site, so
+    /// find-references / rename / unused-import are unaffected: the alias's
+    /// liveness rides on the member's own `Qualified` occurrence, which the
+    /// caller records. The alias `Definition` was registered under the
+    /// qualifier's name by `process_import`, so no extra bookkeeping is needed
+    /// to find it; an unknown qualifier records nothing.
+    fn record_qualifier_use(&mut self, qualifier: &ast::Identifier) {
+        if let Some(alias) = self
+            .module_refs
+            .defs_named(&qualifier.name)
+            .iter()
+            .find(|d| d.entity == EntityKind::ModuleAlias)
+            .copied()
+        {
+            self.record_ref(qualifier.span, ReferenceKind::Qualifier, alias);
         }
     }
 
@@ -3211,22 +3252,7 @@ impl Compiler {
         // The member is not in unqualified scope, so resolve the occurrence
         // through the imported scheme's canonical `def`.
         self.record_value_use(scheme.def, member.span, ReferenceKind::Qualified);
-        // The qualifier itself names the import, not a value. Record it as a
-        // `Qualifier` occurrence on the `ModuleAlias` binding so hover and
-        // goto-def on the `b` of `b.add(..)` reach module `b`. Non-use-site,
-        // so find-references / rename / unused-import are unaffected: the
-        // alias's liveness still rides on the `Qualified` member occurrence
-        // above. The alias `Definition` was registered under the qualifier's
-        // name by `process_import`, so no extra bookkeeping is needed to find it.
-        if let Some(alias) = self
-            .module_refs
-            .defs_named(&left.name)
-            .iter()
-            .find(|d| d.entity == EntityKind::ModuleAlias)
-            .copied()
-        {
-            self.record_ref(left.span, ReferenceKind::Qualifier, alias);
-        }
+        self.record_qualifier_use(left);
         QualifiedMember::Resolved {
             module_key,
             member_name: &member.name,

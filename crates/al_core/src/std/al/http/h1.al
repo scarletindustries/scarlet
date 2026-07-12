@@ -124,14 +124,19 @@ pub fn serialize_head(code Int, hs Headers) Binary {
 	serialize_head_with(code, status.reason_phrase(code), hs)
 }
 
-// Whether the connection must close after this message. HTTP/1.0 defaults to
-// close unless `Connection: keep-alive`; HTTP/1.1 defaults to keep-alive
-// unless `Connection: close`. `Connection` is a token list (RFC 9110 §7.6.1),
-// so `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
+// Whether the connection must close after this message. The `close` option
+// wins whenever present, regardless of version (RFC 9112 §9.3). Otherwise
+// HTTP/1.0 defaults to close unless `Connection: keep-alive`; HTTP/1.1
+// defaults to keep-alive. `Connection` is a token list (RFC 9110 §7.6.1), so
+// `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
 pub fn should_close(version Version, hs Headers) Bool {
-	match version {
-		Http11 -> headers.contains_token(hs, CONNECTION, CLOSE)
-		Http10 -> !headers.contains_token(hs, CONNECTION, KEEP_ALIVE)
+	if headers.contains_token(hs, CONNECTION, CLOSE) {
+		True
+	} else {
+		match version {
+			Http11 -> False
+			Http10 -> !headers.contains_token(hs, CONNECTION, KEEP_ALIVE)
+		}
 	}
 }
 

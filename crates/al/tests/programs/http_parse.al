@@ -256,6 +256,7 @@ keep = binary.from_string('GET / HTTP/1.1\r\nHost: x\r\n\r\n')
 close = binary.from_string('GET / HTTP/1.1\r\nConnection: close\r\n\r\n')
 old_keep = binary.from_string('GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n')
 old_plain = binary.from_string('GET / HTTP/1.0\r\n\r\n')
+old_both = binary.from_string('GET / HTTP/1.0\r\nConnection: close, keep-alive\r\n\r\n')
 expect = binary.from_string('POST / HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n')
 show_close = fn(label String, req2 Binary) match h1.parse_request(req2, 0) {
 	Done(_, _, version, hdrs, _) ->
@@ -268,7 +269,26 @@ show_close('http11 default', keep)
 show_close('http11 close', close)
 show_close('http10 keep-alive', old_keep)
 show_close('http10 default', old_plain)
+show_close('http10 close beats keep-alive', old_both)
 show_close('expect 100', expect)
+
+println('')
+println('== token list lookup ==')
+list_hdrs = [
+	Header(name: binary.from_string('Connection'), value: binary.from_string('a,,b')),
+	Header(name: binary.from_string('X-Empty'), value: binary.from_string('')),
+	Header(name: binary.from_string('X-Trailing'), value: binary.from_string('gzip,')),
+]
+show_token = fn(label String, name String, token String) {
+	got = headers.contains_token(list_hdrs, binary.from_string(name), binary.from_string(token))
+	println('${label}: ${got}')
+}
+show_token('a in a,,b', 'Connection', 'a')
+show_token('b in a,,b', 'Connection', 'b')
+show_token('empty token in a,,b', 'Connection', '')
+show_token('empty token in empty value', 'X-Empty', '')
+show_token('empty token after trailing comma', 'X-Trailing', '')
+show_token('gzip with trailing comma', 'X-Trailing', 'gzip')
 
 println('')
 println('== response head serialization ==')

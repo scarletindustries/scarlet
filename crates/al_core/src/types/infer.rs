@@ -709,7 +709,8 @@ impl InferEngine {
         variant_fields: &[VariantField],
         variants: &[Variant],
     ) {
-        debug_assert!(self.nodes.is_empty() && self.children.is_empty() && self.strings.is_empty());
+        debug_assert_eq!(self.pool_watermark(), EnginePoolWatermark::default());
+        debug_assert!(self.vars.is_empty());
         self.nodes.extend_from_slice(nodes);
         self.children.extend_from_slice(children);
         for s in strings {
@@ -809,6 +810,22 @@ impl InferEngine {
         }
     }
 
+    /// Mint a fresh base-26 display name, rejecting any candidate already
+    /// claimed by an annotation or earlier mint (`used_names`) or by the
+    /// caller's in-flight set (`taken`). The winner is inserted into both
+    /// sets before returning so no later mint can collide with it.
+    fn mint_display_name(&mut self, taken: &mut HashSet<StrId>) -> StrId {
+        loop {
+            let candidate = next_letter(&mut self.next_name_uid);
+            let sid = self.intern(&candidate);
+            if !self.used_names.contains(&sid) && !taken.contains(&sid) {
+                self.used_names.insert(sid);
+                taken.insert(sid);
+                return sid;
+            }
+        }
+    }
+
     /// Return the display name for a var id. If unset, mint a fresh base-26
     /// name (skipping any already taken) and remember it so subsequent calls
     /// are stable.
@@ -816,15 +833,9 @@ impl InferEngine {
         if let Some(&name) = self.var_names.get(&id) {
             return self.str(name).to_string();
         }
-        loop {
-            let candidate = next_letter(&mut self.next_name_uid);
-            let sid = self.intern(&candidate);
-            if !self.used_names.contains(&sid) {
-                self.used_names.insert(sid);
-                self.var_names.insert(id, sid);
-                return candidate;
-            }
-        }
+        let sid = self.mint_display_name(&mut HashSet::new());
+        self.var_names.insert(id, sid);
+        self.str(sid).to_string()
     }
 
     // --- Fresh variables ---
@@ -1234,10 +1245,14 @@ impl InferEngine {
     }
 
     /// If `ty` is (or can become) a function of the given arity, return its
-    /// parameter and return types. An unbound var is pre-linked to a fresh
-    /// `fn(a0..aN) -> r` so the caller can proceed and let unification refine
-    /// it. A function of the wrong arity yields `IncorrectArity` carrying the
-    /// real params/ret so the caller can still type-check what it can.
+    /// parameter and return types. An unbound var is bound to a fresh
+    /// `fn(a0..aN) -> r` through `unify` — not a raw `Link` write — so the
+    /// fresh vars are lowered to the var's own level (preventing unsound
+    /// generalization from a deeper scope) and any constraint on the var is
+    /// enforced (a numeric var is not a function). The caller can then proceed
+    /// and let unification refine the fresh vars. A function of the wrong
+    /// arity yields `IncorrectArity` carrying the real params/ret so the
+    /// caller can still type-check what it can.
     pub fn match_fun_type(
         &mut self,
         ty: Ty,
@@ -1250,8 +1265,10 @@ impl InferEngine {
                     let params: SmallVec<[Ty; 4]> = (0..arity).map(|_| self.fresh_var()).collect();
                     let ret = self.fresh_var();
                     let fn_ty = self.mk_fun(&params, ret);
-                    self.vars[id as usize] = TyVarState::Link { ty: fn_ty };
-                    Ok((params, ret))
+                    match self.unify(resolved, fn_ty) {
+                        Ok(()) => Ok((params, ret)),
+                        Err(_) => Err(MatchFunTypeError::NotFn { ty: resolved }),
+                    }
                 }
                 RootVarState::Generic { .. } => Err(MatchFunTypeError::NotFn { ty: resolved }),
             };
@@ -1432,16 +1449,8 @@ impl InferEngine {
             if self.var_names.contains_key(qvar) {
                 continue;
             }
-            loop {
-                let candidate = next_letter(&mut self.next_name_uid);
-                let sid = self.intern(&candidate);
-                if !taken.contains(&sid) {
-                    taken.insert(sid);
-                    self.used_names.insert(sid);
-                    self.var_names.insert(*qvar, sid);
-                    break;
-                }
-            }
+            let sid = self.mint_display_name(&mut taken);
+            self.var_names.insert(*qvar, sid);
         }
     }
 
@@ -2198,6 +2207,38 @@ mod tests {
         assert_eq!(params.len(), 2);
         let resolved = e.find(v);
         assert!(matches!(e.node(resolved), TypeNode::Fun { .. }));
+    }
+
+    #[test]
+    fn match_fun_type_rejects_constrained_var() {
+        // A numeric/addable var used as a callee must be a type error, not a
+        // silent link to a Fun type that erases the constraint.
+        let mut e = new_engine();
+        let n = e.fresh_constrained_var(Constraint::Numeric);
+        assert!(matches!(
+            e.match_fun_type(n, 1),
+            Err(MatchFunTypeError::NotFn { .. })
+        ));
+    }
+
+    #[test]
+    fn match_fun_type_binds_fresh_vars_at_callee_level() {
+        // Calling through a var bound at an outer let level from a deeper
+        // scope: the fresh param/ret vars must be lowered to the callee's
+        // level, so generalizing back at that level does not quantify them.
+        let mut e = new_engine();
+        e.enter_level();
+        let callee = e.fresh_var();
+        e.enter_level();
+        let (params, ret) = e.match_fun_type(callee, 1).expect("should bind");
+        e.leave_level();
+        let param_scheme = e.generalize(params[0]);
+        assert_eq!(
+            param_scheme.quantified.len, 0,
+            "fresh param var tied to outer callee must not be generalized"
+        );
+        let ret_scheme = e.generalize(ret);
+        assert_eq!(ret_scheme.quantified.len, 0);
     }
 
     #[test]
