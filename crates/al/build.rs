@@ -44,22 +44,7 @@ fn main() {
     )
     .unwrap();
 
-    emit_prelude(&mut src, &pre.prelude);
     emit_stdlib_templates(&mut src, &pre, &engine);
-    emit_strs(&mut src, "RESERVED", &pools.reserved);
-    writeln!(
-        src,
-        "pub const NEXT_TYPE_ID: TypeId = {};",
-        tid(pre.next_type_id)
-    )
-    .unwrap();
-    writeln!(
-        src,
-        "pub const STDLIB_LOCAL_COUNT: i32 = {};",
-        pre.blob.local_count
-    )
-    .unwrap();
-
     emit_pools(&mut src, &pools);
 
     // The single handle.
@@ -275,7 +260,24 @@ fn opt_constraint(c: Option<al_core::types::Constraint>) -> String {
     }
 }
 
+/// Emit every `StaticStdlib` field from the flattened pools — `FlatPools` is
+/// the single source for the whole handle, so nothing is wired separately.
 fn emit_pools(out: &mut String, p: &FlatPools) {
+    emit_prelude(out, &p.prelude);
+    emit_strs(out, "RESERVED", &p.reserved);
+    writeln!(
+        out,
+        "pub const NEXT_TYPE_ID: TypeId = {};",
+        tid(p.next_type_id)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "pub const STDLIB_LOCAL_COUNT: i32 = {};",
+        p.local_count
+    )
+    .unwrap();
+
     emit_strs(out, "STR_POOL", &p.str_pool);
     emit_static_slice(
         out,

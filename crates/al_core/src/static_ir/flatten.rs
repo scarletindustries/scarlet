@@ -11,13 +11,15 @@
 use indexmap::IndexMap;
 
 use super::*;
-use crate::bytecode::{Value, ValueView};
+use crate::bytecode::{PreludeBindings, Value, ValueView};
 use crate::module::ModuleInterface;
 use crate::precompile::PrecompileOutput;
+use crate::type_def::TypeId;
 use crate::types::InferEngine;
 
-/// Owned counterpart of `StaticStdlib` — `Vec`s instead of `&'static [_]`.
-#[derive(Debug, Default)]
+/// Owned counterpart of `StaticStdlib` — `Vec`s (and owned values) instead of
+/// `&'static` borrows, field for field. Only [`flatten`] constructs one, fully.
+#[derive(Debug)]
 pub struct FlatPools {
     pub str_pool: Vec<String>,
     pub str_slice_pool: Vec<StrIdx>,
@@ -43,7 +45,10 @@ pub struct FlatPools {
     pub functions: Vec<SFunction>,
     pub constants: Vec<SConst>,
 
+    pub prelude: PreludeBindings,
     pub reserved: Vec<String>,
+    pub next_type_id: TypeId,
+    pub local_count: i32,
 
     str_intern: IndexMap<String, StrIdx>,
 }
@@ -179,6 +184,8 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
     // on engine.strings being dupe-free.
     let mut p = FlatPools {
         str_pool: engine.strings.iter().cloned().collect(),
+        str_slice_pool: Vec::new(),
+        byte_pool: Vec::new(),
         nodes: engine.nodes.clone(),
         children: engine.children.clone(),
         quants: engine.quants.clone(),
@@ -186,7 +193,22 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
         type_params: engine.type_params.clone(),
         variant_fields: engine.variant_fields.clone(),
         variants: engine.variants.clone(),
-        ..FlatPools::default()
+        schemes: Vec::new(),
+        typeinfos: Vec::new(),
+        stypeexport_pool: Vec::new(),
+        sexport_pool: Vec::new(),
+        modules: Vec::new(),
+        typeinfo_by_name: Vec::new(),
+        code: Vec::new(),
+        functions: Vec::new(),
+        constants: Vec::new(),
+        prelude: out.prelude.clone(),
+        // `reserved` is a `BTreeSet`, so this comes out sorted (build.rs
+        // relies on binary_search over the emitted slice).
+        reserved: out.reserved.iter().cloned().collect(),
+        next_type_id: out.next_type_id,
+        local_count: out.blob.local_count,
+        str_intern: IndexMap::new(),
     };
     for (i, s) in engine.strings.iter().enumerate() {
         p.str_intern.entry(s.clone()).or_insert(StrIdx(i as u32));
@@ -222,10 +244,6 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
         let c = p.flatten_const(v);
         p.constants.push(c);
     }
-
-    // `reserved` is a `BTreeSet`, so this comes out sorted (build.rs relies
-    // on binary_search over the emitted slice).
-    p.reserved = out.reserved.iter().cloned().collect();
 
     p
 }
@@ -356,5 +374,22 @@ mod tests {
         assert_eq!(p.reserved, sorted, "reserved names must come out sorted");
         assert_eq!(p.reserved.len(), out.reserved.len());
         assert!(p.reserved.iter().any(|r| r == "Some"));
+
+        // The prelude bindings, next type id, and stdlib local count travel
+        // with the pools — `FlatPools` mirrors every `StaticStdlib` field.
+        assert_eq!(p.next_type_id, out.next_type_id);
+        assert_eq!(p.local_count, out.blob.local_count);
+        for ((n, a), (m, b)) in p.prelude.type_fields().zip(out.prelude.type_fields()) {
+            assert_eq!(n, m);
+            assert_eq!(a.id, b.id, "prelude type '{n}' drifted in flatten");
+        }
+        for ((n, a), (m, b)) in p.prelude.ctor_fields().zip(out.prelude.ctor_fields()) {
+            assert_eq!(n, m);
+            assert_eq!(
+                (a.type_id, a.variant_idx, a.arity),
+                (b.type_id, b.variant_idx, b.arity),
+                "prelude ctor '{n}' drifted in flatten"
+            );
+        }
     }
 }

@@ -94,8 +94,20 @@ pub enum PreludeCaptureError {
     CtorShape {
         name: &'static str,
         of: &'static str,
-        arity: u16,
+        expected_arity: u16,
+        found: CtorFound,
     },
+}
+
+/// What `capture` actually found bound to a constructor name — carried by
+/// [`PreludeCaptureError::CtorShape`] so the diagnostic reports the drift
+/// itself, not just the expectation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtorFound {
+    /// The name is bound, but not to a constructor (e.g. shadowed by a `let`).
+    NotAConstructor,
+    /// A constructor of the wrong owner type and/or arity.
+    Constructor { of: TypeId, arity: u16 },
 }
 
 impl std::fmt::Display for PreludeCaptureError {
@@ -115,10 +127,23 @@ impl std::fmt::Display for PreludeCaptureError {
             PreludeCaptureError::MissingCtor(name) => {
                 write!(f, "prelude: constructor '{name}' is required")
             }
-            PreludeCaptureError::CtorShape { name, of, arity } => write!(
-                f,
-                "prelude: '{name}' must be a {arity}-arity constructor of '{of}'"
-            ),
+            PreludeCaptureError::CtorShape {
+                name,
+                of,
+                expected_arity,
+                found,
+            } => {
+                write!(
+                    f,
+                    "prelude: '{name}' must be a {expected_arity}-arity constructor of '{of}'; "
+                )?;
+                match found {
+                    CtorFound::NotAConstructor => write!(f, "found a non-constructor binding"),
+                    CtorFound::Constructor { of, arity } => {
+                        write!(f, "found a constructor of type #{of} with arity {arity}")
+                    }
+                }
+            }
         }
     }
 }
@@ -175,15 +200,27 @@ macro_rules! prelude_bindings {
                         Some(Scheme {
                             kind: ValueKind::Constructor { type_id, variant_idx, arity: a, .. },
                             ..
-                        }) if *type_id == of.id && *a == arity => Ok(CtorRef {
-                            type_id: *type_id,
-                            variant_idx: *variant_idx,
-                            arity: *a,
-                        }),
+                        }) => {
+                            if *type_id == of.id && *a == arity {
+                                Ok(CtorRef {
+                                    type_id: *type_id,
+                                    variant_idx: *variant_idx,
+                                    arity: *a,
+                                })
+                            } else {
+                                Err(PreludeCaptureError::CtorShape {
+                                    name,
+                                    of: of.name,
+                                    expected_arity: arity,
+                                    found: CtorFound::Constructor { of: *type_id, arity: *a },
+                                })
+                            }
+                        }
                         Some(_) => Err(PreludeCaptureError::CtorShape {
                             name,
                             of: of.name,
-                            arity,
+                            expected_arity: arity,
+                            found: CtorFound::NotAConstructor,
                         }),
                         None => Err(PreludeCaptureError::MissingCtor(name)),
                     }
@@ -238,7 +275,7 @@ prelude_bindings! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArenaSlice, StrId, new_env};
+    use crate::types::{ArenaSlice, StrId, Ty, new_env};
 
     #[test]
     fn capture_on_empty_env_reports_missing_type() {
@@ -248,27 +285,107 @@ mod tests {
         assert_eq!(err.to_string(), "prelude: type 'Int' is required");
     }
 
-    /// Broken `al.al` (e.g. `True` deleted) must surface as a clean compile
-    /// error, not a panic or a confused unify failure later. This test edits
-    /// nothing on disk; it asserts the *shape* of the message that
-    /// `register_prelude` would emit if `True` were missing.
-    #[test]
-    fn ctor_shape_mismatch_message() {
-        // Build an env that defines every prelude type with the correct arity
-        // (so type lookups pass) but no constructors, to exercise the second
-        // failure mode.
+    /// Registers every prelude type with the correct arity (so type lookups
+    /// pass) but no constructors. Tests below layer constructor bindings on
+    /// top to exercise the constructor failure modes.
+    fn env_with_prelude_types() -> (crate::types::TypeEnv, TypeId) {
         let mut env = new_env();
+        let mut bool_id = TypeId::NONE;
         for &(n, arity) in PreludeBindings::TYPE_NAMES {
-            env.register_type_head(
+            let id = env.register_type_head(
                 n,
                 StrId(0),
                 ArenaSlice::EMPTY,
                 ArenaSlice::new(0, arity as u16),
             );
+            if n == names::BOOL {
+                bool_id = id;
+            }
         }
+        (env, bool_id)
+    }
+
+    fn define_true_ctor(env: &mut crate::types::TypeEnv, type_id: TypeId, arity: u16) {
+        env.define(
+            names::TRUE,
+            Scheme {
+                quantified: ArenaSlice::EMPTY,
+                ty: Ty::NONE,
+                kind: ValueKind::Constructor {
+                    type_name: StrId(0),
+                    type_id,
+                    variant_idx: 0,
+                    arity,
+                    field_labels: ArenaSlice::EMPTY,
+                },
+                def: None,
+            },
+        );
+    }
+
+    /// Broken `al.al` (e.g. `True` deleted) must surface as a clean compile
+    /// error, not a panic or a confused unify failure later. This test edits
+    /// nothing on disk; it asserts the *shape* of the message that
+    /// `register_prelude` would emit if `True` were missing.
+    #[test]
+    fn missing_ctor_message() {
+        let (env, _) = env_with_prelude_types();
         let err = PreludeBindings::capture(&env).unwrap_err();
         assert_eq!(err, PreludeCaptureError::MissingCtor(names::TRUE));
         assert_eq!(err.to_string(), "prelude: constructor 'True' is required");
+    }
+
+    /// A constructor that exists but with the wrong shape (here: `True` with
+    /// arity 1 instead of 0) must report what was FOUND, not just what was
+    /// expected — that is the difference between a drift diagnosis and a
+    /// guessing game.
+    #[test]
+    fn ctor_shape_mismatch_message() {
+        let (mut env, bool_id) = env_with_prelude_types();
+        define_true_ctor(&mut env, bool_id, 1);
+        let err = PreludeBindings::capture(&env).unwrap_err();
+        assert_eq!(
+            err,
+            PreludeCaptureError::CtorShape {
+                name: names::TRUE,
+                of: names::BOOL,
+                expected_arity: 0,
+                found: CtorFound::Constructor {
+                    of: bool_id,
+                    arity: 1
+                },
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "prelude: 'True' must be a 0-arity constructor of 'Bool'; \
+                 found a constructor of type #{bool_id} with arity 1"
+            )
+        );
+    }
+
+    /// `True` bound to something that is not a constructor at all (e.g.
+    /// shadowed by a value binding) is the third drift; the message names it.
+    #[test]
+    fn ctor_not_a_constructor_message() {
+        let (mut env, _) = env_with_prelude_types();
+        env.define(names::TRUE, crate::types::mono(Ty::NONE));
+        let err = PreludeBindings::capture(&env).unwrap_err();
+        assert_eq!(
+            err,
+            PreludeCaptureError::CtorShape {
+                name: names::TRUE,
+                of: names::BOOL,
+                expected_arity: 0,
+                found: CtorFound::NotAConstructor,
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "prelude: 'True' must be a 0-arity constructor of 'Bool'; \
+             found a non-constructor binding"
+        );
     }
 
     /// A prelude type declared with the wrong number of parameters (e.g.
