@@ -478,7 +478,9 @@ impl<C: PatCtx> PatElab<'_, C> {
             }
             ast::BinSpec::Int { .. } => {
                 // `seg_bits` is total for `Int`: sizeless defaults to 8.
-                let bits = bits.expect("Int segment width");
+                let Some(bits) = bits else {
+                    elaborator_bug("Int segment with no width", seg.span)
+                };
                 let int_t = self.cx.ty_int();
                 let value = self.pat(&seg.value, int_t);
                 TypedBinPatSeg::Int { bits, value }

@@ -922,11 +922,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let value = self.expr(&seg.value);
                 let bits = seg_bits(self, &seg.spec);
                 match &seg.spec {
-                    ast::BinSpec::Int { .. } => TypedBinSeg::Int {
-                        value,
+                    ast::BinSpec::Int { .. } => {
                         // `seg_bits` is total for `Int`: sizeless defaults to 8.
-                        bits: bits.expect("Int segment width"),
-                    },
+                        let Some(bits) = bits else {
+                            elaborator_bug("Int segment with no width", seg.span)
+                        };
+                        TypedBinSeg::Int { value, bits }
+                    }
                     ast::BinSpec::Binary { .. } => TypedBinSeg::Binary { value, bits },
                     ast::BinSpec::Utf8 => TypedBinSeg::Utf8 { value },
                 }
