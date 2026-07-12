@@ -213,27 +213,6 @@ fn duplicate_constructor_is_dropped_not_double_defined() {
     );
 }
 
-// A duplicate-named constructor is reported once and DROPPED, exactly like a
-// duplicate fn/const: the first registration survives. Previously the second
-// `Dup` was still registered, shadowing the first — `Dup(a: 1)` then resolved
-// to the nullary duplicate and produced a bogus arity error on top of the
-// duplicate-definition diagnostic.
-#[test]
-fn duplicate_constructor_is_dropped_not_double_defined() {
-    let src = "type T {\n\tDup(a Int)\n\tDup\n}\nprintln(Dup(a: 1))\n";
-    let out = check_rejects(src, "'Dup' is already defined");
-    let combined = out.combined();
-    assert_eq!(
-        combined.matches("'Dup' is already defined").count(),
-        1,
-        "expected exactly one duplicate diagnostic:\n{combined}"
-    );
-    assert!(
-        !combined.contains("has 0 field(s)"),
-        "duplicate ctor shadowed the first definition:\n{combined}"
-    );
-}
-
 reject_case! {
     /// Constructor names share the value namespace with fns and consts, so a ctor
     /// that collides with another ctor (or a fn) is a duplicate definition and
@@ -296,10 +275,6 @@ reject_case! {
     /// no-suggestion path is covered by `unknown_identifier_is_error` above.)
     unknown_identifier_suggests_close_name:
         ("println = 1\nfoo = prntln\n", "Did you mean 'println'?"),
-    /// A builtin has a type but no first-class runtime binding, so naming one in
-    /// value position (rather than calling it) is rejected.
-    builtin_used_as_value_is_error:
-        ("x = println\n", "'println' is a builtin and cannot be used as a value"),
 
     // Binding-pattern refutability, declaration placement, and `or`-binder
     // diagnostics. Each negative pin is paired with a positive control that
@@ -321,6 +296,11 @@ ok_case! {
     // Positive control: an all-binders tuple pattern is irrefutable and accepted,
     // so the check above fires on refutability, not on tuple destructuring itself.
     irrefutable_tuple_destructuring_binding_is_ok: ("(x, y) = (1, 2)\nprintln(x + y)\n"),
+
+    // A builtin named in value position is first-class: the elaborator
+    // synthesises an eta wrapper (see `typed_ir::eta`), the same as a
+    // constructor used as a value.
+    builtin_used_as_value_is_ok: ("f = println\nf('done')\n"),
 }
 
 reject_case! {
