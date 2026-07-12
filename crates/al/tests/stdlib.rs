@@ -204,6 +204,27 @@ fn stdlib_decimal() {
          println(decimal.div(bill, decimal.from_int(0), 2))\n",
         "Some(33.33)\nSome(0.1250)\nNone\n",
     );
+    // Half-tie rounding with divisor units near Int max: `2 * r` would wrap
+    // for remainders at or above 2^62, silently rounding toward zero. The
+    // wrap-free `r` vs `d - r` comparison must agree with the small-scale
+    // equivalent of the same fraction (5/9 rounds to 1, 4/9 to 0), handle
+    // both signs, remainders near d, and exact ties.
+    run_outputs(
+        "import al/decimal.{HalfUp, HalfEven}\n\
+         import al/option\n\
+         big = decimal.from_int(9000000000000000000)\n\
+         show = fn(q) { option.map(q, decimal.to_string) }\n\
+         println(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, HalfUp)))\n\
+         println(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, HalfUp)))\n\
+         println(show(decimal.div_with(decimal.from_int(5000000000000000000), big, 0, HalfEven)))\n\
+         println(show(decimal.div_with(decimal.from_int(5), decimal.from_int(9), 0, HalfEven)))\n\
+         println(show(decimal.div_with(decimal.from_int(4000000000000000000), big, 0, HalfUp)))\n\
+         println(show(decimal.div_with(decimal.from_int(0 - 5000000000000000000), big, 0, HalfUp)))\n\
+         println(show(decimal.div_with(decimal.from_int(8999999999999999999), big, 0, HalfEven)))\n\
+         println(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfUp)))\n\
+         println(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfEven)))\n",
+        "Some(1)\nSome(1)\nSome(1)\nSome(1)\nSome(0)\nSome(-1)\nSome(1)\nSome(1)\nSome(0)\n",
+    );
     // Numeric comparison is scale-blind (1.5 == 1.500) even though the
     // representation differs; normalize strips the trailing zeros.
     run_outputs(

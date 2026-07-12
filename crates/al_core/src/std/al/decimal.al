@@ -364,14 +364,18 @@ fn div_round(n Int, d Int, mode Rounding) Int {
 			} else {
 				q + 1
 			}
-			HalfUp -> if 2 * r >= d {
+			// Half-tie tests compare `r` against `d - r` rather than `2 * r`
+			// against `d`: with 0 <= r < d the subtraction never wraps, while
+			// doubling `r` would for divisors above 2^62 — inside the module's
+			// documented |units| range.
+			HalfUp -> if r >= d - r {
 				step_away(q, n)
 			} else {
 				q
 			}
-			HalfEven -> if 2 * r > d {
+			HalfEven -> if r > d - r {
 				step_away(q, n)
-			} else if 2 * r < d {
+			} else if r < d - r {
 				q
 			} else if q % 2 == 0 {
 				q
