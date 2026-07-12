@@ -79,9 +79,9 @@ use crate::reference::{
 use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
-    ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator, InferEngine,
-    MatchFunTypeError, NullaryPrim, Pat, PatternBindings, Scheme, StrId, Ty, TypeEnv, TypeInfo,
-    TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
+    AnnotationContext, ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator,
+    InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, Scheme, StrId, Ty, TypeEnv,
+    TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
 };
 
 mod bridges;
@@ -1830,13 +1830,10 @@ impl Compiler {
         }
     }
 
-    /// Hydrate an annotation through a fresh hydrator that does *not* permit
-    /// new type variables. Used for `let x: T = ...` annotations, where any
-    /// type-variable name must already be in scope (i.e. a parameter of the
-    /// enclosing fn).
+    /// Hydrate a `let x: T = ...` binding annotation, where any type-variable
+    /// name must already be in scope (i.e. a parameter of the enclosing fn).
     fn hydrate_annotation(&mut self, t: &ast::TypeIdentifier) -> Ty {
-        let mut h = Hydrator::new();
-        h.disallow_new_type_variables();
+        let mut h = Hydrator::new(AnnotationContext::Binding);
         self.hydrate(&mut h, t)
     }
 
@@ -4305,7 +4302,7 @@ impl Compiler {
 
         // A lambda's annotation type-variables share scope with each other but
         // are local to the lambda; mint them via a fresh hydrator.
-        let mut hydrator = Hydrator::new();
+        let mut hydrator = Hydrator::new(AnnotationContext::Signature);
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
         for (i, param) in params.iter().enumerate() {
             let p_ty = match &param.typ {

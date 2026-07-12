@@ -63,8 +63,8 @@ use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
 use crate::types::{
-    AddedTypeVar, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme, StrId, Ty,
-    TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
+    AddedTypeVar, AnnotationContext, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme,
+    StrId, Ty, TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
 };
 
 // ---------------------------------------------------------------------------
@@ -608,7 +608,7 @@ impl Compiler {
                         self.emit_def(*dl, name, cb.doc.clone(), *is_pub, DefinitionKind::Constant);
                         let owner = self.owner_defid(cb.identifier.span, EntityKind::Constant);
                         let final_ty = self.with_owner(owner, |c| {
-                            let mut h = Hydrator::new();
+                            let mut h = Hydrator::new(AnnotationContext::Signature);
                             let annot_ty = cb.typ.as_ref().map(|t| c.hydrate(&mut h, t));
                             let init_ty = c.compile_expr_with_hint(&cb.init, annot_ty);
                             if let Some(a) = annot_ty {
@@ -696,7 +696,7 @@ impl Compiler {
         &mut self,
         params: &[ast::Identifier],
     ) -> (Hydrator, ArenaSlice<pool::TypeParams>, Vec<Ty>) {
-        let mut h = Hydrator::new();
+        let mut h = Hydrator::new(AnnotationContext::TypeDefinition);
         let mut type_params: Vec<TypeParam> = Vec::with_capacity(params.len());
         let mut param_tys: Vec<Ty> = Vec::with_capacity(params.len());
         for tp in params {
@@ -754,7 +754,7 @@ impl Compiler {
     }
 
     fn hydrate_fn_signature(&mut self, fd: &ast::FunctionDeclaration) -> FnSig {
-        let mut hydrator = Hydrator::new();
+        let mut hydrator = Hydrator::new(AnnotationContext::Signature);
         let mut param_tys: Vec<Ty> = Vec::with_capacity(fd.params.len());
         for p in &fd.params {
             param_tys.push(self.hydrate_opt(&mut hydrator, p.typ.as_ref()));
@@ -835,8 +835,6 @@ impl Compiler {
             let type_id =
                 self.env
                     .register_type_head(&td.identifier.name, name_id, module, type_params);
-            h.disallow_new_type_variables();
-            h.require_declared_fn_return();
             let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
             let target = self.with_owner(owner, |c| c.hydrate(&mut h, rhs));
             // Store the target CLOSED (`Var(param_id)` → `Bound(idx)`): the
@@ -878,8 +876,6 @@ impl Compiler {
             return;
         };
         let ctors_public = is_public && !*opaque;
-        h.disallow_new_type_variables();
-        h.require_declared_fn_return();
 
         let type_name = &td.identifier.name;
         let m = self.current_module_slice();
