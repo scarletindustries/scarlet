@@ -25,7 +25,7 @@ fn resolve(key: &module::ModuleKey) -> Option<(PathBuf, String)> {
 
 fn check_project(p: &Project, entry_src: &str) -> bytecode::CompileResult {
     let mut sc = scanner::new_scanner(entry_src.to_string());
-    let mut ps = parser::new_parser(&mut sc);
+    let ps = parser::new_parser(&mut sc);
     let parsed = ps.parse_program();
     assert!(
         parsed.diagnostics.is_empty(),
@@ -43,7 +43,7 @@ fn imported_module_type_error_is_stamped_with_that_module() {
     let entry_src = "import ./lib\n_x = lib.broken\n";
 
     let result = check_project(&p, entry_src);
-    assert!(!result.success, "expected the lib type error to surface");
+    assert!(!result.success(), "expected the lib type error to surface");
 
     let lib_key = module_key(&p.dir, "lib.al");
     let stamped = result
@@ -66,7 +66,7 @@ fn imported_module_type_error_renders_against_that_modules_text() {
     let entry_src = "import ./lib\n_x = lib.broken\n";
 
     let result = check_project(&p, entry_src);
-    assert!(!result.success, "expected the lib type error to surface");
+    assert!(!result.success(), "expected the lib type error to surface");
 
     let out = diagnostic::render_diagnostics(&result.diagnostics, entry_src, "main.al", &resolve);
 
@@ -94,7 +94,7 @@ fn unresolvable_source_prints_location_but_never_a_snippet() {
     let entry_src = "import ./lib\n_x = lib.broken\n";
 
     let result = check_project(&p, entry_src);
-    assert!(!result.success, "expected the lib type error to surface");
+    assert!(!result.success(), "expected the lib type error to surface");
 
     // A resolver with no answer: header + location only, no caret into the
     // entry file's text.
