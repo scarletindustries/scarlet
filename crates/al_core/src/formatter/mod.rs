@@ -34,12 +34,19 @@ pub enum FormatResult {
     CommentsLost {
         comment: String,
     },
+    /// A formatter bug: the produced output does not re-parse cleanly back
+    /// into a program with the same number of top-level nodes. No output is
+    /// produced — callers must leave the source untouched. `detail` describes
+    /// the failure (the first re-parse diagnostic, or the node-count
+    /// mismatch), for the bug report.
+    OutputInvalid {
+        detail: String,
+    },
 }
 
 pub fn format(input: &str) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
-    let scanned_tokens = s.scan_all();
-    let scanner_diagnostics = s.take_diagnostics();
+    let (scanned_tokens, scanner_diagnostics) = s.scan_all();
 
     // Every comment in the input, with how often it occurs, so the layout can
     // be checked afterwards: a comment the formatter fails to re-emit must
@@ -115,10 +122,12 @@ pub fn format(input: &str) -> FormatResult {
     // longer comment sharing a prefix, cannot mask a real loss. A miss means
     // some formatter path failed to query trivia — refuse to produce output
     // so the bug is a no-op instead of deleting the user's comment in place.
+    let mut rescan = scanner::new_scanner(output.clone());
+    let (rescanned_tokens, rescan_diagnostics) = rescan.scan_all();
+
     if !expected_comments.is_empty() {
         let mut actual_comments: HashMap<String, usize> = HashMap::new();
-        let mut rescan = scanner::new_scanner(output.clone());
-        for tok in rescan.scan_all() {
+        for tok in &rescanned_tokens {
             for t in &tok.leading_trivia {
                 if let Some(c) = t.comment_text() {
                     *actual_comments.entry(c.trim_end().to_string()).or_default() += 1;
@@ -132,6 +141,35 @@ pub fn format(input: &str) -> FormatResult {
                 };
             }
         }
+    }
+
+    // Postcondition: the output itself scans and parses cleanly, into the
+    // same number of top-level nodes as the input. The formatter has shipped
+    // bugs of exactly this shape — `- -x` collapsing to the rejected `--`
+    // token — so an output the parser rejects must refuse to emit, never
+    // overwrite the user's valid source with broken code in place.
+    let mut rp = parser::new_parser_from_tokens(rescanned_tokens, rescan_diagnostics);
+    let reparsed = rp.parse_program();
+    if let Some(d) = reparsed
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Severity::Error)
+    {
+        return FormatResult::OutputInvalid {
+            detail: format!(
+                "output does not re-parse: {} at {}:{}",
+                d.message, d.span.start_line, d.span.start_column
+            ),
+        };
+    }
+    if reparsed.ast.body.len() != result.ast.body.len() {
+        return FormatResult::OutputInvalid {
+            detail: format!(
+                "output re-parses to {} top-level nodes, input had {}",
+                reparsed.ast.body.len(),
+                result.ast.body.len()
+            ),
+        };
     }
 
     FormatResult::Formatted { output }
@@ -313,7 +351,7 @@ impl Formatter {
             }
             ast::Statement::Declaration { decl, public } => self.declaration(decl, *public),
             ast::Statement::ImportDeclaration(s) => {
-                let mut out = vec![text("import "), text(s.path.join("/"))];
+                let mut out = vec![text("import "), text(s.path.to_string())];
                 if let Some(a) = &s.alias {
                     out.push(text(" as "));
                     out.push(text(a.name.clone()));
@@ -774,38 +812,44 @@ impl Formatter {
         // they share one group and break together. If any branch is a
         // multi-statement block, force every branch body to hard-break so the
         // chain reads symmetrically.
-        let mut bodies: Vec<&ast::Expression> = Vec::new();
-        let mut conds: Vec<&ast::Expression> = Vec::new();
-        let mut if_spans: Vec<Span> = Vec::new();
+        struct Clause<'a> {
+            /// Span of the clause's `if` token, where a comment between
+            /// `else` and `if` attaches.
+            if_span: Span,
+            cond: &'a ast::Expression,
+            body: &'a ast::Expression,
+        }
+        let mut clauses: Vec<Clause> = Vec::new();
         let mut cur = e;
-        loop {
+        let else_body = loop {
             match cur {
                 ast::Expression::IfExpression(i) => {
-                    if_spans.push(i.span);
-                    conds.push(&i.condition);
-                    bodies.push(&i.body);
+                    clauses.push(Clause {
+                        if_span: i.span,
+                        cond: &i.condition,
+                        body: &i.body,
+                    });
                     cur = &i.else_body;
                 }
-                other => {
-                    bodies.push(other);
-                    break;
-                }
+                other => break other,
             }
-        }
+        };
         // An if/else stays on one line only when it is a single, comment-free
         // if/else (no `else if` chain) whose every branch is a bare atom — i.e.
         // a ternary. Anything heavier (a chain, a non-trivial branch, a
         // comment) breaks every clause onto its own lines so the whole thing
         // reads symmetrically, the way `match` always does.
-        let is_chain = conds.len() > 1;
-        let cond_comment = conds.iter().any(|c| self.has_comment_at(c.span()));
+        let is_chain = clauses.len() > 1;
+        let cond_comment = clauses.iter().any(|c| self.has_comment_at(c.cond.span()));
         // A comment between a condition (or `else`) and its branch's `{`
         // attaches to the `{` token — a branch carrying one cannot stay flat.
-        let brace_comment = bodies.iter().any(|b| self.has_comment_at(b.span()));
+        let brace_comment = clauses.iter().any(|c| self.has_comment_at(c.body.span()))
+            || self.has_comment_at(else_body.span());
         let trivial = !is_chain
             && !cond_comment
             && !brace_comment
-            && bodies.iter().all(|b| self.is_trivial_branch(b));
+            && clauses.iter().all(|c| self.is_trivial_branch(c.body))
+            && self.is_trivial_branch(else_body);
         let body = |b: &ast::Expression| {
             if trivial {
                 self.body_as_block(b)
@@ -813,8 +857,8 @@ impl Formatter {
                 self.body_as_hard_block(b)
             }
         };
-        let mut clauses: Vec<Doc> = Vec::new();
-        for (i, c) in conds.iter().enumerate() {
+        let mut docs: Vec<Doc> = Vec::new();
+        for (i, clause) in clauses.iter().enumerate() {
             // A comment between `else` and `if` attaches to the nested `if`
             // token, which starts that IfExpression's span. The chain head's
             // own leading trivia (i == 0) is emitted by the enclosing
@@ -824,29 +868,28 @@ impl Formatter {
             } else {
                 d![
                     text("else "),
-                    self.comments_before(if_spans[i]),
+                    self.comments_before(clause.if_span),
                     text("if ")
                 ]
             };
-            clauses.push(d![
+            docs.push(d![
                 kw,
-                self.comments_before(c.span()),
-                self.expr(c),
+                self.comments_before(clause.cond.span()),
+                self.expr(clause.cond),
                 text(" "),
-                self.comments_before(bodies[i].span()),
-                body(bodies[i]),
+                self.comments_before(clause.body.span()),
+                body(clause.body),
             ]);
         }
-        let last = bodies[conds.len()];
-        clauses.push(d![
+        docs.push(d![
             text("else "),
-            self.comments_before(last.span()),
-            body(last)
+            self.comments_before(else_body.span()),
+            body(else_body)
         ]);
         if trivial {
-            group(join(clauses, line()))
+            group(join(docs, line()))
         } else {
-            join(clauses, text(" "))
+            join(docs, text(" "))
         }
     }
 
@@ -1136,6 +1179,9 @@ mod tests {
             FormatResult::CommentsLost { comment } => {
                 panic!("formatter lost the comment `{comment}` in:\n{src}")
             }
+            FormatResult::OutputInvalid { detail } => {
+                panic!("formatter produced invalid output ({detail}) for:\n{src}")
+            }
         }
     }
 
@@ -1150,6 +1196,9 @@ mod tests {
             }
             FormatResult::CommentsLost { comment } => {
                 panic!("re-format lost the comment `{comment}`:\n{out}")
+            }
+            FormatResult::OutputInvalid { detail } => {
+                panic!("re-format produced invalid output ({detail}):\n{out}")
             }
         }
     }
@@ -1174,6 +1223,9 @@ mod tests {
                 FormatResult::CommentsLost { comment } => {
                     panic!("formatting {name} lost the comment `{comment}`")
                 }
+                FormatResult::OutputInvalid { detail } => {
+                    panic!("formatting {name} produced invalid output: {detail}")
+                }
             };
             match format(&once) {
                 FormatResult::Formatted { output } => {
@@ -1184,6 +1236,9 @@ mod tests {
                 }
                 FormatResult::CommentsLost { comment } => {
                     panic!("re-formatting {name} lost the comment `{comment}`")
+                }
+                FormatResult::OutputInvalid { detail } => {
+                    panic!("re-formatting {name} produced invalid output: {detail}")
                 }
             }
         }
@@ -1501,8 +1556,7 @@ mod tests {
     /// formatter does not silently split or merge program structure.
     fn top_level_items(src: &str) -> usize {
         let mut s = scanner::new_scanner(src.to_string());
-        let toks = s.scan_all();
-        let diags = s.take_diagnostics();
+        let (toks, diags) = s.scan_all();
         let mut p = parser::new_parser_from_tokens(toks, diags);
         p.parse_program().ast.body.len()
     }
@@ -1672,6 +1726,9 @@ mod tests {
                 assert!(output.contains("// stranded before else"), "{output}")
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+            FormatResult::OutputInvalid { detail } => {
+                panic!("formatter produced invalid output: {detail}")
+            }
         }
     }
 
@@ -1694,6 +1751,9 @@ mod tests {
                 )
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+            FormatResult::OutputInvalid { detail } => {
+                panic!("formatter produced invalid output: {detail}")
+            }
         }
     }
 
@@ -1710,6 +1770,9 @@ mod tests {
                 assert!(output.contains("// stranded before else\n"), "{output}")
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+            FormatResult::OutputInvalid { detail } => {
+                panic!("formatter produced invalid output: {detail}")
+            }
         }
     }
 

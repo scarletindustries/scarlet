@@ -52,22 +52,16 @@ impl Scanner {
         ));
     }
 
-    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
-        std::mem::take(&mut self.diagnostics)
-    }
-
     fn in_interp_string(&self) -> bool {
         !self.interp_stack.is_empty()
     }
 
-    fn enter_interp_string(&mut self, quote: u8) {
-        // Called while the opening quote's token is being scanned, so the
-        // token-start fields still point at the quote itself.
+    fn enter_interp_string(&mut self, quote: u8, start_line: i32, start_column: i32) {
         self.interp_stack.push(InterpFrame {
             quote,
             brace_depth: 0,
-            start_line: self.token_start_line,
-            start_column: self.token_start_column,
+            start_line,
+            start_column,
         });
     }
 
@@ -201,7 +195,7 @@ impl Scanner {
         }
     }
 
-    pub fn scan_next(&mut self) -> Token {
+    fn scan_next(&mut self) -> Token {
         if let Some(&InterpFrame {
             quote,
             brace_depth: 0,
@@ -299,7 +293,14 @@ impl Scanner {
                 let next = self.peek_char();
 
                 if next == 0 || next == b'\n' || next == b'\r' {
-                    self.add_error("Unterminated string literal".to_string());
+                    // Anchor at the opening quote (one byte before the body
+                    // start): the cursor sits at the line end / EOF, away from
+                    // the string that is actually broken.
+                    self.diagnostics.push(Diagnostic::error(
+                        Span::point(start_line, start_col - 1),
+                        DiagnosticCode::ParseError,
+                        "Unterminated string literal".to_string(),
+                    ));
                     return self.new_token(Kind::Error(utf8(result).into()));
                 }
 
@@ -310,7 +311,7 @@ impl Scanner {
                         self.column = start_col;
                         self.line = start_line;
                         self.diagnostics.truncate(diag_len);
-                        self.enter_interp_string(ch);
+                        self.enter_interp_string(ch, start_line, start_col - 1);
                         return self.new_token(Kind::InterpStringStart);
                     }
                 }
@@ -389,20 +390,20 @@ impl Scanner {
         }
     }
 
-    pub fn scan_all(&mut self) -> Vec<Token> {
-        let mut result = Vec::new();
+    pub fn scan_all(&mut self) -> (Vec<Token>, Vec<Diagnostic>) {
+        let mut tokens = Vec::new();
 
         loop {
             let t = self.scan_next();
             let is_eof = t.kind == Kind::Eof;
-            result.push(t);
+            tokens.push(t);
 
             if is_eof {
                 break;
             }
         }
 
-        result
+        (tokens, std::mem::take(&mut self.diagnostics))
     }
 
     fn new_token(&mut self, kind: Kind) -> Token {
@@ -525,7 +526,19 @@ impl Scanner {
             let ch = self.peek_char();
 
             if ch == 0 || ch == b'\n' || ch == b'\r' {
-                self.add_error("Unterminated string literal".to_string());
+                // Anchor at the opening quote — the frame carries its position
+                // exactly for this. The cursor is at the line end / EOF, which
+                // points away from the string that is actually broken.
+                let anchor = self
+                    .interp_stack
+                    .last()
+                    .map(|f| Span::point(f.start_line, f.start_column))
+                    .unwrap_or_else(|| Span::point(self.line, self.column));
+                self.diagnostics.push(Diagnostic::error(
+                    anchor,
+                    DiagnosticCode::ParseError,
+                    "Unterminated string literal".to_string(),
+                ));
                 self.exit_interp_string();
                 return self.new_token(Kind::Error(utf8(result).into()));
             }
@@ -595,9 +608,7 @@ mod tests {
     use Kind::*;
 
     fn scan(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
-        let mut s = new_scanner(src);
-        let toks = s.scan_all();
-        (toks, s.take_diagnostics())
+        new_scanner(src).scan_all()
     }
 
     fn ident(s: &str) -> Kind {
@@ -1088,6 +1099,37 @@ mod tests {
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert!(!ks.contains(&PuncDiv), "no stray tokens from the CRLF");
         assert!(ks.ends_with(&[ident("y"), PuncEquals, num("1"), Eof]));
+    }
+
+    #[test]
+    fn test_unterminated_plain_string_reports_at_opening_quote() {
+        // Anchored at the opening quote (line 0, column 4), not at EOF.
+        let (_, diags) = scan("x = 'abc");
+        assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
+        assert!(diags[0].message.contains("Unterminated string literal"));
+        assert_eq!(
+            (diags[0].span.start_line, diags[0].span.start_column),
+            (0, 4)
+        );
+    }
+
+    #[test]
+    fn test_unterminated_interp_string_content_reports_at_opening_quote() {
+        // The `${b}` closes, then the trailing content runs into EOF: the
+        // error is anchored at the opening quote (column 4), not at EOF.
+        let (_, diags) = scan("x = 'a${b} cd");
+        let unterminated: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("Unterminated string literal"))
+            .collect();
+        assert_eq!(unterminated.len(), 1, "diagnostics: {diags:?}");
+        assert_eq!(
+            (
+                unterminated[0].span.start_line,
+                unterminated[0].span.start_column
+            ),
+            (0, 4)
+        );
     }
 
     #[test]

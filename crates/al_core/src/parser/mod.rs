@@ -67,8 +67,7 @@ pub struct Parser {
 }
 
 pub fn new_parser(s: &mut Scanner) -> Parser {
-    let tokens = s.scan_all();
-    let diags = s.take_diagnostics();
+    let (tokens, diags) = s.scan_all();
     new_parser_from_tokens(tokens, diags)
 }
 
@@ -2152,18 +2151,16 @@ impl Parser {
         let import_span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Import))?;
 
-        let mut path: Vec<String> = Vec::new();
-
-        // Leading `.` / `..` segments for relative imports. The literal strings
-        // are the resolver's contract (module::resolve matches on "." / "..");
-        // do not derive them from Kind's Display.
+        // Leading `.` / `..` segments for relative imports; the grammar only
+        // admits them before the first module name, so they fill `leading`
+        // and never mix into `names`.
+        let mut leading: Vec<ast::RelSeg> = Vec::new();
         while matches!(self.kind(), Kind::PuncDot | Kind::PuncDotdot) {
-            let seg = if self.kind() == Kind::PuncDot {
-                "."
+            leading.push(if self.kind() == Kind::PuncDot {
+                ast::RelSeg::CurrentDir
             } else {
-                ".."
-            };
-            path.push(seg.to_string());
+                ast::RelSeg::ParentDir
+            });
             self.advance();
             if self.kind() != Kind::PuncDiv {
                 return Err("Expected `/` after relative import segment".to_string());
@@ -2174,13 +2171,13 @@ impl Parser {
         // Track the span of the final module-name segment; the last write wins.
         let mut path_span = self.current_span();
         let first = self.eat_name("Expected module name after `import`")?;
-        path.push(first);
+        let mut names: Vec<String> = vec![first];
 
         while self.kind() == Kind::PuncDiv {
             self.eat(Kind::PuncDiv)?;
             path_span = self.current_span();
             let seg = self.eat_name("Expected module name after `/`")?;
-            path.push(seg);
+            names.push(seg);
         }
 
         let mut alias: Option<ast::Identifier> = None;
@@ -2209,7 +2206,7 @@ impl Parser {
         }
 
         Ok(ast::Statement::ImportDeclaration(ast::ImportDeclaration {
-            path,
+            path: ast::ImportPath { leading, names },
             alias,
             items,
             path_span,

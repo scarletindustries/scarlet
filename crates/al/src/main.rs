@@ -174,11 +174,20 @@ fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnosti
 
 fn dump_tokens(src: &str) {
     let mut s = scanner::new_scanner(src.to_string());
-    for tok in s.scan_all() {
+    let (tokens, diagnostics) = s.scan_all();
+    for tok in tokens {
         eprintln!("Token: {:?} trivia: {}", tok.kind, tok.leading_trivia.len());
         for t in &tok.leading_trivia {
             eprintln!("  Trivia: {t:?}");
         }
+    }
+    for d in &diagnostics {
+        eprintln!(
+            "Scan error: {}:{}: {}",
+            d.span.start_line + 1,
+            d.span.start_column + 1,
+            d.message
+        );
     }
 }
 
@@ -248,9 +257,12 @@ fn main() -> process::ExitCode {
             let file = read_file_or_die(&args.entrypoint);
             let expr = parse_source(&file, &args.entrypoint);
             let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+            let Some(emitted) = result.emitted else {
+                die("nothing to disassemble: the compile produced no program");
+            };
             let text = match &args.only {
-                Some(n) => al::dis::disassemble_fn(&result.program, n),
-                None => al::dis::disassemble(&result.program),
+                Some(n) => al::dis::disassemble_fn(&emitted.program, n),
+                None => al::dis::disassemble(&emitted.program),
             };
             print!("{text}");
         }
@@ -299,13 +311,16 @@ fn cmd_run(args: RunArgs) {
     }
 
     let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+    let Some(emitted) = result.emitted else {
+        die("nothing to run: the compile produced no program");
+    };
 
     // argv[0] is the entrypoint path; the rest are the program's own arguments.
     let mut argv = Vec::with_capacity(args.args.len() + 1);
     argv.push(args.entrypoint.clone());
     argv.extend(args.args.iter().cloned());
 
-    let mut v = vm::new_vm_with_argv(result.program, argv).unwrap_or_else(|e| die(e));
+    let mut v = vm::new_vm_with_argv(emitted.program, argv).unwrap_or_else(|e| die(e));
     let run_result = v.run().unwrap_or_else(|e| die(e));
 
     if !matches!(run_result.as_enum(), Some(e) if e.type_id() == al::stdlib::prelude::NIL.type_id) {
@@ -339,6 +354,14 @@ fn cmd_fmt(args: FmtArgs) {
                 eprintln!(
                     "formatter bug: formatting would delete the comment `{comment}`; input left unchanged"
                 );
+                print!("{content}");
+                let _ = io::stdout().flush();
+                process::exit(1);
+            }
+            formatter::FormatResult::OutputInvalid { detail } => {
+                // Formatter bug: pass the input through untouched so valid
+                // source is never replaced with broken code, and fail loudly.
+                eprintln!("formatter bug: {detail}; input left unchanged");
                 print!("{content}");
                 let _ = io::stdout().flush();
                 process::exit(1);
@@ -384,6 +407,13 @@ fn cmd_fmt(args: FmtArgs) {
                 eprintln!(
                     "Error formatting {}: formatter bug: formatting would delete the comment \
                      `{comment}`; file left unchanged",
+                    file.display()
+                );
+                has_errors = true;
+            }
+            formatter::FormatResult::OutputInvalid { detail } => {
+                eprintln!(
+                    "Error formatting {}: formatter bug: {detail}; file left unchanged",
                     file.display()
                 );
                 has_errors = true;
