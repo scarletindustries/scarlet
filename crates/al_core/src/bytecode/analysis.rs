@@ -208,8 +208,11 @@ enum PreparedType {
         /// 3.5 to `close_body` each stored field template at registration.
         type_params: ArenaSlice<pool::TypeParams>,
     },
-    /// `type X = ...` — registered in Pass 2, nothing for Pass 3.5 to read.
-    Alias,
+    /// `type X = ...` — registered in Pass 2 (`register_aliases`), which
+    /// records the `TypeId` here so Pass 3.5's export reads the registry
+    /// positionally by id, never by name. `None` means registration was
+    /// skipped (the alias is part of a cycle) and there is nothing to export.
+    Alias { type_id: Option<TypeId> },
 }
 
 /// Hydrated shape of one `fn` declaration's signature. Returned by
@@ -264,6 +267,10 @@ impl Compiler {
         // Pass 0 — partition + reserved/duplicate name checks.
         // -------------------------------------------------------------------
         let mut type_decls: Vec<(&ast::TypeDeclaration, bool)> = Vec::new();
+        // One entry per `type_decls` entry (same order): `true` marks a ctor
+        // whose name Pass 0 flagged as a duplicate, so Pass 3.5 drops it the
+        // way duplicate fns/consts are dropped from `decls`.
+        let mut dup_ctors: Vec<Vec<bool>> = Vec::new();
         let mut decls: Vec<Decl<'_>> = Vec::new();
         let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, Op)> = Vec::new();
         let mut other_nodes: Vec<&ast::Node> = Vec::new();
@@ -272,7 +279,7 @@ impl Compiler {
         let mut seen_types: HashMap<&str, Span> = HashMap::new();
         let mut seen_values: HashMap<&str, Span> = HashMap::new();
 
-        let in_stdlib = self.current_module.first().map(String::as_str) == Some("al");
+        let in_stdlib = module::is_stdlib(&self.current_module);
 
         for (node_idx, node) in block.body.iter().enumerate() {
             match node {
@@ -288,14 +295,20 @@ impl Compiler {
                                 );
                                 let dup = check_duplicate(self, &mut seen_types, &td.identifier);
                                 check_reserved(self, &td.identifier, in_prelude);
+                                let mut dups: Vec<bool> = Vec::new();
                                 if let ast::TypeBody::Variants { ctors, .. } = &td.body {
                                     for ctor in ctors {
                                         check_reserved(self, &ctor.identifier, in_prelude);
-                                        check_duplicate(self, &mut seen_values, &ctor.identifier);
+                                        dups.push(check_duplicate(
+                                            self,
+                                            &mut seen_values,
+                                            &ctor.identifier,
+                                        ));
                                     }
                                 }
                                 if !dup {
                                     type_decls.push((td, is_public));
+                                    dup_ctors.push(dups);
                                 }
                             }
                             ast::Declaration::Function(fd) => {
@@ -354,7 +367,7 @@ impl Compiler {
         let mut prepared_types: Vec<PreparedType> = Vec::with_capacity(type_decls.len());
         for (td, is_public) in &type_decls {
             if matches!(td.body, ast::TypeBody::Alias(_)) {
-                prepared_types.push(PreparedType::Alias);
+                prepared_types.push(PreparedType::Alias { type_id: None });
                 continue;
             }
             let (h, type_params, param_tys) = self.hydrate_type_params(&td.type_params);
@@ -379,7 +392,7 @@ impl Compiler {
         // -------------------------------------------------------------------
         // Pass 2 — toposort + register aliases.
         // -------------------------------------------------------------------
-        self.register_aliases(&type_decls);
+        self.register_aliases(&type_decls, &mut prepared_types);
 
         // -------------------------------------------------------------------
         // Pass 3 — pre-allocate one slot per decl, then register fn
@@ -486,8 +499,8 @@ impl Compiler {
         // -------------------------------------------------------------------
         // Pass 3.5 — hydrate constructor bodies; define ctor values.
         // -------------------------------------------------------------------
-        for ((td, is_public), pt) in type_decls.iter().zip(prepared_types) {
-            self.register_constructors(td, *is_public, pt, &mut iface);
+        for (((td, is_public), pt), dups) in type_decls.iter().zip(prepared_types).zip(&dup_ctors) {
+            self.register_constructors(td, *is_public, pt, dups, &mut iface);
         }
 
         // -------------------------------------------------------------------
@@ -773,11 +786,25 @@ impl Compiler {
     // Pass 2 helper.
     // -----------------------------------------------------------------------
 
-    fn register_aliases(&mut self, type_decls: &[(&ast::TypeDeclaration, bool)]) {
-        let aliases: Vec<(&ast::TypeDeclaration, &ast::TypeIdentifier, bool)> = type_decls
+    /// Registers each acyclic alias and records its `TypeId` back into the
+    /// matching `prepared_types` slot (built one-to-one with `type_decls`),
+    /// so Pass 3.5's export can read the registry by id instead of by name.
+    fn register_aliases(
+        &mut self,
+        type_decls: &[(&ast::TypeDeclaration, bool)],
+        prepared_types: &mut [PreparedType],
+    ) {
+        type AliasEntry<'a> = (
+            usize,
+            &'a ast::TypeDeclaration,
+            &'a ast::TypeIdentifier,
+            bool,
+        );
+        let aliases: Vec<AliasEntry<'_>> = type_decls
             .iter()
-            .filter_map(|(td, p)| match &td.body {
-                ast::TypeBody::Alias(rhs) => Some((*td, rhs, *p)),
+            .enumerate()
+            .filter_map(|(decl_idx, (td, p))| match &td.body {
+                ast::TypeBody::Alias(rhs) => Some((decl_idx, *td, rhs, *p)),
                 _ => None,
             })
             .collect();
@@ -787,11 +814,11 @@ impl Compiler {
 
         let mut graph: StableGraph<(), (), Directed> = StableGraph::new();
         let mut idx_of: HashMap<&str, NodeIndex> = HashMap::new();
-        for &(a, _, _) in &aliases {
+        for &(_, a, _, _) in &aliases {
             let n = graph.add_node(());
             idx_of.insert(a.identifier.name.as_str(), n);
         }
-        for &(a, rhs, _) in &aliases {
+        for &(_, a, rhs, _) in &aliases {
             let from = idx_of[a.identifier.name.as_str()];
             let mut deps: Vec<&str> = Vec::new();
             collect_type_ast_deps(rhs, &mut deps);
@@ -802,11 +829,10 @@ impl Compiler {
             }
         }
 
-        let by_idx: HashMap<NodeIndex, (&ast::TypeDeclaration, &ast::TypeIdentifier, bool)> =
-            aliases
-                .iter()
-                .map(|a| (idx_of[a.0.identifier.name.as_str()], *a))
-                .collect();
+        let by_idx: HashMap<NodeIndex, AliasEntry<'_>> = aliases
+            .iter()
+            .map(|a| (idx_of[a.1.identifier.name.as_str()], *a))
+            .collect();
 
         // tarjan_scc yields components in reverse topological order (dependees
         // before dependers). A component with more than one node, or a single
@@ -817,7 +843,7 @@ impl Compiler {
                 component.len() > 1 || graph.find_edge(component[0], component[0]).is_some();
             if cyclic {
                 for node in &component {
-                    if let Some(&(td, _, _)) = by_idx.get(node) {
+                    if let Some(&(_, td, _, _)) = by_idx.get(node) {
                         self.error(
                             format!("Recursive type alias '{}'", td.identifier.name),
                             td.identifier.span,
@@ -826,7 +852,7 @@ impl Compiler {
                 }
                 continue;
             }
-            let Some(&(td, rhs, is_pub)) = by_idx.get(&component[0]) else {
+            let Some(&(decl_idx, td, rhs, is_pub)) = by_idx.get(&component[0]) else {
                 continue;
             };
             let (mut h, type_params, _) = self.hydrate_type_params(&td.type_params);
@@ -844,6 +870,9 @@ impl Compiler {
             // before `export_type` runs in Pass 3.5.
             let target = self.engine.close_body(target, type_params);
             self.env.set_type_body(type_id, TypeBody::Alias { target });
+            prepared_types[decl_idx] = PreparedType::Alias {
+                type_id: Some(type_id),
+            };
             self.store_and_emit_def(&td.identifier, &td.doc, DefinitionKind::Type, is_pub);
         }
     }
@@ -852,13 +881,25 @@ impl Compiler {
     // Pass 3.5 helper.
     // -----------------------------------------------------------------------
 
+    /// `dup_ctors` is positional with `ctors` (built in Pass 0): a `true`
+    /// entry marks a duplicate-named constructor, which is dropped here —
+    /// neither added to `variants` nor defined as a value — matching how
+    /// duplicate fns/consts never reach `decls`.
     fn register_constructors(
         &mut self,
         td: &ast::TypeDeclaration,
         is_public: bool,
         pt: PreparedType,
+        dup_ctors: &[bool],
         iface: &mut Option<&mut ModuleInterface>,
     ) {
+        // The id the export below reads the registry with. Positional (from
+        // Pass 1/2), never the name: a same-named registration analysed later
+        // shadows the by-name map but can never hijack the by-id entry.
+        let export_id = match &pt {
+            PreparedType::Head { type_id, .. } => Some(*type_id),
+            PreparedType::Alias { type_id } => *type_id,
+        };
         let (
             ast::TypeBody::Variants { ctors, opaque },
             PreparedType::Head {
@@ -871,7 +912,7 @@ impl Compiler {
         ) = (&td.body, pt)
         else {
             // Aliases and externals have no constructors; just export the type info.
-            let ti = self.env.lookup_type_info(&td.identifier.name);
+            let ti = export_id.and_then(|id| self.env.lookup_type_info_by_id(id));
             export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
         };
@@ -886,7 +927,11 @@ impl Compiler {
         // sees type→type edges.
         let owner = self.owner_defid(td.identifier.span, EntityKind::Type);
         self.with_owner(owner, |c| {
-            for (variant_idx, ctor) in ctors.iter().enumerate() {
+            for (ctor, _) in ctors.iter().zip(dup_ctors).filter(|&(_, dup)| !dup) {
+                // Index into the *surviving* variants, not the source ctor
+                // list: dropped duplicates must not leave holes in the
+                // `variant_idx` ↔ `variants` correspondence the VM tags by.
+                let variant_idx = variants.len() as u16;
                 let mut field_itys: Vec<Ty> = Vec::with_capacity(ctor.fields.len());
                 let mut field_defs: Vec<VariantField> = Vec::with_capacity(ctor.fields.len());
                 let mut label_ids: Vec<StrId> = Vec::with_capacity(ctor.fields.len());
@@ -909,7 +954,7 @@ impl Compiler {
 
                     let qualified = format!("{}.{}", ctor.identifier.name, f.label.name);
                     let field_dl = DefinitionLocation::new(f.label.span, m, EntityKind::Field);
-                    c.env.definitions.insert(qualified, field_dl);
+                    c.env.store_definition(&qualified, field_dl);
                     c.emit_def(
                         field_dl,
                         &f.label.name,
@@ -937,7 +982,7 @@ impl Compiler {
                 scheme.kind = ValueKind::Constructor {
                     type_name: type_name_id,
                     type_id,
-                    variant_idx: variant_idx as u16,
+                    variant_idx,
                     arity: ctor.fields.len() as u16,
                     field_labels,
                 };
@@ -992,7 +1037,7 @@ impl Compiler {
         self.env
             .set_type_body(type_id, TypeBody::Custom { variants });
 
-        let ti = self.env.lookup_type_info(type_name);
+        let ti = self.env.lookup_type_info_by_id(type_id);
         export_type(iface.as_deref_mut(), type_name, is_public, ti);
     }
 }
