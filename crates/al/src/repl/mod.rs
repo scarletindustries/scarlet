@@ -123,7 +123,7 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
         {
             return EvalOutcome::Incomplete;
         }
-        diagnostic::print_diagnostics(&probe.diagnostics, input, "<repl>");
+        diagnostic::print_diagnostics(&probe.diagnostics, input, "<repl>", &|_| None);
         return EvalOutcome::Failed;
     }
 
@@ -132,7 +132,7 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
     let mut combined_parser = parser::new_parser(&mut combined_scanner);
     let combined = combined_parser.parse_program();
     if diagnostic::has_errors(&combined.diagnostics) {
-        diagnostic::print_diagnostics(&combined.diagnostics, &combined_src, "<repl>");
+        diagnostic::print_diagnostics(&combined.diagnostics, &combined_src, "<repl>", &|_| None);
         return EvalOutcome::Failed;
     }
     let combined_ast = ast::Expression::BlockExpression(combined.ast);
@@ -140,7 +140,7 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
     let result = bytecode::compile(&combined_ast, None, Some(&crate::STDLIB));
 
     if !result.diagnostics.is_empty() {
-        diagnostic::print_diagnostics(&result.diagnostics, &combined_src, "<repl>");
+        diagnostic::print_diagnostics(&result.diagnostics, &combined_src, "<repl>", &|_| None);
         if !result.success {
             return EvalOutcome::Failed;
         }

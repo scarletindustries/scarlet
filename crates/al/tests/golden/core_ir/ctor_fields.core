@@ -2,7 +2,7 @@ toplevel:
   let %0:t0 = c0
   let %1:t0 = c1
   let %2:t1 = ctor 6400.0(%0, %1)
-  let %3:t2 = GetFieldUnchecked(%2)
+  let %3:t2 = GetFieldUnchecked#0(%2)
   let %4:t3 = GetFieldUnchecked#1(%2)
   drop %2 [Enum:2]
   ret AddInt(%3, %4)

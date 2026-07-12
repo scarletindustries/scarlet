@@ -31,7 +31,9 @@
 //! in the entry frame, whose `code_start` is 0 while the block starts at
 //! `base`.
 
-use super::{Atom, Callee, CodeAddr, CoreBind, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
+use super::{
+    Atom, Callee, CodeAddr, CoreBind, CoreExpr, CoreFn, CorePat, Imm, LocalId, VariantRef,
+};
 use crate::bytecode::{Instruction, Op, enum_name_prefix_hash, op, op_ab, op_arg};
 use crate::tivec::TiVec;
 use crate::type_def::TypeId;
@@ -197,6 +199,27 @@ fn unbound_local(id: LocalId) -> ! {
         "internal compiler error: emit reached unbound local {id}. \
          Please report this as a compiler bug."
     )
+}
+
+/// Flatten a typed [`Imm`] to the instruction's raw `i32` operand — the one
+/// point where the tag is erased. `Op::IndexOr` is the only op whose operand
+/// encodes a constant default (`ConstId`, or `-1` for "default was pushed");
+/// any other op/variant pairing is a lowering bug, and aborts rather than
+/// emit an operand the VM would misread.
+#[allow(clippy::panic)]
+fn imm_operand(op: Op, imm: Imm) -> i32 {
+    match (op, imm) {
+        (Op::IndexOr, Imm::Const(c)) => c.0 as i32,
+        (Op::IndexOr, Imm::PushedDefault) => -1,
+        (Op::IndexOr, Imm::None | Imm::Index(_) | Imm::Argc(_))
+        | (_, Imm::Const(_) | Imm::PushedDefault) => panic!(
+            "internal compiler error: {op:?} cannot carry immediate {imm:?}. \
+             Please report this as a compiler bug."
+        ),
+        (_, Imm::None) => 0,
+        (_, Imm::Index(i)) => i32::from(i),
+        (_, Imm::Argc(n)) => n as i32,
+    }
 }
 
 impl<'a, C: EmitCtx> Emitter<'a, C> {
@@ -802,7 +825,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         let Atom::PrimOp {
             op: prim,
             args,
-            imm: 0,
+            imm: Imm::None,
         } = rhs
         else {
             return None;
@@ -884,7 +907,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         if let Atom::PrimOp {
             op: prim @ (Op::AddInt | Op::SubInt),
             args,
-            imm: 0,
+            imm: Imm::None,
         } = a
             && !args.iter().any(|&x| Self::is_inlined(x, defs))
             && let Some((slot, k)) = self.lc_operands(args)
@@ -919,7 +942,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 imm,
             } => {
                 self.push_args(args, defs);
-                self.push(op_arg(*prim, *imm));
+                self.push(op_arg(*prim, imm_operand(*prim, *imm)));
                 // `Print` consumes and pushes nothing; supply the `()` here so
                 // the enclosing StoreLocal / Ret has a value.
                 if *prim == Op::Print {

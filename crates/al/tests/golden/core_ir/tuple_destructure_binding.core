@@ -9,7 +9,7 @@ fn s0(%0:t0) -> :t1
       ret c0
 
 fn s1(%0:t2) -> :t1
-  let %1:t0 = TupleIndex(%0)
+  let %1:t0 = TupleIndex#0(%0)
   let %2:t3 = TupleIndex#1(%0)
   drop %0
   let %3:t1 = call fn#160(%1)

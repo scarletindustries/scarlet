@@ -252,9 +252,8 @@ impl Workspace {
     /// importer of the queried file is never inside its imports' closure, so
     /// the session graph rooted at that file cannot carry these reverse edges
     /// — their true URIs are stored directly (see [`WorkspaceXrefs`]). Only
-    /// reference sites are surfaced — real uses plus the `{item}` tokens of a
-    /// selective import, which rename must rewrite; the declaration's own
-    /// self-occurrence and `Import`/`Alias` bindings are not.
+    /// real use sites are surfaced; the declaration's own self-occurrence and
+    /// import/alias bindings are not.
     pub(super) fn dependent_callers(
         &self,
         uri: &str,
@@ -264,7 +263,7 @@ impl Workspace {
             .and_then(|p| self.roots.get(&root_for(&self.workspace_roots, &p)))
             .into_iter()
             .flat_map(move |r| r.xrefs.callers(def))
-            .filter(|x| x.kind.is_reference_site())
+            .filter(|x| x.kind.is_use_site())
     }
 
     // ========================================================================
@@ -444,7 +443,7 @@ impl Workspace {
                         mr.occurrences()
                             .iter()
                             .map(|o| o.reference)
-                            .filter(|r| r.target.module != entry_id && r.kind.is_reference_site())
+                            .filter(|r| r.target.module != entry_id && r.kind.is_use_site())
                             .map(|r| (r.target, r.span, r.kind))
                             .collect()
                     })

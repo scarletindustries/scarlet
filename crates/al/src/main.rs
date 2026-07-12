@@ -96,10 +96,25 @@ struct FmtArgs {
     debug: bool,
 }
 
+/// Resolve a diagnostic's module provenance to (path, text) so it renders
+/// against the file its span actually points into. A stamped `ModuleKey` is
+/// either an on-disk module (the key is its canonical path, `.al` stripped)
+/// or an embedded stdlib module, both of which `resolve_canonical` handles.
+fn resolve_diagnostic_source(key: &al::module::ModuleKey) -> Option<(PathBuf, String)> {
+    let path: al::module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
+    match al::module::resolve_canonical(&path).ok()?.source {
+        al::module::ModuleSource::File(p) => {
+            let text = fs::read_to_string(&p).ok()?;
+            Some((p, text))
+        }
+        al::module::ModuleSource::Embedded(s) => Some((PathBuf::from(key.as_str()), s.to_string())),
+    }
+}
+
 /// Print diagnostics (if any) and exit when `fail` is set.
 fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entrypoint: &str) {
     if !diagnostics.is_empty() {
-        diagnostic::print_diagnostics(diagnostics, file, entrypoint);
+        diagnostic::print_diagnostics(diagnostics, file, entrypoint, &resolve_diagnostic_source);
         if fail {
             process::exit(1);
         }

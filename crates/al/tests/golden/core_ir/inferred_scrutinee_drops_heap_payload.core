@@ -9,7 +9,7 @@ fn s0() -> :t0
       ret c1
     | 263.0(%3) ->
       drop %2 [Enum:1]
-      let %4:t3 = GetFieldUnchecked(%3)
+      let %4:t3 = GetFieldUnchecked#0(%3)
       drop %3
       let %5:t0 = c2
       ret AddInt(%4, %5)

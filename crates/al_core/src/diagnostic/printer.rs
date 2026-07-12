@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use super::editor::{Editor, build_editor_url, detect_editor};
 use super::{Diagnostic, Severity, count_errors};
+use crate::module::ModuleKey;
 use crate::term::Palette;
 
 /// A detected editor plus the canonical path to link to. Only constructed
@@ -13,10 +15,13 @@ struct LinkTarget {
     abs_path: String,
 }
 
-/// Environment-derived rendering decisions, computed once per `print_diagnostics`
-/// call so per-diagnostic formatting is a pure function of its inputs.
-struct RenderCtx {
-    palette: Palette,
+/// The text a diagnostic's span points into, plus the path to print for it:
+/// the entry file, or a resolved imported module. Snippets are only ever
+/// sliced out of a `SourceView` whose identity matches the diagnostic's
+/// `source`, so a span from module A can never index file B's text.
+struct SourceView<'a> {
+    file_path: &'a str,
+    lines: Vec<&'a str>,
     link: Option<LinkTarget>,
 }
 
@@ -43,21 +48,22 @@ fn canonical_path(file_path: &str) -> Option<String> {
         .and_then(|p| p.to_str().map(|s| s.to_string()))
 }
 
-fn format_diagnostic_with_lines(
-    d: &Diagnostic,
-    lines: &[&str],
-    file_path: &str,
-    ctx: &RenderCtx,
-) -> String {
+fn link_target(editor: Option<Editor>, file_path: &str) -> Option<LinkTarget> {
+    let editor = editor?;
+    canonical_path(file_path).map(|abs_path| LinkTarget { editor, abs_path })
+}
+
+fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palette) -> String {
     let mut result = String::new();
 
-    let p = &ctx.palette;
     let color = match d.severity {
         Severity::Error => p.red,
         Severity::Hint => p.cyan,
     };
     let label = severity_label(d.severity);
 
+    let file_path = view.file_path;
+    let lines = &view.lines;
     let display_line = d.span.start_line + 1;
     let source_line = get_source_line(lines, display_line);
     // Span columns count bytes (the scanner bumps the column once per byte),
@@ -69,10 +75,10 @@ fn format_diagnostic_with_lines(
         .unwrap_or(d.span.start_column as usize) as i32
         + 1;
     let location = format!("{file_path}:{display_line}:{display_col}");
-    let loc = match &ctx.link {
+    let loc = match &view.link {
         Some(link) => {
             let url = build_editor_url(link.editor, &link.abs_path, display_line, display_col);
-            ctx.palette.hyperlink(&url, &location)
+            p.hyperlink(&url, &location)
         }
         None => location,
     };
@@ -123,37 +129,121 @@ fn format_diagnostic_with_lines(
     result
 }
 
-pub fn print_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &str) {
-    let lines: Vec<&str> = source.lines().collect();
+/// Header + location only, for a diagnostic whose source module could not be
+/// resolved to text: pointing a caret into some *other* file's text would be
+/// worse than no snippet at all.
+fn format_diagnostic_header(d: &Diagnostic, file_path: &str, p: &Palette) -> String {
+    let color = match d.severity {
+        Severity::Error => p.red,
+        Severity::Hint => p.cyan,
+    };
+    let label = severity_label(d.severity);
+    let display_line = d.span.start_line + 1;
+    let display_col = d.span.start_column + 1;
+    format!(
+        "{}{color}{label}{}: {} {}at {file_path}:{display_line}:{display_col}{}",
+        p.bold, p.reset, d.message, p.dim, p.reset
+    )
+}
 
+/// A resolved non-entry source: owned text plus the path to display.
+struct ResolvedSource {
+    file_path: String,
+    text: String,
+    link: Option<LinkTarget>,
+}
+
+/// Print `diagnostics` to stderr. `source`/`file_path` are the ENTRY file —
+/// what diagnostics with `source: None` render against. A diagnostic stamped
+/// with a `ModuleKey` is rendered against `resolve(&key)`'s path and text
+/// instead; when the resolver has no answer (`None`), only the header and
+/// location are printed, never a snippet sliced from the wrong file.
+pub fn print_diagnostics(
+    diagnostics: &[Diagnostic],
+    source: &str,
+    file_path: &str,
+    resolve: &dyn Fn(&ModuleKey) -> Option<(std::path::PathBuf, String)>,
+) {
+    let output = render_diagnostics(diagnostics, source, file_path, resolve);
+    if !output.is_empty() {
+        eprintln!("{output}");
+    }
+}
+
+/// [`print_diagnostics`] as a pure function of its inputs (modulo the palette
+/// and editor detection, which read the environment): the full rendered text,
+/// empty when there is nothing to print.
+pub fn render_diagnostics(
+    diagnostics: &[Diagnostic],
+    source: &str,
+    file_path: &str,
+    resolve: &dyn Fn(&ModuleKey) -> Option<(std::path::PathBuf, String)>,
+) -> String {
     let palette = Palette::for_stderr();
     // Cheap gates first: only detect an editor (which may fork `ps`) when a
     // link could actually be rendered.
-    let link = if palette.enabled() {
-        canonical_path(file_path)
-            .and_then(|abs_path| detect_editor().map(|editor| LinkTarget { editor, abs_path }))
+    let editor = if palette.enabled() {
+        detect_editor()
     } else {
         None
     };
-    let ctx = RenderCtx { palette, link };
+    let entry = SourceView {
+        file_path,
+        lines: source.lines().collect(),
+        link: link_target(editor, file_path),
+    };
+
+    // Resolve each distinct foreign source once; `None` is cached too so an
+    // unresolvable module isn't re-probed per diagnostic.
+    let mut resolved: HashMap<&ModuleKey, Option<ResolvedSource>> = HashMap::new();
+    for key in diagnostics.iter().filter_map(|d| d.source.as_ref()) {
+        resolved.entry(key).or_insert_with(|| {
+            resolve(key).map(|(path, text)| {
+                let file_path = path.display().to_string();
+                let link = link_target(editor, &file_path);
+                ResolvedSource {
+                    file_path,
+                    text,
+                    link,
+                }
+            })
+        });
+    }
 
     let mut output: Vec<String> = Vec::new();
     for d in diagnostics {
-        output.push(format_diagnostic_with_lines(d, &lines, file_path, &ctx));
+        let rendered = match &d.source {
+            None => format_diagnostic_with_lines(d, &entry, &palette),
+            Some(key) => match resolved.get(key) {
+                Some(Some(r)) => {
+                    let view = SourceView {
+                        file_path: &r.file_path,
+                        lines: r.text.lines().collect(),
+                        // Reuse the cached link rather than re-canonicalizing
+                        // the same path once per diagnostic.
+                        link: r.link.as_ref().map(|l| LinkTarget {
+                            editor: l.editor,
+                            abs_path: l.abs_path.clone(),
+                        }),
+                    };
+                    format_diagnostic_with_lines(d, &view, &palette)
+                }
+                _ => format_diagnostic_header(d, key.as_str(), &palette),
+            },
+        };
+        output.push(rendered);
     }
 
     let error_count = count_errors(diagnostics);
 
     if error_count > 0 {
         let noun = if error_count == 1 { "error" } else { "errors" };
-        let p = &ctx.palette;
+        let p = &palette;
         output.push(format!(
             "Found {}{}{error_count} {noun}{}",
             p.bold, p.red, p.reset
         ));
     }
 
-    if !output.is_empty() {
-        eprintln!("{}", output.join("\n"));
-    }
+    output.join("\n")
 }

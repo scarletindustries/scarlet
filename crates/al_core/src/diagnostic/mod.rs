@@ -1,7 +1,7 @@
 mod editor;
 mod printer;
 
-pub use printer::print_diagnostics;
+pub use printer::{print_diagnostics, render_diagnostics};
 
 use crate::span::Span;
 
@@ -34,6 +34,12 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub code: DiagnosticCode,
     pub message: String,
+    /// Which module's text `span` points into. `None` means the entry file —
+    /// the source the compile was invoked on. Constructors default to `None`;
+    /// `compile_module_body` stamps every diagnostic raised while an imported
+    /// module is being compiled with that module's key, so the printer never
+    /// renders a span from module A against file B's text.
+    pub source: Option<crate::module::ModuleKey>,
 }
 
 impl Diagnostic {
@@ -43,6 +49,7 @@ impl Diagnostic {
             severity: Severity::Error,
             code,
             message,
+            source: None,
         }
     }
 
@@ -52,6 +59,7 @@ impl Diagnostic {
             severity: Severity::Hint,
             code,
             message,
+            source: None,
         }
     }
 }
