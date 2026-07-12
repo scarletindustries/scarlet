@@ -422,11 +422,12 @@ enum Consumer<'e> {
 /// leaves exactly one value, and cannot be observed out of order: the only
 /// operands that overtake it are `PushLocal`/`PushConst`, which have no
 /// effects. `Ctor`/`Call`/`Closure` allocate or transfer control and are never
-/// hoisted; `Print`/`BinReadUtf8` do not leave exactly one value.
+/// hoisted; a primop that [`Op::pushes_extra`] flags (`Print`/`BinReadUtf8`)
+/// does not leave exactly one value.
 fn is_hoistable(rhs: &Atom) -> bool {
     match rhs {
         Atom::Local(_) | Atom::Const(_) => true,
-        Atom::PrimOp { op, .. } => !pushes_extra(*op),
+        Atom::PrimOp { op, .. } => !op.pushes_extra(),
         Atom::Ctor { .. } | Atom::Closure { .. } | Atom::Call { .. } => false,
     }
 }
@@ -513,15 +514,6 @@ fn split_self_tail_drops(mut e: &CoreExpr) -> Option<(Vec<LocalId>, Vec<LocalId>
         return None;
     }
     Some((now, moved, args))
-}
-
-/// True for the two primops whose lowering is not "push args, dispatch, one
-/// value on the stack": `Print` leaves nothing (emit appends `PushNil`) and
-/// `BinReadUtf8` leaves two words (emit appends `MakeTuple 2`). Neither may
-/// feed the if-condition fusion, which branches on the raw dispatch result.
-#[inline]
-fn pushes_extra(o: Op) -> bool {
-    matches!(o, Op::Print | Op::BinReadUtf8)
 }
 
 /// Whole-body facts gathered in one pre-pass, before a single instruction is
@@ -669,7 +661,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     } = &**body
                         && *cond == bind.id
                         && self.is_single_use_temp(bind.id)
-                        && matches!(rhs, Atom::PrimOp { op, .. } if !pushes_extra(*op))
+                        && matches!(rhs, Atom::PrimOp { op, .. } if !op.pushes_extra())
                     {
                         self.emit_cond_if(rhs, then, els, tail);
                         return;

@@ -1060,8 +1060,7 @@ fn compile_impl(
         // Jump operands are frame-relative, so fusion has to know which frame
         // owns each instruction: `functions` is that map, and the entry frame
         // owns everything the bodies do not.
-        let entry = c.program.entry as usize;
-        fuse(&mut c.program.code, &c.program.functions, entry);
+        fuse(&mut c.program.code, &c.program.functions);
     }
 
     let (references, _facts) = c.finalize_references();

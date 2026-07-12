@@ -21,12 +21,14 @@
 //!    scheduler thread takes a plain `clone()` of the shared program — no
 //!    owned mirror, no per-thread constant re-hydration.
 //!
-//! Adding an opcode touches four places: (1) [`Op::has_jump_target`]'s
+//! Adding an opcode touches five places: (1) [`Op::has_jump_target`]'s
 //! exhaustive match (compile-enforced — a new opcode does not build until its
-//! operand is classified), (2) emission in [`compiler`], (3) dispatch in the
-//! VM's interpreter loop, and (4) [`builtin_op`] name registration if it is
-//! exposed as a `@vm` intrinsic. Heap values the op builds are reference
-//! counted, so it simply allocates its result.
+//! operand is classified), (2) [`Op::pushes_extra`]'s exhaustive match
+//! (likewise compile-enforced — its stack effect must be classified before
+//! `core_ir::emit` may hoist or fuse around it), (3) emission in [`compiler`],
+//! (4) dispatch in the VM's interpreter loop, and (5) [`builtin_op`] name
+//! registration if it is exposed as a `@vm` intrinsic. Heap values the op
+//! builds are reference counted, so it simply allocates its result.
 //!
 //! # Reading order
 //!
@@ -564,6 +566,174 @@ impl Op {
             | Op::FloatFromInt
             | Op::FloatToString
             | Op::Print
+            | Op::StackDepth
+            | Op::Halt
+            | Op::FileRead
+            | Op::FileWrite
+            | Op::TcpListen
+            | Op::TcpAccept
+            | Op::TcpConnect
+            | Op::TcpRead
+            | Op::TcpReadUntil
+            | Op::TcpWrite
+            | Op::TcpWriteParts
+            | Op::TcpClose
+            | Op::TcpCloseServer
+            | Op::TcpLocalAddr
+            | Op::DnsResolve
+            | Op::IpParse
+            | Op::ProcessSpawn
+            | Op::SpawnLocal
+            | Op::SpawnOnEach
+            | Op::Sleep
+            | Op::Monotonic
+            | Op::Argv
+            | Op::EnvMap
+            | Op::MapGet
+            | Op::MapHas
+            | Op::MapKeys
+            | Op::MapValues
+            | Op::MapSize
+            | Op::MapNew
+            | Op::MapSet
+            | Op::MapDelete
+            | Op::MapToList => false,
+        }
+    }
+
+    /// True when this op's lowering is not "push args, dispatch, exactly one
+    /// value on the stack": `Print` leaves nothing (emit appends `PushNil`)
+    /// and `BinReadUtf8` leaves two words (emit appends `MakeTuple 2`).
+    /// `core_ir::emit`'s operand hoisting and if-condition fusion both treat
+    /// a primop as a single-value expression, so they key off this and it is
+    /// the ONE authority on which primops break that shape.
+    ///
+    /// The match is exhaustive on purpose: a new opcode does not compile
+    /// until its stack effect is classified here, rather than defaulting to
+    /// "one value" and silently miscompiling around hoisting/fusion.
+    pub const fn pushes_extra(self) -> bool {
+        match self {
+            Op::Print | Op::BinReadUtf8 => true,
+
+            Op::PushConst
+            | Op::PushLocal
+            | Op::PushGlobal
+            | Op::StoreLocal
+            | Op::PushNil
+            | Op::PushTrue
+            | Op::PushFalse
+            | Op::Pop
+            | Op::Dup
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Neg
+            | Op::AddInt
+            | Op::SubInt
+            | Op::MulInt
+            | Op::DivInt
+            | Op::ModInt
+            | Op::NegInt
+            | Op::AddFloat
+            | Op::SubFloat
+            | Op::MulFloat
+            | Op::DivFloat
+            | Op::NegFloat
+            | Op::AddStr
+            | Op::Eq
+            | Op::Neq
+            | Op::Lt
+            | Op::Gt
+            | Op::Lte
+            | Op::Gte
+            | Op::LtInt
+            | Op::GtInt
+            | Op::LteInt
+            | Op::GteInt
+            | Op::EqInt
+            | Op::NeqInt
+            | Op::LtFloat
+            | Op::GtFloat
+            | Op::LteFloat
+            | Op::GteFloat
+            | Op::Not
+            | Op::Jump
+            | Op::JumpIfFalse
+            | Op::Call
+            | Op::TailCall
+            | Op::CallSelf
+            | Op::TailCallSelf
+            | Op::CallKnown
+            | Op::TailCallKnown
+            | Op::Ret
+            | Op::SubIntLC
+            | Op::AddIntLC
+            | Op::JumpGeIntLC
+            | Op::JumpNeIntLC
+            | Op::Nop
+            | Op::MakeArray
+            | Op::MakeTuple
+            | Op::TupleIndex
+            | Op::MakeRange
+            | Op::Index
+            | Op::IndexOr
+            | Op::ElemAt
+            | Op::ArrayLen
+            | Op::ArraySlice
+            | Op::ArrayConcat
+            | Op::Prepend
+            | Op::SeqDrop
+            | Op::Append
+            | Op::GetField
+            | Op::GetFieldUnchecked
+            | Op::MakeEnumPayload
+            | Op::MatchEnum
+            | Op::UnwrapEnum
+            | Op::SwitchTag
+            | Op::MakeClosure
+            | Op::PushCapture
+            | Op::PushSelf
+            | Op::Drop
+            | Op::Reuse
+            | Op::ToString
+            | Op::StrConcatN
+            | Op::StrSplit
+            | Op::StrLen
+            | Op::StrContains
+            | Op::StrTrim
+            | Op::IntToString
+            | Op::BinFromString
+            | Op::BinToString
+            | Op::BinBitSize
+            | Op::BinByteSize
+            | Op::BinSlice
+            | Op::BinAppend
+            | Op::BinConcatN
+            | Op::BinFromInt
+            | Op::BinReadInt
+            | Op::BinTake
+            | Op::BinMatchPrefix
+            | Op::BinView
+            | Op::BinIndexOf
+            | Op::BinByteAt
+            | Op::BinParseInt
+            | Op::BinEqIgnoreAsciiCase
+            | Op::BinToAsciiLower
+            | Op::BinFromIntAscii
+            | Op::HttpParseHead
+            | Op::HttpFraming
+            | Op::HttpChunkDecode
+            | Op::HttpHeaderGet
+            | Op::HttpHeaderHas
+            | Op::HttpSerializeHead
+            | Op::FloatFloor
+            | Op::FloatCeil
+            | Op::FloatRound
+            | Op::FloatTruncate
+            | Op::FloatFromInt
+            | Op::FloatToString
             | Op::StackDepth
             | Op::Halt
             | Op::FileRead

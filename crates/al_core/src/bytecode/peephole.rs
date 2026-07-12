@@ -17,8 +17,8 @@
 //! executing it. So resolving an operand to a `program.code` index needs the
 //! owning frame, and `program.functions` is the only place that says which
 //! frame owns which instruction. `base_of` records that per instruction: a
-//! function body's own `code_start`, and the entry frame's `code_start` (0)
-//! for everything spliced around those bodies.
+//! function body's own `code_start`, and the entry frame's `code_start` for
+//! everything spliced around those bodies.
 //!
 //! Two rules follow. A window whose interior — every slot after the head — is
 //! a jump target is left unfused: a branch landing on a `Nop` would skip the
@@ -28,13 +28,9 @@
 
 use super::{Function, Instruction, Op, op, op_ab};
 
-pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usize) {
+pub(super) fn fuse(code: &mut [Instruction], functions: &[Function]) {
     let len = code.len();
 
-    debug_assert_eq!(
-        functions[entry].code_start, 0,
-        "entry frame must start at 0; base_of's default fill relies on it"
-    );
     // `Function`'s layout fields are i32 as a cross-crate constraint — the VM
     // in crates/al shares the struct, so widening them to u32 is out of scope
     // here. Negative values would mean a corrupt function table.
@@ -47,20 +43,23 @@ pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usiz
 
     // `base_of[i]` is the `code_start` a jump operand at `code[i]` resolves
     // against. Function bodies are disjoint regions carved out of the entry
-    // frame's stream; the entry frame's own `code_start` is 0 (it runs the
-    // module-init code that precedes every body), which is the default.
+    // frame's stream, and the entry frame — which spans the whole stream, so
+    // has maximal `code_len` — participates in the fill like any other frame:
+    // it is stamped first and every body then overwrites its own range. No
+    // instruction inside a frame ever keeps the placeholder 0, so nothing
+    // depends on the entry frame starting at 0.
     //
     // `functions` may hold more than one entry frame: seeding the precompiled
     // stdlib copies that compile's whole `functions` vec, whose last element is
     // its own `__main__` spanning the entire prelude stream. Filling in
     // descending `code_len` order makes a containing region lose to every
-    // region nested inside it, whatever the iteration order — so a stale entry
-    // frame can never stamp its base over a body's.
+    // region nested inside it, whatever the iteration order — so neither entry
+    // frame can stamp its base over a body's.
     let mut base_of = vec![0i32; len];
     // `code_start >= 0` guards the i32 layout fields (see the debug_assert
     // above): a negative start never names a real region.
     let mut order: Vec<usize> = (0..functions.len())
-        .filter(|&i| i != entry && functions[i].code_len > 0 && functions[i].code_start >= 0)
+        .filter(|&i| functions[i].code_len > 0 && functions[i].code_start >= 0)
         .collect();
     order.sort_by_key(|&i| std::cmp::Reverse(functions[i].code_len));
     for i in order {
@@ -205,7 +204,7 @@ mod tests {
         // against a base of 0 it would point at `code[2]` and the interior
         // would look unreachable.
         let (mut code, functions) = body_and_stale_entry(2);
-        fuse(&mut code, &functions, 2);
+        fuse(&mut code, &functions);
         assert_eq!(
             code[8].op,
             Op::PushLocal,
@@ -236,7 +235,7 @@ mod tests {
             code_start: 0,
             code_len: code.len() as i32,
         }];
-        fuse(&mut code, &functions, 0);
+        fuse(&mut code, &functions);
         assert_eq!(
             code[3].op,
             Op::PushLocal,
@@ -250,7 +249,7 @@ mod tests {
     fn body_window_still_fuses_when_no_interior_target() {
         // `Jump` operand 6 → target `8 + 6 = 14`, outside the window.
         let (mut code, functions) = body_and_stale_entry(6);
-        fuse(&mut code, &functions, 2);
+        fuse(&mut code, &functions);
         assert_eq!(code[8].op, Op::JumpGeIntLC);
         assert_eq!(code[8].operand, 4, "fused operand stays frame-relative");
         assert_eq!(code[9].op, Op::Nop);
