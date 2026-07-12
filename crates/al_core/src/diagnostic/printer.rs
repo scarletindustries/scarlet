@@ -5,8 +5,9 @@ use super::{Diagnostic, Severity, count_errors};
 use crate::term::Palette;
 
 /// A detected editor plus the canonical path to link to. Only constructed
-/// when every precondition holds (color on, editor found, file exists), so
-/// holding one is proof the link can be emitted.
+/// when every precondition holds (color on, editor found, path canonicalized —
+/// which implies the file exists), so holding one is proof the link can be
+/// emitted.
 struct LinkTarget {
     editor: Editor,
     abs_path: String,
@@ -33,11 +34,13 @@ fn get_source_line<'a>(lines: &'a [&'a str], line_number: i32) -> &'a str {
     lines[(line_number - 1) as usize]
 }
 
-fn real_path(file_path: &str) -> String {
+/// The canonicalized absolute path of `file_path`, or `None` if resolution
+/// fails. Canonicalization succeeding implies the file exists and the path is
+/// absolute, so a `Some` is the proof [`LinkTarget`] requires.
+fn canonical_path(file_path: &str) -> Option<String> {
     std::fs::canonicalize(file_path)
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| file_path.to_string())
 }
 
 fn format_diagnostic_with_lines(
@@ -56,7 +59,15 @@ fn format_diagnostic_with_lines(
     let label = severity_label(d.severity);
 
     let display_line = d.span.start_line + 1;
-    let display_col = d.span.start_column + 1;
+    let source_line = get_source_line(lines, display_line);
+    // Span columns count bytes (the scanner bumps the column once per byte),
+    // but printed locations and editor line:col URLs are read as characters —
+    // re-measure the prefix in chars so links land right on non-ASCII lines.
+    let display_col = source_line
+        .get(..d.span.start_column as usize)
+        .map(|s| s.chars().count())
+        .unwrap_or(d.span.start_column as usize) as i32
+        + 1;
     let location = format!("{file_path}:{display_line}:{display_col}");
     let loc = match &ctx.link {
         Some(link) => {
@@ -75,7 +86,6 @@ fn format_diagnostic_with_lines(
     let line_num_width = display_line.to_string().len();
     let padding = " ".repeat(line_num_width);
 
-    let source_line = get_source_line(lines, display_line);
     let _ = writeln!(
         result,
         "{}{display_line}  |{} {source_line}",
@@ -120,12 +130,8 @@ pub fn print_diagnostics(diagnostics: &[Diagnostic], source: &str, file_path: &s
     // Cheap gates first: only detect an editor (which may fork `ps`) when a
     // link could actually be rendered.
     let link = if palette.enabled() {
-        let abs_path = real_path(file_path);
-        if std::path::Path::new(&abs_path).exists() {
-            detect_editor().map(|editor| LinkTarget { editor, abs_path })
-        } else {
-            None
-        }
+        canonical_path(file_path)
+            .and_then(|abs_path| detect_editor().map(|editor| LinkTarget { editor, abs_path }))
     } else {
         None
     };

@@ -23,7 +23,9 @@ pub enum DiagnosticCode {
     TypeError,
     ModuleError,
     UnusedBinding,
-    Other,
+    /// Secondary note pointing at another source location involved in a
+    /// prior diagnostic (e.g. "first defined here").
+    RelatedLocation,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +60,7 @@ pub fn has_errors(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
 }
 
-pub fn count_errors(diagnostics: &[Diagnostic]) -> usize {
+fn count_errors(diagnostics: &[Diagnostic]) -> usize {
     diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
