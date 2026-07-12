@@ -69,6 +69,20 @@ pub fn format(input: &str) -> FormatResult {
         }
     }
 
+    // A spread's `..` token precedes the spread expression's span, so comments
+    // above a `..x` call argument attach to the `..` token, not the token the
+    // AST span starts at. Map each token's start position back to the start of
+    // an immediately preceding `..`, so `call_arg` can query that trivia.
+    let mut dotdot_before: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+    for pair in scanned_tokens.windows(2) {
+        if pair[0].kind == Kind::PuncDotdot {
+            dotdot_before.insert(
+                (pair[1].span.start_line, pair[1].span.start_column),
+                (pair[0].span.start_line, pair[0].span.start_column),
+            );
+        }
+    }
+
     let mut p = parser::new_parser_from_tokens(scanned_tokens, scanner_diagnostics);
     let result = p.parse_program();
 
@@ -82,7 +96,10 @@ pub fn format(input: &str) -> FormatResult {
         return FormatResult::ParseFailed { errors };
     }
 
-    let f = Formatter { trivia_map };
+    let f = Formatter {
+        trivia_map,
+        dotdot_before,
+    };
     let body = f.program(&result.ast, &eof_trivia);
     let mut output = doc::layout(&body, MAX_WIDTH);
     while output.ends_with('\n') {
@@ -91,15 +108,29 @@ pub fn format(input: &str) -> FormatResult {
     output.push('\n');
 
     // Postcondition: every input comment made it into the output. Comments
-    // are emitted verbatim (modulo trailing-whitespace trim), so each text
-    // must appear at least as often as it was scanned. A miss means some
-    // formatter path failed to query trivia — refuse to produce output so
-    // the bug is a no-op instead of deleting the user's comment in place.
-    for (comment, &count) in &expected_comments {
-        if output.matches(comment.as_str()).count() < count {
-            return FormatResult::CommentsLost {
-                comment: comment.clone(),
-            };
+    // are emitted verbatim (modulo trailing-whitespace trim), so re-scanning
+    // the output must find each comment text as trivia at least as often as
+    // it was scanned from the input. Comparing trivia to trivia — never raw
+    // substrings — means a string literal that looks like a comment, or a
+    // longer comment sharing a prefix, cannot mask a real loss. A miss means
+    // some formatter path failed to query trivia — refuse to produce output
+    // so the bug is a no-op instead of deleting the user's comment in place.
+    if !expected_comments.is_empty() {
+        let mut actual_comments: HashMap<String, usize> = HashMap::new();
+        let mut rescan = scanner::new_scanner(output.clone());
+        for tok in rescan.scan_all() {
+            for t in &tok.leading_trivia {
+                if let Some(c) = t.comment_text() {
+                    *actual_comments.entry(c.trim_end().to_string()).or_default() += 1;
+                }
+            }
+        }
+        for (comment, &count) in &expected_comments {
+            if actual_comments.get(comment).copied().unwrap_or(0) < count {
+                return FormatResult::CommentsLost {
+                    comment: comment.clone(),
+                };
+            }
         }
     }
 
@@ -108,6 +139,9 @@ pub fn format(input: &str) -> FormatResult {
 
 struct Formatter {
     trivia_map: HashMap<(i32, i32), Vec<Trivia>>,
+    /// Start position of a `..` token, keyed by the start position of the
+    /// token that immediately follows it. See `format`.
+    dotdot_before: HashMap<(i32, i32), (i32, i32)>,
 }
 
 impl Formatter {
@@ -194,7 +228,11 @@ impl Formatter {
     /// lists (call arguments, array/tuple elements, `<<>>` segments) and the
     /// tokens of an `if`/`else` chain.
     fn comments_before(&self, s: Span) -> Doc {
-        let Some(trivia) = self.trivia_at(s) else {
+        self.comments_before_at((s.start_line, s.start_column))
+    }
+
+    fn comments_before_at(&self, pos: (i32, i32)) -> Doc {
+        let Some(trivia) = self.trivia_map.get(&pos).map(|v| v.as_slice()) else {
             return nil();
         };
         let mut parts = Vec::new();
@@ -649,7 +687,21 @@ impl Formatter {
     }
 
     fn call_arg(&self, a: &ast::CallArg) -> Doc {
-        let comments = self.comments_before(a.span());
+        // `CallArg::Spread`'s span starts at the expression, after the `..`
+        // token — but a comment above the argument attaches to the `..`
+        // token's trivia. Query the `..` position too for spreads (keeping
+        // the expression position for a comment between `..` and operand).
+        let comments = match a {
+            ast::CallArg::Spread(e) => {
+                let start = (e.span().start_line, e.span().start_column);
+                let before_dotdot = self
+                    .dotdot_before
+                    .get(&start)
+                    .map_or(nil(), |&p| self.comments_before_at(p));
+                d![before_dotdot, self.comments_before_at(start)]
+            }
+            _ => self.comments_before(a.span()),
+        };
         let arg = match a {
             ast::CallArg::Positional(e) => self.expr(e),
             ast::CallArg::Labeled { label, value } => {
@@ -678,12 +730,8 @@ impl Formatter {
             (ast::BinKind::Int, Some(e)) => d![text(":size("), self.expr(e), text(")")],
             (ast::BinKind::Binary, None) => text(":binary"),
             (ast::BinKind::Binary, Some(e)) => d![text(":bytes("), self.expr(e), text(")")],
-            (ast::BinKind::Utf8, None) if value_is_string => nil(),
-            (ast::BinKind::Utf8, None) => text(":utf8"),
-            // `parse_bin_size_spec` returns Utf8 only for a bare `:utf8`, with
-            // no size — a sized Utf8 segment cannot be constructed.
-            #[allow(clippy::unreachable)]
-            (ast::BinKind::Utf8, Some(_)) => unreachable!("parser never sizes a utf8 segment"),
+            (ast::BinKind::Utf8, _) if value_is_string => nil(),
+            (ast::BinKind::Utf8, _) => text(":utf8"),
         }
     }
 
@@ -1565,6 +1613,13 @@ mod tests {
     }
 
     #[test]
+    fn call_spread_argument_comments_survive() {
+        let out = fmt("f(\n\t// rest\n\t..args,\n)\n");
+        assert!(out.contains("// rest"), "comment deleted:\n{out}");
+        assert_round_trips(&out);
+    }
+
+    #[test]
     fn tuple_element_comments_survive() {
         let out = fmt("x = (\n\t// left\n\t1,\n\t2,\n)\n");
         assert!(out.contains("// left"), "comment deleted:\n{out}");
@@ -1615,6 +1670,44 @@ mod tests {
             // actually be present in the output.
             FormatResult::Formatted { output } => {
                 assert!(output.contains("// stranded before else"), "{output}")
+            }
+            FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+        }
+    }
+
+    /// A dropped comment whose text also appears inside a string literal must
+    /// still be detected: the postcondition compares rescanned comment trivia,
+    /// never raw substrings, so lookalike text cannot mask a deletion.
+    #[test]
+    fn comment_loss_is_not_masked_by_string_literal() {
+        let src = "s = \"// stranded before else\"\nif a {\n\t1\n}\n// stranded before else\nelse {\n\t2\n}\n";
+        match format(src) {
+            FormatResult::CommentsLost { comment } => {
+                assert_eq!(comment, "// stranded before else")
+            }
+            // If a future change learns to emit this comment too, it must
+            // appear in addition to the string literal.
+            FormatResult::Formatted { output } => {
+                assert!(
+                    output.matches("// stranded before else").count() >= 2,
+                    "{output}"
+                )
+            }
+            FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
+        }
+    }
+
+    /// A dropped comment that is a prefix of a longer, surviving comment must
+    /// still be detected — `// TODO` vs `// TODO: fix` is a common pair.
+    #[test]
+    fn comment_loss_is_not_masked_by_longer_comment() {
+        let src = "// stranded before else and more\nif a {\n\t1\n}\n// stranded before else\nelse {\n\t2\n}\n";
+        match format(src) {
+            FormatResult::CommentsLost { comment } => {
+                assert_eq!(comment, "// stranded before else")
+            }
+            FormatResult::Formatted { output } => {
+                assert!(output.contains("// stranded before else\n"), "{output}")
             }
             FormatResult::ParseFailed { errors } => panic!("parse failed: {errors:?}"),
         }
