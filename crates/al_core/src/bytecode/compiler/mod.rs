@@ -80,8 +80,8 @@ use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::types::{
     AnnotationContext, ArenaSlice, Constraint, DefinitionLocation, EntityKind, Hydrator,
-    InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, Scheme, StrId, Ty, TypeEnv,
-    TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
+    InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink, Scheme, StrId,
+    Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
 };
 
 mod bridges;
@@ -1942,7 +1942,9 @@ impl Compiler {
 
                 let mut b = PatternBindings::new();
                 for (i, pattern) in tdb.patterns.iter().enumerate() {
-                    self.type_pattern(pattern, elem_vars[i], &mut b);
+                    // No usefulness check runs here — the refutability check
+                    // below is syntactic, so an ill-typed pattern is harmless.
+                    let _ = self.type_pattern(pattern, elem_vars[i], &mut b.sink());
                 }
                 self.bind_pattern_initials(&b);
 
@@ -2010,7 +2012,7 @@ impl Compiler {
                 let pattern = cdb.as_pattern();
 
                 let mut b = PatternBindings::new();
-                let typed_ok = self.type_pattern(&pattern, init_ty, &mut b);
+                let typed_ok = self.type_pattern(&pattern, init_ty, &mut b.sink());
 
                 self.bind_pattern_initials(&b);
                 self.type_pattern_sizes(&pattern);
@@ -4572,7 +4574,7 @@ impl Compiler {
             self.push_block_scope();
 
             b.clear();
-            if !self.type_pattern(&arm.pattern, subject_ty, &mut b) {
+            if !self.type_pattern(&arm.pattern, subject_ty, &mut b.sink()) {
                 any_pattern_err = true;
             }
             self.bind_pattern_initials(&b);

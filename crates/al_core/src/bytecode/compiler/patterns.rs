@@ -10,11 +10,12 @@ impl Compiler {
     /// Emits no bytecode. Returns `false` if any unification or binding step
     /// failed; the caller propagates this so that exhaustiveness/usefulness
     /// checks (which assume well-typed patterns) can be skipped.
+    #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
     pub(super) fn type_pattern(
         &mut self,
         pat: &ast::Pattern,
         expected: Ty,
-        b: &mut PatternBindings,
+        b: &mut PatternSink<'_>,
     ) -> bool {
         match pat {
             ast::Pattern::Binary {
@@ -153,13 +154,17 @@ impl Compiler {
                 // pushes a frame whose first alternative establishes the
                 // canonical set; `finish` pops it and folds the bound names
                 // into the enclosing frame so a sibling binding after the
-                // or-pattern still sees them for duplicate detection.
+                // or-pattern still sees them for duplicate detection. Each
+                // non-first alternative takes ownership of the scope and only
+                // its completeness check hands the scope back.
                 let mut or = b.enter_or();
-                let mut ok = self.type_pattern(first, expected, or.bindings());
+                let mut ok = self.type_pattern(first, expected, &mut or.sink());
                 for alt in rest {
                     let mut a = or.enter_alternative();
-                    ok &= self.type_pattern(alt, expected, a.bindings());
-                    ok &= a.finish(alt.span(), &mut self.engine);
+                    ok &= self.type_pattern(alt, expected, &mut a.sink());
+                    let (scope, complete) = a.finish(alt.span(), &mut self.engine);
+                    ok &= complete;
+                    or = scope;
                 }
                 or.finish();
                 ok
@@ -230,7 +235,7 @@ impl Compiler {
         rest: bool,
         span: Span,
         expected: Ty,
-        b: &mut PatternBindings,
+        b: &mut PatternSink<'_>,
     ) -> bool {
         let CtorHead { qualifier, name } = head;
         let ctor = match qualifier {

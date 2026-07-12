@@ -47,11 +47,12 @@ impl OrFrame {
 }
 
 /// Accumulator for variable bindings introduced by a pattern. The compiler
-/// runs `type_pattern` against this, then reads [`bindings`](Self::bindings)
-/// to allocate locals and populate the type environment before compiling the
-/// arm body. Or-patterns push an [`OrFrame`] so nesting — including an
-/// or-pattern inside a *non-first* alternative of an enclosing or — is handled
-/// by the stack rather than by the caller carrying a save/restore token.
+/// runs `type_pattern` against the write view ([`sink`](Self::sink)), then
+/// reads [`bindings`](Self::bindings) to allocate locals and populate the
+/// type environment before compiling the arm body. Or-patterns push an
+/// [`OrFrame`] so nesting — including an or-pattern inside a *non-first*
+/// alternative of an enclosing or — is handled by the stack rather than by
+/// the caller carrying a save/restore token.
 pub struct PatternBindings {
     frames: Vec<OrFrame>,
     initial: IndexMap<String, (Ty, Span)>,
@@ -94,10 +95,19 @@ impl PatternBindings {
         }
     }
 
+    /// The write view `type_pattern` records bindings through. It exposes
+    /// only [`bind`](PatternSink::bind) and [`enter_or`](PatternSink::enter_or)
+    /// — `clear` and the result iterator stay here on the owner, so pattern
+    /// typing cannot reset the accumulator (or read half-built results)
+    /// mid-pattern.
+    pub fn sink(&mut self) -> PatternSink<'_> {
+        PatternSink(self)
+    }
+
     /// Record a binding. Returns `false` (and pushes a diagnostic onto
     /// `engine`) on duplicate-var, extra-var-in-alternative, or a type
     /// mismatch between alternatives.
-    pub fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> bool {
+    fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> bool {
         if name == "_" {
             return true;
         }
@@ -151,7 +161,7 @@ impl PatternBindings {
     /// "exit without enter", and "enter without exit" (including via `?` or
     /// early return while the scope is live) are all unrepresentable at the
     /// call site.
-    pub fn enter_or(&mut self) -> OrScope<'_> {
+    fn enter_or(&mut self) -> OrScope<'_> {
         self.frames.push(OrFrame {
             boundary: self.initial.len(),
             phase: OrPhase::Establishing {
@@ -162,21 +172,47 @@ impl PatternBindings {
     }
 }
 
+/// Write-only view of a [`PatternBindings`], obtained from
+/// [`PatternBindings::sink`], [`OrScope::sink`], or [`Alt::sink`]. Pattern
+/// typing recurses through this view, which can record bindings and open
+/// or-pattern scopes but can neither `clear` the accumulator nor read the
+/// result iterator — so emptying frames out from under a live [`OrScope`] is
+/// unrepresentable.
+pub struct PatternSink<'a>(&'a mut PatternBindings);
+
+impl PatternSink<'_> {
+    /// Record a binding. Returns `false` (and pushes a diagnostic onto
+    /// `engine`) on duplicate-var, extra-var-in-alternative, or a type
+    /// mismatch between alternatives.
+    #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
+    pub fn bind(&mut self, name: &str, ty: Ty, span: Span, engine: &mut InferEngine) -> bool {
+        self.0.bind(name, ty, span, engine)
+    }
+
+    /// Begin typing an or-pattern — see [`OrScope`] for the protocol.
+    pub fn enter_or(&mut self) -> OrScope<'_> {
+        self.0.enter_or()
+    }
+}
+
 /// Scoped protocol handle for one or-pattern, obtained from
-/// [`PatternBindings::enter_or`]. Sub-patterns are typed through
-/// [`bindings`](Self::bindings) (a nested or-pattern pushes and pops its own
-/// frame there, in balanced fashion); dropping the scope pops this or's frame
-/// and folds its bound names into the enclosing frame, so an early return
-/// cannot leave a stale frame behind. [`finish`](Self::finish) is the
-/// explicit spelling of that drop.
+/// [`PatternSink::enter_or`]. Sub-patterns are typed through
+/// [`sink`](Self::sink) (a nested or-pattern pushes and pops its own frame
+/// there, in balanced fashion). Non-first alternatives are entered by
+/// [`enter_alternative`](Self::enter_alternative), which consumes the scope;
+/// the scope only comes back from [`Alt::finish`], so an alternative can
+/// never be left half-open. Dropping the scope pops this or's frame and folds
+/// its bound names into the enclosing frame, so an early return cannot leave
+/// a stale frame behind. [`finish`](Self::finish) is the explicit spelling of
+/// that drop.
 pub struct OrScope<'a> {
     b: &'a mut PatternBindings,
 }
 
-impl OrScope<'_> {
-    /// The underlying accumulator, for typing a pattern inside this or.
-    pub fn bindings(&mut self) -> &mut PatternBindings {
-        self.b
+impl<'a> OrScope<'a> {
+    /// Write view of the accumulator, for typing a pattern inside this or.
+    pub fn sink(&mut self) -> PatternSink<'_> {
+        PatternSink(&mut *self.b)
     }
 
     /// The frame [`PatternBindings::enter_or`] pushed for this scope. It is
@@ -191,13 +227,14 @@ impl OrScope<'_> {
         }
     }
 
-    /// Switch to the next non-first alternative of this or-pattern and return
-    /// the handle the alternative is typed through. The first call freezes
-    /// the first alternative's bindings as the canonical set; subsequent
-    /// calls just reset `seen`. The completeness check ([`Alt::finish`]) only
-    /// exists on the returned handle, so "finish an alternative before
-    /// entering one" fails to compile rather than hitting a runtime assert.
-    pub fn enter_alternative(&mut self) -> Alt<'_> {
+    /// Switch to the next non-first alternative of this or-pattern. Consumes
+    /// the scope: it is held by the returned [`Alt`] and only handed back by
+    /// [`Alt::finish`], so skipping an alternative's completeness check —
+    /// entering the next alternative, or finishing the or, with the previous
+    /// alternative half-open — fails to compile rather than hitting a runtime
+    /// assert. The first call freezes the first alternative's bindings as the
+    /// canonical set; subsequent calls just reset `seen`.
+    pub fn enter_alternative(mut self) -> Alt<'a> {
         let f = self.frame_mut();
         f.phase = match std::mem::replace(
             &mut f.phase,
@@ -217,7 +254,7 @@ impl OrScope<'_> {
                 OrPhase::Checking { canonical, seen }
             }
         };
-        Alt { b: &mut *self.b }
+        Alt { scope: self }
     }
 
     /// Finish typing this or-pattern. Explicit spelling of the scope's drop —
@@ -250,30 +287,35 @@ impl Drop for OrScope<'_> {
 }
 
 /// Handle for typing one non-first alternative of an or-pattern, obtained
-/// from [`OrScope::enter_alternative`]. It mutably reborrows the scope, so
-/// the or-pattern protocol cannot advance (next alternative, finish) until
-/// this alternative's handle is released.
+/// from [`OrScope::enter_alternative`]. It owns the scope, so the or-pattern
+/// protocol cannot advance (next alternative, finish) until this
+/// alternative's completeness check ([`finish`](Self::finish)) has run and
+/// handed the scope back. Dropping the handle drops the scope, so the
+/// early-return path still pops the frame.
 pub struct Alt<'a> {
-    b: &'a mut PatternBindings,
+    scope: OrScope<'a>,
 }
 
-impl Alt<'_> {
-    /// The underlying accumulator, for typing this alternative's pattern.
-    pub fn bindings(&mut self) -> &mut PatternBindings {
-        self.b
+impl<'a> Alt<'a> {
+    /// Write view of the accumulator, for typing this alternative's pattern.
+    pub fn sink(&mut self) -> PatternSink<'_> {
+        PatternSink(&mut *self.scope.b)
     }
 
-    /// Finish typing this alternative. Reports any name from the or's
-    /// canonical set that the branch failed to bind.
+    /// Finish typing this alternative, handing the or-pattern's scope back.
+    /// Reports any name from the or's canonical set that the branch failed to
+    /// bind.
     #[allow(clippy::panic)]
-    pub fn finish(self, alt_span: Span, engine: &mut InferEngine) -> bool {
+    #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
+    pub fn finish(self, alt_span: Span, engine: &mut InferEngine) -> (OrScope<'a>, bool) {
+        let scope = self.scope;
         // `enter_alternative` put the frame in `Checking` and this handle's
-        // borrow keeps every nested scope balanced above it, so the top frame
-        // is ours and checking.
+        // ownership keeps every nested scope balanced above it, so the top
+        // frame is ours and checking.
         let Some(OrFrame {
             phase: OrPhase::Checking { canonical, seen },
             ..
-        }) = self.b.frames.last()
+        }) = scope.b.frames.last()
         else {
             panic!("Alt outlived its frame — compiler bug")
         };
@@ -281,7 +323,7 @@ impl Alt<'_> {
         // Every canonical name is in `initial` (it was inserted while all
         // enclosing frames were establishing), so iterate `initial` for a
         // stable diagnostic order.
-        for name in self.b.initial.keys() {
+        for name in scope.b.initial.keys() {
             if canonical.contains(name) && !seen.contains(name) {
                 engine.error_at_span(
                     format!("Variable '{name}' must be bound in every alternative of this pattern"),
@@ -290,7 +332,7 @@ impl Alt<'_> {
                 ok = false;
             }
         }
-        ok
+        (scope, ok)
     }
 }
 
@@ -318,13 +360,13 @@ mod tests {
         let (mut e, int_ty, sp, mut b) = setup();
         assert!(b.initial.is_empty());
 
-        assert!(b.bind("_", int_ty, sp, &mut e));
+        assert!(b.sink().bind("_", int_ty, sp, &mut e));
         assert!(
             b.initial.is_empty(),
             "'_' must not be recorded as a binding"
         );
 
-        assert!(b.bind("x", int_ty, sp, &mut e));
+        assert!(b.sink().bind("x", int_ty, sp, &mut e));
         assert_eq!(b.initial.len(), 1);
         assert!(e.diagnostics.is_empty(), "no diagnostics expected");
     }
@@ -335,13 +377,14 @@ mod tests {
     fn dropping_or_scope_pops_frame() {
         let (mut e, int_ty, sp, mut b) = setup();
         {
-            let mut or = b.enter_or();
-            assert!(or.bindings().bind("x", int_ty, sp, &mut e));
+            let mut s = b.sink();
+            let mut or = s.enter_or();
+            assert!(or.sink().bind("x", int_ty, sp, &mut e));
         }
         assert!(b.frames.is_empty(), "drop must pop the or frame");
         // `x` is still visible for duplicate detection; fresh names still bind.
-        assert!(!b.bind("x", int_ty, sp, &mut e));
-        assert!(b.bind("y", int_ty, sp, &mut e));
+        assert!(!b.sink().bind("x", int_ty, sp, &mut e));
+        assert!(b.sink().bind("y", int_ty, sp, &mut e));
     }
 
     // An or-pattern alternative may re-bind the canonical name at a unifiable
@@ -350,17 +393,19 @@ mod tests {
     #[test]
     fn or_alternative_rebinds_canonical_name_and_rejects_duplicates() {
         let (mut e, int_ty, sp, mut b) = setup();
-        let mut or = b.enter_or();
+        let mut s = b.sink();
+        let mut or = s.enter_or();
         // First alternative establishes the canonical binding `x`.
-        assert!(or.bindings().bind("x", int_ty, sp, &mut e));
+        assert!(or.sink().bind("x", int_ty, sp, &mut e));
 
         // Second alternative re-binds `x` (canonical, unifiable) — accepted.
         let mut alt = or.enter_alternative();
-        assert!(alt.bindings().bind("x", int_ty, sp, &mut e));
+        assert!(alt.sink().bind("x", int_ty, sp, &mut e));
         // Re-binding `x` again in the *same* alternative is a duplicate.
-        assert!(!alt.bindings().bind("x", int_ty, sp, &mut e));
+        assert!(!alt.sink().bind("x", int_ty, sp, &mut e));
         // `x` was bound, so this alternative is complete.
-        assert!(alt.finish(sp, &mut e));
+        let (or, complete) = alt.finish(sp, &mut e);
+        assert!(complete);
         or.finish();
 
         assert_eq!(e.diagnostics.len(), 1, "exactly the duplicate is reported");
@@ -377,12 +422,16 @@ mod tests {
     fn or_alternative_type_conflict_rejected() {
         let (mut e, int_ty, sp, mut b) = setup();
         let str_ty = e.icon_string();
-        let mut or = b.enter_or();
-        assert!(or.bindings().bind("x", int_ty, sp, &mut e)); // canonical x : Int
+        let mut s = b.sink();
+        let mut or = s.enter_or();
+        assert!(or.sink().bind("x", int_ty, sp, &mut e)); // canonical x : Int
 
         let mut alt = or.enter_alternative();
         // Binding x : String in another alternative cannot unify with Int.
-        assert!(!alt.bindings().bind("x", str_ty, sp, &mut e));
+        assert!(!alt.sink().bind("x", str_ty, sp, &mut e));
+        // The scope is only reachable back through the alternative's finish.
+        let (or, complete) = alt.finish(sp, &mut e);
+        assert!(complete, "`x` was bound (at the wrong type), so complete");
         or.finish();
 
         assert!(
@@ -400,16 +449,20 @@ mod tests {
     fn nested_or_inside_non_first_alternative() {
         let (mut e, int_ty, sp, mut b) = setup();
         // Outer: A(a) | B( C(a) | D(a) )
-        let mut outer = b.enter_or();
-        assert!(outer.bindings().bind("a", int_ty, sp, &mut e)); // A(a)
+        let mut s = b.sink();
+        let mut outer = s.enter_or();
+        assert!(outer.sink().bind("a", int_ty, sp, &mut e)); // A(a)
         let mut oalt = outer.enter_alternative();
-        let mut inner = oalt.bindings().enter_or();
-        assert!(inner.bindings().bind("a", int_ty, sp, &mut e)); // C(a) — must NOT be a duplicate
+        let mut osink = oalt.sink();
+        let mut inner = osink.enter_or();
+        assert!(inner.sink().bind("a", int_ty, sp, &mut e)); // C(a) — must NOT be a duplicate
         let mut ialt = inner.enter_alternative();
-        assert!(ialt.bindings().bind("a", int_ty, sp, &mut e)); // D(a)
-        assert!(ialt.finish(sp, &mut e));
+        assert!(ialt.sink().bind("a", int_ty, sp, &mut e)); // D(a)
+        let (inner, i_complete) = ialt.finish(sp, &mut e);
+        assert!(i_complete);
         inner.finish();
-        assert!(oalt.finish(sp, &mut e));
+        let (outer, o_complete) = oalt.finish(sp, &mut e);
+        assert!(o_complete);
         outer.finish();
 
         assert!(
@@ -426,13 +479,19 @@ mod tests {
     fn nested_or_rejects_duplicate_from_enclosing_alt() {
         let (mut e, int_ty, sp, mut b) = setup();
         // Outer: A(a) | B(a, C(a) | D(a)) — B's first arg and the inner or both bind `a`.
-        let mut outer = b.enter_or();
-        assert!(outer.bindings().bind("a", int_ty, sp, &mut e));
+        let mut s = b.sink();
+        let mut outer = s.enter_or();
+        assert!(outer.sink().bind("a", int_ty, sp, &mut e));
         let mut oalt = outer.enter_alternative();
-        assert!(oalt.bindings().bind("a", int_ty, sp, &mut e)); // B's first arg
-        let mut inner = oalt.bindings().enter_or();
-        assert!(!inner.bindings().bind("a", int_ty, sp, &mut e)); // C(a) — dup of B's first arg
+        assert!(oalt.sink().bind("a", int_ty, sp, &mut e)); // B's first arg
+        let mut osink = oalt.sink();
+        let mut inner = osink.enter_or();
+        assert!(!inner.sink().bind("a", int_ty, sp, &mut e)); // C(a) — dup of B's first arg
         inner.finish();
+        // `outer` is unreachable until `oalt` is finished — the scope only
+        // comes back through the alternative's completeness check.
+        let (outer, o_complete) = oalt.finish(sp, &mut e);
+        assert!(o_complete);
         outer.finish();
 
         assert_eq!(e.diagnostics.len(), 1);
