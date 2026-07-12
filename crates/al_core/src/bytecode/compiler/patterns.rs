@@ -184,7 +184,9 @@ impl Compiler {
     /// `io.NotFound` — the same constructor `import al/io.{NotFound}` would
     /// bring into scope, reached through the module qualifier instead. Returns
     /// `None` when the qualifier is unknown, the member is missing, or it is
-    /// not a constructor; the caller renders the diagnostic.
+    /// not a constructor — and each failure path emits its own diagnostic
+    /// before returning, so the caller must only short-circuit on `None`,
+    /// never report again.
     ///
     /// A private (or `opaque`-hidden) constructor is reported here, so
     /// `match e { id.Id(n) -> n }` gives the same error `id.Id(1)` already

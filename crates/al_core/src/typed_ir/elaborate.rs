@@ -489,10 +489,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     /// The type of the expression the walk enters *next*, without entering it.
     ///
-    /// The two callers need a sub-expression's type before elaborating it (a
-    /// property access's receiver, an `or`'s left side), and in both the check
-    /// walk entered that sub-expression first — so it is the entry under the
-    /// cursor. Entering it (via [`Self::expr`]) still consumes it.
+    /// The three callers need a sub-expression's type before elaborating it
+    /// (a property access's receiver, an `or`'s left side, a `match`
+    /// scrutinee), and in each the check walk entered that sub-expression
+    /// first — so it is the entry under the cursor. Entering it (via
+    /// [`Self::expr`]) still consumes it.
     fn peek_ty(&mut self, at: Span) -> Ty {
         let Some(&WalkStep::Ty(t)) = self.walk_tys.get(self.cursor) else {
             elaborator_bug("sub-expression with no inferred type", at)

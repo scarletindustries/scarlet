@@ -92,8 +92,11 @@ type ReqHead {
 	headers Headers
 }
 
-// The outcome of writing one response: whether the connection may stay alive,
-// and if so, the batch of bytes still queued for the next vectored write.
+// The outcome of writing one response. `respond` owns the close decision
+// end-to-end, so the variants are literal: KeepAlive means the connection WILL
+// be reused and carries the batch of bytes still queued for the next vectored
+// write; Close means it must not be — everything owed has already been flushed
+// (a closing response has no next read boundary for its batch to ride).
 type Sent {
 	KeepAlive(pending Array(Binary))
 	Close
@@ -475,11 +478,11 @@ fn maybe_continue(sock Socket, hdrs Headers) Result(Nil, NetError) {
 	}
 }
 
-// Run the handler, hand the response to `respond`, then decide keep-alive vs
-// close. This is the ONLY place the connection is reused, and it is reached
-// only after the request body was fully read above — so the socket sits
-// exactly at the next request boundary and there is no unconsumed body to be
-// misframed.
+// Run the handler and hand the response to `respond`, which owns the
+// keep-alive vs close decision: Close stops the loop, KeepAlive recurses.
+// This is the ONLY place the connection is reused, and it is reached only
+// after the request body was fully read above — so the socket sits exactly at
+// the next request boundary and there is no unconsumed body to be misframed.
 fn respond_and_continue(
 	sock Socket,
 	leftover_buf Binary,
@@ -493,17 +496,15 @@ fn respond_and_continue(
 	match respond(sock, pending, req.method, req.version, close_after, resp) {
 		Err(e) -> Err(e)
 		Ok(Close) -> Ok(Nil)
-		Ok(KeepAlive(still_pending)) -> if close_after {
-			flush(sock, still_pending)
-		} else {
+		Ok(KeepAlive(still_pending)) ->
 			serve_conn(sock, leftover_buf, leftover_off, head_deadline(), handler, still_pending)
-		}
 	}
 }
 
 // Turn a response into wire bytes with the framing chosen by the body's own
-// constructor. Returns whether the connection may stay alive, and the updated
-// batch of unwritten parts.
+// constructor. Owns `close_after` end-to-end: a closing response is flushed
+// here and reported as Close, a kept-alive one comes back as KeepAlive with
+// the updated batch of unwritten parts — the caller never re-decides.
 //
 // Buffered responses (a Fixed body already in memory — the http.text case —
 // or a bodiless HEAD/204/304 response) are NOT written here: their head +
@@ -549,25 +550,45 @@ fn respond(
 		hdrs = conn_headers(version, close_after, strip_framing(resp.headers))
 		if suppress_body(method, resp.status) {
 			head = h1.serialize_head(resp.status, head_only_headers(method, hdrs, resp.body))
-			Ok(KeepAlive([..pending, head]))
+			finish_buffered(sock, close_after, [..pending, head])
 		} else {
 			match resp.body {
 				Fixed(len, b) ->
-					buffer_body(sock, pending, resp.status, with_length(hdrs, len), len, b)
+					buffer_body(
+						sock,
+						pending,
+						close_after,
+						resp.status,
+						with_length(hdrs, len),
+						len,
+						b,
+					)
 				Unsized(b) -> match version {
 					Http11 -> {
 						chunked = headers.set(hdrs, NAME_TRANSFER_ENCODING, VAL_CHUNKED)
 						match flush(sock, pending) {
 							Err(e) -> Err(e)
-							Ok(
-								_,
-							) -> match body.drain_chunked_with_head(
-								h1.serialize_head(resp.status, chunked),
-								sanitize_trailers(b),
-								sock,
-							) {
-								Ok(_) -> Ok(KeepAlive([]))
-								Err(e) -> Err(e)
+							Ok(_) -> match body.probe(sanitize_trailers(b)) {
+								// The body SOURCE failed on its very first pull,
+								// before this response's head was written: the
+								// framed 500 is still deliverable, so send it
+								// instead of dropping the connection unanswered.
+								Err(_) -> replace_with_500(sock, [])
+								Ok(
+									probed,
+								) -> match body.drain_chunked_with_head(
+									h1.serialize_head(resp.status, chunked),
+									probed,
+									sock,
+								) {
+									Ok(_) -> finish_buffered(sock, close_after, [])
+									// Past the probe the head is on the wire:
+									// whichever side failed, aborting mid-stream
+									// is the only outcome that lets the peer see
+									// the chunked body as truncated.
+									Err(body.SourceFailed(e)) -> Err(e)
+									Err(body.SinkFailed(e)) -> Err(e)
+								}
 							}
 						}
 					}
@@ -575,15 +596,25 @@ fn respond(
 						closing = headers.set(hdrs, NAME_CONNECTION, VAL_CLOSE)
 						match flush(sock, pending) {
 							Err(e) -> Err(e)
-							Ok(
-								_,
-							) -> match body.drain_with_head(
-								h1.serialize_head(resp.status, closing),
-								b,
-								sock,
-							) {
-								Ok(_) -> Ok(Close)
-								Err(e) -> Err(e)
+							Ok(_) -> match body.probe(b) {
+								// Same pre-write window as the chunked arm: the
+								// head has not gone out, a framed 500 still can.
+								Err(_) -> replace_with_500(sock, [])
+								Ok(
+									probed,
+								) -> match body.drain_with_head(
+									h1.serialize_head(resp.status, closing),
+									probed,
+									sock,
+								) {
+									Ok(_) -> Ok(Close)
+									// Mid-stream failure of either side: abort.
+									// (Close-delimited framing means the peer
+									// cannot tell truncation from completion —
+									// an HTTP/1.0 limitation, not a choice.)
+									Err(body.SourceFailed(e)) -> Err(e)
+									Err(body.SinkFailed(e)) -> Err(e)
+								}
 							}
 						}
 					}
@@ -598,6 +629,22 @@ fn respond(
 fn replace_with_500(sock Socket, pending Array(Binary)) Result(Sent, NetError) {
 	reject(sock, pending, 500)
 	Ok(Close)
+}
+
+// Finish a response whose remaining bytes (if any) are batched in `parts`.
+// On keep-alive the batch rides the next vectored write at the next read
+// boundary; a closing connection has no next boundary, so the batch is
+// flushed here and the result says Close — this is where `respond` makes
+// Sent's variants literal.
+fn finish_buffered(sock Socket, close_after Bool, parts Array(Binary)) Result(Sent, NetError) {
+	if close_after {
+		match flush(sock, parts) {
+			Ok(_) -> Ok(Close)
+			Err(e) -> Err(e)
+		}
+	} else {
+		Ok(KeepAlive(parts))
+	}
 }
 
 // The driver owns framing: any Content-Length or Transfer-Encoding the
@@ -661,29 +708,35 @@ fn negative_fixed_length(b ResponseBody) Bool {
 // promise of exactly `len` bytes. The body is dissected here: one already in
 // memory (http.text) just becomes parts; one that keeps producing chunks is a
 // real stream, so everything accumulated so far flushes and the rest drains
-// directly. A body whose bytes contradict `len` before the head has gone out
-// is replaced with a 500-and-close; a stream that turns out short or long
-// AFTER the head (and its Content-Length) is on the wire can only close —
-// keeping the connection would let the next response be read out of frame.
-// The drain is budgeted at the promised remainder, so an over-long stream is
-// cut off at the boundary: no byte past the advertised length is ever sent.
+// directly. Anything that goes wrong before the head is written — the body
+// SOURCE failing outright, or its bytes contradicting `len` — is replaced
+// with a 500-and-close, because nothing of this response is on the wire yet;
+// a stream that fails, turns out short, or overruns AFTER the head (and its
+// Content-Length) is committed can only abort or close — keeping the
+// connection would let the next response be read out of frame. The drain is
+// budgeted at the promised remainder, so an over-long stream is cut off at
+// the boundary: no byte past the advertised length is ever sent.
 fn buffer_body(
 	sock Socket,
 	pending Array(Binary),
+	close_after Bool,
 	status Int,
 	hdrs Headers,
 	len Int,
 	b Body,
 ) Result(Sent, NetError) {
 	match body.take_buffered(b) {
-		Err(e) -> Err(e)
+		// take_buffered only pulls, never writes: this is the body SOURCE
+		// failing while the sink is still untouched, so the framed 500 is
+		// deliverable (and carries the batched responses ahead of it out too).
+		Err(_) -> replace_with_500(sock, pending)
 		Ok(Empty) -> if len == 0 {
-			Ok(KeepAlive([..pending, h1.serialize_head(status, hdrs)]))
+			finish_buffered(sock, close_after, [..pending, h1.serialize_head(status, hdrs)])
 		} else {
 			replace_with_500(sock, pending)
 		}
 		Ok(Whole(data)) -> if binary.byte_size(data) == len {
-			Ok(KeepAlive([..pending, h1.serialize_head(status, hdrs), data]))
+			finish_buffered(sock, close_after, [..pending, h1.serialize_head(status, hdrs), data])
 		} else {
 			replace_with_500(sock, pending)
 		}
@@ -695,8 +748,12 @@ fn buffer_body(
 				match flush(sock, [..pending, h1.serialize_head(status, hdrs), first, second]) {
 					Err(e) -> Err(e)
 					Ok(_) -> match body.drain_counted(rest, sock, len - got) {
-						Err(e) -> Err(e)
-						Ok(body.Complete) -> Ok(KeepAlive([]))
+						// The head and its Content-Length are on the wire:
+						// whichever side failed, nothing framed is deliverable
+						// any more — abort so the peer sees the truncation.
+						Err(body.SourceFailed(e)) -> Err(e)
+						Err(body.SinkFailed(e)) -> Err(e)
+						Ok(body.Complete) -> finish_buffered(sock, close_after, [])
 						// Short or over-long after the head (and its
 						// Content-Length) is on the wire: closing is the only
 						// way to keep the next response in frame.

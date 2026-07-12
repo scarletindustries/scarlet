@@ -8,7 +8,7 @@ use std::net::{TcpListener, TcpStream};
 
 mod common;
 use common::net::spawn_al_server;
-use common::{Project, wait_or_kill};
+use common::{Project, run_outputs, wait_or_kill};
 
 /// AL source that binds `127.0.0.1:0`, prints the `listening <addr>` line
 /// `spawn_al_server` waits for, then runs `body` with `server` in scope.
@@ -692,6 +692,130 @@ fn http_server_connection_close_semantics() {
 
     drop(stream2);
     srv.shutdown_clean(stream);
+}
+
+/// `body.content_length` is a pub entry point, so a caller may hand it a raw
+/// parsed header value: 0 and negative counts must both terminate immediately
+/// with an empty body (the `n <= 0` pattern socket.read_exact documents)
+/// instead of issuing reads against the socket. Nothing is ever sent on the
+/// connected pair here, so a regression shows up as a read error against the
+/// short deadline (or a hang) rather than `empty empty`.
+#[test]
+fn http_body_content_length_non_positive_terminates() {
+    let src = r#"import al/net
+import al/net/socket
+import al/http/body
+import al/binary
+import al/time
+outcome = fn(collected) match collected {
+	Ok(b) -> if binary.byte_size(b) == 0 { 'empty' } else { 'bytes' }
+	Err(_) -> 'error'
+}
+match net.listen('127.0.0.1', 0) {
+	Err(_) -> println('listen failed')
+	Ok(server) -> match net.local_addr(server) {
+		Err(_) -> println('local_addr failed')
+		Ok(addr) -> match net.connect_addr(addr) {
+			Err(_) -> println('connect failed')
+			Ok(_client) -> match net.accept(server) {
+				Err(_) -> println('accept failed')
+				Ok(conn) -> {
+					deadline = time.add_ms(time.monotonic(), 250)
+					zero = outcome(body.collect(body.content_length(conn, 0, deadline), 16))
+					neg = outcome(body.collect(body.content_length(conn, 0 - 1, deadline), 16))
+					println('${zero} ${neg}')
+				}
+			}
+		}
+	}
+}
+"#;
+    run_outputs(src, "empty empty\n");
+}
+
+/// A response body SOURCE that fails before anything was written must yield
+/// the framed 500 (still deliverable — the head never went out), not a
+/// dropped connection. Covers both framing paths: a Fixed body, whose first
+/// pulls happen in take_buffered before any write, and an Unsized body,
+/// probed before its head is serialized. The Fixed case is pipelined behind a
+/// healthy request to prove the batched response ahead of the 500 goes out
+/// with it.
+#[test]
+fn http_server_body_source_failure_yields_framed_500() {
+    let proj = Project::new("io_http_source_500");
+    let src = listening_src(
+        "import al/http.{Response, Fixed, Unsized}\nimport al/net/error.{UnexpectedEof}",
+        r#"http.serve_on(server, fn(req) {
+	match http.path(req) {
+		<<'/fixed'>> -> Response(status: 200, headers: [], body: Fixed(5, fn() Err(UnexpectedEof)))
+		<<'/unsized'>> -> Response(status: 200, headers: [], body: Unsized(fn() Err(UnexpectedEof)))
+		else -> http.text('ok')
+	}
+})"#,
+    );
+    let srv = spawn_al_server(&proj, &src);
+    let mut tmp = [0u8; 64];
+
+    // --- Fixed body source failure, pipelined behind a healthy request -----
+    let mut stream = srv.connect();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /fixed HTTP/1.1\r\nHost: x\r\n\r\n")
+        .expect("write healthy + fixed-failure pipeline");
+    let mut buf = Vec::new();
+    assert_200(
+        &mut stream,
+        &mut buf,
+        b"ok",
+        "response batched ahead of the 500",
+    );
+    let (status, headers, body) = read_one_response(&mut stream, &mut buf);
+    assert!(
+        status.starts_with("HTTP/1.1 500"),
+        "a Fixed body failing pre-write must answer a framed 500, got {status:?}"
+    );
+    assert!(body.is_empty(), "the framed 500 carries no body");
+    assert_eq!(
+        headers.get("connection").map(String::as_str),
+        Some("close"),
+        "the framed 500 must advertise Connection: close"
+    );
+    let n = stream.read(&mut tmp).expect("read after fixed-body 500");
+    assert_eq!(n, 0, "server must close after the framed 500");
+
+    // --- Unsized body source failure ----------------------------------------
+    let mut stream2 = srv.connect();
+    stream2
+        .write_all(b"GET /unsized HTTP/1.1\r\nHost: x\r\n\r\n")
+        .expect("write unsized-failure request");
+    let mut buf2 = Vec::new();
+    let (status2, headers2, _body2) = read_one_response(&mut stream2, &mut buf2);
+    assert!(
+        status2.starts_with("HTTP/1.1 500"),
+        "an Unsized body failing its first pull must answer a framed 500, got {status2:?}"
+    );
+    assert_eq!(
+        headers2.get("connection").map(String::as_str),
+        Some("close")
+    );
+    let n2 = stream2.read(&mut tmp).expect("read after unsized-body 500");
+    assert_eq!(n2, 0, "server must close after the framed 500");
+
+    drop(stream);
+    drop(stream2);
+    // A fresh connection still gets a healthy response: the failed bodies
+    // poisoned nothing beyond their own connections.
+    let mut stream3 = srv.connect();
+    stream3
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .expect("write post-failure GET");
+    let mut buf3 = Vec::new();
+    assert_200(
+        &mut stream3,
+        &mut buf3,
+        b"ok",
+        "fresh connection after failures",
+    );
+    srv.shutdown_clean(stream3);
 }
 
 /// Run `src` under a forced scheduler count, bounded: a wedge is a red test,

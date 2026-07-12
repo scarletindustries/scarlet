@@ -45,15 +45,20 @@ pub fn from_binary(b Binary) Body {
 // A Content-Length-framed reader over `reader`: yields exactly `n` more bytes
 // across as many chunks as the socket hands back, then Done. `n` is threaded
 // immutably — the socket fd is the real cursor — and capped at 64 KiB per read.
-// A peer close before `n` is reached is an error (UnexpectedEof), not a clean
-// end. `deadline` is the ONE absolute deadline for the whole body, taken by
-// the caller when the framing was decided: every read counts against it, so a
-// peer dribbling a byte per read cannot keep resetting the clock — once the
-// deadline passes the next read errs with TimedOut.
+// A non-positive `n` yields Done without touching the socket (the same `n <= 0`
+// termination socket.read_exact documents): this is a pub entry point, so a
+// caller passing a raw parsed header value straight through must not spin the
+// reader forever on a negative count. A peer close before `n` is reached is an
+// error (UnexpectedEof), not a clean end. `deadline` is the ONE absolute
+// deadline for the whole body, taken by the caller when the framing was
+// decided: every read counts against it, so a peer dribbling a byte per read
+// cannot keep resetting the clock — once the deadline passes the next read
+// errs with TimedOut.
 pub fn content_length(reader Socket, n Int, deadline Instant) Body {
-	fn() match n {
-		0 -> Ok(Done([]))
-		else -> match socket.read_until(reader, int.min(n, READ_SIZE), deadline) {
+	fn() if n <= 0 {
+		Ok(Done([]))
+	} else {
+		match socket.read_until(reader, int.min(n, READ_SIZE), deadline) {
 			Ok(Data(chunk)) ->
 				Ok(Chunk(chunk, content_length(reader, n - binary.byte_size(chunk), deadline)))
 			Ok(Closed) -> Err(UnexpectedEof)
@@ -82,7 +87,9 @@ pub type Buffered {
 // bytes with other writes; a body that keeps producing chunks comes back as
 // `Streaming` so the caller can drain it for real. This is what lets a server
 // coalesce a batch of pipelined buffered responses into one vectored write
-// while still streaming the responses that need it.
+// while still streaming the responses that need it. Because this never
+// writes, its Err is by construction a SOURCE failure — the caller's sink is
+// untouched and still usable for an error response.
 pub fn take_buffered(b Body) Result(Buffered, NetError) {
 	match pull(b) {
 		Err(e) -> Err(e)
@@ -95,12 +102,40 @@ pub fn take_buffered(b Body) Result(Buffered, NetError) {
 	}
 }
 
+// Pull a body's first step without consuming it: the returned body replays
+// that step and then continues as before. Lets a caller find out whether the
+// source produces at all BEFORE committing any bytes (e.g. a response head)
+// to the wire — a source that fails on its very first pull surfaces here,
+// while the sink is still untouched and an error response is still
+// deliverable. Like take_buffered, this never writes, so its Err is by
+// construction a source failure.
+pub fn probe(b Body) Result(Body, NetError) {
+	match pull(b) {
+		Ok(step) -> Ok(fn() Ok(step))
+		Err(e) -> Err(e)
+	}
+}
+
+// Which side of a drain failed. A drain couples a SOURCE (the body's pull
+// thunk) to a SINK (the socket): the recovery differs by side — a failed
+// source leaves the socket itself healthy, while a failed sink leaves nothing
+// deliverable — so the error names the side instead of collapsing both into
+// one NetError the caller cannot tell apart.
+pub type DrainError {
+	// The body's pull thunk failed. The socket is untouched by this error,
+	// though bytes written by EARLIER steps of the same drain may already be
+	// on the wire — the caller knows whether the head had gone out.
+	SourceFailed(err NetError)
+	// A socket write failed; the connection is unusable.
+	SinkFailed(err NetError)
+}
+
 // Pump a whole body out to `sock`: pull a chunk, write it, recurse. The write
 // parks on backpressure, so a slow consumer naturally rate-limits the source —
 // the next chunk is not pulled until the previous one has drained. Nothing is
 // buffered: memory stays O(chunk). Trailers on Done are dropped — a raw
 // (non-chunked) body has no wire representation for them.
-pub fn drain(body Body, sock Socket) Result(Nil, NetError) {
+pub fn drain(body Body, sock Socket) Result(Nil, DrainError) {
 	drain_prefixed([], body, sock)
 }
 
@@ -108,7 +143,7 @@ pub fn drain(body Body, sock Socket) Result(Nil, NetError) {
 // vectored write as the first body chunk: a buffered single-chunk response
 // (http.text) reaches the kernel in exactly ONE syscall, head and body
 // together. Subsequent chunks drain as usual.
-pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Nil, NetError) {
+pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Nil, DrainError) {
 	drain_prefixed([head], body, sock)
 }
 
@@ -116,20 +151,20 @@ pub fn drain_with_head(head Binary, body Body, sock Socket) Result(Nil, NetError
 // write — the response head on the first call, `[]` after — so the head rides
 // the same vectored write as the first chunk (or as Done, if the body is
 // empty) without a separate code path per case.
-fn drain_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, NetError) {
+fn drain_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match socket.write_parts(sock, [..prefix, data]) {
 			Ok(_) -> drain_prefixed([], next, sock)
-			Err(e) -> Err(e)
+			Err(e) -> Err(SinkFailed(e))
 		}
 		Ok(Done(_)) -> match prefix {
 			[] -> Ok(Nil)
 			else -> match socket.write_parts(sock, prefix) {
 				Ok(_) -> Ok(Nil)
-				Err(e) -> Err(e)
+				Err(e) -> Err(SinkFailed(e))
 			}
 		}
-		Err(e) -> Err(e)
+		Err(e) -> Err(SourceFailed(e))
 	}
 }
 
@@ -150,11 +185,11 @@ pub type Drained {
 // reports how the body squared with that budget. A chunk that would push past
 // the budget is NOT written — the caller (who already advertised the length on
 // the wire) sees `Overran` without a single unpromised byte having been sent.
-pub fn drain_counted(body Body, sock Socket, limit Int) Result(Drained, NetError) {
+pub fn drain_counted(body Body, sock Socket, limit Int) Result(Drained, DrainError) {
 	drain_counted_from(body, sock, limit, 0)
 }
 
-fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Drained, NetError) {
+fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Drained, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> {
 			total = written + binary.byte_size(data)
@@ -163,7 +198,7 @@ fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Dra
 			} else {
 				match socket.write(sock, data) {
 					Ok(_) -> drain_counted_from(next, sock, limit, total)
-					Err(e) -> Err(e)
+					Err(e) -> Err(SinkFailed(e))
 				}
 			}
 		}
@@ -172,7 +207,7 @@ fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Dra
 		} else {
 			Ok(Short(written))
 		}
-		Err(e) -> Err(e)
+		Err(e) -> Err(SourceFailed(e))
 	}
 }
 
@@ -184,7 +219,7 @@ fn drain_counted_from(body Body, sock Socket, limit Int, written Int) Result(Dra
 // truncate the body. Like `drain`, the write parks on backpressure, so a slow
 // consumer rate-limits the source. Lets an unknown-length body keep the
 // connection alive on HTTP/1.1 instead of framing by close.
-pub fn drain_chunked(body Body, sock Socket) Result(Nil, NetError) {
+pub fn drain_chunked(body Body, sock Socket) Result(Nil, DrainError) {
 	drain_chunked_prefixed([], body, sock)
 }
 
@@ -193,7 +228,7 @@ pub fn drain_chunked(body Body, sock Socket) Result(Nil, NetError) {
 // first chunk, then the stream drains as usual. Empty leading chunks are
 // skipped with the head still pending; a body that ends without producing a
 // chunk writes head + terminator together.
-pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, NetError) {
+pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, DrainError) {
 	drain_chunked_prefixed([head], body, sock)
 }
 
@@ -202,7 +237,7 @@ pub fn drain_chunked_with_head(head Binary, body Body, sock Socket) Result(Nil, 
 // or head + terminator for an empty body) and is `[]` thereafter. Keeping this
 // as one function means the empty-chunk skip and the trailer terminator are
 // implemented once, not once per with_head variant.
-fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, NetError) {
+fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(Nil, DrainError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> match binary.byte_size(data) {
 			0 -> drain_chunked_prefixed(prefix, next, sock)
@@ -210,7 +245,7 @@ fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(N
 				header = binary.append(binary.from_int_ascii(size, Hex), CRLF)
 				match socket.write_parts(sock, [..prefix, header, data, CRLF]) {
 					Ok(_) -> drain_chunked_prefixed([], next, sock)
-					Err(e) -> Err(e)
+					Err(e) -> Err(SinkFailed(e))
 				}
 			}
 		}
@@ -221,10 +256,10 @@ fn drain_chunked_prefixed(prefix Array(Binary), body Body, sock Socket) Result(N
 			}
 			match socket.write_parts(sock, [..prefix, ..terminator]) {
 				Ok(_) -> Ok(Nil)
-				Err(e) -> Err(e)
+				Err(e) -> Err(SinkFailed(e))
 			}
 		}
-		Err(e) -> Err(e)
+		Err(e) -> Err(SourceFailed(e))
 	}
 }
 
