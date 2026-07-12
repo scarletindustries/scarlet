@@ -152,10 +152,16 @@ impl ElabCtx for Compiler {
             // elaboration runs, so a decl's own name is only findable on its
             // `ToplevelDecl`. Reached for an intra-SCC forward ref (a dependee
             // is already bound in the elaborator's own scope and never gets
-            // here).
-            (None, None) if self.outer_scopes.is_empty() => self
-                .decl_denotation(id)
-                .unwrap_or_else(Denotation::self_closure),
+            // here). A name the type env knows but no decl carries is a broken
+            // invariant — a `self_closure` fallback would silently compile a
+            // reference to the wrong value.
+            (None, None) if self.outer_scopes.is_empty() => match self.decl_denotation(id) {
+                Some(den) => den,
+                None => typed_ir::elaborator_bug(
+                    "toplevel name resolves to no decl and no binding",
+                    Span::DUMMY,
+                ),
+            },
             (None, None) => Denotation::self_closure(),
         };
         Some((ty, den))
