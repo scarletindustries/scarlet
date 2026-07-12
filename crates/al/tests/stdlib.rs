@@ -131,6 +131,15 @@ fn stdlib_array() {
          println(array.contains([1, 2], 9))\n",
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
+    // `length` is a plain pub fn wrapping the @vm builtin, so it stays
+    // first-class: usable as a value and passable to higher-order fns.
+    run_outputs(
+        "import al/array\n\
+         f = array.length\n\
+         println(f([1, 2, 3]))\n\
+         println(array.map([[1], [2, 3], []], array.length))\n",
+        "3\n[1, 2, 0]\n",
+    );
 }
 
 run_case! {

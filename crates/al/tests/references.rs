@@ -196,7 +196,7 @@ fn stdlib_import_path_is_tracked() {
 
     // Cross-module goto-def into the stdlib: the cursor on `array.length`
     // resolves to the real `length` declaration in `al/array` (`src/std/al/
-    // array.al`, `pub fn length` — 0-based line 35, the identifier span).
+    // array.al`, `pub fn length` — 0-based line 37, the identifier span).
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
@@ -208,7 +208,7 @@ fn stdlib_import_path_is_tracked() {
     );
     assert_eq!(
         (span.start_line, span.start_column, span.end_column),
-        (35, 7, 13),
+        (37, 7, 13),
         "must land on the real `length` declaration span, got {span:?}"
     );
     // The synthesised stdlib definition and the entry's qualified occurrence

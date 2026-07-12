@@ -33,7 +33,11 @@ pub fn reverse(xs Array(a)) Array(a) {
 }
 
 @vm(array__length)
-pub fn length(xs Array(a)) Int
+fn length_raw(xs Array(a)) Int
+
+pub fn length(xs Array(a)) Int {
+	length_raw(xs)
+}
 
 pub fn contains(xs Array(a), target a) Bool {
 	match xs {

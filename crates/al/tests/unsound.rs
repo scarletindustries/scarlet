@@ -255,10 +255,11 @@ fn u20_arithmetic_is_total_vm_never_exits() {
         ("println({0 - 7} / 2)\n", "-3\n"),
         ("println({0 - 7} % 2)\n", "-1\n"),
         ("println(7 % {0 - 2})\n", "1\n"),
-        // i64::MIN has no positive counterpart: both unary negation and
-        // `int.abs` of it wrap back to itself. The i64::MIN literal is
-        // unrepresentable (it exceeds the lexer's positive-magnitude range),
-        // so reach it via the wrapped `MAX + 1`.
+        // i64::MIN has no positive counterpart: unary negation of it wraps
+        // back to itself, while `int.abs` saturates to Int max — totality is
+        // preserved either way. The i64::MIN literal is unrepresentable (it
+        // exceeds the lexer's positive-magnitude range), so reach it via the
+        // wrapped `MAX + 1`.
         (
             "m = 9223372036854775807 + 1\n\
              println(0 - m)\n",
@@ -268,7 +269,7 @@ fn u20_arithmetic_is_total_vm_never_exits() {
             "import al/int\n\
              m = 9223372036854775807 + 1\n\
              println(int.abs(m))\n",
-            "-9223372036854775808\n",
+            "9223372036854775807\n",
         ),
         // Float overflow to +/-Inf collapses to 0.0 — AL's value space has no
         // Inf/NaN. e-notation does not lex, so reach Inf by squaring: 10^4096
