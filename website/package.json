@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "bun src/index.html",
     "check": "bun scripts/check-examples.ts",
-    "build": "bun scripts/check-examples.ts && bun run build.tsx"
+    "build": "bun run build.tsx"
   },
   "dependencies": {
     "bun-plugin-tailwind": "^0.1.2",
