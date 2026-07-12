@@ -1758,17 +1758,13 @@ impl Value {
                         _life: PhantomData,
                     }),
                     HeapTag::Seq => ValueView::Array(SeqRef { root: self }),
-                    HeapTag::SeqLeaf | HeapTag::SeqBranch => {
-                        debug_assert!(false, "kind() on an interior vector node");
-                        ValueView::Nil
-                    }
+                    HeapTag::SeqLeaf | HeapTag::SeqBranch => view_mismatch("kind"),
                     HeapTag::Map => ValueView::Map(MapRef {
                         obj,
                         _life: PhantomData,
                     }),
                     HeapTag::HamtBranch | HeapTag::HamtEntry | HeapTag::HamtCollision => {
-                        debug_assert!(false, "kind() on an interior map node");
-                        ValueView::Nil
+                        view_mismatch("kind")
                     }
                 }
             }
