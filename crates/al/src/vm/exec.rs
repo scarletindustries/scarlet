@@ -63,8 +63,7 @@
 
 use al_core::bytecode::value::ReuseAddr;
 use al_core::bytecode::{
-    Op, Value, ValueView, enum_hash_with_payload, freed_objects_pending, take_freed_objects,
-    values_equal,
+    Op, Value, ValueView, freed_objects_pending, take_freed_objects, values_equal,
 };
 use al_core::heap::ProcHeap;
 use al_core::static_ir::VariantTemplate;
@@ -1087,7 +1086,7 @@ impl VM {
     /// in place instead of allocating fresh.
     fn make_enum_payload(
         &mut self,
-        prehash_idx: i32,
+        _prehash_idx: i32,
         payload_count: usize,
         with_reuse: bool,
     ) -> VmResult<()> {
@@ -1154,11 +1153,12 @@ impl VM {
         // `enum_name_prefix_hash(enum_name, variant_name)`. Folding only the
         // payload hashes here is bit-identical to hashing the name bytes then
         // the payloads in one pass, without re-walking the static name bytes.
-        // The prehash constant is read by reference — unlike the header it is
-        // never `PushConst`-ed, so there is no extra opcode dispatch, no stack
-        // push/pop, and no per-construction refcount churn on the path.
-        let name_prefix_hash = self.program.constants[prehash_idx as usize].as_int_typed() as u64;
-        let hash = enum_hash_with_payload(name_prefix_hash, &self.stack[payload_base..]);
+        // Hash lazily: `0` marks the cell "not yet hashed"; `EnumRef::hash`
+        // computes and caches on first use. Constructing is orders of
+        // magnitude more common than hashing, and the payload walk here was a
+        // measured ~5% of a keep-alive HTTP request. (The op still carries
+        // its prehash-constant operand; nothing reads it at runtime now.)
+        let hash = 0u64;
         // `enum_name`/`variant_name` are frozen constant-pool `Str` values —
         // stored as single reference words, never copied per construction.
         let v = Value::enum_reuse_in(

@@ -2063,10 +2063,45 @@ impl<'a> EnumRef<'a> {
         // SAFETY: constructed from a tag-checked Enum value.
         unsafe { (payload_word(self.obj, 0) >> 32) as u16 }
     }
+    /// See [`freeze_enum_hash`]: the publish path hashes a cell before it is
+    /// marked immortal, so a frozen cell always carries a nonzero hash and
+    /// the lazy-write guard below is never the load-bearing protection for
+    /// one (it exists for the 2^-64 true-zero case and for defence).
+    /// The raw stored hash word: `0` means "not computed yet" — enum cells
+    /// built on a process heap defer hashing to first use. Frozen cells
+    /// always carry their build-time hash.
     #[inline]
-    pub fn hash(&self) -> u64 {
+    fn stored_hash(&self) -> u64 {
         // SAFETY: as above.
         unsafe { payload_word(self.obj, 1) }
+    }
+
+    /// The value hash, computed on first use and cached in the cell.
+    ///
+    /// Construction outnumbers hashing by orders of magnitude on a server's
+    /// hot path — every `Ok`/`Err`/`Response` is constructed, almost none is
+    /// ever a map key or equality operand — so eagerly hashing the payload at
+    /// construction was a measured ~5% of a keep-alive request. The in-place
+    /// cache write is sound because a process heap has exactly one owner
+    /// thread (shared-nothing); a frozen cell — shared across threads — is
+    /// never written here, because it always carries a nonzero build-time
+    /// hash. A true hash of `0` (one in 2^64) is recomputed per read rather
+    /// than cached.
+    pub fn hash(&self) -> u64 {
+        let stored = self.stored_hash();
+        if stored != 0 {
+            return stored;
+        }
+        let prefix = enum_name_prefix_hash(self.enum_name(), self.variant_name());
+        let h = enum_hash_with_payload(prefix, self.payload());
+        // SAFETY: tag-checked Enum cell; word 1 is the hash slot. The header
+        // read mirrors `payload_word`'s layout (header at word 0).
+        unsafe {
+            if h != 0 && !header_is_immortal(*self.obj) {
+                (self.obj as *mut u64).add(2).write(h);
+            }
+        }
+        h
     }
     /// The `Str` value holding the enum type name (for re-construction).
     #[inline]
@@ -2806,7 +2841,11 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
     }
     match (a.kind(), b.kind()) {
         (ValueView::Enum(ae), ValueView::Enum(be)) => {
-            ae.hash() == be.hash()
+            // Cached-hash inequality is a cheap "not equal"; an uncomputed
+            // side skips the shortcut rather than paying two payload walks
+            // to avoid the one structural walk below.
+            let (ha, hb) = (ae.stored_hash(), be.stored_hash());
+            (ha == 0 || hb == 0 || ha == hb)
                 && ae.type_id() == be.type_id()
                 && ae.variant_name() == be.variant_name()
                 && push_pairs(pending, ae.payload(), be.payload())
@@ -2977,6 +3016,30 @@ pub fn hash_value(v: &Value) -> u64 {
 /// constructor site and the VM folds payloads into it via
 /// [`enum_hash_with_payload`] instead of re-walking the name bytes on every
 /// construction.
+/// Compute-and-cache an Enum cell's hash in place if still unset.
+///
+/// Called by the publish path on the (still-mortal, single-owner) SOURCE cell
+/// right before its image is copied and frozen: a frozen cell is shared
+/// across threads and must never be lazily written afterwards, so the hash
+/// must ride into the frozen image. Hashing the source rather than the copy
+/// makes the result independent of graph-copy order — the copy inherits the
+/// cached word verbatim. Non-enum tags and already-hashed cells are no-ops.
+///
+/// # Safety
+/// `obj` must point at a live heap object (header word first) that the
+/// calling thread owns exclusively — the cell may be written.
+pub unsafe fn freeze_enum_hash(obj: *const u64) {
+    unsafe {
+        if header_tag(*obj) == HeapTag::Enum {
+            let r = EnumRef {
+                obj,
+                _life: std::marker::PhantomData::<&u64>,
+            };
+            let _ = r.hash();
+        }
+    }
+}
+
 pub fn enum_name_prefix_hash(enum_name: &str, variant_name: &str) -> u64 {
     let h = fnv1a_bytes(HASH_BASIS, enum_name.as_bytes());
     fnv1a_bytes(h, variant_name.as_bytes())

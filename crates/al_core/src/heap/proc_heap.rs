@@ -34,8 +34,8 @@ use libmimalloc_sys::mi_free;
 use libmimalloc_sys::mi_malloc_aligned;
 
 use crate::bytecode::value::{
-    Arena, RC_PREFIX_WORDS, Value, binary_clone_backing, for_each_child, header_has_off_heap_link,
-    header_total_words, mark_immortal, rc_increment,
+    Arena, RC_PREFIX_WORDS, Value, binary_clone_backing, for_each_child, freeze_enum_hash,
+    header_has_off_heap_link, header_total_words, mark_immortal, rc_increment,
 };
 use crate::frozen::{FrozenBuilder, FrozenConst};
 
@@ -221,6 +221,12 @@ fn copy_node_into<A: Arena>(
     // then share the off-heap Arc backing if this is a Binary box (which the
     // frozen area, if that is the destination, then holds for the program's life).
     unsafe {
+        if immortal {
+            // A frozen cell is shared across threads and can never be lazily
+            // hashed, so hash the (single-owner) source now: the copy below
+            // carries the cached word into the frozen image.
+            freeze_enum_hash(src_obj);
+        }
         std::ptr::copy_nonoverlapping(src_obj, d.as_ptr(), words);
         if immortal {
             mark_immortal(d.as_ptr());

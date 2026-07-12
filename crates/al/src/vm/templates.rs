@@ -18,7 +18,7 @@
 //! `VM::stdlib_template`, which builds and memoizes an [`EnumTemplate`]
 //! on first use against the same frozen area.
 
-use al_core::bytecode::{Arena, Value, enum_hash_with_payload, enum_name_prefix_hash};
+use al_core::bytecode::{Arena, Value};
 use al_core::frozen::FrozenBuilder;
 use al_core::static_ir::VariantTemplate;
 
@@ -33,8 +33,6 @@ use crate::stdlib;
 pub(super) struct EnumTemplate {
     type_id: al_core::TypeId,
     variant_idx: u16,
-    /// `enum_name_prefix_hash(enum_name, variant_name)`.
-    prefix_hash: u64,
     /// Frozen `Str` value of the enum type name.
     enum_name: Value,
     /// Frozen `Str` value of the variant name.
@@ -47,7 +45,8 @@ impl EnumTemplate {
     /// Build an instance carrying `payload` in `a`. Names and labels are
     /// frozen references, never copied.
     pub(super) fn instantiate<A: Arena + ?Sized>(&self, a: &mut A, payload: &[Value]) -> Value {
-        let hash = enum_hash_with_payload(self.prefix_hash, payload);
+        // Lazy: see `EnumRef::hash` — 0 means "computed on first use".
+        let hash = 0u64;
         Value::enum_in(
             a,
             self.type_id,
@@ -104,7 +103,6 @@ pub(super) fn enum_template(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Enum
     EnumTemplate {
         type_id: t.type_id,
         variant_idx: t.variant_idx,
-        prefix_hash: enum_name_prefix_hash(t.type_name, t.variant_name),
         enum_name: fb.str(t.type_name).into_value(),
         variant_name: fb.str(t.variant_name).into_value(),
         labels: fb.tuple(labels).into_value(),

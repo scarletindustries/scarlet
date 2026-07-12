@@ -338,8 +338,7 @@ fn parse_parts(whole Binary, frac Binary) Option(Decimal) {
 		Ok(w) if k <= 18 -> match binary.parse_int(frac, Dec) {
 			// w * 10^k + f overflows Int exactly when w exceeds
 			// (Int max - f) / 10^k; wrapping would corrupt the value.
-			Ok(f) if w <= { int.max_value - f } / pow10(k) ->
-				Some(Decimal(w * pow10(k) + f, k))
+			Ok(f) if w <= { int.max_value - f } / pow10(k) -> Some(Decimal(w * pow10(k) + f, k))
 			else -> None
 		}
 		else -> None
@@ -418,11 +417,7 @@ fn div_round_huge(n Int, d Int, k Int, mode Rounding) Int {
 			} else {
 				0
 			}
-			Ceiling -> if n < 0 {
-				0
-			} else {
-				1
-			}
+			Ceiling -> if n < 0 { 0 } else { 1 }
 			HalfUp -> if on_half && int.abs(n) >= 5 * pow10(18) {
 				step_away(0, n)
 			} else {
