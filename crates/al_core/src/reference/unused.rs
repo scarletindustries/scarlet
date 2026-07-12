@@ -81,8 +81,9 @@ impl ReferenceGraph {
     ///
     /// The kind filter is load-bearing: the populator records, with
     /// `owner == None`, a `ReferenceKind::Definition` self-occurrence for
-    /// *every* top-level fn/const/type and an `Import`/`Alias` occurrence for
-    /// every import. Rooting on `owner.is_none()` alone would make every
+    /// *every* top-level fn/const/type, an `Import`/`Alias` occurrence for
+    /// every import, and an `ImportItem` binding token for every selective
+    /// import item. Rooting on `owner.is_none()` alone would make every
     /// top-level definition its own reachability root, so no private definition
     /// could ever be reported as dead. Only a real qualified/unqualified use in
     /// the executed body is a root.
@@ -126,11 +127,13 @@ impl ReferenceGraph {
     ///   alias importing the same module is never kept alive (or masked) by a
     ///   use that went through its sibling.
     /// * selective `import a/b.{item}` then `item()`: the item-binding is an
-    ///   `Unqualified` occurrence whose target is the remote `item`, recorded
-    ///   *inside* the declaration span; any use-site occurrence of one of
-    ///   those imported targets *outside* the declaration is a genuine use.
-    ///   al imports bind only within the importing module, so the use is
-    ///   intra-module.
+    ///   [`ReferenceKind::ImportItem`] occurrence whose target is the remote
+    ///   `item`; any use-site occurrence of one of those imported targets is
+    ///   a genuine use (a use site is never a binding token, by kind). al
+    ///   imports bind only within the importing module, so the use is
+    ///   intra-module. The declaration-span containment attributes each
+    ///   binding token to *this* import statement, so a sibling selective
+    ///   import's used items never keep this one alive.
     fn has_real_use(&self, def: &Definition) -> bool {
         let refs = self.references_to(def.defid);
         let direct = refs.iter().any(|r| r.kind.is_use_site());
@@ -146,9 +149,11 @@ impl ReferenceGraph {
         {
             return true;
         }
-        // Selective `import a/b.{item}`: targets bound by this import are the
-        // occurrences nested inside the declaration that resolve somewhere
-        // other than the alias itself.
+        // Selective `import a/b.{item}`: targets bound by this import are its
+        // `ImportItem` binding tokens, plus the local def minted for the `Y`
+        // of an `{X as Y}` item (recorded as an `Alias` occurrence inside the
+        // declaration, targeting the local alias rather than this module
+        // alias).
         let Some(mr) = self.modules.get(&def.defid.module) else {
             return false;
         };
@@ -156,13 +161,19 @@ impl ReferenceGraph {
             .occurrences()
             .iter()
             .map(|o| o.reference)
-            .filter(|r| r.target != def.defid && r.span.within(&decl_span))
+            .filter(|r| {
+                matches!(r.kind, ReferenceKind::ImportItem | ReferenceKind::Alias)
+                    && r.target != def.defid
+                    && r.span.within(&decl_span)
+            })
             .map(|r| r.target)
             .collect();
         !imported.is_empty()
-            && mr.occurrences().iter().map(|o| o.reference).any(|r| {
-                imported.contains(&r.target) && r.kind.is_use_site() && !r.span.within(&decl_span)
-            })
+            && mr
+                .occurrences()
+                .iter()
+                .map(|o| o.reference)
+                .any(|r| imported.contains(&r.target) && r.kind.is_use_site())
     }
 
     /// `Hint` diagnostics for the entry module: unused private definitions and
@@ -406,16 +417,17 @@ mod tests {
     #[test]
     fn unused_diag_unqualified_import_item_used_keeps_import_live() {
         // `import a/b.{used}` then `pub fn main() { used() }`. The item
-        // binding records an `Unqualified` occurrence whose target is the
-        // *remote* `used` def in `a/b` (not the alias), and so does the
-        // `used()` call — the import must still be recognised as used.
+        // binding records an `ImportItem` occurrence whose target is the
+        // *remote* `used` def in `a/b` (not the alias); the `used()` call
+        // records an `Unqualified` use of the same target — the import must
+        // still be recognised as used.
         //
-        // The boundary that tells the item *binding* (inside the declaration)
-        // from the real *use* (outside it) is the alias's `ModuleAlias`
-        // *definition* span, which production records as the full declaration
-        // span. The `Import` *occurrence* covers only the final module-name
-        // segment (`b`), too narrow to contain the binding — modelled here to
-        // prove that narrowing does not regress unused detection.
+        // The binding token is attributed to this import by containment in
+        // the alias's `ModuleAlias` *definition* span, which production
+        // records as the full declaration span. The `Import` *occurrence*
+        // covers only the final module-name segment (`b`), too narrow to
+        // contain the binding — modelled here to prove that narrowing does
+        // not regress unused detection.
         let (mut g, m, _) = main_graph();
         let lib = g.intern_module(&mp(&["a", "b"]));
 
@@ -434,7 +446,7 @@ mod tests {
             // The `Import` occurrence covers only the `b` path segment; the
             // `used` item-binding occurrence sits inside the declaration span.
             add_ref(&mut mr, None, (1, 9, 10), K::Import, alias);
-            add_ref(&mut mr, None, (1, 12, 16), K::Unqualified, remote_used);
+            add_ref(&mut mr, None, (1, 12, 16), K::ImportItem, remote_used);
             let main = add_def(&mut mr, m, "main", 3, EntityKind::Function, true);
             if with_use {
                 // `pub fn main() { used() }` — a real use, outside the
@@ -507,7 +519,7 @@ mod tests {
                 def(lib, 1, 9, 13, EntityKind::ModuleAlias),
             );
             add_ref(&mut mr, None, (1, 17, 18), K::Alias, alias);
-            add_ref(&mut mr, None, (1, 20, 25), K::Unqualified, remote_empty);
+            add_ref(&mut mr, None, (1, 20, 25), K::ImportItem, remote_empty);
             if with_use {
                 // `println(empty())` on line 2 — a real use, outside the
                 // declaration.

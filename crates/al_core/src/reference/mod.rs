@@ -104,6 +104,10 @@ pub enum ReferenceKind {
     Import,
     /// The `as` alias in `import a/b as c` (binds a `ModuleAlias`).
     Alias,
+    /// The item-binding token inside an import list — the `x` of
+    /// `import a/b.{x}`. A reference site for find-references/rename,
+    /// never an evaluating use.
+    ImportItem,
     /// The defining occurrence itself (a `fn`/`type`/`let` name at its
     /// declaration site). Lets goto-def on a declaration resolve to itself
     /// and lets find-references include the definition.
@@ -114,9 +118,9 @@ impl ReferenceKind {
     /// Whether this occurrence is a real *use* in code — a qualified or
     /// unqualified name that evaluates the target — as opposed to a binding
     /// occurrence that merely declares it (`Import` path, `Alias` binding,
-    /// `Definition` self-occurrence) or names a module (`Qualifier`). Drives
-    /// find-references, the xref reverse index, and the unused/dead-code use
-    /// check.
+    /// `ImportItem` binding token, `Definition` self-occurrence) or names a
+    /// module (`Qualifier`). Drives find-references, the xref reverse index,
+    /// and the unused/dead-code use check.
     pub fn is_use_site(self) -> bool {
         matches!(self, ReferenceKind::Qualified | ReferenceKind::Unqualified)
     }
@@ -125,11 +129,14 @@ impl ReferenceKind {
     /// [`is_use_site`](Self::is_use_site): the `b` of `b.add(..)` is a genuine
     /// textual reference to the import alias `b`, so it belongs in the result
     /// even though it is not a *use* for liveness purposes (a `Qualifier` never
-    /// evaluates its target — see [`ReferenceKind::Qualifier`]). Binding
-    /// occurrences (`Import`/`Alias`/`Definition`) stay out: the declaration is
-    /// added separately, under `includeDeclaration`.
+    /// evaluates its target — see [`ReferenceKind::Qualifier`]). Likewise the
+    /// `x` of `import a/b.{x}` (an `ImportItem`) spells the imported symbol's
+    /// name, so find-references and rename must hit the token even though
+    /// merely importing it evaluates nothing. Binding occurrences
+    /// (`Import`/`Alias`/`Definition`) stay out: the declaration is added
+    /// separately, under `includeDeclaration`.
     pub fn is_reference_site(self) -> bool {
-        self.is_use_site() || matches!(self, ReferenceKind::Qualifier)
+        self.is_use_site() || matches!(self, ReferenceKind::Qualifier | ReferenceKind::ImportItem)
     }
 }
 

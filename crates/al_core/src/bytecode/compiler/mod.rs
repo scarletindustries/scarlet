@@ -2172,9 +2172,10 @@ impl Compiler {
                 let vdef = ev.scheme.def;
                 // The `X` token of `{X}` / `{X as Y}` always names the imported
                 // symbol, so it targets X's canonical def — goto-def on it chains
-                // to the real declaration, and renaming X rewrites it.
+                // to the real declaration, and renaming X rewrites it. It is a
+                // binding token, not an evaluating use, hence `ImportItem`.
                 if let Some(dl) = vdef {
-                    item_refs.push((item.name.span, ReferenceKind::Unqualified, dl));
+                    item_refs.push((item.name.span, ReferenceKind::ImportItem, dl));
                 }
                 // An aliased item `{X as Y}` introduces a *new* local name Y.
                 // Mint Y its own DefId so its rename class is separate from X's:
@@ -2229,7 +2230,7 @@ impl Compiler {
                 self.env.store_type_info(&local_name, ti);
                 type_item_refs.push((
                     item.name.span,
-                    ReferenceKind::Unqualified,
+                    ReferenceKind::ImportItem,
                     item.name.name.clone(),
                 ));
                 if let Some(a) = item.alias.as_ref() {

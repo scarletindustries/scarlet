@@ -856,3 +856,66 @@ fn one_used_constructor_is_enough_to_keep_the_type() {
     let s = checked_with(&p, entry);
     assert_no_msg(&unused_msgs(&s), "unused type `Color`");
 }
+
+// ---------------------------------------------------------------------------
+// Selective import item-binding tokens are `ImportItem` occurrences — binding,
+// not use. The `{helper}` token alone must not keep the import alive, and
+// rename of the imported symbol must still rewrite the token.
+// ---------------------------------------------------------------------------
+
+/// `import ./lib.{helper}` whose item is never mentioned again: the binding
+/// token in the import list is not a use, so the import is reported unused.
+/// Adding a real call unflags it (the check is live, not just disabled).
+#[test]
+fn unused_selective_import_item_binding_token_is_not_a_use() {
+    let p = Project::new("selective_unused");
+    p.write("lib.al", "pub fn helper() Int { 7 }\n");
+    let entry = "import ./lib.{helper}\nprintln(1)\n";
+    p.write("a.al", entry);
+    assert_msg_eq(
+        &unused_msgs(&checked_with(&p, entry)),
+        "unused import `lib`",
+    );
+
+    let p2 = Project::new("selective_used");
+    p2.write("lib.al", "pub fn helper() Int { 7 }\n");
+    let used = "import ./lib.{helper}\nprintln(helper())\n";
+    p2.write("a.al", used);
+    assert_no_msg(&unused_msgs(&checked_with(&p2, used)), "unused import");
+}
+
+/// Rename driven from the `{helper}` binding token: the token is still a
+/// reference site, so it resolves for rename and every rewritten span —
+/// declaration in lib, the import token, and the call — spells `helper`.
+#[test]
+fn rename_selective_import_item_rewrites_the_binding_token() {
+    let p = Project::new("selective_rename");
+    let lib = "pub fn helper() Int { 7 }\n";
+    p.write("lib.al", lib);
+    let entry = "import ./lib.{helper}\nx = helper()\nprintln(x)\n";
+    p.write("a.al", entry);
+    let s = checked_with(&p, entry);
+
+    // Cursor on the binding token inside the import list.
+    let (l, c) = cursor(entry, "helper", 1, 1);
+    let (defid, _) = s
+        .prepare_rename("main", l, c)
+        .expect("the `{helper}` token resolves to lib's `helper`");
+    assert_eq!(defid.entity, EntityKind::Function);
+
+    let spans = s.rename(defid);
+    for (m, sp) in &spans {
+        let src = if m.last().map(String::as_str) == Some("lib") {
+            lib
+        } else {
+            entry
+        };
+        assert_eq!(span_text(src, sp), "helper", "at {m:?} {sp:?}");
+    }
+    // Declaration in lib + the import's binding token + the `helper()` call.
+    assert_eq!(
+        spans.len(),
+        3,
+        "rename must cover the declaration, the import token and the use: {spans:?}"
+    );
+}
