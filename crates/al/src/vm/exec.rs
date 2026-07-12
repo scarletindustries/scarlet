@@ -66,6 +66,7 @@ use al_core::bytecode::{
     Op, Value, ValueView, enum_hash_with_payload, freed_objects_pending, take_freed_objects,
     values_equal,
 };
+use al_core::heap::ProcHeap;
 use al_core::static_ir::VariantTemplate;
 use smallvec::SmallVec;
 
@@ -1058,7 +1059,7 @@ impl VM {
         if slot >= self.globals.len() {
             self.globals.resize(slot + 1, Value::nil());
         }
-        let frozen = freeze::freeze_global(&mut self.frozen, self.stack[slot].clone());
+        let frozen = freeze::freeze_global(&mut self.frozen, &self.stack[slot]);
         self.globals[slot] = frozen.value();
         self.runtime.publish_global(slot, frozen);
     }
@@ -1129,11 +1130,16 @@ impl VM {
         let field_labels = match self.label_cache.get(&labels_key) {
             Some(cached) => cached.clone(),
             None => {
-                // The label strings are frozen constants; build the canonical
-                // labels Tuple in the frozen area once per ctor site, shared by
-                // every instance.
-                let labels = expect_string_array(labels_val)?;
-                let tuple = self.frozen.tuple(labels);
+                // The label strings are frozen constants — `publish_frozen`
+                // is a pure passthrough for them, and the only door from a
+                // runtime `Value` to a `FrozenConst` child. The canonical
+                // labels Tuple is built in the frozen area once per ctor
+                // site, shared by every instance.
+                let labels = expect_string_array(labels_val)?
+                    .iter()
+                    .map(|l| ProcHeap::publish_frozen(&mut self.frozen, l))
+                    .collect();
+                let tuple = self.frozen.tuple(labels).into_value();
                 self.label_cache.insert(labels_key, tuple.clone());
                 tuple
             }

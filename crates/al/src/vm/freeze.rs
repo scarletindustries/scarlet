@@ -80,8 +80,8 @@ impl FrozenValue {
 /// This is [`ProcHeap::publish_frozen`] (`rc_publish_graph`): the source graph
 /// is left exactly as it was, immediates and already-frozen pointers come back
 /// unchanged, and `Arc` backings of binaries are bumped, not copied.
-pub(super) fn freeze_global(builder: &mut FrozenBuilder, root: Value) -> FrozenValue {
-    FrozenValue::new(ProcHeap::publish_frozen(builder, root))
+pub(super) fn freeze_global(builder: &mut FrozenBuilder, root: &Value) -> FrozenValue {
+    FrozenValue::new(ProcHeap::publish_frozen(builder, root).into_value())
 }
 
 #[cfg(test)]
@@ -103,7 +103,7 @@ mod tests {
             Value::bool(true),
             Value::nil(),
         ] {
-            let fv = freeze_global(&mut b, v.clone());
+            let fv = freeze_global(&mut b, &v);
             assert_eq!(fv.value().to_bits(), v.to_bits());
         }
     }
@@ -116,7 +116,7 @@ mod tests {
 
         let mut b = builder();
         let before = b.area().words_used();
-        let fv = freeze_global(&mut b, t.clone());
+        let fv = freeze_global(&mut b, &t);
         let loaded = fv.value();
 
         // The load is the published word itself (zero-copy).
@@ -141,9 +141,9 @@ mod tests {
     #[test]
     fn frozen_pointers_are_shared_not_recopied() {
         let mut b = builder();
-        let s = b.str("constant");
+        let s = b.str("constant").into_value();
         let used = b.area().words_used();
-        let fv = freeze_global(&mut b, s.clone());
+        let fv = freeze_global(&mut b, &s);
         assert_eq!(b.area().words_used(), used, "no copy out of the area");
         assert_eq!(fv.value().to_bits(), s.to_bits());
     }
@@ -156,9 +156,9 @@ mod tests {
 
         let mut b = builder();
         let count_before = Arc::strong_count(&backing);
-        // Clone so `bin` (and its box's Arc count) stays live through the
-        // assertion; the real VM likewise freezes a clone of the binding.
-        let fv = freeze_global(&mut b, bin.clone());
+        // The source is only read: `bin` (and its box's Arc count) stays
+        // live through the assertion.
+        let fv = freeze_global(&mut b, &bin);
         let loaded = fv.value();
         let view = loaded.as_binary().expect("frozen binary");
         assert_eq!(view.bit_len(), 8192);

@@ -166,9 +166,9 @@ impl FrozenArea {
         }
     }
 
-    /// Whether `ptr` points into allocated frozen storage. The GC does not
-    /// need this (it skips everything outside the process's own spaces); it
-    /// exists for debug assertions and tests.
+    /// Whether `ptr` points into allocated frozen storage. Reference counting
+    /// never consults this — immortal objects are skipped via the header bit;
+    /// it exists for debug assertions and tests.
     pub fn contains(&self, ptr: *const u64) -> bool {
         let addr = ptr as usize;
         let segments = lock(&self.segments);
@@ -240,6 +240,51 @@ impl fmt::Debug for FrozenArea {
             .field("words_used", &self.words_used())
             .finish()
     }
+}
+
+/// A constant `Value` with frozen provenance: an immediate, or a pointer into
+/// a frozen area — never a mortal process-heap object. Minted only by
+/// [`FrozenBuilder`]'s constant methods and the crate's frozen-publish engine
+/// ([`crate::heap::ProcHeap::publish_frozen`], which deep-copies mortal
+/// graphs into the area), so the aggregate constructors ([`FrozenBuilder::tuple`],
+/// [`FrozenBuilder::enum_`]) can require `FrozenConst` children: storing a
+/// mortal value into a frozen constant — a release-mode dangling pointer once
+/// the owning process heap dies — is a type error instead of a debug-only
+/// assertion.
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct FrozenConst(Value);
+
+impl FrozenConst {
+    /// Borrow the underlying value.
+    pub fn value(&self) -> &Value {
+        &self.0
+    }
+
+    /// Unwrap into the underlying value (e.g. to store in a constant pool).
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+
+    /// Crate-internal mint for the frozen-publish engine
+    /// ([`crate::heap::ProcHeap::publish_frozen`]), whose roots are frozen by
+    /// construction. Deliberately not public: outside this crate a
+    /// `FrozenConst` can only come from a `FrozenBuilder` method or
+    /// `publish_frozen`, both of which build into a frozen area.
+    pub(crate) fn from_publish(v: Value) -> FrozenConst {
+        debug_assert!(
+            !v.is_heap() || v.is_immortal(),
+            "publish produced a mortal value"
+        );
+        FrozenConst(v)
+    }
+}
+
+/// View `FrozenConst` children as the raw `Value` slice the object
+/// constructors take.
+fn frozen_values(items: &[FrozenConst]) -> &[Value] {
+    // SAFETY: `FrozenConst` is `repr(transparent)` over `Value`.
+    unsafe { std::slice::from_raw_parts(items.as_ptr().cast::<Value>(), items.len()) }
 }
 
 /// Intern table for string-aggregate constants, keyed by the aggregate's
@@ -350,8 +395,8 @@ impl FrozenBuilder {
 //
 // Each method writes the constant's `[header][payload…]` object image into
 // the area through the builder's `Arena` impl (the `Value::*_in`
-// constructors in `bytecode::value`) and returns a `Value` holding the
-// frozen pointer; immediates (int/float/bool/nil) have no backing words and
+// constructors in `bytecode::value`) and returns a [`FrozenConst`] holding
+// the frozen pointer; immediates (int/float/bool/nil) have no backing words and
 // the methods exist so constant construction uniformly goes through the
 // builder. String contents — and label lists — are interned, so every
 // constant-pool entry naming the same string (enum names, variant names,
@@ -361,68 +406,67 @@ impl FrozenBuilder {
     /// A frozen Int constant. Small ints are immediates (no backing
     /// allocation); the method exists so constant construction uniformly
     /// goes through the builder.
-    pub fn int(&mut self, i: i64) -> Value {
+    pub fn int(&mut self, i: i64) -> FrozenConst {
         if let Some(v) = self.ints.get(&i) {
-            return v.clone();
+            return FrozenConst(v.clone());
         }
         let v = Value::int_in(self, i);
         // Only a boxed int (outside the NaN-box small range) needs interning;
         // an immediate already dedups by bits in the pool.
-        if !(-(1i64 << 47)..(1i64 << 47)).contains(&i) {
+        if !Value::fits_small_int(i) {
             self.ints.insert(i, v.clone());
         }
-        v
+        FrozenConst(v)
     }
 
     /// A frozen Float constant (immediate; see [`FrozenBuilder::int`]).
-    pub fn float(&mut self, f: f64) -> Value {
-        Value::float(f)
+    pub fn float(&mut self, f: f64) -> FrozenConst {
+        FrozenConst(Value::float(f))
     }
 
     /// A frozen Bool constant (immediate; see [`FrozenBuilder::int`]).
-    pub fn bool(&mut self, b: bool) -> Value {
-        Value::bool(b)
+    pub fn bool(&mut self, b: bool) -> FrozenConst {
+        FrozenConst(Value::bool(b))
     }
 
     /// A frozen string constant: one canonical `Value` per distinct
     /// contents per program. Enum/variant names and field labels all resolve
     /// through here, so every compile-time occurrence of the same name
     /// points at the same frozen allocation.
-    pub fn str(&mut self, s: &str) -> Value {
+    pub fn str(&mut self, s: &str) -> FrozenConst {
         if let Some(v) = self.strs.get(s) {
-            return v.clone();
+            return FrozenConst(v.clone());
         }
         let v = Value::str_in(self, s);
         self.strs.insert(Box::from(s), v.clone());
-        v
+        FrozenConst(v)
     }
 
     /// A frozen all-string array constant (enum field-label lists). Interned
     /// as a unit: every construction site of the same variant shares one
     /// array allocation, and each element shares the canonical interned
     /// string.
-    pub fn str_array(&mut self, items: &[&str]) -> Value {
-        self.intern_str_aggregate(items, |b| &mut b.str_arrays, Value::array_in)
+    pub fn str_array(&mut self, items: &[&str]) -> FrozenConst {
+        FrozenConst(self.intern_str_aggregate(items, |b| &mut b.str_arrays, Value::array_in))
     }
 
-    /// A frozen tuple constant over already-built (frozen) elements. A mortal
-    /// heap element would violate the area's no-process-heap-pointers
-    /// invariant; the constructors debug-assert every stored child is
-    /// immortal.
-    pub fn tuple(&mut self, items: Vec<Value>) -> Value {
-        Value::tuple_in(self, &items)
+    /// A frozen tuple constant. Children carry frozen provenance by type: a
+    /// mortal heap element — which would violate the area's
+    /// no-process-heap-pointers invariant — cannot be passed here.
+    pub fn tuple(&mut self, items: Vec<FrozenConst>) -> FrozenConst {
+        FrozenConst(Value::tuple_in(self, frozen_values(&items)))
     }
 
     /// A frozen binary constant of `bit_len` bits.
-    pub fn binary_bits(&mut self, bytes: Vec<u8>, bit_len: u64) -> Value {
-        Value::binary_bits_in(self, bytes, bit_len)
+    pub fn binary_bits(&mut self, bytes: Vec<u8>, bit_len: u64) -> FrozenConst {
+        FrozenConst(Value::binary_bits_in(self, bytes, bit_len))
     }
 
     /// A frozen enum constant. The names and field labels are interned so
     /// they point at the area's canonical allocations; the hash is computed
     /// exactly the way the VM computes it at construction so equality keeps
-    /// working. `payload` values must already be frozen (debug-asserted by
-    /// the constructors, as for [`FrozenBuilder::tuple`]).
+    /// working. `payload` children carry frozen provenance by type, as for
+    /// [`FrozenBuilder::tuple`].
     pub fn enum_(
         &mut self,
         type_id: crate::type_def::TypeId,
@@ -430,13 +474,14 @@ impl FrozenBuilder {
         enum_name: &str,
         variant_name: &str,
         field_labels: &[&str],
-        payload: Vec<Value>,
-    ) -> Value {
-        let hash = enum_hash_with_payload(enum_name_prefix_hash(enum_name, variant_name), &payload);
-        let en = self.str(enum_name);
-        let vn = self.str(variant_name);
+        payload: Vec<FrozenConst>,
+    ) -> FrozenConst {
+        let payload = frozen_values(&payload);
+        let hash = enum_hash_with_payload(enum_name_prefix_hash(enum_name, variant_name), payload);
+        let en = self.str(enum_name).into_value();
+        let vn = self.str(variant_name).into_value();
         let labels_tuple = self.label_tuple(field_labels);
-        Value::enum_in(
+        FrozenConst(Value::enum_in(
             self,
             type_id,
             variant_idx,
@@ -444,8 +489,8 @@ impl FrozenBuilder {
             en,
             vn,
             labels_tuple,
-            &payload,
-        )
+            payload,
+        ))
     }
 
     /// The canonical frozen labels reference for enum objects. An enum
@@ -472,7 +517,7 @@ impl FrozenBuilder {
         if let Some(v) = map(self).get(&BorrowedStrs(items)) {
             return v.clone();
         }
-        let elems: Vec<Value> = items.iter().map(|s| self.str(s)).collect();
+        let elems: Vec<Value> = items.iter().map(|s| self.str(s).into_value()).collect();
         let v = construct(self, &elems);
         let key: Box<[Box<str>]> = items.iter().map(|&s| Box::from(s)).collect();
         map(self).insert(key, v.clone());
@@ -691,10 +736,14 @@ mod tests {
         let a1 = b.str("Some");
         let a2 = b.str("Some");
         let other = b.str("None");
-        assert_eq!(a1.as_str(), Some("Some"));
-        assert_eq!(addr(&a1), addr(&a2), "same contents, same allocation");
-        assert_ne!(addr(&a1), addr(&other));
-        assert!(area.contains(addr(&a1) as *const u64));
+        assert_eq!(a1.value().as_str(), Some("Some"));
+        assert_eq!(
+            addr(a1.value()),
+            addr(a2.value()),
+            "same contents, same allocation"
+        );
+        assert_ne!(addr(a1.value()), addr(other.value()));
+        assert!(area.contains(addr(a1.value()) as *const u64));
         // Interning means no second allocation: the area holds exactly the
         // words of "Some" and "None".
         let words = area.words_used();
@@ -709,13 +758,17 @@ mod tests {
         let l1 = b.str_array(&["host", "port"]);
         let l2 = b.str_array(&["host", "port"]);
         let l3 = b.str_array(&["host"]);
-        assert_eq!(addr(&l1), addr(&l2), "same contents, same array");
-        assert_ne!(addr(&l1), addr(&l3));
-        assert!(area.contains(addr(&l1) as *const u64));
+        assert_eq!(
+            addr(l1.value()),
+            addr(l2.value()),
+            "same contents, same array"
+        );
+        assert_ne!(addr(l1.value()), addr(l3.value()));
+        assert!(area.contains(addr(l1.value()) as *const u64));
         // Elements share the canonical interned strings.
-        let elem = l1.as_array().unwrap().get(0).unwrap();
+        let elem = l1.value().as_array().unwrap().get(0).unwrap();
         assert_eq!(elem.as_str(), Some("host"));
-        assert_eq!(addr(&elem), addr(&b.str("host")));
+        assert_eq!(addr(&elem), addr(b.str("host").value()));
     }
 
     /// Enum constants built through the builder carry interned names/labels:
@@ -741,9 +794,9 @@ mod tests {
             &["user", "pass"],
             vec![],
         );
-        assert_ne!(addr(&v1), addr(&v2), "distinct enum objects");
-        assert!(area.contains(addr(&v1) as *const u64));
-        let (e1, e2) = (v1.as_enum().unwrap(), v2.as_enum().unwrap());
+        assert_ne!(addr(v1.value()), addr(v2.value()), "distinct enum objects");
+        assert!(area.contains(addr(v1.value()) as *const u64));
+        let (e1, e2) = (v1.value().as_enum().unwrap(), v2.value().as_enum().unwrap());
         assert_eq!(e1.enum_name(), "Credentials");
         assert_eq!(e1.variant_name(), "Basic");
         assert_eq!(e1.field_labels()[1].as_str(), Some("pass"));
@@ -755,7 +808,10 @@ mod tests {
             addr(&e2.variant_name_value())
         );
         assert_eq!(addr(&e1.labels_value()), addr(&e2.labels_value()));
-        assert_eq!(addr(&e1.enum_name_value()), addr(&b.str("Credentials")));
+        assert_eq!(
+            addr(&e1.enum_name_value()),
+            addr(b.str("Credentials").value())
+        );
         assert!(area.contains(addr(&e1.labels_value()) as *const u64));
     }
 }

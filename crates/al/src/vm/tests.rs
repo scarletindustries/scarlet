@@ -131,7 +131,13 @@ fn range_index_and_len_do_not_overflow() {
     // `(5..10)[idx]` via Op::Index.
     let index_at = |idx: i64| -> (Value, VM) {
         run_fn(
-            move |f| vec![f.int(5), f.int(10), f.int(idx)],
+            move |f| {
+                vec![
+                    f.int(5).into_value(),
+                    f.int(10).into_value(),
+                    f.int(idx).into_value(),
+                ]
+            },
             vec![
                 op_arg(Op::PushConst, 0),
                 op_arg(Op::PushConst, 1),
@@ -156,7 +162,7 @@ fn range_index_and_len_do_not_overflow() {
     // `len(i64::MIN..i64::MAX)` via Op::ArrayLen: `end - start` overflows,
     // so the length must saturate to i64::MAX instead of panicking/wrapping.
     let (len, _vm) = run_fn(
-        |f| vec![f.int(i64::MIN), f.int(i64::MAX)],
+        |f| vec![f.int(i64::MIN).into_value(), f.int(i64::MAX).into_value()],
         vec![
             op_arg(Op::PushConst, 0),
             op_arg(Op::PushConst, 1),
@@ -241,7 +247,7 @@ fn superinstr_add_int_lc_adds_local_and_const_with_wrapping() {
     // local[0] = constants[0]; AddIntLC pushes local[0] + constants[1].
     let add = |local: i64, c: i64| -> Option<i64> {
         let (v, _vm) = run_fn(
-            move |f| vec![f.int(local), f.int(c)],
+            move |f| vec![f.int(local).into_value(), f.int(c).into_value()],
             vec![
                 op_arg(Op::PushConst, 0),
                 op_arg(Op::StoreLocal, 0),
@@ -266,7 +272,7 @@ fn superinstr_sub_int_lc_subtracts_const_from_local_with_wrapping() {
     // local[0] = constants[0]; SubIntLC pushes local[0] - constants[1].
     let sub = |local: i64, c: i64| -> Option<i64> {
         let (v, _vm) = run_fn(
-            move |f| vec![f.int(local), f.int(c)],
+            move |f| vec![f.int(local).into_value(), f.int(c).into_value()],
             vec![
                 op_arg(Op::PushConst, 0),
                 op_arg(Op::StoreLocal, 0),
@@ -290,10 +296,10 @@ fn jump_lc_taken(jump_op: Op, local: i64, c: i64) -> bool {
     let (r, _vm) = run_fn(
         move |f| {
             vec![
-                f.int(local),        // 0: local value
-                f.int(c),            // 1: compared constant
-                Value::small_int(0), // 2: fall-through marker (not taken)
-                Value::small_int(1), // 3: jump-target marker (taken)
+                f.int(local).into_value(), // 0: local value
+                f.int(c).into_value(),     // 1: compared constant
+                Value::small_int(0),       // 2: fall-through marker (not taken)
+                Value::small_int(1),       // 3: jump-target marker (taken)
             ]
         },
         vec![

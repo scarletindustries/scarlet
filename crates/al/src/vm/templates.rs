@@ -100,14 +100,14 @@ pub(super) struct PreludeTemplates {
 /// intern its names and labels in the frozen area and precompute the
 /// name-prefix hash.
 pub(super) fn enum_template(fb: &mut FrozenBuilder, t: &VariantTemplate) -> EnumTemplate {
-    let labels: Vec<Value> = t.labels.iter().map(|l| fb.str(l)).collect();
+    let labels = t.labels.iter().map(|l| fb.str(l)).collect();
     EnumTemplate {
         type_id: t.type_id,
         variant_idx: t.variant_idx,
         prefix_hash: enum_name_prefix_hash(t.type_name, t.variant_name),
-        enum_name: fb.str(t.type_name),
-        variant_name: fb.str(t.variant_name),
-        labels: fb.tuple(labels),
+        enum_name: fb.str(t.type_name).into_value(),
+        variant_name: fb.str(t.variant_name).into_value(),
+        labels: fb.tuple(labels).into_value(),
     }
 }
 

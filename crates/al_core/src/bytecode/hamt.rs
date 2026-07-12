@@ -32,7 +32,7 @@
 
 use super::value::{
     Arena, HamtMapRef, HamtNodeRef, MapRef, Value, hamt_branch_in, hamt_collision_in,
-    hamt_entry_in, hamt_map_in, hash_value, values_equal,
+    hamt_entry_in, hamt_map_in, hash_value, map_entry_hash, values_equal,
 };
 
 /// Hash bits consumed per trie level (32-way branching).
@@ -421,10 +421,21 @@ pub fn hamt_hash(m: MapRef<'_>) -> u64 {
     let root = m.as_hamt().root;
     for_each_entry(&root, &mut |k, v| {
         // Per-entry hash combines key and value; the cross-entry fold is
-        // commutative so insertion order does not matter.
-        acc = acc.wrapping_add(hash_value(&k).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ hash_value(&v));
+        // commutative so insertion order does not matter. `map_entry_hash` is
+        // shared with the `Env` backing's fold so equal maps hash identically
+        // across backings.
+        acc = acc.wrapping_add(map_entry_hash(hash_value(&k), hash_value(&v)));
     });
     acc
+}
+
+/// Whether a HAMT-backed map holds exactly `size` entries, every one of which
+/// satisfies `f`. Serves the cross-backing (`Env` vs `Hamt`) arm of
+/// [`super::value::values_equal`], which probes the process environment per
+/// entry instead of materializing it.
+pub fn hamt_matches(m: MapRef<'_>, size: usize, mut f: impl FnMut(Value, Value) -> bool) -> bool {
+    let h = m.as_hamt();
+    h.size == size && try_for_each_entry(&h.root, &mut f)
 }
 
 /// Structural equality of two HAMT-backed maps. The caller has already

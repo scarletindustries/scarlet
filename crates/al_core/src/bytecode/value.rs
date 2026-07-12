@@ -375,9 +375,11 @@ fn alloc_obj<A: Arena + ?Sized>(
 /// `*_reuse_in` constructors are therefore safe to call from the
 /// `#![deny(unsafe_code)]` VM crate.
 ///
-/// Owns the cell's rc==1 count while held. NOT `Drop`: an unconsumed
-/// `Some(addr)` would leak the cell — every `ReuseAddr` is passed straight to
-/// a constructor, which either overwrites it (reuse) or ignores it (`None`).
+/// Owns the cell's rc==1 count while held: `Drop` frees the cell, so a token
+/// that never reaches a constructor (e.g. a VM handler erroring out between
+/// popping the token and building) releases its allocation instead of leaking
+/// it. The hot path pays nothing — [`reuse_or_alloc`] consumes the address
+/// via `take`, so a consumed token drops as `None`.
 #[derive(Debug)]
 pub struct ReuseAddr(Option<NonNull<u64>>);
 
@@ -386,6 +388,19 @@ impl ReuseAddr {
     #[inline(always)]
     pub const fn none() -> ReuseAddr {
         ReuseAddr(None)
+    }
+}
+
+impl Drop for ReuseAddr {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            // SAFETY: a `Some` address is only produced by `into_reuse_addr`
+            // from a live, uniquely-owned (rc==1) mortal cell that
+            // `hollow_for_reuse` already stripped of children, so freeing the
+            // object is the whole release (`free_object` walks no child
+            // slots, and does drop a Binary's off-heap backing).
+            unsafe { free_object(p.as_ptr()) };
+        }
     }
 }
 
@@ -411,11 +426,13 @@ impl ReuseAddr {
 #[inline]
 fn reuse_or_alloc<A: Arena + ?Sized>(
     a: &mut A,
-    reuse: ReuseAddr,
+    mut reuse: ReuseAddr,
     tag: HeapTag,
     payload_words: usize,
 ) -> NonNull<u64> {
-    let Some(obj) = reuse.0 else {
+    // `take` consumes the address so the token's `Drop` (the unconsumed-token
+    // backstop) sees `None` and costs nothing here.
+    let Some(obj) = reuse.0.take() else {
         return alloc_obj(a, tag, payload_words, false);
     };
     // SAFETY: `ReuseAddr(Some(_))` is only produced by `into_reuse_addr` from
@@ -2605,6 +2622,62 @@ fn hash_int(i: i64) -> u64 {
     fnv1a_combine(HASH_BASIS, i as u64)
 }
 
+/// The [`hash_value`] of a `Str` holding `s`, computable without a `Value`:
+/// length plus a sampled byte prefix/suffix, so equal strings hash equally and
+/// hashing stays O(1) in string size. The `Str` arm of `hash_value` delegates
+/// here, so string contents hash one way everywhere (in particular, the `Env`
+/// map fold hashes host strings exactly like arena `Str` values).
+#[inline]
+fn hash_str(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let h = fnv1a_combine(HASH_BASIS, bytes.len() as u64);
+    fnv1a_bytes_sampled(h, bytes.len(), |i| bytes[i])
+}
+
+/// Per-entry combine for a map's order-independent entry fold. Both map
+/// backings fold `map_entry_hash` of every entry with `wrapping_add`
+/// ([`super::hamt::hamt_hash`] and [`env_map_hash`]), so maps holding equal
+/// entries hash identically regardless of backing or insertion order.
+#[inline]
+pub(crate) fn map_entry_hash(key_hash: u64, value_hash: u64) -> u64 {
+    key_hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ value_hash
+}
+
+/// Order-independent entry fold of the `Env` map view — the live process
+/// environment as `(String, String)` pairs. Entries not valid UTF-8 (key or
+/// value) are invisible to the `Map(String, String)` view, so they are
+/// skipped, matching the VM's `Env` reads. The environment is written only
+/// before the program starts (nothing in the runtime mutates it), so the fold
+/// is stable for the program's lifetime.
+fn env_map_hash() -> u64 {
+    let mut acc = 0u64;
+    for (k, v) in std::env::vars_os() {
+        if let (Some(k), Some(v)) = (k.to_str(), v.to_str()) {
+            acc = acc.wrapping_add(map_entry_hash(hash_str(k), hash_str(v)));
+        }
+    }
+    acc
+}
+
+/// Structural equality of the live process-environment view against a
+/// HAMT-backed map: the same entry count, and every HAMT entry is a
+/// `(Str, Str)` pair present in the environment with an equal value. Count
+/// equality plus containment is a bijection because HAMT keys are distinct.
+/// Non-UTF-8 environment entries are excluded, as in [`env_map_hash`].
+fn env_equals_hamt(m: MapRef<'_>) -> bool {
+    let env_len = std::env::vars_os()
+        .filter(|(k, v)| k.to_str().is_some() && v.to_str().is_some())
+        .count();
+    super::hamt::hamt_matches(m, env_len, |k, v| match (k.as_str(), v.as_str()) {
+        // `env::var` may panic on names no environment can contain (empty,
+        // `=`, NUL) — such a key is simply absent, never a panic.
+        (Some(k), Some(v)) if !k.is_empty() && !k.contains(['=', '\0']) => {
+            std::env::var(k).is_ok_and(|ev| ev == v)
+        }
+        _ => false,
+    })
+}
+
 /// Hash a sequence from its length and a bounded prefix of its element hashes.
 /// A `Range(s, e)` and the array it materialises to (`[s, s+1, …, e-1]`) have
 /// the same length and the same leading elements, so they hash identically.
@@ -2636,7 +2709,9 @@ pub fn range_len(s: i64, e: i64) -> i64 {
 /// AL structural equality — the semantics of `==`. Lives here (not in the VM)
 /// because it is the partner of [`hash_value`] and both are needed by
 /// [`super::hamt`] to key the persistent map. Ranges and arrays compare by
-/// their elements; maps compare structurally regardless of internal order.
+/// their elements; maps compare structurally regardless of internal order or
+/// backing — an `Env`-backed map (the live view of the process environment)
+/// equals a HAMT holding exactly the environment's entries.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     // Bit-identical words are always equal: immediates are their value, heap
     // words name the same object, and a real NaN never enters the box.
@@ -2690,8 +2765,13 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         }
         (ValueView::Map(am), ValueView::Map(bm)) => match (am.backing(), bm.backing()) {
             (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm),
+            // Two `Env` views read through to the same live process
+            // environment.
             (MapBacking::Env, MapBacking::Env) => true,
-            _ => false,
+            // Cross-backing: compare the environment's entries against the
+            // HAMT's, entry-wise.
+            (MapBacking::Env, MapBacking::Hamt) => env_equals_hamt(bm),
+            (MapBacking::Hamt, MapBacking::Env) => env_equals_hamt(am),
         },
         _ => false,
     }
@@ -2720,11 +2800,7 @@ pub fn hash_value(v: &Value) -> u64 {
             h = fnv1a_combine(h, if b { 1 } else { 0 });
         }
         ValueView::Str(s) => {
-            // Length plus a sampled prefix/suffix: equal strings hash equally
-            // and construction stays O(1) in string size.
-            let bytes = s.as_bytes();
-            h = fnv1a_combine(h, bytes.len() as u64);
-            h = fnv1a_bytes_sampled(h, bytes.len(), |i| bytes[i]);
+            h = hash_str(s);
         }
         ValueView::Enum(e) => {
             h = e.hash();
@@ -2787,14 +2863,16 @@ pub fn hash_value(v: &Value) -> u64 {
             h = fnv1a_combine(h, 0);
         }
         ValueView::Map(m) => {
-            // Fold the backing, then — for a HAMT — every entry through an
-            // order-independent combine, so two equal maps built by different
-            // insertion orders hash alike. The `Env` view carries no entries.
-            h = fnv1a_combine(h, m.backing() as u64);
-            match m.backing() {
-                MapBacking::Hamt => h = h.wrapping_add(super::hamt::hamt_hash(m)),
-                MapBacking::Env => {}
-            }
+            // Maps compare structurally across backings (`values_equal`), so
+            // both backings fold every entry through the same order-independent
+            // [`map_entry_hash`] combine — and the backing tag itself is NOT
+            // folded: an `Env` view and a HAMT holding the same entries must
+            // hash identically. `wrapping_add` keeps the cross-entry fold
+            // commutative, so insertion order does not matter either.
+            h = h.wrapping_add(match m.backing() {
+                MapBacking::Hamt => super::hamt::hamt_hash(m),
+                MapBacking::Env => env_map_hash(),
+            });
         }
     }
     h
@@ -2845,7 +2923,7 @@ mod tests {
         // The same shape built into the frozen area is immortal.
         let area = Arc::new(FrozenArea::new());
         let mut b = area.builder();
-        let frozen = b.int(i64::MAX);
+        let frozen = b.int(i64::MAX).into_value();
         assert!(frozen.is_heap());
         assert!(frozen.is_immortal());
         // Tag/length are still decoded correctly with bit 7 set.
@@ -3120,6 +3198,62 @@ mod tests {
             &payload,
         );
         assert_ne!(fresh.object_addr().unwrap(), addr);
+    }
+
+    /// Cross-backing map equality: the `Env` view equals a HAMT holding
+    /// exactly the environment's entries, and equal maps hash identically.
+    #[test]
+    fn env_map_equals_hamt_with_same_entries() {
+        use crate::bytecode::hamt;
+
+        let mut h = test_heap();
+        let env = Value::env_map_in(&mut h);
+        let mut m = hamt::empty(&mut h);
+        for (k, v) in std::env::vars_os() {
+            let (Ok(k), Ok(v)) = (k.into_string(), v.into_string()) else {
+                continue;
+            };
+            let kv = Value::str_in(&mut h, &k);
+            let vv = Value::str_in(&mut h, &v);
+            let hash = hash_value(&kv);
+            m = hamt::insert(&mut h, &m, kv, vv, hash);
+        }
+        assert!(values_equal(&env, &m), "env view == same-entry HAMT");
+        assert!(values_equal(&m, &env), "and symmetrically");
+        assert_eq!(
+            hash_value(&env),
+            hash_value(&m),
+            "equal values hash identically"
+        );
+
+        // A differing entry breaks equality both ways.
+        let kv = Value::str_in(&mut h, "__al_env_eq_test_key__");
+        let vv = Value::str_in(&mut h, "x");
+        let hash = hash_value(&kv);
+        let m2 = hamt::insert(&mut h, &m, kv, vv, hash);
+        assert!(!values_equal(&env, &m2));
+        assert!(!values_equal(&m2, &env));
+    }
+
+    /// The `Drop` backstop: a reuse token that never reaches a constructor
+    /// (e.g. a VM handler erroring out after popping it) frees its hollow
+    /// cell instead of leaking it.
+    #[test]
+    fn unconsumed_reuse_addr_frees_its_cell_on_drop() {
+        let mut h = test_heap();
+        let a = Value::str_in(&mut h, "payload");
+        let mut old = Value::enum_with_names_in(&mut h, TypeId(0), 0, "E", "V", &["x"], &[a]);
+        old.hollow_for_reuse();
+        let reuse = old.into_reuse_addr();
+        let _ = take_freed_objects();
+        drop(reuse);
+        assert_eq!(
+            take_freed_objects(),
+            1,
+            "dropping an unconsumed token frees the hollow cell"
+        );
+        // The `none` token drops as a no-op.
+        drop(ReuseAddr::none());
     }
 
     #[test]

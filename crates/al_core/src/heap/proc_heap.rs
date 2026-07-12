@@ -37,7 +37,7 @@ use crate::bytecode::value::{
     Arena, RC_PREFIX_WORDS, Value, binary_clone_backing, for_each_child, header_has_off_heap_link,
     header_total_words, mark_immortal, rc_increment,
 };
-use crate::frozen::FrozenBuilder;
+use crate::frozen::{FrozenBuilder, FrozenConst};
 
 #[cfg(feature = "alloc-counter")]
 thread_local! {
@@ -158,13 +158,15 @@ impl ProcHeap {
     }
 
     /// Publish the graph reachable from `root` into the frozen area, returning
-    /// the frozen root. References already in the frozen area are shared as-is.
-    /// See [`rc_publish_graph`].
+    /// the frozen root — the crate's only mint of a [`FrozenConst`] from an
+    /// arbitrary runtime value. References already in the frozen area are
+    /// shared as-is (a pure passthrough); mortal graphs are deep-copied. See
+    /// [`rc_publish_graph`].
     ///
     /// Associated (no `&self`): the copy writes only into `builder`; the source
     /// process heap is neither read nor mutated.
-    pub fn publish_frozen(builder: &mut FrozenBuilder, root: Value) -> Value {
-        rc_publish_graph(&root, builder)
+    pub fn publish_frozen(builder: &mut FrozenBuilder, root: &Value) -> FrozenConst {
+        FrozenConst::from_publish(rc_publish_graph(root, builder))
     }
 }
 
