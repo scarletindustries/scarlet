@@ -1550,8 +1550,9 @@ impl Compiler {
     /// so a given slice always denotes the same path (hence the same id); the
     /// memo is dropped in `reset_to`, the single point the pool is rewound.
     /// Replaces a per-occurrence `strs_of` (`Vec<String>` + a `String` per
-    /// segment) plus `ref_interner.intern` (`path_key` joined `String` + a
-    /// string-hash probe) with one `ArenaSlice`-keyed probe on a cache hit.
+    /// segment) plus `ref_interner.intern` (a `ModuleKey::of` joined `String`
+    /// and a string-hash probe) with one `ArenaSlice`-keyed probe on a cache
+    /// hit.
     fn module_id_of_slice(&mut self, sl: ArenaSlice<pool::StrSlices>) -> ModuleId {
         if let Some(&id) = self.defid_module_memo.get(&sl) {
             return id;

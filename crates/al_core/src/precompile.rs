@@ -69,7 +69,7 @@ use crate::bytecode::{
     new_compiler,
 };
 use crate::diagnostic::{self, has_errors};
-use crate::module::{ModuleInterface, stdlib};
+use crate::module::{ModuleInterface, ModuleKey, stdlib};
 use crate::span::Span;
 use crate::types::{InferEngine, TypeBody, TypeInfo};
 
@@ -105,7 +105,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     let at = Span::DUMMY;
     for path in stdlib::all_modules()? {
         c.load_module(&path, at);
-        bail_on_errors(&c, &path.join("/"))?;
+        bail_on_errors(&c, ModuleKey::for_stdlib(&path).as_str())?;
     }
 
     let mut interfaces: IndexMap<String, ModuleInterface> =
