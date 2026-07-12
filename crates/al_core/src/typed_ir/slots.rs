@@ -6,36 +6,35 @@
 
 use smallvec::SmallVec;
 
-use crate::types::StrId;
-
 /// One slot per declared constructor field. Constructor arity is small, so the
 /// common case stays off the heap.
 pub(crate) type Slots<T> = SmallVec<[Option<T>; 4]>;
 
 /// A malformed argument list. Each variant hands back the offending item
 /// itself, so a caller that needs its span carries the span in `T` rather than
-/// re-indexing the sequence it passed in. Elaboration discards these (the
-/// typechecker has already reported them); the compiler renders them.
-pub(crate) enum SlotError<T> {
+/// re-indexing the sequence it passed in. Elaboration and the exhaustiveness
+/// checker discard these (the typechecker has already reported them); the
+/// compiler renders them.
+pub(crate) enum SlotError<L, T> {
     /// Positional item past the last declared field.
     ExtraPositional(T),
     /// Label naming no declared field, with the label.
-    UnknownLabel(StrId, T),
+    UnknownLabel(L, T),
     /// Item that landed on an already-filled field, with that field's index.
     Duplicate(T, usize),
 }
 
 /// Slot positional and labeled items into declared-field order: positionals
 /// fill slots left-to-right, a labeled item lands on its declared index.
-/// Overflowing positionals and unknown labels fill no slot. Shared by the
-/// elaborator and the typechecker's `slot_ctor_args`, which layers diagnostics
-/// on the returned errors. The exhaustiveness checker slots `Pat`s the same
-/// way, over its own constructor table.
-pub(crate) fn slot_labeled<T>(
-    labels: &[StrId],
+/// Overflowing positionals and unknown labels fill no slot. Generic over the
+/// label representation `L` — the typechecker's `slot_ctor_args` and the
+/// elaborator pass interned `StrId`s, the exhaustiveness checker passes
+/// `&str`s — so all consumers run the one algorithm.
+pub(crate) fn slot_labeled<L: PartialEq + Copy, T>(
+    labels: &[L],
     arity: usize,
-    items: impl IntoIterator<Item = (Option<StrId>, T)>,
-) -> (Slots<T>, Vec<SlotError<T>>) {
+    items: impl IntoIterator<Item = (Option<L>, T)>,
+) -> (Slots<T>, Vec<SlotError<L, T>>) {
     let mut by_pos: Slots<T> = (0..arity).map(|_| None).collect();
     let mut errors = Vec::new();
     let mut next_pos = 0usize;
@@ -50,10 +49,10 @@ pub(crate) fn slot_labeled<T>(
                 }
                 i
             }
-            Some(sid) => match labels.iter().position(|&l| l == sid) {
+            Some(label) => match labels.iter().position(|&l| l == label) {
                 Some(i) => i,
                 None => {
-                    errors.push(SlotError::UnknownLabel(sid, val));
+                    errors.push(SlotError::UnknownLabel(label, val));
                     continue;
                 }
             },
