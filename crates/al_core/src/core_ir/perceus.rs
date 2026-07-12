@@ -44,24 +44,32 @@ use crate::typed_ir::{RTy, ResolvedPool};
 /// the arena the elaborator resolved into: no `find` is needed (the types are
 /// resolved by construction) and no unsolved variable can reach here to make
 /// `is_heap` answer `false` by accident.
-pub fn perceus(pool: &ResolvedPool, mut f: CoreFn) -> CoreFn {
+pub fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
+    let CoreFn {
+        name,
+        params,
+        body,
+        ret_ty,
+    } = f;
     let mut cx = Perceus::new(pool);
-    for p in &f.params {
+    for p in &params {
         cx.record_bind(p, None);
     }
-    let body = std::mem::replace(&mut f.body, CoreExpr::Tail(Atom::Local(LocalId(0))));
     let (body, live) = cx.drop_pass(body);
     // Params are owned on entry; any not read by the body drop at its head so
     // the frame's release count still balances.
-    let dead_params: Vec<LocalId> = f
-        .params
+    let dead_params: Vec<LocalId> = params
         .iter()
         .map(|p| p.id)
         .filter(|id| !live.contains(id))
         .collect();
     let body = cx.wrap_drops(&dead_params, None, body);
-    f.body = reuse_pass(body);
-    f
+    CoreFn {
+        name,
+        params,
+        body: reuse_pass(body),
+        ret_ty,
+    }
 }
 
 /// Set of locals live at a program point. `BTreeSet` for deterministic
@@ -92,14 +100,18 @@ struct Perceus<'p> {
     shape: BTreeMap<LocalId, ReuseShape>,
 }
 
-/// One `Let` peeled off the spine during the backward walk, awaiting its
-/// body's live set to decide which drops go between rhs and body.
-enum SpineLet {
-    Atom {
-        bind: CoreBind,
-        rhs: Atom,
-        rhs_live: Live,
-    },
+/// One `Let`/`LetJoin` peeled off the spine during the backward walk,
+/// awaiting its body's live set to decide which drops go between rhs and
+/// body.
+struct SpineLet {
+    bind: CoreBind,
+    rhs_live: Live,
+    rhs: SpineRhs,
+}
+
+/// The rhs of a peeled [`SpineLet`].
+enum SpineRhs {
+    Atom(Atom),
     /// A `LetJoin`'s rhs is a whole `CoreExpr`. Treated opaquely for
     /// liveness: `rhs_live` is `join_live(join)` and no drops are inserted
     /// inside it.
@@ -113,11 +125,7 @@ enum SpineLet {
     /// heap temp inside a join is held to the end of the enclosing frame and
     /// can never become a `Reuse` token. Sinking drops into join bodies is a
     /// pending optimization, not a soundness fix.
-    Join {
-        bind: CoreBind,
-        join: Box<CoreExpr>,
-        rhs_live: Live,
-    },
+    Join(Box<CoreExpr>),
 }
 
 impl<'p> Perceus<'p> {
@@ -158,25 +166,27 @@ impl<'p> Perceus<'p> {
     /// straight-line body doesn't recurse on the Rust stack.
     fn drop_pass(&mut self, mut e: CoreExpr) -> (CoreExpr, Live) {
         let mut spine: Vec<SpineLet> = Vec::new();
-        loop {
+        // Peel the `Let`/`LetJoin`/`Drop` spine onto `spine`, then transform
+        // the terminal and break with its `(body, live)`.
+        let (mut body, mut live) = loop {
             match e {
                 CoreExpr::Let { bind, rhs, body } => {
                     let rhs_live = atom_live(&rhs);
                     self.record_bind(&bind, ctor_shape(&rhs));
-                    spine.push(SpineLet::Atom {
+                    spine.push(SpineLet {
                         bind,
-                        rhs,
                         rhs_live,
+                        rhs: SpineRhs::Atom(rhs),
                     });
                     e = *body;
                 }
                 CoreExpr::LetJoin { bind, join, body } => {
                     let rhs_live = join_live(&join);
                     self.record_bind(&bind, None);
-                    spine.push(SpineLet::Join {
+                    spine.push(SpineLet {
                         bind,
-                        join,
                         rhs_live,
+                        rhs: SpineRhs::Join(join),
                     });
                     e = *body;
                 }
@@ -186,100 +196,74 @@ impl<'p> Perceus<'p> {
                     // reinserted from the fresh liveness result below.
                     e = *body;
                 }
-                terminal => {
-                    enum Payload {
-                        Atom(Atom),
-                        Join(Box<CoreExpr>),
-                    }
-                    let (mut body, mut live) = self.drop_terminal(terminal);
-                    while let Some(frame) = spine.pop() {
-                        let (bind, rhs_live, payload) = match frame {
-                            SpineLet::Atom {
-                                bind,
-                                rhs,
-                                rhs_live,
-                            } => (bind, rhs_live, Payload::Atom(rhs)),
-                            SpineLet::Join {
-                                bind,
-                                join,
-                                rhs_live,
-                            } => (bind, rhs_live, Payload::Join(join)),
-                        };
-                        // A local read by `rhs` and still live after is a
-                        // non-last-use: reading dups (VM `PushLocal`), so the
-                        // slot's own reference outlives this read.
-                        // Newly dead at this let: rhs operands whose last read
-                        // is here, plus the bind itself if the body never
-                        // reads it. These drop between rhs and body — as early
-                        // as Perceus permits, so reuse tokens are hot.
-                        let mut dead: Vec<LocalId> = rhs_live
-                            .iter()
-                            .copied()
-                            .filter(|x| !live.contains(x))
-                            .collect();
-                        if !live.contains(&bind.id) {
-                            dead.push(bind.id);
-                        }
-                        body = self.wrap_drops(&dead, None, body);
-                        live.remove(&bind.id);
-                        live.extend(rhs_live);
-                        body = match payload {
-                            Payload::Atom(rhs) => CoreExpr::Let {
-                                bind,
-                                rhs,
-                                body: Box::new(body),
-                            },
-                            Payload::Join(join) => CoreExpr::LetJoin {
-                                bind,
-                                join,
-                                body: Box::new(body),
-                            },
-                        };
-                    }
-                    return (body, live);
+                CoreExpr::Tail(a) => {
+                    let live = atom_live(&a);
+                    break (self.release_self_tail_args(a), live);
+                }
+                CoreExpr::If {
+                    cond,
+                    then,
+                    els,
+                    ty,
+                } => {
+                    let (then, live_t) = self.drop_pass(*then);
+                    let (els, live_e) = self.drop_pass(*els);
+                    // Ownership equalisation at the join: each branch must
+                    // release exactly the same set (everything live into
+                    // either), so the branch that doesn't need a local drops
+                    // it at entry.
+                    let then = self.wrap_drops(&set_diff(&live_e, &live_t), None, then);
+                    let els = self.wrap_drops(&set_diff(&live_t, &live_e), None, els);
+                    let mut live: Live = &live_t | &live_e;
+                    live.insert(cond);
+                    break (
+                        CoreExpr::If {
+                            cond,
+                            then: Box::new(then),
+                            els: Box::new(els),
+                            ty,
+                        },
+                        live,
+                    );
+                }
+                CoreExpr::Match { scrut, arms, ty } => {
+                    break self.drop_match(scrut, arms, ty);
                 }
             }
+        };
+        while let Some(frame) = spine.pop() {
+            // A local read by `rhs` and still live after is a non-last-use:
+            // reading dups (VM `PushLocal`), so the slot's own reference
+            // outlives this read. Newly dead at this let: rhs operands whose
+            // last read is here, plus the bind itself if the body never
+            // reads it. These drop between rhs and body — as early as
+            // Perceus permits, so reuse tokens are hot.
+            let mut dead: Vec<LocalId> = frame
+                .rhs_live
+                .iter()
+                .copied()
+                .filter(|x| !live.contains(x))
+                .collect();
+            if !live.contains(&frame.bind.id) {
+                dead.push(frame.bind.id);
+            }
+            body = self.wrap_drops(&dead, None, body);
+            live.remove(&frame.bind.id);
+            live.extend(frame.rhs_live);
+            body = match frame.rhs {
+                SpineRhs::Atom(rhs) => CoreExpr::Let {
+                    bind: frame.bind,
+                    rhs,
+                    body: Box::new(body),
+                },
+                SpineRhs::Join(join) => CoreExpr::LetJoin {
+                    bind: frame.bind,
+                    join,
+                    body: Box::new(body),
+                },
+            };
         }
-    }
-
-    fn drop_terminal(&mut self, e: CoreExpr) -> (CoreExpr, Live) {
-        match e {
-            CoreExpr::Tail(a) => {
-                let live = atom_live(&a);
-                (self.release_self_tail_args(a), live)
-            }
-            CoreExpr::If {
-                cond,
-                then,
-                els,
-                ty,
-            } => {
-                let (then, live_t) = self.drop_pass(*then);
-                let (els, live_e) = self.drop_pass(*els);
-                // Ownership equalisation at the join: each branch must
-                // release exactly the same set (everything live into either),
-                // so the branch that doesn't need a local drops it at entry.
-                let then = self.wrap_drops(&set_diff(&live_e, &live_t), None, then);
-                let els = self.wrap_drops(&set_diff(&live_t, &live_e), None, els);
-                let mut live: Live = &live_t | &live_e;
-                live.insert(cond);
-                (
-                    CoreExpr::If {
-                        cond,
-                        then: Box::new(then),
-                        els: Box::new(els),
-                        ty,
-                    },
-                    live,
-                )
-            }
-            CoreExpr::Match { scrut, arms, ty } => self.drop_match(scrut, arms, ty),
-            // `drop_pass` peels every `Let`/`LetJoin`/`Drop` before calling here.
-            #[allow(clippy::unreachable)]
-            CoreExpr::Let { .. } | CoreExpr::LetJoin { .. } | CoreExpr::Drop { .. } => {
-                unreachable!()
-            }
-        }
+        (body, live)
     }
 
     /// Release the argument slots of a self-tail-call.
