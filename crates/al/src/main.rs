@@ -123,7 +123,7 @@ fn report(diagnostics: &[diagnostic::Diagnostic], fail: bool, file: &str, entryp
 
 fn parse_source(file: &str, entrypoint: &str) -> ast::Expression {
     let mut s = scanner::new_scanner(file.to_string());
-    let mut p = parser::new_parser(&mut s);
+    let p = parser::new_parser(&mut s);
     let result = p.parse_program();
 
     let fail = diagnostic::has_errors(&result.diagnostics);
@@ -153,7 +153,7 @@ fn compile_source(
         None => f(expr, base_dir, Some(&STDLIB)),
     };
 
-    report(&result.diagnostics, !result.success, file, entrypoint);
+    report(&result.diagnostics, !result.success(), file, entrypoint);
 
     result
 }

@@ -188,7 +188,15 @@ pub struct CompileResult {
     /// owning `IncrementalSession` can keep answering queries against the same
     /// graph after the result is handed back.
     pub references: Rc<ReferenceGraph>,
-    pub success: bool,
+}
+
+impl CompileResult {
+    /// Whether the compile succeeded — definitionally, whether `diagnostics`
+    /// carries no error. Derived rather than stored so no construction site
+    /// can disagree with the diagnostics it hands back.
+    pub fn success(&self) -> bool {
+        !has_errors(&self.diagnostics)
+    }
 }
 
 // ============================================================================
@@ -577,7 +585,7 @@ struct LoweredBody {
 /// entering an expression) and its fill (on leaving it). No `Ty` ever takes this
 /// value: it indexes the engine's node arena, which cannot reach `u32::MAX`
 /// entries. A slot can only still hold it if `compile_expr_inner` unwound.
-const WALK_TY_PENDING: Ty = u32::MAX;
+const WALK_TY_PENDING: Ty = Ty(u32::MAX);
 
 /// A region with no unfilled slot left in it. Checked wherever a region leaves
 /// the compiler for the elaborator: a `WALK_TY_PENDING` that got that far would
@@ -596,6 +604,34 @@ fn walk_region_is_filled(region: &[WalkStep]) -> bool {
 fn walk_region_underflow() -> ! {
     panic!(
         "internal compiler error: close_walk_region without matching open_walk_region. \
+         Please report this as a compiler bug."
+    )
+}
+
+/// Toplevel elaboration finished with module-scope slots still queued — the
+/// check walk and the elaborator disagreed about which statements bind at
+/// module scope. Aborts, in release as well as debug: every bind after the
+/// point of disagreement would silently land in the wrong global slot.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn unclaimed_toplevel_slots(n: usize) -> ! {
+    panic!(
+        "internal compiler error: toplevel elaboration left {n} module-scope slot(s) unclaimed. \
+         Please report this as a compiler bug."
+    )
+}
+
+/// Something pushed a `Function` while the elaborator walked — the `FuncIdx`
+/// the next `FnTable::push` mints would stop naming it. Aborts, in release as
+/// well as debug: every eta wrapper reserved after the stray push would
+/// silently call the wrong function.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn function_reserved_during_elaboration() -> ! {
+    panic!(
+        "internal compiler error: a `Function` was reserved while the elaborator walked. \
          Please report this as a compiler bug."
     )
 }
@@ -769,6 +805,22 @@ enum QualifiedMember<'a> {
     },
 }
 
+/// A callee that resolved to a plain name or a qualified `module.member`:
+/// the looked-up scheme plus everything `compile_call` needs to dispatch on
+/// the scheme's `ValueKind` and render diagnostics about the callee.
+struct ResolvedCallee<'a> {
+    name: &'a str,
+    span: Span,
+    scheme: Scheme,
+    /// Whether the callee has a runtime binding (see `Compiler::has_binding`).
+    has_binding: bool,
+    /// The module the member resolved through, when the callee was a
+    /// qualified `module.member`. Diagnostics render it via
+    /// `Compiler::module_name` — the user-visible name, never the canonical
+    /// key (see the naming-convention note on `module_name`).
+    qualifier: Option<ModuleKey>,
+}
+
 struct CompiledBody {
     iface: ModuleInterface,
     watermark: Watermark,
@@ -935,7 +987,6 @@ fn compile_impl(
                 emitted: None,
                 diagnostics: c.engine.diagnostics,
                 references: Rc::new(ReferenceGraph::new()),
-                success: false,
             };
         }
     }
@@ -1064,7 +1115,6 @@ fn compile_impl(
     }
 
     let (references, _facts) = c.finalize_references();
-    let success = !has_errors(&c.engine.diagnostics);
     CompileResult {
         emitted: Some(Emitted {
             program: c.program,
@@ -1072,7 +1122,6 @@ fn compile_impl(
         }),
         diagnostics: c.engine.diagnostics,
         references,
-        success,
     }
 }
 
@@ -1099,7 +1148,7 @@ impl Compiler {
         std::mem::take(&mut self.module_table).into_loaded()
     }
     pub(crate) fn take_type_info(&mut self) -> IndexMap<String, crate::types::TypeInfo> {
-        std::mem::take(&mut self.env.type_info)
+        self.env.take_type_info()
     }
     /// Tear down for `precompile_stdlib`: program + scalars, plus the engine
     /// (whose arena `flatten` snapshots).
@@ -1133,16 +1182,16 @@ impl Compiler {
         // The static type arena IS the live arena's prefix — every `Ty`/
         // `ArenaSlice` in stdlib schemes/typeinfos indexes into it. memcpy
         // every pool + intern strings.
-        self.engine.seed_arena(
-            s.nodes,
-            s.children,
-            s.str_pool,
-            s.quants,
-            s.str_slices,
-            s.type_params,
-            s.variant_fields,
-            s.variants,
-        );
+        self.engine.seed_arena(crate::types::ArenaSeed {
+            nodes: s.nodes,
+            children: s.children,
+            strings: s.str_pool,
+            quants: s.quants,
+            str_slices: s.str_slices,
+            type_params: s.type_params,
+            variant_fields: s.variant_fields,
+            variants: s.variants,
+        });
 
         let (code, functions, constants) = s.hydrate_program(&mut self.frozen);
         self.program.code = code;
@@ -1161,8 +1210,9 @@ impl Compiler {
         // place (a colliding user type gets its own id and its own entry).
         for (name, idx) in s.typeinfo_by_name {
             let ti = s.typeinfos[idx.0 as usize];
-            self.env.type_info.insert((*name).to_string(), ti);
-            self.env.type_info_by_id.insert(ti.id, ti);
+            // `store_type_info` keeps both registries in lockstep; the env is
+            // fresh here, so no overwrite occurs and nothing is journaled.
+            self.env.store_type_info(name, ti);
         }
 
         // Re-export prelude constructor/@vm schemes (Some/None/Ok/Err/True/...)
@@ -1753,7 +1803,7 @@ impl Compiler {
                 name,
                 doc,
                 false,
-                DefinitionKind::Value,
+                DefinitionKind::Value { alias_of: None },
             );
         }
     }
@@ -2197,17 +2247,19 @@ impl Compiler {
                     );
                     let alias_defid = self.defid_of(alias_dl);
                     let canonical = vdef.map(|dl| self.defid_of(dl));
-                    let mut def = Definition::new(
+                    // goto-def / hover on Y chains to X's real declaration
+                    // via `alias_of`; rename and find-references stay on this
+                    // alias.
+                    let def = Definition::new(
                         alias_defid.module,
                         alias_defid.span,
                         local_name.clone(),
                         None,
                         false,
-                        DefinitionKind::Value,
+                        DefinitionKind::Value {
+                            alias_of: canonical,
+                        },
                     );
-                    // goto-def / hover on Y chains to X's real declaration; rename
-                    // and find-references stay on this alias.
-                    def.alias_of = canonical;
                     self.module_refs.add_definition(def);
                     item_refs.push((a.span, ReferenceKind::Alias, alias_dl));
                 } else {
@@ -2350,7 +2402,7 @@ impl Compiler {
 
         let hash = source_hash(&text);
         let mut sc = crate::scanner::new_scanner(text);
-        let mut parser = crate::parser::new_parser(&mut sc);
+        let parser = crate::parser::new_parser(&mut sc);
         let parsed = parser.parse_program();
         for d in parsed.diagnostics {
             // The span is `at` — the import site in the *importing* module —
@@ -2544,11 +2596,9 @@ impl Compiler {
         // statements bind at module scope — the failure the old name-keyed map
         // could not represent, and one that silently mis-slots every bind after
         // the point of disagreement.
-        debug_assert!(
-            self.toplevel_binds.is_empty(),
-            "toplevel elaboration left {} module-scope slot(s) unclaimed",
-            self.toplevel_binds.len()
-        );
+        if !self.toplevel_binds.is_empty() {
+            unclaimed_toplevel_slots(self.toplevel_binds.len());
+        }
         let LoweredBody { core: top, pool } = lowered;
         // Perceus runs so *temporaries* passed into calls are moved (rc==1 in
         // the callee → its own reuse fires); `emit_toplevel` suppresses the
@@ -2990,9 +3040,10 @@ impl Compiler {
         self.error(msg, sp);
     }
 
-    /// Diagnose a named value used in value position. Constructors are legal
-    /// (the Core emit synthesises a nullary build or an eta wrapper); builtins
-    /// are not, and a `Local`/`ModuleFn` with no runtime binding is an error.
+    /// Diagnose a named value used in value position. Constructors and
+    /// builtins are legal (the elaborator synthesises a nullary build or an
+    /// eta wrapper — see `typed_ir::eta`); a `Local`/`ModuleFn` with no
+    /// runtime binding is an error.
     fn check_named_value(
         &mut self,
         name: &str,
@@ -3002,21 +3053,13 @@ impl Compiler {
         has_binding: bool,
     ) {
         match kind {
-            ValueKind::Constructor { .. } => {}
-            ValueKind::Builtin { .. } => self.error_builtin_as_value(name, sp),
+            ValueKind::Constructor { .. } | ValueKind::Builtin { .. } => {}
             ValueKind::Local | ValueKind::ModuleFn => {
                 if !has_binding {
                     self.no_runtime_binding(name, qualifier, sp);
                 }
             }
         }
-    }
-
-    fn error_builtin_as_value(&mut self, name: &str, sp: Span) {
-        self.error(
-            format!("'{}' is a builtin and cannot be used as a value", name),
-            sp,
-        );
     }
 
     // ========================================================================
@@ -3129,8 +3172,13 @@ impl Compiler {
         // anything yet. This lets us dispatch on `ValueKind` for constructors
         // and builtins, and use the callee's known type to push hints into
         // function-literal arguments.
-        if let Some((name, name_span, scheme, has_binding)) =
-            self.resolve_simple_callee(&expr.callee)
+        if let Some(ResolvedCallee {
+            name,
+            span: name_span,
+            scheme,
+            has_binding,
+            qualifier,
+        }) = self.resolve_simple_callee(&expr.callee)
         {
             let inst_ty = self.engine.instantiate(&scheme, &self.rigid_ids);
             // Hover-only here; the graph occurrence (with the correct
@@ -3159,7 +3207,8 @@ impl Compiler {
                 ValueKind::Local | ValueKind::ModuleFn => {
                     let ret = self.compile_positional_args(inst_ty, &expr.arguments, expr.span);
                     if !has_binding {
-                        self.no_runtime_binding(name, None, name_span);
+                        let module = qualifier.as_ref().map(|k| self.module_name(k));
+                        self.no_runtime_binding(name, module.as_deref(), name_span);
                     }
                     ret
                 }
@@ -3319,7 +3368,7 @@ impl Compiler {
     fn resolve_simple_callee<'a>(
         &mut self,
         callee: &'a ast::Expression,
-    ) -> Option<(&'a str, Span, Scheme, bool)> {
+    ) -> Option<ResolvedCallee<'a>> {
         match callee {
             ast::Expression::Identifier(id) => {
                 let scheme = *self.env.lookup(&id.name)?;
@@ -3328,7 +3377,13 @@ impl Compiler {
                 // seam for calls (this path bypasses `compile_identifier`).
                 // `record` in `compile_call` is hover-only.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
-                Some((&id.name, id.span, scheme, has_binding))
+                Some(ResolvedCallee {
+                    name: &id.name,
+                    span: id.span,
+                    scheme,
+                    has_binding,
+                    qualifier: None,
+                })
             }
             // Qualified callee `module.member()`. Both failure modes mean "no
             // simple callee" (a failed lookup has already been diagnosed by
@@ -3337,12 +3392,18 @@ impl Compiler {
                 match self.resolve_qualified_member(pa) {
                     QualifiedMember::NotQualified | QualifiedMember::LookupFailed => None,
                     QualifiedMember::Resolved {
+                        module_key,
                         member_name,
                         member_span,
                         scheme,
                         has_binding,
-                        ..
-                    } => Some((member_name, member_span, scheme, has_binding)),
+                    } => Some(ResolvedCallee {
+                        name: member_name,
+                        span: member_span,
+                        scheme,
+                        has_binding,
+                        qualifier: Some(module_key),
+                    }),
                 }
             }
             _ => None,
@@ -3499,9 +3560,13 @@ impl Compiler {
             } => {
                 let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
                 self.record(member_name, ty, member_span, None);
+                // Rendered lazily: the qualifier only reaches a diagnostic on
+                // the no-runtime-binding path, so the common (bound) case
+                // skips the display-name lookup entirely.
+                let module = (!has_binding).then(|| self.module_name(&module_key));
                 self.check_named_value(
                     member_name,
-                    Some(module_key.as_str()),
+                    module.as_deref(),
                     member_span,
                     scheme.kind,
                     has_binding,
@@ -3936,7 +4001,7 @@ impl Compiler {
         // anything the caller reads — they exist so the next `FnTable::push`
         // lands on the `Function` reserved for it below.
         let filler = || TypedFn {
-            name: crate::types::NO_STR,
+            name: crate::types::StrId::NONE,
             params: Vec::new(),
             ret: nil,
             body: TypedExpr::Nil { ty: nil },
@@ -3955,12 +4020,9 @@ impl Compiler {
             "the elaborator must not append to `program.code`"
         );
 
-        debug_assert_eq!(
-            self.program.functions.len(),
-            eta_base,
-            "nothing may reserve a `Function` while the elaborator walks: \
-             the `FuncIdx` the next `FnTable::push` mints would stop naming it"
-        );
+        if self.program.functions.len() != eta_base {
+            function_reserved_during_elaboration();
+        }
         for w in &fns[eta_base..] {
             let arity = w.params.len() as i32;
             self.program.functions.push(Function {
