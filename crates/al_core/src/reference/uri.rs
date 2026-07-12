@@ -54,18 +54,7 @@ impl fmt::Display for ModuleUriError {
         match self {
             ModuleUriError::Embedded => write!(f, "precompiled stdlib module"),
             ModuleUriError::NoPath => write!(f, "module is not in the reference graph"),
-            ModuleUriError::Resolve(ResolveError::FileNotFound(p)) => {
-                write!(f, "file not found: {}", p.display())
-            }
-            ModuleUriError::Resolve(ResolveError::NoSuchStdlibModule(p)) => {
-                write!(f, "no such stdlib module {}", p.join("/"))
-            }
-            ModuleUriError::Resolve(ResolveError::NoBaseDir) => {
-                write!(f, "no base directory to resolve against")
-            }
-            ModuleUriError::Resolve(ResolveError::BareName(n)) => {
-                write!(f, "bare module name `{n}` has no source file")
-            }
+            ModuleUriError::Resolve(e) => write!(f, "{e}"),
         }
     }
 }
@@ -137,7 +126,7 @@ mod tests {
         let mut g = ReferenceGraphBuilder::new();
         // Graph module paths are canonical file identities; one resolves
         // straight back to its on-disk file.
-        let canon = crate::module::file_module_path(&file);
+        let canon = crate::module::file_module_path(&file).unwrap();
         let m = g.intern_module(&canon);
         let g = g.finish();
         let uri = module_uri(&g, m).expect("canonical module resolves");

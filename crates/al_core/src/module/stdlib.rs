@@ -8,14 +8,12 @@ pub fn lookup(path: &str) -> Option<&'static str> {
 }
 
 /// Every stdlib module path other than the prelude itself, sorted for
-/// deterministic precompilation order. Runs only at build time (via
-/// `precompile_stdlib` in `build.rs`), so a bad glob surfaces as a loud
-/// build failure through `precompile_stdlib`'s `Result` rather than a
-/// silently empty stdlib.
-pub fn all_modules() -> Result<Vec<crate::module::ModulePath>, String> {
+/// deterministic precompilation order.
+#[allow(clippy::expect_used)] // the const glob literal failing is a bug here, not a runtime condition
+pub fn all_modules() -> Vec<crate::module::ModulePath> {
     let mut out: Vec<_> = STD
         .find("al/**/*.al")
-        .map_err(|e| format!("stdlib glob pattern is invalid: {e}"))?
+        .expect("stdlib glob literal is valid")
         .map(|e| {
             let p = e.path().with_extension("");
             p.components()
@@ -24,5 +22,5 @@ pub fn all_modules() -> Result<Vec<crate::module::ModulePath>, String> {
         })
         .collect();
     out.sort();
-    Ok(out)
+    out
 }

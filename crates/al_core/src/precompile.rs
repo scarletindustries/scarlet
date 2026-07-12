@@ -105,7 +105,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     bail_on_errors(&c, "prelude")?;
 
     let at = Span::DUMMY;
-    for path in stdlib::all_modules()? {
+    for path in stdlib::all_modules() {
         c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at);
         bail_on_errors(&c, ModuleKey::for_stdlib(&path).as_str())?;
     }

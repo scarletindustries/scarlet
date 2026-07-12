@@ -39,8 +39,13 @@ impl ModuleKey {
     }
 
     /// Key of the on-disk module at `p` (see [`file_module_path`]).
+    ///
+    /// Panics if `p` has no absolute form (empty path / unfetchable cwd);
+    /// callers hand in real on-disk paths, for which that cannot happen.
+    /// Fallible resolution goes through [`resolve`] instead.
+    #[allow(clippy::expect_used)] // asserting the documented precondition above
     pub fn for_file(p: &Path) -> Self {
-        Self::of(&file_module_path(p))
+        Self::of(&file_module_path(p).expect("on-disk module path has an absolute form"))
     }
 
     /// Key of a stdlib module addressed by its written `al/...` path — the
@@ -94,13 +99,19 @@ impl std::fmt::Display for ModuleKey {
 /// (`"C:\a\b" -> ["C:", "a", "b"]`). The prefix MUST be kept — dropping it
 /// would merge `C:\proj\b.al` with `D:\proj\b.al`, the same
 /// different-files-one-key collision this identity exists to prevent.
-pub fn file_module_path(p: &Path) -> ModulePath {
+///
+/// Errs with [`ResolveError::UnresolvablePath`] when `p` has no absolute
+/// form (an empty path, or an unfetchable cwd) — such a file has no
+/// canonical identity, and falling back to the path as given would mint a
+/// relative "identity" that violates the invariant above.
+pub fn file_module_path(p: &Path) -> Result<ModulePath, ResolveError> {
     // Absolute and lexically normalised — deliberately NOT `canonicalize()`,
     // which resolves symlinks. On macOS a temp dir is `/var/...` but canonical
     // `/private/var/...`, so canonicalising here made the LSP hand the editor
     // two different URIs for one project: the entry as opened, its imports as
     // resolved. Identity must agree with the path the editor is using.
-    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let abs =
+        std::path::absolute(p).map_err(|_| ResolveError::UnresolvablePath(p.to_path_buf()))?;
     let mut out: Vec<String> = Vec::new();
     for c in abs.components() {
         match c {
@@ -122,7 +133,7 @@ pub fn file_module_path(p: &Path) -> ModulePath {
     {
         *last = stem.to_string();
     }
-    out
+    Ok(out)
 }
 
 /// `true` for a [`file_module_path`] — the identity of an already-resolved
@@ -785,6 +796,10 @@ pub enum ResolveError {
     /// The import resolved to an on-disk location, but no file is there.
     /// Carries the filesystem path that was probed.
     FileNotFound(PathBuf),
+    /// The file exists but `std::path::absolute` failed for it (an empty
+    /// path, or an unfetchable cwd), so it has no canonical identity to key
+    /// on. See [`file_module_path`].
+    UnresolvablePath(PathBuf),
     /// An `al/...` path that names no embedded stdlib module. Carries the
     /// module path as written (there is no filesystem path to show).
     NoSuchStdlibModule(ModulePath),
@@ -793,6 +808,25 @@ pub enum ResolveError {
     /// Reserved for a future package manager; distinct from the not-found
     /// errors so the diagnostic can suggest `use "./name"` instead.
     BareName(String),
+}
+
+/// The one user-facing rendering of each resolution failure; every consumer
+/// (compiler diagnostics, `ModuleUriError`) delegates here rather than
+/// wording its own copy.
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::FileNotFound(p) => write!(f, "file not found: {}", p.display()),
+            ResolveError::UnresolvablePath(p) => {
+                write!(f, "cannot determine an absolute path for {}", p.display())
+            }
+            ResolveError::NoSuchStdlibModule(p) => {
+                write!(f, "no such stdlib module {}", p.join("/"))
+            }
+            ResolveError::NoBaseDir => write!(f, "no base directory to resolve against"),
+            ResolveError::BareName(n) => write!(f, "bare module name `{n}` has no source file"),
+        }
+    }
 }
 
 /// A resolved import: where the module's source lives, plus its canonical
@@ -837,7 +871,7 @@ pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedMod
             p.set_file_name(format!("{name}.al"));
         }
         if p.is_file() {
-            let canon = file_module_path(&p);
+            let canon = file_module_path(&p)?;
             let key = ModuleKey::of(&canon);
             return Ok(ResolvedModule {
                 source: ModuleSource::File(p),
@@ -1020,7 +1054,7 @@ mod tests {
                 key,
             }) => {
                 assert_eq!(p, base.join("foo.al"));
-                assert_eq!(canon, file_module_path(&base.join("foo.al")));
+                assert_eq!(canon, file_module_path(&base.join("foo.al")).unwrap());
                 assert_eq!(key, ModuleKey::for_file(&base.join("foo.al")));
             }
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
@@ -1058,7 +1092,7 @@ mod tests {
         ));
 
         // A canonical file identity resolves back to its on-disk file.
-        match resolve_canonical(&file_module_path(&base.join("foo.al"))) {
+        match resolve_canonical(&file_module_path(&base.join("foo.al")).unwrap()) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 ..
