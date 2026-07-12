@@ -620,14 +620,16 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                     // order. Slotting errors are dropped: the typechecker has
                     // already reported them, and the unplaced arg's slot
                     // degrades to a wildcard here.
-                    let labels: Vec<&str> = ctor.labels.iter().map(String::as_str).collect();
+                    let fields: Vec<Option<&str>> = (0..ctor.types.len())
+                        .map(|i| ctor.labels.get(i).map(String::as_str))
+                        .collect();
                     let supplied = args.iter().map(|a| match a {
                         ast::PatternArg::Positional(p) => (None, p),
                         ast::PatternArg::Labeled { label, pattern } => {
                             (Some(label.name.as_str()), pattern)
                         }
                     });
-                    let (by_pos, _errors) = slot_labeled(&labels, ctor.types.len(), supplied);
+                    let (by_pos, _errors) = slot_labeled(&fields, supplied);
                     by_pos
                         .into_iter()
                         .zip(&ctor.types)

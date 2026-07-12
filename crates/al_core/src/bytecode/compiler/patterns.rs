@@ -367,9 +367,14 @@ impl Compiler {
         let items: SmallVec<[Item<'a, T>; 4]> = args
             .map(|(l, v, sp)| (l.map(|l| self.engine.intern(&l.name)), (v, sp)))
             .collect();
+        // One declared-fields description, exactly `arity` long: `slot_labeled`
+        // sizes its slots and resolves labels from this same slice, so the
+        // label table cannot disagree with the arity inside it.
         let field_ids: SmallVec<[StrId; 4]> =
             SmallVec::from_slice(self.engine.str_ids_of(field_labels));
-        let (by_pos, errors) = slot_labeled(&field_ids, arity, items);
+        let fields: SmallVec<[Option<StrId>; 4]> =
+            (0..arity).map(|i| field_ids.get(i).copied()).collect();
+        let (by_pos, errors) = slot_labeled(&fields, items);
         let mut ok = errors.is_empty();
         for e in errors {
             match e {

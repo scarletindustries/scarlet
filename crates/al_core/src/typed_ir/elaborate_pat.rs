@@ -111,9 +111,17 @@ impl CtorPat {
         self.field_tys.len()
     }
 
-    /// Declared field labels, for `slot_labeled`. Exactly [`Self::arity`] long.
+    /// Declared field labels, for hover/diagnostics. Exactly [`Self::arity`]
+    /// long.
     pub fn labels(&self) -> &[StrId] {
         &self.labels
+    }
+
+    /// The declared-fields description [`slot_labeled`] consumes: one entry
+    /// per field, every one labeled. Derived from `labels`, so it is exactly
+    /// [`Self::arity`] long by the same construction invariant.
+    pub fn slot_fields(&self) -> SmallVec<[Option<StrId>; 4]> {
+        self.labels.iter().map(|&l| Some(l)).collect()
     }
 
     /// Field types in declared order. Exactly [`Self::arity`] long, so zipping
@@ -207,8 +215,7 @@ pub fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) ->
 /// unminted and the arm matching too much, so it aborts.
 pub fn slot_pattern_args<'p, C: PatCtx>(
     cx: &mut C,
-    labels: &[StrId],
-    arity: usize,
+    fields: &[Option<StrId>],
     args: &'p [ast::PatternArg],
     span: Span,
 ) -> Slots<&'p ast::Pattern> {
@@ -216,7 +223,7 @@ pub fn slot_pattern_args<'p, C: PatCtx>(
         ast::PatternArg::Positional(p) => (None, p),
         ast::PatternArg::Labeled { label, pattern } => (Some(cx.intern(&label.name)), pattern),
     });
-    let (by_pos, errors) = slot_labeled(labels, arity, supplied);
+    let (by_pos, errors) = slot_labeled(fields, supplied);
     if !errors.is_empty() {
         elaborator_bug("constructor pattern arg desync", span)
     }
@@ -396,7 +403,7 @@ impl<C: PatCtx> PatElab<'_, C> {
             Some(q) => self.cx.resolve_ctor_pat_qualified(&q.name, name, scrut),
             None => self.cx.resolve_ctor_pat(name, scrut),
         };
-        let by_pos = slot_pattern_args(&mut *self.cx, info.labels(), info.arity(), args, span);
+        let by_pos = slot_pattern_args(&mut *self.cx, &info.slot_fields(), args, span);
 
         // `slot_labeled` returns exactly `arity` slots and `field_tys` is
         // exactly `arity` long, so the zip pairs every slot with its own field

@@ -30,12 +30,17 @@ pub(crate) enum SlotError<L, T> {
 /// label representation `L` — the typechecker's `slot_ctor_args` and the
 /// elaborator pass interned `StrId`s, the exhaustiveness checker passes
 /// `&str`s — so all consumers run the one algorithm.
+///
+/// `fields` is the one declared-fields description: one entry per field, in
+/// declared order, `None` for a field with no label (tuple/array positions).
+/// Both the slot count and the label lookup come from this same slice, so a
+/// label table that disagrees with the arity is unspellable — there is no
+/// second width to drift from.
 pub(crate) fn slot_labeled<L: PartialEq + Copy, T>(
-    labels: &[L],
-    arity: usize,
+    fields: &[Option<L>],
     items: impl IntoIterator<Item = (Option<L>, T)>,
 ) -> (Slots<T>, Vec<SlotError<L, T>>) {
-    let mut by_pos: Slots<T> = (0..arity).map(|_| None).collect();
+    let mut by_pos: Slots<T> = fields.iter().map(|_| None).collect();
     let mut errors = Vec::new();
     let mut next_pos = 0usize;
     for (label, val) in items {
@@ -43,13 +48,13 @@ pub(crate) fn slot_labeled<L: PartialEq + Copy, T>(
             None => {
                 let i = next_pos;
                 next_pos += 1;
-                if i >= arity {
+                if i >= fields.len() {
                     errors.push(SlotError::ExtraPositional(val));
                     continue;
                 }
                 i
             }
-            Some(label) => match labels.iter().position(|&l| l == label) {
+            Some(label) => match fields.iter().position(|&f| f == Some(label)) {
                 Some(i) => i,
                 None => {
                     errors.push(SlotError::UnknownLabel(label, val));

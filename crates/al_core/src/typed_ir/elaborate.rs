@@ -1117,7 +1117,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             }
         }
 
-        let (by_pos, errors) = slot_labeled(cp.labels(), arity, supplied);
+        let (by_pos, errors) = slot_labeled(&cp.slot_fields(), supplied);
         // The check walk slotted these same args with the same `slot_labeled`
         // and reported every error it returned; a clean module reslots with
         // none. An error here means the two walks disagree about the call.
@@ -1513,7 +1513,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 let Some(cp) = resolved else {
                     elaborator_bug("unresolved constructor pattern", name.span)
                 };
-                let by_pos = slot_pattern_args(self, cp.labels(), cp.arity(), args, name.span);
+                let by_pos = slot_pattern_args(self, &cp.slot_fields(), args, name.span);
                 let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
                 for (i, (sub, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
                     let Some(sub) = sub else { continue };
