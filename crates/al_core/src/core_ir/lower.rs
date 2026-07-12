@@ -81,9 +81,8 @@ use std::collections::VecDeque;
 use super::{Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, LocalId};
 use crate::bytecode::Op;
 use crate::typed_ir::{
-    BindingId, GlobalSlot, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg,
-    TypedBinSeg, TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat,
-    TypedProgram, ValueRef,
+    BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
+    TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, TypedProgram, ValueRef,
 };
 use crate::types::NO_STR;
 
@@ -207,6 +206,16 @@ struct BinCont<'p> {
     rest: PatRest,
     after: Vec<(LocalId, &'p TypedPat)>,
     then: ArmLeaf<'p>,
+}
+
+/// The position of a `<<>>` walk at one segment boundary — the head of
+/// [`BinCont`], bundled so [`Lower::bin_read`] cannot receive its same-typed
+/// locals in the wrong order.
+#[derive(Clone, Copy)]
+struct BinWalk {
+    bin: LocalId,
+    total: LocalId,
+    cursor: LocalId,
 }
 
 /// Fallthrough continuation for an arm: what to lower when a guard or a nested
@@ -354,24 +363,19 @@ impl Lower {
     /// first, producing the sealed `CoreExpr` for this segment.
     fn seal(&mut self, mark: usize, tail: CoreExpr) -> CoreExpr {
         let mut e = tail;
-        while self.spine.len() > mark {
-            match self.spine.pop() {
-                Some(Pending::Let { bind, rhs }) => {
-                    e = CoreExpr::Let {
-                        bind,
-                        rhs,
-                        body: Box::new(e),
-                    };
-                }
-                Some(Pending::Join { bind, join }) => {
-                    e = CoreExpr::LetJoin {
-                        bind,
-                        join: Box::new(join),
-                        body: Box::new(e),
-                    };
-                }
-                None => debug_assert!(false, "seal underflow"),
-            }
+        for p in self.spine.drain(mark..).rev() {
+            e = match p {
+                Pending::Let { bind, rhs } => CoreExpr::Let {
+                    bind,
+                    rhs,
+                    body: Box::new(e),
+                },
+                Pending::Join { bind, join } => CoreExpr::LetJoin {
+                    bind,
+                    join: Box::new(join),
+                    body: Box::new(e),
+                },
+            };
         }
         e
     }
@@ -462,29 +466,13 @@ impl Lower {
     /// named `let` on a *nested* spine (a join arm, an operand splice) is
     /// local to that segment, where its value already has a home.
     fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) {
-        let v = match bind.global {
-            Some(slot) => {
-                let v = self.let_bound(bind, init);
-                self.pin_global(v, slot);
-                v
-            }
-            None if spine == SpinePos::Outer && bind.name != NO_STR => self.let_bound(bind, init),
-            None => self.operand(init),
+        let owns_slot = bind.global.is_some() || (spine == SpinePos::Outer && bind.name != NO_STR);
+        let v = if owns_slot {
+            self.let_bound(bind, init)
+        } else {
+            self.operand(init)
         };
         self.bind(bind.id, v);
-    }
-
-    /// Pin the binding [`Self::let_bound`] just created (or committed to) for
-    /// `v` to its entry-frame slot. Either way that binding is the newest
-    /// entry on the spine: `let_bound` pushed a fresh `Let`, or adopted the
-    /// short-circuit `LetJoin` its initialiser just pushed.
-    fn pin_global(&mut self, v: LocalId, slot: GlobalSlot) {
-        let bind = match self.spine.last_mut() {
-            Some(Pending::Let { bind, .. }) | Some(Pending::Join { bind, .. }) => bind,
-            None => unreachable!("pin_global: let_bound left nothing on the spine"),
-        };
-        debug_assert_eq!(bind.id, v, "pin_global: spine tail is not the pinned bind");
-        bind.global = Some(slot);
     }
 
     /// `let bind = <init>` for a binding that owns its slot.
@@ -500,17 +488,31 @@ impl Lower {
     /// stack, so [`Self::atom`] binds it — and that `LetJoin` *is* the
     /// binding's single store. Copying it again would add a store T0 never had,
     /// plus a `Drop` of the alias it leaves dead.
+    ///
+    /// A module-scope binding (`bind.global` is `Some`) is pinned to its
+    /// entry-frame slot here, on the binding just created (or committed to):
+    /// either way it is the newest entry on the spine — a fresh `Let`, or the
+    /// adopted short-circuit `LetJoin` the initialiser just pushed.
     fn let_bound(&mut self, bind: &TypedBind, init: &TypedExpr) -> LocalId {
         let mark = self.next;
         let (a, _ty) = self.atom(init);
-        match a {
+        let v = match a {
             Atom::Local(id)
                 if id.0 >= mark && matches!(init, TypedExpr::And { .. } | TypedExpr::Or { .. }) =>
             {
                 id
             }
             a => self.let_(bind.ty, a),
+        };
+        if bind.global.is_some() {
+            let tail = match self.spine.last_mut() {
+                Some(Pending::Let { bind, .. }) | Some(Pending::Join { bind, .. }) => bind,
+                None => unreachable!("let_bound: nothing on the spine to pin"),
+            };
+            debug_assert_eq!(tail.id, v, "let_bound: spine tail is not the pinned bind");
+            tail.global = bind.global;
         }
+        v
     }
 
     /// Lower `e` to a `LocalId` operand: the value is bound via a `Let` on the
@@ -793,7 +795,7 @@ impl Lower {
                 j += 1;
             }
             let mut run: Vec<LocalId> = Vec::with_capacity(j - i);
-            for el in elems.get(i..j).unwrap_or_default() {
+            for el in &elems[i..j] {
                 if let TypedArrayElem::Elem(ex) = el {
                     run.push(self.operand(ex));
                 }
@@ -986,7 +988,7 @@ impl Lower {
             };
             let fall = ArmFall::Arms {
                 scrut,
-                rest: arms.get(i + 1..).unwrap_or_default(),
+                rest: &arms[i + 1..],
             };
             let body = self.nested_arm_body(nested.into(), leaf, fall, result_ty);
             core_arms.push((pat, body));
@@ -1404,9 +1406,7 @@ impl Lower {
                 let width = self.operand(bits);
                 self.bin_read(
                     mark,
-                    bin,
-                    total,
-                    cursor,
+                    BinWalk { bin, total, cursor },
                     width,
                     true,
                     Op::BinReadInt,
@@ -1422,9 +1422,7 @@ impl Lower {
                     let width = self.operand(bits);
                     self.bin_read(
                         mark,
-                        bin,
-                        total,
-                        cursor,
+                        BinWalk { bin, total, cursor },
                         width,
                         true,
                         Op::BinView,
@@ -1439,9 +1437,7 @@ impl Lower {
                     let width = self.let_(int_t, Atom::prim(Op::Sub, vec![total, cursor]));
                     self.bin_read(
                         mark,
-                        bin,
-                        total,
-                        cursor,
+                        BinWalk { bin, total, cursor },
                         width,
                         false,
                         Op::BinView,
@@ -1463,9 +1459,7 @@ impl Lower {
     fn bin_read<'p>(
         &mut self,
         mark: usize,
-        bin: LocalId,
-        total: LocalId,
-        cursor: LocalId,
+        walk: BinWalk,
         width: LocalId,
         need_check: bool,
         read_op: Op,
@@ -1477,6 +1471,7 @@ impl Lower {
     ) -> CoreExpr {
         let int_t = self.temps.int;
         let bool_t = self.temps.bool;
+        let BinWalk { bin, total, cursor } = walk;
         let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
         let build_then = |lo: &mut Self, fall: ArmFall<'p>| -> CoreExpr {
             let tm = lo.spine.len();

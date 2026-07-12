@@ -187,13 +187,23 @@ impl<'p> Perceus<'p> {
                     e = *body;
                 }
                 terminal => {
+                    enum Payload {
+                        Atom(Atom),
+                        Join(Box<CoreExpr>),
+                    }
                     let (mut body, mut live) = self.drop_terminal(terminal);
                     while let Some(frame) = spine.pop() {
-                        let (bind, rhs_live) = match &frame {
-                            SpineLet::Atom { bind, rhs_live, .. }
-                            | SpineLet::Join { bind, rhs_live, .. } => {
-                                (bind.clone(), rhs_live.clone())
-                            }
+                        let (bind, rhs_live, payload) = match frame {
+                            SpineLet::Atom {
+                                bind,
+                                rhs,
+                                rhs_live,
+                            } => (bind, rhs_live, Payload::Atom(rhs)),
+                            SpineLet::Join {
+                                bind,
+                                join,
+                                rhs_live,
+                            } => (bind, rhs_live, Payload::Join(join)),
                         };
                         // A local read by `rhs` and still live after is a
                         // non-last-use: reading dups (VM `PushLocal`), so the
@@ -213,13 +223,13 @@ impl<'p> Perceus<'p> {
                         body = self.wrap_drops(&dead, None, body);
                         live.remove(&bind.id);
                         live.extend(rhs_live);
-                        body = match frame {
-                            SpineLet::Atom { bind, rhs, .. } => CoreExpr::Let {
+                        body = match payload {
+                            Payload::Atom(rhs) => CoreExpr::Let {
                                 bind,
                                 rhs,
                                 body: Box::new(body),
                             },
-                            SpineLet::Join { bind, join, .. } => CoreExpr::LetJoin {
+                            Payload::Join(join) => CoreExpr::LetJoin {
                                 bind,
                                 join,
                                 body: Box::new(body),
@@ -463,13 +473,18 @@ fn reuse_pass(mut body: CoreExpr) -> CoreExpr {
 }
 
 impl ReuseWalk {
-    fn back_edge_seed(&self) -> Option<Vec<Token>> {
-        let mut it = self.self_tails.iter();
-        let first = it.next()?.clone();
+    /// Consumes `self_tails`, so a walk after the seeded second one starts
+    /// accumulating snapshots from scratch instead of mixing in stale ones.
+    fn back_edge_seed(&mut self) -> Option<Vec<Token>> {
+        let tails = std::mem::take(&mut self.self_tails);
+        let first = tails.first()?;
         let seed: Vec<Token> = first
-            .into_iter()
-            .filter(|t| self.self_tails.iter().all(|ts| ts.contains(t)))
-            .map(|t| Token { carried: true, ..t })
+            .iter()
+            .filter(|t| tails.iter().all(|ts| ts.contains(t)))
+            .map(|t| Token {
+                carried: true,
+                ..*t
+            })
             .collect();
         (!seed.is_empty()).then_some(seed)
     }
