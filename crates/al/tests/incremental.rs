@@ -199,7 +199,9 @@ fn query_api_resolves_across_the_module_chain() {
     assert_eq!(m.last().map(String::as_str), Some("b"));
 
     // hover surfaces the name + an inferred type at the same position.
-    let (hn, _, _) = s.hover(Some("main"), l, c).expect("hover at b.b()");
+    let (hn, _, _) = s
+        .hover(Some(&al::module::ModuleKey::main()), l, c)
+        .expect("hover at b.b()");
     assert_eq!(hn, "b");
 
     // documentSymbol / workspace symbol see the chain's declarations.

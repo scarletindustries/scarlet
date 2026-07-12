@@ -762,18 +762,14 @@ impl IncrementalSession {
         }
     }
 
-    /// Resolve a `ModulePath` key to its interned `ModuleId`. `None` means
-    /// the entry (`main`) module, so a single-open-file LSP caller can omit
-    /// the key. A key that names no interned module resolves to `None` — it
+    /// Resolve a module key to its interned `ModuleId`. `None` means the
+    /// entry (`main`) module, so a single-open-file LSP caller can omit the
+    /// key. A key that names no interned module resolves to `None` — it
     /// must not silently fall back to the entry module, or a stale URI would
     /// answer queries with another file's facts.
-    fn module_for(&self, module_key: Option<&str>) -> Option<ModuleId> {
+    fn module_for(&self, module_key: Option<&module::ModuleKey>) -> Option<ModuleId> {
         match module_key {
-            // The LSP hands us a string; wrap it lookup-not-mint. A string
-            // that names no interned module resolves to `None`.
-            Some(key) => self
-                .graph
-                .module_id_by_key(&module::ModuleKey::from_lookup_str(key)),
+            Some(key) => self.graph.module_id_by_key(key),
             None => self.graph.module_id_by_key(&module::ModuleKey::main()),
         }
     }
@@ -791,7 +787,7 @@ impl IncrementalSession {
     /// rather than whichever was recorded first.
     pub fn hover(
         &self,
-        module_key: Option<&str>,
+        module_key: Option<&module::ModuleKey>,
         line: i32,
         col: i32,
     ) -> Option<(String, Type, Option<String>)> {

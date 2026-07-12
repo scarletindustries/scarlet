@@ -120,7 +120,7 @@ fn hover_is_stable_across_many_rewinds() {
         assert!(r.success, "check {i}: {:?}", r.diagnostics);
         // `v` on line 2 (0-based), inside `const v`.
         let (name, ty, _) = s
-            .hover(Some("main"), 1, 6)
+            .hover(Some(&al::module::ModuleKey::main()), 1, 6)
             .unwrap_or_else(|| panic!("no hover fact on check {i}"));
         let rendered = format!("{name}: {ty}");
         match &seen {

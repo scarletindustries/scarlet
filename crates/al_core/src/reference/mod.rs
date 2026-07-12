@@ -145,14 +145,7 @@ pub struct ModuleId(pub u32);
 #[derive(Debug, Default, Clone)]
 pub struct ModuleInterner {
     paths: Vec<ModulePath>,
-    by_key: HashMap<String, ModuleId>,
-}
-
-/// The interner's private hash key for a path: its segments joined with `/`.
-/// Must agree with [`crate::module::ModuleKey`]'s representation —
-/// `lookup_key` compares a `ModuleKey`'s string against these entries.
-fn join_key(path: &ModulePath) -> String {
-    path.join("/")
+    by_key: HashMap<ModuleKey, ModuleId>,
 }
 
 impl ModuleInterner {
@@ -162,7 +155,7 @@ impl ModuleInterner {
 
     /// Intern `path`, returning its stable id (creating one on first sight).
     pub fn intern(&mut self, path: &ModulePath) -> ModuleId {
-        let key = join_key(path);
+        let key = ModuleKey::of(path);
         if let Some(&id) = self.by_key.get(&key) {
             return id;
         }
@@ -174,11 +167,11 @@ impl ModuleInterner {
 
     /// Look up an already-interned path by value.
     pub fn lookup(&self, path: &ModulePath) -> Option<ModuleId> {
-        self.by_key.get(&join_key(path)).copied()
+        self.by_key.get(&ModuleKey::of(path)).copied()
     }
 
-    /// Look up by the `a/b/c` path key directly (what `ModuleTable` keys on).
-    pub fn lookup_key(&self, key: &str) -> Option<ModuleId> {
+    /// Look up by canonical key directly (what `ModuleTable` keys on).
+    pub fn lookup_key(&self, key: &ModuleKey) -> Option<ModuleId> {
         self.by_key.get(key).copied()
     }
 
@@ -636,7 +629,7 @@ impl ReferenceGraph {
     }
 
     pub fn module_id_by_key(&self, key: &ModuleKey) -> Option<ModuleId> {
-        self.interner.lookup_key(key.as_str())
+        self.interner.lookup_key(key)
     }
 
     pub fn module_path(&self, id: ModuleId) -> Option<&ModulePath> {
@@ -1093,7 +1086,10 @@ mod tests {
         assert_eq!(it.path(a), Some(&mp(&["main"])));
         assert_eq!(it.path(b), Some(&mp(&["al", "array"])));
         assert_eq!(it.lookup(&mp(&["al", "array"])), Some(b));
-        assert_eq!(it.lookup_key("al/array"), Some(b));
+        assert_eq!(
+            it.lookup_key(&crate::module::ModuleKey::for_stdlib(&mp(&["al", "array"]))),
+            Some(b)
+        );
         assert_eq!(it.lookup(&mp(&["nope"])), None);
         assert_eq!(it.path(ModuleId(99)), None);
     }

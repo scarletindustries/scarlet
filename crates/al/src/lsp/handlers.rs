@@ -6,6 +6,7 @@
 
 use serde_json::{Value as Json, json};
 
+use crate::module;
 use crate::reference;
 use crate::span::Span;
 
@@ -30,9 +31,13 @@ impl Workspace {
         // for in-repo stdlib files (no session) — the response then falls back
         // to the graph's identity alone.
         let typed = query_module(&uri).and_then(|m| {
-            // The session's lookup-string boundary: the graph's module path
-            // joined into its key form (matches `ModuleKey`'s representation).
-            let key = m.join("/");
+            // Mint the query module's canonical key — its stdlib written
+            // form, or the entry module — rather than hand-joining segments.
+            let key = if module::is_stdlib(&m) {
+                module::ModuleKey::for_stdlib(&m)
+            } else {
+                module::ModuleKey::main()
+            };
             self.session_for(&uri)
                 .and_then(|s| s.hover(Some(&key), line, col))
         });

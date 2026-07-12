@@ -28,10 +28,12 @@ pub type ModulePath = Vec<String>;
 pub struct ModuleKey(String);
 
 impl ModuleKey {
-    /// The one place segments become a key. Private: callers outside this
-    /// module must go through a canonicalizing constructor below, so a key
-    /// can never be built from a path as the user wrote it.
-    fn of(path: &ModulePath) -> Self {
+    /// The one place segments become a key. `pub(crate)` and no wider: the
+    /// reference interner keys its path↔id bijection with it (the graph
+    /// stores only canonical paths, so joining them *is* their key form);
+    /// every other caller must go through a canonicalizing constructor
+    /// below, so a key can never be built from a path as the user wrote it.
+    pub(crate) fn of(path: &ModulePath) -> Self {
         ModuleKey(path.join("/"))
     }
 
