@@ -87,17 +87,36 @@ pub use crate::type_def::PrimitiveKind as Prim;
 /// engine that minted it (or, for static-stdlib types, the engine seeded from
 /// those static arrays). Unlike the previous owned `InferType` tree, `Ty` is
 /// `Copy` so threading types through inference is pointer-sized everywhere.
-pub type Ty = u32;
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Ty(pub u32);
+
+impl Ty {
+    /// Sentinel `Ty` meaning "no arena node".
+    pub const NONE: Ty = Ty(u32::MAX);
+
+    #[inline]
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Index into `InferEngine.strings`.
-pub type StrId = u32;
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct StrId(pub u32);
 
-/// Sentinel `StrId` meaning "no string". Used where a field is logically
-/// `Option<String>` but the struct must stay `Copy` and const-constructible.
-pub const NO_STR: StrId = u32::MAX;
+impl StrId {
+    /// Sentinel `StrId` meaning "no string". Used where a field is logically
+    /// `Option<String>` but the struct must stay `Copy` and
+    /// const-constructible.
+    pub const NONE: StrId = StrId(u32::MAX);
 
-/// Sentinel `Ty` meaning "no arena node".
-pub const NO_TY: Ty = u32::MAX;
+    #[inline]
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Cache slot for a nullary primitive `Con` node. `unify` compares `Con` by
 /// nominal `TypeId` (never arena identity), so one arena node per primitive
@@ -119,7 +138,7 @@ const NULLARY_CACHE_LEN: usize = 6;
 struct NullaryCache([Ty; NULLARY_CACHE_LEN]);
 impl Default for NullaryCache {
     fn default() -> Self {
-        NullaryCache([NO_TY; NULLARY_CACHE_LEN])
+        NullaryCache([Ty::NONE; NULLARY_CACHE_LEN])
     }
 }
 
@@ -314,7 +333,7 @@ pub enum ValueKind {
 #[derive(Debug, Clone, Copy)]
 pub struct QuantVar {
     pub constraint: Option<Constraint>,
-    /// Display name; `NO_STR` when unset.
+    /// Display name; `StrId::NONE` when unset.
     pub name: StrId,
     pub origin_id: Option<i32>,
 }
@@ -554,6 +573,23 @@ pub struct EnginePoolWatermark {
     pub variants: usize,
 }
 
+/// Borrowed view of every static arena/pool slice handed to
+/// [`InferEngine::seed_arena`] (the precompiled stdlib). Named fields — rather
+/// than eight positional slices — so transposing two same-typed pools (e.g.
+/// `children` for `str_slices`) is a compile error, not a corrupted arena
+/// prefix.
+#[derive(Clone, Copy)]
+pub struct ArenaSeed<'a> {
+    pub nodes: &'a [TypeNode],
+    pub children: &'a [Ty],
+    pub strings: &'a [&'a str],
+    pub quants: &'a [QuantVar],
+    pub str_slices: &'a [StrId],
+    pub type_params: &'a [TypeParam],
+    pub variant_fields: &'a [VariantField],
+    pub variants: &'a [Variant],
+}
+
 pub fn next_letter(uid: &mut u64) -> String {
     let alphabet_len: u64 = 26;
     let offset = b'a';
@@ -595,7 +631,7 @@ impl InferEngine {
 
     #[inline]
     pub fn node(&self, t: Ty) -> TypeNode {
-        self.nodes[t as usize]
+        self.nodes[t.idx()]
     }
 
     #[inline]
@@ -605,7 +641,7 @@ impl InferEngine {
 
     #[inline]
     fn push(&mut self, n: TypeNode) -> Ty {
-        let i = self.nodes.len() as Ty;
+        let i = Ty(self.nodes.len() as u32);
         self.nodes.push(n);
         i
     }
@@ -620,14 +656,14 @@ impl InferEngine {
 
     pub fn intern(&mut self, s: &str) -> StrId {
         if let Some(i) = self.strings.get_index_of(s) {
-            return i as StrId;
+            return StrId(i as u32);
         }
-        self.strings.insert_full(s.to_string()).0 as StrId
+        StrId(self.strings.insert_full(s.to_string()).0 as u32)
     }
 
     #[inline]
     pub fn str(&self, id: StrId) -> &str {
-        &self.strings[id as usize]
+        &self.strings[id.idx()]
     }
 
     // --- Side-pool primitives ---
@@ -692,10 +728,10 @@ impl InferEngine {
     /// `precompile.rs` (the static stdlib blob).
     pub fn truncate_to(&mut self, w: &EnginePoolWatermark) {
         self.nodes.truncate(w.nodes);
-        let n = w.nodes as Ty;
+        let n = w.nodes as u32;
         for c in &mut self.nullary_cache.0 {
-            if *c >= n {
-                *c = NO_TY;
+            if c.0 >= n {
+                *c = Ty::NONE;
             }
         }
         self.children.truncate(w.children);
@@ -717,30 +753,19 @@ impl InferEngine {
 
     /// Seed every arena/pool from static slices (the precompiled stdlib). Must
     /// be called before anything is minted so static indices stay valid.
-    #[allow(clippy::too_many_arguments)]
-    pub fn seed_arena(
-        &mut self,
-        nodes: &[TypeNode],
-        children: &[Ty],
-        strings: &[&str],
-        quants: &[QuantVar],
-        str_slices: &[StrId],
-        type_params: &[TypeParam],
-        variant_fields: &[VariantField],
-        variants: &[Variant],
-    ) {
+    pub fn seed_arena(&mut self, seed: ArenaSeed<'_>) {
         debug_assert_eq!(self.pool_watermark(), EnginePoolWatermark::default());
         debug_assert!(self.vars.is_empty());
-        self.nodes.extend_from_slice(nodes);
-        self.children.extend_from_slice(children);
-        for s in strings {
+        self.nodes.extend_from_slice(seed.nodes);
+        self.children.extend_from_slice(seed.children);
+        for s in seed.strings {
             self.intern(s);
         }
-        self.quants.extend_from_slice(quants);
-        self.str_slices.extend_from_slice(str_slices);
-        self.type_params.extend_from_slice(type_params);
-        self.variant_fields.extend_from_slice(variant_fields);
-        self.variants.extend_from_slice(variants);
+        self.quants.extend_from_slice(seed.quants);
+        self.str_slices.extend_from_slice(seed.str_slices);
+        self.type_params.extend_from_slice(seed.type_params);
+        self.variant_fields.extend_from_slice(seed.variant_fields);
+        self.variants.extend_from_slice(seed.variants);
     }
 
     /// Wire the nominal ids of Int/Float/String so engine-minted literal
@@ -772,7 +797,11 @@ impl InferEngine {
     pub fn nullary_con(&mut self, slot: NullaryPrim, id: TypeId, name: &str) -> Ty {
         let i = slot as usize;
         let cached = self.nullary_cache.0[i];
-        if cached != NO_TY {
+        if cached != Ty::NONE {
+            debug_assert!(
+                matches!(self.node(cached), TypeNode::Con { id: cid, .. } if cid == id),
+                "nullary_con slot reused with a different TypeId"
+            );
             return cached;
         }
         let t = self.mk_con(id, name, &[]);
@@ -1332,7 +1361,7 @@ impl InferEngine {
                     RootVarState::Generic { constraint, .. }
                     | RootVarState::Unbound { constraint, .. } => constraint,
                 };
-                let name = self.var_names.get(id).copied().unwrap_or(NO_STR);
+                let name = self.var_names.get(id).copied().unwrap_or(StrId::NONE);
                 QuantVar {
                     constraint,
                     name,
@@ -1523,12 +1552,12 @@ impl InferEngine {
         let count = scheme.quantified.len as usize;
         // Almost every scheme has ≤4 bound vars; keep the substitution on the
         // stack in that case and only spill to the heap for the rare wide one.
-        let mut stack = [0 as Ty; 4];
+        let mut stack = [Ty(0); 4];
         let mut heap: Vec<Ty>;
         let subst: &mut [Ty] = if count <= stack.len() {
             &mut stack[..count]
         } else {
-            heap = vec![0 as Ty; count];
+            heap = vec![Ty(0); count];
             &mut heap[..]
         };
         for (i, slot) in subst.iter_mut().enumerate() {
@@ -1542,7 +1571,7 @@ impl InferEngine {
                     Some(c) => self.fresh_constrained_var(c),
                     None => self.fresh_var(),
                 };
-                if q.name != NO_STR {
+                if q.name != StrId::NONE {
                     self.name_var(fresh, q.name);
                 }
                 fresh
@@ -1683,14 +1712,15 @@ impl InferEngine {
         // `Bool` is NOT here — it is a real two-variant `Named` type and falls
         // through to the env lookup below. Matched by nominal id, not name: a
         // user-declared `type Int { }` is a distinct type and must not resolve
-        // as `Primitive`.
-        if id == self.prim_ids.int {
-            return t_int();
-        } else if id == self.prim_ids.float {
-            return t_float();
-        } else if id == self.prim_ids.string {
-            return t_string();
-        } else if id == self.prim_ids.array {
+        // as `Primitive`. `prim_of` is the single source of the id→primitive
+        // mapping; only `Array` (structural, not a `Prim`) is separate.
+        match self.as_prim(id) {
+            Some(Prim::Int) => return t_int(),
+            Some(Prim::Float) => return t_float(),
+            Some(Prim::String) => return t_string(),
+            None => {}
+        }
+        if id == self.prim_ids.array {
             let elem = args
                 .range()
                 .next()

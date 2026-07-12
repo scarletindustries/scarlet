@@ -78,28 +78,43 @@
 
 use std::collections::VecDeque;
 
-use super::{Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, LocalId};
+use super::{
+    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, Imm, LocalId,
+};
 use crate::bytecode::Op;
 use crate::typed_ir::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
     TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, TypedProgram, ValueRef,
 };
-use crate::types::NO_STR;
+use crate::types::StrId;
 
-/// A `TypedFn` read a [`BindingId`] it never bound, or `TypedFn::binds`
-/// under-counted its binders. Both are elaborator bugs, and both are silent if
-/// papered over: any substituted `LocalId` names a live local, so the program
-/// would run and return the wrong answer. Aborts, in release as well as debug —
-/// the same trade [`crate::typed_ir::elaborator_bug`] makes, and for the same
-/// reason: there is no value to return and no user to address.
+/// Checked narrowing for an [`Imm::Index`] payload. Indices reach lower as
+/// `u32` (tuple/field), `i32` (slot newtypes) and `usize` (positions); one
+/// exceeding `u16` is out of any plausible program shape, so overflow aborts —
+/// silently truncating would emit an instruction addressing the wrong slot.
+#[allow(clippy::panic)]
+fn idx16<T: TryInto<u16> + Copy + std::fmt::Debug>(i: T) -> u16 {
+    match i.try_into() {
+        Ok(v) => v,
+        Err(_) => panic!(
+            "internal compiler error: index immediate {i:?} exceeds u16. \
+             Please report this as a compiler bug."
+        ),
+    }
+}
+
+/// A `TypedFn` misused a [`BindingId`]: read it before binding it, or handed
+/// over one that `TypedFn::binds` never counted. Both are elaborator bugs, and
+/// both are silent if papered over: any substituted `LocalId` names a live
+/// local, so the program would run and return the wrong answer. Aborts, in
+/// release as well as debug — the same trade
+/// [`crate::typed_ir::elaborator_bug`] makes, and for the same reason: there
+/// is no value to return and no user to address.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
-fn read_before_bind(b: BindingId) -> ! {
-    panic!(
-        "internal compiler error: {b} was read before it was bound. \
-         Please report this as a compiler bug."
-    )
+fn binding_bug(b: BindingId, why: &str) -> ! {
+    panic!("internal compiler error: {b} {why}. Please report this as a compiler bug.")
 }
 
 /// Lower a whole typechecked module.
@@ -123,7 +138,7 @@ pub fn lower(p: &TypedProgram) -> CoreProgram {
         debug_assert!(
             f.body.toplevel_globals().is_empty(),
             "ordinary fn s{} carries slot-pinned binds",
-            f.name
+            f.name.0
         );
         fns.push(f);
     }
@@ -134,18 +149,17 @@ pub fn lower(p: &TypedProgram) -> CoreProgram {
     }
 }
 
-/// Lower one function. `params[i]` binds as `LocalId(i)`, matching
-/// `BindingId(i)`.
+/// Lower one function. Each param binds under the [`BindingId`] its
+/// [`TypedBind`] carries.
 fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
     let mut lo = Lower::new(temps, f.binds);
     let params: Vec<CoreBind> = f
         .params
         .iter()
-        .enumerate()
-        .map(|(i, &(_, ty))| {
-            let id = lo.fresh(ty);
-            lo.bind(BindingId(i as u32), id);
-            CoreBind::new(id, ty)
+        .map(|p| {
+            let id = lo.fresh(p.ty);
+            lo.bind(p.id, id);
+            CoreBind::new(id, p.ty)
         })
         .collect();
     let body = lo.sealed(|lo| lo.expr_tail(&f.body, f.ret, SpinePos::Outer));
@@ -216,6 +230,19 @@ struct BinWalk {
     bin: LocalId,
     total: LocalId,
     cursor: LocalId,
+}
+
+/// How wide a fixed-position `<<>>` segment read is. [`Lower::bin_read`]
+/// lowers the width itself: a `Sized` read gets the `end <= total` bounds
+/// guard, a `Remainder` read is `total - cursor` wide by construction, so the
+/// guard is vacuous and skipped. An unguarded read of any other width is
+/// unrepresentable.
+enum SegWidth<'p> {
+    /// The segment's size expression, in bits (the elaborator folded in the
+    /// unit multiplier and the default width).
+    Sized(&'p TypedExpr),
+    /// A sizeless trailing `:binary` segment: the rest of the binary.
+    Remainder,
 }
 
 /// Fallthrough continuation for an arm: what to lower when a guard or a nested
@@ -303,12 +330,15 @@ impl Lower {
         self.tys[id.0 as usize]
     }
 
-    /// Record the local `b` names. Indexed, not `get_mut`: `binds` is sized
-    /// from [`TypedFn::binds`], so an out-of-range `BindingId` means the
-    /// elaborator miscounted the body's binders. Writing nowhere would leave
-    /// the later [`Self::local`] to invent a value; aborting says so.
+    /// Record the local `b` names. `binds` is sized from [`TypedFn::binds`],
+    /// so an out-of-range `BindingId` means the elaborator miscounted the
+    /// body's binders. Writing nowhere would leave the later [`Self::local`]
+    /// to invent a value; aborting says so.
     fn bind(&mut self, b: BindingId, id: LocalId) {
-        self.binds[b.0 as usize] = Some(id);
+        match self.binds.get_mut(b.0 as usize) {
+            Some(slot) => *slot = Some(id),
+            None => binding_bug(b, "is out of range for this fn's binder table"),
+        }
     }
 
     /// The local a [`BindingId`] names.
@@ -320,7 +350,11 @@ impl Lower {
     /// read-before-bind would compile to a program that runs and returns the
     /// wrong answer. Trap instead, in release as well as debug.
     fn local(&self, b: BindingId) -> LocalId {
-        self.binds[b.0 as usize].unwrap_or_else(|| read_before_bind(b))
+        match self.binds.get(b.0 as usize) {
+            Some(Some(id)) => *id,
+            Some(None) => binding_bug(b, "was read before it was bound"),
+            None => binding_bug(b, "is out of range for this fn's binder table"),
+        }
     }
 
     /// Push `let %id = rhs` onto the current spine and return `%id`.
@@ -343,6 +377,38 @@ impl Lower {
         id
     }
 
+    /// Push `let %id = rhs` for a source binding that owns its slot: the
+    /// minted [`CoreBind`] carries `bind.global` from construction, so a
+    /// module-scope decl's entry-frame pin never has to be patched onto the
+    /// spine after the fact.
+    fn let_pinned(&mut self, bind: &TypedBind, rhs: Atom) -> LocalId {
+        let id = self.fresh(bind.ty);
+        self.spine.push(Pending::Let {
+            bind: CoreBind {
+                id,
+                ty: bind.ty,
+                global: bind.global,
+            },
+            rhs,
+        });
+        id
+    }
+
+    /// Push `letj %id = <join>` carrying `bind.global`, as [`Self::let_pinned`]
+    /// does for a plain `Let`. `ty` is the join's own result type.
+    fn let_join_pinned(&mut self, bind: &TypedBind, ty: RTy, join: CoreExpr) -> LocalId {
+        let id = self.fresh(ty);
+        self.spine.push(Pending::Join {
+            bind: CoreBind {
+                id,
+                ty,
+                global: bind.global,
+            },
+            join,
+        });
+        id
+    }
+
     /// Bind an already-pooled `Int` constant to a fresh local. Every integer a
     /// lowered body pushes — an array pattern's length, a `<<>>` walk's initial
     /// bit cursor, a literal segment's width — was interned by the elaborator
@@ -352,10 +418,10 @@ impl Lower {
         self.let_(int_t, Atom::Const(c))
     }
 
-    /// A `PrimOp` atom with `imm = args.len()` — for the variadic `Make*`/
-    /// `*ConcatN`/`Prepend`/`Append` opcodes whose operand is an argc.
+    /// A `PrimOp` atom with `imm = Argc(args.len())` — for the variadic
+    /// `Make*`/`*ConcatN`/`Prepend`/`Append` opcodes whose operand is an argc.
     fn primn(&self, op: Op, args: Vec<LocalId>) -> Atom {
-        let imm = args.len() as i32;
+        let imm = Imm::Argc(args.len() as u32);
         Atom::PrimOp { op, args, imm }
     }
 
@@ -461,12 +527,13 @@ impl Lower {
     ///   alias's `Drop` — that the pre-Core-IR compiler emitted for it.
     ///
     /// Everything else collapses into whatever its initialiser landed in: an
-    /// elaborator-minted temp (`bind.name == NO_STR`, a labelled-argument
+    /// elaborator-minted temp (`bind.name == StrId::NONE`, a labelled-argument
     /// spill or a destructuring scrutinee) names no source-level slot, and a
     /// named `let` on a *nested* spine (a join arm, an operand splice) is
     /// local to that segment, where its value already has a home.
     fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) {
-        let owns_slot = bind.global.is_some() || (spine == SpinePos::Outer && bind.name != NO_STR);
+        let owns_slot =
+            bind.global.is_some() || (spine == SpinePos::Outer && bind.name != StrId::NONE);
         let v = if owns_slot {
             self.let_bound(bind, init)
         } else {
@@ -475,7 +542,10 @@ impl Lower {
         self.bind(bind.id, v);
     }
 
-    /// `let bind = <init>` for a binding that owns its slot.
+    /// `let bind = <init>` for a binding that owns its slot. Both branches
+    /// mint the binding's `CoreBind` themselves ([`Self::let_pinned`] /
+    /// [`Self::let_join_pinned`]), so a module-scope binding (`bind.global` is
+    /// `Some`) carries its entry-frame pin from construction.
     ///
     /// Normally a `Let` of its own, even when `init` already lowered to a local:
     /// `let y = x` is two frame slots, and an `if`/`match` in initialiser
@@ -485,34 +555,25 @@ impl Lower {
     ///
     /// A short-circuit is the exception. `a && b` left its result on the
     /// operand stack and was stored once, straight into the binding; ANF has no
-    /// stack, so [`Self::atom`] binds it — and that `LetJoin` *is* the
-    /// binding's single store. Copying it again would add a store T0 never had,
-    /// plus a `Drop` of the alias it leaves dead.
-    ///
-    /// A module-scope binding (`bind.global` is `Some`) is pinned to its
-    /// entry-frame slot here, on the binding just created (or committed to):
-    /// either way it is the newest entry on the spine — a fresh `Let`, or the
-    /// adopted short-circuit `LetJoin` the initialiser just pushed.
+    /// stack, so its `LetJoin` *is* the binding's single store. Copying it
+    /// again would add a store T0 never had, plus a `Drop` of the alias it
+    /// leaves dead.
     fn let_bound(&mut self, bind: &TypedBind, init: &TypedExpr) -> LocalId {
-        let mark = self.next;
-        let (a, _ty) = self.atom(init);
-        let v = match a {
-            Atom::Local(id)
-                if id.0 >= mark && matches!(init, TypedExpr::And { .. } | TypedExpr::Or { .. }) =>
-            {
-                id
+        match init {
+            // Lowered like `atom`'s short-circuit arm — `lhs` unconditionally
+            // onto the enclosing spine, only the `If` sealed as the join — but
+            // the join is the binding itself.
+            TypedExpr::And { lhs, rhs, .. } | TypedExpr::Or { lhs, rhs, .. } => {
+                let and = matches!(init, TypedExpr::And { .. });
+                let ty = init.ty();
+                let join = self.short_circuit(lhs, rhs, and, ty);
+                self.let_join_pinned(bind, ty, join)
             }
-            a => self.let_(bind.ty, a),
-        };
-        if bind.global.is_some() {
-            let tail = match self.spine.last_mut() {
-                Some(Pending::Let { bind, .. }) | Some(Pending::Join { bind, .. }) => bind,
-                None => unreachable!("let_bound: nothing on the spine to pin"),
-            };
-            debug_assert_eq!(tail.id, v, "let_bound: spine tail is not the pinned bind");
-            tail.global = bind.global;
+            _ => {
+                let (a, _ty) = self.atom(init);
+                self.let_pinned(bind, a)
+            }
         }
-        v
     }
 
     /// Lower `e` to a `LocalId` operand: the value is bound via a `Let` on the
@@ -581,17 +642,17 @@ impl Lower {
                 ValueRef::Slot(slot) => Atom::PrimOp {
                     op: Op::PushLocal,
                     args: vec![],
-                    imm: slot.0,
+                    imm: Imm::Index(idx16(slot.0)),
                 },
                 ValueRef::Global(slot) => Atom::PrimOp {
                     op: Op::PushGlobal,
                     args: vec![],
-                    imm: slot.0,
+                    imm: Imm::Index(idx16(slot.0)),
                 },
                 ValueRef::Capture(idx) => Atom::PrimOp {
                     op: Op::PushCapture,
                     args: vec![],
-                    imm: idx.0,
+                    imm: Imm::Index(idx16(idx.0)),
                 },
                 ValueRef::SelfClosure => Atom::prim(Op::PushSelf, vec![]),
             },
@@ -637,7 +698,7 @@ impl Lower {
                 Atom::PrimOp {
                     op: Op::TupleIndex,
                     args: vec![r],
-                    imm: *idx as i32,
+                    imm: Imm::Index(idx16(*idx)),
                 }
             }
             TypedExpr::Field {
@@ -651,7 +712,7 @@ impl Lower {
                         Op::GetFieldUnchecked
                     },
                     args: vec![r],
-                    imm: *idx as i32,
+                    imm: Imm::Index(idx16(*idx)),
                 }
             }
             TypedExpr::Ctor { variant, args, .. } => {
@@ -805,7 +866,7 @@ impl Lower {
                 && let Some(TypedArrayElem::Spread(sp)) = elems.get(j)
             {
                 let s = self.operand(sp);
-                let k = run.len() as i32;
+                let k = Imm::Argc(run.len() as u32);
                 run.push(s);
                 acc = Some(self.let_(
                     ty,
@@ -820,7 +881,7 @@ impl Lower {
             }
             let a = match acc {
                 Some(a) => {
-                    let k = run.len() as i32;
+                    let k = Imm::Argc(run.len() as u32);
                     let mut args = vec![a];
                     args.extend(run);
                     self.let_(
@@ -959,17 +1020,18 @@ impl Lower {
         // A constant default rides in the operand and never touches the stack:
         // that is the whole win on `a[i] or 0`, whose old fused op *skipped*
         // the default's push on a hit. Any other pure atom is pushed, and
-        // `imm = -1` (never a `ConstId`) tells the VM to pop it.
+        // `Imm::PushedDefault` (encoded as -1, never a `ConstId`) tells the VM
+        // to pop it.
         Some(CoreExpr::Tail(match dflt {
             TypedExpr::Const { value, .. } => Atom::PrimOp {
                 op: Op::IndexOr,
                 args: vec![r, i],
-                imm: value.0 as i32,
+                imm: Imm::Const(*value),
             },
             _ => Atom::PrimOp {
                 op: Op::IndexOr,
                 args: vec![r, i, self.operand(dflt)],
-                imm: -1,
+                imm: Imm::PushedDefault,
             },
         }))
     }
@@ -1168,7 +1230,7 @@ impl Lower {
                             Atom::PrimOp {
                                 op: Op::TupleIndex,
                                 args: vec![v],
-                                imm: j as i32,
+                                imm: Imm::Index(idx16(j)),
                             },
                         );
                         tmp.push((ej, elem));
@@ -1219,7 +1281,7 @@ impl Lower {
                                 Atom::PrimOp {
                                     op: Op::ElemAt,
                                     args: vec![v],
-                                    imm: j as i32,
+                                    imm: Imm::Index(idx16(j)),
                                 },
                             );
                             tmp.push((ej, ep));
@@ -1372,7 +1434,7 @@ impl Lower {
                     Atom::PrimOp {
                         op: Op::TupleIndex,
                         args: vec![pair],
-                        imm: 0,
+                        imm: Imm::Index(0),
                     },
                 );
                 let nbits = self.let_(
@@ -1380,7 +1442,7 @@ impl Lower {
                     Atom::PrimOp {
                         op: Op::TupleIndex,
                         args: vec![pair],
-                        imm: 1,
+                        imm: Imm::Index(1),
                     },
                 );
                 let z = self.int_const(zero);
@@ -1402,66 +1464,46 @@ impl Lower {
             // Int / Binary segment. Width is the size expression (in bits), the
             // elaborator having folded in the unit multiplier and the default
             // width; a sizeless `:binary` segment consumes the rest.
-            TypedBinPatSeg::Int { bits, value } => {
-                let width = self.operand(bits);
+            TypedBinPatSeg::Int { bits, value } => self.bin_read(
+                mark,
+                BinWalk { bin, total, cursor },
+                SegWidth::Sized(bits),
+                Op::BinReadInt,
+                int_t,
+                value,
+                cont,
+                fall,
+                result_ty,
+            ),
+            TypedBinPatSeg::Binary { bits, value } => {
+                let width = match bits {
+                    Some(bits) => SegWidth::Sized(bits),
+                    None => SegWidth::Remainder,
+                };
                 self.bin_read(
                     mark,
                     BinWalk { bin, total, cursor },
                     width,
-                    true,
-                    Op::BinReadInt,
-                    int_t,
+                    Op::BinView,
+                    bin_ty,
                     value,
                     cont,
                     fall,
                     result_ty,
                 )
             }
-            TypedBinPatSeg::Binary { bits, value } => match bits {
-                Some(bits) => {
-                    let width = self.operand(bits);
-                    self.bin_read(
-                        mark,
-                        BinWalk { bin, total, cursor },
-                        width,
-                        true,
-                        Op::BinView,
-                        bin_ty,
-                        value,
-                        cont,
-                        fall,
-                        result_ty,
-                    )
-                }
-                None => {
-                    let width = self.let_(int_t, Atom::prim(Op::Sub, vec![total, cursor]));
-                    self.bin_read(
-                        mark,
-                        BinWalk { bin, total, cursor },
-                        width,
-                        false,
-                        Op::BinView,
-                        bin_ty,
-                        value,
-                        cont,
-                        fall,
-                        result_ty,
-                    )
-                }
-            },
         }
     }
 
-    /// The shared tail of a fixed-width `<<>>` segment: bounds-check
-    /// `cursor + width <= total` (unless the width *is* the remainder), read
-    /// the value, then match the segment's value pattern and continue.
+    /// The shared tail of a fixed-position `<<>>` segment: lower the width
+    /// (bounds-checking the read per [`SegWidth`]), read the value, then match
+    /// the segment's value pattern and continue.
     #[allow(clippy::too_many_arguments)]
     fn bin_read<'p>(
         &mut self,
         mark: usize,
         walk: BinWalk,
-        width: LocalId,
-        need_check: bool,
+        width: SegWidth<'p>,
         read_op: Op,
         val_ty: RTy,
         value: &'p TypedPat,
@@ -1472,21 +1514,27 @@ impl Lower {
         let int_t = self.temps.int;
         let bool_t = self.temps.bool;
         let BinWalk { bin, total, cursor } = walk;
-        let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
-        let build_then = |lo: &mut Self, fall: ArmFall<'p>| -> CoreExpr {
+        let read = |lo: &mut Self, width: LocalId, end: LocalId, fall: ArmFall<'p>| -> CoreExpr {
             let tm = lo.spine.len();
             let sv = lo.let_(val_ty, Atom::prim(read_op, vec![bin, cursor, width]));
             let leaf2 = ArmLeaf::BinCont(Box::new(cont(end)));
             let inner = lo.nested_arm_body(VecDeque::from([(sv, value)]), leaf2, fall, result_ty);
             lo.seal(tm, inner)
         };
-        if need_check {
-            let ok = self.let_(bool_t, Atom::prim(Op::Lte, vec![end, total]));
-            let then_e = build_then(self, fall.clone());
-            self.guard_if(mark, ok, then_e, fall, result_ty)
-        } else {
-            let then_e = build_then(self, fall);
-            self.seal(mark, then_e)
+        match width {
+            SegWidth::Sized(bits) => {
+                let width = self.operand(bits);
+                let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
+                let ok = self.let_(bool_t, Atom::prim(Op::Lte, vec![end, total]));
+                let then_e = read(self, width, end, fall.clone());
+                self.guard_if(mark, ok, then_e, fall, result_ty)
+            }
+            SegWidth::Remainder => {
+                let width = self.let_(int_t, Atom::prim(Op::Sub, vec![total, cursor]));
+                let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
+                let then_e = read(self, width, end, fall);
+                self.seal(mark, then_e)
+            }
         }
     }
 }

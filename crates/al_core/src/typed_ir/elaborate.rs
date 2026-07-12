@@ -65,7 +65,9 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use super::elaborate_pat::{CtorPat, PatCtx, elaborate_arms, seg_bits, slot_pattern_args};
+use super::elaborate_pat::{
+    CtorPat, PatCtx, SpecWidth, elaborate_arms, seg_bits, slot_pattern_args,
+};
 use super::eta::{FnRTy, FnTable, eta_wrapper};
 use super::resolve::{CallForm, Denotation, EtaTarget, ValueForm};
 use super::rty::{RTy, ResolvedNode, ResolvedPool};
@@ -78,7 +80,7 @@ use crate::ast;
 use crate::bytecode::{BinopKind, Op, ShortCircuitOp, Value, ValueBinop, specialize_binop};
 use crate::core_ir::{ConstId, FuncIdx, VariantRef};
 use crate::span::Span;
-use crate::types::{NO_STR, Prim, StrId, Ty};
+use crate::types::{Prim, StrId, Ty};
 
 /// One scheduled node of a block: its index in the block's `body`, and — for a
 /// top-level `fn`/`const` — the entry-frame slot its binding must land in. The
@@ -266,8 +268,9 @@ pub enum WalkStep {
     Qualified(bool),
 }
 
-/// Elaborate `body` into a [`TypedFn`]. `params` are already inferred; each is
-/// bound as `BindingId(i)`. Eta wrappers the body needs are appended to `fns`.
+/// Elaborate `body` into a [`TypedFn`]. `params` are already inferred; each
+/// gets a fresh [`TypedBind`] the returned function carries. Eta wrappers the
+/// body needs are appended to `fns`.
 ///
 /// This is also how the entry file's `__main__` is elaborated when it is a bare
 /// expression rather than a module block; a block goes through
@@ -322,13 +325,13 @@ fn elaborate_fn<C: ElabCtx>(
 ) -> TypedFn {
     let mut el = Elab::new(ctx, pool, fns, walk_tys);
     let ret = el.resolve(ret_ty);
-    let params: Vec<(StrId, RTy)> = params
+    let params: Vec<TypedBind> = params
         .iter()
         .map(|&(nm, ty)| {
             let t = el.resolve(ty);
             let b = el.new_bind(nm, t);
             el.bind_name(nm, b.id);
-            (nm, b.ty)
+            b
         })
         .collect();
     let body = f(&mut el);
@@ -370,7 +373,7 @@ pub struct Elab<'a, C: ElabCtx> {
     /// `StrId → BindingId` for source-named binds in scope. A stack, so
     /// shadowing is push/pop and lookup is a reverse scan.
     names: Vec<(StrId, BindingId)>,
-    /// [`NO_STR`]: binds no source name reaches (an argument spill, a tuple
+    /// [`StrId::NONE`]: binds no source name reaches (an argument spill, a tuple
     /// projection, an `or`-expression's unwrapped payload). `lower` reads it
     /// back off [`TypedBind::name`] to tell an operand temp — free to collapse
     /// into whatever it aliases — from a `let` the source wrote, which owns
@@ -417,7 +420,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         fns: &'a mut FnTable,
         walk_tys: &'a [WalkStep],
     ) -> Self {
-        let anon = NO_STR;
+        let anon = StrId::NONE;
         let eta_param = ctx.intern("_");
         let nil_ty = ctx.ty_nil();
         let nil = ctx.resolve_rty(pool, nil_ty);
@@ -920,17 +923,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 // Value before width, matching the check walk's visit order
                 // (patterns visit width first — see `PatElab::bin_seg`).
                 let value = self.expr(&seg.value);
-                let bits = seg_bits(self, &seg.spec);
-                match &seg.spec {
-                    ast::BinSpec::Int { .. } => {
-                        // `seg_bits` is total for `Int`: sizeless defaults to 8.
-                        let Some(bits) = bits else {
-                            elaborator_bug("Int segment with no width", seg.span)
-                        };
-                        TypedBinSeg::Int { value, bits }
-                    }
-                    ast::BinSpec::Binary { .. } => TypedBinSeg::Binary { value, bits },
-                    ast::BinSpec::Utf8 => TypedBinSeg::Utf8 { value },
+                match seg_bits(self, &seg.spec) {
+                    SpecWidth::Int(bits) => TypedBinSeg::Int { value, bits },
+                    SpecWidth::Bytes(bits) => TypedBinSeg::Binary { value, bits },
+                    SpecWidth::Utf8 => TypedBinSeg::Utf8 { value },
                 }
             })
             .collect();
@@ -1289,7 +1285,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let mut seq: Vec<Step> = Vec::with_capacity(len);
         for &(idx, slot) in &decls {
             match placed.get_mut(idx) {
-                Some(p) => *p = true,
+                Some(p) if !*p => *p = true,
+                // A duplicate index elaborates the decl twice — two globals
+                // initialised from one node, with every reader wired to
+                // whichever slot the second pass claimed. A silent miscompile.
+                Some(_) => elaborator_bug("toplevel decl scheduled twice", span),
                 // A decl the check walk saw but this block does not have: the
                 // two disagree about what module they are walking. Dropping it
                 // would de-globalise a `const` whose slot every already-emitted
@@ -1745,10 +1745,10 @@ mod tests {
     #[test]
     fn a_ctors_fields_specialise_to_the_type_it_is_used_at() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
         let a = p.mk_bound(0);
-        let list_a = p.mk_con(TypeId(9), 1, &[a]);
-        let list_int = p.mk_con(TypeId(9), 1, &[int]);
+        let list_a = p.mk_con(TypeId(9), StrId(1), &[a]);
+        let list_int = p.mk_con(TypeId(9), StrId(1), &[int]);
 
         let m = bound_subst(&p, list_a, list_int);
         assert_eq!(m.get(&0), Some(&int));
@@ -1766,7 +1766,7 @@ mod tests {
     fn an_opaque_use_site_leaves_the_fields_bound() {
         let mut p = pool();
         let a = p.mk_bound(0);
-        let list_a = p.mk_con(TypeId(9), 1, &[a]);
+        let list_a = p.mk_con(TypeId(9), StrId(1), &[a]);
         let opaque = p.mk_bound(7);
         let m = bound_subst(&p, list_a, opaque);
         assert!(m.is_empty());
@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn substitution_over_a_concrete_type_allocates_nothing() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
         let tup = p.mk_tuple(&[int, int]);
         let before = p.len();
         let mut m = HashMap::new();
@@ -1792,10 +1792,10 @@ mod tests {
     #[test]
     fn substitution_rewrites_a_nested_spine() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
         let a = p.mk_bound(0);
         let inner = p.mk_tuple(&[a, int]);
-        let outer = p.mk_con(TypeId(4), 2, &[inner]);
+        let outer = p.mk_con(TypeId(4), StrId(2), &[inner]);
         let mut m = HashMap::new();
         m.insert(0u32, int);
         let out = subst_rty(&mut p, outer, &m);
@@ -1809,10 +1809,10 @@ mod tests {
     #[test]
     fn spilled_lets_preserve_source_order() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
         let mk = |i: u32| TypedBind {
             id: BindingId(i),
-            name: 0,
+            name: StrId(0),
             ty: int,
             global: None,
         };

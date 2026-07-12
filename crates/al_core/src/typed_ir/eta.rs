@@ -43,7 +43,8 @@ use crate::types::StrId;
 
 use super::resolve::EtaTarget;
 use super::{
-    Arity, BindingId, RTy, ResolvedNode, ResolvedPool, TypedCallee, TypedExpr, TypedFn, ValueRef,
+    Arity, BindingId, RTy, ResolvedNode, ResolvedPool, TypedBind, TypedCallee, TypedExpr, TypedFn,
+    ValueRef,
 };
 
 /// The program's function table under construction: [`TypedProgram::fns`]
@@ -168,14 +169,25 @@ pub fn eta_wrapper(
     target: EtaTarget,
     fn_ty: &FnRTy,
 ) -> TypedExpr {
-    let params: Vec<(StrId, RTy)> = fn_ty.params().iter().map(|t| (param_name, *t)).collect();
-    let args: Vec<TypedExpr> = fn_ty
+    // The wrapper is a fresh function, so its `BindingId` space starts at
+    // zero; the body's `Var`s reference the ids stored on `params`, never a
+    // numbering convention.
+    let params: Vec<TypedBind> = fn_ty
         .params()
         .iter()
         .enumerate()
-        .map(|(i, t)| TypedExpr::Var {
-            ty: *t,
-            place: ValueRef::Local(BindingId(i as u32)),
+        .map(|(i, &ty)| TypedBind {
+            id: BindingId(i as u32),
+            name: param_name,
+            ty,
+            global: None,
+        })
+        .collect();
+    let args: Vec<TypedExpr> = params
+        .iter()
+        .map(|b| TypedExpr::Var {
+            ty: b.ty,
+            place: ValueRef::Local(b.id),
         })
         .collect();
     let ret = fn_ty.ret();
@@ -229,8 +241,8 @@ mod tests {
     use crate::type_def::TypeId;
     use crate::types::PrimIds;
 
-    const NAME: StrId = 1;
-    const PARAM: StrId = 2;
+    const NAME: StrId = StrId(1);
+    const PARAM: StrId = StrId(2);
 
     fn pool() -> ResolvedPool {
         ResolvedPool::new(PrimIds {
@@ -245,7 +257,7 @@ mod tests {
         VariantRef {
             type_id: TypeId(9),
             variant_idx: 0,
-            type_name: 10,
+            type_name: StrId(10),
             variant_name: NAME,
         }
     }
@@ -253,7 +265,7 @@ mod tests {
     #[test]
     fn only_a_function_type_makes_an_fn_rty() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
         let tup = p.mk_tuple(&[int, int]);
         let f = p.mk_fun(&[int, int], tup);
         assert!(FnRTy::of(&p, int).is_none());
@@ -268,8 +280,8 @@ mod tests {
     #[test]
     fn a_constructor_wrapper_constructs_from_its_parameters() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let w = p.mk_con(TypeId(9), 10, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let w = p.mk_con(TypeId(9), StrId(10), &[]);
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
@@ -296,7 +308,15 @@ mod tests {
         assert_eq!(fns.len(), 1);
         let f = &fns[0];
         assert_eq!(f.name, NAME);
-        assert_eq!(f.params, vec![(PARAM, int)]);
+        assert_eq!(
+            f.params,
+            vec![TypedBind {
+                id: BindingId(0),
+                name: PARAM,
+                ty: int,
+                global: None,
+            }]
+        );
         assert_eq!(f.ret, w);
         assert_eq!(f.binds, 1);
         assert_eq!(
@@ -317,7 +337,7 @@ mod tests {
     #[test]
     fn a_builtin_wrapper_calls_the_opcode_with_its_parameters_in_order() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
         let ty = p.mk_fun(&[int, int], int);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
@@ -364,8 +384,8 @@ mod tests {
     #[test]
     fn each_wrapper_is_named_by_its_index_in_fns() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let w = p.mk_con(TypeId(9), 10, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let w = p.mk_con(TypeId(9), StrId(10), &[]);
         let cty = p.mk_fun(&[int], w);
         let aty = p.mk_fun(&[int, int], int);
         let ctor_ty = FnRTy::of(&p, cty).expect("a Fun node");
@@ -406,8 +426,8 @@ mod tests {
     #[test]
     fn a_wrapper_names_its_slot_in_the_table_it_was_appended_to() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let w = p.mk_con(TypeId(9), 10, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let w = p.mk_con(TypeId(9), StrId(10), &[]);
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
@@ -423,8 +443,8 @@ mod tests {
             binds: 0,
         };
         let mut fns = FnTable::new();
-        fns.push(existing(100));
-        fns.push(existing(101));
+        fns.push(existing(StrId(100)));
+        fns.push(existing(StrId(101)));
 
         let value = eta_wrapper(
             &mut fns,
@@ -452,8 +472,8 @@ mod tests {
     #[should_panic(expected = "one parameter per declared field")]
     fn a_constructor_whose_type_disagrees_with_its_declaration_is_rejected() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), 0, &[]);
-        let w = p.mk_con(TypeId(9), 10, &[]);
+        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let w = p.mk_con(TypeId(9), StrId(10), &[]);
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 

@@ -25,7 +25,6 @@ use std::rc::Rc;
 
 use super::compiler::{CompileResult, Compiler, new_compiler};
 use crate::ast;
-use crate::diagnostic::has_errors;
 use crate::module::{self, ModulePath};
 use crate::reference::{
     Definition, DefinitionKind, EntityKind, ModuleId, ModuleReferences, ReferenceGraph,
@@ -79,8 +78,11 @@ pub struct HoverFact {
 
 /// Full snapshot of every append-only compiler structure, captured at module
 /// boundaries so an `IncrementalSession` can roll back exactly to that point.
-/// Ordered so `min()` over a set of watermarks picks the earliest-compiled
-/// one; see [`ord_key`](Self::ord_key) for the comparison key.
+/// Two-way selection goes through [`earlier`](Self::earlier) /
+/// [`later`](Self::later), which pick the earliest/latest-compiled one and
+/// merge the `env` payload on ties; the derived-style `Ord` (over
+/// [`ord_key`](Self::ord_key)) exists for sorting and one-sided comparisons
+/// only.
 ///
 /// Every field is the length of an arena that some *surviving* structure holds
 /// indices into. Adding one obliges you to rewind it in
@@ -101,10 +103,12 @@ impl Watermark {
     /// an append-only pool (or a monotone counter), so a watermark captured
     /// earlier compares `<=` one captured later regardless of which entry the
     /// tuple happens to differ on first — `ModuleTable::invalidate` relies on
-    /// `min` picking the earliest-compiled module. `env` is deliberately
-    /// excluded: it is a rollback payload for `TypeEnv::truncate_to`, and
-    /// keeping it out means `EnvWatermark`'s field set can grow or reorder
-    /// without any risk of perturbing this ordering.
+    /// [`earlier`](Self::earlier) picking the earliest-compiled module. `env`
+    /// is deliberately excluded: it is a rollback payload for
+    /// `TypeEnv::truncate_to`, and keeping it out means `EnvWatermark`'s field
+    /// set can grow or reorder without any risk of perturbing this ordering.
+    /// The flip side — equal `ord_key`s can hide different env payloads — is
+    /// why `earlier`/`later` merge `env` on ties instead of picking a side.
     fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, usize, i32) {
         // Exhaustive destructure (no `..`): a new arena length added to
         // `Watermark` must be consciously placed in — or excluded from — the
@@ -118,6 +122,87 @@ impl Watermark {
             local_count,
         } = *self;
         (engine, code, functions, constants, local_count)
+    }
+
+    /// The earlier-compiled of two watermarks, order-independently. This — not
+    /// `Ord::min` — is the sanctioned way to pick between two watermarks:
+    /// `ord_key` excludes `env`, so two watermarks with identical pool lengths
+    /// but *different* env rollback payloads compare `Equal`, and `min` would
+    /// resolve the tie by argument order, silently discarding one payload. If
+    /// the discarded env carried smaller rollback indices, a later
+    /// `TypeEnv::truncate_to` would under-truncate and leave stale entries.
+    /// On a tie this instead keeps the field-wise *deeper* (smaller) rollback
+    /// of the two envs, so `earlier` is symmetric and always conservative.
+    pub fn earlier(self, other: Self) -> Self {
+        match self.ord_key().cmp(&other.ord_key()) {
+            std::cmp::Ordering::Less => self,
+            std::cmp::Ordering::Greater => other,
+            // ord_key ties: every pool-length field is equal, only the env
+            // payloads can differ. Merge them instead of picking a side.
+            std::cmp::Ordering::Equal => Watermark {
+                env: env_field_min(self.env, other.env),
+                ..self
+            },
+        }
+    }
+
+    /// `earlier`'s mirror: the later-compiled of two watermarks, keeping the
+    /// field-wise *shallower* (larger) env on an `ord_key` tie. Used to clamp
+    /// a rewind target to the seed floor (`IncrementalSession::rewind_to`):
+    /// the seed guards the static stdlib prefix, so on a tie no env field may
+    /// drop below what either side would preserve — truncating the env past
+    /// the seed's payload would dangle stdlib bindings whose pools survived.
+    pub fn later(self, other: Self) -> Self {
+        match self.ord_key().cmp(&other.ord_key()) {
+            std::cmp::Ordering::Less => other,
+            std::cmp::Ordering::Greater => self,
+            std::cmp::Ordering::Equal => Watermark {
+                env: env_field_max(self.env, other.env),
+                ..self
+            },
+        }
+    }
+}
+
+/// Field-wise `min` of two env rollback payloads: the deeper rollback in
+/// every dimension. Each field is consumed by [`TypeEnv::truncate_to`]
+/// (`crate::types::TypeEnv::truncate_to`), where *smaller* always rolls back
+/// further — the conservative direction when invalidating.
+///
+/// Exhaustive struct expression on purpose: a field added to `EnvWatermark`
+/// fails to compile here until its merge direction is chosen.
+fn env_field_min(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
+    EnvWatermark {
+        // Truncation lengths for the root bindings / type-info / definition /
+        // doc maps: `truncate_to` keeps only the first N entries, so the
+        // smaller N keeps only entries *both* watermarks would keep.
+        root_scope: a.root_scope.min(b.root_scope),
+        type_info: a.type_info.min(b.type_info),
+        type_info_by_id: a.type_info_by_id.min(b.type_info_by_id),
+        definitions: a.definitions.min(b.definitions),
+        docs: a.docs.min(b.docs),
+        // Overwrite-journal length: `truncate_to` pops (replays) every entry
+        // above it, so the smaller value replays *more* overwrites, restoring
+        // the older of each overwritten value.
+        journal: a.journal.min(b.journal),
+        // Allocation cursor: the smaller value re-mints ids from earlier, so
+        // no surviving id can collide with a re-minted one.
+        next_type_id: a.next_type_id.min(b.next_type_id),
+    }
+}
+
+/// [`env_field_min`]'s mirror for [`Watermark::later`]: the shallower rollback
+/// in every dimension, so clamping to a floor watermark never truncates the
+/// env below what either side preserves.
+fn env_field_max(a: EnvWatermark, b: EnvWatermark) -> EnvWatermark {
+    EnvWatermark {
+        root_scope: a.root_scope.max(b.root_scope),
+        type_info: a.type_info.max(b.type_info),
+        type_info_by_id: a.type_info_by_id.max(b.type_info_by_id),
+        definitions: a.definitions.max(b.definitions),
+        docs: a.docs.max(b.docs),
+        journal: a.journal.max(b.journal),
+        next_type_id: a.next_type_id.max(b.next_type_id),
     }
 }
 
@@ -218,7 +303,7 @@ impl Compiler {
         // pre-watermark slot, and a dangling key would collide with whatever
         // re-interns at that index on the next compile.
         self.locals.retain(|&k, v| {
-            if v.slot < local_count && (k as usize) < engine.strings {
+            if v.slot < local_count && k.idx() < engine.strings {
                 v.depth = 0;
                 true
             } else {
@@ -314,7 +399,6 @@ impl Compiler {
     /// back inside the result so the owning session can keep querying it.
     fn snapshot_result(&mut self) -> (CompileResult, Vec<HoverFact>) {
         let (references, facts) = self.finalize_references();
-        let success = !has_errors(&self.engine.diagnostics);
         (
             CompileResult {
                 // The session is check-only and its consumer (the LSP) reads
@@ -328,7 +412,6 @@ impl Compiler {
                 emitted: None,
                 diagnostics: self.engine.diagnostics.clone(),
                 references,
-                success,
             },
             facts,
         )
@@ -383,7 +466,7 @@ impl Compiler {
                     param_names: sd.param_names.clone(),
                 },
                 EntityKind::Constant => DefinitionKind::Constant,
-                EntityKind::Value => DefinitionKind::Value,
+                EntityKind::Value => DefinitionKind::Value { alias_of: None },
                 EntityKind::Type => DefinitionKind::Type,
                 EntityKind::Field => DefinitionKind::Field,
                 EntityKind::ModuleAlias => DefinitionKind::ModuleAlias {
@@ -592,7 +675,7 @@ impl IncrementalSession {
     /// truncating past `seed` would dangle every one of them at once. Clamping
     /// here (rather than at each caller) means a new rewind site cannot forget.
     fn rewind_to(&mut self, w: Watermark) {
-        self.c.reset_to(&w.max(self.seed));
+        self.c.reset_to(&w.later(self.seed));
     }
 
     pub fn reference_graph(&self) -> &ReferenceGraph {
@@ -631,7 +714,7 @@ impl IncrementalSession {
         if let Some(k) = key
             && let Some(w) = self.c.module_table.invalidate(&k)
         {
-            let floor = self.last_entry.map_or(w, |le| le.min(w)).max(self.seed);
+            let floor = self.last_entry.map_or(w, |le| le.earlier(w)).later(self.seed);
             self.last_entry = Some(floor);
         }
     }
@@ -666,7 +749,7 @@ impl IncrementalSession {
             .collect();
         for k in dirty {
             if let Some(w) = self.c.module_table.invalidate(&k) {
-                floor = floor.min(w);
+                floor = floor.earlier(w);
             }
         }
         // 3. Truncate to the surviving boundary and recompile. `rewind_to`
@@ -801,10 +884,95 @@ impl IncrementalSession {
 
 #[cfg(test)]
 mod tests {
+    use super::Watermark;
     use crate::bytecode::Value;
     use crate::bytecode::compiler::new_compiler;
     use crate::core_ir::{Atom, ConstId, CoreExpr, CoreFn};
+    use crate::type_def::TypeId;
     use crate::typed_ir::RTy;
+    use crate::types::EnvWatermark;
+
+    /// Two watermarks with identical pool lengths compare `Equal` — `ord_key`
+    /// deliberately excludes `env` — yet can carry different env rollback
+    /// payloads. `Ord::min` would break that tie by argument order, silently
+    /// discarding one payload; `earlier` must instead be symmetric and merge
+    /// the envs field-wise toward the deeper rollback.
+    #[test]
+    fn earlier_merges_env_payloads_on_ord_key_ties() {
+        let env_a = EnvWatermark {
+            root_scope: 3,
+            type_info: 9,
+            type_info_by_id: 2,
+            definitions: 8,
+            docs: 1,
+            journal: 7,
+            next_type_id: TypeId(4),
+        };
+        let env_b = EnvWatermark {
+            root_scope: 5,
+            type_info: 6,
+            type_info_by_id: 2,
+            definitions: 4,
+            docs: 2,
+            journal: 3,
+            next_type_id: TypeId(9),
+        };
+        let a = Watermark {
+            env: env_a,
+            ..Watermark::default()
+        };
+        let b = Watermark {
+            env: env_b,
+            ..Watermark::default()
+        };
+        assert_eq!(a, b, "test premise: equal ord_key despite differing envs");
+
+        // The conservative (deeper-rollback) merge: field-wise min.
+        let want_min = EnvWatermark {
+            root_scope: 3,
+            type_info: 6,
+            type_info_by_id: 2,
+            definitions: 4,
+            docs: 1,
+            journal: 3,
+            next_type_id: TypeId(4),
+        };
+        assert_eq!(a.earlier(b).env, want_min);
+        // Symmetric: argument order must not matter.
+        assert_eq!(b.earlier(a).env, want_min);
+
+        // `later` mirrors it: field-wise max, also order-independent.
+        let want_max = EnvWatermark {
+            root_scope: 5,
+            type_info: 9,
+            type_info_by_id: 2,
+            definitions: 8,
+            docs: 2,
+            journal: 7,
+            next_type_id: TypeId(9),
+        };
+        assert_eq!(a.later(b).env, want_max);
+        assert_eq!(b.later(a).env, want_max);
+    }
+
+    /// Off a tie, `earlier`/`later` agree with the `Ord` ordering and keep the
+    /// winner's env intact — no merging.
+    #[test]
+    fn earlier_and_later_follow_ord_when_keys_differ() {
+        let older = Watermark::default();
+        let newer = Watermark {
+            code: 10,
+            env: EnvWatermark {
+                root_scope: 4,
+                ..EnvWatermark::default()
+            },
+            ..Watermark::default()
+        };
+        assert_eq!(older.earlier(newer).env, older.env);
+        assert_eq!(newer.earlier(older).env, older.env);
+        assert_eq!(older.later(newer).env, newer.env);
+        assert_eq!(newer.later(older).env, newer.env);
+    }
 
     /// The resolved-type pool is compile-local, so a `CoreFn` cannot outlive
     /// the compile that lowered it.

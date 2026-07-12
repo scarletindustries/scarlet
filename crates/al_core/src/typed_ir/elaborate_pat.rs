@@ -28,11 +28,14 @@
 //! separate branches and maps each branch's binds onto its own `LocalId`s, but
 //! the arm's guard and body are one tree, so the [`BindingId`] a name refers to
 //! must not depend on which alternative matched. Within one arm a name is bound
-//! to one [`TypedBind`]: the first occurrence mints it, every later occurrence
-//! reuses it. That is what makes `TypedArm { pat, guard, body }` — a single
-//! body over an `Or` of alternatives — well-formed.
+//! to one [`TypedBind`]: the first occurrence mints it, every occurrence in a
+//! *later alternative* reuses it. That is what makes
+//! `TypedArm { pat, guard, body }` — a single body over an `Or` of
+//! alternatives — well-formed. A repeat *within* one alternative (`Pair(x, x)`)
+//! is the one thing that reuse must never absorb — the check walk rejects it,
+//! so elaboration aborts if it sees one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
@@ -188,6 +191,7 @@ pub fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) ->
     PatElab {
         cx,
         bound: HashMap::new(),
+        seen: HashSet::new(),
     }
     .pat(p, scrut)
 }
@@ -285,13 +289,25 @@ struct PatElab<'c, C: PatCtx> {
     /// reusing the [`BindingId`] is exactly the "one variable per name" rule
     /// the single-body [`TypedArm`] shape requires.
     bound: HashMap<StrId, TypedBind>,
+    /// Names bound in the *current* or-alternative (the whole pattern is one
+    /// alternative when no `|` encloses the bind). `bound` alone cannot tell a
+    /// legitimate cross-alternative re-bind from `Pair(x, x)`, which would
+    /// silently alias both positions to one binder; this set is what keeps
+    /// them apart.
+    seen: HashSet<StrId>,
 }
 
 impl<C: PatCtx> PatElab<'_, C> {
     /// Bind `name`, or return the [`TypedBind`] an earlier or-alternative
-    /// already minted for it.
-    fn bind(&mut self, name: &str, ty: RTy) -> TypedBind {
+    /// already minted for it. A repeat within the current alternative is a
+    /// compiler bug — the check walk rejects it ("bound more than once in
+    /// this pattern"), so a clean module cannot produce one — and it aborts
+    /// rather than aliasing two positions to one binder.
+    fn bind(&mut self, name: &str, ty: RTy, span: Span) -> TypedBind {
         let sid = self.cx.intern(name);
+        if !self.seen.insert(sid) {
+            elaborator_bug("duplicate binding in pattern alternative", span)
+        }
         match self.bound.get(&sid) {
             Some(b) => *b,
             None => {
@@ -305,7 +321,7 @@ impl<C: PatCtx> PatElab<'_, C> {
     fn pat(&mut self, p: &ast::Pattern, scrut: RTy) -> TypedPat {
         match p {
             ast::Pattern::Wildcard { .. } => TypedPat::Wild { ty: scrut },
-            ast::Pattern::Var { name } => TypedPat::Bind(self.bind(&name.name, scrut)),
+            ast::Pattern::Var { name } => TypedPat::Bind(self.bind(&name.name, scrut, name.span)),
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => {
                 let value = self.cx.number_const(n);
                 TypedPat::Lit { ty: scrut, value }
@@ -335,10 +351,24 @@ impl<C: PatCtx> PatElab<'_, C> {
             ast::Pattern::Array { elements, span } => self.array(elements, scrut, *span),
             ast::Pattern::Binary { segments, rest, .. } => self.bin(segments, rest.as_ref(), scrut),
             ast::Pattern::Or { first, rest, .. } => {
+                // The `bound` map is shared across alternatives — that is the
+                // "bind once" rule — but the `seen` set restarts from the
+                // enclosing pattern's names for each alternative, so only a
+                // repeat *within* one alternative trips [`Self::bind`]. What
+                // the alternatives bound folds back into `seen` afterwards:
+                // `(A(x) | B(x), x)` repeats `x` in its one alternative.
+                let outer = std::mem::take(&mut self.seen);
+                let mut after = outer.clone();
                 let alts = std::iter::once(&**first)
                     .chain(rest.iter())
-                    .map(|a| self.pat(a, scrut))
+                    .map(|a| {
+                        self.seen = outer.clone();
+                        let alt = self.pat(a, scrut);
+                        after.extend(self.seen.iter().copied());
+                        alt
+                    })
                     .collect();
+                self.seen = after;
                 TypedPat::Or { ty: scrut, alts }
             }
             ast::Pattern::Range { start, end, .. } => {
@@ -412,7 +442,7 @@ impl<C: PatCtx> PatElab<'_, C> {
                 ast::ArrayPatternElement::Spread {
                     binding: Some(id), ..
                 },
-            ] => PatRest::Bind(self.bind(&id.name, scrut)),
+            ] => PatRest::Bind(self.bind(&id.name, scrut, id.span)),
             _ => elaborator_bug("array spread not last", span),
         };
         // `lower` compares `ArrayLen(scrut)` against the prefix length and
@@ -438,7 +468,7 @@ impl<C: PatCtx> PatElab<'_, C> {
             None => PatRest::None,
             Some(r) => match &r.binding {
                 None => PatRest::Discard,
-                Some(id) => PatRest::Bind(self.bind(&id.name, scrut)),
+                Some(id) => PatRest::Bind(self.bind(&id.name, scrut, id.span)),
             },
         };
         // The bit cursor `lower` walks the segments with starts at `0`, and a
@@ -463,24 +493,19 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
         // Width before value, matching the check walk's visit order
         // (expressions visit the value first — see `Elab::binary_literal`).
-        let bits = seg_bits(&mut *self.cx, &seg.spec);
-        match &seg.spec {
-            ast::BinSpec::Utf8 => {
+        match seg_bits(&mut *self.cx, &seg.spec) {
+            SpecWidth::Utf8 => {
                 // `BinReadUtf8` yields the codepoint as an `Int`.
                 let int_t = self.cx.ty_int();
                 TypedBinPatSeg::Utf8 {
                     value: self.pat(&seg.value, int_t),
                 }
             }
-            ast::BinSpec::Binary { .. } => {
+            SpecWidth::Bytes(bits) => {
                 let value = self.pat(&seg.value, scrut);
                 TypedBinPatSeg::Binary { bits, value }
             }
-            ast::BinSpec::Int { .. } => {
-                // `seg_bits` is total for `Int`: sizeless defaults to 8.
-                let Some(bits) = bits else {
-                    elaborator_bug("Int segment with no width", seg.span)
-                };
+            SpecWidth::Int(bits) => {
                 let int_t = self.cx.ty_int();
                 let value = self.pat(&seg.value, int_t);
                 TypedBinPatSeg::Int { bits, value }
@@ -489,39 +514,56 @@ impl<C: PatCtx> PatElab<'_, C> {
     }
 }
 
+/// The width a `<<..>>` segment's spec prescribes, per spec kind, as
+/// [`seg_bits`] computes it. Carrying the kind means a consumer matches on
+/// *this* instead of re-matching the `ast::BinSpec` against a bare
+/// `Option<TypedExpr>` — an `Int` segment's width cannot be missing here, so
+/// the "Int segment with no width" abort has nothing to guard.
+#[derive(Debug)]
+pub enum SpecWidth {
+    /// `:N` / `:size(..)`, or the default 8 when sizeless — an `Int` segment
+    /// always has a width.
+    Int(TypedExpr),
+    /// `:bytes(..)` scaled to bits; `None` is a sizeless `:binary`, which
+    /// consumes the remainder.
+    Bytes(Option<TypedExpr>),
+    /// `:utf8` — the width is data-dependent, decoded at runtime.
+    Utf8,
+}
+
 /// The bits-width rule for `<<..>>` segments, shared by expression
 /// ([`super::elaborate`]'s `binary_literal`) and pattern elaboration so the
 /// two cannot drift: an `Int`'s `:N` / `:size(..)` expression, or the default
-/// 8 when sizeless; a `Binary`'s `:bytes(..)` size scaled to bits. `None` is
-/// a spec with no width expression — a sizeless `:binary` consumes the
-/// remainder (`lower` knows that from `bits: None` rather than from a missing
-/// AST node), and a `:utf8` width is data-dependent. `lower` reads the result
-/// as a plain `Int` expression and never re-derives the default or the unit.
+/// 8 when sizeless; a `Binary`'s `:bytes(..)` size scaled to bits, or the
+/// remainder when sizeless (`lower` knows that from [`SpecWidth::Bytes`]'s
+/// `None` rather than from a missing AST node). `lower` reads each width as a
+/// plain `Int` expression and never re-derives the default or the unit.
 ///
 /// The `:bytes` scale is the generic `Op::Mul`, not `MulInt`: it is a
 /// synthesised node, not one the checker specialised, and today's lowering
 /// emits exactly this — specialising it is a typed-opcode change and belongs
 /// with the rest of them, not here.
-pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> Option<TypedExpr> {
+pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
     match spec {
-        ast::BinSpec::Int { bits: Some(e) } => Some(cx.expr(e)),
+        ast::BinSpec::Int { bits: Some(e) } => SpecWidth::Int(cx.expr(e)),
         ast::BinSpec::Int { bits: None } => {
             let ty = cx.ty_int();
             let value = cx.int_const(8);
-            Some(TypedExpr::Const { ty, value })
+            SpecWidth::Int(TypedExpr::Const { ty, value })
         }
         ast::BinSpec::Binary { bytes: Some(e) } => {
             let ty = cx.ty_int();
             let v = cx.expr(e);
             let eight = cx.int_const(8);
-            Some(TypedExpr::Binary {
+            SpecWidth::Bytes(Some(TypedExpr::Binary {
                 ty,
                 op: Op::Mul,
                 lhs: Box::new(v),
                 rhs: Box::new(TypedExpr::Const { ty, value: eight }),
-            })
+            }))
         }
-        ast::BinSpec::Binary { bytes: None } | ast::BinSpec::Utf8 => None,
+        ast::BinSpec::Binary { bytes: None } => SpecWidth::Bytes(None),
+        ast::BinSpec::Utf8 => SpecWidth::Utf8,
     }
 }
 
@@ -564,8 +606,8 @@ mod tests {
                 string: STRING,
                 array: ARRAY,
             });
-            let int = pool.mk_con(INT, 0, &[]);
-            let binary = pool.mk_con(BINARY, 0, &[]);
+            let int = pool.mk_con(INT, StrId(0), &[]);
+            let binary = pool.mk_con(BINARY, StrId(0), &[]);
             Ctx {
                 pool,
                 names: Vec::new(),
@@ -579,11 +621,11 @@ mod tests {
         }
 
         fn arr(&mut self, elem: RTy) -> RTy {
-            self.pool.mk_con(ARRAY, 0, &[elem])
+            self.pool.mk_con(ARRAY, StrId(0), &[elem])
         }
 
         fn user(&mut self) -> RTy {
-            self.pool.mk_con(USER, 0, &[])
+            self.pool.mk_con(USER, StrId(0), &[])
         }
 
         /// Declare `name` as variant `idx` with the given labels and field
@@ -597,10 +639,10 @@ mod tests {
     impl PatCtx for Ctx {
         fn intern(&mut self, name: &str) -> StrId {
             match self.names.iter().position(|n| n == name) {
-                Some(i) => i as StrId,
+                Some(i) => StrId(i as u32),
                 None => {
                     self.names.push(name.to_string());
-                    (self.names.len() - 1) as StrId
+                    StrId((self.names.len() - 1) as u32)
                 }
             }
         }
@@ -798,8 +840,8 @@ mod tests {
                 variant: VariantRef {
                     type_id: USER,
                     variant_idx: 1,
-                    type_name: 0,
-                    variant_name: 1,
+                    type_name: StrId(0),
+                    variant_name: StrId(1),
                 },
                 fields: vec![],
             }
@@ -1095,6 +1137,67 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec![BindingId(0), BindingId(0)]);
+    }
+
+    /// The check walk rejects `(x, x)` ("bound more than once in this
+    /// pattern" — see `crates/al/tests/unsound.rs` U12), so the elaborator
+    /// seeing one is a compiler bug. It must abort, never silently alias both
+    /// positions to a single binder — that would make `(x, x)` match any pair
+    /// and bind `x` to one arbitrary side.
+    #[test]
+    #[should_panic(expected = "duplicate binding in pattern alternative")]
+    fn a_repeated_name_within_one_alternative_aborts() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let tup = cx.pool.mk_tuple(&[int, int]);
+        let p = ast::Pattern::Tuple {
+            elements: vec![var("x"), var("x")],
+            span: Span::DUMMY,
+        };
+        let _ = elaborate_pattern(&mut cx, &p, tup);
+    }
+
+    /// A name an earlier alternative legitimately bound is still a repeat
+    /// when one alternative binds it twice: only the cross-alternative
+    /// re-bind is the sanctioned reuse.
+    #[test]
+    #[should_panic(expected = "duplicate binding in pattern alternative")]
+    fn a_repeat_inside_a_later_alternative_aborts() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let user = cx.user();
+        cx.ctor("Wrap", 0, &["v"], &[int]);
+        cx.ctor("Pair", 1, &["a", "b"], &[int, int]);
+        let or = ast::Pattern::Or {
+            first: Box::new(ctor_pat("Wrap", vec![pos(var("x"))], false)),
+            rest: vec![ctor_pat("Pair", vec![pos(var("x")), pos(var("x"))], false)],
+            span: Span::DUMMY,
+        };
+        let _ = elaborate_pattern(&mut cx, &or, user);
+    }
+
+    /// What the alternatives bound folds back into the enclosing
+    /// alternative: `(A(x) | B(x), x)` repeats `x` within the one alternative
+    /// the whole tuple is.
+    #[test]
+    #[should_panic(expected = "duplicate binding in pattern alternative")]
+    fn a_name_bound_in_an_or_is_a_repeat_after_it() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let user = cx.user();
+        cx.ctor("A", 0, &["v"], &[int]);
+        cx.ctor("B", 1, &["v"], &[int]);
+        let tup_ty = cx.pool.mk_tuple(&[user, int]);
+        let or = ast::Pattern::Or {
+            first: Box::new(ctor_pat("A", vec![pos(var("x"))], false)),
+            rest: vec![ctor_pat("B", vec![pos(var("x"))], false)],
+            span: Span::DUMMY,
+        };
+        let p = ast::Pattern::Tuple {
+            elements: vec![or, var("x")],
+            span: Span::DUMMY,
+        };
+        let _ = elaborate_pattern(&mut cx, &p, tup_ty);
     }
 
     #[test]

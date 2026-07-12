@@ -159,7 +159,11 @@ pub struct TypeEnv {
     /// per-scope `IndexMap`s, so `push_scope`/`pop_scope` allocate nothing for
     /// the common empty scope and `lookup` is a single hash probe instead of
     /// O(scope depth). Same pattern as `Compiler::locals`.
-    pub bindings: IndexMap<String, Scheme>,
+    ///
+    /// All five maps below are private: every overwrite MUST go through the
+    /// journaling mutators (`define`, `store_type_info`, `store_definition`,
+    /// `store_doc`) or `truncate_to` cannot restore the clobbered entry.
+    bindings: IndexMap<String, Scheme>,
     /// For every `define` while at least one scope is open, `(entry index,
     /// value before this define)`. `pop_scope` replays entries above the top
     /// mark newest-first: `Some` restores the shadowed value in place; `None`
@@ -173,13 +177,13 @@ pub struct TypeEnv {
     /// shadowing (an entry's `type Parsed` over the stdlib's) is the correct
     /// semantics. Semantic lookups (exhaustiveness, field access, hover
     /// resolution) must go through `type_info_by_id` instead.
-    pub type_info: IndexMap<String, TypeInfo>,
+    type_info: IndexMap<String, TypeInfo>,
     /// Type lookup by NOMINAL id — the identity carried in `TypeNode::Con`.
     /// Ids are allocator-unique, so entries here are never overwritten in
     /// place by a name collision; rollback is plain truncation.
-    pub type_info_by_id: IndexMap<TypeId, TypeInfo>,
-    pub definitions: IndexMap<String, DefinitionLocation>,
-    pub docs: IndexMap<String, String>,
+    type_info_by_id: IndexMap<TypeId, TypeInfo>,
+    definitions: IndexMap<String, DefinitionLocation>,
+    docs: IndexMap<String, String>,
     /// Replay log of in-place overwrites; see [`Overwrite`].
     journal: Vec<Overwrite>,
     next_type_id: TypeId,
@@ -260,7 +264,8 @@ impl TypeEnv {
 /// Rollback payload for [`TypeEnv::truncate_to`]. Deliberately not `Ord`:
 /// [`Watermark`](crate::bytecode::Watermark)'s ordering key excludes this
 /// field so `EnvWatermark`'s field set can change without silently perturbing
-/// which cached module `.min()` picks during invalidation.
+/// which cached module `Watermark::earlier` picks during invalidation (on an
+/// ordering tie, `earlier`/`later` merge this payload field-wise instead).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvWatermark {
     pub root_scope: usize,
@@ -479,6 +484,14 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
+    /// Unjournaled escape hatch for `precompile_stdlib`'s teardown: moves the
+    /// by-name type registry out wholesale so `flatten` can snapshot it.
+    /// Journaling is deliberately skipped — the env is being consumed and no
+    /// `truncate_to` can ever run against it afterwards.
+    pub(crate) fn take_type_info(&mut self) -> IndexMap<String, TypeInfo> {
+        std::mem::take(&mut self.type_info)
+    }
+
     /// Nominal lookup by the id carried in `TypeNode::Con`. This is the only
     /// correct way to answer "what are this type's variants/fields" — the
     /// by-name map can be shadowed by whatever same-named type was analysed
@@ -560,16 +573,16 @@ mod tests {
     #[test]
     fn truncate_to_restores_overwritten_root_binding() {
         let mut env = new_env();
-        env.define("x", mono(1));
+        env.define("x", mono(Ty(1)));
         let w = env.watermark();
 
-        env.define("x", mono(2)); // no scope open: root-scope overwrite
-        assert_eq!(env.lookup("x").unwrap().ty, 2);
+        env.define("x", mono(Ty(2))); // no scope open: root-scope overwrite
+        assert_eq!(env.lookup("x").unwrap().ty, Ty(2));
 
         env.truncate_to(&w);
         assert_eq!(
             env.lookup("x").unwrap().ty,
-            1,
+            Ty(1),
             "clobbered root binding must be restored"
         );
     }
@@ -579,15 +592,15 @@ mod tests {
     #[test]
     fn scoped_overwrite_still_rolls_back_via_scope_undo() {
         let mut env = new_env();
-        env.define("x", mono(1));
+        env.define("x", mono(Ty(1)));
         let w = env.watermark();
 
         env.push_scope();
-        env.define("x", mono(2));
+        env.define("x", mono(Ty(2)));
         env.pop_scope();
-        assert_eq!(env.lookup("x").unwrap().ty, 1);
+        assert_eq!(env.lookup("x").unwrap().ty, Ty(1));
 
         env.truncate_to(&w);
-        assert_eq!(env.lookup("x").unwrap().ty, 1);
+        assert_eq!(env.lookup("x").unwrap().ty, Ty(1));
     }
 }

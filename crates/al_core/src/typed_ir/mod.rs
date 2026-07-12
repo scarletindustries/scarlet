@@ -471,15 +471,17 @@ impl TypedExpr {
     }
 }
 
-/// One typechecked function. Parameter `i` is bound as `BindingId(i)`, so
-/// `params` needs no explicit ids.
+/// One typechecked function.
 ///
 /// Nested closures and eta-wrappers are ordinary entries in
 /// [`TypedProgram::fns`]; a `TypedFn` never contains another.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFn {
     pub name: StrId,
-    pub params: Vec<(StrId, RTy)>,
+    /// Each parameter carries the [`BindingId`] the elaborator minted for it,
+    /// so a body reference names the id actually stored here rather than
+    /// trusting a numbering convention.
+    pub params: Vec<TypedBind>,
     pub ret: RTy,
     pub body: TypedExpr,
     /// Number of [`BindingId`]s minted in this function, params included, so a
@@ -487,8 +489,8 @@ pub struct TypedFn {
     ///
     /// Minted **per function, by the elaborator**, and never by anything
     /// downstream: [`elaborate::Elab`] holds the counter, hands out
-    /// `BindingId(0..n)` in the order the body binds them, and writes the final
-    /// `n` here. Params come first, so `params[i]` is `BindingId(i)`.
+    /// `BindingId(0..n)` in the order the body binds them (params first), and
+    /// writes the final `n` here.
     ///
     /// The counter is not global because nothing wants it to be: a `BindingId`
     /// is only ever read against the `TypedFn` that minted it (`lower` builds
@@ -637,7 +639,7 @@ mod tests {
     use super::*;
     use crate::core_ir::lower;
     use crate::type_def::TypeId;
-    use crate::types::{InferEngine, NO_STR, NullaryPrim, Prim, PrimIds, Ty, new_engine};
+    use crate::types::{InferEngine, NullaryPrim, Prim, PrimIds, StrId, Ty, new_engine};
 
     /// The prelude registers its type heads with 1-based ids and records only
     /// `Int`/`Float`/`String`/`Array` as [`PrimIds`]; `Bool` and `Binary` are
@@ -728,10 +730,10 @@ mod tests {
     fn pool_and_temps() -> (ResolvedPool, TempTys) {
         let mut p = ResolvedPool::new(PrimIds::default());
         let prims = p.prims();
-        let int = p.mk_con(prims.int, NO_STR, &[]);
-        let boolean = p.mk_con(TypeId(100), NO_STR, &[]);
-        let string = p.mk_con(prims.string, NO_STR, &[]);
-        let binary = p.mk_con(TypeId(101), NO_STR, &[]);
+        let int = p.mk_con(prims.int, StrId::NONE, &[]);
+        let boolean = p.mk_con(TypeId(100), StrId::NONE, &[]);
+        let string = p.mk_con(prims.string, StrId::NONE, &[]);
+        let binary = p.mk_con(TypeId(101), StrId::NONE, &[]);
         let int_pair = p.mk_tuple(&[int, int]);
         (
             p,
@@ -769,7 +771,7 @@ mod tests {
         let consts = vec![Value::small_int(7), Value::small_int(9)];
         let p = TypedProgram {
             fns: vec![nullary(
-                NO_STR,
+                StrId::NONE,
                 int,
                 TypedExpr::Const {
                     ty: int,
@@ -777,7 +779,7 @@ mod tests {
                 },
             )],
             toplevel: nullary(
-                NO_STR,
+                StrId::NONE,
                 int,
                 TypedExpr::Const {
                     ty: int,
@@ -819,7 +821,7 @@ mod tests {
         let array = {
             let mut pool = pool;
             let prims = pool.prims();
-            let a = pool.mk_con(prims.array, NO_STR, &[int]);
+            let a = pool.mk_con(prims.array, StrId::NONE, &[int]);
             (pool, a)
         };
         let (pool, arr_ty) = array;
@@ -863,7 +865,7 @@ mod tests {
         let p = TypedProgram {
             fns: Vec::new(),
             toplevel: nullary(
-                NO_STR,
+                StrId::NONE,
                 int,
                 TypedExpr::Match {
                     ty: int,

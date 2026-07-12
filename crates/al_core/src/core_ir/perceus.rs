@@ -695,7 +695,7 @@ mod tests {
     use crate::core_ir::testkit::{bind, ctor, func, local, variant};
     use crate::core_ir::{ConstId, FuncIdx};
     use crate::type_def::TypeId;
-    use crate::types::{NO_STR, PrimIds};
+    use crate::types::{PrimIds, StrId};
 
     /// The fixtures build their types directly in a [`ResolvedPool`] — the
     /// same arena the elaborator hands `perceus` in the real pipeline. Under
@@ -708,13 +708,13 @@ mod tests {
 
     /// A nominal, non-primitive type: heap-shaped, unknown allocation width.
     fn con(p: &mut ResolvedPool, id: i32) -> RTy {
-        p.mk_con(TypeId(id), NO_STR, &[])
+        p.mk_con(TypeId(id), StrId::NONE, &[])
     }
 
     /// The unboxed `Int` — heap-shaped `false`, so no `Drop`.
     fn int_ty(p: &mut ResolvedPool) -> RTy {
         let int = p.prims().int;
-        p.mk_con(int, NO_STR, &[])
+        p.mk_con(int, StrId::NONE, &[])
     }
 
     fn count_drops(e: &CoreExpr) -> usize {

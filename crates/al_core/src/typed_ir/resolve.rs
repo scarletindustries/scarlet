@@ -33,9 +33,7 @@ use crate::bytecode::Op;
 use crate::core_ir::{FuncIdx, VariantRef};
 use crate::types::{StrId, ValueKind};
 
-use super::{
-    Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef,
-};
+use super::{Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
 
 /// How a statically-known function is *called*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,8 +234,8 @@ mod tests {
         VariantRef {
             type_id: TypeId(3),
             variant_idx: 1,
-            type_name: 10,
-            variant_name: 11,
+            type_name: StrId(10),
+            variant_name: StrId(11),
         }
     }
 
@@ -261,8 +259,8 @@ mod tests {
     /// `SelfGlobal` pairing above the *only* way to spell a top-level fn.
     #[test]
     fn the_kind_bridge_defers_places_to_the_frame() {
-        assert_eq!(Denotation::from_kind(ValueKind::ModuleFn, 0), None);
-        assert_eq!(Denotation::from_kind(ValueKind::Local, 0), None);
+        assert_eq!(Denotation::from_kind(ValueKind::ModuleFn, StrId(0)), None);
+        assert_eq!(Denotation::from_kind(ValueKind::Local, StrId(0)), None);
     }
 
     /// A nested lambda's frame is a real closure frame, so `PushSelf` is right.
@@ -360,13 +358,13 @@ mod tests {
     fn a_ctors_meaningless_frame_resolution_cannot_leak() {
         let d = Denotation::from_kind(
             ValueKind::Constructor {
-                type_name: 10,
+                type_name: StrId(10),
                 type_id: TypeId(3),
                 variant_idx: 1,
                 arity: 0,
                 field_labels: crate::types::ArenaSlice::EMPTY,
             },
-            11,
+            StrId(11),
         )
         .expect("a constructor's kind fixes its denotation");
         assert_eq!(d.as_value(), ValueForm::Ctor(variant()));
@@ -376,7 +374,7 @@ mod tests {
     /// A builtin's kind fixes it too, and it is not a constructor.
     #[test]
     fn a_builtins_kind_fixes_its_denotation() {
-        let d = Denotation::from_kind(ValueKind::Builtin { op: Op::Add }, 0)
+        let d = Denotation::from_kind(ValueKind::Builtin { op: Op::Add }, StrId(0))
             .expect("a builtin's kind fixes its denotation");
         assert_eq!(d, Denotation::builtin(Op::Add));
         assert_eq!(d.as_ctor(), None);

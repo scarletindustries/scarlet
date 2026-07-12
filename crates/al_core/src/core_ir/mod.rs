@@ -166,6 +166,38 @@ pub enum Callee {
     Local(LocalId),
 }
 
+/// A [`Atom::PrimOp`]'s immediate operand, tagged with its meaning. `lower`
+/// names the variant at each construction site; [`emit`] is the single point
+/// that flattens it to the instruction's `i32` operand — so a `ConstId` can
+/// never be read as an argc, nor the pushed-default sentinel as an index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Imm {
+    /// The op carries no immediate (arithmetic/compare — encoded as 0).
+    None,
+    /// A field/slot index: `TupleIndex`, `GetField`, `PushGlobal`,
+    /// `PushCapture`, `ElemAt`, ...
+    Index(u16),
+    /// An argument count: `MakeArray`, `MakeTuple`, `StrConcatN`,
+    /// `BinConcatN`, `Prepend`, `Append`.
+    Argc(u32),
+    /// `Op::IndexOr` with a constant default riding in the operand.
+    Const(ConstId),
+    /// `Op::IndexOr` with the default pushed on the stack (encoded as -1).
+    PushedDefault,
+}
+
+impl fmt::Display for Imm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Imm::None => Ok(()),
+            Imm::Index(i) => write!(f, "#{i}"),
+            Imm::Argc(n) => write!(f, "#{n}"),
+            Imm::Const(c) => write!(f, "#{c}"),
+            Imm::PushedDefault => f.write_str("#pushed"),
+        }
+    }
+}
+
 /// Right-hand side of a `Let`, or the payload of a `Tail`. Every compound
 /// operand is a `LocalId` — nested evaluation has already been linearised into
 /// the enclosing `Let` spine.
@@ -183,18 +215,13 @@ pub enum Atom {
     },
     /// A primitive VM operation. `op` is the bytecode `Op` directly so
     /// `emit(Let{rhs=PrimOp})` is `PushLocal args; op{operand=imm}; StoreLocal`.
-    /// `imm` is the instruction's immediate operand — an index (`TupleIndex`,
-    /// `GetField`, `PushGlobal`, `PushCapture`, `ElemAt`), an argc (`MakeArray`,
-    /// `MakeTuple`, `StrConcatN`, `BinConcatN`, `Prepend`, `Append`), a
-    /// `ConstId` or `-1` (`Op::IndexOr` — `lower`'s `index_or` rides a constant
-    /// default in the operand, `-1` means "default was pushed"), or 0 for ops
-    /// that carry none. `lower` sets it; `emit` passes it through verbatim. A
-    /// typed imm enum (`Index(u16) | Argc(u32) | Const(ConstId) | None`) is the
-    /// eventual fence here.
+    /// `imm` is the instruction's immediate operand, tagged with its meaning
+    /// (see [`Imm`]). `lower` sets it; `emit::imm_operand` is the one place it
+    /// becomes the raw `i32` — and asserts the op/variant pairing there.
     PrimOp {
         op: Op,
         args: Vec<LocalId>,
-        imm: i32,
+        imm: Imm,
     },
     /// `PushLocal captures; MakeClosure func_idx`. `func_idx` and the capture
     /// set are resolved at lowering time from the fused walk's `Function`
@@ -213,7 +240,11 @@ pub enum Atom {
 impl Atom {
     /// A `PrimOp` with no immediate (the common case for arithmetic/compare).
     pub fn prim(op: Op, args: Vec<LocalId>) -> Self {
-        Atom::PrimOp { op, args, imm: 0 }
+        Atom::PrimOp {
+            op,
+            args,
+            imm: Imm::None,
+        }
     }
 
     /// The locals this atom reads, in push order — a `Call` yields its
@@ -441,10 +472,7 @@ impl fmt::Display for Atom {
                 Ok(())
             }
             Atom::PrimOp { op, args, imm } => {
-                write!(f, "{op:?}")?;
-                if *imm != 0 {
-                    write!(f, "#{imm}")?;
-                }
+                write!(f, "{op:?}{imm}")?;
                 f.write_str("(")?;
                 write_locals(f, args)?;
                 f.write_str(")")
@@ -553,7 +581,7 @@ impl fmt::Display for CoreExpr {
 
 impl fmt::Display for CoreFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn s{}(", self.name)?;
+        write!(f, "fn s{}(", self.name.0)?;
         for (i, p) in self.params.iter().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
@@ -581,7 +609,6 @@ impl fmt::Display for CoreProgram {
 pub(crate) mod testkit {
     use super::*;
     use crate::core_ir::emit::EmitCtx;
-    use crate::types::NO_STR;
 
     pub fn bind(id: u32, ty: RTy) -> CoreBind {
         CoreBind::new(LocalId(id), ty)
@@ -595,8 +622,8 @@ pub(crate) mod testkit {
         VariantRef {
             type_id: TypeId(tid),
             variant_idx: idx,
-            type_name: NO_STR,
-            variant_name: NO_STR,
+            type_name: StrId::NONE,
+            variant_name: StrId::NONE,
         }
     }
 
@@ -615,7 +642,7 @@ pub(crate) mod testkit {
 
     pub fn func(params: Vec<CoreBind>, body: CoreExpr, ret_ty: RTy) -> CoreFn {
         CoreFn {
-            name: NO_STR,
+            name: StrId::NONE,
             params,
             body,
             ret_ty,
@@ -677,7 +704,7 @@ mod tests {
             Atom::PrimOp {
                 op: Op::TupleIndex,
                 args: vec![LocalId(0)],
-                imm: 2,
+                imm: Imm::Index(2),
             }
             .to_string(),
             "TupleIndex#2(%0)"
@@ -822,7 +849,7 @@ else
     #[test]
     fn core_fn_header_and_body() {
         let f = CoreFn {
-            name: 42,
+            name: StrId(42),
             params: vec![bind(0, RTy(1)), bind(1, RTy(1))],
             body: CoreExpr::Tail(Atom::prim(Op::LtInt, vec![LocalId(0), LocalId(1)])),
             ret_ty: RTy(3),

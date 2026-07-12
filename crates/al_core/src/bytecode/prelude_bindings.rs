@@ -238,7 +238,7 @@ prelude_bindings! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArenaSlice, new_env};
+    use crate::types::{ArenaSlice, StrId, new_env};
 
     #[test]
     fn capture_on_empty_env_reports_missing_type() {
@@ -259,7 +259,12 @@ mod tests {
         // failure mode.
         let mut env = new_env();
         for &(n, arity) in PreludeBindings::TYPE_NAMES {
-            env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::new(0, arity as u16));
+            env.register_type_head(
+                n,
+                StrId(0),
+                ArenaSlice::EMPTY,
+                ArenaSlice::new(0, arity as u16),
+            );
         }
         let err = PreludeBindings::capture(&env).unwrap_err();
         assert_eq!(err, PreludeCaptureError::MissingCtor(names::TRUE));
@@ -273,7 +278,7 @@ mod tests {
     fn type_arity_mismatch_message() {
         let mut env = new_env();
         for &(n, _) in PreludeBindings::TYPE_NAMES {
-            env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::EMPTY);
+            env.register_type_head(n, StrId(0), ArenaSlice::EMPTY, ArenaSlice::EMPTY);
         }
         let err = PreludeBindings::capture(&env).unwrap_err();
         assert_eq!(

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use al_core::static_ir::flatten::{FlatPools, flatten};
 use al_core::static_ir::{SConst, Slice};
 use al_core::types::{
-    ArenaSlice, DefinitionLocation, EntityKind, InferEngine, NO_STR, QuantVar, Scheme, TypeBody,
+    ArenaSlice, DefinitionLocation, EntityKind, InferEngine, QuantVar, Scheme, StrId, TypeBody,
     TypeInfo, TypeNode, ValueKind,
 };
 use al_core::{PrecompileOutput, PreludeBindings, TypeId};
@@ -132,13 +132,16 @@ fn typenode(n: &TypeNode) -> String {
         TypeNode::Bound(i) => format!("TypeNode::Bound({i})"),
         TypeNode::Con { id, name, args } => {
             format!(
-                "TypeNode::Con {{ id: {}, name: {name}, args: {} }}",
+                "TypeNode::Con {{ id: {}, name: {name:?}, args: {} }}",
                 tid(id),
                 aslice(args)
             )
         }
         TypeNode::Fun { params, ret } => {
-            format!("TypeNode::Fun {{ params: {}, ret: {ret} }}", aslice(params))
+            format!(
+                "TypeNode::Fun {{ params: {}, ret: {ret:?} }}",
+                aslice(params)
+            )
         }
         TypeNode::Tuple { elems } => format!("TypeNode::Tuple {{ elems: {} }}", aslice(elems)),
     }
@@ -283,16 +286,26 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
     emit_nums(out, "BYTE_POOL", "u8", &p.byte_pool);
 
     emit_static_slice(out, "NODES", "TypeNode", p.nodes.iter().map(typenode));
-    emit_nums(out, "CHILDREN", "u32", &p.children);
+    emit_static_slice(
+        out,
+        "CHILDREN",
+        "Ty",
+        p.children.iter().map(|t| format!("{t:?}")),
+    );
     emit_static_slice(out, "QUANTS", "QuantVar", p.quants.iter().map(quantvar));
-    emit_nums(out, "STR_SLICES", "u32", &p.str_slices);
+    emit_static_slice(
+        out,
+        "STR_SLICES",
+        "StrId",
+        p.str_slices.iter().map(|s| format!("{s:?}")),
+    );
     emit_static_slice(
         out,
         "TYPE_PARAMS",
         "TypeParam",
         p.type_params
             .iter()
-            .map(|tp| lit!(TypeParam: name = tp.name, id = -1)),
+            .map(|tp| lit!(TypeParam: name = format_args!("{:?}", tp.name), id = -1)),
     );
     emit_static_slice(
         out,
@@ -300,7 +313,7 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "VariantField",
         p.variant_fields
             .iter()
-            .map(|f| lit!(VariantField: label = f.label, ty = f.ty)),
+            .map(|f| lit!(VariantField: label = format_args!("{:?}", f.label), ty = format_args!("{:?}", f.ty))),
     );
     emit_static_slice(
         out,
@@ -308,7 +321,7 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "Variant",
         p.variants
             .iter()
-            .map(|v| lit!(Variant: name = v.name, fields = aslice(v.fields))),
+            .map(|v| lit!(Variant: name = format_args!("{:?}", v.name), fields = aslice(v.fields))),
     );
 
     emit_static_slice(out, "SCHEMES", "Scheme", p.schemes.iter().map(scheme));
@@ -386,10 +399,10 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
 }
 
 fn quantvar(qv: &QuantVar) -> String {
-    let name = if qv.name == NO_STR {
-        "NO_STR".into()
+    let name = if qv.name == StrId::NONE {
+        "StrId::NONE".into()
     } else {
-        qv.name.to_string()
+        format!("{:?}", qv.name)
     };
     lit!(QuantVar: constraint = opt_constraint(qv.constraint), name = name, origin_id = "None")
 }
@@ -406,7 +419,7 @@ fn valuekind(k: ValueKind) -> String {
             arity,
             field_labels,
         } => format!(
-            "ValueKind::Constructor {{ type_name: {type_name}, type_id: {}, variant_idx: {variant_idx}, arity: {arity}, field_labels: {} }}",
+            "ValueKind::Constructor {{ type_name: {type_name:?}, type_id: {}, variant_idx: {variant_idx}, arity: {arity}, field_labels: {} }}",
             tid(type_id),
             aslice(field_labels)
         ),
@@ -444,7 +457,7 @@ fn def_lit(d: Option<DefinitionLocation>) -> String {
 }
 
 fn scheme(s: &Scheme) -> String {
-    lit!(Scheme: quantified = aslice(s.quantified), ty = s.ty, kind = valuekind(s.kind), def = def_lit(s.def))
+    lit!(Scheme: quantified = aslice(s.quantified), ty = format_args!("{:?}", s.ty), kind = valuekind(s.kind), def = def_lit(s.def))
 }
 
 fn typeinfo(ti: &TypeInfo) -> String {
@@ -453,12 +466,12 @@ fn typeinfo(ti: &TypeInfo) -> String {
         TypeBody::Unresolved => panic!(
             "build.rs: stdlib type has Unresolved body after precompile — hydration missed it"
         ),
-        TypeBody::Alias { target } => format!("TypeBody::Alias {{ target: {target} }}"),
+        TypeBody::Alias { target } => format!("TypeBody::Alias {{ target: {target:?} }}"),
         TypeBody::Custom { variants } => {
             format!("TypeBody::Custom {{ variants: {} }}", aslice(variants))
         }
     };
-    lit!(TypeInfo: id = tid(ti.id), name = ti.name, module = aslice(ti.module),
+    lit!(TypeInfo: id = tid(ti.id), name = format_args!("{:?}", ti.name), module = aslice(ti.module),
          type_params = aslice(ti.type_params), body = body)
 }
 
