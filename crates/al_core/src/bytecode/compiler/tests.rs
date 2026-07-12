@@ -1,5 +1,20 @@
-#[cfg(test)]
-mod bug2_local_binders_as_definitions {
+use crate::parser::new_parser;
+use crate::scanner::new_scanner;
+
+/// Parse `src` as a program, asserting it parses cleanly, and hand back the
+/// program block.
+fn parse_ok(src: &str) -> crate::ast::BlockExpression {
+    let mut s = new_scanner(src.to_string());
+    let pr = new_parser(&mut s).parse_program();
+    assert!(
+        !crate::diagnostic::has_errors(&pr.diagnostics),
+        "snippet failed to parse: {:?}",
+        pr.diagnostics,
+    );
+    pr.ast
+}
+
+mod local_binders_as_definitions {
     //! Local binders — `name = ..` bindings, fn/lambda parameters, pattern
     //! binders (match arms, tuple/array/ctor destructure), and `or`-receivers —
     //! must be registered as graph `Definition`s, not merely typed in the env.
@@ -10,20 +25,12 @@ mod bug2_local_binders_as_definitions {
     //! `al run` / `al check` graph stays untouched.
 
     use super::super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
+    use super::parse_ok;
 
     /// Compile `src` as the entry module on the LSP path (`collect_hover_facts`
     /// on, so local-def emission fires) and hand back the populated collector.
     fn collect(src: &str) -> Compiler {
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        let block = pr.ast;
+        let block = parse_ok(src);
         let mut c = new_compiler(None, true);
         c.collect_hover_facts = true;
         c.register_prelude();
@@ -141,29 +148,21 @@ mod bug2_local_binders_as_definitions {
 
 /// Perceus drop/reuse assertions on emitted bytecode: validate the
 /// `lower → perceus → emit` pipeline output.
-#[cfg(test)]
 mod perceus_drop {
     use super::super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
+    use super::parse_ok;
 
     /// Compile `src` for real (codegen on) and return the emitted instruction
     /// stream, so tests can assert on generated ops.
     fn emitted(src: &str) -> Vec<crate::bytecode::Instruction> {
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
+        let block = parse_ok(src);
+        let r = compile(&ast::Expression::BlockExpression(block), None, None);
         assert!(
             !crate::diagnostic::has_errors(&r.diagnostics),
             "snippet failed to compile: {:?}",
             r.diagnostics,
         );
-        r.program.code
+        r.emitted.expect("a non-check compile emits").program.code
     }
 
     #[test]
@@ -281,21 +280,15 @@ mod perceus_drop {
 /// recorded types run out under it — exactly what a subtree inference never
 /// resolved looks like — so without the gate an ordinary type error would reach
 /// `typed_ir::elaborator_bug` and abort the compiler.
-#[cfg(test)]
 mod clean_module_gate {
     use super::super::*;
+    use super::parse_ok;
     use crate::parser::new_parser;
     use crate::scanner::new_scanner;
 
     fn diagnose(src: &str) -> Vec<Diagnostic> {
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        compile(&ast::Expression::BlockExpression(pr.ast), None, None).diagnostics
+        let block = parse_ok(src);
+        compile(&ast::Expression::BlockExpression(block), None, None).diagnostics
     }
 
     fn codes(ds: &[Diagnostic]) -> Vec<DiagnosticCode> {
@@ -368,22 +361,20 @@ mod clean_module_gate {
     /// And the clean module still elaborates: the gate is not a mute button.
     #[test]
     fn a_clean_module_reaches_the_core_pipeline() {
-        let mut s = new_scanner("fn f(x Int) Int { x + 1 }\nf(1)\n".to_string());
-        let pr = new_parser(&mut s).parse_program();
-        let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
+        let block = parse_ok("fn f(x Int) Int { x + 1 }\nf(1)\n");
+        let r = compile(&ast::Expression::BlockExpression(block), None, None);
         assert!(r.success, "{:#?}", r.diagnostics);
+        let emitted = r.emitted.expect("a non-check compile emits");
         assert!(
-            !r.core.fns.is_empty(),
+            !emitted.core.fns.is_empty(),
             "a diagnostics-clean module must produce Core"
         );
     }
 }
 
-#[cfg(test)]
 mod toplevel_slot_queue {
     use super::super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
+    use super::parse_ok;
 
     /// `toplevel_binds` is positional, so only the walk the toplevel
     /// elaboration mirrors — a module's own statement list — may fill it.
@@ -415,14 +406,8 @@ mod toplevel_slot_queue {
     #[test]
     fn a_bare_match_expression_compiles_without_stealing_a_pattern_slot() {
         let src = "match Some(1) { Some(v) -> { w = v + 1\n v + w }\n None -> 0 }";
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "{:?}",
-            pr.diagnostics
-        );
-        let [ast::Node::Expression(expr)] = &pr.ast.body[..] else {
+        let block = parse_ok(src);
+        let [ast::Node::Expression(expr)] = &block.body[..] else {
             panic!("expected a single bare expression");
         };
         let r = compile(expr, None, None);
@@ -434,7 +419,6 @@ mod toplevel_slot_queue {
     }
 }
 
-#[cfg(test)]
 mod qualified_ctor_pattern_occurrences {
     //! A qualified constructor pattern (`io.NotFound(p)`) must record the same
     //! occurrence pair as the expression path: a `Qualified` use of the
@@ -443,8 +427,7 @@ mod qualified_ctor_pattern_occurrences {
     //! and rename blind to modules referenced only from patterns.
 
     use super::super::*;
-    use crate::parser::new_parser;
-    use crate::scanner::new_scanner;
+    use super::parse_ok;
 
     #[test]
     fn qualified_ctor_pattern_records_qualified_plus_qualifier() {
@@ -455,14 +438,7 @@ mod qualified_ctor_pattern_occurrences {
             \x20 Err(_) -> \"other\"\n\
             }\n\
             println(x)\n";
-        let mut s = new_scanner(src.to_string());
-        let pr = new_parser(&mut s).parse_program();
-        assert!(
-            !crate::diagnostic::has_errors(&pr.diagnostics),
-            "snippet failed to parse: {:?}",
-            pr.diagnostics,
-        );
-        let block = pr.ast;
+        let block = parse_ok(src);
         let mut c = new_compiler(None, true);
         c.collect_hover_facts = true;
         c.register_prelude();

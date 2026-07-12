@@ -23,7 +23,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
             .lookup_type_info_by_id(tid)
             .and_then(|ti| ti.variants())
         else {
-            return 0;
+            unreachable!("emit asked for labels of a type with no variants: {tid:?}");
         };
         let variant = self.engine.variants_of(vs)[variant_idx as usize];
         let labels: Vec<String> = self
@@ -33,7 +33,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
             .map(|f| self.engine.str(f.label).to_string())
             .collect();
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let v = self.frozen.str_array(&refs);
+        let v = self.frozen.str_array(&refs).into_value();
         self.add_constant(v)
     }
     fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
@@ -50,7 +50,7 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
         if !self.prelude.bool.is(tid) {
             return None;
         }
-        Some(variant_idx == self.prelude.true_.variant_idx)
+        Some(self.prelude.true_.is(tid, variant_idx))
     }
 }
 

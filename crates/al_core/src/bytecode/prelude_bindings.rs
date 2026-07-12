@@ -54,9 +54,8 @@ impl TypeRef {
 }
 
 // Deliberately no PartialEq: like `TypeRef`, equality on a pre-capture
-// (all-`TypeId::NONE`) binding would falsely match. If ctor identity checks
-// are ever needed, add a guarded `fn is(&self, type_id: TypeId, variant_idx:
-// u16) -> bool` that requires `type_id != TypeId::NONE`.
+// (all-`TypeId::NONE`) binding would falsely match. Identity checks go
+// through [`CtorRef::is`], which guards on `type_id != TypeId::NONE`.
 #[derive(Debug, Clone, Copy)]
 pub struct CtorRef {
     pub type_id: TypeId,
@@ -70,12 +69,20 @@ impl CtorRef {
         variant_idx: 0,
         arity: 0,
     };
+
+    /// Whether `(type_id, variant_idx)` is this prelude constructor. Guards on
+    /// `type_id != NONE` so a pre-capture (all-zero) binding never falsely
+    /// matches — the same guard as [`TypeRef::is`].
+    #[inline]
+    pub fn is(&self, type_id: TypeId, variant_idx: u16) -> bool {
+        type_id != TypeId::NONE && type_id == self.type_id && variant_idx == self.variant_idx
+    }
 }
 
 /// Why [`PreludeBindings::capture`] rejected the loaded prelude. Each variant
 /// names the exact `al.al` drift; `Display` renders the message the compiler
 /// reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreludeCaptureError {
     MissingType(&'static str),
     TypeArity {
@@ -83,9 +90,9 @@ pub enum PreludeCaptureError {
         expected: usize,
         found: usize,
     },
-    MissingCtor(String),
+    MissingCtor(&'static str),
     CtorShape {
-        name: String,
+        name: &'static str,
         of: &'static str,
         arity: u16,
     },
@@ -159,7 +166,7 @@ macro_rules! prelude_bindings {
                     }
                     Ok(TypeRef { id: ti.id, name })
                 };
-                let ctor = |name: &str, of: &TypeRef, arity: u16| -> Result<CtorRef, PreludeCaptureError> {
+                let ctor = |name: &'static str, of: &TypeRef, arity: u16| -> Result<CtorRef, PreludeCaptureError> {
                     match env.lookup(name) {
                         Some(Scheme {
                             kind: ValueKind::Constructor { type_id, variant_idx, arity: a, .. },
@@ -170,11 +177,11 @@ macro_rules! prelude_bindings {
                             arity: *a,
                         }),
                         Some(_) => Err(PreludeCaptureError::CtorShape {
-                            name: name.to_string(),
+                            name,
                             of: of.name,
                             arity,
                         }),
-                        None => Err(PreludeCaptureError::MissingCtor(name.to_string())),
+                        None => Err(PreludeCaptureError::MissingCtor(name)),
                     }
                 };
                 $( let $tf = ty(names::$tn, $ta)?; )*
@@ -251,7 +258,7 @@ mod tests {
             env.register_type_head(n, 0, ArenaSlice::EMPTY, ArenaSlice::new(0, arity as u16));
         }
         let err = PreludeBindings::capture(&env).unwrap_err();
-        assert_eq!(err, PreludeCaptureError::MissingCtor("True".to_string()));
+        assert_eq!(err, PreludeCaptureError::MissingCtor(names::TRUE));
         assert_eq!(err.to_string(), "prelude: constructor 'True' is required");
     }
 

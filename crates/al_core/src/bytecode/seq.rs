@@ -773,6 +773,10 @@ fn rebalance<A: Arena + ?Sized>(
                 // implies the count is already within optimal + E_MAX);
                 // backstop so a violated invariant degrades to a slightly
                 // overfull level rather than an infinite loop.
+                debug_assert!(
+                    i < plan_len,
+                    "rebalance: no sparse node despite plan_len > optimal + E_MAX"
+                );
                 break;
             }
             let mut r = plan[i];

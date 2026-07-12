@@ -1861,11 +1861,9 @@ impl Compiler {
                 // lambda can resolve its own (not-yet-bound) name through the
                 // entry frame.
                 let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name_id);
-                let idx = if defer_slot {
-                    None
-                } else {
-                    Some(self.get_or_create_local(&name))
-                };
+                if !defer_slot {
+                    self.get_or_create_local(&name);
+                }
 
                 let annot_ty = vb.typ.as_ref().map(|a| self.hydrate_annotation(a));
 
@@ -1917,7 +1915,7 @@ impl Compiler {
                 self.record(&name, final_ty, vb.identifier.span, vb.doc.clone());
                 self.emit_value_def(vb.identifier.span, &name, vb.doc.clone());
 
-                if idx.is_none() {
+                if defer_slot {
                     self.get_or_create_local(&name);
                 }
             }
@@ -2674,7 +2672,10 @@ impl Compiler {
     /// Close the region [`Self::open_walk_region`] opened, returning it and
     /// restoring the enclosing body's.
     fn close_walk_region(&mut self) -> Vec<WalkStep> {
-        let outer = self.walk_tys_stack.pop().unwrap_or_default();
+        let outer = self
+            .walk_tys_stack
+            .pop()
+            .expect("close_walk_region without matching open_walk_region");
         let region = std::mem::replace(&mut self.walk_tys, outer);
         debug_assert!(
             walk_region_is_filled(&region),
@@ -4664,10 +4665,6 @@ impl Compiler {
 // Free helpers
 // ============================================================================
 
-/// The span that "defines" the type of an expression for error reporting:
-/// for a block, the last node (recursively); otherwise the expression's own
-/// span. This focuses a return-type or branch-type mismatch on the actual
-/// value-producing sub-expression rather than the whole `{ ... }`.
 /// Whether matching `p` can fail on a value of its own type. Only wildcards,
 /// bare names, and tuples of those are irrefutable; a constructor pattern is
 /// refutable even for a single-variant type (the tag is still tested), and an
@@ -4682,6 +4679,10 @@ fn pattern_is_refutable(p: &ast::Pattern) -> bool {
     }
 }
 
+/// The span that "defines" the type of an expression for error reporting:
+/// for a block, the last node (recursively); otherwise the expression's own
+/// span. This focuses a return-type or branch-type mismatch on the actual
+/// value-producing sub-expression rather than the whole `{ ... }`.
 pub fn type_defining_span(expr: &ast::Expression) -> Span {
     match expr {
         ast::Expression::BlockExpression(b) => match b.body.last() {
