@@ -726,10 +726,13 @@ impl ModuleTable {
                 }
             }
         }
+        // `Watermark::earlier`, not `Iterator::min`: watermarks with equal
+        // pool lengths tie under `Ord`, and `earlier` merges their env
+        // rollback payloads instead of keeping whichever came first.
         let min_wm = closure
             .iter()
             .filter_map(|k| self.loaded.get(k).and_then(|cm| cm.watermark()))
-            .min()?;
+            .reduce(Watermark::earlier)?;
         self.loaded.retain(|k, cm| {
             if closure.contains(k) {
                 return false;
@@ -743,7 +746,11 @@ impl ModuleTable {
     /// earliest watermark among them. Used as the overflow fallback when a
     /// recompiled module no longer fits its reserved id range.
     pub fn invalidate_all(&mut self) -> Option<Watermark> {
-        let min_wm = self.loaded.values().filter_map(|cm| cm.watermark()).min()?;
+        let min_wm = self
+            .loaded
+            .values()
+            .filter_map(|cm| cm.watermark())
+            .reduce(Watermark::earlier)?;
         self.loaded
             .retain(|_, cm| !matches!(cm.origin, ModuleOrigin::File { .. }));
         Some(min_wm)

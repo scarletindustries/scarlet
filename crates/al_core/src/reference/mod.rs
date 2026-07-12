@@ -251,7 +251,15 @@ impl DefId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionKind {
     /// A `let`/parameter/match binder — a local value.
-    Value,
+    Value {
+        /// For an import-alias binding (the `Y` of `import a.{X as Y}`): the
+        /// canonical definition it stands for (`X`). It is the goto-def/hover
+        /// *chain* edge (see [`ReferenceGraph::canonical`]): those queries
+        /// follow it to the real declaration, while find-references and
+        /// rename stay anchored on this alias, so renaming `Y` does not
+        /// rewrite `X` (and vice versa). `None` for every ordinary binder.
+        alias_of: Option<DefId>,
+    },
     Function {
         /// The parameter names, for rendering `fn(path String)` in hover.
         /// Documentation only — see `module::ExportedValue::param_names`.
@@ -297,7 +305,7 @@ impl DefinitionKind {
     /// `DefId.entity` of the definition carrying it.
     pub fn entity(&self) -> EntityKind {
         match self {
-            DefinitionKind::Value => EntityKind::Value,
+            DefinitionKind::Value { .. } => EntityKind::Value,
             DefinitionKind::Function { .. } => EntityKind::Function,
             DefinitionKind::Constant => EntityKind::Constant,
             DefinitionKind::Constructor { .. } => EntityKind::Constructor,
@@ -311,12 +319,6 @@ impl DefinitionKind {
 /// A declared name: its canonical id, the source name as written, the span of
 /// the declaring identifier, its doc comment, visibility, and the kind-specific
 /// payload ([`DefinitionKind`]).
-///
-/// `alias_of` links an import-alias binding (the `Y` of `import a.{X as Y}`) to
-/// the canonical definition it stands for (`X`). It is the goto-def/hover
-/// *chain* edge: those queries follow it to the real declaration, while
-/// find-references and rename stay anchored on this alias, so renaming `Y` does
-/// not rewrite `X` (and vice versa). `None` for every ordinary definition.
 #[derive(Debug, Clone)]
 pub struct Definition {
     pub defid: DefId,
@@ -324,7 +326,6 @@ pub struct Definition {
     pub doc: Option<String>,
     pub kind: DefinitionKind,
     pub is_pub: bool,
-    pub alias_of: Option<DefId>,
 }
 
 impl Definition {
@@ -345,7 +346,6 @@ impl Definition {
             doc,
             kind,
             is_pub,
-            alias_of: None,
         }
     }
 
@@ -374,6 +374,16 @@ impl Definition {
     pub fn ctor_of(&self) -> Option<DefId> {
         match self.kind {
             DefinitionKind::Constructor { ctor_of, .. } => ctor_of,
+            _ => None,
+        }
+    }
+
+    /// For an import-alias value binding: the canonical definition it stands
+    /// for (see [`DefinitionKind::Value`]). `None` for every other kind and
+    /// for every ordinary binder.
+    pub fn alias_of(&self) -> Option<DefId> {
+        match self.kind {
+            DefinitionKind::Value { alias_of } => alias_of,
             _ => None,
         }
     }
@@ -760,7 +770,7 @@ impl ReferenceGraph {
         self.modules.get(&id.module)?.definition(id)
     }
 
-    /// Follow an import-alias binding (`Definition::alias_of`) to the canonical
+    /// Follow an import-alias binding (`DefinitionKind::Value::alias_of`) to the canonical
     /// definition it stands for — e.g. the `Y` of `import a.{X as Y}` resolves
     /// to `X`. This is the goto-def/hover chain; find-references and rename use
     /// the raw `DefId` so the alias and its target stay separate rename classes.
@@ -769,7 +779,7 @@ impl ReferenceGraph {
     pub fn canonical(&self, id: DefId) -> DefId {
         let mut cur = id;
         for _ in 0..16 {
-            match self.definition(cur).and_then(|d| d.alias_of) {
+            match self.definition(cur).and_then(|d| d.alias_of()) {
                 Some(next) if next != cur => cur = next,
                 _ => break,
             }
@@ -854,7 +864,7 @@ fn def(module: ModuleId, line: i32, c0: i32, c1: i32, kind: EntityKind) -> DefId
 #[cfg(test)]
 pub(crate) fn stub_kind(defid: DefId) -> DefinitionKind {
     match defid.entity {
-        EntityKind::Value => DefinitionKind::Value,
+        EntityKind::Value => DefinitionKind::Value { alias_of: None },
         EntityKind::Function => DefinitionKind::Function {
             param_names: Vec::new(),
         },

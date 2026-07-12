@@ -714,7 +714,10 @@ impl IncrementalSession {
         if let Some(k) = key
             && let Some(w) = self.c.module_table.invalidate(&k)
         {
-            let floor = self.last_entry.map_or(w, |le| le.earlier(w)).later(self.seed);
+            let floor = self
+                .last_entry
+                .map_or(w, |le| le.earlier(w))
+                .later(self.seed);
             self.last_entry = Some(floor);
         }
     }

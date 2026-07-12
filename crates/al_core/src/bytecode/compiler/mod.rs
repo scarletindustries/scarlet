@@ -2347,14 +2347,8 @@ impl Compiler {
     ) -> Option<(ModulePath, ModuleKey)> {
         let resolved = match module::resolve(path, self.base_dir.as_deref()) {
             Ok(r) => r,
-            Err(ResolveError::FileNotFound(p)) => {
-                self.module_error(format!("file not found: {}", p.display()), at);
-                return None;
-            }
-            Err(ResolveError::NoSuchStdlibModule(p)) => {
-                self.module_error(format!("no such stdlib module {}", p.join("/")), at);
-                return None;
-            }
+            // These two get richer, import-syntax-aware guidance than
+            // `ResolveError`'s shared Display wording provides.
             Err(ResolveError::BareName(p)) => {
                 self.module_error(
                     format!(
@@ -2371,6 +2365,10 @@ impl Compiler {
                         .to_string(),
                     at,
                 );
+                return None;
+            }
+            Err(e) => {
+                self.module_error(e.to_string(), at);
                 return None;
             }
         };

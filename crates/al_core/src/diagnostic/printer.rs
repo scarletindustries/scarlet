@@ -48,30 +48,9 @@ fn canonical_path(file_path: &str) -> Option<String> {
         .and_then(|p| p.to_str().map(|s| s.to_string()))
 }
 
-/// Lazily-detected editor, shared by every link in one render: detection may
-/// fork `ps`, so it runs at most once, and only after some path has actually
-/// canonicalized (the REPL's `<repl>` never does, so it never pays the fork).
-struct EditorProbe {
-    enabled: bool,
-    detected: Option<Option<Editor>>,
-}
-
-impl EditorProbe {
-    fn new(enabled: bool) -> Self {
-        EditorProbe {
-            enabled,
-            detected: None,
-        }
-    }
-
-    fn link_target(&mut self, file_path: &str) -> Option<LinkTarget> {
-        if !self.enabled {
-            return None;
-        }
-        let abs_path = canonical_path(file_path)?;
-        let editor = (*self.detected.get_or_insert_with(detect_editor))?;
-        Some(LinkTarget { editor, abs_path })
-    }
+fn link_target(editor: Option<Editor>, file_path: &str) -> Option<LinkTarget> {
+    let editor = editor?;
+    canonical_path(file_path).map(|abs_path| LinkTarget { editor, abs_path })
 }
 
 fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palette) -> String {
@@ -201,11 +180,17 @@ pub fn render_diagnostics(
     resolve: &dyn Fn(&ModuleKey) -> Option<(std::path::PathBuf, String)>,
 ) -> String {
     let palette = Palette::for_stderr();
-    let mut editor = EditorProbe::new(palette.enabled());
+    // Cheap gates first: only detect an editor (which may fork `ps`) when a
+    // link could actually be rendered.
+    let editor = if palette.enabled() {
+        detect_editor()
+    } else {
+        None
+    };
     let entry = SourceView {
         file_path,
         lines: source.lines().collect(),
-        link: editor.link_target(file_path),
+        link: link_target(editor, file_path),
     };
 
     // Resolve each distinct foreign source once; `None` is cached too so an
@@ -215,7 +200,7 @@ pub fn render_diagnostics(
         resolved.entry(key).or_insert_with(|| {
             resolve(key).map(|(path, text)| {
                 let file_path = path.display().to_string();
-                let link = editor.link_target(&file_path);
+                let link = link_target(editor, &file_path);
                 ResolvedSource {
                     file_path,
                     text,
