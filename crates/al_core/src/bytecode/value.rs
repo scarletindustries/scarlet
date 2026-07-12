@@ -233,7 +233,7 @@ const HEADER_LEN_SHIFT: u32 = 8;
 
 /// Pack an object header word.
 #[inline]
-pub fn pack_header(tag: HeapTag, payload_words: usize, off_heap: bool) -> u64 {
+fn pack_header(tag: HeapTag, payload_words: usize, off_heap: bool) -> u64 {
     HEADER_BIT
         | ((tag as u64) << HEADER_TAG_SHIFT)
         | if off_heap { HEADER_OFF_HEAP_BIT } else { 0 }
@@ -249,7 +249,7 @@ fn header_marks_object(word: u64) -> bool {
 }
 
 #[inline]
-pub fn header_tag(word: u64) -> HeapTag {
+fn header_tag(word: u64) -> HeapTag {
     debug_assert!(header_marks_object(word));
     match (word & HEADER_TAG_MASK) >> HEADER_TAG_SHIFT {
         0 => HeapTag::BigInt,
@@ -272,20 +272,20 @@ pub fn header_tag(word: u64) -> HeapTag {
 
 /// Payload length in words encoded in a header.
 #[inline]
-pub fn header_payload_words(word: u64) -> usize {
+fn header_payload_words(word: u64) -> usize {
     debug_assert!(header_marks_object(word));
     (word >> HEADER_LEN_SHIFT) as usize
 }
 
 /// Total object size (header + payload) in words.
 #[inline]
-pub fn header_total_words(word: u64) -> usize {
+pub(crate) fn header_total_words(word: u64) -> usize {
     1 + header_payload_words(word)
 }
 
 /// Whether the object owns an `Arc` and sits on its space's off-heap list.
 #[inline]
-pub fn header_has_off_heap_link(word: u64) -> bool {
+pub(crate) fn header_has_off_heap_link(word: u64) -> bool {
     debug_assert!(header_marks_object(word));
     word & HEADER_OFF_HEAP_BIT != 0
 }
@@ -293,7 +293,7 @@ pub fn header_has_off_heap_link(word: u64) -> bool {
 /// Whether the object is immortal (frozen): reference counting must never
 /// touch it. See [`HEADER_IMMORTAL_BIT`].
 #[inline]
-pub fn header_is_immortal(word: u64) -> bool {
+fn header_is_immortal(word: u64) -> bool {
     debug_assert!(header_marks_object(word));
     word & HEADER_IMMORTAL_BIT != 0
 }
@@ -873,24 +873,40 @@ pub(crate) struct HamtMapRef {
 }
 
 impl HamtMapRef {
+    /// The one decoder for the `[backing, size, root]` layout. Release-checks
+    /// the backing discriminant — an `Env` map holds no such words, and
+    /// reading them would be silent garbage.
+    ///
+    /// # Safety
+    /// `obj` must point at a live `Map` object header (the tag is the caller's
+    /// proof; the backing is checked here).
     #[inline]
-    pub(crate) fn of(map: &Value) -> HamtMapRef {
-        if !map.is_heap() {
-            view_mismatch("hamt");
-        }
-        let obj = map.heap_obj();
-        // SAFETY: tag + backing checked; a Hamt map always has 3 payload words.
+    unsafe fn from_obj(obj: *const u64) -> HamtMapRef {
+        // SAFETY: word 0 is the backing discriminant for every Map layout,
+        // and a Hamt map always carries `[backing, size, root]`.
         unsafe {
-            let header = *obj;
-            if header_tag(header) != HeapTag::Map
-                || map_backing(payload_word(obj, 0)) != MapBacking::Hamt
-            {
+            if map_backing(payload_word(obj, 0)) != MapBacking::Hamt {
                 view_mismatch("hamt");
             }
             HamtMapRef {
                 size: payload_word(obj, 1) as usize,
                 root: payload_value(obj, 2),
             }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn of(map: &Value) -> HamtMapRef {
+        if !map.is_heap() {
+            view_mismatch("hamt");
+        }
+        let obj = map.heap_obj();
+        // SAFETY: `obj` is a live object header; the tag check proves Map.
+        unsafe {
+            if header_tag(*obj) != HeapTag::Map {
+                view_mismatch("hamt");
+            }
+            HamtMapRef::from_obj(obj)
         }
     }
 }
@@ -2012,19 +2028,13 @@ impl MapRef<'_> {
         map_backing(unsafe { payload_word(self.obj, 0) })
     }
 
-    /// Decoded `[size, root]` of a `Hamt`-backed map. Callers must have checked
-    /// `backing() == Hamt` — an `Env` map holds no such words, and reading them
-    /// would be silent garbage, so debug builds assert.
+    /// Decoded `[size, root]` of a `Hamt`-backed map. The backing is
+    /// release-checked by [`HamtMapRef::from_obj`] — an `Env` map holds no
+    /// such words.
     #[inline]
     pub(crate) fn as_hamt(&self) -> HamtMapRef {
-        debug_assert_eq!(self.backing(), MapBacking::Hamt);
-        // SAFETY: a Hamt map always carries `[backing, size, root]`.
-        unsafe {
-            HamtMapRef {
-                size: payload_word(self.obj, 1) as usize,
-                root: payload_value(self.obj, 2),
-            }
-        }
+        // SAFETY: a MapRef is only constructed from a tag-checked Map value.
+        unsafe { HamtMapRef::from_obj(self.obj) }
     }
 }
 
@@ -2692,8 +2702,13 @@ fn hash_sequence(len: usize, elem_hashes: impl Iterator<Item = u64>) -> u64 {
     h
 }
 
-fn slices_equal(a: &[Value], b: &[Value]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_equal(x, y))
+/// Push the pairwise elements of two equal-length slices onto the equality
+/// worklist; unequal lengths decide `false` without visiting any element.
+fn push_pairs(pending: &mut Vec<(Value, Value)>, a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && {
+        pending.extend(a.iter().cloned().zip(b.iter().cloned()));
+        true
+    }
 }
 
 /// Normalised element count of the half-open range `s..e` (0 for `e <= s`).
@@ -2711,7 +2726,27 @@ pub fn range_len(s: i64, e: i64) -> i64 {
 /// their elements; maps compare structurally regardless of internal order or
 /// backing — an `Env`-backed map (the live view of the process environment)
 /// equals a HAMT holding exactly the environment's entries.
+///
+/// Iterative, like `release_at_zero`: child pairs (enum payloads, tuple
+/// elements, closure captures, array elements) go onto an explicit worklist
+/// instead of the native stack, so arbitrarily deep values — a 100k-deep
+/// user-defined cons list — cannot overflow it.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
+    let mut pending: Vec<(Value, Value)> = Vec::new();
+    if !pair_equal(a, b, &mut pending) {
+        return false;
+    }
+    while let Some((x, y)) = pending.pop() {
+        if !pair_equal(&x, &y, &mut pending) {
+            return false;
+        }
+    }
+    true
+}
+
+/// One step of [`values_equal`]: decide the pair outright, or push its child
+/// pairs onto `pending` for the driver loop to compare.
+fn pair_equal(a: &Value, b: &Value, pending: &mut Vec<(Value, Value)>) -> bool {
     // Bit-identical words are always equal: immediates are their value, heap
     // words name the same object, and a real NaN never enters the box.
     if a.0 == b.0 {
@@ -2726,14 +2761,17 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
             ae.hash() == be.hash()
                 && ae.type_id() == be.type_id()
                 && ae.variant_name() == be.variant_name()
-                && slices_equal(ae.payload(), be.payload())
+                && push_pairs(pending, ae.payload(), be.payload())
         }
         (ValueView::Nil, ValueView::Nil) => true,
         (ValueView::Closure(x), ValueView::Closure(y)) => {
-            x.func_idx() == y.func_idx() && slices_equal(x.captures(), y.captures())
+            x.func_idx() == y.func_idx() && push_pairs(pending, x.captures(), y.captures())
         }
         (ValueView::Array(aa), ValueView::Array(ba)) => {
-            aa.len() == ba.len() && aa.iter().zip(ba.iter()).all(|(x, y)| values_equal(&x, &y))
+            aa.len() == ba.len() && {
+                pending.extend(aa.iter().zip(ba.iter()));
+                true
+            }
         }
         (ValueView::Range(as_, ae), ValueView::Range(bs, be)) => {
             let alen = range_len(as_, ae);
@@ -2758,7 +2796,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
             true
         }
         (ValueView::Binary(a), ValueView::Binary(b)) => a.bits_eq(&b),
-        (ValueView::Tuple(at), ValueView::Tuple(bt)) => slices_equal(at, bt),
+        (ValueView::Tuple(at), ValueView::Tuple(bt)) => push_pairs(pending, at, bt),
         (ValueView::Socket(asv), ValueView::Socket(bsv)) => {
             asv.id == bsv.id && asv.is_listener == bsv.is_listener
         }
@@ -3232,6 +3270,38 @@ mod tests {
         let m2 = hamt::insert(&mut h, &m, kv, vv, hash);
         assert!(!values_equal(&env, &m2));
         assert!(!values_equal(&m2, &env));
+    }
+
+    /// Guards the worklist rewrite of [`values_equal`]: comparing two equal
+    /// ~100k-deep cons chains overflowed the native stack when equality
+    /// recursed through enum payloads.
+    #[test]
+    fn values_equal_deep_enum_chain_is_iterative() {
+        let mut h = test_heap();
+        let deep = |h: &mut ProcHeap, last: i64| {
+            let mut v = Value::nil();
+            for i in 0..100_000i64 {
+                let head = if i == 99_999 { last } else { i };
+                v = Value::enum_with_names_in(
+                    h,
+                    TypeId(7),
+                    0,
+                    "List",
+                    "Cons",
+                    &["head", "tail"],
+                    &[Value::small_int(head), v],
+                );
+            }
+            v
+        };
+        let a = deep(&mut h, 99_999);
+        let b = deep(&mut h, 99_999);
+        assert!(values_equal(&a, &b), "equal deep chains compare equal");
+        assert_eq!(hash_value(&a), hash_value(&b));
+        // A chain differing only at the innermost element is unequal (the
+        // cached hash already differs at the root).
+        let c = deep(&mut h, -1);
+        assert!(!values_equal(&a, &c));
     }
 
     /// The `Drop` backstop: a reuse token that never reaches a constructor

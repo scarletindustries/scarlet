@@ -86,6 +86,15 @@ impl<I: Idx, T> TiVec<I, T> {
         &self.raw
     }
 
+    /// The elements at `start..`, as a plain read-only slice — for consumers
+    /// that walk a suffix (e.g. everything appended past a base index).
+    /// Returning `&[T]` erases the typed index, but a shared slice can
+    /// neither grow the table nor replace an entry, so no index is minted or
+    /// misdirected through it.
+    pub fn tail_from(&self, start: I) -> &[T] {
+        &self.raw[start.index()..]
+    }
+
     /// Drop the typed-index wrapper. Used at the boundaries where a plain
     /// `Vec` is what the consumer (the VM's `Program`, a test) wants.
     pub fn into_vec(self) -> Vec<T> {

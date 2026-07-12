@@ -213,11 +213,11 @@ impl Denotation {
         }
     }
 
-    /// The variant and declared arity this name constructs, for a pattern's
-    /// use site. `None` for anything that is not a constructor.
-    pub fn as_ctor(&self) -> Option<(VariantRef, u16)> {
+    /// The variant and declared [`Arity`] this name constructs, for a
+    /// pattern's use site. `None` for anything that is not a constructor.
+    pub fn as_ctor(&self) -> Option<(VariantRef, Arity)> {
         match self.0 {
-            Den::Ctor { variant, arity } => Some((variant, arity.0)),
+            Den::Ctor { variant, arity } => Some((variant, arity)),
             _ => None,
         }
     }
@@ -334,7 +334,7 @@ mod tests {
             })
         );
         assert_eq!(d.as_callee(TY), CallForm::Ctor);
-        assert_eq!(d.as_ctor().map(|(_, a)| a), Some(2));
+        assert_eq!(d.as_ctor().map(|(_, a)| a), Some(Arity(2)));
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
         )
         .expect("a constructor's kind fixes its denotation");
         assert_eq!(d.as_value(), ValueForm::Ctor(variant()));
-        assert_eq!(d.as_ctor(), Some((variant(), 0)));
+        assert_eq!(d.as_ctor(), Some((variant(), Arity(0))));
     }
 
     /// A builtin's kind fixes it too, and it is not a constructor.

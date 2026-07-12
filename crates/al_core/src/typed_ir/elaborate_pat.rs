@@ -46,7 +46,7 @@ use crate::core_ir::VariantRef;
 use crate::span::Span;
 use crate::types::StrId;
 
-use super::rty::RTy;
+use super::rty::{Arity, RTy};
 use super::slots::{Slots, slot_labeled};
 use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
 
@@ -95,12 +95,12 @@ impl CtorPat {
     /// take, never a wildcard that would silently match everything.
     pub fn from_parts(
         variant: VariantRef,
-        declared_arity: u16,
+        declared_arity: Arity,
         labels: Vec<StrId>,
         field_tys: Vec<RTy>,
         span: Span,
     ) -> CtorPat {
-        let arity = declared_arity as usize;
+        let arity = declared_arity.0 as usize;
         if labels.len() != arity || field_tys.len() != arity {
             elaborator_bug("constructor field-type desync", span)
         }
@@ -707,7 +707,7 @@ mod tests {
             };
             let type_name = self.intern("T");
             let variant_name = self.intern(name);
-            let arity = labels.len() as u16;
+            let arity = Arity::of(&labels);
             let labels = labels.iter().map(|l| self.intern(l)).collect();
             CtorPat::from_parts(
                 VariantRef {
@@ -951,7 +951,7 @@ mod tests {
         };
         let a = cx.intern("a");
         let b = cx.intern("b");
-        let ok = CtorPat::from_parts(v, 2, vec![a, b], vec![int, int], Span::DUMMY);
+        let ok = CtorPat::from_parts(v, Arity(2), vec![a, b], vec![int, int], Span::DUMMY);
         assert_eq!(ok.arity(), 2);
         assert_eq!(ok.field_tys().len(), ok.labels().len());
         assert_eq!(ok.labels(), [a, b]);
@@ -974,7 +974,7 @@ mod tests {
         };
         let a = cx.intern("a");
         let b = cx.intern("b");
-        let _ = CtorPat::from_parts(v, 2, vec![a, b], vec![int], Span::DUMMY);
+        let _ = CtorPat::from_parts(v, Arity(2), vec![a, b], vec![int], Span::DUMMY);
     }
 
     #[test]
@@ -990,7 +990,7 @@ mod tests {
         };
         let a = cx.intern("a");
         let b = cx.intern("b");
-        let _ = CtorPat::from_parts(v, 1, vec![a, b], vec![int, int], Span::DUMMY);
+        let _ = CtorPat::from_parts(v, Arity(1), vec![a, b], vec![int, int], Span::DUMMY);
     }
 
     #[test]

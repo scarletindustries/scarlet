@@ -38,7 +38,7 @@
 //! [`VariantRef`]: crate::core_ir::VariantRef
 
 use crate::core_ir::FuncIdx;
-use crate::tivec::Idx;
+use crate::tivec::TiVec;
 use crate::types::StrId;
 
 use super::resolve::EtaTarget;
@@ -51,52 +51,15 @@ use super::{
 /// before it is finished, and the only minter of the [`FuncIdx`] a
 /// [`TypedExpr::Closure`] over an appended function carries.
 ///
-/// [`FnTable::push`] is the only way to append, and it returns the index of
-/// the slot the function actually landed in. A caller therefore cannot number
-/// a wrapper against one table while appending it to another, and cannot
-/// insert a function without learning its index — the mismatch the old
-/// `&mut Vec<TypedFn>` seam left to a doc warning is now unspellable.
-///
-/// The table derefs to `[TypedFn]` for reading and for *replacing* an entry
-/// in place (the compiler fills a body into the placeholder slot it
-/// reserved); a slice cannot grow, so no index is ever minted outside `push`.
+/// [`TiVec::push`] returns the index of the slot the function actually landed
+/// in, and a `FuncIdx` is the only subscript the table accepts. A caller
+/// therefore cannot number a wrapper against one table while appending it to
+/// another, cannot insert a function without learning its index, and cannot
+/// read or replace an entry through a raw `usize` — the mismatches the old
+/// `&mut Vec<TypedFn>` seam left to a doc warning are unspellable.
 ///
 /// [`TypedProgram::fns`]: super::TypedProgram::fns
-#[derive(Debug, Default)]
-pub struct FnTable(Vec<TypedFn>);
-
-impl FnTable {
-    pub fn new() -> FnTable {
-        FnTable(Vec::new())
-    }
-
-    /// Append `f` and return the [`FuncIdx`] that now names it.
-    pub fn push(&mut self, f: TypedFn) -> FuncIdx {
-        let idx = FuncIdx::from_usize(self.0.len());
-        self.0.push(f);
-        idx
-    }
-
-    /// The finished table, for [`TypedProgram::fns`].
-    ///
-    /// [`TypedProgram::fns`]: super::TypedProgram::fns
-    pub fn into_vec(self) -> Vec<TypedFn> {
-        self.0
-    }
-}
-
-impl std::ops::Deref for FnTable {
-    type Target = [TypedFn];
-    fn deref(&self) -> &[TypedFn] {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for FnTable {
-    fn deref_mut(&mut self) -> &mut [TypedFn] {
-        &mut self.0
-    }
-}
+pub type FnTable = TiVec<FuncIdx, TypedFn>;
 
 /// An [`RTy`] known to be `fn(params...) ret`.
 ///
@@ -306,7 +269,7 @@ mod tests {
             }
         );
         assert_eq!(fns.len(), 1);
-        let f = &fns[0];
+        let f = &fns[FuncIdx(0)];
         assert_eq!(f.name, NAME);
         assert_eq!(
             f.params,
@@ -358,9 +321,9 @@ mod tests {
                 captures: Vec::new(),
             }
         );
-        assert_eq!(fns[0].binds, 2);
+        assert_eq!(fns[FuncIdx(0)].binds, 2);
         assert_eq!(
-            fns[0].body,
+            fns[FuncIdx(0)].body,
             TypedExpr::Call {
                 ty: int,
                 callee: TypedCallee::Builtin(Op::Add),
@@ -417,7 +380,7 @@ mod tests {
         assert_eq!(idx(&first), FuncIdx(0));
         assert_eq!(idx(&second), FuncIdx(1));
         assert_eq!(fns.len(), 2);
-        assert_eq!(fns[idx(&second).index()].binds, 2);
+        assert_eq!(fns[idx(&second)].binds, 2);
     }
 
     /// The index is the slot pushed, not a count of wrappers: a wrapper
@@ -462,7 +425,7 @@ mod tests {
         };
         assert_eq!(func_idx, FuncIdx(2));
         assert_eq!(fns.len(), 3);
-        assert_eq!(fns[func_idx.index()].name, NAME);
+        assert_eq!(fns[func_idx].name, NAME);
     }
 
     /// The declared field count is authoritative, and the check that the

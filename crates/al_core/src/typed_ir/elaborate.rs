@@ -518,8 +518,8 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// The pattern path, where a constructor is always named bare: `mod.C(x)` is
     /// not a pattern the parser accepts.
     fn ctor_at(&mut self, name: &str, at: RTy, span: Span) -> Option<CtorPat> {
-        let (ctor_ty, den) = self.ctx.resolve_name(name)?;
-        self.ctor_of(ctor_ty, den, at, span)
+        let (scheme, den) = self.ctx.resolve_name(name)?;
+        self.ctor_of(scheme, den, at, span)
     }
 
     /// The call path, which takes the denotation the callee walk *already*
@@ -531,12 +531,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// Once it does, every remaining question has an answer, and a missing or
     /// mismatched label list is a compiler bug rather than a reason to hand the
     /// caller a pattern that matches everything.
-    fn ctor_of(&mut self, ctor_ty: Ty, den: Denotation, at: RTy, span: Span) -> Option<CtorPat> {
+    fn ctor_of(&mut self, scheme: Ty, den: Denotation, at: RTy, span: Span) -> Option<CtorPat> {
         let (variant, arity) = den.as_ctor()?;
         let Some(labels) = self.ctx.ctor_labels(variant) else {
             elaborator_bug("constructor with no declared labels", span)
         };
-        let sig = self.resolve(ctor_ty);
+        let sig = self.resolve(scheme);
         let params: SmallVec<[RTy; 4]> = self.pool.fun_params(sig).into();
         // A nullary constructor's scheme is the type itself, not a function.
         let field_tys = match self.pool.fun_ret(sig) {
@@ -1006,7 +1006,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         // Resolve the callee first so labeled/spread constructor calls route to
         // `ctor_call` before their arguments are reordered.
         match self.callee(&fc.callee) {
-            Callee::Ctor { ty: cty, den } => self.ctor_call(cty, den, &fc.arguments, ty, fc.span),
+            Callee::Ctor { scheme, den } => self.ctor_call(scheme, den, &fc.arguments, ty, fc.span),
             Callee::Value(callee) => {
                 let args = fc
                     .arguments
@@ -1054,7 +1054,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         };
         let sig = self.resolve(fn_ty);
         match den.as_callee(sig) {
-            CallForm::Ctor => Callee::Ctor { ty: fn_ty, den },
+            CallForm::Ctor => Callee::Ctor { scheme: fn_ty, den },
             CallForm::Callee(c) => Callee::Value(c),
         }
     }
@@ -1073,13 +1073,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// would otherwise reorder their side effects.
     fn ctor_call(
         &mut self,
-        ctor_ty: Ty,
+        scheme: Ty,
         den: Denotation,
         args: &[ast::CallArg],
         ty: RTy,
         at: Span,
     ) -> TypedExpr {
-        let Some(cp) = self.ctor_of(ctor_ty, den, ty, at) else {
+        let Some(cp) = self.ctor_of(scheme, den, ty, at) else {
             elaborator_bug("unresolved constructor", at)
         };
         let arity = cp.arity();
@@ -1632,7 +1632,7 @@ enum Callee {
     /// walk resolved. Carrying them is what lets `ctor_call` work for a
     /// qualified `mod.Ctor(..)`, whose bare name is not in scope.
     Ctor {
-        ty: Ty,
+        scheme: Ty,
         den: Denotation,
     },
     Value(TypedCallee),

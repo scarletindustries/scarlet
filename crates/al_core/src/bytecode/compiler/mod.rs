@@ -4021,7 +4021,7 @@ impl Compiler {
         if self.program.functions.len() != eta_base {
             function_reserved_during_elaboration();
         }
-        for w in &fns[eta_base..] {
+        for w in fns.tail_from(crate::core_ir::FuncIdx::from_usize(eta_base)) {
             let arity = w.params.len() as i32;
             self.program.functions.push(Function {
                 name: self.engine.str(w.name).into(),
@@ -4035,7 +4035,7 @@ impl Compiler {
 
         let toplevel = match at {
             Some(func_idx) => {
-                fns[func_idx.index()] = built;
+                fns[func_idx] = built;
                 filler()
             }
             None => built,
