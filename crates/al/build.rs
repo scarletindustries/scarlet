@@ -118,8 +118,8 @@ macro_rules! lit {
     };
 }
 
-fn slice(sl: Slice) -> String {
-    lit!(Slice: start = sl.start, len = sl.len)
+fn slice<T>(sl: Slice<T>) -> String {
+    format!("Slice::new({}, {})", sl.start, sl.len)
 }
 
 fn aslice<P>(sl: ArenaSlice<P>) -> String {
@@ -274,7 +274,12 @@ fn opt_constraint(c: Option<al_core::types::Constraint>) -> String {
 
 fn emit_pools(out: &mut String, p: &FlatPools) {
     emit_strs(out, "STR_POOL", &p.str_pool);
-    emit_nums(out, "STR_SLICE_POOL", "u32", &p.str_slice_pool);
+    emit_static_slice(
+        out,
+        "STR_SLICE_POOL",
+        "StrIdx",
+        p.str_slice_pool.iter().map(|i| format!("{i:?}")),
+    );
     emit_nums(out, "BYTE_POOL", "u8", &p.byte_pool);
 
     emit_static_slice(out, "NODES", "TypeNode", p.nodes.iter().map(typenode));
@@ -318,16 +323,18 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         out,
         "STYPEEXPORT_POOL",
         "STypeExport",
-        p.stypeexport_pool
-            .iter()
-            .map(|e| lit!(STypeExport: name = e.name, info = e.info)),
+        p.stypeexport_pool.iter().map(|e| {
+            lit!(STypeExport: name = format_args!("{:?}", e.name),
+                 info = format_args!("{:?}", e.info))
+        }),
     );
     emit_static_slice(
         out,
         "SEXPORT_POOL",
         "SExport",
         p.sexport_pool.iter().map(|e| {
-            lit!(SExport: name = e.name, scheme = e.scheme,
+            lit!(SExport: name = format_args!("{:?}", e.name),
+                scheme = format_args!("{:?}", e.scheme),
                 local_slot = format_args!("{:?}", e.local_slot),
                 param_names = slice(e.param_names),
                 doc = format_args!("{:?}", e.doc))
@@ -352,10 +359,10 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
     emit_static_slice(
         out,
         "TYPEINFO_BY_NAME",
-        "(&str, u32)",
+        "(&str, TypeInfoIdx)",
         p.typeinfo_by_name
             .iter()
-            .map(|(n, i)| format!("({}, {})", q(n), i)),
+            .map(|(n, i)| format!("({}, {:?})", q(n), i)),
     );
 
     emit_static_slice(
@@ -371,7 +378,7 @@ fn emit_pools(out: &mut String, p: &FlatPools) {
         "FUNCTIONS",
         "SFunction",
         p.functions.iter().map(|f| {
-            lit!(SFunction: name = f.name, arity = f.arity, locals = f.locals,
+            lit!(SFunction: name = format_args!("{:?}", f.name), arity = f.arity, locals = f.locals,
                  capture_count = f.capture_count, code_start = f.code_start, code_len = f.code_len)
         }),
     );
@@ -460,7 +467,7 @@ fn sconst(c: &SConst) -> String {
         SConst::Int(n) => format!("SConst::Int({n}i64)"),
         SConst::Float(f) => format!("SConst::Float({}f64)", float_lit(f)),
         SConst::Bool(b) => format!("SConst::Bool({b})"),
-        SConst::Str(i) => format!("SConst::Str({i})"),
+        SConst::Str(i) => format!("SConst::Str({i:?})"),
         SConst::StrArray(sl) => format!("SConst::StrArray({})", slice(sl)),
         SConst::Binary(sl, bit_len) => format!("SConst::Binary({}, {bit_len}u64)", slice(sl)),
     }

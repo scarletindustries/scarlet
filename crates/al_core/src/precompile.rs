@@ -59,7 +59,7 @@
 //! operands survive the freeze without a relocation pass — nothing in this
 //! module rewrites an operand.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
 
@@ -78,7 +78,9 @@ use crate::types::{InferEngine, TypeBody, TypeInfo};
 pub struct PrecompileOutput {
     pub blob: PrecompiledBlob,
     pub prelude: PreludeBindings,
-    pub reserved: HashSet<String>,
+    /// `BTreeSet` so iteration is sorted: `flatten` copies it verbatim into
+    /// the reproducible stdlib blob, which `is_reserved` binary-searches.
+    pub reserved: BTreeSet<String>,
     pub next_type_id: crate::type_def::TypeId,
 }
 
@@ -104,7 +106,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
 
     let at = Span::DUMMY;
     for path in stdlib::all_modules()? {
-        c.load_module(&path, at);
+        c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at);
         bail_on_errors(&c, ModuleKey::for_stdlib(&path).as_str())?;
     }
 

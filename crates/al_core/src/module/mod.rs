@@ -1,9 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use indexmap::IndexMap;
 
+use crate::ast::{ImportPath, RelSeg};
 use crate::bytecode::Watermark;
 use crate::reference::ModuleReferences;
 use crate::type_def::TypeId;
@@ -44,7 +45,8 @@ impl ModuleKey {
 
     /// Key of a stdlib module addressed by its written `al/...` path — the
     /// one written form that *is* canonical (there is no on-disk identity to
-    /// resolve to; [`resolve`]'s embedded branch mints from it verbatim).
+    /// resolve to; [`resolve_canonical`]'s embedded branch mints from it
+    /// verbatim).
     pub fn for_stdlib(path: &ModulePath) -> Self {
         debug_assert!(is_stdlib(path), "not a stdlib path: {path:?}");
         Self::of(path)
@@ -86,7 +88,7 @@ impl std::fmt::Display for ModuleKey {
 /// `path.last()` reads `util` and not a temp directory.
 ///
 /// The first segment marks it as resolved and keeps it distinct from a
-/// stdlib path (`["al", "io"]`) or a written relative one (`[".", "b"]`):
+/// stdlib path (`["al", "io"]`) or a bare name (`["b"]`):
 /// on Unix an absolute path yields an empty first segment
 /// (`"/a/b" -> ["", "a", "b"]`); on Windows it is the drive/UNC prefix
 /// (`"C:\a\b" -> ["C:", "a", "b"]`). The prefix MUST be kept — dropping it
@@ -127,7 +129,8 @@ pub fn file_module_path(p: &Path) -> ModulePath {
 /// on-disk module, as opposed to an import path as the user wrote it. The
 /// marker is the first segment: empty (Unix root), ending in `:` (a Windows
 /// drive prefix, `C:` / `\\?\C:`), or starting with `\\` (UNC / device).
-/// A written import's first segment (`.`, `..`, a name) never matches any.
+/// A written import's first name segment never matches any (its relative
+/// markers are typed [`RelSeg`]s and cannot appear here at all).
 pub fn is_resolved_file(path: &ModulePath) -> bool {
     path.first()
         .is_some_and(|s| s.is_empty() || s.ends_with(':') || s.starts_with(r"\\"))
@@ -252,7 +255,9 @@ pub struct ModuleInterface {
     pub path: ModulePath,
     pub types: IndexMap<String, TypeInfo>,
     pub values: IndexMap<String, ExportedValue>,
-    pub private_names: HashSet<String>,
+    /// `BTreeSet` so iteration is sorted: `static_ir::flatten` interns these
+    /// in iteration order into the reproducible stdlib blob.
+    pub private_names: BTreeSet<String>,
     /// The module's own doc comment: the `/** */` block at line 0 of its
     /// source. `None` for a module without one. Unlike every other doc in the
     /// language, this one is carried through the precompiled stdlib blob
@@ -267,7 +272,7 @@ impl ModuleInterface {
             path,
             types: IndexMap::new(),
             values: IndexMap::new(),
-            private_names: HashSet::new(),
+            private_names: BTreeSet::new(),
             doc: None,
         }
     }
@@ -342,6 +347,9 @@ impl IdRangeReservation {
 /// hydrated `ModuleInterface` at workspace-graph build time (the stdlib's
 /// precompiled `Scheme.def` already carries the real declaration span).
 #[derive(Debug)]
+// One instance per cached module, moved only at insert; the size gap between
+// `Hydrated` and `File` costs nothing that boxing wouldn't add back in derefs.
+#[allow(clippy::large_enum_variant)]
 pub enum ModuleOrigin {
     Hydrated,
     Embedded {
@@ -350,6 +358,13 @@ pub enum ModuleOrigin {
     File {
         /// FNV-1a of the source bytes this interface was built from.
         source_hash: u64,
+        /// `(mtime, len)` of the on-disk source as of the last time its
+        /// content was hashed and found to match `source_hash`; `None` until
+        /// a hash-equal stat has been observed. Lives here — next to the hash
+        /// it gates — so evicting or replacing the `CachedModule`
+        /// structurally drops its stat gate with it. See
+        /// [`ModuleTable::source_changed`] for the gating protocol.
+        stat: Option<(std::time::SystemTime, u64)>,
         /// Snapshot of every arena/pool length immediately *before* this
         /// module's body was analysed. On invalidation the engine truncates
         /// back to the minimum watermark across the invalidated set, which by
@@ -425,13 +440,6 @@ pub struct ModuleTable {
     /// In-memory document overrides (LSP unsaved buffers). Module resolution
     /// prefers these over `fs::read_to_string`.
     overlays: HashMap<PathBuf, String>,
-    /// Per-module `(mtime, len)` of the on-disk source as of the last time
-    /// its content was hashed and found to match the cached `source_hash`.
-    /// `IncrementalSession::check` stat-gates the per-keystroke staleness scan
-    /// against this: an unchanged tuple means the bytes are unchanged, so the
-    /// full read + FNV hash is skipped. The hash stays the source of truth —
-    /// a stat miss falls through to read + hash and then refreshes the tuple.
-    stat_cache: HashMap<ModuleKey, (std::time::SystemTime, u64)>,
     /// Incremented every time a module body is actually compiled (not on cache
     /// hit). Test/telemetry only.
     compile_count: u32,
@@ -458,7 +466,6 @@ impl Default for ModuleTable {
             loading: HashSet::new(),
             static_fallback: None,
             overlays: HashMap::new(),
-            stat_cache: HashMap::new(),
             compile_count: 0,
             id_bases: HashMap::new(),
             id_high_water: TypeId::NONE,
@@ -568,10 +575,13 @@ impl ModuleTable {
     /// same-`(mtime, len)` content edit is additionally covered by the LSP
     /// `didChangeWatchedFiles` -> `invalidate_path` path.
     pub fn source_changed(&mut self, key: &ModuleKey) -> bool {
-        let (path, expected_hash) = match self.loaded.get(key).map(|cm| &cm.origin) {
+        let (path, expected_hash, cached_stat) = match self.loaded.get(key).map(|cm| &cm.origin) {
             Some(ModuleOrigin::File {
-                path, source_hash, ..
-            }) => (path.clone(), *source_hash),
+                path,
+                source_hash,
+                stat,
+                ..
+            }) => (path.clone(), *source_hash, *stat),
             _ => return false,
         };
 
@@ -583,24 +593,31 @@ impl ModuleTable {
 
         // Disk-backed: skip the read + hash when (mtime, len) is unchanged.
         let stat = file_stat(&path);
-        if let Some(s) = stat
-            && self.stat_cache.get(key) == Some(&s)
-        {
+        if stat.is_some() && cached_stat == stat {
             return false;
         }
 
         match std::fs::read_to_string(&path) {
             Ok(t) => {
                 let changed = source_hash(&t) != expected_hash;
-                if !changed && let Some(s) = stat {
-                    self.stat_cache.insert(key.clone(), s);
+                if !changed && stat.is_some() {
+                    self.set_stat(key, stat);
                 }
                 changed
             }
             Err(_) => {
-                self.stat_cache.remove(key);
+                self.set_stat(key, None);
                 true // file vanished — invalidate
             }
+        }
+    }
+
+    /// Update the stat gate recorded on `key`'s `ModuleOrigin::File`.
+    fn set_stat(&mut self, key: &ModuleKey, s: Option<(std::time::SystemTime, u64)>) {
+        if let Some(cm) = self.loaded.get_mut(key)
+            && let ModuleOrigin::File { stat, .. } = &mut cm.origin
+        {
+            *stat = s;
         }
     }
 
@@ -719,7 +736,6 @@ impl ModuleTable {
             }
             cm.watermark().is_none_or(|w| w < min_wm)
         });
-        self.stat_cache.retain(|k, _| self.loaded.contains_key(k));
         Some(min_wm)
     }
 
@@ -730,7 +746,6 @@ impl ModuleTable {
         let min_wm = self.loaded.values().filter_map(|cm| cm.watermark()).min()?;
         self.loaded
             .retain(|_, cm| !matches!(cm.origin, ModuleOrigin::File { .. }));
-        self.stat_cache.retain(|k, _| self.loaded.contains_key(k));
         Some(min_wm)
     }
 }
@@ -760,11 +775,16 @@ pub enum ModuleSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    NotFound(String),
+    /// The import resolved to an on-disk location, but no file is there.
+    /// Carries the filesystem path that was probed.
+    FileNotFound(PathBuf),
+    /// An `al/...` path that names no embedded stdlib module. Carries the
+    /// module path as written (there is no filesystem path to show).
+    NoSuchStdlibModule(ModulePath),
     NoBaseDir,
     /// A bare module name that is neither `al/*` nor `./`/`../`-relative.
-    /// Reserved for a future package manager; distinct from `NotFound` so the
-    /// diagnostic can suggest `use "./name"` instead of "not found".
+    /// Reserved for a future package manager; distinct from the not-found
+    /// errors so the diagnostic can suggest `use "./name"` instead.
     BareName(String),
 }
 
@@ -781,52 +801,26 @@ pub struct ResolvedModule {
     pub key: ModuleKey,
 }
 
-/// Resolve a module path as written to its source and canonical identity.
+/// Resolve an import path as written to its source and canonical identity.
 /// `base_dir` is the directory of the importing file, used for `./` and `../`
 /// relative imports.
-pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
-    // Already resolved: a canonical file identity, independent of `base_dir`.
-    if is_resolved_file(path) {
-        let key = ModuleKey::of(path);
-        let p = PathBuf::from(format!("{key}.al"));
-        return if p.is_file() {
-            Ok(ResolvedModule {
-                source: ModuleSource::File(p),
-                canon: path.clone(),
-                key,
-            })
-        } else {
-            Err(ResolveError::NotFound(p.display().to_string()))
-        };
-    }
-
-    // Stdlib: any path rooted at `al`.
-    if is_stdlib(path) {
-        let key = ModuleKey::of(path);
-        return match stdlib::lookup(key.as_str()) {
-            Some(src) => Ok(ResolvedModule {
-                source: ModuleSource::Embedded(src),
-                canon: path.clone(),
-                key,
-            }),
-            None => Err(ResolveError::NotFound(key.0)),
-        };
-    }
-
-    // Relative: `.` or `..` segments.
-    if matches!(path.first().map(|s| s.as_str()), Some(".") | Some("..")) {
+pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
+    // Relative: leading `.` / `..` markers.
+    if path.is_relative() {
         let Some(base) = base_dir else {
             return Err(ResolveError::NoBaseDir);
         };
         let mut p: PathBuf = base.to_path_buf();
-        for seg in path {
-            match seg.as_str() {
-                "." => {}
-                ".." => {
+        for seg in &path.leading {
+            match seg {
+                RelSeg::CurrentDir => {}
+                RelSeg::ParentDir => {
                     p.pop();
                 }
-                other => p.push(other),
             }
+        }
+        for name in &path.names {
+            p.push(name);
         }
         // Append `.al` rather than `set_extension`, which *replaces* anything
         // after a dot in the module name (`./b.v2` would look up `b.al`);
@@ -844,7 +838,45 @@ pub fn resolve(path: &ModulePath, base_dir: Option<&Path>) -> Result<ResolvedMod
                 key,
             });
         }
-        return Err(ResolveError::NotFound(p.display().to_string()));
+        return Err(ResolveError::FileNotFound(p));
+    }
+
+    resolve_canonical(&path.names)
+}
+
+/// Resolve a canonical, non-relative module path — a resolved on-disk file
+/// identity ([`file_module_path`]), a stdlib path, or a bare name. This is
+/// the form module paths take in the reference graph, so the LSP's
+/// module-to-URI translation enters here.
+pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveError> {
+    // Already resolved: a canonical file identity.
+    if is_resolved_file(path) {
+        let key = ModuleKey::of(path);
+        // Rebuild the on-disk path with the platform separator; the key's
+        // '/'-join form is cache identity only.
+        let p = PathBuf::from(format!("{}.al", path.join(std::path::MAIN_SEPARATOR_STR)));
+        return if p.is_file() {
+            Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                canon: path.clone(),
+                key,
+            })
+        } else {
+            Err(ResolveError::FileNotFound(p))
+        };
+    }
+
+    // Stdlib: any path rooted at `al`.
+    if is_stdlib(path) {
+        let key = ModuleKey::of(path);
+        return match stdlib::lookup(key.as_str()) {
+            Some(src) => Ok(ResolvedModule {
+                source: ModuleSource::Embedded(src),
+                canon: path.clone(),
+                key,
+            }),
+            None => Err(ResolveError::NoSuchStdlibModule(path.clone())),
+        };
     }
 
     // Bare names other than `al` are reserved for a future package manager.
@@ -936,12 +968,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn rel(leading: &[RelSeg], names: &[&str]) -> ImportPath {
+        ImportPath {
+            leading: leading.to_vec(),
+            names: names.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     // `resolve` routes `al/*` to embedded source, relative paths against a base
     // dir (with `.`/`..` navigation), and errors clearly otherwise.
     #[test]
     fn resolve_stdlib_relative_and_errors() {
         // Embedded stdlib: source, canonical path, and key all line up.
-        match resolve(&vec!["al".into(), "array".into()], None) {
+        match resolve(&rel(&[], &["al", "array"]), None) {
             Ok(r) => {
                 assert!(matches!(r.source, ModuleSource::Embedded(_)));
                 assert_eq!(r.canon, vec!["al".to_string(), "array".to_string()]);
@@ -950,13 +989,13 @@ mod tests {
             other => panic!("expected al/array to resolve embedded, got {other:?}"),
         }
         assert!(matches!(
-            resolve(&vec!["al".into(), "no_such_mod".into()], None),
-            Err(ResolveError::NotFound(_))
+            resolve(&rel(&[], &["al", "no_such_mod"]), None),
+            Err(ResolveError::NoSuchStdlibModule(_))
         ));
 
         // Relative import with no base dir cannot be resolved.
         assert!(matches!(
-            resolve(&vec![".".into(), "foo".into()], None),
+            resolve(&rel(&[RelSeg::CurrentDir], &["foo"]), None),
             Err(ResolveError::NoBaseDir)
         ));
 
@@ -967,7 +1006,7 @@ mod tests {
         std::fs::create_dir_all(base.join("sub")).unwrap();
 
         // `./foo` from base; the canonical key comes from the resolved file.
-        match resolve(&vec![".".into(), "foo".into()], Some(&base)) {
+        match resolve(&rel(&[RelSeg::CurrentDir], &["foo"]), Some(&base)) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 canon,
@@ -980,7 +1019,10 @@ mod tests {
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
         }
         // `../bar` from base/sub climbs to base/bar.al.
-        match resolve(&vec!["..".into(), "bar".into()], Some(&base.join("sub"))) {
+        match resolve(
+            &rel(&[RelSeg::ParentDir], &["bar"]),
+            Some(&base.join("sub")),
+        ) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 ..
@@ -989,23 +1031,33 @@ mod tests {
         }
         // A dot in the module name is part of the name: `./b.v2` resolves to
         // `b.v2.al` (appending `.al`), not `b.al` (replacing the suffix).
-        match resolve(&vec![".".into(), "b.v2".into()], Some(&base)) {
+        match resolve(&rel(&[RelSeg::CurrentDir], &["b.v2"]), Some(&base)) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
                 ..
             }) => assert_eq!(p, base.join("b.v2.al")),
             other => panic!("expected ./b.v2 to resolve to b.v2.al, got {other:?}"),
         }
-        // A relative path to a non-existent file is NotFound.
-        assert!(matches!(
-            resolve(&vec![".".into(), "ghost".into()], Some(&base)),
-            Err(ResolveError::NotFound(_))
-        ));
+        // A relative path to a non-existent file is FileNotFound, carrying
+        // the probed filesystem path.
+        match resolve(&rel(&[RelSeg::CurrentDir], &["ghost"]), Some(&base)) {
+            Err(ResolveError::FileNotFound(p)) => assert_eq!(p, base.join("ghost.al")),
+            other => panic!("expected ./ghost to be FileNotFound, got {other:?}"),
+        }
         // Bare names (no `al` root, not relative) are reserved -> BareName.
         assert!(matches!(
-            resolve(&vec!["somepkg".into()], None),
+            resolve(&rel(&[], &["somepkg"]), None),
             Err(ResolveError::BareName(_))
         ));
+
+        // A canonical file identity resolves back to its on-disk file.
+        match resolve_canonical(&file_module_path(&base.join("foo.al"))) {
+            Ok(ResolvedModule {
+                source: ModuleSource::File(p),
+                ..
+            }) => assert_eq!(p, std::path::absolute(base.join("foo.al")).unwrap()),
+            other => panic!("expected canonical path to resolve, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1056,6 +1108,7 @@ mod tests {
             iface: ModuleInterface::new(vec!["m".to_string()]),
             origin: ModuleOrigin::File {
                 source_hash: source_hash(body),
+                stat: None,
                 watermark: Watermark::default(),
                 path: path.clone(),
                 refs: Rc::new(ModuleReferences::new(crate::reference::ModuleId(0))),

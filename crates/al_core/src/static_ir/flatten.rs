@@ -20,7 +20,7 @@ use crate::types::InferEngine;
 #[derive(Debug, Default)]
 pub struct FlatPools {
     pub str_pool: Vec<String>,
-    pub str_slice_pool: Vec<u32>,
+    pub str_slice_pool: Vec<StrIdx>,
     pub byte_pool: Vec<u8>,
 
     pub nodes: Vec<TypeNode>,
@@ -37,7 +37,7 @@ pub struct FlatPools {
     pub stypeexport_pool: Vec<STypeExport>,
     pub sexport_pool: Vec<SExport>,
     pub modules: Vec<(String, SModule)>,
-    pub typeinfo_by_name: Vec<(String, u32)>,
+    pub typeinfo_by_name: Vec<(String, TypeInfoIdx)>,
 
     pub code: Vec<Instruction>,
     pub functions: Vec<SFunction>,
@@ -45,55 +45,56 @@ pub struct FlatPools {
 
     pub reserved: Vec<String>,
 
-    str_intern: IndexMap<String, u32>,
+    str_intern: IndexMap<String, StrIdx>,
+}
+
+/// Slice whose `len` is the pool-length delta since `start` — structurally in
+/// agreement with what the push loop actually appended, whatever that loop
+/// skipped or filtered.
+fn slice_since<T>(pool_len_after: usize, start: u32) -> Slice<T> {
+    Slice::new(start, pool_len_after as u32 - start)
 }
 
 impl FlatPools {
-    fn intern(&mut self, s: &str) -> u32 {
+    fn intern(&mut self, s: &str) -> StrIdx {
         if let Some(&i) = self.str_intern.get(s) {
             return i;
         }
-        let i = self.str_pool.len() as u32;
+        let i = StrIdx(self.str_pool.len() as u32);
         self.str_pool.push(s.to_string());
         self.str_intern.insert(s.to_string(), i);
         i
     }
 
-    fn push_str_slice<I: IntoIterator<Item = String>>(&mut self, it: I) -> Slice {
+    fn push_str_slice<I: IntoIterator<Item = String>>(&mut self, it: I) -> Slice<StrIdx> {
         let start = self.str_slice_pool.len() as u32;
         for s in it {
             let i = self.intern(&s);
             self.str_slice_pool.push(i);
         }
-        Slice {
-            start,
-            len: self.str_slice_pool.len() as u32 - start,
-        }
+        slice_since(self.str_slice_pool.len(), start)
     }
 
-    fn push_bytes(&mut self, bytes: &[u8]) -> Slice {
+    fn push_bytes(&mut self, bytes: &[u8]) -> Slice<u8> {
         let start = self.byte_pool.len() as u32;
         self.byte_pool.extend_from_slice(bytes);
-        Slice {
-            start,
-            len: self.byte_pool.len() as u32 - start,
-        }
+        slice_since(self.byte_pool.len(), start)
     }
 
-    fn push_scheme(&mut self, s: Scheme) -> u32 {
+    fn push_scheme(&mut self, s: Scheme) -> SchemeIdx {
         // `s.def` (the declaring `DefinitionLocation`) is preserved: its
         // `module` `ArenaSlice` indexes the static string-slice pool, which
         // `seed_static` memcpies back as the live arena's prefix, so the
         // location stays valid after hydration. This is what lets cross-module
         // goto-def / find-references land inside a precompiled `al/*` module
         // (`synth_refs_from_interface` reads it back).
-        let i = self.schemes.len() as u32;
+        let i = SchemeIdx(self.schemes.len() as u32);
         self.schemes.push(s);
         i
     }
 
-    fn push_typeinfo(&mut self, ti: TypeInfo) -> u32 {
-        let i = self.typeinfos.len() as u32;
+    fn push_typeinfo(&mut self, ti: TypeInfo) -> TypeInfoIdx {
+        let i = TypeInfoIdx(self.typeinfos.len() as u32);
         self.typeinfos.push(ti);
         i
     }
@@ -106,10 +107,7 @@ impl FlatPools {
             let name = self.intern(n);
             self.stypeexport_pool.push(STypeExport { name, info });
         }
-        let types = Slice {
-            start: t_start,
-            len: iface.types.len() as u32,
-        };
+        let types = slice_since(self.stypeexport_pool.len(), t_start);
         let v_start = self.sexport_pool.len() as u32;
         for (n, ev) in &iface.values {
             let scheme = self.push_scheme(ev.scheme);
@@ -124,18 +122,10 @@ impl FlatPools {
                 doc,
             });
         }
-        let values = Slice {
-            start: v_start,
-            len: iface.values.len() as u32,
-        };
-        // `private_names` is a `HashSet` with a randomly-seeded hasher, so its
-        // iteration order differs run to run. Interning it in that order would
-        // permute `str_pool` and shift every `StrId` frozen into `.rodata` —
-        // an irreproducible build. Sort, as `flatten` already does for
-        // `reserved`.
-        let mut private: Vec<String> = iface.private_names.iter().cloned().collect();
-        private.sort();
-        let private_names = self.push_str_slice(private);
+        let values = slice_since(self.sexport_pool.len(), v_start);
+        // `private_names` is a `BTreeSet`: iteration is sorted by type, so
+        // interning in that order is reproducible build to build.
+        let private_names = self.push_str_slice(iface.private_names.iter().cloned());
         let doc = iface.doc.as_deref().map(|d| self.intern(d));
         self.modules.push((
             key.to_string(),
@@ -199,7 +189,7 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
         ..FlatPools::default()
     };
     for (i, s) in engine.strings.iter().enumerate() {
-        p.str_intern.entry(s.clone()).or_insert(i as u32);
+        p.str_intern.entry(s.clone()).or_insert(StrIdx(i as u32));
     }
 
     let mut keys: Vec<&String> = out.blob.interfaces.keys().collect();
@@ -233,8 +223,9 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
         p.constants.push(c);
     }
 
+    // `reserved` is a `BTreeSet`, so this comes out sorted (build.rs relies
+    // on binary_search over the emitted slice).
     p.reserved = out.reserved.iter().cloned().collect();
-    p.reserved.sort();
 
     p
 }
@@ -276,7 +267,7 @@ mod tests {
         assert_eq!(p.functions.len(), prog.functions.len());
         for (sf, f) in p.functions.iter().zip(&prog.functions) {
             assert_eq!(
-                p.str_pool[sf.name as usize].as_str(),
+                p.str_pool[sf.name.0 as usize].as_str(),
                 &*f.name,
                 "function name lost in interning"
             );
@@ -306,12 +297,12 @@ mod tests {
                 (SConst::Float(f), ValueView::Float(g)) => assert_eq!(*f, g),
                 (SConst::Bool(b), ValueView::Bool(c)) => assert_eq!(*b, c),
                 (SConst::Str(i), ValueView::Str(s)) => {
-                    assert_eq!(p.str_pool[*i as usize].as_str(), s);
+                    assert_eq!(p.str_pool[i.0 as usize].as_str(), s);
                 }
                 (SConst::StrArray(sl), ValueView::Array(arr)) => {
                     let strs: Vec<&str> = p.str_slice_pool[sl.range()]
                         .iter()
-                        .map(|&i| p.str_pool[i as usize].as_str())
+                        .map(|&i| p.str_pool[i.0 as usize].as_str())
                         .collect();
                     let want: Vec<String> = arr
                         .iter()
@@ -344,7 +335,7 @@ mod tests {
         // never recompiled; declaration docs travel on `SExport::doc`.
         for (k, iface) in &out.blob.interfaces {
             let (_, m) = p.modules.iter().find(|(mk, _)| mk == k).unwrap();
-            let flat = m.doc.map(|i| p.str_pool[i as usize].as_str());
+            let flat = m.doc.map(|i| p.str_pool[i.0 as usize].as_str());
             assert_eq!(flat, iface.doc.as_deref(), "module doc lost for '{k}'");
         }
         let (_, sched) = p
@@ -352,7 +343,7 @@ mod tests {
             .iter()
             .find(|(k, _)| k == "al/scheduler")
             .expect("al/scheduler is precompiled");
-        let doc = p.str_pool[sched.doc.expect("al/scheduler has a module doc") as usize].as_str();
+        let doc = p.str_pool[sched.doc.expect("al/scheduler has a module doc").0 as usize].as_str();
         assert!(doc.contains("Lightweight processes."));
 
         // The standalone type-info table covers every entry by name.

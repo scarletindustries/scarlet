@@ -10,6 +10,7 @@
 
 pub mod flatten;
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::bytecode::{Function, Instruction, PreludeBindings, Value};
@@ -37,16 +38,52 @@ pub struct VariantTemplate {
     pub labels: &'static [&'static str],
 }
 
-/// Half-open `[start, start+len)` index into a sibling pool. Distinct from
-/// `ArenaSlice` only in width (`u32` len vs `u16`) since string-slice pools
-/// can exceed 65 535 entries while type-argument lists cannot.
-#[derive(Debug, Clone, Copy)]
-pub struct Slice {
+/// Index into [`StaticStdlib::str_pool`]. Distinct from the engine-side
+/// `StrId`: `str_pool` extends `engine.strings` past its verbatim prefix with
+/// names interned during flattening, so a `StrIdx` is not always a valid
+/// `StrId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StrIdx(pub u32);
+
+/// Index into [`StaticStdlib::schemes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SchemeIdx(pub u32);
+
+/// Index into [`StaticStdlib::typeinfos`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeInfoIdx(pub u32);
+
+/// Half-open `[start, start+len)` index into the sibling pool whose element
+/// type is `T`, so a slice can only index the pool it was minted against.
+/// Distinct from `ArenaSlice` only in width (`u32` len vs `u16`) since
+/// string-slice pools can exceed 65 535 entries while type-argument lists
+/// cannot.
+#[derive(Debug)]
+pub struct Slice<T> {
     pub start: u32,
     pub len: u32,
+    _marker: PhantomData<T>,
 }
 
-impl Slice {
+// Manual impls: a derive would bound `T: Clone`/`T: Copy`, which the
+// `PhantomData` doesn't require.
+impl<T> Clone for Slice<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Slice<T> {}
+
+impl<T> Slice<T> {
+    #[inline]
+    pub const fn new(start: u32, len: u32) -> Self {
+        Slice {
+            start,
+            len,
+            _marker: PhantomData,
+        }
+    }
+
     #[inline]
     pub fn range(self) -> std::ops::Range<usize> {
         self.start as usize..self.start as usize + self.len as usize
@@ -55,37 +92,37 @@ impl Slice {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SExport {
-    pub name: u32,
-    pub scheme: u32,
+    pub name: StrIdx,
+    pub scheme: SchemeIdx,
     pub local_slot: Option<GlobalSlot>,
     /// `str_slice_pool` range of `str_pool` indices: the function's parameter
     /// names, in order.
-    pub param_names: Slice,
+    pub param_names: Slice<StrIdx>,
     /// `str_pool` index of the declaration's doc comment, if it has one.
-    pub doc: Option<u32>,
+    pub doc: Option<StrIdx>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct STypeExport {
-    pub name: u32,
-    pub info: u32,
+    pub name: StrIdx,
+    pub info: TypeInfoIdx,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SModule {
-    pub types: Slice,
-    pub values: Slice,
-    pub private_names: Slice,
-    pub path: Slice,
+    pub types: Slice<STypeExport>,
+    pub values: Slice<SExport>,
+    pub private_names: Slice<StrIdx>,
+    pub path: Slice<StrIdx>,
     /// `str_pool` index of the module-level doc comment (the `/** */` block
     /// at the top of the file), if there is one. Declaration docs travel on
     /// [`SExport::doc`].
-    pub doc: Option<u32>,
+    pub doc: Option<StrIdx>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct SFunction {
-    pub name: u32,
+    pub name: StrIdx,
     pub arity: i32,
     pub locals: i32,
     pub capture_count: i32,
@@ -98,18 +135,18 @@ pub enum SConst {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(u32),
-    StrArray(Slice),
+    Str(StrIdx),
+    StrArray(Slice<StrIdx>),
     /// A binary literal: `bit_len` logical bits whose `bit_len.div_ceil(8)`
     /// bytes live in `byte_pool` at the given slice (bit offset 0).
-    Binary(Slice, u64),
+    Binary(Slice<u8>, u64),
 }
 
 /// Single handle bundling every static pool.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticStdlib {
     pub str_pool: &'static [&'static str],
-    pub str_slice_pool: &'static [u32],
+    pub str_slice_pool: &'static [StrIdx],
     pub byte_pool: &'static [u8],
 
     /// The type arena and side-pools — the same `Copy` types the live engine
@@ -128,7 +165,7 @@ pub struct StaticStdlib {
     pub stypeexport_pool: &'static [STypeExport],
     pub sexport_pool: &'static [SExport],
     pub modules: &'static [(&'static str, SModule)],
-    pub typeinfo_by_name: &'static [(&'static str, u32)],
+    pub typeinfo_by_name: &'static [(&'static str, TypeInfoIdx)],
 
     pub code: &'static [Instruction],
     pub functions: &'static [SFunction],
@@ -142,11 +179,11 @@ pub struct StaticStdlib {
 
 impl StaticStdlib {
     #[inline]
-    fn s(&self, i: u32) -> String {
-        self.str_pool[i as usize].to_string()
+    fn s(&self, i: StrIdx) -> String {
+        self.str_pool[i.0 as usize].to_string()
     }
     #[inline]
-    fn modpath(&self, sl: Slice) -> Vec<String> {
+    fn modpath(&self, sl: Slice<StrIdx>) -> Vec<String> {
         self.str_slice_pool[sl.range()]
             .iter()
             .map(|&i| self.s(i))
@@ -158,13 +195,13 @@ impl StaticStdlib {
         for te in &self.stypeexport_pool[m.types.range()] {
             iface
                 .types
-                .insert(self.s(te.name), self.typeinfos[te.info as usize]);
+                .insert(self.s(te.name), self.typeinfos[te.info.0 as usize]);
         }
         for e in &self.sexport_pool[m.values.range()] {
             iface.values.insert(
                 self.s(e.name),
                 ExportedValue {
-                    scheme: self.schemes[e.scheme as usize],
+                    scheme: self.schemes[e.scheme.0 as usize],
                     local_slot: e.local_slot,
                     param_names: self.str_slice_pool[e.param_names.range()]
                         .iter()
@@ -202,7 +239,7 @@ impl StaticStdlib {
             .functions
             .iter()
             .map(|f| Function {
-                name: Arc::from(self.str_pool[f.name as usize]),
+                name: Arc::from(self.str_pool[f.name.0 as usize]),
                 arity: f.arity,
                 locals: f.locals,
                 capture_count: f.capture_count,
@@ -213,21 +250,24 @@ impl StaticStdlib {
         let constants: Vec<Value> = self
             .constants
             .iter()
-            .map(|c| match *c {
-                SConst::Int(n) => frozen.int(n),
-                SConst::Float(f) => frozen.float(f),
-                SConst::Bool(b) => frozen.bool(b),
-                SConst::Str(i) => frozen.str(self.str_pool[i as usize]),
-                SConst::StrArray(sl) => {
-                    let strs: Vec<&str> = self.str_slice_pool[sl.range()]
-                        .iter()
-                        .map(|&i| self.str_pool[i as usize])
-                        .collect();
-                    frozen.str_array(&strs)
+            .map(|c| {
+                match *c {
+                    SConst::Int(n) => frozen.int(n),
+                    SConst::Float(f) => frozen.float(f),
+                    SConst::Bool(b) => frozen.bool(b),
+                    SConst::Str(i) => frozen.str(self.str_pool[i.0 as usize]),
+                    SConst::StrArray(sl) => {
+                        let strs: Vec<&str> = self.str_slice_pool[sl.range()]
+                            .iter()
+                            .map(|&i| self.str_pool[i.0 as usize])
+                            .collect();
+                        frozen.str_array(&strs)
+                    }
+                    SConst::Binary(sl, bit_len) => {
+                        frozen.binary_bits(self.byte_pool[sl.range()].to_vec(), bit_len)
+                    }
                 }
-                SConst::Binary(sl, bit_len) => {
-                    frozen.binary_bits(self.byte_pool[sl.range()].to_vec(), bit_len)
-                }
+                .into_value()
             })
             .collect();
         (code, functions, constants)
