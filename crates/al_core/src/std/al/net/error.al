@@ -37,7 +37,9 @@ pub type NetError {
 	MessageTooLarge(limit Int)
 	// A write was handed a binary that is not a whole number of bytes.
 	UnalignedBinary
-	// A port number outside 0..=65535 was passed to listen/connect.
+	// A port number outside 0..=65535 was passed to listen/connect. Raised by
+	// the AL wrappers before the VM is reached: an opaque `SocketAddress`
+	// cannot carry an out-of-range port, so this is checked at construction.
 	InvalidPort
 	// An OS error with no dedicated variant above, carrying its raw errno so it
 	// is still matchable — never a string.

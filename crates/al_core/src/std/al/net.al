@@ -6,6 +6,7 @@ import al/net/error.{
 	ConnectionReset,
 	Errno,
 	HostUnreachable,
+	InvalidPort,
 	NetworkDown,
 	NetworkUnreachable,
 	NotConnected,
@@ -26,7 +27,10 @@ pub fn listen_addr(addr SocketAddress) Result(Server, NetError)
 // scheduler thread. IP literals resolve synchronously.
 pub fn listen(host String, port Int) Result(Server, NetError) {
 	match resolve(host) {
-		Ok(ip) -> listen_addr(SocketAddress(ip, port))
+		Ok(ip) -> match address.socket_address(ip, port) {
+			Ok(addr) -> listen_addr(addr)
+			Err(Nil) -> Err(InvalidPort)
+		}
 		Err(e) -> Err(e)
 	}
 }
@@ -124,7 +128,10 @@ pub fn resolve(host String) Result(IpAddress, NetError)
 // blocks the scheduler.
 pub fn connect(host String, port Int) Result(Socket, NetError) {
 	match resolve(host) {
-		Ok(ip) -> connect_addr(SocketAddress(ip, port))
+		Ok(ip) -> match address.socket_address(ip, port) {
+			Ok(addr) -> connect_addr(addr)
+			Err(Nil) -> Err(InvalidPort)
+		}
 		Err(e) -> Err(e)
 	}
 }
