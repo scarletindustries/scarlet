@@ -569,6 +569,34 @@ pub(super) fn header_get(
     })
 }
 
+/// Whether every field is safe to serialize: non-empty RFC 9110 token name
+/// (§5.6.2), CR/LF/NUL-free value. One native walk — the connection driver
+/// runs this on every response it writes, and the interpreted per-byte form
+/// was a measurable share of a keep-alive server's request cost.
+pub(super) fn headers_valid(headers_val: &Value) -> VmResult<Value> {
+    fn is_token_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric()
+            | matches!(
+                b,
+                b'!' | b'#'..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'..=b'`' | b'|' | b'~'
+            )
+    }
+    let bad = for_each_header(headers_val, "headers.valid", |name, value| {
+        if name.is_empty() || !name.iter().copied().all(is_token_byte) {
+            return Ok(ControlFlow::Break(()));
+        }
+        let value_bytes = field_bytes(value).ok_or_else(|| not_headers("headers.valid"))?;
+        if value_bytes
+            .iter()
+            .any(|&b| b == b'\r' || b == b'\n' || b == 0)
+        {
+            return Ok(ControlFlow::Break(()));
+        }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(Value::bool(bad.is_none()))
+}
+
 /// Whether any header name matches (ASCII-case-insensitive).
 pub(super) fn header_has(headers_val: &Value, name: &BinaryRef<'_>) -> VmResult<Value> {
     Ok(Value::bool(

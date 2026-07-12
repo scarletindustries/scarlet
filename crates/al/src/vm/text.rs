@@ -452,6 +452,15 @@ impl VM {
 
     #[cold]
     #[inline(never)]
+    pub(super) fn http_headers_valid(&mut self) -> VmResult<()> {
+        let headers = self.pop()?;
+        let v = http::headers_valid(&headers)?;
+        self.stack.push(v);
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
     pub(super) fn http_header_has(&mut self) -> VmResult<()> {
         let name_v = self.pop_binary("headers.has")?;
         let headers = self.pop()?;

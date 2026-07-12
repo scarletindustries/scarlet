@@ -52,13 +52,25 @@ pub fn set(h Headers, name Binary, value Binary) Headers {
 }
 
 // Remove every field whose name matches `name` (case-insensitive).
+//
+// Identity when the name is absent: the walk-and-rebuild allocates a fresh
+// cons per field, and the response hot path deletes framing headers that are
+// almost never present — the native `has` probe makes that case free.
 pub fn delete(h Headers, name Binary) Headers {
+	if has(h, name) {
+		delete_walk(h, name)
+	} else {
+		h
+	}
+}
+
+fn delete_walk(h Headers, name Binary) Headers {
 	match h {
 		[] -> []
 		[field, ..rest] -> if binary.eq_ignore_ascii_case(field.name, name) {
-			delete(rest, name)
+			delete_walk(rest, name)
 		} else {
-			[field, ..delete(rest, name)]
+			[field, ..delete_walk(rest, name)]
 		}
 	}
 }
@@ -92,12 +104,8 @@ pub fn field(name Binary, value Binary) Result(Header, InvalidHeader) {
 // The connection driver checks this before a response's header block (or
 // trailer list) reaches the wire, so a handler that built raw Header values
 // from unvalidated input cannot split the response.
-pub fn valid(h Headers) Bool {
-	match h {
-		[] -> True
-		[f, ..rest] -> valid_name(f.name) && valid_value(f.value) && valid(rest)
-	}
-}
+@vm(http__headers_valid)
+pub fn valid(h Headers) Bool
 
 // A field name must be a non-empty RFC 9110 token (§5.6.2).
 fn valid_name(name Binary) Bool {

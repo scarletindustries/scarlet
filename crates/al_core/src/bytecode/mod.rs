@@ -344,6 +344,7 @@ pub enum Op {
     /// `[headers, name] -> Bool` — whether any header name matches `name`
     /// ASCII-case-insensitively.
     HttpHeaderHas,
+    HttpHeadersValid,
     /// `[code, reason, headers] -> Binary` — serialize a response head (status
     /// line, header block, terminating blank line) as one contiguous buffer.
     HttpSerializeHead,
@@ -564,6 +565,7 @@ impl Op {
             | Op::HttpChunkDecode
             | Op::HttpHeaderGet
             | Op::HttpHeaderHas
+            | Op::HttpHeadersValid
             | Op::HttpSerializeHead
             | Op::FloatFloor
             | Op::FloatCeil
@@ -733,6 +735,7 @@ impl Op {
             | Op::HttpChunkDecode
             | Op::HttpHeaderGet
             | Op::HttpHeaderHas
+            | Op::HttpHeadersValid
             | Op::HttpSerializeHead
             | Op::FloatFloor
             | Op::FloatCeil
@@ -822,6 +825,7 @@ pub fn builtin_op(name: &str) -> Option<Op> {
         "http__chunk_decode" => Op::HttpChunkDecode,
         "http__header_get" => Op::HttpHeaderGet,
         "http__header_has" => Op::HttpHeaderHas,
+        "http__headers_valid" => Op::HttpHeadersValid,
         "http__serialize_head" => Op::HttpSerializeHead,
         "float__floor" => Op::FloatFloor,
         "float__ceil" => Op::FloatCeil,

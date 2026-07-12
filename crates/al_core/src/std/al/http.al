@@ -689,8 +689,12 @@ fn head_only_headers(method Method, hs Headers, b ResponseBody) Headers {
 	}
 }
 
+// `hs` has already been stripped of Content-Length (`strip_framing` runs
+// before every call), so a plain prepend is `headers.set`-equivalent without
+// walking and rebuilding the list. Field order is not significant (RFC 9110
+// §5.3 — only same-named fields are ordered).
 fn with_length(hs Headers, len Int) Headers {
-	headers.set(hs, NAME_CONTENT_LENGTH, binary.from_int_ascii(len, Dec))
+	[Header(name: NAME_CONTENT_LENGTH, value: binary.from_int_ascii(len, Dec)), ..hs]
 }
 
 // A Fixed body advertising a negative length — an unkeepable promise. respond

@@ -890,6 +890,7 @@ impl VM {
                 Op::HttpChunkDecode => self.http_chunk_decode()?,
                 Op::HttpHeaderGet => self.http_header_get()?,
                 Op::HttpHeaderHas => self.http_header_has()?,
+                Op::HttpHeadersValid => self.http_headers_valid()?,
                 Op::HttpSerializeHead => self.http_serialize_head()?,
                 // Float→Int casts use saturating `as i64`; Value floats are
                 // canonicalized finite (no NaN/Inf), so these stay total.
