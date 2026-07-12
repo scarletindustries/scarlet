@@ -145,10 +145,12 @@ impl PatternBindings {
 
     /// Begin typing an or-pattern. Pushes a fresh frame in establishing phase
     /// and returns the scoped handle that owns the rest of the protocol —
-    /// alternatives are entered/finished through the [`OrScope`], and
-    /// [`OrScope::finish`] pops the frame. The frame's push and pop are tied
-    /// to one value's lifetime, so "alternative outside an or-pattern" and
-    /// "exit without enter" are unrepresentable at the call site.
+    /// alternatives are entered/finished through the [`OrScope`], and the
+    /// frame is popped by the scope's `Drop`. The frame's push and pop are
+    /// tied to one value's lifetime, so "alternative outside an or-pattern",
+    /// "exit without enter", and "enter without exit" (including via `?` or
+    /// early return while the scope is live) are all unrepresentable at the
+    /// call site.
     pub fn enter_or(&mut self) -> OrScope<'_> {
         self.frames.push(OrFrame {
             boundary: self.initial.len(),
@@ -163,8 +165,10 @@ impl PatternBindings {
 /// Scoped protocol handle for one or-pattern, obtained from
 /// [`PatternBindings::enter_or`]. Sub-patterns are typed through
 /// [`bindings`](Self::bindings) (a nested or-pattern pushes and pops its own
-/// frame there, in balanced fashion); [`finish`](Self::finish) consumes the
-/// scope and pops this or's frame.
+/// frame there, in balanced fashion); dropping the scope pops this or's frame
+/// and folds its bound names into the enclosing frame, so an early return
+/// cannot leave a stale frame behind. [`finish`](Self::finish) is the
+/// explicit spelling of that drop.
 pub struct OrScope<'a> {
     b: &'a mut PatternBindings,
 }
@@ -177,9 +181,8 @@ impl OrScope<'_> {
 
     /// The frame [`PatternBindings::enter_or`] pushed for this scope. It is
     /// the top of the stack whenever a method here runs: nested scopes borrow
-    /// `self` through [`bindings`](Self::bindings) and must be finished before
-    /// this one is usable again, and `finish` — the only pop — consumes the
-    /// scope.
+    /// `self` through [`bindings`](Self::bindings) and must be dropped before
+    /// this one is usable again, and this scope's own drop is the only pop.
     #[allow(clippy::panic)]
     fn frame_mut(&mut self) -> &mut OrFrame {
         match self.b.frames.last_mut() {
@@ -188,10 +191,13 @@ impl OrScope<'_> {
         }
     }
 
-    /// Switch to the next non-first alternative of this or-pattern. The first
-    /// call freezes the first alternative's bindings as the canonical set;
-    /// subsequent calls just reset `seen`.
-    pub fn enter_alternative(&mut self) {
+    /// Switch to the next non-first alternative of this or-pattern and return
+    /// the handle the alternative is typed through. The first call freezes
+    /// the first alternative's bindings as the canonical set; subsequent
+    /// calls just reset `seen`. The completeness check ([`Alt::finish`]) only
+    /// exists on the returned handle, so "finish an alternative before
+    /// entering one" fails to compile rather than hitting a runtime assert.
+    pub fn enter_alternative(&mut self) -> Alt<'_> {
         let f = self.frame_mut();
         f.phase = match std::mem::replace(
             &mut f.phase,
@@ -211,18 +217,65 @@ impl OrScope<'_> {
                 OrPhase::Checking { canonical, seen }
             }
         };
+        Alt { b: &mut *self.b }
     }
 
-    /// Call after typing each non-first alternative. Reports any name from
-    /// this or's canonical set that the branch failed to bind.
-    pub fn finish_alternative(&self, alt_span: Span, engine: &mut InferEngine) -> bool {
+    /// Finish typing this or-pattern. Explicit spelling of the scope's drop —
+    /// see the `Drop` impl for what popping the frame entails.
+    pub fn finish(self) {}
+}
+
+/// Popping the frame is tied to the scope's lifetime rather than a method the
+/// caller must remember to reach on every path: the names this or-pattern
+/// bound (its canonical set, or `seen` if it never left the establishing
+/// phase) become part of the enclosing alternative's `seen` so a sibling
+/// binding after the or-pattern still sees them for duplicate detection.
+impl Drop for OrScope<'_> {
+    fn drop(&mut self) {
+        // Never panic here: a panicking drop during unwind aborts, and this
+        // runs on unwind by design. The frame's existence is guaranteed
+        // structurally — this drop is the only pop, one per `enter_or` push.
+        let Some(inner) = self.b.frames.pop() else {
+            debug_assert!(false, "OrScope outlived its frame — compiler bug");
+            return;
+        };
+        let bound = match inner.phase {
+            OrPhase::Establishing { seen } => seen,
+            OrPhase::Checking { canonical, .. } => canonical,
+        };
+        if let Some(parent) = self.b.frames.last_mut() {
+            parent.seen_mut().extend(bound);
+        }
+    }
+}
+
+/// Handle for typing one non-first alternative of an or-pattern, obtained
+/// from [`OrScope::enter_alternative`]. It mutably reborrows the scope, so
+/// the or-pattern protocol cannot advance (next alternative, finish) until
+/// this alternative's handle is released.
+pub struct Alt<'a> {
+    b: &'a mut PatternBindings,
+}
+
+impl Alt<'_> {
+    /// The underlying accumulator, for typing this alternative's pattern.
+    pub fn bindings(&mut self) -> &mut PatternBindings {
+        self.b
+    }
+
+    /// Finish typing this alternative. Reports any name from the or's
+    /// canonical set that the branch failed to bind.
+    #[allow(clippy::panic)]
+    pub fn finish(self, alt_span: Span, engine: &mut InferEngine) -> bool {
+        // `enter_alternative` put the frame in `Checking` and this handle's
+        // borrow keeps every nested scope balanced above it, so the top frame
+        // is ours and checking.
         let Some(OrFrame {
             phase: OrPhase::Checking { canonical, seen },
             ..
         }) = self.b.frames.last()
         else {
-            debug_assert!(false, "finish_alternative before enter_alternative");
-            return true;
+            panic!("Alt outlived its frame — compiler bug")
         };
         let mut ok = true;
         // Every canonical name is in `initial` (it was inserted while all
@@ -238,24 +291,6 @@ impl OrScope<'_> {
             }
         }
         ok
-    }
-
-    /// Finish typing this or-pattern. The names it bound (its canonical set,
-    /// or `seen` if it never left the establishing phase) become part of the
-    /// enclosing alternative's `seen` so a sibling binding after the
-    /// or-pattern still sees them for duplicate detection.
-    #[allow(clippy::panic)]
-    pub fn finish(self) {
-        let Some(inner) = self.b.frames.pop() else {
-            panic!("OrScope outlived its frame — compiler bug")
-        };
-        let bound = match inner.phase {
-            OrPhase::Establishing { seen } => seen,
-            OrPhase::Checking { canonical, .. } => canonical,
-        };
-        if let Some(parent) = self.b.frames.last_mut() {
-            parent.seen_mut().extend(bound);
-        }
     }
 }
 
@@ -294,6 +329,21 @@ mod tests {
         assert!(e.diagnostics.is_empty(), "no diagnostics expected");
     }
 
+    // Dropping an OrScope without an explicit `finish()` — the early-return
+    // path — still pops its frame, so later pattern typing is unaffected.
+    #[test]
+    fn dropping_or_scope_pops_frame() {
+        let (mut e, int_ty, sp, mut b) = setup();
+        {
+            let mut or = b.enter_or();
+            assert!(or.bindings().bind("x", int_ty, sp, &mut e));
+        }
+        assert!(b.frames.is_empty(), "drop must pop the or frame");
+        // `x` is still visible for duplicate detection; fresh names still bind.
+        assert!(!b.bind("x", int_ty, sp, &mut e));
+        assert!(b.bind("y", int_ty, sp, &mut e));
+    }
+
     // An or-pattern alternative may re-bind the canonical name at a unifiable
     // type (the success path), but binding the same name twice within one
     // alternative is an error.
@@ -305,12 +355,12 @@ mod tests {
         assert!(or.bindings().bind("x", int_ty, sp, &mut e));
 
         // Second alternative re-binds `x` (canonical, unifiable) — accepted.
-        or.enter_alternative();
-        assert!(or.bindings().bind("x", int_ty, sp, &mut e));
+        let mut alt = or.enter_alternative();
+        assert!(alt.bindings().bind("x", int_ty, sp, &mut e));
         // Re-binding `x` again in the *same* alternative is a duplicate.
-        assert!(!or.bindings().bind("x", int_ty, sp, &mut e));
+        assert!(!alt.bindings().bind("x", int_ty, sp, &mut e));
         // `x` was bound, so this alternative is complete.
-        assert!(or.finish_alternative(sp, &mut e));
+        assert!(alt.finish(sp, &mut e));
         or.finish();
 
         assert_eq!(e.diagnostics.len(), 1, "exactly the duplicate is reported");
@@ -330,9 +380,9 @@ mod tests {
         let mut or = b.enter_or();
         assert!(or.bindings().bind("x", int_ty, sp, &mut e)); // canonical x : Int
 
-        or.enter_alternative();
+        let mut alt = or.enter_alternative();
         // Binding x : String in another alternative cannot unify with Int.
-        assert!(!or.bindings().bind("x", str_ty, sp, &mut e));
+        assert!(!alt.bindings().bind("x", str_ty, sp, &mut e));
         or.finish();
 
         assert!(
@@ -352,14 +402,14 @@ mod tests {
         // Outer: A(a) | B( C(a) | D(a) )
         let mut outer = b.enter_or();
         assert!(outer.bindings().bind("a", int_ty, sp, &mut e)); // A(a)
-        outer.enter_alternative();
-        let mut inner = outer.bindings().enter_or();
+        let mut oalt = outer.enter_alternative();
+        let mut inner = oalt.bindings().enter_or();
         assert!(inner.bindings().bind("a", int_ty, sp, &mut e)); // C(a) — must NOT be a duplicate
-        inner.enter_alternative();
-        assert!(inner.bindings().bind("a", int_ty, sp, &mut e)); // D(a)
-        assert!(inner.finish_alternative(sp, &mut e));
+        let mut ialt = inner.enter_alternative();
+        assert!(ialt.bindings().bind("a", int_ty, sp, &mut e)); // D(a)
+        assert!(ialt.finish(sp, &mut e));
         inner.finish();
-        assert!(outer.finish_alternative(sp, &mut e));
+        assert!(oalt.finish(sp, &mut e));
         outer.finish();
 
         assert!(
@@ -378,9 +428,9 @@ mod tests {
         // Outer: A(a) | B(a, C(a) | D(a)) — B's first arg and the inner or both bind `a`.
         let mut outer = b.enter_or();
         assert!(outer.bindings().bind("a", int_ty, sp, &mut e));
-        outer.enter_alternative();
-        assert!(outer.bindings().bind("a", int_ty, sp, &mut e)); // B's first arg
-        let mut inner = outer.bindings().enter_or();
+        let mut oalt = outer.enter_alternative();
+        assert!(oalt.bindings().bind("a", int_ty, sp, &mut e)); // B's first arg
+        let mut inner = oalt.bindings().enter_or();
         assert!(!inner.bindings().bind("a", int_ty, sp, &mut e)); // C(a) — dup of B's first arg
         inner.finish();
         outer.finish();

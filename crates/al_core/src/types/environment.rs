@@ -143,6 +143,9 @@ impl TypeInfo {
 /// by `truncate_to` before the length truncation.
 #[derive(Debug, Clone)]
 enum Overwrite {
+    /// A root-scope `define` that replaced an existing entry. Defines inside
+    /// an open scope roll back through `scope_undo` instead.
+    Binding(String, Scheme),
     TypeInfo(String, TypeInfo),
     TypeInfoById(TypeId, TypeInfo),
     Definition(String, DefinitionLocation),
@@ -220,7 +223,6 @@ impl TypeEnv {
                 }
             }
         }
-        self.bindings.truncate(w.root_scope);
         // Undo in-place overwrites first (newest first, so the oldest value of
         // a multiply-overwritten key wins), then truncate by length. A
         // restored entry that itself sits above the truncation point is
@@ -228,6 +230,9 @@ impl TypeEnv {
         // transient.
         while self.journal.len() > w.journal {
             match self.journal.pop() {
+                Some(Overwrite::Binding(name, s)) => {
+                    self.bindings.insert(name, s);
+                }
                 Some(Overwrite::TypeInfo(name, ti)) => {
                     self.type_info.insert(name, ti);
                 }
@@ -243,6 +248,7 @@ impl TypeEnv {
                 None => break,
             }
         }
+        self.bindings.truncate(w.root_scope);
         self.type_info.truncate(w.type_info);
         self.type_info_by_id.truncate(w.type_info_by_id);
         self.definitions.truncate(w.definitions);
@@ -329,6 +335,14 @@ impl TypeEnv {
         };
         if !self.scope_marks.is_empty() {
             self.scope_undo.push((idx, prev));
+        } else if let Some(prev) = prev {
+            // Root-scope overwrite: `truncate_to`'s by-length truncation
+            // cannot undo an in-place replace, so journal it exactly like the
+            // flat maps do. Cold path — only root-level shadowing (e.g. a
+            // module redefining a prelude name) reaches here; every define
+            // inside a function body has a scope open.
+            self.journal
+                .push(Overwrite::Binding(name.to_string(), prev));
         }
     }
 
@@ -533,4 +547,47 @@ fn levenshtein(a: &str, b: &str) -> usize {
     }
 
     prev[b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::infer::mono;
+    use super::*;
+
+    // A root-scope `define` that overwrites an existing root binding is
+    // journaled and undone by `truncate_to` — by-length truncation alone
+    // cannot reach an in-place replace.
+    #[test]
+    fn truncate_to_restores_overwritten_root_binding() {
+        let mut env = new_env();
+        env.define("x", mono(1));
+        let w = env.watermark();
+
+        env.define("x", mono(2)); // no scope open: root-scope overwrite
+        assert_eq!(env.lookup("x").unwrap().ty, 2);
+
+        env.truncate_to(&w);
+        assert_eq!(
+            env.lookup("x").unwrap().ty,
+            1,
+            "clobbered root binding must be restored"
+        );
+    }
+
+    // The same overwrite inside an open scope rolls back through `scope_undo`
+    // and must NOT be double-restored by the journal.
+    #[test]
+    fn scoped_overwrite_still_rolls_back_via_scope_undo() {
+        let mut env = new_env();
+        env.define("x", mono(1));
+        let w = env.watermark();
+
+        env.push_scope();
+        env.define("x", mono(2));
+        env.pop_scope();
+        assert_eq!(env.lookup("x").unwrap().ty, 1);
+
+        env.truncate_to(&w);
+        assert_eq!(env.lookup("x").unwrap().ty, 1);
+    }
 }
