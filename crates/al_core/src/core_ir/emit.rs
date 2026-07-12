@@ -33,7 +33,7 @@
 
 use super::{Atom, Callee, CodeAddr, CoreBind, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
 use crate::bytecode::{Instruction, Op, enum_name_prefix_hash, op, op_ab, op_arg};
-use crate::tivec::{Idx, TiVec};
+use crate::tivec::TiVec;
 use crate::type_def::TypeId;
 use crate::types::StrId;
 
@@ -136,8 +136,8 @@ pub fn emit_toplevel<C: EmitCtx>(
     e.next_slot = spill;
     e.max_locals = spill;
     for &(id, slot) in preassigned {
-        e.preassigned.resize_at_least(id, NO_SLOT);
-        e.preassigned[id] = slot;
+        e.preassigned.resize_at_least(id, None);
+        e.preassigned[id] = Some(slot);
     }
     // Not `emit_expr`: the entry frame is `__main__`, whose slots *are* the
     // program's globals — a `TailCall`/`Ret` here would collapse that frame
@@ -159,19 +159,21 @@ pub fn emit_toplevel<C: EmitCtx>(
 struct Emitter<'a, C: EmitCtx> {
     code: TiVec<CodeAddr, Instruction>,
     /// `LocalId → stack slot`. Dense (lower mints ids in order) so a vector
-    /// indexed by id, growing on demand, beats a hashmap.
-    slots: TiVec<LocalId, i32>,
+    /// indexed by id, growing on demand, beats a hashmap. `None` (or out of
+    /// range) means the id was never bound — reading it is a compiler bug,
+    /// aborted by [`unbound_local`].
+    slots: TiVec<LocalId, Option<i32>>,
     /// `LocalId → pinned slot` for the module-toplevel decl binds; consulted
     /// by [`Self::bind`] before falling through to `next_slot`. Empty for
     /// ordinary function bodies.
-    preassigned: TiVec<LocalId, i32>,
+    preassigned: TiVec<LocalId, Option<i32>>,
     /// `LocalId → constant-pool index` for `let x = Const(c)` binds that were
     /// elided instead of materialised into a slot: every `PushLocal x` becomes
     /// `PushConst c`. This is what restores the fused walk's
     /// `PushLocal s; PushConst k; op` operand shape from ANF — without it every
     /// literal costs a `PushConst; StoreLocal` pair and no `*IntLC`
     /// superinstruction can ever form.
-    const_of: TiVec<LocalId, i32>,
+    const_of: TiVec<LocalId, Option<i32>>,
     /// Whole-body facts gathered before emission (use counts, reuse claims,
     /// which locals must own a real slot).
     scan: Scan,
@@ -183,8 +185,19 @@ struct Emitter<'a, C: EmitCtx> {
     ctx: &'a mut C,
 }
 
-const NO_SLOT: i32 = -1;
-const NO_CONST: i32 = -1;
+/// A `LocalId` reached emission without ever being bound to a slot — a broken
+/// emit invariant. Aborts, in release as well as debug: any slot returned
+/// instead (the old fallback was 0) compiles to a `PushLocal 0` that silently
+/// clobbers or reads parameter 0. Mirrors `lower`'s `read_before_bind`.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn unbound_local(id: LocalId) -> ! {
+    panic!(
+        "internal compiler error: emit reached unbound local {id}. \
+         Please report this as a compiler bug."
+    )
+}
 
 impl<'a, C: EmitCtx> Emitter<'a, C> {
     fn new(ctx: &'a mut C) -> Self {
@@ -244,16 +257,16 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     /// were already emitted with; every other bind takes the next linear slot.
     fn bind(&mut self, bind: &CoreBind) -> i32 {
         let id = bind.id;
-        self.slots.resize_at_least(id, NO_SLOT);
-        let slot = match self.preassigned.get(id).copied() {
-            Some(s) if s != NO_SLOT => s,
-            _ => {
+        self.slots.resize_at_least(id, None);
+        let slot = match self.preassigned.get(id).copied().flatten() {
+            Some(s) => s,
+            None => {
                 let s = self.next_slot;
                 self.next_slot += 1;
                 s
             }
         };
-        self.slots[id] = slot;
+        self.slots[id] = Some(slot);
         if slot + 1 > self.max_locals {
             self.max_locals = slot + 1;
         }
@@ -265,11 +278,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         self.slots
             .get(id)
             .copied()
-            .filter(|&s| s != NO_SLOT)
-            .unwrap_or_else(|| {
-                debug_assert!(false, "emit: unbound LocalId {id}");
-                0
-            })
+            .flatten()
+            .unwrap_or_else(|| unbound_local(id))
     }
 
     /// True when `id` is a module-toplevel decl bind pinned to an entry-frame
@@ -278,14 +288,24 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     /// suppressed at emit time.
     #[inline]
     fn is_pinned(&self, id: LocalId) -> bool {
-        self.preassigned.get(id).is_some_and(|&s| s != NO_SLOT)
+        self.preassigned.get(id).copied().flatten().is_some()
+    }
+
+    /// The one place `Op::Drop` is written. A pinned `id` emits nothing:
+    /// globals are never dropped — the entry-frame slot it lives in *is* the
+    /// program's global table, and fn bodies read it via `PushGlobal` for the
+    /// rest of the run.
+    fn emit_drop(&mut self, id: LocalId) {
+        if !self.is_pinned(id) {
+            self.push(op_arg(Op::Drop, self.slot(id)));
+        }
     }
 
     /// The constant-pool index `id` was aliased to, if [`Self::try_alias_const`]
     /// elided its `Let`.
     #[inline]
     fn const_idx(&self, id: LocalId) -> Option<i32> {
-        self.const_of.get(id).copied().filter(|&c| c != NO_CONST)
+        self.const_of.get(id).copied().flatten()
     }
 
     /// Record every `let x = Const(c)` that nothing addresses by slot, ahead of
@@ -306,16 +326,11 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 CoreExpr::Let { bind, rhs, body } => {
                     let id = bind.id;
                     if let Atom::Const(c) = rhs
-                        && !self
-                            .scan
-                            .needs_slot
-                            .get(id.index())
-                            .copied()
-                            .unwrap_or(false)
+                        && !self.scan.needs_slot(id)
                         && !self.is_pinned(id)
                     {
-                        self.const_of.resize_at_least(id, NO_CONST);
-                        self.const_of[id] = c.0 as i32;
+                        self.const_of.resize_at_least(id, None);
+                        self.const_of[id] = Some(c.0 as i32);
                     }
                     e = body;
                 }
@@ -447,18 +462,14 @@ fn peel_call_arg_drops<'a>(
     mut body: &'a CoreExpr,
     args: &[LocalId],
     callee: Option<LocalId>,
-    reuse_claimed: &[bool],
+    scan: &Scan,
 ) -> (Vec<LocalId>, &'a CoreExpr) {
     let mut moved = Vec::new();
     while let CoreExpr::Drop { local, body: b, .. } = body {
         if !args.contains(local) && callee != Some(*local) {
             break;
         }
-        if reuse_claimed
-            .get(local.0 as usize)
-            .copied()
-            .unwrap_or(false)
-        {
+        if scan.reuse_claimed(*local) {
             break;
         }
         moved.push(*local);
@@ -522,14 +533,14 @@ struct Scan {
     /// `Ctor{reuse: Some(x)}` targets. [`peel_call_arg_drops`] must not peel
     /// such a drop into the callee: the cell is this frame's reuse token, not
     /// ownership to hand off.
-    reuse_claimed: Vec<bool>,
+    reuse_claimed: TiVec<LocalId, bool>,
     /// Locals the emitter addresses *by slot* rather than by pushing them:
     /// `Match` scrutinees (`emit_payload_binds` re-reads the slot per arm),
     /// `Drop` targets (`Op::Drop` names a slot), and reuse targets
     /// (`Op::Reuse` names a slot). These can never be const-aliased.
-    needs_slot: Vec<bool>,
+    needs_slot: TiVec<LocalId, bool>,
     /// Occurrence count per local, over every operand position in the body.
-    uses: Vec<u32>,
+    uses: TiVec<LocalId, u32>,
 }
 
 impl Scan {
@@ -539,30 +550,42 @@ impl Scan {
         s
     }
 
-    fn grow(&mut self, id: LocalId) -> usize {
-        let i = id.0 as usize;
-        if i >= self.uses.len() {
-            self.uses.resize(i + 1, 0);
-            self.needs_slot.resize(i + 1, false);
-            self.reuse_claimed.resize(i + 1, false);
-        }
-        i
+    /// Whether `id` must own a real slot. Out of range means the pre-pass
+    /// never saw `id` at all; the conservative answer keeps its slot.
+    fn needs_slot(&self, id: LocalId) -> bool {
+        self.needs_slot.get(id).copied().unwrap_or(true)
+    }
+
+    /// Occurrence count of `id` over every operand position in the body.
+    fn uses(&self, id: LocalId) -> u32 {
+        self.uses.get(id).copied().unwrap_or(0)
+    }
+
+    /// Whether some `Ctor{reuse: Some(id)}` in the body claims `id`'s cell.
+    fn reuse_claimed(&self, id: LocalId) -> bool {
+        self.reuse_claimed.get(id).copied().unwrap_or(false)
+    }
+
+    fn grow(&mut self, id: LocalId) {
+        self.uses.resize_at_least(id, 0);
+        self.needs_slot.resize_at_least(id, false);
+        self.reuse_claimed.resize_at_least(id, false);
     }
 
     fn use_(&mut self, id: LocalId) {
-        let i = self.grow(id);
-        self.uses[i] += 1;
+        self.grow(id);
+        self.uses[id] += 1;
     }
 
     fn pin(&mut self, id: LocalId) {
-        let i = self.grow(id);
-        self.needs_slot[i] = true;
+        self.grow(id);
+        self.needs_slot[id] = true;
     }
 
     fn claim(&mut self, id: LocalId) {
-        let i = self.grow(id);
-        self.reuse_claimed[i] = true;
-        self.needs_slot[i] = true;
+        self.grow(id);
+        self.reuse_claimed[id] = true;
+        self.needs_slot[id] = true;
     }
 
     fn atom(&mut self, a: &Atom) {
@@ -682,16 +705,12 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     // keeps the frame and so never drains them itself.
                     if tail && let Some((now, moved, args)) = split_self_tail_drops(e) {
                         for x in now {
-                            if !self.is_pinned(x) {
-                                self.push(op_arg(Op::Drop, self.slot(x)));
-                            }
+                            self.emit_drop(x);
                         }
                         self.emit_call(Callee::Self_, args, &moved, true, &[]);
                         return;
                     }
-                    if !self.is_pinned(*local) {
-                        self.push(op_arg(Op::Drop, self.slot(*local)));
-                    }
+                    self.emit_drop(*local);
                     e = body;
                 }
                 CoreExpr::If {
@@ -735,7 +754,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             } else {
                 None
             };
-            let (moved, rest) = peel_call_arg_drops(body, args, cid, &self.scan.reuse_claimed);
+            let (moved, rest) = peel_call_arg_drops(body, args, cid, &self.scan);
             self.emit_call(*callee, args, &moved, false, defs);
             rest
         } else {
@@ -749,10 +768,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     /// True when `id` is an ordinary frame temp read exactly once — safe to
     /// leave on the operand stack instead of storing it.
     fn is_single_use_temp(&self, id: LocalId) -> bool {
-        let i = id.0 as usize;
-        !self.is_pinned(id)
-            && !self.scan.needs_slot.get(i).copied().unwrap_or(true)
-            && self.scan.uses.get(i).copied().unwrap_or(0) == 1
+        !self.is_pinned(id) && !self.scan.needs_slot(id) && self.scan.uses(id) == 1
     }
 
     /// Emit `then`/`els` after the already-emitted conditional jump at
@@ -965,9 +981,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             self.push_operand(id, defs);
         }
         for &m in moved {
-            if !self.is_pinned(m) {
-                self.push(op_arg(Op::Drop, self.slot(m)));
-            }
+            self.emit_drop(m);
         }
         let argc = args.len() as i32;
         match callee {
@@ -1154,12 +1168,11 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             }
             self.next_slot = mark;
         }
-        // Fallthrough: unreachable when the source match was exhaustive
-        // (checked at lowering); balance the VM stack if it is ever hit.
-        self.push(op(Op::PushNil));
-        if tail {
-            self.push(op(Op::Ret));
-        }
+        // Match fell through: exhaustiveness bug — halt rather than propagate
+        // nil. Unreachable when the source match was exhaustive (checked at
+        // lowering); a fallthrough here means a checker or lowering defect,
+        // and stopping the VM beats returning a nil that flows onward.
+        self.push(op(Op::Halt));
         self.patch_all(&ends);
     }
 

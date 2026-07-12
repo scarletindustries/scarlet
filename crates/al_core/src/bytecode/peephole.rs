@@ -31,6 +31,20 @@ use super::{Function, Instruction, Op, op, op_ab};
 pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usize) {
     let len = code.len();
 
+    debug_assert_eq!(
+        functions[entry].code_start, 0,
+        "entry frame must start at 0; base_of's default fill relies on it"
+    );
+    // `Function`'s layout fields are i32 as a cross-crate constraint — the VM
+    // in crates/al shares the struct, so widening them to u32 is out of scope
+    // here. Negative values would mean a corrupt function table.
+    debug_assert!(
+        functions
+            .iter()
+            .all(|f| f.code_start >= 0 && f.code_len >= 0),
+        "function table holds a negative code_start/code_len"
+    );
+
     // `base_of[i]` is the `code_start` a jump operand at `code[i]` resolves
     // against. Function bodies are disjoint regions carved out of the entry
     // frame's stream; the entry frame's own `code_start` is 0 (it runs the
@@ -43,6 +57,8 @@ pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usiz
     // region nested inside it, whatever the iteration order — so a stale entry
     // frame can never stamp its base over a body's.
     let mut base_of = vec![0i32; len];
+    // `code_start >= 0` guards the i32 layout fields (see the debug_assert
+    // above): a negative start never names a real region.
     let mut order: Vec<usize> = (0..functions.len())
         .filter(|&i| i != entry && functions[i].code_len > 0 && functions[i].code_start >= 0)
         .collect();
@@ -62,8 +78,16 @@ pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usiz
     for (i, instr) in code.iter().enumerate() {
         if instr.op.has_jump_target() {
             let t = base_of[i] as i64 + instr.operand as i64;
-            if t >= 0 && (t as usize) < len {
-                is_target[t as usize] = true;
+            // `SwitchTag` dispatches to `base + tag` for any tag in `0..a`:
+            // every jump-table row is a live branch target, not just the base.
+            let span = match instr.op {
+                Op::SwitchTag => (instr.a as i64).max(1),
+                _ => 1,
+            };
+            for t in t..t + span {
+                if t >= 0 && (t as usize) < len {
+                    is_target[t as usize] = true;
+                }
             }
         }
     }
@@ -76,8 +100,6 @@ pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usiz
         let base = base_of[i];
         if i0.op != Op::PushLocal
             || i1.op != Op::PushConst
-            || i0.operand as u32 > u8::MAX as u32
-            || i1.operand as u32 > u16::MAX as u32
             || is_target[i + 1]
             || is_target[i + 2]
             || base_of[i + 1] != base
@@ -86,7 +108,13 @@ pub(super) fn fuse(code: &mut [Instruction], functions: &[Function], entry: usiz
             i += 1;
             continue;
         }
-        let (slot, konst) = (i0.operand as u8, i1.operand as u16);
+        // The operands must pack into the fused op's a/b fields; `try_from`
+        // makes the narrowing checked instead of a bounds test plus a
+        // wrapping cast that could silently drift apart.
+        let (Ok(slot), Ok(konst)) = (u8::try_from(i0.operand), u16::try_from(i1.operand)) else {
+            i += 1;
+            continue;
+        };
         let i2 = code[i + 2];
 
         // 4-wide: PushLocal; PushConst; {Lt,Eq}Int; JumpIfFalse
@@ -184,6 +212,38 @@ mod tests {
             "window whose interior is a branch target must stay unfused"
         );
         assert_eq!(code[10].op, Op::LtInt);
+    }
+
+    #[test]
+    fn switch_tag_table_rows_are_branch_targets() {
+        // `SwitchTag` with 3 rows at 2..5 dispatches to `2 + tag` — every row
+        // is a live branch target. The fusable window at 3..6 overlaps rows 1
+        // and 2; fusing it would leave a `Nop` where a dispatch lands.
+        let mut code = vec![
+            op_ab(Op::SwitchTag, 3, 0, 2),
+            op(Op::Nop),
+            op(Op::Nop),
+            op_arg(Op::PushLocal, 0),
+            op_arg(Op::PushConst, 0),
+            op(Op::AddInt),
+            op(Op::Nop),
+        ];
+        let functions = vec![Function {
+            name: "__main__".into(),
+            arity: 0,
+            locals: 0,
+            capture_count: 0,
+            code_start: 0,
+            code_len: code.len() as i32,
+        }];
+        fuse(&mut code, &functions, 0);
+        assert_eq!(
+            code[3].op,
+            Op::PushLocal,
+            "window overlapping a jump-table row must stay unfused"
+        );
+        assert_eq!(code[4].op, Op::PushConst);
+        assert_eq!(code[5].op, Op::AddInt);
     }
 
     #[test]

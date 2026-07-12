@@ -86,6 +86,22 @@ struct CtorInfo {
     types: Vec<RcType>,
 }
 
+impl CtorInfo {
+    /// Constructor absent from the subject type's table (literals, binary
+    /// shapes, ranges, type-error fallout). Payload types are unknown, so
+    /// every column is `Infinite` — keeping `types` parallel to `arity`, the
+    /// invariant every table-built `CtorInfo` maintains and `specialize`
+    /// asserts.
+    fn opaque(id: u32, arity: usize) -> Self {
+        CtorInfo {
+            id,
+            arity,
+            labels: vec![],
+            types: vec![RcType::Infinite; arity],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct TypeCtors {
     ctors: Vec<CtorInfo>,
@@ -337,6 +353,10 @@ impl PatternMatrix {
     }
 
     fn specialize(&self, ctor: &CtorInfo) -> PatternMatrix {
+        // Every caller prepends `ctor.types` onto the type stack in lockstep
+        // with the `ctor.arity` pattern columns pushed here; a mismatch would
+        // silently misalign the two stacks.
+        debug_assert!(ctor.arity == ctor.types.len());
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest| match head {
             Pat::Wildcard => result
@@ -394,18 +414,14 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
         }
         Pat::Ctor { id, args } => {
             // Constructors absent from the type's table (literals, binary
-            // shapes, ranges, type-error fallout) get an empty payload type
-            // list, matching their lowering as opaque nullary ctors.
+            // shapes, ranges, type-error fallout) get an opaque fallback with
+            // one `Infinite` type per arg, keeping the pattern and type
+            // stacks column-aligned through the recursion.
             let fallback;
             let ctor_info = match type_ctors.find(*id) {
                 Some(c) => c,
                 None => {
-                    fallback = CtorInfo {
-                        id: *id,
-                        arity: args.len(),
-                        labels: vec![],
-                        types: vec![],
-                    };
+                    fallback = CtorInfo::opaque(*id, args.len());
                     &fallback
                 }
             };
@@ -467,6 +483,12 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
 /// treating `Binary` as infinite (a wildcard / `else` arm is required for
 /// exhaustiveness). Dynamic sizes and non-literal segment values are keyed by
 /// span so we never emit a false-positive unreachable error.
+///
+/// The encoding must be INJECTIVE: string segment values can contain the
+/// delimiter chars (`,`, kind chars `i`/`b`/`u`, digits), so they are
+/// length-prefixed (`s<len>:<value>`) rather than quoted — otherwise two
+/// structurally different patterns could share a key and one would be
+/// falsely flagged unreachable.
 fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
     use std::fmt::Write;
     let mut key = String::from("#bin:");
@@ -475,7 +497,7 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
             ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => key.push('_'),
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => key.push_str(&n.value),
             ast::Pattern::Literal(ast::PatternLiteral::String(s)) => {
-                let _ = write!(key, "'{}'", s.value);
+                let _ = write!(key, "s{}:{}", s.value.len(), s.value);
             }
             other => {
                 let sp = other.span();
@@ -1176,6 +1198,43 @@ mod tests {
         let p2 = m.lower(&bin_pat(vec![bin_seg(lit("2"), None)], false));
         m.push(&p1);
         assert!(m.is_useful(&p2));
+    }
+
+    /// Segment string values can contain the key's delimiter chars. Before
+    /// the length-prefixed encoding, `<<"a'i8,'b":int>>` and
+    /// `<<"a":int-8, "b":int>>` both keyed as `#bin:'a'i8,'b'i,`, so the
+    /// second (structurally different) pattern was falsely redundant.
+    #[test]
+    fn binary_string_key_is_injective() {
+        let str_lit = |v: &str| {
+            ast::Pattern::Literal(ast::PatternLiteral::String(ast::StringLiteral {
+                value: v.to_string(),
+                span: crate::span::Span::DUMMY,
+            }))
+        };
+        let mut m = UsefulnessMatrix::new(t_binary());
+        let p1 = m.lower(&bin_pat(vec![bin_seg(str_lit("a'i8,'b"), None)], false));
+        let p2 = m.lower(&bin_pat(
+            vec![
+                bin_seg(str_lit("a"), Some("8")),
+                bin_seg(str_lit("b"), None),
+            ],
+            false,
+        ));
+        m.push(&p1);
+        assert!(m.is_useful(&p2));
+    }
+
+    /// An unknown constructor (type-error fallout) with args must keep the
+    /// pattern and type stacks column-aligned: the old empty-`types` fallback
+    /// exhausted the type stack early and reported every duplicate arm as
+    /// useful.
+    #[test]
+    fn unknown_ctor_with_args_duplicate_is_redundant() {
+        let mut m = UsefulnessMatrix::new(t_int());
+        m.push_s(&ctor("Foo", vec![SPat::Wildcard]));
+        assert!(!m.is_useful_s(&ctor("Foo", vec![SPat::Wildcard])));
+        assert!(m.is_useful_s(&ctor("Bar", vec![SPat::Wildcard])));
     }
 
     /// A nullary constructor pattern such as `True`.

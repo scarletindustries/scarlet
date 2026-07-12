@@ -81,8 +81,9 @@ use std::collections::VecDeque;
 use super::{Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, LocalId};
 use crate::bytecode::Op;
 use crate::typed_ir::{
-    BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
-    TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, TypedProgram, ValueRef,
+    BindingId, GlobalSlot, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg,
+    TypedBinSeg, TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat,
+    TypedProgram, ValueRef,
 };
 use crate::types::NO_STR;
 
@@ -102,46 +103,41 @@ fn read_before_bind(b: BindingId) -> ! {
     )
 }
 
-/// A lowered module plus the entry-frame slot assignments its toplevel needs.
-///
-/// `emit_toplevel` pins each module-scope `Let` to the slot every already-
-/// emitted fn body addresses it by (`PushGlobal slot`). The pairing comes
-/// straight out of [`crate::typed_ir::TypedBind::global`], so a def/use
-/// mismatch is unspellable: there is no name-keyed queue to dequeue from.
-pub struct Lowered {
-    pub program: CoreProgram,
-    /// `(toplevel Let bind, entry-frame slot)`, in binding order.
-    pub toplevel_globals: Vec<(LocalId, i32)>,
-}
-
 /// Lower a whole typechecked module.
 ///
 /// Total: a `TypedProgram` is only ever built for a diagnostics-clean module,
 /// and every form such a module can take has an arm below.
+///
+/// Module-scope decls come back pinned: each toplevel `Let` whose
+/// [`TypedBind::global`] named an entry-frame slot carries it on
+/// [`CoreBind::global`], recoverable via [`CoreExpr::toplevel_globals`]. The
+/// pairing comes straight out of the `TypedBind`, so a def/use mismatch
+/// against the `PushGlobal slot` every already-emitted fn body addresses it by
+/// is unspellable: there is no name-keyed queue to dequeue from.
 pub fn lower(p: &TypedProgram) -> CoreProgram {
-    lower_all(p).program
-}
-
-/// [`lower`], plus the toplevel's `LocalId → entry-frame slot` map.
-pub fn lower_all(p: &TypedProgram) -> Lowered {
     let mut fns = Vec::with_capacity(p.fns.len());
     for f in &p.fns {
-        fns.push(lower_fn(p.temps, f).0);
+        let f = lower_fn(p.temps, f);
+        // `TypedBind::global` is stamped on module-toplevel decls only. A
+        // pinned bind inside an ordinary fn would be silently ignored — only
+        // `emit_toplevel` reads the pinning — so it is an elaborator bug.
+        debug_assert!(
+            f.body.toplevel_globals().is_empty(),
+            "ordinary fn s{} carries slot-pinned binds",
+            f.name
+        );
+        fns.push(f);
     }
-    let (top, toplevel_globals) = lower_fn(p.temps, &p.toplevel);
-    Lowered {
-        program: CoreProgram {
-            fns,
-            consts: p.consts.clone(),
-            toplevel: top.body,
-        },
-        toplevel_globals,
+    CoreProgram {
+        toplevel: lower_fn(p.temps, &p.toplevel).body,
+        fns,
+        consts: p.consts.clone(),
     }
 }
 
 /// Lower one function. `params[i]` binds as `LocalId(i)`, matching
 /// `BindingId(i)`.
-fn lower_fn(temps: TempTys, f: &TypedFn) -> (CoreFn, Vec<(LocalId, i32)>) {
+fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
     let mut lo = Lower::new(temps, f.binds);
     let params: Vec<CoreBind> = f
         .params
@@ -153,17 +149,13 @@ fn lower_fn(temps: TempTys, f: &TypedFn) -> (CoreFn, Vec<(LocalId, i32)>) {
             CoreBind::new(id, ty)
         })
         .collect();
-    let body = lo.sealed(|lo| lo.expr_tail(&f.body, f.ret));
-    let globals = std::mem::take(&mut lo.globals);
-    (
-        CoreFn {
-            name: f.name,
-            params,
-            body,
-            ret_ty: f.ret,
-        },
-        globals,
-    )
+    let body = lo.sealed(|lo| lo.expr_tail(&f.body, f.ret, SpinePos::Outer));
+    CoreFn {
+        name: f.name,
+        params,
+        body,
+        ret_ty: f.ret,
+    }
 }
 
 /// One pending binding on the spine, sealed around a tail later. `Join` is a
@@ -250,6 +242,18 @@ struct OrCont<'p> {
     outer: ArmFall<'p>,
 }
 
+/// Whether an [`Lower::expr_tail`] walk is on the function's own outermost
+/// `Let`/`Seq` spine or a nested one (a join arm, a guard body, an operand
+/// splice). Only bindings on the outermost spine own frame slots — see
+/// [`Lower::let_bind_at`]. Passed per call site, so the root-spine property is
+/// visible where each walk starts: [`lower_fn`] passes `Outer`, every other
+/// caller `Nested`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpinePos {
+    Outer,
+    Nested,
+}
+
 struct Lower {
     temps: TempTys,
     next: u32,
@@ -264,9 +268,6 @@ struct Lower {
     /// Let-bindings emitted so far in the current linear segment; folded
     /// around the segment's tail by [`Self::seal`].
     spine: Vec<Pending>,
-    /// `(bind, entry-frame slot)` for every module-scope binding walked so far.
-    globals: Vec<(LocalId, i32)>,
-    outer_spine: bool,
 }
 
 impl Lower {
@@ -277,8 +278,6 @@ impl Lower {
             tys: Vec::new(),
             binds: vec![None; binds as usize],
             spine: Vec::new(),
-            globals: Vec::new(),
-            outer_spine: true,
         }
     }
 
@@ -391,20 +390,19 @@ impl Lower {
     /// `result_ty` — a join arm in operand position, or the function's own
     /// tail. Opens a fresh spine segment.
     fn expr_as(&mut self, e: &TypedExpr, result_ty: RTy) -> CoreExpr {
-        self.sealed(|lo| lo.expr_tail(e, result_ty))
+        self.sealed(|lo| lo.expr_tail(e, result_ty, SpinePos::Nested))
     }
 
     /// Lower `e` in tail position. The `Let`/`Seq` spine is walked iteratively:
     /// a module toplevel is one `Let` per declaration and can be thousands deep.
-    fn expr_tail(&mut self, e: &TypedExpr, result_ty: RTy) -> CoreExpr {
-        let outer = std::mem::replace(&mut self.outer_spine, false);
+    fn expr_tail(&mut self, e: &TypedExpr, result_ty: RTy, spine: SpinePos) -> CoreExpr {
         let mut e = e;
         loop {
             match e {
                 TypedExpr::Let {
                     bind, init, body, ..
                 } => {
-                    self.let_bind_g(bind, init, outer);
+                    self.let_bind_at(bind, init, spine);
                     e = body;
                 }
                 TypedExpr::Seq { effect, body, .. } => {
@@ -445,36 +443,48 @@ impl Lower {
         }
     }
 
-    /// `let bind = init` in a statement/tail spine.
+    /// `let bind = init` on the spine at `spine` position.
     ///
     /// Two kinds of binding own their slot rather than aliasing whatever local
     /// the initialiser landed in:
     ///
-    /// * a module-scope binding — fn bodies address it by its own
-    ///   `PushGlobal` slot, distinct from whatever it aliases;
-    /// * a source-named `let` at any depth. Collapsing it into a local the
-    ///   source already named would silently drop the `StoreLocal`/`PushLocal`
-    ///   pair — and, for a heap value, the dead alias's `Drop` — that the
-    ///   pre-Core-IR compiler emitted for it.
+    /// * a module-scope binding (`bind.global` is `Some`) — fn bodies address
+    ///   it by its own `PushGlobal` slot, distinct from whatever it aliases,
+    ///   so the minted [`CoreBind`] is pinned to that slot;
+    /// * a source-named `let` on the fn's *outermost* spine. Collapsing it
+    ///   into a local the source already named would silently drop the
+    ///   `StoreLocal`/`PushLocal` pair — and, for a heap value, the dead
+    ///   alias's `Drop` — that the pre-Core-IR compiler emitted for it.
     ///
-    /// An elaborator-minted temp (`bind.name == NO_STR`) — a labelled-argument
-    /// spill, a destructuring scrutinee — names no source-level slot, so it
-    /// collapses into whatever its initialiser landed in.
-    fn let_bind(&mut self, bind: &TypedBind, init: &TypedExpr) {
-        self.let_bind_g(bind, init, false)
-    }
-
-    fn let_bind_g(&mut self, bind: &TypedBind, init: &TypedExpr, outer: bool) {
+    /// Everything else collapses into whatever its initialiser landed in: an
+    /// elaborator-minted temp (`bind.name == NO_STR`, a labelled-argument
+    /// spill or a destructuring scrutinee) names no source-level slot, and a
+    /// named `let` on a *nested* spine (a join arm, an operand splice) is
+    /// local to that segment, where its value already has a home.
+    fn let_bind_at(&mut self, bind: &TypedBind, init: &TypedExpr, spine: SpinePos) {
         let v = match bind.global {
             Some(slot) => {
                 let v = self.let_bound(bind, init);
-                self.globals.push((v, slot.0));
+                self.pin_global(v, slot);
                 v
             }
-            None if outer && bind.name != NO_STR => self.let_bound(bind, init),
+            None if spine == SpinePos::Outer && bind.name != NO_STR => self.let_bound(bind, init),
             None => self.operand(init),
         };
         self.bind(bind.id, v);
+    }
+
+    /// Pin the binding [`Self::let_bound`] just created (or committed to) for
+    /// `v` to its entry-frame slot. Either way that binding is the newest
+    /// entry on the spine: `let_bound` pushed a fresh `Let`, or adopted the
+    /// short-circuit `LetJoin` its initialiser just pushed.
+    fn pin_global(&mut self, v: LocalId, slot: GlobalSlot) {
+        let bind = match self.spine.last_mut() {
+            Some(Pending::Let { bind, .. }) | Some(Pending::Join { bind, .. }) => bind,
+            None => unreachable!("pin_global: let_bound left nothing on the spine"),
+        };
+        debug_assert_eq!(bind.id, v, "pin_global: spine tail is not the pinned bind");
+        bind.global = Some(slot);
     }
 
     /// `let bind = <init>` for a binding that owns its slot.
@@ -543,7 +553,7 @@ impl Lower {
                 TypedExpr::Let {
                     bind, init, body, ..
                 } => {
-                    self.let_bind(bind, init);
+                    self.let_bind_at(bind, init, SpinePos::Nested);
                     e = body;
                 }
                 TypedExpr::Seq { effect, body, .. } => {
@@ -569,7 +579,7 @@ impl Lower {
                 ValueRef::Slot(slot) => Atom::PrimOp {
                     op: Op::PushLocal,
                     args: vec![],
-                    imm: slot as i32,
+                    imm: slot,
                 },
                 ValueRef::Global(slot) => Atom::PrimOp {
                     op: Op::PushGlobal,
@@ -579,7 +589,7 @@ impl Lower {
                 ValueRef::Capture(idx) => Atom::PrimOp {
                     op: Op::PushCapture,
                     args: vec![],
-                    imm: idx as i32,
+                    imm: idx,
                 },
                 ValueRef::SelfClosure => Atom::prim(Op::PushSelf, vec![]),
             },
@@ -1129,7 +1139,7 @@ impl Lower {
         loop {
             let Some((v, p)) = nested.pop_front() else {
                 let tail = match leaf {
-                    ArmLeaf::Body(e) => self.expr_tail(e, result_ty),
+                    ArmLeaf::Body(e) => self.expr_tail(e, result_ty, SpinePos::Nested),
                     ArmLeaf::Guarded { guard, body } => {
                         let cond = self.operand(guard);
                         let then = self.expr_as(body, result_ty);

@@ -223,7 +223,7 @@ pub fn collect(body Body, max Int) Result(Binary, NetError) {
 fn collect_into(body Body, max Int, acc Binary) Result(Binary, NetError) {
 	match pull(body) {
 		Ok(Chunk(data, next)) -> if binary.byte_size(acc) + binary.byte_size(data) > max {
-			Err(MessageTooLarge)
+			Err(MessageTooLarge(max))
 		} else {
 			collect_into(next, max, binary.append(acc, data))
 		}

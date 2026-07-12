@@ -60,7 +60,7 @@ pub fn perceus(pool: &ResolvedPool, mut f: CoreFn) -> CoreFn {
         .filter(|id| !live.contains(id))
         .collect();
     let body = cx.wrap_drops(&dead_params, None, body);
-    f.body = cx.reuse_pass(body);
+    f.body = reuse_pass(body);
     f
 }
 
@@ -90,9 +90,6 @@ struct Perceus<'p> {
     /// `Call` result, a tuple, anything whose arity the rhs does not prove —
     /// drop with `shape: None` and are never offered for reuse.
     shape: BTreeMap<LocalId, ReuseShape>,
-    /// Token sets reaching each `Tail(Call{Self_})` in the current reuse walk.
-    /// Consumed by [`Self::reuse_pass`] to seed the loop-carried second walk.
-    self_tails: Vec<Vec<Token>>,
 }
 
 /// One `Let` peeled off the spine during the backward walk, awaiting its
@@ -129,7 +126,6 @@ impl<'p> Perceus<'p> {
             pool,
             ty: BTreeMap::new(),
             shape: BTreeMap::new(),
-            self_tails: Vec::new(),
         }
     }
 
@@ -201,7 +197,7 @@ impl<'p> Perceus<'p> {
                         };
                         // A local read by `rhs` and still live after is a
                         // non-last-use: reading dups (VM `PushLocal`), so the
-                        // slot's own reference outlives this read → `Shared`.
+                        // slot's own reference outlives this read.
                         // Newly dead at this let: rhs operands whose last read
                         // is here, plus the bind itself if the body never
                         // reads it. These drop between rhs and body — as early
@@ -435,26 +431,38 @@ impl<'p> Perceus<'p> {
         }
         body
     }
+}
 
-    // ── Phase 2: forward reuse pairing ─────────────────────────────────────
+// ── Phase 2: forward reuse pairing ──────────────────────────────────────────
 
-    /// Frame-limited reuse over the drop-annotated body, with a second seeded
-    /// walk for loop-carried tokens on tail-self-recursive bodies.
-    fn reuse_pass(&mut self, mut body: CoreExpr) -> CoreExpr {
-        self.self_tails.clear();
-        self.pair(&mut body, &mut Vec::new());
-        // Loop-carried: tokens present at *every* self-tail dominate the loop
-        // head across `TailCallSelf`. Intersection guarantees the reuse slot
-        // is either nil (first iter) or a hollowed cell (subsequent iters) at
-        // every leading `Ctor` we pair — the runtime `into_reuse_addr`
-        // debug-assert on rc==1 relies on that dominance.
-        if let Some(mut seed) = self.back_edge_seed() {
-            self.self_tails.clear();
-            self.pair(&mut body, &mut seed);
-        }
-        body
+/// State of one function's reuse walk. Constructed fresh inside
+/// [`reuse_pass`], so a walk can never observe another function's back-edge
+/// token sets.
+struct ReuseWalk {
+    /// Token sets reaching each `Tail(Call{Self_})` in the current walk.
+    /// Consumed by [`reuse_pass`] to seed the loop-carried second walk.
+    self_tails: Vec<Vec<Token>>,
+}
+
+/// Frame-limited reuse over the drop-annotated body, with a second seeded
+/// walk for loop-carried tokens on tail-self-recursive bodies.
+fn reuse_pass(mut body: CoreExpr) -> CoreExpr {
+    let mut walk = ReuseWalk {
+        self_tails: Vec::new(),
+    };
+    walk.pair(&mut body, &mut Vec::new());
+    // Loop-carried: tokens present at *every* self-tail dominate the loop
+    // head across `TailCallSelf`. Intersection guarantees the reuse slot
+    // is either nil (first iter) or a hollowed cell (subsequent iters) at
+    // every leading `Ctor` we pair — the runtime `into_reuse_addr`
+    // debug-assert on rc==1 relies on that dominance.
+    if let Some(mut seed) = walk.back_edge_seed() {
+        walk.pair(&mut body, &mut seed);
     }
+    body
+}
 
+impl ReuseWalk {
     fn back_edge_seed(&self) -> Option<Vec<Token>> {
         let mut it = self.self_tails.iter();
         let first = it.next()?.clone();
@@ -516,12 +524,11 @@ impl<'p> Perceus<'p> {
                     avail.retain(|t| t.slot != bind.id);
                     e = body;
                 }
-                CoreExpr::LetJoin { bind, body, .. } => {
+                CoreExpr::LetJoin { body, .. } => {
                     // A join in operand position may contain a `Call` on some
                     // path; conservatively clear (frame-limited) rather than
                     // walk into it. The slot is overwritten by `StoreLocal`.
                     avail.clear();
-                    avail.retain(|t| t.slot != bind.id);
                     e = body;
                 }
                 CoreExpr::If { then, els, .. } => {
@@ -561,12 +568,13 @@ impl<'p> Perceus<'p> {
     }
 }
 
-/// Free locals of an atom, with duplicate-occurrence detection: a local
-/// appearing twice in one atom (e.g. `add(x, x)`) is `Shared` regardless of
-/// downstream liveness.
+/// Free locals of an atom as a set; a duplicate operand (`add(x, x)`)
+/// collapses — the VM's `PushLocal` dup keeps RC correct.
 fn atom_live(a: &Atom) -> Live {
     let mut live = Live::new();
-    a.for_each_operand(|id| if !live.insert(id) {});
+    a.for_each_operand(|id| {
+        live.insert(id);
+    });
     live
 }
 
@@ -575,56 +583,75 @@ fn atom_live(a: &Atom) -> Live {
 /// opaque atom for liveness — Perceus does not currently insert drops *inside*
 /// a join, only around it.
 fn join_live(e: &CoreExpr) -> Live {
-    fn go(e: &CoreExpr, live: &mut Live, bound: &mut Live) {
-        match e {
-            CoreExpr::Let { bind, rhs, body } => {
-                for x in atom_live(rhs) {
-                    if !bound.contains(&x) {
-                        live.insert(x);
+    /// The `Let`/`LetJoin`/`Drop` spine is walked iteratively (mirroring
+    /// `drop_pass`'s `SpineLet` peel) so recursion depth is branch nesting,
+    /// never spine length; `go` recurses only at `If`/`Match` arms and into a
+    /// `LetJoin`'s join, whose nesting is operand depth. Ids bound on this
+    /// spine collect in `scope` and pop before returning so a sibling branch
+    /// never sees them.
+    fn go(mut e: &CoreExpr, live: &mut Live, bound: &mut Live) {
+        let mut scope: Vec<LocalId> = Vec::new();
+        loop {
+            match e {
+                CoreExpr::Let { bind, rhs, body } => {
+                    for x in atom_live(rhs) {
+                        if !bound.contains(&x) {
+                            live.insert(x);
+                        }
                     }
-                }
-                bound.insert(bind.id);
-                go(body, live, bound);
-                bound.remove(&bind.id);
-            }
-            CoreExpr::LetJoin { bind, join, body } => {
-                go(join, live, bound);
-                bound.insert(bind.id);
-                go(body, live, bound);
-                bound.remove(&bind.id);
-            }
-            CoreExpr::Drop { body, .. } => go(body, live, bound),
-            CoreExpr::Tail(a) => {
-                for x in atom_live(a) {
-                    if !bound.contains(&x) {
-                        live.insert(x);
+                    if bound.insert(bind.id) {
+                        scope.push(bind.id);
                     }
+                    e = body;
                 }
-            }
-            CoreExpr::If {
-                cond, then, els, ..
-            } => {
-                if !bound.contains(cond) {
-                    live.insert(*cond);
-                }
-                go(then, live, bound);
-                go(els, live, bound);
-            }
-            CoreExpr::Match { scrut, arms, .. } => {
-                if !bound.contains(scrut) {
-                    live.insert(*scrut);
-                }
-                for (pat, body) in arms {
-                    let intro: Vec<LocalId> = pat.binds().map(|b| b.id).collect();
-                    for &b in &intro {
-                        bound.insert(b);
+                CoreExpr::LetJoin { bind, join, body } => {
+                    go(join, live, bound);
+                    if bound.insert(bind.id) {
+                        scope.push(bind.id);
                     }
-                    go(body, live, bound);
-                    for &b in &intro {
-                        bound.remove(&b);
+                    e = body;
+                }
+                CoreExpr::Drop { body, .. } => e = body,
+                CoreExpr::Tail(a) => {
+                    for x in atom_live(a) {
+                        if !bound.contains(&x) {
+                            live.insert(x);
+                        }
                     }
+                    break;
+                }
+                CoreExpr::If {
+                    cond, then, els, ..
+                } => {
+                    if !bound.contains(cond) {
+                        live.insert(*cond);
+                    }
+                    go(then, live, bound);
+                    go(els, live, bound);
+                    break;
+                }
+                CoreExpr::Match { scrut, arms, .. } => {
+                    if !bound.contains(scrut) {
+                        live.insert(*scrut);
+                    }
+                    for (pat, body) in arms {
+                        let mut intro: Vec<LocalId> = Vec::new();
+                        for b in pat.binds() {
+                            if bound.insert(b.id) {
+                                intro.push(b.id);
+                            }
+                        }
+                        go(body, live, bound);
+                        for &b in &intro {
+                            bound.remove(&b);
+                        }
+                    }
+                    break;
                 }
             }
+        }
+        for id in scope {
+            bound.remove(&id);
         }
     }
     let mut live = Live::new();

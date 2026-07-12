@@ -27,15 +27,20 @@ pub fn read(c Socket, max Int) Result(Read, NetError)
 
 // Read exactly `count` bytes, parking until they have all arrived. Errs with
 // UnexpectedEof if the peer closes the connection before `count` bytes have
-// been read.
+// been read. A `count` of zero or less asks for nothing and returns Ok(<<>>)
+// without touching the socket.
 pub fn read_exact(c Socket, count Int) Result(Binary, NetError) {
 	read_exact_loop(c, count, <<>>)
 }
 
+// The guard is `<= 0`, not `== 0`: `read` clamps its `max` to at least one
+// byte, so a negative `remaining` handed to it would drain the socket until
+// error or EOF instead of terminating.
 fn read_exact_loop(c Socket, remaining Int, acc Binary) Result(Binary, NetError) {
-	match remaining {
-		0 -> Ok(acc)
-		else -> match read(c, remaining) {
+	if remaining <= 0 {
+		Ok(acc)
+	} else {
+		match read(c, remaining) {
 			Ok(Data(b)) ->
 				read_exact_loop(c, remaining - binary.byte_size(b), binary.append(acc, b))
 			Ok(Closed) -> Err(UnexpectedEof)

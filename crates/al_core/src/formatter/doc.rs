@@ -1,10 +1,20 @@
 use std::borrow::Cow;
 use std::collections::VecDeque;
 
+use unicode_width::UnicodeWidthChar;
+
 const TAB_WIDTH: isize = 4;
 
+/// A layout document. The representation is private: the layout engine relies
+/// on invariants only the constructors in this module maintain (most notably
+/// that a `Group`'s `Breaks` is `Always` exactly when its subtree contains a
+/// hard newline), so a `Doc` can be built solely via `text`, `line`, `group`,
+/// `group_as`, `hardline`, and friends.
 #[derive(Debug, Clone)]
-pub enum Doc {
+pub struct Doc(DocInner);
+
+#[derive(Debug, Clone)]
+enum DocInner {
     Nil,
     /// Literal text. `width` is the display-column count, precomputed so `fits`
     /// probes pay O(1) per visit instead of re-decoding UTF-8 on every probe.
@@ -13,9 +23,12 @@ pub enum Doc {
         width: isize,
     },
     /// Soft break. Flat → `unbroken`; broken → `broken` then newline+indent.
+    /// `width` is the display-column count of `unbroken`, precomputed so the
+    /// flat rendering and width probes share `Text`'s column convention.
     Break {
         broken: &'static str,
         unbroken: &'static str,
+        width: isize,
     },
     /// `n` hard newlines. Forces every enclosing group to break.
     HardLine(usize),
@@ -43,7 +56,7 @@ pub enum Doc {
 
 impl Doc {
     pub fn is_nil(&self) -> bool {
-        matches!(self, Doc::Nil)
+        matches!(self.0, DocInner::Nil)
     }
 }
 
@@ -78,53 +91,55 @@ enum Mode {
 }
 
 pub fn nil() -> Doc {
-    Doc::Nil
+    Doc(DocInner::Nil)
 }
 
 pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     let s = s.into();
     if s.is_empty() {
-        return Doc::Nil;
+        return nil();
     }
     let width = str_width(&s);
-    Doc::Text { s, width }
+    Doc(DocInner::Text { s, width })
 }
 
 /// Soft break: " " when flat, newline when broken.
 pub fn line() -> Doc {
-    Doc::Break {
-        broken: "",
-        unbroken: " ",
-    }
+    break_("", " ")
 }
 
 /// Soft break: "" when flat, newline when broken.
 fn line0() -> Doc {
-    Doc::Break {
-        broken: "",
-        unbroken: "",
-    }
+    break_("", "")
 }
 
 /// Soft break that emits `broken` (e.g. ",") before the newline when broken,
 /// and `unbroken` when flat.
 fn break_(broken: &'static str, unbroken: &'static str) -> Doc {
-    Doc::Break { broken, unbroken }
+    Doc(DocInner::Break {
+        broken,
+        unbroken,
+        width: str_width(unbroken),
+    })
 }
 
 pub fn hardline() -> Doc {
-    Doc::HardLine(1)
+    Doc(DocInner::HardLine(1))
 }
 
 pub fn hardlines(n: usize) -> Doc {
-    if n == 0 { Doc::Nil } else { Doc::HardLine(n) }
+    if n == 0 {
+        nil()
+    } else {
+        Doc(DocInner::HardLine(n))
+    }
 }
 
 pub fn nest(tabs: isize, d: Doc) -> Doc {
     if tabs == 0 {
         return d;
     }
-    Doc::Nest(tabs, Box::new(d))
+    Doc(DocInner::Nest(tabs, Box::new(d)))
 }
 
 /// Indent that applies only in the broken layout. A hugging (flat) rendering
@@ -133,37 +148,38 @@ fn nest_if_broken(tabs: isize, d: Doc) -> Doc {
     if tabs == 0 {
         return d;
     }
-    Doc::NestIfBroken(tabs, Box::new(d))
+    Doc(DocInner::NestIfBroken(tabs, Box::new(d)))
 }
 
-/// Mark `d` as a hugged trailing item; see `Doc::Hug`.
+/// Mark `d` as a hugged trailing item; see `DocInner::Hug`.
 fn hug(d: Doc) -> Doc {
-    Doc::Hug(Box::new(d))
+    Doc(DocInner::Hug(Box::new(d)))
 }
 
 pub fn group(d: Doc) -> Doc {
     // Idempotent: an already-grouped doc keeps its own Breaks. Only explicit
     // group_as() calls override an inner Group's Breaks.
-    if matches!(d, Doc::Group { .. }) {
+    if matches!(d.0, DocInner::Group { .. }) {
         return d;
     }
     group_as(Breaks::Reluctantly, d)
 }
 
 pub fn group_as(breaks: Breaks, d: Doc) -> Doc {
-    match d {
-        Doc::Text { .. } | Doc::Nil => d,
-        Doc::Group { doc, .. } => group_as(breaks, *doc),
-        _ => {
+    match d.0 {
+        DocInner::Text { .. } | DocInner::Nil => d,
+        DocInner::Group { doc, .. } => group_as(breaks, *doc),
+        inner => {
+            let d = Doc(inner);
             let breaks = if contains_hardline(&d) {
                 Breaks::Always
             } else {
                 breaks
             };
-            Doc::Group {
+            Doc(DocInner::Group {
                 doc: Box::new(d),
                 breaks,
-            }
+            })
         }
     }
 }
@@ -174,8 +190,8 @@ pub fn group_as(breaks: Breaks, d: Doc) -> Doc {
 /// never needs to break on its behalf.
 pub fn ends_line(d: &Doc) -> bool {
     matches!(
-        d,
-        Doc::Group {
+        d.0,
+        DocInner::Group {
             breaks: Breaks::Willingly,
             ..
         }
@@ -185,32 +201,32 @@ pub fn ends_line(d: &Doc) -> bool {
 /// Whether the doc contains a hard newline. Nested groups answer from their
 /// cached `Breaks` flag rather than being walked again.
 fn contains_hardline(d: &Doc) -> bool {
-    match d {
-        Doc::Nil | Doc::Text { .. } | Doc::Break { .. } => false,
-        Doc::HardLine(_) => true,
-        Doc::Nest(_, inner) | Doc::NestIfBroken(_, inner) => contains_hardline(inner),
+    match &d.0 {
+        DocInner::Nil | DocInner::Text { .. } | DocInner::Break { .. } => false,
+        DocInner::HardLine(_) => true,
+        DocInner::Nest(_, inner) | DocInner::NestIfBroken(_, inner) => contains_hardline(inner),
         // A hugged item's hard newlines are real for every group except the
         // hugging group itself (which accounts for them via `Breaks::Hugging`),
         // so enclosing groups still break around it.
-        Doc::Hug(inner) => contains_hardline(inner),
-        Doc::Group { breaks, .. } => matches!(breaks, Breaks::Always | Breaks::Hugging),
-        Doc::Concat(ds) => ds.iter().any(contains_hardline),
+        DocInner::Hug(inner) => contains_hardline(inner),
+        DocInner::Group { breaks, .. } => matches!(breaks, Breaks::Always | Breaks::Hugging),
+        DocInner::Concat(ds) => ds.iter().any(contains_hardline),
     }
 }
 
 pub fn concat(ds: Vec<Doc>) -> Doc {
     let mut out: Vec<Doc> = Vec::with_capacity(ds.len());
     for d in ds {
-        match d {
-            Doc::Nil => {}
-            Doc::Concat(inner) => out.extend(inner),
-            other => out.push(other),
+        match d.0 {
+            DocInner::Nil => {}
+            DocInner::Concat(inner) => out.extend(inner),
+            other => out.push(Doc(other)),
         }
     }
     match out.len() {
-        0 => Doc::Nil,
-        1 => out.into_iter().next().unwrap_or(Doc::Nil),
-        _ => Doc::Concat(out),
+        0 => nil(),
+        1 => out.into_iter().next().unwrap_or_else(nil),
+        _ => Doc(DocInner::Concat(out)),
     }
 }
 
@@ -229,10 +245,10 @@ pub fn join(items: Vec<Doc>, sep: Doc) -> Doc {
     // Peel a Concat separator into its parts so each of the N-1 separators
     // pushes the (alloc-free) leaf parts directly instead of cloning the
     // wrapper Vec that `concat` would immediately flatten and drop.
-    let sep_parts: &[Doc] = match &sep {
-        Doc::Concat(v) => v,
-        Doc::Nil => &[],
-        s => std::slice::from_ref(s),
+    let sep_parts: &[Doc] = match &sep.0 {
+        DocInner::Concat(v) => v,
+        DocInner::Nil => &[],
+        _ => std::slice::from_ref(&sep),
     };
     let mut out = Vec::with_capacity(items.len() + (items.len() - 1) * sep_parts.len());
     for (i, it) in items.into_iter().enumerate() {
@@ -294,7 +310,7 @@ pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static st
     }
     items.push(hug(last));
     let body = join(items, d![text(","), line()]);
-    Doc::Group {
+    Doc(DocInner::Group {
         doc: Box::new(d![
             text(open),
             nest_if_broken(1, d![line0(), body]),
@@ -302,7 +318,7 @@ pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static st
             text(close),
         ]),
         breaks: Breaks::Hugging,
-    }
+    })
 }
 
 /// Like `delimited`, but emits no trailing comma when broken across lines.
@@ -412,16 +428,20 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
     work.push_back((0, Mode::Broken, doc));
 
     while let Some((indent, mode, d)) = work.pop_front() {
-        match d {
-            Doc::Nil => {}
-            Doc::Text { s, width } => {
+        match &d.0 {
+            DocInner::Nil => {}
+            DocInner::Text { s, width } => {
                 out.push_str(s);
                 col += width;
             }
-            Doc::Break { broken, unbroken } => match mode {
+            DocInner::Break {
+                broken,
+                unbroken,
+                width,
+            } => match mode {
                 Mode::Flat => {
                     out.push_str(unbroken);
-                    col += unbroken.len() as isize;
+                    col += width;
                 }
                 Mode::Broken => {
                     out.push_str(broken);
@@ -429,17 +449,17 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                     col = indent * TAB_WIDTH;
                 }
             },
-            Doc::HardLine(n) => {
+            DocInner::HardLine(n) => {
                 for _ in 1..*n {
                     out.push('\n');
                 }
                 emit_newline(&mut out, indent);
                 col = indent * TAB_WIDTH;
             }
-            Doc::Nest(i, inner) => {
+            DocInner::Nest(i, inner) => {
                 work.push_front((indent + i, mode, inner));
             }
-            Doc::NestIfBroken(i, inner) => {
+            DocInner::NestIfBroken(i, inner) => {
                 let indent = if mode == Mode::Broken {
                     indent + i
                 } else {
@@ -447,14 +467,14 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                 };
                 work.push_front((indent, mode, inner));
             }
-            Doc::Hug(inner) => {
+            DocInner::Hug(inner) => {
                 // A hugged item always renders broken: its hard newlines are
                 // real, and the groups inside it must re-probe their own widths
                 // because the enclosing group's flat probe stopped at the hug
                 // rather than walking its whole subtree.
                 work.push_front((indent, Mode::Broken, inner));
             }
-            Doc::Group { doc: inner, breaks } => {
+            DocInner::Group { doc: inner, breaks } => {
                 let m = if *breaks == Breaks::Always {
                     // A hard newline inside makes flat rendering impossible.
                     Mode::Broken
@@ -479,7 +499,7 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                 };
                 work.push_front((indent, m, inner));
             }
-            Doc::Concat(ds) => {
+            DocInner::Concat(ds) => {
                 for d in ds.iter().rev() {
                     work.push_front((indent, mode, d));
                 }
@@ -503,7 +523,12 @@ fn str_width(s: &str) -> isize {
     }
     let mut w = 0isize;
     for c in s.chars() {
-        w += if c == '\t' { TAB_WIDTH } else { 1 };
+        w += if c == '\t' {
+            TAB_WIDTH
+        } else {
+            // Real terminal columns: CJK/emoji count 2, combining marks 0.
+            c.width().unwrap_or(0) as isize
+        };
     }
     w
 }
@@ -540,29 +565,29 @@ fn fits<'d>(
                 None => return true,
             },
         };
-        match d {
-            Doc::Nil => {}
-            Doc::Text { width, .. } => remaining -= width,
-            Doc::Break { unbroken, .. } => match mode {
-                Mode::Flat => remaining -= unbroken.len() as isize,
+        match &d.0 {
+            DocInner::Nil => {}
+            DocInner::Text { width, .. } => remaining -= width,
+            DocInner::Break { width, .. } => match mode {
+                Mode::Flat => remaining -= width,
                 // An already-broken break ends the line; everything before it fit.
                 Mode::Broken => return true,
             },
-            Doc::HardLine(_) => match mode {
+            DocInner::HardLine(_) => match mode {
                 // Inside flat content a hard newline cannot render flat;
                 // in the trailing work it simply ends the line.
                 Mode::Flat => return false,
                 Mode::Broken => return true,
             },
-            Doc::Nest(i, inner) => probe.push((indent + i, mode, inner)),
+            DocInner::Nest(i, inner) => probe.push((indent + i, mode, inner)),
             // Nesting never affects a width probe (probes stop at the first
             // newline); whether the conditional indent applies is resolved at
             // layout time.
-            Doc::NestIfBroken(_, inner) => probe.push((indent, mode, inner)),
+            DocInner::NestIfBroken(_, inner) => probe.push((indent, mode, inner)),
             // A hugged item always renders broken, so probe it the way trailing
             // broken content is probed: its first hard newline ends the line.
-            Doc::Hug(inner) => probe.push((indent, Mode::Broken, inner)),
-            Doc::Group { doc, breaks } => {
+            DocInner::Hug(inner) => probe.push((indent, Mode::Broken, inner)),
+            DocInner::Group { doc, breaks } => {
                 let m = match (mode, *breaks) {
                     // Inside flat-probed content everything must stay flat.
                     (Mode::Flat, _) => Mode::Flat,
@@ -577,7 +602,7 @@ fn fits<'d>(
                 };
                 probe.push((indent, m, doc));
             }
-            Doc::Concat(ds) => {
+            DocInner::Concat(ds) => {
                 for d in ds.iter().rev() {
                     probe.push((indent, mode, d));
                 }

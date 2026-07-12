@@ -1,7 +1,8 @@
 import al/net/address.{SocketAddress, IpAddress}
 import al/net/socket.{Socket}
-import al/net/error.{NetError, ConnectionAborted, ConnectionReset, Errno}
+import al/net/error.{NetError, ConnectionAborted, ConnectionReset, Errno, NotConnected}
 import al/scheduler
+import al/string
 
 pub type Server
 
@@ -61,8 +62,14 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 //
 // A per-connection accept error (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the
-// listening socket is dead — the loop retries. Any other variant means the
-// listener itself is gone, so the loop exits and this core stops accepting.
+// listening socket is dead — the loop retries. An unmapped errno is usually
+// descriptor exhaustion (EMFILE/ENFILE), where accept fails without dequeuing
+// anything, so that retry backs off for 100ms first — retrying immediately
+// would spin this core at full speed against the same full descriptor table.
+// NotConnected is the shutdown signal a `net.close` delivers to parked
+// acceptors, so the loop exits quietly; any other variant means the listener
+// itself died unexpectedly, which is reported before this core stops
+// accepting.
 fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 	match accept(server) {
 		Ok(sock) -> {
@@ -79,8 +86,12 @@ fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 		}
 		Err(ConnectionAborted) -> accept_loop(server, handler)
 		Err(ConnectionReset) -> accept_loop(server, handler)
-		Err(Errno(_)) -> accept_loop(server, handler)
-		Err(_) -> Nil
+		Err(Errno(_)) -> {
+			scheduler.sleep(100)
+			accept_loop(server, handler)
+		}
+		Err(NotConnected) -> Nil
+		Err(e) -> println('accept failed: ${string.inspect(e)}')
 	}
 }
 

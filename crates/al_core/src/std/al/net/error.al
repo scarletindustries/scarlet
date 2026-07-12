@@ -1,6 +1,10 @@
-// Typed errors for network and socket operations, mirroring Rust's
-// std::io::ErrorKind (the POSIX/errno failure set) so a caller can `match` the
-// exact failure rather than parse a message string.
+// Typed errors for network and socket operations. Two kinds of variant live
+// here: the errno-mirroring ones (TimedOut through PermissionDenied, plus the
+// Errno catch-all), which the VM maps from OS failures following Rust's
+// std::io::ErrorKind, and four AL-level protocol/validation errors raised
+// directly by stdlib code — UnexpectedEof, MessageTooLarge, UnalignedBinary,
+// and InvalidPort. Either way a caller `match`es the exact failure rather
+// than parsing a message string.
 pub type NetError {
 	// No data (or no connection) arrived before the deadline. (ETIMEDOUT)
 	TimedOut
@@ -28,8 +32,9 @@ pub type NetError {
 	PermissionDenied
 	// The peer closed the connection before a required number of bytes arrived.
 	UnexpectedEof
-	// A message or body exceeded the maximum size the reader will buffer.
-	MessageTooLarge
+	// A message or body exceeded the maximum size the reader will buffer;
+	// carries that limit in bytes.
+	MessageTooLarge(limit Int)
 	// A write was handed a binary that is not a whole number of bytes.
 	UnalignedBinary
 	// A port number outside 0..=65535 was passed to listen/connect.

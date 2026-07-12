@@ -92,7 +92,7 @@ impl Arity {
     /// literal, so a `len()` cast lives here rather than at each call site.
     #[inline]
     pub fn of<T>(items: &[T]) -> Self {
-        Arity(items.len() as u16)
+        Arity(u16::try_from(items.len()).expect("constructor arity exceeds u16"))
     }
 }
 
@@ -127,8 +127,9 @@ pub struct CoreBind {
 }
 
 impl CoreBind {
-    /// Fresh bind with pass-default `(Process, Shared)`, pinned to no slot.
-    /// `lower` uses this; `perceus` / `mode_infer` refine in place.
+    /// Fresh bind, pinned to no slot. `lower` mints every bind through this
+    /// and pins [`Self::global`] afterwards on the module-toplevel decls whose
+    /// [`crate::typed_ir::TypedBind::global`] named one.
     pub fn new(id: LocalId, ty: RTy) -> Self {
         CoreBind {
             id,
@@ -165,7 +166,7 @@ impl ReuseShape {
     pub fn enum_(arity: usize) -> Self {
         ReuseShape {
             tag: HeapTag::Enum,
-            words: arity as u16,
+            words: u16::try_from(arity).expect("constructor arity exceeds u16"),
         }
     }
 }
@@ -329,7 +330,34 @@ pub enum CoreExpr {
     Tail(Atom),
 }
 
-impl CoreExpr {}
+impl CoreExpr {
+    /// The `(bind, entry-frame slot)` pairs pinned on this expression's
+    /// outermost `Let`/`LetJoin` spine, in binding order.
+    ///
+    /// Meaningful on a module toplevel, where `lower` copied
+    /// [`crate::typed_ir::TypedBind::global`] onto each decl's [`CoreBind`];
+    /// module decls are spine bindings by construction, so the walk steps
+    /// through the `Drop`s Perceus interleaves and stops at the first join
+    /// point. `emit_toplevel`'s `preassigned` argument is derived from the
+    /// body it is handed via this walk, so no caller can pass a pinning that
+    /// disagrees with the IR.
+    pub fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
+        let mut out = Vec::new();
+        let mut cur = self;
+        loop {
+            match cur {
+                CoreExpr::Let { bind, body, .. } | CoreExpr::LetJoin { bind, body, .. } => {
+                    if let Some(slot) = bind.global {
+                        out.push((bind.id, slot));
+                    }
+                    cur = body;
+                }
+                CoreExpr::Drop { body, .. } => cur = body,
+                CoreExpr::Match { .. } | CoreExpr::If { .. } | CoreExpr::Tail(_) => return out,
+            }
+        }
+    }
+}
 
 /// One lowered function.
 #[derive(Debug, Clone)]
@@ -350,10 +378,14 @@ pub struct CoreProgram {
 }
 
 impl Default for CoreProgram {
+    /// The empty program: no functions, a toplevel that returns nil. The nil
+    /// lives in `consts` so the invariant every consumer leans on — the
+    /// toplevel only references `ConstId`s below `consts.len()` — holds for
+    /// the default exactly as it does for every lowered program.
     fn default() -> Self {
         CoreProgram {
             fns: Vec::new(),
-            consts: Vec::new(),
+            consts: vec![Value::nil()],
             toplevel: CoreExpr::Tail(Atom::Const(ConstId(0))),
         }
     }

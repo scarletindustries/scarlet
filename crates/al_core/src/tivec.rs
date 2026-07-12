@@ -210,7 +210,7 @@ macro_rules! newtype_index {
         impl $crate::tivec::Idx for $name {
             #[inline]
             fn from_usize(i: usize) -> Self {
-                debug_assert!(i <= u32::MAX as usize, concat!(stringify!($name), " overflow"));
+                assert!(i <= u32::MAX as usize, concat!(stringify!($name), " overflow"));
                 $name(i as u32)
             }
             #[inline]
