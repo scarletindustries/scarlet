@@ -7,21 +7,30 @@ const TAB_WIDTH: isize = 4;
 
 /// A layout document. The representation is private: the layout engine relies
 /// on invariants only the constructors in this module maintain (most notably
-/// that a `Group`'s `Breaks` is `Always` exactly when its subtree contains a
-/// hard newline), so a `Doc` can be built solely via `text`, `line`, `group`,
-/// `group_as`, `hardline`, and friends.
+/// that a `Group`'s subtree contains a hard newline iff its `Breaks` is
+/// `Always` or `Hugging` — `Always` is never chosen for a hardline-free
+/// subtree, and `Hugging` is built only by `delimited_hug`, whose hugged
+/// final item provably hard-breaks), so a `Doc` can be built solely via
+/// `text`, `line`, `group`, `group_willing`, `hardline`, and friends.
 #[derive(Debug, Clone)]
 pub struct Doc(DocInner);
 
 #[derive(Debug, Clone)]
 enum DocInner {
     Nil,
-    /// Literal text. `width` is the display-column count, precomputed so `fits`
-    /// probes pay O(1) per visit instead of re-decoding UTF-8 on every probe.
+    /// Literal text, guaranteed newline-free: `text()` splits multi-line
+    /// strings into one `Text` per line joined by `RawNewline`s. `width` is
+    /// the display-column count, precomputed so `fits` probes pay O(1) per
+    /// visit instead of re-decoding UTF-8 on every probe.
     Text {
         s: Cow<'static, str>,
         width: isize,
     },
+    /// A newline embedded in literal text (a multi-line `/* … */` block
+    /// comment). Unlike `HardLine` it emits no indent — the text's own
+    /// continuation lines must render verbatim — but it still forces every
+    /// enclosing group to break and ends the line for width probes.
+    RawNewline,
     /// Soft break. Flat → `unbroken`; broken → `broken` then newline+indent.
     /// `width` is the display-column count of `unbroken`, precomputed so the
     /// flat rendering and width probes share `Text`'s column convention.
@@ -62,9 +71,11 @@ impl Doc {
 
 /// How willing a group is to be the point where its line breaks. This is what
 /// `fits` consults when a group appears in the content trailing the group
-/// being probed.
+/// being probed. Private: `Always` is valid only when the subtree contains a
+/// hard newline and `Hugging` only for `delimited_hug`'s shape, so groups are
+/// built via `group`/`group_willing`, which establish those invariants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Breaks {
+enum Breaks {
     /// Contains a hard newline: never renders flat, so the line provably ends
     /// inside it.
     Always,
@@ -99,6 +110,40 @@ pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     if s.is_empty() {
         return nil();
     }
+    if !s.contains('\n') {
+        return single_line_text(s);
+    }
+    // Multi-line text (a `/* … */` block comment spanning lines) is split
+    // into one Text per line joined by RawNewlines, so column accounting
+    // resumes from the last line and enclosing groups see the hard break.
+    let mut parts: Vec<Doc> = Vec::new();
+    match s {
+        Cow::Borrowed(s) => {
+            for (i, line) in s.split('\n').enumerate() {
+                if i > 0 {
+                    parts.push(Doc(DocInner::RawNewline));
+                }
+                if !line.is_empty() {
+                    parts.push(single_line_text(Cow::Borrowed(line)));
+                }
+            }
+        }
+        Cow::Owned(s) => {
+            for (i, line) in s.split('\n').enumerate() {
+                if i > 0 {
+                    parts.push(Doc(DocInner::RawNewline));
+                }
+                if !line.is_empty() {
+                    parts.push(single_line_text(Cow::Owned(line.to_owned())));
+                }
+            }
+        }
+    }
+    concat(parts)
+}
+
+fn single_line_text(s: Cow<'static, str>) -> Doc {
+    debug_assert!(!s.contains('\n'));
     let width = str_width(&s);
     Doc(DocInner::Text { s, width })
 }
@@ -165,7 +210,14 @@ pub fn group(d: Doc) -> Doc {
     group_as(Breaks::Reluctantly, d)
 }
 
-pub fn group_as(breaks: Breaks, d: Doc) -> Doc {
+/// Group that breaks willingly: block-shaped (`{ … }`), a natural end for the
+/// line, so width probes of earlier content assume the line ends at its first
+/// break instead of breaking that earlier content.
+pub fn group_willing(d: Doc) -> Doc {
+    group_as(Breaks::Willingly, d)
+}
+
+fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d.0 {
         DocInner::Text { .. } | DocInner::Nil => d,
         DocInner::Group { doc, .. } => group_as(breaks, *doc),
@@ -203,7 +255,7 @@ pub fn ends_line(d: &Doc) -> bool {
 fn contains_hardline(d: &Doc) -> bool {
     match &d.0 {
         DocInner::Nil | DocInner::Text { .. } | DocInner::Break { .. } => false,
-        DocInner::HardLine(_) => true,
+        DocInner::HardLine(_) | DocInner::RawNewline => true,
         DocInner::Nest(_, inner) | DocInner::NestIfBroken(_, inner) => contains_hardline(inner),
         // A hugged item's hard newlines are real for every group except the
         // hugging group itself (which accounts for them via `Breaks::Hugging`),
@@ -447,6 +499,12 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                 emit_newline(&mut out, indent);
                 col = indent * TAB_WIDTH;
             }
+            DocInner::RawNewline => {
+                // No indent: the surrounding text's continuation line renders
+                // verbatim from column zero.
+                out.push('\n');
+                col = 0;
+            }
             DocInner::Nest(i, inner) => {
                 work.push_front((indent + i, mode, inner));
             }
@@ -564,7 +622,7 @@ fn fits<'d>(
                 // An already-broken break ends the line; everything before it fit.
                 Mode::Broken => return true,
             },
-            DocInner::HardLine(_) => match mode {
+            DocInner::HardLine(_) | DocInner::RawNewline => match mode {
                 // Inside flat content a hard newline cannot render flat;
                 // in the trailing work it simply ends the line.
                 Mode::Flat => return false,
@@ -650,6 +708,58 @@ mod tests {
     fn hardline_forces_break() {
         let d = group(d![text("a"), hardline(), text("b")]);
         assert_eq!(layout(&d, 80), "a\nb");
+    }
+
+    #[test]
+    fn multiline_text_forces_group_break() {
+        // A multi-line block comment inside a group is a hard break: the
+        // group can never render flat, however generous the width.
+        let d = group(d![text("/* a\n   b */"), line(), text("c")]);
+        assert_eq!(layout(&d, 80), "/* a\n   b */\nc");
+    }
+
+    #[test]
+    fn multiline_text_renders_verbatim_without_indent() {
+        // Continuation lines of embedded text render from column zero even
+        // under a nest — the text's own leading whitespace is preserved.
+        let d = d![
+            text("head"),
+            nest(
+                2,
+                d![hardline(), text("/* a\n   b */"), hardline(), text("c")]
+            ),
+        ];
+        assert_eq!(layout(&d, 80), "head\n\t\t/* a\n   b */\n\t\tc");
+    }
+
+    #[test]
+    fn col_resumes_after_multiline_text() {
+        // The text's total width exceeds the budget, but its last line is
+        // short: the group that follows fits on the resumed line and must
+        // stay flat, not be broken by the earlier lines' widths.
+        let doc = d![
+            text("/* aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbb */ "),
+            parens("f(", "ccc"),
+        ];
+        assert_eq!(
+            layout(&doc, 20),
+            "/* aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbb */ f(ccc)"
+        );
+    }
+
+    #[test]
+    fn width_probe_stops_at_trailing_multiline_text() {
+        // A multi-line comment trailing a group ends the line at its first
+        // embedded newline: the probe counts only the comment's first line,
+        // so the group stays flat.
+        let doc = d![
+            parens("f(", "aaaa"),
+            text(" /* x\n   yyyyyyyyyyyyyyyyyyyyyyyy */"),
+        ];
+        assert_eq!(
+            layout(&doc, 12),
+            "f(aaaa) /* x\n   yyyyyyyyyyyyyyyyyyyyyyyy */"
+        );
     }
 
     #[test]
