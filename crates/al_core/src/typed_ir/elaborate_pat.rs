@@ -325,6 +325,19 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
     }
 
+    /// A `..name` rest binder. The parser normalizes a bare `_` var pattern to
+    /// [`ast::Pattern::Wildcard`] but leaves a `.._` rest as a binding named
+    /// `_`, and the check walk never records `_` (any number of `_` binds pass
+    /// checking), so `_` must not reach [`Self::bind`]'s duplicate abort — it
+    /// is a discard here, as everywhere else.
+    fn rest_bind(&mut self, id: &ast::Identifier, ty: RTy) -> PatRest {
+        if id.name == "_" {
+            PatRest::Discard
+        } else {
+            PatRest::Bind(self.bind(&id.name, ty, id.span))
+        }
+    }
+
     fn pat(&mut self, p: &ast::Pattern, scrut: RTy) -> TypedPat {
         match p {
             ast::Pattern::Wildcard { .. } => TypedPat::Wild { ty: scrut },
@@ -449,7 +462,7 @@ impl<C: PatCtx> PatElab<'_, C> {
                 ast::ArrayPatternElement::Spread {
                     binding: Some(id), ..
                 },
-            ] => PatRest::Bind(self.bind(&id.name, scrut, id.span)),
+            ] => self.rest_bind(id, scrut),
             _ => elaborator_bug("array spread not last", span),
         };
         // `lower` compares `ArrayLen(scrut)` against the prefix length and
@@ -475,7 +488,7 @@ impl<C: PatCtx> PatElab<'_, C> {
             None => PatRest::None,
             Some(r) => match &r.binding {
                 None => PatRest::Discard,
-                Some(id) => PatRest::Bind(self.bind(&id.name, scrut, id.span)),
+                Some(id) => self.rest_bind(id, scrut),
             },
         };
         // The bit cursor `lower` walks the segments with starts at `0`, and a
@@ -1205,6 +1218,59 @@ mod tests {
             span: Span::DUMMY,
         };
         let _ = elaborate_pattern(&mut cx, &p, tup_ty);
+    }
+
+    /// The check walk exempts `_` from the once-per-alternative rule, and the
+    /// parser materializes a `.._` rest as a binding named `_` (a bare `_` var
+    /// becomes `Wildcard`, a rest does not). Two `_`-named rests in one
+    /// alternative — array or binary — are checker-clean and must elaborate as
+    /// discards, not trip the duplicate abort.
+    #[test]
+    fn underscore_rests_are_discards_and_never_duplicates() {
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let arr = cx.arr(int);
+        let binary = cx.binary;
+        let tup_ty = cx.pool.mk_tuple(&[arr, arr, binary]);
+        let arr_rest = |bind: &str| ast::Pattern::Array {
+            elements: vec![ast::ArrayPatternElement::Spread {
+                binding: Some(ident(bind)),
+                span: Span::DUMMY,
+            }],
+            span: Span::DUMMY,
+        };
+        let bin_rest = ast::Pattern::Binary {
+            segments: vec![],
+            rest: Some(ast::BinaryPatternRest {
+                binding: Some(ident("_")),
+                span: Span::DUMMY,
+            }),
+            span: Span::DUMMY,
+        };
+        let p = ast::Pattern::Tuple {
+            elements: vec![arr_rest("_"), arr_rest("_"), bin_rest],
+            span: Span::DUMMY,
+        };
+        let p = elaborate_pattern(&mut cx, &p, tup_ty);
+        // No binder was minted for any `_`.
+        assert_eq!(cx.binds.len(), 0);
+        let TypedPat::Tuple { elems, .. } = &p else {
+            panic!("expected Tuple")
+        };
+        assert!(matches!(
+            &elems[0],
+            TypedPat::Array {
+                rest: PatRest::Discard,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &elems[2],
+            TypedPat::Bin {
+                rest: PatRest::Discard,
+                ..
+            }
+        ));
     }
 
     #[test]
