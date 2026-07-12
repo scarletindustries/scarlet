@@ -11,23 +11,25 @@
 //! This module is the data model + index/query layer only. Population happens
 //! during the existing typecheck/infer pass (other units) by building
 //! `ModuleReferences` and handing them to a `ReferenceGraph`; the graph never
-//! alters inference or codegen.
+//! alters inference or codegen. The unused-import / dead-code analysis that
+//! consumes the index lives in [`unused`], and the rename planner in
+//! [`rename`].
 //!
 //! Module identity is interned to a [`ModuleId`] (`Copy`) rather than carried
 //! as a `Vec<String>` so a `DefId` can ride on `Copy` types and survive
 //! incremental recompiles independent of any one inference engine's arenas.
 
 use std::cell::OnceCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
 
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::module::{ModuleKey, ModulePath};
 use crate::span::Span;
 
 pub mod rename;
+pub mod unused;
 pub mod uri;
 
 pub use uri::{ModuleUriError, module_uri, path_to_uri};
@@ -91,8 +93,10 @@ pub enum ReferenceKind {
     /// The `module` half of a `module.member` access: the identifier that
     /// names an import alias rather than a value. Targets the `ModuleAlias`
     /// definition so hover / goto-def on the qualifier can reach the imported
-    /// module. Not a use site — the alias's liveness is decided by the
-    /// `Qualified` occurrence on the member (see [`Definition::imports_module`]).
+    /// module. Not a use site — a qualifier never evaluates its target — but
+    /// it is the direct alias→use edge the unused-import check reads: an
+    /// alias is live iff one of these occurrences exists outside its
+    /// declaration (see `ReferenceGraph::has_real_use` in [`unused`]).
     Qualifier,
     /// A bare `name` resolved through the local/value environment.
     Unqualified,
@@ -181,6 +185,15 @@ impl ModuleInterner {
         self.paths.get(id.0 as usize)
     }
 
+    /// Every interned path in id order: the `i`th item is `ModuleId(i)`'s.
+    /// Infallible by construction — it walks the dense id-indexed store
+    /// directly — so a caller mirroring the first-seen id assignment cannot
+    /// skip an id (and thereby renumber every later one) the way a fallible
+    /// per-id lookup could.
+    pub fn paths(&self) -> impl Iterator<Item = &ModulePath> {
+        self.paths.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.paths.len()
     }
@@ -239,8 +252,11 @@ pub enum DefinitionKind {
         /// — every single-constructor `type Config { name String }` — was
         /// reported unused. It is NOT an occurrence: `find-references` on the
         /// type must not list the constructor's declaration, and renaming one
-        /// must not rename the other. `None` only for a definition synthesised
-        /// from a hydrated stdlib interface, which carries no type `DefId`.
+        /// must not rename the other — except a record-shorthand type, whose
+        /// constructor shares the declaring token/span and so forms one rename
+        /// class with it (see `rename::ReferenceGraph::rename_with`). `None`
+        /// only for a definition synthesised from a hydrated stdlib interface,
+        /// which carries no type `DefId`.
         ctor_of: Option<DefId>,
         /// The constructor's field labels, mirrored for hover (they also live
         /// in `ValueKind::Constructor.field_labels`).
@@ -254,9 +270,9 @@ pub enum DefinitionKind {
         /// import; for `import a/b as c.{item}` `defid.span` is only the `c`
         /// identifier while `decl_span` still covers the full statement.
         decl_span: Span,
-        /// The module this alias imports — the alias→imported-module edge that
-        /// lets a `Qualified` occurrence resolving into that module keep this
-        /// import alive.
+        /// The module this alias imports — the alias→imported-module edge
+        /// LSP module navigation follows (see
+        /// [`ReferenceGraph::module_named_at`]).
         imports_module: Option<ModuleId>,
     },
     Field,
@@ -298,20 +314,19 @@ pub struct Definition {
 }
 
 impl Definition {
+    /// Build a definition from its location and payload. The `DefId` is
+    /// derived here — `DefId.entity` always equals `kind.entity()` — so a
+    /// definition whose id disagrees with its payload is unrepresentable.
     pub fn new(
-        defid: DefId,
+        module: ModuleId,
+        span: Span,
         name: impl Into<String>,
         doc: Option<String>,
         is_pub: bool,
         kind: DefinitionKind,
     ) -> Self {
-        debug_assert_eq!(
-            kind.entity(),
-            defid.entity,
-            "DefinitionKind payload must match the DefId's EntityKind"
-        );
         Definition {
-            defid,
+            defid: DefId::new(module, span, kind.entity()),
             name: name.into(),
             doc,
             kind,
@@ -493,11 +508,23 @@ impl ModuleReferences {
     }
 
     /// Register a declared name. Re-declaring the same `DefId` overwrites the
-    /// previous record (last write wins, matching the existing flat env).
+    /// previous record (last write wins, matching the existing flat env);
+    /// `name_to_defs` is re-keyed when the overwrite changes the name so the
+    /// index always matches the stored definitions.
     pub fn add_definition(&mut self, def: Definition) {
         let defid = def.defid;
         let name = def.name.clone();
-        if self.definitions.insert(defid, def).is_none() {
+        if let Some(old) = self.definitions.insert(defid, def) {
+            if old.name != name {
+                if let Some(bucket) = self.name_to_defs.get_mut(&old.name) {
+                    bucket.retain(|d| *d != defid);
+                    if bucket.is_empty() {
+                        self.name_to_defs.remove(&old.name);
+                    }
+                }
+                self.name_to_defs.entry(name).or_default().push(defid);
+            }
+        } else {
             self.name_to_defs.entry(name).or_default().push(defid);
         }
         self.line_index.take();
@@ -774,238 +801,6 @@ impl ReferenceGraph {
     pub fn all_defs(&self) -> impl Iterator<Item = &Definition> {
         self.modules.values().flat_map(|m| m.definitions())
     }
-
-    // --- Reachability hooks (unused-import / dead-code) ---
-
-    /// Reachability roots: every `pub` definition. The non-LSP consumer adds
-    /// the entry module's top-level definitions to this set before walking.
-    fn roots(&self) -> impl Iterator<Item = DefId> + '_ {
-        self.all_defs().filter(|d| d.is_pub).map(|d| d.defid)
-    }
-
-    /// Definition→definition edges: an edge `(a, b)` means definition `a`
-    /// contains an occurrence that resolves to definition `b`.
-    fn edges(&self) -> impl Iterator<Item = (DefId, DefId)> + '_ {
-        self.modules.values().flat_map(|mr| {
-            mr.occurrences
-                .iter()
-                .filter_map(|occ| occ.owner.map(|o| (o, occ.reference.target)))
-        })
-    }
-
-    /// The set of definitions reachable from `roots()` plus `extra_roots`,
-    /// walking [`edges`](Self::edges). A definition only self-referenced
-    /// (recursive but otherwise unused) is *not* made reachable by its own
-    /// edge, so it is correctly reported as dead.
-    fn reachable(&self, extra_roots: Vec<DefId>) -> HashSet<DefId> {
-        let mut adj: HashMap<DefId, Vec<DefId>> = HashMap::new();
-        for (from, to) in self.edges() {
-            adj.entry(from).or_default().push(to);
-        }
-        // A constructor keeps its type alive: `Config(name: 'x')` mentions the
-        // constructor, never the type, and `type Config { name String }` names
-        // both with one identifier. This is a structural edge, not a use —
-        // `edges()` is built from occurrences and must stay that way, or
-        // find-references on the type would list the constructor's declaration.
-        for mr in self.modules.values() {
-            for d in mr.definitions.values() {
-                if let Some(ty) = d.ctor_of() {
-                    adj.entry(d.defid).or_default().push(ty);
-                }
-            }
-        }
-        let mut seen: HashSet<DefId> = HashSet::new();
-        let mut queue: VecDeque<DefId> = VecDeque::new();
-        for r in self.roots().chain(extra_roots) {
-            if seen.insert(r) {
-                queue.push_back(r);
-            }
-        }
-        while let Some(d) = queue.pop_front() {
-            if let Some(next) = adj.get(&d) {
-                for &n in next {
-                    if seen.insert(n) {
-                        queue.push_back(n);
-                    }
-                }
-            }
-        }
-        seen
-    }
-}
-
-// ============================================================================
-// Unused / dead-code Hint diagnostics (the non-LSP reachability consumer)
-// ============================================================================
-
-impl ReferenceGraph {
-    /// Targets of the entry module's executed top-level body — *use*
-    /// occurrences (`Qualified`/`Unqualified`) with no enclosing definition
-    /// (`owner == None`). That code runs whenever the program runs, so anything
-    /// it names is a live root in addition to the `pub` API surface (see
-    /// [`roots`](Self::roots)).
-    ///
-    /// The kind filter is load-bearing: the populator records, with
-    /// `owner == None`, a `ReferenceKind::Definition` self-occurrence for
-    /// *every* top-level fn/const/type and an `Import`/`Alias` occurrence for
-    /// every import. Rooting on `owner.is_none()` alone would make every
-    /// top-level definition its own reachability root, so no private definition
-    /// could ever be reported as dead. Only a real qualified/unqualified use in
-    /// the executed body is a root.
-    fn entry_toplevel_roots(&self, entry: ModuleId) -> Vec<DefId> {
-        match self.modules.get(&entry) {
-            Some(mr) => mr
-                .occurrences
-                .iter()
-                .filter_map(|occ| {
-                    (occ.owner.is_none() && occ.reference.kind.is_use_site())
-                        .then_some(occ.reference.target)
-                })
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// The reachable set under the full dead-code root rule: every `pub`
-    /// definition (workspace-wide) plus everything the entry module's
-    /// top-level body references, closed over `definition -> reference` edges.
-    /// A self-only-recursive definition is *not* made reachable by its own
-    /// edge, so it is still reported as dead.
-    pub fn reachable_from_entry(&self, entry: ModuleId) -> HashSet<DefId> {
-        self.reachable(self.entry_toplevel_roots(entry))
-    }
-
-    /// Whether `def` is used as a real (qualified/unqualified) reference
-    /// anywhere. An import declaration's own `Import`/`Alias`/`Definition`
-    /// occurrences never count as a use.
-    ///
-    /// For a `ModuleAlias` this also keeps the import alive when an
-    /// *unqualified selective* item it introduced is used (`import a/b.{used}`
-    /// then `used()`) or when a *plain qualified* member is used (`import a/b`
-    /// then `b.foo()`). The compiler records a selective item-binding as an
-    /// `Unqualified` occurrence and a `b.foo()` call as a `Qualified`
-    /// occurrence whose `target` is the *remote* imported `DefId`, not this
-    /// alias — so neither use ever points back at the alias and the direct
-    /// check alone spuriously reports the import as unused. Both links are
-    /// stored on the alias `Definition` at population time:
-    ///
-    /// * selective `import a/b.{item}`: every item-binding occurrence sits
-    ///   inside the declaration's [`Definition::decl_span`], so any imported
-    ///   target referenced from *outside* it is a genuine use; and
-    /// * plain `import a/b` + `b.foo()`: a `Qualified` occurrence outside the
-    ///   declaration keeps this import alive iff it resolves into the alias's
-    ///   [`Definition::imports_module`]. Matching on that exact module — not
-    ///   "any other module" — stops one used qualified import from masking a
-    ///   second, genuinely-unused one.
-    fn has_real_use(&self, def: &Definition) -> bool {
-        let direct = self
-            .references_to(def.defid)
-            .iter()
-            .any(|r| r.kind.is_use_site());
-        if direct || def.entity() != EntityKind::ModuleAlias {
-            return direct;
-        }
-        let Some(mr) = self.modules.get(&def.defid.module) else {
-            return false;
-        };
-        let decl_span = def.decl_span();
-        // Targets introduced by this import: occurrences nested inside the
-        // declaration that resolve somewhere other than the alias itself.
-        let imported: HashSet<DefId> = mr
-            .occurrences()
-            .iter()
-            .map(|o| o.reference)
-            .filter(|r| r.target != def.defid && r.span.within(&decl_span))
-            .map(|r| r.target)
-            .collect();
-        // Selective `import a/b.{item}`: used iff one of those imported targets
-        // has a qualified/unqualified occurrence *outside* the declaration — a
-        // real use in code, not the binding occurrence itself. al imports bind
-        // only within the importing module, so the use is intra-module.
-        let selective_item_used = !imported.is_empty()
-            && mr.occurrences().iter().map(|o| o.reference).any(|r| {
-                imported.contains(&r.target) && r.kind.is_use_site() && !r.span.within(&decl_span)
-            });
-        if selective_item_used {
-            return true;
-        }
-        // Plain `import a/b` + `b.foo()`: a `Qualified` occurrence outside the
-        // declaration keeps this import alive iff it resolves into the module
-        // this alias imports. (Only `Qualified` — selective items are
-        // `Unqualified` and handled above.)
-        match def.imports_module() {
-            Some(imported_mid) => mr.occurrences().iter().map(|o| o.reference).any(|r| {
-                r.kind == ReferenceKind::Qualified
-                    && r.target.module == imported_mid
-                    && !r.span.within(&decl_span)
-            }),
-            None => false,
-        }
-    }
-
-    /// `Hint` diagnostics for the entry module: unused private definitions and
-    /// unused imports, decided by workspace reachability
-    /// ([`reachable_from_entry`](Self::reachable_from_entry)).
-    ///
-    /// Only definitions *owned by* `entry` are reported, so prelude / `@vm` /
-    /// standard-library definitions (which live in other modules, and are
-    /// `pub` when they are intrinsics) are never flagged; `pub` items are never
-    /// flagged; a self-only-recursive private definition *is* flagged (it is
-    /// not reachable from any root). Output is ordered by source position so it
-    /// flows stably through `publishDiagnostics` when appended to
-    /// `CompileResult.diagnostics`.
-    pub fn unused_diagnostics(&self, entry: ModuleId) -> Vec<Diagnostic> {
-        let Some(mr) = self.modules.get(&entry) else {
-            return Vec::new();
-        };
-        let reachable = self.reachable_from_entry(entry);
-        let mut out: Vec<Diagnostic> = Vec::new();
-
-        for def in mr.definitions.values() {
-            if def.entity() == EntityKind::ModuleAlias {
-                // Unused import: an import/alias binding that nothing uses
-                // qualified or unqualified.
-                if !self.has_real_use(def) {
-                    out.push(Diagnostic::hint(
-                        def.span(),
-                        DiagnosticCode::UnusedBinding,
-                        format!("unused import `{}`", def.name),
-                    ));
-                }
-                continue;
-            }
-            // Unused private definition: non-pub, unreachable, and a reportable
-            // declaration kind. `Value` binders are covered by the unused-binding
-            // check, `Constructor`/`Field` via their owning `Type`, `ModuleAlias`
-            // as an unused import (above).
-            if def.is_pub
-                || !matches!(
-                    def.entity(),
-                    EntityKind::Function | EntityKind::Constant | EntityKind::Type
-                )
-                || reachable.contains(&def.defid)
-            {
-                continue;
-            }
-            out.push(Diagnostic::hint(
-                def.span(),
-                DiagnosticCode::UnusedBinding,
-                format!("unused {} `{}`", def.entity().noun(), def.name),
-            ));
-        }
-
-        out.sort_by_key(|d| (d.span.start_line, d.span.start_column));
-        out
-    }
-
-    /// [`unused_diagnostics`](Self::unused_diagnostics) keyed by module path;
-    /// empty if `entry` was never interned into this graph.
-    pub fn unused_diagnostics_for(&self, entry: &ModulePath) -> Vec<Diagnostic> {
-        match self.module_id(entry) {
-            Some(id) => self.unused_diagnostics(id),
-            None => Vec::new(),
-        }
-    }
 }
 
 // ============================================================================
@@ -1060,16 +855,38 @@ fn add_ref(
 }
 
 #[cfg(test)]
+fn main_graph() -> (ReferenceGraph, ModuleId, ModuleReferences) {
+    let mut g = ReferenceGraph::new();
+    let m = g.intern_module(&mp(&["main"]));
+    let mr = ModuleReferences::new(m);
+    (g, m, mr)
+}
+
+#[cfg(test)]
+fn add_def(
+    mr: &mut ModuleReferences,
+    m: ModuleId,
+    name: &str,
+    line: i32,
+    kind: EntityKind,
+    is_pub: bool,
+) -> DefId {
+    let d = def(m, line, 3, 3 + name.len() as i32, kind);
+    mr.add_definition(Definition::new(
+        d.module,
+        d.span,
+        name,
+        None,
+        is_pub,
+        stub_kind(d),
+    ));
+    d
+}
+
+#[cfg(test)]
 mod tests {
     use super::{ReferenceKind as K, *};
-    use crate::diagnostic::Severity;
-
-    fn main_graph() -> (ReferenceGraph, ModuleId, ModuleReferences) {
-        let mut g = ReferenceGraph::new();
-        let m = g.intern_module(&mp(&["main"]));
-        let mr = ModuleReferences::new(m);
-        (g, m, mr)
-    }
+    use std::collections::HashSet;
 
     // ---- ModuleInterner ----
 
@@ -1154,7 +971,8 @@ mod tests {
 
         let foo = def(m, 1, 3, 6, EntityKind::Function);
         mr.add_definition(Definition::new(
-            foo,
+            foo.module,
+            foo.span,
             "foo",
             Some("the foo".into()),
             true,
@@ -1178,7 +996,8 @@ mod tests {
 
         let target = def(m, 1, 0, 3, EntityKind::Function);
         mr.add_definition(Definition::new(
-            target,
+            target.module,
+            target.span,
             "fn",
             None,
             false,
@@ -1211,7 +1030,8 @@ mod tests {
         let helper = def(lib, 1, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
         lib_mr.add_definition(Definition::new(
-            helper,
+            helper.module,
+            helper.span,
             "helper",
             Some("doc".into()),
             true,
@@ -1222,7 +1042,14 @@ mod tests {
         // app uses `helper` twice (qualified), inside app's `run`.
         let run = def(app, 1, 3, 6, EntityKind::Function);
         let mut app_mr = ModuleReferences::new(app);
-        app_mr.add_definition(Definition::new(run, "run", None, true, stub_kind(run)));
+        app_mr.add_definition(Definition::new(
+            run.module,
+            run.span,
+            "run",
+            None,
+            true,
+            stub_kind(run),
+        ));
         add_ref(&mut app_mr, Some(run), (2, 4, 14), K::Qualified, helper);
         add_ref(&mut app_mr, Some(run), (3, 4, 14), K::Qualified, helper);
         g.insert_module(app_mr);
@@ -1282,7 +1109,8 @@ mod tests {
         let helper = def(lib, 1, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
         lib_mr.add_definition(Definition::new(
-            helper,
+            helper.module,
+            helper.span,
             "helper",
             Some("doc".into()),
             true,
@@ -1300,516 +1128,6 @@ mod tests {
         assert_eq!(
             g.definition(helper).map(|d| d.name.as_str()),
             Some("helper")
-        );
-    }
-
-    // ---- Reachability / dead-code ----
-
-    #[test]
-    fn edges_only_emitted_for_owned_occurrences() {
-        let (mut g, m, mut mr) = main_graph();
-
-        let a = def(m, 1, 0, 1, EntityKind::Function);
-        let b = def(m, 2, 0, 1, EntityKind::Function);
-        mr.add_definition(Definition::new(a, "a", None, true, stub_kind(a)));
-        mr.add_definition(Definition::new(b, "b", None, false, stub_kind(b)));
-
-        // Owned by `a` -> contributes an a->b edge.
-        add_ref(&mut mr, Some(a), (1, 5, 6), K::Unqualified, b);
-        // Unowned top-level occurrence -> no edge.
-        add_ref(&mut mr, None, (9, 0, 1), K::Unqualified, b);
-        g.insert_module(mr);
-
-        let edges: Vec<(DefId, DefId)> = g.edges().collect();
-        assert_eq!(edges, vec![(a, b)]);
-
-        // `b` is reachable: `a` is a pub root and references it.
-        assert!(g.reachable(Vec::new()).contains(&b));
-    }
-
-    #[test]
-    fn reachable_closes_transitively_and_skips_self_only_recursion() {
-        let (mut g, m, mut mr) = main_graph();
-
-        // pub `a` -> private `b` -> private `deep`: a multi-hop chain whose
-        // middle node `b` is not itself a root.
-        let a = add_def(&mut mr, m, "a", 1, EntityKind::Function, true);
-        let b = add_def(&mut mr, m, "b", 3, EntityKind::Function, false);
-        let deep = add_def(&mut mr, m, "deep", 5, EntityKind::Function, false);
-        // private `loopy`, only self-recursive.
-        let loopy = add_def(&mut mr, m, "loopy", 7, EntityKind::Function, false);
-
-        add_ref(&mut mr, Some(a), (2, 4, 5), K::Unqualified, b);
-        add_ref(&mut mr, Some(b), (4, 4, 8), K::Unqualified, deep);
-        add_ref(&mut mr, Some(loopy), (8, 4, 9), K::Unqualified, loopy);
-        g.insert_module(mr);
-
-        let r = g.reachable(Vec::new());
-        assert!(
-            r.contains(&deep),
-            "transitively reachable through a -> b -> deep"
-        );
-        assert!(
-            !r.contains(&loopy),
-            "a self-only-recursive private def is not rooted by its own edge"
-        );
-    }
-
-    // ---- Unused / dead-code Hint diagnostics ----
-
-    fn add_def(
-        mr: &mut ModuleReferences,
-        m: ModuleId,
-        name: &str,
-        line: i32,
-        kind: EntityKind,
-        is_pub: bool,
-    ) -> DefId {
-        let d = def(m, line, 3, 3 + name.len() as i32, kind);
-        mr.add_definition(Definition::new(d, name, None, is_pub, stub_kind(d)));
-        d
-    }
-
-    #[track_caller]
-    fn sole_unused(g: &ReferenceGraph, m: ModuleId) -> Diagnostic {
-        let mut d = g.unused_diagnostics(m);
-        assert_eq!(d.len(), 1, "expected exactly one unused diagnostic: {d:?}");
-        d.pop().unwrap()
-    }
-
-    #[test]
-    fn unused_diag_flags_private_fn_keeps_pub_and_used() {
-        let (mut g, m, mut mr) = main_graph();
-        let api = add_def(&mut mr, m, "api", 1, EntityKind::Function, true);
-        let used = add_def(&mut mr, m, "used", 3, EntityKind::Function, false);
-        let dead = add_def(&mut mr, m, "dead", 5, EntityKind::Function, false);
-        // pub `api` calls private `used`; nobody calls `dead`.
-        add_ref(&mut mr, Some(api), (2, 4, 8), K::Unqualified, used);
-        g.insert_module(mr);
-
-        let d = sole_unused(&g, m);
-        assert_eq!(d.severity, Severity::Hint);
-        assert_eq!(d.message, "unused function `dead`");
-        assert_eq!(d.span, dead.span);
-    }
-
-    #[test]
-    fn unused_diag_entry_toplevel_body_keeps_def_live() {
-        let (mut g, m, mut mr) = main_graph();
-        let helper = add_def(&mut mr, m, "helper", 1, EntityKind::Function, false);
-        let dead = add_def(&mut mr, m, "dead", 4, EntityKind::Function, false);
-        // `helper` is only called by the executed top-level body (owner None).
-        add_ref(&mut mr, None, (9, 0, 6), K::Unqualified, helper);
-        g.insert_module(mr);
-
-        let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused function `dead`");
-        assert_eq!(d.span, dead.span);
-    }
-
-    #[test]
-    fn unused_diag_self_recursive_only_is_flagged() {
-        let (mut g, m, mut mr) = main_graph();
-        let spin = add_def(&mut mr, m, "spin", 1, EntityKind::Function, false);
-        // `spin` references only itself — a self edge never makes it reachable.
-        add_ref(&mut mr, Some(spin), (2, 4, 8), K::Unqualified, spin);
-        g.insert_module(mr);
-
-        assert_eq!(sole_unused(&g, m).message, "unused function `spin`");
-    }
-
-    #[test]
-    fn unused_diag_only_reports_entry_module() {
-        let (mut g, entry, mut em) = main_graph();
-        let lib = g.intern_module(&mp(&["lib"]));
-
-        add_def(&mut em, entry, "go", 1, EntityKind::Function, true);
-        g.insert_module(em);
-
-        // A private, unreachable def in another module must NOT surface when
-        // diagnosing the entry module (prelude/@vm/library defs live here).
-        let mut lm = ModuleReferences::new(lib);
-        add_def(&mut lm, lib, "secret", 1, EntityKind::Function, false);
-        g.insert_module(lm);
-
-        assert!(g.unused_diagnostics(entry).is_empty());
-    }
-
-    #[test]
-    fn unused_diag_unused_and_used_module_alias_import() {
-        let (mut g, m, mut mr) = main_graph();
-        let unused_imp = add_def(&mut mr, m, "io", 1, EntityKind::ModuleAlias, false);
-        let used_imp = add_def(&mut mr, m, "fmt", 2, EntityKind::ModuleAlias, false);
-        // `fmt` is used through a qualified access; `io` never is.
-        add_ref(&mut mr, None, (5, 4, 12), K::Qualified, used_imp);
-        g.insert_module(mr);
-
-        let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused import `io`");
-        assert_eq!(d.span, unused_imp.span);
-    }
-
-    #[test]
-    fn unused_diag_import_with_only_decl_occurrences_is_flagged() {
-        let (mut g, m, mut mr) = main_graph();
-        let imp = add_def(&mut mr, m, "util", 1, EntityKind::ModuleAlias, false);
-        // The import declaration's own occurrences are not "uses".
-        add_ref(&mut mr, None, (1, 7, 11), K::Import, imp);
-        add_ref(&mut mr, None, (1, 7, 11), K::Definition, imp);
-        g.insert_module(mr);
-
-        assert_eq!(sole_unused(&g, m).message, "unused import `util`");
-    }
-
-    #[test]
-    fn unused_diag_unqualified_import_item_used_keeps_import_live() {
-        // `import a/b.{used}` then `pub fn main() { used() }`. The item
-        // binding records an `Unqualified` occurrence whose target is the
-        // *remote* `used` def in `a/b` (not the alias), and so does the
-        // `used()` call — the import must still be recognised as used.
-        //
-        // The boundary that tells the item *binding* (inside the declaration)
-        // from the real *use* (outside it) is the alias's `ModuleAlias`
-        // *definition* span, which production records as the full declaration
-        // span. The `Import` *occurrence* covers only the final module-name
-        // segment (`b`), too narrow to contain the binding — modelled here to
-        // prove that narrowing does not regress unused detection.
-        let (mut g, m, _) = main_graph();
-        let lib = g.intern_module(&mp(&["a", "b"]));
-
-        let build = |with_use: bool| {
-            let mut mr = ModuleReferences::new(m);
-            let alias = def(m, 1, 0, 18, EntityKind::ModuleAlias);
-            mr.add_definition(Definition::new(alias, "b", None, false, stub_kind(alias)));
-            let remote_used = def(lib, 1, 3, 7, EntityKind::Function);
-            // The `Import` occurrence covers only the `b` path segment; the
-            // `used` item-binding occurrence sits inside the declaration span.
-            add_ref(&mut mr, None, (1, 9, 10), K::Import, alias);
-            add_ref(&mut mr, None, (1, 12, 16), K::Unqualified, remote_used);
-            let main = add_def(&mut mr, m, "main", 3, EntityKind::Function, true);
-            if with_use {
-                // `pub fn main() { used() }` — a real use, outside the
-                // declaration.
-                add_ref(
-                    &mut mr,
-                    Some(main),
-                    (3, 16, 20),
-                    K::Unqualified,
-                    remote_used,
-                );
-            }
-            mr
-        };
-
-        g.insert_module(build(true));
-        assert!(
-            g.unused_diagnostics(m).is_empty(),
-            "an import whose unqualified item is used must not be flagged"
-        );
-
-        // Drop the use: the same import is now genuinely unused again, so
-        // the check is still live (we didn't just disable it).
-        g.insert_module(build(false));
-        assert_eq!(sole_unused(&g, m).message, "unused import `b`");
-    }
-
-    #[test]
-    fn unused_diag_aliased_selective_import_item_used_keeps_import_live() {
-        // `import ./util as u.{empty}` then `println(empty())`. The parser
-        // emits `as u` *before* `.{empty}`, so production records the alias's
-        // `ModuleAlias` `defid.span` as just the `u` identifier — the item
-        // binding at `empty` (and any later use of it) sit *after* `u`. The
-        // full declaration extent is stored on `Definition::decl_span`, so the
-        // binding counts as inside the import and the `empty()` call counts as
-        // a real use.
-        //
-        //   import ./util as u.{empty}
-        //   0      ^9   ^13 ^17^20   ^25
-        let (mut g, m, _) = main_graph();
-        let lib = g.intern_module(&mp(&["util"]));
-
-        // The alias `defid.span` covers only the `as u` name; `decl_span`
-        // covers the whole `import ...` statement.
-        let alias = def(m, 1, 17, 18, EntityKind::ModuleAlias);
-
-        let build = |with_use: bool| {
-            let mut mr = ModuleReferences::new(m);
-            let alias_def = Definition::new(
-                alias,
-                "u",
-                None,
-                false,
-                DefinitionKind::ModuleAlias {
-                    decl_span: Span::single_line(1, 0, 26),
-                    imports_module: Some(lib),
-                },
-            );
-            mr.add_definition(alias_def);
-            let remote_empty = def(lib, 2, 7, 12, EntityKind::Function);
-            // `Import` path segment (`util`) -> the imported module; `Alias`
-            // name (`u`) -> this alias; `empty` item binding -> the remote
-            // `empty`.
-            add_ref(
-                &mut mr,
-                None,
-                (1, 9, 13),
-                K::Import,
-                def(lib, 1, 9, 13, EntityKind::ModuleAlias),
-            );
-            add_ref(&mut mr, None, (1, 17, 18), K::Alias, alias);
-            add_ref(&mut mr, None, (1, 20, 25), K::Unqualified, remote_empty);
-            if with_use {
-                // `println(empty())` on line 2 — a real use, outside the
-                // declaration.
-                add_ref(&mut mr, None, (2, 8, 13), K::Unqualified, remote_empty);
-            }
-            mr
-        };
-
-        g.insert_module(build(true));
-        assert!(
-            g.unused_diagnostics(m).is_empty(),
-            "a used item from an aliased selective import must not be flagged"
-        );
-
-        // Drop the use: the same import is now genuinely unused, so the check
-        // is still live (the widened boundary did not just disable it).
-        g.insert_module(build(false));
-        let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused import `u`");
-        assert_eq!(d.span, alias.span);
-    }
-
-    #[test]
-    fn unused_diag_constant_and_type_wording_and_ordering() {
-        let (mut g, m, mut mr) = main_graph();
-        // Declared out of source order to prove the output is position-sorted.
-        add_def(&mut mr, m, "Color", 9, EntityKind::Type, false);
-        add_def(&mut mr, m, "MAX", 2, EntityKind::Constant, false);
-        g.insert_module(mr);
-
-        let d = g.unused_diagnostics(m);
-        let msgs: Vec<&str> = d.iter().map(|x| x.message.as_str()).collect();
-        assert_eq!(msgs, vec!["unused constant `MAX`", "unused type `Color`"]);
-    }
-
-    #[test]
-    fn unused_diag_value_binders_are_not_reported() {
-        let (mut g, m, mut mr) = main_graph();
-        // `Value` is the unused-binding checker's job, never a dead-code hint.
-        add_def(&mut mr, m, "x", 1, EntityKind::Value, false);
-        g.insert_module(mr);
-        assert!(g.unused_diagnostics(m).is_empty());
-    }
-
-    #[test]
-    fn unused_diag_cross_module_pub_keeps_private_live() {
-        let (mut g, entry, mut em) = main_graph();
-        let lib = g.intern_module(&mp(&["lib"]));
-
-        // lib: pub `run` -> private `helper`.
-        let mut lm = ModuleReferences::new(lib);
-        let run = add_def(&mut lm, lib, "run", 1, EntityKind::Function, true);
-        let helper = add_def(&mut lm, lib, "helper", 3, EntityKind::Function, false);
-        add_ref(&mut lm, Some(run), (2, 4, 10), K::Unqualified, helper);
-        g.insert_module(lm);
-
-        // entry top-level body calls `lib.run` qualified.
-        add_ref(&mut em, None, (5, 0, 7), K::Qualified, run);
-        g.insert_module(em);
-
-        assert!(g.unused_diagnostics(entry).is_empty());
-        // `helper` is reachable via the pub `run` root, not dead.
-        assert!(g.reachable_from_entry(entry).contains(&helper));
-    }
-
-    #[test]
-    fn unused_diag_for_path_and_unknown_entry() {
-        let (mut g, m, mut mr) = main_graph();
-        add_def(&mut mr, m, "dead", 1, EntityKind::Function, false);
-        g.insert_module(mr);
-
-        assert_eq!(g.unused_diagnostics_for(&mp(&["main"])).len(), 1);
-        // Never-interned path: empty, no panic.
-        assert!(g.unused_diagnostics_for(&mp(&["ghost"])).is_empty());
-        // Interned but never populated: empty.
-        let bare = g.intern_module(&mp(&["bare"]));
-        assert!(g.unused_diagnostics(bare).is_empty());
-    }
-
-    /// Mirrors production `Compiler::emit_def`, which records a
-    /// `K::Definition` self-occurrence (`owner == None`,
-    /// `target == the def`) for every top-level fn/const/type. Such
-    /// self-occurrences must NOT be treated as entry-body reachability roots
-    /// (the `entry_toplevel_roots` kind filter) — otherwise every top-level
-    /// definition roots itself and no dead private code is ever reported.
-    #[test]
-    fn unused_diag_definition_self_occurrence_does_not_root_dead_code() {
-        let (mut g, m, mut mr) = main_graph();
-
-        let api = add_def(&mut mr, m, "api", 1, EntityKind::Function, true);
-        let used = add_def(&mut mr, m, "used", 3, EntityKind::Function, false);
-        let dead = add_def(&mut mr, m, "dead", 5, EntityKind::Function, false);
-
-        // emit_def's self-occurrence for every top-level def (owner None).
-        for d in [api, used, dead] {
-            mr.add_reference(None, Reference::new(d.span, K::Definition, d));
-        }
-        // pub `api` calls private `used`; nobody calls `dead`.
-        add_ref(&mut mr, Some(api), (2, 4, 8), K::Unqualified, used);
-        g.insert_module(mr);
-
-        let d = sole_unused(&g, m);
-        assert_eq!(d.message, "unused function `dead`");
-        assert_eq!(d.span, dead.span);
-    }
-
-    /// Production shape of `import a/b` + `b.foo()`: the populator records the
-    /// module-name segment as an `Import` occurrence whose target is owned by
-    /// the *imported* module `a/b` (`DefId::new(imported_mid, path_span,
-    /// ModuleAlias)`) — the alias->imported-module edge — and the call as a
-    /// `Qualified` occurrence whose target is the *remote* `foo` def, also owned
-    /// by `a/b`. Neither ever points back at the alias. The import must not be
-    /// reported as unused, and dropping the use must flag it again.
-    #[test]
-    fn unused_diag_plain_qualified_import_recovers_use() {
-        let (mut g, m, mut mr) = main_graph();
-        let lib = g.intern_module(&mp(&["a", "b"]));
-
-        // `a/b` defines pub `foo` (+ its emit_def self-occurrence).
-        let foo = def(lib, 1, 3, 6, EntityKind::Function);
-        let mut lib_mr = ModuleReferences::new(lib);
-        lib_mr.add_definition(Definition::new(foo, "foo", None, true, stub_kind(foo)));
-        lib_mr.add_reference(None, Reference::new(foo.span, K::Definition, foo));
-        g.insert_module(lib_mr);
-
-        // The `Import` occurrence's target is owned by the imported module
-        // `a/b`, not the importing module.
-        let import_seg = def(lib, 1, 7, 8, EntityKind::ModuleAlias);
-
-        // main: `import a/b` then `pub fn run() { b.foo() }`. The
-        // alias→imported-module edge is stored on the `Definition`.
-        let alias = def(m, 1, 3, 4, EntityKind::ModuleAlias);
-        let alias_def = Definition::new(
-            alias,
-            "b",
-            None,
-            false,
-            DefinitionKind::ModuleAlias {
-                decl_span: alias.span,
-                imports_module: Some(lib),
-            },
-        );
-        mr.add_definition(alias_def);
-        mr.add_reference(None, Reference::new(alias.span, K::Definition, alias));
-        add_ref(&mut mr, None, (1, 7, 8), K::Import, import_seg);
-        let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
-        mr.add_reference(None, Reference::new(run.span, K::Definition, run));
-        // `b.foo()` — a `Qualified` occurrence targeting the *remote* `foo`.
-        add_ref(&mut mr, Some(run), (3, 18, 21), K::Qualified, foo);
-        g.insert_module(mr);
-
-        assert!(
-            g.unused_diagnostics(m).is_empty(),
-            "a plain qualified import whose member is used must not be flagged"
-        );
-
-        // Drop the use: the import is genuinely unused again and IS flagged
-        // (the check is still live, not just disabled).
-        let mut mr2 = ModuleReferences::new(m);
-        let alias2 = def(m, 1, 3, 4, EntityKind::ModuleAlias);
-        let alias_def2 = Definition::new(
-            alias2,
-            "b",
-            None,
-            false,
-            DefinitionKind::ModuleAlias {
-                decl_span: alias2.span,
-                imports_module: Some(lib),
-            },
-        );
-        mr2.add_definition(alias_def2);
-        mr2.add_reference(None, Reference::new(alias2.span, K::Definition, alias2));
-        add_ref(&mut mr2, None, (1, 7, 8), K::Import, import_seg);
-        let run2 = add_def(&mut mr2, m, "run", 3, EntityKind::Function, true);
-        mr2.add_reference(None, Reference::new(run2.span, K::Definition, run2));
-        g.insert_module(mr2);
-
-        assert_eq!(sole_unused(&g, m).message, "unused import `b`");
-    }
-
-    /// Two plain qualified imports where only one is used: the unused one must
-    /// still be flagged. The used import's cross-module `Qualified` occurrence
-    /// must not mask the genuinely-unused sibling — the regression guarded here
-    /// (`has_real_use` formerly kept *any* import alive on *any* cross-module
-    /// qualified use, so `c.use()` wrongly suppressed `import a/b`'s hint).
-    #[test]
-    fn unused_diag_one_of_two_plain_qualified_imports_still_flagged() {
-        let (mut g, m, mut mr) = main_graph();
-        let lib_b = g.intern_module(&mp(&["a", "b"]));
-        let lib_c = g.intern_module(&mp(&["a", "c"]));
-
-        // `a/c` defines pub `used`; `a/b` defines pub `foo` (never used here).
-        let used = def(lib_c, 1, 3, 7, EntityKind::Function);
-        let mut c_mr = ModuleReferences::new(lib_c);
-        c_mr.add_definition(Definition::new(used, "used", None, true, stub_kind(used)));
-        g.insert_module(c_mr);
-        let foo = def(lib_b, 1, 3, 6, EntityKind::Function);
-        let mut b_mr = ModuleReferences::new(lib_b);
-        b_mr.add_definition(Definition::new(foo, "foo", None, true, stub_kind(foo)));
-        g.insert_module(b_mr);
-
-        // main:
-        //   import a/b   (line 1, unused)
-        //   import a/c   (line 2, used via c.used())
-        //   pub fn run() { c.used() }
-        let alias_b = def(m, 1, 7, 8, EntityKind::ModuleAlias);
-        let def_b = Definition::new(
-            alias_b,
-            "b",
-            None,
-            false,
-            DefinitionKind::ModuleAlias {
-                decl_span: alias_b.span,
-                imports_module: Some(lib_b),
-            },
-        );
-        mr.add_definition(def_b);
-        add_ref(
-            &mut mr,
-            None,
-            (1, 7, 8),
-            K::Import,
-            def(lib_b, 1, 7, 8, EntityKind::ModuleAlias),
-        );
-        let alias_c = def(m, 2, 7, 8, EntityKind::ModuleAlias);
-        let def_c = Definition::new(
-            alias_c,
-            "c",
-            None,
-            false,
-            DefinitionKind::ModuleAlias {
-                decl_span: alias_c.span,
-                imports_module: Some(lib_c),
-            },
-        );
-        mr.add_definition(def_c);
-        add_ref(
-            &mut mr,
-            None,
-            (2, 7, 8),
-            K::Import,
-            def(lib_c, 2, 7, 8, EntityKind::ModuleAlias),
-        );
-        let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
-        // `c.used()` — a cross-module `Qualified` occurrence into `a/c` only.
-        add_ref(&mut mr, Some(run), (3, 18, 24), K::Qualified, used);
-        g.insert_module(mr);
-
-        assert_eq!(
-            sole_unused(&g, m).message,
-            "unused import `b`",
-            "the unused `a/b` import must be flagged while the used `a/c` is not"
         );
     }
 
