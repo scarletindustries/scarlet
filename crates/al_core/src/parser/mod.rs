@@ -1060,15 +1060,13 @@ impl Parser {
         let segments = self.parse_comma_list(Kind::BinOpen, Kind::BinClose, |p| {
             let seg_start = p.current_span();
             let value = p.parse_expression()?;
-            let (size, unit, kind) = p.parse_bin_size_spec(matches!(
+            let spec = p.parse_bin_size_spec(matches!(
                 value,
                 ast::Expression::StringLiteral(_) | ast::Expression::InterpolatedString(_)
             ))?;
             Ok(ast::BinSegment {
                 value,
-                size,
-                unit,
-                kind,
+                spec,
                 span: p.span_from(seg_start),
             })
         })?;
@@ -1088,17 +1086,13 @@ impl Parser {
     // Absent spec -> default 8-bit Int (size left None; codegen supplies 8),
     // except string segments (`value_is_string`) which default to Utf8: a bare
     // string means its UTF-8 bytes, not a single 8-bit Int.
-    fn parse_bin_size_spec(
-        &mut self,
-        value_is_string: bool,
-    ) -> PResult<(Option<ast::Expression>, ast::BinUnit, ast::BinKind)> {
+    fn parse_bin_size_spec(&mut self, value_is_string: bool) -> PResult<ast::BinSpec> {
         if self.kind() != Kind::PuncColon {
-            let kind = if value_is_string {
-                ast::BinKind::Utf8
+            return Ok(if value_is_string {
+                ast::BinSpec::Utf8
             } else {
-                ast::BinKind::Int
-            };
-            return Ok((None, ast::BinUnit::Bits, kind));
+                ast::BinSpec::Int { bits: None }
+            });
         }
         self.eat(Kind::PuncColon)?;
 
@@ -1106,32 +1100,32 @@ impl Parser {
             let span = self.current_span();
             let value = self.eat_number("Expected bit width")?;
             let n = ast::Expression::NumberLiteral(ast::NumberLiteral { value, span });
-            return Ok((Some(n), ast::BinUnit::Bits, ast::BinKind::Int));
+            return Ok(ast::BinSpec::Int { bits: Some(n) });
         }
 
         if let Kind::Identifier(kw) = self.kind() {
             match kw.as_ref() {
                 "binary" => {
                     self.advance();
-                    return Ok((None, ast::BinUnit::Bytes, ast::BinKind::Binary));
+                    return Ok(ast::BinSpec::Binary { bytes: None });
                 }
                 "utf8" => {
                     self.advance();
-                    return Ok((None, ast::BinUnit::Bits, ast::BinKind::Utf8));
+                    return Ok(ast::BinSpec::Utf8);
                 }
                 "bytes" => {
                     self.advance();
                     self.eat(Kind::PuncOpenParen)?;
                     let size = self.parse_expression()?;
                     self.eat(Kind::PuncCloseParen)?;
-                    return Ok((Some(size), ast::BinUnit::Bytes, ast::BinKind::Binary));
+                    return Ok(ast::BinSpec::Binary { bytes: Some(size) });
                 }
                 "size" => {
                     self.advance();
                     self.eat(Kind::PuncOpenParen)?;
                     let size = self.parse_expression()?;
                     self.eat(Kind::PuncCloseParen)?;
-                    return Ok((Some(size), ast::BinUnit::Bits, ast::BinKind::Int));
+                    return Ok(ast::BinSpec::Int { bits: Some(size) });
                 }
                 _ => {}
             }
@@ -1330,13 +1324,14 @@ impl Parser {
         let first = self.parse_pattern_range()?;
 
         if self.kind() == Kind::BitwiseOr {
-            let mut patterns = vec![first];
+            let mut rest = Vec::new();
             while self.kind() == Kind::BitwiseOr {
                 self.eat(Kind::BitwiseOr)?;
-                patterns.push(self.parse_pattern_range()?);
+                rest.push(self.parse_pattern_range()?);
             }
             return Ok(ast::Pattern::Or {
-                patterns,
+                first: Box::new(first),
+                rest,
                 span: self.span_from(start),
             });
         }
@@ -1565,15 +1560,13 @@ impl Parser {
             let value = self.parse_pattern_atom()?;
             // A bare string-literal segment matches its UTF-8 bytes as a
             // prefix (`<<'GET ', ..rest>>`), not a single 8-bit Int.
-            let (size, unit, kind) = self.parse_bin_size_spec(matches!(
+            let spec = self.parse_bin_size_spec(matches!(
                 value,
                 ast::Pattern::Literal(ast::PatternLiteral::String(_))
             ))?;
             segments.push(ast::BinSegmentPat {
                 value,
-                size,
-                unit,
-                kind,
+                spec,
                 span: self.span_from(seg_start),
             });
 
@@ -1654,7 +1647,7 @@ impl Parser {
         let identifier = self.eat_identifier("Expected function name")?;
 
         let params = self.parse_parameters()?;
-        let return_type = self.parse_function_return_types()?;
+        let return_type = self.parse_function_return_type()?;
 
         let vm_attr = attributes.iter().find(|a| a.name.name == "vm");
         let body = if let Some(vm_attr) = vm_attr {
@@ -1720,7 +1713,7 @@ impl Parser {
         )
     }
 
-    fn parse_function_return_types(&mut self) -> PResult<Option<ast::TypeIdentifier>> {
+    fn parse_function_return_type(&mut self) -> PResult<Option<ast::TypeIdentifier>> {
         if self.at_loose_type_start() {
             return Ok(Some(self.parse_type_identifier()?));
         }
@@ -2856,17 +2849,23 @@ mod tests {
             panic!("expected BinaryLiteral, got {:?}", vb.init)
         };
         assert_eq!(bl.segments.len(), 5);
-        assert_eq!(bl.segments[0].kind, ast::BinKind::Int);
-        assert!(bl.segments[0].size.is_none());
-        assert_eq!(bl.segments[1].kind, ast::BinKind::Int);
-        assert_eq!(bl.segments[1].unit, ast::BinUnit::Bits);
-        assert!(bl.segments[1].size.is_some());
-        assert_eq!(bl.segments[2].kind, ast::BinKind::Binary);
-        assert_eq!(bl.segments[2].unit, ast::BinUnit::Bytes);
-        assert!(bl.segments[2].size.is_some());
-        assert_eq!(bl.segments[3].kind, ast::BinKind::Binary);
-        assert!(bl.segments[3].size.is_none());
-        assert_eq!(bl.segments[4].kind, ast::BinKind::Utf8);
+        assert!(matches!(
+            bl.segments[0].spec,
+            ast::BinSpec::Int { bits: None }
+        ));
+        assert!(matches!(
+            bl.segments[1].spec,
+            ast::BinSpec::Int { bits: Some(_) }
+        ));
+        assert!(matches!(
+            bl.segments[2].spec,
+            ast::BinSpec::Binary { bytes: Some(_) }
+        ));
+        assert!(matches!(
+            bl.segments[3].spec,
+            ast::BinSpec::Binary { bytes: None }
+        ));
+        assert!(matches!(bl.segments[4].spec, ast::BinSpec::Utf8));
     }
 
     #[test]

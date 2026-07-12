@@ -10,9 +10,9 @@ use crate::token::{Kind, Trivia};
 
 pub mod doc;
 use doc::{
-    Breaks, Doc, block, delimited, delimited_commas_when_flat, delimited_hug,
-    delimited_no_trailing, group, group_as, hard_braces, hard_list, hard_list_bare, hardline,
-    hardlines, join, line, nest, nil, text,
+    Doc, block, delimited, delimited_commas_when_flat, delimited_hug, delimited_no_trailing, group,
+    group_willing, hard_braces, hard_list, hard_list_bare, hardline, hardlines, join, line, nest,
+    nil, text,
 };
 
 const MAX_WIDTH: isize = 100;
@@ -690,7 +690,7 @@ impl Formatter {
                         d![
                             self.comments_before(s.span),
                             self.expr(&s.value),
-                            self.bin_size_spec(s.kind, &s.size, is_string)
+                            self.bin_size_spec(&s.spec, is_string)
                         ]
                     })
                     .collect();
@@ -754,22 +754,19 @@ impl Formatter {
     /// `parse_bin_size_spec`. Int-kind with a literal width emits the bare
     /// `:N` shorthand; a dynamic Int width uses `:size(..)`. A string-literal
     /// segment's Utf8 kind is the parser default, so its `:utf8` is omitted.
-    fn bin_size_spec(
-        &self,
-        kind: ast::BinKind,
-        size: &Option<ast::Expression>,
-        value_is_string: bool,
-    ) -> Doc {
-        match (kind, size) {
-            (ast::BinKind::Int, None) => nil(),
-            (ast::BinKind::Int, Some(ast::Expression::NumberLiteral(n))) => {
-                d![text(":"), text(n.value.clone())]
+    fn bin_size_spec(&self, spec: &ast::BinSpec, value_is_string: bool) -> Doc {
+        match spec {
+            ast::BinSpec::Int { bits: None } => nil(),
+            ast::BinSpec::Int {
+                bits: Some(ast::Expression::NumberLiteral(n)),
+            } => d![text(":"), text(n.value.clone())],
+            ast::BinSpec::Int { bits: Some(e) } => d![text(":size("), self.expr(e), text(")")],
+            ast::BinSpec::Binary { bytes: None } => text(":binary"),
+            ast::BinSpec::Binary { bytes: Some(e) } => {
+                d![text(":bytes("), self.expr(e), text(")")]
             }
-            (ast::BinKind::Int, Some(e)) => d![text(":size("), self.expr(e), text(")")],
-            (ast::BinKind::Binary, None) => text(":binary"),
-            (ast::BinKind::Binary, Some(e)) => d![text(":bytes("), self.expr(e), text(")")],
-            (ast::BinKind::Utf8, _) if value_is_string => nil(),
-            (ast::BinKind::Utf8, _) => text(":utf8"),
+            ast::BinSpec::Utf8 if value_is_string => nil(),
+            ast::BinSpec::Utf8 => text(":utf8"),
         }
     }
 
@@ -954,7 +951,7 @@ impl Formatter {
             let tail = if doc::ends_line(&body) {
                 d![text(" -> "), body]
             } else {
-                group_as(Breaks::Willingly, nest(1, d![text(" ->"), line(), body]))
+                group_willing(nest(1, d![text(" ->"), line(), body]))
             };
             arms.push(d![head, guard, tail]);
         }
@@ -1004,7 +1001,7 @@ impl Formatter {
                         d![
                             self.comments_before(s.span),
                             self.pattern(&s.value),
-                            self.bin_size_spec(s.kind, &s.size, is_string)
+                            self.bin_size_spec(&s.spec, is_string)
                         ]
                     })
                     .collect();
@@ -1052,8 +1049,11 @@ impl Formatter {
                 }
                 d![text(head), delimited("(", items, ")")]
             }
-            P::Or { patterns, .. } => {
-                let ps: Vec<Doc> = patterns.iter().map(|p| self.pattern(p)).collect();
+            P::Or { first, rest, .. } => {
+                let ps: Vec<Doc> = std::iter::once(&**first)
+                    .chain(rest.iter())
+                    .map(|p| self.pattern(p))
+                    .collect();
                 join(ps, text(" | "))
             }
             P::Range { start, end, .. } => {
@@ -1314,6 +1314,9 @@ mod tests {
             ("comment_preserved_above_fn",
              "// hello\nfn a() Int { 1 }\n",
              "// hello\nfn a() Int {\n\t1\n}\n"),
+            ("multiline_block_comment_preserved_verbatim",
+             "/* a\n   b */\nfn a() Int { 1 }\n",
+             "/* a\n   b */\nfn a() Int {\n\t1\n}\n"),
         ];
         for (name, src, expected) in cases {
             let out = fmt(src);

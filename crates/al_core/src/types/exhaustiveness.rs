@@ -1,5 +1,6 @@
 use crate::ast;
 use crate::type_def::Type;
+use crate::typed_ir::slots::slot_labeled;
 use indexmap::IndexSet;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -12,7 +13,7 @@ use std::rc::Rc;
 /// and stores integers instead of `String`s and seen-ctor membership is a
 /// bitset lookup. Ids 0 and 1 are pre-reserved for the array constructors so
 /// `get_type_ctors` and `pat_to_string` can refer to them without a lookup.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Interner(IndexSet<String>);
 
 const EMPTY_LIST_ID: u32 = 0;
@@ -102,7 +103,7 @@ impl CtorInfo {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct TypeCtors {
     ctors: Vec<CtorInfo>,
     infinite: bool,
@@ -504,19 +505,17 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
                 let _ = write!(key, "@{}:{}", sp.start_line, sp.start_column);
             }
         }
-        match seg.kind {
-            ast::BinKind::Int => key.push('i'),
-            ast::BinKind::Binary => key.push('b'),
-            ast::BinKind::Utf8 => key.push('u'),
+        // The kind char also fixes the size's unit: 'i' widths are bits,
+        // 'b' sizes are bytes, so `<<x:16>>` and `<<x:bytes(16)>>` cannot
+        // share a key.
+        match &seg.spec {
+            ast::BinSpec::Int { .. } => key.push('i'),
+            ast::BinSpec::Binary { .. } => key.push('b'),
+            ast::BinSpec::Utf8 => key.push('u'),
         }
-        match &seg.size {
+        match seg.spec.size_expr() {
             None => {}
-            Some(ast::Expression::NumberLiteral(n)) => {
-                key.push_str(&n.value);
-                if seg.unit == ast::BinUnit::Bytes {
-                    key.push('B');
-                }
-            }
+            Some(ast::Expression::NumberLiteral(n)) => key.push_str(&n.value),
             Some(e) => {
                 let sp = e.span();
                 let _ = write!(key, "?{}:{}", sp.start_line, sp.start_column);
@@ -611,40 +610,31 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
             let id = interner.intern(&name.name);
             let pat_args: Rc<[Pat]> = match type_ctors.find(id) {
                 Some(ctor) => {
-                    // Slot args into field-DECLARATION order, mirroring the
-                    // compiler's `slot_ctor_args`: positional args fill
-                    // declaration slots left to right, labeled args land at
-                    // their field's declaration index, and any slot left empty
-                    // (including those covered by a `..` rest) becomes a
-                    // wildcard. Lowering in source order instead would permute
-                    // the usefulness matrix relative to real match semantics,
-                    // yielding unsound false-exhaustiveness (and false
-                    // positives) whenever labels name fields out of order.
-                    let arity = ctor.types.len();
-                    let mut slots: Vec<Option<Pat>> = vec![None; arity];
-                    let mut next_positional = 0usize;
-                    for a in args {
-                        let (idx, inner) = match a {
-                            ast::PatternArg::Positional(p) => {
-                                let i = next_positional;
-                                next_positional += 1;
-                                (i, p)
-                            }
-                            ast::PatternArg::Labeled { label, pattern } => (
-                                ctor.labels
-                                    .iter()
-                                    .position(|fl| fl == &label.name)
-                                    .unwrap_or(arity),
-                                pattern,
-                            ),
-                        };
-                        if idx < arity {
-                            slots[idx] = Some(lower_pattern(inner, &ctor.types[idx], interner));
+                    // Slot args into field-DECLARATION order with the same
+                    // `slot_labeled` the typechecker and elaborator use: any
+                    // slot left empty (including those covered by a `..` rest)
+                    // becomes a wildcard. Lowering in source order instead
+                    // would permute the usefulness matrix relative to real
+                    // match semantics, yielding unsound false-exhaustiveness
+                    // (and false positives) whenever labels name fields out of
+                    // order. Slotting errors are dropped: the typechecker has
+                    // already reported them, and the unplaced arg's slot
+                    // degrades to a wildcard here.
+                    let labels: Vec<&str> = ctor.labels.iter().map(String::as_str).collect();
+                    let supplied = args.iter().map(|a| match a {
+                        ast::PatternArg::Positional(p) => (None, p),
+                        ast::PatternArg::Labeled { label, pattern } => {
+                            (Some(label.name.as_str()), pattern)
                         }
-                    }
-                    slots
+                    });
+                    let (by_pos, _errors) = slot_labeled(&labels, ctor.types.len(), supplied);
+                    by_pos
                         .into_iter()
-                        .map(|p| p.unwrap_or(Pat::Wildcard))
+                        .zip(&ctor.types)
+                        .map(|(slot, field_t)| match slot {
+                            Some(p) => lower_pattern(p, field_t, interner),
+                            None => Pat::Wildcard,
+                        })
                         .collect()
                 }
                 // Unresolved type / unknown constructor: typing already reported
@@ -717,9 +707,9 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                 nullary(interner.intern(&bin_pattern_key(segments, rest.is_some())))
             }
         }
-        ast::Pattern::Or { patterns, .. } => Pat::Or {
-            patterns: patterns
-                .iter()
+        ast::Pattern::Or { first, rest, .. } => Pat::Or {
+            patterns: std::iter::once(&**first)
+                .chain(rest.iter())
                 .map(|p| lower_pattern(p, t, interner))
                 .collect(),
         },
@@ -1102,14 +1092,14 @@ mod tests {
     fn bin_seg(value: ast::Pattern, size: Option<&str>) -> ast::BinSegmentPat {
         ast::BinSegmentPat {
             value,
-            size: size.map(|n| {
-                ast::Expression::NumberLiteral(ast::NumberLiteral {
-                    value: n.to_string(),
-                    span: crate::span::Span::DUMMY,
-                })
-            }),
-            unit: ast::BinUnit::Bits,
-            kind: ast::BinKind::Int,
+            spec: ast::BinSpec::Int {
+                bits: size.map(|n| {
+                    ast::Expression::NumberLiteral(ast::NumberLiteral {
+                        value: n.to_string(),
+                        span: crate::span::Span::DUMMY,
+                    })
+                }),
+            },
             span: crate::span::Span::DUMMY,
         }
     }

@@ -1247,7 +1247,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
             E::BinaryLiteral(bl) => {
                 for seg in &bl.segments {
                     self.expr(&seg.value);
-                    if let Some(sz) = &seg.size {
+                    if let Some(sz) = seg.spec.size_expr() {
                         self.expr(sz);
                     }
                 }

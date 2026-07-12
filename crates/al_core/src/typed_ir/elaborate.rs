@@ -906,19 +906,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let segs = bl
             .segments
             .iter()
-            .map(|seg| match seg.kind {
-                ast::BinKind::Int => TypedBinSeg::Int {
+            .map(|seg| match &seg.spec {
+                ast::BinSpec::Int { bits } => TypedBinSeg::Int {
                     value: self.expr(&seg.value),
-                    bits: self.seg_bits(seg.size.as_ref(), seg.unit, 8),
+                    bits: self.seg_int_bits(bits.as_ref()),
                 },
-                ast::BinKind::Binary => TypedBinSeg::Binary {
+                ast::BinSpec::Binary { bytes } => TypedBinSeg::Binary {
                     value: self.expr(&seg.value),
-                    bits: seg
-                        .size
-                        .as_ref()
-                        .map(|sz| self.seg_bits(Some(sz), seg.unit, 0)),
+                    bits: bytes.as_ref().map(|sz| self.seg_bytes_bits(sz)),
                 },
-                ast::BinKind::Utf8 => TypedBinSeg::Utf8 {
+                ast::BinSpec::Utf8 => TypedBinSeg::Utf8 {
                     value: self.expr(&seg.value),
                 },
             })
@@ -926,41 +923,35 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         TypedExpr::BinLit { ty, segs }
     }
 
-    /// A `<<..>>` segment's width in bits: the size expression scaled by its
-    /// unit, or the kind's default.
+    /// An `Int` segment's width in bits: the `:N` / `:size(..)` expression,
+    /// or the default 8.
+    fn seg_int_bits(&mut self, bits: Option<&ast::Expression>) -> TypedExpr {
+        match bits {
+            None => TypedExpr::Const {
+                ty: self.int_rty(),
+                value: self.ctx.int_const(8),
+            },
+            Some(e) => self.expr(e),
+        }
+    }
+
+    /// A `Binary` segment's `:bytes(..)` size scaled to bits.
     ///
     /// The scale is `Op::Mul`, not `Op::MulInt`. It is a synthesised node, not
     /// one the checker specialised, and today's lowering emits exactly this —
     /// changing it would move the opcode histogram for no semantic gain.
-    fn seg_bits(
-        &mut self,
-        size: Option<&ast::Expression>,
-        unit: ast::BinUnit,
-        default: i64,
-    ) -> TypedExpr {
+    fn seg_bytes_bits(&mut self, bytes: &ast::Expression) -> TypedExpr {
         let int_r = self.int_rty();
-        match size {
-            None => TypedExpr::Const {
-                ty: int_r,
-                value: self.ctx.int_const(default),
-            },
-            Some(e) => {
-                let v = self.expr(e);
-                if unit == ast::BinUnit::Bytes {
-                    let eight = TypedExpr::Const {
-                        ty: int_r,
-                        value: self.ctx.int_const(8),
-                    };
-                    TypedExpr::Binary {
-                        ty: int_r,
-                        op: Op::Mul,
-                        lhs: Box::new(v),
-                        rhs: Box::new(eight),
-                    }
-                } else {
-                    v
-                }
-            }
+        let v = self.expr(bytes);
+        let eight = TypedExpr::Const {
+            ty: int_r,
+            value: self.ctx.int_const(8),
+        };
+        TypedExpr::Binary {
+            ty: int_r,
+            op: Op::Mul,
+            lhs: Box::new(v),
+            rhs: Box::new(eight),
         }
     }
 

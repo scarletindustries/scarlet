@@ -311,9 +311,73 @@ pub struct ImportItem {
     pub alias: Option<Identifier>,
 }
 
+/// A relative marker segment of an import path: the `.` / `..` in
+/// `import ../lib/util`. A distinct type — not the literal strings "." /
+/// ".." inside the name list — so the resolver can never confuse a marker
+/// with a module name (or vice versa: a module literally named `.` cannot
+/// be smuggled in as a marker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelSeg {
+    /// `.` — the importing file's own directory.
+    CurrentDir,
+    /// `..` — one directory up.
+    ParentDir,
+}
+
+impl std::fmt::Display for RelSeg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RelSeg::CurrentDir => ".",
+            RelSeg::ParentDir => "..",
+        })
+    }
+}
+
+/// A module path as written in an `import`: relative markers first, module
+/// names after. The split makes "markers lead, names follow" structurally
+/// true — `import a/../b` is unrepresentable, not merely rejected.
+#[derive(Debug, Clone)]
+pub struct ImportPath {
+    /// Leading `.` / `..` segments; empty for stdlib (`al/...`) and bare paths.
+    pub leading: Vec<RelSeg>,
+    /// The module-name segments (`al`/`string` in `import al/string`).
+    pub names: Vec<String>,
+}
+
+impl ImportPath {
+    /// Wrap an already-canonical, non-relative path (a stdlib `al/...` path
+    /// or a resolved file identity) as an import with no relative markers.
+    pub fn canonical(names: Vec<String>) -> Self {
+        ImportPath {
+            leading: Vec::new(),
+            names,
+        }
+    }
+
+    pub fn is_relative(&self) -> bool {
+        !self.leading.is_empty()
+    }
+}
+
+/// The path as the user wrote it, `/`-joined (e.g. `../lib/util`).
+impl std::fmt::Display for ImportPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut sep = "";
+        for seg in &self.leading {
+            write!(f, "{sep}{seg}")?;
+            sep = "/";
+        }
+        for name in &self.names {
+            write!(f, "{sep}{name}")?;
+            sep = "/";
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ImportDeclaration {
-    pub path: Vec<String>,
+    pub path: ImportPath,
     pub alias: Option<Identifier>,
     pub items: Vec<ImportItem>,
     /// Span of the final module-name path segment (e.g. `string` in `import al/string`).
@@ -497,27 +561,38 @@ pub enum ArrayElement {
     SpreadElement(SpreadElement),
 }
 
-/// Size unit for a `<<>>` segment's `:N` / `:bytes(N)` spec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinUnit {
-    Bits,
-    Bytes,
+/// The parsed `:spec` suffix of a `<<>>` segment: how the value is encoded
+/// into / decoded from the binary, and how wide it is. An `Int` width is
+/// always in bits, a `Binary` size always in bytes, and `Utf8` never carries
+/// a size — no other combination is expressible.
+#[derive(Debug, Clone)]
+pub enum BinSpec {
+    /// `:N` / `:size(expr)` — an integer of `bits` bits; `None` means the
+    /// default width (8, supplied downstream).
+    Int { bits: Option<Expression> },
+    /// `:bytes(expr)` — a sub-binary of `bytes` bytes; `:binary` (`None`)
+    /// consumes the remainder.
+    Binary { bytes: Option<Expression> },
+    /// `:utf8`, or the default for a bare string segment.
+    Utf8,
 }
 
-/// How a `<<>>` segment's value is encoded into / decoded from the binary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinKind {
-    Int,
-    Binary,
-    Utf8,
+impl BinSpec {
+    /// The runtime size expression, if the spec carries one
+    /// (`:N` / `:size(expr)` / `:bytes(expr)`).
+    pub fn size_expr(&self) -> Option<&Expression> {
+        match self {
+            BinSpec::Int { bits } => bits.as_ref(),
+            BinSpec::Binary { bytes } => bytes.as_ref(),
+            BinSpec::Utf8 => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BinSegment {
     pub value: Expression,
-    pub size: Option<Expression>,
-    pub unit: BinUnit,
-    pub kind: BinKind,
+    pub spec: BinSpec,
     pub span: Span,
 }
 
@@ -564,8 +639,11 @@ pub enum Pattern {
         span: Span,
     },
     Literal(PatternLiteral),
+    /// `p | q | ..` — at least two alternatives: `first` and the non-empty
+    /// tail the parser accumulated after the first `|`.
     Or {
-        patterns: Vec<Pattern>,
+        first: Box<Pattern>,
+        rest: Vec<Pattern>,
         span: Span,
     },
     Range {
@@ -599,16 +677,14 @@ pub enum ArrayPatternElement {
 #[derive(Debug, Clone)]
 pub struct BinSegmentPat {
     pub value: Pattern,
-    pub size: Option<Expression>,
-    pub unit: BinUnit,
-    pub kind: BinKind,
+    pub spec: BinSpec,
     pub span: Span,
 }
 
 impl BinSegmentPat {
     /// The string of a `<<'literal'>>` (Utf8 string-literal) pattern segment.
     pub fn utf8_literal(&self) -> Option<&str> {
-        if self.kind != BinKind::Utf8 {
+        if !matches!(self.spec, BinSpec::Utf8) {
             return None;
         }
         match &self.value {
@@ -705,7 +781,7 @@ impl Pattern {
             Pattern::Binary { segments, rest, .. } => {
                 for seg in segments {
                     seg.value.for_each_binder(or_mode, f);
-                    if let Some(sz) = &seg.size {
+                    if let Some(sz) = seg.spec.size_expr() {
                         f(PatternBinder::SizeExpr(sz));
                     }
                 }
@@ -715,18 +791,14 @@ impl Pattern {
                     f(PatternBinder::Name(id));
                 }
             }
-            Pattern::Or { patterns, .. } => match or_mode {
-                OrAlternatives::All => {
-                    for p in patterns {
+            Pattern::Or { first, rest, .. } => {
+                first.for_each_binder(or_mode, f);
+                if or_mode == OrAlternatives::All {
+                    for p in rest {
                         p.for_each_binder(or_mode, f);
                     }
                 }
-                OrAlternatives::First => {
-                    if let Some(first) = patterns.first() {
-                        first.for_each_binder(or_mode, f);
-                    }
-                }
-            },
+            }
         }
     }
 }

@@ -48,7 +48,7 @@
 //!   a scope replays only the bindings it actually shadowed, never a map
 //!   snapshot.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -58,7 +58,7 @@ use super::{Function, Op, PreludeBindings, Program, TypeRef, Value, op, op_arg};
 use crate::ast;
 use crate::core_ir::CoreFn;
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
-use crate::frozen::FrozenBuilder;
+use crate::frozen::{FrozenBuilder, FrozenConst};
 use crate::tivec::Idx;
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
@@ -161,18 +161,33 @@ enum FieldMismatch {
 // CompileResult
 // ============================================================================
 
+/// The artifacts one compile materialises together: the bytecode `Program`
+/// and the Core IR it was derived from. A `check` still carries one — the
+/// function table it registers is mode-independent and pinned by
+/// `crates/al/tests/check_parity.rs` — its bodies are simply never emitted.
+#[derive(Debug)]
+pub struct Emitted {
+    pub program: Program,
+    /// Lowered Core IR (typed ANF) for the whole program.
+    /// Golden-snapshotted by `crates/al/tests/core_ir.rs`.
+    pub core: crate::core_ir::CoreProgram,
+}
+
 #[derive(Debug)]
 pub struct CompileResult {
-    pub program: Program,
+    /// What the compile built, when it built anything. `None` means no
+    /// program exists at all: the incremental (LSP) session's check path,
+    /// which analyses without materialising a result, and a compile whose
+    /// stdlib seed failed before the program was touched. Consumers that run
+    /// or disassemble must unwrap the absence explicitly — handing a real
+    /// `entry` index over empty code is unrepresentable.
+    pub emitted: Option<Emitted>,
     pub diagnostics: Vec<Diagnostic>,
     /// Workspace reference graph (the single source of truth for goto-def /
     /// find-refs / rename / symbols / dead-code). An owned `Rc` handle so the
     /// owning `IncrementalSession` can keep answering queries against the same
     /// graph after the result is handed back.
     pub references: Rc<ReferenceGraph>,
-    /// Lowered Core IR (typed ANF) for the whole program.
-    /// Golden-snapshotted by `crates/al/tests/core_ir.rs`.
-    pub core: crate::core_ir::CoreProgram,
     pub success: bool,
 }
 
@@ -437,7 +452,9 @@ pub struct Compiler {
     /// interface (every exported type and constructor) so the set is derived
     /// from `al.al` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
-    pub(super) reserved: HashSet<String>,
+    /// `BTreeSet` so `precompile_stdlib`'s snapshot iterates sorted — the
+    /// blob's `RESERVED` slice must be reproducible (and binary-searchable).
+    pub(super) reserved: BTreeSet<String>,
     /// When the binary is built with the static stdlib, this is the
     /// `&'static StaticStdlib` handle; lazy-hydrate fallthrough lookups consult
     /// it on a runtime-map miss. `None` for the from-source path
@@ -547,7 +564,7 @@ struct Elaborated {
 /// A module toplevel's entry-frame slot pinnings ride the IR itself: `lower`
 /// copied `TypedBind::global` — stamped by `ElabCtx::global_slot` during
 /// elaboration — onto each module-scope `Let`'s `CoreBind`, and
-/// [`Compiler::append_toplevel_init`] reads them back off the body via
+/// `emit_toplevel` reads them back off the body it emits via
 /// `CoreExpr::toplevel_globals`. So a def/use mismatch against the
 /// `PushGlobal <slot>` already baked into every emitted fn body is
 /// unspellable: there is no side table to desync from the binds it describes.
@@ -821,7 +838,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         imported_qualifiers: HashMap::new(),
         base_dir: base_dir.map(|p| p.to_path_buf()),
         prelude: PreludeBindings::default(),
-        reserved: HashSet::new(),
+        reserved: BTreeSet::new(),
         static_stdlib: None,
         core: crate::core_ir::CoreProgram::default(),
         frame_closures: Vec::new(),
@@ -898,11 +915,12 @@ fn compile_impl(
             None => c.register_prelude(),
         }
         if has_errors(&c.engine.diagnostics) {
+            // The seed itself failed: the user's program was never compiled,
+            // so there is nothing to hand back — not even a partial one.
             return CompileResult {
-                program: c.program,
+                emitted: None,
                 diagnostics: c.engine.diagnostics,
                 references: Rc::new(ReferenceGraph::new()),
-                core: c.core,
                 success: false,
             };
         }
@@ -1035,10 +1053,12 @@ fn compile_impl(
     let (references, _facts) = c.finalize_references();
     let success = !has_errors(&c.engine.diagnostics);
     CompileResult {
-        program: c.program,
+        emitted: Some(Emitted {
+            program: c.program,
+            core: c.core,
+        }),
         diagnostics: c.engine.diagnostics,
         references,
-        core: c.core,
         success,
     }
 }
@@ -1049,7 +1069,7 @@ fn compile_impl(
 pub(crate) struct CompilerParts {
     pub(crate) program: Program,
     pub(crate) prelude: PreludeBindings,
-    pub(crate) reserved: HashSet<String>,
+    pub(crate) reserved: BTreeSet<String>,
     pub(crate) next_type_id: TypeId,
     pub(crate) local_count: i32,
 }
@@ -1127,7 +1147,7 @@ impl Compiler {
         // watermark, so they are never truncated and never overwritten in
         // place (a colliding user type gets its own id and its own entry).
         for (name, idx) in s.typeinfo_by_name {
-            let ti = s.typeinfos[*idx as usize];
+            let ti = s.typeinfos[idx.0 as usize];
             self.env.type_info.insert((*name).to_string(), ti);
             self.env.type_info_by_id.insert(ti.id, ti);
         }
@@ -1204,20 +1224,20 @@ impl Compiler {
 
     /// Pool a frozen Int constant.
     fn const_int(&mut self, i: i64) -> i32 {
-        let v = self.frozen.int(i);
+        let v = self.frozen.int(i).into_value();
         self.add_constant(v)
     }
 
     /// Pool a frozen string constant (interned: every pool entry with the
     /// same contents shares one frozen allocation).
     fn const_str(&mut self, s: &str) -> i32 {
-        let v = self.frozen.str(s);
+        let v = self.frozen.str(s).into_value();
         self.add_constant(v)
     }
 
     /// Pool a frozen binary constant of `bit_len` bits.
     fn const_binary(&mut self, bytes: Vec<u8>, bit_len: u64) -> i32 {
-        let v = self.frozen.binary_bits(bytes, bit_len);
+        let v = self.frozen.binary_bits(bytes, bit_len).into_value();
         self.add_constant(v)
     }
 
@@ -1528,7 +1548,7 @@ impl Compiler {
     pub(super) fn note(&mut self, msg: String, sp: Span) {
         self.engine
             .diagnostics
-            .push(Diagnostic::hint(sp, DiagnosticCode::Other, msg));
+            .push(Diagnostic::hint(sp, DiagnosticCode::RelatedLocation, msg));
     }
 
     fn unused_binding(&mut self, name: &str, sp: Span) {
@@ -1694,10 +1714,11 @@ impl Compiler {
         is_pub: bool,
         kind: DefinitionKind,
     ) {
-        let defid = self.defid_of(dl);
+        let loc = self.defid_of(dl);
+        let def = Definition::new(loc.module, loc.span, name, doc, is_pub, kind);
+        let defid = def.defid;
         let first = self.module_refs.definition(defid).is_none();
-        self.module_refs
-            .add_definition(Definition::new(defid, name, doc, is_pub, kind));
+        self.module_refs.add_definition(def);
         if first {
             self.module_refs.add_reference(
                 Some(defid),
@@ -2042,17 +2063,19 @@ impl Compiler {
         let Some((canon, key)) = self.load_module(&imp.path, imp.span) else {
             return;
         };
-        self.module_display.insert(key.clone(), imp.path.join("/"));
+        self.module_display
+            .insert(key.clone(), imp.path.to_string());
 
+        // The default qualifier is the last module-name segment; relative
+        // markers live in `path.leading`, so they can't be picked up here.
         let qualifier = imp
             .alias
             .as_ref()
             .map(|a| a.name.clone())
             .unwrap_or_else(|| {
                 imp.path
-                    .iter()
-                    .rev()
-                    .find(|s| s.as_str() != "." && s.as_str() != "..")
+                    .names
+                    .last()
                     .cloned()
                     .unwrap_or_else(|| key.as_str().to_string())
             });
@@ -2075,7 +2098,8 @@ impl Compiler {
         let imported_mid = self.ref_interner.intern(&canon);
         let alias_defid = DefId::new(cur_mid, alias_span, EntityKind::ModuleAlias);
         self.module_refs.add_definition(Definition::new(
-            alias_defid,
+            cur_mid,
+            alias_span,
             qualifier.clone(),
             None,
             false,
@@ -2163,7 +2187,8 @@ impl Compiler {
                     let alias_defid = self.defid_of(alias_dl);
                     let canonical = vdef.map(|dl| self.defid_of(dl));
                     let mut def = Definition::new(
-                        alias_defid,
+                        alias_defid.module,
+                        alias_defid.span,
                         local_name.clone(),
                         None,
                         false,
@@ -2254,13 +2279,17 @@ impl Compiler {
 
     pub(crate) fn load_module(
         &mut self,
-        path: &ModulePath,
+        path: &ast::ImportPath,
         at: Span,
     ) -> Option<(ModulePath, ModuleKey)> {
         let resolved = match module::resolve(path, self.base_dir.as_deref()) {
             Ok(r) => r,
-            Err(ResolveError::NotFound(p)) => {
-                self.module_error(format!("Unknown module '{p}' (not found)"), at);
+            Err(ResolveError::FileNotFound(p)) => {
+                self.module_error(format!("file not found: {}", p.display()), at);
+                return None;
+            }
+            Err(ResolveError::NoSuchStdlibModule(p)) => {
+                self.module_error(format!("no such stdlib module {}", p.join("/")), at);
                 return None;
             }
             Err(ResolveError::BareName(p)) => {
@@ -2337,6 +2366,7 @@ impl Compiler {
         let origin = match source_path {
             Some(path) => ModuleOrigin::File {
                 source_hash: hash,
+                stat: None,
                 watermark: body.watermark,
                 path,
                 refs,
@@ -2501,17 +2531,8 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{top}", self.engine.str(top.name));
         }
-        // The slot pinnings ride the binds themselves, so reading them off the
-        // post-Perceus body hands `emit_toplevel` a `preassigned` that cannot
-        // disagree with the IR it is emitting.
-        let preassigned: Vec<(crate::core_ir::LocalId, i32)> = top
-            .body
-            .toplevel_globals()
-            .into_iter()
-            .map(|(id, slot)| (id, slot.0))
-            .collect();
         let base = self.program.code.len() as i32;
-        let mut out = emit::emit_toplevel(&top.body, slot_base, &preassigned, self);
+        let mut out = emit::emit_toplevel(&top.body, slot_base, self);
         // A function body links by plain append because its block starts at its
         // own `Function.code_start`. This block does not: it is spliced into the
         // *entry* frame, whose `code_start` is 0 (it must run the module-init
@@ -3017,14 +3038,13 @@ impl Compiler {
     fn compile_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> Ty {
         for seg in &bl.segments {
             let vty = self.compile_expr(&seg.value);
-            let expected = match seg.kind {
-                ast::BinKind::Int => self.ty_int(),
-                ast::BinKind::Binary => self.ty_binary(),
-                ast::BinKind::Utf8 => self.ty_string(),
+            let expected = match seg.spec {
+                ast::BinSpec::Int { .. } => self.ty_int(),
+                ast::BinSpec::Binary { .. } => self.ty_binary(),
+                ast::BinSpec::Utf8 => self.ty_string(),
             };
             self.engine.unify_at(expected, vty, seg.value.span());
-            // `:utf8` never carries a size expression (see parse_bin_size_spec).
-            self.type_seg_size(seg.size.as_ref());
+            self.type_seg_size(seg.spec.size_expr());
         }
         self.ty_binary()
     }
@@ -4631,10 +4651,10 @@ impl Compiler {
     /// literal `0`: the compile has already failed.
     fn const_number(&mut self, n: &ast::NumberLiteral) -> Value {
         match number_literal_value(&n.value, &mut self.frozen) {
-            Ok(v) => v,
+            Ok(v) => v.into_value(),
             Err(e) => {
                 self.error(e.message(&n.value), n.span);
-                e.recovery(&mut self.frozen)
+                e.recovery(&mut self.frozen).into_value()
             }
         }
     }
@@ -4657,10 +4677,7 @@ fn pattern_is_refutable(p: &ast::Pattern) -> bool {
     match p {
         ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => false,
         ast::Pattern::Tuple { elements, .. } => elements.iter().any(pattern_is_refutable),
-        ast::Pattern::Or { patterns, .. } => match patterns.last() {
-            Some(last) => pattern_is_refutable(last),
-            None => true,
-        },
+        ast::Pattern::Or { first, rest, .. } => pattern_is_refutable(rest.last().unwrap_or(first)),
         _ => true,
     }
 }
@@ -4705,7 +4722,7 @@ impl NumLitError {
     /// Value to substitute so codegen can continue after the diagnostic has
     /// been emitted. Kind-preserving so the inferred type still matches user
     /// intent and the compile doesn't cascade into spurious type errors.
-    fn recovery(&self, frozen: &mut FrozenBuilder) -> Value {
+    fn recovery(&self, frozen: &mut FrozenBuilder) -> FrozenConst {
         match self {
             NumLitError::IntOutOfRange => frozen.int(0),
             NumLitError::InvalidFloat => frozen.float(0.0),
@@ -4720,7 +4737,7 @@ impl NumLitError {
 /// obtain a fabricated `Value` for out-of-domain input. The only
 /// `Value`-producing path for callers is [`Compiler::const_number`], which
 /// emits a diagnostic before recovering.
-fn number_literal_value(s: &str, frozen: &mut FrozenBuilder) -> Result<Value, NumLitError> {
+fn number_literal_value(s: &str, frozen: &mut FrozenBuilder) -> Result<FrozenConst, NumLitError> {
     if s.contains('.') {
         s.parse()
             .map(|f| frozen.float(f))

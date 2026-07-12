@@ -307,8 +307,11 @@ impl<C: PatCtx> PatElab<'_, C> {
             }
             ast::Pattern::Array { elements, span } => self.array(elements, scrut, *span),
             ast::Pattern::Binary { segments, rest, .. } => self.bin(segments, rest.as_ref(), scrut),
-            ast::Pattern::Or { patterns, .. } => {
-                let alts = patterns.iter().map(|a| self.pat(a, scrut)).collect();
+            ast::Pattern::Or { first, rest, .. } => {
+                let alts = std::iter::once(&**first)
+                    .chain(rest.iter())
+                    .map(|a| self.pat(a, scrut))
+                    .collect();
                 TypedPat::Or { ty: scrut, alts }
             }
             ast::Pattern::Range { start, end, .. } => {
@@ -447,26 +450,23 @@ impl<C: PatCtx> PatElab<'_, C> {
             let bits = self.cx.int_const(width);
             return TypedBinPatSeg::Utf8Literal { bytes, bits };
         }
-        match seg.kind {
-            ast::BinKind::Utf8 => {
+        match &seg.spec {
+            ast::BinSpec::Utf8 => {
                 // `BinReadUtf8` yields the codepoint as an `Int`.
                 let int_t = self.cx.ty_int();
                 TypedBinPatSeg::Utf8 {
                     value: self.pat(&seg.value, int_t),
                 }
             }
-            ast::BinKind::Binary => {
+            ast::BinSpec::Binary { bytes } => {
                 // A sizeless `:binary` consumes the remainder; `lower` knows
                 // that from `bits: None` rather than from a missing AST node.
-                let bits = seg
-                    .size
-                    .as_ref()
-                    .map(|sz| self.seg_bits(Some(sz), seg.unit, 8));
+                let bits = bytes.as_ref().map(|sz| self.seg_bytes_bits(sz));
                 let value = self.pat(&seg.value, scrut);
                 TypedBinPatSeg::Binary { bits, value }
             }
-            ast::BinKind::Int => {
-                let bits = self.seg_bits(seg.size.as_ref(), seg.unit, 8);
+            ast::BinSpec::Int { bits } => {
+                let bits = self.seg_int_bits(bits.as_ref());
                 let int_t = self.cx.ty_int();
                 let value = self.pat(&seg.value, int_t);
                 TypedBinPatSeg::Int { bits, value }
@@ -474,28 +474,29 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
     }
 
-    /// A segment's width *in bits*: the default when there is no `size(..)`,
-    /// and the `unit` multiplier already folded in. `lower` reads a plain `Int`
-    /// expression and never re-derives either.
+    /// An `Int` segment's width *in bits*: the `:N` / `:size(..)` expression,
+    /// or the default 8. `lower` reads a plain `Int` expression and never
+    /// re-derives the default.
+    fn seg_int_bits(&mut self, bits: Option<&ast::Expression>) -> TypedExpr {
+        let ty = self.cx.ty_int();
+        match bits {
+            None => {
+                let value = self.cx.int_const(8);
+                TypedExpr::Const { ty, value }
+            }
+            Some(e) => self.cx.expr(e),
+        }
+    }
+
+    /// A `Binary` segment's `:bytes(..)` size scaled to bits, so `lower`
+    /// never re-derives the unit.
     ///
     /// The multiply is the generic `Op::Mul`, matching what `lower` emits
     /// today; specialising it to `MulInt` is a typed-opcode change and belongs
     /// with the rest of them, not here.
-    fn seg_bits(
-        &mut self,
-        size: Option<&ast::Expression>,
-        unit: ast::BinUnit,
-        default: i64,
-    ) -> TypedExpr {
+    fn seg_bytes_bits(&mut self, bytes: &ast::Expression) -> TypedExpr {
         let ty = self.cx.ty_int();
-        let Some(e) = size else {
-            let value = self.cx.int_const(default);
-            return TypedExpr::Const { ty, value };
-        };
-        let v = self.cx.expr(e);
-        if unit != ast::BinUnit::Bytes {
-            return v;
-        }
+        let v = self.cx.expr(bytes);
         let eight = self.cx.int_const(8);
         TypedExpr::Binary {
             ty,
@@ -1051,10 +1052,8 @@ mod tests {
         cx.ctor("Wrap", 1, &["v"], &[int]);
 
         let or = ast::Pattern::Or {
-            patterns: vec![
-                ctor_pat("Cons", vec![pos(var("x")), pos(wild())], false),
-                ctor_pat("Wrap", vec![pos(var("x"))], false),
-            ],
+            first: Box::new(ctor_pat("Cons", vec![pos(var("x")), pos(wild())], false)),
+            rest: vec![ctor_pat("Wrap", vec![pos(var("x"))], false)],
             span: Span::DUMMY,
         };
         let p = elaborate_pattern(&mut cx, &or, user);
@@ -1108,17 +1107,10 @@ mod tests {
         assert!(cx.scope.is_empty());
     }
 
-    fn seg(
-        value: ast::Pattern,
-        size: Option<ast::Expression>,
-        unit: ast::BinUnit,
-        kind: ast::BinKind,
-    ) -> ast::BinSegmentPat {
+    fn seg(value: ast::Pattern, spec: ast::BinSpec) -> ast::BinSegmentPat {
         ast::BinSegmentPat {
             value,
-            size,
-            unit,
-            kind,
+            spec,
             span: Span::DUMMY,
         }
     }
@@ -1137,21 +1129,19 @@ mod tests {
                         value: "hi".to_string(),
                         span: Span::DUMMY,
                     })),
-                    None,
-                    ast::BinUnit::Bits,
-                    ast::BinKind::Utf8,
+                    ast::BinSpec::Utf8,
                 ),
                 // `n:8` — the Int default.
-                seg(var("n"), None, ast::BinUnit::Bits, ast::BinKind::Int),
-                // `m:size(k)-bytes` — the unit multiplier is folded in.
+                seg(var("n"), ast::BinSpec::Int { bits: None }),
+                // `m:bytes(2)` — the bytes-to-bits multiplier is folded in.
                 seg(
                     var("m"),
-                    Some(ast::Expression::NumberLiteral(num(2))),
-                    ast::BinUnit::Bytes,
-                    ast::BinKind::Int,
+                    ast::BinSpec::Binary {
+                        bytes: Some(ast::Expression::NumberLiteral(num(2))),
+                    },
                 ),
                 // `b:binary` — sizeless, consumes the remainder.
-                seg(var("b"), None, ast::BinUnit::Bits, ast::BinKind::Binary),
+                seg(var("b"), ast::BinSpec::Binary { bytes: None }),
             ],
             rest: Some(ast::BinaryPatternRest {
                 binding: Some(ident("tail")),
@@ -1197,7 +1187,9 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match &segs[2] {
-            TypedBinPatSeg::Int { bits, .. } => match bits {
+            TypedBinPatSeg::Binary {
+                bits: Some(bits), ..
+            } => match bits {
                 TypedExpr::Binary { op, rhs, .. } => {
                     assert_eq!(*op, Op::Mul);
                     let TypedExpr::Const { value, .. } = rhs.as_ref() else {
@@ -1229,7 +1221,7 @@ mod tests {
         let int = cx.int;
         let bin_t = cx.binary;
         let p = ast::Pattern::Binary {
-            segments: vec![seg(var("c"), None, ast::BinUnit::Bits, ast::BinKind::Utf8)],
+            segments: vec![seg(var("c"), ast::BinSpec::Utf8)],
             rest: None,
             span: Span::DUMMY,
         };

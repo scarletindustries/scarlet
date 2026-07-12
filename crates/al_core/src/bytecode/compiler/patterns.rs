@@ -35,9 +35,9 @@ impl Compiler {
                     if seg.utf8_literal().is_some() {
                         continue;
                     }
-                    let seg_val_ty = match seg.kind {
-                        ast::BinKind::Int | ast::BinKind::Utf8 => self.ty_int(),
-                        ast::BinKind::Binary => self.ty_binary(),
+                    let seg_val_ty = match seg.spec {
+                        ast::BinSpec::Int { .. } | ast::BinSpec::Utf8 => self.ty_int(),
+                        ast::BinSpec::Binary { .. } => self.ty_binary(),
                     };
                     ok &= self.type_pattern(&seg.value, seg_val_ty, b);
                 }
@@ -148,22 +148,18 @@ impl Compiler {
                 expected,
                 b,
             ),
-            ast::Pattern::Or { patterns, .. } => {
+            ast::Pattern::Or { first, rest, .. } => {
                 // Scope the canonical binding set to this or-pattern: `enter_or`
                 // pushes a frame whose first alternative establishes the
                 // canonical set; `finish` pops it and folds the bound names
                 // into the enclosing frame so a sibling binding after the
                 // or-pattern still sees them for duplicate detection.
                 let mut or = b.enter_or();
-                let mut ok = true;
-                let mut iter = patterns.iter();
-                if let Some(first) = iter.next() {
-                    ok &= self.type_pattern(first, expected, or.bindings());
-                }
-                for alt in iter {
-                    or.enter_alternative();
-                    ok &= self.type_pattern(alt, expected, or.bindings());
-                    ok &= or.finish_alternative(alt.span(), &mut self.engine);
+                let mut ok = self.type_pattern(first, expected, or.bindings());
+                for alt in rest {
+                    let mut a = or.enter_alternative();
+                    ok &= self.type_pattern(alt, expected, a.bindings());
+                    ok &= a.finish(alt.span(), &mut self.engine);
                 }
                 or.finish();
                 ok
