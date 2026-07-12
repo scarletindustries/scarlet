@@ -63,7 +63,7 @@ use crate::span::Span;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
 use crate::types::{
-    AddedTypeVar, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, NO_STR, Scheme, StrId, Ty,
+    AddedTypeVar, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme, StrId, Ty,
     TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
 };
 
@@ -192,17 +192,24 @@ impl<'a> Prepared<'a> {
 /// the same name collapsed those maps to one entry while `type_decls` kept
 /// both — the exact desync class as the fn/`Prepared` bug. Carrying this in a
 /// `Vec` built one-to-one with `type_decls` makes the desync unrepresentable:
-/// Pass 3.5 reads it positionally, never by name. Aliases push a placeholder
-/// entry (`TypeId::NONE`, `NO_STR`, empty hydrator) that is dropped unread by
-/// `register_constructors`' non-`Variants` early return.
-struct PreparedType {
-    type_id: TypeId,
-    name_id: StrId,
-    hydrator: Hydrator,
-    param_tys: Vec<Ty>,
-    /// The `TypeParam` slice registered on the type head — needed by Pass 3.5
-    /// to `close_body` each stored field template at registration.
-    type_params: ArenaSlice<pool::TypeParams>,
+/// Pass 3.5 reads it positionally, never by name.
+///
+/// Aliases have no head registered in Pass 1 (Pass 2 owns them) and so no
+/// data to carry: they get the `Alias` variant, not a sentinel-filled `Head`,
+/// so a consumer cannot read placeholder fields as real — the type forces it
+/// to handle the alias case.
+enum PreparedType {
+    Head {
+        type_id: TypeId,
+        name_id: StrId,
+        hydrator: Hydrator,
+        param_tys: Vec<Ty>,
+        /// The `TypeParam` slice registered on the type head — needed by Pass
+        /// 3.5 to `close_body` each stored field template at registration.
+        type_params: ArenaSlice<pool::TypeParams>,
+    },
+    /// `type X = ...` — registered in Pass 2, nothing for Pass 3.5 to read.
+    Alias,
 }
 
 /// Hydrated shape of one `fn` declaration's signature. Returned by
@@ -347,13 +354,7 @@ impl Compiler {
         let mut prepared_types: Vec<PreparedType> = Vec::with_capacity(type_decls.len());
         for (td, is_public) in &type_decls {
             if matches!(td.body, ast::TypeBody::Alias(_)) {
-                prepared_types.push(PreparedType {
-                    type_id: TypeId::NONE,
-                    name_id: NO_STR,
-                    hydrator: Hydrator::new(),
-                    param_tys: Vec::new(),
-                    type_params: ArenaSlice::EMPTY,
-                });
+                prepared_types.push(PreparedType::Alias);
                 continue;
             }
             let (h, type_params, param_tys) = self.hydrate_type_params(&td.type_params);
@@ -366,7 +367,7 @@ impl Compiler {
             if matches!(td.body, ast::TypeBody::External) {
                 self.env.set_type_body(type_id, TypeBody::External);
             }
-            prepared_types.push(PreparedType {
+            prepared_types.push(PreparedType::Head {
                 type_id,
                 name_id,
                 hydrator: h,
@@ -525,6 +526,10 @@ impl Compiler {
         // a later `let` cannot re-point a name a decl body already resolved.
         // -------------------------------------------------------------------
         self.begin_deferred_elaboration();
+        // Each decl's final scheme, filled positionally as its SCC is
+        // generalized. Tarjan covers every node, so every entry is `Some`
+        // by the time the export loop below reads it.
+        let mut final_schemes: Vec<Option<Scheme>> = vec![None; prepared.len()];
         for scc in &sccs {
             self.engine.enter_level();
             let mut inferred: Vec<(usize, Ty)> = Vec::with_capacity(scc.len());
@@ -630,22 +635,27 @@ impl Compiler {
                     scheme.kind = ValueKind::Local;
                 }
                 self.env.define(p.name(), scheme);
+                final_schemes[idx] = Some(scheme);
             }
         }
 
-        // Export fns/consts now that schemes are final.
-        for p in &prepared {
-            if let Some(&s) = self.env.lookup(p.name()) {
-                export_value(
-                    iface.as_deref_mut(),
-                    p.name(),
-                    p.is_pub(),
-                    s,
-                    Some(p.slot()),
-                    p.param_names(),
-                    p.doc(),
-                );
-            }
+        // Export fns/consts now that schemes are final. Read each scheme
+        // positionally from `final_schemes` — never back out of the env by
+        // name, which desyncs under shadowing (see the module invariant
+        // above). Iterated in `prepared` (source) order, not SCC order:
+        // `ModuleInterface.values` is an `IndexMap`, so insertion order is
+        // the order importers observe.
+        for (p, s) in prepared.iter().zip(final_schemes) {
+            let s = s.unwrap_or_else(|| panic!("decl '{}' was never generalized", p.name()));
+            export_value(
+                iface.as_deref_mut(),
+                p.name(),
+                p.is_pub(),
+                s,
+                Some(p.slot()),
+                p.param_names(),
+                p.doc(),
+            );
         }
 
         // -------------------------------------------------------------------
@@ -851,21 +861,23 @@ impl Compiler {
         pt: PreparedType,
         iface: &mut Option<&mut ModuleInterface>,
     ) {
-        let ast::TypeBody::Variants { ctors, opaque } = &td.body else {
+        let (
+            ast::TypeBody::Variants { ctors, opaque },
+            PreparedType::Head {
+                type_id,
+                name_id: type_name_id,
+                hydrator: mut h,
+                param_tys: param_generics,
+                type_params,
+            },
+        ) = (&td.body, pt)
+        else {
             // Aliases and externals have no constructors; just export the type info.
             let ti = self.env.lookup_type_info(&td.identifier.name);
             export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
         };
         let ctors_public = is_public && !*opaque;
-
-        let PreparedType {
-            type_id,
-            name_id: type_name_id,
-            hydrator: mut h,
-            param_tys: param_generics,
-            type_params,
-        } = pt;
         h.disallow_new_type_variables();
         h.require_declared_fn_return();
 
