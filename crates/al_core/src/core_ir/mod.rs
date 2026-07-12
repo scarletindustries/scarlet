@@ -185,8 +185,12 @@ pub enum Atom {
     /// `emit(Let{rhs=PrimOp})` is `PushLocal args; op{operand=imm}; StoreLocal`.
     /// `imm` is the instruction's immediate operand — an index (`TupleIndex`,
     /// `GetField`, `PushGlobal`, `PushCapture`, `ElemAt`), an argc (`MakeArray`,
-    /// `MakeTuple`, `StrConcatN`, `BinConcatN`, `Prepend`, `Append`), or 0 for
-    /// ops that carry none. `lower` sets it; `emit` passes it through verbatim.
+    /// `MakeTuple`, `StrConcatN`, `BinConcatN`, `Prepend`, `Append`), a
+    /// `ConstId` or `-1` (`Op::IndexOr` — `lower`'s `index_or` rides a constant
+    /// default in the operand, `-1` means "default was pushed"), or 0 for ops
+    /// that carry none. `lower` sets it; `emit` passes it through verbatim. A
+    /// typed imm enum (`Index(u16) | Argc(u32) | Const(ConstId) | None`) is the
+    /// eventual fence here.
     PrimOp {
         op: Op,
         args: Vec<LocalId>,

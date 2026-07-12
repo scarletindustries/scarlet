@@ -21,9 +21,12 @@
 //!    scheduler thread takes a plain `clone()` of the shared program — no
 //!    owned mirror, no per-thread constant re-hydration.
 //!
-//! Adding an opcode touches two places: emission in [`compiler`] and
-//! dispatch in the VM's interpreter loop. Heap values the op builds are
-//! reference counted, so it simply allocates its result.
+//! Adding an opcode touches four places: (1) [`Op::has_jump_target`]'s
+//! exhaustive match (compile-enforced — a new opcode does not build until its
+//! operand is classified), (2) emission in [`compiler`], (3) dispatch in the
+//! VM's interpreter loop, and (4) [`builtin_op`] name registration if it is
+//! exposed as a `@vm` intrinsic. Heap values the op builds are reference
+//! counted, so it simply allocates its result.
 //!
 //! # Reading order
 //!

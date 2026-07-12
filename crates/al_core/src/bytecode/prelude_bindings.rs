@@ -150,7 +150,11 @@ macro_rules! prelude_bindings {
         }
 
         impl PreludeBindings {
-            pub const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
+            /// Name/arity of every prelude type binding. Exists for the
+            /// capture-error tests below, which register the types without
+            /// their constructors.
+            #[cfg(test)]
+            const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
 
             pub fn capture(env: &TypeEnv) -> Result<Self, PreludeCaptureError> {
                 let ty = |name: &'static str, expected: usize| -> Result<TypeRef, PreludeCaptureError> {

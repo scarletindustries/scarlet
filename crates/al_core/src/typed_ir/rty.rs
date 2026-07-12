@@ -220,11 +220,6 @@ impl ResolvedPool {
         }
     }
 
-    /// Arity of a function type; `0` for anything else.
-    pub fn arity(&self, t: RTy) -> Arity {
-        Arity::of(self.fun_params(t))
-    }
-
     /// Nominal id → primitive, by id and never by name.
     fn as_prim(&self, id: TypeId) -> Option<Prim> {
         if id == self.prims.int {
@@ -349,8 +344,8 @@ mod tests {
         let f = p.mk_fun(&[int, res], nil);
         assert_eq!(p.fun_params(f), &[int, res]);
         assert_eq!(p.fun_ret(f), Some(nil));
-        assert_eq!(p.arity(f), Arity(2));
-        assert_eq!(p.arity(int), Arity(0));
+        assert_eq!(Arity::of(p.fun_params(f)), Arity(2));
+        assert_eq!(Arity::of(p.fun_params(int)), Arity(0));
         assert_eq!(p.fun_ret(int), None);
     }
 }

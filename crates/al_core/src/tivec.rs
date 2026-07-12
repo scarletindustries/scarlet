@@ -47,13 +47,6 @@ impl<I: Idx, T> TiVec<I, T> {
         }
     }
 
-    pub fn with_capacity(n: usize) -> Self {
-        TiVec {
-            raw: Vec::with_capacity(n),
-            _idx: PhantomData,
-        }
-    }
-
     pub fn len(&self) -> usize {
         self.raw.len()
     }
@@ -81,25 +74,12 @@ impl<I: Idx, T> TiVec<I, T> {
     }
 
     /// True when `i` names an element of this vector.
-    pub fn contains_idx(&self, i: I) -> bool {
+    fn contains_idx(&self, i: I) -> bool {
         i.index() < self.raw.len()
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.raw.iter()
-    }
-
-    /// `(index, &element)` pairs — `enumerate()` that yields `I`, not `usize`.
-    pub fn iter_enumerated(&self) -> impl Iterator<Item = (I, &T)> {
-        self.raw
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (I::from_usize(i), v))
-    }
-
-    /// Every valid index, in order.
-    pub fn indices(&self) -> std::iter::Map<std::ops::Range<usize>, fn(usize) -> I> {
-        (0..self.raw.len()).map(I::from_usize as fn(usize) -> I)
     }
 
     pub fn as_slice(&self) -> &[T] {
@@ -247,20 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn indices_and_enumeration_agree() {
-        let v: TiVec<A, u8> = (0..4u8).collect();
-        let by_index: Vec<u8> = v.indices().map(|i| v[i]).collect();
-        let by_enum: Vec<u8> = v.iter_enumerated().map(|(_, &x)| x).collect();
-        assert_eq!(by_index, by_enum);
-        assert_eq!(v.indices().next_back(), Some(A(3)));
-        assert!(v.contains_idx(A(3)));
-        assert!(!v.contains_idx(A(4)));
-    }
-
-    #[test]
     fn resize_at_least_grows_only_when_the_index_is_out_of_range() {
         let mut v: TiVec<A, u8> = TiVec::new();
+        assert!(!v.contains_idx(A(2)));
         v.resize_at_least(A(2), 9);
+        assert!(v.contains_idx(A(2)));
         assert_eq!(v.as_slice(), &[9, 9, 9]);
         v[A(0)] = 1;
         v.resize_at_least(A(1), 9);

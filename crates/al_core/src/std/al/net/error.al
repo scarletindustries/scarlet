@@ -1,10 +1,10 @@
-// Typed errors for network and socket operations. Two kinds of variant live
+// Typed errors for network and socket operations. Three kinds of variant live
 // here: the errno-mirroring ones (TimedOut through PermissionDenied, plus the
-// Errno catch-all), which the VM maps from OS failures following Rust's
-// std::io::ErrorKind, and four AL-level protocol/validation errors raised
-// directly by stdlib code — UnexpectedEof, MessageTooLarge, UnalignedBinary,
-// and InvalidPort. Either way a caller `match`es the exact failure rather
-// than parsing a message string.
+// Errno catch-all), which the VM maps from the raw OS errno (names mirror
+// Rust's std::io::ErrorKind); UnexpectedEof and MessageTooLarge, raised by AL
+// stdlib protocol code; and UnalignedBinary and InvalidPort, raised by the VM
+// itself. Either way a caller `match`es the exact failure rather than parsing
+// a message string.
 pub type NetError {
 	// No data (or no connection) arrived before the deadline. (ETIMEDOUT)
 	TimedOut

@@ -329,15 +329,6 @@ pub fn delimited_no_trailing(open: &'static str, items: Vec<Doc>, close: &'stati
     delimited_with(open, items, close, d![text(","), line()], line0())
 }
 
-/// Like `delimited`, but items are separated by a single space when flat and by
-/// newlines when broken, with no commas and no trailing separator. For the
-/// constructs whose separator punctuation was removed from the grammar
-/// (constructor fields, type args/params, fn-type params, import items,
-/// attribute args) — their items are self-delimiting, so the comma was noise.
-pub fn delimited_ws(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
-    delimited_with(open, items, close, line(), line0())
-}
-
 /// `{ body }` on one line, or broken across lines with the body indented.
 pub fn block(body: Doc) -> Doc {
     if body.is_nil() {

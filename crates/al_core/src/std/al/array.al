@@ -18,7 +18,7 @@ pub fn fold(xs Array(a), init b, f fn(b, a) b) b {
 }
 
 // Runs f on every element for its side effect; if you want a value out, use map or fold.
-pub fn each(xs Array(a), f fn(a) b) Nil {
+pub fn each(xs Array(a), f fn(a) Nil) Nil {
 	match xs {
 		[] -> Nil
 		[h, ..t] -> {
@@ -35,6 +35,8 @@ pub fn reverse(xs Array(a)) Array(a) {
 @vm(array__length)
 fn length_raw(xs Array(a)) Int
 
+// @vm decls are not first-class values; the wrapper keeps array.length
+// passable as a function.
 pub fn length(xs Array(a)) Int {
 	length_raw(xs)
 }

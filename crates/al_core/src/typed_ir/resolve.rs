@@ -34,7 +34,7 @@ use crate::core_ir::{FuncIdx, VariantRef};
 use crate::types::{StrId, ValueKind};
 
 use super::{
-    Arity, BindingId, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef,
+    Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef,
 };
 
 /// How a statically-known function is *called*.
@@ -83,7 +83,8 @@ pub enum ValueForm {
 pub enum EtaTarget {
     /// Arity comes from the declaration, not from the (instantiated) type.
     Ctor { variant: VariantRef, arity: Arity },
-    /// Arity is the wrapped type's `ResolvedPool::arity`.
+    /// Arity comes from the instantiated function type via `FnRTy` — the only
+    /// constructor proving the type is a `Fun`.
     Builtin { op: Op },
 }
 
@@ -99,11 +100,6 @@ pub enum CallForm {
 }
 
 impl Denotation {
-    /// A binding the elaborator itself minted in the current function.
-    pub fn local(id: BindingId) -> Self {
-        Denotation(Den::Value(ValueRef::Local(id)))
-    }
-
     /// A raw frame slot the module walk assigned — see [`ValueRef::Slot`].
     pub fn slot(slot: FrameSlot) -> Self {
         Denotation(Den::Value(ValueRef::Slot(slot)))

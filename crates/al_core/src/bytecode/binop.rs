@@ -70,9 +70,10 @@ impl BinopKind {
 
 /// Pick the opcode for an operator, specialized to the operand's prim when
 /// inference has resolved one. An unresolved (still polymorphic) operand keeps
-/// the generic op so the VM's tag-dispatching path handles it. Core IR
-/// elaboration is the only caller — it is the sole bytecode emit route — so this
-/// is where a new specialization belongs.
+/// the generic op so the VM's tag-dispatching path handles it. Typed IR
+/// elaboration (`typed_ir::elaborate`) is the only caller — it is the sole
+/// route from source operators to opcodes — so this is where a new
+/// specialization belongs.
 ///
 /// Total: every `(ValueBinop, Option<Prim>)` names an opcode.
 pub fn specialize_binop(op: ValueBinop, prim: Option<Prim>) -> Op {

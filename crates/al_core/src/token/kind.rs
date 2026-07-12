@@ -57,9 +57,11 @@ pub enum Kind {
     PuncMod,
 }
 
-/// Displays the source text of the token: the payload for text-bearing kinds,
-/// the fixed spelling otherwise. No quoting — error sites that want quotes
-/// add their own.
+/// Display for diagnostics, not source reconstruction: the payload for
+/// text-bearing kinds, the fixed spelling for punctuation/operators/keywords,
+/// and a human-readable description for `Eof` and the interpolation
+/// delimiters (which have no single spelling). No quoting — error sites that
+/// want quotes add their own.
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {

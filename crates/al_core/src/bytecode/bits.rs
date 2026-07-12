@@ -58,10 +58,11 @@ pub fn tail_mask(bit_len: u64) -> Option<u8> {
 /// Copy `n` logical bits of `src` starting at bit `src_at` into `dst` starting
 /// at bit `dst_at` (MSB-first). Caller guarantees `dst` holds bits
 /// `[dst_at, dst_at + n)` and `src` holds bits `[src_at, src_at + n)`; unlike
-/// [`read_byte`], an out-of-window access panics. The all-byte-aligned span is
-/// a `memcpy`; only ragged edges take the per-bit loop, so an N-way concat
-/// through this is O(total bits). Writes overwrite (not OR), so `dst` need not
-/// be pre-zeroed.
+/// [`read_byte`], an out-of-window access panics. When *both* `dst_at` and
+/// `src_at` are multiples of 8, the whole-byte prefix is a `memcpy` and only
+/// the ragged tail takes the per-bit loop; any unaligned start copies the
+/// entire span bit by bit. Writes overwrite (not OR), so `dst` need not be
+/// pre-zeroed.
 pub fn copy_bits(dst: &mut [u8], dst_at: u64, src: &[u8], src_at: u64, n: u64) {
     let mut done = 0u64;
     if dst_at.is_multiple_of(8) && src_at.is_multiple_of(8) {
