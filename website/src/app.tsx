@@ -49,11 +49,10 @@ export const sections: Section[] = [
         id: "intro-http",
         code: `import al/http
 
-http.serve(
-    '0.0.0.0',
-    8080,
-    fn(_req) http.text('Hello from al/http!'),
-) or e -> println('serve failed: \${e}')`,
+match http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) {
+    Ok(_) -> println('Listening on http://localhost:8080')
+    Err(e) -> println('serve failed: \${e}')
+}`,
       },
       "Each connection is handled by its own process. A process is a piece of runtime state costing a few hundred bytes, cheap enough to start one per connection and forget about it. The runtime schedules processes across every CPU core. Code inside a process reads like it blocks, and when it waits on a socket, the runtime parks it and runs another one. The language has no `async` keyword and no locks.",
       "There is no null and there are no exceptions. A function that can fail returns a `Result`, a value that can be absent is an `Option`, and the type checker rejects programs that ignore either case. Both unwrap with the `or` keyword.",
@@ -423,24 +422,24 @@ more = [0, ..numbers, 6]
 println(combined)  // [1, 2, 3, 4]
 println(more)      // [0, 1, 2, 3, 4, 5, 6]`,
       },
-      "`al/list` has the usual functions over arrays:",
+      "`al/array` has the usual functions over arrays:",
       {
-        id: "list-functions",
-        code: `import al/list
+        id: "array-functions",
+        code: `import al/array
 
 numbers = [1, 2, 3, 4, 5]
 
-doubled = list.map(numbers, fn(n) n * 2)
-evens = list.filter(numbers, fn(n) n % 2 == 0)
-total = list.fold(numbers, 0, fn(acc, n) acc + n)
+doubled = array.map(numbers, fn(n) n * 2)
+evens = array.filter(numbers, fn(n) n % 2 == 0)
+total = array.fold(numbers, 0, fn(acc, n) acc + n)
 
 println(doubled)  // [2, 4, 6, 8, 10]
 println(evens)    // [2, 4]
 println(total)    // 15
 
-println(list.reverse(numbers))         // [5, 4, 3, 2, 1]
-println(list.contains(numbers, 3))     // True
-println(list.find(numbers, fn(n) n > 3))  // Some(4)`,
+println(array.reverse(numbers))         // [5, 4, 3, 2, 1]
+println(array.contains(numbers, 3))     // True
+println(array.find(numbers, fn(n) n > 3))  // Some(4)`,
       },
     ],
   },
@@ -506,8 +505,8 @@ println(person.age)   // 30`,
         id: "sum-types",
         code: `type Expr {
     Num(value Int)
-    Add(left Expr right Expr)
-    Mul(left Expr right Expr)
+    Add(left Expr, right Expr)
+    Mul(left Expr, right Expr)
 }
 
 type Status {
@@ -532,11 +531,11 @@ println(Banned('spam'))  // Banned(spam)`,
       "Constructors are ordinary functions. Pass them anywhere a function goes.",
       {
         id: "constructors-as-functions",
-        code: `import al/list
+        code: `import al/array
 
 type Wrapper { Box(value Int) }
 
-boxed = list.map([1, 2, 3], Box)
+boxed = array.map([1, 2, 3], Box)
 println(boxed)  // [Box(1), Box(2), Box(3)]`,
       },
     ],
@@ -580,11 +579,11 @@ println(doubled)      // [2, 4, 6]`,
       "Types take parameters the same way. The binary search tree below stores any element type: `to_array` walks a `Tree(t)`, while `insert` compares values with `<` and so takes a `Tree(Int)`.",
       {
         id: "generic-types",
-        code: `import al/list
+        code: `import al/array
 
 type Tree(t) {
     Leaf
-    Node(left Tree(t) value t right Tree(t))
+    Node(left Tree(t), value t, right Tree(t))
 }
 
 // In-order walk: left subtree, value, right subtree
@@ -605,7 +604,7 @@ fn insert(tree Tree(Int), x Int) Tree(Int) {
     }
 }
 
-tree = list.fold([5, 3, 8, 1, 9, 2, 7], Leaf, insert)
+tree = array.fold([5, 3, 8, 1, 9, 2, 7], Leaf, insert)
 println(to_array(tree))  // [1, 2, 3, 5, 7, 8, 9]
 
 // The same to_array works on a Tree(String)
@@ -626,7 +625,10 @@ println(to_array(names))  // [grace, linus]`,
       "`type X = Y` declares an alias: a second name for the same type, interchangeable with the original. To make a distinct type that wraps another, declare a constructor instead. The wrapper does not unify with what it wraps, so the checker keeps them apart.",
       {
         id: "type-aliases",
-        code: `type Pair(a, b) { first a second b }
+        code: `type Pair(a, b) {
+    first a
+    second b
+}
 
 // Aliases: interchangeable with the right-hand side
 type Id = Int
@@ -701,7 +703,11 @@ println(handle(Nack('oops')))  // failed: oops`,
       "Patterns on records may name the fields they care about and ignore the rest with `..`. Single-constructor types destructure directly in a binding, no match needed.",
       {
         id: "field-patterns",
-        code: `type User { name String age Int email String }
+        code: `type User {
+    name String
+    age Int
+    email String
+}
 
 fn name_of(u User) String {
     match u {
@@ -710,7 +716,11 @@ fn name_of(u User) String {
 }
 
 // Irrefutable destructuring in a binding
-type Point { x Int y Int }
+type Point {
+    x Int
+    y Int
+}
+
 Point(x: a, y: b) = Point(x: 3, y: 4)
 
 println(name_of(User(name: 'alice', age: 30, email: 'a@b.c')))  // alice
@@ -843,7 +853,10 @@ fn describe(s Status) String {
       "`Option(a)` is a value that might not exist: `Some(value)` or `None`. `Result(t, e)` is an operation that might fail: `Ok(value)` or `Err(error)`. Both are ordinary types from the prelude. Nothing about them is built into the compiler except the `or` keyword for unwrapping them.",
       {
         id: "option",
-        code: `type User { id Int name String }
+        code: `type User {
+    id Int
+    name String
+}
 
 fn find_user(id Int) Option(User) {
     if id == 0 { None }
@@ -949,6 +962,23 @@ println(quote('hi'))        // "hi"   (imported directly)
 
 id = Id(value: 7)
 println(string.inspect(id))  // Id(7)`,
+      },
+      "Constructors also work through the module qualifier, in expressions and in patterns. Matching on `io.NotFound` reads clearer than importing `NotFound` by name and cannot collide with another module's `NotFound`.",
+      {
+        id: "qualified-constructors",
+        code: `import al/io
+
+path = 'no-such-file.txt'
+
+text = io.read_text(path) or err -> {
+    match err {
+        io.NotFound(p) -> println('missing: \${p}')
+        else -> println('read failed: \${err}')
+    }
+    ''
+}
+
+println(text)`,
       },
     ],
   },
@@ -1071,41 +1101,32 @@ println('main: done spawning, waiting at exit')
     id: "sockets",
     title: "Sockets",
     body: [
-      "`al/net` listens for and opens TCP connections; `al/net/socket` reads and writes them. A read parks the calling process until bytes arrive, and a write parks it until the kernel accepts the bytes. Nothing else stops while a process waits.",
-      "The shape of a server: listen, accept in a loop, spawn a process per connection.",
+      "`al/net` listens for and opens TCP connections; `al/net/socket` reads and writes them. A read parks the calling process until bytes arrive or the peer closes the connection, and a write parks it until the kernel accepts the bytes. Nothing else stops while a process waits.",
+      "The shape of a server: listen, then hand each accepted connection to its own process. `net.serve` and `net.serve_on` do the accept loop for you, running one acceptor per core, all draining the same listener.",
       {
         id: "sockets",
         code: `import al/net
-import al/net/socket.{Socket}
-import al/binary
-import al/scheduler
+import al/net/socket.{Socket, Data, Closed}
 
 // Echo every byte a client sends until it disconnects
 fn echo(sock Socket) Nil {
     match socket.read(sock, 65536) {
-        Ok(data) -> if binary.byte_size(data) == 0 {
-            // Zero bytes means the client closed the connection
-            socket.close(sock) or Nil
-        } else {
-            socket.write(sock, data) or Nil
+        Ok(Data(bytes)) -> {
+            socket.write(sock, bytes) or Nil
             echo(sock)
         }
+        // The client closed the connection, or the read failed
+        Ok(Closed) -> socket.close(sock) or Nil
         Err(_) -> socket.close(sock) or Nil
     }
 }
 
-fn serve(server) {
-    match net.accept(server) {
-        Ok(sock) -> scheduler.spawn(fn() echo(sock))
-        Err(e) -> println('accept failed: \${e}')
-    }
-    serve(server)
-}
-
+// One process per connection, all draining the listener's shared accept
+// queue. net.serve does exactly this in the standard library.
 match net.listen('127.0.0.1', 7777) {
     Ok(server) -> {
         println('echo server on port 7777')
-        serve(server)
+        net.serve_on(server, echo)
     }
     Err(e) -> println('listen failed: \${e}')
 }`,
@@ -1149,35 +1170,29 @@ println(content)  // hello file`,
         id: "http-routes",
         code: `import al/http
 import al/http.{Request, Response}
-import al/binary
-
-const ROOT = binary.from_string('/')
-const HELLO = binary.from_string('/hello')
 
 fn handler(req Request) Response {
-    if req.path == ROOT {
-        http.text('home page')
-    } else if req.path == HELLO {
-        http.text('hello!')
-    } else {
-        http.not_found()
+    match http.path(req) {
+        <<'/'>> -> http.text('home page')
+        <<'/hello'>> -> http.text('hello!')
+        else -> http.not_found()
     }
 }
 
-http.serve('0.0.0.0', 8080, handler) or e -> {
-    println('serve failed: \${e}')
+match http.serve('0.0.0.0', 8080, handler) {
+    Ok(_) -> println('Listening on http://localhost:8080')
+    Err(e) -> println('serve failed: \${e}')
 }`,
       },
-      "The request gives you `method`, `path`, `version`, `headers`, and `body`. Responses are built with `http.text`, `http.ok`, `http.not_found`, and `http.with_header`.",
+      "The request gives you `method`, `target`, `version`, `headers`, `trailers`, and `body`. `http.path` and `http.query` split an origin-form target. Responses are built with `http.text`, `http.ok`, `http.not_found`, and `http.with_header`.",
       "If you want to see what AL looks like at the level below `al/http`, here is a server written straight on sockets. It answers pipelined requests and serves each connection in its own process. This is `examples/http_server.al` in the repository:",
       {
         id: "http-full",
-        code: `import al/scheduler
-import al/net.{Server}
-import al/net/socket.{Socket}
+        code: `import al/net
+import al/net/socket.{Socket, Data, Closed}
 import al/string
 import al/binary
-import al/list
+import al/array
 import al.{Ok}
 
 const body = 'Hello from AL!'
@@ -1188,8 +1203,8 @@ const response = binary.from_string('\${header}\${body}')
 // blank line; clients may pipeline several into one packet.
 fn count_requests(data Binary) Int {
     match binary.to_string(data) {
-        Ok(text) -> list.length(string.split(text, '\\r\\n\\r\\n')) - 1
-        else -> 0
+        Ok(text) -> array.length(string.split(text, '\\r\\n\\r\\n')) - 1
+        Err(_) -> 0
     }
 }
 
@@ -1205,42 +1220,24 @@ fn responses(n Int, parts Array(Binary)) Array(Binary) {
 // Serve one connection: answer every request it sends until it closes.
 fn respond(sock Socket) Nil {
     match socket.read(sock, 65536) {
-        Ok(data) -> match binary.byte_size(data) {
-            // Zero bytes read: the client closed the connection.
-            0 -> socket.close(sock) or Nil
-            else -> {
-                n = count_requests(data)
-                match n {
-                    // No complete request yet; read more.
-                    0 -> respond(sock)
-                    else -> {
-                        socket.write_parts(sock, responses(n, [])) or Nil
-                        respond(sock)
-                    }
-                }
+        Ok(Data(data)) -> match count_requests(data) {
+            // No complete request yet; read more.
+            0 -> respond(sock)
+            n -> {
+                socket.write_parts(sock, responses(n, [])) or Nil
+                respond(sock)
             }
         }
-        else -> socket.close(sock) or Nil
+        Ok(Closed) -> socket.close(sock) or Nil
+        Err(_) -> socket.close(sock) or Nil
     }
 }
 
-// Accept connections forever. Each connection is handled by its own process,
-// and the runtime spreads those processes across every CPU core.
-fn serve(server Server) {
-    match net.accept(server) {
-        Ok(sock) -> scheduler.spawn(fn() respond(sock))
-        Err(e) -> println('accept failed: \${e}')
-    }
-
-    serve(server)
-}
-
-match net.listen('0.0.0.0', 8080) {
-    Err(e) -> println('listen failed: \${e}')
-    Ok(server) -> {
-        println('Listening on http://localhost:8080')
-        serve(server)
-    }
+// net.serve runs an accept loop on every core, each connection handled by its
+// own process on the core that accepted it, all draining one shared listener.
+match net.serve('0.0.0.0', 8080, respond) {
+    Ok(_) -> println('Listening on http://localhost:8080')
+    Err(e) -> println('serve failed: \${e}')
 }`,
       },
       "The standard library's own implementation, `al/http` plus its `h1` parser, body streaming, and header handling, is about a thousand lines of AL. It covers keep-alive, pipelining, Expect: 100-continue, Content-Length framing, and the request smuggling rejects from RFC 7230. Reading it is a decent way to learn the language.",
@@ -1258,24 +1255,32 @@ match net.listen('0.0.0.0', 8080) {
       {
         id: "stdlib-list",
         plain: true,
-        code: `al/list      map, filter, fold, reverse, length, contains, find, any, all, concat
+        code: `al/array     map, filter, fold, each, reverse, length, contains, find, any,
+             all, concat
 al/string    split, length, contains, trim, inspect
-al/int       to_string, max, min, abs, clamp
+al/int       to_string, max, min, min_value, max_value, abs, clamp
 al/float     floor, ceil, round, truncate, from_int, to_string, max, min, abs
 al/bool      negate, to_string
+al/decimal   fixed-point arithmetic
 al/option    map, then, unwrap, or_else, is_some, is_none
 al/result    map, map_err, then, unwrap, is_ok, is_err
+al/map       new, set, get, delete, has, keys, values, size, to_list,
+             from_list, fold, merge
 al/binary    from_string, to_string, bit_size, byte_size, slice, slice_bytes,
              append, index_of, byte_at, parse_int, eq_ignore_ascii_case,
              to_ascii_lower, from_int_ascii
 al/io        read_file, write_file, read_text, write_text
-al/net       listen, accept, connect, local_addr, close
-al/net/socket    read, read_exact, write, write_parts, close
-al/net/address   to_string, ip_to_string
-al/http      serve, text, ok, not_found, with_header
+al/net       listen, listen_addr, accept, serve, serve_on, connect,
+             connect_addr, resolve, local_addr, close
+al/net/socket    read, read_exact, read_within, read_until, write,
+                 write_parts, close
+al/net/address   parse, to_string, ip_to_string, is_v6
+al/http      serve, serve_on, text, ok, not_found, with_header, path, query
 al/http/h1   sans-IO HTTP/1.1 parser
 al/http/body al/http/headers al/http/status
-al/scheduler   spawn, sleep`,
+al/scheduler   spawn, spawn_local, spawn_on_each, sleep
+al/time      monotonic, add_ms, since_ms, to_deadline_ms
+al/process   argv, env, get_env`,
       },
       "Anything missing from this list does not exist yet. The source for all of it is in `crates/al_core/src/std/al/` in the repository, and it reads like the examples on this page.",
     ],
@@ -1292,15 +1297,15 @@ al/scheduler   spawn, sleep`,
       {
         id: "tooling-commands",
         plain: true,
-        code: `al run <file.al>     Type check, compile, and run a program
-al check <path>      Type check without running
-al fmt [path]        Format source files
-al repl              Interactive session
-al lsp               Language server
-al build <file.al>   Parse a program and print its AST
-al upgrade           Swap the binary for a newer build`,
+        code: `al run <file.al> [args]  Type check, compile, and run a program
+al check <path>          Type check without running
+al fmt [path]            Format source files
+al dis <file.al>         Print the compiled bytecode
+al repl                  Interactive session
+al lsp                   Language server
+al upgrade               Swap the binary for a newer build`,
       },
-      "The formatter has no configuration. `al fmt --check` verifies formatting without changing files. The REPL keeps definitions across entries. The language server does hover types, go to definition, and diagnostics; the VSCode extension in the repository wires it up.",
+      "The formatter has no configuration. `al fmt --check` verifies formatting without changing files. The REPL keeps definitions across entries. `al dis --fn NAME` shows one function's bytecode instead of the whole program. The language server does hover types, go to definition, find references, rename, and diagnostics; the VSCode extension in the repository wires it up.",
       "Type errors point at the code that caused them, with the source line shown:",
       {
         id: "type-error",
