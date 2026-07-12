@@ -2664,16 +2664,15 @@ fn env_map_hash() -> u64 {
 /// `(Str, Str)` pair present in the environment with an equal value. Count
 /// equality plus containment is a bijection because HAMT keys are distinct.
 /// Non-UTF-8 environment entries are excluded, as in [`env_map_hash`].
+/// The environment is snapshotted once — probing per entry via `env::var`
+/// would be an O(env) scan per key and case-insensitive on Windows, where a
+/// HAMT with case-variant duplicate keys could falsely compare equal.
 fn env_equals_hamt(m: MapRef<'_>) -> bool {
-    let env_len = std::env::vars_os()
-        .filter(|(k, v)| k.to_str().is_some() && v.to_str().is_some())
-        .count();
-    super::hamt::hamt_matches(m, env_len, |k, v| match (k.as_str(), v.as_str()) {
-        // `env::var` may panic on names no environment can contain (empty,
-        // `=`, NUL) — such a key is simply absent, never a panic.
-        (Some(k), Some(v)) if !k.is_empty() && !k.contains(['=', '\0']) => {
-            std::env::var(k).is_ok_and(|ev| ev == v)
-        }
+    let env: std::collections::HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    super::hamt::hamt_matches(m, env.len(), |k, v| match (k.as_str(), v.as_str()) {
+        (Some(k), Some(v)) => env.get(k).is_some_and(|ev| ev == v),
         _ => false,
     })
 }
