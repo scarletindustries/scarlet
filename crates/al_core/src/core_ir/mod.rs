@@ -105,10 +105,10 @@ pub struct CoreBind {
     /// the bind rather than in a `CoreProgram`-level `Vec<(LocalId, i32)>`
     /// because every later pass rewrites binds: a parallel `LocalId`-keyed
     /// table desyncs the moment one renumbers or drops a bind, whereas a field
-    /// travels with the binding it describes. `emit_toplevel`'s `preassigned`
-    /// argument is derived from the body it is handed
-    /// ([`CoreExpr::toplevel_globals`]), so no caller can pass a pinning that
-    /// disagrees with the IR.
+    /// travels with the binding it describes. `emit_toplevel` derives the
+    /// pinning itself from the body it emits
+    /// ([`CoreExpr::toplevel_globals`]) — it takes no pinning argument, so a
+    /// pinning that disagrees with the IR is unrepresentable.
     pub global: Option<GlobalSlot>,
 }
 
@@ -324,9 +324,9 @@ impl CoreExpr {
     /// [`crate::typed_ir::TypedBind::global`] onto each decl's [`CoreBind`];
     /// module decls are spine bindings by construction, so the walk steps
     /// through the `Drop`s Perceus interleaves and stops at the first join
-    /// point. `emit_toplevel`'s `preassigned` argument is derived from the
-    /// body it is handed via this walk, so no caller can pass a pinning that
-    /// disagrees with the IR.
+    /// point. `emit_toplevel` derives its pinning from the body it emits via
+    /// this walk — it takes no pinning argument, so a pinning that disagrees
+    /// with the IR is unrepresentable.
     pub fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
         let mut out = Vec::new();
         let mut cur = self;

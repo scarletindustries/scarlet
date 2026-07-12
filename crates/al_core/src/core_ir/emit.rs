@@ -106,19 +106,19 @@ pub fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
 }
 
 /// Lower a bare expression (module toplevel). `slot_base` is the first
-/// entry-frame slot this file may allocate; `preassigned` pins specific
-/// `LocalId`s (the top-level `fn`/`const` decls) to the exact slots
-/// `analyse_module` already handed out — the fn bodies emitted during that
-/// walk reference those slots via `PushGlobal`, so the entry-frame init
-/// **must** `StoreLocal` to the same indices. Every other bind (compound-init
-/// temporaries, top-level `let`s, expression spills) is allocated linearly
-/// past the preassigned range.
-pub fn emit_toplevel<C: EmitCtx>(
-    body: &CoreExpr,
-    slot_base: i32,
-    preassigned: &[(LocalId, i32)],
-    ctx: &mut C,
-) -> EmitOut {
+/// entry-frame slot this file may allocate. The slot pinnings for the
+/// top-level `fn`/`const` decls ride the body's own binds
+/// ([`CoreExpr::toplevel_globals`]) — the exact slots `analyse_module`
+/// already handed out. The fn bodies emitted during that walk reference
+/// those slots via `PushGlobal`, so the entry-frame init **must**
+/// `StoreLocal` to the same indices; deriving the pinning here, from the
+/// body being emitted, makes a disagreeing pinning unrepresentable. A
+/// `GlobalSlot` unwraps to a plain frame slot at this point because the
+/// entry frame *is* the global table — this function's premise. Every
+/// other bind (compound-init temporaries, top-level `let`s, expression
+/// spills) is allocated linearly past the preassigned range.
+pub fn emit_toplevel<C: EmitCtx>(body: &CoreExpr, slot_base: i32, ctx: &mut C) -> EmitOut {
+    let preassigned = body.toplevel_globals();
     let mut e = Emitter::new(ctx);
     e.scan = Scan::of(body);
     // The entry frame's `StoreLocal`s double as the program's global-table
@@ -131,13 +131,13 @@ pub fn emit_toplevel<C: EmitCtx>(
     // `next_slot++` never collides with a pinned slot.
     let spill = preassigned
         .iter()
-        .map(|&(_, s)| s + 1)
+        .map(|&(_, s)| s.0 + 1)
         .fold(slot_base, i32::max);
     e.next_slot = spill;
     e.max_locals = spill;
-    for &(id, slot) in preassigned {
+    for &(id, slot) in &preassigned {
         e.preassigned.resize_at_least(id, None);
-        e.preassigned[id] = Some(slot);
+        e.preassigned[id] = Some(slot.0);
     }
     // Not `emit_expr`: the entry frame is `__main__`, whose slots *are* the
     // program's globals — a `TailCall`/`Ret` here would collapse that frame
@@ -773,16 +773,20 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
 
     /// Emit `then`/`els` after the already-emitted conditional jump at
     /// `else_j`. Both arms restart slot allocation from the current mark: they
-    /// are mutually exclusive, so their temps may overlap.
+    /// are mutually exclusive, so their temps may overlap. In tail position
+    /// there is no merge jump to emit: every tail arm ends in its own
+    /// `Ret`/`TailCall*`, so a jump after it could never execute.
     fn emit_branches(&mut self, else_j: CodeAddr, then: &CoreExpr, els: &CoreExpr, tail: bool) {
         let mark = self.next_slot;
         self.emit_expr_in(then, tail);
         self.next_slot = mark;
-        let end_j = self.jump(Op::Jump);
+        let end_j = (!tail).then(|| self.jump(Op::Jump));
         self.patch(else_j);
         self.emit_expr_in(els, tail);
         self.next_slot = mark;
-        self.patch(end_j);
+        if let Some(end_j) = end_j {
+            self.patch(end_j);
+        }
     }
 
     /// `if <prim>(..) { then } else { els }` with the condition still on the
@@ -1118,7 +1122,11 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 self.emit_payload_binds(scrut_slot, fields);
             }
             self.emit_expr_in(body, tail);
-            ends.push(self.jump(Op::Jump));
+            // A tail arm ends in `Ret`/`TailCall*`; a merge jump after it
+            // would be unreachable.
+            if !tail {
+                ends.push(self.jump(Op::Jump));
+            }
             self.next_slot = mark;
         }
         self.patch_all(&ends);
@@ -1162,7 +1170,11 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 CorePat::Wild => None,
             };
             self.emit_expr_in(body, tail);
-            ends.push(self.jump(Op::Jump));
+            // A tail arm ends in `Ret`/`TailCall*`; a merge jump after it
+            // would be unreachable.
+            if !tail {
+                ends.push(self.jump(Op::Jump));
+            }
             if let Some(f) = fail {
                 self.patch(f);
             }
@@ -1463,7 +1475,7 @@ mod tests {
         assert_eq!(out.code[0].operand, 0);
         assert_eq!(out.code[1].op, Op::PushLocal);
         assert_eq!(out.code[2].op, Op::JumpIfFalse);
-        // else target patched past the then-arm's Ret + Jump
+        // else target patched past the then-arm's Ret (no merge jump in tail)
         let else_tgt = out.code[2].operand;
         assert_eq!(out.code[else_tgt as usize].op, Op::PushConst);
     }
