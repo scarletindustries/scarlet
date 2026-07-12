@@ -195,15 +195,47 @@ impl ReferenceGraph {
 
         self.reject_if_not_renameable(def)?;
 
-        // (module, span) pairs to rewrite. Always include the declaration's
-        // own name span; reverse edges supply every use. `Import` occurrences
-        // span the module path, never the symbol name, so they are skipped.
-        let mut sites: Vec<(ModuleId, Span)> = vec![(def.module, def_record.span())];
-        for r in self.references_to(def) {
-            if r.kind == ReferenceKind::Import {
-                continue;
+        // The rename class: every DefId spelt by the same declaring token. A
+        // record-shorthand `type Config { .. }` mints TWO definitions at the
+        // same identifier span — the Type and its implicit Constructor — so
+        // renaming either must rewrite both, or constructor calls (resp. type
+        // annotations) are left on the old name and the rename ships a broken
+        // program. A multi-constructor type's constructors have their own
+        // spans and stay separate rename classes.
+        let mut class: Vec<DefId> = vec![def];
+        match def.entity {
+            EntityKind::Type => {
+                if let Some(mr) = self.module_refs(def.module) {
+                    class.extend(
+                        mr.definitions()
+                            .filter(|d| d.ctor_of() == Some(def) && d.defid.span == def.span)
+                            .map(|d| d.defid),
+                    );
+                }
             }
-            sites.push((r.module, r.span));
+            EntityKind::Constructor => {
+                if let Some(ty) = def_record.ctor_of()
+                    && ty.span == def.span
+                {
+                    class.push(ty);
+                }
+            }
+            _ => {}
+        }
+
+        // (module, span) pairs to rewrite. Always include the declaration's
+        // own name span (once — every class member shares the same token);
+        // reverse edges supply every use of every class member. `Import`
+        // occurrences span the module path, never the symbol name, so they
+        // are skipped.
+        let mut sites: Vec<(ModuleId, Span)> = vec![(def.module, def_record.span())];
+        for d in &class {
+            for r in self.references_to(*d) {
+                if r.kind == ReferenceKind::Import {
+                    continue;
+                }
+                sites.push((r.module, r.span));
+            }
         }
 
         // Resolve every involved module to a URI up front; refuse the whole
@@ -270,7 +302,9 @@ impl ReferenceGraph {
 #[cfg(test)]
 mod tests {
     use super::{ReferenceKind as K, *};
-    use crate::reference::{Definition, ModuleReferences, Reference, add_ref, def, mp, stub_kind};
+    use crate::reference::{
+        Definition, DefinitionKind, ModuleReferences, Reference, add_ref, def, mp, stub_kind,
+    };
     use std::collections::HashMap;
 
     /// lib defines `helper` (pub); app imports it and uses it twice plus its
@@ -519,6 +553,103 @@ mod tests {
         let edits = &we.changes["file:///proj/main.al"];
         assert_eq!(edits[0].span, Span::single_line(0, 3, 6));
         assert_eq!(edits[0].new_text, "go");
+    }
+
+    /// Record-shorthand `type Config { .. }`: a Type and an implicit
+    /// Constructor minted at the SAME identifier span, plus a type-annotation
+    /// use (targets the Type) and a constructor-call use (targets the
+    /// Constructor).
+    fn record_shorthand() -> (ReferenceGraph, ModuleId, DefId, DefId) {
+        let mut g = ReferenceGraph::new();
+        let m = g.intern_module(&mp(&["main"]));
+        let ty = def(m, 0, 5, 11, EntityKind::Type);
+        let ctor = def(m, 0, 5, 11, EntityKind::Constructor);
+        let mut mr = ModuleReferences::new(m);
+        mr.add_definition(Definition::new(ty, "Config", None, false, stub_kind(ty)));
+        mr.add_definition(Definition::new(
+            ctor,
+            "Config",
+            None,
+            false,
+            DefinitionKind::Constructor {
+                ctor_of: Some(ty),
+                param_names: Vec::new(),
+            },
+        ));
+        add_ref(&mut mr, None, (3, 10, 16), K::Unqualified, ty);
+        add_ref(&mut mr, None, (5, 8, 14), K::Unqualified, ctor);
+        g.insert_module(mr);
+        (g, m, ty, ctor)
+    }
+
+    #[test]
+    fn record_shorthand_rename_from_type_rewrites_ctor_uses() {
+        let (g, m, ty, _ctor) = record_shorthand();
+        let mut map = HashMap::new();
+        map.insert(m, "file:///main.al");
+        let we = g.rename_with(ty, "Settings", resolver(&map)).expect("ok");
+        let edits = &we.changes["file:///main.al"];
+        assert_eq!(edits.len(), 3, "decl + type use + ctor use, got {edits:?}");
+        assert_eq!(edits[0].span, Span::single_line(0, 5, 11));
+        assert_eq!(edits[1].span, Span::single_line(3, 10, 16));
+        assert_eq!(edits[2].span, Span::single_line(5, 8, 14));
+        assert!(edits.iter().all(|e| e.new_text == "Settings"));
+    }
+
+    #[test]
+    fn record_shorthand_rename_from_ctor_rewrites_type_uses() {
+        let (g, m, _ty, ctor) = record_shorthand();
+        let mut map = HashMap::new();
+        map.insert(m, "file:///main.al");
+        let we = g.rename_with(ctor, "Settings", resolver(&map)).expect("ok");
+        let edits = &we.changes["file:///main.al"];
+        assert_eq!(edits.len(), 3, "decl + type use + ctor use, got {edits:?}");
+        assert_eq!(edits[0].span, Span::single_line(0, 5, 11));
+        assert_eq!(edits[1].span, Span::single_line(3, 10, 16));
+        assert_eq!(edits[2].span, Span::single_line(5, 8, 14));
+    }
+
+    #[test]
+    fn multi_constructor_type_rename_keeps_ctors_separate() {
+        // `type Shape { A B }`: the constructors have their own spans, so
+        // renaming the type must NOT drag them along, and vice versa.
+        let mut g = ReferenceGraph::new();
+        let m = g.intern_module(&mp(&["main"]));
+        let ty = def(m, 0, 5, 10, EntityKind::Type);
+        let a = def(m, 1, 2, 3, EntityKind::Constructor);
+        let b = def(m, 2, 2, 3, EntityKind::Constructor);
+        let mut mr = ModuleReferences::new(m);
+        mr.add_definition(Definition::new(ty, "Shape", None, false, stub_kind(ty)));
+        for (c, n) in [(a, "A"), (b, "B")] {
+            mr.add_definition(Definition::new(
+                c,
+                n,
+                None,
+                false,
+                DefinitionKind::Constructor {
+                    ctor_of: Some(ty),
+                    param_names: Vec::new(),
+                },
+            ));
+        }
+        add_ref(&mut mr, None, (4, 8, 9), K::Unqualified, a);
+        add_ref(&mut mr, None, (6, 10, 15), K::Unqualified, ty);
+        g.insert_module(mr);
+
+        let mut map = HashMap::new();
+        map.insert(m, "file:///main.al");
+
+        let we = g.rename_with(ty, "Form", resolver(&map)).expect("ok");
+        let edits = &we.changes["file:///main.al"];
+        assert_eq!(edits.len(), 2, "type decl + type use only, got {edits:?}");
+        assert_eq!(edits[0].span, Span::single_line(0, 5, 10));
+        assert_eq!(edits[1].span, Span::single_line(6, 10, 15));
+
+        let we = g.rename_with(a, "C", resolver(&map)).expect("ok");
+        let edits = &we.changes["file:///main.al"];
+        assert_eq!(edits.len(), 2, "ctor decl + ctor use only, got {edits:?}");
+        assert_eq!(edits[0].span, Span::single_line(1, 2, 3));
+        assert_eq!(edits[1].span, Span::single_line(4, 8, 9));
     }
 
     #[test]
