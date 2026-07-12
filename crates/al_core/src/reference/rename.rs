@@ -24,7 +24,6 @@
 //!   identical edits are de-duplicated so the two paths can't double-apply.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use crate::module::ModulePath;
 use crate::span::Span;
@@ -176,8 +175,8 @@ impl ReferenceGraph {
 
     /// Project `def -> new_name` into a `WorkspaceEdit`, resolving every
     /// occurrence's [`ModuleId`] to a URI through `uri_of`. The generic form;
-    /// [`rename`](Self::rename) wraps it with the spec's `module::resolve`
-    /// translation plus an entry-module override.
+    /// [`rename`](Self::rename) wraps it with the spec's
+    /// `module::resolve_canonical` translation plus an entry-module override.
     pub(crate) fn rename_with<F>(
         &self,
         def: DefId,
@@ -255,9 +254,18 @@ impl ReferenceGraph {
             }
         }
         if !unresolved.is_empty() {
+            // Name every refused module, even one whose ModuleId has no
+            // interned path — dropping it would hide the very failure being
+            // reported.
             let mods = unresolved
                 .into_iter()
-                .filter_map(|(m, e)| self.module_path(m).cloned().map(|p| (p, e)))
+                .map(|(m, e)| {
+                    let path = self
+                        .module_path(m)
+                        .cloned()
+                        .unwrap_or_else(|| vec![format!("<module#{}>", m.0)]);
+                    (path, e)
+                })
                 .collect();
             return Err(RenameError::Unresolvable(mods));
         }
@@ -278,14 +286,14 @@ impl ReferenceGraph {
     }
 
     /// Project `def -> new_name` into a `WorkspaceEdit`, translating each
-    /// module to a URI via [`crate::module::resolve`] relative to `base_dir`.
-    /// `entry` lets the caller pin one module (the open buffer / bare entry
-    /// module, which `resolve` deliberately can't locate) to a known URI.
+    /// module to a URI via [`crate::module::resolve_canonical`] (graph module
+    /// paths are canonical). `entry` lets the caller pin one module (the open
+    /// buffer / bare entry module, which resolution deliberately can't
+    /// locate) to a known URI.
     pub fn rename(
         &self,
         def: DefId,
         new_name: &str,
-        base_dir: Option<&Path>,
         entry: Option<(ModuleId, &str)>,
     ) -> Result<WorkspaceEdit, RenameError> {
         self.rename_with(def, new_name, |m| {
@@ -294,7 +302,7 @@ impl ReferenceGraph {
             {
                 return Ok(euri.to_string());
             }
-            module_uri(self, m, base_dir)
+            module_uri(self, m)
         })
     }
 }
@@ -317,7 +325,8 @@ mod tests {
         let helper = def(lib, 0, 3, 9, EntityKind::Function);
         let mut lib_mr = ModuleReferences::new(lib);
         lib_mr.add_definition(Definition::new(
-            helper,
+            helper.module,
+            helper.span,
             "helper",
             None,
             true,
@@ -332,7 +341,14 @@ mod tests {
 
         let run = def(app, 0, 3, 6, EntityKind::Function);
         let mut app_mr = ModuleReferences::new(app);
-        app_mr.add_definition(Definition::new(run, "run", None, false, stub_kind(run)));
+        app_mr.add_definition(Definition::new(
+            run.module,
+            run.span,
+            "run",
+            None,
+            false,
+            stub_kind(run),
+        ));
         // import path occurrence (must NOT be rewritten by a symbol rename)
         add_ref(&mut app_mr, None, (0, 7, 14), K::Import, helper);
         // two qualified uses of helper
@@ -396,7 +412,14 @@ mod tests {
         let m = g.intern_module(&mp(&["main"]));
         let foo = def(m, 0, 3, 6, EntityKind::Function);
         let mut mr = ModuleReferences::new(m);
-        mr.add_definition(Definition::new(foo, "foo", None, false, stub_kind(foo)));
+        mr.add_definition(Definition::new(
+            foo.module,
+            foo.span,
+            "foo",
+            None,
+            false,
+            stub_kind(foo),
+        ));
         add_ref(&mut mr, Some(foo), (5, 4, 7), K::Unqualified, foo);
         g.insert_module(mr);
 
@@ -427,7 +450,8 @@ mod tests {
         let map_fn = def(std_mod, 0, 4, 7, EntityKind::Function);
         let mut std_mr = ModuleReferences::new(std_mod);
         std_mr.add_definition(Definition::new(
-            map_fn,
+            map_fn.module,
+            map_fn.span,
             "map",
             None,
             true,
@@ -443,7 +467,7 @@ mod tests {
         let err = g.prepare_rename(user, 1, 3).unwrap_err();
         assert_eq!(err, RenameError::NotRenameable(NotRenameableReason::Stdlib));
         // and rename() itself refuses too.
-        let err2 = g.rename(map_fn, "renamed", None, None).unwrap_err();
+        let err2 = g.rename(map_fn, "renamed", None).unwrap_err();
         assert_eq!(
             err2,
             RenameError::NotRenameable(NotRenameableReason::Stdlib)
@@ -468,7 +492,14 @@ mod tests {
         let m = g.intern_module(&mp(&["main"]));
         let alias = def(m, 0, 7, 10, EntityKind::ModuleAlias);
         let mut mr = ModuleReferences::new(m);
-        mr.add_definition(Definition::new(alias, "lib", None, false, stub_kind(alias)));
+        mr.add_definition(Definition::new(
+            alias.module,
+            alias.span,
+            "lib",
+            None,
+            false,
+            stub_kind(alias),
+        ));
         g.insert_module(mr);
 
         // Cursor on the alias binding — the wide `ModuleAlias` definition span
@@ -479,7 +510,7 @@ mod tests {
             RenameError::NotRenameable(NotRenameableReason::ModuleAlias)
         );
         assert_eq!(
-            g.rename(alias, "renamed", None, Some((m, "file:///main.al")))
+            g.rename(alias, "renamed", Some((m, "file:///main.al")))
                 .unwrap_err(),
             RenameError::NotRenameable(NotRenameableReason::ModuleAlias)
         );
@@ -541,13 +572,14 @@ mod tests {
 
     #[test]
     fn rename_via_module_resolve_with_entry_override() {
-        // The entry module is the bare ["main"] path, which module::resolve
-        // deliberately cannot locate; the caller pins it via `entry`.
+        // The entry module is the bare ["main"] path, which
+        // module::resolve_canonical deliberately cannot locate; the caller
+        // pins it via `entry`.
         let (g, _lib, app, _helper) = workspace();
         let run = def(app, 0, 3, 6, EntityKind::Function);
         // run is private to app, only referenced at its declaration.
         let we = g
-            .rename(run, "go", None, Some((app, "file:///proj/main.al")))
+            .rename(run, "go", Some((app, "file:///proj/main.al")))
             .expect("entry-pinned rename ok");
         assert_eq!(we.changes.len(), 1);
         let edits = &we.changes["file:///proj/main.al"];
@@ -565,9 +597,17 @@ mod tests {
         let ty = def(m, 0, 5, 11, EntityKind::Type);
         let ctor = def(m, 0, 5, 11, EntityKind::Constructor);
         let mut mr = ModuleReferences::new(m);
-        mr.add_definition(Definition::new(ty, "Config", None, false, stub_kind(ty)));
         mr.add_definition(Definition::new(
-            ctor,
+            ty.module,
+            ty.span,
+            "Config",
+            None,
+            false,
+            stub_kind(ty),
+        ));
+        mr.add_definition(Definition::new(
+            ctor.module,
+            ctor.span,
             "Config",
             None,
             false,
@@ -619,10 +659,18 @@ mod tests {
         let a = def(m, 1, 2, 3, EntityKind::Constructor);
         let b = def(m, 2, 2, 3, EntityKind::Constructor);
         let mut mr = ModuleReferences::new(m);
-        mr.add_definition(Definition::new(ty, "Shape", None, false, stub_kind(ty)));
+        mr.add_definition(Definition::new(
+            ty.module,
+            ty.span,
+            "Shape",
+            None,
+            false,
+            stub_kind(ty),
+        ));
         for (c, n) in [(a, "A"), (b, "B")] {
             mr.add_definition(Definition::new(
-                c,
+                c.module,
+                c.span,
                 n,
                 None,
                 false,

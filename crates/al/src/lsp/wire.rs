@@ -135,7 +135,7 @@ pub(super) fn query_module(uri: &str) -> Option<ModulePath> {
 /// module maps to its request URI (the entry module is bare and `resolve`
 /// deliberately can't locate it); in-repo stdlib targets resolve against the
 /// stdlib root so goto-def lands on the real declaration; everything else
-/// goes through `module::resolve` via `reference::module_uri`.
+/// goes through `module::resolve_canonical` via `reference::module_uri`.
 pub(super) fn uri_for(
     graph: &reference::ReferenceGraph,
     request_uri: &str,
@@ -153,7 +153,7 @@ pub(super) fn uri_for(
         }
         return None;
     }
-    reference::module_uri(graph, module, req_path.parent()).ok()
+    reference::module_uri(graph, module).ok()
 }
 
 /// Shape a pure `WorkspaceEdit` (computed in `al_core`, which has no

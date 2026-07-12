@@ -11,8 +11,7 @@ use crate::reference;
 use crate::span::Span;
 
 use super::wire::{
-    clean_doc_comment, doc_uri, query_module, range_json, symbol_kind, uri_for, uri_to_path,
-    workspace_edit_json,
+    clean_doc_comment, doc_uri, query_module, range_json, symbol_kind, uri_for, workspace_edit_json,
 };
 use super::workspace::Workspace;
 
@@ -87,17 +86,13 @@ impl Workspace {
         };
         // A position naming a module — the final segment of `import a/b`, or
         // the `b` of `b.add(..)` — resolves to that module's file at 0:0.
-        // `module::resolve` maps `./x` to its on-disk file and an embedded
-        // `al/*` module to nothing (null); it never fabricates a location.
-        // Without this the cursor would resolve to the importing alias's own
-        // binding, whose span is the whole `import` declaration — a no-op
-        // self-jump.
+        // `module::resolve_canonical` maps the module's canonical identity to
+        // its on-disk file and an embedded `al/*` module to nothing (null);
+        // it never fabricates a location. Without this the cursor would
+        // resolve to the importing alias's own binding, whose span is the
+        // whole `import` declaration — a no-op self-jump.
         if let Some(import_mod) = graph.module_named_at(mid, line, col) {
-            let req_path = uri_to_path(&uri);
-            return match req_path
-                .as_deref()
-                .and_then(|p| reference::module_uri(graph, import_mod, p.parent()).ok())
-            {
+            return match reference::module_uri(graph, import_mod).ok() {
                 Some(u) => json!({
                     "uri": u,
                     "range": {
@@ -202,9 +197,7 @@ impl Workspace {
         if let Some((graph, mid)) = self.graph_module(&uri)
             && let Some(defid) = graph.def_id_at(mid, line, col)
         {
-            let base = uri_to_path(&uri);
-            let base_dir = base.as_deref().and_then(|p| p.parent());
-            return match graph.rename(defid, &new_name, base_dir, Some((mid, uri.as_str()))) {
+            return match graph.rename(defid, &new_name, Some((mid, uri.as_str()))) {
                 Ok(mut we) => {
                     // Fold in dependent-file callers (see `dependent_callers`).
                     // `graph.rename` already validated `new_name` and rejected

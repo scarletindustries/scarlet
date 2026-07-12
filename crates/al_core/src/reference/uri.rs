@@ -1,6 +1,7 @@
 //! `file://` URI translation for the reference graph. Maps a filesystem
 //! [`Path`] to the percent-encoded URI the LSP wire uses (round-trips with the
-//! LSP's `uri_to_path`), and a [`ModuleId`] to a URI via `module::resolve`.
+//! LSP's `uri_to_path`), and a [`ModuleId`] to a URI via
+//! `module::resolve_canonical`.
 //! Separate from `rename` because every LSP handler that returns a location
 //! (goto-def, find-references, workspace-index) needs this, not just rename.
 
@@ -9,7 +10,7 @@ use std::path::Path;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
-use crate::module::{ModuleSource, ResolveError, resolve};
+use crate::module::{ModuleSource, ResolveError, resolve_canonical};
 
 use super::{ModuleId, ReferenceGraph};
 
@@ -53,7 +54,12 @@ impl fmt::Display for ModuleUriError {
         match self {
             ModuleUriError::Embedded => write!(f, "precompiled stdlib module"),
             ModuleUriError::NoPath => write!(f, "module is not in the reference graph"),
-            ModuleUriError::Resolve(ResolveError::NotFound(p)) => write!(f, "not found: {p}"),
+            ModuleUriError::Resolve(ResolveError::FileNotFound(p)) => {
+                write!(f, "file not found: {}", p.display())
+            }
+            ModuleUriError::Resolve(ResolveError::NoSuchStdlibModule(p)) => {
+                write!(f, "no such stdlib module {}", p.join("/"))
+            }
             ModuleUriError::Resolve(ResolveError::NoBaseDir) => {
                 write!(f, "no base directory to resolve against")
             }
@@ -64,17 +70,15 @@ impl fmt::Display for ModuleUriError {
     }
 }
 
-/// Map a [`ModuleId`] to a file URI via [`crate::module::resolve`] (the
-/// spec-mandated translation). The error says *why* there is no URI — see
+/// Map a [`ModuleId`] to a file URI via [`crate::module::resolve_canonical`]
+/// (the spec-mandated translation; graph module paths are always canonical —
+/// a resolved file identity, a stdlib path, or the bare entry — so no base
+/// directory is involved). The error says *why* there is no URI — see
 /// [`ModuleUriError`]; LSP location responders that only need presence call
 /// `.ok()`, while rename reports the reason per module.
-pub fn module_uri(
-    graph: &ReferenceGraph,
-    module: ModuleId,
-    base_dir: Option<&Path>,
-) -> Result<String, ModuleUriError> {
+pub fn module_uri(graph: &ReferenceGraph, module: ModuleId) -> Result<String, ModuleUriError> {
     let path = graph.module_path(module).ok_or(ModuleUriError::NoPath)?;
-    match resolve(path, base_dir) {
+    match resolve_canonical(path) {
         Ok(r) => match r.source {
             ModuleSource::File(p) => Ok(path_to_uri(&p)),
             ModuleSource::Embedded(_) => Err(ModuleUriError::Embedded),
@@ -111,34 +115,33 @@ mod tests {
         let mut g = ReferenceGraph::new();
         let std_mod = g.intern_module(&mp(&["al", "array"]));
         // al/array resolves to embedded stdlib source -> not an editable file.
-        assert_eq!(module_uri(&g, std_mod, None), Err(ModuleUriError::Embedded));
+        assert_eq!(module_uri(&g, std_mod), Err(ModuleUriError::Embedded));
         // a bare non-al module is reserved/unresolvable.
         let bare = g.intern_module(&mp(&["whatever"]));
         assert!(matches!(
-            module_uri(&g, bare, None),
+            module_uri(&g, bare),
             Err(ModuleUriError::Resolve(_))
         ));
         // an id that was never interned has no path at all.
-        assert_eq!(
-            module_uri(&g, ModuleId(99), None),
-            Err(ModuleUriError::NoPath)
-        );
+        assert_eq!(module_uri(&g, ModuleId(99)), Err(ModuleUriError::NoPath));
     }
 
     #[test]
-    fn module_uri_resolves_relative_file() {
+    fn module_uri_resolves_canonical_file() {
         let dir = std::env::temp_dir().join(format!("al_uri_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("helpers.al");
         std::fs::write(&file, "pub fn x() { 1 }\n").expect("write temp module");
 
         let mut g = ReferenceGraph::new();
-        // a `./helpers` relative import resolves against base_dir.
-        let m = g.intern_module(&mp(&[".", "helpers"]));
-        let uri = module_uri(&g, m, Some(&dir)).expect("relative module resolves");
+        // Graph module paths are canonical file identities; one resolves
+        // straight back to its on-disk file.
+        let canon = crate::module::file_module_path(&file);
+        let m = g.intern_module(&canon);
+        let uri = module_uri(&g, m).expect("canonical module resolves");
         assert!(uri.starts_with("file://"));
         assert!(uri.ends_with("helpers.al"));
-        assert_eq!(uri, path_to_uri(&file));
+        assert_eq!(uri, path_to_uri(&std::path::absolute(&file).unwrap()));
 
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&dir);
