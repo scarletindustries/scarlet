@@ -100,9 +100,10 @@ type Sent {
 }
 
 // Largest request body the default buffered path will accept. A Content-Length
-// above this is rejected with 413 before any of the body is read — the
-// mandatory denial-of-service bound (a dribbled multi-gigabyte upload can
-// neither exhaust memory nor pin the connection).
+// above this is rejected with 413 before any of the body is read. Together
+// with BODY_TIMEOUT_MS this is the denial-of-service bound: a dribbled upload
+// can neither exhaust memory (MAX_BODY) nor pin the connection (the body
+// deadline).
 const MAX_BODY = 1048576
 const READ_SIZE = 65536
 // How long the peer has to deliver a complete request head, as ONE absolute
@@ -110,10 +111,11 @@ const READ_SIZE = 65536
 // dribbling a header byte per read cannot keep resetting the clock. The same
 // deadline bounds how long an idle keep-alive connection is held open.
 const HEAD_TIMEOUT_MS = 30000
-// Per-read bound while a request body is being received (chunked path); the
-// Content-Length path gets the same bound from body.content_length. A peer
-// that stalls mid-body this long forfeits the connection.
-const BODY_READ_TIMEOUT_MS = 30000
+// How long the peer has to deliver a complete request body, as ONE absolute
+// deadline taken when the framing is decided — the same slowloris defense as
+// the head: a peer dribbling a body byte per read cannot keep resetting the
+// clock, it runs out of time and forfeits the connection (TimedOut).
+const BODY_TIMEOUT_MS = 30000
 const EMPTY = <<>>
 const QUESTION = <<'?'>>
 
@@ -238,6 +240,12 @@ fn head_deadline() Instant {
 	time.add_ms(time.monotonic(), HEAD_TIMEOUT_MS)
 }
 
+// The absolute deadline for receiving the whole request body, taken once when
+// the framing is decided so partial reads never extend it.
+fn body_deadline() Instant {
+	time.add_ms(time.monotonic(), BODY_TIMEOUT_MS)
+}
+
 // The keep-alive / pipelining loop. `buf`/`off` carry the bytes already read
 // but not yet consumed (the start of the next request when pipelined).
 // `pending` carries the responses to requests already handled but not yet
@@ -270,8 +278,7 @@ fn serve_conn(
 			}
 		}
 		Bad(status) -> {
-			flush(sock, pending) or Nil
-			write_error(sock, status)
+			reject(sock, pending, status)
 			Ok(Nil)
 		}
 		Done(method, target, version, hdrs, consumed) -> {
@@ -279,6 +286,14 @@ fn serve_conn(
 			handle(sock, buf, consumed, head, handler, pending)
 		}
 	}
+}
+
+// Refuse a request: flush anything still pending (so earlier pipelined
+// responses are not lost), then write a framed error response. The caller
+// stops its loop afterwards so the connection closes.
+fn reject(sock Socket, pending Array(Binary), status Int) Nil {
+	flush(sock, pending) or Nil
+	write_error(sock, status)
 }
 
 // Write out accumulated response parts, if any, as one vectored write.
@@ -309,8 +324,7 @@ fn handle(
 ) Result(Nil, NetError) {
 	match h1.framing(head.headers) {
 		Invalid(status) -> {
-			flush(sock, pending) or Nil
-			write_error(sock, status)
+			reject(sock, pending, status)
 			Ok(Nil)
 		}
 		NoBody ->
@@ -323,22 +337,28 @@ fn handle(
 				pending,
 			)
 		Length(n) -> if n > MAX_BODY {
-			flush(sock, pending) or Nil
-			write_error(sock, 413)
+			reject(sock, pending, 413)
 			Ok(Nil)
 		} else {
+			// The whole body must arrive by one absolute deadline, taken here —
+			// where the framing is decided — exactly like the head deadline.
+			deadline = body_deadline()
 			// The body is read off the socket: anything still pending must go
 			// out first, or the client could sit waiting for those responses
 			// before it sends the body we are about to wait for.
 			match flush(sock, pending) {
 				Err(e) -> Err(e)
-				Ok(_) -> read_body(sock, buf, consumed, n, head, handler)
+				Ok(_) -> read_body(sock, buf, consumed, n, deadline, head, handler)
 			}
 		}
-		// Chunked body: same flush-first reasoning as Content-Length.
-		Chunked -> match flush(sock, pending) {
-			Err(e) -> Err(e)
-			Ok(_) -> read_chunked_body(sock, buf, consumed, head, handler)
+		// Chunked body: same flush-first reasoning as Content-Length, and the
+		// same absolute body deadline.
+		Chunked -> {
+			deadline = body_deadline()
+			match flush(sock, pending) {
+				Err(e) -> Err(e)
+				Ok(_) -> read_chunked_body(sock, buf, consumed, deadline, head, handler)
+			}
 		}
 	}
 }
@@ -355,6 +375,7 @@ fn read_body(
 	buf Binary,
 	consumed Int,
 	n Int,
+	deadline Instant,
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
@@ -365,7 +386,7 @@ fn read_body(
 			buffered = int.min(avail, n)
 			head_bytes = binary.slice_bytes(buf, consumed, buffered)
 			need = n - buffered
-			match body.collect(body.content_length(sock, need), MAX_BODY) {
+			match body.collect(body.content_length(sock, need, deadline), MAX_BODY) {
 				Err(e) -> Err(e)
 				// Pending responses were flushed before the body was read, so
 				// this request starts a fresh batch.
@@ -389,33 +410,37 @@ fn read_chunked_body(
 	sock Socket,
 	buf Binary,
 	off Int,
+	deadline Instant,
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
 	match maybe_continue(sock, head.headers) {
 		Err(e) -> Err(e)
-		Ok(_) -> chunked_loop(sock, buf, off, head, handler)
+		Ok(_) -> chunked_loop(sock, buf, off, deadline, head, handler)
 	}
 }
 
 // The chunked read/decode loop. The native decoder (h1.chunk_decode) scans
 // whatever is buffered so far; this loop owns the I/O decision —
 // ChunkedNeedMore means read more off the socket (parking on backpressure,
-// bounded per read by BODY_READ_TIMEOUT_MS) and retry from the same offset,
-// exactly like serve_conn's head-parsing loop. The decoder caps the decoded size at MAX_BODY (413), so memory stays
-// bounded no matter what the wire claims, and `consumed` points at the first
-// byte after the terminator so pipelined requests carry forward through
-// respond_and_continue unchanged.
+// every read counting against the one absolute body deadline) and retry from
+// the same offset, exactly like serve_conn's head-parsing loop. The decoder
+// caps the decoded size at MAX_BODY (413), so memory stays bounded no matter
+// what the wire claims, and `consumed` points at the first byte after the
+// terminator so pipelined requests carry forward through respond_and_continue
+// unchanged.
 fn chunked_loop(
 	sock Socket,
 	buf Binary,
 	off Int,
+	deadline Instant,
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
 	match h1.chunk_decode(buf, off, MAX_BODY) {
-		ChunkedNeedMore -> match socket.read_within(sock, READ_SIZE, BODY_READ_TIMEOUT_MS) {
-			Ok(Data(more)) -> chunked_loop(sock, binary.append(buf, more), off, head, handler)
+		ChunkedNeedMore -> match socket.read_until(sock, READ_SIZE, deadline) {
+			Ok(Data(more)) ->
+				chunked_loop(sock, binary.append(buf, more), off, deadline, head, handler)
 			// Peer closed mid-body: there is no complete request to answer.
 			Ok(Closed) -> Ok(Nil)
 			Err(e) -> Err(e)
@@ -567,11 +592,9 @@ fn respond(
 }
 
 // Discard the handler's response and answer with a framed 500 instead,
-// closing the connection. Anything still pending is flushed first so earlier
-// pipelined responses are not lost.
+// closing the connection.
 fn replace_with_500(sock Socket, pending Array(Binary)) Result(Sent, NetError) {
-	flush(sock, pending) or Nil
-	write_error(sock, 500)
+	reject(sock, pending, 500)
 	Ok(Close)
 }
 
@@ -671,11 +694,12 @@ fn buffer_body(
 					Err(e) -> Err(e)
 					Ok(_) -> match body.drain_counted(rest, sock, len - got) {
 						Err(e) -> Err(e)
-						Ok(n) -> if got + n == len {
-							Ok(KeepAlive([]))
-						} else {
-							Ok(Close)
-						}
+						Ok(body.Complete) -> Ok(KeepAlive([]))
+						// Short or over-long after the head (and its
+						// Content-Length) is on the wire: closing is the only
+						// way to keep the next response in frame.
+						Ok(body.Short(_)) -> Ok(Close)
+						Ok(body.Overran(_)) -> Ok(Close)
 					}
 				}
 			}
