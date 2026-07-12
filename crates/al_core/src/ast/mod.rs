@@ -537,7 +537,7 @@ impl CallArg {
     pub fn span(&self) -> Span {
         match self {
             CallArg::Positional(e) => e.span(),
-            CallArg::Labeled { label, value } => label.span.cover(value.span()),
+            CallArg::Labeled { label, value } => label.span.union(&value.span()),
             CallArg::Spread(e) => e.span(),
         }
     }

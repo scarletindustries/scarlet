@@ -8,12 +8,14 @@ pub struct Span {
 
 impl Span {
     /// A synthetic placeholder span for generated / prelude / test AST that has
-    /// no source location.
+    /// no source location. Deliberately empty (`start == end`) so it can never
+    /// [`contain`](Span::contains) any point — synthetic nodes must not win
+    /// position queries (hover/goto/references) at the start of a file.
     pub const DUMMY: Span = Span {
         start_line: 0,
         start_column: 0,
         end_line: 0,
-        end_column: 1,
+        end_column: 0,
     };
 
     /// A single-column span at `(line, col)` — end column is `col + 1`.
@@ -33,17 +35,6 @@ impl Span {
             start_column: c0,
             end_line: line,
             end_column: c1,
-        }
-    }
-
-    /// The span from `self`'s start to `other`'s end. Caller guarantees `self`
-    /// starts at or before `other`; use [`Span::union`] when order is unknown.
-    pub fn cover(self, other: Span) -> Span {
-        Span {
-            start_line: self.start_line,
-            start_column: self.start_column,
-            end_line: other.end_line,
-            end_column: other.end_column,
         }
     }
 
@@ -87,7 +78,7 @@ impl Span {
     }
 
     /// The smallest `Span` covering both `self` and `other` (`(line, col)`
-    /// order). Unlike [`Span::cover`], makes no assumption about ordering.
+    /// order). Makes no assumption about which span comes first.
     pub fn union(&self, other: &Span) -> Span {
         let (a_start, a_end) = self.endpoints();
         let (b_start, b_end) = other.endpoints();
@@ -99,5 +90,31 @@ impl Span {
             end_line,
             end_column,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Span;
+
+    #[test]
+    fn dummy_contains_no_point() {
+        assert!(!Span::DUMMY.contains(0, 0));
+    }
+
+    #[test]
+    fn union_is_order_independent() {
+        let a = Span::single_line(1, 2, 5);
+        let b = Span::single_line(3, 0, 4);
+        assert_eq!(a.union(&b), b.union(&a));
+        assert_eq!(
+            a.union(&b),
+            Span {
+                start_line: 1,
+                start_column: 2,
+                end_line: 3,
+                end_column: 4,
+            }
+        );
     }
 }
