@@ -16,6 +16,10 @@ use crate::bytecode::{Function, Instruction, PreludeBindings, Value};
 use crate::frozen::FrozenBuilder;
 use crate::module::{ExportedValue, ModuleInterface};
 use crate::type_def::TypeId;
+// Re-exported for the generated stdlib file: build.rs emits `SExport`
+// literals whose `local_slot` field Debug-prints as `Some(GlobalSlot(n))`,
+// and the generated code glob-imports this module.
+pub use crate::typed_ir::GlobalSlot;
 use crate::types::{
     QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
 };
@@ -53,7 +57,7 @@ impl Slice {
 pub struct SExport {
     pub name: u32,
     pub scheme: u32,
-    pub local_slot: Option<i32>,
+    pub local_slot: Option<GlobalSlot>,
     /// `str_slice_pool` range of `str_pool` indices: the function's parameter
     /// names, in order.
     pub param_names: Slice,
@@ -73,8 +77,9 @@ pub struct SModule {
     pub values: Slice,
     pub private_names: Slice,
     pub path: Slice,
-    /// `str_pool` index of the module-level (`//!`) doc comment, if there is
-    /// one. Declaration docs travel on [`SExport::doc`].
+    /// `str_pool` index of the module-level doc comment (the `/** */` block
+    /// at the top of the file), if there is one. Declaration docs travel on
+    /// [`SExport::doc`].
     pub doc: Option<u32>,
 }
 

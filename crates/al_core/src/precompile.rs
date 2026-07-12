@@ -103,7 +103,7 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     bail_on_errors(&c, "prelude")?;
 
     let at = Span::DUMMY;
-    for path in stdlib::all_modules() {
+    for path in stdlib::all_modules()? {
         c.load_module(&path, at);
         bail_on_errors(&c, &path.join("/"))?;
     }
