@@ -6,7 +6,7 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parser;
 use crate::scanner;
 use crate::span::Span;
-use crate::token::{Kind, Trivia};
+use crate::token::{Kind, Token, Trivia};
 
 pub mod doc;
 use doc::{
@@ -44,35 +44,39 @@ pub enum FormatResult {
     },
 }
 
+/// Every comment among the tokens' leading trivia, keyed by trimmed text with
+/// its occurrence count. Texts are trimmed the same way
+/// `trivia_doc`/`comments_before` trim them before emission. The comment-loss
+/// postcondition compares the input census against the output census, so both
+/// sides must count with identical keying — they share this one function.
+fn comment_census(tokens: &[Token]) -> HashMap<String, usize> {
+    let mut census: HashMap<String, usize> = HashMap::new();
+    for tok in tokens {
+        for t in &tok.leading_trivia {
+            if let Some(c) = t.comment_text() {
+                *census.entry(c.trim_end().to_string()).or_default() += 1;
+            }
+        }
+    }
+    census
+}
+
 pub fn format(input: &str) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
     let (scanned_tokens, scanner_diagnostics) = s.scan_all();
 
-    // Every comment in the input, with how often it occurs, so the layout can
-    // be checked afterwards: a comment the formatter fails to re-emit must
-    // make `format` a no-op, never silent data loss. Texts are trimmed the
-    // same way `trivia_doc`/`comments_before` trim them before emission.
-    let mut expected_comments: HashMap<String, usize> = HashMap::new();
-    for tok in &scanned_tokens {
-        for t in &tok.leading_trivia {
-            if let Some(c) = t.comment_text() {
-                *expected_comments
-                    .entry(c.trim_end().to_string())
-                    .or_default() += 1;
-            }
-        }
-    }
+    // Every comment in the input, so the layout can be checked afterwards: a
+    // comment the formatter fails to re-emit must make `format` a no-op,
+    // never silent data loss.
+    let expected_comments = comment_census(&scanned_tokens);
 
-    let mut trivia_map: HashMap<(i32, i32), Vec<Trivia>> = HashMap::new();
+    let mut trivia_map: HashMap<Pos, Vec<Trivia>> = HashMap::new();
     let mut eof_trivia: Vec<Trivia> = Vec::new();
     for tok in &scanned_tokens {
         if tok.kind == Kind::Eof {
             eof_trivia = tok.leading_trivia.clone();
         } else if !tok.leading_trivia.is_empty() {
-            trivia_map.insert(
-                (tok.span.start_line, tok.span.start_column),
-                tok.leading_trivia.clone(),
-            );
+            trivia_map.insert(Pos::start_of(&tok.span), tok.leading_trivia.clone());
         }
     }
 
@@ -80,17 +84,14 @@ pub fn format(input: &str) -> FormatResult {
     // above a `..x` call argument attach to the `..` token, not the token the
     // AST span starts at. Map each token's start position back to the start of
     // an immediately preceding `..`, so `call_arg` can query that trivia.
-    let mut dotdot_before: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+    let mut dotdot_before: HashMap<Pos, Pos> = HashMap::new();
     for pair in scanned_tokens.windows(2) {
         if pair[0].kind == Kind::PuncDotdot {
-            dotdot_before.insert(
-                (pair[1].span.start_line, pair[1].span.start_column),
-                (pair[0].span.start_line, pair[0].span.start_column),
-            );
+            dotdot_before.insert(Pos::start_of(&pair[1].span), Pos::start_of(&pair[0].span));
         }
     }
 
-    let mut p = parser::new_parser_from_tokens(scanned_tokens, scanner_diagnostics);
+    let p = parser::new_parser_from_tokens(scanned_tokens, scanner_diagnostics);
     let result = p.parse_program();
 
     let errors: Vec<Diagnostic> = result
@@ -126,14 +127,7 @@ pub fn format(input: &str) -> FormatResult {
     let (rescanned_tokens, rescan_diagnostics) = rescan.scan_all();
 
     if !expected_comments.is_empty() {
-        let mut actual_comments: HashMap<String, usize> = HashMap::new();
-        for tok in &rescanned_tokens {
-            for t in &tok.leading_trivia {
-                if let Some(c) = t.comment_text() {
-                    *actual_comments.entry(c.trim_end().to_string()).or_default() += 1;
-                }
-            }
-        }
+        let actual_comments = comment_census(&rescanned_tokens);
         for (comment, &count) in &expected_comments {
             if actual_comments.get(comment).copied().unwrap_or(0) < count {
                 return FormatResult::CommentsLost {
@@ -148,7 +142,7 @@ pub fn format(input: &str) -> FormatResult {
     // bugs of exactly this shape — `- -x` collapsing to the rejected `--`
     // token — so an output the parser rejects must refuse to emit, never
     // overwrite the user's valid source with broken code in place.
-    let mut rp = parser::new_parser_from_tokens(rescanned_tokens, rescan_diagnostics);
+    let rp = parser::new_parser_from_tokens(rescanned_tokens, rescan_diagnostics);
     let reparsed = rp.parse_program();
     if let Some(d) = reparsed
         .diagnostics
@@ -175,11 +169,41 @@ pub fn format(input: &str) -> FormatResult {
     FormatResult::Formatted { output }
 }
 
+/// A scanner line/column position, keying trivia by the position of the token
+/// it attaches to. A dedicated type — not a bare `(i32, i32)` tuple — so that
+/// transposing line and column is a compile error rather than a silent
+/// lookup miss.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Pos {
+    line: i32,
+    column: i32,
+}
+
+impl Pos {
+    fn start_of(span: &Span) -> Pos {
+        Pos {
+            line: span.start_line,
+            column: span.start_column,
+        }
+    }
+
+    /// Start position of the closing `}` token ending `span`. The trivia map
+    /// is keyed by a token's *start* position, so `span` must end in a
+    /// one-column `}` token: `end_column - 1` is then exactly the brace's
+    /// start column.
+    fn closing_brace_of(span: &Span) -> Pos {
+        Pos {
+            line: span.end_line,
+            column: span.end_column - 1,
+        }
+    }
+}
+
 struct Formatter {
-    trivia_map: HashMap<(i32, i32), Vec<Trivia>>,
+    trivia_map: HashMap<Pos, Vec<Trivia>>,
     /// Start position of a `..` token, keyed by the start position of the
     /// token that immediately follows it. See `format`.
-    dotdot_before: HashMap<(i32, i32), (i32, i32)>,
+    dotdot_before: HashMap<Pos, Pos>,
 }
 
 impl Formatter {
@@ -187,17 +211,15 @@ impl Formatter {
 
     fn trivia_at(&self, s: Span) -> Option<&[Trivia]> {
         self.trivia_map
-            .get(&(s.start_line, s.start_column))
+            .get(&Pos::start_of(&s))
             .map(|v| v.as_slice())
     }
 
     /// Trivia attached to the closing `}` of `s` — the comments sitting after
-    /// a block's last node. The trivia map is keyed by a token's *start*
-    /// position, so `s` must end in a one-column `}` token: `end_column - 1`
-    /// is then exactly the brace's start column.
+    /// a block's last node.
     fn closing_brace_trivia(&self, s: Span) -> Option<&[Trivia]> {
         self.trivia_map
-            .get(&(s.end_line, s.end_column - 1))
+            .get(&Pos::closing_brace_of(&s))
             .map(|v| v.as_slice())
     }
 
@@ -266,10 +288,10 @@ impl Formatter {
     /// lists (call arguments, array/tuple elements, `<<>>` segments) and the
     /// tokens of an `if`/`else` chain.
     fn comments_before(&self, s: Span) -> Doc {
-        self.comments_before_at((s.start_line, s.start_column))
+        self.comments_before_at(Pos::start_of(&s))
     }
 
-    fn comments_before_at(&self, pos: (i32, i32)) -> Doc {
+    fn comments_before_at(&self, pos: Pos) -> Doc {
         let Some(trivia) = self.trivia_map.get(&pos).map(|v| v.as_slice()) else {
             return nil();
         };
@@ -603,20 +625,30 @@ impl Formatter {
                     })
                     .collect();
                 let q = pick_quote(&literal);
-                let mut out = String::from(q);
+                let mut parts: Vec<Doc> = vec![text(q.to_string())];
                 for part in &s.parts {
                     match part {
-                        ast::InterpPart::Literal(sl) => out.push_str(&escape_string(&sl.value, q)),
+                        ast::InterpPart::Literal(sl) => {
+                            parts.push(text(escape_string(&sl.value, q)))
+                        }
+                        // The sub-expression is a real Doc inside the enclosing
+                        // layout: its hard breaks carry the current indent and
+                        // width probes see its real flat width. Splicing a
+                        // pre-rendered string here instead emitted hard-breaking
+                        // sub-expressions (match, multi-statement lambda) at
+                        // indent 0 mid-string. Newlines inside `${…}` are
+                        // ordinary expression tokens, so they never change the
+                        // string's runtime value — only the literal parts do,
+                        // and those are single-line escaped text.
                         ast::InterpPart::Expr(e) => {
-                            out.push_str("${");
-                            // Layout sub-expression flat at infinite width.
-                            out.push_str(&doc::layout(&self.expr(e), isize::MAX));
-                            out.push('}');
+                            parts.push(text("${"));
+                            parts.push(group(self.expr(e)));
+                            parts.push(text("}"));
                         }
                     }
                 }
-                out.push(q);
-                text(out)
+                parts.push(text(q.to_string()));
+                doc::concat(parts)
             }
             E::NumberLiteral(n) => text(n.value.clone()),
             E::Identifier(id) => text(id.name.clone()),
@@ -731,7 +763,7 @@ impl Formatter {
         // the expression position for a comment between `..` and operand).
         let comments = match a {
             ast::CallArg::Spread(e) => {
-                let start = (e.span().start_line, e.span().start_column);
+                let start = Pos::start_of(&e.span());
                 let before_dotdot = self
                     .dotdot_before
                     .get(&start)
@@ -1560,7 +1592,7 @@ mod tests {
     fn top_level_items(src: &str) -> usize {
         let mut s = scanner::new_scanner(src.to_string());
         let (toks, diags) = s.scan_all();
-        let mut p = parser::new_parser_from_tokens(toks, diags);
+        let p = parser::new_parser_from_tokens(toks, diags);
         p.parse_program().ast.body.len()
     }
 
@@ -1798,5 +1830,42 @@ mod tests {
             matches!(format(&out), FormatResult::Formatted { .. }),
             "formatted output does not re-parse:\n{out}"
         );
+    }
+
+    #[test]
+    fn interpolation_stays_flat_when_it_fits() {
+        let out = fmt("x = 'value: ${a + b}'\n");
+        assert_eq!(out, "x = 'value: ${a + b}'\n");
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn hard_breaking_match_inside_interpolation_gets_real_layout() {
+        // A `match` inside `${…}` always renders across multiple lines. It
+        // must lay out at the enclosing indent — not be spliced in as text
+        // pre-rendered at indent 0 — and the result must re-parse and be
+        // stable under a second format pass.
+        let src =
+            "fn f(y Int) String {\n\t'value: ${match y { 0 -> 'zero'\n else -> 'other' }}'\n}\n";
+        let out = fmt(src);
+        assert_eq!(
+            out,
+            "fn f(y Int) String {\n\t'value: ${match y {\n\t\t0 -> 'zero'\n\t\telse -> 'other'\n\t}}'\n}\n"
+        );
+        assert_round_trips(&out);
+    }
+
+    #[test]
+    fn wide_interpolated_expression_breaks_at_enclosing_indent() {
+        // The sub-expression participates in the enclosing layout: when it
+        // overflows the line it breaks with real indentation instead of being
+        // measured (and emitted) at infinite width.
+        let src = "fn f() String {\n\t'r: ${wwwwwwwwwwwwwwwwwwwwwwwwwwwwww(aaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbb, cccccc)}'\n}\n";
+        let out = fmt(src);
+        assert!(
+            out.contains("(\n\t\taaaaaaaaaaaaaaaaaaaaaaaaaa,\n"),
+            "expected the call to break per-argument at the enclosing indent, got:\n{out}"
+        );
+        assert_round_trips(&out);
     }
 }

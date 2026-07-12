@@ -220,6 +220,15 @@ pub fn group_willing(d: Doc) -> Doc {
 fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d.0 {
         DocInner::Text { .. } | DocInner::Nil => d,
+        // A hugging group's layout is already decided: its hugged final item
+        // provably hard-breaks, so rebuilding it with the caller's `breaks`
+        // would land on `Always` and silently turn the hug into per-item
+        // breaks. Overriding a hug is never meaningful — the hug already ends
+        // the line — so keep the group as-is.
+        DocInner::Group {
+            breaks: Breaks::Hugging,
+            ..
+        } => d,
         DocInner::Group { doc, .. } => group_as(breaks, *doc),
         inner => {
             let d = Doc(inner);
@@ -889,6 +898,21 @@ mod tests {
         assert_eq!(
             layout(&doc(), 14),
             "f(aaaa) or g(\n\tfn() {\n\t\tbody\n\t},\n)"
+        );
+    }
+
+    #[test]
+    fn regrouping_a_hugging_group_preserves_the_hug() {
+        // `group`/`group_willing` on a hugging list must not rebuild it with
+        // another Breaks: its subtree contains a hardline, so a rebuild would
+        // land on Always and turn the hug into per-item breaks.
+        let hugging = || delimited_hug("(", vec![text("a"), lambda()], ")");
+        let expected = layout(&d![text("f"), hugging()], 80);
+        assert_eq!(expected, "f(a, fn() {\n\tbody\n})");
+        assert_eq!(layout(&d![text("f"), group(hugging())], 80), expected);
+        assert_eq!(
+            layout(&d![text("f"), group_willing(hugging())], 80),
+            expected
         );
     }
 }
