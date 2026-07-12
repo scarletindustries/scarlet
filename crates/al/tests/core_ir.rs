@@ -31,7 +31,7 @@ fn lower(source: &str) -> String {
     let ast = parse(source);
     let r = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
     assert!(
-        r.success,
+        r.success(),
         "compile failed:\n{source}\n--- diagnostics ---\n{:#?}",
         r.diagnostics
     );
@@ -491,7 +491,7 @@ mod unlowerable {
     }
 
     fn assert_rejected(r: &al::bytecode::CompileResult, at: Span, what: &str) {
-        assert!(!r.success, "{what} accepted an unlowerable program");
+        assert!(!r.success(), "{what} accepted an unlowerable program");
         let d = r
             .diagnostics
             .iter()
@@ -528,7 +528,7 @@ mod unlowerable {
     fn the_same_block_without_the_error_node_compiles_and_runs() {
         let expr = crate::common::parse("1 + 1\n");
         let r = al::bytecode::compile(&expr, None, Some(&al::STDLIB));
-        assert!(r.success, "{:?}", r.diagnostics);
+        assert!(r.success(), "{:?}", r.diagnostics);
         let program = r.emitted.expect("a successful compile emits").program;
         let mut vm = al::vm::new_vm(program).expect("vm init");
         let val = vm.run().expect("vm run");

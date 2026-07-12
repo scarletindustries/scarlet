@@ -22,7 +22,7 @@ fn fresh_three_module_session(tag: &str) -> (Project, IncrementalSession) {
 
     let mut s = IncrementalSession::new(&al::STDLIB);
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
+    assert!(r.success(), "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "b + c compile on first check");
     (p, s)
 }
@@ -33,13 +33,13 @@ fn three_module_incremental() {
 
     // --- no change: b and c are cache hits, only entry recompiles.
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "unchanged: {:?}", r.diagnostics);
+    assert!(r.success(), "unchanged: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "no module recompile on unchanged");
 
     // --- change c: c invalidated, b is a dependent → both recompile.
     p.write("c.al", "pub fn val() Int { 2 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "c-changed: {:?}", r.diagnostics);
+    assert!(r.success(), "c-changed: {:?}", r.diagnostics);
     assert_eq!(
         s.compile_count(),
         4,
@@ -49,19 +49,19 @@ fn three_module_incremental() {
     // --- change b only: c is cache-hit, b recompiles.
     p.write("b.al", "import ./c\npub fn b() Int { c.val() + 100 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "b-changed: {:?}", r.diagnostics);
+    assert!(r.success(), "b-changed: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 5, "b-change recompiles b only; c cached");
 
     // --- type error introduced in c is reported.
     p.write("c.al", "pub fn val() Int { 'nope' }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(!r.success, "expected type error in c");
+    assert!(!r.success(), "expected type error in c");
     assert_eq!(s.compile_count(), 7);
 
     // --- fix c: clean again.
     p.write("c.al", "pub fn val() Int { 3 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "fixed: {:?}", r.diagnostics);
+    assert!(r.success(), "fixed: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 9);
 }
 
@@ -76,7 +76,7 @@ fn overlay_preferred_over_disk() {
     );
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(
-        !r.success,
+        !r.success(),
         "overlay change must be picked up even though disk is unchanged"
     );
     // c+b recompiled from the overlay.
@@ -103,7 +103,7 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
     // is what makes the forced eviction below provable — the next bump cannot
     // come from a detected source change, only from invalidate_path.
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "unchanged: {:?}", r.diagnostics);
+    assert!(r.success(), "unchanged: {:?}", r.diagnostics);
     assert_eq!(
         s.compile_count(),
         2,
@@ -117,7 +117,7 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
     let before = s.compile_count();
     s.invalidate_path(&cpath);
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "after force-evict: {:?}", r.diagnostics);
+    assert!(r.success(), "after force-evict: {:?}", r.diagnostics);
     assert_eq!(
         s.compile_count(),
         before + 2,
@@ -129,7 +129,7 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
     s.set_overlay(cpath.clone(), "pub fn val() Int { 'oops' }\n".to_string());
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(
-        !r.success,
+        !r.success(),
         "overlay type error must be observed over clean disk"
     );
 
@@ -141,7 +141,7 @@ fn invalidate_path_drops_overlay_and_force_evicts() {
     s.invalidate_path(&cpath);
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(
-        r.success,
+        r.success(),
         "clean disk must be re-read after invalidate_path drops the overlay: {:?}",
         r.diagnostics
     );
@@ -158,7 +158,7 @@ fn unrelated_module_keeps_type_id_base() {
 
     let mut s = IncrementalSession::new(&al::STDLIB);
     let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
+    assert!(r.success(), "initial: {:?}", r.diagnostics);
 
     let x0 = s
         .module_id_base(&module_key(&p.dir, "x.al"))
@@ -175,7 +175,7 @@ fn unrelated_module_keeps_type_id_base() {
         "pub type X { X }\npub type X2 { X2 }\npub fn f() X { X }\n",
     );
     let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "after x edit: {:?}", r.diagnostics);
+    assert!(r.success(), "after x edit: {:?}", r.diagnostics);
 
     assert_eq!(
         s.module_id_base(&module_key(&p.dir, "x.al")),
@@ -243,7 +243,7 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     // still resolve after B is recompiled.
     p.write("b.al", "import ./c\npub fn b() Int { c.val() + 41 }\n");
     let r = s.check(&parse(A_SRC), Some(&p.dir));
-    assert!(r.success, "after B edit: {:?}", r.diagnostics);
+    assert!(r.success(), "after B edit: {:?}", r.diagnostics);
     assert!(s.compile_count() > n0, "B recompiled");
     let (m1, _) = s
         .definition("main", l, c)
@@ -263,7 +263,7 @@ fn edit_b_keeps_refs_then_invalidation_drops_reverse_edges() {
     p.write("b.al", "import ./c\npub fn gone() Int { c.val() }\n");
     p.write("a.al", entry2);
     let r = s.check(&parse(entry2), Some(&p.dir));
-    assert!(r.success, "after invalidation: {:?}", r.diagnostics);
+    assert!(r.success(), "after invalidation: {:?}", r.diagnostics);
     assert!(
         s.reference_graph().references_to(bdef0).is_empty()
             && s.reference_graph().references_to(bdef1).is_empty(),
@@ -339,7 +339,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     // assigned the very next 256-aligned block — big0 + 256 — *before*
     // big grows. That places y exactly where big's later spill will land.
     let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "initial: {:?}", r.diagnostics);
+    assert!(r.success(), "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "big + y compile on first check");
 
     let big0 = s
@@ -375,7 +375,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     p.write("big.al", &big_module_src(BIG_TYPE_COUNT, 2));
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(
-        r.success,
+        r.success(),
         "overflow recovery must keep the check green within one pass: {:?}",
         r.diagnostics
     );
@@ -431,7 +431,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     );
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(
-        r.success,
+        r.success(),
         "post-recovery unrelated edit: {:?}",
         r.diagnostics
     );

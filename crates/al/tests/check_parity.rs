@@ -38,13 +38,13 @@ fn both(source: &str) -> (FnShape, FnShape) {
     let ast = parse(source);
     let built = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
     assert!(
-        built.success,
+        built.success(),
         "compile failed:\n{source}\n{:#?}",
         built.diagnostics
     );
     let checked = al::bytecode::check(&ast, None, Some(&al::STDLIB));
     assert!(
-        checked.success,
+        checked.success(),
         "check failed:\n{source}\n{:#?}",
         checked.diagnostics
     );
@@ -259,7 +259,7 @@ println(outer(4))
 "#,
     );
     let built = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
-    assert!(built.success, "{:#?}", built.diagnostics);
+    assert!(built.success(), "{:#?}", built.diagnostics);
     let built = built.emitted.expect("compile emits").program;
     assert_no_jump_into_a_foreign_body(&built);
 }
@@ -270,7 +270,7 @@ fn check_and_compile_agree_on_the_entry_index() {
     let ast = parse("fn f(x) {\n\tx\n}\nprintln(f(1))\n");
     let built = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
     let checked = al::bytecode::check(&ast, None, Some(&al::STDLIB));
-    assert!(built.success && checked.success);
+    assert!(built.success() && checked.success());
     let built = built.emitted.expect("compile emits").program;
     let checked = checked.emitted.expect("check registers the function table");
     assert_eq!(built.entry, checked.program.entry);

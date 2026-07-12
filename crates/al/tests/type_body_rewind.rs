@@ -41,7 +41,7 @@ fn cached_module_type_bodies_survive_rewinds() {
         // an open template.
         let r = s.check(&parse(&entry(i)), Some(&p.dir));
         assert!(
-            r.success,
+            r.success(),
             "check {i} failed after rewind: {:?}",
             r.diagnostics
         );

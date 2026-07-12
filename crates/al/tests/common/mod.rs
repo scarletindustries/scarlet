@@ -348,7 +348,7 @@ macro_rules! run_case {
 /// reference-graph query API consume.
 pub fn parse(src: &str) -> ast::Expression {
     let mut sc = scanner::new_scanner(src.to_string());
-    let mut p = parser::new_parser(&mut sc);
+    let p = parser::new_parser(&mut sc);
     let r = p.parse_program();
     assert!(
         r.diagnostics.is_empty(),
@@ -467,7 +467,7 @@ use al::span::Span;
 pub fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
     let mut s = IncrementalSession::new(&al::STDLIB);
     let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     s
 }
 

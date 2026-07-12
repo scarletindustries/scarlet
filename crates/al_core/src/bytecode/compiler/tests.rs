@@ -14,6 +14,31 @@ fn parse_ok(src: &str) -> crate::ast::BlockExpression {
     pr.ast
 }
 
+/// Compile `src` as the entry module on the LSP path (`collect_hover_facts`
+/// on, so reference/occurrence collection fires) and hand back the populated
+/// compiler.
+fn collect(src: &str) -> super::Compiler {
+    let block = parse_ok(src);
+    let mut c = super::new_compiler(None, true);
+    c.collect_hover_facts = true;
+    c.register_prelude();
+    assert!(
+        !crate::diagnostic::has_errors(&c.engine.diagnostics),
+        "prelude failed to load: {:?}",
+        c.engine.diagnostics,
+    );
+    c.process_imports(&block);
+    c.env.push_scope();
+    c.analyse_module(&block, None);
+    c.env.pop_scope();
+    assert!(
+        !crate::diagnostic::has_errors(&c.engine.diagnostics),
+        "snippet failed to compile: {:?}",
+        c.engine.diagnostics,
+    );
+    c
+}
+
 mod local_binders_as_definitions {
     //! Local binders — `name = ..` bindings, fn/lambda parameters, pattern
     //! binders (match arms, tuple/array/ctor destructure), and `or`-receivers —
@@ -25,31 +50,7 @@ mod local_binders_as_definitions {
     //! `al run` / `al check` graph stays untouched.
 
     use super::super::*;
-    use super::parse_ok;
-
-    /// Compile `src` as the entry module on the LSP path (`collect_hover_facts`
-    /// on, so local-def emission fires) and hand back the populated collector.
-    fn collect(src: &str) -> Compiler {
-        let block = parse_ok(src);
-        let mut c = new_compiler(None, true);
-        c.collect_hover_facts = true;
-        c.register_prelude();
-        assert!(
-            !crate::diagnostic::has_errors(&c.engine.diagnostics),
-            "prelude failed to load: {:?}",
-            c.engine.diagnostics,
-        );
-        c.process_imports(&block);
-        c.env.push_scope();
-        c.analyse_module(&block, None);
-        c.env.pop_scope();
-        assert!(
-            !crate::diagnostic::has_errors(&c.engine.diagnostics),
-            "snippet failed to compile: {:?}",
-            c.engine.diagnostics,
-        );
-        c
-    }
+    use super::collect;
 
     /// The single `DefId` declared under `name` in the entry collector.
     fn sole_def(c: &Compiler, name: &str) -> DefId {
@@ -350,7 +351,7 @@ mod clean_module_gate {
             "snippet must fail to parse"
         );
         let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
-        assert!(!r.success, "an unparseable program must not compile");
+        assert!(!r.success(), "an unparseable program must not compile");
         assert!(
             codes(&r.diagnostics).contains(&DiagnosticCode::ParseError),
             "the check walk restates the parse error: {:#?}",
@@ -363,7 +364,7 @@ mod clean_module_gate {
     fn a_clean_module_reaches_the_core_pipeline() {
         let block = parse_ok("fn f(x Int) Int { x + 1 }\nf(1)\n");
         let r = compile(&ast::Expression::BlockExpression(block), None, None);
-        assert!(r.success, "{:#?}", r.diagnostics);
+        assert!(r.success(), "{:#?}", r.diagnostics);
         let emitted = r.emitted.expect("a non-check compile emits");
         assert!(
             !emitted.core.fns.is_empty(),
@@ -427,7 +428,7 @@ mod qualified_ctor_pattern_occurrences {
     //! and rename blind to modules referenced only from patterns.
 
     use super::super::*;
-    use super::parse_ok;
+    use super::collect;
 
     #[test]
     fn qualified_ctor_pattern_records_qualified_plus_qualifier() {
@@ -438,19 +439,7 @@ mod qualified_ctor_pattern_occurrences {
             \x20 Err(_) -> \"other\"\n\
             }\n\
             println(x)\n";
-        let block = parse_ok(src);
-        let mut c = new_compiler(None, true);
-        c.collect_hover_facts = true;
-        c.register_prelude();
-        c.process_imports(&block);
-        c.env.push_scope();
-        c.analyse_module(&block, None);
-        c.env.pop_scope();
-        assert!(
-            !crate::diagnostic::has_errors(&c.engine.diagnostics),
-            "snippet failed to compile: {:?}",
-            c.engine.diagnostics,
-        );
+        let c = collect(src);
 
         // The qualified pattern head sits on 0-based line 3. The `Err` ctor
         // and the arm body's `p` use on the same line are ordinary

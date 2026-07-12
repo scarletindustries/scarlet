@@ -18,7 +18,7 @@ fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_dia
     let mut s = checked_with(&p, entry1);
 
     let r2 = recheck(&mut s, &p, entry2);
-    assert!(!r2.success, "import still resolves: {:?}", r2.diagnostics);
+    assert!(!r2.success(), "import still resolves: {:?}", r2.diagnostics);
     let found = r2
         .diagnostics
         .iter()
@@ -59,6 +59,6 @@ fn kept_selective_type_import_keeps_resolving_across_checks() {
     let mut s = checked_with(&p, entry);
     for i in 1..3 {
         let r = recheck(&mut s, &p, entry);
-        assert!(r.success, "check {i} (kept import): {:?}", r.diagnostics);
+        assert!(r.success(), "check {i} (kept import): {:?}", r.diagnostics);
     }
 }

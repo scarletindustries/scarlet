@@ -638,7 +638,7 @@ fn f(n Int) Int {\n\
 f(3)\n";
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&al::STDLIB));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     let r = r.emitted.expect("a successful compile emits");
     // Restrict to `f`'s bytecode range so stdlib generics don't false-positive.
     let f = r
@@ -698,7 +698,7 @@ fn f() Int {\n\
 println(f())\n";
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&al::STDLIB));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     let r = r.emitted.expect("a successful compile emits");
     let f = r
         .program
@@ -752,7 +752,11 @@ fn double(x Int) Int { x * 2 }\n";
 fn run_counting_allocs(src: &str) -> (usize, String) {
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&al::STDLIB));
-    assert!(r.success, "compile failed: {:?}\n---\n{src}", r.diagnostics);
+    assert!(
+        r.success(),
+        "compile failed: {:?}\n---\n{src}",
+        r.diagnostics
+    );
     let r = r.emitted.expect("a successful compile emits");
     ProcHeap::reset_alloc_count();
     let mut v = vm::new_vm(r.program).expect("vm init");
@@ -963,7 +967,7 @@ fn dot_loop_emits_paired_reuse() {
     use bytecode::Op;
     let ast = common::parse(&format!("{DOT_SRC}dot_loop(10, 0)\n"));
     let r = bytecode::compile(&ast, None, Some(&al::STDLIB));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     let r = r.emitted.expect("a successful compile emits");
     let f = r
         .program
@@ -1043,5 +1047,32 @@ run_case! {
         \x20 Err(_) -> Nil\n\
          }\n",
         "7\n42\n",
+    ),
+}
+
+run_case! {
+    // A `@vm` builtin named without being called is a first-class value: the
+    // elaborator synthesises an eta wrapper (`typed_ir::eta`) over the opcode,
+    // the same as for a constructor used as a value. Bind it, pass it, call it
+    // through the VM — not just the typechecker.
+    builtin_bound_to_a_local_is_callable: (
+        "import al/string\n\
+         f = string.length\n\
+         println(f('abc'))\n",
+        "3\n",
+    ),
+    builtin_passed_as_a_function_argument: (
+        "import al/array\n\
+         import al/string\n\
+         println(array.map(['a', 'bb', 'ccc'], string.length))\n",
+        "[1, 2, 3]\n",
+    ),
+    // A bare (unqualified) builtin as a value — `println` itself — exercises
+    // the identifier path rather than the `module.member` path.
+    bare_builtin_as_value_is_callable: (
+        "import al/array\n\
+         each = array.each\n\
+         each([1, 2], println)\n",
+        "1\n2\n",
     ),
 }

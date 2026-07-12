@@ -46,7 +46,7 @@ fn apply_all(xs Array(Int)) Array(Int) { array.map(xs, double) }
 println(apply_all([1, 2, 3]))
 ";
     let r = al::bytecode::compile(&parse(src), None, Some(&al::STDLIB));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     let r = r.emitted.expect("a successful compile emits");
 
     // The seeded stdlib is large; the entry adds `__main__` on top of the two
@@ -94,7 +94,7 @@ println(array.map([lib.one()], fn(x Int) x + 1))
         p.write("lib.al", &format!("pub fn one() Int {{ {} }}\n", i + 1));
         let r = s.check(&parse(entry), Some(&p.dir));
         assert!(
-            r.success,
+            r.success(),
             "check {i} failed after rewind: {:?}",
             r.diagnostics
         );
@@ -118,7 +118,7 @@ fn hover_is_stable_across_many_rewinds() {
     let mut seen: Option<String> = None;
     for i in 0..8 {
         let r = s.check(&parse(entry), Some(&p.dir));
-        assert!(r.success, "check {i}: {:?}", r.diagnostics);
+        assert!(r.success(), "check {i}: {:?}", r.diagnostics);
         // `v` on line 2 (0-based), inside `const v`.
         let (name, ty, _) = s
             .hover(Some(&al::module::ModuleKey::main()), 1, 6)
@@ -156,7 +156,7 @@ println(g(lib.go(2)))
 
     let mut s = IncrementalSession::new(&al::STDLIB);
     let first = s.check(&parse(entry), Some(&p.dir));
-    assert!(first.success, "initial: {:?}", first.diagnostics);
+    assert!(first.success(), "initial: {:?}", first.diagnostics);
 
     for i in 0..5 {
         // Touch the module so it (and the entry) recompile against a rewound
@@ -167,7 +167,7 @@ println(g(lib.go(2)))
         );
         let r = s.check(&parse(entry), Some(&p.dir));
         assert!(
-            r.success,
+            r.success(),
             "check {i} after closure rewind: {:?}",
             r.diagnostics
         );
@@ -188,7 +188,7 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
     let entry = "import ./lib\nprintln(lib.mk())\n";
 
     let mut s = IncrementalSession::new(&al::STDLIB);
-    assert!(s.check(&parse(entry), Some(&p.dir)).success);
+    assert!(s.check(&parse(entry), Some(&p.dir)).success());
     // The id-base table is keyed by the module's canonical identity (the
     // resolved file), never the `./lib` spelling — a written-path lookup
     // here would always be `None` and the assertion below vacuous.
@@ -203,14 +203,14 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
         "lib.al",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (3, 4) }\n",
     );
-    assert!(s.check(&parse(entry), Some(&p.dir)).success);
+    assert!(s.check(&parse(entry), Some(&p.dir)).success());
 
     p.write(
         "lib.al",
         "pub type Pair = (Int, Int)\npub fn mk() Pair { (1, 2) }\n",
     );
     let r = s.check(&parse(entry), Some(&p.dir));
-    assert!(r.success, "after revert: {:?}", r.diagnostics);
+    assert!(r.success(), "after revert: {:?}", r.diagnostics);
     assert_eq!(
         base_before,
         s.module_id_base(&lib),

@@ -112,7 +112,7 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
     // Parse the entry alone first: only its diagnostics belong to the user,
     // and an unterminated form must ask for another line rather than replay.
     let mut probe_scanner = scanner::new_scanner(input.to_string());
-    let mut probe_parser = parser::new_parser(&mut probe_scanner);
+    let probe_parser = parser::new_parser(&mut probe_scanner);
     let probe = probe_parser.parse_program();
 
     if diagnostic::has_errors(&probe.diagnostics) {
@@ -129,7 +129,7 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
 
     let combined_src = format!("{prelude}{input}\n");
     let mut combined_scanner = scanner::new_scanner(combined_src.clone());
-    let mut combined_parser = parser::new_parser(&mut combined_scanner);
+    let combined_parser = parser::new_parser(&mut combined_scanner);
     let combined = combined_parser.parse_program();
     if diagnostic::has_errors(&combined.diagnostics) {
         diagnostic::print_diagnostics(&combined.diagnostics, &combined_src, "<repl>", &|_| None);
@@ -141,7 +141,7 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
 
     if !result.diagnostics.is_empty() {
         diagnostic::print_diagnostics(&result.diagnostics, &combined_src, "<repl>", &|_| None);
-        if !result.success {
+        if !result.success() {
             return EvalOutcome::Failed;
         }
     }

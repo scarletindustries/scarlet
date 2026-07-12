@@ -27,7 +27,7 @@ fn shadowing_import_does_not_corrupt_prelude_across_checks() {
     // prelude binding, so calling it with a String must type-check.
     let r2 = recheck(&mut s, &p, "println(\"hello\")\n");
     assert!(
-        r2.success,
+        r2.success(),
         "prelude `println` must accept a String after a prior shadowing import \
          was rolled back; got diagnostics: {:?}",
         r2.diagnostics

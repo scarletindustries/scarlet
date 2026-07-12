@@ -15,11 +15,11 @@ use al::{STDLIB, ast, parser, scanner};
 
 fn program_of(src: &str) -> bytecode::Program {
     let mut sc = scanner::new_scanner(src.to_string());
-    let mut p = parser::new_parser(&mut sc);
+    let p = parser::new_parser(&mut sc);
     let parsed = p.parse_program();
     let expr = ast::Expression::BlockExpression(parsed.ast);
     let r = bytecode::compile(&expr, None, Some(&STDLIB));
-    assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     r.emitted.expect("a successful compile emits").program
 }
 
