@@ -113,7 +113,7 @@ fn external_type_allowed_in_user_code() {
 fn unknown_module() {
     let proj = Project::new("unknown_mod");
     proj.write("main.al", "import al/nope\n");
-    project_rejects(&proj, "run", "main.al", &["not found", "Unknown module"]);
+    project_rejects(&proj, "run", "main.al", &["no such stdlib module al/nope"]);
 }
 
 run_case! {
@@ -341,7 +341,7 @@ fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
     proj.write("sub/b.al", "pub fn who() String {\n\t'SUB'\n}\n");
     // `./b` from the root: `sub/b.al` must NOT satisfy it.
     proj.write("main.al", "import ./b\n\nprintln(b.who())\n");
-    project_rejects(&proj, "check", "main.al", &["Unknown module"]);
+    project_rejects(&proj, "check", "main.al", &["file not found"]);
 }
 
 /// A type defined in `sub/b.al` and one in `b.al` are different types, even

@@ -214,7 +214,9 @@ fn build_request(head ReqHead, trailers Headers, b Body) Request {
 // One slow or hostile connection parks only its own process. The accept loop
 // runs on every core in parallel (net.serve), all draining one shared accept
 // queue, and each connection is handled on the core that accepted it.
-pub fn serve(host String, port Int, handler fn(Request) Response) Result(Nil, NetError) {
+// Returns the bound `Server` handle, so the caller can shut the listener down
+// with `net.close` or read a kernel-assigned port back with `net.local_addr`.
+pub fn serve(host String, port Int, handler fn(Request) Response) Result(Server, NetError) {
 	net.serve(host, port, fn(sock) drive(sock, handler))
 }
 

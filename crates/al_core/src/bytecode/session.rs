@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use super::Program;
 use super::compiler::{CompileResult, Compiler, new_compiler};
 use crate::ast;
 use crate::diagnostic::has_errors;
@@ -318,19 +317,16 @@ impl Compiler {
         (
             CompileResult {
                 // The session is check-only and its consumer (the LSP) reads
-                // only `diagnostics` + the reference graph, never `program`.
+                // only `diagnostics` + the reference graph, never a program.
                 // Cloning the seeded, hydrated stdlib `Program`
                 // (code+functions+constants, each constant string a fresh `Rc`
-                // bump) on every keystroke is pure waste, so hand back an empty
-                // program. The cheap `Copy` scalar metadata is preserved in
-                // case a future consumer inspects it.
-                program: Program {
-                    entry: self.program.entry,
-                    ..Program::default()
-                },
+                // bump) on every keystroke would be pure waste, so nothing is
+                // materialised at all: `None` says so in the type, where the
+                // old fabricated `Program` (a real `entry` index over empty
+                // code, under `success: true`) invited a consumer to run it.
+                emitted: None,
                 diagnostics: self.engine.diagnostics.clone(),
                 references,
-                core: crate::core_ir::CoreProgram::default(),
                 success,
             },
             facts,
@@ -395,7 +391,8 @@ impl Compiler {
                 },
             };
             mr.add_definition(Definition::new(
-                defid,
+                defid.module,
+                defid.span,
                 sd.name.clone(),
                 sd.doc.clone(),
                 true,
@@ -429,12 +426,12 @@ impl Compiler {
         // 2. Mirror the persistent interner's first-seen id assignment into the
         //    graph: interning in id order reproduces identical ids, so the
         //    graph's `ModuleId`s match the ones already baked into every
-        //    persisted / freshly-collected `DefId`.
+        //    persisted / freshly-collected `DefId`. `paths()` walks the dense
+        //    id-indexed store directly, so no id can be skipped — a skip would
+        //    silently renumber every later module.
         let mut graph = ReferenceGraph::new();
-        for i in 0..self.ref_interner.len() as u32 {
-            if let Some(p) = self.ref_interner.path(ModuleId(i)).cloned() {
-                graph.intern_module(&p);
-            }
+        for p in self.ref_interner.paths() {
+            graph.intern_module(p);
         }
 
         // 3. Every cached module's references; for static/hydrated stdlib

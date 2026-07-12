@@ -47,6 +47,7 @@ println(apply_all([1, 2, 3]))
 ";
     let r = al::bytecode::compile(&parse(src), None, Some(&al::STDLIB));
     assert!(r.success, "compile failed: {:?}", r.diagnostics);
+    let r = r.emitted.expect("a successful compile emits");
 
     // The seeded stdlib is large; the entry adds `__main__` on top of the two
     // user fns.

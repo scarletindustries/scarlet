@@ -35,7 +35,8 @@ fn lower(source: &str) -> String {
         "compile failed:\n{source}\n--- diagnostics ---\n{:#?}",
         r.diagnostics
     );
-    let core: &al::core_ir::CoreProgram = &r.core;
+    let emitted = r.emitted.as_ref().expect("a successful compile emits");
+    let core: &al::core_ir::CoreProgram = &emitted.core;
     let raw = format!("{core}");
     // Renumber consts first: the `where` block needs each original index to
     // look up its `Value`, and its new name to print under.
@@ -528,7 +529,8 @@ mod unlowerable {
         let expr = crate::common::parse("1 + 1\n");
         let r = al::bytecode::compile(&expr, None, Some(&al::STDLIB));
         assert!(r.success, "{:?}", r.diagnostics);
-        let mut vm = al::vm::new_vm(r.program).expect("vm init");
+        let program = r.emitted.expect("a successful compile emits").program;
+        let mut vm = al::vm::new_vm(program).expect("vm init");
         let val = vm.run().expect("vm run");
         assert_eq!(al::vm::inspect(&val, vm.program()), "2");
     }

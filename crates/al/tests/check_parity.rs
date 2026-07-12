@@ -26,9 +26,8 @@ type FnShape = Vec<(String, i32, i32)>;
 /// registered, in index order. `code_start`/`code_len`/`locals` are
 /// deliberately excluded: those are the emit half, and `check` legitimately
 /// leaves them empty.
-fn fn_shape(r: &al::bytecode::CompileResult) -> FnShape {
-    r.program
-        .functions
+fn fn_shape(p: &al::bytecode::Program) -> FnShape {
+    p.functions
         .iter()
         .map(|f| (f.name.to_string(), f.arity, f.capture_count))
         .collect()
@@ -49,7 +48,9 @@ fn both(source: &str) -> (FnShape, FnShape) {
         "check failed:\n{source}\n{:#?}",
         checked.diagnostics
     );
-    (fn_shape(&built), fn_shape(&checked))
+    let built = built.emitted.expect("compile emits").program;
+    let checked = checked.emitted.expect("check registers the function table");
+    (fn_shape(&built), fn_shape(&checked.program))
 }
 
 #[test]
@@ -151,11 +152,11 @@ println(is_even(10))
 /// frame, whose `code_start` is 0. So a bare `ins.operand` is not a
 /// `program.code` index and comparing it to one is a category error; this is
 /// the table that turns it into one.
-fn frame_bases(r: &al::bytecode::CompileResult) -> Vec<i32> {
-    let entry = r.program.entry as usize;
-    let len = r.program.code.len();
+fn frame_bases(p: &al::bytecode::Program) -> Vec<i32> {
+    let entry = p.entry as usize;
+    let len = p.code.len();
     let mut base_of = vec![0i32; len];
-    for (i, f) in r.program.functions.iter().enumerate() {
+    for (i, f) in p.functions.iter().enumerate() {
         if i == entry || f.code_len <= 0 || f.code_start < 0 {
             continue;
         }
@@ -179,10 +180,9 @@ fn frame_bases(r: &al::bytecode::CompileResult) -> Vec<i32> {
 /// Targets are resolved through [`frame_bases`], not read raw: a body's jumps
 /// count from its own `code_start`, so an unresolved operand of `3` would look
 /// like an address inside whichever body happens to start at index ≤ 3.
-fn assert_no_jump_into_a_foreign_body(r: &al::bytecode::CompileResult) {
-    let entry = r.program.entry as usize;
-    let bodies: Vec<(usize, i32, i32)> = r
-        .program
+fn assert_no_jump_into_a_foreign_body(p: &al::bytecode::Program) {
+    let entry = p.entry as usize;
+    let bodies: Vec<(usize, i32, i32)> = p
         .functions
         .iter()
         .enumerate()
@@ -191,12 +191,12 @@ fn assert_no_jump_into_a_foreign_body(r: &al::bytecode::CompileResult) {
         .map(|(i, f)| (i, f.code_start, f.code_start + f.code_len))
         .collect();
     assert!(!bodies.is_empty(), "no bodies to guard");
-    let base_of = frame_bases(r);
+    let base_of = frame_bases(p);
     // Guards the guard: at least one `Jump` must precede a body and clear it
     // entirely, or the assertion below is trivially true for want of a
     // jump-over to check.
     let mut skips = 0;
-    for (pc, ins) in r.program.code.iter().enumerate() {
+    for (pc, ins) in p.code.iter().enumerate() {
         if !matches!(ins.op, al::bytecode::Op::Jump) {
             continue;
         }
@@ -206,9 +206,9 @@ fn assert_no_jump_into_a_foreign_body(r: &al::bytecode::CompileResult) {
         // stream and lands in no body at all — which the `inside || !targets`
         // check below would wave through. Pin the address space first.
         assert!(
-            target >= 0 && (target as usize) < r.program.code.len(),
+            target >= 0 && (target as usize) < p.code.len(),
             "Jump at {pc} resolves to {target}, outside code[0, {})",
-            r.program.code.len(),
+            p.code.len(),
         );
         let pc = pc as i32;
         for &(idx, start, end) in &bodies {
@@ -217,7 +217,7 @@ fn assert_no_jump_into_a_foreign_body(r: &al::bytecode::CompileResult) {
             assert!(
                 inside || !targets,
                 "Jump at {pc} targets {target} — inside function {idx} ({}), whose body is [{start}, {end})",
-                r.program.functions[idx].name,
+                p.functions[idx].name,
             );
             if pc < start && target >= end {
                 skips += 1;
@@ -260,6 +260,7 @@ println(outer(4))
     );
     let built = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
     assert!(built.success, "{:#?}", built.diagnostics);
+    let built = built.emitted.expect("compile emits").program;
     assert_no_jump_into_a_foreign_body(&built);
 }
 
@@ -270,9 +271,8 @@ fn check_and_compile_agree_on_the_entry_index() {
     let built = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
     let checked = al::bytecode::check(&ast, None, Some(&al::STDLIB));
     assert!(built.success && checked.success);
-    assert_eq!(built.program.entry, checked.program.entry);
-    assert_eq!(
-        &*built.program.functions[built.program.entry as usize].name,
-        "__main__"
-    );
+    let built = built.emitted.expect("compile emits").program;
+    let checked = checked.emitted.expect("check registers the function table");
+    assert_eq!(built.entry, checked.program.entry);
+    assert_eq!(&*built.functions[built.entry as usize].name, "__main__");
 }

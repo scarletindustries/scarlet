@@ -357,4 +357,7 @@ port = port_arg()
 
 println('bench_service listening on http://127.0.0.1:${port} (${USER_COUNT} users)')
 
-http.serve('127.0.0.1', port, fn(req) route(req, tables)) or e -> println('serve failed: ${e}')
+match http.serve('127.0.0.1', port, fn(req) route(req, tables)) {
+	Ok(_) -> Nil
+	Err(e) -> println('serve failed: ${e}')
+}

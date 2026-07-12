@@ -146,7 +146,12 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
         }
     }
 
-    let program = result.program;
+    let Some(emitted) = result.emitted else {
+        // A successful non-check compile always emits; reaching here means
+        // the stdlib seed itself failed, which the diagnostics above covered.
+        return EvalOutcome::Failed;
+    };
+    let program = emitted.program;
 
     let mut v = match vm::new_vm(program) {
         Ok(vm) => vm,

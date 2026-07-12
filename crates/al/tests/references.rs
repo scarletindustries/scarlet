@@ -713,7 +713,10 @@ fn session_recheck_keeps_stdlib_types_intact() {
 // `Framing` / `Header` to real enum types — not collapse them to a builtin —
 // even though al/http and al/http/headers were hydrated by an earlier check.
 const HTTP_HELLO_ENTRY: &str = "import al/http\n\
-http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) or e -> println(e)\n";
+match http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) {\n\
+\tOk(_) -> Nil\n\
+\tErr(e) -> println(e)\n\
+}\n";
 
 #[test]
 fn session_hydrates_h1_after_http_in_earlier_check() {

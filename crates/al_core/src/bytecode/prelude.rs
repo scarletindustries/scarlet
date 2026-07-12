@@ -28,7 +28,7 @@ impl Compiler {
         //    from the recorded ModuleInterface into the root scope so they are
         //    visible everywhere without an explicit import.
         let at = Span::DUMMY;
-        let path = module::al_prelude();
+        let path = crate::ast::ImportPath::canonical(module::al_prelude());
         let Some((_, key)) = self.load_module(&path, at) else {
             return;
         };

@@ -20,6 +20,6 @@ fn echo(sock Socket) Nil {
 // SO_REUSEPORT socket) and handles each connection on the core that accepted
 // it. The acceptors keep the program alive.
 match net.serve('127.0.0.1', 7777, echo) {
-	Ok(Nil) -> println('echo server on port 7777')
+	Ok(_) -> println('echo server on port 7777')
 	Err(e) -> println('serve failed: ${e}')
 }

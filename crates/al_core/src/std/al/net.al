@@ -1,6 +1,15 @@
 import al/net/address.{SocketAddress, IpAddress}
 import al/net/socket.{Socket}
-import al/net/error.{NetError, ConnectionAborted, ConnectionReset, Errno, NotConnected}
+import al/net/error.{
+	NetError,
+	ConnectionAborted,
+	ConnectionReset,
+	Errno,
+	HostUnreachable,
+	NetworkDown,
+	NetworkUnreachable,
+	NotConnected,
+}
 import al/scheduler
 import al/string
 
@@ -34,13 +43,16 @@ pub fn accept(s Server) Result(Socket, NetError)
 // never moves between cores), and `handler` runs once per connection in its
 // own lightweight process.
 //
-// Returns once the listeners are bound and the acceptors are running; the
-// acceptors keep the program alive. A bind failure is reported as `Err`.
-pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Nil, NetError) {
+// Returns the bound `Server` once the listeners are bound and the acceptors
+// are running; the acceptors keep the program alive. The handle is what lets
+// the caller shut the listener down later with `close`, or read a kernel-
+// assigned port back with `local_addr` after binding port 0. A bind failure
+// is reported as `Err`.
+pub fn serve(host String, port Int, handler fn(Socket) Nil) Result(Server, NetError) {
 	match listen(host, port) {
 		Ok(server) -> {
 			serve_on(server, handler)
-			Ok(Nil)
+			Ok(server)
 		}
 		Err(e) -> Err(e)
 	}
@@ -62,7 +74,10 @@ pub fn serve_on(server Server, handler fn(Socket) Nil) Nil {
 //
 // A per-connection accept error (ECONNABORTED, ECONNRESET, an unmapped errno
 // such as EMFILE/EPROTO) means one incoming connection was lost, not that the
-// listening socket is dead — the loop retries. An unmapped errno is usually
+// listening socket is dead — the loop retries. ENETDOWN/ENETUNREACH/
+// EHOSTUNREACH are per-connection too: accept(2) documents them as
+// already-pending errors of the ACCEPTED connection — one that died in the
+// queue — not as listener death, so they retry as well. An unmapped errno is usually
 // descriptor exhaustion (EMFILE/ENFILE), where accept fails without dequeuing
 // anything, so that retry backs off for 100ms first — retrying immediately
 // would spin this core at full speed against the same full descriptor table.
@@ -86,6 +101,8 @@ fn accept_loop(server Server, handler fn(Socket) Nil) Nil {
 		}
 		Err(ConnectionAborted) -> accept_loop(server, handler)
 		Err(ConnectionReset) -> accept_loop(server, handler)
+		Err(NetworkDown) | Err(NetworkUnreachable) | Err(HostUnreachable) ->
+			accept_loop(server, handler)
 		Err(Errno(_)) -> {
 			scheduler.sleep(100)
 			accept_loop(server, handler)
