@@ -62,21 +62,38 @@ fn lookup_basename(base: &str) -> Option<Editor> {
         .map(|(_, e)| *e)
 }
 
-/// Match a $VISUAL/$EDITOR value, which may contain a full path and/or flags
-/// (e.g. `/usr/local/bin/code --wait`): first whitespace token → basename →
-/// lowercase → exact lookup.
-fn match_env_var(value: &str) -> Option<Editor> {
-    let cmd = value.split_whitespace().next()?;
+fn match_basename(cmd: &str) -> Option<Editor> {
     let base = Path::new(cmd).file_name()?.to_str()?.to_lowercase();
     lookup_basename(&base)
+}
+
+/// Match a $VISUAL/$EDITOR value, which may contain a full path and/or flags.
+/// Three forms, tried in order:
+/// - quoted command with flags: `"/Applications/.../bin/code" -w` — the
+///   quoted span is the command;
+/// - unquoted command with flags: `/usr/local/bin/code --wait` — the first
+///   whitespace token is the command;
+/// - unquoted flag-free path containing spaces:
+///   `/Applications/Sublime Text.app/.../bin/subl` — the whole value is the
+///   command, matched as a fallback.
+fn match_env_var(value: &str) -> Option<Editor> {
+    let value = value.trim();
+    let cmd = if let Some(rest) = value.strip_prefix('"') {
+        rest.split('"').next()
+    } else if let Some(rest) = value.strip_prefix('\'') {
+        rest.split('\'').next()
+    } else {
+        value.split_whitespace().next()
+    };
+    cmd.and_then(match_basename)
+        .or_else(|| match_basename(value))
 }
 
 /// Match a `ps -o comm=` line by its exact lowercase basename. No whitespace
 /// split here: comm values are argument-free but may themselves contain
 /// spaces (`sublime text`, `code - insiders`).
 fn match_process_name(comm: &str) -> Option<Editor> {
-    let base = Path::new(comm.trim()).file_name()?.to_str()?.to_lowercase();
-    lookup_basename(&base)
+    match_basename(comm.trim())
 }
 
 /// Detect the user's editor once per process; `ps` is forked at most once.
@@ -167,6 +184,22 @@ mod tests {
             Some(Editor::Vscode)
         );
         assert_eq!(match_env_var("PyCharm"), Some(jetbrains("pycharm")));
+        // Unquoted flag-free macOS path containing spaces:
+        assert_eq!(
+            match_env_var("/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl"),
+            Some(Editor::Sublime)
+        );
+        // Quoted macOS path with flags:
+        assert_eq!(
+            match_env_var(
+                "\"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code\" -w"
+            ),
+            Some(Editor::Vscode)
+        );
+        assert_eq!(
+            match_env_var("'/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl' -w"),
+            Some(Editor::Sublime)
+        );
         // Substring false-positives that the old contains-based matcher hit:
         assert_eq!(match_env_var("encoder"), None);
         assert_eq!(match_env_var("/opt/xcode/bin/edit"), None);
