@@ -382,6 +382,61 @@ core_golden!(
      f()\n"
 );
 
+// A fallible multi-arm binary-literal match — the `http.to_method` shape.
+// Every failure edge (each segment compare, each arm's exhausted pattern)
+// jumps to a shared per-suffix continuation, so each arm body and the final
+// no-match trap are lowered exactly once. Before join points this shape
+// re-lowered every remaining arm at every failure edge, multiplying the IR.
+core_golden!(
+    binary_match_method,
+    "type Method {\n\
+     \tGet\n\
+     \tPost\n\
+     \tPut\n\
+     \tDelete\n\
+     \tOther(m Binary)\n\
+     }\n\
+     fn to_method(m Binary) Method {\n\
+     \tmatch m {\n\
+     \t\t<<'GET'>> -> Get\n\
+     \t\t<<'POST'>> -> Post\n\
+     \t\t<<'PUT'>> -> Put\n\
+     \t\t<<'DELETE'>> -> Delete\n\
+     \t\telse -> Other(m)\n\
+     \t}\n\
+     }\n\
+     to_method(<<'PUT'>>)\n"
+);
+
+// A guarded match: a guard's false edge is a failure edge like any pattern
+// mismatch, so it routes to the next arm's shared continuation instead of
+// re-lowering the trailing arms under the guard's `if`.
+core_golden!(
+    guarded_match,
+    "fn clamp(n Int, lo Int, hi Int) Int {\n\
+     \tmatch n {\n\
+     \t\tx if x < lo -> lo\n\
+     \t\tx if x > hi -> hi\n\
+     \t\tx -> x\n\
+     \t}\n\
+     }\n\
+     clamp(5, 0, 10)\n"
+);
+
+// An or-pattern match: every alternative of `a | b | c` shares the one arm
+// body, and each alternative's failure edge shares the next-arm continuation.
+core_golden!(
+    or_pattern_match,
+    "fn small(n Int) Int {\n\
+     \tmatch n {\n\
+     \t\t0 | 1 -> 1\n\
+     \t\t2 | 3 | 4 -> 2\n\
+     \t\telse -> 0\n\
+     \t}\n\
+     }\n\
+     small(3)\n"
+);
+
 // ── Structural assertions ──────────────────────────────────────────────────
 // The goldens above pin the whole IR, so they also move when the type arena
 // hands out a different number of vars. These assert only the property that
@@ -484,6 +539,240 @@ fn destructure_binding_matches_match_spelling() {
         "destructuring binding and match must release the same set:\n--- binding ---\n{}\n--- match ---\n{}",
         fn_body(&binding, 1),
         fn_body(&matched, 1)
+    );
+}
+
+// ── Fallible matches lower each arm body exactly once ──────────────────────
+// A failure edge (a binary segment mismatch, a false guard, an exhausted
+// or-pattern alternative) jumps to a shared continuation for the remaining
+// arms instead of re-lowering them in place. Each program below marks every
+// arm body with a distinct integer literal no other part of the program (and
+// nothing the renumbering rewrites) can produce, so counting the marker in
+// the printed fn body counts how many times that arm body was lowered.
+
+/// The renumbered `ConstId` whose `where`-block value contains `marker` as a
+/// standalone digit run. An integer literal always lowers to `Atom::Const`,
+/// so the marker never appears in the fn body as digits — only as this `cN`.
+fn marker_const(core: &str, marker: usize) -> usize {
+    let needle = marker.to_string();
+    let standalone = |line: &str| {
+        let b = line.as_bytes();
+        let mut i = 0;
+        while let Some(pos) = line[i..].find(&needle) {
+            let lo = i + pos;
+            let hi = lo + needle.len();
+            let fresh = lo == 0 || !b[lo - 1].is_ascii_digit();
+            if fresh && (hi == b.len() || !b[hi].is_ascii_digit()) {
+                return true;
+            }
+            i = lo + 1;
+        }
+        false
+    };
+    let where_block = core.split("where\n").nth(1).expect("a where block");
+    let mut found = Vec::new();
+    for line in where_block.lines() {
+        if let Some((name, value)) = line.trim().split_once(" = ")
+            && standalone(value)
+        {
+            found.push(
+                name.strip_prefix('c')
+                    .expect("const name")
+                    .parse()
+                    .expect("const index"),
+            );
+        }
+    }
+    // Exactly one pool entry: were a re-lowered arm body to mint a fresh
+    // (undeduplicated) constant, counting only the first id would miss it.
+    match found[..] {
+        [id] => id,
+        [] => panic!("marker {marker} not in the const pool:\n{core}"),
+        _ => panic!("marker {marker} pooled more than once ({found:?}):\n{core}"),
+    }
+}
+
+fn assert_arm_bodies_once(source: &str, markers: &[usize]) {
+    let core = lower(source);
+    let body = fn_body(&core, 0);
+    for &m in markers {
+        let id = marker_const(&core, m);
+        let n = id_spans(&body, b'c')
+            .iter()
+            .filter(|(_, k)| *k == id)
+            .count();
+        assert_eq!(
+            n, 1,
+            "arm body marker {m} (c{id}) must be lowered exactly once, found {n} times in:\n{body}"
+        );
+    }
+}
+
+/// The `to_method` shape: multi-arm binary-literal match with an `else`. Every
+/// segment-compare failure edge must reach the remaining arms through a shared
+/// continuation, not a fresh copy of them.
+#[test]
+fn binary_match_arm_bodies_lowered_once() {
+    assert_arm_bodies_once(
+        "fn code(m Binary) Int {\n\
+         \tmatch m {\n\
+         \t\t<<'GET'>> -> 101\n\
+         \t\t<<'POST'>> -> 202\n\
+         \t\t<<'PUT'>> -> 303\n\
+         \t\t<<'DELETE'>> -> 404\n\
+         \t\t<<'PATCH'>> -> 505\n\
+         \t\telse -> 606\n\
+         \t}\n\
+         }\n\
+         code(<<'HEAD'>>)\n",
+        &[101, 202, 303, 404, 505, 606],
+    );
+}
+
+/// A false guard falls through to the next arm via the same shared
+/// continuation as a pattern mismatch — the trailing arms are not duplicated
+/// under the guard's `if`.
+#[test]
+fn guarded_match_arm_bodies_lowered_once() {
+    assert_arm_bodies_once(
+        "fn band(x Int, y Int) Int {\n\
+         \tmatch x {\n\
+         \t\tn if n < y -> 101\n\
+         \t\tn if n > y -> 202\n\
+         \t\telse -> 303\n\
+         \t}\n\
+         }\n\
+         band(1, 2)\n",
+        &[101, 202, 303],
+    );
+}
+
+/// Every alternative of an or-pattern shares one lowered arm body, and an
+/// exhausted alternative list shares the next arm's continuation.
+#[test]
+fn or_pattern_arm_bodies_lowered_once() {
+    assert_arm_bodies_once(
+        "fn cls(n Int) Int {\n\
+         \tmatch n {\n\
+         \t\t0 | 1 -> 101\n\
+         \t\t2 | 3 | 4 -> 202\n\
+         \t\telse -> 303\n\
+         \t}\n\
+         }\n\
+         cls(3)\n",
+        &[101, 202, 303],
+    );
+}
+
+/// An always-matching mid-chain alternative (`<<..>>`) supersedes the
+/// alternatives written after it: they are lowered then discarded, and the
+/// discard must retract their `goto` counts. Otherwise a join whose every
+/// edge lived in the discarded subtree — here the arm's own fallthrough,
+/// targeted only by the unreachable `<<2>>` — is still materialized as a
+/// `letc` block nothing jumps to.
+#[test]
+fn discarded_alternative_leaves_no_unreachable_continuation() {
+    let core = lower(
+        "fn g(b Binary) Int {\n\
+         \tmatch b {\n\
+         \t\t<<1>> | <<..>> | <<2>> -> 1\n\
+         \t}\n\
+         }\n\
+         g(<<1>>)\n",
+    );
+    let body = fn_body(&core, 0);
+    let mut declared = Vec::new();
+    let mut targeted = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(label) = t.strip_prefix("letc ").and_then(|r| r.strip_suffix(" =")) {
+            declared.push(label);
+        } else if let Some(label) = t.strip_prefix("goto ") {
+            targeted.push(label);
+        }
+    }
+    assert!(!declared.is_empty(), "expected join points in:\n{body}");
+    for label in declared {
+        assert!(
+            targeted.contains(&label),
+            "letc {label} is declared but no goto targets it:\n{body}"
+        );
+    }
+}
+
+// ── Infallible matches stay on the flat no-continuation path ────────────────
+// The join-point machinery exists to deduplicate *failure* continuations; a
+// match with no failure edge must not pay for it. These shapes lowered to a
+// single flat `Match` before join points existed and must keep doing so —
+// `emit`'s `SwitchTag` fast path pattern-matches that flat shape, so a
+// gratuitous `LetCont` here would also demote an exhaustive enum match to the
+// `MatchEnum` ladder. The bytecode-level twin of this test
+// (`dis::an_infallible_match_keeps_the_flat_lowering`) pins the exact
+// instruction sequences.
+
+/// No `letc`/`goto` in the printed IR of a fn whose matches cannot fail.
+fn assert_no_continuations(source: &str, fn_idx: usize) {
+    let core = lower(source);
+    let body = fn_body(&core, fn_idx);
+    for needle in ["letc ", "goto "] {
+        assert!(
+            !body.contains(needle),
+            "infallible match lowered a `{}` continuation:\n{body}",
+            needle.trim_end()
+        );
+    }
+}
+
+/// Exhaustive one-arm-per-variant enum match: every head is tested by the
+/// `Match` itself and every payload bind is irrefutable, so no failure edge
+/// exists and no continuation is minted.
+#[test]
+fn exhaustive_enum_match_stays_flat() {
+    assert_no_continuations(
+        "type Shape {\n\
+         \tCircle(r Int)\n\
+         \tRect(w Int, h Int)\n\
+         }\n\
+         fn area(s Shape) Int {\n\
+         \tmatch s {\n\
+         \t\tCircle(r) -> r * r * 3\n\
+         \t\tRect(w, h) -> w * h\n\
+         \t}\n\
+         }\n\
+         area(Circle(2))\n",
+        0,
+    );
+}
+
+/// A single irrefutable arm (tuple destructure) is pure projection.
+#[test]
+fn single_irrefutable_arm_stays_flat() {
+    assert_no_continuations(
+        "fn single(p (Int, Int)) Int {\n\
+         \tmatch p {\n\
+         \t\t(a, b) -> a + b\n\
+         \t}\n\
+         }\n\
+         single((1, 2))\n",
+        0,
+    );
+}
+
+/// A literal ladder with a wildcard: a head miss falls to the next arm of the
+/// same flat `Match` (the ladder's own `JumpIfFalse`), which is not a failure
+/// edge — nothing resumes matching mid-arm — so no continuation is minted.
+#[test]
+fn literal_ladder_stays_flat() {
+    assert_no_continuations(
+        "fn lits(n Int) String {\n\
+         \tmatch n {\n\
+         \t\t1 -> 'one'\n\
+         \t\t2 -> 'two'\n\
+         \t\telse -> 'many'\n\
+         \t}\n\
+         }\n\
+         lits(1)\n",
+        0,
     );
 }
 

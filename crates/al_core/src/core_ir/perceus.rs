@@ -36,7 +36,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, LocalId, ReuseShape};
+use super::{Atom, Callee, CoreBind, CoreExpr, CoreFn, CorePat, JoinId, LocalId, ReuseShape};
 use crate::typed_ir::{RTy, ResolvedPool};
 
 /// Run Perceus on a single lowered function. `pool` is consulted only to
@@ -98,6 +98,12 @@ struct Perceus<'p> {
     /// `Call` result, a tuple, anything whose arity the rhs does not prove —
     /// drop with `shape: None` and are never offered for reuse.
     shape: BTreeMap<LocalId, ReuseShape>,
+    /// Live-in set of each `LetCont`'s continuation, recorded when the
+    /// `LetCont` is peeled — before its body (which contains every `Goto` to
+    /// it) is walked, so a `Goto` can always look its target up here. Keyed by
+    /// `JoinId`, which `lower` mints uniquely per function — the exact scope
+    /// of one `Perceus` value.
+    cont_live: BTreeMap<JoinId, Live>,
 }
 
 /// One `Let`/`LetJoin` peeled off the spine during the backward walk,
@@ -107,6 +113,20 @@ struct SpineLet {
     bind: CoreBind,
     rhs_live: Live,
     rhs: SpineRhs,
+}
+
+/// One node peeled off the spine by [`Perceus::drop_pass`].
+enum SpineFrame {
+    Let(SpineLet),
+    /// A `LetCont` whose continuation was already drop-processed at peel
+    /// time. The declaration binds no value and reads nothing itself — on
+    /// unwind it is rebuilt around the body unchanged, with no drops of its
+    /// own: its continuation's live-ins reach the enclosing live set through
+    /// the `Goto`s that jump to it.
+    Cont {
+        id: JoinId,
+        cont: CoreExpr,
+    },
 }
 
 /// The rhs of a peeled [`SpineLet`].
@@ -134,6 +154,7 @@ impl<'p> Perceus<'p> {
             pool,
             ty: BTreeMap::new(),
             shape: BTreeMap::new(),
+            cont_live: BTreeMap::new(),
         }
     }
 
@@ -165,29 +186,41 @@ impl<'p> Perceus<'p> {
     /// responsibility. The `Let` spine is walked iteratively so a long
     /// straight-line body doesn't recurse on the Rust stack.
     fn drop_pass(&mut self, mut e: CoreExpr) -> (CoreExpr, Live) {
-        let mut spine: Vec<SpineLet> = Vec::new();
-        // Peel the `Let`/`LetJoin`/`Drop` spine onto `spine`, then transform
-        // the terminal and break with its `(body, live)`.
+        let mut spine: Vec<SpineFrame> = Vec::new();
+        // Peel the `Let`/`LetJoin`/`LetCont`/`Drop` spine onto `spine`, then
+        // transform the terminal and break with its `(body, live)`.
         let (mut body, mut live) = loop {
             match e {
                 CoreExpr::Let { bind, rhs, body } => {
                     let rhs_live = atom_live(&rhs);
                     self.record_bind(&bind, ctor_shape(&rhs));
-                    spine.push(SpineLet {
+                    spine.push(SpineFrame::Let(SpineLet {
                         bind,
                         rhs_live,
                         rhs: SpineRhs::Atom(rhs),
-                    });
+                    }));
                     e = *body;
                 }
                 CoreExpr::LetJoin { bind, join, body } => {
                     let rhs_live = join_live(&join);
                     self.record_bind(&bind, None);
-                    spine.push(SpineLet {
+                    spine.push(SpineFrame::Let(SpineLet {
                         bind,
                         rhs_live,
                         rhs: SpineRhs::Join(join),
-                    });
+                    }));
+                    e = *body;
+                }
+                CoreExpr::LetCont { id, cont, body } => {
+                    // The continuation is transformed before the body so its
+                    // live-in set is known at every `Goto(id)` the body
+                    // contains — a `Goto` names only a lexically enclosing
+                    // `LetCont`, so peel order is declaration order. Drops
+                    // for locals whose last use is inside the cont are placed
+                    // *inside* it, per path, by this recursive walk.
+                    let (cont, cont_live) = self.drop_pass(*cont);
+                    self.cont_live.insert(id, cont_live);
+                    spine.push(SpineFrame::Cont { id, cont });
                     e = *body;
                 }
                 CoreExpr::Drop { body, .. } => {
@@ -199,6 +232,23 @@ impl<'p> Perceus<'p> {
                 CoreExpr::Tail(a) => {
                     let live = atom_live(&a);
                     break (self.release_self_tail_args(a), live);
+                }
+                CoreExpr::Goto(id) => {
+                    // The edge hands the shared cont ownership of exactly the
+                    // cont's live-in set: those locals are released inside it
+                    // (or returned by it) once, identically for every edge.
+                    // Treating the `Goto` as a terminal that reads that set
+                    // makes the ordinary backward pass drop everything else
+                    // before the jump on this path, and the If/Match arm-exit
+                    // equalisation keeps sibling paths consistent — so no
+                    // local is released both before an edge and inside the
+                    // cont, or on neither.
+                    let live = self
+                        .cont_live
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| unscoped_goto(id));
+                    break (CoreExpr::Goto(id), live);
                 }
                 CoreExpr::If {
                     cond,
@@ -232,6 +282,17 @@ impl<'p> Perceus<'p> {
             }
         };
         while let Some(frame) = spine.pop() {
+            let frame = match frame {
+                SpineFrame::Let(frame) => frame,
+                SpineFrame::Cont { id, cont } => {
+                    body = CoreExpr::LetCont {
+                        id,
+                        cont: Box::new(cont),
+                        body: Box::new(body),
+                    };
+                    continue;
+                }
+            };
             // A local read by `rhs` and still live after is a non-last-use:
             // reading dups (VM `PushLocal`), so the slot's own reference
             // outlives this read. Newly dead at this let: rhs operands whose
@@ -530,6 +591,17 @@ impl ReuseWalk {
                     avail.clear();
                     e = body;
                 }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    // A shared cont is entered from many `Goto` edges: a
+                    // token parked on one edge may be a live slot on another,
+                    // so the cont starts with an EMPTY stack and pairs only
+                    // tokens its own interior drops produce. (Seeding with
+                    // the predecessor intersection is a later perf follow-up,
+                    // deliberately absent.) The body keeps `avail` untouched:
+                    // declaring a cont executes nothing.
+                    self.pair(cont, &mut Vec::new());
+                    e = body;
+                }
                 CoreExpr::If { then, els, .. } => {
                     let mut a2 = avail.clone();
                     self.pair(then, avail);
@@ -562,6 +634,8 @@ impl ReuseWalk {
                     }
                     return;
                 }
+                // Tokens die at the edge: the target cont starts empty.
+                CoreExpr::Goto(_) => return,
             }
         }
     }
@@ -610,6 +684,12 @@ fn join_live(e: &CoreExpr) -> Live {
                     }
                     e = body;
                 }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    // The cont's reads are collected at its declaration; a
+                    // `Goto` to it then contributes nothing of its own.
+                    go(cont, live, bound);
+                    e = body;
+                }
                 CoreExpr::Drop { body, .. } => e = body,
                 CoreExpr::Tail(a) => {
                     for x in atom_live(a) {
@@ -619,6 +699,7 @@ fn join_live(e: &CoreExpr) -> Live {
                     }
                     break;
                 }
+                CoreExpr::Goto(_) => break,
                 CoreExpr::If {
                     cond, then, els, ..
                 } => {
@@ -661,6 +742,20 @@ fn join_live(e: &CoreExpr) -> Live {
 /// `a \ b` as a sorted vec.
 fn set_diff(a: &Live, b: &Live) -> Vec<LocalId> {
     a.difference(b).copied().collect()
+}
+
+/// A `Goto` whose join was never peeled as an enclosing `LetCont` is a
+/// lowering bug. Proceeding with an empty live-in set would drop locals the
+/// continuation still reads — a runtime double-free — so abort in release
+/// too, like emit's `unbound_join`.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn unscoped_goto(id: JoinId) -> ! {
+    panic!(
+        "internal compiler error: perceus reached goto to join {id} with no \
+         enclosing LetCont. Please report this as a compiler bug."
+    )
 }
 
 /// Known allocation shape of a `Let`'s rhs. Only a `Ctor` rhs proves a shape;
@@ -706,9 +801,10 @@ mod tests {
             CoreExpr::Drop { body, .. } => 1 + count_drops(body),
             CoreExpr::Let { body, .. } => count_drops(body),
             CoreExpr::LetJoin { join, body, .. } => count_drops(join) + count_drops(body),
+            CoreExpr::LetCont { cont, body, .. } => count_drops(cont) + count_drops(body),
             CoreExpr::If { then, els, .. } => count_drops(then) + count_drops(els),
             CoreExpr::Match { arms, .. } => arms.iter().map(|(_, b)| count_drops(b)).sum(),
-            CoreExpr::Tail(_) => 0,
+            CoreExpr::Tail(_) | CoreExpr::Goto(_) => 0,
         }
     }
 
@@ -725,6 +821,10 @@ mod tests {
                     go(join, out);
                     go(body, out);
                 }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    go(cont, out);
+                    go(body, out);
+                }
                 CoreExpr::Drop { body, .. } => go(body, out),
                 CoreExpr::If { then, els, .. } => {
                     go(then, out);
@@ -736,7 +836,7 @@ mod tests {
                     }
                 }
                 CoreExpr::Tail(Atom::Ctor { reuse, .. }) => out.push(*reuse),
-                CoreExpr::Tail(_) => {}
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
             }
         }
         let mut out = Vec::new();
@@ -751,7 +851,10 @@ mod tests {
                 CoreExpr::Drop { body, .. }
                 | CoreExpr::Let { body, .. }
                 | CoreExpr::LetJoin { body, .. } => e = body,
-                CoreExpr::Tail(_) => return false,
+                CoreExpr::LetCont { cont, body, .. } => {
+                    return find_drop(cont, id) || find_drop(body, id);
+                }
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => return false,
                 CoreExpr::If { then, els, .. } => {
                     return find_drop(then, id) || find_drop(els, id);
                 }
@@ -1070,6 +1173,147 @@ mod tests {
             ctor_reuses(&f.body),
             vec![None, None],
             "arity-2 drop cannot feed arity-3 ctor:\n{}",
+            f.body
+        );
+    }
+
+    /// Join-edge ownership equalisation, the `if_join_equalises_ownership`
+    /// discipline extended to `Goto` edges: `%0` is live into the shared cont
+    /// (its return value), `%2` is not. The `Goto` edge drops `%2` before the
+    /// jump and must NOT drop `%0` (the cont consumes it); the non-`Goto`
+    /// path drops `%0` itself. Every owned local is released exactly once on
+    /// every path — before the edge or inside the cont, never both.
+    #[test]
+    fn goto_edges_equalise_ownership() {
+        let mut pool = pool();
+        let t = con(&mut pool, 99);
+        let int = int_ty(&mut pool);
+        let f = perceus(
+            &pool,
+            func(
+                vec![bind(0, t), bind(1, int), bind(2, t)],
+                CoreExpr::LetCont {
+                    id: JoinId(0),
+                    cont: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
+                    body: Box::new(CoreExpr::If {
+                        cond: local(1),
+                        then: Box::new(CoreExpr::Goto(JoinId(0))),
+                        els: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
+                        ty: t,
+                    }),
+                },
+                t,
+            ),
+        );
+        let CoreExpr::LetCont { cont, body, .. } = &f.body else {
+            panic!("LetCont survives the pass:\n{}", f.body)
+        };
+        assert_eq!(count_drops(cont), 0, "cont returns %0:\n{}", f.body);
+        let CoreExpr::If { then, els, .. } = &**body else {
+            panic!("{}", f.body)
+        };
+        assert!(
+            find_drop(then, local(2)),
+            "Goto edge drops the local the cont does not consume:\n{}",
+            f.body
+        );
+        assert!(
+            !find_drop(then, local(0)),
+            "Goto edge must not drop a cont live-in (the cont owns it):\n{}",
+            f.body
+        );
+        assert!(
+            find_drop(els, local(0)),
+            "non-Goto path drops %0:\n{}",
+            f.body
+        );
+        assert!(!find_drop(els, local(2)), "els returns %2:\n{}", f.body);
+    }
+
+    /// A local whose last use is inside the shared cont drops there, per
+    /// path, exactly once — covering every entering edge — and no edge drops
+    /// it before its `Goto`.
+    #[test]
+    fn drop_inside_shared_cont_not_on_edges() {
+        let mut pool = pool();
+        let t = con(&mut pool, 99);
+        let int = int_ty(&mut pool);
+        let cont = CoreExpr::Let {
+            bind: bind(2, int),
+            rhs: Atom::prim(Op::AddInt, vec![local(0)]),
+            body: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
+        };
+        let f = perceus(
+            &pool,
+            func(
+                vec![bind(0, t), bind(1, int)],
+                CoreExpr::LetCont {
+                    id: JoinId(0),
+                    cont: Box::new(cont),
+                    body: Box::new(CoreExpr::If {
+                        cond: local(1),
+                        then: Box::new(CoreExpr::Goto(JoinId(0))),
+                        els: Box::new(CoreExpr::Goto(JoinId(0))),
+                        ty: int,
+                    }),
+                },
+                int,
+            ),
+        );
+        assert_eq!(
+            count_drops(&f.body),
+            1,
+            "exactly one Drop, inside the cont:\n{}",
+            f.body
+        );
+        let CoreExpr::LetCont { cont, .. } = &f.body else {
+            panic!("{}", f.body)
+        };
+        assert!(
+            find_drop(cont, local(0)),
+            "%0's last use is in the cont, so it drops there:\n{}",
+            f.body
+        );
+    }
+
+    /// A reuse token parked before the `LetCont` pairs with a `Ctor` on the
+    /// fallthrough path but never with one inside the cont: a shared cont is
+    /// entered from many edges, so its token stack starts empty.
+    #[test]
+    fn cont_enters_with_empty_reuse_stack() {
+        let mut pool = pool();
+        let t = con(&mut pool, 99);
+        let int = int_ty(&mut pool);
+        let f = perceus(
+            &pool,
+            func(
+                vec![bind(0, int)],
+                CoreExpr::Let {
+                    bind: bind(1, t),
+                    rhs: ctor(&[0, 0]),
+                    body: Box::new(CoreExpr::Let {
+                        bind: bind(2, int),
+                        rhs: Atom::prim(Op::AddInt, vec![local(1)]),
+                        // Drop %1 [Enum:2] lands here, ahead of the LetCont.
+                        body: Box::new(CoreExpr::LetCont {
+                            id: JoinId(0),
+                            cont: Box::new(CoreExpr::Tail(ctor(&[0, 0]))),
+                            body: Box::new(CoreExpr::If {
+                                cond: local(2),
+                                then: Box::new(CoreExpr::Goto(JoinId(0))),
+                                els: Box::new(CoreExpr::Tail(ctor(&[0, 0]))),
+                                ty: t,
+                            }),
+                        }),
+                    }),
+                },
+                t,
+            ),
+        );
+        assert_eq!(
+            ctor_reuses(&f.body),
+            vec![None, None, Some(local(1))],
+            "the cont's ctor must not claim %1's token; the body-path ctor may:\n{}",
             f.body
         );
     }

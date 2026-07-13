@@ -72,6 +72,10 @@ impl<I: Idx, T> TiVec<I, T> {
         self.raw.get(i.index())
     }
 
+    pub fn get_mut(&mut self, i: I) -> Option<&mut T> {
+        self.raw.get_mut(i.index())
+    }
+
     /// True when `i` names an element of this vector.
     fn contains_idx(&self, i: I) -> bool {
         i.index() < self.raw.len()

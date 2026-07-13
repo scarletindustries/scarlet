@@ -1,0 +1,96 @@
+fn s0(%0:t0) -> :t1
+  letc j0 =
+    letc j1 =
+      letc j2 =
+        letc j3 =
+          match %0 :t1
+            | _ ->
+              ret ctor 6400.4(%0)
+        match %0 :t1
+          | _ ->
+            let %22:t2 = BinBitSize(%0)
+            let %23:t2 = c0
+            let %24:t0 = c1
+            let %25:t3 = BinMatchPrefix(%0, %23, %24)
+            drop %24
+            if %25 :t1
+              let %26:t2 = c2
+              let %27:t2 = Add(%23, %26)
+              let %28:t3 = Eq(%27, %22)
+              if %28 :t1
+                drop %0
+                ret ctor 6400.3()
+              else
+                goto j3
+            else
+              goto j3
+      match %0 :t1
+        | _ ->
+          let %15:t2 = BinBitSize(%0)
+          let %16:t2 = c0
+          let %17:t0 = c3
+          let %18:t3 = BinMatchPrefix(%0, %16, %17)
+          drop %17
+          if %18 :t1
+            let %19:t2 = c4
+            let %20:t2 = Add(%16, %19)
+            let %21:t3 = Eq(%20, %15)
+            if %21 :t1
+              drop %0
+              ret ctor 6400.2()
+            else
+              goto j2
+          else
+            goto j2
+    match %0 :t1
+      | _ ->
+        let %8:t2 = BinBitSize(%0)
+        let %9:t2 = c0
+        let %10:t0 = c5
+        let %11:t3 = BinMatchPrefix(%0, %9, %10)
+        drop %10
+        if %11 :t1
+          let %12:t2 = c6
+          let %13:t2 = Add(%9, %12)
+          let %14:t3 = Eq(%13, %8)
+          if %14 :t1
+            drop %0
+            ret ctor 6400.1()
+          else
+            goto j1
+        else
+          goto j1
+  match %0 :t1
+    | _ ->
+      let %1:t2 = BinBitSize(%0)
+      let %2:t2 = c0
+      let %3:t0 = c7
+      let %4:t3 = BinMatchPrefix(%0, %2, %3)
+      drop %3
+      if %4 :t1
+        let %5:t2 = c4
+        let %6:t2 = Add(%2, %5)
+        let %7:t3 = Eq(%6, %1)
+        if %7 :t1
+          drop %0
+          ret ctor 6400.0()
+        else
+          goto j0
+      else
+        goto j0
+
+toplevel:
+  let %0:t4@g0 = closure fn#0()
+  let %1:t5 = c8
+  let %2:t6 = BinFromString(%1)
+  ret call %0(%2)
+where
+  c0 = Int(0)
+  c1 = Binary(48 bits)
+  c2 = Int(48)
+  c3 = Binary(24 bits)
+  c4 = Int(24)
+  c5 = Binary(32 bits)
+  c6 = Int(32)
+  c7 = Binary(24 bits)
+  c8 = Str("PUT")

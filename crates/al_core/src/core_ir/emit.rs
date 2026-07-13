@@ -18,6 +18,8 @@
 //! | `Tail(Call{Self_})`               | `PushLocal args; TailCallSelf argc`       |
 //! | `Match` (all-Ctor, exhaustive)    | `PushLocal s; SwitchTag; jump-table; arms`|
 //! | `Match` (otherwise)               | per-arm `MatchEnum`/`Eq` ladder           |
+//! | `LetCont{id,cont,body}`           | body; cont as a labelled block after it   |
+//! | `Goto(id)`                        | `Jump` to that label (shared by all preds)|
 //!
 //! Jump targets are **function-relative**: every operand of a jump op (and the
 //! `SwitchTag` table base) indexes the returned `code` vector, so emit never
@@ -32,7 +34,7 @@
 //! `base`.
 
 use super::{
-    Atom, Callee, CodeAddr, CoreBind, CoreExpr, CoreFn, CorePat, Imm, LocalId, VariantRef,
+    Atom, Callee, CodeAddr, CoreBind, CoreExpr, CoreFn, CorePat, Imm, JoinId, LocalId, VariantRef,
 };
 use crate::bytecode::{Instruction, Op, enum_name_prefix_hash, op, op_ab, op_arg};
 use crate::tivec::TiVec;
@@ -179,6 +181,13 @@ struct Emitter<'a, C: EmitCtx> {
     /// Whole-body facts gathered before emission (use counts, reuse claims,
     /// which locals must own a real slot).
     scan: Scan,
+    /// Per-join pending `Goto` jumps, patched in one go when the join's cont
+    /// block is emitted. `Some` while the declaring `LetCont`'s body is being
+    /// emitted (collecting), `None` before declaration and after sealing —
+    /// a `Goto` finding `None` is a scoping bug, aborted by [`unbound_join`].
+    /// Layout makes every `Goto` a forward jump: the cont block sits after
+    /// the body that contains its predecessors.
+    joins: TiVec<JoinId, Option<Vec<CodeAddr>>>,
     /// Off for the module toplevel, whose `StoreLocal`s are the global-table
     /// init and must all be emitted.
     alias_consts: bool,
@@ -197,6 +206,34 @@ struct Emitter<'a, C: EmitCtx> {
 fn unbound_local(id: LocalId) -> ! {
     panic!(
         "internal compiler error: emit reached unbound local {id}. \
+         Please report this as a compiler bug."
+    )
+}
+
+/// A `Goto` named a join that no enclosing `LetCont` is currently collecting
+/// — either never declared, or already sealed (a backward edge). Both are
+/// lowering bugs: a `JoinId` is only meaningful inside its `LetCont`'s body.
+/// Aborts like [`unbound_local`]; any jump emitted instead would land at a
+/// stale or zero offset and execute unrelated code.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn unbound_join(id: JoinId) -> ! {
+    panic!(
+        "internal compiler error: emit reached goto to undeclared join {id}. \
+         Please report this as a compiler bug."
+    )
+}
+
+/// A `LetCont` declared a `JoinId` that an enclosing `LetCont` is still
+/// collecting. Lowering mints fresh ids, so this is a lowering bug; silently
+/// overwriting the pending vec would send the outer `Goto`s to a stale offset.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn redeclared_join(id: JoinId) -> ! {
+    panic!(
+        "internal compiler error: emit declared join {id} twice on one path. \
          Please report this as a compiler bug."
     )
 }
@@ -229,6 +266,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             slots: TiVec::new(),
             preassigned: TiVec::new(),
             const_of: TiVec::new(),
+            joins: TiVec::new(),
             scan: Scan::default(),
             alias_consts: false,
             next_slot: 0,
@@ -361,6 +399,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     self.register_const_aliases(join);
                     e = body;
                 }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    self.register_const_aliases(cont);
+                    e = body;
+                }
                 CoreExpr::Drop { body, .. } => e = body,
                 CoreExpr::If { then, els, .. } => {
                     self.register_const_aliases(then);
@@ -372,7 +414,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     }
                     return;
                 }
-                CoreExpr::Tail(_) => return,
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => return,
             }
         }
     }
@@ -452,6 +494,41 @@ fn is_hoistable(rhs: &Atom) -> bool {
         Atom::Local(_) | Atom::Const(_) => true,
         Atom::PrimOp { op, .. } => !op.pushes_extra(),
         Atom::Ctor { .. } | Atom::Closure { .. } | Atom::Call { .. } => false,
+    }
+}
+
+/// True when no path through `e` falls through to the following instruction
+/// in value position: every leaf is a `Goto`, jumping away instead of leaving
+/// a value. A merge/skip jump emitted after such an expression could never
+/// execute — the same reasoning the emitter already applies to tail arms,
+/// whose every exit is its own `Ret`/`TailCall*`. A `Tail` leaf falls through
+/// (it leaves its value on the stack), so any path reaching one defeats this.
+fn diverges(mut e: &CoreExpr) -> bool {
+    loop {
+        match e {
+            CoreExpr::Goto(_) => return true,
+            CoreExpr::Tail(_) => return false,
+            CoreExpr::Let { body, .. }
+            | CoreExpr::LetJoin { body, .. }
+            | CoreExpr::Drop { body, .. } => e = body,
+            // Body `Goto`s may land in this very cont, which then falls
+            // through — so the cont must diverge too.
+            CoreExpr::LetCont { cont, body, .. } => {
+                if !diverges(cont) {
+                    return false;
+                }
+                e = body;
+            }
+            CoreExpr::If { then, els, .. } => {
+                if !diverges(then) {
+                    return false;
+                }
+                e = els;
+            }
+            CoreExpr::Match { arms, .. } => {
+                return arms.iter().all(|(_, b)| diverges(b));
+            }
+        }
     }
 }
 
@@ -624,6 +701,10 @@ impl Scan {
                     self.walk(join);
                     e = body;
                 }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    self.walk(cont);
+                    e = body;
+                }
                 CoreExpr::Drop { local, body, .. } => {
                     self.use_(*local);
                     self.pin(*local);
@@ -648,6 +729,7 @@ impl Scan {
                     self.atom(a);
                     return;
                 }
+                CoreExpr::Goto(_) => return,
             }
         }
     }
@@ -714,6 +796,41 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     self.push(op_arg(Op::StoreLocal, slot));
                     e = body;
                 }
+                // Body first, then the cont as a labelled block after it;
+                // every `Goto` collected while emitting the body is patched to
+                // that one label. NOT the `LetJoin` shape above: control only
+                // reaches the cont through a `Goto` edge, so there is no
+                // unconditional inline evaluation and no `StoreLocal` merge.
+                CoreExpr::LetCont { id, cont, body } => {
+                    self.joins.resize_at_least(*id, None);
+                    if self.joins[*id].is_some() {
+                        redeclared_join(*id);
+                    }
+                    self.joins[*id] = Some(Vec::new());
+                    let mark = self.next_slot;
+                    self.emit_expr_in(body, tail);
+                    // In value position the body's normal completion falls
+                    // through with its value on the stack and must skip the
+                    // cont block; in tail position every body exit is its own
+                    // `Ret`/`TailCall*`, and a diverging body only jumps away
+                    // ([`diverges`]), so a skip jump could never execute.
+                    let skip = (!tail && !diverges(body)).then(|| self.jump(Op::Jump));
+                    let pending = match self.joins[*id].take() {
+                        Some(p) => p,
+                        None => unbound_join(*id),
+                    };
+                    self.patch_all(&pending);
+                    // The cont references only locals bound strictly before
+                    // this node, so the body's temps are dead on every `Goto`
+                    // edge and the cont may reuse their slots.
+                    self.next_slot = mark;
+                    self.emit_expr_in(cont, tail);
+                    self.next_slot = mark;
+                    if let Some(skip) = skip {
+                        self.patch(skip);
+                    }
+                    return;
+                }
                 CoreExpr::Drop { local, body, .. } => {
                     // `drop arg…; tail self(args)`: the arg releases belong
                     // between the operand pushes and `TailCallSelf`, which
@@ -742,6 +859,18 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 }
                 CoreExpr::Tail(atom) => {
                     self.emit_atom(atom, tail, &[]);
+                    return;
+                }
+                // A terminal jump to the join's cont block, which is emitted
+                // (and this label patched) when the declaring `LetCont` seals.
+                // Carries no value in either mode: the cont's own tail
+                // produces the result this position owes.
+                CoreExpr::Goto(id) => {
+                    let j = self.jump(Op::Jump);
+                    match self.joins.get_mut(*id) {
+                        Some(Some(pending)) => pending.push(j),
+                        _ => unbound_join(*id),
+                    }
                     return;
                 }
             }
@@ -790,12 +919,13 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     /// `else_j`. Both arms restart slot allocation from the current mark: they
     /// are mutually exclusive, so their temps may overlap. In tail position
     /// there is no merge jump to emit: every tail arm ends in its own
-    /// `Ret`/`TailCall*`, so a jump after it could never execute.
+    /// `Ret`/`TailCall*`, so a jump after it could never execute. Likewise a
+    /// diverging arm ([`diverges`]) only exits via `Goto`.
     fn emit_branches(&mut self, else_j: CodeAddr, then: &CoreExpr, els: &CoreExpr, tail: bool) {
         let mark = self.next_slot;
         self.emit_expr_in(then, tail);
         self.next_slot = mark;
-        let end_j = (!tail).then(|| self.jump(Op::Jump));
+        let end_j = (!tail && !diverges(then)).then(|| self.jump(Op::Jump));
         self.patch(else_j);
         self.emit_expr_in(els, tail);
         self.next_slot = mark;
@@ -1137,9 +1267,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 self.emit_payload_binds(scrut_slot, fields);
             }
             self.emit_expr_in(body, tail);
-            // A tail arm ends in `Ret`/`TailCall*`; a merge jump after it
-            // would be unreachable.
-            if !tail {
+            // A tail arm ends in `Ret`/`TailCall*`, and a diverging arm only
+            // exits via `Goto`; a merge jump after either is unreachable.
+            if !tail && !diverges(body) {
                 ends.push(self.jump(Op::Jump));
             }
             self.next_slot = mark;
@@ -1185,9 +1315,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 CorePat::Wild => None,
             };
             self.emit_expr_in(body, tail);
-            // A tail arm ends in `Ret`/`TailCall*`; a merge jump after it
-            // would be unreachable.
-            if !tail {
+            // A tail arm ends in `Ret`/`TailCall*`, and a diverging arm only
+            // exits via `Goto`; a merge jump after either is unreachable.
+            if !tail && !diverges(body) {
                 ends.push(self.jump(Op::Jump));
             }
             if let Some(f) = fail {
@@ -1469,6 +1599,98 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `LetCont` lays out its body first and the cont as one labelled block
+    /// after it; every `Goto` is a forward `Jump` to that label, and many
+    /// predecessors share it.
+    #[test]
+    fn letcont_gotos_share_one_label_after_the_body() {
+        use super::super::JoinId;
+        // letcont j0 = ret c1
+        // in if %0 { goto j0 } else { if %1 { goto j0 } else { ret c0 } }
+        let body = CoreExpr::LetCont {
+            id: JoinId(0),
+            cont: Box::new(CoreExpr::Tail(Atom::Const(ConstId(1)))),
+            body: Box::new(CoreExpr::If {
+                cond: LocalId(0),
+                then: Box::new(CoreExpr::Goto(JoinId(0))),
+                els: Box::new(CoreExpr::If {
+                    cond: LocalId(1),
+                    then: Box::new(CoreExpr::Goto(JoinId(0))),
+                    els: Box::new(CoreExpr::Tail(Atom::Const(ConstId(0)))),
+                    ty: RTy(0),
+                }),
+                ty: RTy(0),
+            }),
+        };
+        let f = func(vec![bind(0), bind(1)], body, RTy(0));
+        let mut cx = ctx(None);
+        let out = emit(&f, &mut cx);
+        assert_eq!(
+            ops(&out),
+            vec![
+                Op::PushLocal,   // 0: %0
+                Op::JumpIfFalse, // 1: -> 3
+                Op::Jump,        // 2: goto j0
+                Op::PushLocal,   // 3: %1
+                Op::JumpIfFalse, // 4: -> 6
+                Op::Jump,        // 5: goto j0
+                Op::PushConst,   // 6: c0
+                Op::Ret,         // 7: body's own exit — no skip jump in tail
+                Op::PushConst,   // 8: cont (the shared label)
+                Op::Ret,         // 9
+            ]
+        );
+        // Both gotos jump forward to the one cont label, function-relative.
+        assert_eq!(out.code[2].operand, 8);
+        assert_eq!(out.code[5].operand, 8);
+        assert_eq!(out.code[1].operand, 3);
+        assert_eq!(out.code[4].operand, 6);
+    }
+
+    /// In value position (a `LetJoin` operand) the body's normal completion
+    /// must jump over the cont block so both paths meet at the merge-point
+    /// `StoreLocal` with exactly one value on the stack.
+    #[test]
+    fn letcont_in_value_position_skips_the_cont_block() {
+        use super::super::JoinId;
+        // letj %2 = (letcont j0 = ret c1 in if %0 { goto j0 } else { ret c0 })
+        // ret %2
+        let body = CoreExpr::LetJoin {
+            bind: bind(2),
+            join: Box::new(CoreExpr::LetCont {
+                id: JoinId(0),
+                cont: Box::new(CoreExpr::Tail(Atom::Const(ConstId(1)))),
+                body: Box::new(CoreExpr::If {
+                    cond: LocalId(0),
+                    then: Box::new(CoreExpr::Goto(JoinId(0))),
+                    els: Box::new(CoreExpr::Tail(Atom::Const(ConstId(0)))),
+                    ty: RTy(0),
+                }),
+            }),
+            body: Box::new(CoreExpr::Tail(Atom::Local(LocalId(2)))),
+        };
+        let f = func(vec![bind(0)], body, RTy(0));
+        let mut cx = ctx(None);
+        let out = emit(&f, &mut cx);
+        assert_eq!(
+            ops(&out),
+            vec![
+                Op::PushLocal,   // 0: %0
+                Op::JumpIfFalse, // 1: -> 3
+                Op::Jump,        // 2: goto j0 -> 5 (no merge jump: arm diverges)
+                Op::PushConst,   // 3: c0
+                Op::Jump,        // 4: skip the cont block -> 6
+                Op::PushConst,   // 5: cont: c1, falls through to the merge
+                Op::StoreLocal,  // 6: %2
+                Op::PushLocal,   // 7: %2
+                Op::Ret,         // 8
+            ]
+        );
+        assert_eq!(out.code[2].operand, 5); // goto lands on the cont label
+        assert_eq!(out.code[4].operand, 6); // skip lands past the cont
+        assert_eq!(out.code[1].operand, 3);
     }
 
     #[test]

@@ -1,0 +1,53 @@
+fn s0(%0:t0) -> :t1
+  letc j0 =
+    letc j3 =
+      match %0 :t1
+        | _ ->
+          ret c0
+    match %0 :t1
+      | _ ->
+        letc j4 =
+          ret c1
+        letc j5 =
+          letc j6 =
+            match %0 :t1
+              | c2 ->
+                goto j4
+              | _ ->
+                goto j3
+          match %0 :t1
+            | c3 ->
+              goto j4
+            | _ ->
+              goto j6
+        match %0 :t1
+          | c1 ->
+            goto j4
+          | _ ->
+            goto j5
+  match %0 :t1
+    | _ ->
+      letc j1 =
+        ret c4
+      letc j2 =
+        match %0 :t1
+          | c4 ->
+            goto j1
+          | _ ->
+            goto j0
+      match %0 :t1
+        | c0 ->
+          goto j1
+        | _ ->
+          goto j2
+
+toplevel:
+  let %0:t2@g0 = closure fn#0()
+  let %1:t1 = c3
+  ret call %0(%1)
+where
+  c0 = Int(0)
+  c1 = Int(2)
+  c2 = Int(4)
+  c3 = Int(3)
+  c4 = Int(1)

@@ -1,0 +1,31 @@
+fn s0(%0:t0, %1:t1, %2:t2) -> :t1
+  letc j0 =
+    letc j1 =
+      match %0 :t1
+        | %7 ->
+          ret %7
+    match %0 :t1
+      | %5 ->
+        let %6:t3 = GtInt(%5, %2)
+        if %6 :t1
+          ret %2
+        else
+          goto j1
+  match %0 :t1
+    | %3 ->
+      let %4:t3 = LtInt(%3, %1)
+      if %4 :t1
+        ret %1
+      else
+        goto j0
+
+toplevel:
+  let %0:t4@g0 = closure fn#0()
+  let %1:t5 = c0
+  let %2:t5 = c1
+  let %3:t5 = c2
+  ret call %0(%1, %2, %3)
+where
+  c0 = Int(5)
+  c1 = Int(0)
+  c2 = Int(10)

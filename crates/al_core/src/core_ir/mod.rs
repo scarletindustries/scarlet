@@ -43,6 +43,16 @@ newtype_index!(
 );
 
 newtype_index!(
+    /// Labelled-continuation index, scoped to one lowered body (function or
+    /// toplevel). Minted by `lower` wherever a fallible match needs a shared
+    /// failure continuation: [`CoreExpr::LetCont`] declares it and
+    /// [`CoreExpr::Goto`] transfers to it. Names *code*, never a value —
+    /// distinct from `LocalId` so a join label can never subscript the local
+    /// table.
+    pub struct JoinId("j")
+);
+
+newtype_index!(
     /// Index into `CoreProgram.fns` / `Program.functions` / `TypedProgram::fns`
     /// — one numbering, shared by all three. Minted only where the `Function`
     /// slot it names is reserved (`FnTable::push`, the compiler's
@@ -324,6 +334,21 @@ pub enum CoreExpr {
         join: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
+    /// Declares the zero-arity labelled continuation `cont`, in scope for
+    /// every `Goto(id)` inside `body`. Unlike `LetJoin` — a *value* join,
+    /// evaluated unconditionally inline then stored — `cont` runs only when a
+    /// failure edge in `body` fires, may be entered from many such edges, and
+    /// is itself in tail position (its result is the expression's result).
+    /// Zero arity suffices because `cont` references only locals bound
+    /// strictly before this node, and this node dominates every `Goto` to
+    /// `id`. `lower` mints one per fallible match-arm suffix so each arm body
+    /// is lowered exactly once and failure edges become `Goto`s instead of
+    /// re-lowered copies of the remaining arms.
+    LetCont {
+        id: JoinId,
+        cont: Box<CoreExpr>,
+        body: Box<CoreExpr>,
+    },
     /// Inserted by `perceus` at the last use of `local`: releases the frame's
     /// reference and — when the cell is uniquely owned — parks the hollowed
     /// allocation in `local`'s slot for a paired `Ctor{reuse}` to overwrite.
@@ -350,6 +375,13 @@ pub enum CoreExpr {
     },
     /// Tail position: return value or tail call.
     Tail(Atom),
+    /// Terminal transfer to the continuation an enclosing [`CoreExpr::LetCont`]
+    /// declared for this `JoinId`. Legal only in tail position — it stands
+    /// where a `Tail` could, never in operand position — so it carries no
+    /// value: the continuation's own tail produces the result. `emit` lowers
+    /// it to a jump to the continuation's label; many `Goto`s may share one
+    /// label.
+    Goto(JoinId),
 }
 
 impl CoreExpr {
@@ -374,8 +406,11 @@ impl CoreExpr {
                     }
                     cur = body;
                 }
-                CoreExpr::Drop { body, .. } => cur = body,
-                CoreExpr::Match { .. } | CoreExpr::If { .. } | CoreExpr::Tail(_) => return out,
+                CoreExpr::Drop { body, .. } | CoreExpr::LetCont { body, .. } => cur = body,
+                CoreExpr::Match { .. }
+                | CoreExpr::If { .. }
+                | CoreExpr::Tail(_)
+                | CoreExpr::Goto(_) => return out,
             }
         }
     }
@@ -538,6 +573,11 @@ impl fmt::Display for Indented<'_> {
                     Indented(join, depth + 1).fmt(f)?;
                     cur = body;
                 }
+                CoreExpr::LetCont { id, cont, body } => {
+                    writeln!(f, "letc {id} =")?;
+                    Indented(cont, depth + 1).fmt(f)?;
+                    cur = body;
+                }
                 CoreExpr::Drop { local, shape, body } => {
                     match shape {
                         Some(s) => writeln!(f, "drop {local} [{:?}:{}]", s.tag, s.words)?,
@@ -547,6 +587,9 @@ impl fmt::Display for Indented<'_> {
                 }
                 CoreExpr::Tail(a) => {
                     return writeln!(f, "ret {a}");
+                }
+                CoreExpr::Goto(id) => {
+                    return writeln!(f, "goto {id}");
                 }
                 CoreExpr::If {
                     cond,

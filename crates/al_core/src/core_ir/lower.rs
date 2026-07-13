@@ -79,9 +79,10 @@
 use std::collections::VecDeque;
 
 use super::{
-    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, Imm, LocalId,
+    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, Imm, JoinId, LocalId,
 };
 use crate::bytecode::Op;
+use crate::tivec::TiVec;
 use crate::typed_ir::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
     TypedBind, TypedCallee, TypedExpr, TypedFn, TypedInterpPart, TypedPat, TypedProgram, ValueRef,
@@ -191,16 +192,21 @@ enum ArmLeaf<'p> {
     /// current segment's value pattern has bound its names — those bindings are
     /// in scope for the next segment's `size(...)` expression.
     BinCont(Box<BinCont<'p>>),
-    /// An or-pattern alternative just matched: resume with the sub-patterns
-    /// that were queued *after* the or-pattern, then `leaf`, using `outer` —
-    /// not the try-next-alternative fall — as the fallthrough. The first
-    /// matching alternative commits; guard/rest failure falls to the next arm,
-    /// never retries a sibling alternative.
+    /// An or-pattern alternative just matched, in a *binding* or-pattern
+    /// (whose commit path cannot be shared — see [`Lower::or_alternatives`]):
+    /// resume with the sub-patterns that were queued *after* the or-pattern,
+    /// then `leaf`, using `outer` — not the try-next-alternative fall — as
+    /// the fallthrough. The first matching alternative commits; guard/rest
+    /// failure falls to the next arm, never retries a sibling alternative.
     OrBody {
         rest_nested: Vec<(LocalId, &'p TypedPat)>,
         leaf: Box<ArmLeaf<'p>>,
-        outer: ArmFall<'p>,
+        outer: ArmFall,
     },
+    /// A bind-free or-pattern alternative just matched: jump to the shared
+    /// commit continuation — the sub-patterns queued after the or-pattern
+    /// plus the arm body, lowered once for all alternatives.
+    OrCommit(JoinId),
 }
 
 /// Suspended state of a `<<>>` pattern walk: `segs` are the segments still to
@@ -245,37 +251,21 @@ enum SegWidth<'p> {
     Remainder,
 }
 
-/// Fallthrough continuation for an arm: what to lower when a guard or a nested
-/// refutable sub-pattern fails after the arm's `CorePat` head already matched.
-#[derive(Clone)]
-enum ArmFall<'p> {
-    /// Resume matching on the remaining source arms against the original
-    /// scrutinee.
-    Arms {
-        scrut: LocalId,
-        rest: &'p [TypedArm],
-    },
-    /// Try the next alternative of an or-pattern; when `alts` is exhausted,
-    /// fall to `outer`.
-    OrAlt(Box<OrCont<'p>>),
-}
-
-/// Suspended state of an or-pattern walk: `alts` are the alternatives still to
-/// try against `scrut`. An alternative that fails to match tries the next, and
-/// finally `outer`; an alternative that matches commits — `rest_nested` then
-/// `leaf` are lowered with `outer` as the fallthrough, so a subsequent miss
-/// never retries a sibling alternative.
-///
-/// Every alternative of a well-formed or-pattern binds the same names to the
-/// same [`BindingId`]s, so re-entering [`Lower::bind`] for the next alternative
-/// overwrites exactly the entries the previous one wrote.
-#[derive(Clone)]
-struct OrCont<'p> {
-    scrut: LocalId,
-    alts: &'p [TypedPat],
-    rest_nested: Vec<(LocalId, &'p TypedPat)>,
-    leaf: ArmLeaf<'p>,
-    outer: ArmFall<'p>,
+/// Fallthrough continuation for an arm: where control transfers when a guard
+/// or a nested refutable sub-pattern fails after the arm's `CorePat` head
+/// already matched. `Copy` — the continuation is a [`JoinId`] label, not a
+/// re-lowerable description of the remaining arms — so an arm with many
+/// failure edges lowers its fallthrough once and `Goto`s it from every edge.
+#[derive(Clone, Copy)]
+enum ArmFall {
+    /// Jump to the join holding "resume matching": the remaining source arms
+    /// (ultimately the no-arm-matched trap), or the next alternative of an
+    /// enclosing or-pattern.
+    Join(JoinId),
+    /// No join was minted because the arm cannot fail ([`arm_fallible`] said
+    /// so). Consulting it is a lowering bug: [`Lower::arm_fallthrough`]
+    /// aborts rather than emit a failure edge the classifier proved absent.
+    Unreachable,
 }
 
 /// Whether an [`Lower::expr_tail`] walk is on the function's own outermost
@@ -304,6 +294,12 @@ struct Lower {
     /// Let-bindings emitted so far in the current linear segment; folded
     /// around the segment's tail by [`Self::seal`].
     spine: Vec<Pending>,
+    /// `Goto` count per minted [`JoinId`].
+    /// [`Self::match_arms`] reads it after lowering an arm: a
+    /// join no failure edge ever targeted is not materialized as a `LetCont`,
+    /// which is what keeps an arm that *could* fail in shape but never does
+    /// (`<<..r>>`, say) on the flat no-continuation path.
+    join_uses: TiVec<JoinId, u32>,
 }
 
 impl Lower {
@@ -314,6 +310,7 @@ impl Lower {
             tys: Vec::new(),
             binds: vec![None; binds as usize],
             spine: Vec::new(),
+            join_uses: TiVec::new(),
         }
     }
 
@@ -375,6 +372,53 @@ impl Lower {
             join,
         });
         id
+    }
+
+    /// Mint a fresh join-point label, initially targeted by no `Goto`.
+    fn fresh_join(&mut self) -> JoinId {
+        self.join_uses.push(0)
+    }
+
+    /// A `Goto` edge into `j`, counted so [`Self::join_used`] can tell a live
+    /// continuation from one nothing jumps to.
+    fn goto_join(&mut self, j: JoinId) -> CoreExpr {
+        self.join_uses[j] += 1;
+        CoreExpr::Goto(j)
+    }
+
+    /// Whether any failure edge targeted `j`.
+    fn join_used(&self, j: JoinId) -> bool {
+        self.join_uses[j] > 0
+    }
+
+    /// Retract the `Goto` counts inside a lowered subtree that assembly is
+    /// discarding ([`Self::or_alternatives`] dropping the alternatives after
+    /// one that always matches). Without this the discarded edges keep their
+    /// target joins "used", and a join whose every surviving edge was
+    /// discarded would still be materialized as a dead `LetCont`.
+    fn retract_gotos(&mut self, e: &CoreExpr) {
+        match e {
+            CoreExpr::Goto(j) => self.join_uses[*j] -= 1,
+            CoreExpr::Let { body, .. } | CoreExpr::Drop { body, .. } => self.retract_gotos(body),
+            CoreExpr::LetJoin { join, body, .. } => {
+                self.retract_gotos(join);
+                self.retract_gotos(body);
+            }
+            CoreExpr::LetCont { cont, body, .. } => {
+                self.retract_gotos(cont);
+                self.retract_gotos(body);
+            }
+            CoreExpr::Match { arms, .. } => {
+                for (_, arm) in arms {
+                    self.retract_gotos(arm);
+                }
+            }
+            CoreExpr::If { then, els, .. } => {
+                self.retract_gotos(then);
+                self.retract_gotos(els);
+            }
+            CoreExpr::Tail(_) => {}
+        }
     }
 
     /// Push `let %id = rhs` for a source binding that owns its slot: the
@@ -966,12 +1010,6 @@ impl Lower {
 
     // ── pattern lowering ───────────────────────────────────────────────────
 
-    /// Lower `arms` against an already-bound `scrut`. A guarded arm lowers to
-    /// `pat => if <guard> { body } else { match scrut on remaining arms }`: the
-    /// guard-fail path is a fresh nested `Match` over the tail of the arm list,
-    /// so guard failure resumes matching exactly as the source does. The tail
-    /// arms also remain in the enclosing `Match` for ordinary pattern
-    /// fallthrough, so each guard duplicates the trailing arms once.
     /// `arr[i] or <pure atom>` → one [`Op::IndexOr`], no `Option` cell.
     ///
     /// `or_expr` elaborates `x or d` to a two-arm match on `Option`. When `x`
@@ -1036,9 +1074,29 @@ impl Lower {
         }))
     }
 
+    /// Lower `arms` against an already-bound `scrut`.
+    ///
+    /// Arms lower front-to-back (so locals are minted in source order), but
+    /// the tree assembles back-to-front: each fallible arm's failure edges —
+    /// a false guard, a refutable nested sub-pattern, a `<<>>` bounds check —
+    /// `Goto` one zero-arity [`CoreExpr::LetCont`] holding "try the remaining
+    /// arms", so every arm body and the final no-arm-matched trap are lowered
+    /// exactly once, however many failure edges resume there.
+    ///
+    /// An arm with no failure edge needs no continuation: it is prepended
+    /// onto the entry `Match` of the suffix below it, so a run of infallible
+    /// arms — in particular a whole exhaustive enum match — keeps the flat
+    /// single-`Match` shape (and `SwitchTag` eligibility) it had before join
+    /// points existed. The trap is the innermost seed: a `Match` with no
+    /// arms, whose empty ladder is the emitter's one `Halt` per match.
     fn match_arms(&mut self, scrut: LocalId, arms: &[TypedArm], result_ty: RTy) -> CoreExpr {
-        let mut core_arms = Vec::with_capacity(arms.len());
-        for (i, arm) in arms.iter().enumerate() {
+        let mut lowered = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let fall = if arm_fallible(arm) {
+                ArmFall::Join(self.fresh_join())
+            } else {
+                ArmFall::Unreachable
+            };
             let mut nested = Vec::new();
             let pat = self.pattern(&arm.pat, scrut, &mut nested);
             let leaf = match &arm.guard {
@@ -1048,18 +1106,52 @@ impl Lower {
                     body: &arm.body,
                 },
             };
-            let fall = ArmFall::Arms {
-                scrut,
-                rest: &arms[i + 1..],
-            };
             let body = self.nested_arm_body(nested.into(), leaf, fall, result_ty);
-            core_arms.push((pat, body));
+            lowered.push((pat, body, fall));
         }
-        CoreExpr::Match {
-            scrut,
-            arms: core_arms,
-            ty: result_ty,
+
+        // The suffix assembled so far: the entry `Match` over `entry_arms`,
+        // wrapped in a `LetCont` when the arms below it were sealed behind a
+        // join. Kept unassembled so an infallible arm can join the entry
+        // match's ladder instead of chaining another jump.
+        let assemble = |entry_arms: VecDeque<(CorePat, CoreExpr)>,
+                        wrap: Option<(JoinId, CoreExpr)>| {
+            let entry = CoreExpr::Match {
+                scrut,
+                arms: entry_arms.into(),
+                ty: result_ty,
+            };
+            match wrap {
+                Some((id, cont)) => CoreExpr::LetCont {
+                    id,
+                    cont: Box::new(cont),
+                    body: Box::new(entry),
+                },
+                None => entry,
+            }
+        };
+        let mut entry_arms: VecDeque<(CorePat, CoreExpr)> = VecDeque::new();
+        let mut wrap: Option<(JoinId, CoreExpr)> = None;
+        for (pat, body, fall) in lowered.into_iter().rev() {
+            match fall {
+                // Live failure edges: seal everything below as this arm's
+                // continuation. A refutable head gets a wildcard arm routing
+                // a head miss to the same join the body's failure edges use;
+                // an irrefutable head cannot miss, so none is added.
+                ArmFall::Join(j) if self.join_used(j) => {
+                    let cont = assemble(entry_arms, wrap.take());
+                    let head_refutable = matches!(pat, CorePat::Lit(_) | CorePat::Ctor { .. });
+                    entry_arms = VecDeque::from([(pat, body)]);
+                    if head_refutable {
+                        entry_arms.push_back((CorePat::Wild, self.goto_join(j)));
+                    }
+                    wrap = Some((j, cont));
+                }
+                // No failure edge ever fired (or none could): flat.
+                _ => entry_arms.push_front((pat, body)),
+            }
         }
+        assemble(entry_arms, wrap)
     }
 
     /// Lower `p` to a flat [`CorePat`] head. Any structure `CorePat` cannot
@@ -1114,13 +1206,19 @@ impl Lower {
         }
     }
 
-    /// Lower the fallthrough continuation for an arm whose guard or nested
-    /// refutable sub-pattern failed: resume matching — either on the remaining
-    /// source arms, or on the next alternative of an enclosing or-pattern.
-    fn arm_fallthrough(&mut self, fall: ArmFall<'_>, result_ty: RTy) -> CoreExpr {
+    /// The failure edge itself: a `Goto` to the arm's fallthrough join.
+    /// [`ArmFall::Unreachable`] means [`arm_fallible`] proved no such edge
+    /// exists, so reaching this with it is a lowering bug — and a silent one
+    /// if papered over, since any substitute expression would change what a
+    /// failed match evaluates to. Abort instead, in release as well as debug.
+    #[allow(clippy::panic)]
+    fn arm_fallthrough(&mut self, fall: ArmFall) -> CoreExpr {
         match fall {
-            ArmFall::Arms { scrut, rest } => self.match_arms(scrut, rest, result_ty),
-            ArmFall::OrAlt(oc) => self.or_alternatives(*oc, result_ty),
+            ArmFall::Join(j) => self.goto_join(j),
+            ArmFall::Unreachable => panic!(
+                "internal compiler error: failure edge lowered for a match arm classified \
+                 infallible. Please report this as a compiler bug."
+            ),
         }
     }
 
@@ -1131,10 +1229,10 @@ impl Lower {
         mark: usize,
         cond: LocalId,
         then: CoreExpr,
-        fall: ArmFall<'_>,
+        fall: ArmFall,
         result_ty: RTy,
     ) -> CoreExpr {
-        let els = self.arm_fallthrough(fall, result_ty);
+        let els = self.arm_fallthrough(fall);
         self.seal(
             mark,
             CoreExpr::If {
@@ -1146,44 +1244,97 @@ impl Lower {
         )
     }
 
-    /// Lower the remaining alternatives of an or-pattern. Only the alternative
-    /// pattern itself uses the try-next-alternative fallthrough; once it
-    /// matches, `rest_nested` and `leaf` are lowered with `outer` (via
-    /// [`ArmLeaf::OrBody`]) so a guard/trailing-pattern miss falls to the next
-    /// arm — commit-on-first-match.
-    fn or_alternatives<'p>(&mut self, oc: OrCont<'p>, result_ty: RTy) -> CoreExpr {
-        let OrCont {
-            scrut,
-            alts,
-            rest_nested,
-            leaf,
-            outer,
-        } = oc;
-        let Some((first, tail)) = alts.split_first() else {
-            return self.arm_fallthrough(outer, result_ty);
+    /// Lower an or-pattern's alternatives. Assembly mirrors
+    /// [`Self::match_arms`]: alternatives lower front-to-back, each refutable
+    /// alternative's failure edges `Goto` a join holding "try the next
+    /// alternative", and the last (or first irrefutable) alternative falls to
+    /// `outer` — so no alternative is ever lowered twice.
+    ///
+    /// The commit path — the sub-patterns queued after the or-pattern, then
+    /// the arm body — always uses `outer` as its fallthrough, never a
+    /// try-next-alternative join: the first matching alternative commits, and
+    /// a guard/trailing-pattern miss falls to the next *arm*. When no
+    /// alternative binds a name the commit path is itself one shared join,
+    /// entered by [`ArmLeaf::OrCommit`] from every alternative. A *binding*
+    /// or-pattern lowers it once per alternative ([`ArmLeaf::OrBody`])
+    /// instead: each alternative binds the same [`BindingId`]s to its own
+    /// fresh locals, and a zero-arity continuation has no way to receive
+    /// per-alternative locals — so the duplication is bounded by the written
+    /// alternative count, never multiplied by failure edges.
+    ///
+    /// Every alternative of a well-formed or-pattern binds the same names to
+    /// the same [`BindingId`]s, so re-entering [`Lower::bind`] for the next
+    /// alternative overwrites exactly the entries the previous one wrote.
+    fn or_alternatives<'p>(
+        &mut self,
+        scrut: LocalId,
+        alts: &'p [TypedPat],
+        rest_nested: Vec<(LocalId, &'p TypedPat)>,
+        leaf: ArmLeaf<'p>,
+        outer: ArmFall,
+        result_ty: RTy,
+    ) -> CoreExpr {
+        let commit = (!alts.iter().any(pat_binds)).then(|| self.fresh_join());
+
+        let mut lowered: Vec<(Option<JoinId>, CoreExpr)> = Vec::with_capacity(alts.len());
+        for (i, alt) in alts.iter().enumerate() {
+            // An irrefutable alternative always matches: it terminates the
+            // chain, and any alternatives written after it are unreachable —
+            // they are not lowered at all.
+            let terminal = i + 1 == alts.len() || !nested_fallible(alt);
+            let fall_join = (!terminal).then(|| self.fresh_join());
+            let fall = match fall_join {
+                Some(j) => ArmFall::Join(j),
+                None => outer,
+            };
+            let alt_leaf = match commit {
+                Some(cj) => ArmLeaf::OrCommit(cj),
+                None => ArmLeaf::OrBody {
+                    rest_nested: rest_nested.clone(),
+                    leaf: Box::new(leaf.clone()),
+                    outer,
+                },
+            };
+            let e = self.nested_arm_body(VecDeque::from([(scrut, alt)]), alt_leaf, fall, result_ty);
+            lowered.push((fall_join, e));
+            if terminal {
+                break;
+            }
+        }
+
+        // Assemble back-to-front: each alternative whose join a failure edge
+        // targeted seals the alternatives after it as that join's
+        // continuation; one whose join went unused (fallible in shape only,
+        // e.g. `<<..r>>`) supersedes them outright — retracting the discarded
+        // subtree's `Goto` counts so joins only its edges targeted are not
+        // materialized.
+        let Some((_, mut cur)) = lowered.pop() else {
+            return self.arm_fallthrough(outer);
         };
-        let inner_fall = if tail.is_empty() {
-            outer.clone()
-        } else {
-            ArmFall::OrAlt(Box::new(OrCont {
-                scrut,
-                alts: tail,
-                rest_nested: rest_nested.clone(),
-                leaf: leaf.clone(),
-                outer: outer.clone(),
-            }))
-        };
-        let body_leaf = ArmLeaf::OrBody {
-            rest_nested,
-            leaf: Box::new(leaf),
-            outer,
-        };
-        self.nested_arm_body(
-            VecDeque::from([(scrut, first)]),
-            body_leaf,
-            inner_fall,
-            result_ty,
-        )
+        while let Some((fall_join, e)) = lowered.pop() {
+            cur = match fall_join {
+                Some(j) if self.join_used(j) => CoreExpr::LetCont {
+                    id: j,
+                    cont: Box::new(cur),
+                    body: Box::new(e),
+                },
+                _ => {
+                    self.retract_gotos(&cur);
+                    e
+                }
+            };
+        }
+        match commit {
+            Some(cj) => {
+                let cont = self.nested_arm_body(rest_nested.into(), leaf, outer, result_ty);
+                CoreExpr::LetCont {
+                    id: cj,
+                    cont: Box::new(cont),
+                    body: Box::new(cur),
+                }
+            }
+            None => cur,
+        }
     }
 
     /// Flatten `nested` residual sub-patterns into successive `Match`/`Let`
@@ -1196,7 +1347,7 @@ impl Lower {
         &mut self,
         mut nested: VecDeque<(LocalId, &'p TypedPat)>,
         leaf: ArmLeaf<'p>,
-        fall: ArmFall<'p>,
+        fall: ArmFall,
         result_ty: RTy,
     ) -> CoreExpr {
         let mark = self.spine.len();
@@ -1216,6 +1367,7 @@ impl Lower {
                         leaf,
                         outer,
                     } => self.nested_arm_body(rest_nested.into(), *leaf, outer, result_ty),
+                    ArmLeaf::OrCommit(j) => self.goto_join(j),
                 };
                 return self.seal(mark, tail);
             };
@@ -1245,8 +1397,8 @@ impl Lower {
                     for r in inner.into_iter().rev() {
                         nested.push_front(r);
                     }
-                    let body = self.nested_arm_body(nested, leaf, fall.clone(), result_ty);
-                    let els = self.arm_fallthrough(fall, result_ty);
+                    let body = self.nested_arm_body(nested, leaf, fall, result_ty);
+                    let els = self.arm_fallthrough(fall);
                     let m = CoreExpr::Match {
                         scrut: v,
                         arms: vec![(sub, body), (CorePat::Wild, els)],
@@ -1294,7 +1446,7 @@ impl Lower {
                         for r in tmp.into_iter().rev() {
                             nested.push_front(r);
                         }
-                        let inner = self.nested_arm_body(nested, leaf, fall.clone(), result_ty);
+                        let inner = self.nested_arm_body(nested, leaf, fall, result_ty);
                         self.seal(then_mark, inner)
                     };
                     return self.guard_if(mark, ok, then, fall, result_ty);
@@ -1308,23 +1460,14 @@ impl Lower {
                         let then_mark = self.spine.len();
                         let hi = self.let_(int_t, Atom::Const(*hi));
                         let lt = self.let_(bool_t, Atom::prim(Op::Lt, vec![v, hi]));
-                        let inner = self.nested_arm_body(nested, leaf, fall.clone(), result_ty);
-                        self.guard_if(then_mark, lt, inner, fall.clone(), result_ty)
+                        let inner = self.nested_arm_body(nested, leaf, fall, result_ty);
+                        self.guard_if(then_mark, lt, inner, fall, result_ty)
                     };
                     return self.guard_if(mark, ge, then, fall, result_ty);
                 }
                 TypedPat::Or { alts, .. } => {
                     let rest_nested: Vec<_> = nested.into_iter().collect();
-                    let body = self.or_alternatives(
-                        OrCont {
-                            scrut: v,
-                            alts,
-                            rest_nested,
-                            leaf,
-                            outer: fall,
-                        },
-                        result_ty,
-                    );
+                    let body = self.or_alternatives(v, alts, rest_nested, leaf, fall, result_ty);
                     return self.seal(mark, body);
                 }
                 TypedPat::Bin {
@@ -1359,7 +1502,7 @@ impl Lower {
     /// `BinCont` leaf so the value pattern's bindings are in scope for the next
     /// segment's `size(...)`. When `segs` is empty, emit the trailing `..rest`
     /// bind or exact-length check and resume with `bc.after` / `bc.then`.
-    fn bin_segments<'p>(&mut self, bc: BinCont<'p>, fall: ArmFall<'p>, result_ty: RTy) -> CoreExpr {
+    fn bin_segments<'p>(&mut self, bc: BinCont<'p>, fall: ArmFall, result_ty: RTy) -> CoreExpr {
         let mark = self.spine.len();
         let int_t = self.temps.int;
         let bool_t = self.temps.bool;
@@ -1390,7 +1533,7 @@ impl Lower {
                 }
                 PatRest::None => {
                     let ok = self.let_(bool_t, Atom::prim(Op::Eq, vec![cursor, total]));
-                    let body = self.nested_arm_body(after.into(), then, fall.clone(), result_ty);
+                    let body = self.nested_arm_body(after.into(), then, fall, result_ty);
                     return self.guard_if(mark, ok, body, fall, result_ty);
                 }
             }
@@ -1419,7 +1562,7 @@ impl Lower {
                     let tm = self.spine.len();
                     let w = self.int_const(*bits);
                     let cur2 = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, w]));
-                    let inner = self.bin_segments(cont(cur2), fall.clone(), result_ty);
+                    let inner = self.bin_segments(cont(cur2), fall, result_ty);
                     self.seal(tm, inner)
                 };
                 self.guard_if(mark, ok, then_e, fall, result_ty)
@@ -1451,12 +1594,8 @@ impl Lower {
                     let tm = self.spine.len();
                     let cur2 = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, nbits]));
                     let leaf2 = ArmLeaf::BinCont(Box::new(cont(cur2)));
-                    let inner = self.nested_arm_body(
-                        VecDeque::from([(cp, value)]),
-                        leaf2,
-                        fall.clone(),
-                        result_ty,
-                    );
+                    let inner =
+                        self.nested_arm_body(VecDeque::from([(cp, value)]), leaf2, fall, result_ty);
                     self.seal(tm, inner)
                 };
                 self.guard_if(mark, ok, then_e, fall, result_ty)
@@ -1508,13 +1647,13 @@ impl Lower {
         val_ty: RTy,
         value: &'p TypedPat,
         cont: impl Fn(LocalId) -> BinCont<'p>,
-        fall: ArmFall<'p>,
+        fall: ArmFall,
         result_ty: RTy,
     ) -> CoreExpr {
         let int_t = self.temps.int;
         let bool_t = self.temps.bool;
         let BinWalk { bin, total, cursor } = walk;
-        let read = |lo: &mut Self, width: LocalId, end: LocalId, fall: ArmFall<'p>| -> CoreExpr {
+        let read = |lo: &mut Self, width: LocalId, end: LocalId, fall: ArmFall| -> CoreExpr {
             let tm = lo.spine.len();
             let sv = lo.let_(val_ty, Atom::prim(read_op, vec![bin, cursor, width]));
             let leaf2 = ArmLeaf::BinCont(Box::new(cont(end)));
@@ -1526,7 +1665,7 @@ impl Lower {
                 let width = self.operand(bits);
                 let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
                 let ok = self.let_(bool_t, Atom::prim(Op::Lte, vec![end, total]));
-                let then_e = read(self, width, end, fall.clone());
+                let then_e = read(self, width, end, fall);
                 self.guard_if(mark, ok, then_e, fall, result_ty)
             }
             SegWidth::Remainder => {
@@ -1537,4 +1676,59 @@ impl Lower {
             }
         }
     }
+}
+
+// ── Arm classification ──────────────────────────────────────────────────────
+// Syntactic answers to "does lowering this arm ever consult its `ArmFall`?",
+// read by `match_arms` before any lowering happens so an infallible arm can
+// carry `ArmFall::Unreachable` and mint no join. Sound in one direction only:
+// `false` guarantees no failure edge is lowered (`arm_fallthrough` aborts on
+// `Unreachable`, so a wrong `false` cannot miscompile silently); `true` may
+// over-approximate — a `<<..r>>` pattern is refutable in shape but matches
+// every binary — which costs an unused `JoinId` and nothing else, since
+// `match_arms` only materializes a `LetCont` for a join some edge targeted.
+
+/// Whether lowering `arm` can produce a failure edge *after* its `CorePat`
+/// head matched: a guard, or refutable structure the flat head cannot carry.
+fn arm_fallible(arm: &TypedArm) -> bool {
+    arm.guard.is_some() || head_fallible(&arm.pat)
+}
+
+/// [`arm_fallible`] for the arm's own pattern. `Wild`/`Bind` always match and
+/// a `Lit` head is checked by the `Match` ladder itself — a miss falls to the
+/// next arm of the same `Match`, touching no failure continuation. Only
+/// compound `Ctor` fields survive into the nested queue (`Wild`/`Bind` fields
+/// are bound by the head); every other pattern is queued whole.
+fn head_fallible(p: &TypedPat) -> bool {
+    match p {
+        TypedPat::Wild { .. } | TypedPat::Bind(_) | TypedPat::Lit { .. } => false,
+        TypedPat::Ctor { fields, .. } => fields.iter().any(nested_fallible),
+        _ => nested_fallible(p),
+    }
+}
+
+/// Whether a residual sub-pattern can fail once queued. Mirrors
+/// [`Lower::nested_arm_body`]'s arms: `Tuple` is pure projection over its
+/// elements, while nested `Ctor`/`Lit` always lower a fail edge (even a
+/// single-variant `Ctor` — its inner `Match` carries one), as do the
+/// length/bounds/range checks of the rest.
+fn nested_fallible(p: &TypedPat) -> bool {
+    match p {
+        TypedPat::Wild { .. } | TypedPat::Bind(_) => false,
+        TypedPat::Tuple { elems, .. } => elems.iter().any(nested_fallible),
+        TypedPat::Lit { .. }
+        | TypedPat::Ctor { .. }
+        | TypedPat::Array { .. }
+        | TypedPat::Bin { .. }
+        | TypedPat::Or { .. }
+        | TypedPat::Range { .. } => true,
+    }
+}
+
+/// Whether `p` binds any name. Decides or-pattern commit-path sharing
+/// ([`Lower::or_alternatives`]): a zero-arity continuation cannot receive the
+/// per-alternative locals a binding alternative mints, so only a bind-free
+/// or-pattern shares its commit path as a join.
+fn pat_binds(p: &TypedPat) -> bool {
+    !crate::typed_ir::elaborate_pat::pat_binds(p).is_empty()
 }

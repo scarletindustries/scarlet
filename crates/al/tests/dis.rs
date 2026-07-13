@@ -152,3 +152,177 @@ fn a_big_int_constant_is_pooled_once() {
         p.constants.len()
     );
 }
+
+/// The size gate for join-point match lowering: a fallible match shares one
+/// fallthrough continuation (`LetCont`/`Goto`) across its failure edges
+/// instead of re-lowering every remaining arm at each edge. Without sharing,
+/// the duplication is multiplicative on binary patterns: `to_method`'s 8-arm
+/// binary match alone compiled to 48,100 instructions and the benchmark
+/// program to 72,333. These bounds fail loudly if any lowering path regresses
+/// to per-edge re-lowering.
+#[test]
+fn bench_service_compiles_without_match_arm_duplication() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bench_service.al");
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let p = program_of(&src);
+    assert!(
+        p.code.len() < 30_000,
+        "bench_service compiled to {} instructions (gate: < 30,000); \
+         fallible-match lowering is duplicating arm bodies per failure edge",
+        p.code.len()
+    );
+    let to_method = p
+        .functions
+        .iter()
+        .find(|f| &*f.name == "to_method")
+        .expect("bench_service imports al/http, which defines to_method");
+    assert!(
+        to_method.code_len < 500,
+        "to_method compiled to {} instructions (expected ~150-250); its \
+         binary match is re-lowering the remaining arms at every failure edge",
+        to_method.code_len
+    );
+}
+
+/// One function's instructions as `(op, operand)` pairs. Jump operands are
+/// function-relative, so the pairs are position-independent and comparable
+/// against a literal expectation; constant-pool operands are program-absolute
+/// and shift with the stdlib, so callers blank them.
+fn fn_instructions(p: &bytecode::Program, name: &str) -> Vec<(Op, i32)> {
+    // Last match: user functions are emitted after the stdlib, so a stdlib
+    // function that happens to share the name cannot shadow the fixture's.
+    let f = p
+        .functions
+        .iter()
+        .rev()
+        .find(|f| &*f.name == name)
+        .unwrap_or_else(|| panic!("no function {name}"));
+    p.code[f.code_start as usize..(f.code_start + f.code_len) as usize]
+        .iter()
+        .map(|i| (i.op, i.operand))
+        .collect()
+}
+
+/// A match that cannot fail keeps the flat pre-join-point lowering
+/// byte-for-byte: no `LetCont` continuation blocks after the arms, no `Goto`
+/// jumps on failure edges — because no failure edge exists. The three shapes
+/// below (exhaustive per-variant enum match, single irrefutable arm, literal
+/// ladder) pin the exact instruction sequences the pre-join-point compiler
+/// produced, captured from its output; only constant-pool operands are
+/// blanked, being stdlib-relative. A `LetCont` sneaking into an infallible
+/// match would append a continuation block (extra instructions) or reroute an
+/// edge through a `Jump`, and either breaks the literal sequence.
+#[test]
+fn an_infallible_match_keeps_the_flat_lowering() {
+    use Op::*;
+    let p = program_of(
+        "type Shape {\n\
+         \tCircle(r Int)\n\
+         \tRect(w Int, h Int)\n\
+         }\n\
+         fn area(s Shape) Int {\n\
+         \tmatch s {\n\
+         \t\tCircle(r) -> r * r * 3\n\
+         \t\tRect(w, h) -> w * h\n\
+         \t}\n\
+         }\n\
+         fn single(p (Int, Int)) Int {\n\
+         \tmatch p {\n\
+         \t\t(a, b) -> a + b\n\
+         \t}\n\
+         }\n\
+         fn lits(n Int) String {\n\
+         \tmatch n {\n\
+         \t\t1 -> 'one'\n\
+         \t\t2 -> 'two'\n\
+         \t\telse -> 'many'\n\
+         \t}\n\
+         }\n\
+         println(area(Circle(2)) + single((1, 2)))\n\
+         println(lits(1))\n",
+    );
+    // Constant-pool indices move with the stdlib; blank them.
+    let blanked = |name: &str| {
+        fn_instructions(&p, name)
+            .into_iter()
+            .map(|(op, operand)| (op, if op == PushConst { -1 } else { operand }))
+            .collect::<Vec<_>>()
+    };
+
+    // Exhaustive per-variant enum match: `PushLocal; SwitchTag`, the jump
+    // table, then each arm exactly once — payload spill, scrutinee drop,
+    // body, `Ret`.
+    assert_eq!(
+        blanked("area"),
+        vec![
+            (PushLocal, 0),
+            (SwitchTag, 2), // table base: right after the switch
+            (Jump, 4),      // tag 0 -> Circle arm
+            (Jump, 14),     // tag 1 -> Rect arm
+            (PushLocal, 0),
+            (UnwrapEnum, 0),
+            (StoreLocal, 1),
+            (Drop, 0),
+            (PushLocal, 1),
+            (PushLocal, 1),
+            (MulInt, 0),
+            (PushConst, -1),
+            (MulInt, 0),
+            (Ret, 0),
+            (PushLocal, 0),
+            (UnwrapEnum, 0),
+            (StoreLocal, 2),
+            (StoreLocal, 1),
+            (Drop, 0),
+            (PushLocal, 1),
+            (PushLocal, 2),
+            (MulInt, 0),
+            (Ret, 0),
+        ]
+    );
+
+    // Single irrefutable arm: straight-line projections, no branch at all,
+    // the ladder's one trailing `Halt`.
+    assert_eq!(
+        blanked("single"),
+        vec![
+            (PushLocal, 0),
+            (TupleIndex, 0),
+            (StoreLocal, 1),
+            (PushLocal, 0),
+            (TupleIndex, 1),
+            (StoreLocal, 2),
+            (Drop, 0),
+            (PushLocal, 1),
+            (PushLocal, 2),
+            (AddInt, 0),
+            (Ret, 0),
+            (Halt, 0),
+        ]
+    );
+
+    // Literal ladder: a head miss falls to the next arm's own test inside the
+    // one flat `Match` — no continuation is minted for it.
+    assert_eq!(
+        blanked("lits"),
+        vec![
+            (PushLocal, 0),
+            (PushConst, -1),
+            (Eq, 0),
+            (JumpIfFalse, 6),
+            (PushConst, -1),
+            (Ret, 0),
+            (PushLocal, 0),
+            (PushConst, -1),
+            (Eq, 0),
+            (JumpIfFalse, 12),
+            (PushConst, -1),
+            (Ret, 0),
+            (PushConst, -1),
+            (Ret, 0),
+            (Halt, 0),
+        ]
+    );
+}
