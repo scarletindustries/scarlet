@@ -1,0 +1,11 @@
+x = 12  ->  x = 12
+y = x + 3  ->  y = 15
+x*y  ->  (x * y) = 180
+z = (x + y) * 2  ->  z = 54
+x = x + 100  ->  x = 112
+x - z  ->  (x - z) = 58
+z / (y - y)  !  division by zero
+a + 1  !  undefined variable: a
+2 +  !  unexpected end of input
+12abc  !  bad number: 12abc
+x $ y  !  unexpected character: $

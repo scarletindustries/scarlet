@@ -1,0 +1,75 @@
+GET /
+  | HTTP/1.1 200 OK
+  | Content-Length: 4
+  | Content-Type: text/plain; charset=utf-8
+  | Connection: close
+  | 
+  | root
+POST /echo
+  | HTTP/1.1 200 OK
+  | Content-Length: 11
+  | Content-Type: text/plain; charset=utf-8
+  | Connection: close
+  | 
+  | echo: hello
+GET /stream
+  | HTTP/1.1 200 OK
+  | Connection: close
+  | Transfer-Encoding: chunked
+  | 
+  | 8
+  | streamed
+  | 0
+  | 
+  | 
+GET /nope
+  | HTTP/1.1 404 Not Found
+  | Content-Length: 9
+  | Content-Type: text/plain; charset=utf-8
+  | Connection: close
+  | 
+  | Not Found
+POST /pump
+  | HTTP/1.1 200 OK
+  | Content-Length: 17
+  | 
+  | pumped 2048 bytes
+GET /bare
+  | HTTP/1.1 200 OK
+  | Content-Length: 12
+  | 
+  | drained bare
+GET /chunked
+  | HTTP/1.1 200 OK
+  | Transfer-Encoding: chunked
+  | 
+  | 6
+  | first 
+  | 6
+  | second
+  | 0
+  | 
+  | 
+GET /streamed
+  | HTTP/1.1 200 OK
+  | Transfer-Encoding: chunked
+  | 
+  | 6
+  | first 
+  | 6
+  | second
+  | 0
+  | 
+  | 
+counted: Complete
+GET /counted
+  | HTTP/1.1 200 OK
+  | Content-Length: 12
+  | 
+  | counted body
+overrun: Overran(5)
+GET /overrun
+  | HTTP/1.1 200 OK
+  | Content-Length: 5
+  | 
+  | five!

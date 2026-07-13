@@ -1,0 +1,8 @@
+1 x USD 12.50 -> USD 18.49
+10 x USD 12.50 -> USD 118.75, saved USD 6.25
+100 x USD 12.50 -> USD 1000.00, saved USD 250.00
+ordered 6, restocking 12
+can ship: True, credit -599
+tiers [0, 10, 10, 10, 20]
+largest tier 20, off the end -1
+order placed: True

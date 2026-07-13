@@ -1,0 +1,30 @@
+PASS tuple index 0
+PASS tuple index 1
+PASS tuple index 2
+PASS tuple index 0 is Bool
+PASS nested tuple index
+PASS whole nested element
+PASS tuple eq is structural
+PASS tuple ne on one slot
+PASS tuple destructuring
+PASS rebound tuple retypes
+PASS destructuring with wildcards
+PASS nested tuple destructuring
+PASS tuple returned from fn
+PASS tuple inside array
+PASS tuple as map key
+PASS tuple key miss
+PASS record field access
+PASS record eq is structural
+PASS record ne on one field
+PASS record update overrides
+PASS record update copies the rest
+PASS record update leaves the original alone
+PASS nested record field access
+PASS nested record eq
+PASS nested record update
+PASS record destructuring binding
+PASS record inside tuple
+PASS array of records in tuple
+PASS record update inside a fn
+PASS record update keeps other fields

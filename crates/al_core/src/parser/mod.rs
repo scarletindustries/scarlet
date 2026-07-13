@@ -2463,27 +2463,39 @@ mod tests {
         );
     }
 
-    macro_rules! parses_file {
-        ($($name:ident: $path:literal,)*) => {$(
-            #[test]
-            fn $name() {
-                let r = assert_no_errors(include_str!($path));
-                assert!(!r.ast.body.is_empty());
+    /// Every program in the repo's two .al corpora must parse cleanly. Globbed
+    /// rather than listed so curating the corpus can never break the build.
+    #[test]
+    fn parses_every_corpus_program() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut seen = 0;
+        for dir in [root.join("examples"), root.join("crates/al/tests/programs")] {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|s| s.to_str()) != Some("al") {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                // a.al/b.al are the LSP import-demo scratch pair; they may be mid-edit.
+                if name == "a.al" || name == "b.al" {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                let r = parse(&src);
+                let errors: Vec<_> = r
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == diagnostic::Severity::Error)
+                    .collect();
+                assert!(errors.is_empty(), "{name} failed to parse: {errors:#?}");
+                assert!(!r.ast.body.is_empty(), "{name} parsed to an empty program");
+                seen += 1;
             }
-        )*};
-    }
-
-    parses_file! {
-        test_hello_al: "../../../../examples/hello.al",
-        test_fizzbuzz_al: "../../../../examples/fizzbuzz.al",
-        test_factorial_al: "../../../../examples/factorial.al",
-        test_shapes_al: "../../../../examples/shapes.al",
-        test_fibonacci_al: "../../../../examples/fibonacci.al",
-        test_all_language_features_al: "../../../../crates/al/tests/programs/all_language_features.al",
-        test_trying_out_tuples_al: "../../../../crates/al/tests/programs/trying_out_tuples.al",
-        test_generic_structs_and_enums_al:
-            "../../../../crates/al/tests/programs/trying_out_generic_structs_and_enums.al",
-        test_match_patterns_al: "../../../../crates/al/tests/programs/match_patterns_test.al",
+        }
+        assert!(
+            seen > 20,
+            "corpus glob found only {seen} programs — wrong dir?"
+        );
     }
 
     #[test]

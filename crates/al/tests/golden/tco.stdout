@@ -1,12 +1,4 @@
-5
-countdown: 5 is 2 frames deep
-4
-countdown: 4 is 2 frames deep
-3
-countdown: 3 is 2 frames deep
-2
-countdown: 2 is 2 frames deep
-1
-countdown: 1 is 2 frames deep
-0
-countdown: 0 is 2 frames deep
+500000500000
+depth after 1 hop: 2
+depth after 1000000 hops: 2
+1000001 is even: False

@@ -1,0 +1,25 @@
+sum_to(1000000) = 500000500000
+self depth at 1000000: 2
+ping(500001) = -500001
+mutual depth at 500000: 2
+indirect run(200000) = 400000
+indirect depth at 200000: 2
+depth(100000) = 100000
+fib(20) = 6765
+countdown: 3
+countdown: 2
+countdown: 1
+countdown: liftoff
+countdown total = 6
+captured 5, n is now 99
+adder: 11, -9, 7
+pick: yes! no?
+compose: 12 vs 11
+array of closures: [11, 20, 24]
+field closure from match arm: 106
+twice: 21 12 81
+constructor as value: [
+  Some(1),
+  Some(2)
+]
+done

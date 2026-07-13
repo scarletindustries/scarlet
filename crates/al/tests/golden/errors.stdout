@@ -1,0 +1,22 @@
+is_some   True False
+is_none   False True
+map       Some(5)
+unwrap    grace nobody
+then      g
+or_else   anonymous
+or        out of range
+
+parse     Ok(42)
+parse     Err(Empty)
+parse     Err(NotANumber(abc))
+is_ok     True False
+is_err    False True
+map       Ok(84)
+unwrap    42 0
+then      Ok(42)
+then      Err(NotANumber(900 out of range))
+then      Err(NotANumber(abc))
+recover   oops is not a number, using 0
+score     0
+
+io        no such file: no-such-file.txt

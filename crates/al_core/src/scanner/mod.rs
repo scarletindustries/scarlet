@@ -648,10 +648,15 @@ mod tests {
         kinds
     }
 
+    // Inlined rather than include_str!'d from examples/: these tests assert an
+    // exact token vector, which would otherwise freeze the example corpus.
+    const HELLO_SRC: &str = "// Hello world, plus string interpolation with ${}.\n\nprintln('hello, world')\n\nname = 'AL'\nprintln('hello from ${name}')\nprintln('2 + 2 = ${2 + 2}')\n";
+
+    const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> 'FizzBuzz'\n\t\t(0, _) -> 'Fizz'\n\t\t(_, 0) -> 'Buzz'\n\t\telse -> '${n}'\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
+
     #[test]
-    fn test_hello_al() {
-        let src = include_str!("../../../../examples/hello.al");
-        let kinds = kinds_clean(src);
+    fn scans_hello_world() {
+        let kinds = kinds_clean(HELLO_SRC);
 
         #[rustfmt::skip]
         let expected = vec![
@@ -674,9 +679,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fizzbuzz_al() {
-        let src = include_str!("../../../../examples/fizzbuzz.al");
-        let kinds = kinds_clean(src);
+    fn scans_fizzbuzz() {
+        let kinds = kinds_clean(FIZZBUZZ_SRC);
 
         #[rustfmt::skip]
         let expected = vec![

@@ -9,25 +9,68 @@ no spaces: Bad 400
 one space: Bad 400
 leading space: Bad 400
 double space: Bad 400
+empty target: Bad 400
+lowercase version: Bad 505
+trailing junk on request line: Bad 505
+bare lf line ending: NeedMore
+bare cr line ending: NeedMore
+four leading crlfs: Done method=GET target=/ version=Http11 headers=0 consumed=26
+five leading crlfs: Bad 400
 
 == incomplete heads ==
 empty: NeedMore
 partial request line: NeedMore
 no blank line yet: NeedMore
 
+== head size caps ==
+no crlf past 64k: Bad 414
+header block past 64k: Bad 431
+
 == headers ==
 two headers: Done method=GET target=/ version=Http11 headers=2 consumed=50
 ows trimmed: Done method=GET target=/ version=Http11 headers=1 consumed=37
+tab ows trimmed: Done method=GET target=/ version=Http11 headers=1 consumed=34
+empty value: Done method=GET target=/ version=Http11 headers=1 consumed=24
 obs-fold rejected: Bad 400
 ws before colon rejected: Bad 400
 no colon rejected: Bad 400
 empty name rejected: Bad 400
+duplicate host: Done method=GET target=/ version=Http11 headers=2 consumed=36
+duplicate host: get returns first = a
+nul in value parses: Done method=GET target=/ version=Http11 headers=1 consumed=28
+nul in value: headers.valid = False
 
 == header values survive zero-copy ==
 host (lower lookup): example.com
 cookie (upper lookup): a=1; b=2
 x-missing: missing
 has x-custom: True
+
+== header mutation ==
+before: [Host=a, Set-Cookie=x=1, host=b]
+set HOST=z (dedups, keeps casing): [Host=z, Set-Cookie=x=1]
+set absent appends: [Host=a, Set-Cookie=x=1, host=b, X-New=1]
+delete host (case-insensitive, all): [Set-Cookie=x=1]
+delete absent is identity: [Host=a, Set-Cookie=x=1, host=b]
+append keeps duplicates in order: [Host=a, Set-Cookie=x=1, host=b, Set-Cookie=y=2]
+render parts: ["Host", ": ", "a", "\r\n", "Set-Cookie", ": ", "x=1", "\r\n", "host", ": ", "b", "\r\n"]
+render of empty: []
+
+== header validation ==
+plain field: Ok "X-Ok"="value"
+full token charset name: Ok "X-Ok!#$%*+-.^_|~"="v"
+empty value is fine: Ok "X-Ok"=""
+space in name: Err BadName "X Bad"
+colon in name: Err BadName "X:Bad"
+empty name: Err BadName ""
+cr in value: Err BadValue "a\rb"
+lf in value: Err BadValue "a\nb"
+nul in value: Err BadValue "a\0b"
+valid: empty list: True
+valid: token name + clean value: True
+invalid: colon in name: False
+invalid: lf in value: False
+invalid: one bad field among good: False
 
 == pipelined requests ==
 first: /first (consumed 32)
@@ -41,25 +84,40 @@ case-insensitive name: Length 7
 leading zero rejected: Invalid 400
 non-numeric rejected: Invalid 400
 negative rejected: Invalid 400
+empty cl rejected: Invalid 400
+spaced cl rejected: Invalid 400
 overflow rejected: Invalid 400
 duplicate cl rejected: Invalid 400
 te chunked: Chunked
 te chunked case-insensitive: Chunked
+te chunked with ows: Chunked
 te gzip unimplemented: Invalid 501
 te coding list unimplemented: Invalid 501
+te identity unimplemented: Invalid 501
+empty te unimplemented: Invalid 501
+repeated te chunked unimplemented: Invalid 501
 te + cl conflict: Invalid 400
 
 == chunked body decode ==
-single chunk: Done body=hello trailers=0 consumed=15
-multiple chunks: Done body=hello world trailers=0 consumed=26
-empty body: Done body= trailers=0 consumed=5
-extensions ignored: Done body=hello trailers=0 consumed=28
-trailers: Done body=hello trailers=1 consumed=32
+single chunk: Done body="hello" trailers=0 consumed=15
+multiple chunks: Done body="hello world" trailers=0 consumed=26
+empty body: Done body="" trailers=0 consumed=5
+uppercase hex size: Done body="0123456789" trailers=0 consumed=20
+extensions ignored: Done body="hello" trailers=0 consumed=28
+trailers: Done body="hello" trailers=1 consumed=32
+two trailers: Done body="hello" trailers=2 consumed=31
 partial needs more: NeedMore
 terminator missing: NeedMore
+last chunk without final crlf: NeedMore
 bad hex rejected: Bad 400
+empty size line rejected: Bad 400
+signed size rejected: Bad 400
 size lie rejected: Bad 400
+exactly at max: Done body="hello" trailers=0 consumed=15
+one byte over max: Bad 413
+zero max, empty body: Done body="" trailers=0 consumed=5
 oversize rejected: Bad 413
+size line past 4k rejected: Bad 400
 trailer obs-fold rejected: Bad 400
 
 == chunked pipelining ==
@@ -83,22 +141,37 @@ empty token in empty value: False
 empty token after trailing comma: False
 gzip with trailing comma: True
 
+== status reason phrases ==
+100: "Continue"
+200: "OK"
+204: "No Content"
+301: "Moved Permanently"
+400: "Bad Request"
+404: "Not Found"
+418: ""
+431: "Request Header Fields Too Large"
+500: "Internal Server Error"
+503: "Service Unavailable"
+599: ""
+
 == response head serialization ==
-Ok(
-  HTTP/1.1 200 OK
-Content-Type: text/plain
-Content-Length: 5
+200 + two fields: HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n
+404 + no fields: HTTP/1.1 404 Not Found\r\n\r\n
+599 unregistered: HTTP/1.1 599 \r\n\r\n
 
-
-)
-Ok(
-  HTTP/1.1 404 Not Found
-
-
-)
-Ok(HTTP/1.1 418 
-
-)
+== sans-IO bodies ==
+empty body: Done trailers=0
+from_binary round-trip: Ok "hello"
+from_binary empty: Ok ""
+collect past max: Err MessageTooLarge(3)
+hand-written two-chunk body: Ok "abcd"
+failing body propagates: Err UnexpectedEof
+take_buffered empty: Empty
+take_buffered whole: Whole "hello"
+take_buffered streaming: Streaming first="ab" second="cd" rest="ef"
+take_buffered of failing body: Err UnexpectedEof
+collect after probe: Ok "hello"
+probe of failing body: Err UnexpectedEof
 
 == method dispatch via binary patterns ==
 [Get, Post, Put, Delete, Patch, Head, Options, Other(BREW)]

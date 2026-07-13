@@ -1,0 +1,56 @@
+PASS literal zero
+PASS negative literal
+PASS range low
+PASS range boundary is exclusive
+PASS range fallthrough
+PASS string literal
+PASS empty string literal
+PASS float literal
+PASS or-pattern ctors red
+PASS or-pattern ctors black
+PASS or-pattern literals
+PASS or-pattern literals fall through
+PASS or-pattern in tuple slot
+PASS or-pattern in tuple slot misses
+PASS or-pattern in array slot
+PASS or-pattern in array slot misses
+PASS wildcard arm matches
+PASS wildcard arm catches the rest
+PASS guard true branch
+PASS guard second branch
+PASS guard falls through
+PASS positional ctor args
+PASS labeled ctor args
+PASS ctor rest pattern
+PASS qualified ctor pattern
+PASS imported ctor pattern
+PASS literal in ctor payload
+PASS binding after literal arm
+PASS int literal in ctor payload
+PASS binding after int literal arm
+PASS nested ctor 3 deep
+PASS nested ctor err
+PASS nested ctor none
+PASS tuple literal pair
+PASS tuple wildcard
+PASS tuple bindings
+PASS nested tuple exact
+PASS nested tuple bind whole
+PASS bool tuple exhaustive
+PASS array empty
+PASS array single
+PASS array literal elements
+PASS array fixed length
+PASS array spread binding
+PASS array cons split is total (non-empty)
+PASS array cons split is total (empty)
+PASS tuple in array
+PASS tuple in array fallthrough
+PASS array in tuple
+PASS binary utf8 + widths + bytes(n) + rest
+PASS binary empty
+PASS binary wildcard
+PASS binary size(expr)
+PASS ctor destructuring binding
+PASS tuple destructuring binding
+typed discard runs for its effect

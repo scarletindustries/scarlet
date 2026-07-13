@@ -1,0 +1,8 @@
+bulk: AL-2 x12
+bulk: AL-3 x40
+revenue: 93900 cents over 4 orders
+add_base(1) = 11, base is now 100
+normalise [100, 101, 104, 109]
+quantities [4, 12, 40, 7, 1, 2]
+biggest sku: AL-3
+cheap sku: none

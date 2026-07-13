@@ -1,0 +1,12 @@
+loopback is v6: False, resolve agrees: True
+a constructed address: 127.0.0.1:8080
+an impossible one: port 70000 is out of range
+connect to port 70000: InvalidPort
+bound 127.0.0.1, kernel picked a port: True
+echo:hello
+echo:sockets
+read_exact past close: UnexpectedEof
+read_until: deadline passed
+read_within: waited out the 50ms: True
+echo:served
+server: listener closed

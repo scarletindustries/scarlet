@@ -5,8 +5,9 @@ import "./globals.css";
 // render as inline code. Snippets are AL source unless marked `plain`.
 //
 // Every AL snippet is type checked against the real compiler by
-// scripts/check-examples.ts, which runs as part of the build. Keep it that
-// way: if an example stops compiling, the site should stop building.
+// scripts/check-examples.ts. Run it with `bun run check`, beside a compiler
+// build — not on Vercel, which has no Rust toolchain, so the deploy build does
+// not chain it. Keep the snippets compiling: a broken one is a broken site.
 
 export type Snippet = {
   id: string;
@@ -1185,7 +1186,7 @@ match http.serve('0.0.0.0', 8080, handler) {
 }`,
       },
       "The request gives you `method`, `target`, `version`, `headers`, `trailers`, and `body`. `http.path` and `http.query` split an origin-form target. Responses are built with `http.text`, `http.ok`, `http.not_found`, and `http.with_header`.",
-      "If you want to see what AL looks like at the level below `al/http`, here is a server written straight on sockets. It answers pipelined requests and serves each connection in its own process. This is `examples/http_server.al` in the repository:",
+      "If you want to see what AL looks like at the level below `al/http`, here is a server written straight on sockets. It answers pipelined requests and serves each connection in its own process:",
       {
         id: "http-full",
         code: `import al/net
@@ -1196,7 +1197,8 @@ import al/array
 import al.{Ok}
 
 const body = 'Hello from AL!'
-const header = 'HTTP/1.1 200 OK\\r\\nContent-Length: \${string.length(body)}\\r\\nConnection: keep-alive\\r\\n\\r\\n'
+const content_length = string.length(body)
+const header = 'HTTP/1.1 200 OK\\r\\nContent-Length: \${content_length}\\r\\nConnection: keep-alive\\r\\n\\r\\n'
 const response = binary.from_string('\${header}\${body}')
 
 // How many complete HTTP requests this read contains. Requests end with a

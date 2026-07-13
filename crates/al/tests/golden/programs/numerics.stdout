@@ -1,0 +1,66 @@
+bounds: 9223372036854775807 -9223372036854775808
+wrap up: -9223372036854775808
+wrap down: 9223372036854775807
+wrap mul: 3875820019684212736
+wrap neg: -9223372036854775808
+boxing: 140737488355327 140737488355328 True
+boxed round trip: 9223372036854775807 9223372036854775807
+boxed equality: True
+abs: 7 7 9223372036854775807
+max/min: 9 3 -3
+clamp: 5 10 0
+div by zero: 0 0
+mod by zero: 7 -7
+trunc div: 3 -3 -3 3
+rem sign: 1 -1 1 -1
+exact div: 2 0 0
+float fmt: 2.0 0.5 -0.0
+float repr: 0.30000000000000004 0.3333333333333333
+float big: 9223372036854776000.0
+float huge: 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0
+float overflow: 0.0
+float div zero: 0.0 0.0 0.0
+float mod zero: 1.5
+floor: 2 -3
+ceil: 3 -2
+round ties: 3 4 -2
+truncate: 2 -2
+float abs: 2.5 0.0
+float max/min: 1.5 1.25
+float.to_string: 1.0 0.25
+from_int: 3.0 -3.0
+to_string: 0 -42 -9223372036854775808
+parse: Ok(42) Ok(0)
+parse rejects: Err(Nil) Err(Nil) Err(Nil)
+parse overflow: Err(Nil)
+signed round trip: Ok(-42)
+max round trip: Ok(9223372036854775807)
+hex: Ok(ff)
+hex parse: Ok(255)
+decimal: 19.99
+parts: units=1999 scale=2
+from_int: 7
+mul: 59.97
+add: 20.00
+sub: -0.01
+neg/abs: -19.99 19.99
+round half even: 2.34 2.36
+round half up: 2.35
+round toward zero: -2.34
+round toward -inf: -2.35
+div: Ok(3.3333)
+div by zero: Err(DividedByZero)
+decimal.eq: True but == is False
+compare: Eq Gt
+lt/lte/gt/gte: True True True True
+min/max: 1.5 19.99
+is_zero/is_negative/is_positive: True True True
+normalize: 1.5
+parse: Ok(1999) Err(Nil)
+to_float: 19.99
+from_float: Ok(0.125)
+int cmp: True True False True True True
+float cmp: True True False
+string eq: True True
+bool eq: True True
+mixed by hand: True True

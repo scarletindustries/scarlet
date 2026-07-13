@@ -1,0 +1,39 @@
+PASS Int eq
+PASS Int ne
+PASS Float eq
+PASS String eq
+PASS String ne on prefix
+PASS Bool eq
+PASS Nil eq
+PASS Binary eq
+PASS Binary ne
+PASS Int lt
+PASS Int gte
+PASS Float gt
+PASS boxed int equals literal
+PASS boxed int ne
+PASS i64 arithmetic wraps to MIN
+PASS wrap is exact
+PASS Array eq
+PASS Array ne on length
+PASS nested Array eq
+PASS Tuple eq
+PASS nested Tuple eq
+PASS Tuple ne
+PASS Array of Tuple eq
+PASS Map eq ignores insertion order
+PASS Map ne on size
+PASS record eq
+PASS record ne on one field
+PASS enum eq compares payloads
+PASS enum ne on payload
+PASS enum ne across variants
+PASS nested user type eq
+PASS Option eq
+PASS Option None eq
+PASS Result eq
+PASS Result ne across variants
+PASS Order eq
+PASS Decimal == is structural
+PASS decimal.eq is numeric
+PASS normalize makes them structurally equal

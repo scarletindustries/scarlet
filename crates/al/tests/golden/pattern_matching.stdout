@@ -1,0 +1,22 @@
+click at the origin
+click on the diagonal at 3
+click at 12,40
+escape
+shift + key 65
+scroll nudge down
+scroll -30
+quit
+200: success
+302: redirect
+404: client error
+503: server error
+100: unclassified
+GET -> read
+PATCH -> write
+DELETE -> remove
+TRACE -> unknown
+bottom right
+empty batch
+single 204
+pair 200, 404
+first 1 + [2, 3, 4]

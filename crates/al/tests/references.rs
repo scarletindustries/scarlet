@@ -708,7 +708,7 @@ fn session_recheck_keeps_stdlib_types_intact() {
 }
 
 // The LSP-workspace reality that broke in the field: one entry hydrates
-// al/http (examples/http_hello.al), a later entry in the same session imports
+// al/http (as any small server does), a later entry in the same session imports
 // al/http/h1 directly. h1's hydration must still resolve `Parsed` /
 // `Framing` / `Header` to real enum types — not collapse them to a builtin —
 // even though al/http and al/http/headers were hydrated by an earlier check.
@@ -738,7 +738,7 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
 }
 
 // The shadowed-stdlib-type bug: an entry file declaring a type
-// whose name collides with a seeded stdlib type — calculator.al's
+// whose name collides with a seeded stdlib type — a user's
 // `type Parsed = Result(...)` vs al/http/h1's `Parsed` enum — overwrote the
 // seeded `type_info` entry IN PLACE (IndexMap::insert keeps the existing,
 // pre-watermark index), so the next check's truncate-by-length rollback could

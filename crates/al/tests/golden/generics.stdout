@@ -1,0 +1,10 @@
+42 and forty-two
+twice doubling 3: 12
+twice shouting: go!!
+size_then_double(claude) = 12
+Pair{ first: one, second: 1 } swapped is Pair{ first: 1, second: one }
+stack [3, 2, 1]
+first Some(3)
+first of nothing None
+Ok(7) / Err(-1 is not positive)
+sizes [2, 6, 9]

@@ -1,0 +1,11 @@
+project/
+  README.md  1024b
+  src/
+    main.al  2048b
+    lib.al  512b
+  tests/
+    golden.al  256b
+4 files, 3 dirs, 3840 bytes
+Stat{ files: 4, dirs: 3, bytes: 3840 }
+file lib.al of 512b
+not found

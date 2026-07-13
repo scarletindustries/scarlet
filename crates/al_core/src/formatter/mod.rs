@@ -1237,40 +1237,39 @@ mod tests {
 
     #[test]
     fn idempotent_on_examples() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|s| s.to_str()) != Some("al") {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if name == "demo_syntax_errors.al" {
-                continue;
-            }
-            let src = std::fs::read_to_string(&path).unwrap();
-            let once = match format(&src) {
-                FormatResult::Formatted { output } => output,
-                // Source itself does not parse — outside the formatter's remit.
-                FormatResult::ParseFailed { .. } => continue,
-                FormatResult::CommentsLost { comment } => {
-                    panic!("formatting {name} lost the comment `{comment}`")
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for dir in [root.join("examples"), root.join("crates/al/tests/programs")] {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|s| s.to_str()) != Some("al") {
+                    continue;
                 }
-                FormatResult::OutputInvalid { detail } => {
-                    panic!("formatting {name} produced invalid output: {detail}")
-                }
-            };
-            match format(&once) {
-                FormatResult::Formatted { output } => {
-                    assert_eq!(once, output, "formatter not idempotent for {name}")
-                }
-                FormatResult::ParseFailed { .. } => {
-                    panic!("formatted output of {name} does not re-parse:\n{once}")
-                }
-                FormatResult::CommentsLost { comment } => {
-                    panic!("re-formatting {name} lost the comment `{comment}`")
-                }
-                FormatResult::OutputInvalid { detail } => {
-                    panic!("re-formatting {name} produced invalid output: {detail}")
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let src = std::fs::read_to_string(&path).unwrap();
+                let once = match format(&src) {
+                    FormatResult::Formatted { output } => output,
+                    // Source itself does not parse — outside the formatter's remit.
+                    FormatResult::ParseFailed { .. } => continue,
+                    FormatResult::CommentsLost { comment } => {
+                        panic!("formatting {name} lost the comment `{comment}`")
+                    }
+                    FormatResult::OutputInvalid { detail } => {
+                        panic!("formatting {name} produced invalid output: {detail}")
+                    }
+                };
+                match format(&once) {
+                    FormatResult::Formatted { output } => {
+                        assert_eq!(once, output, "formatter not idempotent for {name}")
+                    }
+                    FormatResult::ParseFailed { .. } => {
+                        panic!("formatted output of {name} does not re-parse:\n{once}")
+                    }
+                    FormatResult::CommentsLost { comment } => {
+                        panic!("re-formatting {name} lost the comment `{comment}`")
+                    }
+                    FormatResult::OutputInvalid { detail } => {
+                        panic!("re-formatting {name} produced invalid output: {detail}")
+                    }
                 }
             }
         }
@@ -1571,19 +1570,18 @@ mod tests {
     }
 
     #[test]
-    fn triangle_case() {
-        let src = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/triangle.al"),
-        )
-        .unwrap();
-        let out = fmt(&src);
+    fn if_chain_and_struct_call_break() {
+        // Inlined rather than read from examples/: an over-long if-chain and an
+        // over-long struct call must each break, one clause / one arg per line.
+        let src = "type TriangleInfo {\n\tsides String\n\ttriangle_type String\n\tperimeter Int\n\tvalid Bool\n}\n\nfn classify_triangle(a, b, c) String {\n\tif a + b <= c {\n\t\t'Invalid'\n\t} else if a == b && b == c {\n\t\t'Equilateral'\n\t} else {\n\t\t'Scalene'\n\t}\n}\n\nfn analyze_triangle(a, b, c) {\n\tTriangleInfo(sides: '${a}, ${b}, ${c}', triangle_type: classify_triangle(a, b, c), perimeter: a + b + c, valid: a + b > c)\n}\n";
+        let out = fmt(src);
         assert!(
             out.contains("\t} else if a == b && b == c {\n\t\t'Equilateral'\n"),
-            "classify_triangle should break per-clause:\n{out}"
+            "if-chain should break per-clause:\n{out}"
         );
         assert!(
             out.contains("TriangleInfo(\n\t\tsides: "),
-            "TriangleInfo call should break per-arg:\n{out}"
+            "struct call should break per-arg:\n{out}"
         );
     }
 

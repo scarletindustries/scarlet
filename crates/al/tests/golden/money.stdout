@@ -13,3 +13,36 @@ split 3 ways:
   $10.97
   $10.96
 shares sum back to $32.90
+
+1.50 == 1.5      False
+decimal.eq       True
+decimal.compare  Eq
+
+lt lte           False False
+gt gte           True True
+min max          5.00 19.99
+neg abs          -19.99 19.99
+is_zero          True False
+is_negative      True False
+is_positive      True False
+
+units, scale     123400 @ 4
+rebuilt          12.3400
+normalize        12.34
+new(5, -3)       5000
+from_int         7
+
+to_float         19.99
+from_float       0.30
+from_float 20dp  True
+
+10 / 3 @ 4       3.3333
+div by zero      DividedByZero
+places > 18      ScaleOutOfRange
+
+HalfEven	 2.345 -> 2.34	-2.345 -> -2.34
+HalfUp	 2.345 -> 2.35	-2.345 -> -2.35
+Down	 2.345 -> 2.34	-2.345 -> -2.34
+Up	 2.345 -> 2.35	-2.345 -> -2.35
+Floor	 2.345 -> 2.34	-2.345 -> -2.35
+Ceiling	 2.345 -> 2.35	-2.345 -> -2.34

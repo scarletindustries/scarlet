@@ -1,0 +1,172 @@
+// Generic declarations and their instantiations: generic fns, generic structs,
+// generic enums, recursive and nested type parameters, phantom parameters,
+// parameterised aliases, and enough distinct instantiations to shake out
+// monomorphisation bugs.
+
+// --- generic structs and enums ----------------------------------------------
+
+type Box(t) {
+	value t
+}
+
+type Pair(a, b) {
+	first a
+	second b
+}
+
+type Either(l, r) {
+	Left(value l)
+	Right(value r)
+}
+
+// A parameter that appears in no field: purely a compile-time tag.
+type Tagged(unit) {
+	amount Int
+}
+
+type Meters {
+	Meters
+}
+
+type Seconds {
+	Seconds
+}
+
+// A generic struct whose field is itself a function type.
+type Lazy(a) {
+	force fn() a
+}
+
+// A parameterised type alias.
+type Endo(a) = fn(a) a
+
+// --- recursive generic types -------------------------------------------------
+
+type List(a) {
+	Cons(head a, tail List(a))
+	Empty
+}
+
+type Tree(a) {
+	Leaf
+	Node(left Tree(a), value a, right Tree(a))
+}
+
+// --- generic functions --------------------------------------------------------
+
+fn identity(x a) a {
+	x
+}
+
+fn make_pair(x a, y b) Pair(a, b) {
+	Pair(first: x, second: y)
+}
+
+fn swap(p Pair(a, b)) Pair(b, a) {
+	Pair(first: p.second, second: p.first)
+}
+
+fn unwrap_either(e Either(t, t)) t {
+	match e {
+		Left(v) -> v
+		Right(v) -> v
+	}
+}
+
+fn list_of(xs Array(a)) List(a) {
+	match xs {
+		[] -> Empty
+		[h, ..t] -> Cons(head: h, tail: list_of(t))
+	}
+}
+
+fn map_list(l List(a), f fn(a) b) List(b) {
+	match l {
+		Empty -> Empty
+		Cons(h, t) -> Cons(head: f(h), tail: map_list(t, f))
+	}
+}
+
+fn list_to_array(l List(a)) Array(a) {
+	match l {
+		Empty -> []
+		Cons(h, t) -> [h, ..list_to_array(t)]
+	}
+}
+
+fn insert(t Tree(Int), v Int) Tree(Int) {
+	match t {
+		Leaf -> Node(left: Leaf, value: v, right: Leaf)
+		Node(l, x, r) -> if v < x {
+			Node(left: insert(l, v), value: x, right: r)
+		} else {
+			Node(left: l, value: x, right: insert(r, v))
+		}
+	}
+}
+
+fn in_order(t Tree(a)) Array(a) {
+	match t {
+		Leaf -> []
+		Node(l, x, r) -> [..in_order(l), x, ..in_order(r)]
+	}
+}
+
+// --- instantiations ----------------------------------------------------------
+
+// One generic fn, six distinct shapes. Each is a separate monomorphisation.
+println(identity(1))
+println(identity('s'))
+println(identity(2.5))
+println(identity([1, 2]))
+println(identity((1, 'a')))
+println(identity(Some(True)))
+
+println(make_pair(100, 'hundred'))
+println(swap(make_pair(1, 'one')))
+same Either(String, String) = Left(value: 'left')
+println(unwrap_either(same))
+
+int_box = Box(value: 42)
+str_box = Box(value: 'boxed')
+nested_box = Box(value: Box(value: [1, 2]))
+println(int_box.value)
+println(str_box.value)
+println(nested_box.value.value)
+
+// Record update on a generic struct keeps the instantiation.
+bumped = Box(..int_box, value: int_box.value + 1)
+println(bumped.value)
+
+// Phantom parameter: the same runtime shape, two incompatible static types.
+distance Tagged(Meters) = Tagged(amount: 100)
+elapsed Tagged(Seconds) = Tagged(amount: 30)
+println(distance.amount + elapsed.amount)
+
+thunk Lazy(String) = Lazy(force: fn() 'forced')
+println(thunk.force())
+
+bump Endo(Int) = fn(n Int) n + 1
+println(bump(41))
+
+// Nested type parameters: Either(Option((Int, String)), String).
+nested Either(Option((Int, String)), String) = Left(value: Some((7, 'seven')))
+println(match nested {
+	Left(Some((n, s))) -> '${n}=${s}'
+	Left(None) -> 'missing'
+	Right(msg) -> msg
+})
+
+// Recursive generic enum at two element types, mapped between them.
+nums = list_of([1, 2, 3])
+strs = map_list(nums, fn(n) 'n${n}')
+println(list_to_array(nums))
+println(list_to_array(strs))
+
+tree = insert(insert(insert(insert(Leaf, 5), 2), 8), 1)
+println(in_order(tree))
+
+// Prelude generics compose with user generics.
+boxes Array(Box(Int)) = [Box(value: 1), Box(value: 2)]
+ok Result(Int, String) = Ok(3)
+println(make_pair(boxes, ok))

@@ -1,8 +1,0 @@
-x = 12
-y = 15
-(x * y) = 180
-z = 54
-x = 112
-(x - z) = 58
-(z / (y - y)) = division by zero
-(a + 1) = undefined variable: a

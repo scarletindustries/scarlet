@@ -1,0 +1,20 @@
+hello, world
+nested: hello, world!
+hello, world (still: hello, world)
+tab:	here
+quote:'q'	price:	$5
+[a, b, c]
+[one, two, three]
+[h, é, l, l, o]
+[a, , b]
+[a,,b]
+héllo: 5 scalars, 6 bytes
+contains  True False
+trim      [padded]
+inspect   [1, 2, 3] Some(x)
+words     [the, quick, brown, fox]
+longest   quick
+join      the, quick, brown, fox
+resplit   True
+bytes     65 76
+upper?    True

@@ -1,5 +1,0 @@
-AgeReport{ name: Timmy, age: 1, stage: Infant, can_vote: False, can_drive: False, years_to_retire: 64 }
-AgeReport{ name: Charlie, age: 10, stage: Child, can_vote: False, can_drive: False, years_to_retire: 55 }
-AgeReport{ name: Thomas, age: 16, stage: Teenager, can_vote: False, can_drive: True, years_to_retire: 49 }
-AgeReport{ name: Martin, age: 35, stage: Adult, can_vote: True, can_drive: True, years_to_retire: 30 }
-AgeReport{ name: Edward, age: 70, stage: Senior, can_vote: True, can_drive: True, years_to_retire: 0 }

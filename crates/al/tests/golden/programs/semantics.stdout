@@ -1,0 +1,59 @@
+call args, left to right:
+  eval a
+  eval b
+  eval c
+= 123
+binary operands, left to right:
+  eval lhs
+  eval rhs
+= 6
+&& short-circuits on the first False:
+  eval l
+= False
+|| short-circuits on the first True:
+  eval l
+= True
+and both sides run when they must:
+  eval l
+  eval r
+= False
+block value: 36
+block in interpolation: 2
+if is an expression: high (36)
+same-scope rebind: 20
+nested shadow: outer=1 inner=12
+param shadows const: 20 const is still 3
+or default: 4 0
+or binding: 12
+or on Option: 3 0
+unary: -7 7 True False -3.5
+escapes: a	b "quoted" 'single' back\slash
+literal dollar: ${not interpolated}
+control lengths: 10 1 1
+double quotes hold an apostrophe — it's 2 of them — and interpolate
+nested: yes: 4
+empty interpolation of empty string: []
+index: Some(10) Some(30)
+out of bounds: None None
+index with fallback: 20 0
+slice: [2, 3]
+slice whole: [1, 2, 3, 4, 5]
+slice empty: []
+slice computed bounds: [2, 3, 4]
+range value: [1, 2, 3] True
+range with bounds that meet: []
+range indexed: Some(12)
+array spread: [1, 2, 3, 4, 5, 6, 7]
+spread only: [2, 3]
+record update: Config{ host: localhost, port: 80, debug: False }
+record update: Config{ host: localhost, port: 8080, debug: True }
+typed discard runs its expression
+tuple destructure: 1 one
+positional destructure: localhost 8080 True
+labelled destructure: 80
+ignored bindings: 80
+tick 3
+tick 2
+tick 1
+annotated consts: cap=100
+42

@@ -1,0 +1,27 @@
+1
+s
+2.5
+[1, 2]
+(1, a)
+Some(True)
+Pair{ first: 100, second: hundred }
+Pair{ first: one, second: 1 }
+left
+42
+boxed
+[1, 2]
+43
+130
+forced
+42
+7=seven
+[1, 2, 3]
+[n1, n2, n3]
+[1, 2, 5, 8]
+Pair {
+  first: [
+    Box{ value: 1 },
+    Box{ value: 2 }
+  ],
+  second: Ok(3)
+}

@@ -1,0 +1,19 @@
+write: Ok(Nil)
+read back: ledger v1
+round trip: True
+missing: NotFound(/nonexistent/al/missing.txt)
+directory: IsADirectory(/tmp)
+write bytes: Ok(Nil)
+snapshot: v1, 2 samples
+unaligned: UnalignedBinary
+snapshot survived: True
+add_ms then since_ms: 250
+since_ms is signed: -250
+monotonic never rewinds: True
+deadline in raw ms: 250
+slept at least 50ms: True
+argv is non-empty: True
+PATH is set: True
+unset var: None
+env has PATH: True
+env inspects as: <map env>

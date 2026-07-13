@@ -1,0 +1,64 @@
+-- frames --
+send    counter http.requests = 4210 req
+  wire  <<65, 76, 77, 16, 0, 22, 104, 116, 116, 112, 46, 114, 101, 113, 117, 101, 115, 116, 115, 61, 52, 50, 49, 48, 32, 114, 101, 113>>
+  head  v1 flags=0 len=22
+  recv  counter http.requests = 4210 req
+send    gauge heap.used = 65535 MiB
+  wire  <<65, 76, 77, 17, 0, 19, 104, 101, 97, 112, 46, 117, 115, 101, 100, 61, 54, 53, 53, 51, 53, 32, 77, 105, 66>>
+  head  v1 flags=1 len=19
+  recv  gauge heap.used = 65535 MiB
+
+-- rejects --
+lying length : truncated or foreign frame
+from the futu: unsupported version 3
+another proto: truncated or foreign frame
+empty         : truncated or foreign frame
+
+-- streaming --
+read 49 bytes
+  frame 1: cpu.busy=91 pct
+  frame 2: disk.reads=12 iops
+  4 bytes left over: wait for more
+drained 2 whole frames
+
+-- widths --
+nibbles of <<161>>:   hi=10 lo=1
+nibbles of <<1, 2>>:  not exactly one byte
+<<300:8>> truncates:  <<44>>
+<<-1:8>> wraps:       <<255>>
+<<65535:16>>:         <<255, 255>>
+compact(7, 4):        <<4, 7:size(4)>>
+  bit_size            12
+  byte_size           2
+  read back           Ok(7)
+compact(4210, 13):    <<13, 131, 18:size(5)>>
+  read back           Ok(4210)
+
+-- text --
+tag:                  <<194, 181, 115, 58, 49, 50>>
+  as a string         Ok(µs:12)
+  first codepoint     Some(181)
+  of <<>>             None
+  of <<104, 105>>     Some(104)
+to_string of raw bytes: Err(Nil)
+
+-- scanning --
+bytes:                39
+index_of ": ":        Some(14)
+index_of "\r\n":      Some(20)
+index_of "zz":        None
+field name:           Ok(Content-Length)
+lowercased:           Ok(content-length)
+is content-length:    True
+is content-type:      False
+past the end:         <<>>
+byte_at 0:            67
+byte_at 900:          -1
+parse_int(Dec):       Ok(4210)
+"ff" as Dec:          Err(Nil)
+"ff" as Hex:          Ok(255)
+255 to Dec ascii:     <<50, 53, 53>>
+255 to Hex ascii:     <<102, 102>>
+hex ascii round trip: Ok(4210)
+slice bits 0..4:      Ok(<<4:size(4)>>)
+slice bits 8000..8:   Err(Nil)
