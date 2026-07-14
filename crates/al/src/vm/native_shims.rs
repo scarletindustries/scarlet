@@ -290,6 +290,66 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
     into_bits(v)
 }
 
+/// `Op::MakeArray` behind the C ABI: build a persistent array in the running
+/// process heap from `len` element words, exactly the interpreter's
+/// `VM::make_array` (`Value::array_in` over the operand slice, then the
+/// truncate that releases the operand references).
+///
+/// `elems` points at `len` value words, each carrying one owned reference the
+/// caller transfers; the construction takes the array's own reference per
+/// element and this shim releases the transferred ones.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `elems` must point
+/// at `len` initialized value words whose references the caller owns and
+/// transfers to this call.
+#[cold]
+pub unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
+    let n = len as usize;
+    // SAFETY: `elems` points at `n` initialized value words (`Value` is
+    // repr(transparent) over u64); borrowed here — the construction takes
+    // its own reference per element.
+    let vals: &[Value] = if n == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(elems.cast::<Value>(), n) }
+    };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let v = Value::array_in(&mut vm.heap, vals);
+    for i in 0..n {
+        // SAFETY: each word carries one owned reference, released exactly
+        // once here.
+        drop(unsafe { Value::from_bits(elems.add(i).read()) });
+    }
+    into_bits(v)
+}
+
+/// `Op::MakeTuple` behind the C ABI — [`al_shim_make_array`] over
+/// `Value::tuple_in`, the interpreter's `VM::make_tuple`.
+///
+/// # Safety
+/// Same contract as [`al_shim_make_array`].
+#[cold]
+pub unsafe extern "C" fn al_shim_make_tuple(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
+    let n = len as usize;
+    // SAFETY: see `al_shim_make_array`; identical contract.
+    let vals: &[Value] = if n == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(elems.cast::<Value>(), n) }
+    };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let v = Value::tuple_in(&mut vm.heap, vals);
+    for i in 0..n {
+        // SAFETY: each word carries one owned reference, released exactly
+        // once here.
+        drop(unsafe { Value::from_bits(elems.add(i).read()) });
+    }
+    into_bits(v)
+}
+
 /// Truncating division on unboxed `i64`s with the interpreter's `Op::DivInt`
 /// totality — see [`div_int`]. Pure; safe to call from anywhere.
 pub extern "C" fn al_shim_div_int(a: i64, b: i64) -> i64 {
@@ -325,12 +385,14 @@ pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
 /// registration (`JITBuilder::symbol`). The names here are the contract the
 /// CLIF emitter's `declare`d externals resolve against; keep the two sides
 /// sourced from this one table.
-pub fn shim_symbols() -> [(&'static str, *const u8); 12] {
+pub fn shim_symbols() -> [(&'static str, *const u8); 14] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
         ("al_shim_int_unbox", al_shim_int_unbox as *const u8),
         ("al_shim_enum_alloc", al_shim_enum_alloc as *const u8),
+        ("al_shim_make_array", al_shim_make_array as *const u8),
+        ("al_shim_make_tuple", al_shim_make_tuple as *const u8),
         ("al_shim_add_int_val", al_shim_add_int_val as *const u8),
         ("al_shim_sub_int_val", al_shim_sub_int_val as *const u8),
         ("al_shim_mul_int_val", al_shim_mul_int_val as *const u8),

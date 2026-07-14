@@ -177,6 +177,8 @@ const SYM_RT_TAIL_CALL_VALUE: &str = "al_rt_tail_call_value";
 const SYM_DIV_INT: &str = "al_shim_div_int";
 const SYM_MOD_INT: &str = "al_shim_mod_int";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
+const SYM_MAKE_ARRAY: &str = "al_shim_make_array";
+const SYM_MAKE_TUPLE: &str = "al_shim_make_tuple";
 const SYM_PUSH_GLOBAL: &str = "al_shim_push_global";
 
 // ============================================================================
@@ -526,6 +528,15 @@ impl Gate<'_> {
                 args,
                 imm: Imm::None,
             } => args.is_empty().then_some(()),
+            // Aggregate literals: one allocator-shim call over an owned
+            // element buffer (`Op::MakeArray`/`Op::MakeTuple` parity). The
+            // argc immediate and the operand list must agree — `lower`
+            // guarantees it, and codegen reads only the list.
+            Atom::PrimOp {
+                op: Op::MakeArray | Op::MakeTuple,
+                args,
+                imm: Imm::Argc(n),
+            } => (args.len() == *n as usize).then_some(()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return None;
@@ -693,6 +704,11 @@ pub(crate) mod gate_diag {
                 args,
                 imm: Imm::None,
             } => (!args.is_empty()).then(|| "bool-head-args".into()),
+            Atom::PrimOp {
+                op: Op::MakeArray | Op::MakeTuple,
+                args,
+                imm: Imm::Argc(n),
+            } => (args.len() != *n as usize).then(|| "aggregate-argc-mismatch".into()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return Some(format!("op:{op:?}"));
@@ -1138,8 +1154,9 @@ impl Uses {
             Atom::Local(x) => self.need_word(*x),
             Atom::Const(_) => {}
             Atom::PrimOp { op, args, .. } => match op {
-                // Field reads consume the receiver's boxed word.
-                Op::TupleIndex | Op::GetFieldUnchecked => {
+                // Field reads consume the receiver's boxed word; aggregate
+                // constructors consume one owned word per element.
+                Op::TupleIndex | Op::GetFieldUnchecked | Op::MakeArray | Op::MakeTuple => {
                     for &x in args {
                         self.need_word(x);
                     }
@@ -1268,6 +1285,8 @@ struct RtRefs {
     release: ir::FuncRef,
     hollow: ir::FuncRef,
     enum_alloc: ir::FuncRef,
+    make_array: ir::FuncRef,
+    make_tuple: ir::FuncRef,
     push_global: ir::FuncRef,
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
@@ -1308,6 +1327,8 @@ fn declare_imports<M: Module>(
         &[ptr, i64t, i64t, i64t, i64t, ptr, i64t],
         Some(i64t),
     )?;
+    let make_array = import(module, SYM_MAKE_ARRAY, &[ptr, ptr, i64t], Some(i64t))?;
+    let make_tuple = import(module, SYM_MAKE_TUPLE, &[ptr, ptr, i64t], Some(i64t))?;
     let push_global = import(module, SYM_PUSH_GLOBAL, &[ptr, i64t], Some(i64t))?;
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
@@ -1356,6 +1377,8 @@ fn declare_imports<M: Module>(
         release: module.declare_func_in_func(release, func),
         hollow: module.declare_func_in_func(hollow, func),
         enum_alloc: module.declare_func_in_func(enum_alloc, func),
+        make_array: module.declare_func_in_func(make_array, func),
+        make_tuple: module.declare_func_in_func(make_tuple, func),
         push_global: module.declare_func_in_func(push_global, func),
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
@@ -1910,6 +1933,31 @@ impl<'a> BodyGen<'a> {
                 };
                 AtomVal {
                     word: want_word.then(|| self.b.ins().iconst(types::I64, bits as i64)),
+                    int: None,
+                }
+            }
+            // `Op::MakeArray`/`Op::MakeTuple` parity: spill the owned element
+            // words and let the shim build the aggregate in the process heap
+            // (releasing the transferred references, the interpreter's
+            // build-then-truncate).
+            Atom::PrimOp {
+                op: op @ (Op::MakeArray | Op::MakeTuple),
+                args,
+                imm: Imm::Argc(_),
+            } => {
+                if want_int {
+                    unsupported_node("int view of an aggregate");
+                }
+                let buf = self.arg_buffer(args);
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let f = if matches!(op, Op::MakeArray) {
+                    self.fns.make_array
+                } else {
+                    self.fns.make_tuple
+                };
+                let call = self.b.ins().call(f, &[self.vmx, buf, n]);
+                AtomVal {
+                    word: Some(self.b.inst_results(call)[0]),
                     int: None,
                 }
             }
@@ -3599,6 +3647,53 @@ mod tests {
         if b == 0 { a } else { a.wrapping_rem(b) }
     }
 
+    /// `al_shim_make_array`'s mock: build from the borrowed element words,
+    /// then release the transferred references — the shim contract.
+    unsafe extern "C" fn t_make_array(
+        vmx: *mut core::ffi::c_void,
+        elems: *const u64,
+        len: i64,
+    ) -> u64 {
+        let vm = vm_of(vmx);
+        let n = len as usize;
+        // SAFETY: `n` owned element words per the shim contract.
+        unsafe {
+            let vals: &[Value] = if n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(elems.cast::<Value>(), n)
+            };
+            let v = Value::array_in(&mut vm.heap, vals);
+            for i in 0..n {
+                drop(Value::from_bits(elems.add(i).read()));
+            }
+            ManuallyDrop::new(v).to_bits()
+        }
+    }
+
+    /// `al_shim_make_tuple`'s mock — see [`t_make_array`].
+    unsafe extern "C" fn t_make_tuple(
+        vmx: *mut core::ffi::c_void,
+        elems: *const u64,
+        len: i64,
+    ) -> u64 {
+        let vm = vm_of(vmx);
+        let n = len as usize;
+        // SAFETY: `n` owned element words per the shim contract.
+        unsafe {
+            let vals: &[Value] = if n == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(elems.cast::<Value>(), n)
+            };
+            let v = Value::tuple_in(&mut vm.heap, vals);
+            for i in 0..n {
+                drop(Value::from_bits(elems.add(i).read()));
+            }
+            ManuallyDrop::new(v).to_bits()
+        }
+    }
+
     // ---- harness ----------------------------------------------------------
 
     struct Jit {
@@ -3649,6 +3744,8 @@ mod tests {
         jb.symbol(SYM_DIV_INT, t_div_int as *const u8);
         jb.symbol(SYM_MOD_INT, t_mod_int as *const u8);
         jb.symbol(SYM_ENUM_ALLOC, t_enum_alloc as *const u8);
+        jb.symbol(SYM_MAKE_ARRAY, t_make_array as *const u8);
+        jb.symbol(SYM_MAKE_TUPLE, t_make_tuple as *const u8);
         jb.symbol(SYM_RT_CALL, t_rt_call as *const u8);
         jb.symbol(SYM_RT_TAIL_CALL, t_rt_tail_call as *const u8);
         jb.symbol(SYM_RT_PUSH_FRAME, t_rt_push_frame as *const u8);
@@ -4085,6 +4182,44 @@ mod tests {
         assert_eq!(classify(&pool, tys, nil), Repr::Dyn);
         let boolean = pool.mk_con(BOOL_TID, StrId(0), &[]);
         assert_eq!(classify(&pool, tys, boolean), Repr::Immediate);
+    }
+
+    /// Aggregate literals through the allocator shims: `[c, x]` and
+    /// `(c, x)` built from a constant and a param, contents and refcounts
+    /// checked through the returned value.
+    #[test]
+    fn make_array_and_tuple_literals() {
+        let (pool, int) = int_pool();
+        let body = |op| {
+            testkit::func(
+                vec![testkit::bind(0, int)],
+                CoreExpr::Let {
+                    bind: testkit::bind(1, int),
+                    rhs: Atom::Const(ConstId(0)),
+                    body: Box::new(CoreExpr::Tail(Atom::PrimOp {
+                        op,
+                        args: vec![local(1), local(0)],
+                        imm: Imm::Argc(2),
+                    })),
+                },
+                int,
+            )
+        };
+        let j = jit(
+            &[body(Op::MakeArray), body(Op::MakeTuple)],
+            &pool,
+            &test_consts(),
+        );
+        let (v, _) = run(&j, 0, &[Value::small_int(9)], 1 << 40);
+        let arr = v.as_array().expect("MakeArray builds an array");
+        let got: Vec<i64> = arr.iter().filter_map(|e| e.as_int()).collect();
+        assert_eq!(got, vec![2, 9]);
+        drop(v);
+        let (v, _) = run(&j, 1, &[Value::small_int(9)], 1 << 40);
+        let t = v.as_tuple().expect("MakeTuple builds a tuple");
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].as_int(), Some(2));
+        assert_eq!(t[1].as_int(), Some(9));
     }
 
     /// The nullary Bool heads `&&`/`||` lowering materializes
