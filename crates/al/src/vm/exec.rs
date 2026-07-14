@@ -149,6 +149,13 @@ impl VM {
     /// spends it. On a `Done` exit the remainder is written back to
     /// `native_reds` for the native caller to keep spending.
     pub(super) fn execute_slice_budgeted(&mut self, budget: i32) -> VmResult<Step> {
+        // Instrumented builds print the accumulated op histogram here: a
+        // served-load run never exits, so slice entry is the one recurring
+        // point that can notice the sample is big enough. Compiled out
+        // entirely by default.
+        #[cfg(feature = "op-histogram")]
+        super::op_histogram::maybe_dump(&self.program);
+
         // Hoist the active frame's scalar state into locals so the per-instruction
         // path avoids two Vec indexes. Synced back to self.frames on Call/TailCall/Ret.
         // `func_idx` is hoisted for `CallSelf`/`TailCallSelf`, which resolve the
@@ -524,6 +531,16 @@ impl VM {
         // loop head, which re-fetches and runs the full match; those bodies
         // are calls and family handlers, so the extra fetch is free relative
         // to the work they are about to do.
+        // Instrumented builds collapse the replicated tails: a `dispatch!()`
+        // site that decodes nothing falls out to the shared loop head, which
+        // re-fetches and runs the full match. Semantics are unchanged (that
+        // is already the path for every opcode the copy does not decode) and
+        // it is what makes the loop head the single counting site.
+        #[cfg(feature = "op-histogram")]
+        macro_rules! dispatch {
+            () => {{}};
+        }
+        #[cfg(not(feature = "op-histogram"))]
         macro_rules! dispatch {
             () => {{
                 let addr = code_start + ip;
@@ -625,6 +642,9 @@ impl VM {
                 break;
             };
             ip += 1;
+
+            #[cfg(feature = "op-histogram")]
+            super::op_histogram::record(instr.op, func_idx);
 
             match instr.op {
                 Op::PushConst => push_const!(instr),

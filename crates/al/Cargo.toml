@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[features]
+# Interpreter dispatch instrumentation: per-opcode and per-function op
+# histograms dumped to stderr once a run passes AL_OP_HISTOGRAM_OPS ops.
+# Off by default — a normal run must not write to stderr.
+op-histogram = []
+
 [dependencies]
 al_core = { path = "../al_core" }
 clap = { version = "4", features = ["derive"] }

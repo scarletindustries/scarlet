@@ -166,6 +166,10 @@ pub mod native;
 /// and generated code calls them; see the module docs for the parity
 /// contract.
 pub mod native_shims;
+/// The `op-histogram` feature's dispatch counters. Absent from a default
+/// build, which must leave stderr untouched.
+#[cfg(feature = "op-histogram")]
+pub mod op_histogram;
 /// Public: the `AL_PERF_MAP=1` perf-map writer — one `/tmp/perf-<pid>.map`
 /// symbol line per JIT-compiled body, written by [`jit::finalize_into`].
 pub mod perf_map;
