@@ -46,8 +46,8 @@
 #![allow(unsafe_code)]
 
 use al_core::TypeId;
-use al_core::bytecode::Value;
-use al_core::bytecode::value::ReuseAddr;
+use al_core::bytecode::value::{ReuseAddr, range_len};
+use al_core::bytecode::{Value, ValueView, seq};
 
 use super::VM;
 
@@ -350,6 +350,124 @@ pub unsafe extern "C" fn al_shim_make_tuple(vmx: *mut VM, elems: *const u64, len
     into_bits(v)
 }
 
+/// `VM::seq_root`, total: the coverage gate only admits these ops on a
+/// *proven* `Array`-typed operand, whose runtime inhabitants are a
+/// persistent tree or a lazy `Range` — the interpreter's error arm is
+/// statically unreachable, so a stray value passes through untouched
+/// (debug builds assert instead).
+fn seq_root_total(vm: &mut VM, v: Value) -> Value {
+    match v.kind() {
+        ValueView::Array(_) => v,
+        ValueView::Range(s, e) => seq::from_int_range(&mut vm.heap, s, e),
+        _ => {
+            debug_assert!(false, "seq op on a non-sequence value");
+            v
+        }
+    }
+}
+
+/// `Op::ArrayLen` (`VM::seq_len`) behind the C ABI, on a proven
+/// `Array`-typed word: tree and lazy-range lengths, boxed like the
+/// interpreter's `push_int` (a range's length can exceed the small-int
+/// payload). The transferred reference is released.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `seq` must carry
+/// one owned reference the caller transfers.
+pub unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
+    // SAFETY: owned word per the contract above.
+    let v = unsafe { Value::from_bits(seq) };
+    let n = match v.kind() {
+        ValueView::Array(a) => a.len() as i64,
+        ValueView::Range(s, e) => range_len(s, e),
+        ValueView::Tuple(t) => t.len() as i64,
+        _ => {
+            debug_assert!(false, "ArrayLen on a non-sequence value");
+            0
+        }
+    };
+    drop(v);
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    into_bits(vm.boxed_int(n))
+}
+
+/// `Op::BinByteSize` (`VM::bin_byte_size`) behind the C ABI, on a proven
+/// `Binary`-typed word. The transferred reference is released.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `bin` must carry
+/// one owned reference the caller transfers.
+pub unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
+    // SAFETY: owned word per the contract above.
+    let v = unsafe { Value::from_bits(bin) };
+    let n = match v.kind() {
+        ValueView::Binary(b) => b.bit_len().div_ceil(8) as i64,
+        _ => {
+            debug_assert!(false, "BinByteSize on a non-binary value");
+            0
+        }
+    };
+    drop(v);
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    into_bits(vm.boxed_int(n))
+}
+
+/// `Op::Append` (`VM::seq_append`) behind the C ABI: `buf[0]` is the
+/// sequence, `buf[1..len]` the pushed elements, the interpreter's operand
+/// order. Builds `push_back` by `push_back` over the persistent tree
+/// (materializing a lazy range first), then releases every transferred
+/// reference — the interpreter's read-in-place-then-truncate.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `buf` must point
+/// at `len >= 1` initialized value words whose references the caller owns
+/// and transfers to this call.
+pub unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
+    let n = len as usize;
+    // SAFETY: `buf` points at `n` initialized value words, borrowed here;
+    // the tree takes its own reference per element (`push_back` clones).
+    let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let mut root = seq_root_total(vm, words[0].clone());
+    for e in &words[1..] {
+        root = seq::push_back(&mut vm.heap, &root, e.clone());
+    }
+    for i in 0..n {
+        // SAFETY: each word carries one owned reference, released exactly
+        // once here.
+        drop(unsafe { Value::from_bits(buf.add(i).read()) });
+    }
+    into_bits(root)
+}
+
+/// `Op::Prepend` (`VM::seq_prepend`) behind the C ABI: `buf[..len-1]` are
+/// the elements in source order, `buf[len-1]` the sequence — the
+/// interpreter's operand order. `push_front` in reverse so the final order
+/// is `[e0, .., ek-1, ..seq]`, then releases every transferred reference.
+///
+/// # Safety
+/// Same contract as [`al_shim_seq_append`].
+pub unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
+    let n = len as usize;
+    // SAFETY: see `al_shim_seq_append`; identical contract.
+    let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let mut root = seq_root_total(vm, words[n - 1].clone());
+    for e in words[..n - 1].iter().rev() {
+        root = seq::push_front(&mut vm.heap, &root, e.clone());
+    }
+    for i in 0..n {
+        // SAFETY: each word carries one owned reference, released exactly
+        // once here.
+        drop(unsafe { Value::from_bits(buf.add(i).read()) });
+    }
+    into_bits(root)
+}
+
 /// Truncating division on unboxed `i64`s with the interpreter's `Op::DivInt`
 /// totality — see [`div_int`]. Pure; safe to call from anywhere.
 pub extern "C" fn al_shim_div_int(a: i64, b: i64) -> i64 {
@@ -385,7 +503,7 @@ pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
 /// registration (`JITBuilder::symbol`). The names here are the contract the
 /// CLIF emitter's `declare`d externals resolve against; keep the two sides
 /// sourced from this one table.
-pub fn shim_symbols() -> [(&'static str, *const u8); 14] {
+pub fn shim_symbols() -> [(&'static str, *const u8); 18] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
@@ -393,6 +511,10 @@ pub fn shim_symbols() -> [(&'static str, *const u8); 14] {
         ("al_shim_enum_alloc", al_shim_enum_alloc as *const u8),
         ("al_shim_make_array", al_shim_make_array as *const u8),
         ("al_shim_make_tuple", al_shim_make_tuple as *const u8),
+        ("al_shim_seq_len", al_shim_seq_len as *const u8),
+        ("al_shim_seq_append", al_shim_seq_append as *const u8),
+        ("al_shim_seq_prepend", al_shim_seq_prepend as *const u8),
+        ("al_shim_bin_byte_size", al_shim_bin_byte_size as *const u8),
         ("al_shim_add_int_val", al_shim_add_int_val as *const u8),
         ("al_shim_sub_int_val", al_shim_sub_int_val as *const u8),
         ("al_shim_mul_int_val", al_shim_mul_int_val as *const u8),

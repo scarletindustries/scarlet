@@ -179,6 +179,10 @@ const SYM_MOD_INT: &str = "al_shim_mod_int";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
 const SYM_MAKE_ARRAY: &str = "al_shim_make_array";
 const SYM_MAKE_TUPLE: &str = "al_shim_make_tuple";
+const SYM_SEQ_LEN: &str = "al_shim_seq_len";
+const SYM_SEQ_APPEND: &str = "al_shim_seq_append";
+const SYM_SEQ_PREPEND: &str = "al_shim_seq_prepend";
+const SYM_BIN_BYTE_SIZE: &str = "al_shim_bin_byte_size";
 const SYM_PUSH_GLOBAL: &str = "al_shim_push_global";
 
 // ============================================================================
@@ -486,6 +490,30 @@ impl Gate<'_> {
         self.reprs.get(id).copied().unwrap_or_default() == Repr::Int
     }
 
+    /// The pool proves `id` an `Array` — the type whose runtime inhabitants
+    /// are exactly the persistent tree and the lazy `Range`, the two shapes
+    /// the seq shims are total over.
+    fn is_array(&self, id: LocalId) -> bool {
+        match self.ty_of(id) {
+            Some(t) => matches!(
+                self.pool.node(t),
+                ResolvedNode::Con { id, .. } if id == self.pool.prims().array
+            ),
+            None => false,
+        }
+    }
+
+    /// The pool proves `id` a `Binary` (nominal — see [`ReprTys`]).
+    fn is_binary(&self, id: LocalId) -> bool {
+        match self.ty_of(id) {
+            Some(t) => matches!(
+                self.pool.node(t),
+                ResolvedNode::Con { id, .. } if self.tys.binary.is(id)
+            ),
+            None => false,
+        }
+    }
+
     fn atom(&self, a: &Atom) -> Option<()> {
         match a {
             Atom::Local(_) | Atom::Const(_) => Some(()),
@@ -537,6 +565,41 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Argc(n),
             } => (args.len() == *n as usize).then_some(()),
+            // Seq extension: `args[0]` (Append) / `args[k]` (Prepend) is
+            // the sequence, the rest the pushed elements. The shims elide
+            // the interpreter's non-sequence error, so the pool must prove
+            // the sequence operand `Array` (tree or lazy range — the shapes
+            // the shims are total over).
+            Atom::PrimOp {
+                op: Op::Append,
+                args,
+                imm: Imm::Argc(m),
+            } => (args.len() == *m as usize + 1 && self.is_array(args[0])).then_some(()),
+            Atom::PrimOp {
+                op: Op::Prepend,
+                args,
+                imm: Imm::Argc(k),
+            } => (args.len() == *k as usize + 1 && self.is_array(args[*k as usize])).then_some(()),
+            // Whole-op length reads, total under the same proofs: `ArrayLen`
+            // elides the interpreter's type error on a proven `Array` (the
+            // gate stays narrower than `seq_len`'s Tuple arm — no stdlib
+            // body lengths a tuple), `BinByteSize` on a proven `Binary`.
+            Atom::PrimOp {
+                op: Op::ArrayLen,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [recv] => self.is_array(*recv).then_some(()),
+                _ => None,
+            },
+            Atom::PrimOp {
+                op: Op::BinByteSize,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [recv] => self.is_binary(*recv).then_some(()),
+                _ => None,
+            },
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return None;
@@ -709,6 +772,34 @@ pub(crate) mod gate_diag {
                 args,
                 imm: Imm::Argc(n),
             } => (args.len() != *n as usize).then(|| "aggregate-argc-mismatch".into()),
+            Atom::PrimOp {
+                op: Op::Append,
+                args,
+                imm: Imm::Argc(m),
+            } => (!(args.len() == *m as usize + 1 && g.is_array(args[0])))
+                .then(|| "append-unproven-seq".into()),
+            Atom::PrimOp {
+                op: Op::Prepend,
+                args,
+                imm: Imm::Argc(k),
+            } => (!(args.len() == *k as usize + 1 && g.is_array(args[*k as usize])))
+                .then(|| "prepend-unproven-seq".into()),
+            Atom::PrimOp {
+                op: Op::ArrayLen,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [recv] if g.is_array(*recv) => None,
+                _ => Some("array-len-unproven".into()),
+            },
+            Atom::PrimOp {
+                op: Op::BinByteSize,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [recv] if g.is_binary(*recv) => None,
+                _ => Some("bin-byte-size-unproven".into()),
+            },
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return Some(format!("op:{op:?}"));
@@ -1155,8 +1246,16 @@ impl Uses {
             Atom::Const(_) => {}
             Atom::PrimOp { op, args, .. } => match op {
                 // Field reads consume the receiver's boxed word; aggregate
-                // constructors consume one owned word per element.
-                Op::TupleIndex | Op::GetFieldUnchecked | Op::MakeArray | Op::MakeTuple => {
+                // constructors and the seq/binary whole-op shims consume one
+                // owned word per operand.
+                Op::TupleIndex
+                | Op::GetFieldUnchecked
+                | Op::MakeArray
+                | Op::MakeTuple
+                | Op::Append
+                | Op::Prepend
+                | Op::ArrayLen
+                | Op::BinByteSize => {
                     for &x in args {
                         self.need_word(x);
                     }
@@ -1287,6 +1386,10 @@ struct RtRefs {
     enum_alloc: ir::FuncRef,
     make_array: ir::FuncRef,
     make_tuple: ir::FuncRef,
+    seq_len: ir::FuncRef,
+    seq_append: ir::FuncRef,
+    seq_prepend: ir::FuncRef,
+    bin_byte_size: ir::FuncRef,
     push_global: ir::FuncRef,
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
@@ -1329,6 +1432,10 @@ fn declare_imports<M: Module>(
     )?;
     let make_array = import(module, SYM_MAKE_ARRAY, &[ptr, ptr, i64t], Some(i64t))?;
     let make_tuple = import(module, SYM_MAKE_TUPLE, &[ptr, ptr, i64t], Some(i64t))?;
+    let seq_len = import(module, SYM_SEQ_LEN, &[ptr, i64t], Some(i64t))?;
+    let seq_append = import(module, SYM_SEQ_APPEND, &[ptr, ptr, i64t], Some(i64t))?;
+    let seq_prepend = import(module, SYM_SEQ_PREPEND, &[ptr, ptr, i64t], Some(i64t))?;
+    let bin_byte_size = import(module, SYM_BIN_BYTE_SIZE, &[ptr, i64t], Some(i64t))?;
     let push_global = import(module, SYM_PUSH_GLOBAL, &[ptr, i64t], Some(i64t))?;
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
@@ -1379,6 +1486,10 @@ fn declare_imports<M: Module>(
         enum_alloc: module.declare_func_in_func(enum_alloc, func),
         make_array: module.declare_func_in_func(make_array, func),
         make_tuple: module.declare_func_in_func(make_tuple, func),
+        seq_len: module.declare_func_in_func(seq_len, func),
+        seq_append: module.declare_func_in_func(seq_append, func),
+        seq_prepend: module.declare_func_in_func(seq_prepend, func),
+        bin_byte_size: module.declare_func_in_func(bin_byte_size, func),
         push_global: module.declare_func_in_func(push_global, func),
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
@@ -1935,6 +2046,49 @@ impl<'a> BodyGen<'a> {
                     word: want_word.then(|| self.b.ins().iconst(types::I64, bits as i64)),
                     int: None,
                 }
+            }
+            // Seq extension and whole-op length shims, all `Imm::None` /
+            // `Imm::Argc` shapes the gate proved total: owned operands in,
+            // owned result out.
+            Atom::PrimOp {
+                op: op @ (Op::Append | Op::Prepend),
+                args,
+                imm: Imm::Argc(_),
+            } => {
+                if want_int {
+                    unsupported_node("int view of a sequence");
+                }
+                let buf = self.arg_buffer(args);
+                let n = self.b.ins().iconst(types::I64, args.len() as i64);
+                let f = if matches!(op, Op::Append) {
+                    self.fns.seq_append
+                } else {
+                    self.fns.seq_prepend
+                };
+                let call = self.b.ins().call(f, &[self.vmx, buf, n]);
+                AtomVal {
+                    word: Some(self.b.inst_results(call)[0]),
+                    int: None,
+                }
+            }
+            Atom::PrimOp {
+                op: op @ (Op::ArrayLen | Op::BinByteSize),
+                args,
+                imm: Imm::None,
+            } => {
+                let [recv] = args.as_slice() else {
+                    unsupported_node("length arity")
+                };
+                let w = self.owned_word(*recv);
+                let f = if matches!(op, Op::ArrayLen) {
+                    self.fns.seq_len
+                } else {
+                    self.fns.bin_byte_size
+                };
+                let call = self.b.ins().call(f, &[self.vmx, w]);
+                let r = self.b.inst_results(call)[0];
+                let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, r));
+                AtomVal { word: Some(r), int }
             }
             // `Op::MakeArray`/`Op::MakeTuple` parity: spill the owned element
             // words and let the shim build the aggregate in the process heap
@@ -3272,6 +3426,9 @@ mod tests {
     /// `int_pool` primitive ids and from `testkit::variant()`'s `TypeId(0)`.
     const BOOL_TID: TypeId = TypeId(5);
 
+    /// The Binary nominal id the test prelude assigns.
+    const BIN_TID: TypeId = TypeId(6);
+
     /// A captured-prelude stand-in: `Bool` is `BOOL_TID` with `True` at
     /// variant 0 and `False` at variant 1 (the real prelude's order); every
     /// other binding stays pending, so nothing else falsely matches.
@@ -3280,6 +3437,10 @@ mod tests {
             bool: TypeRef {
                 id: BOOL_TID,
                 name: "Bool",
+            },
+            binary: TypeRef {
+                id: BIN_TID,
+                name: "Binary",
             },
             true_: CtorRef {
                 type_id: BOOL_TID,
@@ -3671,6 +3832,83 @@ mod tests {
         }
     }
 
+    /// `al_shim_seq_len`'s mock: length of an owned Array/Range/Tuple word,
+    /// boxed into the test heap; the transferred reference released.
+    unsafe extern "C" fn t_seq_len(vmx: *mut core::ffi::c_void, seq: u64) -> u64 {
+        use crate::bytecode::ValueView;
+        let vm = vm_of(vmx);
+        // SAFETY: owned word per the shim contract.
+        let v = unsafe { Value::from_bits(seq) };
+        let n = match v.kind() {
+            ValueView::Array(a) => a.len() as i64,
+            ValueView::Range(s, e) => crate::bytecode::value::range_len(s, e),
+            ValueView::Tuple(t) => t.len() as i64,
+            _ => panic!("t_seq_len on a non-sequence"),
+        };
+        drop(v);
+        ManuallyDrop::new(Value::int_in(&mut vm.heap, n)).to_bits()
+    }
+
+    /// `al_shim_bin_byte_size`'s mock.
+    unsafe extern "C" fn t_bin_byte_size(vmx: *mut core::ffi::c_void, bin: u64) -> u64 {
+        let vm = vm_of(vmx);
+        // SAFETY: owned word per the shim contract.
+        let v = unsafe { Value::from_bits(bin) };
+        let n = match v.kind() {
+            crate::bytecode::ValueView::Binary(b) => b.bit_len().div_ceil(8) as i64,
+            _ => panic!("t_bin_byte_size on a non-binary"),
+        };
+        drop(v);
+        ManuallyDrop::new(Value::int_in(&mut vm.heap, n)).to_bits()
+    }
+
+    /// `al_shim_seq_append`'s mock: `buf[0]` the sequence, the rest pushed
+    /// elements; transferred references released at the end.
+    unsafe extern "C" fn t_seq_append(
+        vmx: *mut core::ffi::c_void,
+        buf: *const u64,
+        len: i64,
+    ) -> u64 {
+        use crate::bytecode::seq;
+        let vm = vm_of(vmx);
+        let n = len as usize;
+        // SAFETY: `n` owned value words per the shim contract.
+        unsafe {
+            let words: &[Value] = std::slice::from_raw_parts(buf.cast::<Value>(), n);
+            let mut root = words[0].clone();
+            for e in &words[1..] {
+                root = seq::push_back(&mut vm.heap, &root, e.clone());
+            }
+            for i in 0..n {
+                drop(Value::from_bits(buf.add(i).read()));
+            }
+            ManuallyDrop::new(root).to_bits()
+        }
+    }
+
+    /// `al_shim_seq_prepend`'s mock: elements in source order, sequence last.
+    unsafe extern "C" fn t_seq_prepend(
+        vmx: *mut core::ffi::c_void,
+        buf: *const u64,
+        len: i64,
+    ) -> u64 {
+        use crate::bytecode::seq;
+        let vm = vm_of(vmx);
+        let n = len as usize;
+        // SAFETY: `n` owned value words per the shim contract.
+        unsafe {
+            let words: &[Value] = std::slice::from_raw_parts(buf.cast::<Value>(), n);
+            let mut root = words[n - 1].clone();
+            for e in words[..n - 1].iter().rev() {
+                root = seq::push_front(&mut vm.heap, &root, e.clone());
+            }
+            for i in 0..n {
+                drop(Value::from_bits(buf.add(i).read()));
+            }
+            ManuallyDrop::new(root).to_bits()
+        }
+    }
+
     /// `al_shim_make_tuple`'s mock — see [`t_make_array`].
     unsafe extern "C" fn t_make_tuple(
         vmx: *mut core::ffi::c_void,
@@ -3746,6 +3984,10 @@ mod tests {
         jb.symbol(SYM_ENUM_ALLOC, t_enum_alloc as *const u8);
         jb.symbol(SYM_MAKE_ARRAY, t_make_array as *const u8);
         jb.symbol(SYM_MAKE_TUPLE, t_make_tuple as *const u8);
+        jb.symbol(SYM_SEQ_LEN, t_seq_len as *const u8);
+        jb.symbol(SYM_SEQ_APPEND, t_seq_append as *const u8);
+        jb.symbol(SYM_SEQ_PREPEND, t_seq_prepend as *const u8);
+        jb.symbol(SYM_BIN_BYTE_SIZE, t_bin_byte_size as *const u8);
         jb.symbol(SYM_RT_CALL, t_rt_call as *const u8);
         jb.symbol(SYM_RT_TAIL_CALL, t_rt_tail_call as *const u8);
         jb.symbol(SYM_RT_PUSH_FRAME, t_rt_push_frame as *const u8);
@@ -4220,6 +4462,74 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert_eq!(t[0].as_int(), Some(2));
         assert_eq!(t[1].as_int(), Some(9));
+    }
+
+    /// The seq/binary whole-op shims: `[2, x]` appended and prepended one
+    /// element each, then measured; a binary's byte size through its shim.
+    /// The seq binds are Array-typed so the gate's proofs hold.
+    #[test]
+    fn seq_extension_and_length_shims() {
+        let (mut pool, int) = int_pool();
+        let arr = pool.mk_con(TypeId(4), StrId(0), &[]);
+        // fn f(x Int) Int { a = [c, x]; b = append(a, x); c2 = prepend(x, b); len(c2) }
+        let f = testkit::func(
+            vec![testkit::bind(0, int)],
+            CoreExpr::Let {
+                bind: testkit::bind(1, arr),
+                rhs: Atom::PrimOp {
+                    op: Op::MakeArray,
+                    args: vec![local(0), local(0)],
+                    imm: Imm::Argc(2),
+                },
+                body: Box::new(CoreExpr::Let {
+                    bind: testkit::bind(2, arr),
+                    rhs: Atom::PrimOp {
+                        op: Op::Append,
+                        args: vec![local(1), local(0)],
+                        imm: Imm::Argc(1),
+                    },
+                    body: Box::new(CoreExpr::Let {
+                        bind: testkit::bind(3, arr),
+                        rhs: Atom::PrimOp {
+                            op: Op::Prepend,
+                            args: vec![local(0), local(2)],
+                            imm: Imm::Argc(1),
+                        },
+                        body: Box::new(CoreExpr::Tail(Atom::PrimOp {
+                            op: Op::ArrayLen,
+                            args: vec![local(3)],
+                            imm: Imm::None,
+                        })),
+                    }),
+                }),
+            },
+            int,
+        );
+        let j = jit(&[f], &pool, &test_consts());
+        let (v, _) = run(&j, 0, &[Value::small_int(7)], 1 << 40);
+        assert_eq!(v.as_int(), Some(4), "[7,7] + append + prepend has 4 elems");
+    }
+
+    /// `BinByteSize` through its shim, on a proven Binary-typed param.
+    #[test]
+    fn bin_byte_size_shim() {
+        let (mut pool, int) = int_pool();
+        let pre = test_prelude();
+        let bin = pool.mk_con(pre.binary.id, StrId(0), &[]);
+        let f = testkit::func(
+            vec![testkit::bind(0, bin)],
+            CoreExpr::Tail(Atom::PrimOp {
+                op: Op::BinByteSize,
+                args: vec![local(0)],
+                imm: Imm::None,
+            }),
+            int,
+        );
+        let j = jit(&[f], &pool, &test_consts());
+        let mut heap = ProcHeap::new();
+        let b = Value::binary_in(&mut heap, vec![1, 2, 3, 4, 5]);
+        let (v, _) = run(&j, 0, &[b], 1 << 40);
+        assert_eq!(v.as_int(), Some(5));
     }
 
     /// The nullary Bool heads `&&`/`||` lowering materializes
