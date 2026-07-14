@@ -6,8 +6,11 @@
 //! `docs/type-directed-memory-design.md` are Core→Core; type erasure happens
 //! exactly once at Core→bytecode. See `docs/core-ir-spec.md`.
 
+pub mod clif;
 pub mod emit;
 pub mod lower;
+pub mod native_frame;
+pub mod native_rc;
 pub mod perceus;
 
 use std::fmt;

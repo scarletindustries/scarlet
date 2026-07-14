@@ -152,8 +152,23 @@ mod freeze;
 mod http;
 mod inspect;
 mod io;
+/// Public: JIT module construction and the runtime-symbol resolution seam
+/// (`JITBuilder::symbol` registration, finalize-time publication into the
+/// entry table); documents the `al_core`/`al` layering choice.
+pub mod jit;
 mod map;
 mod migrate;
+/// Public like [`native_shims`]: the JIT finalize step registers
+/// [`native::al_rt_enter_interp`] by symbol for compiled bodies to call
+/// interpreter-only functions through.
+pub mod native;
+/// Public: the JIT finalize step registers these symbols with the builder,
+/// and generated code calls them; see the module docs for the parity
+/// contract.
+pub mod native_shims;
+/// Public: the `AL_PERF_MAP=1` perf-map writer — one `/tmp/perf-<pid>.map`
+/// symbol line per JIT-compiled body, written by [`jit::finalize_into`].
+pub mod perf_map;
 mod poll;
 mod sched;
 mod templates;
@@ -164,6 +179,7 @@ mod text;
 pub use inspect::inspect;
 use inspect::{f64_str, value_type_name};
 use migrate::Migrant;
+use native::NativePending;
 use poll::Wait;
 use sched::{Inbound, Runtime, Seed};
 use templates::{EnumTemplate, PreludeTemplates, enum_template};
@@ -406,6 +422,37 @@ pub struct VM {
     /// hands the value out, keeping it alive for the VM's lifetime — which
     /// covers the caller's consumption (print/inspect) of the result.
     main_result: Option<(Value, ProcHeap)>,
+    /// The payload of a non-`Done` [`NativeStatus`](al_core::bytecode::NativeStatus)
+    /// currently unwinding native
+    /// frames (a park's `Wait` or a `VmError`), parked here so the status
+    /// word crossing the `extern "C"` boundary stays a single machine word.
+    /// Set by [`VM::status_from_outcome`], consumed by
+    /// [`VM::outcome_from_status`]; at most one is in flight per scheduler.
+    native_pending: Option<NativePending>,
+    /// The interpreter's frame floor: `execute_slice` ends its slice when a
+    /// `Ret` pops the frame stack back to exactly this depth. 0 — the whole
+    /// process — everywhere except inside a native→interpreter re-entry
+    /// ([`native::al_rt_enter_interp`]), which raises it so the interpreter
+    /// hands control back to the native caller when the frame it was asked
+    /// to run returns. Scheduler-transient, never part of a suspended
+    /// process: every non-`Done` status unwinds through the shim, which
+    /// restores the floor before returning, so it is 0 again by the time
+    /// `scheduler_loop` suspends or parks the process.
+    native_floor: usize,
+    /// The reduction budget on the native side of the backend boundary.
+    /// `execute_slice` keeps its budget in a hot-loop local; compiled code
+    /// cannot reach that local, so this field is the counter its checkpoints
+    /// (`native::al_rt_call`'s entry charge, `native::al_rt_checkpoint` at
+    /// self-tail back-edges) decrement instead. The interp→native entry must
+    /// store its remaining slice budget here before invoking a table entry
+    /// and read it back after, and the native→interp re-entry
+    /// (`native::al_rt_enter_interp`) resumes the interpreter on it
+    /// (`execute_slice_budgeted`, which writes the remainder back on a
+    /// `Done` exit), so one budget governs the whole scheduling slice no
+    /// matter which backend spends it. Like `native_floor` it is
+    /// scheduler-transient scratch: a non-`Done` status ends the slice, and
+    /// the next entry re-seeds it.
+    native_reds: i32,
     /// Runnable processes in round-robin order (the running one is not here).
     run_queue: VecDeque<Process>,
     /// Processes waiting on I/O readiness or timers, keyed by a unique wait id
@@ -508,6 +555,9 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         current_is_main: false,
         current_pid: 0,
         main_result: None,
+        native_pending: None,
+        native_floor: 0,
+        native_reds: 0,
         run_queue: VecDeque::new(),
         parked: HashMap::new(),
         io_waiters: HashMap::new(),
@@ -637,7 +687,7 @@ impl VM {
                 return Ok(result);
             }
 
-            match self.execute_slice()? {
+            match self.run_slice()? {
                 Step::Done => {
                     // The ended process's connections die with it.
                     self.release_connections_of(self.current_pid);
@@ -1259,6 +1309,7 @@ fn halt_test_vm() -> VM {
         code: vec![op(Op::Halt)],
         entry: 0,
         frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+        native: Default::default(),
     })
     .expect("test VM construction must succeed")
 }

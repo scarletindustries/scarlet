@@ -36,6 +36,7 @@ fn single_fn_program(
         code,
         entry: 0,
         frozen,
+        native: Default::default(),
     }
 }
 

@@ -1031,6 +1031,7 @@ mod tests {
             }],
             entry: 0,
             frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+            native: Default::default(),
         }
     }
 

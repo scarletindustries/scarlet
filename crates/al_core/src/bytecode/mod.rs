@@ -62,6 +62,7 @@ pub mod binop;
 pub mod bits;
 pub mod compiler;
 pub mod hamt;
+pub mod native;
 mod peephole;
 mod prelude;
 pub mod prelude_bindings;
@@ -73,6 +74,7 @@ use std::sync::Arc;
 
 pub use binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 pub use compiler::*;
+pub use native::{NativeEntry, NativeStatus, NativeTable};
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use session::{HoverFact, IncrementalSession, Watermark};
 pub use value::{
@@ -925,6 +927,12 @@ pub struct Program {
     /// here so the area lives exactly as long as the program that points into
     /// it; every scheduler's clone of the program shares the same area.
     pub frozen: Arc<crate::frozen::FrozenArea>,
+    /// Compiled-function entry points, one slot per `functions` entry and
+    /// indexed by the same `FuncIdx` numbering. `Arc`-backed like `frozen`,
+    /// so every scheduler's clone of the program consults one table. Sized
+    /// by [`compiler`] once the function list is final; an empty table (the
+    /// default) means "interpret everything". See [`native`].
+    pub native: NativeTable,
 }
 
 // Worker scheduler threads clone the shared program (load-bearing fact 3):

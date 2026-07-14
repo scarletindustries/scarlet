@@ -8,6 +8,11 @@ build = "build.rs"
 al_core = { path = "../al_core" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-native = { workspace = true }
 libc = "0.2"
 memchr = "2"
 mio = { version = "1", features = ["os-poll", "os-ext"] }

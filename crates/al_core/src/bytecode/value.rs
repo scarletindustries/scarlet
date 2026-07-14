@@ -1138,22 +1138,8 @@ impl Value {
             return;
         }
         // SAFETY: rc==1 makes this the sole owner, so mutating the payload
-        // in place is sound. `for_each_child` visits exactly the child-typed
-        // words per the header's tag; assigning through the `&mut Value` view
-        // drops the old child (one decref) and writes an immediate.
-        //
-        // Immediates and frozen children own nothing, so there is no reference
-        // to give back — and the paired constructor rewrites every child word
-        // of a same-shape cell regardless. Skipping their stores keeps the
-        // hollow of an all-scalar record (the `dot_loop` bench shape: three
-        // `Int` fields plus three immortal name words) down to the walk itself.
-        unsafe {
-            for_each_child(self.heap_obj() as *mut u64, &mut |c: &mut Value| {
-                if c.is_heap() && !c.is_immortal() {
-                    *c = Value::small_int(0);
-                }
-            });
-        }
+        // in place is sound.
+        unsafe { hollow_children(self.heap_obj() as *mut u64) }
     }
 
     /// Consume a Perceus reuse token pushed by `Op::Reuse`. The token is
@@ -2412,13 +2398,26 @@ thread_local! {
     /// process for bulk reclamation, so a large cascading free preempts at the
     /// next call instead of stalling the scheduler.
     static FREED_OBJECTS: Cell<u64> = const { Cell::new(0) };
+
+    /// Running total of frees drained through [`take_freed_objects`] since
+    /// the last [`reset_freed_objects_total`]. The drain is a scheduler
+    /// checkpoint (rare), so accumulating here adds nothing to the per-free
+    /// path; parity tests read it to assert every allocation on a run was
+    /// freed exactly once (`ProcHeap::alloc_count == freed_objects_total`),
+    /// no matter which backend — interpreter or native — did the freeing.
+    static FREED_OBJECTS_TOTAL: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Reclamation done on this thread since the last call: the count of objects
-/// freed, reset to zero. See [`FREED_OBJECTS`].
+/// freed, reset to zero. See [`FREED_OBJECTS`]. The drained count also feeds
+/// the running [`freed_objects_total`].
 #[inline]
 pub fn take_freed_objects() -> u64 {
-    FREED_OBJECTS.with(|c| c.replace(0))
+    let n = FREED_OBJECTS.with(|c| c.replace(0));
+    if n != 0 {
+        FREED_OBJECTS_TOTAL.with(|c| c.set(c.get() + n));
+    }
+    n
 }
 
 /// Objects freed on this thread since the last [`take_freed_objects`], without
@@ -2427,6 +2426,24 @@ pub fn take_freed_objects() -> u64 {
 #[inline]
 pub fn freed_objects_pending() -> u64 {
     FREED_OBJECTS.with(|c| c.get())
+}
+
+/// Every object freed on this thread since the last
+/// [`reset_freed_objects_total`], including frees not yet drained by
+/// [`take_freed_objects`]. Test instrumentation for the heap-balance parity
+/// gate: on a run whose result holds no heap objects, this must equal
+/// `ProcHeap::alloc_count` once the VM is dropped.
+pub fn freed_objects_total() -> u64 {
+    FREED_OBJECTS_TOTAL.with(|c| c.get()) + FREED_OBJECTS.with(|c| c.get())
+}
+
+/// Zero this thread's [`freed_objects_total`] (and the undrained
+/// [`FREED_OBJECTS`] balance feeding it). Call immediately before the code
+/// span whose frees a test is measuring, alongside
+/// `ProcHeap::reset_alloc_count`.
+pub fn reset_freed_objects_total() {
+    FREED_OBJECTS_TOTAL.with(|c| c.set(0));
+    FREED_OBJECTS.with(|c| c.set(0));
 }
 
 /// Store `child` into the object slot at `slot`, taking a new reference to it
@@ -2506,6 +2523,85 @@ pub(crate) fn release_bits(bits: u64) {
     }
     // SAFETY: the count just reached zero, so this frame is the sole owner.
     unsafe { release_at_zero(obj) };
+}
+
+// ---- native-backend layout facts ---------------------------------------------
+//
+// The Cranelift backend bakes these into generated code. They are derived from
+// the same private constants the interpreter uses so the two backends cannot
+// drift if the NaN-box layout changes.
+
+/// Mask for the dynamic mortal-heap drop gate the native backend emits inline:
+/// `bits & NATIVE_MORTAL_GATE_MASK == NATIVE_MORTAL_HEAP_BITS` is true exactly
+/// for mortal heap values (heap tag set, immortality marker clear) — one AND
+/// plus one CMP, never reading memory. This is [`release_bits`]' fast-path
+/// test, exported as bit constants.
+pub const NATIVE_MORTAL_GATE_MASK: u64 = SIGN | QNAN | VALUE_IMMORTAL;
+/// Expected gate result for a mortal heap value; see [`NATIVE_MORTAL_GATE_MASK`].
+pub const NATIVE_MORTAL_HEAP_BITS: u64 = SIGN | QNAN;
+/// Mask recovering the object header pointer from a heap value word.
+pub const NATIVE_PTR_MASK: u64 = PTR_PAYLOAD;
+/// Byte offset from the object header pointer to its refcount slot.
+pub const NATIVE_RC_BYTE_OFFSET: i32 = -((RC_PREFIX_WORDS as i32) * 8);
+
+/// Symbol name JIT modules register [`native_release_at_zero`] under.
+pub const NATIVE_RELEASE_AT_ZERO_SYMBOL: &str = "al_native_release_at_zero";
+
+/// [`release_at_zero`] behind an `extern "C"` ABI for JIT-compiled code. The
+/// native drop sequence inlines the gate + saturation guard + decrement and
+/// calls this only when the count reaches zero, so every native free routes
+/// through the interpreter's own release path and `FREED_OBJECTS` accounting
+/// (reclamation charging, exact-allocation-count tests) stays identical.
+///
+/// # Safety
+/// `obj` must be a live mortal heap object whose refcount just reached zero,
+/// not yet freed, allocated through a `ProcHeap`.
+#[cold]
+pub unsafe extern "C" fn native_release_at_zero(obj: *mut u64) {
+    unsafe { release_at_zero(obj) }
+}
+
+/// Symbol name JIT modules register [`native_hollow_for_reuse`] under.
+pub const NATIVE_HOLLOW_FOR_REUSE_SYMBOL: &str = "al_native_hollow_for_reuse";
+
+/// [`Value::hollow_for_reuse`]'s child-release walk behind an `extern "C"`
+/// ABI for JIT-compiled code. The native reuse-drop sequence inlines the
+/// mortal-heap gate and the rc==1 uniqueness test and calls this only on a
+/// uniquely-owned cell: children are released in place (their frees route
+/// through the interpreter's own release path, so `FREED_OBJECTS` accounting
+/// stays identical) and the hollowed allocation — header intact, rc still 1 —
+/// stays parked in its frame slot for a paired reuse constructor.
+///
+/// # Safety
+/// `obj` must be a live, uniquely-owned (rc == 1) mortal heap object
+/// allocated through a `ProcHeap`.
+pub unsafe extern "C" fn native_hollow_for_reuse(obj: *mut u64) {
+    unsafe { hollow_children(obj) }
+}
+
+/// Release every mortal heap child of `obj` in place, overwriting each with
+/// an immediate sentinel — the shared body of [`Value::hollow_for_reuse`] and
+/// its native face [`native_hollow_for_reuse`]. `for_each_child` visits
+/// exactly the child-typed words per the header's tag; assigning through the
+/// `&mut Value` view drops the old child (one decref) and writes an
+/// immediate.
+///
+/// Immediates and frozen children own nothing, so there is no reference to
+/// give back — and the paired constructor rewrites every child word of a
+/// same-shape cell regardless. Skipping their stores keeps the hollow of an
+/// all-scalar record (the `dot_loop` bench shape: three `Int` fields plus
+/// three immortal name words) down to the walk itself.
+///
+/// # Safety
+/// `obj` must be a live, uniquely-owned (rc == 1) mortal heap object.
+unsafe fn hollow_children(obj: *mut u64) {
+    unsafe {
+        for_each_child(obj, &mut |c: &mut Value| {
+            if c.is_heap() && !c.is_immortal() {
+                *c = Value::small_int(0);
+            }
+        });
+    }
 }
 
 /// Free `obj` — whose refcount just hit zero — and everything it transitively

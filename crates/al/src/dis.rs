@@ -15,7 +15,10 @@
 use std::fmt::Write as _;
 
 use crate::bytecode::{Function, Instruction, Op, Program};
+use crate::core_ir::clif::{self, NativePlan};
+use crate::tivec::Idx as _;
 use crate::vm::inspect;
+use crate::vm::jit;
 
 /// Column at which the `;` comment starts.
 /// Render `program` as text: a header, each function's code, then the
@@ -27,6 +30,65 @@ pub fn disassemble(program: &Program) -> String {
 /// Only functions whose name contains `needle`.
 pub fn disassemble_fn(program: &Program, needle: &str) -> String {
     render(program, Some(needle))
+}
+
+/// `--native <fn>`: the bytecode listing for functions matching `needle`,
+/// each compiled body followed by its CLIF and finalized machine-code size.
+///
+/// `plans` are the hook-captured [`NativePlan`]s for every body the
+/// `AL_NATIVE` mode selected and the A0 gate admitted — so this renders what
+/// the runtime would actually compile, not a hypothetical. A matching
+/// bytecode function without a plan gets a note instead of a listing. The
+/// code size comes from defining the body into a real host-ISA module (the
+/// same flags the runtime JIT uses), so it is the size of the machine code
+/// the VM would execute; nothing is finalized or run here.
+pub fn disassemble_native(
+    program: &Program,
+    needle: &str,
+    plans: Vec<NativePlan>,
+) -> Result<String, String> {
+    let mut out = render(program, Some(needle));
+    let mut module = jit::jit_module().map_err(|e| e.to_string())?;
+    let native = clif::native_set(&plans, program);
+    let mut listed = false;
+    for plan in plans {
+        let idx = plan.func_idx.index();
+        let Some(f) = program.functions.get(idx) else {
+            continue;
+        };
+        if !f.name.contains(needle) {
+            continue;
+        }
+        match clif::compile(&mut module, &plan, &native, program) {
+            Ok(Some(body)) => {
+                let _ = writeln!(
+                    out,
+                    "\nnative fn#{idx} {} ({} bytes)",
+                    f.name, body.code_size
+                );
+                let _ = write!(out, "{}", body.clif);
+                if !body.clif.ends_with('\n') {
+                    let _ = writeln!(out);
+                }
+            }
+            Ok(None) => {
+                let _ = writeln!(
+                    out,
+                    "\n; native fn#{idx} {}: not compiled (a constant or match arm is outside coverage)",
+                    f.name
+                );
+            }
+            Err(e) => return Err(format!("native compile of {} failed: {e}", f.name)),
+        }
+        listed = true;
+    }
+    if !listed {
+        let _ = writeln!(
+            out,
+            "\n; no native body matches {needle:?} (not covered, or excluded by AL_NATIVE)"
+        );
+    }
+    Ok(out)
 }
 
 fn render(program: &Program, only: Option<&str>) -> String {

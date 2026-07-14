@@ -9,9 +9,11 @@
         clippy::unimplemented,
     )
 )]
-// Unsafe code is confined to one designated module (vm::freeze Send/Sync
-// impls), which carries its own `allow(unsafe_code)` and justification.
-// Everything else is compiler-enforced safe.
+// Unsafe code is confined to designated modules — vm::freeze (Send/Sync
+// impls), vm::native_shims (the raw-pointer/raw-bits JIT runtime boundary)
+// and vm::jit (publishing finalized code addresses as typed entries) — each
+// carrying its own `allow(unsafe_code)` and justification. Everything else
+// is compiler-enforced safe.
 #![deny(unsafe_code)]
 
 pub use al_core::*;

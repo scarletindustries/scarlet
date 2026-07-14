@@ -70,6 +70,63 @@ pub struct EmitOut {
     pub code: Vec<Instruction>,
     /// High-water stack-slot count for the frame — becomes `Function.locals`.
     pub locals: i32,
+    /// The frame-layout facts this emission fixed, for the native backend's
+    /// interpreter parity. See [`FrameLayout`].
+    pub layout: FrameLayout,
+}
+
+/// The frame-layout facts one [`emit`] run fixed for its body, recorded for
+/// the native (Cranelift) backend.
+///
+/// Compiled code must keep the interpreter's frame layout **bit-for-bit**:
+/// locals live in process-stack slots at `frame.base_slot`, registers hold
+/// values only within a function, and at every call site and reduction
+/// checkpoint the `(stack, frames)` pair must be bit-identical to the
+/// interpreter's state at that bytecode ip — that is what makes suspension,
+/// migration, per-function fallback and the interpreter-as-differential-oracle
+/// work unchanged. Both halves of that contract are decided *here*, during
+/// bytecode emission, so they are captured here rather than re-derived (a
+/// second slot allocator or a second ip computation could silently drift):
+///
+/// - which stack slot each `LocalId` occupies ([`FrameLayout::slot`]) —
+///   including the locals emit elides entirely (const aliases, single-use
+///   operand-stack temps), which own no slot and never touch the frame in
+///   either backend, and the slot sharing across mutually-exclusive branch
+///   arms (`emit_branches`/`LetCont` rewind `next_slot`);
+/// - the bytecode resume ip of every non-tail call site
+///   ([`FrameLayout::call_resume_ips`]) — the value the interpreter's
+///   `enter_frame!` stores into the caller frame's `ip` at that call (the
+///   post-increment ip, i.e. the instruction after the call), and therefore
+///   the exact ip a native caller must store so that a suspended callee
+///   resumes through the interpreter with the caller finishing interpreted.
+///
+/// Offsets are function-relative like every jump operand ([`emit`]'s
+/// contract), which is also `frame.ip`'s coordinate space — no relocation
+/// applies. The peephole pass (`bytecode::peephole`) rewrites fused windows
+/// in place (`Nop`-filling, "nothing moves") and never fuses across a call,
+/// so these ips stay valid in the final stream.
+#[derive(Debug, Clone, Default)]
+pub struct FrameLayout {
+    /// `LocalId → stack slot`, exactly the emitter's own table.
+    slots: TiVec<LocalId, Option<i32>>,
+    /// High-water slot count of this body alone (`EmitOut::locals`). The
+    /// final `Function.locals` maxes this with the reserved param count.
+    pub locals: i32,
+    /// Function-relative resume ip per non-tail call instruction
+    /// (`Call`/`CallKnown`/`CallSelf`), in emission order — which is the
+    /// order a straight walk of the same Core IR meets the call atoms
+    /// (calls are never hoisted or reordered; see [`is_hoistable`]).
+    pub call_resume_ips: Vec<i32>,
+}
+
+impl FrameLayout {
+    /// The stack slot `id` occupies (frame-relative: the value word lives at
+    /// `stack[frame.base_slot + slot]`), or `None` when emit elided the
+    /// local (const alias / operand-stack temp) and it never touches the
+    /// frame.
+    pub fn slot(&self, id: LocalId) -> Option<i32> {
+        self.slots.get(id).copied().flatten()
+    }
 }
 
 /// Shift every jump operand in a freshly emitted block by `base`, turning the
@@ -103,10 +160,7 @@ pub fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
         e.bind(p);
     }
     e.emit_expr(&f.body);
-    EmitOut {
-        code: e.code.into_vec(),
-        locals: e.max_locals,
-    }
+    e.finish()
 }
 
 /// Lower a bare expression (module toplevel). `slot_base` is the first
@@ -148,10 +202,7 @@ pub fn emit_toplevel<C: EmitCtx>(body: &CoreExpr, slot_base: i32, ctx: &mut C) -
     // and clobber every `PushGlobal` the callee (and everything it transitively
     // calls) performs. The trailing `Halt` the caller appends is the real exit.
     e.emit_expr_in(body, false);
-    EmitOut {
-        code: e.code.into_vec(),
-        locals: e.max_locals,
-    }
+    e.finish()
 }
 
 /// An emitted jump whose operand is not yet known is named by the [`CodeAddr`]
@@ -191,6 +242,9 @@ struct Emitter<'a, C: EmitCtx> {
     /// Off for the module toplevel, whose `StoreLocal`s are the global-table
     /// init and must all be emitted.
     alias_consts: bool,
+    /// Function-relative resume ip recorded after each non-tail call
+    /// instruction, in emission order — [`FrameLayout::call_resume_ips`].
+    call_resume_ips: Vec<i32>,
     next_slot: i32,
     max_locals: i32,
     ctx: &'a mut C,
@@ -269,9 +323,24 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             joins: TiVec::new(),
             scan: Scan::default(),
             alias_consts: false,
+            call_resume_ips: Vec::new(),
             next_slot: 0,
             max_locals: 0,
             ctx,
+        }
+    }
+
+    /// Package the finished emission: the code block plus the frame-layout
+    /// facts ([`FrameLayout`]) this run fixed.
+    fn finish(self) -> EmitOut {
+        EmitOut {
+            code: self.code.into_vec(),
+            locals: self.max_locals,
+            layout: FrameLayout {
+                slots: self.slots,
+                locals: self.max_locals,
+                call_resume_ips: self.call_resume_ips,
+            },
         }
     }
 
@@ -559,18 +628,45 @@ fn consumer_operands(a: &Atom) -> Option<Vec<LocalId>> {
 /// `Op::Drop` while `PushLocal` still holds a dup (rc==2), zeroing the slot
 /// and handing the cell to the callee — the paired `Reuse` then reads nil and
 /// allocates fresh (the `dot_loop` bench-gate regression).
+///
+/// A drop whose local a directly-following `tail self(..)` passes again is
+/// also **not** peeled: that drop was parked by
+/// `perceus::release_self_tail_args` for the back-edge, not placed after this
+/// call as a last use, and it must stay put for [`split_self_tail_drops`] to
+/// sink between the tail's operand pushes and the `TailCallSelf` (the pushed
+/// dup keeps the value alive while the slot's reference goes). Peeling it
+/// would release the slot *before* the tail re-reads it, handing the next
+/// iteration a dead word — `loop_apply(f, ..) = .. loop_apply(f, .., f(x))`
+/// called `f` once and looped with nil.
 fn peel_call_arg_drops<'a>(
-    mut body: &'a CoreExpr,
+    body: &'a CoreExpr,
     args: &[LocalId],
     callee: Option<LocalId>,
     scan: &Scan,
 ) -> (Vec<LocalId>, &'a CoreExpr) {
+    let self_tail_args: &[LocalId] = {
+        let mut e = body;
+        while let CoreExpr::Drop { body: b, .. } = e {
+            e = b;
+        }
+        match e {
+            CoreExpr::Tail(Atom::Call {
+                callee: Callee::Self_,
+                args,
+            }) => args,
+            _ => &[],
+        }
+    };
     let mut moved = Vec::new();
+    let mut body = body;
     while let CoreExpr::Drop { local, body: b, .. } = body {
         if !args.contains(local) && callee != Some(*local) {
             break;
         }
         if scan.reuse_claimed(*local) {
+            break;
+        }
+        if self_tail_args.contains(local) {
             break;
         }
         moved.push(*local);
@@ -1151,6 +1247,14 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 self.push(op_arg(o, argc));
             }
         }
+        // The interpreter's `enter_frame!` stores the post-increment ip —
+        // the instruction after the call — into the caller frame; record
+        // that ip so a native caller can store the identical value
+        // ([`FrameLayout::call_resume_ips`]). Tail calls collapse the frame
+        // and store no resume point.
+        if !tail {
+            self.call_resume_ips.push(self.here().to_operand());
+        }
     }
 
     /// Push the four-constant construct header + payload fields, then
@@ -1419,6 +1523,75 @@ mod tests {
         assert_eq!(out.code[1].op, Op::CallKnown);
         assert_eq!(out.code[1].b, 1);
         assert_eq!(out.code[1].operand, 7);
+    }
+
+    /// The [`FrameLayout`] the native backend consumes must state exactly
+    /// what this emission did: params own slots 0.., a stored local owns the
+    /// `StoreLocal` operand's slot, elided locals own none, and every
+    /// non-tail call records the interpreter's resume ip (the instruction
+    /// after the call — `enter_frame!` stores the post-increment ip).
+    #[test]
+    fn frame_layout_mirrors_the_emitted_frame() {
+        // let %2 = call fn#7(%0, %1); let %3 = AddInt(%2, %0);
+        // ret call self(%3, %2)
+        let body = CoreExpr::Let {
+            bind: bind(2),
+            rhs: Atom::Call {
+                callee: Callee::Known(FuncIdx(7)),
+                args: vec![LocalId(0), LocalId(1)],
+            },
+            body: Box::new(CoreExpr::Let {
+                bind: bind(3),
+                rhs: Atom::prim(Op::AddInt, vec![LocalId(2), LocalId(0)]),
+                body: Box::new(CoreExpr::Tail(Atom::Call {
+                    callee: Callee::Self_,
+                    args: vec![LocalId(3), LocalId(2)],
+                })),
+            }),
+        };
+        let f = func(vec![bind(0), bind(1)], body, RTy(0));
+        let mut cx = ctx(None);
+        let out = emit(&f, &mut cx);
+
+        // Params take slots 0..arity — the interpreter's argument layout.
+        assert_eq!(out.layout.slot(LocalId(0)), Some(0));
+        assert_eq!(out.layout.slot(LocalId(1)), Some(1));
+        assert_eq!(out.layout.slot(LocalId(2)), Some(2));
+        assert_eq!(out.layout.locals, out.locals);
+
+        // One non-tail call: its resume ip names the instruction after the
+        // `CallKnown` (the `StoreLocal` the interpreter resumes at). The
+        // trailing self-call is a tail call and records nothing.
+        assert_eq!(out.layout.call_resume_ips.len(), 1);
+        let ip = out.layout.call_resume_ips[0];
+        assert_eq!(out.code[ip as usize - 1].op, Op::CallKnown);
+        assert_eq!(out.code[ip as usize].op, Op::StoreLocal);
+        assert_eq!(
+            out.code[ip as usize].operand,
+            out.layout.slot(LocalId(2)).unwrap()
+        );
+    }
+
+    /// A `let x = <const>` whose reads became `PushConst` owns no slot, and
+    /// the layout must say so — the native backend keeps such locals in
+    /// registers only, matching a frame the interpreter never wrote.
+    #[test]
+    fn frame_layout_elides_const_aliases() {
+        // let %1 = c0; ret AddInt(%0, %1)
+        let body = CoreExpr::Let {
+            bind: bind(1),
+            rhs: Atom::Const(ConstId(0)),
+            body: Box::new(CoreExpr::Tail(Atom::prim(
+                Op::AddInt,
+                vec![LocalId(0), LocalId(1)],
+            ))),
+        };
+        let f = func(vec![bind(0)], body, RTy(0));
+        let mut cx = ctx(None);
+        let out = emit(&f, &mut cx);
+        assert_eq!(out.layout.slot(LocalId(0)), Some(0));
+        assert_eq!(out.layout.slot(LocalId(1)), None);
+        assert!(out.layout.call_resume_ips.is_empty());
     }
 
     #[test]

@@ -416,6 +416,11 @@ pub struct Compiler {
     /// the module's `CachedModule`. Reset by `reset_to` like `recorded`.
     pub(super) module_refs: ModuleReferences,
     check_only: bool,
+    /// Whole-unit accounting for the native compile-at-load pass: how many
+    /// bodies the `AL_NATIVE` mode selected and how long the native hook
+    /// spent on them. Summarised against the 100ms unit budget (under
+    /// `AL_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
+    native_stats: super::native::UnitStats,
     /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
     /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
     /// (the LSP) consumes `HoverFact`s; the free `compile`/`check` entry points
@@ -548,6 +553,11 @@ pub struct Compiler {
     /// constructor or sibling decl (`println = 5` after `fn g() { println(x) }`
     /// turned the callee into a self-call).
     deferred_env_pin: Option<(usize, TypeEnv)>,
+    /// Native-backend hook, installed by [`compile_with_native`] and fired by
+    /// `elaborate_body` / `materialize_eta_wrappers` once per lowered body —
+    /// see [`NativeHook`]. `None` on every other path (plain compile/check,
+    /// the LSP session, `precompile_stdlib`).
+    native_hook: Option<NativeHook>,
 }
 
 /// One body, elaborated into a whole-module [`TypedProgram`] that the Core
@@ -580,6 +590,45 @@ struct LoweredBody {
     core: CoreFn,
     pool: ResolvedPool,
 }
+
+/// Per-body hook into the native (Cranelift) backend: called once for every
+/// lowered function body, at the only point in the pipeline where the body's
+/// post-perceus [`CoreFn`] and the [`ResolvedPool`] its `RTy`s index are both
+/// alive. An `RTy` is an index into a *per-body* pool that dies when the
+/// [`LoweredBody`] carrying it is consumed, so a post-pass over
+/// [`Emitted::core`] would resolve every type through the wrong (or a dropped)
+/// arena — native codegen must hang off this seam or not run at all.
+///
+/// The body's [`FuncIdx`](crate::core_ir::FuncIdx) is passed explicitly: it is
+/// the slot the body owns in `program.functions`/`CoreProgram::fns`, and the
+/// key the native entry table, closure dispatch and the perf map all share.
+/// The hook only observes — it receives shared references and no compiler
+/// handle, so it cannot reserve or reorder `Function` entries, and the
+/// numbering `tests/check_parity.rs` pins is untouched by installing one.
+///
+/// Fires for declared function bodies and for the eta wrappers elaboration
+/// mints; never for module toplevels or `__main__` (always-interpreted glue,
+/// no `FuncIdx` of their own), and never under `check_only`. Every fire is
+/// additionally gated on the process-wide `AL_NATIVE` mode
+/// ([`native::config`](super::native::config)): `off` suppresses the hook
+/// entirely, `native` (the default) fires for every body, and `mix` fires for
+/// a seeded per-function subset — so a backend never sees a body the mode
+/// excluded and need not re-implement the env contract. Stdlib bodies
+/// pass through this compiler only inside `precompile_stdlib` (cargo-build
+/// time, no hook installed) and are seeded from the precompiled blob at
+/// runtime without re-lowering, so a hook installed via
+/// [`compile_with_native`] sees exactly the user program's bodies.
+///
+/// A caller-installed callback, even though CLIF construction itself lives in
+/// this crate beside `emit` (`core_ir::clif`): the driver — `crates/al`, which
+/// owns the VM, the runtime shims generated code calls by symbol name, and the
+/// JIT finalize step that resolves them (`vm/jit.rs`) — decides what each fire
+/// does and captures the `JITModule` it accumulates into, then finalizes and
+/// publishes entries into the emitted program's
+/// [`NativeTable`](super::NativeTable) after [`compile_with_native`] returns.
+/// This compiler stays backend-agnostic: it hands over `(FuncIdx, CoreFn,
+/// pool)` and never learns what a backend is.
+pub type NativeHook = Box<dyn FnMut(crate::core_ir::FuncIdx, &CoreFn, &ResolvedPool)>;
 
 /// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
 /// entering an expression) and its fill (on leaving it). No `Ty` ever takes this
@@ -837,7 +886,22 @@ pub fn compile(
     base_dir: Option<&Path>,
     pre: Option<&'static crate::static_ir::StaticStdlib>,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, false, None, pre)
+    compile_impl(expr, base_dir, false, None, pre, None)
+}
+
+/// [`compile`], with a [`NativeHook`] installed for the duration: the hook is
+/// called once per lowered function body, paired with the live `ResolvedPool`
+/// its `RTy`s index and keyed by the body's `FuncIdx`. See [`NativeHook`] for
+/// the full contract. The caller publishes whatever the hook compiled into
+/// the emitted program's [`NativeTable`](super::NativeTable) after this
+/// returns — the table is sized once the function list is final.
+pub fn compile_with_native(
+    expr: &ast::Expression,
+    base_dir: Option<&Path>,
+    pre: Option<&'static crate::static_ir::StaticStdlib>,
+    native_hook: NativeHook,
+) -> CompileResult {
+    compile_impl(expr, base_dir, false, None, pre, Some(native_hook))
 }
 
 pub fn check(
@@ -845,7 +909,7 @@ pub fn check(
     base_dir: Option<&Path>,
     pre: Option<&'static crate::static_ir::StaticStdlib>,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, true, None, pre)
+    compile_impl(expr, base_dir, true, None, pre, None)
 }
 
 /// Analyse a file *as* a specific stdlib module (used when editing
@@ -857,7 +921,7 @@ pub fn check_as_module(
     base_dir: Option<&Path>,
     module: ModulePath,
 ) -> CompileResult {
-    compile_impl(expr, base_dir, true, Some(module), None)
+    compile_impl(expr, base_dir, true, Some(module), None, None)
 }
 
 pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compiler {
@@ -913,6 +977,8 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         deferred_bodies: Vec::new(),
         defer_depth: 0,
         deferred_env_pin: None,
+        native_hook: None,
+        native_stats: super::native::UnitStats::default(),
     }
 }
 
@@ -962,8 +1028,17 @@ fn compile_impl(
     check_only: bool,
     as_module: Option<ModulePath>,
     pre: Option<&'static crate::static_ir::StaticStdlib>,
+    native_hook: Option<NativeHook>,
 ) -> CompileResult {
     let mut c = new_compiler(base_dir, check_only);
+    c.native_hook = native_hook;
+    // The AL_NATIVE env contract is applied at program construction whether
+    // or not a backend hook was installed: `config()` reads the env exactly
+    // once process-wide (echoing the mix seed when `AL_NATIVE_SEED` was set),
+    // and `off` drops the hook outright so no body can fire it.
+    if super::native::config().mode == super::native::NativeMode::Off {
+        c.native_hook = None;
+    }
     if let Some(m) = as_module.clone() {
         // `as_module` is always a stdlib path (see `check_as_module`), whose
         // written form is its canonical identity.
@@ -1106,12 +1181,19 @@ fn compile_impl(
         code_len: c.program.code.len() as i32 - main_start,
     });
     c.program.entry = c.program.functions.len() as i32 - 1;
+    // The function list is final: size the native-entry table against it so
+    // the backend can publish compiled bodies keyed by the same `FuncIdx`
+    // numbering. Slots start empty (= interpret).
+    c.program.native = super::NativeTable::new(c.program.functions.len());
 
     if !check_only {
         // Jump operands are frame-relative, so fusion has to know which frame
         // owns each instruction: `functions` is that map, and the entry frame
         // owns everything the bodies do not.
         fuse(&mut c.program.code, &c.program.functions);
+        // Whole-unit native compile accounting, printed under
+        // `AL_NATIVE_DEBUG` and checked against the <100ms budget.
+        c.native_stats.log_summary(c.program.code.len());
     }
 
     let (references, _facts) = c.finalize_references();
@@ -4071,6 +4153,22 @@ impl Compiler {
         use crate::core_ir::{emit, perceus};
         for (i, w) in wrappers.into_iter().enumerate() {
             let w = perceus::perceus(pool, w);
+            // Wrappers own real `Function` slots and are `CallKnown` targets,
+            // so they are native candidates like any declared body; `base + i`
+            // is the `FuncIdx` their reservation in `Self::elaborate` fixed.
+            // Guarded on `check_only` here (unlike `elaborate_body`, which
+            // returned before its hook) because a check still materializes
+            // wrappers. Gated on the `AL_NATIVE` mode like every hook fire.
+            let wrapper_idx = crate::core_ir::FuncIdx::from_usize(base + i);
+            if !self.check_only
+                && let Some(hook) = self.native_hook.as_mut()
+                && super::native::config().includes(wrapper_idx)
+            {
+                let native_t0 = std::time::Instant::now();
+                hook(wrapper_idx, &w, pool);
+                self.native_stats.record(native_t0.elapsed());
+                super::native::log_selected(wrapper_idx, self.engine.str(w.name));
+            }
             let jump_over = self.current_addr();
             self.program.code.push(op_arg(Op::Jump, 0));
             let body_start = self.current_addr();
@@ -4123,6 +4221,19 @@ impl Compiler {
         let core = perceus::perceus(&pool, core);
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{core}", self.engine.str(name));
+        }
+        // The native-backend seam: this body's `RTy`s index `pool`, which dies
+        // with this call — see [`NativeHook`]. Post-perceus, so the hook sees
+        // the same Core IR (Drops, reuse tokens and all) that `emit` consumes.
+        // Gated on the `AL_NATIVE` mode (off/native/mix); the hook time feeds
+        // the whole-unit budget summary.
+        if let Some(hook) = self.native_hook.as_mut()
+            && super::native::config().includes(func_idx)
+        {
+            let native_t0 = std::time::Instant::now();
+            hook(func_idx, &core, &pool);
+            self.native_stats.record(native_t0.elapsed());
+            super::native::log_selected(func_idx, self.engine.str(name));
         }
         self.core.fns.push(core.clone());
         // Linking a body is a plain append: `emit`'s jump operands are relative

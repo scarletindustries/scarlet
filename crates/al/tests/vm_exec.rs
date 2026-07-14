@@ -616,6 +616,8 @@ run_case! {
 
 use al::heap::ProcHeap;
 use al::{bytecode, vm};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Mutex;
 
 // `lower`+`emit` must select the typed `*Int` ops exactly as the direct
@@ -747,9 +749,102 @@ fn lsum(xs List) Int {\n\
 }\n\
 fn double(x Int) Int { x * 2 }\n";
 
-/// Compile and run `src` in-process, returning `(total ProcHeap allocations
+/// Compile `src` through the native backend's load-time pipeline, exactly as
+/// `al run` does: `compile_with_native`'s hook captures a Cranelift plan per
+/// mode-selected body, and the plans are JITed and published into the
+/// program's `NativeTable`.
+///
+/// `must_native` names the functions the caller's parity claim rides on:
+/// whenever the process-wide `AL_NATIVE` mode selected one, its table slot
+/// must actually be filled. Without this check a coverage-gate rejection
+/// would silently interpret the "native" run and the parity assertion below
+/// would compare the interpreter to itself.
+fn compile_native(src: &str, must_native: &[&str]) -> bytecode::Program {
+    use al::core_ir::clif;
+    use al::tivec::Idx as _;
+    let ast = common::parse(src);
+    let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
+    let sink = Rc::clone(&plans);
+    let r = bytecode::compile_with_native(
+        &ast,
+        None,
+        Some(&al::STDLIB),
+        Box::new(move |idx, f, pool| {
+            if let Some(p) = clif::plan(idx, f, pool, al::STDLIB.prelude) {
+                sink.borrow_mut().push(p);
+            }
+        }),
+    );
+    assert!(
+        r.success(),
+        "compile failed: {:?}\n---\n{src}",
+        r.diagnostics
+    );
+    let program = r.emitted.expect("a successful compile emits").program;
+
+    let plans = plans.take();
+    if !plans.is_empty() {
+        let mut module = vm::jit::jit_module().expect("jit module");
+        let native = clif::native_set(&plans, &program);
+        let mut defs = Vec::with_capacity(plans.len());
+        for plan in &plans {
+            let body = clif::compile(&mut module, plan, &native, &program).expect("clif define");
+            if let Some(body) = body {
+                let name = program
+                    .functions
+                    .get(body.func_idx.index())
+                    .map(|f| f.name.to_string())
+                    .unwrap_or_default();
+                defs.push(vm::jit::JitDef {
+                    fn_idx: body.func_idx,
+                    func_id: body.func_id,
+                    name,
+                    code_size: body.code_size,
+                });
+            }
+        }
+        vm::jit::finalize_into(&mut module, &defs, &program.native).expect("jit finalize");
+        // Dropping the module keeps the executable mapping alive (vm::jit's
+        // code-lifetime docs): the published entries outlive this scope.
+    }
+
+    let cfg = bytecode::native::config();
+    for name in must_native {
+        let pos = program
+            .functions
+            .iter()
+            .position(|f| &*f.name == *name)
+            .unwrap_or_else(|| panic!("fn {name} in program"));
+        let idx = al::core_ir::FuncIdx::from_usize(pos);
+        if cfg.includes(idx) {
+            assert!(
+                program.native.get(idx).is_some(),
+                "AL_NATIVE mode {:?} selected `{name}` but no native body was \
+                 published (coverage gate rejected it?); the native half of this \
+                 alloc-count parity test would silently interpret",
+                cfg.mode
+            );
+        }
+    }
+    program
+}
+
+/// Run an already-built `program`, returning `(total ProcHeap allocations
 /// during the run, rendered result value)`. Caller holds `ALLOC_LOCK`.
-fn run_counting_allocs(src: &str) -> (usize, String) {
+fn count_run(program: bytecode::Program) -> (usize, String) {
+    ProcHeap::reset_alloc_count();
+    let mut v = vm::new_vm(program).expect("vm init");
+    let val = v.run().expect("vm run");
+    let allocs = ProcHeap::alloc_count();
+    (allocs, vm::inspect(&val, v.program()))
+}
+
+/// Compile and run `src` in-process twice — interpreter-only, then with the
+/// native backend published (see [`compile_native`]) — and assert the Perceus
+/// parity gate: an identical result and an IDENTICAL exact allocation count.
+/// `must_native` is the caller's native-is-actually-active claim. Returns the
+/// shared `(allocs, rendered result)`. Caller holds `ALLOC_LOCK`.
+fn run_counting_allocs(src: &str, must_native: &[&str]) -> (usize, String) {
     let ast = common::parse(src);
     let r = bytecode::compile(&ast, None, Some(&al::STDLIB));
     assert!(
@@ -758,11 +853,19 @@ fn run_counting_allocs(src: &str) -> (usize, String) {
         r.diagnostics
     );
     let r = r.emitted.expect("a successful compile emits");
-    ProcHeap::reset_alloc_count();
-    let mut v = vm::new_vm(r.program).expect("vm init");
-    let val = v.run().expect("vm run");
-    let allocs = ProcHeap::alloc_count();
-    (allocs, vm::inspect(&val, v.program()))
+    let (interp_allocs, interp_out) = count_run(r.program);
+
+    let (native_allocs, native_out) = count_run(compile_native(src, must_native));
+    assert_eq!(
+        interp_out, native_out,
+        "native result diverged from the interpreter for:\n{src}"
+    );
+    assert_eq!(
+        interp_allocs, native_allocs,
+        "Perceus parity: native allocated {native_allocs} cells vs the \
+         interpreter's {interp_allocs} for:\n{src}"
+    );
+    (interp_allocs, interp_out)
 }
 
 /// `a[i] or <default>` must not build the `Some` box that `Index` returns and
@@ -780,8 +883,10 @@ fn index_or_default_allocates_nothing() {
             "fn go(a Array(Int), i Int, acc Int) Int {{\n\tif i == 0 {{ acc }} else {{ go(a, i - 1, {body}) }}\n}}\ngo([1, 2, 3], 2000, 0)\n"
         )
     };
-    let (with_or, out) = run_counting_allocs(&prog("acc + { a[0] or 0 }"));
-    let (baseline, _) = run_counting_allocs(&prog("acc + 1"));
+    // `go` reads an array (`Op::IndexOr`), outside the native coverage gate:
+    // no `must_native` claim — the parity assertion still holds either way.
+    let (with_or, out) = run_counting_allocs(&prog("acc + { a[0] or 0 }"), &[]);
+    let (baseline, _) = run_counting_allocs(&prog("acc + 1"), &[]);
     assert_eq!(out.trim(), "2000");
     assert_eq!(
         with_or,
@@ -832,8 +937,12 @@ fn list_map_unique_reuses_in_place() {
              lsum(chain(build(100), {k}))\n"
         )
     };
-    let (a1, r1) = run_counting_allocs(&prog(1));
-    let (a10, r10) = run_counting_allocs(&prog(10));
+    // The reuse shapes under test live in the LIST_SRC fns; `chain` is only
+    // the driver, so it carries no must-native claim (interpreted or native,
+    // the alloc-count parity assertion binds either way).
+    let native = &["build", "lmap", "lsum", "double"];
+    let (a1, r1) = run_counting_allocs(&prog(1), native);
+    let (a10, r10) = run_counting_allocs(&prog(10), native);
     // Correctness: build(100) sums to 5050; each map doubles every element.
     assert_eq!(r1, "10100", "1× doubled sum");
     assert_eq!(r10, "5171200", "10× doubled sum");
@@ -865,8 +974,9 @@ fn list_map_shared_falls_back_to_alloc() {
              (lsum(alias), lsum(ys))\n"
         )
     };
-    let (a20, r20) = run_counting_allocs(&prog(20));
-    let (a200, r200) = run_counting_allocs(&prog(200));
+    let native = &["build", "lmap", "lsum", "double"];
+    let (a20, r20) = run_counting_allocs(&prog(20), native);
+    let (a200, r200) = run_counting_allocs(&prog(200), native);
     // Correctness: `alias` still reads the ORIGINAL values — proving the
     // shared cells were not overwritten in place — and `ys` reads doubled.
     assert_eq!(r20, "(210, 420)");
@@ -924,7 +1034,10 @@ fn dot_loop_perceus_reuse_gate() {
     // N=10_000 discriminates decisively (20_000 vs. constant) while keeping
     // the debug run fast; the spec's ≪2M for N=1M is this same ratio.
     const N: u64 = 10_000;
-    let (allocs, r) = run_counting_allocs(&format!("{DOT_SRC}dot_loop({N}, 0)\n"));
+    let (allocs, r) = run_counting_allocs(
+        &format!("{DOT_SRC}dot_loop({N}, 0)\n"),
+        &["dot", "dot_loop"],
+    );
     // ∑ₙ₌₁ᴺ 3n²+15n+14 at N=10_000.
     assert_eq!(r, "1000900220000", "dot_loop correctness at N={N}");
     // ≪ 2N: loop-carried reuse ⇒ a handful of fixed allocs; no reuse ⇒ 2N.

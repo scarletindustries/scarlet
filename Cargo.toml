@@ -4,6 +4,11 @@ resolver = "2"
 
 [workspace.dependencies]
 indexmap = "2"
+cranelift-codegen = "0.133.1"
+cranelift-frontend = "0.133.1"
+cranelift-module = "0.133.1"
+cranelift-jit = "0.133.1"
+cranelift-native = "0.133.1"
 
 [profile.release]
 strip = true

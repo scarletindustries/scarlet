@@ -12,14 +12,17 @@
 )]
 #![deny(unsafe_code)]
 
+use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::rc::Rc;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use al::cli::{help, man};
+use al::core_ir::clif;
 use al::{STDLIB, ast, bytecode, diagnostic, formatter, lsp, parser, repl, scanner, vm};
 
 const VERSION: &str = include_str!("../../../VERSION");
@@ -66,6 +69,10 @@ struct DisArgs {
     /// function is printed too — they are compiled into the same program.
     #[arg(long = "fn", value_name = "NAME")]
     only: Option<String>,
+    /// Print the CLIF and finalized code size of natively compiled functions
+    /// whose name contains this, beside their bytecode listing.
+    #[arg(long = "native", value_name = "NAME", conflicts_with = "only")]
+    native: Option<String>,
 }
 
 #[derive(Args)]
@@ -132,17 +139,15 @@ fn parse_source(file: &str, entrypoint: &str) -> ast::Expression {
     ast::Expression::BlockExpression(result.ast)
 }
 
-type CompileFn = fn(
-    &ast::Expression,
-    Option<&Path>,
-    Option<&'static al::StaticStdlib>,
-) -> bytecode::CompileResult;
-
 fn compile_source(
     expr: &ast::Expression,
     file: &str,
     entrypoint: &str,
-    f: CompileFn,
+    f: impl FnOnce(
+        &ast::Expression,
+        Option<&Path>,
+        Option<&'static al::StaticStdlib>,
+    ) -> bytecode::CompileResult,
 ) -> bytecode::CompileResult {
     let path = Path::new(entrypoint);
     let base_dir = path.parent();
@@ -271,15 +276,43 @@ fn main() -> process::ExitCode {
         Some(Commands::Dis(args)) => {
             let file = read_file_or_die(&args.entrypoint);
             let expr = parse_source(&file, &args.entrypoint);
-            let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
-            let Some(emitted) = result.emitted else {
-                die("nothing to disassemble: the compile produced no program");
-            };
-            let text = match &args.only {
-                Some(n) => al::dis::disassemble_fn(&emitted.program, n),
-                None => al::dis::disassemble(&emitted.program),
-            };
-            print!("{text}");
+            if let Some(needle) = &args.native {
+                // Capture a plan for every body the AL_NATIVE mode selects and
+                // the coverage gate admits. Names are matched after compile —
+                // the hook sees interned ids, the emitted program the names.
+                let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
+                let sink = Rc::clone(&plans);
+                let result = compile_source(&expr, &file, &args.entrypoint, move |e, base, pre| {
+                    bytecode::compile_with_native(
+                        e,
+                        base,
+                        pre,
+                        Box::new(move |idx, f, pool| {
+                            if let Some(p) = clif::plan(idx, f, pool, STDLIB.prelude) {
+                                sink.borrow_mut().push(p);
+                            }
+                        }),
+                    )
+                });
+                let Some(emitted) = result.emitted else {
+                    die("nothing to disassemble: the compile produced no program");
+                };
+                let plans = plans.take();
+                match al::dis::disassemble_native(&emitted.program, needle, plans) {
+                    Ok(text) => print!("{text}"),
+                    Err(e) => die(e),
+                }
+            } else {
+                let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+                let Some(emitted) = result.emitted else {
+                    die("nothing to disassemble: the compile produced no program");
+                };
+                let text = match &args.only {
+                    Some(n) => al::dis::disassemble_fn(&emitted.program, n),
+                    None => al::dis::disassemble(&emitted.program),
+                };
+                print!("{text}");
+            }
         }
         Some(Commands::Check { entrypoint }) => {
             let file = read_file_or_die(&entrypoint);
@@ -325,10 +358,30 @@ fn cmd_run(args: RunArgs) {
         println!();
     }
 
-    let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+    // The native backend's load-time compile: the hook captures a plan for
+    // every body the AL_NATIVE mode selects and the coverage gate admits
+    // (none under `off` — the compiler suppresses the hook), and
+    // `publish_native` below turns the plans into machine code once the
+    // program (and its constant pool, which the plans' ConstIds index) is
+    // final.
+    let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
+    let sink = Rc::clone(&plans);
+    let result = compile_source(&expr, &file, &args.entrypoint, move |e, base, pre| {
+        bytecode::compile_with_native(
+            e,
+            base,
+            pre,
+            Box::new(move |idx, f, pool| {
+                if let Some(p) = clif::plan(idx, f, pool, STDLIB.prelude) {
+                    sink.borrow_mut().push(p);
+                }
+            }),
+        )
+    });
     let Some(emitted) = result.emitted else {
         die("nothing to run: the compile produced no program");
     };
+    publish_native(plans.take(), &emitted.program);
 
     // argv[0] is the entrypoint path; the rest are the program's own arguments.
     let mut argv = Vec::with_capacity(args.args.len() + 1);
@@ -341,6 +394,70 @@ fn cmd_run(args: RunArgs) {
     if !matches!(run_result.as_enum(), Some(e) if e.type_id() == al::stdlib::prelude::NIL.type_id) {
         println!("{}", vm::inspect(&run_result, v.program()));
     }
+}
+
+/// JIT every hook-captured plan into one immortal module and publish the
+/// entries into the program's [`NativeTable`](bytecode::NativeTable). Any
+/// failure falls back to interpretation by leaving slots empty — bytecode
+/// exists for every function regardless — with a diagnostic only under
+/// `AL_NATIVE_DEBUG` (a default run's stderr stays empty).
+fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
+    use al::tivec::Idx as _;
+    if plans.is_empty() {
+        return;
+    }
+    let t0 = std::time::Instant::now();
+    let mut module = match vm::jit::jit_module() {
+        Ok(m) => m,
+        Err(e) => {
+            if bytecode::native::debug() {
+                eprintln!("al-native: {e}; interpreting everything");
+            }
+            return;
+        }
+    };
+    let native = clif::native_set(&plans, program);
+    let mut defs = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        match clif::compile(&mut module, plan, &native, program) {
+            Ok(Some(body)) => {
+                let name = program
+                    .functions
+                    .get(body.func_idx.index())
+                    .map(|f| f.name.to_string())
+                    .unwrap_or_default();
+                defs.push(vm::jit::JitDef {
+                    fn_idx: body.func_idx,
+                    func_id: body.func_id,
+                    name,
+                    code_size: body.code_size,
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                if bytecode::native::debug() {
+                    eprintln!("al-native: define failed: {e}; interpreting everything");
+                }
+                return;
+            }
+        }
+    }
+    if let Err(e) = vm::jit::finalize_into(&mut module, &defs, &program.native) {
+        if bytecode::native::debug() {
+            eprintln!("al-native: finalize failed: {e}; interpreting everything");
+        }
+        return;
+    }
+    if bytecode::native::debug() {
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "al-native: jit {} of {} planned bodies in {ms:.2}ms",
+            defs.len(),
+            plans.len(),
+        );
+    }
+    // Dropping the module keeps the executable mapping alive (see vm::jit's
+    // code-lifetime docs): the published entries stay valid forever.
 }
 
 fn cmd_fmt(args: FmtArgs) {

@@ -65,8 +65,10 @@ use al_core::bytecode::value::ReuseAddr;
 use al_core::bytecode::{
     Op, Value, ValueView, freed_objects_pending, take_freed_objects, values_equal,
 };
+use al_core::core_ir::FuncIdx;
 use al_core::heap::ProcHeap;
 use al_core::static_ir::VariantTemplate;
+use al_core::tivec::Idx;
 use smallvec::SmallVec;
 
 use super::poll::monotonic_now_ms;
@@ -81,7 +83,72 @@ use super::{
 const FREES_PER_REDUCTION: u64 = 256;
 
 impl VM {
+    /// One scheduling slice of the current process, dispatched on the top
+    /// frame's resume point. Resume-after-suspension re-enters the
+    /// *interpreter* at `frame.ip` — bytecode is kept for every function
+    /// precisely as its fallback and resume path — except when `ip == 0`
+    /// ("enter from the top"), the one resume point at which a compiled
+    /// body may be (re-)entered: every suspension point inside a native
+    /// function leaves `ip == 0` (the entry checkpoint of `al_rt_call` and
+    /// the self-tail back-edge of `al_rt_checkpoint`, whose frame-at-yield
+    /// shape is the `TailCallSelf` contract), while a native *caller*
+    /// suspended under a callee holds a nonzero bytecode resume ip and so
+    /// finishes interpreted. An `ip == 0` frame whose function the table
+    /// does not cover — or any nonzero ip — runs `execute_slice` as always.
+    pub(super) fn run_slice(&mut self) -> VmResult<Step> {
+        debug_assert_eq!(
+            self.native_floor, 0,
+            "a suspended process must never carry a raised frame floor"
+        );
+        let f = self.frame();
+        if f.ip == 0
+            && self
+                .program
+                .native
+                .get(FuncIdx::from_usize(f.func_idx as usize))
+                .is_some()
+        {
+            // A fresh slice's whole budget, seeded on the native side of the
+            // boundary (`native_reds`) — the counter the compiled body's
+            // checkpoints spend, mirroring `execute_slice`'s hot-loop local.
+            self.native_reds = REDUCTION_BUDGET;
+            take_freed_objects();
+            let status = self.drive_top_frame();
+            return match self.outcome_from_status(status) {
+                // The native entry returned into a frame below it. That
+                // frame's `ip` is a bytecode resume point by convention
+                // (callers store it before any call that can suspend), so
+                // the rest of the slice interprets from there, the return
+                // protocol already applied and the result on top of the
+                // stack — on the budget the native side left, not a fresh
+                // one: it is all still the same scheduling slice.
+                Ok(Step::Done) if !self.frames.is_empty() => {
+                    self.execute_slice_budgeted(self.native_reds)
+                }
+                outcome => outcome,
+            };
+        }
+        self.execute_slice()
+    }
+
     pub(super) fn execute_slice(&mut self) -> VmResult<Step> {
+        // A fresh slice: discard any reclamation count left over from before
+        // it (a previous process's death-free, scheduler bookkeeping) — it
+        // must not be billed to the process about to run. `run_slice`'s
+        // native entry does the same before `drive_top_frame`.
+        take_freed_objects();
+        self.execute_slice_budgeted(REDUCTION_BUDGET)
+    }
+
+    /// As [`VM::execute_slice`], but starting from `budget` remaining
+    /// reductions instead of a fresh slice's worth — the interpreter half of
+    /// the `native_reds` contract (see the field doc in `mod.rs`): a
+    /// native→interp re-entry and the post-native continuation of a slice
+    /// both resume the *same* budget the native side has been spending, so
+    /// one budget governs the whole scheduling slice no matter which backend
+    /// spends it. On a `Done` exit the remainder is written back to
+    /// `native_reds` for the native caller to keep spending.
+    pub(super) fn execute_slice_budgeted(&mut self, budget: i32) -> VmResult<Step> {
         // Hoist the active frame's scalar state into locals so the per-instruction
         // path avoids two Vec indexes. Synced back to self.frames on Call/TailCall/Ret.
         // `func_idx` is hoisted for `CallSelf`/`TailCallSelf`, which resolve the
@@ -91,13 +158,14 @@ impl VM {
             (f.ip, f.code_start, f.base_slot, f.func_idx)
         };
         // Remaining reduction budget for this slice; one function application
-        // costs one reduction. Exhaustion preempts the process.
-        let mut reds = REDUCTION_BUDGET;
-        // Discard any reclamation count left over from before this slice (a
-        // previous process's death-free, scheduler bookkeeping): it must not be
-        // billed to the process about to run. Frees during this slice accumulate
-        // from here and are charged at its call checkpoints (`charge_reclamation`).
-        take_freed_objects();
+        // costs one reduction. Exhaustion preempts the process. No freed-object
+        // discard here: the fresh-slice entries (`execute_slice`, `run_slice`'s
+        // native path) drop pre-slice leftovers themselves, so a mid-slice
+        // continuation (`enter_interp`, `run_slice`'s post-native `Done` arm)
+        // keeps the native portion's accrued reclamation debt flowing — it is
+        // charged at this loop's next call checkpoint (`charge_reclamation`),
+        // the debt half of the cross-backend budget contract.
+        let mut reds = budget;
 
         // Dispatch helpers. Defined before the loop so their free
         // `self`/`ip`/`base_slot`/`code_start`/`func_idx`/`reds` resolve to
@@ -220,6 +288,53 @@ impl VM {
                 }
             }};
         }
+        // The interp→native seam, one per *non-tail* call kind: after
+        // `enter_frame!` (and its reds checkpoint) the callee frame is
+        // exactly the state a native entry expects — `CallFrame` pushed,
+        // arguments in `[base_slot, base_slot+arity)`, `ip == 0` — so a
+        // table hit hands the frame to the native trampoline instead of
+        // interpreting the body. One budget governs the slice on both sides
+        // of the boundary: the remaining `reds` cross into `native_reds` and
+        // whatever the compiled code left crosses back. On `Done` the callee
+        // has returned with the return protocol applied and the caller frame
+        // on top again, so the hoisted frame state re-syncs and
+        // interpretation continues at the stored resume ip. Any other status
+        // ends the slice as the interpreter's own yield/park/error would.
+        //
+        // Tail calls deliberately do NOT take this seam: an interpreted tail
+        // chain that bounced into native here (and back out through
+        // `al_rt_enter_interp` when the native callee tail-calls an
+        // uncovered function) would stack one Rust frame pair per bounce,
+        // breaking the language's flat-tail-call guarantee for a mutually
+        // recursive covered/uncovered pair. A tail-collapsed frame sits at
+        // `ip == 0`, so the covered function goes native at the next slice
+        // boundary (`run_slice`) instead — bounded, and the frame shape is
+        // identical.
+        macro_rules! native_entry_check {
+            ($target:expr) => {{
+                if self
+                    .program
+                    .native
+                    .get(FuncIdx::from_usize($target as usize))
+                    .is_some()
+                {
+                    self.native_reds = reds;
+                    let status = self.drive_top_frame();
+                    reds = self.native_reds;
+                    match self.outcome_from_status(status)? {
+                        Step::Done => {
+                            debug_assert!(self.frames.len() > self.native_floor);
+                            let f = self.frame();
+                            ip = f.ip;
+                            code_start = f.code_start;
+                            base_slot = f.base_slot;
+                            func_idx = f.func_idx;
+                        }
+                        step => return Ok(step),
+                    }
+                }
+            }};
+        }
 
         // ---- Hot-opcode bodies ------------------------------------------
         //
@@ -318,7 +433,17 @@ impl VM {
                 }
                 ip = 0;
 
+                // The checkpoint runs AFTER the frame work, so a yield at a
+                // self-tail back-edge suspends with `frame.ip == 0` and the
+                // next iteration's arguments already in the locals: resume
+                // re-enters the function from the top and the loop continues.
+                // This frame-at-yield shape is a contract any alternative
+                // execution backend must reproduce; pinned by
+                // `tests/vm_fairness.rs`.
                 checkpoint!();
+                if $instr.op == Op::CallSelf {
+                    native_entry_check!(func_idx);
+                }
             }};
         }
         // Known top-level target: `func_idx` is an immediate operand and the
@@ -346,6 +471,9 @@ impl VM {
                     $instr.op == Op::TailCallKnown
                 );
                 checkpoint!();
+                if $instr.op == Op::CallKnown {
+                    native_entry_check!(target_idx);
+                }
             }};
         }
         macro_rules! ret {
@@ -359,6 +487,16 @@ impl VM {
 
                 self.stack.push(ret_val);
 
+                // Popping to the frame floor ends the slice with the return
+                // protocol already applied (truncate + push result). The
+                // floor is 0 for a whole process — the last frame's return —
+                // and is raised across a native→interpreter re-entry
+                // (`native::al_rt_enter_interp`) so control returns to the
+                // native caller when the frame it pushed returns, instead of
+                // interpreting on into the native caller's own body.
+                if self.frames.len() == self.native_floor {
+                    break;
+                }
                 match self.frames.last() {
                     None => break,
                     Some(f) => {
@@ -652,6 +790,9 @@ impl VM {
                         instr.op == Op::TailCall
                     );
                     checkpoint!();
+                    if instr.op == Op::Call {
+                        native_entry_check!(cl_func_idx);
+                    }
                 }
                 Op::CallSelf | Op::TailCallSelf => {
                     call_self!(instr);
@@ -962,8 +1103,11 @@ impl VM {
             }
         }
 
-        // Halt, Ret with no caller, or running off the end of the code: the
-        // current process is finished and its result is its top-of-stack.
+        // Halt, Ret with no caller or to the frame floor, or running off the
+        // end of the code. Publish the remaining budget for a native caller
+        // sitting under the floor (`enter_interp` resumes spending it); for a
+        // finished process the write is dead — the next slice re-seeds.
+        self.native_reds = reds;
         Ok(Step::Done)
     }
 
@@ -974,7 +1118,7 @@ impl VM {
     /// shifts the surviving args down by *moving* them (no clone), which is
     /// exactly the required behaviour.
     #[inline]
-    fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
+    pub(super) fn collapse_tail_frame(&mut self, base: usize, args_start: usize) {
         debug_assert!(base <= args_start && args_start <= self.stack.len());
         self.stack.drain(base..args_start);
     }
