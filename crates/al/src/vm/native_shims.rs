@@ -468,6 +468,112 @@ pub unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len:
     into_bits(root)
 }
 
+/// `Op::HttpParseHead` (`VM::http_parse_head`) behind the C ABI: parse a
+/// request head out of a proven `Binary`-typed buffer at `off`. Infallible
+/// on the Rust side — malformed input comes back as an AL enum value — so
+/// the only interpreter error this elides is the pop's type check, which
+/// the gate's Binary/Int proofs make unreachable. The transferred buffer
+/// reference is released; the result carries its own.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `buf` must carry
+/// one owned reference the caller transfers.
+pub unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i64) -> u64 {
+    // SAFETY: owned word per the contract above.
+    let v = unsafe { Value::from_bits(buf) };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let r = super::http::parse_head(&vm.templates, &mut vm.heap, &super::bin_ref(&v), off);
+    drop(v);
+    into_bits(r)
+}
+
+/// `Op::HttpHeadersValid` (`VM::http_headers_valid`) behind the C ABI, on a
+/// proven `Array(Header)`-typed word. Pure — the result is a Bool
+/// immediate; the shape error the interpreter can raise is unreachable
+/// under the proof (debug builds assert, release answers `false`).
+///
+/// # Safety
+/// `headers` must carry one owned reference the caller transfers.
+pub unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
+    // SAFETY: owned word per the contract above.
+    let v = unsafe { Value::from_bits(headers) };
+    let r = super::http::headers_valid(&v).unwrap_or_else(|_| {
+        debug_assert!(false, "HttpHeadersValid on a non-header array");
+        Value::bool(false)
+    });
+    drop(v);
+    into_bits(r)
+}
+
+/// `Op::HttpHeaderHas` (`VM::http_header_has`) behind the C ABI, on proven
+/// `Array(Header)` + `Binary` words. Pure Bool result; both transferred
+/// references released.
+///
+/// # Safety
+/// `headers` and `name` must each carry one owned reference the caller
+/// transfers.
+pub unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64 {
+    // SAFETY: owned words per the contract above.
+    let (h, n) = unsafe { (Value::from_bits(headers), Value::from_bits(name)) };
+    let r = super::http::header_has(&h, &super::bin_ref(&n)).unwrap_or_else(|_| {
+        debug_assert!(false, "HttpHeaderHas on a non-header array");
+        Value::bool(false)
+    });
+    drop(h);
+    drop(n);
+    into_bits(r)
+}
+
+/// `Op::HttpSerializeHead` (`VM::http_serialize_head`) behind the C ABI:
+/// one fresh binary over the serialized head. Proofs: `code` Int (passed
+/// unboxed), `reason` Binary, `headers` Array(Header) — the shape error is
+/// unreachable (debug asserts, release answers nil).
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `reason` and
+/// `headers` must each carry one owned reference the caller transfers.
+pub unsafe extern "C" fn al_shim_http_serialize_head(
+    vmx: *mut VM,
+    code: i64,
+    reason: u64,
+    headers: u64,
+) -> u64 {
+    // SAFETY: owned words per the contract above.
+    let (rv, hv) = unsafe { (Value::from_bits(reason), Value::from_bits(headers)) };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let r = super::http::serialize_head(&mut vm.heap, code, &super::bin_ref(&rv), &hv)
+        .unwrap_or_else(|_| {
+            debug_assert!(false, "HttpSerializeHead on a non-header array");
+            Value::nil()
+        });
+    drop(rv);
+    drop(hv);
+    into_bits(r)
+}
+
+/// `Op::HttpFraming` (`VM::http_framing`) behind the C ABI, on a proven
+/// `Array(Header)`-typed word: classify the body framing (`Length(Int)` is
+/// the only fresh allocation). The shape error is unreachable under the
+/// proof (debug asserts, release answers nil).
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`; `headers` must
+/// carry one owned reference the caller transfers.
+pub unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64 {
+    // SAFETY: owned word per the contract above.
+    let v = unsafe { Value::from_bits(headers) };
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    let r = super::http::framing(&vm.templates, &mut vm.heap, &v).unwrap_or_else(|_| {
+        debug_assert!(false, "HttpFraming on a non-header array");
+        Value::nil()
+    });
+    drop(v);
+    into_bits(r)
+}
+
 /// Truncating division on unboxed `i64`s with the interpreter's `Op::DivInt`
 /// totality — see [`div_int`]. Pure; safe to call from anywhere.
 pub extern "C" fn al_shim_div_int(a: i64, b: i64) -> i64 {
@@ -503,7 +609,7 @@ pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
 /// registration (`JITBuilder::symbol`). The names here are the contract the
 /// CLIF emitter's `declare`d externals resolve against; keep the two sides
 /// sourced from this one table.
-pub fn shim_symbols() -> [(&'static str, *const u8); 18] {
+pub fn shim_symbols() -> [(&'static str, *const u8); 23] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
@@ -515,6 +621,23 @@ pub fn shim_symbols() -> [(&'static str, *const u8); 18] {
         ("al_shim_seq_append", al_shim_seq_append as *const u8),
         ("al_shim_seq_prepend", al_shim_seq_prepend as *const u8),
         ("al_shim_bin_byte_size", al_shim_bin_byte_size as *const u8),
+        (
+            "al_shim_http_parse_head",
+            al_shim_http_parse_head as *const u8,
+        ),
+        (
+            "al_shim_http_headers_valid",
+            al_shim_http_headers_valid as *const u8,
+        ),
+        (
+            "al_shim_http_header_has",
+            al_shim_http_header_has as *const u8,
+        ),
+        (
+            "al_shim_http_serialize_head",
+            al_shim_http_serialize_head as *const u8,
+        ),
+        ("al_shim_http_framing", al_shim_http_framing as *const u8),
         ("al_shim_add_int_val", al_shim_add_int_val as *const u8),
         ("al_shim_sub_int_val", al_shim_sub_int_val as *const u8),
         ("al_shim_mul_int_val", al_shim_mul_int_val as *const u8),

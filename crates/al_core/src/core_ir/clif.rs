@@ -183,6 +183,11 @@ const SYM_SEQ_LEN: &str = "al_shim_seq_len";
 const SYM_SEQ_APPEND: &str = "al_shim_seq_append";
 const SYM_SEQ_PREPEND: &str = "al_shim_seq_prepend";
 const SYM_BIN_BYTE_SIZE: &str = "al_shim_bin_byte_size";
+const SYM_HTTP_PARSE_HEAD: &str = "al_shim_http_parse_head";
+const SYM_HTTP_HEADERS_VALID: &str = "al_shim_http_headers_valid";
+const SYM_HTTP_HEADER_HAS: &str = "al_shim_http_header_has";
+const SYM_HTTP_SERIALIZE_HEAD: &str = "al_shim_http_serialize_head";
+const SYM_HTTP_FRAMING: &str = "al_shim_http_framing";
 const SYM_PUSH_GLOBAL: &str = "al_shim_push_global";
 
 // ============================================================================
@@ -580,6 +585,46 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Argc(k),
             } => (args.len() == *k as usize + 1 && self.is_array(args[*k as usize])).then_some(()),
+            // The pure HTTP whole-ops: parse/classify/validate/serialize
+            // over proven `Binary`/`Int`/`Array(Header)` operands. Their
+            // only interpreter error is a shape check the proofs make
+            // unreachable; parking/IO ops (`TcpRead*`/`TcpWrite*`) are NOT
+            // in this family — suspension cannot cross a native frame.
+            Atom::PrimOp {
+                op: Op::HttpParseHead,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [buf, off] => (self.is_binary(*buf) && self.is_int(*off)).then_some(()),
+                _ => None,
+            },
+            Atom::PrimOp {
+                op: Op::HttpHeadersValid | Op::HttpFraming,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [headers] => self.is_array(*headers).then_some(()),
+                _ => None,
+            },
+            Atom::PrimOp {
+                op: Op::HttpHeaderHas,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [headers, name] => (self.is_array(*headers) && self.is_binary(*name)).then_some(()),
+                _ => None,
+            },
+            Atom::PrimOp {
+                op: Op::HttpSerializeHead,
+                args,
+                imm: Imm::None,
+            } => match args.as_slice() {
+                [code, reason, headers] => {
+                    (self.is_int(*code) && self.is_binary(*reason) && self.is_array(*headers))
+                        .then_some(())
+                }
+                _ => None,
+            },
             // Whole-op length reads, total under the same proofs: `ArrayLen`
             // elides the interpreter's type error on a proven `Array` (the
             // gate stays narrower than `seq_len`'s Tuple arm — no stdlib
@@ -784,6 +829,29 @@ pub(crate) mod gate_diag {
                 imm: Imm::Argc(k),
             } => (!(args.len() == *k as usize + 1 && g.is_array(args[*k as usize])))
                 .then(|| "prepend-unproven-seq".into()),
+            Atom::PrimOp {
+                op:
+                    op @ (Op::HttpParseHead
+                    | Op::HttpHeadersValid
+                    | Op::HttpFraming
+                    | Op::HttpHeaderHas
+                    | Op::HttpSerializeHead),
+                args,
+                imm: Imm::None,
+            } => {
+                let ok = match (op, args.as_slice()) {
+                    (Op::HttpParseHead, [buf, off]) => g.is_binary(*buf) && g.is_int(*off),
+                    (Op::HttpHeadersValid | Op::HttpFraming, [headers]) => g.is_array(*headers),
+                    (Op::HttpHeaderHas, [headers, name]) => {
+                        g.is_array(*headers) && g.is_binary(*name)
+                    }
+                    (Op::HttpSerializeHead, [code, reason, headers]) => {
+                        g.is_int(*code) && g.is_binary(*reason) && g.is_array(*headers)
+                    }
+                    _ => false,
+                };
+                (!ok).then(|| format!("http-unproven:{op:?}"))
+            }
             Atom::PrimOp {
                 op: Op::ArrayLen,
                 args,
@@ -1255,9 +1323,26 @@ impl Uses {
                 | Op::Append
                 | Op::Prepend
                 | Op::ArrayLen
-                | Op::BinByteSize => {
+                | Op::BinByteSize
+                | Op::HttpHeadersValid
+                | Op::HttpFraming
+                | Op::HttpHeaderHas => {
                     for &x in args {
                         self.need_word(x);
+                    }
+                }
+                // Mixed views: the Int operand is handed to the shim raw.
+                Op::HttpParseHead => {
+                    if let [buf, off] = args.as_slice() {
+                        self.need_word(*buf);
+                        self.need_int(*off);
+                    }
+                }
+                Op::HttpSerializeHead => {
+                    if let [code, reason, headers] = args.as_slice() {
+                        self.need_int(*code);
+                        self.need_word(*reason);
+                        self.need_word(*headers);
                     }
                 }
                 // `PushGlobal` reads the entry frame, not a local: no operand
@@ -1390,6 +1475,11 @@ struct RtRefs {
     seq_append: ir::FuncRef,
     seq_prepend: ir::FuncRef,
     bin_byte_size: ir::FuncRef,
+    http_parse_head: ir::FuncRef,
+    http_headers_valid: ir::FuncRef,
+    http_header_has: ir::FuncRef,
+    http_serialize_head: ir::FuncRef,
+    http_framing: ir::FuncRef,
     push_global: ir::FuncRef,
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
@@ -1436,6 +1526,16 @@ fn declare_imports<M: Module>(
     let seq_append = import(module, SYM_SEQ_APPEND, &[ptr, ptr, i64t], Some(i64t))?;
     let seq_prepend = import(module, SYM_SEQ_PREPEND, &[ptr, ptr, i64t], Some(i64t))?;
     let bin_byte_size = import(module, SYM_BIN_BYTE_SIZE, &[ptr, i64t], Some(i64t))?;
+    let http_parse_head = import(module, SYM_HTTP_PARSE_HEAD, &[ptr, i64t, i64t], Some(i64t))?;
+    let http_headers_valid = import(module, SYM_HTTP_HEADERS_VALID, &[i64t], Some(i64t))?;
+    let http_header_has = import(module, SYM_HTTP_HEADER_HAS, &[i64t, i64t], Some(i64t))?;
+    let http_serialize_head = import(
+        module,
+        SYM_HTTP_SERIALIZE_HEAD,
+        &[ptr, i64t, i64t, i64t],
+        Some(i64t),
+    )?;
+    let http_framing = import(module, SYM_HTTP_FRAMING, &[ptr, i64t], Some(i64t))?;
     let push_global = import(module, SYM_PUSH_GLOBAL, &[ptr, i64t], Some(i64t))?;
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
@@ -1490,6 +1590,11 @@ fn declare_imports<M: Module>(
         seq_append: module.declare_func_in_func(seq_append, func),
         seq_prepend: module.declare_func_in_func(seq_prepend, func),
         bin_byte_size: module.declare_func_in_func(bin_byte_size, func),
+        http_parse_head: module.declare_func_in_func(http_parse_head, func),
+        http_headers_valid: module.declare_func_in_func(http_headers_valid, func),
+        http_header_has: module.declare_func_in_func(http_header_has, func),
+        http_serialize_head: module.declare_func_in_func(http_serialize_head, func),
+        http_framing: module.declare_func_in_func(http_framing, func),
         push_global: module.declare_func_in_func(push_global, func),
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
@@ -1904,6 +2009,15 @@ impl<'a> BodyGen<'a> {
         w
     }
 
+    /// The owned value word a whole-op shim returned: the word view as is,
+    /// the int view through the dynamic unbox (a shim result carries no
+    /// static Int proof at this seam, so the decode stays total).
+    fn opaque_result(&mut self, call: ir::Inst, want_int: bool) -> AtomVal {
+        let r = self.b.inst_results(call)[0];
+        let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, r));
+        AtomVal { word: Some(r), int }
+    }
+
     /// Record a binding's produced value: write it through to its frame slot
     /// (where it has one — the slot takes the word's owned reference), and
     /// define the register views its uses demand.
@@ -2070,6 +2184,70 @@ impl<'a> BodyGen<'a> {
                     word: Some(self.b.inst_results(call)[0]),
                     int: None,
                 }
+            }
+            // The pure HTTP whole-ops: owned operands in (the Int views raw),
+            // one shim call, owned result out.
+            Atom::PrimOp {
+                op: Op::HttpParseHead,
+                args,
+                imm: Imm::None,
+            } => {
+                let [buf, off] = args.as_slice() else {
+                    unsupported_node("HttpParseHead arity")
+                };
+                let b = self.owned_word(*buf);
+                let o = self.int_of(*off);
+                let call = self
+                    .b
+                    .ins()
+                    .call(self.fns.http_parse_head, &[self.vmx, b, o]);
+                self.opaque_result(call, want_int)
+            }
+            Atom::PrimOp {
+                op: op @ (Op::HttpHeadersValid | Op::HttpFraming),
+                args,
+                imm: Imm::None,
+            } => {
+                let [headers] = args.as_slice() else {
+                    unsupported_node("http headers arity")
+                };
+                let h = self.owned_word(*headers);
+                let call = if matches!(op, Op::HttpHeadersValid) {
+                    self.b.ins().call(self.fns.http_headers_valid, &[h])
+                } else {
+                    self.b.ins().call(self.fns.http_framing, &[self.vmx, h])
+                };
+                self.opaque_result(call, want_int)
+            }
+            Atom::PrimOp {
+                op: Op::HttpHeaderHas,
+                args,
+                imm: Imm::None,
+            } => {
+                let [headers, name] = args.as_slice() else {
+                    unsupported_node("HttpHeaderHas arity")
+                };
+                let h = self.owned_word(*headers);
+                let n = self.owned_word(*name);
+                let call = self.b.ins().call(self.fns.http_header_has, &[h, n]);
+                self.opaque_result(call, want_int)
+            }
+            Atom::PrimOp {
+                op: Op::HttpSerializeHead,
+                args,
+                imm: Imm::None,
+            } => {
+                let [code, reason, headers] = args.as_slice() else {
+                    unsupported_node("HttpSerializeHead arity")
+                };
+                let c = self.int_of(*code);
+                let r = self.owned_word(*reason);
+                let h = self.owned_word(*headers);
+                let call = self
+                    .b
+                    .ins()
+                    .call(self.fns.http_serialize_head, &[self.vmx, c, r, h]);
+                self.opaque_result(call, want_int)
             }
             Atom::PrimOp {
                 op: op @ (Op::ArrayLen | Op::BinByteSize),
@@ -3932,6 +4110,14 @@ mod tests {
         }
     }
 
+    /// Stand-in for the HTTP shims: no clif unit test drives them (they wrap
+    /// `crates/al`'s parser, exercised end-to-end by the goldens and the io
+    /// suite under `AL_NATIVE=native`), but every compiled body declares all
+    /// imports, so finalize needs *an* address per symbol.
+    extern "C" fn t_http_unused() -> u64 {
+        panic!("http shim called from a clif unit test")
+    }
+
     // ---- harness ----------------------------------------------------------
 
     struct Jit {
@@ -3988,6 +4174,11 @@ mod tests {
         jb.symbol(SYM_SEQ_APPEND, t_seq_append as *const u8);
         jb.symbol(SYM_SEQ_PREPEND, t_seq_prepend as *const u8);
         jb.symbol(SYM_BIN_BYTE_SIZE, t_bin_byte_size as *const u8);
+        jb.symbol(SYM_HTTP_PARSE_HEAD, t_http_unused as *const u8);
+        jb.symbol(SYM_HTTP_HEADERS_VALID, t_http_unused as *const u8);
+        jb.symbol(SYM_HTTP_HEADER_HAS, t_http_unused as *const u8);
+        jb.symbol(SYM_HTTP_SERIALIZE_HEAD, t_http_unused as *const u8);
+        jb.symbol(SYM_HTTP_FRAMING, t_http_unused as *const u8);
         jb.symbol(SYM_RT_CALL, t_rt_call as *const u8);
         jb.symbol(SYM_RT_TAIL_CALL, t_rt_tail_call as *const u8);
         jb.symbol(SYM_RT_PUSH_FRAME, t_rt_push_frame as *const u8);
