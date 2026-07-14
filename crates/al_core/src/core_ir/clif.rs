@@ -223,8 +223,14 @@ enum Repr {
     Int,
     /// Proven immediate: `Float` (AL floats are finite f64 bit patterns —
     /// `Value::float` collapses NaN/Inf — so the `QNAN` tag space is never
-    /// theirs), `Bool` (`HDR_BOOL`) and `Nil` (`HDR_NIL`), which are never
-    /// heap. Dup and drop compile to nothing.
+    /// theirs) and `Bool` (`HDR_BOOL`), which are never heap — a Bool ctor
+    /// compiles to `PushTrue`/`PushFalse`, so no Bool cell ever exists. Dup
+    /// and drop compile to nothing. `Nil` deliberately does NOT qualify: a
+    /// `Nil()` constructor goes through `MakeEnumPayload` like any other
+    /// nullary ctor and allocates a *mortal heap enum* (only the frozen
+    /// prelude constant is an immediate), so a Nil-typed local can own a
+    /// live refcount — eliding its gates double-frees (the
+    /// `socket_address` `Err(Nil)` shape).
     Immediate,
     /// Proven heap cell: strings, arrays, binaries, tuples and `fn` values,
     /// whose constructors always allocate (`str_in`/`array_in`/`binary_in`/
@@ -241,12 +247,11 @@ enum Repr {
 }
 
 /// The prelude type identities [`classify`] needs beyond the pool's prims:
-/// `Bool`/`Nil` values are VM immediates and `Binary`'s are heap cells,
-/// which no `RTy` node can reveal (they are ordinary `Con`s there).
+/// `Bool` values are VM immediates and `Binary`'s are heap cells, which no
+/// `RTy` node can reveal (they are ordinary `Con`s there).
 #[derive(Clone, Copy)]
 struct ReprTys {
     bool: TypeRef,
-    nil: TypeRef,
     binary: TypeRef,
 }
 
@@ -254,7 +259,6 @@ impl ReprTys {
     fn of(prelude: &PreludeBindings) -> ReprTys {
         ReprTys {
             bool: prelude.bool,
-            nil: prelude.nil,
             binary: prelude.binary,
         }
     }
@@ -268,7 +272,7 @@ fn classify(pool: &ResolvedPool, tys: ReprTys, t: RTy) -> Repr {
             Some(Prim::Int) => Repr::Int,
             Some(Prim::Float) => Repr::Immediate,
             Some(Prim::String) => Repr::Heap,
-            None if tys.bool.is(id) || tys.nil.is(id) => Repr::Immediate,
+            None if tys.bool.is(id) => Repr::Immediate,
             None if id == pool.prims().array || tys.binary.is(id) => Repr::Heap,
             None => Repr::Dyn,
         },
@@ -514,6 +518,14 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Index(_),
             } => args.is_empty().then_some(()),
+            // A bare Bool head materialized by `&&`/`||` lowering: its word
+            // is a compile-time immediate constant (`emit_ctor`'s Bool-path
+            // parity — no heap cell, no operand).
+            Atom::PrimOp {
+                op: Op::PushTrue | Op::PushFalse,
+                args,
+                imm: Imm::None,
+            } => args.is_empty().then_some(()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return None;
@@ -676,6 +688,11 @@ pub(crate) mod gate_diag {
                 args,
                 imm: Imm::Index(_),
             } => (!args.is_empty()).then(|| "push-global-args".into()),
+            Atom::PrimOp {
+                op: Op::PushTrue | Op::PushFalse,
+                args,
+                imm: Imm::None,
+            } => (!args.is_empty()).then(|| "bool-head-args".into()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return Some(format!("op:{op:?}"));
@@ -1128,8 +1145,8 @@ impl Uses {
                     }
                 }
                 // `PushGlobal` reads the entry frame, not a local: no operand
-                // to demand a view of.
-                Op::PushGlobal => {}
+                // to demand a view of. The Bool heads are nullary constants.
+                Op::PushGlobal | Op::PushTrue | Op::PushFalse => {}
                 _ => match nop_of(*op) {
                     Some((NOp::Not, _)) => {
                         for &x in args {
@@ -1876,6 +1893,25 @@ impl<'a> BodyGen<'a> {
                 let call = self.b.ins().call(self.fns.push_global, &[self.vmx, n]);
                 let w = self.b.inst_results(call)[0];
                 self.field_result(w, want_word, want_int)
+            }
+            // The Bool heads `&&`/`||` lowering materializes: one iconst of
+            // the immediate's bits, `emit`'s `PushTrue`/`PushFalse` parity.
+            Atom::PrimOp {
+                op: op @ (Op::PushTrue | Op::PushFalse),
+                ..
+            } => {
+                if want_int {
+                    unsupported_node("int view of a Bool");
+                }
+                let bits = if matches!(op, Op::PushTrue) {
+                    self.facts.bool_true
+                } else {
+                    self.facts.bool_false
+                };
+                AtomVal {
+                    word: want_word.then(|| self.b.ins().iconst(types::I64, bits as i64)),
+                    int: None,
+                }
             }
             Atom::PrimOp {
                 op: Op::GetFieldUnchecked,
@@ -4027,6 +4063,54 @@ mod tests {
         let (v, yields) = run(&j, 0, &[], 1 << 40);
         assert_eq!(v.to_bits(), Value::small_int(2).to_bits());
         assert_eq!(yields, 0);
+    }
+
+    /// A Nil-typed value must keep dynamic RC gates: `Nil()` constructors
+    /// heap-allocate through `MakeEnumPayload` like any nullary ctor, so
+    /// classifying Nil as an immediate elides the dup on a consuming use of
+    /// a slotted Nil local and double-frees (the `socket_address`
+    /// `Err(Nil)` shape). Only `Bool` (whose ctors are `PushTrue`/
+    /// `PushFalse` — no cell) may claim `Repr::Immediate` among nominals.
+    #[test]
+    fn nil_typed_values_are_not_immediates() {
+        let mut pool = ResolvedPool::new(PrimIds {
+            int: TypeId(1),
+            float: TypeId(2),
+            string: TypeId(3),
+            array: TypeId(4),
+        });
+        let pre = test_prelude();
+        let tys = ReprTys::of(&pre);
+        let nil = pool.mk_con(pre.nil.id, StrId(0), &[]);
+        assert_eq!(classify(&pool, tys, nil), Repr::Dyn);
+        let boolean = pool.mk_con(BOOL_TID, StrId(0), &[]);
+        assert_eq!(classify(&pool, tys, boolean), Repr::Immediate);
+    }
+
+    /// The nullary Bool heads `&&`/`||` lowering materializes
+    /// (`Op::PushTrue`/`Op::PushFalse`): tail position and via a `Let` bind.
+    #[test]
+    fn bool_heads_from_short_circuit_lowering() {
+        let (pool, int) = int_pool();
+        let t = testkit::func(
+            vec![],
+            CoreExpr::Tail(Atom::prim(Op::PushTrue, vec![])),
+            int,
+        );
+        let f = testkit::func(
+            vec![],
+            CoreExpr::Let {
+                bind: testkit::bind(0, int),
+                rhs: Atom::prim(Op::PushFalse, vec![]),
+                body: Box::new(CoreExpr::Tail(Atom::Local(local(0)))),
+            },
+            int,
+        );
+        let j = jit(&[t, f], &pool, &test_consts());
+        let (v, _) = run(&j, 0, &[], 1 << 40);
+        assert_eq!(v.to_bits(), Value::bool(true).to_bits());
+        let (v, _) = run(&j, 1, &[], 1 << 40);
+        assert_eq!(v.to_bits(), Value::bool(false).to_bits());
     }
 
     #[test]
