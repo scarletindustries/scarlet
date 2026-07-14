@@ -177,6 +177,7 @@ const SYM_RT_TAIL_CALL_VALUE: &str = "al_rt_tail_call_value";
 const SYM_DIV_INT: &str = "al_shim_div_int";
 const SYM_MOD_INT: &str = "al_shim_mod_int";
 const SYM_ENUM_ALLOC: &str = "al_shim_enum_alloc";
+const SYM_PUSH_GLOBAL: &str = "al_shim_push_global";
 
 // ============================================================================
 // plan: the hook-time half (coverage gate + type-directed facts)
@@ -503,6 +504,16 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Index(_),
             } => (args.len() == 1).then_some(()),
+            // `PushGlobal` reads the entry frame's slot: top-level
+            // `fn`/`const`/`let` bindings, written once by `__main__` before
+            // any body that reads them runs. One shim call (the global area
+            // is a `Vec` with no ABI-stable base), same owned clone the
+            // interpreter's arm performs.
+            Atom::PrimOp {
+                op: Op::PushGlobal,
+                args,
+                imm: Imm::Index(_),
+            } => args.is_empty().then_some(()),
             Atom::PrimOp { op, args, imm } => {
                 if *imm != Imm::None {
                     return None;
@@ -977,6 +988,9 @@ impl Uses {
                         self.need_word(x);
                     }
                 }
+                // `PushGlobal` reads the entry frame, not a local: no operand
+                // to demand a view of.
+                Op::PushGlobal => {}
                 _ => match nop_of(*op) {
                     Some((NOp::Not, _)) => {
                         for &x in args {
@@ -1098,6 +1112,7 @@ struct RtRefs {
     release: ir::FuncRef,
     hollow: ir::FuncRef,
     enum_alloc: ir::FuncRef,
+    push_global: ir::FuncRef,
     int_box: ir::FuncRef,
     div_int: ir::FuncRef,
     mod_int: ir::FuncRef,
@@ -1137,6 +1152,7 @@ fn declare_imports<M: Module>(
         &[ptr, i64t, i64t, i64t, i64t, ptr, i64t],
         Some(i64t),
     )?;
+    let push_global = import(module, SYM_PUSH_GLOBAL, &[ptr, i64t], Some(i64t))?;
     let int_box = import(module, NATIVE_INT_BOX_SYMBOL, &[ptr, i64t], Some(i64t))?;
     let div_int = import(module, SYM_DIV_INT, &[i64t, i64t], Some(i64t))?;
     let mod_int = import(module, SYM_MOD_INT, &[i64t, i64t], Some(i64t))?;
@@ -1184,6 +1200,7 @@ fn declare_imports<M: Module>(
         release: module.declare_func_in_func(release, func),
         hollow: module.declare_func_in_func(hollow, func),
         enum_alloc: module.declare_func_in_func(enum_alloc, func),
+        push_global: module.declare_func_in_func(push_global, func),
         int_box: module.declare_func_in_func(int_box, func),
         div_int: module.declare_func_in_func(div_int, func),
         mod_int: module.declare_func_in_func(mod_int, func),
@@ -1706,6 +1723,20 @@ impl<'a> BodyGen<'a> {
                 let obj = self.b.ins().band_imm(w, NATIVE_PTR_MASK as i64);
                 let f = self.load_payload_word(obj, 1 + *i as usize);
                 self.field_result(f, want_word, want_int)
+            }
+            // The interpreter's `Op::PushGlobal`. The shim hands back the
+            // global area's word borrowed; `field_result` takes the reference
+            // only where this use keeps one, which is the same ownership the
+            // interpreter's `globals[slot].clone()` produces.
+            Atom::PrimOp {
+                op: Op::PushGlobal,
+                imm: Imm::Index(slot),
+                ..
+            } => {
+                let n = self.b.ins().iconst(types::I64, i64::from(*slot));
+                let call = self.b.ins().call(self.fns.push_global, &[self.vmx, n]);
+                let w = self.b.inst_results(call)[0];
+                self.field_result(w, want_word, want_int)
             }
             Atom::PrimOp {
                 op: Op::GetFieldUnchecked,

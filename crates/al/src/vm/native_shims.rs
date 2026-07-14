@@ -302,12 +302,32 @@ pub extern "C" fn al_shim_mod_int(a: i64, b: i64) -> i64 {
     mod_int(a, b)
 }
 
+/// `Op::PushGlobal`: the entry frame's slot `slot`, **borrowed**. Top-level
+/// `fn`/`const`/`let` bindings live in the scheduler-shared global area,
+/// written once before any body that reads them runs and never reassigned, so
+/// the returned word stays live for the program — the caller takes its own
+/// reference only where it keeps one (`field_result`'s retain), exactly as the
+/// interpreter's arm clones out of the same borrow. The array is a `Vec` with
+/// no ABI-stable base, hence a shim rather than an inline load.
+///
+/// # Safety
+/// `vmx` must point at the running scheduler's live `VM`, and `slot` must be
+/// in range for its global area — both guaranteed by the emitter, which copies
+/// the operand from the bytecode the checker already validated. The returned
+/// word is borrowed: it carries no reference the caller owns.
+pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
+    // SAFETY: `vmx` is the running scheduler's VM per the contract above.
+    let vm = unsafe { &mut *vmx };
+    vm.globals[slot as usize].to_bits()
+}
+
 /// Every shim, as `(symbol name, address)` pairs for JIT symbol
 /// registration (`JITBuilder::symbol`). The names here are the contract the
 /// CLIF emitter's `declare`d externals resolve against; keep the two sides
 /// sourced from this one table.
-pub fn shim_symbols() -> [(&'static str, *const u8); 11] {
+pub fn shim_symbols() -> [(&'static str, *const u8); 12] {
     [
+        ("al_shim_push_global", al_shim_push_global as *const u8),
         ("al_shim_int_box", al_shim_int_box as *const u8),
         ("al_shim_int_unbox", al_shim_int_unbox as *const u8),
         ("al_shim_enum_alloc", al_shim_enum_alloc as *const u8),
