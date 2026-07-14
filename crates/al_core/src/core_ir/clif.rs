@@ -618,6 +618,145 @@ impl Gate<'_> {
     }
 }
 
+/// Diagnostic mirror of [`Gate`]: walks a whole body without short-circuiting
+/// and names every node the A0 gate rejects. Test-only — the compile path uses
+/// [`plan`], whose decision this mirrors clause for clause (a body with no
+/// reasons here is exactly a body `plan` accepts).
+#[cfg(test)]
+pub(crate) mod gate_diag {
+    use super::*;
+
+    /// Every rejection reason in `f`, in walk order. Empty iff [`plan`]
+    /// accepts the body.
+    pub(crate) fn reasons(
+        f: &CoreFn,
+        pool: &ResolvedPool,
+        prelude: &PreludeBindings,
+    ) -> Vec<String> {
+        let mut g = Gate {
+            pool,
+            bools: BoolCtors::of(prelude),
+            tys: ReprTys::of(prelude),
+            reprs: TiVec::new(),
+            local_tys: TiVec::new(),
+            switch_counts: HashMap::new(),
+        };
+        for p in &f.params {
+            g.record(p);
+        }
+        let mut out = Vec::new();
+        walk(&mut g, &f.body, &mut out);
+        out
+    }
+
+    /// [`Gate::atom`], with `Some(reason)` at every `None` site.
+    fn atom_reason(g: &Gate, a: &Atom) -> Option<String> {
+        match a {
+            Atom::Local(_) | Atom::Const(_) => None,
+            Atom::PrimOp {
+                op: Op::TupleIndex,
+                args,
+                imm: Imm::Index(i),
+            } => {
+                let [recv] = args.as_slice() else {
+                    return Some("tuple-index-arity".into());
+                };
+                match g.ty_of(*recv) {
+                    Some(t) if g.pool.tuple_elem(t, *i as usize).is_some() => None,
+                    _ => Some("tuple-index-unproven".into()),
+                }
+            }
+            Atom::PrimOp {
+                op: Op::GetFieldUnchecked,
+                args,
+                imm: Imm::Index(_),
+            } => (args.len() != 1).then(|| "get-field-arity".into()),
+            Atom::PrimOp {
+                op: Op::PushGlobal,
+                args,
+                imm: Imm::Index(_),
+            } => (!args.is_empty()).then(|| "push-global-args".into()),
+            Atom::PrimOp { op, args, imm } => {
+                if *imm != Imm::None {
+                    return Some(format!("op:{op:?}"));
+                }
+                match nop_of(*op) {
+                    None => Some(format!("op:{op:?}")),
+                    Some((_, poly)) => (poly && !args.iter().all(|&x| g.is_int(x)))
+                        .then(|| format!("poly-non-int:{op:?}")),
+                }
+            }
+            Atom::Call { .. } | Atom::Closure { .. } => None,
+            Atom::Ctor {
+                variant, fields, ..
+            } => (g.bools.polarity(variant).is_some() && !fields.is_empty())
+                .then(|| "bool-ctor-fields".into()),
+        }
+    }
+
+    /// [`Gate::expr`], continuing past rejections and collecting them all.
+    fn walk(g: &mut Gate, mut e: &CoreExpr, out: &mut Vec<String>) {
+        loop {
+            match e {
+                CoreExpr::Let { bind, rhs, body } => {
+                    if let Some(r) = atom_reason(g, rhs) {
+                        out.push(r);
+                    }
+                    g.record(bind);
+                    e = body;
+                }
+                CoreExpr::LetJoin { bind, join, body } => {
+                    walk(g, join, out);
+                    g.record(bind);
+                    e = body;
+                }
+                CoreExpr::LetCont { cont, body, .. } => {
+                    walk(g, cont, out);
+                    e = body;
+                }
+                CoreExpr::Drop { body, .. } => e = body,
+                CoreExpr::If { then, els, .. } => {
+                    walk(g, then, out);
+                    e = els;
+                }
+                CoreExpr::Match { arms, .. } => {
+                    if let Some((tid, count)) = g.switch_shape(arms)
+                        && *g.switch_counts.entry(tid).or_insert(count) != count
+                    {
+                        out.push("switch-count-mismatch".into());
+                    }
+                    for (pat, body) in arms {
+                        match pat {
+                            CorePat::Wild | CorePat::Lit(_) => {}
+                            CorePat::Bind(b) => g.record(b),
+                            CorePat::Ctor { variant, fields } => {
+                                if g.bools.polarity(variant).is_some() {
+                                    if !fields.is_empty() {
+                                        out.push("bool-pat-fields".into());
+                                    }
+                                } else {
+                                    for f in fields {
+                                        g.record(f);
+                                    }
+                                }
+                            }
+                        }
+                        walk(g, body, out);
+                    }
+                    return;
+                }
+                CoreExpr::Tail(a) => {
+                    if let Some(r) = atom_reason(g, a) {
+                        out.push(r);
+                    }
+                    return;
+                }
+                CoreExpr::Goto(_) => return,
+            }
+        }
+    }
+}
+
 // ============================================================================
 // compile: the post-compile half (layout, constants, CLIF)
 // ============================================================================

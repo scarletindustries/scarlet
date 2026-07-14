@@ -501,3 +501,150 @@ mod qualified_ctor_pattern_occurrences {
         );
     }
 }
+
+mod stdlib_native_gate_probe {
+    //! STEP-1 experiment: if the native hook could see stdlib bodies, how many
+    //! would the A0 coverage gate accept? Replicates `precompile_stdlib`'s
+    //! pipeline (source compile, no blob) with a gate-probing hook installed
+    //! from the very start, so prelude bodies are probed too. Diagnostic: it
+    //! prints a report under `--nocapture` and only asserts internal
+    //! consistency (the diag walker must mirror `plan` exactly).
+
+    use std::cell::RefCell;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::rc::Rc;
+
+    use super::super::*;
+    use crate::core_ir::FuncIdx;
+    use crate::core_ir::clif;
+    use crate::module::{ModuleKey, stdlib};
+
+    /// Prelude bindings from a first, hook-free run. Stdlib compilation is
+    /// deterministic (pinned by `precompile_stdlib_is_deterministic`), so the
+    /// type/ctor identities are valid for the probed second run.
+    fn prelude_bindings() -> PreludeBindings {
+        let mut c = new_compiler(None, false);
+        c.register_prelude();
+        assert!(!crate::diagnostic::has_errors(c.diagnostics()));
+        c.prelude.clone()
+    }
+
+    struct Probe {
+        idx: FuncIdx,
+        plan: Option<clif::NativePlan>,
+        reasons: Vec<String>,
+    }
+
+    #[test]
+    fn stdlib_gate_coverage_report() {
+        let prelude = prelude_bindings();
+        let probes: Rc<RefCell<Vec<Probe>>> = Rc::default();
+        let sink = Rc::clone(&probes);
+        let mut c = new_compiler(None, false);
+        c.native_hook = Some(Box::new(move |idx, f, pool| {
+            let plan = clif::plan(idx, f, pool, &prelude);
+            let reasons = clif::gate_diag::reasons(f, pool, &prelude);
+            sink.borrow_mut().push(Probe { idx, plan, reasons });
+        }));
+
+        let at = crate::span::Span::DUMMY;
+        c.register_prelude();
+        assert!(!crate::diagnostic::has_errors(c.diagnostics()));
+        // Hook-fire counts per module, in load order (probe order is fire order).
+        let mut bounds = vec![("al (prelude)".to_string(), probes.borrow().len())];
+        for path in stdlib::all_modules() {
+            c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at);
+            assert!(
+                !crate::diagnostic::has_errors(c.diagnostics()),
+                "errors compiling {}",
+                ModuleKey::for_stdlib(&path).as_str()
+            );
+            bounds.push((
+                ModuleKey::for_stdlib(&path).as_str().to_string(),
+                probes.borrow().len(),
+            ));
+        }
+
+        let probes = probes.take();
+        let fn_name = |idx: FuncIdx| c.program.functions[idx.index()].name.to_string();
+
+        // The diag walker must agree with the real gate, body for body.
+        for p in &probes {
+            assert_eq!(
+                p.plan.is_some(),
+                p.reasons.is_empty(),
+                "gate_diag disagrees with plan on fn#{} {}: {:?}",
+                p.idx.index(),
+                fn_name(p.idx),
+                p.reasons
+            );
+        }
+
+        let fire_order: Vec<bool> = probes.iter().map(|p| p.plan.is_some()).collect();
+        let failed: Vec<(FuncIdx, Vec<String>)> = probes
+            .iter()
+            .filter(|p| p.plan.is_none())
+            .map(|p| (p.idx, p.reasons.clone()))
+            .collect();
+        let plans: Vec<clif::NativePlan> = probes.into_iter().filter_map(|p| p.plan).collect();
+        let compilable = clif::native_set(&plans, &c.program);
+
+        println!("== stdlib native-gate probe ==");
+        println!("function table size:     {}", c.program.functions.len());
+        println!("bodies seen by hook:     {}", fire_order.len());
+        println!("pass A0 coverage gate:   {}", plans.len());
+        println!(
+            "also pass compile gates: {}  (consts / ctor-sites / use-scan)",
+            compilable.len()
+        );
+
+        println!("\n-- per module (gate-pass / hooked) --");
+        let mut prev = 0usize;
+        for (name, upto) in &bounds {
+            if *upto > prev {
+                let pass = fire_order[prev..*upto].iter().filter(|ok| **ok).count();
+                println!("{:24} {:3} / {:3}", name, pass, *upto - prev);
+            }
+            prev = *upto;
+        }
+
+        println!("\n-- blocking reasons (count = rejected fns containing it) --");
+        let mut blocking: BTreeMap<&str, usize> = BTreeMap::new();
+        for (_, reasons) in &failed {
+            for r in reasons.iter().map(String::as_str).collect::<BTreeSet<_>>() {
+                *blocking.entry(r).or_default() += 1;
+            }
+        }
+        let mut blocking: Vec<_> = blocking.into_iter().collect();
+        blocking.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        for (r, n) in &blocking {
+            println!("{n:4}  {r}");
+        }
+
+        println!("\n-- rejected fns and their distinct blockers --");
+        for (idx, reasons) in &failed {
+            let distinct: BTreeSet<&str> = reasons.iter().map(String::as_str).collect();
+            println!(
+                "fn#{:<4} {:32} {}",
+                idx.index(),
+                fn_name(*idx),
+                distinct.into_iter().collect::<Vec<_>>().join(" ")
+            );
+        }
+
+        println!("\n-- gate-passing fns --");
+        for p in &plans {
+            let jit = if compilable.contains(&p.func_idx) {
+                "jit"
+            } else {
+                "PLAN-ONLY"
+            };
+            println!(
+                "fn#{:<4} {:32} {}",
+                p.func_idx.index(),
+                fn_name(p.func_idx),
+                jit
+            );
+        }
+    }
+}
