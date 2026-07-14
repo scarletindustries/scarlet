@@ -613,11 +613,13 @@ struct LoweredBody {
 /// ([`native::config`](super::native::config)): `off` suppresses the hook
 /// entirely, `native` (the default) fires for every body, and `mix` fires for
 /// a seeded per-function subset — so a backend never sees a body the mode
-/// excluded and need not re-implement the env contract. Stdlib bodies
-/// pass through this compiler only inside `precompile_stdlib` (cargo-build
-/// time, no hook installed) and are seeded from the precompiled blob at
-/// runtime without re-lowering, so a hook installed via
-/// [`compile_with_native`] sees exactly the user program's bodies.
+/// excluded and need not re-implement the env contract. Stdlib bodies fire
+/// it too: installing a hook makes `compile_impl` re-lower the whole stdlib
+/// from source instead of seeding the precompiled blob (which ships
+/// post-emit bytecode — no `CoreFn`/`ResolvedPool` exists to hand a hook),
+/// so the hook sees every function body in the program, stdlib and user
+/// alike. Only the hook-free paths (plain compile/check, the LSP, `off`
+/// mode) take the seeded shortcut.
 ///
 /// A caller-installed callback, even though CLIF construction itself lives in
 /// this crate beside `emit` (`core_ir::clif`): the driver — `crates/al`, which
@@ -1052,7 +1054,40 @@ fn compile_impl(
     let is_prelude_self = as_module.as_deref() == Some(module::al_prelude().as_slice());
     if !is_prelude_self {
         match pre {
-            Some(s) => c.seed_static(s),
+            Some(s) if c.native_hook.is_none() => c.seed_static(s),
+            // A native hook is installed (and the mode is not `off`): the
+            // backend needs to see stdlib bodies, and a body is only visible
+            // at its own `lower` — the blob ships post-emit bytecode with no
+            // `CoreFn`/`ResolvedPool` to hand the hook. So re-lower the whole
+            // stdlib from source instead of seeding. Eager (every module, not
+            // just the entry's imports) so the function table matches the
+            // seeded one entry for entry: the pipeline is deterministic
+            // (pinned by `precompile_stdlib_is_deterministic`, and by
+            // `relowered_stdlib_reproduces_the_seeded_program` from the
+            // driver's side), so this produces the blob's program prefix,
+            // numbering included. Startup pays the stdlib compile; `off`
+            // dropped the hook above and keeps the seeded fast path.
+            Some(_) => {
+                c.register_prelude();
+                let at = Span::DUMMY;
+                for path in module::stdlib::all_modules() {
+                    if has_errors(&c.engine.diagnostics) {
+                        break;
+                    }
+                    c.load_module(&ast::ImportPath::canonical(path), at);
+                }
+                // Reset the memos that would otherwise leak across the
+                // stdlib/user boundary: a seeded compile starts with both
+                // empty, so leaving them populated would let user code dedup
+                // constants against stdlib pool entries and resolve stdlib
+                // callees to `CallKnown` where the seeded program reads the
+                // module-init global slot — same semantics, different
+                // bytecode. The relowered program must *be* the seeded one
+                // (`relowered_stdlib_reproduces_the_seeded_program`), so the
+                // native/off split stays a NativeTable, not a program.
+                c.const_dedup.clear();
+                c.global_to_func.clear();
+            }
             None => c.register_prelude(),
         }
         if has_errors(&c.engine.diagnostics) {

@@ -107,13 +107,16 @@ fn hook_fires_per_body_keyed_by_program_func_idx() {
     }
 
     let name_of = |s: &Seen| program.functions[s.idx].name.to_string();
+    // The hook now sees stdlib bodies too (they precede the user program in
+    // the function table, and the stdlib has its own fns named `add`), so
+    // the user's bodies are the *last* bearers of these names.
     let add = seen
         .iter()
-        .find(|s| name_of(s) == "add")
+        .rfind(|s| name_of(s) == "add")
         .expect("hook saw `add`");
     let twice = seen
         .iter()
-        .find(|s| name_of(s) == "twice")
+        .rfind(|s| name_of(s) == "twice")
         .expect("hook saw `twice`");
 
     // The RTys resolved through the pool the hook was handed: this is the
@@ -152,5 +155,71 @@ fn toplevel_glue_is_never_hooked() {
     assert!(
         seen.iter().all(|s| s.idx != entry),
         "`__main__` is always-interpreted glue and must not reach the hook"
+    );
+}
+
+/// The re-lowering contract behind the stdlib unlock: installing a hook makes
+/// `compile_impl` recompile the whole stdlib from source instead of seeding
+/// the precompiled blob — and determinism makes that recompile reproduce the
+/// seeded program *exactly*. Function table (names, arities, captures, code
+/// spans), instruction stream, entry index and constant pool must all agree,
+/// or the native path would be running a different program than `off` does.
+#[test]
+fn relowered_stdlib_reproduces_the_seeded_program() {
+    pin_native_mode();
+    // Imports pull real stdlib modules (and their transitive deps) so the
+    // comparison covers module init glue, not just the prelude.
+    let src = r#"
+import al/array
+import al/string
+
+fn double(x Int) Int { x * 2 }
+
+println(array.length(array.map([1, 2, 3], double)))
+println(string.length('hello'))
+"#;
+    let (relowered, seen) = compile_recording(src);
+    assert!(
+        seen.len() > 100,
+        "expected the hook to see the whole stdlib (got {} bodies)",
+        seen.len()
+    );
+
+    let plain = al::bytecode::compile(&parse(src), None, Some(&al::STDLIB));
+    assert!(plain.success(), "compile failed: {:#?}", plain.diagnostics);
+    let seeded = plain.emitted.expect("compile emits").program;
+
+    let fns = |p: &al::bytecode::Program| -> Vec<(String, i32, i32, i32, i32, i32)> {
+        p.functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.to_string(),
+                    f.arity,
+                    f.locals,
+                    f.capture_count,
+                    f.code_start,
+                    f.code_len,
+                )
+            })
+            .collect()
+    };
+    assert_eq!(fns(&relowered), fns(&seeded), "function tables diverge");
+    assert_eq!(relowered.entry, seeded.entry);
+
+    let code = |p: &al::bytecode::Program| -> Vec<(al::bytecode::Op, u8, u16, i32)> {
+        p.code.iter().map(|i| (i.op, i.a, i.b, i.operand)).collect()
+    };
+    assert_eq!(code(&relowered), code(&seeded), "bytecode diverges");
+
+    // `Value`'s Debug renders logically (no addresses), so frozen heap
+    // constants built at runtime compare equal to the blob's.
+    let consts = |p: &al::bytecode::Program| -> Vec<String> {
+        p.constants.iter().map(|v| format!("{v:?}")).collect()
+    };
+    assert_eq!(
+        consts(&relowered),
+        consts(&seeded),
+        "constant pools diverge"
     );
 }

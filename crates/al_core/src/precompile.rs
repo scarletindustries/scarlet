@@ -24,10 +24,14 @@
 //! (`RTy`/`ResolvedPool`) is compile-local, and it stays out of the blob
 //! because **the stdlib is frozen after `emit`, not before `lower`**:
 //! `PrecompiledBlob::program` is finished bytecode, and `seed_static` installs
-//! it directly. No stdlib body is ever re-lowered at runtime, so no stdlib
-//! `RTy` ever needs to exist. `build.rs`'s dependency set is unaffected.
-//! Pinned by `blob_freezes_exactly_the_engine_pools` below and by
+//! it directly. No stdlib body is ever re-lowered *from the blob*, so no
+//! stdlib `RTy` ever needs to exist in it. `build.rs`'s dependency set is
+//! unaffected. Pinned by `blob_freezes_exactly_the_engine_pools` below and by
 //! `crates/al/tests/arena_rewind.rs::stdlib_bodies_are_never_relowered`.
+//! (The native-backend path needs stdlib `CoreFn`s and therefore does not
+//! seed at all: with a hook installed, `compile_impl` recompiles the stdlib
+//! from source — reproducing this blob's program exactly, by the determinism
+//! below — rather than the blob growing a pool to carry.)
 //!
 //! # Why the return type is `(PrecompileOutput, InferEngine)` and nothing else
 //!

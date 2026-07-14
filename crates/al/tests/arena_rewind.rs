@@ -10,9 +10,11 @@
 //! 2. **The precompiled stdlib blob.** `seed_static` memcpys the `.rodata`
 //!    arenas in as the live engine's prefix; every `Ty` frozen into a static
 //!    `Scheme` indexes there. No rewind may cross that prefix, and — because
-//!    the blob ships *bytecode*, not IR — no stdlib body is ever re-lowered,
-//!    which is why the post-inference resolved-type pool stays compile-local
-//!    and out of the blob.
+//!    the blob ships *bytecode*, not IR — no stdlib body is ever re-lowered
+//!    from it, which is why the post-inference resolved-type pool stays
+//!    compile-local and out of the blob. (The native-backend path re-lowers
+//!    the stdlib *from source* instead of seeding — it never reads bodies out
+//!    of the blob either.)
 
 use al::bytecode::IncrementalSession;
 
@@ -21,15 +23,18 @@ use common::{Project, module_key, parse};
 
 // ── Seam 2: the frozen blob ────────────────────────────────────────────────
 
-/// The spec's third assumption, confirmed behaviourally: **no stdlib body is
-/// lowered at runtime.** The stdlib contributes hundreds of entries to
-/// `program.functions` (hydrated straight out of `.rodata`) and exactly zero to
-/// `core.fns` — `lower` only ever runs over the code being compiled now. A
-/// resolved-type arena is therefore compile-local by construction: there is no
-/// stdlib `RTy` for `static_ir::flatten` to serialise, and `build.rs`'s
-/// dependency set need not grow a new pool.
+/// The spec's third assumption, confirmed behaviourally: **on the hook-free
+/// path, no stdlib body is lowered at runtime.** The stdlib contributes
+/// hundreds of entries to `program.functions` (hydrated straight out of
+/// `.rodata`) and exactly zero to `core.fns` — `lower` only ever runs over
+/// the code being compiled now. A resolved-type arena is therefore
+/// compile-local by construction: there is no stdlib `RTy` for
+/// `static_ir::flatten` to serialise, and `build.rs`'s dependency set need
+/// not grow a new pool. (The native-backend path opts out of the seed
+/// entirely and recompiles the stdlib from source — its per-body pools are
+/// just as compile-local; nothing there reads IR from the blob either.)
 ///
-/// If this ever fails — if some stdlib body reaches `lower` at runtime — the
+/// If this ever fails — if a *seeded* compile lowers a stdlib body — the
 /// blob must start carrying the resolved-type pool, and the spec's
 /// "build.rs dependency set unchanged" non-goal is dead.
 #[test]
