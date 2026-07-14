@@ -6,9 +6,10 @@
  * seconds, the user changing the system time) — so it is the right primitive
  * for measuring durations, computing deadlines, and timing out I/O.
  *
- * Instant is opaque: it can only be obtained from monotonic() and only moved
- * with add_ms / compared with since_ms, so a wall-clock ms count or a bare
- * duration cannot be passed where an absolute monotonic deadline is expected.
+ * Instant is opaque: it can only be obtained from monotonic() (or its deadline
+ * form, deadline_in_ms) and only moved with add_ms / compared with since_ms, so
+ * a wall-clock ms count or a bare duration cannot be passed where an absolute
+ * monotonic deadline is expected.
  */
 
 pub opaque type Instant {
@@ -27,6 +28,13 @@ pub fn add_ms(t Instant, ms Int) Instant {
 	match t {
 		Instant(n) -> Instant(n + ms)
 	}
+}
+
+// The instant `ms` milliseconds from now: the deadline every I/O call wants,
+// named once. `add_ms(monotonic(), ms)` says the same thing but reads the clock
+// into an Instant only to take it straight back apart.
+pub fn deadline_in_ms(ms Int) Instant {
+	Instant(monotonic_ms() + ms)
 }
 
 // Milliseconds elapsed from `earlier` to `later`; negative if `later` is

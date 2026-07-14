@@ -363,7 +363,7 @@ ok_case! {
          \t}\n\
          }\n\
          remote = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \tDone(_, _, _, _, consumed) -> consumed\n\
+         \tDone(_, _, _, _, _, consumed) -> consumed\n\
          \tNeedMore -> 0 - 1\n\
          \tBad(s) -> s\n\
          }\n\

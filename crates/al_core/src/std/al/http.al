@@ -12,6 +12,7 @@ import al/http/h1.{
 	Version,
 	Http10,
 	Http11,
+	HeadFlags,
 }
 import al/http/body.{Body, Empty, Whole, Streaming}
 import al/http/headers.{Header, Headers}
@@ -55,10 +56,16 @@ pub type Request {
 	target Binary
 	version Version
 	headers Headers
+	// The `Connection`/`Expect` answers the head parser recorded on its one pass
+	// over `headers`. Carried on the request so the message-control decisions
+	// (keep-alive, 100-continue) are field reads, and so they answer the header
+	// section exactly as it arrived — a handler rewriting `headers` cannot move
+	// them.
+	flags HeadFlags
 	// Trailer fields received after a chunked body. Kept separate from
 	// `headers`: RFC 9110 §6.5.1 forbids merging trailers into the header
-	// section for message-control decisions (Connection, Expect), so the
-	// keep-alive check reads only `headers`.
+	// section for message-control decisions (Connection, Expect), so `flags`
+	// answers those from the head's fields alone.
 	trailers Headers
 	body Body
 }
@@ -90,6 +97,7 @@ type ReqHead {
 	target Binary
 	version Version
 	headers Headers
+	flags HeadFlags
 }
 
 // The outcome of writing one response. `respond` owns the close decision
@@ -208,6 +216,7 @@ fn build_request(head ReqHead, trailers Headers, b Body) Request {
 		target: head.target,
 		version: head.version,
 		headers: head.headers,
+		flags: head.flags,
 		trailers: trailers,
 		body: b,
 	)
@@ -242,13 +251,13 @@ fn drive(sock Socket, handler fn(Request) Response) Nil {
 // The absolute deadline for reading the next request head, taken once at the
 // top of each request cycle so partial reads never extend it.
 fn head_deadline() Instant {
-	time.add_ms(time.monotonic(), HEAD_TIMEOUT_MS)
+	time.deadline_in_ms(HEAD_TIMEOUT_MS)
 }
 
 // The absolute deadline for receiving the whole request body, taken once when
 // the framing is decided so partial reads never extend it.
 fn body_deadline() Instant {
-	time.add_ms(time.monotonic(), BODY_TIMEOUT_MS)
+	time.deadline_in_ms(BODY_TIMEOUT_MS)
 }
 
 // The keep-alive / pipelining loop. `buf`/`off` carry the bytes already read
@@ -273,6 +282,8 @@ fn serve_conn(
 	handler fn(Request) Response,
 	pending Array(Binary),
 ) Result(Nil, NetError) {
+	// An exhausted `buf` parses to NeedMore off an empty window; guarding that
+	// with an `off >= byte_size` test measured worse, so the parse is unconditional.
 	match h1.parse_request(buf, off) {
 		NeedMore -> match flush(sock, pending) {
 			Err(e) -> Err(e)
@@ -286,8 +297,14 @@ fn serve_conn(
 			reject(sock, pending, status)
 			Ok(Nil)
 		}
-		Done(method, target, version, hdrs, consumed) -> {
-			head = ReqHead(method: method, target: target, version: version, headers: hdrs)
+		Done(method, target, version, hdrs, flags, consumed) -> {
+			head = ReqHead(
+				method: method,
+				target: target,
+				version: version,
+				headers: hdrs,
+				flags: flags,
+			)
 			handle(sock, buf, consumed, head, handler, pending)
 		}
 	}
@@ -313,9 +330,17 @@ fn flush(sock Socket, pending Array(Binary)) Result(Nil, NetError) {
 }
 
 // Concatenate the unconsumed tail of `buf` (from `off`) with freshly read
-// bytes, resetting the parse offset to 0.
+// bytes, resetting the parse offset to 0. A fully consumed buffer — every
+// request on a connection the peer is not pipelining — has no tail to
+// concatenate, so the freshly read bytes ARE the new buffer: taking that exit
+// keeps the read off the copy path entirely.
 fn carry(buf Binary, off Int, more Binary) Binary {
-	binary.append(binary.slice_bytes(buf, off, binary.byte_size(buf) - off), more)
+	rest = binary.byte_size(buf) - off
+	if rest == 0 {
+		more
+	} else {
+		binary.append(binary.slice_bytes(buf, off, rest), more)
+	}
 }
 
 // Decide framing, then deliver the body under the bounded-buffer model.
@@ -384,7 +409,7 @@ fn read_body(
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
-	match maybe_continue(sock, head.headers) {
+	match maybe_continue(sock, head.flags) {
 		Err(e) -> Err(e)
 		Ok(_) -> {
 			avail = binary.byte_size(buf) - consumed
@@ -419,7 +444,7 @@ fn read_chunked_body(
 	head ReqHead,
 	handler fn(Request) Response,
 ) Result(Nil, NetError) {
-	match maybe_continue(sock, head.headers) {
+	match maybe_continue(sock, head.flags) {
 		Err(e) -> Err(e)
 		Ok(_) -> chunked_loop(sock, buf, off, deadline, head, handler)
 	}
@@ -470,8 +495,8 @@ fn chunked_loop(
 
 // Honor Expect: 100-continue by writing the interim response before the body
 // is read, so a client that waits for it will start sending.
-fn maybe_continue(sock Socket, hdrs Headers) Result(Nil, NetError) {
-	if h1.want_100_continue(hdrs) {
+fn maybe_continue(sock Socket, f HeadFlags) Result(Nil, NetError) {
+	if h1.want_100_continue(f) {
 		socket.write(sock, h1.serialize_head(100, []))
 	} else {
 		Ok(Nil)
@@ -492,7 +517,7 @@ fn respond_and_continue(
 	pending Array(Binary),
 ) Result(Nil, NetError) {
 	resp = handler(req)
-	close_after = h1.should_close(req.version, req.headers) || response_close(resp)
+	close_after = h1.should_close(req.version, req.flags) || response_close(resp)
 	match respond(sock, pending, req.method, req.version, close_after, resp) {
 		Err(e) -> Err(e)
 		Ok(Close) -> Ok(Nil)

@@ -155,7 +155,16 @@ fn lacks(v Binary, byte Binary) Bool {
 // mishandles both a list value (`Connection: keep-alive, Upgrade`) and a
 // repeated field. Every field with the name is scanned; each element is OWS-
 // trimmed before the case-insensitive compare.
+//
+// The token-list fields a driver asks about are usually absent (a response
+// rarely carries `Connection`), so the walk starts with the native `has`
+// probe — one op that answers the miss instead of a call frame and a native
+// compare per field. Same shape as `delete` above, and for the same reason.
 pub fn contains_token(h Headers, name Binary, token Binary) Bool {
+	has(h, name) && token_walk(h, name, token)
+}
+
+fn token_walk(h Headers, name Binary, token Binary) Bool {
 	match h {
 		[] -> False
 		[field, ..rest] -> {
@@ -163,7 +172,7 @@ pub fn contains_token(h Headers, name Binary, token Binary) Bool {
 			if hit {
 				True
 			} else {
-				contains_token(rest, name, token)
+				token_walk(rest, name, token)
 			}
 		}
 	}

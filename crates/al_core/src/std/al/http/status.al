@@ -81,17 +81,26 @@ const rp_unknown = <<>>
 
 // The reason phrase for a status code, e.g. 404 -> "Not Found". Returns an
 // empty binary for codes not in the registry.
+//
+// An Int match compiles to a chain of compares tested in source order, and
+// this one runs on every response head the server serves, so the handful of
+// codes a server emits at volume are tested before the rest of the registry
+// (which follows in its own order).
 pub fn reason_phrase(code Int) Binary {
 	match code {
+		200 -> rp_ok
+		404 -> rp_not_found
+		500 -> rp_internal_server_error
+		204 -> rp_no_content
+		304 -> rp_not_modified
+		400 -> rp_bad_request
 		100 -> rp_continue
 		101 -> rp_switching_protocols
 		102 -> rp_processing
 		103 -> rp_early_hints
-		200 -> rp_ok
 		201 -> rp_created
 		202 -> rp_accepted
 		203 -> rp_non_authoritative
-		204 -> rp_no_content
 		205 -> rp_reset_content
 		206 -> rp_partial_content
 		207 -> rp_multi_status
@@ -101,15 +110,12 @@ pub fn reason_phrase(code Int) Binary {
 		301 -> rp_moved_permanently
 		302 -> rp_found
 		303 -> rp_see_other
-		304 -> rp_not_modified
 		305 -> rp_use_proxy
 		307 -> rp_temporary_redirect
 		308 -> rp_permanent_redirect
-		400 -> rp_bad_request
 		401 -> rp_unauthorized
 		402 -> rp_payment_required
 		403 -> rp_forbidden
-		404 -> rp_not_found
 		405 -> rp_method_not_allowed
 		406 -> rp_not_acceptable
 		407 -> rp_proxy_auth_required
@@ -133,7 +139,6 @@ pub fn reason_phrase(code Int) Binary {
 		429 -> rp_too_many_requests
 		431 -> rp_header_fields_too_large
 		451 -> rp_unavailable_legal
-		500 -> rp_internal_server_error
 		501 -> rp_not_implemented
 		502 -> rp_bad_gateway
 		503 -> rp_service_unavailable

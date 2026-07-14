@@ -410,7 +410,8 @@ fn stdlib_http_builtins() {
         "import al/binary\n\
          import al/http/h1.{Done, NeedMore, Bad, Http10, Http11}\n\
          r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \tDone(_, _, version, _, consumed) -> match version { Http10 -> 10 Http11 -> 11 } + consumed\n\
+         \tDone(_, _, version, _, _, consumed) ->\n\
+         \t\tmatch version { Http10 -> 10 Http11 -> 11 } + consumed\n\
          \tNeedMore -> 0\n\
          \tBad(s) -> s\n\
          }\n\
@@ -420,7 +421,7 @@ fn stdlib_http_builtins() {
         "import al/binary\n\
          import al/http/h1.{Done, NoBody, Length, Chunked, Invalid}\n\
          r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
-         \tDone(_, _, _, hdrs, _) -> match h1.framing(hdrs) {\n\
+         \tDone(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {\n\
          \t\tNoBody -> 0\n\
          \t\tLength(n) -> n\n\
          \t\tChunked -> 0 - 2\n\
@@ -461,6 +462,56 @@ fn stdlib_http_builtins() {
          println(binary.to_string(v))\n\
          println(headers.has(hs, binary.from_string('HOST')))\n",
     );
+}
+
+// Token-list matching exists twice: natively in `vm::http::has_token` (which
+// fills `HeadFlags` while parsing a request head) and in AL as
+// `headers.contains_token` (which the response path uses). They are separate
+// code with no shared implementation, so this table drives ONE set of cases
+// through BOTH and demands the same answer — an edit to either side that
+// changes OWS trimming, empty-element handling, case folding, or whole-token
+// matching fails here rather than drifting silently.
+#[test]
+fn native_and_al_token_matching_agree() {
+    // (Connection value, does it carry the `close` token?)
+    let cases: &[(&str, bool)] = &[
+        ("close", true),
+        // Case-insensitive.
+        ("CLOSE", true),
+        // List element, OWS-trimmed.
+        ("keep-alive, close", true),
+        ("  close  ", true),
+        // Trailing comma / empty elements are ignored, never a match.
+        ("close,", true),
+        ("a,,close", true),
+        (",,", false),
+        ("", false),
+        // A token matches whole, not by prefix or substring.
+        ("closed", false),
+        ("no-close", false),
+    ];
+    for (value, expected) in cases {
+        let source = format!(
+            "import al/binary\n\
+             import al/http/h1.{{Done}}\n\
+             import al/http/headers.{{Header}}\n\
+             name = binary.from_string('Connection')\n\
+             value = binary.from_string('{value}')\n\
+             native = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\nConnection: {value}\\r\\n\\r\\n'), 0) {{\n\
+             \tDone(_, _, _, _, flags, _) -> flags.conn_close\n\
+             \telse -> False\n\
+             }}\n\
+             al = headers.contains_token([Header(name: name, value: value)], name, binary.from_string('close'))\n\
+             println(native)\n\
+             println(al)\n"
+        );
+        let want = if *expected {
+            "True\nTrue\n"
+        } else {
+            "False\nFalse\n"
+        };
+        run_outputs(&source, want);
+    }
 }
 
 // The ASCII byte builtins each hydrate a distinct `Scheme` from their `@vm`

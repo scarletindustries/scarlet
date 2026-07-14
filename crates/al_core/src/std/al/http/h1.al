@@ -18,20 +18,28 @@ import al/http/status
 // (keep-alive, 100-continue, how to frame the response) stays in AL, here and
 // in al/http.
 
-// Header names matched per request (case-insensitive); the values are the
-// tokens RFC 9112 defines for them.
-const CONNECTION = <<'connection'>>
-const CLOSE = <<'close'>>
-const KEEP_ALIVE = <<'keep-alive'>>
-const EXPECT = <<'expect'>>
-const CONTINUE_100 = <<'100-continue'>>
-
 // The HTTP/1.x minor version on the wire. HTTP/2 speaks a different framing
 // layer entirely and never reaches this parser, so it is deliberately absent —
 // a `Version` value proves the message was HTTP/1.0 or HTTP/1.1.
 pub type Version {
 	Http10
 	Http11
+}
+
+// The `Connection` and `Expect` token-list answers, recorded by the head
+// parser during the single pass it already makes over every field. They are
+// the raw tokens found, not a decision: `close` beating `keep_alive` and the
+// per-version default stay in `should_close` below. Recording them at parse
+// time is what keeps `should_close`/`want_100_continue` field reads instead of
+// a fresh walk of the whole header list each.
+//
+// Only the request head's own fields contribute. A chunked body's trailer
+// block never does: trailers carry no connection or expectation semantics
+// (RFC 9110 §6.5.1).
+pub opaque type HeadFlags {
+	conn_close Bool
+	conn_keep_alive Bool
+	expect_100_continue Bool
 }
 
 // The outcome of parsing one request head out of `buf` starting at an offset.
@@ -43,6 +51,7 @@ pub type Parsed {
 		target Binary
 		version Version
 		headers Headers
+		flags HeadFlags
 		consumed Int
 	)
 	NeedMore
@@ -129,19 +138,21 @@ pub fn serialize_head(code Int, hs Headers) Binary {
 // HTTP/1.0 defaults to close unless `Connection: keep-alive`; HTTP/1.1
 // defaults to keep-alive. `Connection` is a token list (RFC 9110 §7.6.1), so
 // `keep-alive, Upgrade` still keeps an HTTP/1.0 connection alive.
-pub fn should_close(version Version, hs Headers) Bool {
-	if headers.contains_token(hs, CONNECTION, CLOSE) {
+// The tokens themselves were found by the head parser (`HeadFlags`), so this
+// is the decision only — no second walk of the header list.
+pub fn should_close(version Version, f HeadFlags) Bool {
+	if f.conn_close {
 		True
 	} else {
 		match version {
 			Http11 -> False
-			Http10 -> !headers.contains_token(hs, CONNECTION, KEEP_ALIVE)
+			Http10 -> !f.conn_keep_alive
 		}
 	}
 }
 
 // Whether the client asked the server to send an interim 100 response before
 // it streams the request body (`Expect: 100-continue`).
-pub fn want_100_continue(hs Headers) Bool {
-	headers.contains_token(hs, EXPECT, CONTINUE_100)
+pub fn want_100_continue(f HeadFlags) Bool {
+	f.expect_100_continue
 }

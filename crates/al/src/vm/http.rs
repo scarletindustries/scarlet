@@ -212,7 +212,7 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
     // Header block: one field per CRLF-terminated line, ended by a blank line.
     // The size cap measures from the request-line start, so the whole head
     // (request line + every field) shares MAX_HEAD.
-    let (headers, consumed) = match parse_header_block(
+    let (headers, flags, consumed) = match parse_header_block(
         t,
         a,
         win,
@@ -221,7 +221,7 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
         MAX_HEAD,
         Reject::HeaderFieldsTooLarge,
     ) {
-        HeaderBlock::Done(headers, consumed) => (headers, consumed),
+        HeaderBlock::Done(headers, flags, consumed) => (headers, flags, consumed),
         HeaderBlock::NeedMore => return t.parsed_need_more.clone(),
         HeaderBlock::Bad(status) => return reject(&t.parsed_bad, a, status),
     };
@@ -229,6 +229,20 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
     let method = win.view(a, off, sp1 - off);
     let target = win.view(a, sp1 + 1, sp2 - sp1 - 1);
     let headers = Value::array_in(a, &headers);
+    let flags = if flags == HeadFlags::default() {
+        // The common head names neither field; share the frozen all-false
+        // record instead of allocating one per request.
+        t.head_flags_none.clone()
+    } else {
+        t.head_flags.instantiate(
+            a,
+            &[
+                Value::bool(flags.conn_close),
+                Value::bool(flags.conn_keep_alive),
+                Value::bool(flags.expect_100_continue),
+            ],
+        )
+    };
     t.parsed_done.instantiate(
         a,
         &[
@@ -236,17 +250,55 @@ fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, o
             target,
             version,
             headers,
+            flags,
             Value::small_int(consumed as i64),
         ],
     )
 }
 
+/// The `Connection`/`Expect` token-list answers an HTTP/1.1 server needs from
+/// every request head, recorded by `parse_header_block` while it already has
+/// each field's trimmed name and value in hand. Raw findings, not decisions:
+/// `close` outranking `keep_alive`, and the per-version default, stay in
+/// `al/http/h1.should_close`.
+#[derive(Default, Clone, Copy, PartialEq)]
+struct HeadFlags {
+    conn_close: bool,
+    conn_keep_alive: bool,
+    expect_100_continue: bool,
+}
+
+/// Whether `value` carries `token` as one of its comma-separated elements,
+/// matching `al/http/headers.has_token`: elements are OWS-trimmed, compared
+/// case-insensitively, and empty elements (`a,,b`, a trailing comma, an empty
+/// value) are ignored rather than matching an empty token.
+fn has_token(value: &[u8], token: &[u8]) -> bool {
+    value.split(|&b| b == b',').any(|el| {
+        let el = trim_ows(el);
+        !el.is_empty() && el.eq_ignore_ascii_case(token)
+    })
+}
+
+fn trim_ows(mut el: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = el
+        && is_ows(*first)
+    {
+        el = rest;
+    }
+    while let [rest @ .., last] = el
+        && is_ows(*last)
+    {
+        el = rest;
+    }
+    el
+}
+
 /// Outcome of parsing one CRLF-terminated header block (request-head fields
 /// or chunked-body trailers).
 enum HeaderBlock {
-    /// The parsed fields and the offset just past the blank line that ended
-    /// the block.
-    Done(Vec<Value>, usize),
+    /// The parsed fields, the connection/expectation tokens seen among them,
+    /// and the offset just past the blank line that ended the block.
+    Done(Vec<Value>, HeadFlags, usize),
     NeedMore,
     Bad(Reject),
 }
@@ -273,6 +325,7 @@ fn parse_header_block(
     let len = bytes.len();
     let mut pos = start;
     let mut headers: Vec<Value> = Vec::with_capacity(8);
+    let mut flags = HeadFlags::default();
     loop {
         if pos - cap_start > cap {
             return HeaderBlock::Bad(over_cap_status);
@@ -285,7 +338,7 @@ fn parse_header_block(
             };
         };
         if crlf == pos {
-            return HeaderBlock::Done(headers, pos + 2);
+            return HeaderBlock::Done(headers, flags, pos + 2);
         }
         if is_ows(bytes[pos]) {
             return HeaderBlock::Bad(Reject::BadRequest);
@@ -305,6 +358,18 @@ fn parse_header_block(
         let mut vend = crlf;
         while vend > vstart && is_ows(bytes[vend - 1]) {
             vend -= 1;
+        }
+        // The name and the trimmed value are already in hand, so the token
+        // lists every request consults are answered here rather than by a
+        // later walk of the whole field list per question. A trailer block's
+        // findings are dropped by its caller (RFC 9110 §6.5.1).
+        let name_bytes = &bytes[pos..colon];
+        if name_bytes.eq_ignore_ascii_case(b"connection") {
+            let value_bytes = &bytes[vstart..vend];
+            flags.conn_close |= has_token(value_bytes, b"close");
+            flags.conn_keep_alive |= has_token(value_bytes, b"keep-alive");
+        } else if name_bytes.eq_ignore_ascii_case(b"expect") {
+            flags.expect_100_continue |= has_token(&bytes[vstart..vend], b"100-continue");
         }
         let name = win.view(a, pos, colon - pos);
         let value = win.view(a, vstart, vend - vstart);
@@ -492,7 +557,10 @@ fn chunk_decode_window(
                 MAX_TRAILER_BLOCK,
                 Reject::HeaderFieldsTooLarge,
             ) {
-                HeaderBlock::Done(trailers, consumed) => {
+                // Any Connection/Expect tokens the block recorded are dropped:
+                // a trailer field carries no connection or expectation
+                // semantics (RFC 9110 §6.5.1).
+                HeaderBlock::Done(trailers, _, consumed) => {
                     let mut body: Vec<u8> = Vec::with_capacity(total as usize);
                     for &(start, end) in &segments {
                         body.extend_from_slice(&bytes[start..end]);
@@ -712,7 +780,7 @@ mod tests {
         );
         // consumed == whole buffer
         assert_eq!(
-            payload_int(&parsed, 4),
+            payload_int(&parsed, 5),
             buf.as_binary().unwrap().bit_len() as i64 / 8
         );
     }
@@ -807,12 +875,108 @@ mod tests {
         let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         // consumed points just past the first head's blank line.
-        let consumed = payload_int(&parsed, 4);
+        let consumed = payload_int(&parsed, 5);
         assert_eq!(consumed, "\r\nGET / HTTP/1.1\r\n\r\n".len() as i64);
         // Parsing again from `consumed` yields the pipelined request.
         let second = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), consumed);
         assert_eq!(variant_of(&second), "Done");
         assert_eq!(payload_bytes(&second, 1), b"/next");
+    }
+
+    /// `(conn_close, conn_keep_alive, expect_100_continue)` as recorded on a
+    /// parsed head.
+    fn flags_of(x: &mut Fix, src: &str) -> (bool, bool, bool) {
+        let parsed = x.parse(src, 0);
+        assert_eq!(variant_of(&parsed), "Done", "for {src:?}");
+        let f = parsed.as_enum().unwrap().payload()[4].clone();
+        let p = f.as_enum().expect("expected a HeadFlags record").payload();
+        (
+            p[0].as_bool().unwrap(),
+            p[1].as_bool().unwrap(),
+            p[2].as_bool().unwrap(),
+        )
+    }
+
+    #[test]
+    fn records_connection_and_expect_tokens() {
+        let mut x = fix();
+        let base = "GET / HTTP/1.1\r\n";
+        // (header block, close, keep-alive, 100-continue)
+        let cases: &[(&str, bool, bool, bool)] = &[
+            ("Host: h\r\n\r\n", false, false, false),
+            ("Connection: close\r\n\r\n", true, false, false),
+            // Case-insensitive on both the name and the token.
+            ("CONNECTION: Close\r\n\r\n", true, false, false),
+            ("connection: KEEP-ALIVE\r\n\r\n", false, true, false),
+            // Token list: OWS-trimmed elements, non-matching ones ignored.
+            (
+                "Connection: keep-alive, Upgrade\r\n\r\n",
+                false,
+                true,
+                false,
+            ),
+            ("Connection: Upgrade,close\r\n\r\n", true, false, false),
+            // Both options present: recorded raw, the precedence is AL's call.
+            ("Connection: close, keep-alive\r\n\r\n", true, true, false),
+            // Empty elements are ignored, never a match.
+            ("Connection: ,,\r\n\r\n", false, false, false),
+            ("Connection: \r\n\r\n", false, false, false),
+            // A token must match whole, not by prefix/substring.
+            ("Connection: closed\r\n\r\n", false, false, false),
+            ("Connection: no-keep-alive\r\n\r\n", false, false, false),
+            // Repeated fields union, as a single list value would.
+            (
+                "Connection: keep-alive\r\nConnection: close\r\n\r\n",
+                true,
+                true,
+                false,
+            ),
+            ("Expect: 100-continue\r\n\r\n", false, false, true),
+            ("expect: 100-Continue\r\n\r\n", false, false, true),
+            ("Expect: other\r\n\r\n", false, false, false),
+            // A name that merely contains "connection"/"expect" is a different
+            // field.
+            ("X-Connection: close\r\n\r\n", false, false, false),
+            ("Expectation: 100-continue\r\n\r\n", false, false, false),
+            (
+                "Connection: close\r\nExpect: 100-continue\r\n\r\n",
+                true,
+                false,
+                true,
+            ),
+        ];
+        for (block, close, keep_alive, expect) in cases {
+            assert_eq!(
+                flags_of(&mut x, &format!("{base}{block}")),
+                (*close, *keep_alive, *expect),
+                "for {block:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailers_never_contribute_flags() {
+        // RFC 9110 §6.5.1: a trailer field carries no connection or
+        // expectation semantics. The head's own fields are the only source.
+        let mut x = fix();
+        let v = chunk_of(
+            &mut x,
+            "5\r\nhello\r\n0\r\nConnection: close\r\nExpect: 100-continue\r\n\r\n",
+            1 << 20,
+        );
+        assert_eq!(variant_of(&v), "ChunkedDone");
+        // The trailers themselves still round-trip as ordinary fields.
+        assert_eq!(
+            v.as_enum().unwrap().payload()[1].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            flags_of(
+                &mut x,
+                "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            (false, false, false)
+        );
     }
 
     #[test]

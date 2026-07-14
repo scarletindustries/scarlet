@@ -83,6 +83,12 @@ pub(super) struct PreludeTemplates {
     pub(super) header: EnumTemplate,
     pub(super) version_http10: Value,
     pub(super) version_http11: Value,
+    pub(super) head_flags: EnumTemplate,
+    /// The all-false `HeadFlags`, pre-built whole in the frozen area. The
+    /// overwhelming majority of request heads carry neither `Connection` nor
+    /// `Expect`, so the common parse copies this word instead of allocating a
+    /// record the caller immediately reads three `False`s out of.
+    pub(super) head_flags_none: Value,
     pub(super) parsed_done: EnumTemplate,
     pub(super) parsed_need_more: Value,
     pub(super) parsed_bad: EnumTemplate,
@@ -124,6 +130,12 @@ fn frozen_enum_value(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Value {
 
 impl PreludeTemplates {
     pub(super) fn new(fb: &mut FrozenBuilder) -> Self {
+        let head_flags = enum_template(fb, &stdlib::http::h1::HEAD_FLAGS);
+        // Immediates, so the frozen record owns no mortal children.
+        let head_flags_none = head_flags.instantiate(
+            fb,
+            &[Value::bool(false), Value::bool(false), Value::bool(false)],
+        );
         PreludeTemplates {
             nil: frozen_enum_value(fb, &stdlib::prelude::NIL),
             none: frozen_enum_value(fb, &stdlib::prelude::NONE),
@@ -139,6 +151,8 @@ impl PreludeTemplates {
             header: enum_template(fb, &stdlib::http::headers::HEADER),
             version_http10: frozen_enum_value(fb, &stdlib::http::h1::HTTP10),
             version_http11: frozen_enum_value(fb, &stdlib::http::h1::HTTP11),
+            head_flags,
+            head_flags_none,
             parsed_done: enum_template(fb, &stdlib::http::h1::DONE),
             parsed_need_more: frozen_enum_value(fb, &stdlib::http::h1::NEED_MORE),
             parsed_bad: enum_template(fb, &stdlib::http::h1::BAD),

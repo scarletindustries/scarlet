@@ -87,7 +87,7 @@ fn grow(b Binary, n Int) Binary {
 
 fn show_parse(label String, input Binary) Nil {
 	out = match h1.parse_request(input, 0) {
-		Done(method, target, version, hdrs, consumed) ->
+		Done(method, target, version, hdrs, _, consumed) ->
 			'Done method=${str(
 				method,
 			)} target=${str(
@@ -101,7 +101,7 @@ fn show_parse(label String, input Binary) Nil {
 
 fn show_framing(label String, input Binary) Nil {
 	out = match h1.parse_request(input, 0) {
-		Done(_, _, _, hdrs, _) -> match h1.framing(hdrs) {
+		Done(_, _, _, hdrs, _, _) -> match h1.framing(hdrs) {
 			NoBody -> 'NoBody'
 			Length(n) -> 'Length ${n}'
 			Chunked -> 'Chunked'
@@ -202,7 +202,7 @@ show_parse('empty name rejected', <<'GET / HTTP/1.1\r\n: value\r\n\r\n'>>)
 dup = <<'GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n'>>
 show_parse('duplicate host', dup)
 match h1.parse_request(dup, 0) {
-	Done(_, _, _, hdrs, _) -> {
+	Done(_, _, _, hdrs, _, _) -> {
 		first = match headers.get(hdrs, <<'host'>>) {
 			Some(v) -> str(v)
 			None -> 'missing'
@@ -220,7 +220,7 @@ match h1.parse_request(dup, 0) {
 nul_req = <<'GET / HTTP/1.1\r\nX-N: a\0b\r\n\r\n'>>
 show_parse('nul in value parses', nul_req)
 match h1.parse_request(nul_req, 0) {
-	Done(_, _, _, hdrs, _) -> println('nul in value: headers.valid = ${headers.valid(hdrs)}')
+	Done(_, _, _, hdrs, _, _) -> println('nul in value: headers.valid = ${headers.valid(hdrs)}')
 	else -> println('nul in value: parse failed')
 }
 
@@ -230,7 +230,7 @@ req = <<
 	'GET /path HTTP/1.1\r\nHost: example.com\r\nX-Custom: hello world\r\nCookie: a=1; b=2\r\n\r\n',
 >>
 match h1.parse_request(req, 0) {
-	Done(_, _, _, hdrs, _) -> {
+	Done(_, _, _, hdrs, _, _) -> {
 		host = match headers.get(hdrs, <<'host'>>) {
 			Some(v) -> str(v)
 			None -> 'missing'
@@ -311,10 +311,10 @@ println('')
 println('== pipelined requests ==')
 pipelined = <<'GET /first HTTP/1.1\r\nHost: a\r\n\r\nGET /second HTTP/1.1\r\nHost: b\r\n\r\n'>>
 match h1.parse_request(pipelined, 0) {
-	Done(_, target1, _, _, consumed1) -> {
+	Done(_, target1, _, _, _, consumed1) -> {
 		println('first: ${str(target1)} (consumed ${consumed1})')
 		match h1.parse_request(pipelined, consumed1) {
-			Done(_, target2, _, _, consumed2) ->
+			Done(_, target2, _, _, _, consumed2) ->
 				println('second: ${str(target2)} (consumed ${consumed2})')
 			else -> println('second parse failed')
 		}
@@ -415,7 +415,7 @@ chunked_req = <<
 	'POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /after HTTP/1.1\r\n\r\n',
 >>
 match h1.parse_request(chunked_req, 0) {
-	Done(_, target1, _, hdrs1, head_end) -> {
+	Done(_, target1, _, hdrs1, _, head_end) -> {
 		f = match h1.framing(hdrs1) {
 			Chunked -> 'chunked'
 			else -> 'other'
@@ -425,7 +425,8 @@ match h1.parse_request(chunked_req, 0) {
 			ChunkedDone(decoded, _, body_end) -> {
 				println('body: ${str(decoded)} (ends at ${body_end})')
 				match h1.parse_request(chunked_req, body_end) {
-					Done(_, target2, _, _, _) -> println('next pipelined request: ${str(target2)}')
+					Done(_, target2, _, _, _, _) ->
+						println('next pipelined request: ${str(target2)}')
 					else -> println('next request parse failed')
 				}
 			}
@@ -444,12 +445,12 @@ old_plain = <<'GET / HTTP/1.0\r\n\r\n'>>
 old_both = <<'GET / HTTP/1.0\r\nConnection: close, keep-alive\r\n\r\n'>>
 expect = <<'POST / HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n'>>
 show_close = fn(label String, req2 Binary) match h1.parse_request(req2, 0) {
-	Done(_, _, version, hdrs, _) ->
+	Done(_, _, version, _, flags, _) ->
 		println(
 			'${label}: close=${h1.should_close(
 				version,
-				hdrs,
-			)} want100=${h1.want_100_continue(hdrs)}',
+				flags,
+			)} want100=${h1.want_100_continue(flags)}',
 		)
 	else -> println('${label}: parse failed')
 }
@@ -556,7 +557,7 @@ methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'BREW']
 shown = array.map(methods, fn(name) {
 	req3 = <<'${name} / HTTP/1.1\r\n\r\n'>>
 	match h1.parse_request(req3, 0) {
-		Done(m, _, _, _, _) -> match m {
+		Done(m, _, _, _, _, _) -> match m {
 			<<'GET'>> -> 'Get'
 			<<'POST'>> -> 'Post'
 			<<'PUT'>> -> 'Put'
