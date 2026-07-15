@@ -153,6 +153,11 @@ pub fn jit_module() -> Result<JITModule, JitError> {
         // on before anything makes frames big.
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
+        // The context argument lives in the pinned register (r15/x21) for
+        // the whole body and is re-read at every use, never spilled — a
+        // frame must not hold a scheduler-derived word across a suspension
+        // point (the stage-2 plan's F1 fix).
+        ("enable_pinned_reg", "true"),
     ] {
         flags
             .set(name, value)

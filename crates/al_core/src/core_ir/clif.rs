@@ -1824,7 +1824,6 @@ struct BodyGen<'a> {
     facts: ValueBits,
     fns: RtRefs,
     ptr_ty: ir::Type,
-    vmx: ir::Value,
     /// The frame-base pointer (`&stack[frame.base_slot]`), re-fetched after
     /// every runtime call that can grow the value stack.
     base: Variable,
@@ -1862,10 +1861,17 @@ impl<'a> BodyGen<'a> {
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         b.seal_block(entry);
-        let vmx = b.block_params(entry)[0];
+        // The context argument moves straight into the pinned register
+        // (x86_64 r15 / aarch64 x21) and every use re-reads it from there
+        // (`Self::vmx`). It must never live in the frame as an ordinary
+        // spillable value: a frame that holds a scheduler-derived word and
+        // then parks resumes on whatever scheduler wakes it, handing the old
+        // scheduler's pointer to a shim — cross-thread mutation of one VM.
+        let ctx = b.block_params(entry)[0];
+        b.ins().set_pinned_reg(ctx);
 
         let base = b.declare_var(ptr_ty);
-        let call = b.ins().call(fns.rt_frame_base, &[vmx]);
+        let call = b.ins().call(fns.rt_frame_base, &[ctx]);
         let base0 = b.inst_results(call)[0];
         b.def_var(base, base0);
 
@@ -1883,7 +1889,6 @@ impl<'a> BodyGen<'a> {
             facts: value_bits(),
             fns,
             ptr_ty,
-            vmx,
             base,
             out_slot,
             words: TiVec::new(),
@@ -1894,6 +1899,22 @@ impl<'a> BodyGen<'a> {
             ctor_sites,
             ctor_cursor: 0,
         };
+        g.init_params();
+        g
+    }
+
+    /// The native context argument, re-read from the pinned register at
+    /// every use. Deliberately NOT a cached `ir::Value`: a cached value is
+    /// an ordinary SSA name regalloc may spill into the frame and keep live
+    /// across calls — the exact word that must never survive into a parked
+    /// frame. A fresh `get_pinned_reg` per use costs one reg-reg move and
+    /// guarantees resumed code reads whatever the resume fragment loaded.
+    fn vmx(&mut self) -> ir::Value {
+        self.b.ins().get_pinned_reg(self.ptr_ty)
+    }
+
+    fn init_params(&mut self) {
+        let g = self;
         for p in &g.plan.fun.params {
             let slot = g.slot_of(p.id);
             let w = g.load_slot(slot);
@@ -1910,7 +1931,6 @@ impl<'a> BodyGen<'a> {
         let head = g.loop_head;
         g.b.ins().jump(head, &[]);
         g.b.switch_to_block(head);
-        g
     }
 
     fn run(mut self) {
@@ -2138,7 +2158,8 @@ impl<'a> BodyGen<'a> {
                 ..
             } => {
                 let n = self.b.ins().iconst(types::I64, i64::from(*slot));
-                let call = self.b.ins().call(self.fns.push_global, &[self.vmx, n]);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.push_global, &[vmx, n]);
                 let w = self.b.inst_results(call)[0];
                 self.field_result(w, want_word, want_int)
             }
@@ -2179,7 +2200,8 @@ impl<'a> BodyGen<'a> {
                 } else {
                     self.fns.seq_prepend
                 };
-                let call = self.b.ins().call(f, &[self.vmx, buf, n]);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(f, &[vmx, buf, n]);
                 AtomVal {
                     word: Some(self.b.inst_results(call)[0]),
                     int: None,
@@ -2197,10 +2219,8 @@ impl<'a> BodyGen<'a> {
                 };
                 let b = self.owned_word(*buf);
                 let o = self.int_of(*off);
-                let call = self
-                    .b
-                    .ins()
-                    .call(self.fns.http_parse_head, &[self.vmx, b, o]);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.http_parse_head, &[vmx, b, o]);
                 self.opaque_result(call, want_int)
             }
             Atom::PrimOp {
@@ -2215,7 +2235,8 @@ impl<'a> BodyGen<'a> {
                 let call = if matches!(op, Op::HttpHeadersValid) {
                     self.b.ins().call(self.fns.http_headers_valid, &[h])
                 } else {
-                    self.b.ins().call(self.fns.http_framing, &[self.vmx, h])
+                    let vmx = self.vmx();
+                    self.b.ins().call(self.fns.http_framing, &[vmx, h])
                 };
                 self.opaque_result(call, want_int)
             }
@@ -2243,10 +2264,11 @@ impl<'a> BodyGen<'a> {
                 let c = self.int_of(*code);
                 let r = self.owned_word(*reason);
                 let h = self.owned_word(*headers);
+                let vmx = self.vmx();
                 let call = self
                     .b
                     .ins()
-                    .call(self.fns.http_serialize_head, &[self.vmx, c, r, h]);
+                    .call(self.fns.http_serialize_head, &[vmx, c, r, h]);
                 self.opaque_result(call, want_int)
             }
             Atom::PrimOp {
@@ -2263,7 +2285,8 @@ impl<'a> BodyGen<'a> {
                 } else {
                     self.fns.bin_byte_size
                 };
-                let call = self.b.ins().call(f, &[self.vmx, w]);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(f, &[vmx, w]);
                 let r = self.b.inst_results(call)[0];
                 let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, r));
                 AtomVal { word: Some(r), int }
@@ -2287,7 +2310,8 @@ impl<'a> BodyGen<'a> {
                 } else {
                     self.fns.make_tuple
                 };
-                let call = self.b.ins().call(f, &[self.vmx, buf, n]);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(f, &[vmx, buf, n]);
                 AtomVal {
                     word: Some(self.b.inst_results(call)[0]),
                     int: None,
@@ -2412,10 +2436,8 @@ impl<'a> BodyGen<'a> {
                     .ins()
                     .iconst(types::I64, i64::from(func_idx.to_operand()));
                 let n = self.b.ins().iconst(types::I64, captures.len() as i64);
-                let call = self
-                    .b
-                    .ins()
-                    .call(self.fns.make_closure, &[self.vmx, fi, buf, n]);
+                let vmx = self.vmx();
+                let call = self.b.ins().call(self.fns.make_closure, &[vmx, fi, buf, n]);
                 let w = self.b.inst_results(call)[0];
                 if want_int {
                     unsupported_node("int view of a closure");
@@ -2471,8 +2493,10 @@ impl<'a> BodyGen<'a> {
     /// Package an Int result: the raw value always, the boxed word (with the
     /// interpreter's spill rule) only when a use wants it.
     fn int_result(&mut self, raw: ir::Value, want_word: bool) -> AtomVal {
-        let word =
-            want_word.then(|| box_int(&mut self.b, &self.facts, self.vmx, raw, self.fns.int_box));
+        let word = want_word.then(|| {
+            let vmx = self.vmx();
+            box_int(&mut self.b, &self.facts, vmx, raw, self.fns.int_box)
+        });
         AtomVal {
             word,
             int: Some(raw),
@@ -2537,10 +2561,11 @@ impl<'a> BodyGen<'a> {
         let vn = self.b.ins().iconst(types::I64, site.variant_name as i64);
         let lb = self.b.ins().iconst(types::I64, site.labels as i64);
         let n = self.b.ins().iconst(types::I64, fields.len() as i64);
+        let vmx = self.vmx();
         let call = self
             .b
             .ins()
-            .call(self.fns.enum_alloc, &[self.vmx, packed, en, vn, lb, buf, n]);
+            .call(self.fns.enum_alloc, &[vmx, packed, en, vn, lb, buf, n]);
         self.b.inst_results(call)[0]
     }
 
@@ -2746,40 +2771,46 @@ impl<'a> BodyGen<'a> {
                 // by driving the collapsed chain — `drive_top_frame` inside
                 // `al_rt_call` would have done the same.
                 Some(entry) => {
+                    let vmx = self.vmx();
                     let push = self
                         .b
                         .ins()
-                        .call(self.fns.rt_push_frame, &[self.vmx, t, r, buf, n]);
+                        .call(self.fns.rt_push_frame, &[vmx, t, r, buf, n]);
                     let s = self.b.inst_results(push)[0];
                     self.unwind_unless_done(s);
-                    let direct = self.b.ins().call(entry, &[self.vmx]);
+                    let vmx = self.vmx();
+                    let direct = self.b.ins().call(entry, &[vmx]);
                     let s = self.b.inst_results(direct)[0];
+                    let vmx = self.vmx();
                     let after = self
                         .b
                         .ins()
-                        .call(self.fns.rt_direct_result, &[self.vmx, s, outp]);
+                        .call(self.fns.rt_direct_result, &[vmx, s, outp]);
                     self.b.inst_results(after)[0]
                 }
                 // Interpreter-only callee: the trampoline stays.
                 None => {
+                    let vmx = self.vmx();
                     let call = self
                         .b
                         .ins()
-                        .call(self.fns.rt_call, &[self.vmx, t, r, buf, n, outp]);
+                        .call(self.fns.rt_call, &[vmx, t, r, buf, n, outp]);
                     self.b.inst_results(call)[0]
                 }
             },
             Err(cw) => {
+                let vmx = self.vmx();
                 let call = self
                     .b
                     .ins()
-                    .call(self.fns.rt_call_value, &[self.vmx, cw, r, buf, n, outp]);
+                    .call(self.fns.rt_call_value, &[vmx, cw, r, buf, n, outp]);
                 self.b.inst_results(call)[0]
             }
         };
         self.unwind_unless_done(status);
         // The callee chain may have grown (and reallocated) the value stack.
-        let refetch = self.b.ins().call(self.fns.rt_frame_base, &[self.vmx]);
+        let vmx = self.vmx();
+        let refetch = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
         let nb = self.b.inst_results(refetch)[0];
         self.b.def_var(self.base, nb);
         self.b.ins().stack_load(types::I64, self.out_slot, 0)
@@ -2807,10 +2838,8 @@ impl<'a> BodyGen<'a> {
             .ins()
             .iconst(types::I64, i64::from(target.to_operand()));
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
-        let call = self
-            .b
-            .ins()
-            .call(self.fns.rt_tail_call, &[self.vmx, t, buf, n]);
+        let vmx = self.vmx();
+        let call = self.b.ins().call(self.fns.rt_tail_call, &[vmx, t, buf, n]);
         let status = self.b.inst_results(call)[0];
         if self.b.func.signature.call_conv.supports_tail_calls()
             && let Some(&peer) = self.peers.get(&target)
@@ -2828,7 +2857,8 @@ impl<'a> BodyGen<'a> {
             self.b.switch_to_block(bail);
             self.b.ins().return_(&[status]);
             self.b.switch_to_block(go);
-            self.b.ins().return_call(peer, &[self.vmx]);
+            let vmx = self.vmx();
+            self.b.ins().return_call(peer, &[vmx]);
             return;
         }
         self.b.ins().return_(&[status]);
@@ -2842,10 +2872,11 @@ impl<'a> BodyGen<'a> {
         let buf = self.arg_buffer(args);
         let cw = self.owned_word(callee);
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
+        let vmx = self.vmx();
         let call = self
             .b
             .ins()
-            .call(self.fns.rt_tail_call_value, &[self.vmx, cw, buf, n]);
+            .call(self.fns.rt_tail_call_value, &[vmx, cw, buf, n]);
         let status = self.b.inst_results(call)[0];
         self.b.ins().return_(&[status]);
     }
@@ -2891,7 +2922,8 @@ impl<'a> BodyGen<'a> {
                 },
             );
         }
-        let call = self.b.ins().call(self.fns.rt_checkpoint, &[self.vmx]);
+        let vmx = self.vmx();
+        let call = self.b.ins().call(self.fns.rt_checkpoint, &[vmx]);
         let status = self.b.inst_results(call)[0];
         let bail = self.b.create_block();
         self.b.set_cold_block(bail);
@@ -3168,7 +3200,8 @@ impl<'a> BodyGen<'a> {
             }
             (a, Dest::Ret) => {
                 let w = self.owned_atom_word(a);
-                self.b.ins().call(self.fns.rt_ret, &[self.vmx, w]);
+                let vmx = self.vmx();
+                self.b.ins().call(self.fns.rt_ret, &[vmx, w]);
                 let done = self
                     .b
                     .ins()
@@ -4149,6 +4182,7 @@ mod tests {
     fn jit_with(fns: &[CoreFn], pool: &ResolvedPool, program: crate::bytecode::Program) -> Jit {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
+        flags.set("enable_pinned_reg", "true").unwrap();
         flags.set("is_pic", "false").unwrap();
         flags.set("opt_level", "speed").unwrap();
         let isa = cranelift_native::builder()
@@ -4557,6 +4591,7 @@ mod tests {
 
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
+        flags.set("enable_pinned_reg", "true").unwrap();
         flags.set("is_pic", "false").unwrap();
         let isa = cranelift_native::builder()
             .unwrap()
@@ -4783,6 +4818,7 @@ mod tests {
         // body routes both call sites through `al_rt_call`.
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
+        flags.set("enable_pinned_reg", "true").unwrap();
         flags.set("is_pic", "false").unwrap();
         let isa = cranelift_native::builder()
             .unwrap()
