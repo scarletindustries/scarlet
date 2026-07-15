@@ -3759,15 +3759,57 @@ mod tests {
             }
         }
 
-        /// Mirrors `VM::call_native`, including its LOAD-BEARING
-        /// `#[inline(never)]`: the entry reaches the whole TestVm through
-        /// the pointer stored in `ctx`, and an inlined caller would let the
-        /// optimizer cache TestVm state across the opaque call (see the
-        /// real `call_native`'s comment for the incident).
+        /// Mirrors `VM::call_native`, including the pinned-register bracket
+        /// that makes it sound: `enable_pinned_reg` drops the pinned
+        /// register (x86_64 r15 / aarch64 x21) from Cranelift's callee-save
+        /// set, so a compiled entry writes it and never restores it — while
+        /// this caller's ABI says it survives. Without the bracket the
+        /// harness measures a VM whose registers the entry silently ate.
+        /// `#[inline(never)]` is kept as a memory barrier only; it is not
+        /// what makes the register safe.
         #[inline(never)]
         fn call_entry(vm: &mut TestVm, entry: NativeEntry) -> NativeStatus {
             vm.ctx.vm = (vm as *mut TestVm).cast();
-            entry((&raw mut vm.ctx).cast())
+            // SAFETY: a finalized entry from this harness's module, and this
+            // TestVm's live ctx — the two arguments the shim forwards.
+            unsafe { Self::call_entry_preserving_pinned((&raw mut vm.ctx).cast(), entry) }
+        }
+
+        /// See `VM::call_entry_preserving_pinned`. Duplicated rather than
+        /// shared because `al_core` cannot name the VM crate, and the whole
+        /// point of the harness is to exercise the same ABI the VM uses.
+        ///
+        /// # Safety
+        /// `entry` must be a finalized JIT entry and `ctx` a live context.
+        #[cfg(target_arch = "x86_64")]
+        #[unsafe(naked)]
+        unsafe extern "C" fn call_entry_preserving_pinned(
+            ctx: *mut core::ffi::c_void,
+            entry: NativeEntry,
+        ) -> NativeStatus {
+            // rdi = ctx, rsi = entry. Entry rsp is 8 (mod 16); one push makes
+            // it 0, which is what the callee's `call` requires. The return
+            // value rides in rax untouched.
+            core::arch::naked_asm!("push r15", "call rsi", "pop r15", "ret")
+        }
+
+        /// See the x86_64 sibling; AAPCS64's pinned register is x21.
+        ///
+        /// # Safety
+        /// As the x86_64 sibling.
+        #[cfg(target_arch = "aarch64")]
+        #[unsafe(naked)]
+        unsafe extern "C" fn call_entry_preserving_pinned(
+            ctx: *mut core::ffi::c_void,
+            entry: NativeEntry,
+        ) -> NativeStatus {
+            // x0 = ctx, x1 = entry; sp stays 16-aligned; result in x0.
+            core::arch::naked_asm!(
+                "stp x21, x30, [sp, #-16]!",
+                "blr x1",
+                "ldp x21, x30, [sp], #16",
+                "ret",
+            )
         }
     }
 

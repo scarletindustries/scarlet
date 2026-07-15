@@ -124,6 +124,58 @@ pub(super) enum NativePending {
     Error(VmError),
 }
 
+/// Call a JIT entry, preserving the pinned register the JIT clobbers.
+///
+/// `enable_pinned_reg` gives generated code the pinned register (r15 on
+/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list:
+/// `cranelift-codegen/src/isa/x64/abi.rs` reads `R15 => !enable_pinned_reg`,
+/// and the aarch64 backend the same for x21. So a compiled entry's prologue
+/// writes the register and no epilogue puts it back — while every Rust caller
+/// on the path here is entitled by the platform ABI to assume it survives.
+///
+/// This shim restores that assumption at the one door where it is violated.
+/// It is the same bracket [`super::stack::switch`] already applies at the
+/// other door; Stage 2c routes entries through `run_on_stack`, which
+/// subsumes it.
+///
+/// # Safety
+/// `entry` must be a finalized JIT entry and `ctx` a live `NativeCtx` for the
+/// running VM.
+#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn call_entry_preserving_pinned(
+    ctx: *mut core::ffi::c_void,
+    entry: NativeEntry,
+) -> NativeStatus {
+    // rdi = ctx, rsi = entry. Entry rsp ≡ 8 (mod 16); one push makes it ≡ 0,
+    // which is what the callee's `call` requires. The return value rides in
+    // rax and is never touched.
+    core::arch::naked_asm!("push r15", "call rsi", "pop r15", "ret")
+}
+
+/// See the x86_64 sibling. AAPCS64 makes x19-x28 callee-saved; the pinned
+/// register is x21.
+///
+/// # Safety
+/// As the x86_64 sibling.
+#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn call_entry_preserving_pinned(
+    ctx: *mut core::ffi::c_void,
+    entry: NativeEntry,
+) -> NativeStatus {
+    // x0 = ctx, x1 = entry. Save x21 alongside the link register; sp stays
+    // 16-aligned throughout. The return value rides in x0.
+    core::arch::naked_asm!(
+        "stp x21, x30, [sp, #-16]!",
+        "blr x1",
+        "ldp x21, x30, [sp], #16",
+        "ret",
+    )
+}
+
 impl VM {
     /// Invoke a compiled function body. The one place the entry's context
     /// is minted: `ctx.vm` is re-published as this scheduler's `&mut VM` on
@@ -135,22 +187,35 @@ impl VM {
     /// The caller must have completed the frame handshake first: callee
     /// `CallFrame` pushed, arguments in `[base_slot, base_slot + arity)`.
     ///
-    /// `#[inline(never)]` is LOAD-BEARING, not an optimization choice. The
-    /// entry receives only `&native_ctx` — 16 bytes — and reaches the rest
-    /// of the VM through the `vm` pointer stored inside it, a provenance
-    /// chain the optimizer cannot see through an opaque fn pointer. Inlined
-    /// into the interpreter loop, LLVM concluded the call could not touch
-    /// `stack`/`frames`/`native_reds`, kept them cached in registers across
-    /// it, and resumed interpreting on stale state (silent value-stack
-    /// desync after the first yield; release-only, found by the bench
-    /// gate). The non-inlined boundary passes `&mut self` to this function,
-    /// which is what forces the caller to treat every VM field as clobbered
-    /// — the same escape the pre-context ABI got by passing `self` straight
-    /// into the entry.
+    /// Entered through [`call_entry_preserving_pinned`], which is the whole
+    /// reason this is sound: `enable_pinned_reg` (jit.rs) hands the JIT the
+    /// pinned register (x86_64 r15 / aarch64 x21) by *removing it from
+    /// Cranelift's callee-save set* — every compiled entry writes it and
+    /// never restores it. That register is callee-saved under SysV/AAPCS64,
+    /// so Rust callers legitimately keep live values in it across this call.
+    /// The shim brackets the indirect call with a save/restore, which is the
+    /// contract the ABI already promised and the JIT silently stopped
+    /// keeping. Without it the clobber lands in whichever caller's frame is
+    /// unlucky — `execute_slice_budgeted` is 105 KB of register pressure and
+    /// pushes the pinned register in its own prologue — and the symptom is a
+    /// wrong answer, in release, with no test failing.
+    ///
+    /// `#[inline(never)]` is kept as a memory barrier: the entry reaches the
+    /// VM only through the pointer stored in `native_ctx`, and while that
+    /// escape is visible to LLVM's capture analysis, keeping the boundary
+    /// opaque costs nothing and makes the reload obvious in the disassembly.
+    /// It is NOT what makes the pinned register safe — that is the shim. An
+    /// earlier revision believed the opposite and shipped the clobber.
     #[inline(never)]
     pub(super) fn call_native(&mut self, entry: NativeEntry) -> NativeStatus {
         self.native_ctx.vm = (self as *mut VM).cast();
-        entry((&raw mut self.native_ctx).cast())
+        // SAFETY: `entry` is a finalized JIT entry registered in the native
+        // table for this program, and the pointer is to this VM's live
+        // `native_ctx` — the two arguments the shim forwards unchanged.
+        #[allow(unsafe_code)]
+        unsafe {
+            call_entry_preserving_pinned((&raw mut self.native_ctx).cast(), entry)
+        }
     }
 
     /// Encode a slice outcome as the one-word [`NativeStatus`] native
