@@ -175,6 +175,9 @@ pub mod op_histogram;
 pub mod perf_map;
 mod poll;
 mod sched;
+/// Public: per-process native stack regions and switch primitives (Stage 1
+/// of the machine-stack plan, dormant until suspension uses them).
+pub mod stack;
 mod templates;
 #[cfg(test)]
 mod tests;
@@ -217,6 +220,11 @@ pub enum VmError {
     Internal(Cow<'static, str>),
     /// mio poll / fd registration / OS resource failure.
     Io(std::io::Error),
+    /// The pooled native-stack budget is exhausted: `live` stacks against a
+    /// cap derived from the kernel's `vm.max_map_count` (each stack costs
+    /// exactly two VMAs). Surfaced as a value a spawn can report, never a
+    /// raw ENOMEM from a mid-slab mmap ([`stack::slab`]).
+    StackBudget { live: usize, cap: usize },
 }
 
 impl VmError {
@@ -253,6 +261,14 @@ impl fmt::Display for VmError {
                 write!(f, "internal VM error (likely a compiler bug): {s}")
             }
             Self::Io(e) => write!(f, "scheduler I/O failed: {e}"),
+            Self::StackBudget { live, cap } => {
+                write!(
+                    f,
+                    "cannot allocate a process stack: {live} live at the \
+                     vm.max_map_count budget ({cap}); raise the sysctl or \
+                     spawn fewer concurrent processes"
+                )
+            }
         }
     }
 }

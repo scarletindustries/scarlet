@@ -10,10 +10,12 @@
     )
 )]
 // Unsafe code is confined to designated modules — vm::freeze (Send/Sync
-// impls), vm::native_shims (the raw-pointer/raw-bits JIT runtime boundary)
-// and vm::jit (publishing finalized code addresses as typed entries) — each
-// carrying its own `allow(unsafe_code)` and justification. Everything else
-// is compiler-enforced safe.
+// impls), vm::native_shims (the raw-pointer/raw-bits JIT runtime boundary),
+// vm::jit (publishing finalized code addresses as typed entries), and the
+// vm::stack family (vm::stack::switch moves the machine stack pointer,
+// vm::stack::slab owns the mmap'd stack regions, vm::stack::fault handles
+// the guard-page signal) — each carrying its own `allow(unsafe_code)` and
+// justification. Everything else is compiler-enforced safe.
 #![deny(unsafe_code)]
 
 pub use al_core::*;
