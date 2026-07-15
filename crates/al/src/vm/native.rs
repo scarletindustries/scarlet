@@ -83,8 +83,14 @@ use super::{CallFrame, Step, VM, VmError, VmResult};
 
 /// The payload half of a [`NativeStatus::Parked`]/[`NativeStatus::Error`],
 /// parked in the VM while the status word unwinds the native frames above
-/// it. At most one is in flight per scheduler: the trampoline consumes it
+/// it. At most one is in flight per process: the trampoline consumes it
 /// before the process suspends or the error propagates.
+///
+/// Always handled boxed: the variants are wide (a `Wait`, a `VmError`), the
+/// slot is empty except mid-unwind, and the slot lives on every `Process` —
+/// inline it would cost every parked process the payload's full width in
+/// RSS (measured +76 B/proc at 100k parked). One allocation per park/error
+/// unwind is noise next to the park itself.
 pub(super) enum NativePending {
     Parked(Wait),
     Error(VmError),
@@ -115,12 +121,12 @@ impl VM {
                 // new suspension can be produced; a leftover here means a
                 // native frame swallowed a non-Done status.
                 debug_assert!(self.native_pending.is_none());
-                self.native_pending = Some(NativePending::Parked(wait));
+                self.native_pending = Some(Box::new(NativePending::Parked(wait)));
                 NativeStatus::Parked
             }
             Err(err) => {
                 debug_assert!(self.native_pending.is_none());
-                self.native_pending = Some(NativePending::Error(err));
+                self.native_pending = Some(Box::new(NativePending::Error(err)));
                 NativeStatus::Error
             }
         }
@@ -132,13 +138,13 @@ impl VM {
         match status {
             NativeStatus::Done => Ok(Step::Done),
             NativeStatus::Yield => Ok(Step::Yield),
-            NativeStatus::Parked => match self.native_pending.take() {
+            NativeStatus::Parked => match self.native_pending.take().map(|p| *p) {
                 Some(NativePending::Parked(wait)) => Ok(Step::Parked(wait)),
                 _ => Err(VmError::internal(
                     "native code returned NativeStatus::Parked with no pending wait",
                 )),
             },
-            NativeStatus::Error => match self.native_pending.take() {
+            NativeStatus::Error => match self.native_pending.take().map(|p| *p) {
                 Some(NativePending::Error(err)) => Err(err),
                 _ => Err(VmError::internal(
                     "native code returned NativeStatus::Error with no pending error",

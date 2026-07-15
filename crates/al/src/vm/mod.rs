@@ -326,6 +326,16 @@ struct Process {
     /// ([`VM::conn_owner`]) so a process's connections close when it ends —
     /// the BEAM controlling-process rule.
     pid: u64,
+    /// The native-boundary scratch, suspended. These are the process's own
+    /// computation state — the frame floor, the remaining slice budget, and
+    /// the payload of a status word in flight — so they travel with it, like
+    /// `stack`/`frames`, and never leak to the next process the scheduler
+    /// runs. The running process's copies are the `VM` fields of the same
+    /// names (see their docs for the contracts); `suspend_current`/`resume`
+    /// swap them with these.
+    native_floor: usize,
+    native_reds: i32,
+    native_pending: Option<Box<NativePending>>,
 }
 
 /// A tabled TCP connection: the stream plus its controlling process.
@@ -426,22 +436,42 @@ pub struct VM {
     /// hands the value out, keeping it alive for the VM's lifetime — which
     /// covers the caller's consumption (print/inspect) of the result.
     main_result: Option<(Value, ProcHeap)>,
+    // The three fields below are the RUNNING process's native-boundary
+    // scratch — process state mirrored into the VM for the duration of a
+    // slice, exactly like `stack`/`frames`/`heap`, and moved in and out by
+    // `suspend_current`/`resume` (see `Process::native_floor`). They are
+    // NOT scheduler state: a value left here by one process must never be
+    // observable by the next, and residence on `Process` is what enforces
+    // that. What the status-word unwind resets, per field:
+    //
+    // - `native_floor` is restored on `enter_interp`'s RETURN path only —
+    //   each nesting level restores the floor it found — so it is back to 0
+    //   by the time a non-`Done` status reaches `scheduler_loop` precisely
+    //   because, today, every unwind runs to completion before the process
+    //   suspends (asserted at slice entry, `exec.rs`). A suspension that
+    //   ever stops the unwind partway (a native frame parked in place) makes
+    //   the raised floor part of the process's suspended state; it travels.
+    // - `native_pending` is set when a `Parked`/`Error` status begins its
+    //   unwind and consumed by `outcome_from_status` at the trampoline the
+    //   moment the unwind completes — before the process suspends — so a
+    //   suspended process carries `None` today.
+    // - `native_reds` is never reset by the unwind at all: a non-`Done`
+    //   status ends the slice, and every slice entry re-seeds the budget.
+    //   Whatever remains at suspension is the process's own leftover.
     /// The payload of a non-`Done` [`NativeStatus`](al_core::bytecode::NativeStatus)
     /// currently unwinding native
     /// frames (a park's `Wait` or a `VmError`), parked here so the status
     /// word crossing the `extern "C"` boundary stays a single machine word.
     /// Set by [`VM::status_from_outcome`], consumed by
-    /// [`VM::outcome_from_status`]; at most one is in flight per scheduler.
-    native_pending: Option<NativePending>,
+    /// [`VM::outcome_from_status`]; at most one is in flight per process.
+    /// Boxed to keep `Process` small — see [`NativePending`].
+    native_pending: Option<Box<NativePending>>,
     /// The interpreter's frame floor: `execute_slice` ends its slice when a
     /// `Ret` pops the frame stack back to exactly this depth. 0 — the whole
     /// process — everywhere except inside a native→interpreter re-entry
     /// ([`native::al_rt_enter_interp`]), which raises it so the interpreter
     /// hands control back to the native caller when the frame it was asked
-    /// to run returns. Scheduler-transient, never part of a suspended
-    /// process: every non-`Done` status unwinds through the shim, which
-    /// restores the floor before returning, so it is 0 again by the time
-    /// `scheduler_loop` suspends or parks the process.
+    /// to run returns, and restores it on the way out.
     native_floor: usize,
     /// The reduction budget on the native side of the backend boundary.
     /// `execute_slice` keeps its budget in a hot-loop local; compiled code
@@ -453,9 +483,7 @@ pub struct VM {
     /// (`native::al_rt_enter_interp`) resumes the interpreter on it
     /// (`execute_slice_budgeted`, which writes the remainder back on a
     /// `Done` exit), so one budget governs the whole scheduling slice no
-    /// matter which backend spends it. Like `native_floor` it is
-    /// scheduler-transient scratch: a non-`Done` status ends the slice, and
-    /// the next entry re-seeds it.
+    /// matter which backend spends it.
     native_reds: i32,
     /// Runnable processes in round-robin order (the running one is not here).
     run_queue: VecDeque<Process>,
@@ -777,6 +805,9 @@ impl VM {
             frames: std::mem::take(&mut self.frames),
             is_main: std::mem::take(&mut self.current_is_main),
             pid: self.current_pid,
+            native_floor: std::mem::take(&mut self.native_floor),
+            native_reds: std::mem::take(&mut self.native_reds),
+            native_pending: self.native_pending.take(),
         }
     }
 
@@ -787,6 +818,9 @@ impl VM {
         self.frames = p.frames;
         self.current_is_main = p.is_main;
         self.current_pid = p.pid;
+        self.native_floor = p.native_floor;
+        self.native_reds = p.native_reds;
+        self.native_pending = p.native_pending;
     }
 
     /// Donation policy, run at most once per yield: give the coldest queued
@@ -1207,6 +1241,9 @@ impl VM {
             frames,
             is_main: false,
             pid,
+            native_floor: 0,
+            native_reds: 0,
+            native_pending: None,
         });
     }
 
