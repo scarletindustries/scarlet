@@ -71,16 +71,63 @@ pub enum NativeStatus {
     TailCall = 4,
 }
 
+/// The compiled-code context: what the pinned register (x86_64 r15,
+/// aarch64 x21) points at for the duration of a compiled body, and the
+/// argument every [`NativeEntry`] receives. `#[repr(C)]` because the field
+/// offsets are ABI — generated code bakes them in as load offsets
+/// ([`NativeCtx::VM_OFFSET`]); this is the spike's `SpikeProc` shape.
+///
+/// The indirection exists for exactly one reason: nothing scheduler-derived
+/// may be resident in a compiled frame across a suspension point. The VM
+/// pointer therefore lives HERE, re-published by every entry invocation
+/// (`VM::call_native`), and compiled code loads it fresh immediately before
+/// each runtime call — a parked frame carries neither the VM nor the ctx,
+/// and a resume on another scheduler reads that scheduler's VM by
+/// construction.
+#[repr(C)]
+#[derive(Debug)]
+pub struct NativeCtx {
+    /// Offset 0. The reduction budget compiled checkpoints will decrement
+    /// in place once reds checks move into generated code (the
+    /// cold-fragment step); until then shims spend the VM's own counter and
+    /// this field is dormant. Offset 0 is deliberate: the hottest load.
+    pub reds: i64,
+    /// Offset 8. This scheduler's `&mut VM`, opaque here (`al_core` cannot
+    /// name the type). Re-published per entry; read per runtime call.
+    pub vm: *mut core::ffi::c_void,
+}
+
+impl NativeCtx {
+    /// Load offsets baked into generated code (`core_ir::clif`). Changing
+    /// the struct without these is silent memory corruption — hence repr(C)
+    /// and the constants living beside the fields.
+    pub const REDS_OFFSET: i32 = 0;
+    pub const VM_OFFSET: i32 = 8;
+
+    pub fn new() -> NativeCtx {
+        NativeCtx {
+            reds: 0,
+            vm: core::ptr::null_mut(),
+        }
+    }
+}
+
+impl Default for NativeCtx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The compiled-function calling convention: arguments are already in the
 /// callee's frame slots (the interpreter layout — args at
 /// `[base_slot, base_slot + arity)`), the `CallFrame` is pushed, and the
-/// entry runs against the VM behind `vmx`.
+/// entry runs against the scheduler state behind `ctx`.
 ///
-/// `vmx` is the `al` crate's VM, opaque here: `al_core` compiles bodies and
-/// owns this table, but only the VM crate can name the concrete type. Both
-/// sides of the boundary cast through this alias, so the signature is
-/// written down exactly once.
-pub type NativeEntry = extern "C" fn(vmx: *mut core::ffi::c_void) -> NativeStatus;
+/// `ctx` is a [`NativeCtx`], passed as an opaque pointer so both sides of
+/// the boundary cast through this one alias. The entry's prologue moves it
+/// into the pinned register; the VM it names is behind
+/// [`NativeCtx::VM_OFFSET`] and only shims dereference that.
+pub type NativeEntry = extern "C" fn(ctx: *mut core::ffi::c_void) -> NativeStatus;
 
 /// The per-program entry table. See the module docs for the sharing and
 /// lifetime story.

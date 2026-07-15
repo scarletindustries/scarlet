@@ -156,7 +156,7 @@ use crate::bytecode::value::{
     NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_MORTAL_HEAP_BITS, NATIVE_PTR_MASK,
     NATIVE_RC_BYTE_OFFSET, NATIVE_RELEASE_AT_ZERO_SYMBOL,
 };
-use crate::bytecode::{CtorRef, NativeStatus, Op, PreludeBindings, TypeRef, Value};
+use crate::bytecode::{CtorRef, NativeCtx, NativeStatus, Op, PreludeBindings, TypeRef, Value};
 use crate::tivec::{Idx, TiVec};
 use crate::type_def::TypeId;
 use crate::typed_ir::{RTy, ResolvedNode, ResolvedPool};
@@ -1861,17 +1861,21 @@ impl<'a> BodyGen<'a> {
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         b.seal_block(entry);
-        // The context argument moves straight into the pinned register
-        // (x86_64 r15 / aarch64 x21) and every use re-reads it from there
-        // (`Self::vmx`). It must never live in the frame as an ordinary
-        // spillable value: a frame that holds a scheduler-derived word and
-        // then parks resumes on whatever scheduler wakes it, handing the old
-        // scheduler's pointer to a shim — cross-thread mutation of one VM.
+        // The context argument (`NativeCtx`) moves straight into the pinned
+        // register (x86_64 r15 / aarch64 x21) and every use re-reads it from
+        // there (`Self::ctx`/`Self::vmx`). It must never live in the frame
+        // as an ordinary spillable value: a frame that holds a
+        // scheduler-derived word and then parks resumes on whatever
+        // scheduler wakes it, handing the old scheduler's pointer to a shim
+        // — cross-thread mutation of one VM.
         let ctx = b.block_params(entry)[0];
         b.ins().set_pinned_reg(ctx);
+        let vm = b
+            .ins()
+            .load(ptr_ty, MemFlagsData::trusted(), ctx, NativeCtx::VM_OFFSET);
 
         let base = b.declare_var(ptr_ty);
-        let call = b.ins().call(fns.rt_frame_base, &[ctx]);
+        let call = b.ins().call(fns.rt_frame_base, &[vm]);
         let base0 = b.inst_results(call)[0];
         b.def_var(base, base0);
 
@@ -1903,14 +1907,27 @@ impl<'a> BodyGen<'a> {
         g
     }
 
-    /// The native context argument, re-read from the pinned register at
-    /// every use. Deliberately NOT a cached `ir::Value`: a cached value is
-    /// an ordinary SSA name regalloc may spill into the frame and keep live
-    /// across calls — the exact word that must never survive into a parked
-    /// frame. A fresh `get_pinned_reg` per use costs one reg-reg move and
-    /// guarantees resumed code reads whatever the resume fragment loaded.
-    fn vmx(&mut self) -> ir::Value {
+    /// The context pointer ([`NativeCtx`]), re-read from the pinned
+    /// register at every use. Deliberately NOT a cached `ir::Value`: a
+    /// cached value is an ordinary SSA name regalloc may spill into the
+    /// frame and keep live across calls — the exact word that must never
+    /// survive into a parked frame.
+    fn ctx(&mut self) -> ir::Value {
         self.b.ins().get_pinned_reg(self.ptr_ty)
+    }
+
+    /// The scheduler's VM for shim calls, loaded from the context
+    /// immediately before each use ([`NativeCtx::VM_OFFSET`]) and never
+    /// earlier: the load-per-call is what makes a resumed frame read the
+    /// resuming scheduler's VM instead of a stale one.
+    fn vmx(&mut self) -> ir::Value {
+        let ctx = self.ctx();
+        self.b.ins().load(
+            self.ptr_ty,
+            MemFlagsData::trusted(),
+            ctx,
+            NativeCtx::VM_OFFSET,
+        )
     }
 
     fn init_params(&mut self) {
@@ -2778,8 +2795,10 @@ impl<'a> BodyGen<'a> {
                         .call(self.fns.rt_push_frame, &[vmx, t, r, buf, n]);
                     let s = self.b.inst_results(push)[0];
                     self.unwind_unless_done(s);
-                    let vmx = self.vmx();
-                    let direct = self.b.ins().call(entry, &[vmx]);
+                    // Peer entries take the CTX (they are NativeEntry, not
+                    // shims): each prologue re-pins and re-loads its own vm.
+                    let ctx = self.ctx();
+                    let direct = self.b.ins().call(entry, &[ctx]);
                     let s = self.b.inst_results(direct)[0];
                     let vmx = self.vmx();
                     let after = self
@@ -2857,8 +2876,8 @@ impl<'a> BodyGen<'a> {
             self.b.switch_to_block(bail);
             self.b.ins().return_(&[status]);
             self.b.switch_to_block(go);
-            let vmx = self.vmx();
-            self.b.ins().return_call(peer, &[vmx]);
+            let ctx = self.ctx();
+            self.b.ins().return_call(peer, &[ctx]);
             return;
         }
         self.b.ins().return_(&[status]);
@@ -3687,6 +3706,9 @@ mod tests {
         reds: i64,
         budget: i64,
         yields: usize,
+        /// What the mock hands each entry, exactly as `VM::call_native`
+        /// does: `ctx.vm` re-published per invocation, pointing back here.
+        ctx: NativeCtx,
     }
 
     struct TestFrame {
@@ -3730,11 +3752,22 @@ mod tests {
             loop {
                 let func = self.frames.last().unwrap().func;
                 let entry = self.entries[func].expect("mock runtime only drives native fns");
-                let status = entry((self as *mut TestVm).cast()) as u64;
+                let status = Self::call_entry(self, entry) as u64;
                 if status != NativeStatus::TailCall as u64 {
                     return status;
                 }
             }
+        }
+
+        /// Mirrors `VM::call_native`, including its LOAD-BEARING
+        /// `#[inline(never)]`: the entry reaches the whole TestVm through
+        /// the pointer stored in `ctx`, and an inlined caller would let the
+        /// optimizer cache TestVm state across the opaque call (see the
+        /// real `call_native`'s comment for the incident).
+        #[inline(never)]
+        fn call_entry(vm: &mut TestVm, entry: NativeEntry) -> NativeStatus {
+            vm.ctx.vm = (vm as *mut TestVm).cast();
+            entry((&raw mut vm.ctx).cast())
         }
     }
 
@@ -4274,6 +4307,7 @@ mod tests {
     /// resumable at ip 0 by the convention). Returns the result value.
     fn run(jit: &Jit, func: usize, args: &[Value], budget: i64) -> (Value, usize) {
         let mut vm = TestVm {
+            ctx: NativeCtx::new(),
             stack: Vec::new(),
             frames: Vec::new(),
             funcs: jit
@@ -5541,6 +5575,7 @@ mod tests {
         // Drive by hand: the parked cell must sit in the slot at rc == 1,
         // which `run`'s argument clone would break.
         let mut vm = TestVm {
+            ctx: NativeCtx::new(),
             stack: Vec::new(),
             frames: Vec::new(),
             funcs: j
@@ -5634,6 +5669,7 @@ mod tests {
 
     fn hand_vm(j: &Jit, budget: i64) -> TestVm {
         TestVm {
+            ctx: NativeCtx::new(),
             stack: Vec::new(),
             frames: Vec::new(),
             funcs: j

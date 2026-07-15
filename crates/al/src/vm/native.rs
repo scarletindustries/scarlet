@@ -125,16 +125,32 @@ pub(super) enum NativePending {
 }
 
 impl VM {
-    /// Invoke a compiled function body. The one place the opaque `vmx`
-    /// pointer is minted: it is always this scheduler's `&mut VM`, and the
-    /// entry (or a shim it calls) is the only thing that dereferences it
-    /// for the duration of the call.
+    /// Invoke a compiled function body. The one place the entry's context
+    /// is minted: `ctx.vm` is re-published as this scheduler's `&mut VM` on
+    /// every invocation — the C1 re-derivation store, the reason a frame
+    /// resumed on another scheduler can only ever observe that scheduler's
+    /// VM — and the entry (or a shim it calls) is the only thing that
+    /// dereferences it for the duration of the call.
     ///
     /// The caller must have completed the frame handshake first: callee
     /// `CallFrame` pushed, arguments in `[base_slot, base_slot + arity)`.
-    #[inline]
+    ///
+    /// `#[inline(never)]` is LOAD-BEARING, not an optimization choice. The
+    /// entry receives only `&native_ctx` — 16 bytes — and reaches the rest
+    /// of the VM through the `vm` pointer stored inside it, a provenance
+    /// chain the optimizer cannot see through an opaque fn pointer. Inlined
+    /// into the interpreter loop, LLVM concluded the call could not touch
+    /// `stack`/`frames`/`native_reds`, kept them cached in registers across
+    /// it, and resumed interpreting on stale state (silent value-stack
+    /// desync after the first yield; release-only, found by the bench
+    /// gate). The non-inlined boundary passes `&mut self` to this function,
+    /// which is what forces the caller to treat every VM field as clobbered
+    /// — the same escape the pre-context ABI got by passing `self` straight
+    /// into the entry.
+    #[inline(never)]
     pub(super) fn call_native(&mut self, entry: NativeEntry) -> NativeStatus {
-        entry((self as *mut VM).cast())
+        self.native_ctx.vm = (self as *mut VM).cast();
+        entry((&raw mut self.native_ctx).cast())
     }
 
     /// Encode a slice outcome as the one-word [`NativeStatus`] native
@@ -915,12 +931,18 @@ mod tests {
     }
 
     // A stand-in native entry: proves the signature crosses a real C-ABI
-    // call and that `call_native` hands over a pointer round-trippable to
-    // the VM. It only compares the pointer — dereferencing `vmx` is the
-    // JIT'd code's (and the shims') side of the contract.
-    extern "C" fn yield_entry(vmx: *mut core::ffi::c_void) -> NativeStatus {
-        assert!(!vmx.is_null());
+    // call and that `call_native` hands over a non-null context. Reading
+    // the VM out of it is [`vm_from_ctx`]'s job in the stubs below.
+    extern "C" fn yield_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
+        assert!(!ctx.is_null());
         NativeStatus::Yield
+    }
+
+    /// What a compiled prologue does with its argument: the entry receives
+    /// a [`al_core::bytecode::NativeCtx`] and the VM lives behind its `vm`
+    /// field — stubs must read it the same way generated code does.
+    fn vm_from_ctx(ctx: *mut core::ffi::c_void) -> *mut VM {
+        unsafe { (*ctx.cast::<al_core::bytecode::NativeCtx>()).vm.cast() }
     }
 
     #[test]
@@ -1175,8 +1197,8 @@ mod tests {
     /// A compiled body stand-in for `fn add_five(n) { n + 5 }`: reads its
     /// argument through the frame base, applies the return protocol via
     /// `al_rt_ret`, reports `Done` — the callee side of call kind 1.
-    extern "C" fn add_five_entry(vmx: *mut core::ffi::c_void) -> NativeStatus {
-        let vm: *mut VM = vmx.cast();
+    extern "C" fn add_five_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
+        let vm: *mut VM = vm_from_ctx(ctx);
         let base = unsafe { al_rt_frame_base(vm) };
         let n = small(unsafe { base.read() });
         unsafe { al_rt_ret(vm, Value::small_int(n + 5).to_bits()) };
@@ -1256,8 +1278,8 @@ mod tests {
     /// A compiled body stand-in for `fn f1(n) { f2(n + 1) }` with the call
     /// in tail position: the cross-function tail-call site compiles to
     /// `return al_rt_tail_call(...)`.
-    extern "C" fn tail_to_f2_entry(vmx: *mut core::ffi::c_void) -> NativeStatus {
-        let vm: *mut VM = vmx.cast();
+    extern "C" fn tail_to_f2_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
+        let vm: *mut VM = vm_from_ctx(ctx);
         let base = unsafe { al_rt_frame_base(vm) };
         let n = small(unsafe { base.read() });
         let args = [Value::small_int(n + 1).to_bits()];
@@ -1364,8 +1386,8 @@ mod tests {
     /// A compiled body stand-in for `fn f1() { loop { f2() } }`: calls the
     /// interpreter-only f2 forever. The yield must come out of the *shared*
     /// slice budget, not a fresh one per native→interp re-entry.
-    extern "C" fn call_interp_forever_entry(vmx: *mut core::ffi::c_void) -> NativeStatus {
-        let vm: *mut VM = vmx.cast();
+    extern "C" fn call_interp_forever_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
+        let vm: *mut VM = vm_from_ctx(ctx);
         loop {
             let mut out = 0u64;
             let status = unsafe { al_rt_call(vm, 2, 0, std::ptr::null(), 0, &raw mut out) };

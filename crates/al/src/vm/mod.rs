@@ -494,6 +494,13 @@ pub struct VM {
     /// [`VM::outcome_from_status`]; at most one is in flight per process.
     /// Boxed to keep `Process` small — see [`NativePending`].
     native_pending: Option<Box<NativePending>>,
+    /// What the pinned register points at while compiled code runs
+    /// ([`al_core::bytecode::NativeCtx`]): `vm` is re-published by every
+    /// [`VM::call_native`] — scheduler state compiled frames re-derive
+    /// instead of carrying. Scheduler-owned, never part of a suspended
+    /// process; a resume fragment reloads the pinned register from the
+    /// resuming scheduler's copy.
+    native_ctx: al_core::bytecode::NativeCtx,
     /// The interpreter's frame floor: `execute_slice` ends its slice when a
     /// `Ret` pops the frame stack back to exactly this depth. 0 — the whole
     /// process — everywhere except inside a native→interpreter re-entry
@@ -616,6 +623,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         current_pid: 0,
         main_result: None,
         native_pending: None,
+        native_ctx: al_core::bytecode::NativeCtx::new(),
         native_floor: 0,
         native_reds: 0,
         run_queue: VecDeque::new(),
