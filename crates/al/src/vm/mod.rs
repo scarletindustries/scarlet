@@ -352,6 +352,13 @@ struct Process {
     native_floor: usize,
     native_reds: i32,
     native_pending: Option<Box<NativePending>>,
+    /// A suspended native-stack computation (C3 scaffolding). Always `None`
+    /// until suspension can park machine frames in place; from that point a
+    /// process is EITHER fully described by `frames` OR carries the machine
+    /// half here — never both, so the interpreter can never re-execute a
+    /// frame that survives on a parked stack. `resume` asserts the Stage-1
+    /// half of that contract.
+    parked: Option<stack::ParkedStack>,
 }
 
 /// A tabled TCP connection: the stream plus its controlling process.
@@ -379,7 +386,12 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 // A migrant crosses an OS-thread boundary as a plain move; this must hold by
-// construction (owned arena + plain-data frames), never via unsafe impls.
+// construction (owned arena + plain-data frames), never via unsafe impls on
+// `Process` itself. Two components carry audited unsafe Send impls of their
+// own (`stack::StackHandle`, `stack::SavedContext`), and for those this
+// bound is structural only — a parked stack's *bytes* are Send regardless
+// of what they name, so thread-affinity of its contents is guarded by the
+// process-stack purity invariant (`vm::stack`), not by this line.
 const _: () = al_core::assert_send::<Process>();
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
@@ -717,6 +729,15 @@ impl VM {
     /// schedulers return Nil when the program is over.
     fn scheduler_loop(&mut self) -> VmResult<Value> {
         loop {
+            // Re-publish this scheduler's VM for the native boundary's
+            // re-derivation seam (C1: shims read the scheduler from this
+            // thread-local, never from anything that traveled with a
+            // process). Once per iteration, not once per loop: the store is
+            // one instruction, and re-deriving *here* — the top of every
+            // slice, after any resume — is the discipline the
+            // process-stack purity invariant names.
+            native::set_current_vm(self);
+
             // Make sure some process is current.
             if self.frames.is_empty() && !self.acquire_work()? {
                 // Program over, nothing current: the heap slot holds the empty
@@ -824,11 +845,16 @@ impl VM {
             native_floor: std::mem::take(&mut self.native_floor),
             native_reds: std::mem::take(&mut self.native_reds),
             native_pending: self.native_pending.take(),
+            parked: None,
         }
     }
 
     /// Make `p` the running process.
     fn resume(&mut self, p: Process) {
+        debug_assert!(
+            p.parked.is_none(),
+            "nothing parks a native stack yet; resuming one needs the Stage-2 dispatch arm"
+        );
         self.heap = p.heap;
         self.stack = p.stack;
         self.frames = p.frames;
@@ -1260,6 +1286,7 @@ impl VM {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
+            parked: None,
         });
     }
 

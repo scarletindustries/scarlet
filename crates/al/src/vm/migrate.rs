@@ -49,9 +49,16 @@ pub(super) struct Migrant {
 // A migrant crosses an OS-thread boundary, so it must be `Send`. The fd
 // handles are inherently `Send`; the meaningful constraint is
 // `Process: Send`, which must hold by construction — a process owns its
-// memory outright, nothing in it is shared with the donor scheduler. This
-// assert is the compile-time gate for migration soundness: if `Process` ever
-// regains a field that cannot move across threads, donation must not build.
+// memory outright, nothing in it is shared with the donor scheduler.
+//
+// KNOW WHAT THIS GATE CANNOT SEE: `Send` is structural, and a stack region
+// is `Send` as a byte buffer no matter what its bytes name. A raw machine
+// word inside a parked native stack (`Process::parked`) that points at the
+// donor scheduler's `VM` passes this assert and corrupts on resume. That
+// obligation is discharged by the process-stack purity invariant
+// (`vm::stack` module doc) — scheduler state lives in thread-locals that
+// resumed code re-derives — not by this bound. The assert still earns its
+// keep against ordinary regressions (an `Rc`, a non-Send fd wrapper).
 const _: () = al_core::assert_send::<Migrant>();
 
 /// Visit every socket reachable from `v` — the one fd-walk shared by every
@@ -318,6 +325,7 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
+            parked: None,
         };
 
         let mut donor = halt_test_vm();
@@ -424,6 +432,7 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
+            parked: None,
         };
 
         let mut donor = halt_test_vm();
@@ -565,6 +574,7 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
+            parked: None,
         };
 
         let connections = donor.detach_fds(&p);

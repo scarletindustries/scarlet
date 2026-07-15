@@ -81,6 +81,34 @@ use al_core::tivec::Idx;
 use super::poll::Wait;
 use super::{CallFrame, Step, VM, VmError, VmResult};
 
+thread_local! {
+    /// The scheduler's VM for this OS thread, re-published at the top of
+    /// every `scheduler_loop` iteration (C1 scaffolding). When compiled
+    /// code stops carrying `vmx` in its frames — the machine-stack plan —
+    /// every shim re-derives the VM from here instead, so a frame parked on
+    /// thread A and resumed on thread B reads B's scheduler by
+    /// construction; the migration corruption (a spilled `&mut VM` crossing
+    /// threads inside a parked frame) becomes unrepresentable. Dormant
+    /// today: nothing reads it yet except through [`current_vm`].
+    static CURRENT_VM: std::cell::Cell<*mut VM> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// Publish `vm` as this scheduler thread's VM. Called once per
+/// `scheduler_loop` iteration; the pointer is stable for the VM's lifetime,
+/// so the repeated store is a discipline (re-derive after every suspension
+/// point), not a correctness need today.
+pub(super) fn set_current_vm(vm: *mut VM) {
+    CURRENT_VM.with(|c| c.set(vm));
+}
+
+/// The VM last published on this thread. Null before the first
+/// `scheduler_loop` iteration (or on a non-scheduler thread); the caller
+/// owns the resulting aliasing obligations — this is the re-derivation
+/// seam, and only the shim trampoline should ever dereference it.
+pub fn current_vm() -> *mut VM {
+    CURRENT_VM.with(std::cell::Cell::get)
+}
+
 /// The payload half of a [`NativeStatus::Parked`]/[`NativeStatus::Error`],
 /// parked in the VM while the status word unwinds the native frames above
 /// it. At most one is in flight per process: the trampoline consumes it
@@ -808,6 +836,26 @@ mod tests {
 
     use super::super::halt_test_vm;
     use super::*;
+
+    // The C1 re-derivation seam: CURRENT_VM is per OS thread — a value
+    // published on one scheduler thread is invisible on another, which is
+    // the property that makes "re-derive after every suspension point"
+    // migration-safe.
+    #[test]
+    fn current_vm_is_thread_local() {
+        let mut vm = halt_test_vm();
+        set_current_vm(&mut vm);
+        assert_eq!(current_vm(), (&raw mut vm).cast());
+        let other = std::thread::spawn(|| current_vm() as usize)
+            .join()
+            .expect("probe thread");
+        assert_eq!(
+            other as *mut VM,
+            std::ptr::null_mut(),
+            "another thread must not observe this scheduler's VM"
+        );
+        assert_eq!(current_vm(), (&raw mut vm).cast());
+    }
 
     #[test]
     fn done_and_yield_round_trip() {

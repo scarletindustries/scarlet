@@ -566,6 +566,7 @@ fn parked_process() -> Process {
         native_floor: 0,
         native_reds: 0,
         native_pending: None,
+        parked: None,
     }
 }
 
@@ -705,6 +706,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
         native_floor: 0,
         native_reds: 0,
         native_pending: None,
+        parked: None,
     };
 
     // A quiescent connection is donatable.
@@ -743,6 +745,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
         native_floor: 0,
         native_reds: 0,
         native_pending: None,
+        parked: None,
     };
     assert!(!vm.can_donate_fds(&framed));
 
