@@ -144,6 +144,15 @@ pub fn jit_module() -> Result<JITModule, JitError> {
         // whole compile unit is small enough that "speed" stays well inside
         // the load-time budget.
         ("opt_level", "speed"),
+        // Compiled frames will eventually live on 256K per-process stacks
+        // with one guard page ([`super::stack`]). A frame larger than a page
+        // does a single unprobed `sub rsp, N` that can step clean over the
+        // guard, landing its first local write in the NEXT process's stack —
+        // silent corruption, no fault. Probing defaults off in Cranelift and
+        // costs ~0 while frame parity keeps frames tiny; it must already be
+        // on before anything makes frames big.
+        ("enable_probestack", "true"),
+        ("probestack_strategy", "inline"),
     ] {
         flags
             .set(name, value)
