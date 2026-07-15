@@ -550,3 +550,57 @@ mod mode_tests {
         assert!(differs);
     }
 }
+
+/// Call a JIT entry, preserving the pinned register the JIT clobbers.
+///
+/// `enable_pinned_reg` gives generated code the pinned register (r15 on
+/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list:
+/// `cranelift-codegen/src/isa/x64/abi.rs` reads `R15 => !enable_pinned_reg`,
+/// and the aarch64 backend does the same for x21. So a compiled entry's
+/// prologue writes the register and no epilogue puts it back — while every
+/// Rust caller on the path is entitled by the platform ABI to assume it
+/// survives. This shim restores that assumption at the one door where it is
+/// violated, and it lives here because it is part of the [`NativeEntry`]
+/// contract itself: anyone who calls an entry needs it, so the ABI owns it
+/// rather than any one caller.
+///
+/// It is the only asm in `al_core`. The VM's process-stack switching lives in
+/// `al::vm::stack::switch`; this is deliberately not that — it is one
+/// register bracket around one indirect call, with no stack manipulation.
+///
+/// # Safety
+/// `entry` must be a finalized JIT entry and `ctx` a live context of the
+/// shape that entry was compiled against.
+#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn call_entry_preserving_pinned(
+    ctx: *mut core::ffi::c_void,
+    entry: NativeEntry,
+) -> NativeStatus {
+    // rdi = ctx, rsi = entry. Entry rsp is 8 (mod 16); one push makes it 0,
+    // which is what the callee's `call` requires. The return value rides in
+    // rax and is never touched.
+    core::arch::naked_asm!("push r15", "call rsi", "pop r15", "ret")
+}
+
+/// See the x86_64 sibling. AAPCS64 makes x19-x28 callee-saved; the pinned
+/// register is x21.
+///
+/// # Safety
+/// As the x86_64 sibling.
+#[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn call_entry_preserving_pinned(
+    ctx: *mut core::ffi::c_void,
+    entry: NativeEntry,
+) -> NativeStatus {
+    // x0 = ctx, x1 = entry; sp stays 16-aligned; the result rides in x0.
+    core::arch::naked_asm!(
+        "stp x21, x30, [sp, #-16]!",
+        "blr x1",
+        "ldp x21, x30, [sp], #16",
+        "ret",
+    )
+}

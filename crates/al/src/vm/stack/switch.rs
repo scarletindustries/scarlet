@@ -110,9 +110,32 @@ pub unsafe fn run_on_stack(
     arg: *mut c_void,
 ) -> u64 {
     let sched_slot = SCHED_SP.with(Cell::as_ptr);
+    // Entries NEST: a shim runs on the C stack, re-enters the interpreter,
+    // and the interpreter calls a compiled body, which lands here again. The
+    // inner entry publishes a switch point deeper down the C stack; without
+    // restoring the outer one on the way out, a *flat* loop of
+    // native->shim->interp->native round-trips would republish one frame-pair
+    // lower every iteration and walk the scheduler's thread stack to death —
+    // with no guard page there to name it. Depth must be a stack discipline,
+    // not a ratchet.
+    let prev = SCHED_SP.with(Cell::get);
+    let restore = RestoreSchedSp(prev);
     // SAFETY: forwarded contract; `sched_slot` is this thread's live TLS
     // slot for the duration of the call.
-    unsafe { run_on_stack_raw(proc, new_sp, entry, arg, sched_slot) }
+    let out = unsafe { run_on_stack_raw(proc, new_sp, entry, arg, sched_slot) };
+    drop(restore);
+    out
+}
+
+/// Puts the enclosing entry's switch point back, on every exit path
+/// including an abort-in-progress — a leaked inner switch point is a silent
+/// stack walk, so this must not depend on reaching the end of a function.
+struct RestoreSchedSp(*mut u8);
+
+impl Drop for RestoreSchedSp {
+    fn drop(&mut self) {
+        SCHED_SP.with(|c| c.set(self.0));
+    }
 }
 
 /// [`run_on_stack`] without the TLS publication — the raw switch.
@@ -232,6 +255,112 @@ pub unsafe fn call_on_sched_stack(f: Entry, arg: *mut c_void) -> u64 {
     // SAFETY: sched_sp is the switch point run_on_stack published on this
     // thread; the space below it is dead until run_on_stack returns.
     unsafe { call_on_c_stack_raw(sched_sp, f, arg) }
+}
+
+/// Resume a parked context, publishing THIS thread's switch point first.
+///
+/// [`swap_context`] is the raw register/sp exchange: it restores the
+/// callee-saved registers the parked context saved, including the pinned
+/// register and — critically — leaving [`SCHED_SP`] untouched. A process
+/// parked on scheduler A and resumed on scheduler B would therefore run with
+/// B's TLS still holding whatever switch point B's last *completed*
+/// `run_on_stack` left behind, which sits ABOVE B's current C-stack depth.
+/// The resumed body's first [`call_on_sched_stack`] would then set
+/// `rsp` to that stale address and the shim's frames would overwrite every
+/// live frame beneath it — including the one that called us. Re-reading a
+/// stale thread-local is not re-derivation.
+///
+/// This is the only sanctioned way to enter a [`SavedContext`]: it saves the
+/// current context into `save`, publishes the switch point that `save`
+/// occupies, and hands control to `resume`.
+///
+/// # Safety
+/// As [`swap_context`]: both pointers must be valid, `resume` must name a
+/// context parked by this module, and the resumed stack must be live.
+pub unsafe fn resume_on_stack(save: *mut SavedContext, resume: *const SavedContext) {
+    let sched_slot = SCHED_SP.with(Cell::as_ptr);
+    // The switch point must be the sp this thread parks at, which only the
+    // asm can see — it is the very value `swap_context` writes into `save`.
+    // Publishing anything computable from Rust here is wrong: `save` itself
+    // is a `SavedContext` living in some *caller's* frame, which on a
+    // migrated resume is a frame on the wrong thread's stack entirely.
+    // SAFETY: forwarded contract; `sched_slot` is this thread's live TLS slot.
+    unsafe { resume_context_raw(save, resume, sched_slot) }
+}
+
+/// [`swap_context`] plus one store: publish the parking sp as this thread's
+/// [`SCHED_SP`] switch point. This is the resume half of the C4 contract —
+/// everything below the returned sp is dead C stack that a shim may use.
+///
+/// # Safety
+/// As [`swap_context`]; additionally `sched_slot` must be valid to write.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn resume_context_raw(
+    save: *mut SavedContext,
+    resume: *const SavedContext,
+    sched_slot: *mut *mut u8,
+) {
+    // rdi = save, rsi = resume, rdx = sched_slot. Identical to swap_context
+    // but for `mov [rdx], rsp`: the saved sp IS the switch point.
+    naked_asm!(
+        "push rbp",
+        "push rbx",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "mov [rdi], rsp",
+        "mov [rdx], rsp", // publish the switch point (SCHED_SP)
+        "mov rsp, [rsi]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "ret",
+    )
+}
+
+/// # Safety
+/// As the x86_64 twin.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn resume_context_raw(
+    save: *mut SavedContext,
+    resume: *const SavedContext,
+    sched_slot: *mut *mut u8,
+) {
+    // x0 = save, x1 = resume, x2 = sched_slot.
+    naked_asm!(
+        "stp x29, x30, [sp, #-160]!",
+        "stp x19, x20, [sp, #16]",
+        "stp x21, x22, [sp, #32]",
+        "stp x23, x24, [sp, #48]",
+        "stp x25, x26, [sp, #64]",
+        "stp x27, x28, [sp, #80]",
+        "stp d8, d9, [sp, #96]",
+        "stp d10, d11, [sp, #112]",
+        "stp d12, d13, [sp, #128]",
+        "stp d14, d15, [sp, #144]",
+        "mov x9, sp",
+        "str x9, [x0]",
+        "str x9, [x2]", // publish the switch point (SCHED_SP)
+        "ldr x9, [x1]",
+        "mov sp, x9",
+        "ldp x19, x20, [sp, #16]",
+        "ldp x21, x22, [sp, #32]",
+        "ldp x23, x24, [sp, #48]",
+        "ldp x25, x26, [sp, #64]",
+        "ldp x27, x28, [sp, #80]",
+        "ldp d8, d9, [sp, #96]",
+        "ldp d10, d11, [sp, #112]",
+        "ldp d12, d13, [sp, #128]",
+        "ldp d14, d15, [sp, #144]",
+        "ldp x29, x30, [sp], #160",
+        "ret",
+    )
 }
 
 /// # Safety
@@ -677,6 +806,22 @@ mod tests {
         sched: SavedContext,
         proc: SavedContext,
         seen_tag: AtomicU64,
+        /// Address of a local inside a shim invoked via
+        /// `call_on_sched_stack` AFTER the cross-thread resume. It must land
+        /// on the resuming thread's C stack; if the resume did not republish
+        /// the switch point it lands on the parking thread's, which is the
+        /// bug.
+        shim_local: AtomicU64,
+    }
+
+    /// Runs on the C stack via `call_on_sched_stack`; reports the address of
+    /// one of its own locals so the caller can tell whose C stack it got.
+    unsafe extern "C" fn where_am_i(arg: *mut c_void) -> u64 {
+        let probe = 0u64;
+        let st = unsafe { &*arg.cast::<CrossState>() };
+        st.shim_local
+            .store((&raw const probe) as u64, Ordering::Relaxed);
+        0
     }
 
     unsafe extern "C" fn cross_entry(arg: *mut c_void) -> u64 {
@@ -689,6 +834,11 @@ mod tests {
         // Resumed — on thread B. Re-derivation must observe B, not A.
         let after = THREAD_TAG.with(|t| t.load(Ordering::Relaxed));
         st.seen_tag.store(after, Ordering::Relaxed);
+        // The load-bearing half: a shim call from the resumed process stack.
+        // This is what a compiled body does first, and it reads SCHED_SP. If
+        // the resume did not republish it, this switches to thread A's stale
+        // switch point and scribbles over thread B's live frames.
+        unsafe { call_on_sched_stack(where_am_i, arg) };
         unsafe { swap_context(&raw mut (*stp).proc, &raw const st.sched) };
         unreachable!("parked context resumed after the test ended");
     }
@@ -701,12 +851,13 @@ mod tests {
             sched: SavedContext::empty(),
             proc: SavedContext::empty(),
             seen_tag: AtomicU64::new(0),
+            shim_local: AtomicU64::new(0),
         };
         st.proc = unsafe { prepare_stack(h.top(), cross_entry, (&raw mut st).cast()) };
 
         // Thread A: start the context; it parks.
         THREAD_TAG.with(|t| t.store(0xA, Ordering::Relaxed));
-        unsafe { swap_context(&raw mut st.sched, &raw const st.proc) };
+        unsafe { resume_on_stack(&raw mut st.sched, &raw const st.proc) };
 
         // Hand the parked continuation (stack + context) to thread B and
         // resume it there — the same plain move a migrating Process makes.
@@ -714,11 +865,16 @@ mod tests {
         // parked context itself writes through.
         let sched_addr = (&raw mut st.sched) as usize;
         let proc_addr = (&raw const st.proc) as usize;
+        let b_frame = std::sync::atomic::AtomicU64::new(0);
         std::thread::scope(|s| {
-            s.spawn(move || {
+            s.spawn(|| {
                 THREAD_TAG.with(|t| t.store(0xB, Ordering::Relaxed));
+                // A local in THIS thread's frame: the yardstick for "B's C
+                // stack". The resumed shim must land near it, not near A's.
+                let here = 0u64;
+                b_frame.store((&raw const here) as u64, Ordering::Relaxed);
                 unsafe {
-                    swap_context(
+                    resume_on_stack(
                         sched_addr as *mut SavedContext,
                         proc_addr as *const SavedContext,
                     )
@@ -729,6 +885,18 @@ mod tests {
             st.seen_tag.load(Ordering::Relaxed),
             0xB,
             "resumed code must observe the resuming thread's state"
+        );
+        // Thread stacks are megabytes apart; same-stack frames are within a
+        // few KB. Before resume_on_stack published the switch point, the shim
+        // ran on thread A's stack and this distance was enormous — or the
+        // TLS was null and release built `mov rsp, 0`.
+        let shim = st.shim_local.load(Ordering::Relaxed);
+        let b = b_frame.load(Ordering::Relaxed);
+        assert!(shim != 0, "the shim never ran");
+        assert!(
+            shim.abs_diff(b) < 1 << 20,
+            "a shim called after a cross-thread resume ran on the wrong C stack: \
+             shim local {shim:#x}, resuming thread's frame {b:#x}"
         );
         pool.release(h);
     }

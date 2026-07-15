@@ -2944,6 +2944,20 @@ impl<'a> BodyGen<'a> {
         let vmx = self.vmx();
         let call = self.b.ins().call(self.fns.rt_checkpoint, &[vmx]);
         let status = self.b.inst_results(call)[0];
+        // `base` is a raw pointer INTO the scheduler's `VM::stack` Vec — a
+        // scheduler-derived word, and the checkpoint is a suspension point.
+        // Today the yield unwinds by status return and the body is re-entered
+        // from the top, which refetches; the moment a checkpoint parks in
+        // place (Stage 2d) a loop-carried `base` would resume pointing into
+        // the *parking* scheduler's Vec on whatever thread adopts the
+        // process. That is the F1 hazard verbatim, and the landmine sits
+        // exactly where the next commit steps. Refetch unconditionally: it is
+        // one call on a path that just made one, and it makes the loop-carried
+        // value scheduler-clean by construction rather than by argument.
+        let vmx = self.vmx();
+        let refetch = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
+        let nb = self.b.inst_results(refetch)[0];
+        self.b.def_var(self.base, nb);
         let bail = self.b.create_block();
         self.b.set_cold_block(bail);
         let ok = self
@@ -3772,44 +3786,12 @@ mod tests {
             vm.ctx.vm = (vm as *mut TestVm).cast();
             // SAFETY: a finalized entry from this harness's module, and this
             // TestVm's live ctx — the two arguments the shim forwards.
-            unsafe { Self::call_entry_preserving_pinned((&raw mut vm.ctx).cast(), entry) }
-        }
-
-        /// See `VM::call_entry_preserving_pinned`. Duplicated rather than
-        /// shared because `al_core` cannot name the VM crate, and the whole
-        /// point of the harness is to exercise the same ABI the VM uses.
-        ///
-        /// # Safety
-        /// `entry` must be a finalized JIT entry and `ctx` a live context.
-        #[cfg(target_arch = "x86_64")]
-        #[unsafe(naked)]
-        unsafe extern "C" fn call_entry_preserving_pinned(
-            ctx: *mut core::ffi::c_void,
-            entry: NativeEntry,
-        ) -> NativeStatus {
-            // rdi = ctx, rsi = entry. Entry rsp is 8 (mod 16); one push makes
-            // it 0, which is what the callee's `call` requires. The return
-            // value rides in rax untouched.
-            core::arch::naked_asm!("push r15", "call rsi", "pop r15", "ret")
-        }
-
-        /// See the x86_64 sibling; AAPCS64's pinned register is x21.
-        ///
-        /// # Safety
-        /// As the x86_64 sibling.
-        #[cfg(target_arch = "aarch64")]
-        #[unsafe(naked)]
-        unsafe extern "C" fn call_entry_preserving_pinned(
-            ctx: *mut core::ffi::c_void,
-            entry: NativeEntry,
-        ) -> NativeStatus {
-            // x0 = ctx, x1 = entry; sp stays 16-aligned; result in x0.
-            core::arch::naked_asm!(
-                "stp x21, x30, [sp, #-16]!",
-                "blr x1",
-                "ldp x21, x30, [sp], #16",
-                "ret",
-            )
+            unsafe {
+                crate::bytecode::native::call_entry_preserving_pinned(
+                    (&raw mut vm.ctx).cast(),
+                    entry,
+                )
+            }
         }
     }
 

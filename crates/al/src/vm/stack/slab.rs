@@ -45,6 +45,11 @@ pub const STACK_BYTES: usize = 256 * 1024;
 /// enough that an idle program reserves little.
 const SLOTS_PER_SLAB: usize = 64;
 
+/// How many slots a scheduler may cache locally before spilling to
+/// [`ORPHANED_SLOTS`]. One slab's worth: enough that the steady state is
+/// lock-free, small enough that an idle scheduler cannot hoard.
+const LOCAL_FREE_CAP: usize = SLOTS_PER_SLAB;
+
 /// VMAs left for everything that is not a process stack (binary + libs,
 /// mimalloc arenas, JIT mappings, thread stacks). Each live slot costs
 /// exactly 2 VMAs (guard + usable — measured 2.00/proc at every reserve
@@ -300,9 +305,27 @@ impl StackPool {
     pub fn release(&mut self, handle: StackHandle) {
         handle.set_owner(0);
         LIVE_STACKS.fetch_sub(1, Ordering::Relaxed);
-        self.free.push(Slot {
+        let slot = Slot {
             guard_base: handle.guard_base,
-        });
+        };
+        // A process can be spawned on one scheduler and die on another, so
+        // slots do not come home: with an unbounded local list, a scheduler
+        // that mostly frees accumulates them forever while the one that
+        // mostly spawns keeps carving fresh slabs. Both halves keep their
+        // VMAs, so the pair drifts past `vm.max_map_count` while
+        // `LIVE_STACKS` — which counts live stacks, not carved slots — never
+        // notices, and `high_water` cannot fire. Terminal state is the raw
+        // ENOMEM this module exists to make impossible.
+        //
+        // Bounding the local cache fixes it without a lock on the hot path:
+        // the common case (spawn and die on the same scheduler) stays inside
+        // the cap and never touches the mutex; only genuine surplus spills to
+        // the shared pool, where `acquire` already looks before mapping.
+        if self.free.len() < LOCAL_FREE_CAP {
+            self.free.push(slot);
+        } else {
+            lock(&ORPHANED_SLOTS).push(slot);
+        }
         std::mem::forget(handle);
     }
 
