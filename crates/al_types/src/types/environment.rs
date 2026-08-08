@@ -55,9 +55,6 @@ impl EntityKind {
     }
 }
 
-/// How a name is being used at an occurrence site. Mirrors Gleam's
-/// reference-kind set, adapted to al's import syntax.
-
 /// The canonical definition site of a name: its source span, the interned path
 /// of the module that owns it, and what kind of entity it is. `module` is an
 /// `ArenaSlice` into `InferEngine.str_slices` (never a `Vec<String>`) so this

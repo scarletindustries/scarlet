@@ -43,6 +43,8 @@ pub use uri::{ModuleUriError, module_uri, path_to_uri};
 // reference graph re-exports it so `DefId`-keyed consumers keep one enum.
 pub use al_types::types::EntityKind;
 
+/// How a name is being used at an occurrence site. Mirrors Gleam's
+/// reference-kind set, adapted to al's import syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferenceKind {
     /// `module.member` — qualified through an import alias.
