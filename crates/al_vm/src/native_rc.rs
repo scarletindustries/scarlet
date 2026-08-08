@@ -71,10 +71,10 @@ pub enum RcGate {
 /// Emit the mortal test for `bits` at `gate` strength: branch to `rc_block`
 /// when the word is a mortal heap cell (rc slot present), `done_block`
 /// otherwise. Seals `rc_block`; pure bit math either way — immortal and
-/// immediate values must never be dereferenced. `pub(crate)` for the
-/// backend's fused sequences (the reuse-drop's uniqueness test) that open
-/// with the same gate.
-pub(crate) fn emit_mortal_gate(
+/// immediate values must never be dereferenced. Public for the native
+/// backend's fused sequences (the reuse-drop's uniqueness test in
+/// `al_core::core_ir::clif`) that open with the same gate.
+pub fn emit_mortal_gate(
     builder: &mut FunctionBuilder,
     bits: ir::Value,
     gate: RcGate,

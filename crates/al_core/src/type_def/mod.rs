@@ -1,31 +1,11 @@
 use indexmap::IndexMap;
 use std::fmt;
 
-/// Nominal identity of a user-declared type, allocated once per declaration by
-/// [`TypeEnv::register_type_head`](crate::types::TypeEnv::register_type_head).
-/// A newtype so a var-id, `StrId`, ctor-index, or slot number cannot be
-/// silently passed where a nominal type id is expected — every such site is now
-/// a compile error. `repr(transparent)` keeps the runtime encoding a single
-/// `i32` word (the VM stores it in an enum value's header).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct TypeId(pub i32);
-
-impl TypeId {
-    /// Sentinel meaning "no nominal type". Never a real id: allocation starts
-    /// at 1. Used for pre-prelude placeholders and "not a Con" fallbacks.
-    /// Deliberately NOT `Default`: a derived `Default` on a struct embedding a
-    /// `TypeId` would silently manufacture this sentinel. (A `NonZeroI32`
-    /// niche — making `Option<TypeId>` free and the sentinel unrepresentable —
-    /// is the eventual replacement, deferred as too broad for now.)
-    pub const NONE: TypeId = TypeId(0);
-}
-
-impl fmt::Display for TypeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+// `TypeId` — the nominal identity a tagged runtime value carries in its
+// header — lives in `al_vm` and is re-exported here where it is minted
+// ([`TypeEnv::register_type_head`](crate::types::TypeEnv::register_type_head)
+// allocates one per declaration).
+pub use al_vm::TypeId;
 
 /// Names of the *structural* prelude types — those whose `Type` is not
 /// `Named` (because exhaustiveness/array-pattern handling needs the dedicated

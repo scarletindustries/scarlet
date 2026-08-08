@@ -469,7 +469,7 @@ impl FrozenBuilder {
     /// [`FrozenBuilder::tuple`].
     pub fn enum_(
         &mut self,
-        type_id: crate::type_def::TypeId,
+        type_id: crate::TypeId,
         variant_idx: u16,
         enum_name: &str,
         variant_name: &str,
@@ -779,7 +779,7 @@ mod tests {
         let area = Arc::new(FrozenArea::new());
         let mut b = area.builder();
         let v1 = b.enum_(
-            crate::type_def::TypeId(7),
+            crate::TypeId(7),
             0,
             "Credentials",
             "Basic",
@@ -787,7 +787,7 @@ mod tests {
             vec![],
         );
         let v2 = b.enum_(
-            crate::type_def::TypeId(7),
+            crate::TypeId(7),
             0,
             "Credentials",
             "Basic",

@@ -28,7 +28,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::core_ir::FuncIdx;
+use crate::FuncIdx;
 use crate::tivec::Idx;
 
 /// One-word status a native entry returns to its caller (native or

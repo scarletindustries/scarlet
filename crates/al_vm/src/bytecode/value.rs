@@ -99,9 +99,9 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+use crate::TypeId;
 use crate::frozen::FrozenBuilder;
 use crate::heap::ProcHeap;
-use crate::type_def::TypeId;
 
 use super::bits::{copy_bits, get_bit, read_byte, tail_mask};
 pub use super::seq;
@@ -1074,8 +1074,11 @@ impl Value {
         unsafe { for_each_child_slot(self.heap_obj(), &mut |p: *mut Value| f(&*p)) }
     }
 
+    /// The heap object header this value points at. Public for the native
+    /// backend's tests (`al_core::core_ir`), which pair it with [`rc_slot`]
+    /// to assert on refcounts of JIT-manipulated cells.
     #[inline(always)]
-    pub(crate) fn heap_obj(&self) -> *const u64 {
+    pub fn heap_obj(&self) -> *const u64 {
         debug_assert!(self.is_heap());
         (self.0 & PTR_PAYLOAD) as usize as *const u64
     }
@@ -2316,12 +2319,14 @@ pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
 pub(crate) const RC_PREFIX_WORDS: usize = 1;
 
 /// The refcount slot — also the allocation start — of a mortal heap object:
-/// the word immediately before its header.
+/// the word immediately before its header. Public for the native backend's
+/// tests (`al_core::core_ir`), which assert on refcounts of JIT-manipulated
+/// cells.
 ///
 /// # Safety
 /// `obj` must be a mortal (non-immortal) heap object pointer.
 #[inline]
-pub(crate) unsafe fn rc_slot(obj: *const u64) -> *mut u64 {
+pub unsafe fn rc_slot(obj: *const u64) -> *mut u64 {
     unsafe { (obj as *mut u64).sub(RC_PREFIX_WORDS) }
 }
 
