@@ -61,14 +61,14 @@
 //! (a lazy range equals the array of its elements) and the hash
 //! fast-reject on enums.
 
-use al_core::bytecode::value::ReuseAddr;
-use al_core::bytecode::{
+use crate::FuncIdx;
+use crate::bytecode::value::ReuseAddr;
+use crate::bytecode::{
     Op, Value, ValueView, freed_objects_pending, take_freed_objects, values_equal,
 };
-use al_core::core_ir::FuncIdx;
-use al_core::heap::ProcHeap;
-use al_core::static_ir::VariantTemplate;
-use al_core::tivec::Idx;
+use crate::heap::ProcHeap;
+use crate::template::VariantTemplate;
+use crate::tivec::Idx;
 use smallvec::SmallVec;
 
 use super::poll::monotonic_now_ms;
@@ -544,8 +544,7 @@ impl VM {
         macro_rules! dispatch {
             () => {{
                 let addr = code_start + ip;
-                let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize)
-                else {
+                let Some(instr) = crate::bytecode::fetch(&self.program.code, addr as usize) else {
                     break;
                 };
                 match instr.op {
@@ -638,7 +637,7 @@ impl VM {
 
         loop {
             let addr = code_start + ip;
-            let Some(instr) = al_core::bytecode::fetch(&self.program.code, addr as usize) else {
+            let Some(instr) = crate::bytecode::fetch(&self.program.code, addr as usize) else {
                 break;
             };
             ip += 1;
@@ -909,7 +908,7 @@ impl VM {
                     let Some(type_id) = type_id_val.as_int() else {
                         return Err(VmError::internal("enum type id must be int"));
                     };
-                    let type_id = al_core::TypeId(type_id as i32);
+                    let type_id = crate::TypeId(type_id as i32);
 
                     if let Some(ev) = val.as_enum() {
                         // Both operands are frozen constant-pool `Str` values.
@@ -1274,7 +1273,7 @@ impl VM {
         let Some(packed) = type_id_val.as_int() else {
             return Err(VmError::internal("enum type id must be int"));
         };
-        let type_id = al_core::TypeId(packed as i32);
+        let type_id = crate::TypeId(packed as i32);
         let variant_idx = (packed >> 32) as u16;
 
         if enum_name_val.as_str().is_none() {

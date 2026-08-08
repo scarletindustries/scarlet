@@ -64,11 +64,10 @@ use std::time::{Duration, Instant};
 use mio::Token;
 use mio::unix::SourceFd;
 
-use al_core::bytecode::Value;
+use crate::bytecode::Value;
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
 use super::{Process, VM, VmError, VmResult, lock};
-use crate::stdlib;
 
 /// How a parked I/O wait resumes once one of its sockets is ready.
 #[derive(Debug, Clone, Copy)]
@@ -549,7 +548,7 @@ impl VM {
         // Budget the whole result up front in the (just-resumed) woken
         // process's arena: the adopted Ok(Socket) graph or a NetError.
         let Some(socket) = self.pending_connects.remove(&id) else {
-            let aborted = self.stdlib_enum(&stdlib::net::error::CONNECTION_ABORTED);
+            let aborted = self.stdlib_enum(self.runtime.stdlib.net_error.connection_aborted);
             return self.make_err(aborted);
         };
         self.poller_deregister(socket.as_raw_fd());

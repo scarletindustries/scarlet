@@ -3,7 +3,7 @@
 //!
 //! Two ideas shape every method here:
 //!
-//! - **Arrays are persistent trees** ([`al_core::bytecode::seq`]):
+//! - **Arrays are persistent trees** ([`crate::bytecode::seq`]):
 //!   concat merges border nodes, slice/drop path-copy along the cut,
 //!   push is a path copy — operands always stay valid, structurally
 //!   shared values. There is no in-place fast path: seq operands must
@@ -14,7 +14,7 @@
 //!   that need real elements (concat, push) materialize it into a tree
 //!   — that materialization is the op's real cost.
 
-use al_core::bytecode::{Value, ValueView, seq};
+use crate::bytecode::{Value, ValueView, seq};
 
 use super::{VM, VmError, VmResult, range_len, value_type_name};
 

@@ -7,9 +7,9 @@
 use std::time::Duration;
 
 use super::*;
-use al_core::bytecode::values_equal;
-use al_core::bytecode::{Instruction, SocketValue, op, op_ab, op_arg};
-use al_core::frozen::FrozenArea;
+use crate::bytecode::values_equal;
+use crate::bytecode::{Instruction, SocketValue, op, op_ab, op_arg};
+use crate::frozen::FrozenArea;
 
 // A single-function Program ("main", arity 0, no captures) over the given
 // constants and code, with `locals` preallocated local slots. Constants
@@ -51,7 +51,11 @@ fn run_fn(
     code: Vec<Instruction>,
     locals: i32,
 ) -> (Value, VM) {
-    let mut vm = new_vm(single_fn_program(constants, code, locals)).expect("vm must construct");
+    let mut vm = new_vm(
+        single_fn_program(constants, code, locals),
+        &crate::template::test_fixture::TEST_STDLIB,
+    )
+    .expect("vm must construct");
     let value = vm.run().expect("vm must run without panicking or erroring");
     // `value` first: it lives in `vm`'s heap, so it must drop (decref) before
     // the VM's heap is destroyed (tuple fields drop in declaration order).
@@ -96,7 +100,7 @@ fn test_inspect_basic() {
     let mut h = ProcHeap::new();
     assert_eq!(inspect(&Value::small_int(42)), "42");
     assert_eq!(inspect(&Value::bool(true)), "True");
-    let nil = nil_value(&mut h, al_core::TypeId(1));
+    let nil = nil_value(&mut h, crate::TypeId(1));
     assert_eq!(inspect(&nil), "Nil");
     assert_eq!(inspect(&ints(&mut h, &[1, 2])), "[1, 2]");
     let range = Value::range_in(&mut h, 1, 4);
@@ -109,8 +113,8 @@ fn test_values_equal() {
     assert!(values_equal(&Value::small_int(5), &Value::small_int(5)));
     assert!(!values_equal(&Value::small_int(5), &Value::small_int(6)));
     let (na, nb) = (
-        nil_value(&mut h, al_core::TypeId(1)),
-        nil_value(&mut h, al_core::TypeId(1)),
+        nil_value(&mut h, crate::TypeId(1)),
+        nil_value(&mut h, crate::TypeId(1)),
     );
     assert!(values_equal(&na, &nb));
     let five = Value::str_in(&mut h, "5");
@@ -354,7 +358,7 @@ fn ev(
     labels: &[&str],
     payload: Vec<Value>,
 ) -> Value {
-    Value::enum_with_names_in(h, al_core::TypeId(type_id), 0, en, vn, labels, &payload)
+    Value::enum_with_names_in(h, crate::TypeId(type_id), 0, en, vn, labels, &payload)
 }
 
 // A function value renders as `<fn#name>`, the name resolved through
@@ -542,7 +546,7 @@ fn array_slice_range_out_of_bounds_errors() {
         ],
         0,
     );
-    let err = new_vm(program)
+    let err = new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
         .expect("vm must construct")
         .run()
         .expect_err("slicing a range out of bounds must error");
@@ -769,8 +773,13 @@ fn donation_skips_never_spawned_workers() {
     use std::sync::atomic::Ordering;
 
     let program = single_fn_program(|_f| vec![], vec![op(Op::Halt)], 0);
-    let (rt, _poll) =
-        sched::Runtime::new(Arc::new(program), Vec::new(), 3).expect("runtime must construct");
+    let (rt, _poll) = sched::Runtime::new(
+        Arc::new(program),
+        Vec::new(),
+        &crate::template::test_fixture::TEST_STDLIB,
+        3,
+    )
+    .expect("runtime must construct");
     // Worker 1 spawned (slot filled, busier); worker 2's spawn failed
     // (slot empty, permanent load 0) — the state ensure_workers leaves
     // behind on partial failure.

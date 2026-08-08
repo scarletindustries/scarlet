@@ -61,13 +61,12 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use al_core::bytecode::{BinaryRef, SocketValue, Value};
-use al_core::static_ir::VariantTemplate;
+use crate::bytecode::{BinaryRef, SocketValue, Value};
+use crate::template::VariantTemplate;
 
 use super::poll::{EPOCH, Wait, monotonic_now_ms};
 use super::sched::BlockingOp;
 use super::{IO_REDUCTION_COST, Step, VM, VmError, VmResult, bin_ref, lock, str_ref};
-use crate::stdlib;
 
 impl VM {
     // Method contract for this family: `ip` is the already-advanced
@@ -94,9 +93,10 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         let bin_v = self.pop_binary("io.write_file")?;
         let path_v = self.pop_str("io.write_file")?;
-        if let Some(v) =
-            self.reject_unaligned(bin_ref(&bin_v).bit_len(), &stdlib::io::UNALIGNED_BINARY)
-        {
+        if let Some(v) = self.reject_unaligned(
+            bin_ref(&bin_v).bit_len(),
+            self.runtime.stdlib.io_error.unaligned_binary,
+        ) {
             self.stack.push(v);
             return Ok(None);
         }
@@ -246,7 +246,7 @@ impl VM {
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if monotonic_now_ms() >= deadline_ms {
                     // The deadline passed with nothing to read.
-                    let timed_out = self.stdlib_enum(&stdlib::net::error::TIMED_OUT);
+                    let timed_out = self.stdlib_enum(self.runtime.stdlib.net_error.timed_out);
                     let err = self.make_err(timed_out);
                     self.stack.push(err);
                 } else {
@@ -282,7 +282,7 @@ impl VM {
         let sv = connection_socket(&sock_val, "socket.write")?;
         if let Some(v) = self.reject_unaligned(
             bin_ref(&bin_v).bit_len(),
-            &stdlib::net::error::UNALIGNED_BINARY,
+            self.runtime.stdlib.net_error.unaligned_binary,
         ) {
             self.stack.push(v);
             return Ok(None);
@@ -338,7 +338,7 @@ impl VM {
             }
         }
         if unaligned {
-            let e = self.stdlib_enum(&stdlib::net::error::UNALIGNED_BINARY);
+            let e = self.stdlib_enum(self.runtime.stdlib.net_error.unaligned_binary);
             let err = self.make_err(e);
             self.stack.push(err);
             return Ok(None);
@@ -585,21 +585,21 @@ impl VM {
     /// residual — never a string.
     pub(super) fn net_error_value(&mut self, e: &std::io::Error) -> Value {
         let t = match e.raw_os_error() {
-            Some(libc::ETIMEDOUT) => &stdlib::net::error::TIMED_OUT,
-            Some(libc::ECONNREFUSED) => &stdlib::net::error::CONNECTION_REFUSED,
-            Some(libc::ECONNRESET) => &stdlib::net::error::CONNECTION_RESET,
-            Some(libc::ECONNABORTED) => &stdlib::net::error::CONNECTION_ABORTED,
-            Some(libc::ENOTCONN) => &stdlib::net::error::NOT_CONNECTED,
-            Some(libc::EPIPE) => &stdlib::net::error::BROKEN_PIPE,
-            Some(libc::EADDRINUSE) => &stdlib::net::error::ADDR_IN_USE,
-            Some(libc::EADDRNOTAVAIL) => &stdlib::net::error::ADDR_NOT_AVAILABLE,
-            Some(libc::ENETDOWN) => &stdlib::net::error::NETWORK_DOWN,
-            Some(libc::ENETUNREACH) => &stdlib::net::error::NETWORK_UNREACHABLE,
-            Some(libc::EHOSTUNREACH) => &stdlib::net::error::HOST_UNREACHABLE,
-            Some(libc::EACCES) => &stdlib::net::error::PERMISSION_DENIED,
+            Some(libc::ETIMEDOUT) => self.runtime.stdlib.net_error.timed_out,
+            Some(libc::ECONNREFUSED) => self.runtime.stdlib.net_error.connection_refused,
+            Some(libc::ECONNRESET) => self.runtime.stdlib.net_error.connection_reset,
+            Some(libc::ECONNABORTED) => self.runtime.stdlib.net_error.connection_aborted,
+            Some(libc::ENOTCONN) => self.runtime.stdlib.net_error.not_connected,
+            Some(libc::EPIPE) => self.runtime.stdlib.net_error.broken_pipe,
+            Some(libc::EADDRINUSE) => self.runtime.stdlib.net_error.addr_in_use,
+            Some(libc::EADDRNOTAVAIL) => self.runtime.stdlib.net_error.addr_not_available,
+            Some(libc::ENETDOWN) => self.runtime.stdlib.net_error.network_down,
+            Some(libc::ENETUNREACH) => self.runtime.stdlib.net_error.network_unreachable,
+            Some(libc::EHOSTUNREACH) => self.runtime.stdlib.net_error.host_unreachable,
+            Some(libc::EACCES) => self.runtime.stdlib.net_error.permission_denied,
             _ => {
                 let errno = errno_of(e);
-                let tpl = self.stdlib_template(&stdlib::net::error::ERRNO);
+                let tpl = self.stdlib_template(self.runtime.stdlib.net_error.errno);
                 return tpl.instantiate(&mut self.heap, &[errno]);
             }
         };
@@ -610,19 +610,23 @@ impl VM {
     /// path-bearing variants with `path`. Unnamed kinds become `Errno(code)`.
     pub(super) fn io_error_value(&mut self, e: &std::io::Error, path: &str) -> Value {
         let t = match e.raw_os_error() {
-            Some(libc::ENOENT) => &stdlib::io::NOT_FOUND,
-            Some(libc::EACCES) => &stdlib::io::PERMISSION_DENIED,
-            Some(libc::EEXIST) => &stdlib::io::ALREADY_EXISTS,
-            Some(libc::ENOTDIR) => &stdlib::io::NOT_ADIRECTORY,
-            Some(libc::EISDIR) => &stdlib::io::IS_ADIRECTORY,
-            Some(libc::EROFS) => &stdlib::io::READ_ONLY_FILESYSTEM,
-            Some(libc::ELOOP) => &stdlib::io::FILESYSTEM_LOOP,
-            Some(libc::ENOSPC) => return self.stdlib_enum(&stdlib::io::STORAGE_FULL),
-            Some(libc::EDQUOT) => return self.stdlib_enum(&stdlib::io::QUOTA_EXCEEDED),
-            Some(libc::EFBIG) => &stdlib::io::FILE_TOO_LARGE,
+            Some(libc::ENOENT) => self.runtime.stdlib.io_error.not_found,
+            Some(libc::EACCES) => self.runtime.stdlib.io_error.permission_denied,
+            Some(libc::EEXIST) => self.runtime.stdlib.io_error.already_exists,
+            Some(libc::ENOTDIR) => self.runtime.stdlib.io_error.not_a_directory,
+            Some(libc::EISDIR) => self.runtime.stdlib.io_error.is_a_directory,
+            Some(libc::EROFS) => self.runtime.stdlib.io_error.read_only_filesystem,
+            Some(libc::ELOOP) => self.runtime.stdlib.io_error.filesystem_loop,
+            Some(libc::ENOSPC) => {
+                return self.stdlib_enum(self.runtime.stdlib.io_error.storage_full);
+            }
+            Some(libc::EDQUOT) => {
+                return self.stdlib_enum(self.runtime.stdlib.io_error.quota_exceeded);
+            }
+            Some(libc::EFBIG) => self.runtime.stdlib.io_error.file_too_large,
             _ => {
                 let errno = errno_of(e);
-                let tpl = self.stdlib_template(&stdlib::io::ERRNO);
+                let tpl = self.stdlib_template(self.runtime.stdlib.io_error.errno);
                 return tpl.instantiate(&mut self.heap, &[errno]);
             }
         };
@@ -682,7 +686,7 @@ impl VM {
     /// to listen/connect (an `Int` port unchecked-`as u16` would silently wrap).
     #[cold]
     fn push_invalid_port(&mut self) -> VmResult<()> {
-        let e = self.stdlib_enum(&stdlib::net::error::INVALID_PORT);
+        let e = self.stdlib_enum(self.runtime.stdlib.net_error.invalid_port);
         let err = self.make_err(e);
         self.stack.push(err);
         Ok(())
@@ -1010,7 +1014,7 @@ mod tests {
 
     use super::super::{sched, vm_for_runtime};
     use super::*;
-    use al_core::bytecode::{Function, Instruction, Op, Program};
+    use crate::bytecode::{Function, Instruction, Op, Program};
 
     fn halt_program() -> Program {
         Program {
@@ -1030,7 +1034,7 @@ mod tests {
                 operand: 0,
             }],
             entry: 0,
-            frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+            frozen: Arc::new(crate::frozen::FrozenArea::new()),
             native: Default::default(),
         }
     }
@@ -1041,8 +1045,13 @@ mod tests {
     /// and deadlocked whenever a connection landed on the unaccepted twin.
     #[test]
     fn a_foreign_scheduler_registers_the_same_kernel_socket() {
-        let (rt, poll0) = sched::Runtime::new(Arc::new(halt_program()), Vec::new(), 2)
-            .expect("runtime must construct");
+        let (rt, poll0) = sched::Runtime::new(
+            Arc::new(halt_program()),
+            Vec::new(),
+            &crate::template::test_fixture::TEST_STDLIB,
+            2,
+        )
+        .expect("runtime must construct");
         let mut vm0 = vm_for_runtime(Arc::clone(&rt), 0, poll0);
         let mut vm1 = vm_for_runtime(
             Arc::clone(&rt),
@@ -1071,8 +1080,13 @@ mod tests {
     /// socket, because it cannot bind.
     #[test]
     fn retiring_a_listener_reaches_every_scheduler_and_cannot_revive() {
-        let (rt, poll0) = sched::Runtime::new(Arc::new(halt_program()), Vec::new(), 2)
-            .expect("runtime must construct");
+        let (rt, poll0) = sched::Runtime::new(
+            Arc::new(halt_program()),
+            Vec::new(),
+            &crate::template::test_fixture::TEST_STDLIB,
+            2,
+        )
+        .expect("runtime must construct");
         let mut vm0 = vm_for_runtime(Arc::clone(&rt), 0, poll0);
         let mut vm1 = vm_for_runtime(
             Arc::clone(&rt),
@@ -1115,7 +1129,7 @@ mod tests {
     fn a_retire_wake_prevents_a_blocking_poll_wait() {
         use super::super::poll::Wait;
         use super::super::{Process, halt_test_vm};
-        use al_core::heap::ProcHeap;
+        use crate::heap::ProcHeap;
         use std::time::{Duration, Instant};
 
         let mut vm = halt_test_vm();

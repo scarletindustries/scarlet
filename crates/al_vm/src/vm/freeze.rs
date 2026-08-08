@@ -1,8 +1,8 @@
 //! Freezing value graphs into the program-wide frozen area.
 //!
 //! Publishing a global deep-copies the binding's whole value graph into the
-//! [`FrozenArea`](al_core::frozen::FrozenArea) through [`freeze_global`], which
-//! is [`ProcHeap::publish_frozen`] — `al_core::heap`'s `rc_publish_graph` with
+//! [`FrozenArea`](crate::frozen::FrozenArea) through [`freeze_global`], which
+//! is [`ProcHeap::publish_frozen`] — `crate::heap`'s `rc_publish_graph` with
 //! the frozen builder as the destination. Frozen objects are verbatim images of
 //! arena objects (same header, same payload layout — but carrying no refcount
 //! prefix and marked immortal), so the published root word *is* a `Value`:
@@ -30,9 +30,9 @@
 // the frozen-area publication protocol documented on the type.
 #![allow(unsafe_code)]
 
-use al_core::bytecode::Value;
-use al_core::frozen::FrozenBuilder;
-use al_core::heap::ProcHeap;
+use crate::bytecode::Value;
+use crate::frozen::FrozenBuilder;
+use crate::heap::ProcHeap;
 
 /// A published global: the root of a fully-written frozen value graph (or
 /// an immediate), as a raw NaN-box word.
@@ -42,7 +42,7 @@ use al_core::heap::ProcHeap;
 /// segment contents, the table store happens-before the `globals_version`
 /// release-bump, and readers acquire-load the version before touching the
 /// table. After publication the words are never written again, and the
-/// [`FrozenArea`](al_core::frozen::FrozenArea) it points into is `Arc`-held
+/// [`FrozenArea`](crate::frozen::FrozenArea) it points into is `Arc`-held
 /// by the runtime's program (`Program::frozen`) for at least as long as
 /// the table holding it, so the pointer cannot dangle while the value is
 /// reachable.
@@ -87,7 +87,7 @@ pub(super) fn freeze_global(builder: &mut FrozenBuilder, root: &Value) -> Frozen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use al_core::frozen::FrozenArea;
+    use crate::frozen::FrozenArea;
     use std::sync::Arc;
 
     fn builder() -> FrozenBuilder {

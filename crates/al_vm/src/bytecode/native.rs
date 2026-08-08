@@ -92,8 +92,9 @@ pub struct NativeCtx {
     /// cold-fragment step); until then shims spend the VM's own counter and
     /// this field is dormant. Offset 0 is deliberate: the hottest load.
     pub reds: i64,
-    /// Offset 8. This scheduler's `&mut VM`, opaque here (`al_core` cannot
-    /// name the type). Re-published per entry; read per runtime call.
+    /// Offset 8. This scheduler's `&mut VM`, opaque at codegen time (the
+    /// front end cannot name the type). Re-published per entry; read per
+    /// runtime call.
     pub vm: *mut core::ffi::c_void,
 }
 
@@ -564,8 +565,8 @@ mod mode_tests {
 /// contract itself: anyone who calls an entry needs it, so the ABI owns it
 /// rather than any one caller.
 ///
-/// It is the only asm in `al_core`. The VM's process-stack switching lives in
-/// `al::vm::stack::switch`; this is deliberately not that — it is one
+/// It is the only asm outside `vm::stack`. The VM's process-stack switching
+/// lives in `vm::stack::switch`; this is deliberately not that — it is one
 /// register bracket around one indirect call, with no stack manipulation.
 ///
 /// # Safety

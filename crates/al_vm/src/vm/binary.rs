@@ -1,8 +1,8 @@
 //! Bit-granular operations on `HeapValue::Binary`. Bits are addressed MSB-first
-//! (see [`al_core::bytecode::bits`]); the trailing low bits of the last byte
+//! (see [`crate::bytecode::bits`]); the trailing low bits of the last byte
 //! beyond `bit_len` are always zero.
 
-use al_core::bytecode::bits::{get_bit, read_byte};
+use crate::bytecode::bits::{get_bit, read_byte};
 
 pub fn inspect(bytes: &[u8], bit_len: u64) -> String {
     let full = (bit_len / 8) as usize;
@@ -123,7 +123,7 @@ pub fn read_utf8(bytes: &[u8], end: u64, at: u64) -> Option<(u32, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use al_core::bytecode::bits::copy_bits;
+    use crate::bytecode::bits::copy_bits;
 
     #[test]
     fn inspect_aligned_and_partial() {

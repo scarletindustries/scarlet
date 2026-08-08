@@ -44,6 +44,7 @@ mod ids;
 pub mod native_rc;
 pub mod template;
 pub mod tivec;
+pub mod vm;
 
 pub use ids::{FuncIdx, TypeId};
 pub use template::VariantTemplate;

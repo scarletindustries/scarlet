@@ -8,7 +8,7 @@
 //! the payload into that hash and allocates exactly one enum cell — the
 //! names are stored as single reference words into the frozen area
 //! (program-lifetime stable, shared by every process; see
-//! [`al_core::frozen`]).
+//! [`crate::frozen`]).
 //!
 //! [`PreludeTemplates`] is the fixed set every VM carries, built at init
 //! through the program's frozen builder. Nullary values (`Nil`, `None`,
@@ -18,11 +18,9 @@
 //! `VM::stdlib_template`, which builds and memoizes an [`EnumTemplate`]
 //! on first use against the same frozen area.
 
-use al_core::bytecode::{Arena, Value};
-use al_core::frozen::FrozenBuilder;
-use al_core::static_ir::VariantTemplate;
-
-use crate::stdlib;
+use crate::bytecode::{Arena, Value};
+use crate::frozen::FrozenBuilder;
+use crate::template::{StdlibTemplates, VariantTemplate};
 
 /// One prelude/stdlib enum variant, precomputed for cheap construction: the
 /// frozen name and label values (program-lifetime stable, shared by every
@@ -31,7 +29,7 @@ use crate::stdlib;
 /// nothing and borrows nothing.
 #[derive(Clone)]
 pub(super) struct EnumTemplate {
-    type_id: al_core::TypeId,
+    type_id: crate::TypeId,
     variant_idx: u16,
     /// Frozen `Str` value of the enum type name.
     enum_name: Value,
@@ -129,40 +127,42 @@ fn frozen_enum_value(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Value {
 }
 
 impl PreludeTemplates {
-    pub(super) fn new(fb: &mut FrozenBuilder) -> Self {
-        let head_flags = enum_template(fb, &stdlib::http::h1::HEAD_FLAGS);
+    /// Build the fixed template set from the embedder-supplied stdlib table —
+    /// the VM's one source for the constructors its opcodes build unprompted.
+    pub(super) fn new(fb: &mut FrozenBuilder, stdlib: &'static StdlibTemplates) -> Self {
+        let head_flags = enum_template(fb, stdlib.http.head_flags);
         // Immediates, so the frozen record owns no mortal children.
         let head_flags_none = head_flags.instantiate(
             fb,
             &[Value::bool(false), Value::bool(false), Value::bool(false)],
         );
         PreludeTemplates {
-            nil: frozen_enum_value(fb, &stdlib::prelude::NIL),
-            none: frozen_enum_value(fb, &stdlib::prelude::NONE),
-            some: enum_template(fb, &stdlib::prelude::SOME),
-            ok: enum_template(fb, &stdlib::prelude::OK),
-            err: enum_template(fb, &stdlib::prelude::ERR),
-            ip_v4: enum_template(fb, &stdlib::net::address::V4),
-            ip_v6: enum_template(fb, &stdlib::net::address::V6),
-            socket_address: enum_template(fb, &stdlib::net::address::SOCKET_ADDRESS),
-            socket: enum_template(fb, &stdlib::net::socket::SOCKET),
-            read_data: enum_template(fb, &stdlib::net::socket::DATA),
-            read_closed: frozen_enum_value(fb, &stdlib::net::socket::CLOSED),
-            header: enum_template(fb, &stdlib::http::headers::HEADER),
-            version_http10: frozen_enum_value(fb, &stdlib::http::h1::HTTP10),
-            version_http11: frozen_enum_value(fb, &stdlib::http::h1::HTTP11),
+            nil: frozen_enum_value(fb, stdlib.prelude.nil),
+            none: frozen_enum_value(fb, stdlib.prelude.none),
+            some: enum_template(fb, stdlib.prelude.some),
+            ok: enum_template(fb, stdlib.prelude.ok),
+            err: enum_template(fb, stdlib.prelude.err),
+            ip_v4: enum_template(fb, stdlib.net_address.v4),
+            ip_v6: enum_template(fb, stdlib.net_address.v6),
+            socket_address: enum_template(fb, stdlib.net_address.socket_address),
+            socket: enum_template(fb, stdlib.net_socket.socket),
+            read_data: enum_template(fb, stdlib.net_socket.data),
+            read_closed: frozen_enum_value(fb, stdlib.net_socket.closed),
+            header: enum_template(fb, stdlib.http.header),
+            version_http10: frozen_enum_value(fb, stdlib.http.http10),
+            version_http11: frozen_enum_value(fb, stdlib.http.http11),
             head_flags,
             head_flags_none,
-            parsed_done: enum_template(fb, &stdlib::http::h1::DONE),
-            parsed_need_more: frozen_enum_value(fb, &stdlib::http::h1::NEED_MORE),
-            parsed_bad: enum_template(fb, &stdlib::http::h1::BAD),
-            framing_no_body: frozen_enum_value(fb, &stdlib::http::h1::NO_BODY),
-            framing_length: enum_template(fb, &stdlib::http::h1::LENGTH),
-            framing_chunked: frozen_enum_value(fb, &stdlib::http::h1::CHUNKED),
-            framing_invalid: enum_template(fb, &stdlib::http::h1::INVALID),
-            chunked_done: enum_template(fb, &stdlib::http::h1::CHUNKED_DONE),
-            chunked_need_more: frozen_enum_value(fb, &stdlib::http::h1::CHUNKED_NEED_MORE),
-            chunked_bad: enum_template(fb, &stdlib::http::h1::CHUNKED_BAD),
+            parsed_done: enum_template(fb, stdlib.http.parsed_done),
+            parsed_need_more: frozen_enum_value(fb, stdlib.http.parsed_need_more),
+            parsed_bad: enum_template(fb, stdlib.http.parsed_bad),
+            framing_no_body: frozen_enum_value(fb, stdlib.http.framing_no_body),
+            framing_length: enum_template(fb, stdlib.http.framing_length),
+            framing_chunked: frozen_enum_value(fb, stdlib.http.framing_chunked),
+            framing_invalid: enum_template(fb, stdlib.http.framing_invalid),
+            chunked_done: enum_template(fb, stdlib.http.chunked_done),
+            chunked_need_more: frozen_enum_value(fb, stdlib.http.chunked_need_more),
+            chunked_bad: enum_template(fb, stdlib.http.chunked_bad),
         }
     }
 

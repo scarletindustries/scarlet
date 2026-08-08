@@ -5,36 +5,31 @@ edition = "2024"
 build = "build.rs"
 
 [features]
-# Interpreter dispatch instrumentation: per-opcode and per-function op
-# histograms dumped to stderr once a run passes AL_OP_HISTOGRAM_OPS ops.
-# Off by default — a normal run must not write to stderr.
-op-histogram = []
+# Interpreter dispatch instrumentation — forwarded to `al_vm`, where the
+# dispatch loop lives. See its manifest.
+op-histogram = ["al_vm/op-histogram"]
 
 [dependencies]
 al_core = { path = "../al_core" }
+al_vm = { path = "../al_vm" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
-cranelift-codegen = { workspace = true }
-cranelift-frontend = { workspace = true }
-cranelift-jit = { workspace = true }
-cranelift-module = { workspace = true }
-cranelift-native = { workspace = true }
-libc = "0.2"
-memchr = "2"
-mio = { version = "1", features = ["os-poll", "os-ext"] }
 percent-encoding = "2"
 rustyline = "14"
 serde_json = "1"
-smallvec = "1.15"
-socket2 = { version = "0.5", features = ["all"] }
-indexmap = { workspace = true }
 ureq = "2"
 
 [build-dependencies]
 al_core = { path = "../al_core" }
 
 [dev-dependencies]
-al_core = { path = "../al_core", features = ["alloc-counter"] }
+al_core = { path = "../al_core" }
+al_vm = { path = "../al_vm", features = ["alloc-counter"] }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-native = { workspace = true }
 serde_json = "1"
 
 [[bin]]

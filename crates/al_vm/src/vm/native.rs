@@ -3,8 +3,8 @@
 //!
 //! The ABI itself — the [`NativeStatus`] word and the [`NativeEntry`]
 //! signature `extern "C" fn(vmx: *mut c_void) -> NativeStatus` — is defined
-//! once in [`al_core::bytecode::native`] beside the per-program entry
-//! table; `al_core` compiles bodies but cannot name the VM, so `vmx` is
+//! once in [`crate::bytecode::native`] beside the per-program entry
+//! table; the front end compiles bodies but cannot name the VM, so `vmx` is
 //! opaque there. This module pins down what `vmx` actually is (`&mut VM`,
 //! see [`VM::call_native`]) and round-trips the status word to the
 //! interpreter's `VmResult<Step>` outcomes.
@@ -74,9 +74,9 @@
 //! call, or a self-tail back-edge, and exhaustion yields with the callee
 //! frame consistent at `ip == 0`.
 
-use al_core::bytecode::{NativeEntry, NativeStatus, Value};
-use al_core::core_ir::FuncIdx;
-use al_core::tivec::Idx;
+use crate::FuncIdx;
+use crate::bytecode::{NativeEntry, NativeStatus, Value};
+use crate::tivec::Idx;
 
 use super::poll::Wait;
 use super::{CallFrame, Step, VM, VmError, VmResult};
@@ -162,7 +162,7 @@ impl VM {
         // `native_ctx` — the two arguments the shim forwards unchanged.
         #[allow(unsafe_code)]
         unsafe {
-            al_core::bytecode::native::call_entry_preserving_pinned(
+            crate::bytecode::native::call_entry_preserving_pinned(
                 (&raw mut self.native_ctx).cast(),
                 entry,
             )
@@ -955,10 +955,10 @@ mod tests {
     }
 
     /// What a compiled prologue does with its argument: the entry receives
-    /// a [`al_core::bytecode::NativeCtx`] and the VM lives behind its `vm`
+    /// a [`crate::bytecode::NativeCtx`] and the VM lives behind its `vm`
     /// field — stubs must read it the same way generated code does.
     fn vm_from_ctx(ctx: *mut core::ffi::c_void) -> *mut VM {
-        unsafe { (*ctx.cast::<al_core::bytecode::NativeCtx>()).vm.cast() }
+        unsafe { (*ctx.cast::<crate::bytecode::NativeCtx>()).vm.cast() }
     }
 
     #[test]
@@ -971,7 +971,7 @@ mod tests {
 
     use std::sync::Arc;
 
-    use al_core::bytecode::{Function, Instruction, Op, Program, Value, op, op_arg};
+    use crate::bytecode::{Function, Instruction, Op, Program, Value, op, op_arg};
 
     use super::super::{CallFrame, new_vm};
 
@@ -1006,7 +1006,7 @@ mod tests {
             ],
             code,
             entry: 0,
-            frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+            frozen: Arc::new(crate::frozen::FrozenArea::new()),
             native: Default::default(),
         }
     }
@@ -1016,8 +1016,11 @@ mod tests {
     // stored — here 0, pointing at main's `Halt` as the stand-in resume
     // body), the interpreted callee's freshly pushed frame on top.
     fn vm_with_callee_pushed(constants: Vec<Value>, callee: Vec<Instruction>) -> VM {
-        let mut vm =
-            new_vm(caller_callee_program(constants, callee)).expect("test VM must construct");
+        let mut vm = new_vm(
+            caller_callee_program(constants, callee),
+            &crate::template::test_fixture::TEST_STDLIB,
+        )
+        .expect("test VM must construct");
         vm.frames.push(CallFrame {
             func_idx: 0,
             code_start: 0,
@@ -1151,7 +1154,7 @@ mod tests {
 
     use std::mem::ManuallyDrop;
 
-    use al_core::bytecode::NativeTable;
+    use crate::bytecode::NativeTable;
 
     /// A program whose entry (fn 0, "main") is `[Nop, Halt]` — ip 1 is a
     /// realistic non-zero resume point — plus the given functions, laid out
@@ -1185,7 +1188,7 @@ mod tests {
             functions,
             code,
             entry: 0,
-            frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+            frozen: Arc::new(crate::frozen::FrozenArea::new()),
             native: NativeTable::new(fn_count),
         }
     }
@@ -1194,7 +1197,8 @@ mod tests {
     /// frame installed (the stand-in native caller — its bytecode is the
     /// resume fallback), the boundary reds counter seeded.
     fn native_caller_vm(program: Program, reds: i32) -> VM {
-        let mut vm = new_vm(program).expect("test VM must construct");
+        let mut vm = new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
+            .expect("test VM must construct");
         vm.frames.push(CallFrame {
             func_idx: 0,
             code_start: 0,
@@ -1454,7 +1458,7 @@ mod tests {
         assert_eq!(vm.native_floor, 0);
     }
 
-    use al_core::bytecode::value::take_freed_objects;
+    use crate::bytecode::value::take_freed_objects;
 
     #[test]
     fn make_closure_transfers_capture_ownership() {

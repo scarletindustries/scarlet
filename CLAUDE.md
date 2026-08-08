@@ -4,9 +4,11 @@ Before committing, `cargo fmt` and `cargo clippy --all-targets` should both be c
 
 Be sparse when adding comments in the code. Do not add unnecessary comments. Do add comments when explaining larger, more complicated code paths. Especially in things like the parser and compiler or vm.
 
-The AST is defined in `src/ast/mod.rs`. When changing AST shape, also update `src/parser/mod.rs` (construction), `src/formatter/mod.rs` (rendering — a field the formatter drops silently rewrites the user's program), `src/bytecode/compiler.rs` (typecheck), and `src/typed_ir/elaborate*.rs` (which lowers it).
+Crate layout: `crates/al_vm` is the language-agnostic runtime (bytecode ISA, NaN-boxed values, heap, frozen area, interpreter/schedulers/JIT under `al_vm::vm`) and must never depend on `al_core` — Cargo enforces this, keep it that way. `crates/al_core` is the language front end (parser, types, IRs, compiler); it depends on `al_vm` and re-exports the runtime types at their historical paths (`al_core::bytecode::value`, `al_core::heap`, ...). `crates/al` is the driver (CLI, REPL, LSP); its `al::vm` module wires the generated stdlib template table (`STDLIB_TEMPLATES`) into `al_vm::vm` — the VM constructs stdlib values (Ok/Err, NetError, HTTP types) only through that injected table.
 
-The HM type inferencer lives in `src/types/infer.rs`. Type definitions are in `src/type_def/mod.rs`. Exhaustiveness checking is in `src/types/exhaustiveness.rs`.
+The AST is defined in `crates/al_core/src/ast/mod.rs`. When changing AST shape, also update `parser/mod.rs` (construction), `formatter/mod.rs` (rendering — a field the formatter drops silently rewrites the user's program), `bytecode/compiler/` (typecheck), and `typed_ir/elaborate*.rs` (which lowers it).
+
+The HM type inferencer lives in `crates/al_core/src/types/infer.rs`. Type definitions are in `type_def/mod.rs`. Exhaustiveness checking is in `types/exhaustiveness.rs`.
 
 For the VSCode extension in `extension/`, use Bun for package management and running scripts (e.g., `bun install`, `bun run compile`).
 

@@ -37,7 +37,7 @@
 //!
 //! Generated code reaches these functions by symbol: the JIT finalize step
 //! registers every [`shim_symbols`] pair with the builder
-//! (`JITBuilder::symbol`), so `al_core`'s CLIF construction can name them
+//! (`JITBuilder::symbol`), so the front end's CLIF construction can name them
 //! without a dependency on this crate.
 
 // Designated unsafe module: generated code cannot pass `&mut VM` or `Value`,
@@ -45,9 +45,9 @@
 // safety contract states the ownership it assumes.
 #![allow(unsafe_code)]
 
-use al_core::TypeId;
-use al_core::bytecode::value::{ReuseAddr, range_len};
-use al_core::bytecode::{Value, ValueView, seq};
+use crate::TypeId;
+use crate::bytecode::value::{ReuseAddr, range_len};
+use crate::bytecode::{Value, ValueView, seq};
 
 use super::VM;
 
@@ -651,7 +651,7 @@ pub fn shim_symbols() -> [(&'static str, *const u8); 23] {
 
 #[cfg(test)]
 mod tests {
-    use al_core::bytecode::value::HeapTag;
+    use crate::bytecode::value::HeapTag;
 
     use super::super::halt_test_vm;
     use super::*;
@@ -809,8 +809,8 @@ mod tests {
     fn enum_alloc_builds_an_interpreter_shaped_cell() {
         use std::sync::Arc;
 
-        use al_core::bytecode::value::take_freed_objects;
-        use al_core::frozen::FrozenArea;
+        use crate::bytecode::value::take_freed_objects;
+        use crate::frozen::FrozenArea;
 
         let mut vm = halt_test_vm();
         let vmp = &raw mut vm;

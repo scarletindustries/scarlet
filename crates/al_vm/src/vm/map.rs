@@ -10,7 +10,7 @@
 //!   (`set`/`delete`) has nowhere to go in the environment, so it first
 //!   materializes the whole environment into a HAMT and updates that.
 //! - [`MapBacking::Hamt`] — an in-memory persistent hash array mapped trie
-//!   ([`al_core::bytecode::hamt`]). `set`/`delete` path-copy the trie and share
+//!   ([`crate::bytecode::hamt`]). `set`/`delete` path-copy the trie and share
 //!   every untouched subtree, so the prior map stays valid.
 //!
 //! Every op here is a pure stack transformation: it never parks and never
@@ -24,7 +24,7 @@
 //! does not belong to the `Map(String, String)` view. This keeps the read ops
 //! and the materialized-on-write copy mutually consistent.
 
-use al_core::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
+use crate::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
 
 use super::{VM, VmError, VmResult};
 

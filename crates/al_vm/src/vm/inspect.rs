@@ -19,7 +19,7 @@
 
 use std::fmt::Write;
 
-use al_core::bytecode::{MapBacking, Program, Value, ValueView, hamt};
+use crate::bytecode::{MapBacking, Program, Value, ValueView, hamt};
 
 use super::{binary, str_ref};
 
@@ -64,7 +64,7 @@ fn is_simple_value(v: &Value) -> bool {
 /// record-shorthand form (`type T { a Int  b Bool }` → `T{ a: .., b: .. }`).
 /// Sum-type variants and prelude constructors (`Some`, `Ok`, `Err`, …) have a
 /// distinct variant name and keep the positional `Variant(..)` rendering.
-fn is_record(e: &al_core::bytecode::EnumRef<'_>) -> bool {
+fn is_record(e: &crate::bytecode::EnumRef<'_>) -> bool {
     !e.field_labels().is_empty()
         && e.field_labels().len() == e.payload().len()
         && e.enum_name() == e.variant_name()

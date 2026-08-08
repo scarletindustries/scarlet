@@ -35,8 +35,8 @@
 //! appears to vanish with no change to the AL code. The dump names the mode
 //! it ran under so a skewed profile cannot be quoted as a share of AL ops.
 
-use al_core::bytecode::native::{self, NativeMode};
-use al_core::bytecode::{Op, Program};
+use crate::bytecode::native::{self, NativeMode};
+use crate::bytecode::{Op, Program};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

@@ -3,23 +3,23 @@
 //!
 //! # The layering decision, documented
 //!
-//! `al_core` cannot depend on `crates/al`, yet JIT-compiled bodies must call
-//! runtime services on both sides of that boundary: `al_core` owns the value
-//! layout and its release path (`al_native_release_at_zero`), while this
-//! crate owns the VM and the interpreter-parity shims
-//! ([`native_shims`](super::native_shims)). Of the two seams the design
-//! allows — CLIF construction living wholly in `al_core` with symbols
-//! resolved late, or a per-body callback hook the `al` crate installs — the
-//! compiler driver forced the *hook* for codegen placement:
-//! [`compile_with_native`](al_core::bytecode::compile_with_native)'s
-//! [`NativeHook`](al_core::bytecode::NativeHook) fires at the only point
-//! where a body's post-perceus `CoreFn` and its per-body `ResolvedPool` are
-//! both alive, and its docs record why codegen hangs off that seam.
+//! `al_core` (the front end, where CLIF construction lives) depends on this
+//! crate, never the reverse — yet JIT-compiled bodies must call runtime
+//! services on both sides of that boundary: this crate owns the value
+//! layout, its release path (`al_native_release_at_zero`), and the
+//! interpreter-parity shims ([`native_shims`](super::native_shims)), while
+//! codegen itself runs in `al_core`. Of the two seams the design allows —
+//! CLIF construction living wholly in `al_core` with symbols resolved late,
+//! or a per-body callback hook the embedder installs — the compiler driver
+//! forced the *hook* for codegen placement: `compile_with_native`'s
+//! `NativeHook` (both in `al_core::bytecode`) fires at the only point where
+//! a body's post-perceus `CoreFn` and its per-body `ResolvedPool` are both
+//! alive, and its docs record why codegen hangs off that seam.
 //!
 //! Symbol resolution is the *other half* of the seam, and it is what this
 //! module pins down: **runtime symbols cross the crate boundary by NAME.**
-//! CLIF emitted anywhere (including `al_core`'s helpers, e.g.
-//! [`native_rc::emit_dynamic_drop`](al_core::core_ir::native_rc)) refers to
+//! CLIF emitted anywhere (including this crate's own helpers, e.g.
+//! [`native_rc::emit_dynamic_drop`](crate::native_rc)) refers to
 //! runtime functions as `Linkage::Import` declarations under the canonical
 //! names collected in [`runtime_symbols`]; no crate ever links against the
 //! other's functions directly. [`jit_module`] registers every
@@ -35,7 +35,7 @@
 //!
 //! One [`JITModule`] holds one executable mapping shared by every scheduler:
 //! entry pointers published into the program's
-//! [`NativeTable`](al_core::bytecode::NativeTable) are raw code addresses,
+//! [`NativeTable`](crate::bytecode::NativeTable) are raw code addresses,
 //! and processes migrate across scheduler threads mid-flight, so the mapping
 //! is immortal. `cranelift-jit` only unmaps through the explicit (unsafe)
 //! `free_memory` — which nothing here calls — so dropping the module after
@@ -47,12 +47,12 @@
 // declaration.
 #![allow(unsafe_code)]
 
-use al_core::bytecode::value::{
+use crate::FuncIdx;
+use crate::bytecode::value::{
     NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_RELEASE_AT_ZERO_SYMBOL, native_hollow_for_reuse,
     native_release_at_zero,
 };
-use al_core::bytecode::{NativeEntry, NativeTable};
-use al_core::core_ir::FuncIdx;
+use crate::bytecode::{NativeEntry, NativeTable};
 use cranelift_codegen::ir::{AbiParam, Signature, Type, types};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -104,8 +104,8 @@ impl From<ModuleError> for JitError {
 
 /// Every runtime symbol JIT-compiled code may reference, as
 /// `(canonical name, shim address)` pairs — the complete resolution table
-/// [`jit_module`] registers. Sourced from the crates that own each shim:
-/// `al_core`'s release path plus this crate's interpreter-parity shims. The
+/// [`jit_module`] registers: the value layout's release/reuse path
+/// ([`crate::bytecode::value`]) plus the interpreter-parity shims. The
 /// names are the contract [`RuntimeFns::declare`]'s imports resolve against;
 /// a symbol present here but never declared is harmless, a declared name
 /// missing here panics inside `finalize_definitions` naming the symbol —
@@ -194,7 +194,7 @@ pub fn native_entry_signature(module: &JITModule) -> Signature {
 pub struct RuntimeFns {
     /// `al_native_release_at_zero(obj)` — the cold free-at-zero call the
     /// inline drop gate branches to
-    /// ([`native_rc::emit_dynamic_drop`](al_core::core_ir::native_rc)).
+    /// ([`native_rc::emit_dynamic_drop`](crate::native_rc)).
     pub release_at_zero: FuncId,
     /// `al_shim_int_box(vmx, i) -> bits` — box a full-range `i64`, spilling
     /// past the 47-bit immediate range.
@@ -342,12 +342,12 @@ pub fn finalize_into(
 
 #[cfg(test)]
 mod tests {
-    use al_core::bytecode::NativeStatus;
-    use al_core::bytecode::Value;
-    use al_core::bytecode::value::take_freed_objects;
-    use al_core::core_ir::native_rc::emit_dynamic_drop;
-    use al_core::heap::ProcHeap;
-    use al_core::tivec::Idx;
+    use crate::bytecode::NativeStatus;
+    use crate::bytecode::Value;
+    use crate::bytecode::value::take_freed_objects;
+    use crate::heap::ProcHeap;
+    use crate::native_rc::emit_dynamic_drop;
+    use crate::tivec::Idx;
     use cranelift_codegen::ir::InstBuilder;
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
@@ -591,13 +591,14 @@ mod tests {
         assert_eq!(spilled.as_int(), Some(i64::MAX));
     }
 
-    /// The cross-crate composition the layering exists for: CLIF emitted by
-    /// an `al_core` helper (`emit_dynamic_drop`) calling a symbol owned by
-    /// `al_core` (`al_native_release_at_zero`), compiled and resolved through
-    /// this crate's module + registry, with frees landing in the shared
-    /// `FREED_OBJECTS` accounting.
+    /// The by-name composition the layering exists for: CLIF emitted by a
+    /// helper (`emit_dynamic_drop`) calling a runtime symbol
+    /// (`al_native_release_at_zero`) it never links against, compiled and
+    /// resolved through this module + registry, with frees landing in the
+    /// shared `FREED_OBJECTS` accounting. This is exactly how `al_core`'s
+    /// CLIF construction reaches the runtime.
     #[test]
-    fn al_core_emitted_clif_resolves_through_this_registry() {
+    fn front_end_emitted_clif_resolves_through_this_registry() {
         let mut module = jit_module().unwrap();
         let fns = RuntimeFns::declare(&mut module).unwrap();
         let mut sig = module.make_signature();

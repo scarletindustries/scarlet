@@ -22,8 +22,9 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 
-use al_core::bytecode::{Program, Value};
-use al_core::heap::ProcHeap;
+use crate::bytecode::{Program, Value};
+use crate::heap::ProcHeap;
+use crate::template::StdlibTemplates;
 
 use super::freeze::FrozenValue;
 use super::lock;
@@ -61,7 +62,7 @@ pub(super) struct Seed {
 // like `Process`/`Migrant`: the heap owns its slabs, `root` is one machine
 // word into them, and the fd handles are inherently `Send`. If `Seed` ever
 // regains a field that cannot move across threads, spawning must not build.
-const _: () = al_core::assert_send::<Seed>();
+const _: () = crate::assert_send::<Seed>();
 
 /// A unit of work delivered to a scheduler's private inbox: a process that
 /// has not started yet (a seed) or a process moving between schedulers
@@ -285,6 +286,11 @@ pub(super) struct Runtime {
     /// every argument passed after it. Read once per `Op::Argv`; shared by all
     /// schedulers so any process can call `process.argv`.
     pub argv: Vec<String>,
+    /// The embedder-supplied table of every stdlib constructor the VM builds
+    /// of its own accord (I/O results, protocol values). Shared by all
+    /// schedulers; each builds its [`PreludeTemplates`](super::templates)
+    /// from it at construction.
+    pub stdlib: &'static StdlibTemplates,
     /// The program's global (literal) area: top-level bindings as frozen
     /// value words,
     /// published once when main writes them. Workers copy the words into
@@ -352,6 +358,7 @@ impl Runtime {
     pub fn new(
         program: Arc<Program>,
         argv: Vec<String>,
+        stdlib: &'static StdlibTemplates,
         count: usize,
     ) -> std::io::Result<(Arc<Runtime>, mio::Poll)> {
         let poll = mio::Poll::new()?;
@@ -361,6 +368,7 @@ impl Runtime {
         let runtime = Arc::new(Runtime {
             program,
             argv,
+            stdlib,
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),

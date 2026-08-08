@@ -16,8 +16,8 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use al_core::bytecode::{BinaryRef, Value};
-use al_core::heap::ProcHeap;
+use crate::bytecode::{BinaryRef, Value};
+use crate::heap::ProcHeap;
 
 use super::text::Radix;
 use super::{EnumTemplate, PreludeTemplates, VmError, VmResult, int_to_ascii, parse_uint_ascii};
@@ -708,7 +708,7 @@ pub(super) fn serialize_head(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use al_core::frozen::FrozenArea;
+    use crate::frozen::FrozenArea;
 
     /// Per-test fixture: prelude templates frozen in their own area (kept
     /// alive by `_frozen` — the templates point into it) plus a generously
@@ -722,7 +722,7 @@ mod tests {
     fn fix() -> Fix {
         let frozen = Arc::new(FrozenArea::new());
         let mut fb = frozen.builder();
-        let t = PreludeTemplates::new(&mut fb);
+        let t = PreludeTemplates::new(&mut fb, &crate::template::test_fixture::TEST_STDLIB);
         drop(fb);
         let h = ProcHeap::new();
         Fix {

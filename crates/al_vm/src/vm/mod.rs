@@ -5,7 +5,7 @@
 //! scheduler thread — whose dispatch loop (`execute_slice`) runs thousands
 //! of cooperatively preempted processes over a handful of OS threads
 //! without ever letting one block another. The memory those processes run
-//! on is [`al_core::heap`]'s: each process owns its reference-counted value
+//! on is [`crate::heap`]'s: each process owns its reference-counted value
 //! graph, and this module is the opcode-side counterpart of that design — it
 //! decides when to run, park, and move a process, while the heap decides how
 //! to allocate and free. The scheduling shape: reduction budgets, run
@@ -67,7 +67,7 @@
 //!    adopts the arriving values as-is.
 //! 5. **Memory is reference-counted.** A `Value` is not `Copy`: `Clone`
 //!    increments an object's count, `Drop` frees it at zero (see
-//!    [`al_core::heap`]). Nothing moves, so there is no rooting rule and no
+//!    [`crate::heap`]). Nothing moves, so there is no rooting rule and no
 //!    allocation reservation — an opcode just pops its operands and builds
 //!    its result. A large cascading free is billed to the running process at
 //!    the next call checkpoint (`VM::charge_reclamation`) so it cannot stall
@@ -137,12 +137,13 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use al_core::bytecode::value::range_len;
-use al_core::bytecode::{BinaryRef, Program, Value};
+use crate::bytecode::value::range_len;
+use crate::bytecode::{BinaryRef, Program, Value};
 #[cfg(test)]
-use al_core::bytecode::{Function, Op, op};
-use al_core::frozen::FrozenBuilder;
-use al_core::heap::ProcHeap;
+use crate::bytecode::{Function, Op, op};
+use crate::frozen::FrozenBuilder;
+use crate::heap::ProcHeap;
+use crate::template::StdlibTemplates;
 use smallvec::SmallVec;
 
 mod binary;
@@ -154,7 +155,7 @@ mod inspect;
 mod io;
 /// Public: JIT module construction and the runtime-symbol resolution seam
 /// (`JITBuilder::symbol` registration, finalize-time publication into the
-/// entry table); documents the `al_core`/`al` layering choice.
+/// entry table); documents the front-end/runtime layering choice.
 pub mod jit;
 mod map;
 mod migrate;
@@ -392,7 +393,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 // bound is structural only — a parked stack's *bytes* are Send regardless
 // of what they name, so thread-affinity of its contents is guarded by the
 // process-stack purity invariant (`vm::stack`), not by this line.
-const _: () = al_core::assert_send::<Process>();
+const _: () = crate::assert_send::<Process>();
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
 #[inline]
@@ -486,7 +487,7 @@ pub struct VM {
     // - `native_reds` is never reset by the unwind at all: a non-`Done`
     //   status ends the slice, and every slice entry re-seeds the budget.
     //   Whatever remains at suspension is the process's own leftover.
-    /// The payload of a non-`Done` [`NativeStatus`](al_core::bytecode::NativeStatus)
+    /// The payload of a non-`Done` [`NativeStatus`](crate::bytecode::NativeStatus)
     /// currently unwinding native
     /// frames (a park's `Wait` or a `VmError`), parked here so the status
     /// word crossing the `extern "C"` boundary stays a single machine word.
@@ -495,12 +496,12 @@ pub struct VM {
     /// Boxed to keep `Process` small — see [`NativePending`].
     native_pending: Option<Box<NativePending>>,
     /// What the pinned register points at while compiled code runs
-    /// ([`al_core::bytecode::NativeCtx`]): `vm` is re-published by every
+    /// ([`crate::bytecode::NativeCtx`]): `vm` is re-published by every
     /// [`VM::call_native`] — scheduler state compiled frames re-derive
     /// instead of carrying. Scheduler-owned, never part of a suspended
     /// process; a resume fragment reloads the pinned register from the
     /// resuming scheduler's copy.
-    native_ctx: al_core::bytecode::NativeCtx,
+    native_ctx: crate::bytecode::NativeCtx,
     /// The interpreter's frame floor: `execute_slice` ends its slice when a
     /// `Ret` pops the frame stack back to exactly this depth. 0 — the whole
     /// process — everywhere except inside a native→interpreter re-entry
@@ -573,16 +574,22 @@ pub struct VM {
 ///
 /// Built with no command-line arguments; `process.argv` returns an empty
 /// array. Use [`new_vm_with_argv`] to make program arguments visible.
-pub fn new_vm(program: Program) -> VmResult<VM> {
-    new_vm_with_argv(program, Vec::new())
+pub fn new_vm(program: Program, stdlib: &'static StdlibTemplates) -> VmResult<VM> {
+    new_vm_with_argv(program, stdlib, Vec::new())
 }
 
 /// Build the VM that runs `program` as scheduler 0, exposing `argv` (the
 /// entrypoint path followed by the arguments passed after it) to
-/// `process.argv`.
-pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
-    let (runtime, poll) =
-        Runtime::new(Arc::new(program), argv, sched::scheduler_count()).map_err(VmError::Io)?;
+/// `process.argv`. `stdlib` is the embedder's table of every constructor
+/// the VM builds unprompted (I/O results, protocol values) — the runtime's
+/// only knowledge of a front end's stdlib.
+pub fn new_vm_with_argv(
+    program: Program,
+    stdlib: &'static StdlibTemplates,
+    argv: Vec<String>,
+) -> VmResult<VM> {
+    let (runtime, poll) = Runtime::new(Arc::new(program), argv, stdlib, sched::scheduler_count())
+        .map_err(VmError::Io)?;
     Ok(vm_for_runtime(runtime, 0, poll))
 }
 
@@ -597,7 +604,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
     // stays shared — only the vectors copy).
     let program = (*runtime.program).clone();
     let mut frozen = program.frozen.builder();
-    let templates = PreludeTemplates::new(&mut frozen);
+    let templates = PreludeTemplates::new(&mut frozen, runtime.stdlib);
     // The global (literal) area is sized by the entry function: top-level
     // bindings are its "locals", mirrored into this table as they are written.
     let globals_len = program
@@ -623,7 +630,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         current_pid: 0,
         main_result: None,
         native_pending: None,
-        native_ctx: al_core::bytecode::NativeCtx::new(),
+        native_ctx: crate::bytecode::NativeCtx::new(),
         native_floor: 0,
         native_reds: 0,
         run_queue: VecDeque::new(),
@@ -1379,7 +1386,7 @@ fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {
 /// that build values outside an interpreter; hot paths go through
 /// `VM::make_nil`.
 #[cfg(test)]
-fn nil_value(h: &mut ProcHeap, nil_id: al_core::TypeId) -> Value {
+fn nil_value(h: &mut ProcHeap, nil_id: crate::TypeId) -> Value {
     Value::enum_with_names_in(h, nil_id, 0, "Nil", "Nil", &[], &[])
 }
 
@@ -1388,7 +1395,7 @@ fn nil_value(h: &mut ProcHeap, nil_id: al_core::TypeId) -> Value {
 /// tables, run queue — and never execute the program.
 #[cfg(test)]
 fn halt_test_vm() -> VM {
-    new_vm(Program {
+    let program = Program {
         constants: Vec::new(),
         functions: vec![Function {
             name: "main".into(),
@@ -1400,8 +1407,9 @@ fn halt_test_vm() -> VM {
         }],
         code: vec![op(Op::Halt)],
         entry: 0,
-        frozen: Arc::new(al_core::frozen::FrozenArea::new()),
+        frozen: Arc::new(crate::frozen::FrozenArea::new()),
         native: Default::default(),
-    })
-    .expect("test VM construction must succeed")
+    };
+    new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
+        .expect("test VM construction must succeed")
 }

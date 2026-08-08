@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 use std::net::TcpStream;
 
-use al_core::bytecode::{SocketValue, Value};
+use crate::bytecode::{SocketValue, Value};
 
 use super::{Process, VM};
 
@@ -59,7 +59,7 @@ pub(super) struct Migrant {
 // (`vm::stack` module doc) — scheduler state lives in thread-locals that
 // resumed code re-derives — not by this bound. The assert still earns its
 // keep against ordinary regressions (an `Rc`, a non-Send fd wrapper).
-const _: () = al_core::assert_send::<Migrant>();
+const _: () = crate::assert_send::<Migrant>();
 
 /// Visit every socket reachable from `v` — the one fd-walk shared by every
 /// path that pairs a value graph with the per-scheduler socket tables:
@@ -262,7 +262,7 @@ mod tests {
 
     use super::super::{CallFrame, halt_test_vm};
     use super::*;
-    use al_core::heap::ProcHeap;
+    use crate::heap::ProcHeap;
 
     /// A process heap with a pre-granted allocation budget: these tests fill
     /// the heap directly, with no VM `ensure()` loop staking budgets.
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn sockets_leave_listeners_put_move_connections_skip_dangling() {
-        use al_core::bytecode::SocketValue;
+        use crate::bytecode::SocketValue;
         use std::net::{TcpListener, TcpStream};
 
         let mut donor = halt_test_vm();

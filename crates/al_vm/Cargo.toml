@@ -14,6 +14,11 @@ edition = "2024"
 # `cfg(test)` is false.
 alloc-counter = []
 
+# Interpreter dispatch instrumentation: per-opcode and per-function op
+# histograms dumped to stderr once a run passes AL_OP_HISTOGRAM_OPS ops.
+# Off by default — a normal run must not write to stderr.
+op-histogram = []
+
 [dependencies]
 indexmap = { workspace = true }
 cranelift-codegen = { workspace = true }
@@ -21,5 +26,9 @@ cranelift-frontend = { workspace = true }
 cranelift-module = { workspace = true }
 cranelift-jit = { workspace = true }
 cranelift-native = { workspace = true }
+libc = "0.2"
+memchr = "2"
+mio = { version = "1", features = ["os-poll", "os-ext"] }
 smallvec = "1.15"
+socket2 = { version = "0.5", features = ["all"] }
 libmimalloc-sys = { version = "0.1.49", features = ["v2"] }

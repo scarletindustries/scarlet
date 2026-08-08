@@ -19,8 +19,8 @@
 //! sub-views sharing the operand's backing (`Value::binary_view_in`),
 //! so a parse loop walking a buffer allocates only constant-size boxes.
 
-use al_core::bytecode::Value;
-use al_core::bytecode::bits::copy_bits;
+use crate::bytecode::Value;
+use crate::bytecode::bits::copy_bits;
 use smallvec::SmallVec;
 
 use super::{VM, VmError, VmResult, bin_ref, binary, http, str_ref};
