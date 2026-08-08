@@ -1,17 +1,62 @@
 use indexmap::IndexMap;
 
 use super::infer::{ArenaSlice, Scheme, StrId, Ty, pool};
-use crate::span::Span;
 use crate::type_def::TypeId;
+use al_syntax::span::Span;
 
-/// What a definition denotes, stamped on every [`DefinitionLocation`]. This is
-/// the exact enum the reference graph keys [`DefId`](crate::reference::DefId)
-/// on — re-exported from [`crate::reference`] rather than redefined so the
-/// inference env and the graph share one kind vocabulary with no conversion
-/// seam between them. It must stay `Copy` (it is — see the definition) so
+/// What a definition *is*, stamped on every [`DefinitionLocation`]. Drives
+/// LSP symbol kinds and the unused/dead-code rules (e.g. a `ModuleAlias` is
+/// "unused" when no `Qualified` reference targets it). Defined here — the
+/// inference env keys constructor/field metadata on it — and re-exported by
+/// `al_core::reference`, whose graph keys `DefId` on it, so both share one
+/// kind vocabulary with no conversion seam. It must stay `Copy` so
 /// `DefinitionLocation`, and therefore `Scheme`, stays `Copy` and the
 /// precompiled stdlib keeps emitting `&'static [Scheme]` directly.
-pub use crate::reference::EntityKind;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntityKind {
+    /// A `let`/parameter/match binder — a local value.
+    Value,
+    /// A top-level `fn` (module function or `@vm` intrinsic).
+    Function,
+    /// A top-level `const`.
+    Constant,
+    /// A data constructor of a `type`.
+    Constructor,
+    /// A nominal `type` (custom, alias, or external).
+    Type,
+    /// The local binding introduced by `import a/b` or `import a/b as c`,
+    /// used to resolve qualified `c.member` accesses back to the import.
+    ModuleAlias,
+    /// A labelled field of a constructor variant.
+    Field,
+}
+
+impl EntityKind {
+    /// Human-readable noun for this kind, used in the hover panel and the
+    /// unused/dead-code hint message.
+    pub fn noun(self) -> &'static str {
+        match self {
+            EntityKind::Value => "value",
+            EntityKind::Function => "function",
+            EntityKind::Constant => "constant",
+            EntityKind::Constructor => "constructor",
+            EntityKind::Type => "type",
+            EntityKind::ModuleAlias => "module",
+            EntityKind::Field => "field",
+        }
+    }
+
+    /// Whether goto-definition on a target of this kind should navigate. A
+    /// `ModuleAlias` definition spans the whole `import` declaration, so
+    /// resolving it would be a no-op self-jump; the final path segment is
+    /// handled separately as an `Import` occurrence.
+    pub fn is_navigable(self) -> bool {
+        !matches!(self, EntityKind::ModuleAlias)
+    }
+}
+
+/// How a name is being used at an occurrence site. Mirrors Gleam's
+/// reference-kind set, adapted to al's import syntax.
 
 /// The canonical definition site of a name: its source span, the interned path
 /// of the module that owns it, and what kind of entity it is. `module` is an
@@ -263,7 +308,7 @@ impl TypeEnv {
 }
 
 /// Rollback payload for [`TypeEnv::truncate_to`]. Deliberately not `Ord`:
-/// [`Watermark`](crate::bytecode::Watermark)'s ordering key excludes this
+/// `Watermark`'s ordering key excludes this
 /// field so `EnvWatermark`'s field set can change without silently perturbing
 /// which cached module `Watermark::earlier` picks during invalidation (on an
 /// ordering tie, `earlier`/`later` merge this payload field-wise instead).
@@ -485,11 +530,11 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
-    /// Unjournaled escape hatch for `precompile_stdlib`'s teardown: moves the
-    /// by-name type registry out wholesale so `flatten` can snapshot it.
-    /// Journaling is deliberately skipped — the env is being consumed and no
-    /// `truncate_to` can ever run against it afterwards.
-    pub(crate) fn take_type_info(&mut self) -> IndexMap<String, TypeInfo> {
+    /// Unjournaled escape hatch for `precompile_stdlib`'s teardown (in
+    /// `al_core`): moves the by-name type registry out wholesale so `flatten`
+    /// can snapshot it. Journaling is deliberately skipped — the env is being
+    /// consumed and no `truncate_to` can ever run against it afterwards.
+    pub fn take_type_info(&mut self) -> IndexMap<String, TypeInfo> {
         std::mem::take(&mut self.type_info)
     }
 

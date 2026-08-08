@@ -1,0 +1,8 @@
+[package]
+name = "al_syntax"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+percent-encoding = "2"
+unicode-width = "0.1"

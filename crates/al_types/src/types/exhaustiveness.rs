@@ -1,6 +1,6 @@
-use crate::ast;
+use crate::slots::slot_labeled;
 use crate::type_def::Type;
-use crate::typed_ir::slots::slot_labeled;
+use al_syntax::ast;
 use indexmap::IndexSet;
 use smallvec::SmallVec;
 use std::borrow::Cow;
@@ -1098,11 +1098,11 @@ mod tests {
                 bits: size.map(|n| {
                     ast::Expression::NumberLiteral(ast::NumberLiteral {
                         value: n.to_string(),
-                        span: crate::span::Span::DUMMY,
+                        span: al_syntax::span::Span::DUMMY,
                     })
                 }),
             },
-            span: crate::span::Span::DUMMY,
+            span: al_syntax::span::Span::DUMMY,
         }
     }
 
@@ -1111,9 +1111,9 @@ mod tests {
             segments,
             rest: rest.then_some(ast::BinaryPatternRest {
                 binding: None,
-                span: crate::span::Span::DUMMY,
+                span: al_syntax::span::Span::DUMMY,
             }),
-            span: crate::span::Span::DUMMY,
+            span: al_syntax::span::Span::DUMMY,
         }
     }
 
@@ -1121,7 +1121,7 @@ mod tests {
         ast::Pattern::Var {
             name: ast::Identifier {
                 name: name.to_string(),
-                span: crate::span::Span::DUMMY,
+                span: al_syntax::span::Span::DUMMY,
             },
         }
     }
@@ -1183,7 +1183,7 @@ mod tests {
         let lit = |v: &str| {
             ast::Pattern::Literal(ast::PatternLiteral::Number(ast::NumberLiteral {
                 value: v.to_string(),
-                span: crate::span::Span::DUMMY,
+                span: al_syntax::span::Span::DUMMY,
             }))
         };
         let p1 = m.lower(&bin_pat(vec![bin_seg(lit("1"), None)], false));
@@ -1201,7 +1201,7 @@ mod tests {
         let str_lit = |v: &str| {
             ast::Pattern::Literal(ast::PatternLiteral::String(ast::StringLiteral {
                 value: v.to_string(),
-                span: crate::span::Span::DUMMY,
+                span: al_syntax::span::Span::DUMMY,
             }))
         };
         let mut m = UsefulnessMatrix::new(t_binary());
@@ -1235,11 +1235,11 @@ mod tests {
             qualifier: None,
             name: ast::Identifier {
                 name: name.to_string(),
-                span: crate::span::Span::DUMMY,
+                span: al_syntax::span::Span::DUMMY,
             },
             args: vec![],
             rest: false,
-            span: crate::span::Span::DUMMY,
+            span: al_syntax::span::Span::DUMMY,
         }
     }
 
@@ -1249,20 +1249,20 @@ mod tests {
             qualifier: None,
             name: ast::Identifier {
                 name: name.to_string(),
-                span: crate::span::Span::DUMMY,
+                span: al_syntax::span::Span::DUMMY,
             },
             args: fields
                 .into_iter()
                 .map(|(label, pattern)| ast::PatternArg::Labeled {
                     label: ast::Identifier {
                         name: label.to_string(),
-                        span: crate::span::Span::DUMMY,
+                        span: al_syntax::span::Span::DUMMY,
                     },
                     pattern,
                 })
                 .collect(),
             rest,
-            span: crate::span::Span::DUMMY,
+            span: al_syntax::span::Span::DUMMY,
         }
     }
 

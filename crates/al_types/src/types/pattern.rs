@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use indexmap::IndexMap;
 
 use super::infer::{InferEngine, Ty};
-use crate::span::Span;
+use al_syntax::span::Span;
 
 /// Which stage of an or-pattern a frame is in. The canonical set only exists
 /// once the first alternative has been fully typed, so it lives inside

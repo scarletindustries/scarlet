@@ -8,14 +8,14 @@ use smallvec::SmallVec;
 
 /// One slot per declared constructor field. Constructor arity is small, so the
 /// common case stays off the heap.
-pub(crate) type Slots<T> = SmallVec<[Option<T>; 4]>;
+pub type Slots<T> = SmallVec<[Option<T>; 4]>;
 
 /// A malformed argument list. Each variant hands back the offending item
 /// itself, so a caller that needs its span carries the span in `T` rather than
 /// re-indexing the sequence it passed in. Elaboration and the exhaustiveness
 /// checker discard these (the typechecker has already reported them); the
 /// compiler renders them.
-pub(crate) enum SlotError<L, T> {
+pub enum SlotError<L, T> {
     /// Positional item past the last declared field.
     ExtraPositional(T),
     /// Label naming no declared field, with the label.
@@ -36,7 +36,7 @@ pub(crate) enum SlotError<L, T> {
 /// Both the slot count and the label lookup come from this same slice, so a
 /// label table that disagrees with the arity is unspellable — there is no
 /// second width to drift from.
-pub(crate) fn slot_labeled<L: PartialEq + Copy, T>(
+pub fn slot_labeled<L: PartialEq + Copy, T>(
     fields: &[Option<L>],
     items: impl IntoIterator<Item = (Option<L>, T)>,
 ) -> (Slots<T>, Vec<SlotError<L, T>>) {

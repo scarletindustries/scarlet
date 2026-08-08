@@ -31,6 +31,8 @@ dependencies = [
 name = "al_core"
 version = "0.1.0"
 dependencies = [
+ "al_syntax",
+ "al_types",
  "al_vm",
  "cranelift-codegen",
  "cranelift-frontend",
@@ -42,7 +44,24 @@ dependencies = [
  "percent-encoding",
  "petgraph",
  "smallvec",
+]
+
+[[package]]
+name = "al_syntax"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
  "unicode-width",
+]
+
+[[package]]
+name = "al_types"
+version = "0.1.0"
+dependencies = [
+ "al_syntax",
+ "al_vm",
+ "indexmap",
+ "smallvec",
 ]
 
 [[package]]

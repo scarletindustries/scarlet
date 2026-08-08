@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 
 use super::editor::{Editor, build_editor_url, detect_editor};
 use super::{Diagnostic, Severity, count_errors};
-use crate::module::ModuleKey;
+use crate::module_path::ModuleKey;
 use crate::term::Palette;
 
 /// A detected editor plus the canonical path to link to. Only constructed

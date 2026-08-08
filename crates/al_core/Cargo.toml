@@ -9,6 +9,8 @@ edition = "2024"
 alloc-counter = ["al_vm/alloc-counter"]
 
 [dependencies]
+al_syntax = { path = "../al_syntax" }
+al_types = { path = "../al_types" }
 al_vm = { path = "../al_vm" }
 indexmap = { workspace = true }
 cranelift-codegen = { workspace = true }
@@ -20,4 +22,3 @@ smallvec = "1.15"
 petgraph = "0.8"
 include_dir = { version = "0.7", features = ["glob"] }
 percent-encoding = "2"
-unicode-width = "0.1"

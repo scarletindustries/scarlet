@@ -39,7 +39,7 @@ pub struct Diagnostic {
     /// `compile_module_body` stamps every diagnostic raised while an imported
     /// module is being compiled with that module's key, so the printer never
     /// renders a span from module A against file B's text.
-    pub source: Option<crate::module::ModuleKey>,
+    pub source: Option<crate::module_path::ModuleKey>,
 }
 
 impl Diagnostic {

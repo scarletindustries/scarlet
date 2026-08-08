@@ -6,12 +6,12 @@ use indexmap::{IndexMap, IndexSet};
 use smallvec::SmallVec;
 
 use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Variant, VariantField};
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::span::Span;
 use crate::type_def::{
     FieldDef, PrimitiveKind, Type, TypeId, prim_names as pn, t_array, t_float, t_int, t_string,
     t_tuple, t_var,
 };
+use al_syntax::diagnostic::{Diagnostic, DiagnosticCode};
+use al_syntax::span::Span;
 
 // ============================================================================
 // Constraints (Elm-style constrained type variables)
@@ -307,7 +307,7 @@ pub enum ValueKind {
     /// `op` is the resolved VM opcode; the `@vm(name)` string was mapped
     /// through `bytecode::builtin_op` at analysis time so an unknown name
     /// is a compile error at the annotation, never a codegen fallthrough.
-    Builtin { op: crate::bytecode::Op },
+    Builtin { op: al_vm::bytecode::Op },
     /// A data constructor. Carries enough to compile pattern-match and
     /// constructor-call without re-consulting the type env.
     Constructor {

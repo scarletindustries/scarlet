@@ -38,54 +38,11 @@ pub use uri::{ModuleUriError, module_uri, path_to_uri};
 // EntityKind / ReferenceKind
 // ============================================================================
 
-/// What a definition *is*. Drives LSP symbol kinds and the
-/// unused/dead-code rules (e.g. a `ModuleAlias` is "unused" when no
-/// `Qualified` reference targets it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EntityKind {
-    /// A `let`/parameter/match binder — a local value.
-    Value,
-    /// A top-level `fn` (module function or `@vm` intrinsic).
-    Function,
-    /// A top-level `const`.
-    Constant,
-    /// A data constructor of a `type`.
-    Constructor,
-    /// A nominal `type` (custom, alias, or external).
-    Type,
-    /// The local binding introduced by `import a/b` or `import a/b as c`,
-    /// used to resolve qualified `c.member` accesses back to the import.
-    ModuleAlias,
-    /// A labelled field of a constructor variant.
-    Field,
-}
+// `EntityKind` — what a definition *is* — moved to `al_types`
+// (`types::environment`), which keys constructor/field metadata on it; the
+// reference graph re-exports it so `DefId`-keyed consumers keep one enum.
+pub use al_types::types::EntityKind;
 
-impl EntityKind {
-    /// Human-readable noun for this kind, used in the hover panel and the
-    /// unused/dead-code hint message.
-    pub fn noun(self) -> &'static str {
-        match self {
-            EntityKind::Value => "value",
-            EntityKind::Function => "function",
-            EntityKind::Constant => "constant",
-            EntityKind::Constructor => "constructor",
-            EntityKind::Type => "type",
-            EntityKind::ModuleAlias => "module",
-            EntityKind::Field => "field",
-        }
-    }
-
-    /// Whether goto-definition on a target of this kind should navigate. A
-    /// `ModuleAlias` definition spans the whole `import` declaration, so
-    /// resolving it would be a no-op self-jump; the final path segment is
-    /// handled separately as an `Import` occurrence.
-    pub fn is_navigable(self) -> bool {
-        !matches!(self, EntityKind::ModuleAlias)
-    }
-}
-
-/// How a name is being used at an occurrence site. Mirrors Gleam's
-/// reference-kind set, adapted to al's import syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferenceKind {
     /// `module.member` — qualified through an import alias.

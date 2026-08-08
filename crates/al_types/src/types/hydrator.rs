@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use smallvec::SmallVec;
 
 use super::{ArenaSlice, InferEngine, StrId, Ty, TypeBody, TypeEnv, pool};
-use crate::ast;
-use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::span::Span;
-use crate::token::is_type_name;
+use al_syntax::ast;
+use al_syntax::diagnostic::{Diagnostic, DiagnosticCode};
+use al_syntax::span::Span;
+use al_syntax::token::is_type_name;
 
 /// A successfully-resolved type-name occurrence: the use-site span plus the
 /// canonical identity (owning module + interned name) of the `TypeInfo` it
