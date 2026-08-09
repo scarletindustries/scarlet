@@ -1397,12 +1397,11 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
 }
 
 /// A callee, or the constructor whose arguments must be slotted before it can
-/// be one. Keeping these apart is what stops `ctor_call` from having to invent
-/// a placeholder [`TypedCallee`].
+/// be one. Keeping these apart stops `ctor_call` from having to invent a
+/// placeholder [`TypedCallee`].
 enum Callee {
-    /// A saturated constructor call, with the scheme and denotation the callee
-    /// walk resolved. Carrying them is what lets `ctor_call` work for a
-    /// qualified `mod.Ctor(..)`, whose bare name is not in scope.
+    /// A saturated constructor call. It carries the scheme and denotation so a
+    /// qualified `mod.Ctor(..)`, whose bare name is not in scope, still works.
     Ctor {
         scheme: Ty,
         den: Denotation,
@@ -1414,10 +1413,9 @@ enum Callee {
 /// `Let`/`Seq` tree.
 ///
 /// `Elab::block_nodes` collects these in evaluation order and folds once.
-/// Recursing per statement instead — `block_nodes` → `statement` → `let_rest` →
-/// `block_nodes` — costs three stack frames per statement, and a module toplevel
-/// has one statement per declaration: a 1200-declaration module overflowed the
-/// default thread stack before the elaborator reached its tail.
+/// Recursing per statement costs three stack frames each, and a module toplevel
+/// has one statement per declaration: 1200 declarations overflowed the default
+/// thread stack.
 enum Frame {
     /// `let bind = init;`
     Let(TypedBind, TypedExpr),

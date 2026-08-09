@@ -378,12 +378,9 @@ mod tests {
         crate::core_ir::emit::emit(&f, &mut ctx).layout
     }
 
-    // ---- the facts ------------------------------------------------------
-
     #[test]
     fn bit_facts_match_the_value_encoding() {
         let facts = value_bits();
-        // Small-int round trips: header test + payload sign-extension.
         for i in [0i64, 1, -1, 42, -42, (1 << 47) - 1, -(1 << 47)] {
             let bits = Value::small_int(i).to_bits();
             assert_eq!(bits & facts.header_mask, facts.int_header, "{i}");
@@ -393,12 +390,9 @@ mod tests {
         let mut h = ProcHeap::new();
         let big = Value::int_in(&mut h, i64::MAX);
         assert_ne!(big.to_bits() & facts.header_mask, facts.int_header);
-        // Bool boxing is header | flag; nil is a fixed word.
         assert_eq!(facts.bool_true, facts.bool_false | 1);
         assert_eq!(Value::nil().to_bits(), facts.nil);
     }
-
-    // ---- slot access ----------------------------------------------------
 
     #[test]
     fn load_reads_the_interpreter_slot_word() {
@@ -434,8 +428,7 @@ mod tests {
         });
         let f: extern "C" fn(i64, u64) = unsafe { std::mem::transmute(code) };
 
-        // Old word is a mortal BigInt with rc 1 — `StoreLocal` over it must
-        // free it, exactly like `self.stack[slot] = v` dropping the old value.
+        // Old word is a mortal BigInt with rc 1, so the store must free it.
         let mut h = ProcHeap::new();
         let old = Value::int_in(&mut h, i64::MAX);
         let mut frame = vec![Value::small_int(0), old];

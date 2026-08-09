@@ -995,19 +995,13 @@ impl VM {
     /// root into the global area. The global table holds only frozen words, so
     /// it is not a GC root and `PushGlobal` is a word push on every scheduler.
     ///
-    /// The `base_slot == 0 && current_is_main` guard singles out the entry
-    /// frame. Spawned processes also seed a frame at base_slot 0, hence
-    /// `is_main`. Within main no callee can land at base_slot 0 because
-    /// `__main__` opens with the precompiled stdlib's binding stores, so a
-    /// callee's base is always at least the stdlib binding count. Remove that
-    /// floor and a zero-arity module-scope call would publish the callee's
-    /// locals as globals.
+    /// The caller's `base_slot == 0 && current_is_main` guard singles out the
+    /// entry frame. No callee in main can land at base_slot 0 only because
+    /// `__main__` opens with the stdlib's binding stores; remove that floor and
+    /// a zero-arity module-scope call would publish its own locals as globals.
     ///
-    /// The publish is unconditional, so a slot stored twice is frozen and
-    /// published twice. The contract is publish-before-read, not
-    /// publish-once: all of a slot's stores happen inside the one top-level
-    /// statement that owns it, before any closure that could `PushGlobal` it
-    /// exists.
+    /// The publish is unconditional, so a slot stored twice is published twice.
+    /// The contract is publish-before-read, not publish-once.
     #[cold]
     #[inline(never)]
     fn publish_toplevel(&mut self, slot: usize) {

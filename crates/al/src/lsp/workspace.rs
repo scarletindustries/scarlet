@@ -236,14 +236,10 @@ impl Workspace {
         }
     }
 
-    /// Index every non-stdlib `.al` file under `root` into `documents` and
-    /// warm its session, without publishing diagnostics (the file is not in
-    /// `open`). Stdlib files are skipped: they are precompiled and seeded into
-    /// every session, so re-checking them here via `check_as_module` bypasses
-    /// the sessions entirely — pure latency that contributes nothing to
-    /// cross-module resolution. Idempotent (a file already in `documents` is
-    /// left untouched), so it is safe to call again for a workspace folder
-    /// added at runtime after the initial scan latched.
+    /// Index every non-stdlib `.al` file under `root` into `documents` and warm
+    /// its session. Stdlib files are already seeded into every session, so
+    /// re-checking them here would be pure latency. Idempotent, so it is safe
+    /// to call again for a folder added after the initial scan latched.
     pub(super) fn index_root(&mut self, root: &Path) {
         let mut files = Vec::new();
         module::collect_al_files(root, &mut files);
@@ -263,12 +259,9 @@ impl Workspace {
         }
     }
 
-    /// Parse and type-check `text` as `uri`, updating the workspace state
-    /// (session, reverse-edge index, `entry_uri`) and returning the LSP
-    /// diagnostics for `uri`. The transport layer decides whether to publish
-    /// them (only client-open files get a `publishDiagnostics` notification);
-    /// the workspace scan discards the return, and a query's `ensure_entry`
-    /// re-root stages it for the transport layer to drain.
+    /// Parse and type-check `text` as `uri`, updating the session, reverse-edge
+    /// index and `entry_uri`, and return the LSP diagnostics. Callers decide
+    /// whether to publish them.
     fn analyze_text(&mut self, uri: &str, text: &str) -> Vec<Json> {
         eprintln!("[AL LSP] Analyzing: {uri}");
 

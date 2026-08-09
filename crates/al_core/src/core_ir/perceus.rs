@@ -262,23 +262,16 @@ impl<'p> Perceus<'p> {
 
     /// Release the argument slots of a self-tail-call.
     ///
-    /// `TailCallSelf` keeps its frame: the VM's `collapse_tail_frame_self`
-    /// swaps the new arguments into the parameter slots and leaves the
-    /// remaining locals alone, because those slots *are* the per-frame reuse
-    /// table (loop-carried `Drop`→`Reuse` pairing). Every other tail call
-    /// drains `[base, args_start)`, which releases the caller's locals before
-    /// the callee runs; the self-tail edge never does. So a heap argument that
-    /// still sits in a local slot enters the next iteration at rc==2 and its
-    /// `Drop` refuses to hollow it — the canonical
-    /// `map xs f = match xs { Cons(h,t) -> Cons(f h, map t f) }` never reuses
-    /// when a self-recursive driver threads the list through itself.
+    /// `TailCallSelf` keeps its frame and does not drain `[base, args_start)`
+    /// the way every other tail call does, because those slots *are* the
+    /// per-frame reuse table. Without this, a heap argument still sitting in a
+    /// local slot enters the next iteration at rc==2 and its `Drop` refuses to
+    /// hollow it, so a self-recursive `map` never reuses.
     ///
-    /// Emit a `Drop` for each distinct heap argument immediately before the
-    /// `Tail`; `emit` sinks them past the operand pushes (see
-    /// `emit::split_self_tail_drops`), so the `PushLocal` dup keeps the value
-    /// alive while the slot's own reference is released and the callee's
-    /// parameter becomes the sole owner. `shape: None` keeps the reuse walk
-    /// from parking a *live* cell as a token.
+    /// `emit::split_self_tail_drops` sinks these drops past the operand pushes,
+    /// so the `PushLocal` dup keeps the value alive while the slot's own
+    /// reference goes. `shape: None` keeps the reuse walk from parking a live
+    /// cell as a token.
     fn release_self_tail_args(&mut self, a: Atom) -> CoreExpr {
         let Atom::Call {
             callee: Callee::Self_,
@@ -317,10 +310,9 @@ impl<'p> Perceus<'p> {
             dead_binders: Vec<LocalId>,
             scrut_shape: Option<ReuseShape>,
         }
-        // The match itself reads `scrut`; each arm then owns it (destructure
-        // moves the fields out and the cell is dead). `scrut` is live-in to
-        // the Match but is *not* propagated into `live_union` from the arms —
-        // it drops at each arm head unless the arm body itself re-reads it.
+        // The match reads `scrut`; each arm then owns it. `scrut` is live-in to
+        // the Match but is not propagated into `live_union` from the arms: it
+        // drops at each arm head unless that arm re-reads it.
         let mut live_union = Live::new();
         let mut lowered: Vec<Arm> = Vec::with_capacity(arms.len());
         for (pat, body) in arms {
@@ -347,12 +339,9 @@ impl<'p> Perceus<'p> {
         let arms = lowered
             .into_iter()
             .map(|a| {
-                // Outer locals live into some other arm but not this one drop
-                // here; plus this arm's dead pattern binders; plus the
-                // scrutinee if this arm doesn't re-read it. When the pattern
-                // proved the variant, the scrutinee's drop carries that arity
-                // so the reuse walk sees a sized token even for a
-                // multi-variant type.
+                // When the pattern proved the variant, the scrutinee's drop
+                // carries that arity, so the reuse walk sees a sized token even
+                // for a multi-variant type.
                 let mut drops = set_diff(&live_union, &a.live);
                 if !scrut_live_after && !a.live.contains(&scrut) {
                     drops.push(scrut);

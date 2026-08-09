@@ -1,25 +1,18 @@
-//! Mid-flight process migration between schedulers
+//! Mid-flight process migration between schedulers.
 //!
-//! A process owns all of its state — operand stack, call frames, and the
-//! heap its values live in — so moving it to another scheduler is a plain
-//! [`Process`] move; nothing is copied or rebuilt. The one thing
-//! a process references that it does NOT own is its socket fds:
-//! `tcp_listeners`/`tcp_connections` are per-scheduler side tables, so a
-//! migrating process's fds must be re-homed from the donor's tables into the
-//! destination's. A [`Migrant`] is exactly that pairing: the moved process
-//! plus the fds traveling with it.
+//! A process owns its stack, frames and heap, so moving it is a plain
+//! [`Process`] move. The exception is its socket fds: `tcp_listeners` and
+//! `tcp_connections` are per-scheduler side tables, so those must be re-homed
+//! from the donor into the destination. A [`Migrant`] is that pairing.
 //!
-//! Protocol invariants (the donation path in `scheduler_loop` relies on these):
+//! Two invariants the donation path in `scheduler_loop` relies on:
 //!
-//! - **Live count.** A migrant stays counted in `Runtime::live` for its whole
-//!   journey: it was counted when it spawned, donation never decrements, and
-//!   adoption never increments. This is why [`VM::adopt_migrant`] pushes the
-//!   run queue directly instead of going through `Runtime::submit`
-//!   (which would double-count), and why a migrant in transit holds
-//!   `live > 0` — there is no shutdown race while one is in flight.
-//! - **Abort safety.** Donation is gated by the read-only
-//!   [`VM::can_donate_fds`] pre-check so [`VM::detach_fds`] runs only when
-//!   it cannot need to abort; `detach_fds` itself is infallible.
+//! - A migrant stays counted in `Runtime::live` for its whole journey. Donation
+//!   never decrements and adoption never increments, so [`VM::adopt_migrant`]
+//!   must push the run queue directly rather than call `Runtime::submit`, which
+//!   would double-count.
+//! - [`VM::can_donate_fds`] is read-only and runs first, so [`VM::detach_fds`]
+//!   can be infallible.
 
 use std::collections::HashSet;
 use std::net::TcpStream;

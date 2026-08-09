@@ -1367,7 +1367,7 @@ mod tests {
         assert_eq!(vm.frames.len(), 0);
         assert_eq!(vm.stack.len(), 1);
         assert_eq!(small(vm.stack[0].to_bits()), 37);
-        // The frame pop released the handle: the closure is freed.
+        // The frame pop released the handle.
         assert_eq!(take_freed_objects(), 1);
     }
 

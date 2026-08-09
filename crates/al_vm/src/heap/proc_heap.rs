@@ -42,18 +42,13 @@ thread_local! {
 
 /// A process's allocator handle: a zero-sized marker over mimalloc's per-thread
 /// default heap. See the module docs for why there is no per-process
-/// `mi_heap_t`.
-///
-/// `ProcHeap` is trivially `Send` (static assert in `mod.rs`) — it holds no
-/// thread-bound state. Objects are allocated from mimalloc's per-thread default
-/// heap and freed with `mi_free`, which is cross-thread safe, so migrating the
-/// owning `Process` to another scheduler is a plain move.
+/// `mi_heap_t`. It holds no thread-bound state, so moving the owning `Process`
+/// to another scheduler is a plain move.
 #[derive(Default)]
 pub struct ProcHeap;
 
-/// OOM abort for [`ProcHeap::alloc_raw`], keeping the `Arena::alloc_words`
-/// contract infallible: report the failed layout through the global
-/// allocation-error hook (which aborts) instead of unwinding.
+/// OOM abort for [`ProcHeap::alloc_raw`]. Aborts rather than unwinds, keeping
+/// the `Arena::alloc_words` contract infallible.
 #[cold]
 #[inline(never)]
 fn alloc_failed(bytes: usize) -> ! {

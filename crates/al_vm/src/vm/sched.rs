@@ -528,11 +528,8 @@ impl Runtime {
         out
     }
 
-    /// Drain scheduler `me`'s directed work: pinned seeds that must run here
-    /// ([`Runtime::submit_to`]), plus its inbox — seeds direct-handed by
-    /// `submit` and migrants donated by peers. Directed work is taken
-    /// unconditionally (a busy scheduler drains it at every yield); only the
-    /// undirected overflow queue is subject to the pickup limit.
+    /// Drain scheduler `me`'s pinned seeds and inbox. Directed work is taken
+    /// whole; only the overflow queue has a pickup limit.
     pub fn take_directed(&self, me: usize) -> Vec<Inbound> {
         let slot = &self.slots[me];
         let mut out: Vec<Inbound> = lock(&slot.pinned).drain(..).map(Inbound::Seed).collect();
@@ -540,21 +537,16 @@ impl Runtime {
         out
     }
 
-    /// Take up to [`SEED_BATCH`] seeds from the shared overflow queue:
-    /// undirected work raced for by whichever scheduler has capacity first.
+    /// Take up to [`SEED_BATCH`] seeds from the shared overflow queue.
     pub fn take_overflow(&self) -> Vec<Seed> {
         let mut q = lock(&self.injector);
         let take = q.len().min(SEED_BATCH);
         q.drain(..take).collect()
     }
 
-    /// Steal one unit of inbound work from another scheduler's inbox: handed
-    /// off but not yet taken. Called only by an idle scheduler with nothing
-    /// local, so the work starts immediately instead of waiting for its
-    /// assigned scheduler to wake; the owner finding an empty inbox simply
-    /// parks again. This applies to donated migrants as much as seeds — a
-    /// stolen migrant's live count rides with it (counted since its original
-    /// submit), so the handoff is race-free wherever it lands.
+    /// Steal one inbound work item from another scheduler's inbox. Only for an
+    /// idle scheduler with nothing local; the owner finding an empty inbox just
+    /// parks again. A stolen migrant's `live` count rides with it.
     pub fn steal_inbound(&self, me: usize) -> Option<Inbound> {
         let n = self.slots.len();
         for off in 1..n {
@@ -566,9 +558,8 @@ impl Runtime {
         None
     }
 
-    /// A process entered the live set. Paired with [`Runtime::process_finished`];
-    /// every path that adds a process to the count (submit, submit_to, local
-    /// spawn) goes through here so the counter's accounting has one owner.
+    /// A process entered the live set. Paired with
+    /// [`Runtime::process_finished`]; every path that adds a process goes here.
     pub fn process_started(&self) {
         self.live.fetch_add(1, Ordering::AcqRel);
     }

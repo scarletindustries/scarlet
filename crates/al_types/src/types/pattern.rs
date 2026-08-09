@@ -72,9 +72,8 @@ impl PatternBindings {
     }
 
     /// Has `name` already been bound on the current path through the pattern?
-    /// Outside any or-pattern that is simply "is it in `initial`"; inside, it
-    /// is "was it bound before the outermost or, or earlier in any enclosing
-    /// alternative currently being typed".
+    /// Inside an or-pattern that means: bound before the outermost or, or
+    /// earlier in an enclosing alternative being typed now.
     fn already_bound(&self, name: &str) -> bool {
         match self.frames.first() {
             None => self.initial.contains_key(name),
@@ -87,11 +86,9 @@ impl PatternBindings {
         }
     }
 
-    /// The write view `type_pattern` records bindings through. It exposes
-    /// only [`bind`](PatternSink::bind) and [`enter_or`](PatternSink::enter_or)
-    /// — `clear` and the result iterator stay here on the owner, so pattern
-    /// typing cannot reset the accumulator (or read half-built results)
-    /// mid-pattern.
+    /// The write view `type_pattern` records bindings through. `clear` and the
+    /// result iterator stay on the owner, so pattern typing cannot reset the
+    /// accumulator or read half-built results mid-pattern.
     pub fn sink(&mut self) -> PatternSink<'_> {
         PatternSink(self)
     }
@@ -110,11 +107,10 @@ impl PatternBindings {
             );
             return false;
         }
-        // A binding is *fresh* (goes into `initial`) only when every enclosing
-        // or-pattern is still on its first alternative. As soon as any frame is
-        // past its first alternative (`Checking`), the name must belong to the
-        // innermost such frame's canonical set and we unify against the type
-        // `initial` recorded when it was first (freshly) bound.
+        // A binding is fresh only while every enclosing or-pattern is on its
+        // first alternative. Once one is `Checking`, the name must be in that
+        // frame's canonical set and unify with the type `initial` recorded for
+        // its fresh binding.
         let innermost_checking = self.frames.iter().rev().find_map(|f| match &f.phase {
             OrPhase::Checking { canonical, .. } => Some(canonical),
             OrPhase::Establishing { .. } => None,

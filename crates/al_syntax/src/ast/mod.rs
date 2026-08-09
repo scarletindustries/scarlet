@@ -216,18 +216,13 @@ pub struct FunctionParameter {
     pub typ: Option<TypeIdentifier>,
 }
 
-/// A function declaration's body. Encoding "normal fn" vs "`@vm` intrinsic" in
-/// the type (instead of `Option<Expression>` + a separate `@vm` predicate)
-/// makes the desync class impossible: the parser is the single authority, a
-/// `@vm` fn always carries its op, and a body-less normal fn is
-/// unrepresentable. (Previously the parser keyed body-presence on the `@vm`
-/// attribute *name* while the siphon keyed removal on the `@vm` *arg*; a bare
-/// `@vm` diverged the two and panicked an `unreachable!()`.)
+/// A function declaration's body. Not `Option<Expression>` plus a separate
+/// `@vm` predicate: the two can desync, and this makes a `@vm` fn without its
+/// op, or a body-less normal fn, unrepresentable.
 #[derive(Debug, Clone)]
 pub enum FnBody {
-    /// A normal function with an AL expression body.
     Block(Expression),
-    /// A `@vm(op)` intrinsic: no AL body; carries the VM op identifier.
+    /// A `@vm(op)` intrinsic: no AL body, carries the VM op identifier.
     Vm(Identifier),
 }
 
@@ -263,8 +258,8 @@ impl_span!(Declaration: Const, Function, Type);
 
 #[derive(Debug, Clone)]
 pub enum TypeBody {
-    /// `type Name { Ctor ... }`. `opaque` lives here so that opaque-on-alias
-    /// and opaque-on-external are unrepresentable in the AST.
+    /// `type Name { Ctor ... }`. `opaque` lives here so opaque-on-alias and
+    /// opaque-on-external are unrepresentable.
     Variants {
         ctors: Vec<Constructor>,
         opaque: bool,
@@ -295,11 +290,8 @@ pub struct ImportItem {
     pub alias: Option<Identifier>,
 }
 
-/// A relative marker segment of an import path: the `.` / `..` in
-/// `import ../lib/util`. A distinct type — not the literal strings "." /
-/// ".." inside the name list — so the resolver can never confuse a marker
-/// with a module name (or vice versa: a module literally named `.` cannot
-/// be smuggled in as a marker).
+/// The `.` / `..` in `import ../lib/util`. A distinct type, not a "." string
+/// in the name list, so a marker and a module name can never be confused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelSeg {
     /// `.` — the importing file's own directory.
@@ -317,9 +309,8 @@ impl std::fmt::Display for RelSeg {
     }
 }
 
-/// A module path as written in an `import`: relative markers first, module
-/// names after. The split makes "markers lead, names follow" structurally
-/// true — `import a/../b` is unrepresentable, not merely rejected.
+/// A module path as written in an `import`. The split makes "markers lead,
+/// names follow" structural: `import a/../b` is unrepresentable.
 #[derive(Debug, Clone)]
 pub struct ImportPath {
     /// Leading `.` / `..` segments; empty for stdlib (`al/...`) and bare paths.

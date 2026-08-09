@@ -101,8 +101,8 @@
 //! |                   | and fd re-homing                                   |
 //! | [`freeze`]        | publishing top-level bindings into the program-    |
 //! |                   | wide frozen area                                   |
-//! | [`templates`]     | precomputed frozen enum templates for prelude and  |
-//! |                   | stdlib value construction                          |
+//! | [`templates`]     | the resolved view of `Program.abi`: bound          |
+//! |                   | constructor templates, indexed by slot             |
 //! | [`binary`]        | bit-granular reads and writes on `Binary` values   |
 //! | [`http`]          | the HTTP/1.1 byte-scanning hot paths behind        |
 //! |                   | `al/http`                                          |
@@ -143,7 +143,6 @@ use crate::bytecode::{BinaryRef, Program, Value};
 use crate::bytecode::{Function, Op, op};
 use crate::frozen::FrozenBuilder;
 use crate::heap::ProcHeap;
-use crate::template::StdlibTemplates;
 use smallvec::SmallVec;
 
 mod binary;
@@ -190,7 +189,7 @@ use migrate::Migrant;
 use native::NativePending;
 use poll::Wait;
 use sched::{Inbound, Runtime, Seed};
-use templates::{EnumTemplate, PreludeTemplates, enum_template};
+use templates::Templates;
 use text::{int_to_ascii, parse_uint_ascii};
 
 /// A VM-level failure. The variant distinguishes user-visible runtime
