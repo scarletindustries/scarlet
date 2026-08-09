@@ -36,10 +36,6 @@ const SLOTS_PER_SLAB: usize = 64;
 /// [`ORPHANED_SLOTS`].
 const LOCAL_FREE_CAP: usize = SLOTS_PER_SLAB;
 
-/// VMAs left for everything that is not a process stack. Each live slot costs
-/// exactly 2 VMAs (guard + usable).
-const VMA_HEADROOM: usize = 2048;
-
 /// Live (acquired, not yet released) stacks, shared by every scheduler's pool:
 /// the VMA budget is per address space, not per pool.
 static LIVE_STACKS: AtomicUsize = AtomicUsize::new(0);

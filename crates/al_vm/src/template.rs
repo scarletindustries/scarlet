@@ -7,7 +7,6 @@ use crate::TypeId;
 use crate::abi::{AbiSlot, TemplateIdx};
 use crate::bytecode::{Arena, Op, Value};
 use crate::frozen::FrozenBuilder;
-use crate::tivec::TiVec;
 
 /// One constructor, ready to instantiate.
 #[derive(Debug, Clone)]

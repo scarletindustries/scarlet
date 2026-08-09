@@ -485,9 +485,9 @@ impl ModuleTable {
     }
 
     /// Lowest type id not covered by any allocated range. The entry module's
-    /// `next_type_id` is bumped to at least this after `process_imports` so it
-    /// allocates past every reserved block — including those whose owners were
-    /// cache hits and so contributed nothing to `next_type_id` this pass.
+    /// `next_type_id` is bumped to at least this after `process_imports`, so it
+    /// clears blocks whose owners were cache hits and contributed nothing to
+    /// `next_type_id` this pass.
     pub fn id_high_water(&self) -> TypeId {
         self.id_high_water
     }
@@ -505,7 +505,7 @@ impl ModuleTable {
         self.id_bases.get(key).copied()
     }
 
-    /// Number of module bodies actually compiled (test/telemetry only).
+    /// Module bodies actually compiled. Telemetry only.
     pub fn compile_count(&self) -> u32 {
         self.compile_count
     }
@@ -541,9 +541,9 @@ impl ModuleTable {
                 }
             }
         }
-        // `Watermark::earlier`, not `Iterator::min`: watermarks with equal
-        // pool lengths tie under `Ord`, and `earlier` merges their env
-        // rollback payloads instead of keeping whichever came first.
+        // `Watermark::earlier`, not `Iterator::min`: equal pool lengths tie
+        // under `Ord`, and `earlier` merges the env payloads on a tie rather
+        // than keeping whichever came first.
         let min_wm = closure
             .iter()
             .filter_map(|k| self.loaded.get(k).and_then(|cm| cm.watermark()))
@@ -572,8 +572,7 @@ impl ModuleTable {
     }
 }
 
-/// `(mtime, len)` of `path`, or `None` if either is unavailable (a missing
-/// file, or a platform whose filesystem doesn't expose mtime). `None` makes
+/// `(mtime, len)` of `path`, or `None` if either is unavailable. `None` makes
 /// `source_changed` fall back to the read + hash path, so it is always safe.
 fn file_stat(path: &Path) -> Option<(std::time::SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
@@ -596,14 +595,13 @@ pub enum ModuleSource {
 }
 
 /// A resolved import: where the module's source lives, plus its canonical
-/// identity — the segments every downstream consumer (module cache, reference
-/// interner, qualifier map) must key on, never the path as written.
+/// identity. Every downstream consumer must key on that identity, never on the
+/// path as written.
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
     pub source: ModuleSource,
-    /// Canonical identity segments: [`file_module_path`] of the file an
-    /// on-disk module resolved to; the `al/...` path itself for embedded
-    /// stdlib (its written form *is* its identity).
+    /// [`file_module_path`] of the file an on-disk module resolved to; for
+    /// embedded stdlib the written `al/...` path, which *is* its identity.
     pub canon: ModulePath,
     pub key: ModuleKey,
 }
@@ -628,10 +626,8 @@ pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedMod
         for name in &path.names {
             p.push(name);
         }
-        // Append `.al` rather than `set_extension`, which *replaces* anything
-        // after a dot in the module name (`./b.v2` would look up `b.al`);
-        // appending is the inverse of `file_module_path`'s
-        // `strip_suffix(".al")`, so the name round-trips.
+        // Append `.al` rather than `set_extension`, which would replace
+        // anything after a dot in the module name (`./b.v2` -> `b.al`).
         if let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) {
             p.set_file_name(format!("{name}.al"));
         }

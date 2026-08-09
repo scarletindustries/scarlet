@@ -814,8 +814,8 @@ fn index_or_does_not_evaluate_an_impure_default() {
 }
 
 /// Both encodings, plus every boundary: hit, past the end, negative, empty.
-/// `False` is a nullary constructor rather than a constant, so it exercises
-/// the pushed-default path that a grid walk's `row[x] or False` depends on.
+/// `False` is a nullary constructor, not a constant, so it exercises the
+/// pushed-default path a grid walk's `row[x] or False` depends on.
 #[test]
 fn index_or_covers_both_encodings_and_every_boundary() {
     run_outputs(
@@ -831,11 +831,9 @@ fn index_or_covers_both_encodings_and_every_boundary() {
 #[test]
 fn list_map_unique_reuses_in_place() {
     let _g = ALLOC_LOCK.lock().unwrap();
-    // `chain` re-maps its (uniquely owned) argument `k` times: each map's
-    // output is the next map's sole owner, so every `Cons` is rc==1 at its
-    // drop and eligible for reuse. Varying ONLY `k` (list length fixed at 100)
-    // isolates map's per-call allocation cost — build/sum contribute equally
-    // to both runs and cancel.
+    // `chain` re-maps its uniquely owned argument `k` times, so every `Cons`
+    // is rc==1 at its drop. Varying only `k` isolates map's per-call cost;
+    // build/sum contribute equally to both runs and cancel.
     let prog = |k: u32| {
         format!(
             "{LIST_SRC}\
