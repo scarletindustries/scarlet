@@ -13,10 +13,7 @@ use crate::type_def::{
 use al_syntax::diagnostic::{Diagnostic, DiagnosticCode};
 use al_syntax::span::Span;
 
-// ============================================================================
-// Constraints (Elm-style constrained type variables)
-// ============================================================================
-
+/// An Elm-style constrained type variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Constraint {
     Addable,
@@ -40,12 +37,9 @@ impl Constraint {
         }
     }
 
-    /// Greatest lower bound of two constraints: the constraint admitting
-    /// exactly the types both admit, or `None` when their allowed sets are
-    /// disjoint. Exhaustive over variant pairs, so adding a `Constraint`
-    /// variant fails to compile here until its intersections are spelled out
-    /// — unlike the old "smaller allowed set wins" heuristic, which was only
-    /// correct while the lattice was a chain.
+    /// Greatest lower bound: the constraint admitting exactly the types both
+    /// admit, or `None` when their allowed sets are disjoint. Deliberately
+    /// exhaustive over pairs so a new variant must spell out its intersections.
     pub fn intersect(self, other: Constraint) -> Option<Constraint> {
         match (self, other) {
             (Constraint::Addable, Constraint::Addable) => Some(Constraint::Addable),
@@ -55,12 +49,9 @@ impl Constraint {
         }
     }
 
-    /// Whether a rigid generic carrying `generic` already satisfies *this*
-    /// requirement. True iff every concrete type the generic admits is also
-    /// admitted here (the generic's allowed set ⊆ this constraint's), so a
-    /// constrained var may safely link to the generic without discarding the
-    /// constraint. A generic with no constraint satisfies nothing: an
-    /// unconstrained rigid type variable carries no numeric/addable guarantee.
+    /// Whether a rigid generic carrying `generic` satisfies this requirement,
+    /// so a constrained var may link to it without discarding the constraint.
+    /// An unconstrained generic satisfies nothing: it carries no guarantee.
     fn satisfied_by_generic(self, generic: Option<Constraint>) -> bool {
         match generic {
             Some(g) => {
@@ -72,21 +63,11 @@ impl Constraint {
     }
 }
 
-/// A concrete primitive type the inference engine has resolved a `Ty` to.
-/// Used by codegen to pick type-specialized opcodes; unbound/constrained
-/// vars and every other constructor map to `None`. This is the one
-/// primitive-kind enum, `type_def::PrimitiveKind`, under the short name the
-/// codegen paths use — not a parallel definition to keep in sync.
+/// `type_def::PrimitiveKind` under the short name the codegen paths use.
 pub use crate::type_def::PrimitiveKind as Prim;
 
-// ============================================================================
-// Ty / TypeNode — arena-based type representation
-// ============================================================================
-
-/// Index into `InferEngine.nodes`. A `Ty` is meaningful only relative to the
-/// engine that minted it (or, for static-stdlib types, the engine seeded from
-/// those static arrays). Unlike the previous owned `InferType` tree, `Ty` is
-/// `Copy` so threading types through inference is pointer-sized everywhere.
+/// Index into `InferEngine.nodes`. Meaningful only relative to the engine that
+/// minted it, or the engine seeded from the static stdlib arrays.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Ty(pub u32);
@@ -107,9 +88,8 @@ impl Ty {
 pub struct StrId(pub u32);
 
 impl StrId {
-    /// Sentinel `StrId` meaning "no string". Used where a field is logically
-    /// `Option<String>` but the struct must stay `Copy` and
-    /// const-constructible.
+    /// Sentinel `StrId` meaning "no string", for fields that would be
+    /// `Option<String>` if the struct did not have to stay const-constructible.
     pub const NONE: StrId = StrId(u32::MAX);
 
     #[inline]
@@ -119,9 +99,8 @@ impl StrId {
 }
 
 /// Cache slot for a nullary primitive `Con` node. `unify` compares `Con` by
-/// nominal `TypeId` (never arena identity), so one arena node per primitive
-/// can be shared across every literal / comparison / condition instead of
-/// pushing a fresh one on each `ty_int`/`ty_bool`/`icon_*` call.
+/// nominal `TypeId`, never arena identity, so one node per primitive can be
+/// shared across every literal instead of minting one per call.
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
 pub enum NullaryPrim {
@@ -142,10 +121,9 @@ impl Default for NullaryCache {
     }
 }
 
-/// Zero-sized markers naming which `InferEngine` side-pool an [`ArenaSlice`]
-/// indexes. The phantom parameter makes cross-pool indexing (e.g. handing a
-/// `Scheme.quantified` slice to `children_of`) a compile error instead of a
-/// silent out-of-bounds / garbage read.
+/// Markers naming which `InferEngine` side-pool an [`ArenaSlice`] indexes, so
+/// handing a slice to the wrong pool is a compile error rather than a garbage
+/// read.
 pub mod pool {
     pub enum Children {}
     pub enum Quants {}
@@ -155,19 +133,16 @@ pub mod pool {
     pub enum Variants {}
 }
 
-/// Half-open `[start, start+len)` into one of the `InferEngine` side-pools,
-/// tagged by which pool `P` it belongs to (see [`pool`]). `len` is `u16` — no
-/// AL type has more than 65 535 type-arguments, parameters, or tuple elements;
-/// keeping `TypeNode` at 12 bytes matters. `PhantomData` is zero-sized so the
-/// tag costs nothing at runtime.
+/// Half-open `[start, start+len)` into the `InferEngine` side-pool `P` (see
+/// [`pool`]). `len` is `u16` to keep `TypeNode` at 12 bytes; no AL type has
+/// more than 65535 type arguments, parameters, or tuple elements.
 pub struct ArenaSlice<P> {
     pub start: u32,
     pub len: u16,
     _pool: PhantomData<P>,
 }
 
-// Manual impls: `#[derive]` would add spurious `P: Trait` bounds, but the
-// phantom marker is uninhabited and never inspected.
+// Manual impls: `#[derive]` would add spurious `P: Trait` bounds.
 impl<P> Clone for ArenaSlice<P> {
     fn clone(&self) -> Self {
         *self
@@ -212,27 +187,21 @@ impl<P> ArenaSlice<P> {
 }
 
 /// One node of a type, stored flat in the engine's arena. `Copy` and
-/// const-constructible so the static stdlib emits a `&'static [TypeNode]`
-/// directly — there is no separate "static IR" mirror.
+/// const-constructible so the static stdlib emits a `&'static [TypeNode]`.
 #[derive(Debug, Clone, Copy)]
 pub enum TypeNode {
     /// A unification variable, indexing into `InferEngine.vars`. Only valid
     /// within the engine that minted it.
     Var(i32),
-    /// A bound (quantified) variable, indexing into the enclosing
-    /// `Scheme.quantified`. Appears only inside a `Scheme.ty` — `instantiate`
-    /// substitutes every `Bound` away before the type enters live inference,
-    /// so `unify`/`find`/`occurs` never see one.
+    /// A quantified variable, indexing into the enclosing `Scheme.quantified`.
+    /// Appears only inside a `Scheme.ty`: `instantiate` substitutes every
+    /// `Bound` away, so `unify`/`find`/`occurs` never see one.
     Bound(u32),
-    /// `Name(args...)` — a nominal type application.
+    /// `Name(args...)`, a nominal type application.
     ///
-    /// `id` is the type's registered nominal identity (`TypeInfo.id`,
-    /// allocated once per declaration); `name` → `engine.strings` is carried
-    /// for display only. Unification and every semantic lookup
-    /// (exhaustiveness, field access, Option/Result detection) go through
-    /// `id`, never the name: two types that happen to share a name — a user's
-    /// `type Parsed` next to `al/http/h1.Parsed` — are different types and
-    /// must neither unify nor answer for each other's variants.
+    /// `name` is display only. Unification and every semantic lookup go
+    /// through `id`, because two types sharing a name (a user's `type Parsed`
+    /// next to `al/http/h1.Parsed`) must not unify or answer for each other.
     Con {
         id: TypeId,
         name: StrId,
@@ -247,10 +216,7 @@ pub enum TypeNode {
     Tuple { elems: ArenaSlice<pool::Children> },
 }
 
-// ============================================================================
-// TyVarState - union-find backing store
-// ============================================================================
-
+/// Union-find backing store for type variables.
 #[derive(Debug, Clone, Copy)]
 enum TyVarState {
     Unbound {
@@ -258,22 +224,18 @@ enum TyVarState {
         constraint: Option<Constraint>,
     },
     /// Substitution edge. `ty` is an arena index, so path compression is a
-    /// single `u32` write — no `Rc`/clone.
+    /// single `u32` write.
     Link { ty: Ty },
-    /// A rigid quantified variable produced by `generalize`. The `id` is the
-    /// originating var id and serves as the stable identity across
-    /// instantiation. `constraint` is carried so `instantiate` can re-mint a
-    /// constrained fresh var.
+    /// A rigid quantified variable produced by `generalize`. `id` is the
+    /// originating var id, the stable identity across instantiation.
     Generic {
         id: i32,
         constraint: Option<Constraint>,
     },
 }
 
-/// State of a var known to be a union-find root — i.e. what
-/// `vars[id]` holds when `id` came from `find()` returning `Var(id)`. `Link`
-/// is unrepresentable here, so downstream matches need not (and cannot)
-/// invent handling for it.
+/// What `vars[id]` holds when `id` came from `find()` returning `Var(id)`.
+/// `Link` is unrepresentable, so no downstream match can invent handling for it.
 #[derive(Debug, Clone, Copy)]
 enum RootVarState {
     Unbound {
@@ -286,16 +248,9 @@ enum RootVarState {
     },
 }
 
-// ============================================================================
-// ValueKind - what a name in the value environment refers to
-// ============================================================================
-
-/// What a value name refers to. Carried on `Scheme` so that resolving an
-/// identifier yields both its type and its provenance in one lookup.
-///
-/// `Copy` so that `Scheme` is `Copy`, which lets the precompiled stdlib emit
-/// `&'static [Scheme]` directly with no runtime hydration. Strings are
-/// `StrId`s and label lists are `ArenaSlice`s into `InferEngine.str_slices`.
+/// What a value name refers to. Carried on `Scheme` so resolving an identifier
+/// yields its type and its provenance in one lookup. `Copy`, so the
+/// precompiled stdlib can emit `&'static [Scheme]` with no runtime hydration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValueKind {
     /// Ordinary `let`/param binding. Never instantiated (mono).
@@ -303,10 +258,9 @@ pub enum ValueKind {
     Local,
     /// Top-level `fn` in a module. Generic; instantiated on use.
     ModuleFn,
-    /// VM intrinsic registered from Rust (`println`, `net.listen`, ...).
-    /// `op` is the resolved VM opcode; the `@vm(name)` string was mapped
-    /// through `bytecode::builtin_op` at analysis time so an unknown name
-    /// is a compile error at the annotation, never a codegen fallthrough.
+    /// VM intrinsic registered from Rust. The `@vm(name)` string is resolved
+    /// to an opcode at analysis time, so an unknown name is a compile error at
+    /// the annotation rather than a codegen fallthrough.
     Builtin { op: al_vm::bytecode::Op },
     /// A data constructor. Carries enough to compile pattern-match and
     /// constructor-call without re-consulting the type env.
@@ -320,16 +274,10 @@ pub enum ValueKind {
     },
 }
 
-// ============================================================================
-// Scheme - polymorphic type with quantified variables
-// ============================================================================
-
 /// One quantified variable in a `Scheme`. `origin_id` records which engine var
-/// it was generalized from so that, while the body that owns those rigid vars
-/// is being checked, `instantiate` can hand back the *same* var instead of a
-/// fresh one (the `rigid_ids` mechanism). It is engine-local and meaningless
-/// after a scheme crosses engines — `None` then, which is correct: a static
-/// stdlib scheme is never the body-under-check's own.
+/// it was generalized from, so while that body is being checked `instantiate`
+/// hands back the same var instead of a fresh one (the `rigid_ids` mechanism).
+/// It is engine-local, so `None` once a scheme crosses engines.
 #[derive(Debug, Clone, Copy)]
 pub struct QuantVar {
     pub constraint: Option<Constraint>,
@@ -356,10 +304,6 @@ pub fn mono(ty: Ty) -> Scheme {
         def: None,
     }
 }
-
-// ============================================================================
-// Unification errors
-// ============================================================================
 
 #[derive(Debug, Clone, Copy)]
 pub enum UnifyErrorSituation {
@@ -424,8 +368,8 @@ fn could_not_unify(expected: Ty, given: Ty) -> UnifyError {
     }
 }
 
-/// Re-express a child unification failure in terms of the enclosing types so
-/// the user sees the whole shape, not just the leaf that disagreed.
+/// Re-express a child failure in terms of the enclosing types, so the user
+/// sees the whole shape and not just the leaf that disagreed.
 fn unify_enclosed(err: UnifyError, expected: Ty, given: Ty) -> UnifyError {
     match err {
         UnifyError::CouldNotUnify { situation, .. } => UnifyError::CouldNotUnify {
@@ -450,10 +394,7 @@ pub enum MatchFunTypeError {
     },
 }
 
-// ============================================================================
-// InferEngine - the HM inference engine
-// ============================================================================
-
+/// The Hindley-Milner inference engine.
 #[derive(Debug, Default)]
 pub struct InferEngine {
     /// The type arena. `Ty` indexes into this.
@@ -464,10 +405,8 @@ pub struct InferEngine {
     /// Interned strings. `StrId` indexes into this.
     pub strings: IndexSet<String>,
 
-    // ---- Pools backing the `Copy` data carried by `Scheme`/`TypeInfo`.
-    // These exist so those structs can be `Copy` and const-constructible
-    // (`&'static [Scheme]` in the precompiled stdlib) while still describing
-    // variable-length data. All are append-only; indices are stable.
+    // Pools backing the variable-length data `Scheme`/`TypeInfo` carry while
+    // staying `Copy` and const-constructible. Append-only; indices are stable.
     /// `Scheme.quantified` slices into this.
     pub quants: Vec<QuantVar>,
     /// `ValueKind::Constructor.field_labels` and `TypeInfo.module` slice into
@@ -483,27 +422,19 @@ pub struct InferEngine {
     vars: Vec<TyVarState>,
     next_var_id: i32,
     current_level: i32,
-    /// Var id -> display name, stored as an interned `StrId` (Copy) so
-    /// `instantiate` can record the originating quant's name without
-    /// re-allocating the string on every scheme instantiation. Resolved to
-    /// `&str` lazily via `str()` at display time.
+    /// Var id -> display name.
     var_names: HashMap<i32, StrId>,
-    /// Mirror of every value currently in `var_names`. Kept in lockstep with
-    /// `var_names` (every insert mirrored, cleared together; no per-key removal
-    /// exists) so `var_display_name` can test name collisions in O(1) instead
-    /// of rebuilding a `HashSet` from `var_names.values()` on every call.
+    /// Mirror of `var_names`' values, so collision tests are O(1). Must be kept
+    /// in lockstep: every insert mirrored, both cleared together.
     used_names: HashSet<StrId>,
     next_name_uid: u64,
-    /// Nominal ids of the primitive types the engine itself mints `Con` nodes
-    /// for during literal inference (`icon_int`/`icon_float`/`icon_string`).
-    /// Set once after the prelude is registered (or seeded) so engine-minted
-    /// primitives carry the same identity as compiler-minted ones; defaults
-    /// keep engine-only unit tests working without a prelude.
+    /// Nominal ids for the primitives the engine mints `Con` nodes for during
+    /// literal inference. Set once the prelude is registered, so engine-minted
+    /// primitives share identity with compiler-minted ones. The defaults keep
+    /// engine-only unit tests working with no prelude.
     prim_ids: PrimIds,
-    /// One cached arena `Ty` per nullary primitive. Minted on the first
-    /// `nullary_con` call for that slot and returned on every subsequent one,
-    /// so a per-keystroke recompile allocates one `Int` node instead of one
-    /// per literal. Entries past a `truncate_to` watermark are cleared there.
+    /// One cached arena `Ty` per nullary primitive. `truncate_to` clears
+    /// entries past its watermark.
     nullary_cache: NullaryCache,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -520,11 +451,9 @@ pub struct PrimIds {
 
 impl PrimIds {
     /// Map a nominal type id to the corresponding primitive, if it is one.
-    /// Identity is by id, never name — a user's `type Int { }` is not `Int`.
-    ///
-    /// The single source of this mapping: `InferEngine::as_prim` and
-    /// `ResolvedPool::as_prim` both delegate here, so the two sides of the
-    /// `Ty`/`RTy` divide cannot disagree about what counts as a primitive.
+    /// Identity is by id, never name: a user's `type Int { }` is not `Int`.
+    /// `InferEngine::as_prim` and `ResolvedPool::as_prim` both delegate here so
+    /// the two sides of the `Ty`/`RTy` divide cannot disagree.
     pub fn prim_of(self, id: TypeId) -> Option<Prim> {
         if id == self.int {
             Some(Prim::Int)
@@ -540,10 +469,9 @@ impl PrimIds {
 
 impl Default for PrimIds {
     fn default() -> Self {
-        // Engine-only tests mint primitives before any prelude exists; these
-        // placeholder ids are distinct from each other and from the 1-based
-        // ids `register_type_head` allocates, and they are overwritten by
-        // `set_prim_ids` as soon as a compiler owns the engine.
+        // Placeholders for engine-only tests, distinct from each other and from
+        // the 1-based ids `register_type_head` allocates. `set_prim_ids`
+        // overwrites them as soon as a compiler owns the engine.
         PrimIds {
             int: TypeId(-1),
             float: TypeId(-2),
@@ -559,10 +487,9 @@ pub fn new_engine() -> InferEngine {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EnginePoolWatermark {
-    // Field order is significant: derived `Ord` compares lexicographically, and
-    // pools grow monotonically together, so an earlier watermark compares `<`
-    // a later one on `nodes` first. `ModuleTable::invalidate` relies on `min`
-    // over watermarks picking the earliest-compiled module.
+    // Field order is significant: derived `Ord` compares lexicographically, so
+    // `nodes` decides. `ModuleTable::invalidate` relies on `min` over
+    // watermarks picking the earliest-compiled module.
     pub nodes: usize,
     pub children: usize,
     pub strings: usize,
@@ -573,11 +500,9 @@ pub struct EnginePoolWatermark {
     pub variants: usize,
 }
 
-/// Borrowed view of every static arena/pool slice handed to
-/// [`InferEngine::seed_arena`] (the precompiled stdlib). Named fields — rather
-/// than eight positional slices — so transposing two same-typed pools (e.g.
-/// `children` for `str_slices`) is a compile error, not a corrupted arena
-/// prefix.
+/// Every static pool slice handed to [`InferEngine::seed_arena`]. Named fields
+/// rather than eight positional slices, so transposing two same-typed pools is
+/// a compile error and not a corrupted arena prefix.
 #[derive(Clone, Copy)]
 pub struct ArenaSeed<'a> {
     pub nodes: &'a [TypeNode],
@@ -682,9 +607,8 @@ impl InferEngine {
     side_pool!(type_params: TypeParam, pool::TypeParams => push_type_params, type_params_of);
     side_pool!(variant_fields: VariantField, pool::VariantFields => push_variant_fields, variant_fields_of);
     side_pool!(variants: Variant, pool::Variants => push_variants, variants_of);
-    /// Resolve a `field_labels`/`module` slice (a slice of `StrId`s) to owned
-    /// strings. Convenience for diagnostic formatting and codegen header
-    /// constants; hot paths should iterate `str_ids_of` directly.
+    /// Resolve a slice of `StrId`s to owned strings. Hot paths should iterate
+    /// `str_ids_of` instead.
     pub fn strs_of(&self, sl: ArenaSlice<pool::StrSlices>) -> Vec<String> {
         self.str_ids_of(sl)
             .iter()
@@ -704,11 +628,10 @@ impl InferEngine {
         ArenaSlice::new(start, len)
     }
 
-    /// Snapshot every append-only pool length so a later `truncate_to` can
-    /// roll the engine back to exactly this state. Transient inference state
-    /// (`vars`, `var_names`, `next_var_id`, `current_level`, `diagnostics`) is
-    /// fully reset rather than length-captured: stored `Scheme`s use `Bound`,
-    /// never live `Var`s, so no var-id survives across calls.
+    /// Snapshot every append-only pool length so a later `truncate_to` can roll
+    /// the engine back here. Transient state is fully reset rather than
+    /// length-captured: stored `Scheme`s use `Bound`, never live `Var`s, so no
+    /// var id survives across calls.
     pub fn pool_watermark(&self) -> EnginePoolWatermark {
         EnginePoolWatermark {
             nodes: self.nodes.len(),
@@ -722,13 +645,10 @@ impl InferEngine {
         }
     }
 
-    /// INVARIANT: no `TypeInfo` body (variant field template or alias target)
-    /// may reference `vars` across a rewind — `self.vars.clear()` below wipes
-    /// every entry, so a surviving body holding an open `Var(param_id)` would
-    /// make a later `find`/`find_ref` index a cleared (or re-minted) slot.
-    /// All bodies are therefore closed to `Bound(idx)` form at registration:
-    /// `close_body` in `bytecode/analysis.rs` (file modules) and
-    /// `precompile.rs` (the static stdlib blob).
+    /// No `TypeInfo` body may reference `vars` across a rewind: this clears
+    /// every entry, so a body holding an open `Var(param_id)` would make a
+    /// later `find` index a cleared or re-minted slot. Bodies are closed to
+    /// `Bound(idx)` at registration by `close_body` and `precompile.rs`.
     pub fn truncate_to(&mut self, w: &EnginePoolWatermark) {
         self.nodes.truncate(w.nodes);
         let n = w.nodes as u32;
@@ -771,9 +691,8 @@ impl InferEngine {
         self.variants.extend_from_slice(seed.variants);
     }
 
-    /// Wire the nominal ids of Int/Float/String so engine-minted literal
-    /// types carry the same identity as compiler-minted ones. Called once by
-    /// the compiler right after the prelude is registered or seeded.
+    /// Wire the nominal ids of Int/Float/String. Called once by the compiler
+    /// right after the prelude is registered or seeded.
     pub fn set_prim_ids(&mut self, ids: PrimIds) {
         self.prim_ids = ids;
         self.nullary_cache = NullaryCache::default();
@@ -792,10 +711,8 @@ impl InferEngine {
         self.push(TypeNode::Con { id, name, args })
     }
 
-    /// `mk_con(id, name, &[])` memoised per `slot`. First call mints and
-    /// caches; every later call is a single field read (no intern hash, no
-    /// arena push). Correct because `Con` identity is nominal — see
-    /// [`NullaryPrim`].
+    /// `mk_con(id, name, &[])` memoised per `slot`. Sound because `Con`
+    /// identity is nominal; see [`NullaryPrim`].
     #[inline]
     pub fn nullary_con(&mut self, slot: NullaryPrim, id: TypeId, name: &str) -> Ty {
         let i = slot as usize;
@@ -853,10 +770,9 @@ impl InferEngine {
         }
     }
 
-    /// Mint a fresh base-26 display name, rejecting any candidate already
-    /// claimed by an annotation or earlier mint (`used_names`) or by the
-    /// caller's in-flight set (`taken`). The winner is inserted into both
-    /// sets before returning so no later mint can collide with it.
+    /// Mint a fresh base-26 display name, skipping anything already claimed by
+    /// `used_names` or the caller's in-flight `taken` set. The winner joins
+    /// both sets before returning.
     fn mint_display_name(&mut self, taken: &mut HashSet<StrId>) -> StrId {
         loop {
             let candidate = next_letter(&mut self.next_name_uid);
@@ -869,9 +785,8 @@ impl InferEngine {
         }
     }
 
-    /// Return the display name for a var id. If unset, mint a fresh base-26
-    /// name (skipping any already taken) and remember it so subsequent calls
-    /// are stable.
+    /// The display name for a var id, minted and remembered on first call so
+    /// later calls are stable.
     fn var_display_name(&mut self, id: i32) -> String {
         if let Some(&name) = self.var_names.get(&id) {
             return self.str(name).to_string();
@@ -906,10 +821,9 @@ impl InferEngine {
         .0
     }
 
-    /// Mint a fresh rigid generic variable. Used by the hydrator when reading
-    /// type-parameter annotations so that distinct textual occurrences of the
-    /// same parameter share one identity but cannot be solved to a concrete
-    /// type while checking the body.
+    /// Mint a fresh rigid generic variable. The hydrator uses this so repeated
+    /// occurrences of one type parameter share an identity that still cannot be
+    /// solved to a concrete type while checking the body.
     pub fn fresh_generic_var(&mut self) -> (Ty, i32) {
         let id = self.next_var_id;
         self.alloc_var(TyVarState::Generic {
@@ -918,17 +832,10 @@ impl InferEngine {
         })
     }
 
-    // --- Union-find: find with path compression ---
-
-    /// The representative of `t`, without path compression.
-    ///
-    /// Same answer as [`find`](Self::find) — the two are the same chase — but
-    /// it takes `&self`, so a read-only consumer (the `zonk` bridge into
-    /// `typed_ir::ResolvedPool`) can resolve types while holding the engine
-    /// immutably. `find` is this plus the rewrite pass, so their results
-    /// cannot drift.
-    // The chase loop has two independent let-else exits (non-Var node, or a
-    // root var); a single while-let cannot express both.
+    /// The representative of `t`, without path compression. Same answer as
+    /// [`find`](Self::find), but `&self`, so a read-only consumer can resolve
+    /// types while holding the engine immutably.
+    // Two independent let-else exits; a single while-let cannot express both.
     #[allow(clippy::while_let_loop)]
     pub fn find_ref(&self, t: Ty) -> Ty {
         let mut root = t;
@@ -944,12 +851,9 @@ impl InferEngine {
         root
     }
 
-    /// `Some(gid)` when `t`'s representative is a rigid `Generic` variable —
-    /// `gid` being the originating var id `Scheme`'s `QuantVar::origin_id`
-    /// records, so a caller holding the scheme can map the variable onto its
-    /// `Bound` index. `None` for an `Unbound` root and for every non-`Var`
-    /// node: the two are different facts, and only the caller knows whether an
-    /// `Unbound` here is a bug.
+    /// `Some(gid)` when `t`'s representative is a rigid `Generic` variable.
+    /// `gid` is the id `QuantVar::origin_id` records, so a caller holding the
+    /// scheme can map the variable onto its `Bound` index.
     pub fn root_generic_id(&self, t: Ty) -> Option<i32> {
         let TypeNode::Var(id) = self.node(self.find_ref(t)) else {
             return None;
@@ -960,17 +864,14 @@ impl InferEngine {
         }
     }
 
-    /// The nominal ids of `Int`/`Float`/`String`/`Array`, as registered by
-    /// `set_prim_ids`. Handed to a `ResolvedPool` so it answers `prim_of` by
-    /// id, exactly as the engine does.
+    /// The nominal ids registered by `set_prim_ids`. Handed to a
+    /// `ResolvedPool` so it answers `prim_of` the same way the engine does.
     pub fn prim_ids(&self) -> PrimIds {
         self.prim_ids
     }
 
     pub fn find(&mut self, t: Ty) -> Ty {
-        // Two-pass iterative: chase links to the representative, then rewrite
-        // every traversed link to point directly at it. Avoids O(chain) native
-        // recursion on first traversal of a long chain.
+        // Iterative, not recursive: a long chain would blow the native stack.
         let root = self.find_ref(t);
         let mut cur = t;
         while cur != root {
@@ -988,8 +889,7 @@ impl InferEngine {
     }
 
     /// State of a root var. `id` must have come from `find()` returning
-    /// `Var(id)` — the `Link` case is a broken invariant and trips a
-    /// debug_assert (release builds fabricate an Unbound so callers stay total).
+    /// `Var(id)`; a `Link` here means that invariant is broken.
     fn root_var(&self, id: i32) -> RootVarState {
         match self.vars[id as usize] {
             TyVarState::Unbound { level, constraint } => {
@@ -997,7 +897,7 @@ impl InferEngine {
             }
             TyVarState::Generic { id, constraint } => RootVarState::Generic { id, constraint },
             TyVarState::Link { .. } => {
-                debug_assert!(false, "root_var on Link — find() invariant broken");
+                debug_assert!(false, "root_var on Link: find() invariant broken");
                 RootVarState::Unbound {
                     level: 0,
                     constraint: None,
@@ -1006,11 +906,8 @@ impl InferEngine {
         }
     }
 
-    /// If `t` currently resolves (via union-find) to a concrete `Int`, `Float`
-    /// or `String` constructor, return which one. Returns `None` for unbound
-    /// vars (including constrained `numeric`/`addable` vars that haven't been
-    /// unified with a concrete type yet) and for every other constructor.
-    /// Read-only over the union-find aside from `find`'s path compression.
+    /// Which primitive `t` resolves to, if any. `None` for an unbound var, a
+    /// constrained but unsolved var, and every other constructor.
     pub fn resolved_prim(&mut self, t: Ty) -> Option<Prim> {
         let rep = self.find(t);
         if let TypeNode::Con { id, .. } = self.node(rep) {
@@ -1030,14 +927,10 @@ impl InferEngine {
         self.current_level -= 1;
     }
 
-    // --- Occurs check + level adjustment ---
-    //
-    // For sound level-based generalization (Rémy/Didier style), when binding a
-    // var at level L to a type T we must also lower the level of every unbound
-    // var inside T to min(its_level, L). Otherwise an inner var that becomes
-    // observable from an outer scope can be wrongly quantified at the inner
-    // level. Generic vars carry no level and are skipped (already terminal).
-
+    // Level-based generalization: binding a var at level L to a type T must
+    // also lower every unbound var inside T to min(its_level, L). Otherwise an
+    // inner var observable from an outer scope gets quantified at the wrong
+    // level. Generic vars carry no level and are skipped.
     fn occurs_and_adjust(&mut self, var_id: i32, var_level: i32, t: Ty) -> bool {
         let r = self.find(t);
         match self.node(r) {
@@ -1055,8 +948,6 @@ impl InferEngine {
                 }
                 false
             }
-            // `Bound` only exists inside stored schemes; `instantiate`
-            // substitutes it away before any value reaches unification.
             TypeNode::Bound(_) => {
                 debug_assert!(false, "Bound in live inference (occurs_and_adjust)");
                 false
@@ -1115,9 +1006,8 @@ impl InferEngine {
                     id: ib, args: ab, ..
                 },
             ) => {
-                // Nominal identity: same registered type id. Names play no
-                // part — two `Parsed`s from different modules are different
-                // types and must not unify.
+                // Nominal identity only. Two `Parsed`s from different modules
+                // are different types and must not unify.
                 if ia != ib || aa.len != ab.len {
                     return Err(could_not_unify(fa, fb));
                 }
@@ -1175,9 +1065,7 @@ impl InferEngine {
         Ok(())
     }
 
-    /// Convenience wrapper for callers that just want a diagnostic pushed on
-    /// failure rather than handling `UnifyError` themselves. Returns `true` on
-    /// success for drop-in compatibility with the previous bool-returning API.
+    /// `unify`, pushing a diagnostic on failure. `true` on success.
     pub fn unify_at(&mut self, expected: Ty, given: Ty, span: Span) -> bool {
         match self.unify(expected, given) {
             Ok(()) => true,
@@ -1268,9 +1156,8 @@ impl InferEngine {
                     RootVarState::Generic {
                         constraint: gen_c, ..
                     } => {
-                        // Linking the constrained var to a rigid generic
-                        // discards the constraint, so the generic must already
-                        // guarantee it. An unconstrained generic does not.
+                        // Linking discards the constraint, so the generic must
+                        // already guarantee it. An unconstrained one does not.
                         if !constraint.satisfied_by_generic(gen_c) {
                             return Err(could_not_unify(var_ty, resolved));
                         }
@@ -1287,15 +1174,12 @@ impl InferEngine {
         Ok(())
     }
 
-    /// If `ty` is (or can become) a function of the given arity, return its
-    /// parameter and return types. An unbound var is bound to a fresh
-    /// `fn(a0..aN) -> r` through `unify` — not a raw `Link` write — so the
-    /// fresh vars are lowered to the var's own level (preventing unsound
-    /// generalization from a deeper scope) and any constraint on the var is
-    /// enforced (a numeric var is not a function). The caller can then proceed
-    /// and let unification refine the fresh vars. A function of the wrong
-    /// arity yields `IncorrectArity` carrying the real params/ret so the
-    /// caller can still type-check what it can.
+    /// If `ty` is, or can become, a function of the given arity, return its
+    /// parameter and return types. An unbound var goes through `unify` rather
+    /// than a raw `Link` write, so the fresh vars are lowered to the var's own
+    /// level and any constraint on it is enforced (a numeric var is not a
+    /// function). Wrong arity yields `IncorrectArity` carrying the real
+    /// params/ret so the caller can keep checking.
     pub fn match_fun_type(
         &mut self,
         ty: Ty,
@@ -1331,20 +1215,16 @@ impl InferEngine {
         Err(MatchFunTypeError::NotFn { ty: resolved })
     }
 
-    // --- Generalization ---
-    //
-    // Walks the type, flips every Unbound var at level > current to Generic,
-    // and returns the collected ids as the scheme's quantified set. Display
-    // names (a, b, c, ...) are assigned at this point so they are stable
-    // across all later printings of the scheme.
-
+    /// Flip every Unbound var at level > current to Generic and quantify over
+    /// them. Display names are assigned here so they stay stable across every
+    /// later printing of the scheme.
     pub fn generalize(&mut self, ty: Ty) -> Scheme {
         self.generalize_impl(ty, false, ValueKind::Local)
     }
 
-    /// Module-scope generalization (Gleam's `generalise`): every remaining
-    /// Unbound var becomes Generic regardless of level. Used in pass 5 after a
-    /// top-level body has been fully inferred so its scheme is closed.
+    /// Module-scope generalization: every remaining Unbound var becomes
+    /// Generic regardless of level. Run once a top-level body is fully
+    /// inferred, so its scheme is closed.
     pub fn generalize_top(&mut self, ty: Ty) -> Scheme {
         self.generalize_impl(ty, true, ValueKind::ModuleFn)
     }
@@ -1353,10 +1233,9 @@ impl InferEngine {
         let mut ids: IndexSet<i32> = IndexSet::new();
         self.collect_generalizable(ty, ignore_level, &mut ids);
         self.assign_names(&ids);
-        // Close the scheme: rewrite each generalized Var to its Bound index and
-        // snapshot its constraint + display name. After this the closed type
-        // contains no engine-local references, so the scheme can be moved
-        // between engines (precompiled stdlib) without dragging `vars`.
+        // Close the scheme: each generalized Var becomes a Bound index. After
+        // this the type holds no engine-local reference, so the scheme can move
+        // between engines without dragging `vars`.
         let quantified: Vec<QuantVar> = ids
             .iter()
             .map(|id| {
@@ -1381,9 +1260,8 @@ impl InferEngine {
         }
     }
 
-    /// Replace every `Var(id)` whose representative is a `Generic` listed in
-    /// `ids` with `Bound(idx)` of its position, fully resolving links along
-    /// the way.
+    /// Replace every `Var(id)` whose representative is a `Generic` in `ids`
+    /// with `Bound(idx)` of its position.
     fn close_over(&mut self, ty: Ty, ids: &IndexSet<i32>) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => match e.root_var(id) {
@@ -1396,21 +1274,17 @@ impl InferEngine {
         })
     }
 
-    /// Structural type rewrite: resolve `ty`, give `leaf` first refusal at
-    /// every node, and otherwise rebuild Con/Fun/Tuple by recursing into their
-    /// children. Var/Bound that `leaf` declines fall through to the resolved
-    /// node unchanged. Shared spine of close_over / open_with /
-    /// substitute_type_vars / close_body, which differ only at the leaves.
-    /// Subtrees in which nothing was rewritten are returned as-is, so fresh
-    /// arena nodes are only built along paths that actually changed.
+    /// Structural type rewrite: `leaf` gets first refusal at every node, and
+    /// Con/Fun/Tuple are otherwise rebuilt from rewritten children. Shared
+    /// spine of close_over / open_with / substitute_type_vars / close_body,
+    /// which differ only at the leaves. Unchanged subtrees are returned as-is.
     fn rewrite(&mut self, ty: Ty, leaf: &mut impl FnMut(&mut Self, TypeNode) -> Option<Ty>) -> Ty {
         self.rewrite_node(ty, leaf).0
     }
 
-    /// Core of `rewrite`. The bool reports whether the result differs from the
-    /// input `ty` — resolving a union-find link counts as a change, so parents
-    /// rebuild with `find`-resolved children and rewritten output never
-    /// contains live link-vars. `false` means the result is exactly `ty`.
+    /// Core of `rewrite`. The bool says whether the result differs from `ty`.
+    /// Resolving a union-find link counts as a change, so parents rebuild with
+    /// resolved children and the output never contains live link-vars.
     fn rewrite_node(
         &mut self,
         ty: Ty,
@@ -1433,9 +1307,8 @@ impl InferEngine {
                 let (new_ret, ret_changed) = self.rewrite_node(ret, leaf);
                 match kids {
                     Some(kids) => (self.mk_fun(&kids, new_ret), true),
-                    // Params untouched: reuse their existing child slice (the
-                    // arena is append-only, so it stays valid) and only mint
-                    // the Fun node itself.
+                    // Params untouched: the arena is append-only, so their
+                    // existing child slice stays valid.
                     None if ret_changed => (
                         self.push(TypeNode::Fun {
                             params,
@@ -1454,11 +1327,7 @@ impl InferEngine {
     }
 
     /// Rewrite each child of `sl`, returning `None` when every child came back
-    /// unchanged. Iterates the child range by index — the arena is append-only
-    /// with stable indices, so no host copy of the slice is needed — and only
-    /// materialises the result buffer once a child actually changes. The buffer
-    /// is a `SmallVec<[Ty; 4]>` so the common arities (Array/Option/Result/
-    /// tuples ≤4/fn params ≤4) never touch the heap on the instantiate hot path.
+    /// unchanged. The result buffer is only materialised once a child changes.
     fn rewrite_children(
         &mut self,
         sl: ArenaSlice<pool::Children>,
@@ -1545,16 +1414,11 @@ impl InferEngine {
         if scheme.quantified.len == 0 {
             return scheme.ty;
         }
-        // One slot per bound var, decided up front: the original rigid Var if
-        // we are inside that body (recursive self-reference), otherwise a fresh
-        // Unbound carrying the constraint and display name. `QuantVar` is
-        // `Copy`, so read each one out of the pool by index before invoking
-        // `&mut self` methods — no temp `Vec<QuantVar>` needed to dodge the
-        // borrow.
+        // One slot per bound var: the original rigid Var when this is a
+        // recursive self-reference, otherwise a fresh Unbound carrying the
+        // constraint and display name.
         let start = scheme.quantified.start as usize;
         let count = scheme.quantified.len as usize;
-        // Almost every scheme has ≤4 bound vars; keep the substitution on the
-        // stack in that case and only spill to the heap for the rare wide one.
         let mut stack = [Ty(0); 4];
         let mut heap: Vec<Ty>;
         let subst: &mut [Ty] = if count <= stack.len() {

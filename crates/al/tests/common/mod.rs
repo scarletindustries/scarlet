@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 // Shared helpers for the integration-test binaries. Lives in a `tests/`
-// subdirectory so Cargo treats it as a module (`mod common;`) rather than a
-// standalone test target.
+// subdirectory so Cargo treats it as a module, not a test target.
 
 pub mod net;
 
@@ -23,8 +22,7 @@ fn hash_str(s: &str) -> u64 {
 
 /// Write `source` to a uniquely-named temp `.al` file and return its path.
 /// The pid separates test binaries and the thread-id hash separates parallel
-/// test threads (ThreadIds are never reused); same-thread tests run
-/// sequentially, so that pair is enough to keep names unique.
+/// threads; same-thread tests run sequentially, so that pair is enough.
 fn write_temp(source: &str) -> std::path::PathBuf {
     let mut tmp = std::env::temp_dir();
     let pid = std::process::id();
@@ -50,17 +48,13 @@ impl AlOutput {
     }
 }
 
-/// Spawn `al <subcommand> <path>` and capture its output.
-/// Ceiling on any `al` subprocess a test spawns. Generous: under a full
-/// parallel `cargo test` on a loaded machine the child competes with every
-/// other test binary, so a tight bound turns load into a spurious kill. The
-/// point is only that a wedged child fails one test instead of hanging the
-/// suite — and, worse, outliving the run to hold a socket and the target lock.
+/// Ceiling on any `al` subprocess a test spawns. Deliberately generous: under
+/// a parallel `cargo test` a tight bound turns load into a spurious kill. The
+/// point is only that a wedged child fails one test instead of hanging the run.
 pub const CHILD_TIMEOUT_SECS: u64 = 120;
 
-/// Kills its child on drop. A test that panics, early-returns, or is unwound
-/// still reaps the `al` it spawned. (A `SIGKILL`ed *parent* runs no `Drop`, so
-/// this is not total — but it covers every in-process failure path.)
+/// Kills its child on drop, so a panicking or early-returning test still reaps
+/// the `al` it spawned. A SIGKILLed parent runs no `Drop`, so this is not total.
 pub struct ChildGuard(pub Option<Child>);
 
 impl ChildGuard {
@@ -84,10 +78,9 @@ impl Drop for ChildGuard {
 
 /// `al <subcommand> <path>`, bounded by [`CHILD_TIMEOUT_SECS`].
 ///
-/// Not `Command::output()`: that waits forever. A program that blocks — a
-/// server example, a `net.connect` to a listener that never accepted because
-/// of a miscompile — would otherwise wedge the whole test binary, and killing
-/// the runner leaves the `al` child alive holding its port.
+/// Not `Command::output()`: that waits forever, so a program that blocks (a
+/// server example, a `net.connect` to a listener a miscompile never accepted)
+/// would wedge the whole test binary.
 pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
     let bin = env!("CARGO_BIN_EXE_al");
     let child = Command::new(bin)
@@ -99,9 +92,8 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
         .spawn()
         .expect("spawn al");
     let out = wait_or_kill(child, CHILD_TIMEOUT_SECS);
-    // No exit code ⇒ the child died by signal: either `wait_or_kill` reaped a
-    // wedge, or the VM crashed. Both are bugs, and both would otherwise read
-    // as "produced no output" and surface as a baffling diff.
+    // No exit code means the child died by signal — a reaped wedge or a VM
+    // crash. Both would otherwise read as "produced no output".
     assert!(
         out.status.code().is_some(),
         "`al {subcommand} {}` died by signal (wedged past {CHILD_TIMEOUT_SECS}s, or crashed)\n\
@@ -119,20 +111,13 @@ pub fn run_al(subcommand: &str, path: &Path) -> AlOutput {
 }
 
 /// Wait up to `secs` for a self-terminating `child` to exit, then collect its
-/// output. The bound guarantees a wedge fails one test instead of hanging the
-/// suite; it is far above the happy-path runtime, because under a full parallel
-/// `cargo test` the spawned VM competes with every other test binary for CPU
-/// and a tight bound turns load into a spurious kill.
+/// output.
 ///
-/// The pipes MUST be drained while we wait, not after.
-///
-/// A pipe holds ~64 KiB. A child that writes more than that blocks in `write`
-/// until someone reads, so a parent that polls `try_wait` without reading is
-/// deadlocked against its own child — each waiting for the other. `al check` on
-/// a 60k-term `else if` chain renders a 1.1 MB diagnostic and hits this
-/// instantly: the check itself takes 0.09s, but the poll ran to the deadline.
-/// `Command::output()` avoids it by reading both streams concurrently; anything
-/// that replaces `output()` with a timeout must do the same.
+/// The pipes MUST be drained while waiting, not after. A pipe holds ~64 KiB; a
+/// child that writes more blocks in `write` until someone reads, so a parent
+/// polling `try_wait` without reading deadlocks against its own child. `al
+/// check` on a 60k-term `else if` chain renders a 1.1 MB diagnostic and hits
+/// this instantly.
 pub fn wait_or_kill(mut child: Child, secs: u64) -> Output {
     let drain = |s: Option<_>| -> Option<std::thread::JoinHandle<Vec<u8>>> {
         s.map(|mut r: Box<dyn std::io::Read + Send>| {
@@ -164,8 +149,8 @@ pub fn wait_or_kill(mut child: Child, secs: u64) -> Output {
             Err(_) => break,
         }
     }
-    // No-op if it already exited; forces the issue if it overran the deadline.
-    // Killing also closes the pipes, so the drain threads see EOF and join.
+    // No-op if it already exited. Killing closes the pipes, so the drain
+    // threads see EOF and join.
     child.kill().ok();
     let status = child.wait().expect("wait for child");
     Output {
@@ -187,8 +172,7 @@ pub fn run_source(cmd: &str, source: &str) -> AlOutput {
     out
 }
 
-/// `source` followed by the captured streams — the body shared by the
-/// assertion-failure messages below.
+/// `source` followed by the captured streams, for assertion-failure messages.
 fn dump(source: &str, out: &AlOutput) -> String {
     format!(
         "{source}\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -196,11 +180,9 @@ fn dump(source: &str, out: &AlOutput) -> String {
     )
 }
 
-/// The one reject-checker: asserts `out` is a *clean* rejection — failure exit,
-/// a real exit code (never a signal/abort), no Rust panic in the output, and a
-/// diagnostic containing at least one of `expected_diags` (case-sensitive) on
-/// either stream. An empty entry pins only the clean-rejection contract, not the
-/// message.
+/// Assert `out` is a *clean* rejection: failure exit, a real exit code (never a
+/// signal), no Rust panic, and a diagnostic matching one of `expected_diags` on
+/// either stream. An empty entry pins only the clean-rejection contract.
 pub fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diags: &[&str]) {
     assert!(
         !out.success,
@@ -227,18 +209,15 @@ pub fn assert_rejects(out: &AlOutput, cmd: &str, source: &str, expected_diags: &
 }
 
 /// Assert `al check` rejects `source` cleanly with a diagnostic containing
-/// `expected_diag`. Returns the captured output for follow-up assertions.
-/// See [`assert_rejects`] for the full contract.
+/// `expected_diag`. See [`assert_rejects`] for the full contract.
 pub fn check_rejects(source: &str, expected_diag: &str) -> AlOutput {
     let out = run_source("check", source);
     assert_rejects(&out, "check", source, &[expected_diag]);
     out
 }
 
-/// Expand each `name: (src, msg)` entry to a named `#[test]` fn that asserts
-/// `al check` rejects `src` with a diagnostic containing `msg` (via
-/// [`check_rejects`]). Entries may carry `///` docs or other attributes;
-/// `cargo test <name>` still targets a single case.
+/// Expand each `name: (src, msg)` entry to a `#[test]` fn asserting `al check`
+/// rejects `src` with a diagnostic containing `msg`.
 #[macro_export]
 macro_rules! reject_case {
     ( $( $(#[$m:meta])* $name:ident: ($src:expr, $msg:expr $(,)?) ),* $(,)? ) => {
@@ -250,9 +229,7 @@ macro_rules! reject_case {
     };
 }
 
-/// Expand each `name: (src, msg)` entry to a named `#[test]` fn that asserts
-/// `al run` rejects `src` with a diagnostic containing `msg` (via
-/// [`run_rejects`]). The `reject_case!` sibling for runtime rejections.
+/// The `reject_case!` sibling for runtime rejections, via [`run_rejects`].
 #[macro_export]
 macro_rules! run_reject_case {
     ( $( $(#[$m:meta])* $name:ident: ($src:expr, $msg:expr $(,)?) ),* $(,)? ) => {
@@ -265,8 +242,7 @@ macro_rules! run_reject_case {
 }
 
 /// Assert `al run` rejects `source` cleanly with a diagnostic containing
-/// `expected_diag`. Returns the captured output for follow-up assertions.
-/// See [`assert_rejects`] for the full contract.
+/// `expected_diag`. See [`assert_rejects`] for the full contract.
 pub fn run_rejects(source: &str, expected_diag: &str) -> AlOutput {
     let out = run_source("run", source);
     assert_rejects(&out, "run", source, &[expected_diag]);
@@ -274,23 +250,20 @@ pub fn run_rejects(source: &str, expected_diag: &str) -> AlOutput {
 }
 
 /// `al <cmd>` the project file `entry` and assert it fails cleanly with a
-/// diagnostic containing at least one of `msgs`. See [`assert_rejects`].
+/// diagnostic matching one of `msgs`.
 pub fn project_rejects(proj: &Project, cmd: &str, entry: &str, msgs: &[&str]) {
     let r = run_al(cmd, &proj.dir.join(entry));
     assert_rejects(&r, cmd, entry, msgs);
 }
 
-/// `al <cmd>` the project file `entry` and assert it succeeds with exactly
-/// `expected` on stdout.
+/// `al <cmd>` the project file `entry`, asserting exactly `expected` on stdout.
 pub fn run_project_outputs(proj: &Project, cmd: &str, entry: &str, expected: &str) {
     let r = run_al(cmd, &proj.dir.join(entry));
     assert!(r.success, "stdout: {}\nstderr: {}", r.stdout, r.stderr);
     assert_eq!(r.stdout, expected, "stderr: {}", r.stderr);
 }
 
-/// Expand each `name: (src)` entry to a named `#[test]` fn that asserts
-/// `al check` accepts `src` (via [`check_ok`]). The accepting counterpart of
-/// `reject_case!`.
+/// The accepting counterpart of `reject_case!`, via [`check_ok`].
 #[macro_export]
 macro_rules! ok_case {
     ( $( $(#[$m:meta])* $name:ident: ($src:expr $(,)?) ),* $(,)? ) => {
@@ -328,10 +301,8 @@ pub fn run_outputs(source: &str, expected: &str) {
     );
 }
 
-/// Expand each `name: (src, expected)` entry to a named `#[test]` fn that
-/// asserts `al run` on `src` succeeds with exactly `expected` on stdout (via
-/// [`run_outputs`]). Entries may carry `///` docs or other attributes;
-/// `cargo test <name>` still targets a single case.
+/// Expand each `name: (src, expected)` entry to a `#[test]` fn asserting `al
+/// run` on `src` prints exactly `expected`.
 #[macro_export]
 macro_rules! run_case {
     ( $( $(#[$m:meta])* $name:ident: ($src:expr, $expected:expr $(,)?) ),* $(,)? ) => {
@@ -344,8 +315,7 @@ macro_rules! run_case {
 }
 
 /// Parse `src` as a whole program, asserting it is diagnostic-free, and wrap
-/// the resulting block as the `Expression` that `IncrementalSession` and the
-/// reference-graph query API consume.
+/// the block as the `Expression` `IncrementalSession` consumes.
 pub fn parse(src: &str) -> ast::Expression {
     let mut sc = scanner::new_scanner(src.to_string());
     let p = parser::new_parser(&mut sc);
@@ -358,9 +328,8 @@ pub fn parse(src: &str) -> ast::Expression {
     ast::Expression::BlockExpression(r.ast)
 }
 
-/// Line-by-line diff of a golden `want` against the produced `got`, for the
-/// panic message of a snapshot mismatch. Lines are debug-printed so trailing
-/// whitespace is visible; a side that ran out of lines shows `<missing>`.
+/// Line-by-line diff of a golden `want` against `got`, for a snapshot
+/// mismatch panic. Lines are debug-printed so trailing whitespace is visible.
 pub fn diff_lines(want: &str, got: &str) -> String {
     let w: Vec<_> = want.lines().collect();
     let g: Vec<_> = got.lines().collect();
@@ -375,18 +344,16 @@ pub fn diff_lines(want: &str, got: &str) -> String {
             ));
         }
     }
-    // Equal line counts and no differing line: the strings still differ, so it
-    // is a trailing newline — which `lines()` does not surface.
+    // Equal line counts and no differing line means the strings differ only
+    // by a trailing newline, which `lines()` does not surface.
     if out.is_empty() {
         out.push_str("  (line content matches but trailing newline differs)\n");
     }
     out
 }
 
-/// 0-based `(line, col)` of the `nth` (1-based) occurrence of `needle`,
-/// nudged `into` columns to the right so the cursor lands *inside* the
-/// identifier's span (matching the editor convention the graph expects).
-/// Pass `into = 0` to point at the first char of the match.
+/// 0-based `(line, col)` of the `nth` (1-based) occurrence of `needle`, nudged
+/// `into` columns right so the cursor lands *inside* the identifier's span.
 pub fn cursor(src: &str, needle: &str, nth: usize, into: i32) -> (i32, i32) {
     let mut from = 0usize;
     let mut at = None;
@@ -402,9 +369,7 @@ pub fn cursor(src: &str, needle: &str, nth: usize, into: i32) -> (i32, i32) {
 }
 
 /// A throwaway on-disk project directory for `IncrementalSession` tests.
-/// `new` makes a uniquely-named temp dir (process id, the caller's `tag`, a
-/// per-process sequence counter and a nanosecond stamp, so concurrent tests
-/// never collide); `Drop` removes it.
+/// Uniquely named so concurrent tests never collide; `Drop` removes it.
 pub struct Project {
     pub dir: PathBuf,
 }
@@ -434,13 +399,9 @@ impl Project {
     pub fn write(&self, name: &str, src: &str) {
         let path = self.dir.join(name);
         fs::write(&path, src).unwrap();
-        // Force a strictly-increasing mtime independent of filesystem clock
-        // resolution. `source_changed` is stat-gated on `(mtime, len)`, so a
-        // same-length content edit (e.g. `{ 1 }` -> `{ 2 }` in
-        // `three_module_incremental`) is silently dropped on a coarse-mtime FS
-        // when the surrounding sequence completes within one tick. A monotonic
-        // per-write counter spaces each rewrite's mtime well past any FS
-        // granularity, so the gate is deterministically exercised everywhere.
+        // Force a strictly-increasing mtime. `source_changed` is stat-gated
+        // on `(mtime, len)`, so a same-length edit is silently dropped on a
+        // coarse-mtime FS when the sequence finishes within one tick.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         fs::File::open(&path)
@@ -524,8 +485,8 @@ pub fn assert_no_msg(msgs: &[String], needle: &str) {
     );
 }
 
-/// The canonical key of an on-disk module: its identity. A module is the file
-/// it resolved to, so tests that address one by name must go through here.
+/// The canonical key of an on-disk module. A module is the file it resolved
+/// to, so tests that address one by name must go through here.
 pub fn module_key(dir: &std::path::Path, file: &str) -> module::ModuleKey {
     module::ModuleKey::for_file(&dir.join(file))
 }
@@ -543,10 +504,8 @@ fn module_for(g: &ReferenceGraph, module_or_uri: &str) -> Option<ModuleId> {
         return Some(id);
     }
     // 3. Test ergonomics only: a written name (`./c`, `b`). A module's name is
-    // NOT its identity — two `b.al`s in different directories are different
-    // modules — so this matches the last path segment and *panics* on
-    // ambiguity rather than silently picking one, which is the bug this whole
-    // resolution rework exists to kill.
+    // NOT its identity, so this matches the last path segment and panics on
+    // ambiguity rather than silently picking one.
     let want = module_or_uri.rsplit('/').next().unwrap_or(module_or_uri);
     let hits: Vec<ModuleId> = g
         .modules()
@@ -576,11 +535,10 @@ fn symbol_of(g: &ReferenceGraph, d: &Definition) -> Option<SymbolInfo> {
     })
 }
 
-/// String-keyed LSP-style queries (goto-def / prepare-rename / find-refs /
-/// rename / symbols) answered from [`IncrementalSession::reference_graph`].
-/// The production LSP server queries the graph directly with resolved
-/// `ModuleId`s; these helpers key by module path, falling back to the entry
-/// `main` module for the single-open-file case.
+/// String-keyed LSP-style queries answered from
+/// [`IncrementalSession::reference_graph`]. The production server queries the
+/// graph directly with resolved `ModuleId`s; these key by module path and fall
+/// back to the entry `main` module for the single-open-file case.
 pub trait SessionQueryExt {
     fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)>;
     fn prepare_rename(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(DefId, Span)>;
@@ -591,8 +549,8 @@ pub trait SessionQueryExt {
 }
 
 impl SessionQueryExt for IncrementalSession {
-    /// goto-definition: the occurrence under the cursor resolved (through any
-    /// import alias) to its canonical declaration.
+    /// goto-definition: the occurrence under the cursor, resolved through any
+    /// import alias to its canonical declaration.
     fn definition(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(ModulePath, Span)> {
         let g = self.reference_graph();
         let m = module_for(g, module_or_uri)?;
@@ -600,8 +558,8 @@ impl SessionQueryExt for IncrementalSession {
         Some((g.module_path(id.module)?.clone(), id.span))
     }
 
-    /// The raw (alias-preserving) `DefId` under the cursor plus the span of
-    /// the smallest enclosing occurrence.
+    /// The alias-preserving `DefId` under the cursor plus the span of the
+    /// smallest enclosing occurrence.
     fn prepare_rename(&self, module_or_uri: &str, line: i32, col: i32) -> Option<(DefId, Span)> {
         let g = self.reference_graph();
         let m = module_for(g, module_or_uri)?;
@@ -620,8 +578,8 @@ impl SessionQueryExt for IncrementalSession {
         Some((id, cursor))
     }
 
-    /// find-references: the declaration (its self-occurrence de-duplicated)
-    /// plus every occurrence workspace-wide.
+    /// find-references: the declaration plus every occurrence workspace-wide,
+    /// with the declaration's self-occurrence de-duplicated.
     fn references(&self, def: DefId) -> Vec<(ModulePath, Span)> {
         let g = self.reference_graph();
         let mut out: Vec<(ModulePath, Span)> = Vec::new();

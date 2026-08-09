@@ -57,6 +57,7 @@ use crate::types::{
     Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine, new_env, pool,
 };
 
+mod abi;
 mod bridges;
 mod patterns;
 #[cfg(test)]
@@ -970,6 +971,12 @@ fn compile_impl(
     // The function list is final: size the native-entry table against it so the
     // backend can publish bodies keyed by the same `FuncIdx`. Empty = interpret.
     c.program.native = super::NativeTable::new(c.program.functions.len());
+
+    if !check_only {
+        // Bind the runtime-constructed stdlib values (`Program.templates` /
+        // `Program.abi`) and require coverage for every emitted op.
+        c.bind_abi();
+    }
 
     if !check_only {
         // Jump operands are frame-relative, so fusion needs `functions` to know

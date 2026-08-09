@@ -1,28 +1,21 @@
 //! Behavioural pins for the deferred-elaboration pass order.
 //!
-//! `analyse_module`'s Pass 5 parks every function body it walks and elaborates
-//! it (`lower` → `perceus` → `emit`) only after the SCC has been generalized.
-//! Elaboration therefore has to *rebuild* the codegen frame the walk saw —
-//! captures, self-name, and the enclosing scope chain — and it has to place the
-//! parked bodies in a code layout the walk never saw. Both are silent when they
-//! go wrong: the program still runs, it just computes something else.
+//! `analyse_module`'s Pass 5 parks every function body and elaborates it only
+//! after the SCC has been generalized, so elaboration must rebuild the codegen
+//! frame the walk saw and place the parked bodies in a layout the walk never
+//! saw. Both fail silently: the program still runs, it just computes something
+//! else.
 
 mod common;
 use common::run_outputs;
 
 /// A recursive local lambda whose self-name shadows a module-scope `fn`, used
-/// as a *value* (passed to a HOF) inside its own body.
+/// as a *value* inside its own body. Elaboration that restored only the module
+/// scope would find the module-level `foo` and load the wrong function,
+/// printing 1002 instead of 100.
 ///
-/// The walk resolves `foo` in `outer`'s frame and yields `VarLoad::Self_`.
-/// Elaboration must resolve it the same way. If it only restores the module
-/// scope, `resolve_variable`'s `current_binding` short-circuit — which fires
-/// *before* the capture table is consulted — finds the module-level `foo`
-/// instead, yields `SelfGlobal(module_slot)`, and `load_atom` emits
-/// `PushGlobal` of the wrong function. The recursion then runs `n + 1000`
-/// once and stops: 1002 instead of 100.
-///
-/// Recursive *calls* cannot catch this — `resolved_callee` collapses `Self_`
-/// and `SelfGlobal` to the same `Callee::Self_`. Only a value load can.
+/// Recursive *calls* cannot catch this: both self-forms collapse to the same
+/// callee. Only a value load can.
 #[test]
 fn recursive_local_lambda_shadowing_a_module_fn_loads_itself() {
     run_outputs(
@@ -38,9 +31,8 @@ fn recursive_local_lambda_shadowing_a_module_fn_loads_itself() {
     );
 }
 
-/// The same shape one frame deeper: the shadowing lambda is itself nested
-/// inside another lambda, so elaboration has to restore a two-deep scope chain,
-/// not just the innermost one.
+/// The same shape one frame deeper, so elaboration has to restore a two-deep
+/// scope chain rather than just the innermost one.
 #[test]
 fn nested_recursive_lambda_shadowing_resolves_through_the_whole_chain() {
     run_outputs(
@@ -58,11 +50,9 @@ fn nested_recursive_lambda_shadowing_resolves_through_the_whole_chain() {
     );
 }
 
-/// Every declaration in a mutual-recursion SCC is walked before any of its
-/// bodies is emitted, so the SCC's jump-over placeholders sit contiguously
-/// ahead of the whole run of bodies: `[J_a, J_b, body_a, Ret, body_b, Ret]`.
-/// A jump-over patched to "just past my own `Ret`" therefore lands in the
-/// *interior* of the next body. Each one must skip the entire run.
+/// An SCC's jump-over placeholders sit contiguously ahead of the whole run of
+/// bodies (`[J_a, J_b, body_a, Ret, body_b, Ret]`), so one patched to "just
+/// past my own `Ret`" lands inside the next body. Each must skip the whole run.
 #[test]
 fn mutually_recursive_scc_jumps_over_every_parked_body() {
     run_outputs(
@@ -77,9 +67,8 @@ fn mutually_recursive_scc_jumps_over_every_parked_body() {
     );
 }
 
-/// A closure nested inside a mutually-recursive SCC member: its jump-over is
-/// pushed during the walk of `a`, but its body is emitted first (innermost
-/// closure first) — ahead of both `a`'s and `b`'s. Nothing may fall into it.
+/// A closure nested inside an SCC member has its body emitted first, ahead of
+/// both `a`'s and `b`'s. Nothing may fall into it.
 #[test]
 fn closure_inside_a_mutual_scc_is_skipped_by_the_enclosing_stream() {
     run_outputs(
@@ -94,14 +83,10 @@ fn closure_inside_a_mutual_scc_is_skipped_by_the_enclosing_stream() {
     );
 }
 
-/// Declared bodies are parked and elaborated *after* the toplevel `let` walk,
-/// but `TypeEnv::define` overwrites a same-scope binding in place — so a
-/// toplevel bind of a prelude name is visible in the env by the time `g`'s body
-/// lowers. `resolve_name` re-reads the env for the callee's `ValueKind`; with
-/// the rebound `Local` scheme it stops routing `println` as a builtin and, with
-/// no entry-frame slot to find, falls back to `VarLoad::Self_` — `g` calls
-/// itself and prints nothing. The env the decl walk saw has to be restored
-/// around the parked bodies.
+/// Declared bodies elaborate *after* the toplevel `let` walk, and
+/// `TypeEnv::define` overwrites in place, so a toplevel bind of a prelude name
+/// is visible by the time `g`'s body lowers. Without restoring the env the decl
+/// walk saw, `println` stops routing as a builtin and `g` calls itself.
 #[test]
 fn toplevel_bind_shadowing_a_builtin_does_not_repoint_a_decl_body() {
     run_outputs(
@@ -113,9 +98,8 @@ fn toplevel_bind_shadowing_a_builtin_does_not_repoint_a_decl_body() {
     );
 }
 
-/// The same rebinding one step milder: `h` is a declared `fn` (`ValueKind::
-/// ModuleFn`), and the toplevel bind flips it to `Local`. `k`'s call to `h` must
-/// still reach the *function*, not the `Int`.
+/// The same rebinding one step milder: the toplevel bind flips the declared
+/// `fn` `h` to a local. `k`'s call must still reach the function, not the Int.
 #[test]
 fn toplevel_bind_shadowing_a_decl_fn_does_not_repoint_a_sibling_body() {
     run_outputs(
@@ -128,10 +112,9 @@ fn toplevel_bind_shadowing_a_decl_fn_does_not_repoint_a_sibling_body() {
     );
 }
 
-/// The other half of the pin: a lambda parked by the toplevel `let` walk itself
-/// legitimately needs those binds. `a` sits at module-scope depth, so the walk
-/// resolves it to a `VarLoad::Global` rather than a capture — it is reachable at
-/// elaboration time only through the *live* env, never through `capture_env`.
+/// The other half: a lambda parked by the toplevel `let` walk legitimately
+/// needs those binds. `a` resolves to a global rather than a capture, so it is
+/// reachable at elaboration time only through the live env.
 #[test]
 fn toplevel_lambda_still_sees_earlier_toplevel_binds() {
     run_outputs(

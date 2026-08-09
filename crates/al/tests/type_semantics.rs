@@ -218,9 +218,8 @@ reject_case! {
          println(r)\n",
         "Some(None)",
     ),
-    /// Before the fix a `Some(_)` arm was *required* to silence a false
-    /// non-exhaustiveness error; now the explicit inner arms already cover
-    /// `Some(_)`, so that wildcard is correctly reported as dead code.
+    /// The explicit inner arms already cover `Some(_)`, so the wildcard is
+    /// dead code.
     nested_option_redundant_wildcard_is_rejected: (
         "x = Some(Some(5))\n\
          r = match x {\n\
@@ -355,11 +354,7 @@ run_case! {
 
 #[test]
 fn ctor_record_update_overrides_and_projects() {
-    // `..base` projects the unmentioned fields out of `base`, the explicit
-    // label overrides its own field, and `base` itself is left untouched.
-    // The three prints pin all three behaviors at once: `name` is projected
-    // (al), `age` is overridden (19), and the original `base.age` is unchanged
-    // (18) — proving record-update builds a fresh value rather than mutating.
+    // Record-update builds a fresh value: `base` is left untouched.
     run_outputs(
         "type P { P(name String, age Int) }\n\
          base = P(name: 'al', age: 18)\n\
@@ -372,8 +367,7 @@ fn ctor_record_update_overrides_and_projects() {
 }
 
 reject_case! {
-    /// A constructor record-update accepts a single `..base`; a second spread is
-    /// rejected.
+    /// A record-update accepts only one `..base`.
     ctor_record_update_at_most_one_spread: (
         "type P { P(name String, age Int) }\n\
          base = P(name: 'al', age: 18)\n\
@@ -381,14 +375,12 @@ reject_case! {
          println(older.age)\n",
         "Constructor call may have at most one spread",
     ),
-    /// Spread arguments only make sense in constructor record-update calls; in an
-    /// ordinary function call they are a placement error.
+    /// A spread in an ordinary call is a placement error.
     spread_arg_in_plain_call_rejected: (
         "fn f(a Int) Int { a }\nprintln(f(..[1]))\n",
         "Spread arguments are only allowed in constructor record-update calls",
     ),
-    /// Labelled arguments are a constructor-only affordance; passing one to an
-    /// ordinary function is a placement error.
+    /// Labelled arguments are constructor-only.
     labelled_arg_in_plain_call_rejected: (
         "fn f(a Int) Int { a }\nprintln(f(a: 1))\n",
         "Labelled arguments are only allowed in constructor calls",
@@ -449,9 +441,7 @@ reject_case! {
 
 #[test]
 fn or_pattern_binding_after_or_in_tuple() {
-    // Regression: typing an or-pattern left `PatternBindings` stuck in
-    // `Alternative` mode, so a sibling binding *after* it (`y`) was rejected as
-    // "not bound in the first alternative" even though `(0 | 1, y)` is valid.
+    // A binding after an or-pattern, as in `(0 | 1, y)`, is in scope.
     run_outputs(
         "fn f(t (Int, Int)) Int {\n\
          \tmatch t {\n\
@@ -467,9 +457,7 @@ fn or_pattern_binding_after_or_in_tuple() {
 
 #[test]
 fn or_pattern_binding_before_or_in_tuple() {
-    // Regression: `finish_alternative` compared `seen` against the *global*
-    // initial-binding count, so a binding *before* an or-pattern (`y`) was
-    // wrongly reported as "must be bound in every alternative" for `(y, 0 | 1)`.
+    // A binding before an or-pattern, as in `(y, 0 | 1)`, is in scope.
     run_outputs(
         "fn g(t (Int, Int)) Int {\n\
          \tmatch t {\n\
@@ -484,8 +472,7 @@ fn or_pattern_binding_before_or_in_tuple() {
 }
 
 reject_case! {
-    /// The scoping fix must not relax the core invariant: every alternative of
-    /// an or-pattern must bind exactly the same names.
+    /// Every alternative of an or-pattern must bind exactly the same names.
     or_pattern_unequal_bindings_still_rejected: (
         "type R {\n\tGood(v Int)\n\tBad(v Int)\n}\n\
          fn h(r R) Int {\n\
@@ -500,10 +487,8 @@ reject_case! {
 
 #[test]
 fn or_pattern_nested_in_non_first_alternative() {
-    // Regression: the two-state save/restore in `PatternBindings` reset to
-    // Initial mode on entering the inner or, so binding `x` in `(x, 1)` was
-    // rejected as a duplicate of the outer canonical `x`. With the frame stack
-    // the inner or is checked against the outer's canonical set.
+    // A nested or-pattern is checked against the outer or's canonical set,
+    // not treated as a fresh scope.
     run_outputs(
         "fn f(t (Int, (Int, Int))) Int {\n\
          \tmatch t {\n\
@@ -535,9 +520,7 @@ reject_case! {
 
 #[test]
 fn nested_ctor_pattern_exhaustive() {
-    // Regression: cycle-guard in resolve_icon leaked `seen` across sibling
-    // type-args, so the payload type after specializing on Ok had no variants
-    // and `Ok(Nil)` was reported as non-exhaustive.
+    // `resolve_icon`'s cycle guard must not leak across sibling type-args.
     check_ok("match Ok(Nil) { Ok(Nil) -> println('y') Err(e) -> println(e) }\n");
     check_ok(
         "type T {\n\tA\n\tB\n}\n\
@@ -611,8 +594,7 @@ fn reserved_set_derived_from_prelude_iface() {
 #[test]
 fn binary_string_literal_patterns() {
     // A bare string-literal segment matches its UTF-8 bytes as a prefix
-    // (Op::BinMatchPrefix): `<<'GET ', ..rest>>` is one bounds-checked byte
-    // compare. The rest binding is a zero-copy view over the remainder.
+    // (Op::BinMatchPrefix); the rest binding is a zero-copy view.
     run_outputs(
         "import al/binary\n\
          r = match binary.from_string('GET /index.html') {\n\
@@ -632,8 +614,7 @@ fn binary_string_literal_patterns() {
          println(r)\n",
         "1\n",
     );
-    // Without `..rest` the whole binary must be consumed: 'GET' matches
-    // exactly, 'GETX' and 'GE' fall through.
+    // Without `..rest` the whole binary must be consumed.
     run_outputs(
         "import al/binary\n\
          fn is_get(b Binary) Bool {\n\
@@ -647,8 +628,7 @@ fn binary_string_literal_patterns() {
          println(is_get(binary.from_string('GE')))\n",
         "True\nFalse\nFalse\n",
     );
-    // A literal prefix longer than the scrutinee fails cleanly (no read past
-    // the end), and arms are tried in order.
+    // A prefix longer than the scrutinee fails without reading past the end.
     run_outputs(
         "import al/binary\n\
          r = match binary.from_string('DELETE /v') {\n\
@@ -660,8 +640,7 @@ fn binary_string_literal_patterns() {
          println(r)\n",
         "delete\n",
     );
-    // A literal prefix can be followed by destructuring segments: parse the
-    // minor version digit out of an HTTP version token.
+    // A literal prefix can be followed by destructuring segments.
     run_outputs(
         "import al/binary\n\
          r = match binary.from_string('HTTP/1.1') {\n\
@@ -671,8 +650,7 @@ fn binary_string_literal_patterns() {
          println(r)\n",
         "1\n",
     );
-    // Multi-byte UTF-8 literals ('é' is 2 bytes) keep byte-accurate offsets
-    // for the rest binding.
+    // Multi-byte UTF-8 literals keep byte-accurate offsets for the rest.
     run_outputs(
         "import al/binary\n\
          r = match binary.from_string('héllo world') {\n\
@@ -682,8 +660,7 @@ fn binary_string_literal_patterns() {
          println(r)\n",
         "Ok(world)\n",
     );
-    // Consecutive integer literals coalesce into the same single-compare
-    // prefix: <<13, 10, ..>> is CRLF.
+    // Consecutive integer literals coalesce into one prefix compare.
     run_outputs(
         "import al/binary\n\
          r = match binary.from_string('\\r\\nrest') {\n\
@@ -693,8 +670,8 @@ fn binary_string_literal_patterns() {
          println(r)\n",
         "4\n",
     );
-    // Mixed string/int literal runs and sub-byte literal widths coalesce too;
-    // compile-time encoding must match Op::BinFromInt's MSB-first layout.
+    // Mixed and sub-byte literal runs coalesce too; the compile-time
+    // encoding must match Op::BinFromInt's MSB-first layout.
     run_outputs(
         "import al/binary\n\
          packet = <<1:4, 2:4, 'AB', 7>>\n\
@@ -705,8 +682,7 @@ fn binary_string_literal_patterns() {
          println(r)\n",
         "7\n",
     );
-    // String-literal segments in EXPRESSIONS build the UTF-8 bytes (and fold
-    // to a constant): equal to the runtime-built binary.
+    // String-literal segments in expressions fold to the same UTF-8 bytes.
     run_outputs(
         "import al/binary\n\
          println(<<'hi there'>> == binary.from_string('hi there'))\n\
@@ -714,8 +690,7 @@ fn binary_string_literal_patterns() {
          println(binary.bit_size(<<''>>))\n",
         "True\nTrue\n0\n",
     );
-    // A string literal with an Int size spec is still a type error (the
-    // Utf8 default applies only to bare string segments).
+    // The Utf8 default applies only to bare string segments.
     check_rejects(
         "import al/binary\n\
          r = match binary.from_string('AB') {\n\
@@ -798,13 +773,9 @@ reject_case! {
     typed_discard_constructor_is_not_a_type: ("Some = 1\n", "'Some' is not a type"),
 }
 
-// `lower` synthesises an eta-wrapper into `program.code` when a constructor is
-// used as a first-class value, so the body's own code lands after it. `emit`
-// bakes absolute jump targets, and it used to be handed the address captured
-// *before* lowering — every taken jump in the body then pointed
-// `eta_wrapper.len()` instructions too low, into the wrapper. The `else` arm is
-// the one that jumps; the `then` arm falls through and hid this for both
-// branches of the suite.
+// A constructor used as a value makes `lower` synthesise an eta-wrapper into
+// `program.code` ahead of the body, so `emit` must bake absolute jump targets
+// against the post-lowering address. Only the `else` arm jumps.
 #[test]
 fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
     let src = "import al/array\n\
@@ -847,11 +818,10 @@ fn field_access_through_a_module_fn_inferred_scrutinee() {
     run_outputs(src, "7\n");
 }
 
-/// An inferred scrutinee's payload is a heap value, so binding it makes the arm
-/// responsible for releasing it. Without the payload's real type Perceus saw
-/// "not heap" and emitted no `Drop`, holding the `Boxed` to the end of the
-/// frame. The `drop` itself is pinned by the `inferred_scrutinee_drops_heap_payload`
-/// Core IR golden; this pins that the program still computes the right answer.
+/// Binding an inferred scrutinee's heap payload makes the arm responsible for
+/// releasing it, so Perceus needs the payload's real type to emit the `Drop`.
+/// The `drop` itself is pinned by the `inferred_scrutinee_drops_heap_payload`
+/// Core IR golden; this pins the answer.
 #[test]
 fn inferred_scrutinee_with_a_heap_payload_runs() {
     let src = "type Boxed { Boxed(n Int) }\n\
@@ -869,8 +839,7 @@ fn inferred_scrutinee_with_a_heap_payload_runs() {
 }
 
 /// The `Err` payload bound by `expr or e -> body` is the LHS type's second
-/// argument, not a fresh variable — a heap error value has to be droppable, and
-/// its fields have to be reachable.
+/// argument, not a fresh variable, so a heap error stays droppable.
 #[test]
 fn or_receiver_binds_a_heap_error_payload() {
     let src = "type Boxed { Boxed(n Int) }\n\

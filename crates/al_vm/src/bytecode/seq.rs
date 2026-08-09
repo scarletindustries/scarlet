@@ -1,8 +1,6 @@
 //! The persistent vector backing `Array` values: an arena-native RRB
 //! (relaxed radix-balanced) tree.
 //!
-//! ## The shape of a sequence
-//!
 //! ```text
 //!   SeqRoot [ len | shift | head | tree | tail ]
 //!                             |      |      |
@@ -16,22 +14,15 @@
 //!                      (32 elements each)
 //! ```
 //!
-//! The two buffer cells make `push_back`/`push_front` amortized O(1): pushes
-//! fill a buffer word by word, and only a *full* buffer (32 elements) spills
-//! into the tree as a finished leaf — the tree is touched once per 32 pushes.
-//! Every branch stores a cumulative size table, so index search, slicing, and
-//! the rebalancing concatenation of the RRB paper (Bagwell & Rompf, 2011) all
-//! run in O(log32 n) node visits.
+//! The two buffer cells make `push_back`/`push_front` amortized O(1): only a
+//! full 32-element buffer spills into the tree, so the tree is touched once
+//! per 32 pushes. Every branch stores a cumulative size table, so index search,
+//! slicing, and the rebalancing concatenation of the RRB paper (Bagwell &
+//! Rompf, 2011) all run in O(log32 n) node visits.
 //!
-//! ## Persistence
-//!
-//! Nodes are reference-counted arena objects; "mutation" is path copying — an
-//! operation allocates replacements for the O(log32 n) nodes on the
-//! root-to-target path and shares every untouched subtree with the previous
-//! version. A shared node carries one count per referrer, so the prior version
-//! stays valid, and a version's exclusive nodes are freed as it drops.
-//!
-//! ## Operation set and complexity
+//! Nodes are reference-counted arena objects and "mutation" is path copying:
+//! an operation replaces the O(log32 n) nodes on the root-to-target path and
+//! shares every untouched subtree, so the previous version stays valid.
 //!
 //! `from_slice` O(n) · `len` O(1) · `get`/`update` O(log32 n) ·
 //! `push_back`/`push_front`/`pop_front` amortized O(1) · `take`/`skip` and
@@ -49,19 +40,16 @@ const BITS: usize = 5;
 /// than the optimal packing, bounding extra search steps per level.
 const E_MAX: usize = 2;
 
-/// Scratch buffer for assembling a replacement node's slots before handing them
-/// to a builder. Every node image is <= `2 * B` slots. See [`super::scratch`].
+/// Scratch buffer for assembling a replacement node's slots. Every node image
+/// is <= `2 * B` slots.
 type Buf = super::scratch::Buf<{ 2 * B }>;
 
-// ---- node accessors -------------------------------------------------------
-//
 // All layout knowledge lives in `value.rs`: nodes are read through the typed
-// `SeqRootRef` / `SeqNodeRef` views and allocated through the
-// `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders. This module
-// contains no `unsafe`; the RRB algorithm is written entirely in safe code.
+// `SeqRootRef`/`SeqNodeRef` views and built through `seq_root_in`/
+// `seq_leaf_in`/`seq_branch_in`. This module contains no `unsafe`.
 
-/// `(len, shift, head, tree, tail)` of a root. `head`/`tree`/`tail` are
-/// node values or nil; `shift` is the tree height (0 = leaf or nil).
+/// `(len, shift, head, tree, tail)` of a root. `head`/`tree`/`tail` are node
+/// values or nil; `shift` is the tree height (0 = leaf or nil).
 #[inline]
 fn root_parts(root: &Value) -> (usize, usize, Value, Value, Value) {
     let r = SeqRootRef::new(root);
@@ -105,12 +93,10 @@ fn branch_parts(branch: &Value) -> (&[u64], &[Value]) {
     }
 }
 
-/// Descend one level: in a branch's cumulative size table, the child slot
-/// containing element index `idx`, and the cumulative count before that slot.
-/// Starts the scan at the radix guess `idx >> shift`: each child holds at most
-/// `1 << shift` elements, so `sizes[k] <= (k + 1) << shift` and the guess never
-/// overshoots. Strict subtrees hit immediately; relaxed ones walk O(1)
-/// extra steps.
+/// Descend one level: the child slot holding element `idx`, and the cumulative
+/// count before it. The scan starts at the radix guess `idx >> shift`, which
+/// never overshoots because each child holds at most `1 << shift` elements.
+/// A strict subtree hits immediately; a relaxed one walks O(1) extra steps.
 #[inline]
 fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> (usize, usize) {
     let mut k = (idx >> shift).min(sizes.len() - 1);
@@ -133,8 +119,8 @@ fn node_len(node: &Value) -> usize {
     }
 }
 
-/// Direct slot count of a node (elements of a leaf, children of a branch)
-/// — the density measure the rebalance invariant is defined over.
+/// Direct slot count: elements of a leaf, children of a branch. The density
+/// measure the rebalance invariant is defined over.
 #[inline]
 fn slot_count(node: &Value) -> usize {
     match SeqNodeRef::of(node) {
@@ -166,8 +152,7 @@ fn opt_leaf_from<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     }
 }
 
-/// Build a branch at height `shift` over `children` (all at
-/// `shift - BITS`); `seq_branch_in` computes the cumulative size table.
+/// Build a branch at height `shift` over `children`, all at `shift - BITS`.
 fn branch_from<A: Arena + ?Sized>(a: &mut A, shift: usize, children: &[Value]) -> Value {
     debug_assert!(!children.is_empty() && children.len() <= B);
     debug_assert!(shift >= BITS);
@@ -178,8 +163,6 @@ fn branch_from<A: Arena + ?Sized>(a: &mut A, shift: usize, children: &[Value]) -
     }));
     seq_branch_in(a, shift, children)
 }
-
-// ---- public queries ---------------------------------------------------------
 
 #[inline]
 pub fn len(root: &Value) -> usize {
@@ -202,8 +185,8 @@ pub fn get(root: &Value, i: usize) -> Option<Value> {
     }
     let mut node = tree;
     loop {
-        // Compute the next node as the match value so the view's borrow of
-        // `node` ends before the reassignment.
+        // Bound as the match value so the view's borrow of `node` ends before
+        // the reassignment.
         let next = match SeqNodeRef::of(&node) {
             SeqNodeRef::Leaf(elems) => return Some(elems[idx].clone()),
             SeqNodeRef::Branch {
@@ -220,15 +203,12 @@ pub fn get(root: &Value, i: usize) -> Option<Value> {
     }
 }
 
-// ---- construction -------------------------------------------------------------
-
 pub fn empty_in<A: Arena + ?Sized>(a: &mut A) -> Value {
     root_in(a, 0, 0, Value::nil(), Value::nil(), Value::nil())
 }
 
-/// Trailing 1..=B elements the bulk builders keep as the tail buffer; the
-/// remaining body (a whole number of leaves) is packed into the strict tree.
-/// Only meaningful for `n > B`.
+/// Trailing 1..=B elements the bulk builders keep as the tail buffer, leaving a
+/// whole number of leaves for the strict tree. Only meaningful for `n > B`.
 fn bulk_tail_len(n: usize) -> usize {
     if n.is_multiple_of(B) { B } else { n % B }
 }
@@ -237,9 +217,9 @@ fn bulk_tail_len(n: usize) -> usize {
 /// one level per iteration, returning the root and its shift.
 fn pack_tree<A: Arena + ?Sized>(a: &mut A, mut nodes: Vec<Value>) -> (Value, usize) {
     let mut shift = 0;
-    // Group in place: output i is written to nodes[i], which is strictly before
-    // the read window [i*B, (i+1)*B) for B > 1, so writes never clobber unread
-    // children. Avoids allocating a fresh Vec per tree level.
+    // Grouped in place: output i lands at nodes[i], strictly before the read
+    // window [i*B, (i+1)*B) for B > 1, so a write never clobbers an unread
+    // child. Saves a fresh Vec per tree level.
     while nodes.len() > 1 {
         shift += BITS;
         let len = nodes.len();
@@ -270,12 +250,9 @@ pub fn from_slice<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     root_in(a, n, shift, Value::nil(), tree, tail)
 }
 
-/// Bulk build `start..end` as boxed integers. O(n), same tree shape as
-/// [`from_slice`], but the elements are written straight into arena leaves
-/// via a stack buffer (32 at a time) — no n-element host `Vec<Value>` is
-/// materialized first. This is the Range→Array path for the VM's sequence
-/// ops (concat/prepend/append), which would otherwise allocate and fill an
-/// intermediate host Vec only to re-read it here.
+/// Bulk build `start..end` as boxed integers: same tree shape as
+/// [`from_slice`], but elements go straight into arena leaves 32 at a time, so
+/// the Range→Array path never materializes an n-element host `Vec<Value>`.
 pub fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Value {
     let n = range_len(start, end) as usize;
     if n == 0 {
@@ -308,10 +285,8 @@ pub fn from_int_range<A: Arena + ?Sized>(a: &mut A, start: i64, end: i64) -> Val
     root_in(a, n, shift, Value::nil(), tree, tail)
 }
 
-// ---- push/pop at the ends -----------------------------------------------------
-
 /// Append one element. Amortized O(1): the tail buffer absorbs pushes and
-/// is pushed into the tree as a full leaf every 32nd call.
+/// spills into the tree as a full leaf every 32nd call.
 pub fn push_back<A: Arena + ?Sized>(a: &mut A, root: &Value, x: Value) -> Value {
     push_end::<A, false>(a, root, x)
 }
@@ -321,8 +296,8 @@ pub fn push_front<A: Arena + ?Sized>(a: &mut A, root: &Value, x: Value) -> Value
     push_end::<A, true>(a, root, x)
 }
 
-/// Push one element into the head (`FRONT`) or tail buffer, spilling a full
-/// buffer into the tree as a finished leaf.
+/// Push into the head (`FRONT`) or tail buffer, spilling a full buffer into
+/// the tree as a finished leaf.
 fn push_end<A: Arena + ?Sized, const FRONT: bool>(a: &mut A, root: &Value, x: Value) -> Value {
     let (len, mut shift, head, mut tree, tail) = root_parts(root);
     let old = if FRONT { head.clone() } else { tail.clone() };
@@ -365,7 +340,6 @@ pub fn pop_front<A: Arena + ?Sized>(a: &mut A, root: &Value) -> Option<(Value, V
         return Some((e, root_in(a, len - 1, shift, new_head, tree, tail)));
     }
     if !tree.is_nil() {
-        // Pull the leftmost leaf out of the tree to become the head.
         let (leaf, rest) = tree_pop_leftmost(a, &tree, shift);
         let (new_tree, new_shift) = collapse(rest, shift);
         let elems = leaf_elems(&leaf);
@@ -428,8 +402,8 @@ fn tree_update<A: Arena + ?Sized>(a: &mut A, node: &Value, idx: usize, x: Value)
     }
 }
 
-/// Push a full leaf under the right (or left, when `FRONT`) edge of `tree`;
-/// grows the root when that spine is full. Returns the new `(tree, shift)`.
+/// Push a full leaf under the right, or left when `FRONT`, edge of `tree`,
+/// growing the root when that spine is full.
 fn tree_push_leaf<A: Arena + ?Sized, const FRONT: bool>(
     a: &mut A,
     tree: &Value,
@@ -464,9 +438,8 @@ fn make_spine<A: Arena + ?Sized>(a: &mut A, leaf: &Value, shift: usize) -> Value
     node
 }
 
-/// Try to hang `leaf` under the rightmost (or leftmost, when `FRONT`) edge
-/// of `node` (at `shift`) without increasing the height. `None` when every
-/// spine level on that side is full.
+/// Hang `leaf` under `node`'s rightmost, or leftmost when `FRONT`, edge without
+/// increasing the height. `None` when every spine level on that side is full.
 fn try_push<A: Arena + ?Sized, const FRONT: bool>(
     a: &mut A,
     node: &Value,
@@ -499,8 +472,8 @@ fn try_push<A: Arena + ?Sized, const FRONT: bool>(
     None
 }
 
-/// Detach the leftmost leaf. Returns `(leaf, rest)` where `rest` is a node
-/// at the same height as `node` or nil.
+/// Detach the leftmost leaf. `rest` is a node at the same height as `node`,
+/// or nil.
 fn tree_pop_leftmost<A: Arena + ?Sized>(a: &mut A, node: &Value, shift: usize) -> (Value, Value) {
     if shift == 0 {
         return (node.clone(), Value::nil());
@@ -536,8 +509,6 @@ fn collapse(mut node: Value, mut shift: usize) -> (Value, usize) {
     }
     (node, shift)
 }
-
-// ---- slicing --------------------------------------------------------------------
 
 /// The first `n` elements. O(log32 n) path copy.
 pub fn take<A: Arena + ?Sized>(a: &mut A, root: &Value, n: usize) -> Value {
@@ -648,12 +619,9 @@ fn tree_drop<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
     }
 }
 
-// ---- concatenation (RRB merge with rebalancing) -----------------------------------
-
-/// Concatenate two arrays. O(log n): the RRB merge walks the right spine
-/// of `l` and the left spine of `r`, rebalancing each level within the
-/// `E_MAX` slack invariant so lookup depth stays logarithmic no matter how
-/// many concatenations build a vector.
+/// Concatenate two arrays. O(log n): the RRB merge walks `l`'s right spine and
+/// `r`'s left spine, rebalancing each level within the `E_MAX` slack so lookup
+/// depth stays logarithmic however many concatenations built the vector.
 pub fn concat<A: Arena + ?Sized>(a: &mut A, l: &Value, r: &Value) -> Value {
     let (llen, lshift, lhead, ltree, ltail) = root_parts(l);
     let (rlen, rshift, rhead, rtree, rtail) = root_parts(r);
@@ -663,8 +631,8 @@ pub fn concat<A: Arena + ?Sized>(a: &mut A, l: &Value, r: &Value) -> Value {
     if rlen == 0 {
         return l.clone();
     }
-    // Fold the boundary buffers into their trees so the merge sees two
-    // pure trees: left keeps its head buffer, right keeps its tail buffer.
+    // Fold the boundary buffers into their trees so the merge sees two pure
+    // trees; left keeps its head buffer, right keeps its tail buffer.
     let (ltree, lshift) = if ltail.is_nil() {
         (ltree, lshift)
     } else {
@@ -729,10 +697,10 @@ fn concat_sub<A: Arena + ?Sized>(
     }
 }
 
-/// Regroup up to 64 children (left siblings ++ merged middle ++ right
-/// siblings, all at `shift - BITS`) into one or two nodes at `shift`,
-/// redistributing slots when the packing is more than `E_MAX` nodes worse
-/// than optimal (the RRB invariant that bounds tree depth).
+/// Regroup up to 64 children — left siblings ++ merged middle ++ right
+/// siblings, all at `shift - BITS` — into one or two nodes at `shift`,
+/// redistributing slots when the packing is more than `E_MAX` nodes worse than
+/// optimal. That is the RRB invariant bounding tree depth.
 fn rebalance<A: Arena + ?Sized>(
     a: &mut A,
     left: &[Value],
@@ -754,25 +722,21 @@ fn rebalance<A: Arena + ?Sized>(
         for (i, c) in all.iter().enumerate() {
             plan[i] = slot_count(c);
         }
-        // Shrink the plan: find a sparse node (fewer than B - E_MAX/2
-        // slots) and pour its contents into its successors, removing one
-        // node per pass until the count meets the invariant. The threshold
-        // guarantees a sparse node exists whenever the loop runs: if every
-        // node held >= B - E_MAX/2 slots, then total >= len * (B - E_MAX/2),
-        // so optimal = ceil(total / B) >= len - len * E_MAX / (2 * B), and
-        // with len <= 2 * B that is >= len - E_MAX — contradicting
-        // `plan.len() > optimal + E_MAX`. Skipping near-full nodes also
-        // keeps the redistribution local instead of rewriting the whole run.
+        // Pour each sparse node (< B - E_MAX/2 slots) into its successors,
+        // dropping one node per pass. The threshold guarantees a sparse node
+        // exists while the loop runs: if every node held >= B - E_MAX/2, then
+        // optimal >= len - len * E_MAX / (2 * B) >= len - E_MAX for
+        // len <= 2 * B, contradicting the loop condition. Skipping near-full
+        // nodes also keeps the redistribution local.
         while plan_len > optimal + E_MAX {
             let mut i = 0;
             while i < plan_len && plan[i] >= B - E_MAX / 2 {
                 i += 1;
             }
             if i >= plan_len {
-                // Unreachable per the bound above (every node near-full
-                // implies the count is already within optimal + E_MAX);
-                // backstop so a violated invariant degrades to a slightly
-                // overfull level rather than an infinite loop.
+                // Unreachable per the bound above; a backstop so a violated
+                // invariant degrades to a slightly overfull level rather than
+                // an infinite loop.
                 debug_assert!(
                     false,
                     "rebalance: no sparse node despite plan_len > optimal + E_MAX"
@@ -805,11 +769,9 @@ fn rebalance<A: Arena + ?Sized>(
     out
 }
 
-/// Rebuild a run of sibling nodes (at `child_shift`) to the slot counts in
-/// `plan`, streaming their slots in order. Nodes whose count already
-/// matches the plan are reused as-is, preserving sharing; only the
-/// reshaped ones are reallocated (their grandchildren are shared either
-/// way).
+/// Rebuild a run of sibling nodes at `child_shift` to the slot counts in
+/// `plan`, streaming their slots in order. A node whose count already matches
+/// is reused as-is, preserving sharing.
 fn execute_plan<A: Arena + ?Sized>(
     a: &mut A,
     old: &[Value],
@@ -849,23 +811,20 @@ fn execute_plan<A: Arena + ?Sized>(
     out
 }
 
-// ---- iteration ----------------------------------------------------------------
-
 /// Element iterator over an array, front to back: head buffer, in-order tree
-/// walk, tail buffer. Self-contained: every node it walks is held as an owned
-/// `Value` (the sections array, the branch stack, the current leaf), so the
-/// nodes stay alive via their reference counts for as long as the iterator
-/// does — no raw pointers, no rooting requirement on the caller.
+/// walk, tail buffer. Every node it walks is held as an owned `Value`, so the
+/// nodes stay alive by reference count for as long as the iterator does. No
+/// raw pointers, and no rooting requirement on the caller.
 pub struct SeqIter {
     /// Root sections still to be walked, in element order.
     sections: [Value; 3],
     section: usize,
-    /// Branch path to the current leaf: each entry is a branch and the index
-    /// of its next unvisited child. Tree height is `shift / BITS`, so 7 inline
-    /// slots cover any array up to 32^8 (~1.1T) elements without a host alloc.
+    /// Branch path to the current leaf: a branch and the index of its next
+    /// unvisited child. 7 inline slots cover any array up to 32^8 (~1.1T)
+    /// elements without a host alloc.
     stack: SmallVec<[(Value, usize); 7]>,
-    /// The current leaf, owned so its elements stay alive while we yield them
-    /// (nil when no leaf is active yet).
+    /// The current leaf, owned so its elements stay alive while being yielded.
+    /// Nil when no leaf is active yet.
     cur: Value,
     pos: usize,
     remaining: usize,
@@ -900,8 +859,8 @@ impl SeqIter {
         }
     }
 
-    /// Step to the next leaf: resume the deepest unfinished branch, or open
-    /// the next non-nil section. Returns false when the walk is exhausted.
+    /// Step to the next leaf: resume the deepest unfinished branch, or open the
+    /// next non-nil section. False when the walk is exhausted.
     fn advance(&mut self) -> bool {
         while let Some((node, idx)) = self.stack.pop() {
             let child = {
@@ -956,8 +915,6 @@ impl Iterator for SeqIter {
 }
 
 impl ExactSizeIterator for SeqIter {}
-
-// ---- test support ---------------------------------------------------------------
 
 /// Validate every structural invariant of an array; test builds only.
 #[cfg(test)]

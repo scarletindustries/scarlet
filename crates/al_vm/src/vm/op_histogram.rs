@@ -1,39 +1,24 @@
 //! Op histogram instrumentation for the interpreter's dispatch loop.
 //!
-//! Compiled only under the `op-histogram` feature — a default build has no
-//! counters, no branch at slice entry, and writes nothing to stderr (the
-//! goldens assert an empty stderr). Build the measuring binary with
-//! `cargo build --release --features op-histogram`.
+//! Compiled only under the `op-histogram` feature; a default build has no
+//! counters and writes nothing to stderr, which the goldens assert. Every
+//! scheduler thread bumps the same relaxed counters: this is a profile, not a
+//! synchronization mechanism.
 //!
-//! Two histograms are accumulated, both keyed by the identity of the thing
-//! counted rather than by anything positional: `OP_COUNTS` by opcode
-//! discriminant, `FN_COUNTS` by `FuncIdx` (the index into
-//! `Program::functions`, which is also how the interpreter names the frame
-//! it is running). `TOTAL_OPS` is the denominator for both. Every scheduler
-//! thread bumps the same relaxed counters; the numbers are a profile, not a
-//! synchronization mechanism, so relaxed ordering with no per-thread
-//! batching is exactly the contract we want.
+//! The dump fires once from slice entry as soon as `TOTAL_OPS` passes
+//! `AL_OP_HISTOGRAM_OPS` (default 20M), since a served-load run is never asked
+//! to stop. Names are resolved at dump time from the live `Program`, so no name
+//! table rides the hot path.
 //!
-//! The dump fires once, from slice entry, as soon as `TOTAL_OPS` passes a
-//! threshold (`AL_OP_HISTOGRAM_OPS`, default 20M) — a served-load run is
-//! never asked to stop, so "after N ops" is the only place a full profile
-//! can be printed. Opcode and function names are resolved at dump time from
-//! the live `Program`, so no name table has to be carried through the hot
-//! path.
-//!
-//! Only *interpreted* ops are counted: a natively-compiled body is entered
-//! through `native_entry_check!` and never reaches the dispatch loop head,
-//! so it contributes to neither histogram nor to `TOTAL_OPS`. `AL_NATIVE`
-//! defaults to `native`, so the measuring invocation is
+//! Only *interpreted* ops are counted: a natively-compiled body never reaches
+//! the dispatch loop head. Measure with
 //!
 //! ```text
 //! AL_NATIVE=off ./target/release/al run …
 //! ```
 //!
-//! Without that, a JIT'd function reads 0.00% and every interpreted
-//! function's share is inflated by the missing denominator — a hot function
-//! appears to vanish with no change to the AL code. The dump names the mode
-//! it ran under so a skewed profile cannot be quoted as a share of AL ops.
+//! Otherwise a JIT'd function reads 0.00% and every interpreted function's
+//! share is inflated by the missing denominator.
 
 use crate::bytecode::native::{self, NativeMode};
 use crate::bytecode::{Op, Program};
@@ -43,8 +28,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 /// `Op` is `#[repr(u8)]`, so its discriminant indexes this directly.
 const OP_SLOTS: usize = 256;
 
-/// Functions counted individually; anything above lands in the overflow slot
-/// so the histogram's denominator stays honest.
+/// Functions counted individually; anything above lands in the overflow slot,
+/// so the denominator stays honest.
 const FN_SLOTS: usize = 4096;
 
 const DEFAULT_THRESHOLD: u64 = 20_000_000;
@@ -96,12 +81,9 @@ fn threshold() -> u64 {
     }
 }
 
-/// Write both histograms to stderr, biggest share first.
-///
-/// The header names the native mode because the sample's *scope* depends on
-/// it: under anything but `AL_NATIVE=off` the percentages are shares of
-/// interpreted ops, not of AL ops, and the bodies that are missing are
-/// exactly the hot ones the JIT chose to compile.
+/// Write both histograms to stderr, biggest share first. The header names the
+/// native mode because the sample's scope depends on it: under anything but
+/// `AL_NATIVE=off` the missing bodies are exactly the hot ones.
 pub fn dump_op_counts(program: &Program) {
     let total = TOTAL_OPS.load(Ordering::Relaxed).max(1);
     let mode = native::config().mode;
@@ -171,8 +153,8 @@ pub fn dump_op_counts(program: &Program) {
     let _ = err.flush();
 }
 
-/// `AL_NATIVE`'s spelling of the live mode, so the header quotes back the
-/// value an operator would set.
+/// `AL_NATIVE`'s spelling of the live mode, so the header quotes back a value
+/// an operator would set.
 fn mode_name(mode: NativeMode) -> &'static str {
     match mode {
         NativeMode::Off => "off",
@@ -182,8 +164,8 @@ fn mode_name(mode: NativeMode) -> &'static str {
 }
 
 /// Discriminant → mnemonic, recovered from the program's own code: every
-/// opcode with a nonzero count was fetched from it, so no `u8 → Op` cast is
-/// needed and the mapping cannot go stale as opcodes are added.
+/// counted opcode was fetched from it, so no `u8 → Op` cast is needed and the
+/// mapping cannot go stale as opcodes are added.
 fn opcode_names(program: &Program) -> Vec<Option<String>> {
     let mut names: Vec<Option<String>> = vec![None; OP_SLOTS];
     for instr in &program.code {
@@ -196,7 +178,6 @@ fn opcode_names(program: &Program) -> Vec<Option<String>> {
 }
 
 const _: fn() = || {
-    // The counters are keyed by `Op`'s discriminant; a wider repr would index
-    // out of `OP_SLOTS`.
+    // A wider `Op` repr would index out of `OP_SLOTS`.
     let _: [(); 1] = [(); (std::mem::size_of::<Op>() == 1) as usize];
 };

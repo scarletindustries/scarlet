@@ -1,17 +1,11 @@
-//! Prelude bootstrap: load `src/std/al.al` into a fresh compiler so its
-//! names are visible in every AL program without an import.
+//! Prelude bootstrap: load `src/std/al.al` through the ordinary module
+//! pipeline so its names are visible in every AL program without an import.
+//! Nothing here redefines a prelude type in Rust.
 //!
-//! The prelude is real AL source — primitives, `Nil`/`Bool`/`Option`/
-//! `Result`, `println`/`inspect` — declared via external/`@vm` and loaded
-//! through the ordinary module pipeline, so the exact parse/analyse path
-//! that handles user modules produces it; nothing here redefines a prelude
-//! type in Rust.
-//!
-//! Runs exactly once per compiler, before any user code is seen. Its last
-//! act is `PreludeBindings::capture` (see `prelude_bindings.rs`): a strict
-//! typed snapshot of every prelude name the compiler relies on, so a
-//! drifted `al.al` fails loudly here instead of surfacing as a confused
-//! unify error somewhere downstream.
+//! Runs once per compiler, before any user code. It ends in
+//! `PreludeBindings::capture`, a strict typed snapshot of every prelude name
+//! the compiler relies on, so a drifted `al.al` fails here instead of
+//! surfacing as a confused unify error downstream.
 
 use super::PreludeBindings;
 use super::compiler::Compiler;
@@ -21,12 +15,9 @@ use crate::types::ValueKind;
 
 impl Compiler {
     pub(crate) fn register_prelude(&mut self) {
-        // 1. Load al.al via the module pipeline. analyse_module pushes/pops its
-        //    own env scope, so while type heads land in the flat env.type_info,
-        //    value schemes (Some/None/Ok/Err/Nil/True/False/println/...) are
-        //    defined into a scope that is immediately popped. Pull them back
-        //    from the recorded ModuleInterface into the root scope so they are
-        //    visible everywhere without an explicit import.
+        // `analyse_module` defines the value schemes into a scope it pops, so
+        // pull them back out of the recorded interface into the root scope.
+        // Type heads need no such rescue: they land in the flat env.type_info.
         let at = Span::DUMMY;
         let path = crate::ast::ImportPath::canonical(module::al_prelude());
         let Some((_, key)) = self.load_module(&path, at) else {
@@ -47,10 +38,8 @@ impl Compiler {
             self.env.define(name, ev.scheme);
         }
 
-        // 2. Capture strict bindings. After this, every identity check in the
-        //    compiler compares against these refs — no string matching. A
-        //    missing or mis-shaped name is a compile error here, not a silent
-        //    mistype later.
+        // Every identity check in the compiler compares against these refs
+        // rather than matching strings.
         match PreludeBindings::capture(&self.env) {
             Ok(b) => {
                 self.prelude = b;

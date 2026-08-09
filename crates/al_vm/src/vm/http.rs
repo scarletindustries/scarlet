@@ -20,7 +20,10 @@ use crate::bytecode::{BinaryRef, Value};
 use crate::heap::ProcHeap;
 
 use super::text::Radix;
-use super::{EnumTemplate, PreludeTemplates, VmError, VmResult, int_to_ascii, parse_uint_ascii};
+use crate::template::EnumTemplate;
+
+use super::templates::H1;
+use super::{VmError, VmResult, int_to_ascii, parse_uint_ascii};
 
 /// Total request-head size cap (request line + all header fields), mirrored by
 /// `al/http/h1`'s docs. A head that grows past this without completing is
@@ -149,7 +152,7 @@ impl ByteWindow {
 /// Parse one request head out of `bin` starting at byte offset `off`, pushing
 /// an `al/http/h1.Parsed` value.
 pub(super) fn parse_head(
-    t: &PreludeTemplates,
+    t: &H1,
     a: &mut ProcHeap,
     bin: &BinaryRef<'_>,
     off: i64,
@@ -160,7 +163,7 @@ pub(super) fn parse_head(
 /// Every offset below is relative to `win` (the AL-visible binary), so the
 /// `consumed` offset and the returned views line up with the offsets the AL
 /// caller passed in.
-fn parse_head_window(t: &PreludeTemplates, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Value {
+fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Value {
     let bytes = win.bytes();
     let mut off = (off.max(0) as usize).min(win.len);
     let head_start = off;
@@ -313,7 +316,7 @@ enum HeaderBlock {
 /// trailer block measures from the block itself. A block that grows past the
 /// cap without completing is rejected rather than buffered forever.
 fn parse_header_block(
-    t: &PreludeTemplates,
+    t: &H1,
     a: &mut ProcHeap,
     win: &ByteWindow,
     start: usize,
@@ -404,7 +407,7 @@ fn find_crlf(bytes: &[u8], from: usize) -> Option<usize> {
 /// non-digit / overflowing value, or a redundant leading zero ("007") are all
 /// rejected (400).
 pub(super) fn framing(
-    t: &PreludeTemplates,
+    t: &H1,
     a: &mut ProcHeap,
     headers_val: &Value,
 ) -> VmResult<Value> {
@@ -491,7 +494,7 @@ const MAX_TRAILER_BLOCK: usize = MAX_HEAD;
 /// buffer, not in the VM). `consumed` on `ChunkedDone` is the offset just past
 /// the final CRLF, i.e. the start of the next pipelined request.
 pub(super) fn chunk_decode(
-    t: &PreludeTemplates,
+    t: &H1,
     a: &mut ProcHeap,
     bin: &BinaryRef<'_>,
     off: i64,
@@ -501,7 +504,7 @@ pub(super) fn chunk_decode(
 }
 
 fn chunk_decode_window(
-    t: &PreludeTemplates,
+    t: &H1,
     a: &mut ProcHeap,
     win: &ByteWindow,
     off: i64,
@@ -625,7 +628,7 @@ fn find_header(
 /// The value of the first header whose name matches (ASCII-case-insensitive),
 /// as `Option(Binary)`.
 pub(super) fn header_get(
-    t: &PreludeTemplates,
+    t: &H1,
     a: &mut ProcHeap,
     headers_val: &Value,
     name: &BinaryRef<'_>,
@@ -637,10 +640,9 @@ pub(super) fn header_get(
     })
 }
 
-/// Whether every field is safe to serialize: non-empty RFC 9110 token name
-/// (§5.6.2), CR/LF/NUL-free value. One native walk — the connection driver
-/// runs this on every response it writes, and the interpreted per-byte form
-/// was a measurable share of a keep-alive server's request cost.
+/// Whether every field is safe to serialize: a non-empty RFC 9110 token name
+/// (§5.6.2) and a CR/LF/NUL-free value. Native because the connection driver
+/// runs it on every response it writes.
 pub(super) fn headers_valid(headers_val: &Value) -> VmResult<Value> {
     fn is_token_byte(b: u8) -> bool {
         b.is_ascii_alphanumeric()
@@ -672,11 +674,7 @@ pub(super) fn header_has(headers_val: &Value, name: &BinaryRef<'_>) -> VmResult<
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Response-head serialization
-// ---------------------------------------------------------------------------
-
-/// Serialize "HTTP/1.1 <code> <reason>\r\n" + the header block + the blank
+/// Serialize `HTTP/1.1 <code> <reason>` plus the header block and the blank
 /// line into one contiguous buffer, ready for a single socket write.
 pub(super) fn serialize_head(
     a: &mut ProcHeap,
@@ -685,7 +683,7 @@ pub(super) fn serialize_head(
     headers_val: &Value,
 ) -> VmResult<Value> {
     let reason_bytes = reason.full_bytes();
-    // Capacity hint only — for_each_header owns the real shape check.
+    // Capacity hint only; for_each_header owns the real shape check.
     let est = headers_val.as_array().map_or(0, |arr| arr.len());
     let mut out: Vec<u8> = Vec::with_capacity(64 + reason_bytes.len() + est * 64);
     out.extend_from_slice(b"HTTP/1.1 ");
@@ -710,25 +708,40 @@ mod tests {
     use super::*;
     use crate::frozen::FrozenArea;
 
-    /// Per-test fixture: prelude templates frozen in their own area (kept
-    /// alive by `_frozen` — the templates point into it) plus a generously
-    /// pre-ensured arena for the values the scanners build.
+    /// The templates point into `_frozen`, so it must outlive them.
     struct Fix {
         _frozen: Arc<FrozenArea>,
-        t: PreludeTemplates,
+        templates: super::super::templates::Templates,
         h: ProcHeap,
     }
 
     fn fix() -> Fix {
         let frozen = Arc::new(FrozenArea::new());
         let mut fb = frozen.builder();
-        let t = PreludeTemplates::new(&mut fb, &crate::template::test_fixture::TEST_STDLIB);
+        let (templates, abi) = crate::template::test_fixture::build(&mut fb);
+        let program = crate::bytecode::Program {
+            constants: Vec::new(),
+            functions: Vec::new(),
+            code: Vec::new(),
+            entry: 0,
+            frozen: Arc::clone(&frozen),
+            native: Default::default(),
+            templates,
+            abi,
+        };
+        let templates = super::super::templates::Templates::resolve(&program, &mut fb);
         drop(fb);
         let h = ProcHeap::new();
         Fix {
             _frozen: frozen,
-            t,
+            templates,
             h,
+        }
+    }
+
+    impl Fix {
+        fn t(&self) -> &H1 {
+            self.templates.h1().expect("fixture binds every H1 slot")
         }
     }
 
@@ -739,12 +752,12 @@ mod tests {
 
         fn parse(&mut self, src: &str, off: i64) -> Value {
             let buf = self.bin(src);
-            parse_head(&self.t, &mut self.h, &buf.as_binary().unwrap(), off)
+            parse_head(self.t(), &mut self.h, &buf.as_binary().unwrap(), off)
         }
 
         fn chunk(&mut self, input: &str, off: i64, max: i64) -> Value {
             let buf = self.bin(input);
-            chunk_decode(&self.t, &mut self.h, &buf.as_binary().unwrap(), off, max)
+            chunk_decode(self.t(), &mut self.h, &buf.as_binary().unwrap(), off, max)
         }
     }
 
@@ -770,7 +783,7 @@ mod tests {
     fn parses_simple_get() {
         let mut x = fix();
         let buf = x.bin("GET /path HTTP/1.1\r\nHost: example.com\r\n\r\n");
-        let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
+        let parsed = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         assert_eq!(payload_bytes(&parsed, 0), b"GET");
         assert_eq!(payload_bytes(&parsed, 1), b"/path");
@@ -789,7 +802,7 @@ mod tests {
     fn header_views_share_backing_zero_copy() {
         let mut x = fix();
         let buf = x.bin("GET / HTTP/1.1\r\nHost:  spaced.example  \r\n\r\n");
-        let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
+        let parsed = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         let headers = &parsed.as_enum().unwrap().payload()[3];
         let arr = headers.as_array().unwrap();
@@ -861,8 +874,7 @@ mod tests {
         // Up to four leading blank lines are tolerated.
         let parsed = x.parse("\r\n\r\n\r\n\r\nGET / HTTP/1.1\r\n\r\n", 0);
         assert_eq!(variant_of(&parsed), "Done");
-        // A fifth is rejected — an unbounded CRLF stream cannot hold the
-        // connection open.
+        // A fifth is rejected: a CRLF stream cannot hold the connection open.
         let parsed = x.parse("\r\n\r\n\r\n\r\n\r\nGET / HTTP/1.1\r\n\r\n", 0);
         assert_eq!(variant_of(&parsed), "Bad");
         assert_eq!(payload_int(&parsed, 0), 400);
@@ -872,13 +884,13 @@ mod tests {
     fn skips_leading_empty_line_and_reports_consumed() {
         let mut x = fix();
         let buf = x.bin("\r\nGET / HTTP/1.1\r\n\r\nGET /next HTTP/1.1\r\n\r\n");
-        let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
+        let parsed = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         // consumed points just past the first head's blank line.
         let consumed = payload_int(&parsed, 5);
         assert_eq!(consumed, "\r\nGET / HTTP/1.1\r\n\r\n".len() as i64);
         // Parsing again from `consumed` yields the pipelined request.
-        let second = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), consumed);
+        let second = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), consumed);
         assert_eq!(variant_of(&second), "Done");
         assert_eq!(payload_bytes(&second, 1), b"/next");
     }
@@ -934,8 +946,7 @@ mod tests {
             ("Expect: 100-continue\r\n\r\n", false, false, true),
             ("expect: 100-Continue\r\n\r\n", false, false, true),
             ("Expect: other\r\n\r\n", false, false, false),
-            // A name that merely contains "connection"/"expect" is a different
-            // field.
+            // A name merely containing "connection"/"expect" is another field.
             ("X-Connection: close\r\n\r\n", false, false, false),
             ("Expectation: 100-continue\r\n\r\n", false, false, false),
             (
@@ -956,8 +967,7 @@ mod tests {
 
     #[test]
     fn trailers_never_contribute_flags() {
-        // RFC 9110 §6.5.1: a trailer field carries no connection or
-        // expectation semantics. The head's own fields are the only source.
+        // RFC 9110 §6.5.1: only the head's own fields are a source of flags.
         let mut x = fix();
         let v = chunk_of(
             &mut x,
@@ -1000,7 +1010,7 @@ mod tests {
         let parsed = x.parse(src, 0);
         let headers = parsed.as_enum().unwrap().payload()[3].clone();
         let name_v = x.bin(name);
-        let got = header_get(&x.t, &mut x.h, &headers, &name_v.as_binary().unwrap()).unwrap();
+        let got = header_get(x.t(), &mut x.h, &headers, &name_v.as_binary().unwrap()).unwrap();
         match got.as_enum() {
             Some(e) if e.variant_name() == "Some" => e.payload()[0]
                 .as_binary()
@@ -1028,7 +1038,7 @@ mod tests {
         let parsed = x.parse(src, 0);
         assert_eq!(variant_of(&parsed), "Done", "for {src:?}");
         let headers = parsed.as_enum().unwrap().payload()[3].clone();
-        let f = framing(&x.t, &mut x.h, &headers).unwrap();
+        let f = framing(x.t(), &mut x.h, &headers).unwrap();
         let variant = variant_of(&f);
         let arg = f
             .as_enum()
@@ -1061,8 +1071,7 @@ mod tests {
                 "Invalid",
                 Some(400),
             ),
-            // Fits i64 but not the 48-bit small-int payload → reject, never
-            // silently truncate.
+            // Fits i64 but not the 48-bit payload: reject, never truncate.
             (
                 "Content-Length: 200000000000000\r\n\r\n",
                 "Invalid",
@@ -1106,8 +1115,6 @@ mod tests {
             );
         }
     }
-
-    // --- Chunked transfer-encoding decoder ---------------------------------
 
     fn chunk_of(x: &mut Fix, input: &str, max: i64) -> Value {
         x.chunk(input, 0, max)
@@ -1159,8 +1166,7 @@ mod tests {
     #[test]
     fn buffer_boundary_split_then_done() {
         let mut x = fix();
-        // The decoder is stateless: a partial buffer yields NeedMore, and the
-        // same call with the completed buffer yields the full body.
+        // The decoder is stateless, so the completed buffer just works.
         let part = "5\r\nhel";
         assert_eq!(
             variant_of(&chunk_of(&mut x, part, 1 << 20)),
@@ -1227,8 +1233,7 @@ mod tests {
     #[test]
     fn rejects_oversize_decoded_body() {
         let mut x = fix();
-        // A single chunk larger than max: rejected from the size line alone,
-        // before any data needs to be buffered.
+        // Rejected from the size line alone, before any data is buffered.
         let v = chunk_of(&mut x, "FFFFFFFF\r\n", 1024);
         assert_eq!(variant_of(&v), "ChunkedBad");
         assert_eq!(payload_int(&v, 0), 413);
@@ -1289,7 +1294,6 @@ mod tests {
     #[test]
     fn serializes_response_head() {
         let mut x = fix();
-        // Build a headers array via the parser (zero-copy views), then render.
         let parsed = x.parse(
             "GET / HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n",
             0,

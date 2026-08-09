@@ -8,8 +8,7 @@ use al_core::term::Palette;
 const LOGO: [&str; 2] = ["▄▀█ █░░", "█▀█ █▄▄"];
 const LEARN_MORE: &str = "https://al.alistair.sh";
 
-/// Curated, high-value examples per subcommand. Introspection can describe
-/// flags but not show idiomatic usage, so these are maintained by hand.
+/// Hand-maintained: clap can describe flags but not show idiomatic usage.
 fn examples_for(sub: &str) -> &'static [&'static str] {
     match sub {
         "run" => &["al run hello.al", "al run server.al"],
@@ -68,8 +67,7 @@ fn sub_synopsis(sub: &Command) -> String {
     s
 }
 
-/// `-s, --long <VAL>` — aligned so `--long` lines up whether or not there's a
-/// short form.
+/// `-s, --long <VAL>`, padded so `--long` lines up with or without a short.
 fn opt_label(a: &Arg) -> String {
     let mut s = String::new();
     match a.get_short() {
@@ -91,8 +89,8 @@ fn display_width(s: &str) -> usize {
     s.chars().count()
 }
 
-/// One `label  description` row, left column padded to `width` (measured on the
-/// uncolored label so ANSI codes don't skew alignment).
+/// One `label  description` row. `width` is measured on the uncolored label so
+/// ANSI codes do not skew alignment.
 fn row(out: &mut String, p: &Palette, label: &str, desc: &str, width: usize) {
     let pad = " ".repeat(width.saturating_sub(display_width(label)) + 2);
     let _ = write!(out, "  {label}{pad}");
@@ -284,8 +282,8 @@ fn command_help(sub: &Command) -> String {
     o
 }
 
-/// Dispatch help: `None` → full reference, `Some(name)` → that command (falls
-/// back to full reference with a note if the name is unknown, exit 2).
+/// Dispatch help: `None` prints the full reference, `Some(name)` one command.
+/// An unknown name prints the full reference and exits 2.
 pub fn help(cmd: &Command, sub: Option<&str>) -> ExitCode {
     match sub {
         None => {
@@ -322,10 +320,9 @@ pub fn version(cmd: &Command) {
     );
 }
 
-/// Render a clap parse failure in our own voice — never clap's formatter.
-/// clap's `Display` is a multi-line block (`error:` line, indented detail,
-/// blank line, then its own `Usage:`/`For more information` footer). We take
-/// the message block up to that blank line and drop clap's footer entirely.
+/// Render a clap parse failure in our own voice, never clap's formatter.
+/// clap's `Display` puts its own `Usage:`/`For more information` footer after
+/// a blank line, so only the message block above that blank line is kept.
 pub fn error(err: &clap::Error) {
     let p = Palette::for_stderr();
     let raw = err.to_string();

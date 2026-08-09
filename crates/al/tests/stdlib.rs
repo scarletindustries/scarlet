@@ -1,7 +1,5 @@
-//! Runtime golden tests for the pure-AL standard library modules under `al/*`.
-//! Each test drives a stdlib module's public functions through `al run` and
-//! pins the observed output; a change in behaviour (not just "it type-checks")
-//! is caught here.
+//! Runtime golden tests for the pure-AL stdlib modules under `al/*`: each
+//! drives a module's public functions through `al run` and pins the output.
 
 mod common;
 use common::{check_ok, check_rejects, run_outputs};
@@ -15,30 +13,27 @@ fn stdlib_option() {
          println(option.is_some(Some(1)))\n",
         "Some(10)\n99\nTrue\n",
     );
-    // then: Some threads the inner value into f (Some(5) -> Some(6)); None
-    // short-circuits, returning None without ever calling f.
+    // then: None short-circuits without calling f.
     run_outputs(
         "import al/option\n\
          println(option.then(Some(5), fn(x) Some(x + 1)))\n\
          println(option.then(None, fn(x) Some(x + 1)))\n",
         "Some(6)\nNone\n",
     );
-    // or_else: Some keeps the original option; None calls the fallback thunk.
+    // or_else: None calls the fallback thunk.
     run_outputs(
         "import al/option\n\
          println(option.or_else(Some(1), fn() Some(2)))\n\
          println(option.or_else(None, fn() Some(2)))\n",
         "Some(1)\nSome(2)\n",
     );
-    // is_none: True on None, False on Some — exercising both match arms.
     run_outputs(
         "import al/option\n\
          println(option.is_none(None))\n\
          println(option.is_none(Some(1)))\n",
         "True\nFalse\n",
     );
-    // Remaining arms not exercised above: map leaves None untouched,
-    // unwrap on Some yields the inner value, is_some is False on None.
+    // The remaining arms.
     run_outputs(
         "import al/option\n\
          println(option.map(None, fn(x) x * 2))\n\
@@ -56,24 +51,20 @@ fn stdlib_result() {
          println(result.map_err(Err('bad'), fn(e) '${e}!'))\n",
         "Ok(6)\nErr(bad!)\n",
     );
-    // then: Ok threads the inner value into f (here Ok(5) -> Ok(6)); Err
-    // short-circuits, propagating the original error untouched.
+    // then: Err short-circuits, propagating the original error untouched.
     run_outputs(
         "import al/result\n\
          println(result.then(Ok(5), fn(x) Ok(x + 1)))\n\
          println(result.then(Err('e'), fn(x) Ok(x + 1)))\n",
         "Ok(6)\nErr(e)\n",
     );
-    // unwrap: Ok yields the inner value; Err discards the error and returns
-    // the supplied default.
+    // unwrap: Err discards the error and returns the default.
     run_outputs(
         "import al/result\n\
          println(result.unwrap(Ok(5), 0))\n\
          println(result.unwrap(Err('e'), 99))\n",
         "5\n99\n",
     );
-    // is_ok / is_err: each predicate is True on its own constructor and False
-    // on the other, exercising both match arms of each.
     run_outputs(
         "import al/result\n\
          println(result.is_ok(Ok(1)))\n\
@@ -82,8 +73,7 @@ fn stdlib_result() {
          println(result.is_err(Ok(1)))\n",
         "True\nFalse\nTrue\nFalse\n",
     );
-    // Remaining arms not exercised above: map leaves an Err untouched,
-    // map_err leaves an Ok untouched.
+    // The remaining arms.
     run_outputs(
         "import al/result\n\
          println(result.map(Err('e'), fn(x) x + 1))\n\
@@ -103,14 +93,12 @@ fn stdlib_array() {
          println(array.contains([1, 2, 3], 2))\n",
         "[10, 20, 30]\n[3, 4]\n10\n[3, 2, 1]\nTrue\n",
     );
-    // find: returns Some(first match), None when nothing satisfies the predicate.
     run_outputs(
         "import al/array\n\
          println(array.find([1, 2, 3], fn(x) x > 1))\n\
          println(array.find([1, 2, 3], fn(x) x > 9))\n",
         "Some(2)\nNone\n",
     );
-    // any / all: any is True iff some element matches; all is True iff every one does.
     run_outputs(
         "import al/array\n\
          println(array.any([1, 2, 3], fn(x) x > 2))\n\
@@ -119,8 +107,7 @@ fn stdlib_array() {
          println(array.all([2, 3], fn(x) x % 2 == 0))\n",
         "True\nFalse\nTrue\nFalse\n",
     );
-    // Empty-array base cases: the `[] ->` arm of each recursive array fn and the
-    // not-found terminal of contains.
+    // Empty-array base cases.
     run_outputs(
         "import al/array\n\
          println(array.map([], fn(x) x * 10))\n\
@@ -131,8 +118,7 @@ fn stdlib_array() {
          println(array.contains([1, 2], 9))\n",
         "[]\n[]\n0\n0\n[]\nFalse\n",
     );
-    // `length` is a plain pub fn wrapping the @vm builtin, so it stays
-    // first-class: usable as a value and passable to higher-order fns.
+    // `length` wraps a @vm builtin in a plain pub fn, so it stays first-class.
     run_outputs(
         "import al/array\n\
          f = array.length\n\
@@ -165,8 +151,7 @@ run_case! {
 
 #[test]
 fn stdlib_decimal() {
-    // Construction, exact arithmetic, and scale propagation: add aligns to the
-    // wider scale, mul sums scales, sub is add of the negation.
+    // Scale propagation: add aligns to the wider scale, mul sums scales.
     run_outputs(
         "import al/decimal\n\
          a = decimal.new(1999, 2)\n\
@@ -179,9 +164,7 @@ fn stdlib_decimal() {
          println(decimal.to_string(decimal.new(5, 0 - 3)))\n",
         "20.00\n19.98\n59.97\n0.375\n1999\n2\n5000\n",
     );
-    // Rounding: HalfEven is the default (ties to even — 0.125 down, 0.135 up),
-    // HalfUp breaks ties away from zero on both signs, Down truncates, and a
-    // wider target scale zero-pads instead of rounding.
+    // HalfEven is the default; a wider target scale zero-pads.
     run_outputs(
         "import al/decimal.{HalfUp, Down}\n\
          x = decimal.new(2345, 3)\n\
@@ -194,8 +177,6 @@ fn stdlib_decimal() {
          println(decimal.to_string(decimal.round(x, 5)))\n",
         "2.34\n0.12\n0.14\n2.35\n-2.35\n2.34\n2.34500\n",
     );
-    // Division takes an explicit result scale and is Err(DividedByZero) on a
-    // zero divisor.
     run_outputs(
         "import al/decimal\n\
          import al/result\n\
@@ -206,10 +187,8 @@ fn stdlib_decimal() {
         "Ok(33.33)\nOk(0.1250)\nErr(DividedByZero)\n",
     );
     // Half-tie rounding with divisor units near Int max: `2 * r` would wrap
-    // for remainders at or above 2^62, silently rounding toward zero. The
-    // wrap-free `r` vs `d - r` comparison must agree with the small-scale
-    // equivalent of the same fraction (5/9 rounds to 1, 4/9 to 0), handle
-    // both signs, remainders near d, and exact ties.
+    // at remainders past 2^62. The wrap-free `r` vs `d - r` comparison must
+    // agree with the small-scale equivalent of the same fraction.
     run_outputs(
         "import al/decimal.{HalfUp, HalfEven}\n\
          import al/result\n\
@@ -226,8 +205,7 @@ fn stdlib_decimal() {
          println(show(decimal.div_with(decimal.from_int(4500000000000000000), big, 0, HalfEven)))\n",
         "Ok(1)\nOk(1)\nOk(1)\nOk(1)\nOk(0)\nOk(-1)\nOk(1)\nOk(1)\nOk(0)\n",
     );
-    // Numeric comparison is scale-blind (1.5 == 1.500) even though the
-    // representation differs; normalize strips the trailing zeros.
+    // Comparison is scale-blind (1.5 == 1.500); normalize strips the zeros.
     run_outputs(
         "import al/decimal\n\
          a = decimal.new(15, 1)\n\
@@ -241,9 +219,8 @@ fn stdlib_decimal() {
          println(decimal.is_zero(decimal.new(0, 5)))\n",
         "True\nLt\nTrue\n2\n1\nTrue\nTrue\n",
     );
-    // parse round-trips through to_string, keeps the written scale, handles
-    // signs, and rejects malformed or Int-overflowing input instead of
-    // wrapping. -0.05 exercises the sign-on-zero-whole-part case.
+    // parse keeps the written scale and rejects malformed or Int-overflowing
+    // input instead of wrapping. -0.05 is the sign-on-zero-whole-part case.
     run_outputs(
         "import al/decimal\n\
          import al/result\n\
@@ -260,8 +237,7 @@ fn stdlib_decimal() {
          println(result.map(decimal.parse('92233720368547758.07'), decimal.units))\n",
         "Ok(19.99)\nOk(-0.05)\nOk(1.50)\nOk(42)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\nOk(9223372036854775807)\n",
     );
-    // Negative `places` rounds to a multiple of 10^|places| at scale 0, in
-    // round and div alike.
+    // Negative `places` rounds to a multiple of 10^|places| at scale 0.
     run_outputs(
         "import al/decimal\n\
          import al/result\n\
@@ -271,12 +247,9 @@ fn stdlib_decimal() {
          println(result.map(decimal.div(decimal.from_int(1234), decimal.from_int(1), 0 - 2), decimal.to_string))\n",
         "1200\n1230\n0\nOk(1200)\n",
     );
-    // Dropping more than 18 digits (scale - places >= 19): 10^k would wrap,
-    // so the quotient regime is {-1, 0, 1} and is computed without it. The
-    // half boundary is reachable only at k == 19 (5 * 10^18); div is
-    // Err(ScaleOutOfRange) when |places| exceeds 18 or the rescale exponent
-    // exceeds 18 — including places > 18 with a small rescale exponent
-    // (scale(a) > scale(b)), which would otherwise mint a scale-19+ Decimal.
+    // Dropping more than 18 digits: 10^k would wrap, so the quotient regime
+    // is {-1, 0, 1} and is computed without it. div is Err(ScaleOutOfRange)
+    // once |places| or the rescale exponent exceeds 18.
     run_outputs(
         "import al/decimal.{HalfUp, Up}\n\
          import al/result\n\
@@ -292,8 +265,7 @@ fn stdlib_decimal() {
          println(decimal.div(decimal.new(1, 12), decimal.from_int(1), 21))\n",
         "0\nOk(10)\n0\n0\n10\n10\n0\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\nErr(ScaleOutOfRange)\n",
     );
-    // Float bridges are explicitly lossy conveniences; from_float is Err(Nil)
-    // instead of wrapping when units would leave Int range.
+    // Float bridges are lossy; from_float is Err(Nil) rather than wrapping.
     run_outputs(
         "import al/decimal\n\
          import al/result\n\
@@ -327,10 +299,8 @@ fn stdlib_binary() {
          println(binary.bit_size(binary.slice(b, 0, 5) or binary.from_string('')))\n",
         "Ok(<<66>>)\nErr(Nil)\nOk(ABC)\n5\n",
     );
-    // Op::BinReadUtf8 — `<<c:utf8, ..>>` decodes one *codepoint*, not one byte.
-    // [195, 169] is the UTF-8 encoding of 'é' (U+00E9); the pattern binds the
-    // codepoint 233 and advances 16 bits so `..` swallows the empty remainder.
-    // A byte-wise read would bind 195 instead, so 233 discriminates the opcode.
+    // Op::BinReadUtf8 decodes one codepoint, not one byte: [195, 169] is 'é',
+    // so a byte-wise read would bind 195 instead of 233.
     run_outputs(
         "import al/binary\n\
          r = match <<195, 169>> {\n\
@@ -340,9 +310,8 @@ fn stdlib_binary() {
          println(r)\n",
         "233\n",
     );
-    // Op::BinTake — `:bytes(n)` splices the first n bytes (prefix, clamped).
-    // From a 5-byte source `bytes(3)` keeps exactly 65,66,67 ('A','B','C'):
-    // discriminates count (not 5) and prefix-vs-suffix (not 'C','D','E').
+    // Op::BinTake — `:bytes(n)` splices the first n bytes. 65,66,67
+    // discriminates both the count and prefix-vs-suffix.
     run_outputs(
         "import al/binary\n\
          import al/string\n\
@@ -350,24 +319,20 @@ fn stdlib_binary() {
          println(string.inspect(<<src:bytes(3)>>))\n",
         "<<65, 66, 67>>\n",
     );
-    // binary.to_string Err branches: 0xFF is not valid UTF-8 (byte-aligned but
-    // undecodable), and `<<1:4>>` is bit-unaligned (bit_len % 8 != 0). Both
-    // yield Err(Nil) rather than panicking or lossily decoding.
+    // to_string Err branches: undecodable UTF-8, and bit-unaligned input.
     run_outputs(
         "import al/binary\n\
          println(binary.to_string(<<255>>))\n\
          println(binary.to_string(<<1:4>>))\n",
         "Err(Nil)\nErr(Nil)\n",
     );
-    // binary.byte_size rounds up: a 4-bit binary occupies 1 byte (div_ceil),
-    // not 0. The existing aligned case (16 bits -> 2) cannot catch the rounding.
+    // byte_size rounds up: a 4-bit binary occupies 1 byte, not 0.
     run_outputs(
         "import al/binary\n\
          println(binary.byte_size(<<1:4>>))\n",
         "1\n",
     );
-    // binary.slice with a negative offset takes the `at < 0` Err branch (a
-    // different guard than the existing OOB `at + take > bit_len` case).
+    // A negative offset takes the `at < 0` Err branch, not the OOB one.
     run_outputs(
         "import al/binary\n\
          println(binary.slice(binary.from_string('ABC'), 0 - 1, 8))\n",
@@ -382,8 +347,8 @@ fn stdlib_binary() {
 
 #[test]
 fn stdlib_binary_byte_at() {
-    // byte_at : (Binary, Int) -> Int — in-bounds bytes, -1 out of bounds
-    // (both sides), and views (slices) read through their offset.
+    // byte_at is -1 out of bounds on both sides; a view reads through its
+    // offset.
     run_outputs(
         "import al/binary\n\
          b = binary.from_string('AZ')\n\
@@ -402,10 +367,8 @@ fn stdlib_binary_byte_at() {
 
 #[test]
 fn stdlib_http_builtins() {
-    // The native h1 ops surfaced through al/http/h1 and al/http/headers:
-    // parse_request / framing / serialize_head / headers.get / headers.has
-    // each hydrate a Scheme from their @vm declaration. Behaviour is golden
-    // tested (tests/programs/http_parse.al); these pin the call-site types.
+    // These pin the call-site types of the native h1 ops; behaviour is golden
+    // tested in tests/programs/http_parse.al.
     check_ok(
         "import al/binary\n\
          import al/http/h1.{Done, NeedMore, Bad, Http10, Http11}\n\
@@ -431,8 +394,6 @@ fn stdlib_http_builtins() {
          }\n\
          println(r)\n",
     );
-    // chunk_decode : (Binary, Int, Int) -> ChunkBody, with the decoded body /
-    // trailers / consumed offset destructurable from ChunkedDone.
     check_ok(
         "import al/binary\n\
          import al/http/h1.{ChunkedDone, ChunkedNeedMore, ChunkedBad}\n\
@@ -464,19 +425,14 @@ fn stdlib_http_builtins() {
     );
 }
 
-// Token-list matching exists twice: natively in `vm::http::has_token` (which
-// fills `HeadFlags` while parsing a request head) and in AL as
-// `headers.contains_token` (which the response path uses). They are separate
-// code with no shared implementation, so this table drives ONE set of cases
-// through BOTH and demands the same answer — an edit to either side that
-// changes OWS trimming, empty-element handling, case folding, or whole-token
-// matching fails here rather than drifting silently.
+// Token-list matching exists twice with no shared implementation: natively in
+// `vm::http::has_token` and in AL as `headers.contains_token`. This table
+// drives one set of cases through both and demands the same answer.
 #[test]
 fn native_and_al_token_matching_agree() {
     // (Connection value, does it carry the `close` token?)
     let cases: &[(&str, bool)] = &[
         ("close", true),
-        // Case-insensitive.
         ("CLOSE", true),
         // List element, OWS-trimmed.
         ("keep-alive, close", true),
@@ -514,10 +470,8 @@ fn native_and_al_token_matching_agree() {
     }
 }
 
-// The ASCII byte builtins each hydrate a distinct `Scheme` from their `@vm`
-// declaration; one `check_ok` per builtin pins that the call site type-checks
-// against the declared signature (the result is consumed so the program is a
-// complete, well-typed unit).
+// One `check_ok` per ASCII byte builtin, pinning that the call site
+// type-checks against the `@vm`-declared signature.
 #[test]
 fn stdlib_binary_ascii_builtins() {
     // index_of : (Binary, Binary, Int) -> Option(Int)
@@ -569,12 +523,8 @@ fn stdlib_float() {
          println(float.max(1.5, 3.2))\n",
         "2.5\n0.0\n1.5\n3.2\n",
     );
-    // VM float operators, each with a discriminating value assertion: `+`
-    // (AddFloat), `*` (MulFloat), unary `-` (NegFloat) and `<=`/`>=`
-    // (Lte/GteFloat). `-z` with z = 0.0 routes a zero through NegFloat and must
-    // preserve the IEEE-754 sign of zero (`-0.0`, not `0.0`). The `<=`/`>=`
-    // pairs pin the equal boundary — each would fail if the op were the strict
-    // `<`/`>`.
+    // `-z` with z = 0.0 must preserve the IEEE-754 sign of zero. The `<=`/`>=`
+    // pairs pin the equal boundary, which strict `<`/`>` would fail.
     run_outputs(
         "x = 2.5\n\
          z = 0.0\n\
@@ -587,10 +537,8 @@ fn stdlib_float() {
          println(3.5 >= 4.0)\n",
         "3.5\n3.0\n-2.5\n-0.0\nTrue\nTrue\nFalse\n",
     );
-    // floor/ceil/round/truncate on negatives. floor goes toward -inf
-    // (-2.7 -> -3) while truncate goes toward zero (-2.9 -> -2): together the
-    // sign discriminator a positives-only test misses. round is
-    // half-away-from-zero (-2.5 -> -3); ceil toward +inf (-2.1 -> -2).
+    // On negatives floor goes toward -inf while truncate goes toward zero,
+    // round is half-away-from-zero, ceil toward +inf.
     run_outputs(
         "import al/float\n\
          println(float.floor(0.0 - 2.7))\n\
@@ -603,16 +551,9 @@ fn stdlib_float() {
 
 #[test]
 fn stdlib_string() {
-    // string.length counts Unicode *codepoints* (StrLen -> chars().count()),
-    // not bytes: 'héllo' is 5 chars but 6 bytes ('é' = U+00E9 is two UTF-8
-    // bytes), so a chars-vs-bytes regression would print 6 here.
-    // string.split with an empty delimiter takes the char-split branch
-    // (StrSplit's `delim.is_empty()` arm), exploding into one entry per char.
-    // string.contains pins the False arm ('z' absent from 'abc').
-    // string.trim strips *all* leading/trailing whitespace, including the
-    // non-space tab/newline a spaces-only test would miss (Rust str::trim).
-    // string.inspect on a String passes the text through verbatim (the
-    // ToString already-Str fast path) while on a scalar it stringifies (42).
+    // length counts codepoints, not bytes: 'héllo' is 5 chars, 6 bytes.
+    // split with an empty delimiter takes the char-split branch. trim strips
+    // tabs and newlines too. inspect passes a String through verbatim.
     run_outputs(
         "import al/string\n\
          println(string.length('héllo'))\n\

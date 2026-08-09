@@ -1,33 +1,18 @@
 //! Name resolution, finished: the sole producer of [`ValueRef`] and
 //! [`TypedCallee`].
 //!
-//! `lower` used to resolve names itself, mapping a `(Ty, ValueKind, VarLoad)`
-//! triple onto a `PushLocal`/`PushGlobal`/`PushCapture`/`PushSelf` atom at the
-//! point of use. That put one invariant in prose and nowhere else:
+//! A top-level `fn` referenced as a **value** must load `PushGlobal slot`;
+//! `PushSelf` would read the sentinel `captures` a `CallKnown` frame carries,
+//! not the closure. The same name *called* is `CallSelf`. So a top-level fn's
+//! self-reference is two different loads depending on position.
 //!
-//! > A top-level `fn` referenced as a **value** must load `PushGlobal slot`.
-//! > `PushSelf` would read the sentinel `captures` a `CallKnown` frame
-//! > carries, not the closure.
-//!
-//! The same name *called* is `CallSelf`. So a top-level fn's self-reference is
-//! two different loads depending on position, and the old `VarLoad::SelfGlobal`
-//! kept them apart only by every consumer remembering to match it alongside
-//! `VarLoad::Self_` in callee position and alongside `VarLoad::Global` in value
-//! position.
-//!
-//! [`Denotation`] makes that unspellable instead. Its payload is private; the
-//! only way to denote a top-level fn is [`Denotation::self_toplevel_fn`] or
-//! [`Denotation::known_fn`], both of which *fix* the value load to
+//! [`Denotation`] makes the wrong pairing unspellable: its payload is private,
+//! and the constructors that denote a top-level fn fix the value load to
 //! [`ValueRef::Global`]. [`Denotation::as_value`] and
-//! [`Denotation::as_callee`] then project the position-dependent halves. A
-//! caller cannot pair `SelfClosure` with a top-level fn because it cannot build
-//! the pair. `VarLoad` is gone: the module walk builds a `Denotation` straight
-//! from its frame, so there is no untyped intermediate for a consumer to
-//! mis-project.
+//! [`Denotation::as_callee`] project the position-dependent halves.
 //!
-//! [`Denotation::self_closure`] is the *nested lambda* case — a `fn(){}` value
-//! recursing into itself. There `PushSelf` is correct, because the frame is a
-//! closure frame with real captures.
+//! [`Denotation::self_closure`] is the *nested lambda* case, where the frame is
+//! a real closure frame and `PushSelf` is correct.
 
 use crate::bytecode::Op;
 use crate::core_ir::{FuncIdx, VariantRef};
@@ -52,9 +37,9 @@ pub struct Denotation(Den);
 enum Den {
     /// An ordinary runtime value. Calling it is a dynamic call.
     Value(ValueRef),
-    /// A statically-known function. `place` is how it loads as a value,
-    /// `target` is how it is called; the two are never interchangeable and are
-    /// chosen together by the smart constructors.
+    /// A statically-known function. `place` is how it loads as a value and
+    /// `target` is how it is called; the two are never interchangeable, so the
+    /// constructors always choose them together.
     Fn { place: ValueRef, target: FnTarget },
     /// A data constructor.
     Ctor { variant: VariantRef, arity: Arity },
@@ -63,15 +48,14 @@ enum Den {
 }
 
 /// A name in value position. Not every name is a load: a constructor is a
-/// construction, and a non-nullary constructor or a builtin is a request for an
-/// eta wrapper.
+/// construction, and a non-nullary constructor or builtin needs an eta wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueForm {
     /// `TypedExpr::Var { place }`.
     Ref(ValueRef),
     /// A nullary constructor: `TypedExpr::Ctor { variant, args: [] }`.
     Ctor(VariantRef),
-    /// Needs `fn(a0..aN-1) { <apply>(a0..aN-1) }` — a zero-capture
+    /// Needs `fn(a0..aN-1) { <apply>(a0..aN-1) }`: a zero-capture
     /// `TypedExpr::Closure` over a `TypedFn` the elaborator synthesises.
     Eta(EtaTarget),
 }
@@ -81,8 +65,7 @@ pub enum ValueForm {
 pub enum EtaTarget {
     /// Arity comes from the declaration, not from the (instantiated) type.
     Ctor { variant: VariantRef, arity: Arity },
-    /// Arity comes from the instantiated function type via `FnRTy` — the only
-    /// constructor proving the type is a `Fun`.
+    /// Arity comes from the instantiated function type via `FnRTy`.
     Builtin { op: Op },
 }
 
@@ -91,9 +74,8 @@ pub enum EtaTarget {
 pub enum CallForm {
     Callee(TypedCallee),
     /// A constructor call: `TypedExpr::Ctor { variant, args }`, not a call at
-    /// all. Deliberately payload-free — the elaborator's `ctor_of` re-derives
-    /// the variant through [`Denotation::as_ctor`] and owns label reordering
-    /// and the arity check, so no call path can bypass it.
+    /// all. Payload-free on purpose, so every path goes through the
+    /// elaborator's `ctor_of` for label reordering and the arity check.
     Ctor,
 }
 
@@ -112,8 +94,8 @@ impl Denotation {
         Denotation(Den::Value(ValueRef::Capture(idx)))
     }
 
-    /// A top-level `fn` other than the one being elaborated. Called by index;
-    /// loaded — necessarily — from its entry-frame slot.
+    /// A top-level `fn` other than the one being elaborated. Called by index,
+    /// loaded from its entry-frame slot.
     pub fn known_fn(slot: GlobalSlot, func_idx: FuncIdx) -> Self {
         Denotation(Den::Fn {
             place: ValueRef::Global(slot),
@@ -121,9 +103,9 @@ impl Denotation {
         })
     }
 
-    /// The top-level `fn` currently being elaborated. `CallSelf` when called;
-    /// `PushGlobal slot` — never `PushSelf` — when loaded as a value, because a
-    /// `CallKnown` frame's `captures` is a sentinel.
+    /// The top-level `fn` currently being elaborated. `CallSelf` when called,
+    /// `PushGlobal slot` when loaded — never `PushSelf`, because a `CallKnown`
+    /// frame's `captures` is a sentinel.
     pub fn self_toplevel_fn(slot: GlobalSlot) -> Self {
         Denotation(Den::Fn {
             place: ValueRef::Global(slot),
@@ -132,7 +114,7 @@ impl Denotation {
     }
 
     /// A nested lambda referring to itself. Its frame is a real closure frame,
-    /// so `PushSelf` is the correct value load.
+    /// so `PushSelf` is the right value load.
     pub fn self_closure() -> Self {
         Denotation(Den::Fn {
             place: ValueRef::SelfClosure,
@@ -148,15 +130,12 @@ impl Denotation {
         Denotation(Den::Builtin { op })
     }
 
-    /// The denotation a name's [`ValueKind`] fixes on its own, with no help
-    /// from the frame: a data constructor or a `@vm` builtin. `name` is the
-    /// interned source name, used only to complete a constructor's
-    /// [`VariantRef`].
+    /// The denotation a name's [`ValueKind`] fixes on its own: a data
+    /// constructor or a `@vm` builtin.
     ///
-    /// `None` for [`ValueKind::Local`] / [`ValueKind::ModuleFn`] — those denote
-    /// a *place*, and only the frame that bound them knows which. This is why a
-    /// constructor's frame resolution can no longer leak into a [`ValueRef`]:
-    /// there is no parameter here to leak from.
+    /// `None` for [`ValueKind::Local`] / [`ValueKind::ModuleFn`], which denote
+    /// a *place* only the binding frame knows. Taking no place parameter is
+    /// what stops a constructor's frame resolution leaking into a [`ValueRef`].
     pub fn from_kind(kind: ValueKind, name: StrId) -> Option<Self> {
         match kind {
             ValueKind::Constructor {
@@ -192,8 +171,8 @@ impl Denotation {
         }
     }
 
-    /// The name in callee position. `fn_ty` is the callee's own resolved type,
-    /// needed only to type the `TypedExpr::Var` a dynamic call evaluates.
+    /// The name in callee position. `fn_ty` types the `TypedExpr::Var` a
+    /// dynamic call evaluates, and is unused otherwise.
     pub fn as_callee(&self, fn_ty: RTy) -> CallForm {
         match self.0 {
             Den::Fn {
@@ -213,8 +192,7 @@ impl Denotation {
         }
     }
 
-    /// The variant and declared [`Arity`] this name constructs, for a
-    /// pattern's use site. `None` for anything that is not a constructor.
+    /// The variant and declared [`Arity`] this name constructs.
     pub fn as_ctor(&self) -> Option<(VariantRef, Arity)> {
         match self.0 {
             Den::Ctor { variant, arity } => Some((variant, arity)),
@@ -239,11 +217,9 @@ mod tests {
         }
     }
 
-    /// The invariant the old `VarLoad::SelfGlobal` documented in prose: a
-    /// top-level fn is `PushGlobal slot` as a value and `CallSelf` as a callee.
-    /// Neither the
-    /// caller nor a future arm can pair the other way — `Den` is private and
-    /// both halves come from one constructor.
+    /// A top-level fn is `PushGlobal slot` as a value and `CallSelf` as a
+    /// callee. Nothing can pair them the other way: `Den` is private and both
+    /// halves come from one constructor.
     #[test]
     fn a_toplevel_fn_loads_its_global_slot_and_calls_itself() {
         let d = Denotation::self_toplevel_fn(GlobalSlot(4));
@@ -255,8 +231,7 @@ mod tests {
     }
 
     /// A place-valued name gets no denotation from its `ValueKind` alone: only
-    /// the frame that bound it knows where it lives. This is what makes the
-    /// `SelfGlobal` pairing above the *only* way to spell a top-level fn.
+    /// the frame that bound it knows where it lives.
     #[test]
     fn the_kind_bridge_defers_places_to_the_frame() {
         assert_eq!(Denotation::from_kind(ValueKind::ModuleFn, StrId(0)), None);
@@ -284,8 +259,8 @@ mod tests {
         );
     }
 
-    /// A module-scope *value* (a `const`, an import re-exported as a value) has
-    /// no `func_idx`, so calling it is a dynamic call through its load.
+    /// A module-scope *value* has no `func_idx`, so calling it is a dynamic
+    /// call through its load.
     #[test]
     fn a_plain_global_calls_dynamically_through_its_load() {
         let d = Denotation::global(GlobalSlot(5));
@@ -299,8 +274,7 @@ mod tests {
     }
 
     /// A frame slot in resolved-name position is never a `BindingId`: the
-    /// elaborator's own binds are found before the walk is consulted, so what
-    /// is left is a slot the walk minted (a selective `import mod.{x}`).
+    /// elaborator's own binds are found before the walk is consulted.
     #[test]
     fn a_walk_frame_slot_is_the_escape_hatch() {
         let d = Denotation::slot(FrameSlot(6));
@@ -351,9 +325,8 @@ mod tests {
         assert_eq!(d.as_ctor().map(|(_, a)| a), None);
     }
 
-    /// A constructor's frame resolution is meaningless (`resolve_name` finds no
-    /// place for it) and must not leak into a `ValueRef`. `from_kind` takes no
-    /// place at all, so it cannot.
+    /// A constructor's frame resolution is meaningless and must not leak into
+    /// a `ValueRef`. `from_kind` takes no place at all, so it cannot.
     #[test]
     fn a_ctors_meaningless_frame_resolution_cannot_leak() {
         let d = Denotation::from_kind(

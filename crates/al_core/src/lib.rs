@@ -29,5 +29,5 @@ pub use al_vm::{assert_send, assert_send_sync, frozen, heap, tivec};
 
 pub use bytecode::{CtorRef, PreludeBindings, TypeRef};
 pub use precompile::{PrecompileOutput, precompile_stdlib};
-pub use static_ir::{StaticStdlib, VariantTemplate};
+pub use static_ir::StaticStdlib;
 pub use type_def::TypeId;

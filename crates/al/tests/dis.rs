@@ -1,11 +1,9 @@
 //! `al dis` — the compiled bytecode as text.
 //!
-//! The interesting test here is not the formatting: it is that every jump
-//! target lands inside its own function. Jump operands are function-relative
-//! (the VM assigns one straight to `ip`), and `Core`'s control flow is
-//! structured, so an out-of-range target would mean `emit` had produced a jump
-//! into another function's code — which is exactly the miscompile that
-//! function-relative operands exist to make unrepresentable.
+//! The property that matters is that every jump target lands inside its own
+//! function. Jump operands are function-relative (the VM assigns one straight
+//! to `ip`), so an out-of-range target means `emit` produced a jump into
+//! another function's code.
 
 mod common;
 
@@ -38,8 +36,7 @@ fn a_function_disassembles_with_its_header_and_body() {
     assert!(text.contains("Ret"), "{text}");
 }
 
-/// A `PushConst` operand indexes `constants` directly — the one operand whose
-/// meaning needs no per-opcode table — so it renders its value.
+/// A `PushConst` operand indexes `constants` directly, so it renders its value.
 #[test]
 fn a_constant_push_shows_its_value() {
     let p = program_of(FACT);
@@ -64,9 +61,8 @@ fn a_zero_operand_is_printed_not_hidden() {
     );
 }
 
-/// The property that matters. Every jump operand is an `ip` within its own
-/// function; `code_len` itself is the merge point of an `if` whose arms both
-/// return, and is never executed.
+/// `code_len` itself is the merge point of an `if` whose arms both return, so
+/// it is a legal target and never executed.
 #[test]
 fn every_jump_target_is_inside_its_own_function() {
     for src in [
@@ -125,16 +121,12 @@ fn the_full_dump_carries_a_constant_pool() {
     let _ = Op::PushConst; // the op the pool exists for
 }
 
-/// Two literals of the same big int must share one pool entry. The dedup used
-/// to key on `Value::to_bits()` — a *pointer* for a boxed int (outside ±2^47)
-/// — so every use site pooled a fresh copy: 92% of a compiled program's
-/// constant pool was duplicate enum-variant hashes.
+/// Two literals of the same big int must share one pool entry. Dedup must not
+/// key on `Value::to_bits()`, a *pointer* for a boxed int (outside ±2^47).
 ///
-/// The value must not collide with a stdlib constant: a hydrated constant
-/// points into the *static* frozen area and a fresh literal into the
-/// program's builder, so those two are (acceptably) distinct allocations —
-/// one duplicate per value that appears on both sides, bounded by distinct
-/// values rather than use sites.
+/// The fixture value must not collide with a stdlib constant: a hydrated
+/// constant points into the static frozen area and a fresh literal into the
+/// program's builder, so those two are acceptably distinct allocations.
 #[test]
 fn a_big_int_constant_is_pooled_once() {
     let p = program_of("a = 4611686018427387905\nb = 4611686018427387905\nprintln(a == b)\n");
@@ -144,8 +136,8 @@ fn a_big_int_constant_is_pooled_once() {
         .filter(|c| c.as_int() == Some(4611686018427387905))
         .count();
     assert_eq!(hits, 1, "one value, one pool entry");
-    // And the whole pool is small now: the stdlib's worth of constants, not
-    // one entry per constructor *use site*.
+    // The whole pool stays the stdlib's worth of constants, not one entry per
+    // constructor use site.
     assert!(
         p.constants.len() < 600,
         "pool regressed to per-use-site duplicates: {} entries",
@@ -154,12 +146,10 @@ fn a_big_int_constant_is_pooled_once() {
 }
 
 /// The size gate for join-point match lowering: a fallible match shares one
-/// fallthrough continuation (`LetCont`/`Goto`) across its failure edges
-/// instead of re-lowering every remaining arm at each edge. Without sharing,
-/// the duplication is multiplicative on binary patterns: `to_method`'s 8-arm
-/// binary match alone compiled to 48,100 instructions and the benchmark
-/// program to 72,333. These bounds fail loudly if any lowering path regresses
-/// to per-edge re-lowering.
+/// fallthrough continuation across its failure edges instead of re-lowering
+/// every remaining arm at each edge. Without sharing the duplication is
+/// multiplicative on binary patterns — `to_method` alone compiled to 48,100
+/// instructions and this program to 72,333.
 #[test]
 fn bench_service_compiles_without_match_arm_duplication() {
     let path =
@@ -186,13 +176,12 @@ fn bench_service_compiles_without_match_arm_duplication() {
     );
 }
 
-/// One function's instructions as `(op, operand)` pairs. Jump operands are
-/// function-relative, so the pairs are position-independent and comparable
-/// against a literal expectation; constant-pool operands are program-absolute
-/// and shift with the stdlib, so callers blank them.
+/// One function's instructions as `(op, operand)` pairs. Constant-pool
+/// operands are program-absolute and shift with the stdlib, so callers blank
+/// them; jump operands are function-relative and comparable as-is.
 fn fn_instructions(p: &bytecode::Program, name: &str) -> Vec<(Op, i32)> {
     // Last match: user functions are emitted after the stdlib, so a stdlib
-    // function that happens to share the name cannot shadow the fixture's.
+    // function of the same name cannot shadow the fixture's.
     let f = p
         .functions
         .iter()
@@ -205,15 +194,10 @@ fn fn_instructions(p: &bytecode::Program, name: &str) -> Vec<(Op, i32)> {
         .collect()
 }
 
-/// A match that cannot fail keeps the flat pre-join-point lowering
-/// byte-for-byte: no `LetCont` continuation blocks after the arms, no `Goto`
-/// jumps on failure edges — because no failure edge exists. The three shapes
-/// below (exhaustive per-variant enum match, single irrefutable arm, literal
-/// ladder) pin the exact instruction sequences the pre-join-point compiler
-/// produced, captured from its output; only constant-pool operands are
-/// blanked, being stdlib-relative. A `LetCont` sneaking into an infallible
-/// match would append a continuation block (extra instructions) or reroute an
-/// edge through a `Jump`, and either breaks the literal sequence.
+/// A match that cannot fail keeps the flat lowering byte-for-byte: no
+/// continuation blocks, no failure-edge `Goto`s, because no failure edge
+/// exists. A `LetCont` sneaking in would append a block or reroute an edge,
+/// and either breaks these literal sequences.
 #[test]
 fn an_infallible_match_keeps_the_flat_lowering() {
     use Op::*;
@@ -251,9 +235,7 @@ fn an_infallible_match_keeps_the_flat_lowering() {
             .collect::<Vec<_>>()
     };
 
-    // Exhaustive per-variant enum match: `PushLocal; SwitchTag`, the jump
-    // table, then each arm exactly once — payload spill, scrutinee drop,
-    // body, `Ret`.
+    // Exhaustive per-variant enum match: switch, jump table, each arm once.
     assert_eq!(
         blanked("area"),
         vec![
@@ -283,8 +265,7 @@ fn an_infallible_match_keeps_the_flat_lowering() {
         ]
     );
 
-    // Single irrefutable arm: straight-line projections, no branch at all,
-    // the ladder's one trailing `Halt`.
+    // Single irrefutable arm: straight-line projections, no branch.
     assert_eq!(
         blanked("single"),
         vec![
@@ -303,8 +284,8 @@ fn an_infallible_match_keeps_the_flat_lowering() {
         ]
     );
 
-    // Literal ladder: a head miss falls to the next arm's own test inside the
-    // one flat `Match` — no continuation is minted for it.
+    // Literal ladder: a head miss falls to the next arm's own test, with no
+    // continuation minted for it.
     assert_eq!(
         blanked("lits"),
         vec![

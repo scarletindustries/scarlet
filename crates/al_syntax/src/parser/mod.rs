@@ -1542,10 +1542,8 @@ impl Parser {
     }
 
     // `<<seg, seg, .., rest:binary>>` bit-string pattern. Segment values are
-    // restricted to atom patterns (binder / literal / `_`); the size spec is
-    // shared with the expression form. A trailing `..ident` / `..` captures the
-    // remaining bytes (alias for a final `ident:binary` segment) and must be
-    // last.
+    // atom patterns only; the size spec is shared with the expression form.
+    // A trailing `..ident` / `..` captures the rest and must be last.
     fn parse_binary_pattern(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         self.eat(Kind::BinOpen)?;
@@ -1576,8 +1574,8 @@ impl Parser {
 
             let seg_start = self.current_span();
             let value = self.parse_pattern_atom()?;
-            // A bare string-literal segment matches its UTF-8 bytes as a
-            // prefix (`<<'GET ', ..rest>>`), not a single 8-bit Int.
+            // A bare string segment matches its UTF-8 bytes as a prefix
+            // (`<<'GET ', ..rest>>`), not a single 8-bit Int.
             let spec = self.parse_bin_size_spec(matches!(
                 value,
                 ast::Pattern::Literal(ast::PatternLiteral::String(_))
@@ -1636,10 +1634,6 @@ impl Parser {
         Ok((args, rest))
     }
 
-    // ------------------------------------------------------------------------
-    // Functions
-    // ------------------------------------------------------------------------
-
     fn parse_function(&mut self) -> PResult<ast::Node> {
         if matches!(self.peek_next(), Some(Kind::Identifier(_))) {
             let doc = self.extract_doc_comment();
@@ -1675,9 +1669,8 @@ impl Parser {
             if self.kind() == Kind::PuncOpenBrace {
                 return Err("@vm functions cannot have a body".to_string());
             }
-            // Arity is enforced here, once: everything downstream
-            // (`analyse_module`'s Pass 0, `builtin_op`) assumes `FnBody::Vm`
-            // carries exactly the op key.
+            // Arity is enforced here, once: everything downstream assumes
+            // `FnBody::Vm` carries exactly the op key.
             let op = match vm_attr.args.as_slice() {
                 [op] => op.clone(),
                 _ => {
@@ -1707,8 +1700,8 @@ impl Parser {
         self.eat(Kind::Keyword(Keyword::Fn))?;
 
         let params = self.parse_parameters()?;
-        // Lambdas have no return-type slot — body starts immediately after `)`.
-        // This makes `fn(x) x * 3` unambiguous.
+        // Lambdas have no return-type slot: the body starts right after `)`,
+        // which makes `fn(x) x * 3` unambiguous.
         let body = self.parse_expression()?;
 
         Ok(ast::Expression::FunctionExpression(
@@ -1721,9 +1714,8 @@ impl Parser {
         ))
     }
 
-    // Checks whether a token begins a type in param/return position. Unlike
-    // `is_type_start_token`, any identifier qualifies: these positions admit
-    // lowercase type variables.
+    // Whether a token begins a type in param/return position. Any identifier
+    // qualifies: these positions admit lowercase type variables.
     fn at_loose_type_start(&self) -> bool {
         matches!(
             self.kind(),
@@ -1757,10 +1749,6 @@ impl Parser {
 
         Ok(ast::FunctionParameter { typ, identifier })
     }
-
-    // ------------------------------------------------------------------------
-    // Types
-    // ------------------------------------------------------------------------
 
     fn parse_type_identifier(&mut self) -> PResult<ast::TypeIdentifier> {
         self.with_recursion_guard(Self::parse_type_identifier_inner)
@@ -1872,8 +1860,7 @@ impl Parser {
             let variants = self.with_context(ParseContext::TypeDef, |p| {
                 if matches!(&p.cur().kind, Kind::Identifier(s) if !is_type_name(s)) {
                     // Single-constructor shorthand: `type T { field Type ... }`
-                    // desugars to `type T { T(field Type ...) }`. Fields are
-                    // separated by newlines/spaces; commas are rejected.
+                    // desugars to `type T { T(field Type ...) }`.
                     let fields =
                         p.parse_line_separated_list(Kind::PuncCloseBrace, "field", |q| {
                             q.parse_constructor_field()
@@ -1937,7 +1924,6 @@ impl Parser {
     fn parse_constructor_field(&mut self) -> PResult<ast::ConstructorField> {
         let start = self.current_span();
 
-        // Detect a bare type with no label and produce the spec'd error.
         if self.is_type_start() {
             return Err("constructor fields must be labeled: write 'label Type'".to_string());
         }
@@ -1951,10 +1937,6 @@ impl Parser {
             span: self.span_from(start),
         })
     }
-
-    // ------------------------------------------------------------------------
-    // Bindings
-    // ------------------------------------------------------------------------
 
     fn parse_const_binding(&mut self, doc: Option<String>) -> PResult<ast::Declaration> {
         let span = self.current_span();
@@ -1980,11 +1962,9 @@ impl Parser {
         }))
     }
 
-    // Scan from the current `(` to its matching `)` and check whether an `=`
-    // follows on the same line. The same-line requirement mirrors
-    // `is_binding_ahead`'s depth-0 newline rule: `(a, b)` followed by a
-    // fresh-line `=` is a tuple expression plus a separate (erroring) node,
-    // exactly like the identifier case.
+    // Whether an `=` follows the matching `)` on the same line. Same-line
+    // mirrors `is_binding_ahead`'s newline rule: `(a, b)` then a fresh-line
+    // `=` is a tuple expression plus a separate erroring node.
     fn is_tuple_destructuring(&self) -> bool {
         let mut depth = 0;
         let mut i = self.index;
@@ -2042,8 +2022,7 @@ impl Parser {
 
     fn parse_ctor_destructuring(&mut self) -> PResult<ast::Statement> {
         let span = self.current_span();
-        // The dispatch in parse_node guarantees an uppercase identifier followed
-        // by `(`, so parse the constructor head directly.
+        // `parse_node`'s dispatch guarantees an uppercase identifier then `(`.
         let name = self.eat_identifier("Expected constructor name")?;
         self.eat(Kind::PuncOpenParen)?;
         let (args, rest) = self.parse_pattern_args()?;
@@ -2100,7 +2079,7 @@ impl Parser {
             self.eat(Kind::Keyword(Keyword::Opaque))?;
         }
         // Callers reach here with `pub` and/or at least one attribute, so the
-        // error message can always name what actually preceded the junk.
+        // error can always name what preceded the junk.
         let preceded_by = if is_pub { "`pub`" } else { "attributes" };
         let mut decl = self.parse_declaration_inner(doc, attrs, opaque, preceded_by)?;
         let s = decl.span_mut();
@@ -2166,9 +2145,8 @@ impl Parser {
         let import_span = self.current_span();
         self.eat(Kind::Keyword(Keyword::Import))?;
 
-        // Leading `.` / `..` segments for relative imports; the grammar only
-        // admits them before the first module name, so they fill `leading`
-        // and never mix into `names`.
+        // Relative-import segments. The grammar admits them only before the
+        // first module name, so they never mix into `names`.
         let mut leading: Vec<ast::RelSeg> = Vec::new();
         while matches!(self.kind(), Kind::PuncDot | Kind::PuncDotdot) {
             leading.push(if self.kind() == Kind::PuncDot {
@@ -2183,7 +2161,7 @@ impl Parser {
             self.eat(Kind::PuncDiv)?;
         }
 
-        // Track the span of the final module-name segment; the last write wins.
+        // Span of the final module-name segment; the last write wins.
         let mut path_span = self.current_span();
         let first = self.eat_name("Expected module name after `import`")?;
         let mut names: Vec<String> = vec![first];
@@ -2358,7 +2336,7 @@ mod tests {
         result
     }
 
-    /// The `doc` of the program's first declaration, whatever kind it is.
+    /// The `doc` of the program's first declaration.
     fn first_decl_doc(r: &ParseResult) -> Option<String> {
         match r.ast.body.first().expect("a first declaration") {
             ast::Node::Statement(s) => match s.as_ref() {
@@ -2393,8 +2371,8 @@ mod tests {
 
     #[test]
     fn line_comment_before_a_doc_comment_leaves_no_module_doc() {
-        // A `//` comment forces a newline, so the `/** */` no longer begins on
-        // line 0 and stays the declaration's doc.
+        // The `//` forces a newline, so the `/** */` no longer begins on line
+        // 0 and stays the declaration's doc.
         let r = assert_no_errors("// header\n/** Docs f. */\npub fn f() Int { 1 }\n");
         assert_eq!(r.doc, None);
         assert_eq!(first_decl_doc(&r).as_deref(), Some("/** Docs f. */"));
@@ -2409,8 +2387,6 @@ mod tests {
 
     #[test]
     fn module_doc_and_first_declaration_doc_coexist() {
-        // Both comments sit in the same token's leading trivia; the module
-        // takes the first and `f` still gets the second.
         let r = assert_no_errors("/** Module. */\n/** Docs f. */\npub fn f() Int { 1 }\n");
         assert_eq!(r.doc.as_deref(), Some("/** Module. */"));
         assert_eq!(first_decl_doc(&r).as_deref(), Some("/** Docs f. */"));
@@ -2419,7 +2395,7 @@ mod tests {
     #[test]
     fn unterminated_line_zero_doc_is_not_the_module_doc() {
         // The scanner swallows the rest of the file into the comment; treating
-        // that as documentation would put the whole source on the hover card.
+        // that as a module doc would put the whole source on the hover card.
         let r = parse("/** Module prose\npub fn f() Int { 1 }\n");
         assert_eq!(r.doc, None);
     }
@@ -2464,7 +2440,7 @@ mod tests {
     }
 
     /// Every program in the repo's two .al corpora must parse cleanly. Globbed
-    /// rather than listed so curating the corpus can never break the build.
+    /// rather than listed so curating the corpus cannot break the build.
     #[test]
     fn parses_every_corpus_program() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2510,7 +2486,7 @@ mod tests {
     fn test_binary_precedence() {
         let result = parse("1 + 2 * 3");
         assert!(result.diagnostics.is_empty());
-        // Should be 1 + (2 * 3): top level is + with right being *
+        // 1 + (2 * 3)
         if let ast::Node::Expression(ast::Expression::BinaryExpression(b)) = &result.ast.body[0] {
             assert_eq!(b.op, ast::BinaryOp::Add);
             assert!(matches!(*b.right, ast::Expression::BinaryExpression(_)));
@@ -2521,7 +2497,7 @@ mod tests {
 
     #[test]
     fn test_range_precedence() {
-        // -5..5 should be RangeExpression(Unary(-5), 5)
+        // -5..5 is RangeExpression(Unary(-5), 5)
         let result = parse("-5..5");
         assert!(result.diagnostics.is_empty());
         if let ast::Node::Expression(ast::Expression::RangeExpression(r)) = &result.ast.body[0] {
@@ -2530,7 +2506,7 @@ mod tests {
         } else {
             panic!("expected range expression, got {:#?}", result.ast.body[0]);
         }
-        // a+b..c+d should be (a+b)..(c+d)
+        // 1+2..3+4 is (1+2)..(3+4)
         let result = parse("1+2..3+4");
         if let ast::Node::Expression(ast::Expression::RangeExpression(r)) = &result.ast.body[0] {
             assert!(matches!(*r.start, ast::Expression::BinaryExpression(_)));
@@ -2661,8 +2637,7 @@ mod tests {
     #[test]
     fn test_newline_before_equals_is_not_a_binding() {
         // A depth-0 newline before `=` ends the statement: the left-hand side
-        // parses as an expression and the stray `=` errors. The tuple form
-        // follows the same rule as the identifier form.
+        // parses as an expression and the stray `=` errors.
         let r = parse("x\n= 1");
         assert!(!r.diagnostics.is_empty(), "expected an error for stray `=`");
         assert!(matches!(r.ast.body[0], ast::Node::Expression(_)));
@@ -2737,11 +2712,9 @@ mod tests {
         );
         // A binary operator cannot begin a pattern.
         assert_has_error("match 1 { + -> 0 }", "Unexpected '+' in pattern");
-        // Recovery from a bad pattern/guard/arrow that synchronizes to the
-        // arm's `->` must consume it and parse the body, not loop forever
-        // re-erroring on the same token.
-        // `qual.Ctor(..)` is a qualified constructor pattern, and parses. A
-        // lowercase member cannot be a constructor, so it still needs recovery.
+        // Recovery that synchronizes to the arm's `->` must consume it and
+        // parse the body, not loop re-erroring on the same token. A lowercase
+        // member cannot be a constructor, so that case still needs recovery.
         assert_no_errors("match x { net.V6(ip) -> 1 }");
         assert_single_error("match x { net.v6(ip) -> 1 }", "Expected '->', got '.'");
         assert_single_error("match x { a if + -> 1 }", "Unexpected '+'");
@@ -2753,7 +2726,6 @@ mod tests {
             "type P {\n\tP(a Int b Int)\n}\n",
             "fields on one line are separated by commas",
         );
-        // The two-element forms remain valid.
         assert_no_errors("fn f(x (Int, Int)) Int { 1 }");
         assert_no_errors("match (1, 2) { (a, b) -> a }");
     }
@@ -2765,8 +2737,8 @@ mod tests {
             "@vm(add)\nfn f(a Int) Int { a }",
             "@vm functions cannot have a body",
         );
-        // `@vm` carries exactly one arg — the op key. Enforced at parse time
-        // so `FnBody::Vm` always holds it.
+        // `@vm` carries exactly one arg, enforced at parse time so
+        // `FnBody::Vm` always holds it.
         assert_has_error(
             "@vm\nfn f(a Int) Int",
             "@vm takes exactly one argument: the VM op key",
@@ -2793,15 +2765,12 @@ mod tests {
             "@vm(x)\nconst PI = 3",
             "Attributes are not allowed on `const`",
         );
-        // `pub` must be followed by a declaration keyword.
         assert_has_error("pub x = 1", "after `pub`");
-        // Attributes must be followed by a declaration keyword; the message
-        // must not mention `pub` the user never wrote.
+        // The message must not mention a `pub` the user never wrote.
         assert_has_error(
             "@vm(add)\njunk",
             "Expected `fn`, `type`, or `const` after attributes",
         );
-        // A relative import segment must be followed by `/`.
         assert_has_error("import .foo", "Expected `/` after relative import segment");
     }
 
@@ -2821,10 +2790,8 @@ mod tests {
 
     #[test]
     fn test_deep_nesting_does_not_overflow() {
-        // Each of these would drive unbounded native recursion and abort the
-        // process (SIGABRT, exit 134) before the recursion guard existed —
-        // this test itself would take down the whole test binary. With the
-        // guard they become an ordinary "too deep" parse error.
+        // Without the recursion guard each of these aborts the process
+        // (SIGABRT), taking the whole test binary with it.
         let n = 5000;
 
         assert_has_error(&format!("x = {}true", "!".repeat(n)), "too deep");
@@ -2846,10 +2813,9 @@ mod tests {
 
     #[test]
     fn test_reasonable_nesting_ok() {
-        // Realistic nesting must never trip the limit. The worst multiplier
-        // is the array/paren path (~3 guard hits per source level via
-        // parse_expression + parse_unary + parse_primary), so depth 30 ≈ 90,
-        // well under MAX_PARSE_DEPTH (128).
+        // Realistic nesting must never trip the limit. The worst multiplier is
+        // the array/paren path at ~3 guard hits per source level, so 30 source
+        // levels is ~90, under MAX_PARSE_DEPTH.
         let n = 30;
 
         assert_no_errors(&format!("x = {}true", "!".repeat(n)));

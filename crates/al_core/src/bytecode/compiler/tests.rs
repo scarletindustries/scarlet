@@ -1,8 +1,7 @@
 use crate::parser::new_parser;
 use crate::scanner::new_scanner;
 
-/// Parse `src` as a program, asserting it parses cleanly, and hand back the
-/// program block.
+/// Parse `src`, asserting it parses cleanly.
 fn parse_ok(src: &str) -> crate::ast::BlockExpression {
     let mut s = new_scanner(src.to_string());
     let pr = new_parser(&mut s).parse_program();
@@ -14,9 +13,8 @@ fn parse_ok(src: &str) -> crate::ast::BlockExpression {
     pr.ast
 }
 
-/// Compile `src` as the entry module on the LSP path (`collect_hover_facts`
-/// on, so reference/occurrence collection fires) and hand back the populated
-/// compiler.
+/// Compile `src` as the entry module on the LSP path, with
+/// `collect_hover_facts` on so occurrence collection fires.
 fn collect(src: &str) -> super::Compiler {
     let block = parse_ok(src);
     let mut c = super::new_compiler(None, true);
@@ -40,14 +38,11 @@ fn collect(src: &str) -> super::Compiler {
 }
 
 mod local_binders_as_definitions {
-    //! Local binders — `name = ..` bindings, fn/lambda parameters, pattern
-    //! binders (match arms, tuple/array/ctor destructure), and `or`-receivers —
+    //! Local binders (bindings, parameters, pattern binders, `or`-receivers)
     //! must be registered as graph `Definition`s, not merely typed in the env.
-    //! Without the `Definition` record `ReferenceGraph::definition(target)`
-    //! returns `None`, so goto-def / find-refs / hover (the handler path, which
-    //! goes through `definition_at` / `references_to`) are dead on every local.
-    //! Emission is gated on `collect_hover_facts`, so this is LSP-only and the
-    //! `al run` / `al check` graph stays untouched.
+    //! Without the record `ReferenceGraph::definition(target)` returns `None`
+    //! and goto-def / find-refs / hover are dead on every local. Gated on
+    //! `collect_hover_facts`, so `al run` / `al check` are untouched.
 
     use super::super::*;
     use super::collect;
@@ -63,7 +58,7 @@ mod local_binders_as_definitions {
         defs[0]
     }
 
-    /// Whether any recorded occurrence is an unqualified *use* of `target`.
+    /// Whether any recorded occurrence is an unqualified use of `target`.
     fn has_use(c: &Compiler, target: DefId) -> bool {
         c.module_refs
             .occurrences()
@@ -100,17 +95,14 @@ mod local_binders_as_definitions {
                 c.module_refs.definition(d).is_some(),
                 "`{name}` binder was not registered as a graph Definition",
             );
-            // The use site already recorded an Unqualified occurrence targeting
-            // this binder; with the Definition present the goto-def / find-refs
-            // chain (occurrence -> target -> definition()) now closes.
+            // Closes the goto-def chain: occurrence -> target -> definition().
             assert!(has_use(&c, d), "no recorded use targets `{name}`");
         }
     }
 
     #[test]
     fn goto_def_on_a_local_use_resolves_to_a_real_definition() {
-        // Mirrors the handler path: resolve_position(use) -> target, then
-        // definition(target) — the latter returned `None` before the fix.
+        // Mirrors the handler path: resolve_position(use) -> definition().
         let c = collect("fn f(p Int) Int {\n  v = p\n  v\n}\n");
         let v = sole_def(&c, "v");
 
@@ -127,10 +119,9 @@ mod local_binders_as_definitions {
 
     #[test]
     fn shadowing_keeps_inner_and_outer_as_distinct_definitions() {
-        // Two sequential `x` binders -> two distinct DefIds (distinct identifier
-        // spans). `define_at` overwrites the env, so the RHS of `x = x` (compiled
-        // before the second binder lands) sees the outer and the trailing `x`
-        // the inner.
+        // `define_at` overwrites the env, so the RHS of `x = x` (compiled
+        // before the second binder lands) sees the outer binder and the
+        // trailing `x` sees the inner.
         let c = collect("fn f(s Int) Int {\n  x = s\n  x = x\n  x\n}\n");
         let mut defs = c.module_refs.defs_named("x").to_vec();
         assert_eq!(defs.len(), 2, "expected outer + inner `x`, got {defs:?}");
@@ -140,21 +131,17 @@ mod local_binders_as_definitions {
         assert!(c.module_refs.definition(outer).is_some());
         assert!(c.module_refs.definition(inner).is_some());
 
-        // RHS use on line 2 targets the OUTER binder; the trailing `x` on line 3
-        // targets the INNER one.
         assert_eq!(c.module_refs.resolve_position(2, 6), Some(outer));
         assert_eq!(c.module_refs.resolve_position(3, 2), Some(inner));
     }
 }
 
-/// Perceus drop/reuse assertions on emitted bytecode: validate the
-/// `lower → perceus → emit` pipeline output.
+/// Perceus drop/reuse assertions on the `lower → perceus → emit` output.
 mod perceus_drop {
     use super::super::*;
     use super::parse_ok;
 
-    /// Compile `src` for real (codegen on) and return the emitted instruction
-    /// stream, so tests can assert on generated ops.
+    /// Compile `src` with codegen on and return the emitted instructions.
     fn emitted(src: &str) -> Vec<crate::bytecode::Instruction> {
         let block = parse_ok(src);
         let r = compile(&ast::Expression::BlockExpression(block), None, None);
@@ -168,10 +155,8 @@ mod perceus_drop {
 
     #[test]
     fn drop_slot_emitted_at_heap_local_last_use() {
-        // `p` is a `(Int, Int)` tuple → heap-shaped. It is read twice; the
-        // second read is its last use, so the Core perceus pass must insert
-        // `Drop 0` immediately after that read's `Let` (`PushLocal 0;
-        // TupleIndex; StoreLocal`). Int local `n` gets no Drop.
+        // `p` is heap-shaped and read twice, so `Drop 0` belongs right after
+        // the second read's `Let`. Int local `n` gets no Drop.
         let code = emitted(
             "fn f(p (Int, Int), n Int) Int {\n\
             \x20 a = p.0\n\
@@ -183,8 +168,6 @@ mod perceus_drop {
         let drops: Vec<_> = code.iter().filter(|i| i.op == Op::Drop).collect();
         assert_eq!(drops.len(), 1, "expected one DropSlot, got {drops:?}");
         assert_eq!(drops[0].operand, 0, "DropSlot targets param slot 0 (`p`)");
-        // Drop sits right after the last read of `p` (the second `TupleIndex`
-        // let), before any use of `a`/`b`/`n`.
         let pos = code.iter().position(|i| i.op == Op::Drop).unwrap();
         let last_read = code[..pos]
             .iter()
@@ -218,8 +201,7 @@ mod perceus_drop {
     #[test]
     fn reuse_paired_for_match_destructure_then_construct() {
         // Canonical Perceus shape: destructure a Cons, construct a same-arity
-        // Cons in the arm body. Core perceus pairs the scrutinee's dropped
-        // cell with the arm's constructor — `Reuse slot; MakeEnumPayload a=1`.
+        // Cons in the arm body, pairing the dropped cell with the constructor.
         let code = emitted(
             "type List {\n\tLNil\n\tLCons(head Int, tail List)\n}\n\
              fn lmap(xs List, f fn(Int) Int) List {\n\
@@ -250,11 +232,9 @@ mod perceus_drop {
 
     #[test]
     fn reuse_candidate_scoped_per_match_arm() {
-        // Arm 1 destructures a 2-field variant but constructs nothing. Arm 2
-        // (0-field variant) constructs a 2-field value. Reuse pairing is
-        // arm-scoped: arm 1's dropped cell must not be consumed by arm 2's
-        // constructor — at runtime the slot holds a 0-field cell in arm 2 and
-        // the debug shape assert in `reuse_or_alloc` would fire.
+        // Reuse pairing is arm-scoped: arm 1's dropped 2-field cell must not
+        // be consumed by arm 2's constructor. At runtime the slot holds a
+        // 0-field cell in arm 2 and `reuse_or_alloc`'s shape assert fires.
         let code = emitted(
             "type T {\n\tA(x Int, y Int)\n\tB\n}\n\
              fn f(v T) T {\n\
@@ -274,13 +254,10 @@ mod perceus_drop {
 
 /// A module the typechecker rejected must never reach the elaborator.
 ///
-/// `CleanModule` is what makes that true, and it is the whole reason `lower`,
-/// `perceus` and `emit` need no poison arm: their input is a `TypedProgram`,
-/// and only `typed_ir::elaborate_body`/`elaborate_toplevel` can build one.
-/// `Elab` aborts whenever `resolve_name` returns `None`, or the check walk's
-/// recorded types run out under it — exactly what a subtree inference never
-/// resolved looks like — so without the gate an ordinary type error would reach
-/// `typed_ir::elaborator_bug` and abort the compiler.
+/// `CleanModule` is why `lower`, `perceus` and `emit` need no poison arm: they
+/// take a `TypedProgram`, which only `elaborate_body`/`elaborate_toplevel` can
+/// build. `Elab` aborts when `resolve_name` returns `None`, so without the
+/// gate an ordinary type error would abort the compiler.
 mod clean_module_gate {
     use super::super::*;
     use super::parse_ok;
@@ -299,11 +276,10 @@ mod clean_module_gate {
             .collect()
     }
 
-    /// One ill-typed fn beside a well-typed sibling: the type error is the only
-    /// error. The sibling is parked and closed out empty; neither body is
-    /// elaborated, because the proof cannot be minted for the module. Reaching
-    /// the elaborator here would abort the process in `typed_ir::elaborator_bug`, so this
-    /// test also pins that a type error never aborts the compiler.
+    /// One ill-typed fn beside a well-typed sibling: the type error is the
+    /// only diagnostic, and neither body is elaborated. Reaching the
+    /// elaborator would abort the process, so this also pins that a type error
+    /// never aborts the compiler.
     #[test]
     fn a_type_error_is_the_only_diagnostic() {
         let ds = diagnose(
@@ -324,9 +300,8 @@ mod clean_module_gate {
     }
 
     /// The gate is the diagnostics list, not the shape of the offending node:
-    /// an unbound name poisons the module for the elaborator just as a mismatch
-    /// does, and `resolve_name` returning `None` must not be reported twice —
-    /// nor reach `typed_ir::elaborator_bug`.
+    /// an unbound name poisons the module just as a mismatch does, and must be
+    /// reported once.
     #[test]
     fn an_unbound_name_is_reported_once() {
         let ds = diagnose("fn f() Int { nope() }\nf()\n");
@@ -337,11 +312,9 @@ mod clean_module_gate {
         );
     }
 
-    /// `Expression::ErrorNode` is the only form in the language with nothing to
-    /// elaborate, and the typechecker used to type it as a fresh var and say
-    /// nothing — leaving the elaborator to report a compiler bug for a plain
-    /// syntax error. The check walk denies it the `CleanModule` proof instead,
-    /// so the elaborator never sees one.
+    /// `Expression::ErrorNode` is the only form with nothing to elaborate. The
+    /// check walk denies it the `CleanModule` proof, so a plain syntax error
+    /// cannot surface as a compiler bug from the elaborator.
     #[test]
     fn an_error_node_denies_the_proof() {
         let mut s = new_scanner("x = 1 +\n".to_string());
@@ -377,12 +350,10 @@ mod toplevel_slot_queue {
     use super::super::*;
     use super::parse_ok;
 
-    /// `toplevel_binds` is positional, so only the walk the toplevel
-    /// elaboration mirrors — a module's own statement list — may fill it.
-    /// Depth alone does not identify that walk: a bare-expression program runs
-    /// with `scope_marks` empty, so an arm's pattern binding would sit at
-    /// "module depth" with no module statement behind it, and the next `let`
-    /// the elaborator saw would be pinned to the pattern's slot.
+    /// `toplevel_binds` is positional, so only a module's own statement list
+    /// may fill it. Depth alone does not identify that walk: a bare-expression
+    /// program runs with `scope_marks` empty, so an arm's pattern binding
+    /// would sit at "module depth" and steal the next `let`'s slot.
     #[test]
     fn only_the_module_statement_walk_queues_a_slot() {
         let mut c = new_compiler(None, true);
@@ -400,10 +371,9 @@ mod toplevel_slot_queue {
         assert_eq!(c.toplevel_binds.pop_front(), Some(GlobalSlot(8)));
     }
 
-    /// The bare-expression entry point (`bytecode::compile` on a non-block).
-    /// Its outermost block is an arm body, which the elaborator treats as a
-    /// module toplevel and lets drain the queue; the arm's own pattern bindings
-    /// must never have reached it.
+    /// The bare-expression entry point. Its outermost block is an arm body,
+    /// which the elaborator treats as a module toplevel and lets drain the
+    /// queue, so the arm's pattern bindings must never have reached it.
     #[test]
     fn a_bare_match_expression_compiles_without_stealing_a_pattern_slot() {
         let src = "match Some(1) { Some(v) -> { w = v + 1\n v + w }\n None -> 0 }";
@@ -422,10 +392,10 @@ mod toplevel_slot_queue {
 
 mod qualified_ctor_pattern_occurrences {
     //! A qualified constructor pattern (`io.NotFound(p)`) must record the same
-    //! occurrence pair as the expression path: a `Qualified` use of the
-    //! constructor plus a `Qualifier` occurrence on the module alias. Recording
-    //! it `Unqualified` with no alias occurrence made unused-import liveness
-    //! and rename blind to modules referenced only from patterns.
+    //! occurrence pair as the expression path: a `Qualified` use of the ctor
+    //! plus a `Qualifier` occurrence on the module alias. Without the pair,
+    //! unused-import liveness and rename are blind to modules referenced only
+    //! from patterns.
 
     use super::super::*;
     use super::collect;
@@ -441,10 +411,9 @@ mod qualified_ctor_pattern_occurrences {
             println(x)\n";
         let c = collect(src);
 
-        // The qualified pattern head sits on 0-based line 3. The `Err` ctor
-        // and the arm body's `p` use on the same line are ordinary
-        // `Unqualified` occurrences and not part of the pair under test; the
-        // call's own Qualified/Qualifier pair is on line 1, outside the filter.
+        // The qualified pattern head sits on 0-based line 3. `Err` and the
+        // body's `p` on that line are ordinary Unqualified occurrences; the
+        // call's own pair is on line 1, outside the filter.
         let on_pattern: Vec<Reference> = c
             .module_refs
             .occurrences()
@@ -489,10 +458,9 @@ mod qualified_ctor_pattern_occurrences {
             "the Qualifier occurrence targets the `io` module alias"
         );
 
-        // The old bug recorded the ctor as an Unqualified use; make sure that
-        // shape is gone rather than merely joined by the correct pair. (The
-        // unqualified `Err` ctor on the same line legitimately records
-        // Unqualified — only the qualified ctor's def is checked.)
+        // The correct pair must replace the Unqualified record, not merely
+        // join it. `Err` on the same line legitimately records Unqualified, so
+        // only the qualified ctor's def is checked.
         assert!(
             !on_pattern
                 .iter()
@@ -503,12 +471,11 @@ mod qualified_ctor_pattern_occurrences {
 }
 
 mod stdlib_native_gate_probe {
-    //! STEP-1 experiment: if the native hook could see stdlib bodies, how many
-    //! would the A0 coverage gate accept? Replicates `precompile_stdlib`'s
-    //! pipeline (source compile, no blob) with a gate-probing hook installed
-    //! from the very start, so prelude bodies are probed too. Diagnostic: it
-    //! prints a report under `--nocapture` and only asserts internal
-    //! consistency (the diag walker must mirror `plan` exactly).
+    //! Diagnostic: if the native hook could see stdlib bodies, how many would
+    //! the A0 coverage gate accept? Replicates `precompile_stdlib`'s pipeline
+    //! with a gate-probing hook installed from the start, so prelude bodies
+    //! are probed too. Prints a report under `--nocapture`; the only assertion
+    //! is that the diag walker mirrors `plan` exactly.
 
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
@@ -520,8 +487,7 @@ mod stdlib_native_gate_probe {
     use crate::module::{ModuleKey, stdlib};
 
     /// Prelude bindings from a first, hook-free run. Stdlib compilation is
-    /// deterministic (pinned by `precompile_stdlib_is_deterministic`), so the
-    /// type/ctor identities are valid for the probed second run.
+    /// deterministic, so these identities hold for the probed second run.
     fn prelude_bindings() -> PreludeBindings {
         let mut c = new_compiler(None, false);
         c.register_prelude();
@@ -550,7 +516,7 @@ mod stdlib_native_gate_probe {
         let at = crate::span::Span::DUMMY;
         c.register_prelude();
         assert!(!crate::diagnostic::has_errors(c.diagnostics()));
-        // Hook-fire counts per module, in load order (probe order is fire order).
+        // Hook-fire counts per module, in load order.
         let mut bounds = vec![("al (prelude)".to_string(), probes.borrow().len())];
         for path in stdlib::all_modules() {
             c.load_module(&crate::ast::ImportPath::canonical(path.clone()), at);
@@ -568,7 +534,6 @@ mod stdlib_native_gate_probe {
         let probes = probes.take();
         let fn_name = |idx: FuncIdx| c.program.functions[idx.index()].name.to_string();
 
-        // The diag walker must agree with the real gate, body for body.
         for p in &probes {
             assert_eq!(
                 p.plan.is_some(),

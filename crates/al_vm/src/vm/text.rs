@@ -83,15 +83,15 @@ impl VM {
         let bin_v = self.pop_binary("binary.to_string")?;
         let bin = bin_ref(&bin_v);
         let v = if !bin.bit_len().is_multiple_of(8) {
-            self.make_err_nil()
+            self.make_err_nil()?
         } else {
             let bytes = bin.full_bytes();
             match std::str::from_utf8(&bytes) {
                 Ok(s) => {
                     let s = Value::str_in(&mut self.heap, s);
-                    self.make_ok(s)
+                    self.make_ok(s)?
                 }
-                Err(_) => self.make_err_nil(),
+                Err(_) => self.make_err_nil()?,
             }
         };
         self.stack.push(v);
@@ -118,12 +118,12 @@ impl VM {
         let bin_v = self.pop_binary("binary.slice")?;
         let bin = bin_ref(&bin_v);
         let v = if at < 0 || take < 0 || (at as u64) + (take as u64) > bin.bit_len() {
-            self.make_err_nil()
+            self.make_err_nil()?
         } else {
             // O(1): a sub-view sharing the backing, no byte copy.
             let (backing, off) = (bin.backing_arc(), bin.bit_offset() + at as u64);
             let view = Value::binary_view_in(&mut self.heap, backing, off, take as u64);
-            self.make_ok(view)
+            self.make_ok(view)?
         };
         self.stack.push(v);
         Ok(())
@@ -286,8 +286,8 @@ impl VM {
         };
         drop(hay);
         let v = match found {
-            Some(i) => self.make_some(Value::small_int(i)),
-            None => self.make_none(),
+            Some(i) => self.make_some(Value::small_int(i))?,
+            None => self.make_none()?,
         };
         self.stack.push(v);
         Ok(())
@@ -318,9 +318,9 @@ impl VM {
         let v = match parsed {
             Some(n) => {
                 let n = self.boxed_int(n);
-                self.make_some(n)
+                self.make_some(n)?
             }
-            None => self.make_none(),
+            None => self.make_none()?,
         };
         self.stack.push(v);
         Ok(())
@@ -376,7 +376,7 @@ impl VM {
     pub(super) fn http_parse_head(&mut self) -> VmResult<()> {
         let off = self.pop_int("h1.parse_request")?;
         let buf_v = self.pop_binary("h1.parse_request")?;
-        let v = http::parse_head(&self.templates, &mut self.heap, &bin_ref(&buf_v), off);
+        let v = http::parse_head(self.templates.h1()?, &mut self.heap, &bin_ref(&buf_v), off);
         self.stack.push(v);
         Ok(())
     }
@@ -385,7 +385,7 @@ impl VM {
     #[inline(never)]
     pub(super) fn http_framing(&mut self) -> VmResult<()> {
         let headers = self.pop()?;
-        let v = http::framing(&self.templates, &mut self.heap, &headers)?;
+        let v = http::framing(self.templates.h1()?, &mut self.heap, &headers)?;
         self.stack.push(v);
         Ok(())
     }
@@ -396,7 +396,7 @@ impl VM {
         let max = self.pop_int("h1.chunk_decode")?;
         let off = self.pop_int("h1.chunk_decode")?;
         let buf_v = self.pop_binary("h1.chunk_decode")?;
-        let v = http::chunk_decode(&self.templates, &mut self.heap, &bin_ref(&buf_v), off, max);
+        let v = http::chunk_decode(self.templates.h1()?, &mut self.heap, &bin_ref(&buf_v), off, max);
         self.stack.push(v);
         Ok(())
     }
@@ -406,7 +406,7 @@ impl VM {
     pub(super) fn http_header_get(&mut self) -> VmResult<()> {
         let name_v = self.pop_binary("headers.get")?;
         let headers = self.pop()?;
-        let v = http::header_get(&self.templates, &mut self.heap, &headers, &bin_ref(&name_v))?;
+        let v = http::header_get(self.templates.h1()?, &mut self.heap, &headers, &bin_ref(&name_v))?;
         self.stack.push(v);
         Ok(())
     }

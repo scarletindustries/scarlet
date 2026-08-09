@@ -400,7 +400,15 @@ pub unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i6
     let v = unsafe { Value::from_bits(buf) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
-    let r = super::http::parse_head(&vm.templates, &mut vm.heap, &super::bin_ref(&v), off);
+    let r = match vm.templates.h1() {
+        Ok(t) => super::http::parse_head(t, &mut vm.heap, &super::bin_ref(&v), off),
+        // Unreachable: compiled code exists only for programs that bound the
+        // H1 slots (validated at load).
+        Err(_) => {
+            debug_assert!(false, "HttpParseHead with unbound H1 slots");
+            Value::nil()
+        }
+    };
     drop(v);
     into_bits(r)
 }
@@ -481,10 +489,14 @@ pub unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64
     let v = unsafe { Value::from_bits(headers) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
-    let r = super::http::framing(&vm.templates, &mut vm.heap, &v).unwrap_or_else(|_| {
-        debug_assert!(false, "HttpFraming on a non-header array");
-        Value::nil()
-    });
+    let r = vm
+        .templates
+        .h1()
+        .and_then(|t| super::http::framing(t, &mut vm.heap, &v))
+        .unwrap_or_else(|_| {
+            debug_assert!(false, "HttpFraming on a non-header array");
+            Value::nil()
+        });
     drop(v);
     into_bits(r)
 }

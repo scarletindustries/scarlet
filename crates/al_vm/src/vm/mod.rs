@@ -330,47 +330,38 @@ enum Step {
 /// construction — migrating it to another scheduler is a plain move of this
 /// struct, heap and all.
 struct Process {
-    // Field order is not load-bearing: `heap` is a zero-sized allocator marker
-    // (allocation goes to mimalloc's per-thread default heap), and `mi_free` is
-    // global and thread-safe, so a `Value` dropping after `heap` is fine.
+    // Field order is not load-bearing here: `heap` is a zero-sized marker and
+    // `mi_free` is global, so a `Value` dropping after `heap` is fine.
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     is_main: bool,
     heap: ProcHeap,
-    /// Program-unique process id ([`sched::Runtime::next_pid`]); travels with
-    /// the process across schedulers. Connections record their owning pid
-    /// ([`VM::conn_owner`]) so a process's connections close when it ends —
-    /// the BEAM controlling-process rule.
+    /// Program-unique process id, travelling with the process across
+    /// schedulers. Connections record their owning pid so they close when the
+    /// process ends — the BEAM controlling-process rule.
     pid: u64,
-    /// The native-boundary scratch, suspended. These are the process's own
-    /// computation state — the frame floor, the remaining slice budget, and
-    /// the payload of a status word in flight — so they travel with it, like
-    /// `stack`/`frames`, and never leak to the next process the scheduler
-    /// runs. The running process's copies are the `VM` fields of the same
-    /// names (see their docs for the contracts); `suspend_current`/`resume`
-    /// swap them with these.
+    /// The native-boundary scratch, suspended. Process state, not scheduler
+    /// state, so it must travel and must never leak to the next process the
+    /// scheduler runs. The VM fields of the same names are the running
+    /// process's copies; `suspend_current`/`resume` swap them with these.
     native_floor: usize,
     native_reds: i32,
     native_pending: Option<Box<NativePending>>,
-    /// A suspended native-stack computation (C3 scaffolding). Always `None`
-    /// until suspension can park machine frames in place; from that point a
-    /// process is EITHER fully described by `frames` OR carries the machine
-    /// half here — never both, so the interpreter can never re-execute a
-    /// frame that survives on a parked stack. `resume` asserts the Stage-1
-    /// half of that contract.
+    /// A suspended native-stack computation. Always `None` today. Once
+    /// populated, a process is EITHER fully described by `frames` OR carries
+    /// the machine half here, never both, so the interpreter can never
+    /// re-execute a frame that survives on a parked stack.
     parked: Option<stack::ParkedStack>,
 }
 
 /// A tabled TCP connection: the stream plus its controlling process.
 ///
-/// Ownership lives ON the entry (not in a parallel map) so the two can never
-/// disagree, and it NEVER moves implicitly: the process that adopted the
-/// connection controls it, full stop — BEAM's rule, where only an explicit
-/// `controlling_process` call transfers. (An implicit transfer-on-capture was
-/// tried and reverted in review: it made a split reader/writer program's
-/// fate depend on spawn order, and missed toplevel-bound sockets entirely,
-/// because a global is not a capture.) When a connection crosses schedulers
-/// its owner travels with it.
+/// Ownership lives ON the entry, not in a parallel map, so the two cannot
+/// disagree, and it never moves implicitly — the process that adopted the
+/// connection controls it until an explicit transfer. Transferring on capture
+/// instead would make a split reader/writer program's fate depend on spawn
+/// order and would miss toplevel-bound sockets, since a global is not a
+/// capture.
 struct Conn {
     stream: TcpStream,
     owner: u64,
@@ -385,13 +376,11 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-// A migrant crosses an OS-thread boundary as a plain move; this must hold by
-// construction (owned arena + plain-data frames), never via unsafe impls on
-// `Process` itself. Two components carry audited unsafe Send impls of their
-// own (`stack::StackHandle`, `stack::SavedContext`), and for those this
-// bound is structural only — a parked stack's *bytes* are Send regardless
-// of what they name, so thread-affinity of its contents is guarded by the
-// process-stack purity invariant (`vm::stack`), not by this line.
+// A migrant crosses an OS-thread boundary as a plain move. This must hold by
+// construction, never via an unsafe Send impl on `Process` itself. Two
+// components do carry audited unsafe impls of their own; for those, this bound
+// is structural only, and thread-affinity of a parked stack's contents is
+// guarded by the process-stack purity invariant in `vm::stack`.
 const _: () = crate::assert_send::<Process>();
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
@@ -409,47 +398,41 @@ fn bin_ref(v: &Value) -> BinaryRef<'_> {
 }
 
 pub struct VM {
-    /// This scheduler's private copy of the program tables, cloned from the
-    /// runtime's shared [`Runtime::program`] at construction (see
-    /// [`vm_for_runtime`]). Kept inline — not behind the `Arc` — because the
-    /// dispatch loop reads `code`/`constants`/`functions` on every
-    /// instruction and the extra pointer hop is measurable there; the copy
-    /// is shallow where it matters (constants are frozen words pointing
-    /// into the shared `program.frozen`).
+    /// This scheduler's private copy of the program tables. Kept inline rather
+    /// than behind the `Arc` because the dispatch loop reads
+    /// `code`/`constants`/`functions` on every instruction and the extra
+    /// pointer hop is measurable. The copy is shallow where it matters:
+    /// constants are frozen words pointing into the shared `program.frozen`.
     program: Program,
     templates: Templates,
     /// Builder over the program's frozen area, kept for runtime freezing of
-    /// published globals. Field order is not load-bearing: frozen `Value`s
-    /// are immortal, so their `Drop` never reads the frozen area (see
-    /// `VALUE_IMMORTAL`).
+    /// published globals. Frozen `Value`s are immortal, so their `Drop` never
+    /// reads the frozen area and field order does not matter here.
     frozen: FrozenBuilder,
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
-    /// The *running* process's arena. Swapped in/out with `stack`/`frames` on
-    /// every context switch (`suspend_current`/`resume`); between processes it
-    /// is the empty placeholder (`ProcHeap::new()`), which owns nothing.
+    /// The RUNNING process's arena. Swapped in and out with `stack`/`frames`
+    /// on every context switch; between processes it is an empty placeholder
+    /// that owns nothing.
     ///
-    /// Declared AFTER `stack`/`frames`: under reference counting their `Value`s
-    /// free into this heap on drop, so the heap must outlive them at teardown
-    /// (Rust drops fields top-to-bottom).
+    /// Must stay declared AFTER `stack`/`frames`: their `Value`s free into
+    /// this heap on drop, and Rust drops fields top-to-bottom.
     heap: ProcHeap,
-    /// Memoized field-label tuples, one entry per non-prelude ctor site,
-    /// keyed by the address of that site's pooled labels-array constant. The
-    /// labels are statically constant per constructor, so each site freezes
-    /// its labels Tuple once; every later construction stores one reference
-    /// word.
+    /// Memoized field-label tuples, one per non-prelude ctor site, keyed by the
+    /// address of that site's pooled labels-array constant. Labels are constant
+    /// per constructor, so each site freezes its tuple once.
     label_cache: HashMap<usize, Value>,
     next_socket_id: i32,
-    /// This scheduler's clones of shared listeners — "registered with MY
-    /// poller", not "I bound this". The socket itself lives in
+    /// This scheduler's clones of shared listeners: "registered with MY
+    /// poller", not "I bound this". The socket lives in
     /// `Runtime.shared_listeners`; the fd closes when the last clone drops.
     tcp_listeners: HashMap<i32, Arc<TcpListener>>,
     tcp_connections: HashMap<i32, Conn>,
     /// Outbound connections whose non-blocking connect is still in flight,
     /// keyed by their already-allocated socket id.
     pending_connects: HashMap<i32, socket2::Socket>,
-    /// Reusable scratch buffer for socket reads, grown on demand, so each
-    /// read allocates only its result.
+    /// Reusable scratch buffer for socket reads, so each read allocates only
+    /// its result.
     read_scratch: Vec<u8>,
     /// Whether the currently-running process is the main (root) process.
     current_is_main: bool,
@@ -457,95 +440,62 @@ pub struct VM {
     current_pid: u64,
     /// The main process's result, stashed at its `Step::Done` if it finishes
     /// while other processes are still running. The value points into main's
-    /// arena, so the (value, heap) pair travels together (idea 6 above):
-    /// the heap is re-adopted into `self.heap` when the scheduler loop
-    /// hands the value out, keeping it alive for the VM's lifetime — which
-    /// covers the caller's consumption (print/inspect) of the result.
+    /// arena, so the pair travels together: the heap is re-adopted into
+    /// `self.heap` when the scheduler loop hands the value out, keeping it
+    /// alive while the caller prints or inspects it.
     main_result: Option<(Value, ProcHeap)>,
     // The three fields below are the RUNNING process's native-boundary
-    // scratch — process state mirrored into the VM for the duration of a
-    // slice, exactly like `stack`/`frames`/`heap`, and moved in and out by
-    // `suspend_current`/`resume` (see `Process::native_floor`). They are
-    // NOT scheduler state: a value left here by one process must never be
-    // observable by the next, and residence on `Process` is what enforces
-    // that. What the status-word unwind resets, per field:
+    // scratch, mirrored into the VM for the duration of a slice and moved in
+    // and out by `suspend_current`/`resume`. They are NOT scheduler state: a
+    // value left here by one process must never be observable by the next.
     //
-    // - `native_floor` is restored on `enter_interp`'s RETURN path only —
-    //   each nesting level restores the floor it found — so it is back to 0
-    //   by the time a non-`Done` status reaches `scheduler_loop` precisely
-    //   because, today, every unwind runs to completion before the process
-    //   suspends (asserted at slice entry, `exec.rs`). A suspension that
-    //   ever stops the unwind partway (a native frame parked in place) makes
-    //   the raised floor part of the process's suspended state; it travels.
-    // - `native_pending` is set when a `Parked`/`Error` status begins its
-    //   unwind and consumed by `outcome_from_status` at the trampoline the
-    //   moment the unwind completes — before the process suspends — so a
-    //   suspended process carries `None` today.
-    // - `native_reds` is never reset by the unwind at all: a non-`Done`
-    //   status ends the slice, and every slice entry re-seeds the budget.
-    //   Whatever remains at suspension is the process's own leftover.
-    /// The payload of a non-`Done` [`NativeStatus`](crate::bytecode::NativeStatus)
-    /// currently unwinding native
-    /// frames (a park's `Wait` or a `VmError`), parked here so the status
-    /// word crossing the `extern "C"` boundary stays a single machine word.
-    /// Set by [`VM::status_from_outcome`], consumed by
-    /// [`VM::outcome_from_status`]; at most one is in flight per process.
-    /// Boxed to keep `Process` small — see [`NativePending`].
+    // Today `native_floor` is back to 0 and `native_pending` back to `None`
+    // by the time a non-`Done` status reaches `scheduler_loop`, because every
+    // unwind runs to completion before the process suspends (asserted at slice
+    // entry in `exec.rs`). A suspension that ever stops an unwind partway makes
+    // the raised floor part of the suspended state and it travels.
+    /// The payload of a non-`Done`
+    /// [`NativeStatus`](crate::bytecode::NativeStatus) currently unwinding
+    /// native frames, held here so the status word crossing the `extern "C"`
+    /// boundary stays a single machine word. At most one per process.
     native_pending: Option<Box<NativePending>>,
-    /// What the pinned register points at while compiled code runs
-    /// ([`crate::bytecode::NativeCtx`]): `vm` is re-published by every
-    /// [`VM::call_native`] — scheduler state compiled frames re-derive
-    /// instead of carrying. Scheduler-owned, never part of a suspended
-    /// process; a resume fragment reloads the pinned register from the
-    /// resuming scheduler's copy.
+    /// What the pinned register points at while compiled code runs. `vm` is
+    /// re-published by every [`VM::call_native`], so compiled frames re-derive
+    /// scheduler state instead of carrying it. Scheduler-owned, never part of
+    /// a suspended process.
     native_ctx: crate::bytecode::NativeCtx,
     /// The interpreter's frame floor: `execute_slice` ends its slice when a
-    /// `Ret` pops the frame stack back to exactly this depth. 0 — the whole
-    /// process — everywhere except inside a native→interpreter re-entry
-    /// ([`native::al_rt_enter_interp`]), which raises it so the interpreter
-    /// hands control back to the native caller when the frame it was asked
-    /// to run returns, and restores it on the way out.
+    /// `Ret` pops the frame stack back to exactly this depth. 0 everywhere
+    /// except inside a native→interpreter re-entry, which raises it so control
+    /// returns to the native caller, and restores it on the way out.
     native_floor: usize,
     /// The reduction budget on the native side of the backend boundary.
-    /// `execute_slice` keeps its budget in a hot-loop local; compiled code
-    /// cannot reach that local, so this field is the counter its checkpoints
-    /// (`native::al_rt_call`'s entry charge, `native::al_rt_checkpoint` at
-    /// self-tail back-edges) decrement instead. The interp→native entry must
-    /// store its remaining slice budget here before invoking a table entry
-    /// and read it back after, and the native→interp re-entry
-    /// (`native::al_rt_enter_interp`) resumes the interpreter on it
-    /// (`execute_slice_budgeted`, which writes the remainder back on a
-    /// `Done` exit), so one budget governs the whole scheduling slice no
-    /// matter which backend spends it.
+    /// `execute_slice` keeps its budget in a hot-loop local that compiled code
+    /// cannot reach, so native checkpoints decrement this instead. Every
+    /// crossing must hand the budget over in both directions, so one budget
+    /// governs the whole slice no matter which backend spends it.
     native_reds: i32,
     /// Runnable processes in round-robin order (the running one is not here).
     run_queue: VecDeque<Process>,
     /// Processes waiting on I/O readiness or timers, keyed by a unique wait id
     /// so the timer heap can refer to a park without owning it.
     parked: HashMap<u64, (Wait, Process)>,
-    /// Reverse index from socket id to the wait ids parked on it, kept in
-    /// lockstep with `parked` by `park`/`park_remove`. Lets an I/O
-    /// event find its waiters in O(1) instead of scanning every park, and
-    /// makes "is anything waiting on I/O" a non-emptiness check. A socket id
-    /// maps to multiple waits only transiently (e.g. a reader and a writer
-    /// parked on the same connection), so the one-element inline case
-    /// dominates.
+    /// Reverse index from socket id to the wait ids parked on it. Must be kept
+    /// in lockstep with `parked` by `park`/`park_remove`. A socket id maps to
+    /// more than one wait only transiently, so the inline case dominates.
     io_waiters: HashMap<i32, SmallVec<[u64; 1]>>,
     /// Monotonically increasing id handed to each park; the key into `parked`
     /// and the identity (and tie-breaker) recorded in `timer_heap`.
     next_wait_id: u64,
-    /// Lazy-deletion min-heap of `(deadline, wait id)`. A park with a deadline
-    /// pushes one entry and never eagerly removes it: when the park instead
-    /// wakes early on I/O, the entry is discarded on pop once its id is gone
-    /// from `parked` (or its live deadline no longer matches). This keeps the
-    /// nearest deadline an O(log n) peek instead of an O(n) scan of `parked`.
+    /// Lazy-deletion min-heap of `(deadline, wait id)`. Entries are never
+    /// eagerly removed; a stale one is discarded on pop, once its id is gone
+    /// from `parked` or its live deadline no longer matches. Keeps the nearest
+    /// deadline an O(log n) peek instead of an O(n) scan of `parked`.
     timer_heap: BinaryHeap<Reverse<(Instant, u64)>>,
-    /// This scheduler's OS event queue (kqueue/epoll). Owned by this
-    /// scheduler alone; other schedulers reach it only through the waker
-    /// in the runtime's `slots[scheduler_index].waker`.
+    /// This scheduler's OS event queue. Owned by this scheduler alone; others
+    /// reach it only through the runtime's waker slot.
     poll: mio::Poll,
-    /// Reusable event buffer for `poll` (mio clears it on each `poll()`),
-    /// allocated once per VM instead of per poll call — the parked-I/O
+    /// Reusable event buffer for `poll`, allocated once per VM: the parked-I/O
     /// drain runs every scheduler slice under I/O load.
     poll_events: mio::Events,
     /// The scheduler runtime, present from construction. Worker threads
@@ -561,16 +511,13 @@ pub struct VM {
     globals_synced_version: u64,
 }
 
-/// Build the VM that runs `program` as scheduler 0. The runtime is
-/// constructed here, before any code runs; its worker threads start lazily
-/// on the first spawn, so tooling callers (REPL, tests) pay only the
-/// allocations, one copy of the program tables, and one OS poller.
+/// Build the VM that runs `program` as scheduler 0. Worker threads start
+/// lazily on the first spawn, so tooling callers pay only one copy of the
+/// program tables and one OS poller.
 ///
-/// Fails only when scheduler 0's poller cannot be created (fd exhaustion):
-/// the calling thread could never park, so there is no VM to build.
+/// Fails only when scheduler 0's poller cannot be created.
 ///
-/// Built with no command-line arguments; `process.argv` returns an empty
-/// array. Use [`new_vm_with_argv`] to make program arguments visible.
+/// `process.argv` is empty; use [`new_vm_with_argv`] to pass arguments.
 pub fn new_vm(program: Program) -> VmResult<VM> {
     new_vm_with_argv(program, Vec::new())
 }
@@ -590,19 +537,17 @@ pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
 }
 
 /// Build the VM for scheduler `index` over an existing runtime: scheduler 0
-/// via [`new_vm`], workers via [`worker_main`]. `poll` is this scheduler's
-/// own OS poller (created alongside the runtime for scheduler 0, alongside
-/// the worker thread by `ensure_workers`); its waker lives in the runtime's
-/// waker slot so other schedulers can interrupt the wait.
+/// via [`new_vm`], workers via [`worker_main`]. `poll` is this scheduler's own
+/// OS poller; its waker lives in the runtime's waker slot so other schedulers
+/// can interrupt the wait.
 fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
-    // Every scheduler runs against a private copy of the program tables
-    // (the constants are frozen words pointing into `program.frozen`, which
-    // stays shared — only the vectors copy).
+    // Only the vectors copy: the constants are frozen words pointing into
+    // `program.frozen`, which stays shared.
     let program = (*runtime.program).clone();
     let mut frozen = program.frozen.builder();
     let templates = Templates::resolve(&program, &mut frozen);
-    // The global (literal) area is sized by the entry function: top-level
-    // bindings are its "locals", mirrored into this table as they are written.
+    // The entry function sizes the global area: top-level bindings are its
+    // "locals", mirrored into this table as they are written.
     let globals_len = program
         .functions
         .get(program.entry as usize)
@@ -643,16 +588,15 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
 }
 
 impl VM {
-    /// The program this VM runs. Callers that print values after `run()`
-    /// (CLI, REPL) need it to resolve closure names via
-    /// `program.functions[func_idx]`.
+    /// The program this VM runs. Callers that print values after `run()` need
+    /// it to resolve closure names.
     pub fn program(&self) -> &Program {
         &self.program
     }
 
     // The interpreter pushes the entry frame before the loop and never pops the
-    // last one while running, so a frame is always live. These accessors are the
-    // single audited place that relies on that invariant.
+    // last one while running, so a frame is always live. These two accessors
+    // are the only place that relies on it.
     #[inline]
     #[allow(clippy::unwrap_used)]
     fn frame(&self) -> &CallFrame {
@@ -668,26 +612,19 @@ impl VM {
     /// Run the program to completion and return the main process's result.
     ///
     /// The returned value may point into main's arena, which this VM keeps
-    /// alive (the scheduler loop re-adopts it as `self.heap` on exit): the
-    /// value is valid for as long as the VM is, so callers may print or
-    /// inspect it after `run` returns but must not let it outlive the VM.
+    /// alive. It must not outlive the VM.
     ///
-    /// An `Err` is an internal invariant breach, and the runtime behind this
-    /// VM is leaked rather than shut down (see the shutdown comment in the
-    /// body): an embedder that keeps the process alive after an errored run
-    /// — the REPL — accepts that leak; a one-shot embedder — the CLI —
-    /// exits, which reaps everything.
+    /// An `Err` is an internal invariant breach, and the runtime behind this VM
+    /// is leaked rather than shut down; see the shutdown comment in the body.
     pub fn run(&mut self) -> VmResult<Value> {
         let entry = self.program.entry;
         let main_func = &self.program.functions[entry as usize];
         let (code_start, locals) = (main_func.code_start, main_func.locals);
-        // The main process owns a heap like every other process; it starts
-        // here rather than through `resume`.
+        // Main owns a heap like every other process; it starts here rather
+        // than through `resume`.
         self.heap = ProcHeap::new();
-        // The entry function captures nothing; the frame still carries a
-        // closure value for it so every frame is shaped the same. Budgeted
-        // like any other allocation — the stack and frames are empty, so
-        // the root set is trivially consistent.
+        // The entry function captures nothing, but the frame still carries a
+        // closure so every frame is shaped the same.
         let entry_closure = Value::closure_in(&mut self.heap, entry, &[]);
 
         self.frames.push(CallFrame {
@@ -705,20 +642,12 @@ impl VM {
         self.current_pid = self.runtime.alloc_pid();
         let mut result = self.scheduler_loop();
 
-        // Shutdown: by the time scheduler 0's loop returns Ok, the global
-        // live count is zero, so workers are exiting; join them.
-        //
-        // On Err no shutdown is attempted, by contract. An Err is an
-        // internal invariant breach (the "likely a compiler bug" failures),
-        // and the errored main never decrements `live`, so the count cannot
-        // reach zero: the workers cannot be joined — they would park
-        // forever — and the runtime (worker threads, warm blocking-pool
-        // threads, the runtime Arc) is deliberately leaked instead. A
-        // one-shot embedder (the CLI) exits right after, reaping
-        // everything; a long-lived embedder that swallows the error (the
-        // REPL) pays one leaked runtime per errored evaluation. The
-        // symmetric worker-side breach exits the whole process — see
-        // `worker_main`.
+        // On Ok the global live count is zero, so workers are exiting: join
+        // them. On Err nothing is shut down, by contract. An errored main never
+        // decrements `live`, so the count cannot reach zero and joining would
+        // park forever; the whole runtime is deliberately leaked instead. The
+        // CLI exits right after and reaps it; the REPL pays one leaked runtime
+        // per errored evaluation.
         if result.is_ok() {
             let rt = &self.runtime;
             rt.shutdown_blocking();
@@ -739,29 +668,23 @@ impl VM {
     /// schedulers return Nil when the program is over.
     fn scheduler_loop(&mut self) -> VmResult<Value> {
         loop {
-            // Re-publish this scheduler's VM for the native boundary's
-            // re-derivation seam (C1: shims read the scheduler from this
-            // thread-local, never from anything that traveled with a
-            // process). Once per iteration, not once per loop: the store is
-            // one instruction, and re-deriving *here* — the top of every
-            // slice, after any resume — is the discipline the
-            // process-stack purity invariant names.
+            // Shims read the scheduler from this thread-local, never from
+            // anything that travelled with a process. Re-published at the top
+            // of every slice, after any resume, which is what the
+            // process-stack purity invariant requires.
             native::set_current_vm(self);
 
-            // Make sure some process is current.
             if self.frames.is_empty() && !self.acquire_work()? {
-                // Program over, nothing current: the heap slot holds the empty
-                // placeholder. Re-adopt main's arena into it before handing
-                // the value out — the value points into that heap, which now
-                // lives as long as the VM, covering the caller's
-                // print/inspect of the result. Workers (and an errored main)
-                // have no stashed pair and return Nil, which needs no arena.
+                // Program over. Re-adopt main's arena before handing the value
+                // out: the value points into that heap, which must then live as
+                // long as the VM. Workers and an errored main have no stashed
+                // pair and return Nil, which needs no arena.
                 let result = match self.main_result.take() {
                     Some((value, heap)) => {
                         self.heap = heap;
                         value
                     }
-                    None => self.make_nil(),
+                    None => self.make_nil()?,
                 };
                 return Ok(result);
             }
@@ -772,18 +695,15 @@ impl VM {
                     self.release_connections_of(self.current_pid);
                     // The finished process's result is its top-of-stack.
                     if self.current_is_main {
-                        // Main's result points into main's arena: stash the
-                        // (value, heap) pair together until the loop's exit
-                        // hands the value to `run`'s caller (idea 6 in the
-                        // front door) — dropping the heap here would dangle
-                        // the result. The take leaves the empty placeholder
-                        // current.
-                        let result = self.stack.pop().unwrap_or_else(|| self.make_nil());
+                        // Stash the (value, heap) pair together until the
+                        // loop's exit hands the value out; dropping the heap
+                        // here would dangle the result.
+                        let result = match self.stack.pop() {
+                            Some(v) => v,
+                            None => self.make_nil()?,
+                        };
                         self.main_result = Some((result, std::mem::take(&mut self.heap)));
                     } else {
-                        // Drop the finished process's arena with its
-                        // stack/frames; the placeholder owns nothing until
-                        // the next `resume`.
                         self.heap = ProcHeap::new();
                     }
                     self.stack.clear();
@@ -792,23 +712,15 @@ impl VM {
                     self.runtime.process_finished();
                 }
                 Step::Yield => {
-                    // Preempted. Wake any ready parked processes, take the
-                    // work directed at this scheduler (donated migrants,
-                    // direct-handed seeds), then make one balancing decision
-                    // off a single idleness scan:
+                    // One balancing decision per yield, off a single idleness
+                    // scan: pick up an overflow seed when every peer is busy
+                    // and the local queue is shallow, otherwise donate.
                     //
-                    // - every peer busy + shallow local queue: pick up an
-                    //   overflow seed (one per yield) so queued spawns get
-                    //   time-sliced in rather than starving until a local
-                    //   process finishes;
-                    // - a peer idle or trailing this scheduler's queue depth:
-                    //   donate a queued process to it (migration) instead of
-                    //   letting work wait many slices here.
-                    // Unconditional: `poll_parked` early-outs when nothing
-                    // is parked, but only AFTER draining this scheduler's
-                    // retired-listener queue — a busy scheduler that skipped
-                    // it here would keep a closed listener's fd registered
-                    // (and the port bound) until it next idled.
+                    // `poll_parked` runs unconditionally even though it
+                    // early-outs when nothing is parked, because it first
+                    // drains the retired-listener queue. Skipping it would keep
+                    // a closed listener's fd registered, and its port bound,
+                    // until this scheduler next idled.
                     self.poll_parked(false)?;
                     self.take_directed();
                     let peer_idle = self.others_idle();
@@ -826,25 +738,20 @@ impl VM {
                     }
                 }
                 Step::Parked(wait) => {
-                    // Shelve the suspended process under a fresh wait id and
-                    // register its wake conditions (fd index / timer heap /
-                    // blocking pool). The wait's sockets have been registered
-                    // with the poller since adoption; parking arms nothing.
+                    // The wait's sockets have been registered with the poller
+                    // since adoption, so parking arms nothing.
                     let outgoing = self.suspend_current();
                     self.park(wait, outgoing);
                 }
             }
-            // Every step may have changed this scheduler's runnable count
-            // (finish, park, pickup, donation); report it for peers'
-            // donation decisions.
+            // Any step may have changed this scheduler's runnable count; peers
+            // read it for their donation decisions.
             self.publish_load();
         }
     }
 
-    /// Detach the running process's state into a `Process`. The heap moves
-    /// with the stack and frames — the values they hold point into it — and
-    /// the VM is left with the empty placeholder heap until the next
-    /// `resume` installs an owner.
+    /// Detach the running process's state into a `Process`. The heap moves with
+    /// the stack and frames, since the values they hold point into it.
     fn suspend_current(&mut self) -> Process {
         Process {
             heap: std::mem::take(&mut self.heap),
@@ -875,43 +782,26 @@ impl VM {
         self.native_pending = p.native_pending;
     }
 
-    /// Donation policy, run at most once per yield: give the coldest queued
-    /// process to the peer that needs it most. The machinery (`detach_fds`/
-    /// `adopt_migrant`, `Runtime::claim_idle_peer`/`pick_underloaded_peer`/
-    /// `donate`) is policy-independent; the decisions live here:
+    /// Donation policy, run at most once per yield. The machinery is
+    /// policy-independent; the decisions live here.
     ///
-    /// - Victim: the BACK of the run queue — the process that would wait
-    ///   longest for a slice here, with the coldest cache footprint.
-    /// - Target: an idle peer first (`peer_idle`, claimed by flag CAS) — a
-    ///   sleeping core is the worst imbalance. Otherwise the least-loaded
-    ///   busy peer, taken only when this scheduler is ahead by at least two
-    ///   runnable processes so each move strictly narrows the gap (see
-    ///   `Runtime::pick_underloaded_peer`). Busy-peer donation is what
-    ///   levels queue depths mid-run: long CPU-bound processes can sit
-    ///   five-deep on one scheduler and alone on another, and with only
-    ///   idle-driven donation nothing moves until a scheduler drains
-    ///   completely — completion times then spread by whole multiples of a
-    ///   process's runtime.
-    /// - Threshold for an idle target: queue length >= 1. The donor keeps
-    ///   the process it is running and the idle core gains a whole process —
-    ///   strictly better balance. Requiring >= 2 would strand every
-    ///   scheduler's last queued process at the end of a run, leaving the
-    ///   finish tail wide while peers sit idle.
-    /// - Eligibility: never the main process (its result must surface on the
-    ///   scheduler that owns it). Runnable-only is sufficient beyond that —
-    ///   anything with an in-flight blocking job or armed fds is in `parked`,
-    ///   not `run_queue`.
+    /// The victim is the BACK of the run queue: it would wait longest for a
+    /// slice here and has the coldest cache footprint. Never the main process,
+    /// whose result must surface on the scheduler that owns it.
     ///
-    /// Ordering is part of the claim protocol (see `Runtime::claim_idle_peer`):
-    /// the effect-free checks run first — and the fd walk
-    /// (`can_donate_fds`) only after the target probe, so the common
-    /// nothing-to-do yield never traverses the victim — then the peer
-    /// claim, and the fd detach, which moves connection fds out of the
-    /// donor's tables, only once a destination is guaranteed. If the
-    /// donation aborts after a successful claim, the claimed peer is
-    /// notified anyway so it wakes, finds nothing, re-parks, and republishes
-    /// its parked flag; otherwise it would sleep unwakeable by submitters.
-    /// An unclaimed busy target needs no such wake — it never slept.
+    /// The target is an idle peer first, since a sleeping core is the worst
+    /// imbalance; one queued process is enough to justify the move. Otherwise
+    /// the least-loaded busy peer, taken only when this scheduler is ahead by
+    /// two, so each move strictly narrows the gap. Without busy-peer donation,
+    /// long CPU-bound processes sit five-deep on one scheduler and alone on
+    /// another until one drains completely.
+    ///
+    /// Order is part of the claim protocol: effect-free checks first (the fd
+    /// walk only after the target probe, so the common nothing-to-do yield
+    /// never traverses the victim), then the peer claim, then the fd detach
+    /// once a destination is guaranteed. A donation that aborts after a
+    /// successful claim must still notify the claimed peer, or it sleeps
+    /// unwakeable by submitters.
     fn try_donate(&mut self, peer_idle: bool) {
         let Some(victim) = self.run_queue.back() else {
             return;
@@ -920,8 +810,7 @@ impl VM {
             return;
         }
         let rt = Arc::clone(&self.runtime);
-        // Effect-free target probe before anything costly: most yields have
-        // no one worth donating to.
+        // Most yields have no one worth donating to, so probe first.
         let busy_peer = if peer_idle {
             None
         } else {
@@ -977,9 +866,9 @@ impl VM {
                 return Ok(true);
             }
 
-            // 2. Remote seeds; then seeds handed to a peer's inbox that the
-            //    peer has not taken yet — stealing one here starts it sooner
-            //    than waiting for its assigned scheduler to wake.
+            // 2. Remote seeds, then seeds sitting untaken in a peer's inbox:
+            //    stealing one starts it sooner than waiting for its assigned
+            //    scheduler to wake.
             if self.take_inbound() {
                 continue;
             }
@@ -987,20 +876,17 @@ impl VM {
                 continue;
             }
 
-            // Nothing runnable here: republish the (zero) load before any
-            // park below. A direct-handed seed a peer stole out of this
-            // scheduler's inbox leaves `submit`'s in-flight bump in our
+            // Republish the (zero) load before parking below. A seed a peer
+            // stole out of this inbox leaves `submit`'s in-flight bump in our
             // published-load slot, and nothing else corrects it while we sleep.
             self.publish_load();
 
-            // 3. Local parked I/O / timers: wait for them, but stay wakeable
-            //    by other schedulers (seed submissions, program end).
+            // 3. Local parked I/O and timers: wait, but stay wakeable by other
+            //    schedulers.
             if !self.parked.is_empty() {
                 self.set_parked_flag(true);
-                // Re-check for seeds after publishing the flag: a submitter
-                // who scanned before the flag was visible may have pushed to
-                // the overflow queue (or straight into our inbox) expecting
-                // someone to pick it up.
+                // Re-check after publishing the flag: a submitter who scanned
+                // before it was visible may already have pushed work.
                 if self.take_inbound() {
                     self.set_parked_flag(false);
                     continue;
@@ -1015,10 +901,8 @@ impl VM {
             if self.runtime_finished() {
                 return Ok(false);
             }
-            // Wait for a seed or for the program to end. Set the parked flag
-            // first, then re-check (a submitter who missed our flag may have
-            // pushed in between; `notify` is sticky so the reverse race is
-            // safe).
+            // Wait for a seed or for the program to end. Flag first, then
+            // re-check; `notify` is sticky, so the reverse race is safe.
             self.set_parked_flag(true);
             if self.take_inbound() {
                 self.set_parked_flag(false);
@@ -1042,10 +926,9 @@ impl VM {
         self.admit(batch)
     }
 
-    /// Take only the work directed at this scheduler (its inbox: donated
-    /// migrants and direct-handed seeds) into the local run queue. Called at
-    /// every yield — directed work has a chosen destination and must not
-    /// wait, unlike overflow seeds. Returns whether any arrived.
+    /// Take only the work directed at this scheduler's inbox. Called at every
+    /// yield: unlike overflow seeds, directed work has a chosen destination and
+    /// must not wait. Returns whether any arrived.
     fn take_directed(&mut self) -> bool {
         let batch = self.runtime.take_directed(self.scheduler_index);
         self.admit(batch)
@@ -1063,13 +946,12 @@ impl VM {
         self.admit(batch)
     }
 
-    /// Admit a batch of inbound work into the local run queue. Returns
-    /// whether anything was admitted.
+    /// Admit a batch of inbound work into the local run queue. Returns whether
+    /// anything was admitted.
     ///
-    /// Inbound work — seed or migrant — may reference top-level bindings
-    /// published after our last sync; the global area is refreshed before
-    /// hydrating either kind. (Publish happens-before submit, submit
-    /// happens-before take, so this can never be stale.)
+    /// Inbound work may reference top-level bindings published after our last
+    /// sync, so the global area is refreshed first. Publish happens-before
+    /// submit and submit happens-before take, so this can never be stale.
     fn admit(&mut self, batch: Vec<Inbound>) -> bool {
         if batch.is_empty() {
             return false;
@@ -1093,13 +975,10 @@ impl VM {
         self.admit(vec![inbound])
     }
 
-    /// Bring this scheduler's global area up to date with the runtime's
-    /// shared (published) globals. The shared table holds frozen value
-    /// words — pointers into the program-wide frozen area, or immediates —
-    /// so syncing is a plain word copy per slot: no decode, no allocation.
-    /// The `Acquire` load of `globals_version` pairs with the `Release`
-    /// bump in `publish_global`, making the frozen
-    /// segment contents visible before the words are read.
+    /// Bring this scheduler's global area up to date with the runtime's shared
+    /// globals. The shared table holds frozen words, so syncing is a plain word
+    /// copy per slot. The `Acquire` load pairs with the `Release` bump in
+    /// `publish_global`, making the frozen segment visible before the read.
     fn sync_globals(&mut self) {
         let version = self
             .runtime
@@ -1121,8 +1000,7 @@ impl VM {
         self.globals_synced_version = version;
     }
 
-    /// Whether the whole program — every process on every scheduler — has
-    /// finished (the runtime's live count reached zero).
+    /// Whether every process on every scheduler has finished.
     fn runtime_finished(&self) -> bool {
         self.runtime.is_finished()
     }
@@ -1139,7 +1017,7 @@ impl VM {
         self.runtime.any_other_idle(self.scheduler_index)
     }
 
-    /// Mark this scheduler as parked/unparked so seed submitters know who to
+    /// Mark this scheduler parked or unparked, so seed submitters know who to
     /// wake.
     fn set_parked_flag(&self, parked: bool) {
         self.runtime.set_parked(self.scheduler_index, parked);
@@ -1151,23 +1029,18 @@ impl VM {
         self.poll
             .poll(&mut self.poll_events, None)
             .map_err(VmError::Io)?;
-        // A retire notify wakes an idle scheduler with no seed to run; its
-        // registration and Arc clone must still be dropped here, or the
-        // shared fd never closes.
+        // A retire notify wakes an idle scheduler with no seed to run. Its
+        // registration and Arc clone must still be dropped here, or the shared
+        // fd never closes.
         let _ = self.process_retired_listeners();
         Ok(())
     }
 
-    // --- Lightweight processes (al/scheduler) --------------------
-
     /// `scheduler.spawn(f)`: start a new process running the closure `f`.
     ///
-    /// The process is shipped as a `Send` seed that whichever scheduler is
-    /// free will run; the first submit summons the runtime's worker threads
-    /// (one scheduler per CPU core). When no scheduler is idle — including
-    /// when scheduler 0 is the only one — the seed overflows to the shared
-    /// injector and whichever scheduler frees up first picks it up at its
-    /// next yield or idle scan.
+    /// The first submit summons the runtime's worker threads, one scheduler per
+    /// core. With no scheduler idle the seed overflows to the shared injector,
+    /// and whichever frees up first picks it up.
     fn spawn_process(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
         let seed = self.build_seed(&f);
@@ -1175,8 +1048,8 @@ impl VM {
         Ok(())
     }
 
-    /// A spawned closure must be a nullary function; both are compiler
-    /// invariants, so a violation is an internal error rather than a user one.
+    /// A spawned closure must be a nullary function. Both are compiler
+    /// invariants, so a violation is an internal error, not a user one.
     fn check_spawnable(&self, f: &Value) -> VmResult<()> {
         let Some(cl) = f.as_closure() else {
             return Err(VmError::internal("spawn requires a function"));
@@ -1187,37 +1060,31 @@ impl VM {
         Ok(())
     }
 
-    /// Spawn `f` pinned to this scheduler: the child runs on the core that
-    /// spawned it, so any socket it captured stays in this scheduler's tables —
-    /// no fd detach, no cross-core handoff. This is the shared-nothing half of
-    /// the accept fan-out: an acceptor handles each connection on the core it
-    /// accepted on, keeping the connection's buffers and fd local to one core.
+    /// Spawn `f` pinned to this scheduler, so any socket it captured stays in
+    /// this scheduler's tables: no fd detach, no cross-core handoff. The
+    /// shared-nothing half of the accept fan-out.
     fn spawn_local(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
-        // Copy the closure graph into the child's own heap (processes share no
-        // heap), but leave captured fds in place — parent and child run on the
-        // same scheduler and reference the same per-scheduler socket tables.
+        // Processes share no heap, so the closure graph is copied, but captured
+        // fds stay in place: parent and child run on the same scheduler and
+        // reference the same socket tables.
         let (heap, root) = ProcHeap::spawn(&f);
         self.runtime.process_started();
-        // No ownership change: the connection still belongs to the process
-        // that adopted it — ownership never moves implicitly. A handler that
-        // should close the socket when it finishes must do so explicitly
-        // (`net.al`'s accept loop does exactly that).
+        // No ownership change. A handler that should close the socket when it
+        // finishes must do so explicitly.
         self.spawn_process_with_heap(heap, root);
         Ok(())
     }
 
-    /// Spawn one copy of `f` pinned to every live scheduler — the fan-out that
-    /// turns a single accept loop into one acceptor per core. All copies drain
-    /// the same shared accept queue (a listener is one kernel socket), so the
-    /// spread is a locality preference: connections get accepted on the core
-    /// that will run them. The current scheduler runs its copy locally; every
-    /// other live scheduler gets one pinned to its inbox.
+    /// Spawn one copy of `f` pinned to every live scheduler, turning a single
+    /// accept loop into one acceptor per core. A listener is one kernel socket,
+    /// so all copies drain the same queue; the spread is only a locality
+    /// preference.
     fn spawn_on_each(&mut self, f: Value) -> VmResult<()> {
         self.check_spawnable(&f)?;
-        // Summon the worker threads so every scheduler slot is live before we
-        // place a copy on it. A never-spawned worker is skipped — safe, since
-        // any live acceptor drains the shared queue.
+        // Every scheduler slot must be live before a copy is placed on it.
+        // Skipping a never-spawned worker is safe: any live acceptor drains
+        // the shared queue.
         self.runtime.ensure_workers();
         for i in 0..self.runtime.scheduler_count() {
             if i == self.scheduler_index {
@@ -1232,15 +1099,13 @@ impl VM {
         Ok(())
     }
 
-    /// Close every connection the just-ended process `pid` controls — the
-    /// BEAM rule: a socket lives as long as its controlling process. Anything
-    /// parked on one fails with the stale-socket `NetError` instead of
-    /// sleeping forever; a process that returns without `socket.close` no
-    /// longer leaks its fd, and its peer sees EOF.
+    /// Close every connection the just-ended process `pid` controls — the BEAM
+    /// rule that a socket lives as long as its controlling process. Anything
+    /// parked on one fails with the stale-socket `NetError` instead of sleeping
+    /// forever.
     ///
-    /// O(live connections on this scheduler) per process death, behind an
-    /// emptiness gate so compute-only programs pay one branch. A pid→ids
-    /// index would remove the scan if a profile ever asks for it.
+    /// Scans every live connection on this scheduler per process death, behind
+    /// an emptiness gate so compute-only programs pay one branch.
     fn release_connections_of(&mut self, pid: u64) {
         if self.tcp_connections.is_empty() {
             return;
@@ -1256,11 +1121,9 @@ impl VM {
         }
     }
 
-    /// Create a process whose initial heap is `heap` — the seeded
-    /// heap a cross-scheduler spawn copied the closure graph into. The
-    /// closure `f` points into that heap. Every caller has already run
-    /// `check_spawnable` on the source closure (`ProcHeap::spawn` preserves the
-    /// value kind), so `f` is a nullary closure by construction.
+    /// Create a process whose initial heap is `heap` and whose closure `f`
+    /// points into it. `f` is a nullary closure by construction: every caller
+    /// has run `check_spawnable`, and `ProcHeap::spawn` preserves value kind.
     #[allow(clippy::expect_used)]
     fn spawn_process_with_heap(&mut self, heap: ProcHeap, f: Value) -> u64 {
         let pid = self.runtime.alloc_pid();
@@ -1300,34 +1163,24 @@ impl VM {
         });
     }
 
-    /// Copy a closure into a seed the child adopts wholesale: a fresh heap
-    /// holding a deep copy of the closure's graph (sharing preserved via a
-    /// `src → dst` map; no value is shared with this scheduler afterwards), so
-    /// handing the seed to another OS thread is a plain move. `Binary` `Arc`
-    /// backings are shared zero-copy — only the box is copied, never the bytes.
-    /// Captured sockets transfer with it: connections move (this scheduler
-    /// loses them); a listener id needs no transfer at all — the socket is
-    /// shared in `Runtime.shared_listeners`, and the destination registers
-    /// the same fd with its own poller on first accept.
+    /// Copy a closure into a seed the child adopts wholesale. No value is
+    /// shared with this scheduler afterwards, so handing the seed to another OS
+    /// thread is a plain move. `Binary` `Arc` backings are shared zero-copy:
+    /// only the box is copied, never the bytes.
     fn build_seed(&mut self, f: &Value) -> Seed {
-        // The heap copy knows nothing about fd tables, so the captured
-        // sockets are gathered by their own walk and moved/dup'd alongside
-        // the values.
+        // The heap copy knows nothing about fd tables, so captured sockets need
+        // their own walk.
         let mut captured_sockets = Vec::new();
         migrate::for_each_socket(f, &mut |s| captured_sockets.push(s.id));
 
-        // The child's initial heap: a fresh heap holding a deep copy of the
-        // closure graph. `root` points into it, so `(heap, root)` is
-        // self-contained and `Send` as a unit.
+        // `root` points into `heap`, so the pair is self-contained and `Send`.
         let (heap, root) = ProcHeap::spawn(f);
 
-        // Same fd transfer as donation: captured connections move to the
-        // child; captured listeners stay put (the shared socket needs no
-        // transfer). The move IS the ownership handoff — once the fd leaves
-        // this scheduler the child is the only process that can use it, so
-        // it becomes the controlling process. (This is the one place
-        // ownership changes hands, and it follows the fd's forced move, not
-        // a capture heuristic.)
+        // Captured connections move to the child; captured listeners stay put,
+        // since the shared socket needs no transfer. The move IS the ownership
+        // handoff: once the fd leaves this scheduler the child is the only
+        // process that can use it. This is the one place ownership changes
+        // hands, and it follows the fd's forced move, not a capture heuristic.
         let pid = self.runtime.alloc_pid();
         let mut connections = self.detach_socket_ids(captured_sockets);
         for (_, _, owner) in &mut connections {
@@ -1342,12 +1195,9 @@ impl VM {
         }
     }
 
-    /// Build a runnable process on this scheduler from a seed: adopt its
-    /// sockets, adopt its heap (the spawn-side copy of the closure graph) as
-    /// the child's initial heap, and queue it. Top-level bindings come
-    /// from the global area (synced in `admit`, the intake gate every arrival
-    /// path — inbox drain, overflow pickup, steal — funnels through), so the
-    /// seed itself carries none.
+    /// Build a runnable process on this scheduler from a seed. The seed carries
+    /// no top-level bindings: those come from the global area, which `admit`
+    /// syncs on every arrival path.
     fn hydrate_seed(&mut self, seed: Seed) {
         self.spawn_process_with_heap_as(seed.pid, seed.heap, seed.root);
         self.adopt_connections(seed.connections);
@@ -1355,39 +1205,31 @@ impl VM {
 }
 
 /// Entry point for worker scheduler threads (indices 1..N), spawned by
-/// `Runtime::ensure_workers` on the first submit. Each worker runs a VM of
-/// its own over the shared runtime (its poller was created alongside the
-/// thread; the poller's waker sits in the runtime's waker table for
-/// `notify`),
-/// acquiring work like any scheduler — seeds direct-handed to its inbox by
-/// `submit` and migrants donated by peers first, falling back to the shared
-/// overflow injector and to stealing undelivered work from peers' inboxes —
-/// until the whole program finishes.
+/// `Runtime::ensure_workers` on the first submit. Each worker runs its own VM
+/// over the shared runtime and acquires work like any scheduler until the
+/// whole program finishes.
 fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {
     let mut vm = vm_for_runtime(runtime, index, poll);
 
     // Workers have no main process; scheduler_loop starts by acquiring work.
     if let Err(e) = vm.scheduler_loop() {
-        // A VM error indicates a compiler bug, not a user error: program
-        // state is unreliable and there is no path to hand the error to
-        // scheduler 0, so it is fatal to the whole process — even a
-        // long-lived embedder (the REPL) goes down with it.
+        // A VM error means a compiler bug: program state is unreliable and
+        // there is no path to hand the error to scheduler 0, so it takes down
+        // the whole process, even a long-lived embedder.
         eprintln!("al: scheduler {index} failed: {e}");
         std::process::exit(1);
     }
 }
 
-/// Construct a Nil enum value in `h` without a `VM`. Retained for tests
-/// that build values outside an interpreter; hot paths go through
-/// `VM::make_nil`.
+/// Construct a Nil enum value in `h` without a `VM`, for tests that build
+/// values outside an interpreter.
 #[cfg(test)]
 fn nil_value(h: &mut ProcHeap, nil_id: crate::TypeId) -> Value {
     Value::enum_with_names_in(h, nil_id, 0, "Nil", "Nil", &[], &[])
 }
 
-/// A VM over a minimal halt-only program ("main", arity 0). For tests that
-/// drive the VM's side tables directly — timer heap, parked store, socket
-/// tables, run queue — and never execute the program.
+/// A VM over a minimal halt-only program, for tests that drive the VM's side
+/// tables directly and never execute the program.
 #[cfg(test)]
 fn halt_test_vm() -> VM {
     let frozen = Arc::new(crate::frozen::FrozenArea::new());

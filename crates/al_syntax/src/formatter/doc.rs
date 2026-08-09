@@ -590,31 +590,25 @@ fn fits<'d>(
             DocInner::Text { width, .. } => remaining -= width,
             DocInner::Break { width, .. } => match mode {
                 Mode::Flat => remaining -= width,
-                // An already-broken break ends the line; everything before it fit.
                 Mode::Broken => return true,
             },
             DocInner::HardLine(_) | DocInner::RawNewline => match mode {
-                // Inside flat content a hard newline cannot render flat;
-                // in the trailing work it simply ends the line.
+                // Inside flat content a hard newline cannot render flat; in the
+                // trailing work it simply ends the line.
                 Mode::Flat => return false,
                 Mode::Broken => return true,
             },
             DocInner::Nest(i, inner) => probe.push((indent + i, mode, inner)),
-            // Nesting never affects a width probe (probes stop at the first
-            // newline); whether the conditional indent applies is resolved at
-            // layout time.
+            // Nesting never affects a width probe: probes stop at the first
+            // newline.
             DocInner::NestIfBroken(_, inner) => probe.push((indent, mode, inner)),
-            // A hugged item always renders broken, so probe it the way trailing
-            // broken content is probed: its first hard newline ends the line.
             DocInner::Hug(inner) => probe.push((indent, Mode::Broken, inner)),
             DocInner::Group { doc, breaks } => {
                 let m = match (mode, *breaks) {
-                    // Inside flat-probed content everything must stay flat.
                     (Mode::Flat, _) => Mode::Flat,
-                    // A trailing group that is willing to break — or that
-                    // provably breaks — ends the line at its first break; a
-                    // reluctant one is counted at full flat width so the probed
-                    // group breaks instead of it.
+                    // A trailing group that breaks ends the line at its first
+                    // break; a reluctant one is counted at full flat width so
+                    // the probed group breaks instead of it.
                     (Mode::Broken, Breaks::Always | Breaks::Willingly | Breaks::Hugging) => {
                         Mode::Broken
                     }
@@ -683,16 +677,15 @@ mod tests {
 
     #[test]
     fn multiline_text_forces_group_break() {
-        // A multi-line block comment inside a group is a hard break: the
-        // group can never render flat, however generous the width.
+        // A multi-line block comment is a hard break: the group can never
+        // render flat, however generous the width.
         let d = group(d![text("/* a\n   b */"), line(), text("c")]);
         assert_eq!(layout(&d, 80), "/* a\n   b */\nc");
     }
 
     #[test]
     fn multiline_text_renders_verbatim_without_indent() {
-        // Continuation lines of embedded text render from column zero even
-        // under a nest — the text's own leading whitespace is preserved.
+        // Continuation lines render from column zero even under a nest.
         let d = d![
             text("head"),
             nest(
@@ -705,9 +698,8 @@ mod tests {
 
     #[test]
     fn col_resumes_after_multiline_text() {
-        // The text's total width exceeds the budget, but its last line is
-        // short: the group that follows fits on the resumed line and must
-        // stay flat, not be broken by the earlier lines' widths.
+        // The text overflows overall but its last line is short, so the group
+        // after it fits on the resumed line and must stay flat.
         let doc = d![
             text("/* aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbb */ "),
             parens("f(", "ccc"),
@@ -720,9 +712,8 @@ mod tests {
 
     #[test]
     fn width_probe_stops_at_trailing_multiline_text() {
-        // A multi-line comment trailing a group ends the line at its first
-        // embedded newline: the probe counts only the comment's first line,
-        // so the group stays flat.
+        // A trailing multi-line comment ends the line at its first newline,
+        // so the probe counts only its first line and the group stays flat.
         let doc = d![
             parens("f(", "aaaa"),
             text(" /* x\n   yyyyyyyyyyyyyyyyyyyyyyyy */"),
@@ -749,8 +740,8 @@ mod tests {
 
     #[test]
     fn trailing_text_breaks_group() {
-        // `(aaaa)` alone fits, but the text after it on the same line does
-        // not — the group must break rather than overflow the line.
+        // `(aaaa)` alone fits but the trailing text does not, so the group
+        // breaks rather than overflow the line.
         let doc = || d![parens("(", "aaaa"), text(" tail")];
         assert_eq!(layout(&doc(), 11), "(aaaa) tail");
         assert_eq!(layout(&doc(), 9), "(\n\taaaa,\n) tail");
@@ -758,16 +749,14 @@ mod tests {
 
     #[test]
     fn trailing_reluctant_group_breaks_earlier_group() {
-        // Two argument lists on one line: when the pair overflows, the first
-        // one breaks and the second stays intact — not the other way around.
+        // When the pair overflows the first list breaks, not the second.
         let doc = d![parens("f(", "aaaa"), text(" + g"), parens("(", "bbbb")];
         assert_eq!(layout(&doc, 12), "f(\n\taaaa,\n) + g(bbbb)");
     }
 
     #[test]
     fn trailing_block_keeps_earlier_group_flat() {
-        // A block after the args is a natural break point: the args stay
-        // flat and the line ends at the block's `{`.
+        // A block after the args is a natural break point.
         let doc = || d![parens("f(", "aaaa"), text(" "), block(text("body"))];
         assert_eq!(layout(&doc(), 30), "f(aaaa) { body }");
         assert_eq!(layout(&doc(), 10), "f(aaaa) {\n\tbody\n}");
@@ -775,8 +764,7 @@ mod tests {
 
     #[test]
     fn delimited_hug_lets_last_item_hug() {
-        // A hard-breaking last item hugs the delimiters: earlier items stay on
-        // the head line and the closer follows the item's final line.
+        // A hard-breaking last item hugs the delimiters.
         let doc = d![
             text("f"),
             delimited_hug("(", vec![text("a"), lambda()], ")")
@@ -786,9 +774,7 @@ mod tests {
 
     #[test]
     fn delimited_hug_breaks_per_item_when_head_overflows() {
-        // When the head line (everything up to the hugged item's `{`) does not
-        // fit, fall back to the one-item-per-line layout with the hugged item
-        // indented like any other.
+        // Head line does not fit, so fall back to one item per line.
         let doc = d![
             text("f"),
             delimited_hug("(", vec![text("aaaaaaaaaa"), lambda()], ")")
@@ -801,8 +787,7 @@ mod tests {
 
     #[test]
     fn delimited_hug_without_hard_break_matches_delimited() {
-        // Nothing to hug: a flat-rendering last item gives the standard
-        // delimited behaviour in both the fitting and overflowing cases.
+        // Nothing to hug: a flat last item gives plain `delimited` behaviour.
         let items = || vec![text("aaaa"), text("bbbb")];
         let hug_doc = delimited_hug("(", items(), ")");
         let plain_doc = delimited("(", items(), ")");
@@ -812,8 +797,7 @@ mod tests {
 
     #[test]
     fn delimited_hug_falls_back_when_earlier_item_breaks() {
-        // A hard-breaking item before the last leaves nothing for the last to
-        // hug onto: every item goes on its own line.
+        // A hard-breaking earlier item leaves nothing for the last to hug.
         let block_item = || d![text("match x "), hard_braces(text("arm"))];
         let doc = d![
             text("f"),
@@ -827,9 +811,8 @@ mod tests {
 
     #[test]
     fn group_containing_hugging_group_breaks() {
-        // A hugging list provably renders across multiple lines, so an
-        // enclosing group must break around it rather than keep its own
-        // breaks flat.
+        // A hugging list always renders multi-line, so an enclosing group
+        // must break around it.
         let call = || d![text("g"), delimited_hug("(", vec![lambda()], ")")];
         let outer = group(d![
             text("["),
@@ -845,8 +828,7 @@ mod tests {
 
     #[test]
     fn trailing_hugging_group_keeps_earlier_group_flat() {
-        // Like a block, a hugging call after the args is a natural end for the
-        // line: the earlier args stay flat whether the call hugs or breaks.
+        // Like a block, a hugging call is a natural end for the line.
         let doc = || {
             d![
                 parens("f(", "aaaa"),
@@ -855,8 +837,8 @@ mod tests {
             ]
         };
         assert_eq!(layout(&doc(), 30), "f(aaaa) or g(fn() {\n\tbody\n})");
-        // Too narrow for the hug head `g(fn() {`: the call breaks per-item,
-        // but it still ends the line so the earlier group stays flat.
+        // Too narrow for the hug head: the call breaks per item but still
+        // ends the line, so the earlier group stays flat.
         assert_eq!(
             layout(&doc(), 14),
             "f(aaaa) or g(\n\tfn() {\n\t\tbody\n\t},\n)"
@@ -865,9 +847,8 @@ mod tests {
 
     #[test]
     fn regrouping_a_hugging_group_preserves_the_hug() {
-        // `group`/`group_willing` on a hugging list must not rebuild it with
-        // another Breaks: its subtree contains a hardline, so a rebuild would
-        // land on Always and turn the hug into per-item breaks.
+        // A rebuild would land on `Always` and turn the hug into per-item
+        // breaks.
         let hugging = || delimited_hug("(", vec![text("a"), lambda()], ")");
         let expected = layout(&d![text("f"), hugging()], 80);
         assert_eq!(expected, "f(a, fn() {\n\tbody\n})");

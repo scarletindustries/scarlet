@@ -694,11 +694,7 @@ fn session_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
     p.write("a.al", HTTP_ENTRY);
 
-    // First check: a trivial program (no http imports at all).
     let mut s = checked_with(&p, "println(1)\n");
-
-    // Second check: the http program. This is the LSP's reality — one shared
-    // session checks many different entry files in sequence.
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
     assert!(
         r2.success(),
@@ -707,11 +703,9 @@ fn session_recheck_keeps_stdlib_types_intact() {
     );
 }
 
-// The LSP-workspace reality that broke in the field: one entry hydrates
-// al/http (as any small server does), a later entry in the same session imports
-// al/http/h1 directly. h1's hydration must still resolve `Parsed` /
-// `Framing` / `Header` to real enum types — not collapse them to a builtin —
-// even though al/http and al/http/headers were hydrated by an earlier check.
+// One entry hydrates al/http, a later entry in the same session imports
+// al/http/h1 directly. h1's hydration must still resolve `Parsed` / `Framing` /
+// `Header` to real enum types rather than collapsing them to a builtin.
 const HTTP_HELLO_ENTRY: &str = "import al/http\n\
 match http.serve('127.0.0.1', 8080, fn(_req) http.text('hi')) {\n\
 \tOk(_) -> Nil\n\
@@ -724,10 +718,8 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
     p.write("a.al", HTTP_HELLO_ENTRY);
     p.write("b.al", HTTP_ENTRY);
 
-    // First check: a program that imports al/http (hydrates http + headers).
+    // Hydrates http + headers, then h1 directly.
     let mut s = checked_with(&p, HTTP_HELLO_ENTRY);
-
-    // Second check: a program that imports al/http/h1 directly.
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
     assert!(
         r2.success(),
@@ -737,15 +729,10 @@ fn session_hydrates_h1_after_http_in_earlier_check() {
     );
 }
 
-// The shadowed-stdlib-type bug: an entry file declaring a type
-// whose name collides with a seeded stdlib type — a user's
-// `type Parsed = Result(...)` vs al/http/h1's `Parsed` enum — overwrote the
-// seeded `type_info` entry IN PLACE (IndexMap::insert keeps the existing,
-// pre-watermark index), so the next check's truncate-by-length rollback could
-// not restore it: every later check in the session saw the (truncated, now
-// garbage) alias instead of the enum, breaking exhaustiveness and hover for
-// that stdlib type. The env's overwrite journal is what fixes this; this test
-// pins it.
+// An entry type whose name collides with a seeded stdlib type overwrites the
+// `type_info` entry in place (`IndexMap::insert` keeps the pre-watermark
+// index), so truncate-by-length rollback cannot restore it. The env's
+// overwrite journal is what fixes that; this pins it.
 const SHADOWING_ENTRY: &str = "type Parsed = Result(Int, String)\n\
 fn f(x Int) Parsed {\n\
 \tOk(x)\n\
@@ -758,11 +745,10 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
     p.write("a.al", SHADOWING_ENTRY);
     p.write("b.al", HTTP_ENTRY);
 
-    // Check 1: the shadowing entry itself is fine.
     let mut s = checked_with(&p, SHADOWING_ENTRY);
 
-    // Check 2: a different entry that uses the REAL al/http/h1.Parsed must see
-    // the enum (3 variants, exhaustive match), not the dead alias.
+    // An entry using the real al/http/h1.Parsed must see the enum, not the
+    // dead alias.
     let r2 = s.check(&parse(HTTP_ENTRY), Some(&p.dir));
     assert!(
         r2.success(),
@@ -770,8 +756,7 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
         r2.diagnostics
     );
 
-    // And back: re-checking the shadowing entry still works (the journal
-    // restore is itself rolled back cleanly).
+    // And back: the journal restore is itself rolled back cleanly.
     let r3 = s.check(&parse(SHADOWING_ENTRY), Some(&p.dir));
     assert!(
         r3.success(),
@@ -781,9 +766,8 @@ fn entry_type_shadowing_stdlib_name_is_undone_on_next_check() {
 }
 
 /// The unused-import rule keys off the `Qualified` *member* occurrence, not the
-/// `Qualifier`: `c.shared()` keeps `import ./c` alive, while an import whose
-/// alias is never mentioned is still reported. (Find-all-references does list
-/// the qualifier — see `lsp_handlers::find_refs_on_module_alias_lists_the_qualifier`.)
+/// `Qualifier`. Find-all-references does list the qualifier — see
+/// `lsp_handlers::find_refs_on_module_alias_lists_the_qualifier`.
 #[test]
 fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
     let p = Project::new("qualifier_liveness");
@@ -797,11 +781,9 @@ fn qualified_member_use_keeps_the_import_live_but_a_bare_import_still_warns() {
     assert_msg_eq(&msgs, "unused import `d`");
 }
 
-/// A local binding shadows an import's qualifier. Before this was gated, the
-/// member lookup keyed off `imported_qualifiers` before consulting scope, so
-/// `b.x` on a parameter named `b` was rejected as "Module './b' has no member
-/// 'x'" — a valid program that would not compile. Not an LSP concern: this is
-/// name resolution.
+/// A local binding shadows an import's qualifier. Scope must be consulted
+/// before `imported_qualifiers`, or `b.x` on a parameter named `b` is rejected
+/// as "Module './b' has no member 'x'".
 #[test]
 fn a_local_shadows_an_import_qualifier() {
     let p = Project::new("shadow_qualifier");
@@ -824,10 +806,8 @@ fn a_local_shadows_an_import_qualifier() {
     common::run_project_outputs(&p, "run", "a.al", "42\n");
 }
 
-/// `Config(name: 'x')` names the *constructor*, never the type — and a
-/// single-constructor `type Config { name String }` declares both with one
-/// identifier. Reachability therefore never reached the type, and every such
-/// declaration was reported `unused type`. A constructor keeps its type alive.
+/// `Config(name: 'x')` names the constructor, never the type, so reachability
+/// only reaches the type through the structural constructor edge.
 #[test]
 fn a_used_constructor_keeps_its_type_alive() {
     let p = Project::new("unused_ctor_type");
@@ -857,15 +837,9 @@ fn one_used_constructor_is_enough_to_keep_the_type() {
     assert_no_msg(&unused_msgs(&s), "unused type `Color`");
 }
 
-// ---------------------------------------------------------------------------
-// Selective import item-binding tokens are `ImportItem` occurrences — binding,
-// not use. The `{helper}` token alone must not keep the import alive, and
-// rename of the imported symbol must still rewrite the token.
-// ---------------------------------------------------------------------------
-
 /// `import ./lib.{helper}` whose item is never mentioned again: the binding
 /// token in the import list is not a use, so the import is reported unused.
-/// Adding a real call unflags it (the check is live, not just disabled).
+/// Adding a real call unflags it, so the check is live rather than disabled.
 #[test]
 fn unused_selective_import_item_binding_token_is_not_a_use() {
     let p = Project::new("selective_unused");
@@ -884,9 +858,8 @@ fn unused_selective_import_item_binding_token_is_not_a_use() {
     assert_no_msg(&unused_msgs(&checked_with(&p2, used)), "unused import");
 }
 
-/// Rename driven from the `{helper}` binding token: the token is still a
-/// reference site, so it resolves for rename and every rewritten span —
-/// declaration in lib, the import token, and the call — spells `helper`.
+/// The `{helper}` binding token is still a reference site, so rename resolves
+/// from it and every rewritten span spells `helper`.
 #[test]
 fn rename_selective_import_item_rewrites_the_binding_token() {
     let p = Project::new("selective_rename");
@@ -912,7 +885,6 @@ fn rename_selective_import_item_rewrites_the_binding_token() {
         };
         assert_eq!(span_text(src, sp), "helper", "at {m:?} {sp:?}");
     }
-    // Declaration in lib + the import's binding token + the `helper()` call.
     assert_eq!(
         spans.len(),
         3,

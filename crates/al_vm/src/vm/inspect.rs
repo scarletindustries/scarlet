@@ -1,21 +1,14 @@
-//! Value rendering: the `inspect` form every `Print`/`ToString` and the
-//! CLI/REPL result line share, plus the type names error messages use.
+//! Value rendering: the `inspect` form `Print`/`ToString` and the CLI/REPL
+//! result line share, plus the type names error messages use.
 //!
-//! `inspect` renders a value the way the user would write it: records as
-//! `Name{field: v}`, variants as `Name(v)`, strings quoted, floats with
-//! a trailing `.0` so they never read as ints. It is layout-aware —
-//! short simple arrays stay flat, long ones wrap six to a line, nested
-//! aggregates expand one element per line — and the unit tests in
-//! [`super`] lock that shape.
+//! `inspect` renders a value the way the user would write it, and is
+//! layout-aware: short simple arrays stay flat, long ones wrap six to a line,
+//! nested aggregates expand one element per line. The unit tests in [`super`]
+//! lock that shape.
 //!
-//! Everything here is read-only over the value graph: no allocation in
-//! any arena, just one host `String`. The whole rendering streams into a
-//! single output buffer — leaves, separators, and indentation are written
-//! in place, so a nested value costs O(total bytes) instead of re-copying
-//! every child rendering once per ancestor level. Closure names resolve
-//! through the program (`functions[func_idx].name`), which is why
-//! `inspect` takes the [`Program`] and why it stays `pub`: the CLI and
-//! REPL print final results with it after `run()` returns.
+//! Nothing here allocates in an arena — the whole rendering streams into one
+//! host `String`. `inspect` takes the [`Program`] because a closure stores only
+//! its `func_idx` and its name has to be looked up there.
 
 use std::fmt::Write;
 
@@ -40,9 +33,7 @@ pub(super) fn value_type_name(v: &Value) -> String {
     }
 }
 
-/// Render `v` for `println`/`string.inspect`. A closure stores only its
-/// `func_idx` + captures, so its name is resolved here through
-/// `program.functions[func_idx]`.
+/// Render `v` for `println`/`string.inspect`.
 pub fn inspect(v: &Value, program: &Program) -> String {
     let mut out = String::new();
     inspect_impl(v, program, Some(0), &mut out);
@@ -61,8 +52,7 @@ fn is_simple_value(v: &Value) -> bool {
 }
 
 /// A constructor named after its own type that carries field labels is the
-/// record-shorthand form (`type T { a Int  b Bool }` → `T{ a: .., b: .. }`).
-/// Sum-type variants and prelude constructors (`Some`, `Ok`, `Err`, …) have a
+/// record-shorthand form (`T{ a: .., b: .. }`). Sum-type variants have a
 /// distinct variant name and keep the positional `Variant(..)` rendering.
 fn is_record(e: &crate::bytecode::EnumRef<'_>) -> bool {
     !e.field_labels().is_empty()
@@ -104,9 +94,8 @@ fn join_inline(out: &mut String, xs: &[Value], program: &Program) {
     }
 }
 
-/// Body of an expanded container: one line per element, indented one level
-/// past `n`, closing delimiter back at `n`. The caller has already written
-/// the opening delimiter.
+/// Body of an expanded container: one line per element indented past `n`, then
+/// the closing delimiter at `n`. The caller writes the opening delimiter.
 fn block_body<T>(
     out: &mut String,
     close: char,
@@ -128,11 +117,9 @@ fn block_body<T>(
 }
 
 /// Array-of-leaves layout: flat `[..]` when it fits in 80 columns, otherwise
-/// wrapped six elements per line at indent depth `n`. Streams the flat
-/// attempt into `out` and bails as soon as it exceeds the budget, then
-/// truncates and re-renders wrapped — each leaf is written at most twice.
-/// `make_iter` is called once per pass so the wrapped retry restarts from
-/// the front without the caller having to buffer elements.
+/// six elements per line at indent depth `n`. The flat attempt streams into
+/// `out` and bails at the budget, so each leaf is written at most twice.
+/// `make_iter` is called once per pass so the retry needs no buffering.
 fn wrap_six<T, I: Iterator<Item = T>>(
     out: &mut String,
     n: usize,
@@ -177,9 +164,8 @@ fn wrap_six<T, I: Iterator<Item = T>>(
     out.push(']');
 }
 
-/// Render a value into `out`. `indent = None` forces a single-line rendering;
-/// `Some(n)` pretty-prints, expanding containers across lines at indent depth
-/// `n` when their children aren't all simple leaves.
+/// Render a value into `out`. `indent = None` forces one line; `Some(n)`
+/// expands containers across lines when their children are not all leaves.
 fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut String) {
     match v.kind() {
         ValueView::Int(i) => {
@@ -201,9 +187,8 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
             let _ = write!(out, "<{}#{}>", kind, s.id);
         }
         ValueView::Range(a, z) => {
-            // Render like the materialized array, without building one in
-            // any arena (printing must not allocate heap values). Each
-            // element streams straight into `out` — no per-element String.
+            // Render like the materialized array without building one:
+            // printing must not allocate heap values.
             let count = (z as i128 - a as i128).clamp(0, usize::MAX as i128) as usize;
             match indent {
                 None => {
@@ -229,10 +214,9 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
         }
         ValueView::Nil => out.push_str("Nil"),
         ValueView::Map(m) => match m.backing() {
-            // A live view of the host environment: render an opaque marker
-            // rather than dumping (and materializing) every variable.
+            // A live view of the host environment: an opaque marker, rather
+            // than materializing every variable.
             MapBacking::Env => out.push_str("<map env>"),
-            // An in-memory map renders its entries as `{k: v, …}`.
             MapBacking::Hamt => {
                 let entries = hamt::collect_entries(v);
                 out.push('{');
@@ -319,10 +303,8 @@ fn inspect_impl(v: &Value, program: &Program, indent: Option<usize>, out: &mut S
             }
         },
         ValueView::Array(arr) => match indent {
-            // Stream elements straight from the persistent tree; the layout
-            // helpers consume iterators, so nothing is collected into host
-            // memory even for the wrap-six retry (it just restarts a fresh
-            // walk).
+            // The layout helpers take iterators, so elements stream straight
+            // from the persistent tree even on the wrap-six retry.
             None => {
                 out.push('[');
                 for (i, v) in arr.iter().enumerate() {

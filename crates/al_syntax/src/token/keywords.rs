@@ -1,8 +1,7 @@
 use super::Kind;
 
-/// The single source of truth for al's keyword set: `keywords!` derives the
-/// `Keyword` enum, `ALL`, `text`, and `parse` from one list, so adding a
-/// keyword is a one-line edit and the spellings cannot drift apart.
+/// Derives the `Keyword` enum, `ALL`, `text` and `parse` from one list, so the
+/// spellings cannot drift apart.
 macro_rules! keywords {
     (@unit $variant:ident) => { () };
     ($($variant:ident => $text:literal),+ $(,)?) => {

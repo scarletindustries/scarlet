@@ -8,12 +8,10 @@ use al_syntax::diagnostic::{Diagnostic, DiagnosticCode};
 use al_syntax::span::Span;
 use al_syntax::token::is_type_name;
 
-/// A successfully-resolved type-name occurrence: the use-site span plus the
-/// canonical identity (owning module + interned name) of the `TypeInfo` it
-/// resolved to. The hydrator has no `Compiler` handle, so it accumulates these
-/// and the `Compiler::hydrate` wrappers drain them
-/// ([`Hydrator::take_type_refs`]) to record `Reference`s into the reference
-/// graph. Recording-only: it never affects the produced `Ty`.
+/// A resolved type-name occurrence: the use-site span plus the canonical
+/// identity of the `TypeInfo` it resolved to. The hydrator has no `Compiler`
+/// handle, so it accumulates these for the `Compiler::hydrate` wrappers to
+/// drain into the reference graph. It never affects the produced `Ty`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRefHit {
     /// Span of the written type name (the reference occurrence site).
@@ -24,27 +22,25 @@ pub struct TypeRefHit {
     pub module: ArenaSlice<pool::StrSlices>,
 }
 
-/// Where the annotation being hydrated appears in the source. Each position
-/// carries its own policy for two questions: may an unseen lowercase name
-/// mint a fresh type variable, and may a function type omit its return type?
+/// Where the annotation being hydrated appears. Each position answers two
+/// questions: may an unseen lowercase name mint a fresh type variable, and may
+/// a function type omit its return type?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnotationContext {
-    /// A signature-position annotation that opens its own type-variable
-    /// scope: fn signatures, lambda parameters, toplevel const annotations.
-    /// New lowercase names mint fresh (rigid) vars; a bare `fn(..)` return
-    /// hydrates to a fresh var that inference constrains against the body.
+    /// An annotation that opens its own type-variable scope: fn signatures,
+    /// lambda parameters, toplevel const annotations. New lowercase names mint
+    /// fresh rigid vars, and a bare `fn(..)` return gets a fresh var that
+    /// inference constrains against the body.
     Signature,
-    /// A `let x: T = ...` binding annotation. Type-variable names must
-    /// already be in scope (a parameter of the enclosing fn) — an unseen
-    /// lowercase name is an error. A bare `fn(..)` return is still allowed:
-    /// the fresh var unifies with the initializer's type, so it is sound.
+    /// A `let x: T = ...` annotation. An unseen lowercase name is an error. A
+    /// bare `fn(..)` return is still allowed: the fresh var unifies with the
+    /// initializer's type.
     Binding,
-    /// A type-definition body: constructor fields or an alias RHS. Unseen
-    /// lowercase names are errors (type parameters are pre-seeded via
-    /// [`Hydrator::add_type_variable`]), and every function type must
-    /// declare its return type — there is no inference context here, so a
-    /// fresh return var would be generalized into the stored scheme and
-    /// escape unconstrained.
+    /// A type-definition body: constructor fields or an alias RHS. Type
+    /// parameters are pre-seeded via [`Hydrator::add_type_variable`], so an
+    /// unseen lowercase name is an error. Every function type must declare its
+    /// return type: there is no inference context, so a fresh return var would
+    /// be generalized into the stored scheme and escape unconstrained.
     TypeDefinition,
 }
 
@@ -58,20 +54,14 @@ impl AnnotationContext {
     }
 }
 
-/// The Hydrator converts a syntactic type annotation (`ast::TypeIdentifier`)
-/// into a `Ty` for the inference engine.
+/// Converts a syntactic type annotation (`ast::TypeIdentifier`) into a `Ty`.
 ///
-/// It owns the policy for type-variable names appearing in annotations:
-///   - Lowercase identifiers are type variables; uppercase identifiers are
-///     concrete (nominal) types and must resolve in the environment.
-///   - The same lowercase name within one annotation maps to a single shared
-///     var, so `fn(x a, y a) a` ties all three positions together.
-///   - Variables it mints are recorded as *rigid* so that `instantiate` will
-///     not replace them with fresh unbound vars while checking the annotated
-///     body — the body must be polymorphic in exactly those names.
-///   - The [`AnnotationContext`] fixed at construction decides whether an
-///     unseen lowercase name mints a fresh var or errors, and whether a
-///     function type may omit its return type.
+/// It owns the policy for type-variable names in annotations. Lowercase
+/// identifiers are type variables and uppercase ones are nominal types that
+/// must resolve in the environment. The same lowercase name within one
+/// annotation maps to one shared var, so `fn(x a, y a) a` ties all three
+/// positions together. Minted vars are recorded as *rigid* so `instantiate`
+/// will not replace them while checking the annotated body.
 #[derive(Debug)]
 pub struct Hydrator {
     created: HashMap<String, (Ty, i32)>,
@@ -80,10 +70,8 @@ pub struct Hydrator {
     type_refs: Vec<TypeRefHit>,
 }
 
-/// Result of [`Hydrator::add_type_variable`]: the (possibly pre-existing)
-/// type-variable `Ty`, its var id, and whether the name was already seeded.
-/// Returning the id here means callers never re-derive it by pattern-matching
-/// on `TypeNode::Var` — the invariant lives entirely inside this module.
+/// Result of [`Hydrator::add_type_variable`]. Returning the id here keeps
+/// callers from re-deriving it by matching on `TypeNode::Var`.
 #[derive(Debug, Clone, Copy)]
 pub struct AddedTypeVar {
     pub ty: Ty,
@@ -101,11 +89,9 @@ impl Hydrator {
         }
     }
 
-    /// Drain the type-name occurrences resolved since the last call. The
-    /// `Compiler::hydrate` wrappers call this after every `type_from_ast` to
-    /// record the references; a `Hydrator` is reused across the params and
-    /// return of one signature, so draining per call keeps occurrences from
-    /// being recorded twice.
+    /// Drain the type-name occurrences resolved since the last call. A
+    /// `Hydrator` is reused across one signature's params and return, so
+    /// draining per call keeps occurrences from being recorded twice.
     pub fn take_type_refs(&mut self) -> Vec<TypeRefHit> {
         std::mem::take(&mut self.type_refs)
     }
@@ -115,10 +101,8 @@ impl Hydrator {
     }
 
     /// Pre-seed a declared type parameter (the `a` in `type Foo(a, b) { .. }`).
-    /// On a repeated name the *existing* var is returned with `duplicate: true`
-    /// and no fresh var is minted, so both textual occurrences of the parameter
-    /// resolve to the same id. Unlike implicit annotation vars these are *not*
-    /// added to `rigid_ids`.
+    /// A repeated name returns the existing var with `duplicate: true`. Unlike
+    /// implicit annotation vars these are *not* added to `rigid_ids`.
     pub fn add_type_variable(&mut self, name: &str, engine: &mut InferEngine) -> AddedTypeVar {
         if let Some(&(ty, id)) = self.created.get(name) {
             return AddedTypeVar {
@@ -162,10 +146,9 @@ impl Hydrator {
                 }
                 let ret = match &ft.return_type {
                     Some(r) => self.type_from_ast(r, env, engine)?,
-                    // An omitted return type means "infer it" — but type
-                    // definitions (constructor fields and alias RHS) have no
-                    // inference context, so a fresh var there would escape
-                    // unconstrained and defeat soundness.
+                    // An omitted return type means "infer it", but a type
+                    // definition has no inference context, so a fresh var
+                    // there would escape unconstrained.
                     None => {
                         if !self.context.requires_fn_return() {
                             engine.fresh_var()
@@ -208,8 +191,7 @@ impl Hydrator {
             arg_tys.push(self.type_from_ast(ta, env, engine)?);
         }
 
-        // Lowercase identifiers are type variables; uppercase identifiers are
-        // concrete types and must be defined in the environment.
+        // Lowercase identifiers are type variables.
         if !is_type_name(name) {
             if !arg_tys.is_empty() {
                 return Err(err(
@@ -234,10 +216,7 @@ impl Hydrator {
                 if arg_tys.len() != arity {
                     return Err(arity_error(span, name, arity, arg_tys.len()));
                 }
-                // Record the resolved occurrence (canonical name + owning
-                // module) so the compiler can target the type's definition in
-                // the reference graph. Recording-only: the produced `Ty` below
-                // is byte-for-byte unchanged.
+                // Recording-only: the produced `Ty` below is unchanged.
                 self.type_refs.push(TypeRefHit {
                     span: name_span,
                     name: ti.name,
@@ -247,11 +226,10 @@ impl Hydrator {
                     TypeBody::Alias { target } => {
                         Ok(engine.substitute_type_vars(target, ti.type_params, &arg_tys))
                     }
-                    // Custom, External, and Unresolved heads all hydrate to a
-                    // nominal application carrying the type's registered id —
-                    // the identity unification and every semantic lookup use.
-                    // The display name is the canonical `ti.name` (under
-                    // `import mod.{T as X}` the local string is the alias `X`).
+                    // Custom, External and Unresolved heads all hydrate to a
+                    // nominal application carrying the registered id, which is
+                    // the identity unification uses. The display name is the
+                    // canonical `ti.name`, not the local import alias.
                     _ => Ok(engine.mk_con_id(ti.id, ti.name, &arg_tys)),
                 }
             }

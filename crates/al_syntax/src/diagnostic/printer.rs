@@ -6,19 +6,17 @@ use super::{Diagnostic, Severity, count_errors};
 use crate::module_path::ModuleKey;
 use crate::term::Palette;
 
-/// A detected editor plus the canonical path to link to. Only constructed
-/// when every precondition holds (color on, editor found, path canonicalized —
-/// which implies the file exists), so holding one is proof the link can be
-/// emitted.
+/// A detected editor plus the canonical path to link to. Only constructed once
+/// color is on, an editor was found and the path canonicalized, so holding one
+/// is proof the link can be emitted.
 struct LinkTarget {
     editor: Editor,
     abs_path: String,
 }
 
-/// The text a diagnostic's span points into, plus the path to print for it:
-/// the entry file, or a resolved imported module. Snippets are only ever
-/// sliced out of a `SourceView` whose identity matches the diagnostic's
-/// `source`, so a span from module A can never index file B's text.
+/// The text a diagnostic's span points into, plus the path to print for it.
+/// A snippet is only ever sliced from a view whose identity matches the
+/// diagnostic's `source`, so a span from module A cannot index file B's text.
 struct SourceView<'a> {
     file_path: &'a str,
     lines: Vec<&'a str>,
@@ -39,18 +37,17 @@ fn get_source_line<'a>(lines: &'a [&'a str], line_number: i32) -> &'a str {
     lines[(line_number - 1) as usize]
 }
 
-/// The canonicalized absolute path of `file_path`, or `None` if resolution
-/// fails. Canonicalization succeeding implies the file exists and the path is
-/// absolute, so a `Some` is the proof [`LinkTarget`] requires.
+/// The canonicalized absolute path of `file_path`. A `Some` implies the file
+/// exists, which is the proof [`LinkTarget`] requires.
 fn canonical_path(file_path: &str) -> Option<String> {
     std::fs::canonicalize(file_path)
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
 }
 
-/// Lazily-detected editor, shared by every link in one render: detection may
-/// fork `ps`, so it runs at most once, and only after some path has actually
-/// canonicalized (the REPL's `<repl>` never does, so it never pays the fork).
+/// Lazily-detected editor, shared by every link in one render. Detection forks
+/// `ps`, so it runs at most once and only after a path has canonicalized: the
+/// REPL's `<repl>` never does, so it never pays the fork.
 struct EditorProbe {
     enabled: bool,
     detected: Option<Option<Editor>>,
@@ -87,9 +84,8 @@ fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palet
     let lines = &view.lines;
     let display_line = d.span.start_line + 1;
     let source_line = get_source_line(lines, display_line);
-    // Span columns count bytes (the scanner bumps the column once per byte),
-    // but printed locations and editor line:col URLs are read as characters —
-    // re-measure the prefix in chars so links land right on non-ASCII lines.
+    // Span columns count bytes, but printed locations and editor line:col URLs
+    // are read as characters, so re-measure the prefix in chars.
     let display_col = source_line
         .get(..d.span.start_column as usize)
         .map(|s| s.chars().count())
@@ -125,8 +121,8 @@ fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palet
         caret_padding.push(if ch == '\t' { '\t' } else { ' ' });
     }
 
-    // Caret count must be in chars, not bytes: `caret_padding` above is one
-    // char per source char, so byte-counting overshoots on multibyte lines.
+    // In chars, not bytes: `caret_padding` above is one char per source char,
+    // so byte-counting overshoots on multibyte lines.
     let caret_len =
         if d.span.end_line == d.span.start_line && d.span.end_column > d.span.start_column {
             source_line
@@ -150,9 +146,8 @@ fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palet
     result
 }
 
-/// Header + location only, for a diagnostic whose source module could not be
-/// resolved to text: pointing a caret into some *other* file's text would be
-/// worse than no snippet at all.
+/// Header and location only, for a diagnostic whose source module resolved to
+/// no text. A caret into some other file's text would be worse than none.
 fn format_diagnostic_header(d: &Diagnostic, file_path: &str, p: &Palette) -> String {
     let color = match d.severity {
         Severity::Error => p.red,
@@ -174,11 +169,10 @@ struct ResolvedSource {
     link: Option<LinkTarget>,
 }
 
-/// Print `diagnostics` to stderr. `source`/`file_path` are the ENTRY file —
-/// what diagnostics with `source: None` render against. A diagnostic stamped
-/// with a `ModuleKey` is rendered against `resolve(&key)`'s path and text
-/// instead; when the resolver has no answer (`None`), only the header and
-/// location are printed, never a snippet sliced from the wrong file.
+/// Print `diagnostics` to stderr. `source`/`file_path` are the ENTRY file, what
+/// diagnostics with `source: None` render against. One stamped with a
+/// `ModuleKey` renders against `resolve(&key)` instead, or header-only when the
+/// resolver has no answer — never a snippet sliced from the wrong file.
 pub fn print_diagnostics(
     diagnostics: &[Diagnostic],
     source: &str,

@@ -29,11 +29,9 @@ fn relative_selective_and_alias() {
 
 #[test]
 fn aliased_type_import_unifies_with_canonical() {
-    // Regression: `import mod.{T as X}` must hydrate an annotation of `X` to the
-    // type's *canonical* nominal name, not the local alias. A value of the type
-    // carries the canonical name, so an alias-named annotation would never unify
-    // with it and a valid program would be wrongly rejected with a spurious
-    // "Type mismatch: expected 'X', got 'T'".
+    // `import mod.{T as X}` must hydrate an annotation of `X` to the type's
+    // canonical nominal name. Values carry the canonical name, so an
+    // alias-named annotation would never unify with one.
     let proj = Project::new("alias_type");
     proj.write("lib.al", "pub type Color {\n\tRed\n\tGreen\n\tBlue\n}\n");
     proj.write(
@@ -79,7 +77,6 @@ fn opaque_type_hides_constructors() {
          pub fn get(i Id) Int { match i { Id(n) -> n } }\n",
     );
 
-    // The type and smart-constructor functions are importable.
     proj.write(
         "ok.al",
         "import ./id.{Id, make, get}\n\
@@ -88,11 +85,9 @@ fn opaque_type_hides_constructors() {
     );
     run_project_outputs(&proj, "run", "ok.al", "42\n");
 
-    // The constructor is not importable by name.
     proj.write("bad_sel.al", "import ./id.{Id}\nx = Id(1)\n");
     project_rejects(&proj, "check", "bad_sel.al", &["private", "opaque"]);
 
-    // The constructor is not reachable via module qualifier.
     proj.write("bad_qual.al", "import ./id\nx = id.Id(1)\n");
     project_rejects(&proj, "check", "bad_qual.al", &["private", "opaque"]);
 }
@@ -139,7 +134,6 @@ fn query_api_cross_module_goto_def_and_symbols() {
     proj.write("main.al", entry);
     let s = checked_with(&proj, entry);
 
-    // `util.quote(..)` in the entry resolves to its declaration in util.al.
     let (l, c) = cursor(entry, "quote", 1, 0);
     let (m, span) = s
         .definition("main", l, c)
@@ -147,7 +141,6 @@ fn query_api_cross_module_goto_def_and_symbols() {
     assert_eq!(m.last().map(String::as_str), Some("util"));
     assert!(span.end_column > span.start_column, "real decl span");
 
-    // documentSymbol over util.al lists both exported functions.
     let util_path = proj.dir.join("util.al");
     let mut names: Vec<String> = s
         .document_symbols(&util_path.to_string_lossy())
@@ -158,7 +151,6 @@ fn query_api_cross_module_goto_def_and_symbols() {
     names.sort();
     assert_eq!(names, vec!["empty".to_string(), "quote".to_string()]);
 
-    // workspace/symbol finds it and rename mirrors the reverse-edge closure.
     assert!(
         s.workspace_symbols("quote")
             .iter()
@@ -183,13 +175,12 @@ fn query_api_alias_and_selective_imports_resolve() {
     proj.write("main.al", entry);
     let s = checked_with(&proj, entry);
 
-    // Aliased qualified use `u.empty()` resolves into util.al.
     let (l, c) = cursor(entry, "empty", 1, 0);
     let (m, _) = s.definition("main", l, c).expect("u.empty resolves");
     assert_eq!(m.last().map(String::as_str), Some("util"));
 
-    // The selective-import binder `q` (use site `q('x')`) resolves to the
-    // same `quote` declaration the qualified path would.
+    // The selective-import binder `q` resolves to the same `quote`
+    // declaration the qualified path would.
     let (lq, cq) = cursor(entry, "q('x')", 1, 0);
     let (mq, sq) = s.definition("main", lq, cq).expect("q resolves to quote");
     assert_eq!(mq.last().map(String::as_str), Some("util"));
@@ -200,7 +191,6 @@ fn query_api_alias_and_selective_imports_resolve() {
         "selective-import use must point at quote's real declaration"
     );
 
-    // The `as u` module alias is a ModuleAlias definition in the entry.
     assert!(
         s.document_symbols("main")
             .iter()
@@ -209,11 +199,8 @@ fn query_api_alias_and_selective_imports_resolve() {
     );
 }
 
-// An imported module's top level may contain *only* declarations. This mirrors
-// `relative_qualified` exactly except the dependency carries a bare top-level
-// side-effecting statement (`println(99)`), so the failure isolates the
-// imported-module rule — the entry module's own top-level `println(lib.ok())`
-// is fine, only the import is rejected.
+// An imported module's top level may contain only declarations. The entry's
+// own top-level `println` is fine; only the import is rejected.
 #[test]
 fn module_top_level_executable_code_is_error() {
     let proj = Project::new("mod_toplevel_exec");
@@ -227,8 +214,7 @@ fn module_top_level_executable_code_is_error() {
     );
 }
 
-// A selective import naming a member the module does not export is rejected by
-// the import-resolution path, naming the module key and the missing member.
+// Rejected by the import-resolution path.
 #[test]
 fn selective_import_unknown_member_is_error() {
     let proj = Project::new("mod_sel_unknown");
@@ -242,9 +228,8 @@ fn selective_import_unknown_member_is_error() {
     );
 }
 
-// A qualified `module.member` access naming an unexported member is rejected by
-// the qualified-lookup path — a distinct compiler site from the selective
-// import above — with the same module-key + member message.
+// Rejected by the qualified-lookup path, a distinct compiler site from the
+// selective import above, with the same message.
 #[test]
 fn qualified_import_unknown_member_is_error() {
     let proj = Project::new("mod_qual_unknown");
@@ -258,10 +243,9 @@ fn qualified_import_unknown_member_is_error() {
     );
 }
 
-/// A lambda's body is walked while the import qualifier is still in scope, but
-/// elaborated after a same-named top-level `let` has entered the value env.
-/// The qualified/field decision belongs to the check walk, which recorded it; an
-/// elaborator that re-probed the live env would decide `util.empty()` is a field
+/// A lambda's body is walked while the import qualifier is in scope but
+/// elaborated after a same-named top-level `let` entered the value env. An
+/// elaborator that re-probed the live env would read `util.empty()` as a field
 /// access, enter an expression the walk never entered, and abort.
 #[test]
 fn lambda_body_keeps_the_walks_qualifier_verdict() {
@@ -288,15 +272,11 @@ fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
     run_project_outputs(&proj, "run", "main.al", "7\n9\n");
 }
 
-// ── Module identity ────────────────────────────────────────────────────────
-//
-// A module IS the file it resolved to. These pin that, because the compiler
-// used to key its module cache on the import *as written*: `./b` from any
-// directory keyed as `"b"`, so the first `b.al` loaded won program-wide.
-// Nothing failed loudly — the wrong module was simply used.
+// A module is the file it resolved to, never the import as written. Keying the
+// module cache on the spelling made the first `b.al` loaded win program-wide,
+// and nothing failed loudly — the wrong module was simply used.
 
 /// `sub/mid.al` imports `./b`, which must be `sub/b.al`, not the root's.
-/// This printed `ROOT ROOT` before the fix.
 #[test]
 fn same_named_modules_in_different_directories_are_distinct() {
     let proj = Project::new("mod_identity");
@@ -344,9 +324,8 @@ fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
     project_rejects(&proj, "check", "main.al", &["file not found"]);
 }
 
-/// A type defined in `sub/b.al` and one in `b.al` are different types, even
-/// though both modules are spelled `./b`. Sharing a cache entry would have
-/// unified them.
+/// A type in `sub/b.al` and one in `b.al` are different types even though both
+/// modules are spelled `./b`. A shared cache entry would unify them.
 #[test]
 fn same_named_modules_do_not_share_types() {
     let proj = Project::new("mod_identity_types");
@@ -370,12 +349,9 @@ fn same_named_modules_do_not_share_types() {
     run_project_outputs(&proj, "run", "main.al", "1\nx\n");
 }
 
-// ── Qualified constructor patterns ─────────────────────────────────────────
-//
-// `match e { io.NotFound(path) -> … }` reaches a constructor through the module
-// it came from, so a program need not import the name to match on it — and two
-// modules exporting a `NotFound` cannot collide. The *expression* form
-// (`io.NotFound(x)`) already worked; only patterns lacked the qualifier.
+// `match e { io.NotFound(path) -> … }` reaches a constructor through its own
+// module, so a program need not import the name to match on it and two modules
+// exporting a `NotFound` cannot collide.
 
 const COLOR_SRC: &str = "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n";
 
@@ -390,8 +366,8 @@ fn a_qualified_constructor_pattern_matches() {
     run_project_outputs(&proj, "run", "main.al", "3\n0\n");
 }
 
-/// The imported name and the qualified spelling denote the *same* constructor,
-/// so they may be mixed, and exhaustiveness counts them together.
+/// The imported name and the qualified spelling denote the same constructor,
+/// so exhaustiveness counts them together.
 #[test]
 fn qualified_and_imported_constructors_are_the_same_constructor() {
     let proj = Project::new("qual_pat_mixed");
@@ -404,7 +380,7 @@ fn qualified_and_imported_constructors_are_the_same_constructor() {
 }
 
 /// Exhaustiveness resolves a constructor against the scrutinee's own variants,
-/// so a qualified arm must count as covering — and a missing one must not.
+/// so a qualified arm counts as covering.
 #[test]
 fn a_qualified_pattern_is_seen_by_exhaustiveness() {
     let proj = Project::new("qual_pat_exh");
@@ -450,8 +426,8 @@ fn a_qualified_pattern_cannot_reach_an_opaque_constructor() {
 }
 
 /// Every failure must produce a diagnostic. A silent `None` leaves the module
-/// error-free, `CleanModule` is minted, and the elaborator aborts on a program
-/// `al check` accepted — which is exactly what an unknown qualifier used to do.
+/// error-free, mints its clean-module proof, and aborts the elaborator on a
+/// program `al check` accepted.
 #[test]
 fn a_bad_qualified_pattern_is_a_diagnostic_not_a_crash() {
     let proj = Project::new("qual_pat_bad");

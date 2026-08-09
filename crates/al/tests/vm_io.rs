@@ -1,6 +1,4 @@
-// Exercises the VM's I/O opcodes (`Op::FileWrite` / `Op::FileRead` and the TCP
-// ops). File and network I/O is always enabled, so these run plain `al run`
-// through `common::run_al`; the TCP echo test spawns the `al` binary directly
+// Exercises the VM's I/O opcodes. Server tests spawn the `al` binary directly
 // because the server must run concurrently with the Rust client driving it.
 
 use std::io::{Read, Write};
@@ -12,7 +10,6 @@ use common::{Project, run_outputs, wait_or_kill};
 
 /// AL source that binds `127.0.0.1:0`, prints the `listening <addr>` line
 /// `spawn_al_server` waits for, then runs `body` with `server` in scope.
-/// `extra_imports` are added to the base `al/net`+`address`+`result` set.
 fn listening_src(extra_imports: &str, body: &str) -> String {
     format!(
         "import al/net
@@ -30,8 +27,8 @@ match net.listen('127.0.0.1', 0) {{
     )
 }
 
-/// `io.write_text` then `io.read_text` round-trips the content: stdout echoes
-/// what was read back, and the bytes are genuinely on disk.
+/// `io.write_text` then `io.read_text` round-trips, and the bytes land on
+/// disk.
 #[test]
 fn file_write_then_read_roundtrips() {
     let proj = Project::new("io_roundtrip");
@@ -56,13 +53,12 @@ match io.write_text(path, 'hello-io') {
         "roundtrip should succeed\nstdout: {}\nstderr: {}",
         out.stdout, out.stderr
     );
-    // The Ok arm ran with the value read back through Op::FileRead.
     assert_eq!(
         out.stdout, "roundtrip: hello-io\n",
         "wrong roundtrip stdout (stderr: {})",
         out.stderr
     );
-    // Op::FileWrite actually persisted the bytes; not just an in-memory echo.
+    // Persisted, not just echoed in memory.
     assert_eq!(
         std::fs::read_to_string(&data).unwrap(),
         "hello-io",
@@ -72,11 +68,7 @@ match io.write_text(path, 'hello-io') {
 
 /// Full TCP lifecycle through the VM: `net.listen` -> `net.local_addr` ->
 /// `net.accept` -> `sock.peer` -> `net.read` -> `net.write` -> `net.close`.
-/// The `al` program is an echo server; a Rust client drives it and asserts the
-/// bytes round-trip and the server reached its `close` arm (printing `served`).
-/// `net.local_addr` is proven by the harness itself: the client connects to
-/// the port the announcement line reported. This is the only test that
-/// exercises the socket opcodes' success paths.
+/// The only test covering the socket opcodes' success paths.
 #[test]
 fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
@@ -104,12 +96,10 @@ fn tcp_echo_server_roundtrip() {
 }"#,
     );
 
-    // The server blocks on accept(); spawn it and drive it from the client.
     let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
     stream.write_all(b"ping-over-tcp").expect("client write");
-    // Server echoes the bytes then closes the socket, so read_to_end sees the
-    // echo followed by EOF.
+    // The server echoes then closes, so read_to_end sees echo then EOF.
     let mut got = Vec::new();
     stream.read_to_end(&mut got).expect("client read");
     assert_eq!(
@@ -117,28 +107,22 @@ fn tcp_echo_server_roundtrip() {
         "echoed bytes must match what was sent"
     );
 
-    // The announcement line was consumed by the harness; what remains starts
-    // at the peer line.
+    // The harness consumed the announcement line; the rest starts at `peer`.
     let stdout = srv.wait_ok(30);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "expected peer/served, got: {stdout:?}");
-    // peer_addr is the Rust client's loopback connection; port is ephemeral.
     assert!(
         lines[0].starts_with("peer 127.0.0.1:"),
         "peer_addr line mismatch: {:?}",
         lines[0]
     );
-    // `served` proves every arm down to net.close returned Ok.
     assert_eq!(
         lines[1], "served",
         "server did not complete the listen/accept/read/write/close chain"
     );
 }
 
-/// The client side of the API, exercised entirely from AL: a spawned process
-/// serves one connection while the main process `net.connect`s to it, writes
-/// in two pieces, and reads the echo back with `read_exact`. The server echoes
-/// with a single vectored `write_parts`. Covers connect (non-blocking
+/// The client side of the API, entirely from AL. Covers connect (non-blocking
 /// completion), read_exact (cross-read accumulation), and write_parts.
 #[test]
 fn tcp_connect_and_vectored_echo() {
@@ -202,9 +186,8 @@ match net.listen('127.0.0.1', 0) {
 }
 
 /// `socket.read_within` against a peer that connects but never sends must hit
-/// its deadline and take the `Err(timeout)` arm rather than blocking forever.
-/// The Rust client stays connected and silent for the whole window, so the only
-/// thing that can wake the parked read is the deadline timer.
+/// its deadline instead of blocking forever. The client stays connected and
+/// silent, so only the deadline timer can wake the parked read.
 #[test]
 fn tcp_read_within_times_out() {
     let proj = Project::new("io_read_within_timeout");
@@ -219,8 +202,8 @@ fn tcp_read_within_times_out() {
 }"#,
     );
 
-    // The client connects (so `accept` returns) but never writes. Holding the
-    // stream open keeps the socket alive-but-silent across the read window.
+    // Holding the stream open keeps the socket alive but silent across the
+    // read window.
     let srv = spawn_al_server(&proj, &src);
     let _stream = srv.connect();
     let stdout = srv.wait_ok(30);
@@ -234,9 +217,8 @@ fn tcp_read_within_times_out() {
     );
 }
 
-/// `socket.read_within` returns `Ok` with the bytes when data arrives before the
-/// deadline: the readable wake fires and the op re-runs to a successful read.
-/// The generous timeout makes the success path independent of scheduler timing.
+/// `socket.read_within` returns `Ok` when data arrives before the deadline.
+/// The generous timeout keeps this independent of scheduler timing.
 #[test]
 fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
@@ -266,9 +248,8 @@ fn tcp_read_within_returns_data() {
     );
 }
 
-/// Writing a *bit-unaligned* binary (`<<1:4>>` is 4 bits) to a file is rejected
-/// inside the write opcode and surfaces as the typed `IoError::UnalignedBinary`
-/// variant (matched directly here) — the file is never created.
+/// Writing a bit-unaligned binary (`<<1:4>>`) to a file surfaces as
+/// `IoError::UnalignedBinary`, and the file is never created.
 #[test]
 fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
@@ -296,9 +277,8 @@ match io.write_file('__PATH__', <<1:4>>) {
     );
 }
 
-/// Reading a missing path surfaces the typed `IoError::NotFound(path)`, matched
-/// directly here — the offending path is carried in the variant, not buried in
-/// a string. (Proves both the typing and the "carry arguments" goal.)
+/// Reading a missing path surfaces `IoError::NotFound(path)`, with the path
+/// carried in the variant rather than buried in a string.
 #[test]
 fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
@@ -323,17 +303,14 @@ match io.read_text('__PATH__') {
     );
 }
 
-/// Connecting to a port with no listener surfaces the typed
-/// `NetError::ConnectionRefused`, matched directly (not a string compare). This
-/// also exercises the non-blocking-connect completion path (`finish_connect`).
+/// Connecting to a port with no listener surfaces `ConnectionRefused` as a
+/// typed variant, and exercises the non-blocking-connect completion path.
 #[test]
 fn connect_refused_is_typed() {
-    // Reserve an ephemeral localhost port and release it, leaving a port with
-    // no listener. Tests that spawn a server must never do this: in the window
-    // between release and the server's re-bind the kernel can hand the port to
-    // a concurrent test, and a client connecting then reaches the wrong
-    // listener. Spawned servers bind port 0 and announce the kernel-assigned
-    // port instead — see `common::net::spawn_al_server`.
+    // Reserve an ephemeral port and release it. Tests that spawn a server must
+    // never do this: between release and re-bind the kernel can hand the port
+    // to a concurrent test. Spawned servers bind port 0 and announce the
+    // kernel-assigned port instead.
     let port = TcpListener::bind("127.0.0.1:0")
         .expect("reserve a free port")
         .local_addr()
@@ -360,12 +337,9 @@ match net.connect('127.0.0.1', __PORT__) {
     );
 }
 
-/// `io.read_file` offloads to the blocking thread pool instead of running on
-/// a scheduler thread: several spawned processes plus main all read the same
-/// file concurrently and every read completes correctly (exercises offload →
-/// worker → completion → resume). Without the pool these reads would run
-/// inline on the scheduler thread, stalling that core for the duration of
-/// the syscall.
+/// `io.read_file` offloads to the blocking thread pool rather than stalling a
+/// scheduler thread for the syscall: several processes read the same file
+/// concurrently, exercising offload → worker → completion → resume.
 #[test]
 fn file_read_offloads_to_blocking_pool() {
     let proj = Project::new("io_pool");
@@ -434,10 +408,8 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Read exactly one HTTP/1.1 response off `stream`, buffering through `buf`.
-/// Accumulates until the CRLFCRLF head terminator, parses `Content-Length`,
-/// then reads that many body bytes. Any bytes past this response (a pipelined
-/// follow-up) are left in `buf` for the next call. Returns the status line, a
-/// lowercased-name header map, and the body bytes.
+/// Bytes past this response (a pipelined follow-up) are left in `buf` for the
+/// next call. Header-map keys are lowercased.
 fn read_one_response(
     stream: &mut TcpStream,
     buf: &mut Vec<u8>,

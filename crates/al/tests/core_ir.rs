@@ -1,8 +1,5 @@
-//! Golden snapshots of the printed Core IR (typed ANF) for a handful of small
-//! programs, so refactors of `lower` / `perceus` / the printer are diffable
-//! rather than silently behaviour-changing. Each test parses + typechecks a
-//! self-contained source string, lowers it to [`al::core_ir::CoreProgram`],
-//! and compares its `Display` output against `tests/golden/core_ir/<name>.core`.
+//! Golden snapshots of the printed Core IR (typed ANF), compared against
+//! `tests/golden/core_ir/<name>.core`.
 //!
 //! Regenerate after an intentional IR change with
 //! `UPDATE_CORE_GOLDEN=1 cargo test -p al --test core_ir`.
@@ -18,15 +15,10 @@ fn golden_dir() -> PathBuf {
 
 /// Parse + typecheck + lower `source` and return the pretty-printed Core.
 ///
-/// Every id the printer emits — `Ty` (`:N`), `StrId` (`sN`, a function name),
-/// `ConstId` (`cN`) — is an index into a pool shared with the prelude, so its
-/// absolute value moves whenever the stdlib mints a different number of them.
-/// A snapshot that recorded those raw indices would go red on any stdlib edit
-/// (renaming a module is enough), and the only way through would be to
-/// regenerate — which is exactly how a real IR regression slips past. So all
-/// three are renumbered by order of first appearance before comparison, and
-/// each referenced constant's `Value` is printed in a `where` block so the
-/// snapshot still shows what the program computes.
+/// Every printed id is an index into a pool shared with the prelude, so its
+/// absolute value moves on any stdlib edit. All are renumbered by order of
+/// first appearance, and each referenced constant's `Value` is printed in a
+/// `where` block so the snapshot still shows what the program computes.
 fn lower(source: &str) -> String {
     let ast = parse(source);
     let r = al::bytecode::compile(&ast, None, Some(&al::STDLIB));
@@ -38,20 +30,16 @@ fn lower(source: &str) -> String {
     let emitted = r.emitted.as_ref().expect("a successful compile emits");
     let core: &al::core_ir::CoreProgram = &emitted.core;
     let raw = format!("{core}");
-    // Renumber consts first: the `where` block needs each original index to
-    // look up its `Value`, and its new name to print under.
+    // Consts first: the `where` block needs both the original index and the
+    // new name.
     let const_map = renumber(&raw, b'c');
-    // A printed `Ty` is a raw index into the inference engine's node arena,
-    // shared with the prelude, so it shifts whenever the stdlib mints a
-    // different number of fresh vars; `:tK` records only what the snapshot
-    // means to assert (which binders share a type, where a distinct one
-    // appears) rather than an interner offset.
+    // `:tK` records only what the snapshot asserts — which binders share a
+    // type — rather than an interner offset.
     let mut out = apply_renumber(&raw, b':', ":t", &renumber(&raw, b':'));
     out = apply_renumber(&out, b'c', "c", &const_map);
     out = apply_renumber(&out, b's', "s", &renumber(&raw, b's'));
-    // Function indices and global slots are absolute program offsets shared
-    // with the whole stdlib, so adding one stdlib function used to shift
-    // every `fn#N`/`@gN` in every golden. Dense-renumber them like the rest.
+    // `fn#N`/`@gN` are absolute program offsets shared with the stdlib, so
+    // dense-renumber them like the rest.
     out = renumber_prefixed(&out, "fn#");
     out = renumber_prefixed(&out, "@g");
     if !const_map.is_empty() {
@@ -70,9 +58,9 @@ fn lower(source: &str) -> String {
     out
 }
 
-/// Renumber every `<prefix><digits>` token in `s` densely by first
-/// appearance, keeping the prefix. For multi-byte sigils (`fn#`, `@g`) the
-/// single-byte `renumber`/`apply_renumber` pair cannot be used.
+/// Renumber every `<prefix><digits>` token in `s` densely by first appearance.
+/// The single-byte `renumber`/`apply_renumber` pair cannot handle multi-byte
+/// sigils like `fn#` and `@g`.
 fn renumber_prefixed(s: &str, prefix: &str) -> String {
     let mut map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     let mut out = String::with_capacity(s.len());
@@ -97,9 +85,8 @@ fn renumber_prefixed(s: &str, prefix: &str) -> String {
     out
 }
 
-/// Map each id printed with sigil `sig` in `s` to a dense index, in order of
-/// first appearance. `sig` is the byte the printer emits before the digits:
-/// `c` for `ConstId`, `s` for `StrId`, `:` for a `Ty`.
+/// Map each id printed with sigil `sig` to a dense index, in order of first
+/// appearance. `sig` is `c` for `ConstId`, `s` for `StrId`, `:` for a `Ty`.
 fn renumber(s: &str, sig: u8) -> std::collections::HashMap<usize, usize> {
     let mut map = std::collections::HashMap::new();
     for (_, orig) in id_spans(s, sig) {
@@ -132,10 +119,8 @@ fn apply_renumber(
 }
 
 /// Byte ranges of the `<sig><digits>` tokens in `s`, paired with the parsed
-/// number. The sigil must begin a fresh token: the `c` of `proc` and the `s` of
-/// `self` are identifier characters, not ids, and a `:` after a letter is a
-/// `ReuseShape`'s `[Enum:2]` rather than a `Ty`. Only an alphanumeric sigil can
-/// be continued by a preceding digit, so `%0:3`'s `:3` is still a `Ty`.
+/// number. The sigil must begin a fresh token: the `c` of `proc` is not an id,
+/// and a `:` after a letter is a `ReuseShape`'s `[Enum:2]` rather than a `Ty`.
 fn id_spans(s: &str, sig: u8) -> Vec<((usize, usize), usize)> {
     let b = s.as_bytes();
     let ident_sigil = sig.is_ascii_alphanumeric();
@@ -167,8 +152,7 @@ fn id_spans(s: &str, sig: u8) -> Vec<((usize, usize), usize)> {
 }
 
 /// Compare `got` against the on-disk golden for `name`, or overwrite it when
-/// `UPDATE_CORE_GOLDEN` is set. On mismatch, print a line-by-line diff so the
-/// intentional-vs-regression call is easy to make from the test log alone.
+/// `UPDATE_CORE_GOLDEN` is set.
 fn assert_core_golden(name: &str, source: &str) {
     let got = lower(source);
     let path = golden_dir().join(format!("{name}.core"));
@@ -202,11 +186,10 @@ macro_rules! core_golden {
     };
 }
 
-// ── Programs ───────────────────────────────────────────────────────────────
-// One per CoreExpr / Atom shape. Kept import-free so the toplevel snapshot
-// stays small and independent of stdlib churn.
+// One golden per CoreExpr / Atom shape. Kept import-free so the toplevel
+// snapshot stays small and independent of stdlib churn.
 
-// Let-spine of PrimOps: nested arithmetic linearised into `%n = op(...)`.
+// Let-spine of PrimOps.
 core_golden!(
     let_primop,
     "x = 1 + 2\n\
@@ -235,7 +218,7 @@ core_golden!(
      step(7)\n"
 );
 
-// Sum type: Ctor construction + Match with Ctor patterns binding fields.
+// Ctor construction plus Match with Ctor patterns binding fields.
 core_golden!(
     match_ctor,
     "type Shape {\n\
@@ -279,11 +262,9 @@ core_golden!(
      p.x + p.y\n"
 );
 
-// Irrefutable ctor destructuring must project by DECLARED field order (labels
-// and `..` resolved), and each heap-typed projection must get its own `drop` —
-// its bind type comes from the ctor's fn-type, not a `fresh_var()` (a type var
-// is never heap-shaped, so Perceus would silently emit no `Drop` and reuse
-// could not propagate down a recursion).
+// Irrefutable ctor destructuring projects by DECLARED field order, and each
+// heap-typed projection gets its own `drop`. A type var is never heap-shaped,
+// so a bind typed from a `fresh_var()` would silently get no `Drop`.
 core_golden!(
     ctor_destructure_binding,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\
@@ -302,7 +283,7 @@ core_golden!(
 );
 
 // Same for tuple destructuring: element types come from the scrutinee's Tuple
-// node, so a heap element is `Drop`ped rather than held to frame end.
+// node.
 core_golden!(
     tuple_destructure_binding,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\
@@ -336,10 +317,9 @@ core_golden!(
      f(True)\n"
 );
 
-// Perceus inserts no drops INSIDE a join body, so `t` below is held to the end
-// of `f`'s frame rather than released after its last use. Sound (the VM clones
-// on push and releases at frame teardown) but it forfeits a `Reuse` token.
-// This snapshot pins the gap: sinking drops into joins should change it.
+// Perceus inserts no drops inside a join body, so `t` is held to the end of
+// `f`'s frame. Sound, but it forfeits a `Reuse` token. This snapshot pins the
+// gap; sinking drops into joins should change it.
 core_golden!(
     join_body_defers_drop,
     "type L {\n\tCons(h Int, t L)\n\tLNil\n}\n\
@@ -362,11 +342,8 @@ core_golden!(
 );
 
 // A match whose scrutinee's type nothing in the source states: it comes from
-// `Some(Boxed(3))` alone. `lower` used to re-instantiate `Some`'s scheme here,
-// so the payload bind `%3` carried an unbound type-var — not heap-shaped, so
-// Perceus emitted no `drop %3` and the `Boxed` was held to frame end, and
-// `b.n` could not even find the field (it aborted lowering outright). The
-// snapshot pins the `drop` and the `AddInt`: both come from `b`'s real type.
+// `Some(Boxed(3))` alone. The snapshot pins the `drop` and the `AddInt`, both
+// of which need `b`'s real type rather than an unbound var.
 core_golden!(
     inferred_scrutinee_drops_heap_payload,
     "type Boxed { Boxed(n Int) }\n\
@@ -382,11 +359,9 @@ core_golden!(
      f()\n"
 );
 
-// A fallible multi-arm binary-literal match — the `http.to_method` shape.
-// Every failure edge (each segment compare, each arm's exhausted pattern)
-// jumps to a shared per-suffix continuation, so each arm body and the final
-// no-match trap are lowered exactly once. Before join points this shape
-// re-lowered every remaining arm at every failure edge, multiplying the IR.
+// A fallible multi-arm binary-literal match. Every failure edge jumps to a
+// shared per-suffix continuation, so each arm body and the no-match trap are
+// lowered exactly once.
 core_golden!(
     binary_match_method,
     "type Method {\n\
@@ -408,9 +383,8 @@ core_golden!(
      to_method(<<'PUT'>>)\n"
 );
 
-// A guarded match: a guard's false edge is a failure edge like any pattern
-// mismatch, so it routes to the next arm's shared continuation instead of
-// re-lowering the trailing arms under the guard's `if`.
+// A guard's false edge is a failure edge like any pattern mismatch, so it
+// routes to the next arm's shared continuation.
 core_golden!(
     guarded_match,
     "fn clamp(n Int, lo Int, hi Int) Int {\n\
@@ -423,8 +397,7 @@ core_golden!(
      clamp(5, 0, 10)\n"
 );
 
-// An or-pattern match: every alternative of `a | b | c` shares the one arm
-// body, and each alternative's failure edge shares the next-arm continuation.
+// Every alternative of `a | b | c` shares one arm body.
 core_golden!(
     or_pattern_match,
     "fn small(n Int) Int {\n\
@@ -437,15 +410,12 @@ core_golden!(
      small(3)\n"
 );
 
-// ── Structural assertions ──────────────────────────────────────────────────
-// The goldens above pin the whole IR, so they also move when the type arena
-// hands out a different number of vars. These assert only the property that
-// actually matters — that a heap-typed projection gets released — so they stay
-// green across unrelated lowering churn and red on the real regression.
+// The goldens above pin the whole IR, so they move when the type arena hands
+// out a different number of vars. These assert only that a heap-typed
+// projection gets released, so they stay green across unrelated churn.
 
 /// The `idx`-th printed `fn` block (0-based, in emission order). Addressed by
-/// position, not by the `fn s<StrId>` in its signature: interner ids shift
-/// whenever the stdlib interns a different number of strings.
+/// position because interner ids shift with the stdlib.
 fn fn_body(core: &str, idx: usize) -> String {
     let fns: Vec<&str> = core
         .split("\n\n")
@@ -469,9 +439,8 @@ fn g(l L) Int {\n\
 \t}\n\
 }\n";
 
-/// A destructured heap field must get its own `drop`. The bind's type comes
-/// from the constructor's fn-type; a `fresh_var()` is never heap-shaped, so
-/// Perceus would silently emit none and reuse could not propagate.
+/// A destructured heap field must get its own `drop`. The bind's type has to
+/// come from the constructor's fn-type: a `fresh_var()` is never heap-shaped.
 #[test]
 fn ctor_destructure_drops_each_heap_field() {
     let core = lower(&format!(
@@ -493,8 +462,8 @@ fn ctor_destructure_drops_each_heap_field() {
     );
 }
 
-/// Same guarantee for tuple destructuring: element types come from the
-/// scrutinee's `Tuple` node, not a fresh var.
+/// Same for tuple destructuring: element types come from the scrutinee's
+/// `Tuple` node, not a fresh var.
 #[test]
 fn tuple_destructure_drops_each_heap_element() {
     let core = lower(&format!(
@@ -542,17 +511,13 @@ fn destructure_binding_matches_match_spelling() {
     );
 }
 
-// ── Fallible matches lower each arm body exactly once ──────────────────────
-// A failure edge (a binary segment mismatch, a false guard, an exhausted
-// or-pattern alternative) jumps to a shared continuation for the remaining
-// arms instead of re-lowering them in place. Each program below marks every
-// arm body with a distinct integer literal no other part of the program (and
-// nothing the renumbering rewrites) can produce, so counting the marker in
-// the printed fn body counts how many times that arm body was lowered.
+// Each program below marks every arm body with a distinct integer literal
+// nothing else in the program can produce, so counting the marker in the
+// printed fn body counts how many times that arm body was lowered.
 
 /// The renumbered `ConstId` whose `where`-block value contains `marker` as a
-/// standalone digit run. An integer literal always lowers to `Atom::Const`,
-/// so the marker never appears in the fn body as digits — only as this `cN`.
+/// standalone digit run. An integer literal always lowers to `Atom::Const`, so
+/// the marker never appears in the fn body as digits.
 fn marker_const(core: &str, marker: usize) -> usize {
     let needle = marker.to_string();
     let standalone = |line: &str| {
@@ -583,8 +548,8 @@ fn marker_const(core: &str, marker: usize) -> usize {
             );
         }
     }
-    // Exactly one pool entry: were a re-lowered arm body to mint a fresh
-    // (undeduplicated) constant, counting only the first id would miss it.
+    // Exactly one pool entry: a re-lowered arm body that minted a fresh
+    // undeduplicated constant would be missed if we took only the first id.
     match found[..] {
         [id] => id,
         [] => panic!("marker {marker} not in the const pool:\n{core}"),
@@ -608,9 +573,8 @@ fn assert_arm_bodies_once(source: &str, markers: &[usize]) {
     }
 }
 
-/// The `to_method` shape: multi-arm binary-literal match with an `else`. Every
-/// segment-compare failure edge must reach the remaining arms through a shared
-/// continuation, not a fresh copy of them.
+/// Every segment-compare failure edge must reach the remaining arms through a
+/// shared continuation, not a fresh copy of them.
 #[test]
 fn binary_match_arm_bodies_lowered_once() {
     assert_arm_bodies_once(
@@ -630,8 +594,7 @@ fn binary_match_arm_bodies_lowered_once() {
 }
 
 /// A false guard falls through to the next arm via the same shared
-/// continuation as a pattern mismatch — the trailing arms are not duplicated
-/// under the guard's `if`.
+/// continuation as a pattern mismatch.
 #[test]
 fn guarded_match_arm_bodies_lowered_once() {
     assert_arm_bodies_once(
@@ -664,12 +627,9 @@ fn or_pattern_arm_bodies_lowered_once() {
     );
 }
 
-/// An always-matching mid-chain alternative (`<<..>>`) supersedes the
-/// alternatives written after it: they are lowered then discarded, and the
-/// discard must retract their `goto` counts. Otherwise a join whose every
-/// edge lived in the discarded subtree — here the arm's own fallthrough,
-/// targeted only by the unreachable `<<2>>` — is still materialized as a
-/// `letc` block nothing jumps to.
+/// An always-matching mid-chain alternative supersedes the ones after it:
+/// those are lowered then discarded, and the discard must retract their `goto`
+/// counts or a join nothing jumps to is still materialized as a `letc`.
 #[test]
 fn discarded_alternative_leaves_no_unreachable_continuation() {
     let core = lower(
@@ -700,15 +660,10 @@ fn discarded_alternative_leaves_no_unreachable_continuation() {
     }
 }
 
-// ── Infallible matches stay on the flat no-continuation path ────────────────
-// The join-point machinery exists to deduplicate *failure* continuations; a
-// match with no failure edge must not pay for it. These shapes lowered to a
-// single flat `Match` before join points existed and must keep doing so —
-// `emit`'s `SwitchTag` fast path pattern-matches that flat shape, so a
-// gratuitous `LetCont` here would also demote an exhaustive enum match to the
-// `MatchEnum` ladder. The bytecode-level twin of this test
-// (`dis::an_infallible_match_keeps_the_flat_lowering`) pins the exact
-// instruction sequences.
+// A match with no failure edge must lower to a single flat `Match`: `emit`'s
+// `SwitchTag` fast path pattern-matches that shape, so a gratuitous `LetCont`
+// would demote an exhaustive enum match to the `MatchEnum` ladder. The
+// bytecode twin is `dis::an_infallible_match_keeps_the_flat_lowering`.
 
 /// No `letc`/`goto` in the printed IR of a fn whose matches cannot fail.
 fn assert_no_continuations(source: &str, fn_idx: usize) {
@@ -723,9 +678,8 @@ fn assert_no_continuations(source: &str, fn_idx: usize) {
     }
 }
 
-/// Exhaustive one-arm-per-variant enum match: every head is tested by the
-/// `Match` itself and every payload bind is irrefutable, so no failure edge
-/// exists and no continuation is minted.
+/// Exhaustive one-arm-per-variant enum match: no failure edge exists, so no
+/// continuation is minted.
 #[test]
 fn exhaustive_enum_match_stays_flat() {
     assert_no_continuations(
@@ -759,8 +713,7 @@ fn single_irrefutable_arm_stays_flat() {
 }
 
 /// A literal ladder with a wildcard: a head miss falls to the next arm of the
-/// same flat `Match` (the ladder's own `JumpIfFalse`), which is not a failure
-/// edge — nothing resumes matching mid-arm — so no continuation is minted.
+/// same flat `Match`, which is not a failure edge — nothing resumes mid-arm.
 #[test]
 fn literal_ladder_stays_flat() {
     assert_no_continuations(
@@ -776,24 +729,12 @@ fn literal_ladder_stays_flat() {
     );
 }
 
-// ── Unlowerable programs are diagnostics, not panics ───────────────────────
-
-/// `lower` used to `panic!` on any form it could not handle, and `al check`
-/// returned before lowering ran — so a program the typechecker accepted but
-/// `lower` rejected passed `al check` and aborted the process at `al run`.
-///
-/// Threading the typechecker's types through the pipeline closed that hole
-/// completely: `lower`, `perceus` and `emit` consume a `TypedProgram` and are
-/// total, and the elaborator that builds one runs only on a module the
-/// typechecker left clean. `Expression::ErrorNode` — the one AST node with no
-/// meaning to elaborate, and the one the check walk used to type as a fresh var
-/// while saying nothing — is now a *checked* error, so no diagnostic telling the
-/// user to report a compiler bug survives anywhere in the compiler.
+/// An unlowerable program must be a diagnostic, never a panic.
 ///
 /// The parser never produces an `ErrorNode` without also producing a parse
-/// error, so the node has to be spliced in by hand to drive the check walk's
-/// arm directly. Both entry points must reject it, with the diagnostic pointing
-/// at the bad form, and neither may panic.
+/// error, so the node is spliced in by hand to drive the check walk's arm
+/// directly. Both entry points must reject it, with the diagnostic pointing at
+/// the bad form, and neither may panic.
 mod unlowerable {
     use al::diagnostic::{DiagnosticCode, Severity};
     use al::{ast, span::Span};
@@ -840,11 +781,8 @@ mod unlowerable {
         assert_rejected(&r, at, "compile");
     }
 
-    /// And the neighbouring statements of a program the checker accepts still
-    /// reach the VM: rejecting the `ErrorNode` is a gate on the module, not a
-    /// mute button on the pipeline. The same block, with the spliced node
-    /// replaced by the expression the parser would have built, compiles and
-    /// runs.
+    /// Rejecting the `ErrorNode` is a gate on the module, not a mute button on
+    /// the pipeline: the same block without it still compiles and runs.
     #[test]
     fn the_same_block_without_the_error_node_compiles_and_runs() {
         let expr = crate::common::parse("1 + 1\n");

@@ -1,37 +1,17 @@
 //! Core → bytecode.
 //!
-//! [`emit`] walks a [`CoreFn`]'s ANF spine and produces a flat
-//! `Vec<Instruction>` plus the frame's local-slot count. Type erasure happens
-//! here and only here: the `Ty` on each bind is discarded, `LocalId`s become
-//! stack slots, and every `Atom` lowers to the opcode sequence the VM's
-//! dispatch loop expects (see `crate::bytecode::Op`).
+//! [`emit`] walks a [`CoreFn`]'s ANF spine into a flat `Vec<Instruction>` plus
+//! the frame's slot count. Type erasure happens here and only here.
 //!
-//! The mapping is direct — Core is already linearised, so there is no
-//! expression stack to manage:
-//!
-//! | Core                              | Bytecode                                  |
-//! |-----------------------------------|-------------------------------------------|
-//! | `Let{rhs=PrimOp{op,args}}`        | `PushLocal args; op; StoreLocal`          |
-//! | `Let{rhs=Ctor{v,fs,reuse}}`       | header consts; `PushLocal fs`;            |
-//! |                                   | `[Reuse r;]` `MakeEnumPayload{a,b,hash}`  |
-//! | `Let{rhs=Call{Known f}}`          | `PushLocal args; CallKnown{b=argc,f}`     |
-//! | `Tail(Call{Self_})`               | `PushLocal args; TailCallSelf argc`       |
-//! | `Match` (all-Ctor, exhaustive)    | `PushLocal s; SwitchTag; jump-table; arms`|
-//! | `Match` (otherwise)               | per-arm `MatchEnum`/`Eq` ladder           |
-//! | `LetCont{id,cont,body}`           | body; cont as a labelled block after it   |
-//! | `Goto(id)`                        | `Jump` to that label (shared by all preds)|
-//!
-//! Jump targets are **function-relative**: every operand of a jump op (and the
+//! Jump targets are **function-relative**: every jump operand (and the
 //! `SwitchTag` table base) indexes the returned `code` vector, so emit never
-//! spells an absolute `program.code` address and needs no `base` argument.
+//! spells an absolute `program.code` address.
 //!
 //! Relocation keys off the *frame*, not the splice. The VM resolves a jump as
 //! `Function.code_start + operand`, so a block needs [`relocate`] exactly when
-//! its owning frame's `code_start` differs from the address the block is
-//! spliced at. A function body needs none: its `code_start` **is** its splice
-//! address, and the VM adds it back. Only the module toplevel does — it runs
-//! in the entry frame, whose `code_start` is 0 while the block starts at
-//! `base`.
+//! its frame's `code_start` differs from where the block is spliced. A
+//! function body never does; the module toplevel always does, since it runs in
+//! the entry frame whose `code_start` is 0 while the block starts at `base`.
 
 use super::{
     Atom, Callee, CodeAddr, CoreBind, CoreExpr, CoreFn, CorePat, Imm, JoinId, LocalId, VariantRef,
@@ -41,10 +21,8 @@ use crate::tivec::TiVec;
 use crate::type_def::TypeId;
 use crate::types::StrId;
 
-/// Services `emit` needs from the enclosing compilation: string-interner
-/// resolution and constant-pool interning. `Compiler` implements this so the
-/// header constants a `Ctor` needs (`type_id | variant_idx`, names, labels,
-/// prehash) are pooled exactly once alongside every other program constant.
+/// String-interner resolution and constant-pool interning, so a `Ctor`'s
+/// header constants are pooled once alongside every other program constant.
 pub trait EmitCtx {
     /// Resolve an engine-interned string id.
     fn resolve_str(&self, id: StrId) -> &str;
@@ -54,14 +32,12 @@ pub trait EmitCtx {
     fn intern_str(&mut self, s: &str) -> i32;
     /// Pool the frozen field-label array for `(tid, variant_idx)`.
     fn intern_labels(&mut self, tid: TypeId, variant_idx: u16) -> i32;
-    /// Total variant count of `tid` when it is a boxed enum eligible for
-    /// `SwitchTag` (resolved `Con`, not `Bool`, ≤ 255 variants). `None`
-    /// forces the `MatchEnum` ladder.
+    /// Variant count of `tid` when it is a boxed enum eligible for
+    /// `SwitchTag`. `None` forces the `MatchEnum` ladder.
     fn switch_variant_count(&self, tid: TypeId) -> Option<u8>;
-    /// `Some(true)` for prelude `Bool.True`, `Some(false)` for `Bool.False`,
-    /// `None` for any other constructor. `Bool` is unboxed at the VM level so
-    /// its constructors emit `PushTrue`/`PushFalse` and its patterns compare
-    /// with `Eq` — never `MakeEnumPayload`/`MatchEnum`.
+    /// `Some(b)` for prelude `Bool.True`/`Bool.False`, `None` otherwise.
+    /// `Bool` is unboxed in the VM, so its constructors emit
+    /// `PushTrue`/`PushFalse` and its patterns compare with `Eq`.
     fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool>;
 }
 
@@ -70,60 +46,46 @@ pub struct EmitOut {
     pub code: Vec<Instruction>,
     /// High-water stack-slot count for the frame — becomes `Function.locals`.
     pub locals: i32,
-    /// The frame-layout facts this emission fixed, for the native backend's
-    /// interpreter parity. See [`FrameLayout`].
+    /// Frame-layout facts this emission fixed. See [`FrameLayout`].
     pub layout: FrameLayout,
 }
 
-/// The frame-layout facts one [`emit`] run fixed for its body, recorded for
-/// the native (Cranelift) backend.
+/// The frame-layout facts one [`emit`] run fixed, for the native (Cranelift)
+/// backend.
 ///
-/// Compiled code must keep the interpreter's frame layout **bit-for-bit**:
-/// locals live in process-stack slots at `frame.base_slot`, registers hold
-/// values only within a function, and at every call site and reduction
-/// checkpoint the `(stack, frames)` pair must be bit-identical to the
-/// interpreter's state at that bytecode ip — that is what makes suspension,
-/// migration, per-function fallback and the interpreter-as-differential-oracle
-/// work unchanged. Both halves of that contract are decided *here*, during
-/// bytecode emission, so they are captured here rather than re-derived (a
-/// second slot allocator or a second ip computation could silently drift):
+/// Compiled code must reproduce the interpreter's frame layout bit for bit:
+/// at every call site and reduction checkpoint the `(stack, frames)` pair must
+/// match what the interpreter would hold at that bytecode ip. That is what
+/// keeps suspension, migration, per-function fallback and the
+/// interpreter-as-oracle working. Both halves are decided during emission, so
+/// they are recorded here rather than re-derived — a second slot allocator or
+/// ip computation would drift:
 ///
-/// - which stack slot each `LocalId` occupies ([`FrameLayout::slot`]) —
-///   including the locals emit elides entirely (const aliases, single-use
-///   operand-stack temps), which own no slot and never touch the frame in
-///   either backend, and the slot sharing across mutually-exclusive branch
-///   arms (`emit_branches`/`LetCont` rewind `next_slot`);
-/// - the bytecode resume ip of every non-tail call site
-///   ([`FrameLayout::call_resume_ips`]) — the value the interpreter's
-///   `enter_frame!` stores into the caller frame's `ip` at that call (the
-///   post-increment ip, i.e. the instruction after the call), and therefore
-///   the exact ip a native caller must store so that a suspended callee
-///   resumes through the interpreter with the caller finishing interpreted.
+/// - which stack slot each `LocalId` occupies, including the locals emit
+///   elides (they own none) and the slots shared across branch arms;
+/// - the resume ip of every non-tail call, i.e. the post-increment ip the
+///   interpreter's `enter_frame!` stores, so a suspended callee can resume
+///   through the interpreter with the caller finishing interpreted.
 ///
-/// Offsets are function-relative like every jump operand ([`emit`]'s
-/// contract), which is also `frame.ip`'s coordinate space — no relocation
-/// applies. The peephole pass (`bytecode::peephole`) rewrites fused windows
-/// in place (`Nop`-filling, "nothing moves") and never fuses across a call,
-/// so these ips stay valid in the final stream.
+/// Offsets are function-relative, like every jump operand, which is also
+/// `frame.ip`'s coordinate space. The peephole pass rewrites fused windows in
+/// place and never fuses across a call, so these ips survive it.
 #[derive(Debug, Clone, Default)]
 pub struct FrameLayout {
-    /// `LocalId → stack slot`, exactly the emitter's own table.
     slots: TiVec<LocalId, Option<i32>>,
-    /// High-water slot count of this body alone (`EmitOut::locals`). The
-    /// final `Function.locals` maxes this with the reserved param count.
+    /// High-water slot count of this body alone. The final `Function.locals`
+    /// maxes this with the reserved param count.
     pub locals: i32,
-    /// Function-relative resume ip per non-tail call instruction
-    /// (`Call`/`CallKnown`/`CallSelf`), in emission order — which is the
-    /// order a straight walk of the same Core IR meets the call atoms
-    /// (calls are never hoisted or reordered; see [`is_hoistable`]).
+    /// Function-relative resume ip per non-tail call, in emission order —
+    /// which is the order a straight walk of the same Core meets the call
+    /// atoms, since calls are never hoisted (see [`is_hoistable`]).
     pub call_resume_ips: Vec<i32>,
 }
 
 impl FrameLayout {
-    /// The stack slot `id` occupies (frame-relative: the value word lives at
-    /// `stack[frame.base_slot + slot]`), or `None` when emit elided the
-    /// local (const alias / operand-stack temp) and it never touches the
-    /// frame.
+    /// The frame-relative slot `id` occupies — the value word lives at
+    /// `stack[frame.base_slot + slot]` — or `None` when emit elided the local
+    /// and it never touches the frame.
     pub fn slot(&self, id: LocalId) -> Option<i32> {
         self.slots.get(id).copied().flatten()
     }

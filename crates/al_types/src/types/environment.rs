@@ -432,10 +432,8 @@ impl TypeEnv {
         self.definitions.insert(name.to_string(), loc);
     }
 
-    /// Insert (or rebind) a type's info under `name`, journaling any overwrite
-    /// of an existing entry so `truncate_to` can restore it. Selective type
-    /// imports re-bind through here on every check. The by-id registry is kept
-    /// in lockstep.
+    /// Insert or rebind a type's info under `name`, journaling any overwrite so
+    /// `truncate_to` can restore it. Keeps the by-id registry in lockstep.
     pub fn store_type_info(&mut self, name: &str, ti: TypeInfo) {
         if let Some(old) = self.type_info.get(name) {
             self.journal
@@ -461,17 +459,13 @@ impl TypeEnv {
         self.definitions.get(name).copied()
     }
 
-    /// Pass 1: register a type's head (name, module, parameters) with an
-    /// `Unresolved` body and allocate its id. Returns the id so the caller can
-    /// populate `PreludeIds` or wire constructor schemes. The body is filled in
-    /// later via `set_type_body` once all heads in the module are visible,
-    /// which is what permits recursive and mutually-recursive type bodies.
+    /// Pass 1: register a type's head with an `Unresolved` body and allocate
+    /// its id. `set_type_body` fills the body once every head in the module is
+    /// visible, which is what permits mutually-recursive type bodies.
     ///
-    /// `name` MUST be the string that `name_id` was interned from
-    /// (`engine.str(name_id) == name`): the by-name and by-id registries are
-    /// kept in lockstep by [`store_type_info`](Self::store_type_info), so a
-    /// mismatch would let by-name and by-id lookups resolve to different
-    /// `TypeInfo`.
+    /// `name` MUST be the string `name_id` was interned from. The by-name and
+    /// by-id registries are kept in lockstep, so a mismatch would let the two
+    /// lookups resolve to different `TypeInfo`.
     pub fn register_type_head(
         &mut self,
         name: &str,
@@ -494,24 +488,20 @@ impl TypeEnv {
         id
     }
 
-    /// Pass 2/4: attach a hydrated body to a previously-registered head,
-    /// addressed by the nominal id [`register_type_head`](Self::register_type_head)
-    /// returned. Resolution goes through the by-id registry — the by-name map
-    /// is shadowable, so mutating through it could attach a body to whatever
-    /// same-named type was analysed most recently. Any by-name entry that
-    /// still refers to this id is mirrored (same journal discipline).
-    /// Panics if the head was never registered, since that indicates a bug in
-    /// the analysis pass ordering rather than a user error: Pass 1 registers a
-    /// head for every type decl before any body is attached here.
+    /// Pass 2/4: attach a hydrated body to a head registered by
+    /// [`register_type_head`](Self::register_type_head), addressed by nominal
+    /// id. Goes through the by-id registry because the by-name map is
+    /// shadowable, so mutating through it could attach the body to whatever
+    /// same-named type was analysed most recently. Panics if the head was never
+    /// registered: that is a pass-ordering bug, not a user error.
     #[allow(clippy::panic)]
     pub fn set_type_body(&mut self, id: TypeId, body: TypeBody) {
         let entry = self
             .type_info_by_id
             .get_mut(&id)
             .unwrap_or_else(|| panic!("set_type_body: type id {id} head not registered"));
-        // Journal the pre-body value: the head may be a pre-watermark entry
-        // (an overwritten one already journaled by `store_type_info`, in which
-        // case this preserves the chain head→body→restore ordering).
+        // The head may itself be a journaled pre-watermark entry; journaling
+        // the pre-body value preserves the head→body→restore ordering.
         let old = *entry;
         entry.body = body;
         self.journal.push(Overwrite::TypeInfoById(id, old));
@@ -527,27 +517,24 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
-    /// Unjournaled escape hatch for `precompile_stdlib`'s teardown (in
-    /// `al_core`): moves the by-name type registry out wholesale so `flatten`
-    /// can snapshot it. Journaling is deliberately skipped — the env is being
-    /// consumed and no `truncate_to` can ever run against it afterwards.
+    /// Unjournaled escape hatch for `precompile_stdlib`'s teardown: moves the
+    /// by-name type registry out so `flatten` can snapshot it. Safe only
+    /// because the env is being consumed and no `truncate_to` can follow.
     pub fn take_type_info(&mut self) -> IndexMap<String, TypeInfo> {
         std::mem::take(&mut self.type_info)
     }
 
-    /// Nominal lookup by the id carried in `TypeNode::Con`. This is the only
-    /// correct way to answer "what are this type's variants/fields" — the
-    /// by-name map can be shadowed by whatever same-named type was analysed
-    /// most recently.
+    /// Nominal lookup by the id carried in `TypeNode::Con`. The only correct
+    /// way to ask for a type's variants or fields: the by-name map can be
+    /// shadowed by whatever same-named type was analysed most recently.
     pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
         self.type_info_by_id.get(&id).copied()
     }
 
     pub fn suggest_name(&self, name: &str) -> Option<String> {
         let mut best: Option<&String> = None;
-        // Length-proportional threshold (rustc's heuristic): a 2-char typo
-        // shouldn't suggest a 3-edits-away name. `best_dist` is the exclusive
-        // upper bound, so `+1` yields "accept dist ≤ max(len,3)/3".
+        // rustc's heuristic: accept distance <= max(len, 3) / 3. `best_dist` is
+        // an exclusive bound, hence the `+ 1`.
         let mut best_dist = std::cmp::max(name.chars().count(), 3) / 3 + 1;
 
         for candidate in self.bindings.keys() {
@@ -563,10 +550,8 @@ impl TypeEnv {
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    // Char-based, not byte-based, so distances are in the same unit as
-    // `suggest_name`'s `chars().count()` threshold (rustc's heuristic is
-    // char-based). Byte-wise DP would count a multi-byte char substitution
-    // as several edits and overshoot the threshold.
+    // Char-based, matching `suggest_name`'s threshold unit. A byte-wise DP
+    // would count one multi-byte substitution as several edits.
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     if a.is_empty() {
@@ -610,9 +595,7 @@ mod tests {
     use super::super::infer::mono;
     use super::*;
 
-    // A root-scope `define` that overwrites an existing root binding is
-    // journaled and undone by `truncate_to` — by-length truncation alone
-    // cannot reach an in-place replace.
+    // By-length truncation alone cannot reach an in-place replace.
     #[test]
     fn truncate_to_restores_overwritten_root_binding() {
         let mut env = new_env();
@@ -630,8 +613,8 @@ mod tests {
         );
     }
 
-    // The same overwrite inside an open scope rolls back through `scope_undo`
-    // and must NOT be double-restored by the journal.
+    // An overwrite inside an open scope rolls back through `scope_undo` and
+    // must NOT be double-restored by the journal.
     #[test]
     fn scoped_overwrite_still_rolls_back_via_scope_undo() {
         let mut env = new_env();

@@ -22,9 +22,6 @@ use crate::types::{
     QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
 };
 
-// Defined in `al_vm` (the VM instantiates them); re-exported here, where
-// flattening produces them.
-pub use al_vm::VariantTemplate;
 
 /// Index into [`StaticStdlib::str_pool`]. Not interchangeable with a `StrId`:
 /// `str_pool` extends `engine.strings` with names interned while flattening.

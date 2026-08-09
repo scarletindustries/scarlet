@@ -1,11 +1,9 @@
-//! Precompile the AL stdlib at `cargo build` time and emit it as a single
-//! generated Rust source file (`$OUT_DIR/stdlib_generated.rs`) consisting
-//! entirely of `const`/`static` arrays. There is no bincode, no serde, no
-//! runtime deserialization — the binary's `.rodata` IS the stdlib.
+//! Precompile the AL stdlib at build time into `$OUT_DIR/stdlib_generated.rs`,
+//! entirely `const`/`static` arrays: no serde, no runtime deserialization —
+//! the binary's `.rodata` is the stdlib.
 //!
-//! Any error in `src/std/**` (including `PreludeBindings::capture` shape
-//! mismatches like a deleted `True` constructor) fails the *cargo build* with
-//! the diagnostic text.
+//! Any error in `src/std/**`, including `PreludeBindings::capture` shape
+//! mismatches, fails the cargo build with the diagnostic text.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -19,9 +17,8 @@ use al_core::types::{
 use al_core::{PrecompileOutput, PreludeBindings, TypeId};
 
 fn main() {
-    // One rerun-if-changed per file: a directory path alone doesn't reliably
-    // pick up edits to existing files, and the generated `stdlib::*` consts
-    // must track the AL source exactly for the Rust-side bindings to be sound.
+    // One rerun-if-changed per file: a directory path alone does not reliably
+    // pick up edits to existing files.
     for entry in walk_std("../al_core/src/std") {
         println!("cargo:rerun-if-changed={}", entry.display());
     }
@@ -47,7 +44,6 @@ fn main() {
     emit_stdlib_templates(&mut src, &pre, &engine);
     emit_pools(&mut src, &pools);
 
-    // The single handle.
     writeln!(
         src,
         "pub static STDLIB: StaticStdlib = StaticStdlib {{\n    \
@@ -65,10 +61,6 @@ fn main() {
     std::fs::write(out_dir.join("stdlib_generated.rs"), &src)
         .unwrap_or_else(|e| panic!("write stdlib_generated.rs failed: {e}"));
 }
-
-// ---------------------------------------------------------------------------
-// Emitters
-// ---------------------------------------------------------------------------
 
 fn walk_std(root: &str) -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from(root)];
@@ -162,16 +154,13 @@ fn screaming_snake(s: &str) -> String {
     out
 }
 
-/// Emit `pub mod stdlib { pub mod <module> { pub static <CTOR>: VariantTemplate
-/// = ... } }` for every constructor of every stdlib type. The const path
-/// (e.g. `stdlib::net::SOCKET_ADDRESS`) is the binding surface — Rust code that
-/// references one fails to compile if the AL definition is renamed or removed.
+/// Emit a `VariantTemplate` static for every constructor of every stdlib type,
+/// nested in `pub mod stdlib`. The const path (`stdlib::net::SOCKET_ADDRESS`)
+/// is the binding surface: Rust referencing one fails to compile if the AL
+/// definition is renamed or removed.
 fn emit_stdlib_templates(out: &mut String, pre: &PrecompileOutput, eng: &InferEngine) {
-    // Collect every (module path segments, rendered static) pair first so we
-    // can emit nested `mod` blocks for paths like `net/socket` in a single
-    // sorted pass. Only modules that contribute at least one constructor get a
-    // `mod` block, but we still open parent mods (e.g. `net`) when only their
-    // children carry constructors.
+    // Collected first, then sorted, so nested `mod` blocks for paths like
+    // `net/socket` come out in one pass.
     let mut entries: Vec<(Vec<&str>, String)> = Vec::new();
     for (key, iface) in &pre.blob.interfaces {
         let segs: Vec<&str> = if key == "al" {
@@ -260,8 +249,7 @@ fn opt_constraint(c: Option<al_core::types::Constraint>) -> String {
     }
 }
 
-/// Emit every `StaticStdlib` field from the flattened pools — `FlatPools` is
-/// the single source for the whole handle, so nothing is wired separately.
+/// Emit every `StaticStdlib` field from the flattened pools.
 fn emit_pools(out: &mut String, p: &FlatPools) {
     emit_prelude(out, &p.prelude);
     emit_strs(out, "RESERVED", &p.reserved);
@@ -440,10 +428,10 @@ fn entitykind(e: EntityKind) -> &'static str {
     }
 }
 
-/// Emit the declaring `DefinitionLocation` so cross-module goto-def /
-/// find-references can land inside a precompiled `al/*` module. The `module`
-/// `ArenaSlice` indexes the static string-slice pool, which `seed_static`
-/// memcpies back as the live arena's prefix, so the location stays valid.
+/// Emit the declaring `DefinitionLocation` so goto-def can land inside a
+/// precompiled `al/*` module. Its `module` slice indexes the static
+/// string-slice pool, which `seed_static` memcpies back as the live arena's
+/// prefix, so the location stays valid.
 fn def_lit(d: Option<DefinitionLocation>) -> String {
     match d {
         None => "None".to_string(),

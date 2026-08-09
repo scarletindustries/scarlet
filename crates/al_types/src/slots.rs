@@ -1,8 +1,6 @@
 //! Slotting positional and labeled constructor arguments into declared-field
-//! order. One algorithm shared by the typechecker's `slot_ctor_args`, the
-//! elaborator ([`super::elaborate`] / [`super::elaborate_pat`]), and the
-//! exhaustiveness checker — so all three agree, item for item, on which
-//! argument lands in which field and which arguments are malformed.
+//! order. The typechecker, the elaborator and the exhaustiveness checker all
+//! call this, so all three agree on which argument lands in which field.
 
 use smallvec::SmallVec;
 
@@ -10,11 +8,9 @@ use smallvec::SmallVec;
 /// common case stays off the heap.
 pub type Slots<T> = SmallVec<[Option<T>; 4]>;
 
-/// A malformed argument list. Each variant hands back the offending item
-/// itself, so a caller that needs its span carries the span in `T` rather than
-/// re-indexing the sequence it passed in. Elaboration and the exhaustiveness
-/// checker discard these (the typechecker has already reported them); the
-/// compiler renders them.
+/// A malformed argument list. Each variant hands back the offending item, so a
+/// caller needing its span carries the span in `T`. Only the compiler renders
+/// these; elaboration and exhaustiveness discard them as already reported.
 pub enum SlotError<L, T> {
     /// Positional item past the last declared field.
     ExtraPositional(T),
@@ -26,16 +22,12 @@ pub enum SlotError<L, T> {
 
 /// Slot positional and labeled items into declared-field order: positionals
 /// fill slots left-to-right, a labeled item lands on its declared index.
-/// Overflowing positionals and unknown labels fill no slot. Generic over the
-/// label representation `L` — the typechecker's `slot_ctor_args` and the
-/// elaborator pass interned `StrId`s, the exhaustiveness checker passes
-/// `&str`s — so all consumers run the one algorithm.
+/// Overflowing positionals and unknown labels fill no slot. Generic over `L`
+/// so callers can pass either interned `StrId`s or `&str`s.
 ///
-/// `fields` is the one declared-fields description: one entry per field, in
-/// declared order, `None` for a field with no label (tuple/array positions).
-/// Both the slot count and the label lookup come from this same slice, so a
-/// label table that disagrees with the arity is unspellable — there is no
-/// second width to drift from.
+/// `fields` is one entry per declared field, `None` for a field with no label.
+/// Both the slot count and the label lookup come from this slice, so there is
+/// no second width for a label table to drift from.
 pub fn slot_labeled<L: PartialEq + Copy, T>(
     fields: &[Option<L>],
     items: impl IntoIterator<Item = (Option<L>, T)>,

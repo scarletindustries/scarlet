@@ -1398,7 +1398,6 @@ mod tests {
         match &segs[3] {
             TypedBinPatSeg::Binary { bits, value } => {
                 assert!(bits.is_none());
-                // A `:binary` segment's value has the binary type.
                 assert_eq!(value.ty(), bin_t);
             }
             other => panic!("{other:?}"),

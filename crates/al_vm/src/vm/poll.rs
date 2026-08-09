@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 use mio::Token;
 use mio::unix::SourceFd;
 
+use crate::abi::AbiSlot;
 use crate::bytecode::Value;
 
 use super::sched::{BlockingOp, BlockingResult, Completion};
@@ -320,7 +321,7 @@ impl VM {
 
         // A retire wake counts as a wake: it queued a runnable process, and
         // blocking below would strand it behind an idle poller.
-        let mut woke = retired_woke | self.drain_completions();
+        let mut woke = retired_woke | self.drain_completions()?;
         woke |= self.wake_due_timers();
 
         let waiting_on_io = !self.io_waiters.is_empty();
@@ -376,7 +377,7 @@ impl VM {
 
     /// Construct a blocking-pool result in the current process's heap. A
     /// completion carries only `Send` raw data, never a `Value`.
-    fn completion_result(&mut self, result: BlockingResult) -> Value {
+    fn completion_result(&mut self, result: BlockingResult) -> VmResult<Value> {
         match result {
             BlockingResult::ReadFile { path, result } => match result {
                 Ok(bytes) => {
@@ -384,27 +385,27 @@ impl VM {
                     self.make_ok(bin)
                 }
                 Err(e) => {
-                    let err = self.io_error_value(&e, &path);
+                    let err = self.io_error_value(&e, &path)?;
                     self.make_err(err)
                 }
             },
             BlockingResult::WriteFile { path, result } => match result {
                 Ok(()) => {
-                    let nil = self.make_nil();
+                    let nil = self.make_nil()?;
                     self.make_ok(nil)
                 }
                 Err(e) => {
-                    let err = self.io_error_value(&e, &path);
+                    let err = self.io_error_value(&e, &path)?;
                     self.make_err(err)
                 }
             },
             BlockingResult::ResolveDns { result } => match result {
                 Ok(addr) => {
-                    let ip = self.templates.ip_address(&mut self.heap, addr);
+                    let ip = self.templates.ip_address(&mut self.heap, addr)?;
                     self.make_ok(ip)
                 }
                 Err(e) => {
-                    let err = self.net_error_value(&e);
+                    let err = self.net_error_value(&e)?;
                     self.make_err(err)
                 }
             },
@@ -466,7 +467,7 @@ impl VM {
                         fd,
                         action: WakeAction::CompleteConnect,
                         ..
-                    } => self.wake_with(p, |vm| vm.finish_connect(fd)),
+                    } => self.wake_with(p, |vm| vm.finish_connect(fd))?,
                     Wait::Io {
                         action: WakeAction::Rerun,
                         ..
@@ -484,9 +485,9 @@ impl VM {
 
     /// Complete a pending non-blocking connect whose socket became writable:
     /// either adopt the connection or report the error it ended with.
-    fn finish_connect(&mut self, id: i32) -> Value {
+    fn finish_connect(&mut self, id: i32) -> VmResult<Value> {
         let Some(socket) = self.pending_connects.remove(&id) else {
-            let aborted = self.stdlib_enum(self.runtime.stdlib.net_error.connection_aborted);
+            let aborted = self.abi_nullary(AbiSlot::NetEconnaborted)?;
             return self.make_err(aborted);
         };
         self.poller_deregister(socket.as_raw_fd());
@@ -498,13 +499,13 @@ impl VM {
                 match stream.peer_addr() {
                     Ok(peer) => self.adopt_connection(stream, peer),
                     Err(e) => {
-                        let err = self.net_error_value(&e);
+                        let err = self.net_error_value(&e)?;
                         self.make_err(err)
                     }
                 }
             }
             Ok(Some(e)) | Err(e) => {
-                let err = self.net_error_value(&e);
+                let err = self.net_error_value(&e)?;
                 self.make_err(err)
             }
         }

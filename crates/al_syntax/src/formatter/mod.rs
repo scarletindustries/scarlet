@@ -27,28 +27,22 @@ pub enum FormatResult {
     ParseFailed {
         errors: Vec<Diagnostic>,
     },
-    /// A formatter bug: laying out the program dropped a comment that was
-    /// present in the input. No output is produced — callers must leave the
-    /// source untouched. `comment` is (one of) the lost comment(s), for the
-    /// bug report.
+    /// A formatter bug: layout dropped an input comment. No output; callers
+    /// must leave the source untouched. `comment` is one of the lost ones.
     CommentsLost {
         comment: String,
     },
-    /// A formatter bug: the produced output does not re-parse cleanly back
-    /// into a program with the same number of top-level nodes. No output is
-    /// produced — callers must leave the source untouched. `detail` describes
-    /// the failure (the first re-parse diagnostic, or the node-count
-    /// mismatch), for the bug report.
+    /// A formatter bug: the output does not re-parse into a program with the
+    /// same number of top-level nodes. No output; callers must leave the source
+    /// untouched.
     OutputInvalid {
         detail: String,
     },
 }
 
-/// Every comment among the tokens' leading trivia, keyed by trimmed text with
-/// its occurrence count. Texts are trimmed the same way
-/// `trivia_doc`/`comments_before` trim them before emission. The comment-loss
-/// postcondition compares the input census against the output census, so both
-/// sides must count with identical keying — they share this one function.
+/// Every comment in the tokens' leading trivia, keyed by trimmed text with its
+/// count. The comment-loss check compares an input census to an output census,
+/// so both must key identically: they share this one function.
 fn comment_census(tokens: &[Token]) -> HashMap<String, usize> {
     let mut census: HashMap<String, usize> = HashMap::new();
     for tok in tokens {
@@ -65,9 +59,8 @@ pub fn format(input: &str) -> FormatResult {
     let mut s = scanner::new_scanner(input.to_string());
     let (scanned_tokens, scanner_diagnostics) = s.scan_all();
 
-    // Every comment in the input, so the layout can be checked afterwards: a
-    // comment the formatter fails to re-emit must make `format` a no-op,
-    // never silent data loss.
+    // Census the input so a comment the formatter fails to re-emit makes
+    // `format` a no-op instead of silent data loss.
     let expected_comments = comment_census(&scanned_tokens);
 
     let mut trivia_map: HashMap<Pos, Vec<Trivia>> = HashMap::new();
@@ -80,10 +73,9 @@ pub fn format(input: &str) -> FormatResult {
         }
     }
 
-    // A spread's `..` token precedes the spread expression's span, so comments
-    // above a `..x` call argument attach to the `..` token, not the token the
-    // AST span starts at. Map each token's start position back to the start of
-    // an immediately preceding `..`, so `call_arg` can query that trivia.
+    // A spread's `..` token precedes the spread expression's span, so a comment
+    // above `..x` attaches to the `..`, not to where the AST span starts. Map
+    // each token back to a preceding `..` so `call_arg` can find that trivia.
     let mut dotdot_before: HashMap<Pos, Pos> = HashMap::new();
     for pair in scanned_tokens.windows(2) {
         if pair[0].kind == Kind::PuncDotdot {
@@ -115,14 +107,9 @@ pub fn format(input: &str) -> FormatResult {
     }
     output.push('\n');
 
-    // Postcondition: every input comment made it into the output. Comments
-    // are emitted verbatim (modulo trailing-whitespace trim), so re-scanning
-    // the output must find each comment text as trivia at least as often as
-    // it was scanned from the input. Comparing trivia to trivia — never raw
-    // substrings — means a string literal that looks like a comment, or a
-    // longer comment sharing a prefix, cannot mask a real loss. A miss means
-    // some formatter path failed to query trivia — refuse to produce output
-    // so the bug is a no-op instead of deleting the user's comment in place.
+    // Postcondition: every input comment made it into the output. Comparing
+    // trivia to trivia, never raw substrings, so a string literal that looks
+    // like a comment cannot mask a real loss.
     let mut rescan = scanner::new_scanner(output.clone());
     let (rescanned_tokens, rescan_diagnostics) = rescan.scan_all();
 
@@ -137,11 +124,9 @@ pub fn format(input: &str) -> FormatResult {
         }
     }
 
-    // Postcondition: the output itself scans and parses cleanly, into the
-    // same number of top-level nodes as the input. The formatter has shipped
-    // bugs of exactly this shape — `- -x` collapsing to the rejected `--`
-    // token — so an output the parser rejects must refuse to emit, never
-    // overwrite the user's valid source with broken code in place.
+    // Postcondition: the output scans and parses into the same number of
+    // top-level nodes. `- -x` collapsing to the rejected `--` token was a real
+    // bug of this shape, and it must never overwrite valid source in place.
     let rp = parser::new_parser_from_tokens(rescanned_tokens, rescan_diagnostics);
     let reparsed = rp.parse_program();
     if let Some(d) = reparsed
@@ -169,9 +154,8 @@ pub fn format(input: &str) -> FormatResult {
     FormatResult::Formatted { output }
 }
 
-/// A scanner line/column position, keying trivia by the position of the token
-/// it attaches to. A dedicated type — not a bare `(i32, i32)` tuple — so that
-/// transposing line and column is a compile error rather than a silent
+/// A scanner line/column position, keying trivia by the token it attaches to.
+/// A named type so transposing line and column is a compile error, not a silent
 /// lookup miss.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Pos {
@@ -187,10 +171,8 @@ impl Pos {
         }
     }
 
-    /// Start position of the closing `}` token ending `span`. The trivia map
-    /// is keyed by a token's *start* position, so `span` must end in a
-    /// one-column `}` token: `end_column - 1` is then exactly the brace's
-    /// start column.
+    /// Start position of the closing `}` ending `span`. Assumes `span` ends in
+    /// a one-column `}` token, so `end_column - 1` is the brace's start.
     fn closing_brace_of(span: &Span) -> Pos {
         Pos {
             line: span.end_line,
@@ -207,25 +189,21 @@ struct Formatter {
 }
 
 impl Formatter {
-    // ------------------------------------------------------------------ trivia
-
     fn trivia_at(&self, s: Span) -> Option<&[Trivia]> {
         self.trivia_map
             .get(&Pos::start_of(&s))
             .map(|v| v.as_slice())
     }
 
-    /// Trivia attached to the closing `}` of `s` — the comments sitting after
-    /// a block's last node.
+    /// Trivia on the closing `}` of `s`: comments after a block's last node.
     fn closing_brace_trivia(&self, s: Span) -> Option<&[Trivia]> {
         self.trivia_map
             .get(&Pos::closing_brace_of(&s))
             .map(|v| v.as_slice())
     }
 
-    /// Render the leading trivia for a node into a doc that ends ready for the
-    /// node text (i.e. trailing hardline if there were comments). The number of
-    /// blank lines preserved is capped at `max_blanks`.
+    /// Leading trivia for a node, ending ready for the node text. Preserved
+    /// blank lines are capped at `max_blanks`.
     fn leading_trivia(&self, s: Span, first: bool, max_blanks: usize) -> Doc {
         let Some(trivia) = self.trivia_at(s) else {
             return if first { nil() } else { hardline() };
@@ -279,14 +257,10 @@ impl Formatter {
         doc::concat(parts)
     }
 
-    /// Comments attached to the token starting `s`, each followed by a
-    /// hardline so it sits on its own line directly above the node. Nil when
-    /// the token carries no comment, so flat layouts stay flat. Unlike
-    /// `leading_trivia` this never emits a separating newline of its own —
-    /// the caller's layout provides the separation — and blank lines between
-    /// comments are dropped rather than preserved. For nodes inside delimited
-    /// lists (call arguments, array/tuple elements, `<<>>` segments) and the
-    /// tokens of an `if`/`else` chain.
+    /// Comments on the token starting `s`, each on its own line above the
+    /// node, or nil so flat layouts stay flat. Unlike `leading_trivia` this
+    /// emits no separating newline of its own and drops blank lines between
+    /// comments. For nodes inside delimited lists and `if`/`else` chains.
     fn comments_before(&self, s: Span) -> Doc {
         self.comments_before_at(Pos::start_of(&s))
     }
@@ -310,8 +284,6 @@ impl Formatter {
             .is_some_and(|tr| tr.iter().any(|t| t.comment_text().is_some()))
     }
 
-    // ------------------------------------------------------------------ program
-
     fn program(&self, block: &ast::BlockExpression, eof_trivia: &[Trivia]) -> Doc {
         d![
             self.nodes_with_trivia(&block.body, 2),
@@ -326,8 +298,7 @@ impl Formatter {
         }
     }
 
-    /// Emit each node preceded by its leading trivia, capping preserved blank
-    /// lines at `max_blanks`.
+    /// Emit each node preceded by its leading trivia.
     fn nodes_with_trivia(&self, nodes: &[ast::Node], max_blanks: usize) -> Doc {
         let mut parts = Vec::new();
         for (i, n) in nodes.iter().enumerate() {
@@ -336,8 +307,6 @@ impl Formatter {
         }
         doc::concat(parts)
     }
-
-    // -------------------------------------------------------------- statements
 
     fn statement(&self, stmt: &ast::Statement) -> Doc {
         match stmt {
@@ -443,12 +412,9 @@ impl Formatter {
         d![attrs, prefix, body]
     }
 
-    /// A parameter list the author broke after `(` stays broken.
-    ///
-    /// Width alone is the wrong signal here: a four-parameter signature can sit
-    /// at 96 columns and still read worse than one-per-line. Prettier applies
-    /// the same rule to object literals — the newline is the author's, and
-    /// reflowing it discards information the formatter cannot recover.
+    /// A parameter list the author broke after `(` stays broken. Width alone
+    /// is the wrong signal: a signature can fit and still read worse than
+    /// one-per-line, and reflowing discards the author's choice.
     fn params_broken_by_author(&self, header_line: i32, params: &[ast::FunctionParameter]) -> bool {
         params
             .first()
@@ -506,9 +472,8 @@ impl Formatter {
         ]
     }
 
-    /// A function declaration body is always a hard multi-line block — a named
-    /// `fn` never collapses onto its signature line. (Lambdas keep the braceless
-    /// single-expression form via `lambda_body`.)
+    /// A named `fn` body is always a hard multi-line block, never collapsed
+    /// onto the signature line. Lambdas go through `lambda_body` instead.
     fn fn_body(&self, body: &ast::Expression) -> Doc {
         if let ast::Expression::BlockExpression(b) = body {
             let trail = self.trailing_comments(b.span);
@@ -556,8 +521,8 @@ impl Formatter {
             ast::TypeBody::External => head,
             ast::TypeBody::Alias(t) => d![head, text(" = "), self.type_(t)],
             ast::TypeBody::Variants { ctors, .. } => {
-                // Shorthand: a single constructor named after the type with at
-                // least one field emits the field list directly inside `{}`.
+                // Shorthand: one constructor named after the type, with at
+                // least one field, emits the fields directly inside `{}`.
                 if ctors.len() == 1
                     && ctors[0].identifier.name == s.identifier.name
                     && !ctors[0].fields.is_empty()
@@ -565,9 +530,9 @@ impl Formatter {
                     let c = &ctors[0];
                     let mut parts = Vec::new();
                     for (i, f) in c.fields.iter().enumerate() {
-                        // `leading_trivia` emits the separating hardline *and*
-                        // any comment above the field. Emitting the hardline by
-                        // hand instead silently deleted every such comment.
+                        // `leading_trivia` emits the separating hardline and
+                        // any comment above the field. A hand-written hardline
+                        // here deletes the comment.
                         parts.push(self.leading_trivia(f.span, i == 0, 1));
                         parts.push(d![
                             text(f.label.name.clone()),
@@ -596,11 +561,9 @@ impl Formatter {
             .iter()
             .map(|f| d![text(f.label.name.clone()), text(" "), self.type_(&f.typ)])
             .collect();
-        // Four or more fields always go one per line. Width alone is the wrong
-        // signal: `Done(method Binary, target Binary, version Version, headers
-        // Array(Header), consumed Int)` is 92 columns — legal under MAX_WIDTH,
-        // and still unreadable. A broken list needs no commas; the newline
-        // separates, and the parser accepts either.
+        // Four or more fields always go one per line: a wide constructor can
+        // fit under MAX_WIDTH and still be unreadable. A broken list needs no
+        // commas, and the parser accepts either form.
         let list = if fields.len() >= FIELDS_PER_LINE {
             hard_list_bare("(", fields, ")")
         } else {
@@ -608,8 +571,6 @@ impl Formatter {
         };
         d![text(c.identifier.name.clone()), list]
     }
-
-    // ----------------------------------------------------------------- expressions
 
     fn expr(&self, e: &ast::Expression) -> Doc {
         use ast::Expression as E;
@@ -631,15 +592,9 @@ impl Formatter {
                         ast::InterpPart::Literal(sl) => {
                             parts.push(text(escape_string(&sl.value, q)))
                         }
-                        // The sub-expression is a real Doc inside the enclosing
-                        // layout: its hard breaks carry the current indent and
-                        // width probes see its real flat width. Splicing a
-                        // pre-rendered string here instead emitted hard-breaking
-                        // sub-expressions (match, multi-statement lambda) at
-                        // indent 0 mid-string. Newlines inside `${…}` are
-                        // ordinary expression tokens, so they never change the
-                        // string's runtime value — only the literal parts do,
-                        // and those are single-line escaped text.
+                        // A real Doc, not a pre-rendered string, so hard breaks
+                        // carry the enclosing indent. Newlines inside `${…}` are
+                        // ordinary tokens and never change the string's value.
                         ast::InterpPart::Expr(e) => {
                             parts.push(text("${"));
                             parts.push(group(self.expr(e)));
@@ -659,10 +614,9 @@ impl Formatter {
                 self.expr(&b.right),
             ]),
             E::UnaryExpression(u) => {
-                // `- -x` must not collapse into `--x`: the scanner greedily relexes
-                // the `--` as the rejected decrement token, so a valid program would
-                // no longer parse after formatting. Keep the operators apart with a
-                // space whenever the operand's own leading glyph is `-`.
+                // `- -x` must not collapse into `--x`: the scanner relexes
+                // `--` as the rejected decrement token, so the formatted
+                // program would no longer parse.
                 let gap = if u.op == ast::UnaryOp::Neg && starts_with_minus(&u.expression) {
                     text(" ")
                 } else {
@@ -688,9 +642,8 @@ impl Formatter {
             E::FunctionExpression(f) => self.fn_expr(f),
             E::FunctionCallExpression(c) => {
                 let args: Vec<Doc> = c.arguments.iter().map(|a| self.call_arg(a)).collect();
-                // A block-shaped final argument hugs the call's parentheses
-                // (`f(a, fn() { … })`) instead of forcing one argument per
-                // line.
+                // A block-shaped final argument hugs the parentheses,
+                // `f(a, fn() { … })`, instead of one argument per line.
                 let parens = if c.arguments.last().is_some_and(arg_can_hug) {
                     delimited_hug("(", args, ")")
                 } else {
@@ -745,22 +698,17 @@ impl Formatter {
                 ]
             }
             E::RangeExpression(r) => d![self.expr(&r.start), text(".."), self.expr(&r.end)],
-            // Every ErrorNode construction site in the parser also emits an
-            // Error diagnostic, and `format()` returns `ParseFailed` before
-            // building any Doc when errors exist. Reaching here means a parser
-            // path built an ErrorNode without recording the error — surface
-            // that bug instead of silently writing `/* error: … */` into the
-            // formatted output.
+            // `format()` returns `ParseFailed` before building any Doc when
+            // there are errors, so reaching here means a parser path built an
+            // ErrorNode without recording one.
             #[allow(clippy::unreachable)]
             E::ErrorNode(_) => unreachable!("ErrorNode reached formatter; parser emitted no Error"),
         }
     }
 
     fn call_arg(&self, a: &ast::CallArg) -> Doc {
-        // `CallArg::Spread`'s span starts at the expression, after the `..`
-        // token — but a comment above the argument attaches to the `..`
-        // token's trivia. Query the `..` position too for spreads (keeping
-        // the expression position for a comment between `..` and operand).
+        // A spread's span starts after the `..`, but a comment above the
+        // argument attaches to the `..` token. Query both positions.
         let comments = match a {
             ast::CallArg::Spread(e) => {
                 let start = Pos::start_of(&e.span());
@@ -782,10 +730,9 @@ impl Formatter {
         d![comments, arg]
     }
 
-    /// Render the `:spec` suffix of a `<<>>` segment, inverting
-    /// `parse_bin_size_spec`. Int-kind with a literal width emits the bare
-    /// `:N` shorthand; a dynamic Int width uses `:size(..)`. A string-literal
-    /// segment's Utf8 kind is the parser default, so its `:utf8` is omitted.
+    /// The `:spec` suffix of a `<<>>` segment, inverting `parse_bin_size_spec`.
+    /// A string-literal segment's Utf8 kind is the parser default, so its
+    /// `:utf8` is omitted.
     fn bin_size_spec(&self, spec: &ast::BinSpec, value_is_string: bool) -> Doc {
         match spec {
             ast::BinSpec::Int { bits: None } => nil(),
@@ -837,13 +784,10 @@ impl Formatter {
     }
 
     fn if_chain(&self, e: &ast::Expression) -> Doc {
-        // Unroll an if/else-if/.../else chain into a flat list of clauses so
-        // they share one group and break together. If any branch is a
-        // multi-statement block, force every branch body to hard-break so the
-        // chain reads symmetrically.
+        // Unroll an if/else-if/else chain into a flat clause list so they share
+        // one group and break together.
         struct Clause<'a> {
-            /// Span of the clause's `if` token, where a comment between
-            /// `else` and `if` attaches.
+            /// Where a comment between `else` and `if` attaches.
             if_span: Span,
             cond: &'a ast::Expression,
             body: &'a ast::Expression,
@@ -863,15 +807,13 @@ impl Formatter {
                 other => break other,
             }
         };
-        // An if/else stays on one line only when it is a single, comment-free
-        // if/else (no `else if` chain) whose every branch is a bare atom — i.e.
-        // a ternary. Anything heavier (a chain, a non-trivial branch, a
-        // comment) breaks every clause onto its own lines so the whole thing
-        // reads symmetrically, the way `match` always does.
+        // Only a ternary-shaped if/else stays on one line: no chain, no
+        // comments, every branch a bare atom. Anything heavier breaks every
+        // clause, so the whole reads symmetrically like `match`.
         let is_chain = clauses.len() > 1;
         let cond_comment = clauses.iter().any(|c| self.has_comment_at(c.cond.span()));
-        // A comment between a condition (or `else`) and its branch's `{`
-        // attaches to the `{` token — a branch carrying one cannot stay flat.
+        // A comment before a branch's `{` attaches to the brace token, and
+        // such a branch cannot stay flat.
         let brace_comment = clauses.iter().any(|c| self.has_comment_at(c.body.span()))
             || self.has_comment_at(else_body.span());
         let trivial = !is_chain
@@ -889,9 +831,7 @@ impl Formatter {
         let mut docs: Vec<Doc> = Vec::new();
         for (i, clause) in clauses.iter().enumerate() {
             // A comment between `else` and `if` attaches to the nested `if`
-            // token, which starts that IfExpression's span. The chain head's
-            // own leading trivia (i == 0) is emitted by the enclosing
-            // statement list, never here.
+            // token. The chain head's own trivia comes from the statement list.
             let kw = if i == 0 {
                 text("if ")
             } else {
@@ -922,9 +862,8 @@ impl Formatter {
         }
     }
 
-    /// A branch is trivial when it is a single, comment-free expression
-    /// statement whose expression is a bare atom (identifier or literal). These
-    /// are the only branches allowed to keep an `if` on one line.
+    /// A branch is trivial when it is one comment-free bare atom. Only these
+    /// may keep an `if` on one line.
     fn is_trivial_branch(&self, b: &ast::Expression) -> bool {
         let ast::Expression::BlockExpression(blk) = b else {
             return false;
@@ -973,13 +912,9 @@ impl Formatter {
                 self.pattern(&arm.pattern)
             };
             let body = self.expr(&arm.body);
-            // A body that ends the line itself (a block, a match, a hugging
-            // call) hugs the arrow: `Pattern -> match x {`. Anything else gets
-            // a break point after the arrow, so an overflowing arm wraps there
-            // — never inside the pattern, which must stay intact:
-            //
-            //   Pattern(a, b) if guard ->
-            //       wide_body(...)
+            // A body that ends the line itself hugs the arrow. Anything else
+            // gets a break point after the arrow, so an overflowing arm wraps
+            // there rather than inside the pattern.
             let tail = if doc::ends_line(&body) {
                 d![text(" -> "), body]
             } else {
@@ -995,8 +930,6 @@ impl Formatter {
             hard_braces(d![doc::concat(arms), trail]),
         ]
     }
-
-    // ------------------------------------------------------------------ patterns
 
     fn pattern(&self, p: &ast::Pattern) -> Doc {
         use ast::Pattern as P;
@@ -1075,8 +1008,8 @@ impl Formatter {
                     .collect();
                 if *rest {
                     items.push(text(".."));
-                    // No trailing comma: the parser rejects `..,` (rest must be
-                    // the last arg), so a wrapped pattern must end `..\n)`.
+                    // No trailing comma: the parser rejects `..,`, so a wrapped
+                    // pattern must end `..\n)`.
                     return d![text(head), delimited_no_trailing("(", items, ")")];
                 }
                 d![text(head), delimited("(", items, ")")]
@@ -1097,8 +1030,6 @@ impl Formatter {
             }
         }
     }
-
-    // ------------------------------------------------------------------ types
 
     fn type_(&self, t: &ast::TypeIdentifier) -> Doc {
         match &t.kind {
@@ -1161,11 +1092,9 @@ fn escape_string(s: &str, quote: char) -> String {
     result
 }
 
-/// Whether a call argument in final position may hug the call's parentheses.
-/// Only block-shaped expressions hug — ones that read `head { … }` so the
-/// call's closing paren can follow their closing brace. Anything else (calls,
-/// arrays, binary expressions, …) keeps the standard one-argument-per-line
-/// fallback even when it spans multiple lines.
+/// Whether a final call argument may hug the call's parentheses. Only
+/// block-shaped expressions do, so the closing paren can follow their closing
+/// brace. Everything else keeps the one-argument-per-line fallback.
 fn arg_can_hug(a: &ast::CallArg) -> bool {
     let e = match a {
         ast::CallArg::Positional(e) => e,
@@ -1181,10 +1110,8 @@ fn arg_can_hug(a: &ast::CallArg) -> bool {
     )
 }
 
-/// Whether the formatted form of `e` begins with a `-` glyph. The check walks
-/// the leftmost spine of the expression — a prefix `-` is rendered before its
-/// operand, a binary/call/index/range/property/or expression before its left
-/// child — so it mirrors which glyph the formatter actually emits first.
+/// Whether the formatted form of `e` begins with a `-` glyph. Walks the
+/// leftmost spine, mirroring which glyph the formatter emits first.
 fn starts_with_minus(e: &ast::Expression) -> bool {
     use ast::Expression as E;
     match e {
@@ -1248,7 +1175,7 @@ mod tests {
                 let src = std::fs::read_to_string(&path).unwrap();
                 let once = match format(&src) {
                     FormatResult::Formatted { output } => output,
-                    // Source itself does not parse — outside the formatter's remit.
+                    // Unparseable source is outside the formatter's remit.
                     FormatResult::ParseFailed { .. } => continue,
                     FormatResult::CommentsLost { comment } => {
                         panic!("formatting {name} lost the comment `{comment}`")
@@ -1381,10 +1308,8 @@ mod tests {
 
     #[test]
     fn or_handler_overflow_breaks_subject_args() {
-        // `subject(...) or e -> handler(...)` wider than the line: the subject
-        // call's arguments break and the handler call stays intact — not the
-        // other way around (breaking the handler orphans its arguments at the
-        // far right of the line).
+        // When `subject(...) or e -> handler(...)` overflows, the subject's
+        // arguments break and the handler stays intact, not the reverse.
         let out = fmt(
             "http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) or e -> println('serve failed: ${e}')\n",
         );
@@ -1396,8 +1321,8 @@ mod tests {
 
     #[test]
     fn or_block_handler_keeps_subject_flat() {
-        // A `{ … }` handler gives the line a natural break point: the subject
-        // stays flat and the block body breaks.
+        // A `{ … }` handler is the natural break point, so the subject stays
+        // flat and the block body breaks.
         let src = "http.serve('0.0.0.0', 8080, fn(_req) http.text('Hello from al/http!')) or e -> {\n\tprintln('serve failed: ${e}')\n}\n";
         assert_eq!(fmt(src), src);
     }
@@ -1414,8 +1339,7 @@ mod tests {
 
     #[test]
     fn block_lambda_arg_hugs_call_parens() {
-        // A multi-statement lambda as the only argument hugs the call's
-        // parentheses instead of forcing the argument list to break.
+        // A lone multi-statement lambda hugs the parentheses.
         let src = "scheduler.spawn(fn() {\n\tprintln('Hello!')\n\tprintln('Hello!')\n})\n";
         assert_eq!(fmt(src), src);
     }
@@ -1435,8 +1359,7 @@ mod tests {
 
     #[test]
     fn hug_falls_back_when_head_does_not_fit() {
-        // The head line (callee, leading arguments, and the lambda's `{`) is
-        // wider than the limit: every argument goes onto its own line.
+        // The head line is over the limit, so every argument gets its own.
         let out = fmt(&format!(
             "serve('{}', '{}', fn(request) {{\n\thandle(request)\n\thandle(request)\n}})\n",
             "a".repeat(40),
@@ -1454,9 +1377,7 @@ mod tests {
 
     #[test]
     fn multiline_lambda_in_non_final_position_breaks_args() {
-        // Only a *final* block-shaped argument hugs. A multi-line lambda
-        // followed by another argument forces the standard per-argument
-        // layout.
+        // Only a final block-shaped argument hugs.
         let src = "f(fn() {\n\ta()\n\tb()\n}, other)\n";
         assert_eq!(
             fmt(src),
@@ -1466,9 +1387,7 @@ mod tests {
 
     #[test]
     fn hugging_call_as_argument_breaks_outer_call() {
-        // A call whose lambda hugs still renders across multiple lines, so an
-        // outer call wrapping it breaks per-argument (the hug never leaks
-        // upward through another call).
+        // A hug never leaks upward: an outer call still breaks per-argument.
         let src = "outer(inner(fn() {\n\ta()\n\tb()\n}), other)\n";
         assert_eq!(
             fmt(src),
@@ -1478,8 +1397,7 @@ mod tests {
 
     #[test]
     fn hugged_lambda_body_still_wraps_wide_statements() {
-        // Statements inside a hugged lambda still re-probe their own width:
-        // a too-wide call inside the body breaks per-argument.
+        // Statements inside a hugged lambda still re-probe their own width.
         let a = "a".repeat(45);
         let b = "b".repeat(45);
         let src = format!("go(fn() {{\n\tfirst()\n\tprocess('{a}', '{b}')\n}})\n");
@@ -1517,9 +1435,8 @@ mod tests {
 
     #[test]
     fn constructor_pattern_rest_wraps_without_trailing_comma() {
-        // A constructor pattern with a `..` rest marker that wraps across lines
-        // must not emit `..,`: the parser rejects a comma after `..` (rest must
-        // be the last arg), so the formatted source would no longer parse.
+        // A wrapped `..` rest marker must not emit `..,`: the parser rejects a
+        // comma after `..`, so the output would not parse.
         let src = "result = match value {\n\tVeryLongConstructorNameHere(first_argument_name, \
                    second_argument_name, third_argument_name, fourth_argument_name, \
                    fifth_argument_name, ..) -> 1\n\telse -> 0\n}\n";
@@ -1535,9 +1452,8 @@ mod tests {
 
     #[test]
     fn long_match_arm_breaks_after_arrow_not_inside_pattern() {
-        // An overflowing arm wraps after the `->` with the body one indent
-        // deeper. The pattern must stay intact — the old layout broke the
-        // pattern's argument list (`Some(\n\tvalue,\n) -> …`).
+        // An overflowing arm wraps after the `->`, one indent deeper. The
+        // pattern must stay intact.
         let src = "match x {\n\tSome(value) -> quite_long_function_name(value, another_argument, \
                    and_yet_another_long_argument_here)\n\telse -> None\n}\n";
         let out = fmt(src);
@@ -1563,16 +1479,15 @@ mod tests {
 
     #[test]
     fn match_arm_block_body_hugs_arrow() {
-        // A body that ends the line itself (match, if, block) keeps hugging
-        // the arrow instead of wrapping after it.
+        // A body that ends the line itself keeps hugging the arrow.
         let src = "match x {\n\tSome(v) -> match v {\n\t\t0 -> 'zero'\n\t\telse -> 'more'\n\t}\n\telse -> 'none'\n}\n";
         assert_eq!(fmt(src), src);
     }
 
     #[test]
     fn if_chain_and_struct_call_break() {
-        // Inlined rather than read from examples/: an over-long if-chain and an
-        // over-long struct call must each break, one clause / one arg per line.
+        // Inlined rather than read from examples/: an over-long if-chain and
+        // struct call must each break one clause or argument per line.
         let src = "type TriangleInfo {\n\tsides String\n\ttriangle_type String\n\tperimeter Int\n\tvalid Bool\n}\n\nfn classify_triangle(a, b, c) String {\n\tif a + b <= c {\n\t\t'Invalid'\n\t} else if a == b && b == c {\n\t\t'Equilateral'\n\t} else {\n\t\t'Scalene'\n\t}\n}\n\nfn analyze_triangle(a, b, c) {\n\tTriangleInfo(sides: '${a}, ${b}, ${c}', triangle_type: classify_triangle(a, b, c), perimeter: a + b + c, valid: a + b > c)\n}\n";
         let out = fmt(src);
         assert!(
@@ -1585,8 +1500,8 @@ mod tests {
         );
     }
 
-    /// Number of top-level items the source parses into. Used to prove the
-    /// formatter does not silently split or merge program structure.
+    /// Top-level items the source parses into, to prove the formatter does not
+    /// split or merge program structure.
     fn top_level_items(src: &str) -> usize {
         let mut s = scanner::new_scanner(src.to_string());
         let (toks, diags) = s.scan_all();
@@ -1596,12 +1511,10 @@ mod tests {
 
     #[test]
     fn wrapped_subtraction_keeps_operator_trailing() {
-        // A single subtraction wide enough to exceed MAX_WIDTH must wrap with the
-        // operator at the END of the left operand's line. The parser treats a `-`
-        // at the start of a line as a fresh unary expression (see parse_level's
-        // PuncMinus newline guard), so if the operator wraps to the continuation
-        // line the lone subtraction silently re-parses as `left` followed by a
-        // standalone `(-right)` — changing program semantics in place.
+        // A wrapping subtraction must keep the operator at the END of the left
+        // operand's line. The parser reads a leading `-` as a fresh unary
+        // expression, so a wrapped operator silently re-parses as two
+        // statements.
         let src = format!("result = {} - {}\n", "a".repeat(50), "b".repeat(50));
         assert_eq!(top_level_items(&src), 1, "source should be one binding");
 
@@ -1618,8 +1531,7 @@ mod tests {
             );
         }
 
-        // The formatted text must re-parse to the same single binding, not a
-        // binding plus a stray unary expression.
+        // Must re-parse to one binding, not a binding plus a stray unary.
         assert_eq!(
             top_level_items(&out),
             1,
@@ -1629,9 +1541,8 @@ mod tests {
 
     #[test]
     fn nested_unary_minus_keeps_space() {
-        // `- -x` must not be printed as `--x`: the scanner greedily relexes `--`
-        // as the rejected decrement token, so the formatted source would fail to
-        // parse on the round trip — corrupting a valid file in place.
+        // `- -x` must not print as `--x`: the scanner relexes `--` as the
+        // rejected decrement token, corrupting a valid file in place.
         let out = fmt("x = - -y\n");
         assert_eq!(out, "x = - -y\n");
         assert!(
@@ -1648,8 +1559,8 @@ mod tests {
         assert_round_trips(&out);
     }
 
-    /// Dropping a pattern's module qualifier changes the program:
-    /// `io.NotFound` resolves through the module, `NotFound` needs an import.
+    /// Dropping a pattern's module qualifier changes the program: `io.NotFound`
+    /// resolves through the module, `NotFound` needs an import.
     #[test]
     fn a_qualified_constructor_pattern_keeps_its_qualifier() {
         let src = "match e {\n\tio.NotFound(path) -> path\n\tio.Denied -> 'no'\n\telse -> ''\n}\n";
@@ -1659,9 +1570,8 @@ mod tests {
         assert_round_trips(&out);
     }
 
-    /// A comment between the fields of a single-constructor shorthand used to
-    /// be deleted outright: that branch emitted a bare `hardline()` where the
-    /// constructor branch calls `leading_trivia`.
+    /// Regression: a comment between the fields of a single-constructor
+    /// shorthand used to be deleted outright.
     #[test]
     fn shorthand_fields_keep_their_comments() {
         let src = "type R {\n\ta Int\n\t// why b matters\n\tb String\n}\n";
@@ -1743,9 +1653,8 @@ mod tests {
         assert_round_trips(&out);
     }
 
-    /// A comment the formatter has no emission site for (before the `else`
-    /// keyword itself — its token has no span in the AST) must make `format`
-    /// refuse to produce output, never silently delete the comment.
+    /// A comment with no emission site (before the `else` keyword, whose token
+    /// has no AST span) must make `format` refuse to produce output.
     #[test]
     fn unemittable_comment_is_a_noop_not_a_deletion() {
         let src = "if a {\n\t1\n}\n// stranded before else\nelse {\n\t2\n}\n";
@@ -1753,8 +1662,8 @@ mod tests {
             FormatResult::CommentsLost { comment } => {
                 assert_eq!(comment, "// stranded before else")
             }
-            // If a future change learns to emit this comment too, it must
-            // actually be present in the output.
+            // If a future change learns to emit this comment, it must actually
+            // be present in the output.
             FormatResult::Formatted { output } => {
                 assert!(output.contains("// stranded before else"), "{output}")
             }
@@ -1765,9 +1674,8 @@ mod tests {
         }
     }
 
-    /// A dropped comment whose text also appears inside a string literal must
-    /// still be detected: the postcondition compares rescanned comment trivia,
-    /// never raw substrings, so lookalike text cannot mask a deletion.
+    /// A dropped comment whose text also appears in a string literal must still
+    /// be detected: the check compares trivia, never raw substrings.
     #[test]
     fn comment_loss_is_not_masked_by_string_literal() {
         let src = "s = \"// stranded before else\"\nif a {\n\t1\n}\n// stranded before else\nelse {\n\t2\n}\n";
@@ -1775,8 +1683,8 @@ mod tests {
             FormatResult::CommentsLost { comment } => {
                 assert_eq!(comment, "// stranded before else")
             }
-            // If a future change learns to emit this comment too, it must
-            // appear in addition to the string literal.
+            // If a future change learns to emit this comment, it must appear
+            // in addition to the string literal.
             FormatResult::Formatted { output } => {
                 assert!(
                     output.matches("// stranded before else").count() >= 2,
@@ -1790,8 +1698,8 @@ mod tests {
         }
     }
 
-    /// A dropped comment that is a prefix of a longer, surviving comment must
-    /// still be detected — `// TODO` vs `// TODO: fix` is a common pair.
+    /// A dropped comment that is a prefix of a surviving one must still be
+    /// detected: `// TODO` vs `// TODO: fix`.
     #[test]
     fn comment_loss_is_not_masked_by_longer_comment() {
         let src = "// stranded before else and more\nif a {\n\t1\n}\n// stranded before else\nelse {\n\t2\n}\n";
@@ -1811,8 +1719,7 @@ mod tests {
 
     #[test]
     fn unary_minus_before_non_minus_stays_tight() {
-        // A `-` whose operand does not itself lead with `-` must not gain a
-        // spurious space — only the `--` collision needs separating.
+        // Only the `--` collision needs a separating space.
         assert_eq!(fmt("x = -y\n"), "x = -y\n");
         assert_eq!(fmt("x = -f(y)\n"), "x = -f(y)\n");
         assert_eq!(fmt("x = -y.z\n"), "x = -y.z\n");
@@ -1820,8 +1727,7 @@ mod tests {
 
     #[test]
     fn double_not_stays_adjacent() {
-        // `!!x` lexes as two `!` tokens and parses fine, so it must stay tight;
-        // the spacing fix is specific to `-`.
+        // `!!x` lexes as two tokens and parses fine, so it stays tight.
         let out = fmt("x = !!y\n");
         assert_eq!(out, "x = !!y\n");
         assert!(
@@ -1839,10 +1745,8 @@ mod tests {
 
     #[test]
     fn hard_breaking_match_inside_interpolation_gets_real_layout() {
-        // A `match` inside `${…}` always renders across multiple lines. It
-        // must lay out at the enclosing indent — not be spliced in as text
-        // pre-rendered at indent 0 — and the result must re-parse and be
-        // stable under a second format pass.
+        // A `match` inside `${…}` must lay out at the enclosing indent, not be
+        // spliced in as text pre-rendered at indent 0.
         let src =
             "fn f(y Int) String {\n\t'value: ${match y { 0 -> 'zero'\n else -> 'other' }}'\n}\n";
         let out = fmt(src);
@@ -1855,9 +1759,8 @@ mod tests {
 
     #[test]
     fn wide_interpolated_expression_breaks_at_enclosing_indent() {
-        // The sub-expression participates in the enclosing layout: when it
-        // overflows the line it breaks with real indentation instead of being
-        // measured (and emitted) at infinite width.
+        // The sub-expression joins the enclosing layout, so an overflow breaks
+        // with real indentation instead of being measured at infinite width.
         let src = "fn f() String {\n\t'r: ${wwwwwwwwwwwwwwwwwwwwwwwwwwwwww(aaaaaaaaaaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbbbbbbbbbb, cccccc)}'\n}\n";
         let out = fmt(src);
         assert!(
