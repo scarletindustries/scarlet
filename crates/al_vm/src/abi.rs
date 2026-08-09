@@ -253,14 +253,15 @@ impl AbiSlot {
         match self {
             OptionNone | Unit | FsEnospc | FsEdquot | FsUnalignedBinary | NetEtimedout
             | NetEconnrefused | NetEconnreset | NetEconnaborted | NetEnotconn | NetEpipe
-            | NetEaddrinuse | NetEaddrnotavail | NetEnetdown | NetEnetunreach
-            | NetEhostunreach | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed
-            | H1Http10 | H1Http11 | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked
+            | NetEaddrinuse | NetEaddrnotavail | NetEnetdown | NetEnetunreach | NetEhostunreach
+            | NetEacces | NetInvalidPort | NetUnalignedBinary | ReadClosed | H1Http10
+            | H1Http11 | H1ParsedNeedMore | H1FramingNoBody | H1FramingChunked
             | H1ChunkedNeedMore => 0,
             ResultOk | ResultErr | OptionSome | FsEnoent | FsEacces | FsEexist | FsEnotdir
             | FsEisdir | FsErofs | FsEloop | FsEfbig | FsErrnoOther | NetErrnoOther | IpV4
-            | IpV6 | ReadData | H1ParsedBad | H1FramingLength | H1FramingInvalid
-            | H1ChunkedBad => 1,
+            | IpV6 | ReadData | H1ParsedBad | H1FramingLength | H1FramingInvalid | H1ChunkedBad => {
+                1
+            }
             SocketAddr | Socket | H1Header => 2,
             H1HeadFlags | H1ChunkedDone => 3,
             H1ParsedDone => 6,

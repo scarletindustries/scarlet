@@ -145,6 +145,7 @@ impl AbiTable {
 #[cfg(test)]
 pub(crate) mod test_fixture {
     use super::*;
+    use crate::tivec::TiVec;
     use AbiSlot as S;
 
     /// `(slot, type_id, variant_idx, type_name, variant_name, labels)`.

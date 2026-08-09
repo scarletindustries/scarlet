@@ -130,12 +130,7 @@ impl ByteWindow {
 
 /// Parse one request head out of `bin` starting at byte offset `off`, pushing
 /// an `al/http/h1.Parsed` value.
-pub(super) fn parse_head(
-    t: &H1,
-    a: &mut ProcHeap,
-    bin: &BinaryRef<'_>,
-    off: i64,
-) -> Value {
+pub(super) fn parse_head(t: &H1, a: &mut ProcHeap, bin: &BinaryRef<'_>, off: i64) -> Value {
     parse_head_window(t, a, &ByteWindow::of(bin), off)
 }
 
@@ -367,11 +362,7 @@ fn find_crlf(bytes: &[u8], from: usize) -> Option<usize> {
 /// is `Chunked`. Transfer-Encoding alongside Content-Length is a smuggling
 /// conflict (400); any other coding is unimplemented (501). A duplicated,
 /// non-digit, overflowing, or leading-zero Content-Length is a 400.
-pub(super) fn framing(
-    t: &H1,
-    a: &mut ProcHeap,
-    headers_val: &Value,
-) -> VmResult<Value> {
+pub(super) fn framing(t: &H1, a: &mut ProcHeap, headers_val: &Value) -> VmResult<Value> {
     enum Seen {
         Zero,
         Once(Value),
@@ -452,13 +443,7 @@ pub(super) fn chunk_decode(
     chunk_decode_window(t, a, &ByteWindow::of(bin), off, max)
 }
 
-fn chunk_decode_window(
-    t: &H1,
-    a: &mut ProcHeap,
-    win: &ByteWindow,
-    off: i64,
-    max: i64,
-) -> Value {
+fn chunk_decode_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64, max: i64) -> Value {
     let bytes = win.bytes();
     let off = (off.max(0) as usize).min(win.len);
     let max = max.max(0);

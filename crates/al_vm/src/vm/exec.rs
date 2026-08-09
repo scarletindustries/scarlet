@@ -16,11 +16,11 @@
 //! its instruction and falls out to the shared loop head to be re-fetched.
 
 use crate::FuncIdx;
+use crate::abi::AbiSlot;
 use crate::bytecode::value::ReuseAddr;
 use crate::bytecode::{
     Op, Value, ValueView, freed_objects_pending, take_freed_objects, values_equal,
 };
-use crate::abi::AbiSlot;
 use crate::heap::ProcHeap;
 use crate::tivec::Idx;
 use smallvec::SmallVec;

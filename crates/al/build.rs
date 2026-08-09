@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use al_core::static_ir::flatten::{FlatPools, flatten};
 use al_core::static_ir::{SConst, Slice};
 use al_core::types::{
-    ArenaSlice, DefinitionLocation, EntityKind, InferEngine, QuantVar, Scheme, StrId, TypeBody,
-    TypeInfo, TypeNode, ValueKind,
+    ArenaSlice, DefinitionLocation, EntityKind, QuantVar, Scheme, StrId, TypeBody, TypeInfo,
+    TypeNode, ValueKind,
 };
-use al_core::{PrecompileOutput, PreludeBindings, TypeId};
+use al_core::{PreludeBindings, TypeId};
 
 fn main() {
     // One rerun-if-changed per file: a directory path alone does not reliably

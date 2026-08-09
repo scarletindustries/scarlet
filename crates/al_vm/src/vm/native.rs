@@ -802,6 +802,10 @@ mod tests {
         let callee_len = callee.len() as i32;
         let mut code = vec![op(Op::Halt)];
         code.extend(callee);
+        let frozen = Arc::new(crate::frozen::FrozenArea::new());
+        let mut fb = frozen.builder();
+        let (templates, abi) = crate::template::test_fixture::build(&mut fb);
+        drop(fb);
         Program {
             constants,
             functions: vec![
@@ -824,8 +828,10 @@ mod tests {
             ],
             code,
             entry: 0,
-            frozen: Arc::new(crate::frozen::FrozenArea::new()),
+            frozen,
             native: Default::default(),
+            templates,
+            abi,
         }
     }
 
@@ -833,11 +839,8 @@ mod tests {
     // `al_rt_enter_interp` call: its own frame below with the resume ip
     // stored, the interpreted callee's fresh frame on top.
     fn vm_with_callee_pushed(constants: Vec<Value>, callee: Vec<Instruction>) -> VM {
-        let mut vm = new_vm(
-            caller_callee_program(constants, callee),
-            &crate::template::test_fixture::TEST_STDLIB,
-        )
-        .expect("test VM must construct");
+        let mut vm =
+            new_vm(caller_callee_program(constants, callee)).expect("test VM must construct");
         vm.frames.push(CallFrame {
             func_idx: 0,
             code_start: 0,
@@ -894,7 +897,7 @@ mod tests {
         assert!(matches!(resumed, Step::Done));
         assert_eq!(vm.stack.len(), 1);
         // `sleep` pushes the VM's Nil enum, not the raw immediate.
-        assert_eq!(vm.stack[0].to_bits(), vm.make_nil().to_bits());
+        assert_eq!(vm.stack[0].to_bits(), vm.make_nil().unwrap().to_bits());
     }
 
     #[test]
@@ -984,21 +987,26 @@ mod tests {
             });
         }
         let fn_count = functions.len();
+        let frozen = Arc::new(crate::frozen::FrozenArea::new());
+        let mut fb = frozen.builder();
+        let (templates, abi) = crate::template::test_fixture::build(&mut fb);
+        drop(fb);
         Program {
             constants,
             functions,
             code,
             entry: 0,
-            frozen: Arc::new(crate::frozen::FrozenArea::new()),
+            frozen,
             native: NativeTable::new(fn_count),
+            templates,
+            abi,
         }
     }
 
     /// A VM in the state a native caller runs in: main's frame installed as
     /// the stand-in caller, boundary reds counter seeded.
     fn native_caller_vm(program: Program, reds: i32) -> VM {
-        let mut vm = new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
-            .expect("test VM must construct");
+        let mut vm = new_vm(program).expect("test VM must construct");
         vm.frames.push(CallFrame {
             func_idx: 0,
             code_start: 0,

@@ -541,32 +541,24 @@ fn consumer_operands(a: &Atom) -> Option<Vec<LocalId>> {
     }
 }
 
-/// For `let r = call f(args); drop a; drop b; ...body` where `a`,`b` ∈ `args`
-/// (or `= callee` for a dynamic call): return the run of such drops (they are
-/// the operands' *last uses* — Perceus placed them right after the call) plus
-/// the body after them. Emitting those drops between the operand pushes and
-/// the `Call` op transfers ownership into the callee (its Perceus `Drop` then
-/// sees rc==1 and can reuse) instead of the caller holding a dup across the
-/// whole call. The dynamic callee is included so its `Drop` never blocks an
-/// arg's from being peeled.
+/// For `let r = call f(args); drop a; drop b; ...body` with `a`,`b` ∈ `args`
+/// (or the dynamic callee): return that run of drops plus the body after them.
+/// Those drops are the operands' last uses — Perceus placed them right after
+/// the call. Emitting them between the operand pushes and the `Call` moves ownership
+/// into the callee, whose Perceus `Drop` then sees rc==1 and can reuse,
+/// instead of the caller holding a dup across the whole call.
 ///
-/// A drop of a local that some `Ctor{reuse: Some(_)}` in *this* body claims is
-/// **not** peeled: Perceus has already paired that hollowed cell with a
-/// downstream (or loop-carried) constructor here, so ownership must stay in
-/// this frame's slot for `Op::Reuse` to find it. Peeling would emit the
-/// `Op::Drop` while `PushLocal` still holds a dup (rc==2), zeroing the slot
-/// and handing the cell to the callee — the paired `Reuse` then reads nil and
-/// allocates fresh (the `dot_loop` bench-gate regression).
+/// Two drops must NOT be peeled:
 ///
-/// A drop whose local a directly-following `tail self(..)` passes again is
-/// also **not** peeled: that drop was parked by
-/// `perceus::release_self_tail_args` for the back-edge, not placed after this
-/// call as a last use, and it must stay put for [`split_self_tail_drops`] to
-/// sink between the tail's operand pushes and the `TailCallSelf` (the pushed
-/// dup keeps the value alive while the slot's reference goes). Peeling it
-/// would release the slot *before* the tail re-reads it, handing the next
-/// iteration a dead word — `loop_apply(f, ..) = .. loop_apply(f, .., f(x))`
-/// called `f` once and looped with nil.
+/// - one whose local a `Ctor{reuse: Some(_)}` in this body claims. Ownership
+///   has to stay in this frame's slot for `Op::Reuse` to find the cell.
+///   Peeling drops it while `PushLocal` still holds a dup, so the slot zeroes,
+///   the callee takes the cell, and the paired `Reuse` reads nil.
+/// - one whose local a directly-following `tail self(..)` passes again.
+///   `perceus::release_self_tail_args` parked that drop for the back-edge, and
+///   [`split_self_tail_drops`] must sink it between the tail's pushes and the
+///   `TailCallSelf`. Peeling releases the slot before the tail re-reads it and
+///   hands the next iteration a dead word.
 fn peel_call_arg_drops<'a>(
     body: &'a CoreExpr,
     args: &[LocalId],

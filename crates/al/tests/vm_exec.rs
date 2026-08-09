@@ -843,19 +843,16 @@ fn list_map_unique_reuses_in_place() {
              lsum(chain(build(100), {k}))\n"
         )
     };
-    // The reuse shapes under test live in the LIST_SRC fns; `chain` is only
-    // the driver, so it carries no must-native claim (interpreted or native,
-    // the alloc-count parity assertion binds either way).
+    // The reuse shapes live in the LIST_SRC fns; `chain` is only the driver,
+    // so it carries no must-native claim.
     let native = &["build", "lmap", "lsum", "double"];
     let (a1, r1) = run_counting_allocs(&prog(1), native);
     let (a10, r10) = run_counting_allocs(&prog(10), native);
-    // Correctness: build(100) sums to 5050; each map doubles every element.
     assert_eq!(r1, "10100", "1× doubled sum");
     assert_eq!(r10, "5171200", "10× doubled sum");
-    // Nine additional `lmap` passes over 100 cells must allocate a *constant*
-    // (length-independent) amount. Without reuse the delta is 9×100 = 900
-    // fresh Cons cells; a bound of `< len` (100) discriminates decisively
-    // while tolerating a handful of per-pass constants (e.g. LNil).
+    // Nine extra passes over 100 cells must allocate a length-independent
+    // amount. Without reuse the delta is 9×100 = 900, so a bound of 100
+    // discriminates while tolerating a few per-pass constants.
     let delta = a10.saturating_sub(a1);
     assert!(
         delta < 100,
@@ -867,10 +864,9 @@ fn list_map_unique_reuses_in_place() {
 #[test]
 fn list_map_shared_falls_back_to_alloc() {
     let _g = ALLOC_LOCK.lock().unwrap();
-    // Binding the list to a second name keeps every `Cons` at rc>=2, so the
-    // runtime `is_unique()` check inside `lmap` is false at every drop and the
-    // constructor allocates fresh. Varying ONLY `n` isolates the per-element
-    // cost of build+map together.
+    // A second name keeps every `Cons` at rc>=2, so `is_unique()` is false at
+    // every drop and the constructor allocates fresh. Varying only `n`
+    // isolates the per-element cost of build+map together.
     let prog = |n: u32| {
         format!(
             "{LIST_SRC}\
@@ -883,13 +879,13 @@ fn list_map_shared_falls_back_to_alloc() {
     let native = &["build", "lmap", "lsum", "double"];
     let (a20, r20) = run_counting_allocs(&prog(20), native);
     let (a200, r200) = run_counting_allocs(&prog(200), native);
-    // Correctness: `alias` still reads the ORIGINAL values — proving the
-    // shared cells were not overwritten in place — and `ys` reads doubled.
+    // `alias` must still read the original values, proving the shared cells
+    // were not overwritten in place.
     assert_eq!(r20, "(210, 420)");
     assert_eq!(r200, "(20100, 40200)");
-    // Scales with length: 180 more elements ⇒ ~180 build Cons + ~180 map Cons
-    // = ~360. A (wrong) reuse-regardless-of-rc implementation would show ~180
-    // AND corrupt `alias` above; the bound of ≥300 separates the two by >100.
+    // 180 more elements ⇒ ~180 build Cons + ~180 map Cons = ~360. Reusing
+    // regardless of rc would show ~180 and corrupt `alias`; ≥300 separates
+    // the two by over 100.
     let delta = a200.saturating_sub(a20);
     assert!(
         delta >= 300,
@@ -898,19 +894,13 @@ fn list_map_shared_falls_back_to_alloc() {
     );
 }
 
-// ===========================================================================
-// Bench gate (docs/core-ir-spec.md §Constraints): after the Core-IR perceus
-// pass is on, `dot_loop` must show measurable reuse (alloc counter ≪ 2N) and
-// `examples/bench_typed.al` must complete in ≤0.61s under a release build.
-// Phase 2's AST-walker perceus regressed 0.61→0.77s because last-use is
-// unknowable during a forward AST emit — it hedged Nop holes on every read
-// with no compensating reuse in `dot_loop` (construct-then-drop, so no drop
-// dominates a same-shape ctor). ANF makes last-use a linear backward scan and
-// enables loop-carried pairing across `TailCallSelf`.
-// ===========================================================================
+// Bench gate (docs/core-ir-spec.md §Constraints): `dot_loop` must show
+// measurable reuse, alloc counter ≪ 2N. This needs ANF — last-use is
+// unknowable during a forward AST emit, so an AST-walker perceus hedges Nop
+// holes on every read with no compensating reuse here (construct-then-drop, so
+// no drop dominates a same-shape ctor).
 
-/// `dot_loop` from `examples/bench_typed.al`, minus the `println` (the
-/// in-process VM here returns the final value directly).
+/// `dot_loop` from `examples/bench_typed.al`, minus the `println`.
 const DOT_SRC: &str = "\
 type Point {\n\
 \tPoint(x Int, y Int, z Int)\n\
@@ -931,14 +921,10 @@ fn dot_loop(n Int, acc Int) Int {\n\
 #[test]
 fn dot_loop_perceus_reuse_gate() {
     let _g = ALLOC_LOCK.lock().unwrap();
-    // Two `Point(x y z)` per iteration: without loop-carried reuse that is 2N
-    // fresh heap objects. With the Core-IR perceus pass pairing end-of-body
-    // drops of `p`/`q` with the next iteration's `Point(..)` constructors
-    // across `TailCallSelf` (spec §Constraints "Loop-carried reuse" —
-    // `collapse_tail_frame` must not drain reuse slots for self-tail-calls),
-    // the two cells are overwritten in place and allocation is O(1) in N.
-    // N=10_000 discriminates decisively (20_000 vs. constant) while keeping
-    // the debug run fast; the spec's ≪2M for N=1M is this same ratio.
+    // Two `Point`s per iteration: 2N fresh objects without loop-carried reuse,
+    // O(1) with it. Requires `collapse_tail_frame` not to drain reuse slots
+    // for self-tail-calls, so the end-of-body drops of `p`/`q` pair with the
+    // next iteration's constructors across `TailCallSelf`.
     const N: u64 = 10_000;
     let (allocs, r) = run_counting_allocs(
         &format!("{DOT_SRC}dot_loop({N}, 0)\n"),
@@ -946,9 +932,8 @@ fn dot_loop_perceus_reuse_gate() {
     );
     // ∑ₙ₌₁ᴺ 3n²+15n+14 at N=10_000.
     assert_eq!(r, "1000900220000", "dot_loop correctness at N={N}");
-    // ≪ 2N: loop-carried reuse ⇒ a handful of fixed allocs; no reuse ⇒ 2N.
-    // A bound of N/10 separates the two by an order of magnitude while
-    // tolerating any per-run constants.
+    // N/10 separates reuse (a few fixed allocs) from no reuse (2N) by an
+    // order of magnitude while tolerating per-run constants.
     assert!(
         allocs < (N as usize) / 10,
         "dot_loop allocated per-iteration: {allocs} allocs for {N} iterations \
@@ -957,14 +942,12 @@ fn dot_loop_perceus_reuse_gate() {
     );
 }
 
-/// `examples/bench_typed.al` is the typed-opcode workload. Its *output* is
-/// pinned here; its *speed* is not.
+/// `examples/bench_typed.al` is the typed-opcode workload. Its output is
+/// pinned here; its speed is not gated anywhere.
 ///
-/// There used to be a `#[ignore]`d wall-clock gate asserting ≤610ms. It timed
-/// the debug binary against an absolute bar, on a machine whose load average
-/// has ranged 3–170, and it never ran. A benchmark belongs in an interleaved
-/// min-of-N comparison against a named parent commit, not in the unit suite —
-/// and a gate nobody runs reads as coverage it does not provide.
+/// The spec's ≤610ms wall-clock gate was removed deliberately: it timed a debug
+/// build against an absolute bar, never ran, and belongs in an interleaved
+/// min-of-N bench, not here.
 #[test]
 fn bench_typed_output_is_pinned() {
     let path =
@@ -974,13 +957,11 @@ fn bench_typed_output_is_pinned() {
     assert_eq!(out.stdout, "1048576\nTrue\n1000009000022000000\n");
 }
 
-/// Emit-level half of the same gate: `Op::Reuse` must actually be *in*
-/// `dot_loop`'s code, paired with a `MakeEnumPayload a=1` (the reuse-token
-/// form of the constructor), once for each of `p` and `q`. The alloc-counter
-/// test above proves the runtime effect; this one names the mechanism, so a
-/// regression that (say) lets `peel_call_arg_drops` hand `p`/`q` to `dot` —
-/// zeroing the slot before `Reuse` reads it — fails here with a readable
-/// cause rather than as a mysterious allocation count.
+/// Emit-level half of the same gate: `Op::Reuse` paired with a
+/// `MakeEnumPayload a=1`, once each for `p` and `q`. The alloc-counter test
+/// above proves the runtime effect; this one names the mechanism, so a
+/// regression (say `peel_call_arg_drops` handing `p`/`q` to `dot`, zeroing the
+/// slot before `Reuse` reads it) fails with a readable cause.
 #[test]
 fn dot_loop_emits_paired_reuse() {
     use bytecode::Op;
@@ -1004,8 +985,7 @@ fn dot_loop_emits_paired_reuse() {
         "expected one `Reuse` per loop-carried `Point`, got {reuses}: {:?}",
         code.iter().map(|i| i.op).collect::<Vec<_>>()
     );
-    // Every `Point(..)` in the body must consume one: `a = 1` is the flag that
-    // makes `MakeEnumPayload` pop a reuse token instead of allocating fresh.
+    // `a = 1` makes `MakeEnumPayload` pop a reuse token instead of allocating.
     let makes: Vec<u8> = code
         .iter()
         .filter(|i| i.op == Op::MakeEnumPayload)
@@ -1016,8 +996,8 @@ fn dot_loop_emits_paired_reuse() {
         vec![1, 1],
         "both `Point` ctors must take a reuse token"
     );
-    // The token has to reach the constructor: `Reuse` is the instruction
-    // immediately before its `MakeEnumPayload` (payloads are already pushed).
+    // The token must reach the constructor: `Reuse` sits immediately before
+    // its `MakeEnumPayload`, payloads already pushed.
     for (i, ins) in code.iter().enumerate() {
         if ins.op == Op::Reuse {
             assert_eq!(
@@ -1027,8 +1007,8 @@ fn dot_loop_emits_paired_reuse() {
             );
         }
     }
-    // And the drops that make them reusable must NOT have been peeled into
-    // `dot`'s call: they stay in this frame, after the `CallKnown`.
+    // The drops that make them reusable must stay in this frame, after the
+    // `CallKnown`, not be peeled into `dot`'s call.
     let call = code
         .iter()
         .position(|i| i.op == Op::CallKnown)
@@ -1042,14 +1022,12 @@ fn dot_loop_emits_paired_reuse() {
 }
 
 run_case! {
-    // A closure written at *module* toplevel, but inside a nested `if`/`match`
-    // scope, capturing a local of that scope. Such a local is an entry-frame temp,
-    // not a published global: the closure must take it as a by-value capture
-    // (`PushCapture`), exactly as it would inside a fn body. Resolving it to
-    // `PushGlobal <entry-frame slot>` reads whatever the toplevel Core emit happens
-    // to have parked in that slot — the `if` condition, an intermediate temp, ...
-    // The bug only surfaced for single-use nested-scope locals, so read each
-    // captured name exactly once.
+    // A closure at module toplevel but inside a nested `if`/`match` scope,
+    // capturing a local of that scope. Such a local is an entry-frame temp,
+    // not a published global, so it must be a by-value `PushCapture`;
+    // `PushGlobal <entry-frame slot>` would read whatever the toplevel emit
+    // parked there. Only single-use nested-scope locals hit this, so each
+    // captured name is read exactly once.
     toplevel_nested_scope_closure_capture: (
         "if True {\n\
         \x20 z = 7\n\
@@ -1071,9 +1049,8 @@ run_case! {
 
 run_case! {
     // A `@vm` builtin named without being called is a first-class value: the
-    // elaborator synthesises an eta wrapper (`typed_ir::eta`) over the opcode,
-    // the same as for a constructor used as a value. Bind it, pass it, call it
-    // through the VM — not just the typechecker.
+    // elaborator synthesises an eta wrapper over the opcode, as for a ctor
+    // used as a value. Driven through the VM, not just the typechecker.
     builtin_bound_to_a_local_is_callable: (
         "import al/string\n\
          f = string.length\n\
@@ -1086,8 +1063,8 @@ run_case! {
          println(array.map(['a', 'bb', 'ccc'], string.length))\n",
         "[1, 2, 3]\n",
     ),
-    // A bare (unqualified) builtin as a value — `println` itself — exercises
-    // the identifier path rather than the `module.member` path.
+    // A bare builtin as a value takes the identifier path, not
+    // `module.member`.
     bare_builtin_as_value_is_callable: (
         "import al/array\n\
          each = array.each\n\

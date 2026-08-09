@@ -1,39 +1,26 @@
 //! Pattern elaboration: `ast::Pattern` → [`TypedPat`], `ast::MatchArm` →
 //! [`TypedArm`].
 //!
-//! This is the *resolution* half of `core_ir::lower`'s pattern machinery
-//! (`Lower::pattern`, `slot_pattern_args`, `ctor_field_tys`, `match_arms`,
-//! `or_alternatives`, `bin_segments`). Lowering keeps the ANF half — flattening
-//! nesting into successive `CorePat` heads, minting `LocalId`s, threading the
-//! fallthrough continuation. Everything lowering used to *ask the inference
-//! engine* is decided here instead:
+//! The resolution half of `core_ir::lower`'s pattern machinery; `lower` keeps
+//! the ANF half. Everything `lower` would otherwise ask the inference engine
+//! is decided here, so it never sees an unsolved type variable:
 //!
 //! * A [`TypedPat::Ctor`]'s `fields` is exactly the variant's arity, in
-//!   declared-field order. A slot no source argument filled — a labelled
-//!   subset, or a `..` rest — is a [`TypedPat::Wild`] carrying that field's
-//!   resolved type. `lower` therefore never calls `ctor_field_tys`, and can
-//!   never produce a payload bind whose type is an unsolved variable (which is
-//!   how a destructured `Cons` tail lost its `Drop`).
-//! * A [`TypedPat::Array`] carries `elem_ty` projected out of its scrutinee
-//!   type here, so `lower` never asks the pool for `Array(T)`'s `T`.
-//! * [`TypedPat::Lit`] and [`TypedPat::Range`] carry [`ConstId`]s pooled at
-//!   elaboration time — and so do the constants with no source literal behind
-//!   them: an array pattern's length, a `<<>>` walk's initial bit cursor, a
-//!   `<<'lit'>>` segment's width. Interning is a mutation, so `lower` cannot do
-//!   it; every `Atom::Const` it emits names a `ConstId` this module minted.
+//!   declared-field order. A slot no source argument filled is a
+//!   [`TypedPat::Wild`] carrying that field's resolved type.
+//! * A [`TypedPat::Array`] carries `elem_ty` projected out of its scrutinee.
+//! * Interning is a mutation, so `lower` cannot do it: every `ConstId` it
+//!   emits — including ones with no source literal, like an array pattern's
+//!   length or a `<<>>` walk's initial bit cursor — is minted here.
 //!
 //! ## Or-patterns bind once
 //!
-//! `Cons(x, _) | Wrap(x)` binds one `x`. `lower` flattens the alternatives into
-//! separate branches and maps each branch's binds onto its own `LocalId`s, but
-//! the arm's guard and body are one tree, so the [`BindingId`] a name refers to
-//! must not depend on which alternative matched. Within one arm a name is bound
-//! to one [`TypedBind`]: the first occurrence mints it, every occurrence in a
-//! *later alternative* reuses it. That is what makes
-//! `TypedArm { pat, guard, body }` — a single body over an `Or` of
-//! alternatives — well-formed. A repeat *within* one alternative (`Pair(x, x)`)
-//! is the one thing that reuse must never absorb — the check walk rejects it,
-//! so elaboration aborts if it sees one.
+//! `Cons(x, _) | Wrap(x)` binds one `x`. The arm's guard and body are one
+//! tree, so which [`BindingId`] a name means must not depend on which
+//! alternative matched: the first occurrence mints it and every occurrence in
+//! a later alternative reuses it. A repeat *within* one alternative
+//! (`Pair(x, x)`) is what that reuse must never absorb; the check walk rejects
+//! it, so elaboration aborts on one.
 
 use std::collections::{HashMap, HashSet};
 
@@ -50,9 +37,8 @@ use super::rty::{Arity, RTy};
 use super::slots::{Slots, slot_labeled};
 use super::{PatRest, TypedArm, TypedBinPatSeg, TypedBind, TypedExpr, TypedPat, elaborator_bug};
 
-/// Everything a constructor *pattern* head needs, resolved against the
-/// scrutinee's type. Produced by [`PatCtx::resolve_ctor_pat`], which is where
-/// `lower`'s `resolve_name` + `ctor_labels` + `ctor_field_tys` trio moves to.
+/// Everything a constructor pattern head needs, resolved against the
+/// scrutinee's type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtorPat {
     pub variant: VariantRef,
@@ -67,18 +53,11 @@ pub struct CtorPat {
 impl CtorPat {
     /// One `(label, type)` pair per declared field, in declared order.
     ///
-    /// Total, and the only constructor: a `labels`/`field_tys` desync is not
-    /// *rejected* here, it is unspellable. That matters because papering a
-    /// desync over with a `Nil` field type is not a harmless guess — `Nil` is a
-    /// prim `Con`, `ResolvedPool::is_heap` answers `false` for it, and Perceus
-    /// would then emit neither `Dup` nor `Drop` for what may be a heap field: a
-    /// refcount leak, or a use-after-free once the slot is reused.
-    ///
-    /// The *widths* the two independent sources report — `ctor_labels` reads
-    /// the variant's declaration, `field_tys` substitutes the use site's type
-    /// arguments into the constructor's resolved scheme, and
-    /// `ValueKind::Constructor` records an arity — are checked by
-    /// [`Self::from_parts`], which aborts rather than narrowing the pattern.
+    /// The only constructor, so a `labels`/`field_tys` desync is unspellable
+    /// rather than merely rejected. Guessing a field type would be unsound:
+    /// `Nil` is a prim `Con`, `is_heap` answers false for it, and Perceus then
+    /// emits neither `Dup` nor `Drop` for what may be a heap field.
+    /// [`Self::from_parts`] checks the widths the independent sources report.
     pub fn new(variant: VariantRef, fields: Vec<(StrId, RTy)>) -> CtorPat {
         let (labels, field_tys) = fields.into_iter().unzip();
         CtorPat {
@@ -88,11 +67,9 @@ impl CtorPat {
         }
     }
 
-    /// [`Self::new`] from the three widths the walk derived independently, all
-    /// from the same `ctor.fields`. A disagreement is a compiler bug in that
-    /// walk, so it aborts — the same exit the call path
-    /// (`Elab::ctor_call`) and the destructuring path (`Elab::irrefutable`)
-    /// take, never a wildcard that would silently match everything.
+    /// [`Self::new`] from three widths the walk derived independently. A
+    /// disagreement is a compiler bug and aborts — never a wildcard, which
+    /// would silently match everything.
     pub fn from_parts(
         variant: VariantRef,
         declared_arity: Arity,
@@ -111,22 +88,19 @@ impl CtorPat {
         self.field_tys.len()
     }
 
-    /// Declared field labels, for hover/diagnostics. Exactly [`Self::arity`]
-    /// long.
+    /// Declared field labels, for hover and diagnostics.
     pub fn labels(&self) -> &[StrId] {
         &self.labels
     }
 
-    /// The declared-fields description [`slot_labeled`] consumes: one entry
-    /// per field, every one labeled. Derived from `labels`, so it is exactly
-    /// [`Self::arity`] long by the same construction invariant.
+    /// The declared-fields description [`slot_labeled`] consumes: one labeled
+    /// entry per field.
     pub fn slot_fields(&self) -> SmallVec<[Option<StrId>; 4]> {
         self.labels.iter().map(|&l| Some(l)).collect()
     }
 
-    /// Field types in declared order. Exactly [`Self::arity`] long, so zipping
-    /// it against `slot_labeled`'s slots pairs every slot with its type and
-    /// leaves nothing to look up by index.
+    /// Field types in declared order. Exactly [`Self::arity`] long, so it zips
+    /// against `slot_labeled`'s slots.
     pub fn field_tys(&self) -> &[RTy] {
         &self.field_tys
     }
@@ -134,7 +108,7 @@ impl CtorPat {
 
 /// The services pattern elaboration needs from the enclosing elaborator.
 ///
-/// Deliberately *not* an `InferEngine`: every type that crosses this seam is an
+/// Deliberately not an `InferEngine`: every type crossing this seam is an
 /// [`RTy`], so a `fresh_var()` cannot reach a `TypedPat`.
 pub trait PatCtx {
     fn intern(&mut self, name: &str) -> StrId;
@@ -142,7 +116,6 @@ pub trait PatCtx {
     /// Mint a fresh [`BindingId`] for `name` and bring it into scope for the
     /// rest of the pattern, its guard, and its body.
     fn bind(&mut self, name: StrId, ty: RTy) -> TypedBind;
-    /// Depth of the current name scope, for [`PatCtx::scope_reset`].
     fn scope_mark(&mut self) -> usize;
     /// Drop every name bound since `mark`.
     fn scope_reset(&mut self, mark: usize);
@@ -156,15 +129,11 @@ pub trait PatCtx {
 
     /// Resolve a constructor pattern head. Total: a diagnostics-clean module
     /// cannot name a constructor that does not resolve, so an implementation
-    /// aborts (`elaborator_bug`) rather than answering. Answering with a
-    /// wildcard — which `lower`'s poison path did, via `CorePat::Wild` — is a
-    /// silent miscompile: the arm matches unconditionally, its sub-pattern
-    /// bindings never exist, and the body's names then resolve to whatever
-    /// stale frame slots the check walk left behind.
+    /// aborts rather than answering with a wildcard — that would match
+    /// unconditionally and leave the body's names bound to nothing.
     fn resolve_ctor_pat(&mut self, name: &str, scrut: RTy) -> CtorPat;
-    /// `io.NotFound(path)` — resolved through the module qualifier rather than
-    /// the enclosing scope. The typechecker has already accepted it, so a
-    /// failure here is a compiler bug, exactly as for the bare form.
+    /// `io.NotFound(path)`, resolved through the module qualifier. Total for
+    /// the same reason as the bare form.
     fn resolve_ctor_pat_qualified(&mut self, qual: &str, name: &str, scrut: RTy) -> CtorPat;
 
     /// `i`th element type of the tuple type `t`.
@@ -204,15 +173,13 @@ pub fn elaborate_pattern<C: PatCtx>(cx: &mut C, p: &ast::Pattern, scrut: RTy) ->
     .pat(p, scrut)
 }
 
-/// Slot a constructor's positional/labeled pattern args into declared-field
-/// order, so a slot index *is* a field index, not a source-arg index. Shared
-/// by refutable patterns ([`PatElab::ctor`]) and irrefutable destructuring
-/// (`Elab::irrefutable`).
+/// Slot a constructor's pattern args into declared-field order, so a slot
+/// index is a field index rather than a source-arg index.
 ///
-/// The check walk slotted these same args with the same [`slot_labeled`] and
-/// reported every error it returned. An error on a clean module means the two
-/// walks disagree; dropping the mis-slotted sub-pattern would leave its binds
-/// unminted and the arm matching too much, so it aborts.
+/// The check walk already slotted these args the same way and reported any
+/// error, so an error here means the two walks disagree. It aborts: dropping
+/// the mis-slotted sub-pattern would leave its binds unminted and the arm
+/// matching too much.
 pub fn slot_pattern_args<'p, C: PatCtx>(
     cx: &mut C,
     fields: &[Option<StrId>],
@@ -291,25 +258,20 @@ fn collect_rest(rest: &PatRest, out: &mut Vec<TypedBind>) {
 
 struct PatElab<'c, C: PatCtx> {
     cx: &'c mut C,
-    /// Names already bound in this pattern. An or-alternative past the first
-    /// re-binds the same names; typing has proven the sets are identical, so
-    /// reusing the [`BindingId`] is exactly the "one variable per name" rule
-    /// the single-body [`TypedArm`] shape requires.
+    /// Names already bound in this pattern. A later or-alternative re-binds
+    /// the same names onto the same [`BindingId`], which is the one-variable-
+    /// per-name rule the single-body [`TypedArm`] needs.
     bound: HashMap<StrId, TypedBind>,
-    /// Names bound in the *current* or-alternative (the whole pattern is one
-    /// alternative when no `|` encloses the bind). `bound` alone cannot tell a
-    /// legitimate cross-alternative re-bind from `Pair(x, x)`, which would
-    /// silently alias both positions to one binder; this set is what keeps
-    /// them apart.
+    /// Names bound in the *current* or-alternative. `bound` alone cannot tell
+    /// a legitimate cross-alternative re-bind from `Pair(x, x)`.
     seen: HashSet<StrId>,
 }
 
 impl<C: PatCtx> PatElab<'_, C> {
     /// Bind `name`, or return the [`TypedBind`] an earlier or-alternative
-    /// already minted for it. A repeat within the current alternative is a
-    /// compiler bug — the check walk rejects it ("bound more than once in
-    /// this pattern"), so a clean module cannot produce one — and it aborts
-    /// rather than aliasing two positions to one binder.
+    /// minted for it. A repeat within the current alternative is a compiler
+    /// bug (the check walk rejects it) and aborts rather than aliasing two
+    /// positions to one binder.
     fn bind(&mut self, name: &str, ty: RTy, span: Span) -> TypedBind {
         let sid = self.cx.intern(name);
         if !self.seen.insert(sid) {
@@ -325,11 +287,9 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
     }
 
-    /// A `..name` rest binder. The parser normalizes a bare `_` var pattern to
-    /// [`ast::Pattern::Wildcard`] but leaves a `.._` rest as a binding named
-    /// `_`, and the check walk never records `_` (any number of `_` binds pass
-    /// checking), so `_` must not reach [`Self::bind`]'s duplicate abort — it
-    /// is a discard here, as everywhere else.
+    /// A `..name` rest binder. The parser leaves a `.._` rest as a binding
+    /// named `_`, and the check walk never records `_`, so `_` must not reach
+    /// [`Self::bind`]'s duplicate abort.
     fn rest_bind(&mut self, id: &ast::Identifier, ty: RTy) -> PatRest {
         if id.name == "_" {
             PatRest::Discard
@@ -371,11 +331,10 @@ impl<C: PatCtx> PatElab<'_, C> {
             ast::Pattern::Array { elements, span } => self.array(elements, scrut, *span),
             ast::Pattern::Binary { segments, rest, .. } => self.bin(segments, rest.as_ref(), scrut),
             ast::Pattern::Or { first, rest, .. } => {
-                // The `bound` map is shared across alternatives — that is the
-                // "bind once" rule — but the `seen` set restarts from the
-                // enclosing pattern's names for each alternative, so only a
-                // repeat *within* one alternative trips [`Self::bind`]. What
-                // the alternatives bound folds back into `seen` afterwards:
+                // `bound` is shared across alternatives (the bind-once rule),
+                // but `seen` restarts from the enclosing names per
+                // alternative, so only a repeat within one alternative trips
+                // `bind`. What the alternatives bound folds back in after:
                 // `(A(x) | B(x), x)` repeats `x` in its one alternative.
                 let outer = std::mem::take(&mut self.seen);
                 let mut after = outer.clone();
@@ -399,11 +358,10 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
     }
 
-    /// Source args are slotted into declared-field order by the same
-    /// `slot_labeled` the typechecker and the exhaustiveness checker use, so a
-    /// slot index *is* a field index. Every slot is filled: one no source arg
-    /// reached (a labelled subset, or `..`) becomes a `Wild` carrying that
-    /// field's type, which is what gives `fields.len() == arity`.
+    /// Args are slotted into declared-field order by the same `slot_labeled`
+    /// the typechecker and exhaustiveness checker use. Every slot is filled —
+    /// an unreached one becomes a `Wild` carrying that field's type — which is
+    /// what gives `fields.len() == arity`.
     fn ctor(
         &mut self,
         qualifier: Option<&ast::Identifier>,
@@ -418,9 +376,6 @@ impl<C: PatCtx> PatElab<'_, C> {
         };
         let by_pos = slot_pattern_args(&mut *self.cx, &info.slot_fields(), args, span);
 
-        // `slot_labeled` returns exactly `arity` slots and `field_tys` is
-        // exactly `arity` long, so the zip pairs every slot with its own field
-        // type — there is no index to run off the end of.
         let field_tys: SmallVec<[RTy; 4]> = info.field_tys().into();
         let mut fields = Vec::with_capacity(info.arity());
         for (slot, fty) in by_pos.into_iter().zip(field_tys) {
@@ -436,9 +391,9 @@ impl<C: PatCtx> PatElab<'_, C> {
         }
     }
 
-    /// The parser only accepts `..rest` as the final element; anything after
-    /// one — which would otherwise be silently dropped, matching a shorter
-    /// prefix than the source wrote — is a desync and aborts.
+    /// The parser only accepts `..rest` as the final element. Anything after
+    /// one is a desync and aborts: dropping it would match a shorter prefix
+    /// than the source wrote.
     fn array(&mut self, elements: &[ast::ArrayPatternElement], scrut: RTy, span: Span) -> TypedPat {
         let elem_ty = self.cx.array_elem_ty(scrut);
         let pre = elements
@@ -453,8 +408,8 @@ impl<C: PatCtx> PatElab<'_, C> {
             };
             prefix.push(self.pat(ep, elem_ty));
         }
-        // The `..rest` binding is the scrutinee's own array type: it is the
-        // suffix of the same array.
+        // The `..rest` binding takes the scrutinee's own array type: it is a
+        // suffix of the same array, not an element.
         let rest = match rest_elems {
             [] => PatRest::None,
             [ast::ArrayPatternElement::Spread { binding: None, .. }] => PatRest::Discard,
@@ -465,8 +420,8 @@ impl<C: PatCtx> PatElab<'_, C> {
             ] => self.rest_bind(id, scrut),
             _ => elaborator_bug("array spread not last", span),
         };
-        // `lower` compares `ArrayLen(scrut)` against the prefix length and
-        // `SeqDrop`s by it; it has no pool, so the constant is minted here.
+        // `lower` compares `ArrayLen(scrut)` against this and has no pool of
+        // its own, so the constant is minted here.
         let len = self.cx.int_const(prefix.len() as i64);
         TypedPat::Array {
             ty: scrut,
@@ -491,8 +446,7 @@ impl<C: PatCtx> PatElab<'_, C> {
                 Some(id) => self.rest_bind(id, scrut),
             },
         };
-        // The bit cursor `lower` walks the segments with starts at `0`, and a
-        // `:utf8` segment tests its decoded width against it.
+        // The bit cursor `lower` walks the segments with starts here.
         let zero = self.cx.int_const(0);
         TypedPat::Bin {
             ty: scrut,
@@ -504,15 +458,14 @@ impl<C: PatCtx> PatElab<'_, C> {
 
     fn bin_seg(&mut self, seg: &ast::BinSegmentPat, scrut: RTy) -> TypedBinPatSeg {
         // `<<'lit'>>`: match the literal's UTF-8 bytes as a prefix. Its width
-        // is known now, so no `BinBitSize` of a pooled constant is needed.
+        // is known now.
         if let Some(s) = seg.utf8_literal() {
             let width = (s.len() as i64) * 8;
             let bytes = self.cx.binary_const(s.as_bytes().to_vec(), width as u64);
             let bits = self.cx.int_const(width);
             return TypedBinPatSeg::Utf8Literal { bytes, bits };
         }
-        // Width before value, matching the check walk's visit order
-        // (expressions visit the value first — see `Elab::binary_literal`).
+        // Width before value, matching the check walk's visit order.
         match seg_bits(&mut *self.cx, &seg.spec) {
             SpecWidth::Utf8 => {
                 // `BinReadUtf8` yields the codepoint as an `Int`.
@@ -534,15 +487,12 @@ impl<C: PatCtx> PatElab<'_, C> {
     }
 }
 
-/// The width a `<<..>>` segment's spec prescribes, per spec kind, as
-/// [`seg_bits`] computes it. Carrying the kind means a consumer matches on
-/// *this* instead of re-matching the `ast::BinSpec` against a bare
-/// `Option<TypedExpr>` — an `Int` segment's width cannot be missing here, so
-/// the "Int segment with no width" abort has nothing to guard.
+/// The width a `<<..>>` segment's spec prescribes. Carrying the kind means an
+/// `Int` segment's width cannot be missing, so consumers need no "Int segment
+/// with no width" guard.
 #[derive(Debug)]
 pub enum SpecWidth {
-    /// `:N` / `:size(..)`, or the default 8 when sizeless — an `Int` segment
-    /// always has a width.
+    /// `:N` / `:size(..)`, or the default 8 when sizeless.
     Int(TypedExpr),
     /// `:bytes(..)` scaled to bits; `None` is a sizeless `:binary`, which
     /// consumes the remainder.
@@ -551,18 +501,12 @@ pub enum SpecWidth {
     Utf8,
 }
 
-/// The bits-width rule for `<<..>>` segments, shared by expression
-/// ([`super::elaborate`]'s `binary_literal`) and pattern elaboration so the
-/// two cannot drift: an `Int`'s `:N` / `:size(..)` expression, or the default
-/// 8 when sizeless; a `Binary`'s `:bytes(..)` size scaled to bits, or the
-/// remainder when sizeless (`lower` knows that from [`SpecWidth::Bytes`]'s
-/// `None` rather than from a missing AST node). `lower` reads each width as a
-/// plain `Int` expression and never re-derives the default or the unit.
+/// The bits-width rule for `<<..>>` segments, shared by expression and pattern
+/// elaboration so the two cannot drift. `lower` reads each width as a plain
+/// `Int` expression and never re-derives the default or the unit.
 ///
-/// The `:bytes` scale is the generic `Op::Mul`, not `MulInt`: it is a
-/// synthesised node, not one the checker specialised, and today's lowering
-/// emits exactly this — specialising it is a typed-opcode change and belongs
-/// with the rest of them, not here.
+/// The `:bytes` scale uses the generic `Op::Mul`, not `MulInt`: this is a
+/// synthesised node the checker never specialised.
 pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
     match spec {
         ast::BinSpec::Int { bits: Some(e) } => SpecWidth::Int(cx.expr(e)),
@@ -604,9 +548,8 @@ mod tests {
     const BINARY: TypeId = TypeId(5);
     const USER: TypeId = TypeId(9);
 
-    /// A `PatCtx` over a bare pool: constructors come from a table, expressions
-    /// elaborate to a marker `Nil` so the seam is exercised without dragging in
-    /// the expression elaborator.
+    /// A `PatCtx` over a bare pool: constructors come from a table and
+    /// expressions elaborate to a marker `Nil`.
     struct Ctx {
         pool: ResolvedPool,
         names: Vec<String>,
@@ -648,8 +591,7 @@ mod tests {
             self.pool.mk_con(USER, StrId(0), &[])
         }
 
-        /// Declare `name` as variant `idx` with the given labels and field
-        /// types.
+        /// Declare `name` as variant `idx`.
         fn ctor(&mut self, name: &str, idx: u16, labels: &[&'static str], tys: &[RTy]) {
             self.ctors
                 .insert(name.to_string(), (idx, labels.to_vec(), tys.to_vec()));
@@ -713,11 +655,9 @@ mod tests {
             self.int
         }
 
-        /// Mirrors `Elab`'s impl: an unresolved head and a width desync are both
-        /// compiler bugs, and both abort. `arity` comes from the declaration's
-        /// label list, as `ValueKind::Constructor`'s does.
+        /// The stub has no module table, so a qualifier resolves like a bare
+        /// name.
         fn resolve_ctor_pat_qualified(&mut self, _q: &str, name: &str, scrut: RTy) -> CtorPat {
-            // The stub has no module table; a qualifier resolves like a bare name.
             self.resolve_ctor_pat(name, scrut)
         }
 
@@ -819,7 +759,6 @@ mod tests {
             panic!("expected Ctor")
         };
         assert_eq!(variant.variant_idx, 3);
-        // Exactly the arity, in declared-field order: a, b, c.
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0], TypedPat::Wild { ty: int });
         assert_eq!(fields[1], TypedPat::Wild { ty: user });
@@ -841,8 +780,7 @@ mod tests {
             panic!("expected Ctor")
         };
         assert_eq!(fields.len(), 2);
-        // The `tail` slot no source arg filled still carries the heap type the
-        // Perceus pass needs — this is the arm that used to be an unsolved var.
+        // The unfilled `tail` slot still carries the heap type Perceus needs.
         assert_eq!(fields[1], TypedPat::Wild { ty: user });
         assert!(cx.pool.is_heap(fields[1].ty()));
     }
@@ -879,11 +817,9 @@ mod tests {
         let _ = elaborate_pattern(&mut cx, &ctor_pat("Nope", vec![], false), user);
     }
 
-    /// A `field_tys`/`labels` desync is a compiler bug, and it must be *loud*.
-    /// It must never produce a `TypedPat::Ctor` with a guessed field type —
-    /// guessing `Nil` loses Perceus's `Drop` for a heap field, guessing the
-    /// scrutinee's type invents a `Dup`/`Drop` against an immediate — and it
-    /// must never degrade to a wildcard, which silently matches everything.
+    /// A `field_tys`/`labels` desync must abort. Guessing `Nil` loses
+    /// Perceus's `Drop` for a heap field; guessing the scrutinee's type
+    /// invents a `Dup`/`Drop` against an immediate.
     #[test]
     #[should_panic(expected = "constructor field-type desync")]
     fn a_field_type_desync_is_reported_not_guessed() {
@@ -900,10 +836,9 @@ mod tests {
         );
     }
 
-    /// An arg `slot_labeled` cannot place — here an unknown label — is a slot
-    /// error the check walk reported, so a clean module cannot produce one.
-    /// It must abort rather than drop the sub-pattern: dropping it leaves its
-    /// binds unminted and the arm matching more than the source wrote.
+    /// An arg `slot_labeled` cannot place must abort, not be dropped:
+    /// dropping it leaves its binds unminted and the arm matching more than
+    /// the source wrote.
     #[test]
     #[should_panic(expected = "constructor pattern arg desync")]
     fn a_mis_slotted_pattern_arg_aborts_rather_than_dropping_it() {
@@ -933,9 +868,8 @@ mod tests {
         );
     }
 
-    /// An element after `..rest` — which the parser does not produce — must
-    /// abort, not be silently dropped: dropping it matches a shorter prefix
-    /// than the source pattern wrote.
+    /// An element after `..rest` must abort, not be dropped: dropping it
+    /// matches a shorter prefix than the source wrote.
     #[test]
     #[should_panic(expected = "array spread not last")]
     fn an_element_after_the_spread_aborts_rather_than_vanishing() {
@@ -956,9 +890,7 @@ mod tests {
         let _ = elaborate_pattern(&mut cx, &p, arr);
     }
 
-    /// The invariant the type carries: `arity`, `labels` and `field_tys` all
-    /// agree, or [`CtorPat::from_parts`] aborts. `CtorPat::new` cannot even
-    /// spell a disagreement — one `(label, ty)` pair per field.
+    /// `arity`, `labels` and `field_tys` all agree, or `from_parts` aborts.
     #[test]
     fn ctor_pat_pairs_one_field_type_with_each_label() {
         let mut cx = Ctx::new();
@@ -980,7 +912,6 @@ mod tests {
         assert_eq!(direct, ok);
     }
 
-    /// Each of the three widths is checked against the other two.
     #[test]
     #[should_panic(expected = "constructor field-type desync")]
     fn ctor_pat_from_parts_aborts_on_a_short_field_type_list() {
@@ -1045,7 +976,6 @@ mod tests {
         assert_eq!(elem_ty, user);
         assert_ne!(elem_ty, int);
         assert_eq!(prefix.len(), 1);
-        // The length check `lower` emits reads this, so it must be pooled here.
         assert_eq!(cx.consts[len.0 as usize].as_int(), Some(1));
         assert_eq!(prefix[0].ty(), user);
         match rest {
@@ -1138,7 +1068,7 @@ mod tests {
         };
         let p = elaborate_pattern(&mut cx, &or, user);
         let binds = pat_binds(&p);
-        // One `x`, however many alternatives mention it: the arm has one body.
+        // One `x`, however many alternatives mention it.
         assert_eq!(binds.len(), 1);
         assert_eq!(binds[0].id, BindingId(0));
         assert_eq!(cx.binds.len(), 1);
@@ -1159,11 +1089,9 @@ mod tests {
         assert_eq!(ids, vec![BindingId(0), BindingId(0)]);
     }
 
-    /// The check walk rejects `(x, x)` ("bound more than once in this
-    /// pattern" — see `crates/al/tests/unsound.rs` U12), so the elaborator
-    /// seeing one is a compiler bug. It must abort, never silently alias both
-    /// positions to a single binder — that would make `(x, x)` match any pair
-    /// and bind `x` to one arbitrary side.
+    /// The check walk rejects `(x, x)`, so seeing one here is a compiler bug.
+    /// Aliasing both positions to one binder would make `(x, x)` match any
+    /// pair and bind `x` to an arbitrary side.
     #[test]
     #[should_panic(expected = "duplicate binding in pattern alternative")]
     fn a_repeated_name_within_one_alternative_aborts() {
@@ -1177,9 +1105,8 @@ mod tests {
         let _ = elaborate_pattern(&mut cx, &p, tup);
     }
 
-    /// A name an earlier alternative legitimately bound is still a repeat
-    /// when one alternative binds it twice: only the cross-alternative
-    /// re-bind is the sanctioned reuse.
+    /// Only the cross-alternative re-bind is sanctioned reuse; binding a name
+    /// twice inside one alternative is still a repeat.
     #[test]
     #[should_panic(expected = "duplicate binding in pattern alternative")]
     fn a_repeat_inside_a_later_alternative_aborts() {
@@ -1196,9 +1123,8 @@ mod tests {
         let _ = elaborate_pattern(&mut cx, &or, user);
     }
 
-    /// What the alternatives bound folds back into the enclosing
-    /// alternative: `(A(x) | B(x), x)` repeats `x` within the one alternative
-    /// the whole tuple is.
+    /// `(A(x) | B(x), x)` repeats `x` within the one alternative the whole
+    /// tuple is.
     #[test]
     #[should_panic(expected = "duplicate binding in pattern alternative")]
     fn a_name_bound_in_an_or_is_a_repeat_after_it() {
@@ -1221,10 +1147,8 @@ mod tests {
     }
 
     /// The check walk exempts `_` from the once-per-alternative rule, and the
-    /// parser materializes a `.._` rest as a binding named `_` (a bare `_` var
-    /// becomes `Wildcard`, a rest does not). Two `_`-named rests in one
-    /// alternative — array or binary — are checker-clean and must elaborate as
-    /// discards, not trip the duplicate abort.
+    /// parser leaves a `.._` rest as a binding named `_`. Two of them in one
+    /// alternative must elaborate as discards, not trip the duplicate abort.
     #[test]
     fn underscore_rests_are_discards_and_never_duplicates() {
         let mut cx = Ctx::new();
@@ -1252,7 +1176,6 @@ mod tests {
             span: Span::DUMMY,
         };
         let p = elaborate_pattern(&mut cx, &p, tup_ty);
-        // No binder was minted for any `_`.
         assert_eq!(cx.binds.len(), 0);
         let TypedPat::Tuple { elems, .. } = &p else {
             panic!("expected Tuple")
@@ -1293,11 +1216,10 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out[0].guard.is_none());
         assert!(out[1].guard.is_some());
-        // Distinct arms, distinct bindings — the reuse map is per-pattern.
+        // Distinct arms, distinct bindings: the reuse map is per-pattern.
         assert_eq!(cx.binds.len(), 2);
         assert_eq!(cx.binds[0].id, BindingId(0));
         assert_eq!(cx.binds[1].id, BindingId(1));
-        // And no arm's binds outlive it.
         assert!(cx.scope.is_empty());
     }
 
@@ -1355,11 +1277,9 @@ mod tests {
         };
         assert_eq!(ty, bin_t);
         assert_eq!(segs.len(), 4);
-        // `lower` starts its bit cursor here and has no pool of its own.
         assert_eq!(cx.consts[zero.0 as usize].as_int(), Some(0));
 
         match &segs[0] {
-            // The literal's width is pooled, not carried as a bare `i64`.
             TypedBinPatSeg::Utf8Literal { bits, .. } => {
                 assert_eq!(cx.consts[bits.0 as usize].as_int(), Some(16));
             }

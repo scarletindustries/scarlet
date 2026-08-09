@@ -396,7 +396,13 @@ impl VM {
         let max = self.pop_int("h1.chunk_decode")?;
         let off = self.pop_int("h1.chunk_decode")?;
         let buf_v = self.pop_binary("h1.chunk_decode")?;
-        let v = http::chunk_decode(self.templates.h1()?, &mut self.heap, &bin_ref(&buf_v), off, max);
+        let v = http::chunk_decode(
+            self.templates.h1()?,
+            &mut self.heap,
+            &bin_ref(&buf_v),
+            off,
+            max,
+        );
         self.stack.push(v);
         Ok(())
     }
@@ -406,7 +412,12 @@ impl VM {
     pub(super) fn http_header_get(&mut self) -> VmResult<()> {
         let name_v = self.pop_binary("headers.get")?;
         let headers = self.pop()?;
-        let v = http::header_get(self.templates.h1()?, &mut self.heap, &headers, &bin_ref(&name_v))?;
+        let v = http::header_get(
+            self.templates.h1()?,
+            &mut self.heap,
+            &headers,
+            &bin_ref(&name_v),
+        )?;
         self.stack.push(v);
         Ok(())
     }

@@ -1775,7 +1775,6 @@ impl<'a> BodyGen<'a> {
         self.b.finalize();
     }
 
-
     fn slot_of(&self, id: LocalId) -> i32 {
         match self.layout.slot(id) {
             Some(s) => s,
@@ -1818,7 +1817,6 @@ impl<'a> BodyGen<'a> {
         let base = self.b.use_var(self.base);
         FrameSlots::new(&self.layout, base).store_slot_no_release(&mut self.b, slot, zero);
     }
-
 
     fn word_of(&mut self, id: LocalId) -> ir::Value {
         match self.words.get(id).copied().flatten() {
@@ -1911,7 +1909,6 @@ impl<'a> BodyGen<'a> {
             self.b.def_var(var, iv);
         }
     }
-
 
     /// Evaluate a non-call atom. `want_word` asks for an owned boxed word,
     /// `want_int` for the raw `i64` view.
@@ -2329,7 +2326,6 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-
     fn next_ctor_site(&mut self) -> EnumCtorSite {
         let Some(&site) = self.ctor_sites.get(self.ctor_cursor) else {
             ctor_walk_mismatch()
@@ -2442,7 +2438,6 @@ impl<'a> BodyGen<'a> {
         self.b.switch_to_block(merge);
         self.b.block_params(merge)[0]
     }
-
 
     fn next_resume(&mut self) -> i32 {
         let Some(&ip) = self.layout.call_resume_ips.get(self.resume_cursor) else {
@@ -2734,7 +2729,6 @@ impl<'a> BodyGen<'a> {
         self.b.ins().return_(&[status]);
     }
 
-
     /// `Op::Drop` for a covered body, `reusable` = the IR node carried a
     /// `ReuseShape`.
     ///
@@ -2836,7 +2830,6 @@ impl<'a> BodyGen<'a> {
 
         self.b.switch_to_block(done_block);
     }
-
 
     fn expr(&mut self, mut e: &CoreExpr, dst: Dest) {
         loop {
@@ -3415,7 +3408,6 @@ mod tests {
     use crate::typed_ir::RTy;
     use crate::types::PrimIds;
 
-
     fn int_pool() -> (ResolvedPool, RTy) {
         let mut pool = ResolvedPool::new(PrimIds {
             int: TypeId(1),
@@ -3464,7 +3456,6 @@ mod tests {
     fn local(i: u32) -> LocalId {
         LocalId(i)
     }
-
 
     struct FnMeta {
         arity: usize,
@@ -3968,7 +3959,6 @@ mod tests {
         panic!("http shim called from a clif unit test")
     }
 
-
     struct Jit {
         // Keeps the executable mapping alive for the entries' lifetime.
         _module: JITModule,
@@ -4129,7 +4119,6 @@ mod tests {
         (vm.stack.pop().unwrap(), yields)
     }
 
-
     /// An `EmitCtx` that pools constants for real — the compiler's
     /// `intern_*` behavior over a test-owned frozen area — so the emitted
     /// bytecode carries genuine ctor header constants for
@@ -4207,7 +4196,6 @@ mod tests {
         program.constants = ctx.consts;
         program
     }
-
 
     fn let_(id: u32, ty: RTy, rhs: Atom, body: CoreExpr) -> CoreExpr {
         CoreExpr::Let {
@@ -4321,7 +4309,6 @@ mod tests {
         ]
     }
 
-
     #[test]
     fn gate_accepts_the_a0_shapes_and_rejects_the_rest() {
         let (pool, int) = int_pool();
@@ -4431,7 +4418,6 @@ mod tests {
         let ok = compile(&mut module, &p, &native, &ok_program).unwrap();
         assert!(ok.is_some());
     }
-
 
     #[test]
     fn straight_line_return_of_a_constant() {

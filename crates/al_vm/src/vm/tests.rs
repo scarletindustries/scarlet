@@ -19,6 +19,7 @@ fn single_fn_program(
     let frozen = Arc::new(FrozenArea::new());
     let mut fb = frozen.builder();
     let constants = constants(&mut fb);
+    let (templates, abi) = crate::template::test_fixture::build(&mut fb);
     Program {
         constants,
         functions: vec![Function {
@@ -33,6 +34,8 @@ fn single_fn_program(
         entry: 0,
         frozen,
         native: Default::default(),
+        templates,
+        abi,
     }
 }
 
@@ -44,11 +47,7 @@ fn run_fn(
     code: Vec<Instruction>,
     locals: i32,
 ) -> (Value, VM) {
-    let mut vm = new_vm(
-        single_fn_program(constants, code, locals),
-        &crate::template::test_fixture::TEST_STDLIB,
-    )
-    .expect("vm must construct");
+    let mut vm = new_vm(single_fn_program(constants, code, locals)).expect("vm must construct");
     let value = vm.run().expect("vm must run without panicking or erroring");
     // `value` first: tuple fields drop in declaration order, and it must
     // decref before the VM's heap is destroyed.
@@ -509,7 +508,7 @@ fn array_slice_range_out_of_bounds_errors() {
         ],
         0,
     );
-    let err = new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
+    let err = new_vm(program)
         .expect("vm must construct")
         .run()
         .expect_err("slicing a range out of bounds must error");
@@ -720,13 +719,8 @@ fn donation_skips_never_spawned_workers() {
     use std::sync::atomic::Ordering;
 
     let program = single_fn_program(|_f| vec![], vec![op(Op::Halt)], 0);
-    let (rt, _poll) = sched::Runtime::new(
-        Arc::new(program),
-        Vec::new(),
-        &crate::template::test_fixture::TEST_STDLIB,
-        3,
-    )
-    .expect("runtime must construct");
+    let (rt, _poll) =
+        sched::Runtime::new(Arc::new(program), Vec::new(), 3).expect("runtime must construct");
     // Worker 1 spawned and is busier; worker 2's spawn failed, leaving an
     // empty slot and a permanent load of 0.
     let poll = mio::Poll::new().expect("poller must construct");
