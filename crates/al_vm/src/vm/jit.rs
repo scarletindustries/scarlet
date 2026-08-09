@@ -117,6 +117,10 @@ pub fn jit_module() -> Result<JITModule, JitError> {
         // re-read at every use. A frame must never hold a scheduler-derived
         // word across a suspension point.
         ("enable_pinned_reg", "true"),
+        // Cranelift's x64 backend refuses `return_call` without frame
+        // pointers (aarch64 does not care). The rbp push/pop per frame is
+        // part of the tail-call price on x64.
+        ("preserve_frame_pointers", "true"),
     ] {
         flags
             .set(name, value)
