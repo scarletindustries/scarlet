@@ -1337,8 +1337,7 @@ mod tests {
 
     #[test]
     fn dynamic_tail_call_collapses_with_the_closure_handle() {
-        // fn1: interpreter-only identity — the collapsed frame is driven
-        // under the frame floor when the caller's driver dispatches it.
+        // fn1: interpreter-only identity.
         let program = program_with(
             Vec::new(),
             vec![(1, 1, vec![op_arg(Op::PushLocal, 0), op(Op::Ret)])],
@@ -1356,8 +1355,6 @@ mod tests {
                 1,
             )
         };
-        // The caller frame is collapsed in place, the closure installed as
-        // its `captures` handle, and the driver is told to dispatch it.
         assert_eq!(status, NativeStatus::TailCall);
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.frames[0].func_idx, 1);

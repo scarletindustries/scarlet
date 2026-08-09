@@ -229,12 +229,9 @@ impl<'p> Perceus<'p> {
                     continue;
                 }
             };
-            // A local read by `rhs` and still live after is a non-last-use:
-            // reading dups (VM `PushLocal`), so the slot's own reference
-            // outlives this read. Newly dead at this let: rhs operands whose
-            // last read is here, plus the bind itself if the body never
-            // reads it. These drop between rhs and body — as early as
-            // Perceus permits, so reuse tokens are hot.
+            // Newly dead here: rhs operands whose last read is this one, plus
+            // the bind itself if the body never reads it. They drop between rhs
+            // and body, as early as Perceus permits, so reuse tokens are hot.
             let mut dead: Vec<LocalId> = frame
                 .rhs_live
                 .iter()

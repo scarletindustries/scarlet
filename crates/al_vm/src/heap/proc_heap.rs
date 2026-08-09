@@ -1,29 +1,21 @@
 //! [`ProcHeap`]: one process's allocator handle over mimalloc's per-thread
 //! default heap, under non-atomic reference counting.
 //!
-//! Objects are allocated with `mi_malloc_aligned` from the *calling thread's*
-//! default heap and freed individually with `mi_free` as their refcount hits
-//! zero. This is the thread-safe usage of mimalloc: an object may be allocated
-//! on one scheduler core and freed on another (after a process migrates), and
-//! `mi_free` routes the block back to its owning heap's atomic thread-free list.
+//! Objects come from the *calling thread's* default heap and are freed
+//! individually with `mi_free` at refcount zero. `mi_free` routes a block back
+//! to its owning heap, so a process that migrates may free on a different core
+//! than it allocated on.
 //!
-//! We deliberately do NOT use per-process `mi_heap_t`s: a `mi_heap_t` is bound
-//! to its creating thread, so a process's heap built on the spawner and then
-//! run on a worker would be allocated from off-thread — undefined behaviour.
-//! With the default-heap model, a process never owns heap state that has to
-//! cross threads; only its `Value`s (plain words) do, and reference counting
-//! reclaims its graph when the process's roots drop at death.
-//!
-//! [`ProcHeap`] is therefore a zero-sized handle: it exists to give the `Arena`
-//! impl a receiver and to name the two graph-copy entry points ([`spawn`] and
-//! [`publish_frozen`]). There is no collector: no rooting rule, no generations,
-//! no safepoints.
+//! Per-process `mi_heap_t`s would be unsound: a `mi_heap_t` is bound to its
+//! creating thread, so a heap built on the spawner and run on a worker would
+//! allocate off-thread. That is why `ProcHeap` is a zero-sized handle — it
+//! exists to give the `Arena` impl a receiver and to name [`spawn`] and
+//! [`publish_frozen`]. There is no collector, no rooting rule, no safepoints.
 //!
 //! [`spawn`]: ProcHeap::spawn
 //! [`publish_frozen`]: ProcHeap::publish_frozen
 
-// Designated unsafe module: the mimalloc FFI lives here, behind a safe API.
-#![allow(unsafe_code)]
+#![allow(unsafe_code)] // the mimalloc FFI lives here, behind a safe API
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -42,13 +34,9 @@ use crate::frozen::{FrozenBuilder, FrozenConst};
 #[cfg(feature = "alloc-counter")]
 thread_local! {
     /// Test hook: running count of [`ProcHeap::alloc_object`] calls on THIS
-    /// thread. Thread-local (not a process-global atomic) so each Rust test —
-    /// which the default libtest harness runs on its own thread — reads and
-    /// resets an isolated counter; a global would race with the many
-    /// `value`/`hamt` unit tests that allocate in parallel and make exact
-    /// net-allocation assertions (the point of the Perceus reuse tests)
-    /// impossible. The reuse tests drive the VM in-process without spawning
-    /// worker schedulers, so all counted allocations happen on the test thread.
+    /// thread. Thread-local, not a global atomic, so parallel tests do not
+    /// race each other's exact net-allocation assertions. Sound because the
+    /// reuse tests drive the VM without spawning worker schedulers.
     static ALLOC_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

@@ -362,16 +362,13 @@ mod tests {
         (module, code)
     }
 
-    /// A test frame: `Vec<Value>` slots exactly as the interpreter lays them
-    /// out at `frame.base_slot`. Returns the base pointer generated code
-    /// addresses slots against.
+    /// The base pointer generated code addresses slots against.
     fn frame_base(frame: &mut [Value]) -> i64 {
         frame.as_mut_ptr() as i64
     }
 
     fn layout_with_slots(n: u32) -> FrameLayout {
-        // Emit a body that binds locals %0..%n-1 as params: params always own
-        // slots 0.., which is all these tests address.
+        // Params always own slots 0.., which is all these tests address.
         use crate::core_ir::testkit;
         use crate::core_ir::{Atom, CoreExpr};
         use crate::typed_ir::RTy;

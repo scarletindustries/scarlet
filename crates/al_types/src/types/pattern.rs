@@ -66,9 +66,7 @@ impl PatternBindings {
         self.initial.clear();
     }
 
-    /// Iterate the canonical bindings this pattern introduces, in insertion
-    /// order. This is the read-only view the compiler uses to allocate locals
-    /// once `type_pattern` has finished.
+    /// The canonical bindings this pattern introduces, in insertion order.
     pub fn bindings(&self) -> impl Iterator<Item = (&str, &(Ty, Span))> {
         self.initial.iter().map(|(k, v)| (k.as_str(), v))
     }

@@ -304,9 +304,8 @@ fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
     );
 }
 
-/// A `..base` spread unifies the constructor's result type — and with it its
-/// type parameters — before any argument is checked, so a function-literal
-/// argument still gets a concrete parameter type pushed into it.
+/// A `..base` spread must unify the result type before any argument is checked,
+/// so a function-literal argument still gets a concrete parameter type.
 #[test]
 fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     common::run_outputs(

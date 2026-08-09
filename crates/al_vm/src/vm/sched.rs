@@ -495,41 +495,22 @@ impl Runtime {
         (my_load >= len + 2).then_some(peer)
     }
 
-    /// Publish scheduler `me`'s runnable count (running + queued) for
-    /// donors' [`Runtime::pick_underloaded_peer`] scans. Called after every
-    /// change to the count — and always after draining the inbox, so the
-    /// in-flight bumps from `donate`/`submit` are folded into the owner's
-    /// own report rather than double-counted — and once more before the
-    /// owner parks empty, clearing a bump whose work a peer stole away
-    /// (see the [`SchedSlot::run_len`] doc).
+    /// Publish scheduler `me`'s runnable count for donors to read. Must be
+    /// called after draining the inbox, so in-flight bumps are folded in rather
+    /// than double-counted, and again before parking empty.
     pub fn publish_load(&self, me: usize, len: usize) {
         self.slots[me].run_len.store(len, Ordering::Relaxed);
     }
 
     /// Hand a migrating process to a busy `peer` chosen by
-    /// [`Runtime::pick_underloaded_peer`] — the load-leveling path when no
-    /// scheduler is idle. A busy peer may have parked on I/O between being
-    /// chosen and the push, so it is notified (`notify` is sticky, so the
-    /// worst case for a peer that stayed busy is one spurious poll wakeup).
-    /// For a claimed idle peer, use [`Runtime::hand`] instead so the
-    /// [`Claim`] is consumed.
+    /// [`Runtime::pick_underloaded_peer`]. Use [`Runtime::hand`] for a claimed
+    /// idle peer instead, so the [`Claim`] is consumed. The load is bumped here
+    /// so a freshly fed peer is not dog-piled before it reports its own count.
     ///
-    /// The destination's published load is bumped here, when the migrant
-    /// becomes visible to other donors, so a freshly fed peer is not
-    /// dog-piled before it can report its own count.
-    ///
-    /// Deliberately NOT routed through [`Runtime::submit`]: a migrant is an
-    /// already-running process, so it is already counted in `live`, and
-    /// counting it again would leave `live` permanently above zero — the
-    /// program would never shut down. The same fact closes the shutdown
-    /// race: a migrant in transit holds `live > 0`, so no scheduler can
-    /// observe program-end and exit while a process sits in transit in an
-    /// inbox.
-    ///
-    /// Migrants are only ever direct-handed like this, never queued to the
-    /// shared injector (which stays `Seed`-only): with no chosen
-    /// destination, a migrant could strand in the overflow queue behind
-    /// busy schedulers — exactly the imbalance donation exists to fix.
+    /// Must NOT go through [`Runtime::submit`]: a migrant is already counted in
+    /// `live`, and counting it twice would keep `live` above zero and the
+    /// program would never shut down. That count is also what stops a scheduler
+    /// observing program-end while a process sits in transit.
     pub fn donate(&self, peer: usize, m: Migrant) {
         let slot = &self.slots[peer];
         slot.run_len.fetch_add(1, Ordering::Relaxed);
@@ -537,9 +518,8 @@ impl Runtime {
         self.notify(peer);
     }
 
-    /// Take the work destined for scheduler `me`: everything handed to its
-    /// inbox (seeds and migrants), plus (when the inbox is empty) up to
-    /// [`SEED_BATCH`] seeds from the shared overflow queue.
+    /// Take the work destined for scheduler `me`, plus up to [`SEED_BATCH`]
+    /// overflow seeds when its own inbox is empty.
     pub fn take_inbound(&self, me: usize) -> Vec<Inbound> {
         let mut out = self.take_directed(me);
         if out.is_empty() {

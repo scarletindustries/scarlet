@@ -183,24 +183,22 @@ pub struct TypedDiscard {
     pub span: Span,
 }
 
-/// `Ctor(p1, ..) = expr` at statement position. An irrefutable single-arm
-/// destructure; the compiler lowers it to a one-arm match and exhaustiveness
-/// must accept it (so only single-constructor types qualify).
+/// `Ctor(p1, ..) = expr` at statement position. Lowered to a one-arm match
+/// that must pass exhaustiveness, so only single-constructor types qualify.
 #[derive(Debug, Clone)]
 pub struct CtorDestructuringBinding {
     pub name: Identifier,
     pub args: Vec<PatternArg>,
     pub rest: bool,
-    /// Span of just the `Ctor(args)` head, not the `= init` tail — this is what
-    /// diagnostics against the reconstructed pattern should point at.
+    /// Span of just the `Ctor(args)` head, not the `= init` tail.
     pub pattern_span: Span,
     pub init: Expression,
     pub span: Span,
 }
 
 impl CtorDestructuringBinding {
-    /// Re-materialise the constructor pattern for consumers that operate on
-    /// the general [`Pattern`] shape (typing, exhaustiveness, codegen).
+    /// Re-materialise the constructor pattern for consumers of the general
+    /// [`Pattern`] shape.
     pub fn as_pattern(&self) -> Pattern {
         Pattern::Constructor {
             qualifier: None,

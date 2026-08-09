@@ -1374,10 +1374,8 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         }
     }
 
-    /// A `None` here means the scrutinee's type is not the tuple the pattern
-    /// matched against — a typechecker bug. Defaulting to `Nil` would hand
-    /// Perceus a non-heap type for a possibly-heap element and silently lose
-    /// its `Drop`.
+    /// Aborts on `None`: defaulting to `Nil` would hand Perceus a non-heap type
+    /// for a possibly-heap element and silently lose its `Drop`.
     fn tuple_elem_ty(&mut self, t: RTy, i: usize) -> RTy {
         match self.pool.tuple_elem(t, i) {
             Some(t) => t,
@@ -1385,7 +1383,7 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         }
     }
 
-    /// As [`Self::tuple_elem_ty`]: `lower`'s `con_arg(vty, 0, span)`.
+    /// As [`Self::tuple_elem_ty`], for an array's element type.
     fn array_elem_ty(&mut self, t: RTy) -> RTy {
         match self.pool.con_arg(t, 0) {
             Some(t) => t,

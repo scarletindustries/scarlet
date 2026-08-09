@@ -217,20 +217,14 @@ impl Workspace {
             .filter(|x| x.kind.is_reference_site())
     }
 
-    // ========================================================================
-    // Analysis
-    // ========================================================================
-
     pub(super) fn analyze_document(&mut self, uri: &str, text: &str) -> Vec<Json> {
         self.ensure_workspace_scanned();
         self.analyze_text(uri, text)
     }
 
-    /// One-time recursive scan of every workspace root for `.al` files,
-    /// analysing each so its module is compiled/cached and its positions are
-    /// indexed in `documents`. Without this a file imported by neither the
-    /// open file nor its transitive imports is never compiled, so its
-    /// references stay invisible to workspace-wide queries.
+    /// One-time recursive scan of every workspace root for `.al` files.
+    /// Without it, a file outside the open file's import closure is never
+    /// compiled and its references stay invisible to workspace-wide queries.
     pub(super) fn ensure_workspace_scanned(&mut self) {
         if self.scanned {
             return;
