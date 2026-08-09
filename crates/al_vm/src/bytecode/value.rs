@@ -353,15 +353,18 @@ fn reuse_or_alloc<A: Arena + ?Sized>(
         return alloc_obj(a, tag, payload_words, false);
     };
     // SAFETY: `obj` is a live mortal header at rc==1 whose children are
-    // already released. Its allocation is `1 + payload_words` words because
-    // the compiler only pairs a reuse with a same-shape constructor.
+    // already released. The compiler pairs a reuse only with a same-shape
+    // constructor; the size check below keeps a mispairing memory-safe in
+    // release by falling back to a fresh allocation.
     unsafe {
         debug_assert!(!a.marks_immortal(), "Perceus reuse into a frozen arena");
-        debug_assert_eq!(
-            header_total_words(*obj.as_ptr()),
-            1 + payload_words,
-            "Perceus reuse shape mismatch"
-        );
+        if header_total_words(*obj.as_ptr()) != 1 + payload_words {
+            debug_assert!(false, "Perceus reuse shape mismatch");
+            // Children are already hollowed to immediates, so the cell frees
+            // without a walk.
+            free_object(obj.as_ptr());
+            return alloc_obj(a, tag, payload_words, false);
+        }
         debug_assert_eq!(*rc_slot(obj.as_ptr()), 1, "Perceus reuse of a shared cell");
         #[cfg(debug_assertions)]
         for_each_child(obj.as_ptr(), &mut |child: &mut Value| {
@@ -424,16 +427,25 @@ pub(crate) fn view_mismatch(kind: &'static str) -> ! {
 }
 
 /// Every child stored into a frozen object must be an immediate or immortal:
-/// a mortal process-heap pointer frozen into a constant would outlive its
-/// heap. Debug builds only.
+/// A compiler-proven invariant failed at runtime. Aborting beats silently
+/// substituting a wrong value: the program answer would be garbage either way,
+/// and the abort names the bug. Cold by construction — the check guarding each
+/// call is on the proven-correct path.
 #[cold]
 #[inline(never)]
-fn debug_assert_frozen_children<'a>(children: impl IntoIterator<Item = &'a Value>) {
+pub(crate) fn proof_violation(what: &str) -> ! {
+    eprintln!("al_vm: internal invariant violated: {what} (compiler bug)");
+    std::process::abort()
+}
+
+#[inline(never)]
+fn assert_frozen_children<'a>(children: impl IntoIterator<Item = &'a Value>) {
     for child in children {
-        debug_assert!(
-            !child.is_heap() || child.is_immortal(),
-            "mortal value frozen into a constant"
-        );
+        if child.is_heap() && !child.is_immortal() {
+            // Release too: a frozen pointer to a mortal value dangles the
+            // moment its owning process dies, and the freeze path is cold.
+            proof_violation("mortal value frozen into a constant");
+        }
     }
 }
 
@@ -532,7 +544,7 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
     tail: Value,
 ) -> Value {
     if a.marks_immortal() {
-        debug_assert_frozen_children([&head, &tree, &tail]);
+        assert_frozen_children([&head, &tree, &tail]);
     }
     let obj = alloc_obj(a, HeapTag::Seq, 5, false);
     // SAFETY: freshly allocated 5-word payload; header written by `alloc_obj`.
@@ -551,7 +563,7 @@ pub(crate) fn seq_root_in<A: Arena + ?Sized>(
 #[inline]
 pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Value {
     if a.marks_immortal() {
-        debug_assert_frozen_children(items);
+        assert_frozen_children(items);
     }
     let obj = alloc_obj(a, HeapTag::SeqLeaf, 1 + items.len(), false);
     // SAFETY: freshly allocated payload of exactly 1 + len words; header
@@ -600,7 +612,7 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
     children: &[Value],
 ) -> Value {
     if a.marks_immortal() {
-        debug_assert_frozen_children(children);
+        assert_frozen_children(children);
     }
     let n = children.len();
     let obj = alloc_obj(a, HeapTag::SeqBranch, 2 + 2 * n, false);
@@ -687,7 +699,7 @@ impl<'a> HamtNodeRef<'a> {
 #[inline]
 pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Value) -> Value {
     if a.marks_immortal() {
-        debug_assert_frozen_children([&key, &value]);
+        assert_frozen_children([&key, &value]);
     }
     let obj = alloc_obj(a, HeapTag::HamtEntry, 2, false);
     // SAFETY: freshly allocated 2-word payload; header written by `alloc_obj`.
@@ -705,7 +717,7 @@ pub(crate) fn hamt_entry_in<A: Arena + ?Sized>(a: &mut A, key: Value, value: Val
 pub(crate) fn hamt_collision_in<A: Arena + ?Sized>(a: &mut A, hash: u64, pairs: &[Value]) -> Value {
     debug_assert!(pairs.len() >= 4 && pairs.len().is_multiple_of(2));
     if a.marks_immortal() {
-        debug_assert_frozen_children(pairs);
+        assert_frozen_children(pairs);
     }
     let count = pairs.len() / 2;
     let obj = alloc_obj(a, HeapTag::HamtCollision, 2 + pairs.len(), false);
@@ -732,7 +744,7 @@ pub(crate) fn hamt_branch_in<A: Arena + ?Sized>(
 ) -> Value {
     debug_assert_eq!(bitmap.count_ones() as usize, children.len());
     if a.marks_immortal() {
-        debug_assert_frozen_children(children);
+        assert_frozen_children(children);
     }
     let obj = alloc_obj(a, HeapTag::HamtBranch, 1 + children.len(), false);
     // SAFETY: freshly allocated payload of exactly 1 + n words; header written
@@ -795,7 +807,7 @@ impl HamtMapRef {
 #[inline]
 pub(crate) fn hamt_map_in<A: Arena + ?Sized>(a: &mut A, size: usize, root: Value) -> Value {
     if a.marks_immortal() {
-        debug_assert_frozen_children([&root]);
+        assert_frozen_children([&root]);
     }
     let obj = alloc_obj(a, HeapTag::Map, 3, false);
     // SAFETY: freshly allocated 3-word payload; header written by `alloc_obj`.
@@ -1156,7 +1168,7 @@ impl Value {
     /// Allocation: `2 + elements.len()` words.
     pub fn tuple_in<A: Arena + ?Sized>(a: &mut A, elements: &[Value]) -> Value {
         if a.marks_immortal() {
-            debug_assert_frozen_children(elements);
+            assert_frozen_children(elements);
         }
         let obj = alloc_obj(a, HeapTag::Tuple, 1 + elements.len(), false);
         // SAFETY: payload sized for the count word plus the elements; header
@@ -1187,7 +1199,7 @@ impl Value {
     /// Allocation: `3 + captures.len()` words.
     pub fn closure_in<A: Arena + ?Sized>(a: &mut A, func_idx: i32, captures: &[Value]) -> Value {
         if a.marks_immortal() {
-            debug_assert_frozen_children(captures);
+            assert_frozen_children(captures);
         }
         let obj = alloc_obj(a, HeapTag::Closure, 2 + captures.len(), false);
         // SAFETY: payload sized for func_idx + count + captures; header written
@@ -1254,10 +1266,24 @@ impl Value {
         debug_assert!(enum_name.is_tag(HeapTag::Str) && variant_name.is_tag(HeapTag::Str));
         debug_assert!(labels.is_tag(HeapTag::Tuple));
         if a.marks_immortal() {
-            debug_assert_frozen_children(
+            assert_frozen_children(
                 [&enum_name, &variant_name, &labels]
                     .into_iter()
                     .chain(payload),
+            );
+        }
+        #[cfg(debug_assertions)]
+        if hash != 0 {
+            // 0 means "lazy"; anything else must be the real hash, or equal
+            // enums silently compare unequal via the fast-reject.
+            let prefix = enum_name_prefix_hash(
+                enum_name.as_str().unwrap_or(""),
+                variant_name.as_str().unwrap_or(""),
+            );
+            debug_assert_eq!(
+                hash,
+                enum_hash_with_payload(prefix, payload),
+                "enum_in called with a wrong precomputed hash"
             );
         }
         let obj = reuse_or_alloc(a, reuse, HeapTag::Enum, 6 + payload.len());
@@ -1406,16 +1432,17 @@ impl Value {
         }
     }
     /// Int payload of a value the compiler has proven to be an int (the typed
-    /// `*Int` opcodes). "Typed", not "unchecked": misuse is never undefined
-    /// behavior. A non-int falls back to 0 in release, which only keeps misuse
-    /// memory-safe — reaching it is a compiler bug.
+    /// `*Int` opcodes). "Typed", not "unchecked": misuse aborts rather than
+    /// silently computing with a substituted value.
     #[inline(always)]
     pub fn as_int_typed(&self) -> i64 {
-        debug_assert!(self.is_int());
         if self.is_small_int() {
             self.small_int_value()
         } else {
-            self.as_int().unwrap_or(0)
+            match self.as_int() {
+                Some(i) => i,
+                None => proof_violation("*Int opcode on a non-int"),
+            }
         }
     }
     #[inline(always)]
@@ -1426,12 +1453,14 @@ impl Value {
             None
         }
     }
-    /// Float payload under [`Value::as_int_typed`]'s contract: misuse is
-    /// memory-safe but yields the raw NaN-box bits as an `f64`.
+    /// Float payload under [`Value::as_int_typed`]'s contract: misuse aborts.
     #[inline(always)]
     pub fn as_float_typed(&self) -> f64 {
-        debug_assert!(self.is_float());
-        f64::from_bits(self.0)
+        if self.is_float() {
+            f64::from_bits(self.0)
+        } else {
+            proof_violation("*Float opcode on a non-float")
+        }
     }
     #[inline(always)]
     pub fn as_bool(&self) -> Option<bool> {
@@ -1523,18 +1552,19 @@ impl Value {
         }
     }
     /// Payload field `idx` of a value the compiler has proven to be an enum
-    /// with more than `idx` fields (`GetFieldUnchecked`). A wrong tag falls
-    /// back to `nil` in release, but an out-of-bounds `idx` on a real enum is
-    /// NOT guarded there — the compiler must never emit one.
+    /// with more than `idx` fields (`GetFieldUnchecked`). The proof is
+    /// re-checked against the header's payload count — one compare on a word
+    /// already in cache — so a compiler bug aborts instead of reading
+    /// arbitrary heap words.
     #[inline(always)]
     pub fn enum_field_typed(&self, idx: usize) -> Value {
-        debug_assert!(self.as_enum().is_some_and(|e| idx < e.payload().len()));
-        if self.is_tag(HeapTag::Enum) {
-            // SAFETY: tag-checked Enum; payload fields start at word 6
-            // (see `EnumRef::payload`). `idx` is compiler-proven in-bounds.
-            unsafe { payload_value(self.heap_obj(), 6 + idx) }
-        } else {
-            Value::nil()
+        match self.as_enum() {
+            Some(e) if idx < e.payload().len() => {
+                // SAFETY: tag-checked Enum with `idx` bounded by the payload
+                // count; payload fields start at word 6 (see `EnumRef::payload`).
+                unsafe { payload_value(self.heap_obj(), 6 + idx) }
+            }
+            _ => proof_violation("GetFieldUnchecked outside its proof"),
         }
     }
 

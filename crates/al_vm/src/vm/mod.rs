@@ -92,9 +92,6 @@ pub mod op_histogram;
 pub mod perf_map;
 mod poll;
 mod sched;
-/// Per-process native stack regions and switch primitives. Dormant until
-/// suspension uses them.
-pub mod stack;
 mod templates;
 #[cfg(test)]
 mod tests;
@@ -133,9 +130,6 @@ pub enum VmError {
     Internal(Cow<'static, str>),
     /// mio poll / fd registration / OS resource failure.
     Io(std::io::Error),
-    /// The pooled native-stack budget is exhausted: `live` stacks against a cap
-    /// derived from `vm.max_map_count` (each stack costs two VMAs).
-    StackBudget { live: usize, cap: usize },
 }
 
 impl VmError {
@@ -172,14 +166,6 @@ impl fmt::Display for VmError {
                 write!(f, "internal VM error (likely a compiler bug): {s}")
             }
             Self::Io(e) => write!(f, "scheduler I/O failed: {e}"),
-            Self::StackBudget { live, cap } => {
-                write!(
-                    f,
-                    "cannot allocate a process stack: {live} live at the \
-                     vm.max_map_count budget ({cap}); raise the sysctl or \
-                     spawn fewer concurrent processes"
-                )
-            }
         }
     }
 }
@@ -246,11 +232,6 @@ struct Process {
     native_floor: usize,
     native_reds: i32,
     native_pending: Option<Box<NativePending>>,
-    /// A suspended native-stack computation. Always `None` today. Once
-    /// populated, a process is EITHER fully described by `frames` OR carries
-    /// the machine half here, never both, so the interpreter can never
-    /// re-execute a frame that survives on a parked stack.
-    parked: Option<stack::ParkedStack>,
 }
 
 /// A tabled TCP connection: the stream plus its controlling process.
@@ -276,10 +257,7 @@ pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 // A migrant crosses an OS-thread boundary as a plain move. This must hold by
-// construction, never via an unsafe Send impl on `Process` itself. Two
-// components do carry audited unsafe impls of their own; for those, this bound
-// is structural only, and thread-affinity of a parked stack's contents is
-// guarded by the process-stack purity invariant in `vm::stack`.
+// construction, never via an unsafe Send impl on `Process` itself.
 const _: () = crate::assert_send::<Process>();
 
 /// Borrow the string contents of a value `pop_str` already type-checked.
@@ -327,6 +305,10 @@ pub struct VM {
     /// `Runtime.shared_listeners`; the fd closes when the last clone drops.
     tcp_listeners: HashMap<i32, Arc<TcpListener>>,
     tcp_connections: HashMap<i32, Conn>,
+    /// Connection ids by owning pid — the death path's index, kept in
+    /// lockstep with `tcp_connections` by track/evict. A stale id (already
+    /// evicted) is skipped on drain, so eviction need not scrub this map.
+    conns_by_owner: HashMap<u64, Vec<i32>>,
     /// Outbound connections whose non-blocking connect is still in flight,
     /// keyed by their already-allocated socket id.
     pending_connects: HashMap<i32, socket2::Socket>,
@@ -406,6 +388,9 @@ pub struct VM {
     /// `Op::PushGlobal`. On scheduler 0 it mirrors main's frame; workers
     /// hydrate it from the runtime's shared area.
     globals: Vec<Value>,
+    /// Which `globals` slots scheduler 0 has published, so an identical
+    /// re-store skips the frozen-area copy. Meaningful on scheduler 0 only.
+    globals_published: Vec<bool>,
     /// The shared-area version this scheduler last hydrated from.
     globals_synced_version: u64,
 }
@@ -463,6 +448,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         next_socket_id: 1,
         tcp_listeners: HashMap::new(),
         tcp_connections: HashMap::new(),
+        conns_by_owner: HashMap::new(),
         pending_connects: HashMap::new(),
         read_scratch: Vec::new(),
         current_is_main: false,
@@ -482,6 +468,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         runtime,
         scheduler_index: index,
         globals: vec![Value::nil(); globals_len],
+        globals_published: Vec::new(),
         globals_synced_version: 0,
     }
 }
@@ -541,22 +528,31 @@ impl VM {
         self.current_pid = self.runtime.alloc_pid();
         let mut result = self.scheduler_loop();
 
-        // On Ok the global live count is zero, so workers are exiting: join
-        // them. On Err nothing is shut down, by contract. An errored main never
-        // decrements `live`, so the count cannot reach zero and joining would
-        // park forever; the whole runtime is deliberately leaked instead. The
-        // CLI exits right after and reaps it; the REPL pays one leaked runtime
-        // per errored evaluation.
-        if result.is_ok() {
-            let rt = &self.runtime;
-            rt.shutdown_blocking();
-            let workers = std::mem::take(&mut *lock(&rt.workers));
-            for handle in workers {
-                if handle.join().is_err() {
-                    eprintln!("scheduler: a worker thread terminated abnormally");
-                    result = Err(VmError::internal("a scheduler thread panicked"));
-                }
+        // On Ok the global live count is zero, so workers exit on their own.
+        // On Err the count never reaches zero (the errored main cannot
+        // decrement it), so the fault flag forces every scheduler out of its
+        // wait instead — either way the workers can be joined and the runtime
+        // reclaimed, which is what keeps a long-lived embedder (the REPL)
+        // from leaking a thread set per errored evaluation.
+        let rt = Arc::clone(&self.runtime);
+        if result.is_err() {
+            rt.raise_fault_flag();
+        }
+        rt.shutdown_blocking();
+        let workers = std::mem::take(&mut *lock(&rt.workers));
+        for handle in workers {
+            if handle.join().is_err() {
+                eprintln!("scheduler: a worker thread terminated abnormally");
+                result = Err(VmError::internal("a scheduler thread panicked"));
             }
+        }
+        // A worker's fault outranks a clean main result: the program did not
+        // actually finish, part of it was aborted.
+        if result.is_ok()
+            && let Some((index, e)) = rt.take_fault()
+        {
+            eprintln!("al: scheduler {index} failed");
+            result = Err(e);
         }
         result
     }
@@ -567,12 +563,6 @@ impl VM {
     /// schedulers return Nil when the program is over.
     fn scheduler_loop(&mut self) -> VmResult<Value> {
         loop {
-            // Shims read the scheduler from this thread-local, never from
-            // anything that travelled with a process. Re-published at the top
-            // of every slice, after any resume, which is what the
-            // process-stack purity invariant requires.
-            native::set_current_vm(self);
-
             if self.frames.is_empty() && !self.acquire_work()? {
                 // Program over. Re-adopt main's arena before handing the value
                 // out: the value points into that heap, which must then live as
@@ -661,16 +651,11 @@ impl VM {
             native_floor: std::mem::take(&mut self.native_floor),
             native_reds: std::mem::take(&mut self.native_reds),
             native_pending: self.native_pending.take(),
-            parked: None,
         }
     }
 
     /// Make `p` the running process.
     fn resume(&mut self, p: Process) {
-        debug_assert!(
-            p.parked.is_none(),
-            "nothing parks a native stack yet; resuming one needs the Stage-2 dispatch arm"
-        );
         self.heap = p.heap;
         self.stack = p.stack;
         self.frames = p.frames;
@@ -759,6 +744,11 @@ impl VM {
     /// Returns false once the whole program has finished.
     fn acquire_work(&mut self) -> VmResult<bool> {
         loop {
+            // 0. A fault anywhere ends the program: drain out, dropping local
+            // work. `raise_fault` woke every scheduler so this check is seen.
+            if self.runtime.is_faulted() {
+                return Ok(false);
+            }
             // 1. Local runnable processes.
             if let Some(p) = self.run_queue.pop_front() {
                 self.resume(p);
@@ -1006,17 +996,19 @@ impl VM {
     /// Scans every live connection on this scheduler per process death, behind
     /// an emptiness gate so compute-only programs pay one branch.
     fn release_connections_of(&mut self, pid: u64) {
-        if self.tcp_connections.is_empty() {
+        let Some(ids) = self.conns_by_owner.remove(&pid) else {
             return;
-        }
-        let dead: Vec<i32> = self
-            .tcp_connections
-            .iter()
-            .filter(|&(_, conn)| conn.owner == pid)
-            .map(|(&id, _)| id)
-            .collect();
-        for id in dead {
-            drop(self.evict_connection(id));
+        };
+        for id in ids {
+            // Skip ids already evicted (close, migration): the index is
+            // append-only between deaths.
+            if self
+                .tcp_connections
+                .get(&id)
+                .is_some_and(|c| c.owner == pid)
+            {
+                drop(self.evict_connection(id));
+            }
         }
     }
 
@@ -1058,7 +1050,6 @@ impl VM {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
-            parked: None,
         });
     }
 
@@ -1112,11 +1103,10 @@ fn worker_main(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) {
 
     // Workers have no main process; scheduler_loop starts by acquiring work.
     if let Err(e) = vm.scheduler_loop() {
-        // A VM error means a compiler bug: program state is unreliable and
-        // there is no path to hand the error to scheduler 0, so it takes down
-        // the whole process, even a long-lived embedder.
-        eprintln!("al: scheduler {index} failed: {e}");
-        std::process::exit(1);
+        // A VM error means a compiler bug. Hand it to scheduler 0 through the
+        // runtime's fault slot — which also drains every other scheduler —
+        // so an embedder can report it instead of losing the whole process.
+        vm.runtime.raise_fault(vm.scheduler_index, e);
     }
 }
 

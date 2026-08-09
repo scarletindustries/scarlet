@@ -505,8 +505,10 @@ pub enum SpecWidth {
 /// elaboration so the two cannot drift. `lower` reads each width as a plain
 /// `Int` expression and never re-derives the default or the unit.
 ///
-/// The `:bytes` scale uses the generic `Op::Mul`, not `MulInt`: this is a
-/// synthesised node the checker never specialised.
+/// The `:bytes` scale multiplies with `Op::MulInt`: both operands are `Int`
+/// by construction (the width expression is checked `Int`, the scale is a
+/// synthesised `Int` constant), so the typed op applies even though the
+/// checker never saw the node.
 pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
     match spec {
         ast::BinSpec::Int { bits: Some(e) } => SpecWidth::Int(cx.expr(e)),
@@ -521,7 +523,7 @@ pub fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth {
             let eight = cx.int_const(8);
             SpecWidth::Bytes(Some(TypedExpr::Binary {
                 ty,
-                op: Op::Mul,
+                op: Op::MulInt,
                 lhs: Box::new(v),
                 rhs: Box::new(TypedExpr::Const { ty, value: eight }),
             }))
@@ -1305,7 +1307,7 @@ mod tests {
                 bits: Some(bits), ..
             } => match bits {
                 TypedExpr::Binary { op, rhs, .. } => {
-                    assert_eq!(*op, Op::Mul);
+                    assert_eq!(*op, Op::MulInt);
                     let TypedExpr::Const { value, .. } = rhs.as_ref() else {
                         panic!("{rhs:?}")
                     };

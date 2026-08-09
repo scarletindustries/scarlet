@@ -213,22 +213,13 @@ impl Parser {
 
     // Skips tokens until a plausible resumption point for the current context.
     // Never touches the context stack: the frame that pushed always pops.
+    // Terminates structurally: every iteration either returns or ends in the
+    // unconditional `advance()` at the bottom, so progress is one token per
+    // pass and Eof is reached in at most token-count iterations.
     fn synchronize(&mut self) -> SyncOutcome {
         let ctx = self.current_context();
-        let mut iterations = 0u32;
 
         while self.kind() != Kind::Eof {
-            iterations += 1;
-            if iterations > 1000 {
-                self.add_error(
-                    "Parser recovery failed: too many recovery attempts. This is a bug in the parser."
-                        .to_string(),
-                );
-                while self.kind() != Kind::Eof {
-                    self.advance();
-                }
-                return SyncOutcome::AtItem;
-            }
             let delim: Option<(Kind, &[Kind])> = match ctx {
                 ParseContext::TopLevel => {
                     if matches!(

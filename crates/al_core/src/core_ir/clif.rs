@@ -75,6 +75,7 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
     self, AbiParam, InstBuilder, JumpTableData, MemFlagsData, StackSlotData, StackSlotKind, types,
 };
+use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module, ModuleError};
 
@@ -1517,6 +1518,7 @@ fn declare_native_peers<M: Module>(
 ) -> Result<HashMap<FuncIdx, ir::FuncRef>, Box<ModuleError>> {
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
+    sig.call_conv = CallConv::Tail;
     sig.params.push(AbiParam::new(ptr_ty));
     sig.returns.push(AbiParam::new(types::I64));
     let mut peers = HashMap::new();
@@ -1579,11 +1581,27 @@ pub fn compile<M: Module>(
     };
     let mut frozen = program.frozen.builder();
     let Some(ctor_sites) = enum_ctor_sites(plan, program, Some(&mut frozen)) else {
+        // The bytecode no longer matches the emit shape the scan expects —
+        // an emission or peephole change drifted. Interpreting is safe, but
+        // say so: a silent fallback here once meant a whole release ran
+        // slower with nobody noticing.
+        if crate::bytecode::native::debug() {
+            let name = program
+                .functions
+                .get(plan.func_idx.index())
+                .map(|f| f.name.as_ref())
+                .unwrap_or("?");
+            eprintln!("al-native: ctor-site scan failed for {name}; interpreting it");
+        }
         return Ok(None);
     };
 
     let ptr_ty = module.target_config().pointer_type();
     let mut sig = module.make_signature();
+    // Tail calling convention: what admits `return_call` between AL bodies.
+    // Matches `al_vm::vm::jit::native_entry_signature`; Rust reaches these
+    // only through the module's entry trampoline.
+    sig.call_conv = CallConv::Tail;
     sig.params.push(AbiParam::new(ptr_ty));
     sig.returns.push(AbiParam::new(types::I64));
     let name = format!("al_fn_{}", plan.func_idx.index());
@@ -2576,12 +2594,10 @@ impl<'a> BodyGen<'a> {
     /// A cross-function tail call.
     ///
     /// `al_rt_tail_call` collapses the frame in place either way. Who
-    /// dispatches it differs: a native callee under a calling convention that
-    /// admits Cranelift `return_call` gets a direct `return_call`, keeping
-    /// mutual native tail chains in machine code. Cranelift permits
-    /// `return_call` only under `CallConv::Tail`, and `NativeEntry` is
-    /// extern-C, so today `supports_tail_calls()` is false and only the
-    /// fallback runs.
+    /// dispatches it differs: a native peer gets a direct `return_call`,
+    /// keeping mutual native tail chains in machine code (bodies are
+    /// `CallConv::Tail` precisely for this); a non-native callee falls back
+    /// to the shim's `TailCall` status and the trampoline loop.
     fn tail_call_known(&mut self, target: FuncIdx, args: &[LocalId]) {
         let buf = self.arg_buffer(args);
         let t = self
@@ -3382,6 +3398,7 @@ mod tests {
         stack: Vec<Value>,
         frames: Vec<TestFrame>,
         funcs: Vec<FnMeta>,
+        trampoline: *const u8,
         entries: Vec<Option<NativeEntry>>,
         heap: ProcHeap,
         reds: i64,
@@ -3437,19 +3454,22 @@ mod tests {
             }
         }
 
-        /// Mirrors `VM::call_native`, including the pinned-register bracket.
-        /// `enable_pinned_reg` drops that register from Cranelift's
-        /// callee-save set, so a compiled entry clobbers it while this
-        /// caller's ABI says it survives. `#[inline(never)]` is a barrier
-        /// only; it is not what makes the register safe.
+        /// Mirrors `VM::call_native`, including the pinned-register bracket
+        /// and the SystemV->tail trampoline. `enable_pinned_reg` drops that
+        /// register from Cranelift's callee-save set, so a compiled entry
+        /// clobbers it while this caller's ABI says it survives.
+        /// `#[inline(never)]` is a barrier only; it is not what makes the
+        /// register safe.
         #[inline(never)]
         fn call_entry(vm: &mut TestVm, entry: NativeEntry) -> NativeStatus {
             vm.ctx.vm = (vm as *mut TestVm).cast();
-            // SAFETY: a finalized entry from this harness's module, and this
-            // TestVm's live ctx — the two arguments the shim forwards.
+            let tramp = vm.trampoline;
+            // SAFETY: a finalized trampoline + entry from this harness's
+            // module, and this TestVm's live ctx.
             unsafe {
                 crate::bytecode::native::call_entry_preserving_pinned(
                     (&raw mut vm.ctx).cast(),
+                    tramp,
                     entry,
                 )
             }
@@ -3872,6 +3892,8 @@ mod tests {
         // Keeps the frozen constants whose addresses are baked into the
         // code alive (the program owns its frozen area).
         _program: crate::bytecode::Program,
+        /// The module's SystemV->tail bridge; entries are called through it.
+        trampoline: *const u8,
         entries: Vec<Option<NativeEntry>>,
         metas: Vec<FnMeta>,
         clifs: Vec<String>,
@@ -3964,18 +3986,17 @@ mod tests {
             });
             ids.push(body.func_id);
         }
+        let tramp_id = al_vm::vm::jit::entry_trampoline(&mut module).unwrap();
         module.finalize_definitions().unwrap();
+        let trampoline = module.get_finalized_function(tramp_id);
         let entries = ids
             .iter()
-            .map(|&id| {
-                let code = module.get_finalized_function(id);
-                // SAFETY: defined with the NativeEntry signature above.
-                Some(unsafe { std::mem::transmute::<*const u8, NativeEntry>(code) })
-            })
+            .map(|&id| Some(module.get_finalized_function(id) as NativeEntry))
             .collect();
         Jit {
             _module: module,
             _program: program,
+            trampoline,
             entries,
             metas,
             clifs,
@@ -3997,6 +4018,7 @@ mod tests {
                     locals: m.locals,
                 })
                 .collect(),
+            trampoline: jit.trampoline,
             entries: jit.entries.clone(),
             heap: ProcHeap::new(),
             reds: budget,
@@ -5235,6 +5257,7 @@ mod tests {
             ctx: NativeCtx::new(),
             stack: Vec::new(),
             frames: Vec::new(),
+            trampoline: j.trampoline,
             funcs: j
                 .metas
                 .iter()
@@ -5329,6 +5352,7 @@ mod tests {
             ctx: NativeCtx::new(),
             stack: Vec::new(),
             frames: Vec::new(),
+            trampoline: j.trampoline,
             funcs: j
                 .metas
                 .iter()

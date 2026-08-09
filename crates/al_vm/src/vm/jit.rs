@@ -21,12 +21,13 @@
 #![allow(unsafe_code)]
 
 use crate::FuncIdx;
+use crate::bytecode::NativeTable;
 use crate::bytecode::value::{
     NATIVE_HOLLOW_FOR_REUSE_SYMBOL, NATIVE_RELEASE_AT_ZERO_SYMBOL, native_hollow_for_reuse,
     native_release_at_zero,
 };
-use crate::bytecode::{NativeEntry, NativeTable};
 use cranelift_codegen::ir::{AbiParam, Signature, Type, types};
+use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, ModuleError, default_libcall_names};
@@ -47,7 +48,7 @@ pub enum JitError {
     /// Boxed because `ModuleError` is >100 bytes.
     Module(Box<ModuleError>),
     /// [`finalize_into`] was handed a function not declared with the
-    /// [`NativeEntry`] signature; publishing it would type-confuse every
+    /// [`crate::bytecode::NativeEntry`] signature; publishing it would type-confuse every
     /// caller of the entry table.
     EntrySignature { name: String },
 }
@@ -137,10 +138,50 @@ pub fn jit_module() -> Result<JITModule, JitError> {
 /// [`finalize_into`]'s check cannot drift apart.
 pub fn native_entry_signature(module: &JITModule) -> Signature {
     let mut sig = module.make_signature();
+    // The tail calling convention is what admits `return_call`: an AL-level
+    // tail transfer between compiled bodies stays in machine code instead of
+    // bouncing through the trampoline. Rust never calls a tail-cc pointer
+    // directly — every entry goes through [`entry_trampoline`].
+    sig.call_conv = CallConv::Tail;
     sig.params
         .push(AbiParam::new(module.target_config().pointer_type()));
     sig.returns.push(AbiParam::new(types::I64));
     sig
+}
+
+/// Compile the one SystemV bridge the VM calls entries through:
+/// `fn(ctx, entry) -> status`. Cranelift emits the callee-save spills the
+/// tail-cc callee (which preserves nothing) requires, so the assembly bracket
+/// in `bytecode::native` only has to keep the pinned register alive.
+pub fn entry_trampoline(module: &mut JITModule) -> Result<FuncId, JitError> {
+    use cranelift_codegen::ir::InstBuilder;
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    let ptr = module.target_config().pointer_type();
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(ptr)); // ctx
+    sig.params.push(AbiParam::new(ptr)); // tail-cc entry to invoke
+    sig.returns.push(AbiParam::new(types::I64));
+    let id = module.declare_function("al_entry_trampoline", Linkage::Export, &sig)?;
+    let mut ctx = module.make_context();
+    ctx.func.signature = sig;
+    let callee_sig = native_entry_signature(module);
+    let mut fbc = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        b.seal_block(entry);
+        let params = b.block_params(entry).to_vec();
+        let sig_ref = b.import_signature(callee_sig);
+        let call = b.ins().call_indirect(sig_ref, params[1], &[params[0]]);
+        let status = b.inst_results(call)[0];
+        b.ins().return_(&[status]);
+        b.finalize();
+    }
+    module.define_function(id, &mut ctx)?;
+    module.clear_context(&mut ctx);
+    Ok(id)
 }
 
 /// The declared runtime imports, one `FuncId` per shim, ready for
@@ -202,8 +243,18 @@ impl RuntimeFns {
     pub fn declare(module: &mut JITModule) -> Result<RuntimeFns, JitError> {
         let ptr = module.target_config().pointer_type();
         let i64t = types::I64;
+        // A name declared here but missing from `runtime_symbols` would only
+        // surface as a crash inside Cranelift at finalize. Check membership at
+        // declare time instead, so drift is an error with the name in it.
+        let registered: std::collections::HashSet<&'static str> =
+            runtime_symbols().into_iter().map(|(n, _)| n).collect();
         let mut import =
             |name: &'static str, params: &[Type], ret: Option<Type>| -> Result<FuncId, JitError> {
+                if !registered.contains(name) {
+                    return Err(JitError::Host(format!(
+                        "runtime helper {name} is declared but not in the symbol table"
+                    )));
+                }
                 let mut sig = module.make_signature();
                 sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
                 sig.returns.extend(ret.map(AbiParam::new));
@@ -271,14 +322,12 @@ pub fn finalize_into(
             });
         }
     }
+    let tramp = entry_trampoline(module)?;
     module.finalize_definitions()?;
+    table.set_trampoline(module.get_finalized_function(tramp));
     for def in defs {
         let code = module.get_finalized_function(def.func_id);
-        // SAFETY: `code` is the finalized body of a function declared with
-        // `native_entry_signature`, checked above, which is `NativeEntry`'s
-        // ABI; the mapping is immortal.
-        let entry = unsafe { std::mem::transmute::<*const u8, NativeEntry>(code) };
-        table.set(def.fn_idx, entry);
+        table.set(def.fn_idx, code);
         perf_map::record(code as usize, def.code_size as usize, &def.name);
     }
     Ok(())
@@ -605,7 +654,21 @@ mod tests {
 
         finalize_into(&mut module, &[def(0, id, "al_fn_0")], &table).unwrap();
         let entry = table.get(FuncIdx::from_usize(0)).expect("published");
-        assert_eq!(entry(std::ptr::null_mut()), NativeStatus::Done);
+        let tramp = table.trampoline();
+        assert!(
+            !tramp.is_null(),
+            "finalize_into must publish the trampoline"
+        );
+        // SAFETY: finalized trampoline + entry from this module; the body
+        // ignores its ctx.
+        let status = unsafe {
+            crate::bytecode::native::call_entry_preserving_pinned(
+                std::ptr::null_mut(),
+                tramp,
+                entry,
+            )
+        };
+        assert_eq!(status, NativeStatus::Done);
         assert!(table.get(FuncIdx::from_usize(1)).is_none());
     }
 }

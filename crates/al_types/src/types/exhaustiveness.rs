@@ -592,7 +592,15 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                             (Some(label.name.as_str()), pattern)
                         }
                     });
-                    let (by_pos, _errors) = slot_labeled(&fields, supplied);
+                    let (by_pos, errors) = slot_labeled(&fields, supplied);
+                    // Reachable only on ill-typed patterns, which the compiler
+                    // gates out of exhaustiveness (`type_pattern`'s must-use
+                    // contract). A wildcard for a mis-slotted arg could make a
+                    // non-exhaustive match look exhaustive, so hold the gate.
+                    debug_assert!(
+                        errors.is_empty(),
+                        "exhaustiveness ran on an ill-typed pattern"
+                    );
                     by_pos
                         .into_iter()
                         .zip(&ctor.types)

@@ -1009,7 +1009,6 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
-            parked: None,
         };
         // The accept park that retire will wake…
         vm.park(Wait::readable(id), parked());

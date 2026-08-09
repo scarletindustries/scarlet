@@ -97,15 +97,23 @@ impl Default for NativeCtx {
 /// The compiled-function calling convention: arguments are already in the
 /// callee's frame slots (`[base_slot, base_slot + arity)`, the interpreter
 /// layout) and the `CallFrame` is pushed before the entry runs. `ctx` is a
-/// [`NativeCtx`], opaque so both sides cast through this one alias; the
-/// prologue moves it into the pinned register.
-pub type NativeEntry = extern "C" fn(ctx: *mut core::ffi::c_void) -> NativeStatus;
+/// [`NativeCtx`], opaque so both sides cast through this alias; the prologue
+/// moves it into the pinned register.
+///
+/// Entries are compiled under Cranelift's TAIL calling convention (that is
+/// what admits `return_call` between bodies), so Rust never invokes one
+/// directly: every call goes `call_entry_preserving_pinned` -> the module's
+/// SystemV [`entry trampoline`](NativeTable::trampoline) -> the entry.
+pub type NativeEntry = *const u8;
 
 /// The per-program entry table. `Clone` is shallow on purpose: per-scheduler
 /// `Program` clones must observe one table.
 #[derive(Clone, Default)]
 pub struct NativeTable {
     entries: Arc<[AtomicPtr<()>]>,
+    /// The module's SystemV->tail bridge (`al_entry_trampoline`), published by
+    /// `finalize_into` before any entry. Null iff no entry is published.
+    trampoline: Arc<AtomicPtr<()>>,
 }
 
 impl NativeTable {
@@ -117,7 +125,23 @@ impl NativeTable {
             entries: (0..fn_count)
                 .map(|_| AtomicPtr::new(std::ptr::null_mut()))
                 .collect(),
+            trampoline: Arc::new(AtomicPtr::new(std::ptr::null_mut())),
         }
+    }
+
+    /// Publish the module's entry trampoline. Must happen before the first
+    /// [`NativeTable::set`], so a scheduler that sees an entry sees the
+    /// bridge it must be called through.
+    pub fn set_trampoline(&self, code: *const u8) {
+        self.trampoline
+            .store(code.cast_mut().cast(), Ordering::Release);
+    }
+
+    /// The SystemV bridge entries are called through, null when nothing was
+    /// compiled.
+    #[inline]
+    pub fn trampoline(&self) -> *const u8 {
+        self.trampoline.load(Ordering::Acquire).cast_const().cast()
     }
 
     /// Number of slots (== the function count the table was sized for).
@@ -136,7 +160,11 @@ impl NativeTable {
     /// `Release` pairs with [`NativeTable::get`]'s `Acquire`: a scheduler that
     /// observes the pointer also observes the finalised code and icache flush.
     pub fn set(&self, fn_idx: FuncIdx, entry: NativeEntry) {
-        self.entries[fn_idx.index()].store(entry as *mut (), Ordering::Release);
+        debug_assert!(
+            !self.trampoline().is_null(),
+            "publish the trampoline before the first entry"
+        );
+        self.entries[fn_idx.index()].store(entry.cast_mut().cast(), Ordering::Release);
     }
 
     /// The compiled body for `fn_idx`, or `None` when the function is
@@ -144,15 +172,12 @@ impl NativeTable {
     /// grows `Program::functions` past a table sized for an earlier line, and
     /// those newer functions simply interpret.
     #[inline]
-    #[allow(unsafe_code)]
     pub fn get(&self, fn_idx: FuncIdx) -> Option<NativeEntry> {
         let ptr = self.entries.get(fn_idx.index())?.load(Ordering::Acquire);
         if ptr.is_null() {
             None
         } else {
-            // SAFETY: non-null slots are written only by `set`, which takes a
-            // `NativeEntry`; this reverses that cast.
-            Some(unsafe { std::mem::transmute::<*mut (), NativeEntry>(ptr) })
+            Some(ptr.cast_const().cast())
         }
     }
 
@@ -357,6 +382,17 @@ mod tests {
         NativeStatus::Done
     }
 
+    fn stub_entry() -> NativeEntry {
+        stub as *const u8
+    }
+
+    /// A table with a dummy trampoline published, so `set` is usable.
+    fn table(n: usize) -> NativeTable {
+        let t = NativeTable::new(n);
+        t.set_trampoline(stub as *const u8);
+        t
+    }
+
     #[test]
     fn empty_table_answers_none_for_any_idx() {
         let t = NativeTable::default();
@@ -367,22 +403,22 @@ mod tests {
 
     #[test]
     fn set_then_get_round_trips_the_entry() {
-        let t = NativeTable::new(3);
+        let t = table(3);
         assert!(t.get(FuncIdx(1)).is_none());
-        t.set(FuncIdx(1), stub);
+        t.set(FuncIdx(1), stub_entry());
         let entry = t.get(FuncIdx(1)).expect("just set");
-        assert!(std::ptr::fn_addr_eq(entry, stub as NativeEntry));
-        assert_eq!(entry(std::ptr::null_mut()), NativeStatus::Done);
+        assert!(std::ptr::eq(entry, stub_entry()));
         assert!(t.get(FuncIdx(0)).is_none());
         assert!(t.get(FuncIdx(2)).is_none());
     }
 
     #[test]
     fn clones_share_one_table() {
-        let a = NativeTable::new(2);
+        let a = table(2);
         let b = a.clone();
-        a.set(FuncIdx(0), stub);
+        a.set(FuncIdx(0), stub_entry());
         assert!(b.get(FuncIdx(0)).is_some());
+        assert!(std::ptr::eq(b.trampoline(), stub as *const u8));
     }
 
     #[test]
@@ -393,9 +429,9 @@ mod tests {
 
     #[test]
     fn compiled_walks_populated_slots_in_order() {
-        let t = NativeTable::new(4);
-        t.set(FuncIdx(2), stub);
-        t.set(FuncIdx(0), stub);
+        let t = table(4);
+        t.set(FuncIdx(2), stub_entry());
+        t.set(FuncIdx(0), stub_entry());
         let idxs: Vec<FuncIdx> = t.compiled().map(|(i, _)| i).collect();
         assert_eq!(idxs, vec![FuncIdx(0), FuncIdx(2)]);
     }
@@ -501,28 +537,40 @@ mod mode_tests {
     }
 }
 
-/// Call a JIT entry, preserving the pinned register the JIT clobbers.
+/// Call a JIT entry through the module's SystemV trampoline, preserving the
+/// pinned register the JIT clobbers.
 ///
 /// `enable_pinned_reg` gives generated code the pinned register (r15 on
-/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list, so
-/// a compiled entry's prologue writes it and no epilogue puts it back — while
-/// every Rust caller on the path is entitled by the platform ABI to assume it
-/// survives. This restores that assumption. It belongs to the [`NativeEntry`]
-/// contract, not to any one caller, because anyone calling an entry needs it.
+/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list,
+/// so a compiled entry's prologue writes it and no epilogue puts it back —
+/// while every Rust caller on the path is entitled by the platform ABI to
+/// assume it survives. This bracket restores that assumption. The trampoline
+/// (SystemV, Cranelift-compiled) handles every OTHER callee-saved register
+/// the tail-cc entry clobbers.
 ///
 /// # Safety
-/// `entry` must be a finalized JIT entry and `ctx` a live context of the
-/// shape that entry was compiled against.
+/// `tramp` must be the module's finalized `al_entry_trampoline`, `entry` a
+/// finalized tail-cc JIT entry from the same module, and `ctx` a live context
+/// of the shape the entry was compiled against.
 #[allow(unsafe_code)] // the pinned-register bracket the JIT ABI requires; contract above
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 pub unsafe extern "C" fn call_entry_preserving_pinned(
     ctx: *mut core::ffi::c_void,
+    tramp: *const u8,
     entry: NativeEntry,
 ) -> NativeStatus {
-    // rdi = ctx, rsi = entry. Entry rsp is 8 (mod 16); one push makes it 0,
+    // rdi = ctx, rsi = tramp, rdx = entry. The trampoline takes (ctx, entry),
+    // so entry moves into rsi. Entry rsp is 8 (mod 16); one push makes it 0,
     // which is what the callee's `call` requires.
-    core::arch::naked_asm!("push r15", "call rsi", "pop r15", "ret")
+    core::arch::naked_asm!(
+        "push r15",
+        "mov rax, rsi",
+        "mov rsi, rdx",
+        "call rax",
+        "pop r15",
+        "ret",
+    )
 }
 
 /// See the x86_64 sibling. AAPCS64 makes x19-x28 callee-saved; the pinned
@@ -535,12 +583,15 @@ pub unsafe extern "C" fn call_entry_preserving_pinned(
 #[unsafe(naked)]
 pub unsafe extern "C" fn call_entry_preserving_pinned(
     ctx: *mut core::ffi::c_void,
+    tramp: *const u8,
     entry: NativeEntry,
 ) -> NativeStatus {
-    // x0 = ctx, x1 = entry; sp stays 16-aligned; the result rides in x0.
+    // x0 = ctx, x1 = tramp, x2 = entry; the trampoline takes (ctx, entry).
     core::arch::naked_asm!(
         "stp x21, x30, [sp, #-16]!",
-        "blr x1",
+        "mov x9, x1",
+        "mov x1, x2",
+        "blr x9",
         "ldp x21, x30, [sp], #16",
         "ret",
     )

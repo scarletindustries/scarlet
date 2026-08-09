@@ -35,11 +35,8 @@ pub(super) struct Migrant {
 }
 
 // This assert cannot see everything it needs to. `Send` is structural, and a
-// parked native stack (`Process::parked`) is `Send` as a byte buffer no matter
-// what its words point at — a raw pointer into the donor scheduler's `VM` would
-// pass here and corrupt on resume. That obligation is discharged by the
-// process-stack purity invariant in the `vm::stack` module doc. The assert still
-// catches ordinary regressions like an `Rc` or a non-Send fd wrapper.
+// The assert catches ordinary regressions like an `Rc` or a non-Send fd
+// wrapper sneaking into the migrant.
 const _: () = crate::assert_send::<Migrant>();
 
 /// Visit every socket reachable from `v`. The one fd-walk shared by spawn
@@ -151,13 +148,14 @@ impl VM {
     }
 
     /// Adopt connection fds arriving with a seed or migrant. Each keeps the
-    /// owner it arrived with. Infallible by design: a poller registration
-    /// failure is logged and the process still runs, with ops on the
-    /// unwatchable socket surfacing as `NetError` at use.
+    /// owner it arrived with. Infallible by design: on a poller-registration
+    /// failure the stream is dropped (closing the fd), so the socket cannot
+    /// sit live and unwatched — the owning process's next op on the id
+    /// surfaces the stale-socket `NetError` and it is never parked on it.
     pub(super) fn adopt_connections(&mut self, connections: DetachedFds) {
         for (id, c, owner) in connections {
             if let Err(e) = self.track_connection(id, c, owner) {
-                eprintln!("warning: cannot watch adopted connection {id}: {e}");
+                eprintln!("warning: adopted connection {id} closed (cannot watch it: {e})");
             }
         }
     }
@@ -242,7 +240,6 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
-            parked: None,
         };
 
         let mut donor = halt_test_vm();
@@ -337,7 +334,6 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
-            parked: None,
         };
 
         let mut donor = halt_test_vm();
@@ -455,7 +451,6 @@ mod tests {
             native_floor: 0,
             native_reds: 0,
             native_pending: None,
-            parked: None,
         };
 
         let connections = donor.detach_fds(&p);

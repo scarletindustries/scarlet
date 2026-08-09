@@ -205,8 +205,11 @@ fn walk_graph(
 ) -> Value {
     thread_local! {
         /// Per-thread scratch, reused per call to avoid two fresh allocations
-        /// and O(nodes) rehash growth. Sound only because `walk_graph` is
-        /// non-reentrant: its `copy_one` callbacks never spawn or publish.
+        /// and O(nodes) rehash growth. `walk_graph` is non-reentrant (its
+        /// `copy_one` callbacks never spawn or publish), and the `RefCell`
+        /// enforces it: the borrow is held across the whole walk, so a future
+        /// reentrant call panics on the double borrow instead of silently
+        /// corrupting the shared scratch.
         static WALK_SCRATCH: RefCell<(WalkMap, WalkQueue)>
             = RefCell::new((WalkMap::new(), WalkQueue::new()));
     }

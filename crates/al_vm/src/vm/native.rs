@@ -41,32 +41,6 @@ use crate::tivec::Idx;
 use super::poll::Wait;
 use super::{CallFrame, Step, VM, VmError, VmResult};
 
-thread_local! {
-    /// The scheduler's VM for this OS thread, re-published every
-    /// `scheduler_loop` iteration. Nothing reads it yet except
-    /// [`current_vm`]; it exists so shims can re-derive the VM instead of
-    /// trusting a `vmx` spilled into a frame that may resume on another
-    /// thread.
-    static CURRENT_VM: std::cell::Cell<*mut VM> = const { std::cell::Cell::new(std::ptr::null_mut()) };
-}
-
-/// Publish `vm` as this scheduler thread's VM.
-pub(super) fn set_current_vm(vm: *mut VM) {
-    CURRENT_VM.with(|c| c.set(vm));
-}
-
-/// The VM last published on this thread, null on a non-scheduler thread.
-/// Only the shim trampoline should dereference it; the caller owns the
-/// aliasing obligations.
-//
-// `inline(never)`: callers may sit on a process stack whose frame spans a
-// park; an inlined TLS read could be computed pre-park and resumed stale on
-// another scheduler. A real call re-derives the slot on the current thread.
-#[inline(never)]
-pub fn current_vm() -> *mut VM {
-    CURRENT_VM.with(std::cell::Cell::get)
-}
-
 /// The payload half of a [`NativeStatus::Parked`]/[`NativeStatus::Error`],
 /// parked in the VM while the status word unwinds the native frames above
 /// it. At most one is in flight per process.
@@ -93,12 +67,15 @@ impl VM {
     #[inline(never)]
     pub(super) fn call_native(&mut self, entry: NativeEntry) -> NativeStatus {
         self.native_ctx.vm = (self as *mut VM).cast();
-        // SAFETY: `entry` is a finalized JIT entry from this program's native
-        // table, and the pointer is to this VM's live `native_ctx`.
+        let tramp = self.program.native.trampoline();
+        debug_assert!(!tramp.is_null(), "entry published without a trampoline");
+        // SAFETY: `entry` and `tramp` are finalized code from this program's
+        // native table, and the pointer is to this VM's live `native_ctx`.
         #[allow(unsafe_code)]
         unsafe {
             crate::bytecode::native::call_entry_preserving_pinned(
                 (&raw mut self.native_ctx).cast(),
+                tramp,
                 entry,
             )
         }
@@ -660,11 +637,11 @@ pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
 pub unsafe extern "C" fn al_rt_ret(vmx: *mut VM, result: u64) {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
-    // Unreachable with a frame installed; degrade to a no-op rather than
-    // unwind across the C boundary.
+    // Unreachable with a frame installed. Continuing would drop the result,
+    // leak its reference, and run on with corrupted frames; abort instead
+    // (never unwind across the C boundary).
     let Some(frame) = vm.frames.pop() else {
-        debug_assert!(false, "al_rt_ret with no active call frame");
-        return;
+        crate::bytecode::value::proof_violation("al_rt_ret with no active call frame");
     };
     vm.stack.truncate(frame.base_slot);
     // SAFETY: `result` is an owned value word per the contract.
@@ -697,22 +674,6 @@ mod tests {
 
     use super::super::halt_test_vm;
     use super::*;
-
-    #[test]
-    fn current_vm_is_thread_local() {
-        let mut vm = halt_test_vm();
-        set_current_vm(&mut vm);
-        assert_eq!(current_vm(), (&raw mut vm).cast());
-        let other = std::thread::spawn(|| current_vm() as usize)
-            .join()
-            .expect("probe thread");
-        assert_eq!(
-            other as *mut VM,
-            std::ptr::null_mut(),
-            "another thread must not observe this scheduler's VM"
-        );
-        assert_eq!(current_vm(), (&raw mut vm).cast());
-    }
 
     #[test]
     fn done_and_yield_round_trip() {
@@ -782,11 +743,31 @@ mod tests {
         unsafe { (*ctx.cast::<crate::bytecode::NativeCtx>()).vm.cast() }
     }
 
+    /// Stand-in for the module trampoline: test entries are plain Rust
+    /// `extern "C"` fns, so the bridge invokes them as such.
+    extern "C" fn test_trampoline(ctx: *mut core::ffi::c_void, entry: *const u8) -> NativeStatus {
+        type SysvEntry = extern "C" fn(*mut core::ffi::c_void) -> NativeStatus;
+        let f: SysvEntry = unsafe { std::mem::transmute::<*const u8, SysvEntry>(entry) };
+        f(ctx)
+    }
+
+    /// Publish `f` at `fn_idx` with the test trampoline in place.
+    fn publish_test_entry(
+        table: &crate::bytecode::NativeTable,
+        fn_idx: FuncIdx,
+        f: extern "C" fn(*mut core::ffi::c_void) -> NativeStatus,
+    ) {
+        table.set_trampoline(test_trampoline as *const u8);
+        table.set(fn_idx, f as *const u8);
+    }
+
     #[test]
     fn status_crosses_the_extern_c_boundary() {
         let mut vm = halt_test_vm();
-        let entry: NativeEntry = yield_entry;
-        let status = vm.call_native(entry);
+        vm.program
+            .native
+            .set_trampoline(test_trampoline as *const u8);
+        let status = vm.call_native(yield_entry as *const u8);
         assert!(matches!(vm.outcome_from_status(status), Ok(Step::Yield)));
     }
 
@@ -1035,9 +1016,7 @@ mod tests {
     fn known_call_dispatches_directly_via_the_entry_table() {
         let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
         let mut vm = native_caller_vm(program, 100);
-        vm.program
-            .native
-            .set(FuncIdx::from_usize(1), add_five_entry);
+        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), add_five_entry);
 
         let args = [Value::small_int(37).to_bits()];
         let mut out = 0u64;
@@ -1076,9 +1055,7 @@ mod tests {
     fn call_checkpoint_exhaustion_yields_with_the_callee_resumable() {
         let program = program_with(Vec::new(), vec![(1, 2, vec![op(Op::Halt)])]);
         let mut vm = native_caller_vm(program, 1);
-        vm.program
-            .native
-            .set(FuncIdx::from_usize(1), add_five_entry);
+        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), add_five_entry);
 
         let args = [Value::small_int(37).to_bits()];
         let mut out = 0u64;
@@ -1118,9 +1095,7 @@ mod tests {
             ],
         );
         let mut vm = native_caller_vm(program, 100);
-        vm.program
-            .native
-            .set(FuncIdx::from_usize(1), tail_to_f2_entry);
+        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), tail_to_f2_entry);
 
         let args = [Value::small_int(41).to_bits()];
         let mut out = 0u64;
@@ -1147,9 +1122,7 @@ mod tests {
         );
         // Budget 2 puts the yield exactly at the tail edge.
         let mut vm = native_caller_vm(program, 2);
-        vm.program
-            .native
-            .set(FuncIdx::from_usize(1), tail_to_f2_entry);
+        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), tail_to_f2_entry);
 
         let args = [Value::small_int(41).to_bits()];
         let mut out = 0u64;
@@ -1223,9 +1196,11 @@ mod tests {
             ],
         );
         let mut vm = native_caller_vm(program, 10);
-        vm.program
-            .native
-            .set(FuncIdx::from_usize(1), call_interp_forever_entry);
+        publish_test_entry(
+            &vm.program.native,
+            FuncIdx::from_usize(1),
+            call_interp_forever_entry,
+        );
         vm.frames.push(CallFrame {
             func_idx: 1,
             code_start: 2,
@@ -1275,9 +1250,7 @@ mod tests {
     fn dynamic_call_dispatches_through_the_closure_func_idx() {
         let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
         let mut vm = native_caller_vm(program, 100);
-        vm.program
-            .native
-            .set(FuncIdx::from_usize(1), add_five_entry);
+        publish_test_entry(&vm.program.native, FuncIdx::from_usize(1), add_five_entry);
 
         let cl = Value::closure_in(&mut vm.heap, 1, &[]);
         let args = [Value::small_int(37).to_bits()];

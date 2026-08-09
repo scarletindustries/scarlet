@@ -91,6 +91,22 @@ pub(super) struct Completion {
     pub result: BlockingResult,
 }
 
+/// The error completion for a job the pool could not run at all.
+fn failed_blocking_result(op: BlockingOp) -> BlockingResult {
+    let err = || std::io::Error::other("blocking pool unavailable");
+    match op {
+        BlockingOp::ReadFile(path) => BlockingResult::ReadFile {
+            path,
+            result: Err(err()),
+        },
+        BlockingOp::WriteFile(path, _) => BlockingResult::WriteFile {
+            path,
+            result: Err(err()),
+        },
+        BlockingOp::ResolveDns(_) => BlockingResult::ResolveDns { result: Err(err()) },
+    }
+}
+
 /// An elastic pool of OS threads for blocking syscalls that must never run on a
 /// scheduler thread. A burst grows the pool up to `max_total`; as work drains,
 /// idle workers above `max_warm` exit.
@@ -247,6 +263,13 @@ pub(super) struct Runtime {
     pub workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     workers_started: Once,
     blocking: BlockingPool,
+    /// Raised when any scheduler hits a `VmError`: every other scheduler
+    /// drains out through `acquire_work`'s check instead of waiting for
+    /// `live` to reach zero (which an errored run never manages).
+    faulted: AtomicBool,
+    /// The first fault's origin and error, surfaced by scheduler 0 after the
+    /// workers are joined.
+    fault: Mutex<Option<(usize, super::VmError)>>,
 }
 
 impl Runtime {
@@ -280,6 +303,8 @@ impl Runtime {
             blocking: BlockingPool::new(),
             workers: Mutex::new(Vec::new()),
             workers_started: Once::new(),
+            faulted: AtomicBool::new(false),
+            fault: Mutex::new(None),
         });
         Ok((runtime, poll))
     }
@@ -298,15 +323,30 @@ impl Runtime {
         self.workers_started.call_once(|| {
             let count = self.slots.len();
             let mut handles = lock(&self.workers);
-            for index in 1..count {
-                let (poll, waker) = match mio::Poll::new().and_then(|poll| {
-                    let waker = mio::Waker::new(poll.registry(), super::poll::WAKER_TOKEN)?;
-                    Ok((poll, Arc::new(waker)))
-                }) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        eprintln!("warning: cannot create scheduler {index}'s poller ({e})");
-                        continue;
+            'workers: for index in 1..count {
+                // Retry transient failures (fd pressure, EAGAIN) before
+                // permanently running on fewer cores than requested.
+                let mut attempt = 0;
+                let (poll, waker) = loop {
+                    match mio::Poll::new().and_then(|poll| {
+                        let waker = mio::Waker::new(poll.registry(), super::poll::WAKER_TOKEN)?;
+                        Ok((poll, Arc::new(waker)))
+                    }) {
+                        Ok(pair) => break pair,
+                        Err(e) if attempt < 2 => {
+                            attempt += 1;
+                            eprintln!(
+                                "warning: cannot create scheduler {index}'s poller ({e}); retrying"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: cannot create scheduler {index}'s poller ({e}); \
+                                 running without this core"
+                            );
+                            continue 'workers;
+                        }
                     }
                 };
                 let rt = Arc::clone(self);
@@ -602,6 +642,34 @@ impl Runtime {
         self.live.load(Ordering::Acquire) == 0
     }
 
+    /// Record a scheduler's `VmError` (first one wins) and force every
+    /// scheduler out of its wait so the runtime can be torn down.
+    pub(super) fn raise_fault(&self, index: usize, e: super::VmError) {
+        {
+            let mut slot = lock(&self.fault);
+            if slot.is_none() {
+                *slot = Some((index, e));
+            }
+        }
+        self.raise_fault_flag();
+    }
+
+    /// The teardown half of [`Runtime::raise_fault`], for when the caller
+    /// keeps the error itself (scheduler 0's own failure).
+    pub(super) fn raise_fault_flag(&self) {
+        self.faulted.store(true, Ordering::Release);
+        self.shutdown_blocking();
+        self.wake_all();
+    }
+
+    pub(super) fn is_faulted(&self) -> bool {
+        self.faulted.load(Ordering::Acquire)
+    }
+
+    pub(super) fn take_fault(&self) -> Option<(usize, super::VmError)> {
+        lock(&self.fault).take()
+    }
+
     /// Wake one parked scheduler. The wake clears its flag, so back-to-back
     /// submissions fan out instead of all notifying the same one.
     fn wake_one(&self) {
@@ -638,10 +706,25 @@ impl Runtime {
             .name("al-blocking".into())
             .spawn(move || blocking_worker_main(rt))
         {
-            // Undo the count and let an existing worker take the job.
             eprintln!("warning: cannot spawn blocking worker ({e})");
             self.blocking.total.fetch_sub(1, Ordering::AcqRel);
-            self.blocking.cond.notify_one();
+            if self.blocking.total.load(Ordering::Acquire) == 0 {
+                // No worker exists and none could be made: a queued job has
+                // nobody to run it and its process would park forever. Fail
+                // each back to its origin as an error completion.
+                let stranded: Vec<_> = lock(&self.blocking.queue).drain(..).collect();
+                for (job_id, origin, op) in stranded {
+                    self.deliver_completion(
+                        origin,
+                        Completion {
+                            job_id,
+                            result: failed_blocking_result(op),
+                        },
+                    );
+                }
+            } else {
+                self.blocking.cond.notify_one();
+            }
         }
     }
 

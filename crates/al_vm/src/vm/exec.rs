@@ -253,13 +253,15 @@ impl VM {
             }};
         }
         // The entry frame's slots ARE the program's globals, so a store there
-        // freezes and publishes.
+        // freezes and publishes. The frame is identified by function identity
+        // (`func_idx == entry`), never by guessing from `base_slot == 0` —
+        // a zero-argument call could sit at slot 0 too.
         macro_rules! store_local {
             ($instr:ident) => {{
                 let slot = base_slot + $instr.operand as usize;
                 let v = self.pop()?;
                 self.stack[slot] = v;
-                if base_slot == 0 && self.current_is_main {
+                if func_idx == self.program.entry && self.current_is_main {
                     self.publish_toplevel(slot);
                 }
             }};
@@ -1009,8 +1011,23 @@ impl VM {
         if slot >= self.globals.len() {
             self.globals.resize(slot + 1, Value::nil());
         }
+        // Re-storing exactly the published value (an immediate, or a frozen
+        // constant read back and stored again) must not copy the graph into
+        // the never-reclaimed frozen area a second time. Distinct heap values
+        // still freeze per store: or-pattern and cursor rebinds at top level
+        // pay one frozen copy per distinct value until publication moves to
+        // spawn boundaries.
+        if self.globals_published.get(slot).copied().unwrap_or(false)
+            && self.globals[slot].to_bits() == self.stack[slot].to_bits()
+        {
+            return;
+        }
         let frozen = freeze::freeze_global(&mut self.frozen, &self.stack[slot]);
         self.globals[slot] = frozen.value();
+        if slot >= self.globals_published.len() {
+            self.globals_published.resize(slot + 1, false);
+        }
+        self.globals_published[slot] = true;
         self.runtime.publish_global(slot, frozen);
     }
 

@@ -169,6 +169,15 @@ impl VM {
             .register(&mut SourceFd(&fd), Token(id as usize), interests)
             .or_else(|e| {
                 if e.kind() == ErrorKind::AlreadyExists {
+                    // Reachable only when a close path skipped deregistration
+                    // and the kernel reused the fd number. Recover by
+                    // re-pointing the registration, but fail loudly in debug
+                    // so the skipping path gets found — until then, events
+                    // could have been delivered against the stale id.
+                    debug_assert!(
+                        false,
+                        "fd {fd} already registered: a close path skipped poller_deregister"
+                    );
                     registry.reregister(&mut SourceFd(&fd), Token(id as usize), interests)
                 } else {
                     Err(e)
@@ -219,6 +228,7 @@ impl VM {
                 owner,
             },
         );
+        self.conns_by_owner.entry(owner).or_default().push(id);
         Ok(())
     }
 

@@ -285,10 +285,7 @@ fn seq_root_total(vm: &mut VM, v: Value) -> Value {
     match v.kind() {
         ValueView::Array(_) => v,
         ValueView::Range(s, e) => seq::from_int_range(&mut vm.heap, s, e),
-        _ => {
-            debug_assert!(false, "seq op on a non-sequence value");
-            v
-        }
+        _ => crate::bytecode::value::proof_violation("seq op on a non-sequence value"),
     }
 }
 
@@ -306,10 +303,7 @@ pub unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
         ValueView::Array(a) => a.len() as i64,
         ValueView::Range(s, e) => range_len(s, e),
         ValueView::Tuple(t) => t.len() as i64,
-        _ => {
-            debug_assert!(false, "ArrayLen on a non-sequence value");
-            0
-        }
+        _ => crate::bytecode::value::proof_violation("ArrayLen on a non-sequence value"),
     };
     drop(v);
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
@@ -328,10 +322,7 @@ pub unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
     let v = unsafe { Value::from_bits(bin) };
     let n = match v.kind() {
         ValueView::Binary(b) => b.bit_len().div_ceil(8) as i64,
-        _ => {
-            debug_assert!(false, "BinByteSize on a non-binary value");
-            0
-        }
+        _ => crate::bytecode::value::proof_violation("BinByteSize on a non-binary value"),
     };
     drop(v);
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
@@ -404,10 +395,7 @@ pub unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i6
         Ok(t) => super::http::parse_head(t, &mut vm.heap, &super::bin_ref(&v), off),
         // Unreachable: compiled code exists only for programs that bound the
         // H1 slots (validated at load).
-        Err(_) => {
-            debug_assert!(false, "HttpParseHead with unbound H1 slots");
-            Value::nil()
-        }
+        Err(_) => crate::bytecode::value::proof_violation("HttpParseHead with unbound H1 slots"),
     };
     drop(v);
     into_bits(r)
@@ -423,8 +411,7 @@ pub unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
     // SAFETY: owned word per the contract above.
     let v = unsafe { Value::from_bits(headers) };
     let r = super::http::headers_valid(&v).unwrap_or_else(|_| {
-        debug_assert!(false, "HttpHeadersValid on a non-header array");
-        Value::bool(false)
+        crate::bytecode::value::proof_violation("HttpHeadersValid on a non-header array")
     });
     drop(v);
     into_bits(r)
@@ -440,8 +427,7 @@ pub unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64
     // SAFETY: owned words per the contract above.
     let (h, n) = unsafe { (Value::from_bits(headers), Value::from_bits(name)) };
     let r = super::http::header_has(&h, &super::bin_ref(&n)).unwrap_or_else(|_| {
-        debug_assert!(false, "HttpHeaderHas on a non-header array");
-        Value::bool(false)
+        crate::bytecode::value::proof_violation("HttpHeaderHas on a non-header array")
     });
     drop(h);
     drop(n);
@@ -467,8 +453,7 @@ pub unsafe extern "C" fn al_shim_http_serialize_head(
     let vm = unsafe { &mut *vmx };
     let r = super::http::serialize_head(&mut vm.heap, code, &super::bin_ref(&rv), &hv)
         .unwrap_or_else(|_| {
-            debug_assert!(false, "HttpSerializeHead on a non-header array");
-            Value::nil()
+            crate::bytecode::value::proof_violation("HttpSerializeHead on a non-header array")
         });
     drop(rv);
     drop(hv);
@@ -492,8 +477,7 @@ pub unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64
         .h1()
         .and_then(|t| super::http::framing(t, &mut vm.heap, &v))
         .unwrap_or_else(|_| {
-            debug_assert!(false, "HttpFraming on a non-header array");
-            Value::nil()
+            crate::bytecode::value::proof_violation("HttpFraming on a non-header array")
         });
     drop(v);
     into_bits(r)

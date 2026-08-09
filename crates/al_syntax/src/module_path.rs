@@ -20,8 +20,20 @@ pub struct ModuleKey(String);
 impl ModuleKey {
     /// The one place segments become a key. Only callers that already hold
     /// canonical segments may use it; everyone else goes through a
-    /// canonicalizing constructor below.
+    /// canonicalizing constructor below. Debug builds verify the segments are
+    /// actually canonical, so the collision this type exists to prevent
+    /// cannot be reintroduced through this constructor unnoticed.
     pub fn of(path: &ModulePath) -> Self {
+        debug_assert!(
+            path.iter().enumerate().all(|(i, s)| {
+                // A canonical absolute file path encodes its leading `/` as
+                // one empty first segment; everywhere else emptiness, dot
+                // segments, or an embedded separator means the caller skipped
+                // canonicalization.
+                (i == 0 || !s.is_empty()) && s != "." && s != ".." && !s.contains('/')
+            }),
+            "ModuleKey::of on unnormalised segments {path:?}"
+        );
         ModuleKey(path.join("/"))
     }
 

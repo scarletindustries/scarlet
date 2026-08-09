@@ -209,7 +209,7 @@ pub enum ModuleOrigin {
         /// `source_hash`; `None` until then. Lives next to the hash it gates so
         /// evicting the `CachedModule` drops the gate with it. See
         /// [`ModuleTable::source_changed`].
-        stat: Option<(std::time::SystemTime, u64)>,
+        stat: Option<FileStat>,
         /// Every arena/pool length immediately *before* this module's body was
         /// analysed.
         watermark: Watermark,
@@ -440,7 +440,7 @@ impl ModuleTable {
     }
 
     /// Update the stat gate recorded on `key`'s `ModuleOrigin::File`.
-    fn set_stat(&mut self, key: &ModuleKey, s: Option<(std::time::SystemTime, u64)>) {
+    fn set_stat(&mut self, key: &ModuleKey, s: Option<FileStat>) {
         if let Some(cm) = self.loaded.get_mut(key)
             && let ModuleOrigin::File { stat, .. } = &mut cm.origin
         {
@@ -574,10 +574,21 @@ impl ModuleTable {
 
 /// `(mtime, len)` of `path`, or `None` if either is unavailable. `None` makes
 /// `source_changed` fall back to the read + hash path, so it is always safe.
-fn file_stat(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+fn file_stat(path: &Path) -> Option<FileStat> {
     let meta = std::fs::metadata(path).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some((meta.modified().ok()?, meta.len(), ino))
 }
+
+/// The stat gate for [`ModuleTable::source_changed`]: modification time,
+/// length, and (on unix) inode. The inode catches the atomic-replace save
+/// editors do, where a same-second edit can preserve both time and length;
+/// an in-place write preserving all three in the same instant falls to the
+/// LSP's `didChangeWatchedFiles` -> `invalidate_path` backstop.
+type FileStat = (std::time::SystemTime, u64, u64);
 
 /// FNV-1a 64-bit hash over source bytes for cheap change-detection.
 pub fn source_hash(s: &str) -> u64 {
