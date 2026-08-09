@@ -9,8 +9,7 @@
         clippy::unimplemented,
     )
 )]
-// All unsafe code lives in `al_vm` (the runtime crate); this crate — the
-// CLI, REPL, and LSP driver — is compiler-enforced safe.
+// All unsafe code lives in `al_vm`; this crate is the CLI/REPL/LSP driver.
 #![forbid(unsafe_code)]
 
 pub use al_core::*;
@@ -26,5 +25,5 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/stdlib_generated.rs"));
 }
 /// `STDLIB` is the build-time precompiled stdlib; `stdlib` is the generated
-/// module of typed template handles. Both are zero-cost `static` data.
+/// module of typed template handles.
 pub use generated::{STDLIB, stdlib};

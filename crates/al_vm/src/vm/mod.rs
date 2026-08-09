@@ -1,18 +1,7 @@
 //! The virtual machine: lightweight processes and the schedulers that run
-//! them.
-//!
-//! This module is the runtime's front door. It owns the [`VM`] — one per
-//! scheduler thread — whose dispatch loop (`execute_slice`) runs thousands
-//! of cooperatively preempted processes over a handful of OS threads
-//! without ever letting one block another. The memory those processes run
-//! on is [`crate::heap`]'s: each process owns its reference-counted value
-//! graph, and this module is the opcode-side counterpart of that design — it
-//! decides when to run, park, and move a process, while the heap decides how
-//! to allocate and free. The scheduling shape: reduction budgets, run
-//! queues, an injector for spawns, work stealing, and donation-based
-//! migration.
-//!
-//! # The process lifecycle in one diagram
+//! them. One [`VM`] per scheduler thread, running thousands of cooperatively
+//! preempted processes over a handful of OS threads without letting one block
+//! another.
 //!
 //! ```text
 //!   spawn(f) — the closure graph is deep-copied into a fresh heap
@@ -41,93 +30,25 @@
 //!              freed as it drops (main's result is stashed until run() returns)
 //! ```
 //!
-//! # The six ideas (everything else is consequence)
+//! The design in five facts:
 //!
-//! 1. **A context switch is a few pointer moves.** The running process
-//!    lives directly in the VM's `heap`/`stack`/`frames` fields — the
-//!    dispatch loop never indirects through a process handle — and a
-//!    suspended one is those same fields packed into a [`Process`].
-//!    `suspend_current`/`resume` just swap them.
-//! 2. **Preemption is budgeted.** A slice runs until
-//!    its [`REDUCTION_BUDGET`] is spent: a call costs one reduction, a
-//!    syscall [`IO_REDUCTION_COST`] — so accept loops are preempted like
-//!    everything else, and no process rides free.
-//! 3. **Blocking parks the process, never the thread.** An op that would
-//!    block returns [`Step::Parked`] carrying a [`Wait`] — socket
-//!    readiness, a timer, or a blocking-pool job. The scheduler
-//!    shelves the process, arms the OS poller and the timer heap, and runs
-//!    something else; the wake re-runs the instruction or completes the
-//!    pending connect ([`poll::WakeAction`]).
-//! 4. **Work moves between schedulers as owned memory.** The runtime
-//!    ([`sched`]) exists from VM construction; the first spawn summons its
-//!    worker threads, one scheduler per core. Each spawn copies its
-//!    closure graph into a fresh heap and submits the result as a
-//!    [`sched::Seed`]; load balancing donates whole queued processes the
-//!    same way ([`migrate`]). Plain moves, in both cases — the receiver
-//!    adopts the arriving values as-is.
-//! 5. **Memory is reference-counted.** A `Value` is not `Copy`: `Clone`
-//!    increments an object's count, `Drop` frees it at zero (see
-//!    [`crate::heap`]). Nothing moves, so there is no rooting rule and no
-//!    allocation reservation — an opcode just pops its operands and builds
-//!    its result. A large cascading free is billed to the running process at
-//!    the next call checkpoint (`VM::charge_reclamation`) so it cannot stall
-//!    the scheduler.
-//! 6. **A value and its memory travel together.** A process owns every
-//!    heap value it can reach, which is what makes seeds, migrants, and
-//!    suspended processes `Send` by construction — and why main's result
-//!    is stashed as a `(value, heap)` pair until `run()`'s caller is done
-//!    with it.
-//!
-//! # Reading order
-//!
-//! | file              | the one thing it does                              |
-//! |-------------------|----------------------------------------------------|
-//! | this file         | the [`VM`] and the scheduling story: `run`,        |
-//! |                   | `scheduler_loop`, `acquire_work`, suspend/resume,  |
-//! |                   | donation policy, spawn/seed glue                   |
-//! | [`exec`]          | the dispatch loop (`execute_slice`): inline arms,  |
-//! |                   | family-handler routing, stack helpers, and the     |
-//! |                   | call-checkpoint reclamation-fairness charge        |
-//! | [`collections`]   | array/tuple/range/field-access opcodes             |
-//! | [`text`]          | string/binary builtins and HTTP-scanner opcodes    |
-//! | [`io`]            | file/socket/DNS/sleep/spawn opcodes — everything   |
-//! |                   | that can park — and the per-scheduler fd tables    |
-//! | [`poll`]          | parking and wake-up: [`Wait`], the OS poller, the  |
-//! |                   | timer heap, blocking-pool completion delivery      |
-//! | [`sched`]         | the scheduler runtime: worker threads, the         |
-//! |                   | seed injector and inboxes, the blocking pool,      |
-//! |                   | park/notify                                        |
-//! | [`migrate`]       | cross-scheduler process movement: donation glue    |
-//! |                   | and fd re-homing                                   |
-//! | [`freeze`]        | publishing top-level bindings into the program-    |
-//! |                   | wide frozen area                                   |
-//! | [`templates`]     | the resolved view of `Program.abi`: bound          |
-//! |                   | constructor templates, indexed by slot             |
-//! | [`binary`]        | bit-granular reads and writes on `Binary` values   |
-//! | [`http`]          | the HTTP/1.1 byte-scanning hot paths behind        |
-//! |                   | `al/http`                                          |
-//! | [`inspect()`]     | value rendering for `Print`/`ToString` and the     |
-//! |                   | CLI/REPL result line (`vm::inspect`)               |
-//!
-//! # The life of a process
-//!
-//! `spawn(handler)` in a server: the opcode deep-copies the handler closure's
-//! graph into a fresh heap and submits the pair as a seed,
-//! waking an idle scheduler. That scheduler adopts the process, frames the
-//! closure, and resumes it; the child's
-//! `accept` would block, so it parks — interests armed in the poller, the
-//! suspended [`Process`] shelved under a wait id — and the scheduler runs
-//! its next process. A connection arrives: the poller wakes the process,
-//! the accept re-runs and succeeds. Later it exhausts a reduction budget
-//! mid-computation and yields to the back of the run queue; a peer
-//! scheduler goes idle, and at this scheduler's next yield it claims
-//! that peer and donates the queued process — values, stack, frames,
-//! socket fds — which moves over in one piece and keeps running there.
-//! Its final `Ret` leaves the result on top of the stack: the process
-//! is done, its values are freed as it drops, and the runtime's live
-//! count falls. When the count reaches zero, `acquire_work` returns
-//! false on every scheduler, the workers exit, and scheduler 0 hands
-//! main's stashed result back to `run()`'s caller.
+//! - A context switch is a few pointer moves. The running process lives
+//!   directly in the VM's `heap`/`stack`/`frames` fields, and a suspended one
+//!   is those same fields packed into a [`Process`].
+//! - Preemption is budgeted. A slice runs until [`REDUCTION_BUDGET`] is spent:
+//!   a call costs one reduction, a syscall [`IO_REDUCTION_COST`], so an accept
+//!   loop is preempted like everything else.
+//! - Blocking parks the process, never the thread. An op that would block
+//!   returns [`Step::Parked`] with a [`Wait`]; the wake re-runs the
+//!   instruction.
+//! - Work moves between schedulers as owned memory. Spawns copy the closure
+//!   graph into a fresh heap; load balancing donates whole queued processes.
+//!   Plain moves in both cases.
+//! - Memory is reference-counted, so there is no rooting rule and no
+//!   allocation reservation. A process owns every heap value it can reach,
+//!   which is what makes seeds, migrants, and suspended processes `Send` by
+//!   construction — and why main's result is stashed as a `(value, heap)`
+//!   pair until `run()`'s caller is done with it.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -152,31 +73,27 @@ mod freeze;
 mod http;
 mod inspect;
 mod io;
-/// Public: JIT module construction and the runtime-symbol resolution seam
-/// (`JITBuilder::symbol` registration, finalize-time publication into the
-/// entry table); documents the front-end/runtime layering choice.
+/// JIT module construction and the runtime-symbol resolution seam.
 pub mod jit;
 mod map;
 mod migrate;
-/// Public like [`native_shims`]: the JIT finalize step registers
-/// [`native::al_rt_enter_interp`] by symbol for compiled bodies to call
-/// interpreter-only functions through.
+/// Public because the JIT finalize step registers
+/// [`native::al_rt_enter_interp`] by symbol.
 pub mod native;
-/// Public: the JIT finalize step registers these symbols with the builder,
-/// and generated code calls them; see the module docs for the parity
-/// contract.
+/// Public because the JIT finalize step registers these symbols with the
+/// builder and generated code calls them.
 pub mod native_shims;
-/// The `op-histogram` feature's dispatch counters. Absent from a default
-/// build, which must leave stderr untouched.
+/// Dispatch counters. Absent from a default build, which leaves stderr
+/// untouched.
 #[cfg(feature = "op-histogram")]
 pub mod op_histogram;
-/// Public: the `AL_PERF_MAP=1` perf-map writer — one `/tmp/perf-<pid>.map`
-/// symbol line per JIT-compiled body, written by [`jit::finalize_into`].
+/// The `AL_PERF_MAP=1` perf-map writer: one `/tmp/perf-<pid>.map` symbol line
+/// per JIT-compiled body.
 pub mod perf_map;
 mod poll;
 mod sched;
-/// Public: per-process native stack regions and switch primitives (Stage 1
-/// of the machine-stack plan, dormant until suspension uses them).
+/// Per-process native stack regions and switch primitives. Dormant until
+/// suspension uses them.
 pub mod stack;
 mod templates;
 #[cfg(test)]
@@ -192,12 +109,9 @@ use sched::{Inbound, Runtime, Seed};
 use templates::Templates;
 use text::{int_to_ascii, parse_uint_ascii};
 
-/// A VM-level failure. The variant distinguishes user-visible runtime
-/// errors (out-of-bounds, type mismatch — surfaced to AL as a panic
-/// message) from broken type-system invariants (`Internal`: a compiler
-/// bug, not user error) and infrastructure failures (`Io`: mio poll / fd
-/// exhaustion). The top-level handler ([`VM::run`], [`worker_main`]) acts
-/// on that distinction rather than parsing a string.
+/// A VM-level failure. The variants separate user-visible runtime errors from
+/// broken type-system invariants and from infrastructure failures, because
+/// [`VM::run`] and [`worker_main`] act differently on each.
 #[derive(Debug)]
 pub enum VmError {
     /// An operand had the wrong runtime tag for `op`.
@@ -214,16 +128,13 @@ pub enum VmError {
         len: i64,
         what: &'static str,
     },
-    /// Type-system invariant broken — indicates a compiler bug, not user
-    /// error. The runtime behind an `Internal`-errored run is leaked (see
-    /// [`VM::run`]).
+    /// Type-system invariant broken: a compiler bug, not user error. The
+    /// runtime behind an `Internal`-errored run is leaked (see [`VM::run`]).
     Internal(Cow<'static, str>),
     /// mio poll / fd registration / OS resource failure.
     Io(std::io::Error),
-    /// The pooled native-stack budget is exhausted: `live` stacks against a
-    /// cap derived from the kernel's `vm.max_map_count` (each stack costs
-    /// exactly two VMAs). Surfaced as a value a spawn can report, never a
-    /// raw ENOMEM from a mid-slab mmap ([`stack::slab`]).
+    /// The pooled native-stack budget is exhausted: `live` stacks against a cap
+    /// derived from `vm.max_map_count` (each stack costs two VMAs).
     StackBudget { live: usize, cap: usize },
 }
 
@@ -281,14 +192,9 @@ struct CallFrame {
     code_start: i32,
     ip: i32,
     base_slot: usize,
-    // The closure this frame is executing, as a single `Value`. Captures are
-    // read through it (`ClosureRef::captures`), `Op::PushSelf` is a plain
-    // copy of it, and pushing a child frame on every
-    // `Op::Call`/`Op::TailCall`/`Op::CallSelf` copies one word-sized handle.
-    // Keeping the whole closure here (rather than a separate captures slice)
-    // makes the frame plain data and gives the GC exactly one root per frame:
-    // the closure and everything it captures stay reachable while the frame
-    // is live.
+    // The whole closure, not a separate captures slice, so the frame stays
+    // plain data with exactly one root: everything it captures is reachable
+    // while the frame is live.
     captures: Value,
 }
 
@@ -301,12 +207,9 @@ const REDUCTION_BUDGET: i32 = 4000;
 const IO_REDUCTION_COST: i32 = 100;
 
 /// How deep a scheduler's run queue may grow through yield-time injector
-/// pickup. Overflow seeds are
-/// admitted to a busy scheduler only while its queue is shallow, so they
-/// late-bind to whichever scheduler has capacity instead of piling onto
-/// the first one to yield. Idle pickup (acquire_work) stays unconditional,
-/// as does inbox drain — directed work (donated migrants, direct-handed
-/// seeds) already has a chosen destination and is never made to wait.
+/// pickup. Overflow seeds late-bind to whichever scheduler has capacity
+/// instead of piling onto the first one to yield. Idle pickup and inbox drain
+/// stay unconditional: directed work already has a chosen destination.
 const YIELD_PICKUP_QUEUE_LIMIT: usize = 4;
 
 /// Why an execution slice ended.
@@ -319,16 +222,12 @@ enum Step {
     Parked(Wait),
 }
 
-/// A suspended lightweight process — a complete resumable continuation.
-/// The *running* process lives directly in `VM.heap`/`VM.stack`/`VM.frames`
-/// so the dispatch loop is untouched; a context switch swaps those fields
-/// with a `Process` (a few pointer moves).
+/// A suspended lightweight process: a complete resumable continuation. The
+/// RUNNING process lives directly in `VM.heap`/`VM.stack`/`VM.frames`; a
+/// context switch swaps those fields with a `Process`.
 ///
-/// A process *owns* its values: `heap` is the process-private arena that
-/// every heap-backed `Value` in `stack`/`frames` lives in (idea 6 above).
-/// Owning the memory is what makes a suspended process `Send` by
-/// construction — migrating it to another scheduler is a plain move of this
-/// struct, heap and all.
+/// A process owns its values, which is what makes it `Send` by construction —
+/// migrating it to another scheduler is a plain move of this struct.
 struct Process {
     // Field order is not load-bearing here: `heap` is a zero-sized marker and
     // `mi_free` is global, so a `Value` dropping after `heap` is fine.

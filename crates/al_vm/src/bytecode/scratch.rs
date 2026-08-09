@@ -1,23 +1,17 @@
 //! A stack-resident scratch buffer for assembling a replacement node's slots
 //! before handing them to an arena builder.
 //!
-//! Path copying in [`super::seq`] and [`super::hamt`] rebuilds one node image at
-//! a time, and every image has a statically known maximum width (`2 * B` slots
-//! for an RRB node, `WIDTH` children for a HAMT branch). `Buf<N>` holds that
-//! image inline so rebuilding never touches the host allocator — only the arena
-//! node itself is allocated.
+//! Path copying in [`super::seq`] and [`super::hamt`] rebuilds one node image
+//! at a time, and every image has a statically known maximum width. `Buf<N>`
+//! holds it inline, so rebuilding never touches the host allocator.
 //!
-//! It holds owned `Value`s: `extend` clones (incref) and the buffer's drop
-//! decrements — balanced by a builder's `store_child`, so reference counts come
-//! out exactly right.
+//! It owns its `Value`s: `extend` increfs and the buffer's drop decrefs,
+//! balanced against a builder's `store_child`.
 
 use super::value::Value;
 use std::mem::MaybeUninit;
 
 /// Inline buffer of at most `N` owned `Value`s.
-///
-/// The `unsafe` below is initialized-prefix bookkeeping for a stack buffer; it
-/// touches no arena layout — that lives entirely in `value.rs`.
 pub(super) struct Buf<const N: usize> {
     items: [MaybeUninit<Value>; N],
     len: usize,
@@ -53,8 +47,8 @@ impl<const N: usize> Buf<N> {
 impl<const N: usize> Drop for Buf<N> {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: exactly the first `len` slots were initialized via
-        // `push`/`extend`; each is dropped once here and never read again.
+        // SAFETY: exactly the first `len` slots were initialized by
+        // `push`/`extend`, and each is dropped once here.
         for slot in &mut self.items[..self.len] {
             unsafe { slot.assume_init_drop() };
         }

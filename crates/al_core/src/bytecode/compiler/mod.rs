@@ -1,25 +1,52 @@
-//! AST → [`Program`]: Hindley-Milner type inference plus bytecode emission.
+//! AST → [`Program`]: orchestrates Hindley–Milner type inference and bytecode
+//! emission.
 //!
-//! A function body is typechecked by the [`Compiler::compile_expr`] walk, then
-//! lowered to [`crate::core_ir`] ANF, run through Core→Core passes (Perceus
-//! reuse, later mode inference) and emitted by `core_ir::emit`. Type erasure
-//! happens exactly once, at Core→bytecode. See [`Compiler::compile_fn_body`]
+//! Function bodies go through the Core IR pipeline: the fused
+//! [`Compiler::compile_expr`] walk runs first for type inference (a type that
+//! unification just resolved is immediately available so `lower` can pick
+//! typed opcodes — `AddInt` over `Add` — and pattern codegen can consult
+//! variant layouts), then the typechecked body is lowered to
+//! [`crate::core_ir`] ANF, run through Core→Core passes (Perceus reuse, later
+//! mode inference), and finally emitted by `core_ir::emit`. Type erasure
+//! happens exactly once at Core→bytecode. See [`Compiler::compile_fn_body`]
 //! and `docs/core-ir-spec.md`.
 //!
-//! Module top level is the exception: declarations are mutually recursive and
-//! order-free, so `analysis.rs` runs its multi-pass declaration analysis first
-//! and hands each body back to this file. Pattern typechecking lives in
-//! `patterns.rs`, the Core IR bridge impls in `bridges.rs`.
+//! Module top level is the exception: declarations are mutually
+//! recursive and order-free, so `analysis.rs` runs its multi-pass declaration
+//! analysis first and hands each body back to this file.
+//!
+//! # Map of the module
+//!
+//! - **This file** — [`Compiler`] + entry points ([`compile`] / [`check`] /
+//!   [`check_as_module`]): all codegen, scoping, and inference state in one
+//!   struct, documented field by field; the pass itself (`compile_node` /
+//!   `compile_expr` and friends, one method per AST form); and the Core IR
+//!   orchestration ([`Compiler::compile_fn_body`]), the `lower → perceus →
+//!   emit` pipeline hook for function bodies.
+//! - **`patterns.rs`** — pattern type-checking (no codegen):
+//!   [`Compiler::type_pattern`] plus constructor lookup and argument
+//!   slotting.
+//! - **`bridges.rs`** — the `EmitCtx`/[`ElabCtx`] impls through which the
+//!   compiler-agnostic Core IR passes speak to this compilation.
+//! - **`tests.rs`** — the unit-test modules.
+//!
+//! The LSP/workspace layer that owns a `Compiler` across edits —
+//! [`IncrementalSession`], [`Watermark`]/`reset_to`, and the reference-graph
+//! finalization — lives in [`super::session`]; the peephole superinstruction
+//! pass lives in [`super::peephole`].
 //!
 //! # Invariants
 //!
-//! - Every constant `Value` is built through the `const_*` helpers, never a
-//!   bare `Value` constructor, so all constants live in the program's frozen
-//!   area and stay valid on any thread for the program's life.
-//! - Everything a compile appends to stays append-only between module
-//!   boundaries. That is what makes `Watermark` rollback pure truncation.
-//! - Local scoping is undo-log based: popping a scope replays only the
-//!   bindings it actually shadowed, never a map snapshot.
+//! - Every constant `Value` is built through the compiler's
+//!   `FrozenBuilder` handle (the `const_*` helpers), never a bare `Value`
+//!   constructor, so all constants live in the program's frozen area and
+//!   stay valid for the program's life on any thread.
+//! - Everything a compile appends to (inference pool, type env, code,
+//!   functions, constants) stays append-only between module boundaries;
+//!   that is what makes `Watermark` rollback pure truncation.
+//! - Local scoping is undo-log based (`undo_log` / `scope_marks`): popping
+//!   a scope replays only the bindings it actually shadowed, never a map
+//!   snapshot.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -68,29 +95,46 @@ mod tests;
 mod clean {
     use crate::diagnostic::{Diagnostic, has_errors};
 
-    /// Proof, as of the moment it was minted, that the module being compiled
+    /// Proof — as of the moment it was minted — that the module being compiled
     /// has produced no error diagnostic.
     ///
-    /// No pass past the typecheck walk has a poison arm, so rather than teach
-    /// each one to recognise poison the pipeline is made unreachable from a
-    /// poisoned module at its first gate. `typed_ir::elaborate_body`/
-    /// `elaborate_toplevel` are the only constructors of a
-    /// [`TypedFn`](crate::typed_ir::TypedFn), hence of the `TypedProgram`
-    /// `lower` consumes, and
-    /// [`Compiler::elaborate_then_materialize`](super::Compiler::elaborate_then_materialize)
-    /// is their only caller here. It consumes a `CleanModule`, and
-    /// [`CleanModule::mint`] is the only way to make one.
+    /// There is no error node anywhere past the typecheck walk:
+    /// [`TypedExpr`](crate::typed_ir::TypedExpr) has no poison arm, `lower` has
+    /// nothing to emit for a subtree the typechecker rejected, and `perceus`
+    /// has no type to compute its shape from. Rather than teach every pass to
+    /// recognise poison, the whole pipeline is made *unreachable* from a
+    /// poisoned module at its **first** gate, which is the elaborator and not
+    /// `lower`: `typed_ir::elaborate_body`/`elaborate_toplevel` are the only
+    /// constructors of a [`TypedFn`](crate::typed_ir::TypedFn), hence of the
+    /// [`TypedProgram`](crate::typed_ir::TypedProgram) that `lower` consumes,
+    /// and [`Compiler::elaborate_then_materialize`](super::Compiler::elaborate_then_materialize)
+    /// is the only place in this compiler that calls them. It consumes a
+    /// `CleanModule`, and [`CleanModule::mint`] is the only way to make one.
     ///
-    /// Neither `Copy` nor `Clone`, and taken by value: an elaboration can
-    /// itself append diagnostics, so each one re-proves this.
+    /// (`core_ir::lower::lower` itself takes no proof — it does not need
+    /// one. Its argument *is* the proof: a `TypedProgram` cannot exist for a
+    /// module that failed to typecheck, because the only way to build one runs
+    /// through the gate above.)
+    ///
+    /// A body the walk rejected is therefore never elaborated; it is closed out
+    /// empty, which is what the fused pipeline always did. In particular
+    /// `Elab::poison` — which fires when the check walk left an expression with
+    /// no recorded type, exactly what a rejected subtree looks like — cannot be
+    /// reached from a module that already reported a type error, so a plain
+    /// type error never turns into a compiler-bug report.
+    ///
+    /// Neither `Copy` nor `Clone`, and taken by value: cleanliness established
+    /// before one elaboration says nothing about the state after it, since an
+    /// elaboration can itself append diagnostics. Each one re-proves it.
     #[must_use]
     pub(super) struct CleanModule {
         _priv: (),
     }
 
     impl CleanModule {
-        /// `Some` iff `diagnostics` carries no error — the same predicate
-        /// `CompileResult::success` reports.
+        /// `Some` iff `diagnostics` carries no error — exactly the predicate
+        /// `CompileResult::success` reports, so gating on this proof cannot
+        /// change which diagnostics the user sees.
         pub(super) fn mint(diagnostics: &[Diagnostic]) -> Option<Self> {
             (!has_errors(diagnostics)).then_some(Self { _priv: () })
         }
@@ -98,7 +142,9 @@ mod clean {
 }
 use clean::CleanModule;
 
-/// Why a nominal `.field` lookup failed.
+/// Why a nominal `.field` lookup failed. Carries enough of the offending
+/// variant for the typecheck path to render its diagnostics; lower just
+/// discards it.
 enum FieldMismatch {
     /// Receiver's type body has no variants at all (alias, opaque, builtin).
     NotNominal,
@@ -112,66 +158,93 @@ enum FieldMismatch {
     },
 }
 
-/// The bytecode `Program` and the Core IR it came from. A `check` builds one
-/// too — its function table is mode-independent, pinned by
-/// `crates/al/tests/check_parity.rs` — but its bodies are never emitted.
+// ============================================================================
+// CompileResult
+// ============================================================================
+
+/// The artifacts one compile materialises together: the bytecode `Program`
+/// and the Core IR it was derived from. A `check` still carries one — the
+/// function table it registers is mode-independent and pinned by
+/// `crates/al/tests/check_parity.rs` — its bodies are simply never emitted.
 #[derive(Debug)]
 pub struct Emitted {
     pub program: Program,
-    /// Lowered Core IR (typed ANF). Golden-snapshotted by `crates/al/tests/core_ir.rs`.
+    /// Lowered Core IR (typed ANF) for the whole program.
+    /// Golden-snapshotted by `crates/al/tests/core_ir.rs`.
     pub core: crate::core_ir::CoreProgram,
 }
 
 #[derive(Debug)]
 pub struct CompileResult {
-    /// `None` when no program was built at all: the incremental (LSP) check
-    /// path, or a compile whose stdlib seed failed. Consumers that run or
-    /// disassemble must unwrap the absence explicitly.
+    /// What the compile built, when it built anything. `None` means no
+    /// program exists at all: the incremental (LSP) session's check path,
+    /// which analyses without materialising a result, and a compile whose
+    /// stdlib seed failed before the program was touched. Consumers that run
+    /// or disassemble must unwrap the absence explicitly — handing a real
+    /// `entry` index over empty code is unrepresentable.
     pub emitted: Option<Emitted>,
     pub diagnostics: Vec<Diagnostic>,
-    /// Workspace reference graph: the one source of truth for goto-def,
-    /// find-refs, rename, symbols and dead-code. Shared so the owning
-    /// `IncrementalSession` can keep querying it after handing this back.
+    /// Workspace reference graph (the single source of truth for goto-def /
+    /// find-refs / rename / symbols / dead-code). An owned `Rc` handle so the
+    /// owning `IncrementalSession` can keep answering queries against the same
+    /// graph after the result is handed back.
     pub references: Rc<ReferenceGraph>,
 }
 
 impl CompileResult {
-    /// Whether the compile succeeded: whether `diagnostics` carries no error.
-    /// Derived, not stored, so no construction site can disagree with it.
+    /// Whether the compile succeeded — definitionally, whether `diagnostics`
+    /// carries no error. Derived rather than stored so no construction site
+    /// can disagree with the diagnostics it hands back.
     pub fn success(&self) -> bool {
         !has_errors(&self.diagnostics)
     }
 }
 
-/// An enclosing function frame's locals, moved here whole by `enter_fn_frame`
-/// and moved back by `finish_fn_frame`, so a frame push/pop is O(1).
+// ============================================================================
+// Compiler — single-pass: HM type inference + bytecode emission
+// ============================================================================
+
+/// An enclosing function frame's locals, moved here wholesale by
+/// `enter_fn_frame` and moved back by `finish_fn_frame`. Holding the map
+/// itself (rather than a name→slot copy) makes the frame push/pop O(1).
 #[derive(Clone)]
 pub(super) struct Scope {
     locals: HashMap<StrId, LocalSlot>,
 }
 
-/// A live local binding: its stack slot, and the block-scope depth it was bound
-/// at. A rebinding at a strictly shallower depth is inherited from an enclosing
-/// scope, so shadowing must allocate a fresh slot to keep the outer value.
+/// A live local binding: the stack slot it occupies plus the block-scope
+/// nesting depth (`scope_marks.len()`) at which it was bound. The depth lets
+/// `get_or_create_local` decide in O(1) whether a re-binding shadows an
+/// enclosing scope (depth strictly shallower than the current scope ⇒ a fresh
+/// slot must be allocated so the outer value survives the block) or simply
+/// rebinds within the current scope (reuse the slot).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LocalSlot {
     pub(super) slot: i32,
     pub(super) depth: u32,
-    /// This name lives in the entry frame, so a nested body loads it with
-    /// `PushGlobal <slot>` instead of capturing it. Decided once at bind time
-    /// by [`Compiler::binds_a_global`]; `resolve_variable` must read this
-    /// rather than re-derive it from `depth`.
+    /// Recorded by [`Compiler::binds_a_global`] at bind time: this name lives
+    /// in the entry frame, so a nested body loads it with `PushGlobal <slot>`
+    /// rather than capturing it. `resolve_variable` reads this field instead of
+    /// re-deriving the predicate from `depth`, so the binder and the loader
+    /// cannot disagree about which names are globals.
+    pub(super) is_global: bool,
 }
 
-/// One top-level `fn`/`const` declaration of the module being compiled, as the
-/// toplevel elaboration needs it: where it sits in the module block, and which
-/// entry-frame slot the check walk gave it. Nothing maps the name to a slot.
+/// One top-level `fn`/`const` declaration of the module currently being
+/// compiled, as the toplevel elaboration needs it.
+///
+/// Both facts the elaborator needs about a declaration live on this one record:
+/// where it sits in the module block (so the spine can be scheduled in
+/// dependency order) and which entry-frame slot the check walk already gave it
+/// (so `TypedBind::global` pins the `StoreLocal` that the `PushGlobal`s already
+/// emitted into fn bodies address). Nothing maps the *name* back to a slot.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ToplevelDecl {
     /// Index of the declaration's node in the module block's `body`.
     pub(super) node: usize,
-    /// Interned declaration name. Read only to resolve a forward reference to
-    /// this decl from inside the toplevel spine; the answer is its `slot`.
+    /// Interned declaration name. Read only to resolve a forward *reference*
+    /// to this decl from inside the toplevel spine — the AST spells a name, so
+    /// something must translate it — and the answer is this record's `slot`.
     pub(super) name: StrId,
     /// The entry-frame slot Pass 3 allocated for the declaration.
     pub(super) slot: GlobalSlot,
@@ -180,9 +253,12 @@ pub(super) struct ToplevelDecl {
 /// Compiler state snapshotted on entry to a nested function body and restored
 /// by `finish_fn_frame` once its bytecode and closure have been emitted.
 struct FnFrame {
-    /// `undo_log`/`scope_marks` lengths at frame entry. `locals` is restored
-    /// wholesale from `outer_scopes`, so the inner frame's undo entries must be
-    /// discarded here, never replayed against the parent map.
+    /// `undo_log`/`scope_marks` lengths at frame entry. A nested body's
+    /// param/local bindings live in the *enclosing* scope's mark range (no
+    /// `push_local_scope` wraps bare params), so `finish_fn_frame` truncates
+    /// back to these — `locals` is restored wholesale from `outer_scopes`, so
+    /// the inner frame's undo entries must be discarded, never replayed
+    /// against the parent map.
     undo_base: usize,
     marks_base: usize,
     local_count: i32,
@@ -196,8 +272,11 @@ struct FnFrame {
     closures: Vec<ClosureSite>,
 }
 
-/// Per-module compiler state parked by `enter_module_frame` and restored by
-/// `leave_module_frame`.
+/// Per-module compiler state snapshotted on entry to a submodule body by
+/// `enter_module_frame` and restored by `leave_module_frame`. Mirrors
+/// `FnFrame`: adding a per-module field means one line here plus one
+/// swap/restore in the enter/leave pair, not two hand-written
+/// `mem::replace` calls to remember at both ends of `compile_module_body`.
 struct ModuleFrame {
     module: ModulePath,
     module_key: ModuleKey,
@@ -208,7 +287,11 @@ struct ModuleFrame {
 }
 
 /// Compiler frame state parked by `enter_elab_frame` while a [`DeferredBody`]'s
-/// snapshot is swapped in for its elaboration, restored by `leave_elab_frame`.
+/// snapshot is swapped in for its elaboration, and restored wholesale by
+/// `leave_elab_frame`. Mirrors [`ModuleFrame`]: adding a field the elaboration
+/// must see means one line here plus one swap/restore in the enter/leave pair,
+/// not two hand-written `mem::replace` calls to keep paired at both ends of
+/// `elaborate_deferred`.
 struct ElabFrame {
     outer_scopes: Vec<Scope>,
     locals: HashMap<StrId, LocalSlot>,
@@ -220,253 +303,353 @@ struct ElabFrame {
 }
 
 pub struct Compiler {
+    // --- Codegen state ---
     pub(super) program: Program,
-    /// Append handle to `program`'s frozen area. Every constant `Value` is
-    /// built through this (the `const_*` helpers), never a bare `Value`
-    /// constructor, so enum names and field labels share the area's canonical
-    /// interned allocations.
+    /// Append handle to `program`'s frozen area.
+    /// Every constant `Value` the compiler builds — literals, enum
+    /// construction/match headers, folded binaries — is constructed through
+    /// this builder (the `const_*` helpers below), never via bare `Value`
+    /// constructors, so enum names and field labels from compile-time
+    /// constants all point at the area's canonical interned allocations.
     frozen: FrozenBuilder,
-    /// `Value::to_bits` → constant-pool index. `frozen` interns heap constants
-    /// and immediates encode by value, so equal constants have equal bits.
-    /// Lookups re-validate against the live pool, so `reset_to`'s truncate
-    /// needs no paired invalidation — a stale entry just misses.
+    /// `Value::to_bits` → constant-pool index, so `add_constant` returns the
+    /// existing slot for a repeated literal instead of pushing a duplicate.
+    /// `frozen` interns heap constants and immediates encode by value, so
+    /// identical constants have identical bits. Self-validating on lookup
+    /// (index in-bounds and slot bits still match) so `reset_to`'s pool
+    /// truncate needs no paired invalidation — a stale entry just misses.
     const_dedup: HashMap<u64, i32>,
     pub(super) locals: HashMap<StrId, LocalSlot>,
-    /// Scoped-symbol-table undo log. Every mutation of `locals` inside an open
-    /// block scope appends `(name, previous entry)`; `pop_local_scope` unwinds
-    /// back to the entering scope's mark. Costs O(bindings actually shadowed)
-    /// rather than a full `locals` snapshot per scope.
+    /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
+    /// open block scope appends `(name, previous entry)`; `pop_local_scope`
+    /// unwinds back to the entering scope's mark, restoring (or removing) each
+    /// touched name. Replaces snapshotting the whole `locals` map on every
+    /// block/if-arm/match-arm/lambda entry: cost is now O(bindings actually
+    /// shadowed) instead of O(scopes × live locals).
     pub(super) undo_log: Vec<(StrId, Option<LocalSlot>)>,
-    /// `undo_log` length captured at each `push_local_scope`.
+    /// `undo_log` length captured at each `push_local_scope`; `pop_local_scope`
+    /// unwinds the log down to the popped mark.
     pub(super) scope_marks: Vec<usize>,
-    /// Per-scope unused-binding tracking: a let/param/match name that does not
-    /// start with `_`, mapped to its definition span. Anything left when the
-    /// frame pops is an error. Frames move in lockstep with `scope_marks` and
-    /// the fn frames, so a use inside a nested closure can mark an outer
-    /// binding by walking the whole stack.
+    /// Per-scope unused-binding tracking. Each frame maps a let/param/match
+    /// name (that doesn't start with `_`) to its definition span; `mark_used`
+    /// removes the entry on first reference. Anything left when the frame is
+    /// popped is reported as an error. Frames are pushed/popped in lockstep
+    /// with `scope_marks` (blocks) and `enter_fn_frame`/`finish_fn_frame`
+    /// (params), so a use inside a nested closure marks the outer binding by
+    /// walking the whole stack.
     pub(super) unused: Vec<HashMap<StrId, Span>>,
     pub(super) outer_scopes: Vec<Scope>,
     pub(super) local_count: i32,
     /// Entry-frame slot → `program.functions` index for every top-level `fn`
-    /// already compiled. A hit lets the Core emit use `CallKnown` (immediate
-    /// `func_idx`, no callee pushed); a miss — a forward ref within an SCC, or
-    /// a non-fn global — falls back to `PushGlobal; Call`.
+    /// that has already been compiled. Populated by `compile_declared_function`
+    /// after `finish_fn_frame` assigns the `func_idx`; consulted by
+    /// `resolve_variable` to choose between [`Denotation::known_fn`] and
+    /// [`Denotation::global`], which lets the Core emit call a known top-level
+    /// fn with `CallKnown` (immediate `func_idx`, no callee value pushed)
+    /// instead of the `PushGlobal; Call` dynamic path. A miss (forward ref
+    /// within an SCC, or a non-fn global) falls back to `Call`.
     pub(super) global_to_func: HashMap<GlobalSlot, crate::core_ir::FuncIdx>,
-    /// This module's own top-level `fn`/`const` declarations, in Pass 5
     /// This module's own top-level `fn`/`const` declarations, in Pass 5
     /// SCC-visit order (leaves first). Cleared to entry-file scope at
     /// `code_mark`.
     ///
-    /// The elaborator walks the module block's decl nodes in this order, not
-    /// source order, so a forward-referenced `const` is stored before it is
-    /// read. Definition and use read the `slot` off the same record, so they
-    /// cannot disagree.
+    /// One record serves both halves of the toplevel elaboration. The
+    /// [`ToplevelDecl::node`] index *schedules* the spine: the elaborator walks
+    /// the module block's decl nodes in this order, not source order, so a
+    /// forward-referenced `const` is stored before it is read. The
+    /// [`ToplevelDecl::slot`] on that same record is the entry-frame slot the
+    /// decl's `TypedBind::global` is pinned to, and the one an intra-SCC
+    /// forward *reference* loads with `PushGlobal`. Definition and use read the
+    /// same field of the same record, so they cannot disagree.
     pub(super) toplevel_decls: Vec<ToplevelDecl>,
-    /// Entry-frame slots for module-scope binds that are not declarations —
+    /// Entry-frame slots for module-scope binds that are *not* declarations —
     /// top-level `let`s and destructured names — in binding order. Unlike
-    /// `locals` this is not unwound by `pop_local_scope`, so it survives
-    /// `analyse_module`'s scope pop and reaches the toplevel elaboration, which
-    /// drains it in the order it was filled. A queue, not a map: a name can be
-    /// rebound and each binding needs its own slot. Cleared to entry-file scope
-    /// at `code_mark`.
+    /// [`Self::locals`] this is not unwound by `pop_local_scope`, so it
+    /// survives `analyse_module`'s scope pop and reaches the toplevel
+    /// elaboration, which drains it in the order it was filled: both walks
+    /// visit the module's statements in source order. A queue rather than a
+    /// map because a name may be rebound (`x = 10; f = fn() x; x = 20`) and
+    /// each binding needs its own slot — the closures compiled in between
+    /// address distinct slots via `PushGlobal` — so a name is not an identity
+    /// here, and nothing downstream ever maps one back to a slot. Cleared to
+    /// entry-file scope at `code_mark`.
     pub(super) toplevel_binds: VecDeque<GlobalSlot>,
-    /// True only while `analyse_module` walks a module's own statement list —
-    /// the one walk whose bindings the toplevel elaboration mirrors. The queue
-    /// above is positional, so any other walk feeding it would hand the
-    /// elaborator a slot belonging to a different binding. Being a global does
-    /// not say this on its own: imports, prelude slot seeds and declarations
-    /// are globals bound outside the statement walk, each reaching the
-    /// elaborator by its own route.
+    /// True only while `analyse_module` walks a module's own statement list,
+    /// the single walk whose bindings the toplevel elaboration mirrors. The
+    /// queue above is positional, so *any* other walk that fed it would hand
+    /// the elaborator a slot belonging to a different binding. Being a global
+    /// ([`Compiler::binds_a_global`]) does not say this on its own: imports,
+    /// the prelude's slot seeds and `fn`/`const` declarations are all globals
+    /// bound outside the statement walk, and each reaches the elaborator by a
+    /// route of its own.
     pub(super) walking_module_statements: bool,
-    /// Memo for [`ElabCtx::resolve_rty`], keyed by union-find root. Cleared in
-    /// `elaborate`, with the pool it indexes.
+    /// Memo for [`ElabCtx::resolve_rty`], keyed by union-find root: one pool
+    /// node per solved type, for the whole `TypedProgram` the current
+    /// `elaborate` call is building. Cleared there, with the pool.
     rty_cache: HashMap<Ty, RTy>,
     pub(super) captures: HashMap<StrId, i32>,
     pub(super) capture_names: Vec<StrId>,
     pub(super) current_binding: Option<StrId>,
-    /// One-shot self-name for the next `enter_fn_frame(None)`, so a
-    /// `name = fn(...)` lambda can self-recurse without the enclosing fn's
-    /// binding leaking into unrelated (e.g. HOF-arg) lambdas.
+    /// One-shot self-name handed to the next `enter_fn_frame(None)` so a
+    /// `name = fn(...)` binding's lambda can self-recurse, without leaking the
+    /// enclosing fn's binding into unrelated (e.g. HOF-arg) lambdas.
     pub(super) next_fn_self_name: Option<StrId>,
-    /// The definition whose body is being compiled: the `owner` of every
-    /// reference-graph occurrence emitted while it is set, which is the def→def
-    /// edge channel the dead-code reachability walk follows. `None` at module
-    /// top level so genuine executed code roots its references. Spans nested
-    /// lambdas, which have no `DefId` of their own.
+    /// The definition whose body is currently being compiled, used as the
+    /// `owner` of every reference-graph occurrence emitted while it is set
+    /// (the def→def edge channel for dead-code reachability). `None` at module
+    /// top level so genuine executed code roots its references; set/restored
+    /// around each `fn`/`const`/`type` body in the single-pass traversal and
+    /// spans nested lambdas (a lambda has no `DefId`, so its body's references
+    /// belong to the enclosing definition).
     pub(super) current_owner: Option<DefId>,
+    // --- Type inference state ---
     pub(super) engine: InferEngine,
-    /// Generic var ids rigid for the body being checked (a `fn` annotation's
-    /// type parameters). `instantiate` callers pass it so those ids are not
-    /// freshened inside the body.
+    pub(super) env: TypeEnv,
+    /// Generic var ids that are rigid for the body currently being checked
+    /// (the type parameters from a `fn`'s annotation). `instantiate` callers
     /// pass this so those ids are not freshened inside the body.
     pub(super) rigid_ids: HashSet<i32>,
     pub(super) recorded: Vec<RawRef>,
-    /// Reference-graph collector for the module currently being analysed.
-    /// `compile_module_body` moves the finished set into that module's
-    /// `CachedModule`. Reset by `reset_to` like `recorded`.
+    /// Transient reference-graph collector for the module *currently* being
+    /// analysed (entry file, or a submodule between the save/restore dance in
+    /// `compile_module_body`). The typecheck/infer pass emits definitions and
+    /// references into this; `compile_module_body` moves the finished set into
+    /// the module's `CachedModule`. Reset by `reset_to` like `recorded`.
     pub(super) module_refs: ModuleReferences,
     check_only: bool,
-    /// Native compile-at-load accounting: how many bodies the `AL_NATIVE` mode
-    /// selected and how long the hook spent on them. Summarised against the
-    /// 100ms unit budget under `AL_NATIVE_DEBUG`.
+    /// Whole-unit accounting for the native compile-at-load pass: how many
+    /// bodies the `AL_NATIVE` mode selected and how long the native hook
+    /// spent on them. Summarised against the 100ms unit budget (under
+    /// `AL_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
     native_stats: super::native::UnitStats,
-    /// Whether to buffer per-occurrence `RawRef`s and resolve them into
-    /// `HoverFact`s in `finalize_references`. Only the LSP consumes those, so
-    /// `compile`/`check` leave this `false` and skip the whole O(occurrences)
-    /// resolve pass. The reference graph is built separately via `module_refs`
-    /// and is unaffected.
+    /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
+    /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
+    /// (the LSP) consumes `HoverFact`s; the free `compile`/`check` entry points
+    /// discard them, so they leave this `false` and the whole O(occurrences)
+    /// resolve pass (a deep `Type`-tree build + `HashSet` alloc per occurrence)
+    /// plus the per-occurrence `name.to_string()` is skipped. The reference
+    /// graph (goto-def/find-refs/dead-code) is built independently via
+    /// `module_refs` and is unaffected.
     pub(super) collect_hover_facts: bool,
+    // --- Module state ---
     pub(super) module_table: ModuleTable,
     /// Append-only `ModulePath` ↔ `ModuleId` interner backing every `DefId`.
-    /// Persistent across `reset_to` so a `DefId` minted in one `check` still
-    /// resolves after later modules are added or evicted.
+    /// Persistent across `reset_to`/incremental recompiles (like
+    /// `module_table`) so a `DefId` minted in one `check` still resolves after
+    /// later modules are added or evicted; ids are reused across recompiles.
     pub(super) ref_interner: ModuleInterner,
     pub(super) current_module: ModulePath,
-    /// `current_module`'s canonical cache key, kept in lockstep with it so no
-    /// per-module bookkeeping re-derives a key from an unresolved path.
+    /// `current_module`'s canonical cache key, maintained in lockstep with it
+    /// (swapped by `enter_module_frame`, reset alongside it) so per-module
+    /// bookkeeping never re-derives a key from a possibly-unresolved path.
     pub(super) current_module_key: ModuleKey,
-    /// Memo of `current_module` interned into `engine.str_slices`; cleared
-    /// whenever `current_module` is swapped.
+    /// Memo of `current_module` interned into `engine.str_slices`; invalidated
+    /// (set to `None`) whenever `current_module` is swapped in
+    /// `enter_module_frame`.
     pub(super) module_path_slice: Option<ArenaSlice<pool::StrSlices>>,
     /// Memo of a module-path `ArenaSlice` → its interned `ModuleId`. The
-    /// `str_slices` pool is append-only within a compile, so a given slice
-    /// always denotes the same path. Cleared in `reset_to`, the one point the
-    /// pool is rewound.
+    /// `str_slices` pool is append-only within a compile, so a given
+    /// `ArenaSlice` always denotes the same path (hence the same id); cleared
+    /// in `reset_to`, the single point where the pool is rewound. Lets
+    /// `defid_of`/`record` skip the per-occurrence `strs_of` + key-join
+    /// allocations and string-hash probe on the per-keystroke recompile.
     pub(super) defid_module_memo: HashMap<ArenaSlice<pool::StrSlices>, ModuleId>,
     /// Qualifier name in this file → the imported module's canonical key.
     pub(super) imported_qualifiers: HashMap<String, ModuleKey>,
-    /// Canonical module key → the import path as the user wrote it. Identity is
-    /// the resolved file, but diagnostics must still say `./lib`, not
+    /// canonical module key -> the import path as the user wrote it. Identity
+    /// is the resolved file; diagnostics must still say `./lib`, not
     /// `/private/var/.../lib`.
     pub(super) module_display: HashMap<ModuleKey, String>,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) prelude: PreludeBindings,
-    /// Names user code may not redefine: every type and constructor the prelude
-    /// exports, derived from `al.al` rather than mirrored in Rust. `@vm`
-    /// functions are excluded, so `println` is shadowable. `BTreeSet` so the
-    /// blob's `RESERVED` slice is sorted, reproducible and binary-searchable.
+    /// Names user code may not redefine. Populated from the prelude module's
+    /// interface (every exported type and constructor) so the set is derived
+    /// from `al.al` rather than mirrored in Rust. `@vm` functions are
+    /// deliberately excluded — `println` is shadowable.
+    /// `BTreeSet` so `precompile_stdlib`'s snapshot iterates sorted — the
+    /// blob's `RESERVED` slice must be reproducible (and binary-searchable).
     pub(super) reserved: BTreeSet<String>,
-    /// The build-time static stdlib, consulted on a runtime-map miss. `None` on
-    /// the from-source path (`register_prelude`, `precompile_stdlib`, or the
-    /// LSP editing the stdlib).
+    /// When the binary is built with the static stdlib, this is the
+    /// `&'static StaticStdlib` handle; lazy-hydrate fallthrough lookups consult
+    /// it on a runtime-map miss. `None` for the from-source path
+    /// (`register_prelude`, `precompile_stdlib`, LSP-editing-stdlib).
     static_stdlib: Option<&'static crate::static_ir::StaticStdlib>,
-    /// Lowered Core IR accumulated during this compile, moved into
-    /// [`Emitted::core`] at the end of [`compile_impl`].
+    /// Lowered Core IR accumulated during this compile. Each function body
+    /// [`Self::compile_fn_body`] routes through the `lower→perceus→emit`
+    /// pipeline pushes its post-perceus [`crate::core_ir::CoreFn`] into
+    /// `core.fns`, and [`compile_impl`] lowers the module toplevel into
+    /// `core.toplevel`. Moved into [`Emitted::core`] at the end of
+    /// [`compile_impl`].
     pub(super) core: crate::core_ir::CoreProgram,
-    /// The `fn(...) {...}` expressions written directly inside the frame being
-    /// walked, in the order the walk closed them.
+    /// The `fn(...) {...}` expressions written *directly inside the frame being
+    /// walked* — one [`ClosureSite`] each, in the order the walk closed them.
     ///
-    /// The frame owns its sites, not the compiler: `enter_fn_frame` parks the
-    /// enclosing list, `compile_fn_body` moves the walked frame's list into its
-    /// [`ParkedBody`], and `elaborate_deferred` swaps it back in for exactly
-    /// that body's elaboration. A `HashMap<Span, _>` on the compiler could not
-    /// do this: a `Span` carries no file id, so one module's lambda would
-    /// answer for another's at the same offset.
+    /// The frame owns its sites, not the compiler: [`Self::enter_fn_frame`]
+    /// parks the enclosing frame's list and hands the new frame an empty one,
+    /// [`Self::compile_fn_body`] moves the walked frame's list into its
+    /// [`ParkedBody`], and [`Self::elaborate_deferred`] swaps that list back
+    /// in for exactly the elaboration of that body. Entry-frame sites (a lambda
+    /// in a toplevel `let` or `const`) accumulate here across the module walk
+    /// and are dropped once that module's toplevel has been elaborated, so no
+    /// two modules' sites are ever live at once.
+    ///
+    /// That ownership is what a `HashMap<Span, _>` on the compiler could not
+    /// have: a `Span` carries no file id, so a global table let one module's
+    /// lambda answer for another's at the same offset, and its `func_idx`/
+    /// `StrId`s outlived the arenas they indexed (`reset_to`).
     pub(super) frame_closures: Vec<ClosureSite>,
     /// The type the check walk inferred for every expression it entered, in
     /// entry order, one region per elaboration unit.
     ///
-    /// The elaborator consumes it positionally ([`Elab::take_ty`]), never by
-    /// span: a `Span` carries no file id, and re-deriving the types instead
-    /// would reinstantiate constructor and module-function schemes into
-    /// unresolved vars. The invariant is a traversal one — both walks enter the
-    /// same expressions in the same order. The one skip that is a decision
-    /// rather than a syntactic fact (is `name.field` a module member?) is
-    /// recorded as a [`WalkStep::Qualified`], because the env it depends on has
-    /// moved on by the time a deferred body is elaborated. `elaborate_fn`
-    /// asserts the region is fully consumed.
+    /// The elaborator consumes it *positionally* — [`Elab::take_ty`] pops the
+    /// next entry as it enters the next expression — rather than looking a span
+    /// up. Re-deriving the type instead would reinstantiate constructor and
+    /// module-function schemes, producing unresolved vars where the walk had a
+    /// concrete `Con`; keying on `Span` instead let one module's expression
+    /// answer for another's at the same line/column, since a `Span` carries no
+    /// file id.
     ///
-    /// This is the region currently being filled; enclosing bodies' regions are
-    /// parked in [`Compiler::walk_tys_stack`]. What is left when no body is
-    /// open is the module toplevel's own region. Cleared by `reset_to`, whose
-    /// engine rewind would otherwise leave dangling `Ty` indices.
+    /// The invariant is a traversal one, not a naming one: `compile_expr`
+    /// reserves a slot on entry (so the order is pre-order) and the elaborator
+    /// enters exactly the expressions the walk entered, in the same order. Both
+    /// walks skip the same nodes — the `RangeExpression` of a slice, a
+    /// `module.member` qualifier, a simple callee — and both visit constructor
+    /// arguments in source order. The one skip that is a *decision* rather than
+    /// a syntactic fact — is `name.field` a module member? — is recorded as a
+    /// [`WalkStep::Qualified`] rather than re-derived, because the env it
+    /// depends on has moved on by the time a deferred body is elaborated.
+    /// `elaborate_fn` asserts the region is fully consumed, so a divergence
+    /// cannot pass silently.
+    ///
+    /// This is the region currently being filled. A function body opens its own
+    /// ([`Self::compile_fn_body`], which hands it to that body's
+    /// [`ParkedBody`]) and parks the enclosing one in
+    /// [`Compiler::walk_tys_stack`], so a nested lambda's types never mix into
+    /// the enclosing body's region. What is left when no body is open is the
+    /// module toplevel's own region, drained by whoever elaborates that
+    /// toplevel. Cleared by `reset_to`, whose engine rewind would otherwise
+    /// leave dangling `Ty` indices.
     pub(super) walk_tys: Vec<WalkStep>,
     /// The regions of the bodies enclosing the one being walked, innermost last.
     /// Parked, not indexed: only [`Compiler::walk_tys`] is ever written to.
     pub(super) walk_tys_stack: Vec<Vec<WalkStep>>,
-    /// Bodies whose typecheck walk has finished but whose Core pipeline is
-    /// deferred until the enclosing declaration group has been generalized.
-    /// See [`Self::begin_deferred_elaboration`].
+    /// Function bodies whose typecheck walk has finished but whose Core
+    /// pipeline (`lower`→`perceus`→`emit`) is deferred until the enclosing
+    /// declaration group has been generalized. See
+    /// [`Self::begin_deferred_elaboration`].
     deferred_bodies: Vec<DeferredBody>,
-    /// Nesting depth of open deferral regions. The parked bodies drain when it
-    /// returns to zero.
+    /// Nesting depth of open deferral regions. `compile_fn_body` runs the Core
+    /// pipeline inline when this is zero (REPL entries, top-level `let`s and
+    /// bare expressions, which are walked outside `analyse_module`'s Pass 5).
     defer_depth: u32,
-    /// `(bodies parked so far, the value env those bodies saw)`, set by
-    /// [`Self::pin_deferred_env`] at the end of the declaration walk.
+    /// `(number of bodies parked so far, the value env as those bodies saw it)`,
+    /// set by [`Self::pin_deferred_env`] at the end of the declaration walk.
     ///
-    /// A `DeferredBody` snapshots the frame but not `self.env`, and
-    /// `resolve_name` re-queries the live env at drain time. The drain runs
-    /// after the toplevel `let` walk and `TypeEnv::define` overwrites in place,
-    /// so without this pin a toplevel `let` would re-point a name a declared
-    /// body already resolved (`println = 5` after `fn g() { println(x) }`
+    /// A `DeferredBody` snapshots the *frame* (`outer_scopes`, `captures`, the
+    /// self-name) but not `self.env`, and `resolve_name` re-queries the live
+    /// env at drain time for a name's `Ty` and `ValueKind`. The drain now runs
+    /// after the toplevel `let` walk, and `TypeEnv::define` overwrites a
+    /// same-scope binding in place, so without this pin a toplevel `let` would
+    /// re-point a name a declared body already resolved to a builtin,
+    /// constructor or sibling decl (`println = 5` after `fn g() { println(x) }`
     /// turned the callee into a self-call).
     deferred_env_pin: Option<(usize, TypeEnv)>,
-    /// Native-backend hook fired once per lowered body; see [`NativeHook`].
-    /// `None` on every other path.
+    /// Native-backend hook, installed by [`compile_with_native`] and fired by
+    /// `elaborate_body` / `materialize_eta_wrappers` once per lowered body —
+    /// see [`NativeHook`]. `None` on every other path (plain compile/check,
+    /// the LSP session, `precompile_stdlib`).
     native_hook: Option<NativeHook>,
 }
 
-/// One body, elaborated into a whole-module [`TypedProgram`] the Core pipeline
-/// can consume.
+/// One body, elaborated into a whole-module [`TypedProgram`] that the Core
+/// pipeline can consume.
 ///
-/// `FuncIdx` indexes both `TypedProgram::fns` and `program.functions`, so `fns`
-/// is padded up to `program.functions.len()` before the walk. `eta_base` is
-/// that padding length: `fns[eta_base..]` are exactly the eta wrappers the walk
-/// appended, and `program.functions[eta_base..]` their reserved entries.
+/// The elaborator mints a `FuncIdx` for every eta wrapper it needs by pushing
+/// onto its `FnTable`, and `FuncIdx` is also this compiler's index into
+/// `program.functions` (it is what `Atom::Closure` and `CallKnown` carry). So
+/// `fns` is padded up to `program.functions.len()` before the walk starts, and
+/// each wrapper the walk appends past that point gets its `Function` reserved
+/// here in the same order. `eta_base` is the padding length: `fns[eta_base..]`
+/// are exactly the wrappers, and `program.functions[eta_base..]` their reserved
+/// entries.
 struct Elaborated {
     program: TypedProgram,
     eta_base: usize,
 }
 
-/// One body, all the way through `lower`: the `CoreFn` and the arena its `RTy`s
-/// index (`perceus` reads it, `emit` does not).
+/// One body, all the way through `lower`: the `CoreFn` itself and the arena
+/// its `RTy`s index (`perceus` reads it, `emit` does not).
 ///
-/// A module toplevel's entry-frame slot pinnings ride the IR itself — `lower`
-/// copies `TypedBind::global` onto each module-scope `Let`'s `CoreBind` and
-/// `emit_toplevel` reads them back — so there is no side table to desync from
-/// the `PushGlobal <slot>` already baked into every emitted fn body.
+/// A module toplevel's entry-frame slot pinnings ride the IR itself: `lower`
+/// copied `TypedBind::global` — stamped by `ElabCtx::global_slot` during
+/// elaboration — onto each module-scope `Let`'s `CoreBind`, and
+/// `emit_toplevel` reads them back off the body it emits via
+/// `CoreExpr::toplevel_globals`. So a def/use mismatch against the
+/// `PushGlobal <slot>` already baked into every emitted fn body is
+/// unspellable: there is no side table to desync from the binds it describes.
 struct LoweredBody {
     core: CoreFn,
     pool: ResolvedPool,
 }
 
-/// Per-body hook into the native (Cranelift) backend, called once for every
-/// lowered body at the only point where the body's post-perceus [`CoreFn`] and
-/// the [`ResolvedPool`] its `RTy`s index are both alive. The pool is per-body
-/// and dies with the [`LoweredBody`], so a post-pass over [`Emitted::core`]
-/// would resolve types through a dropped arena — native codegen must hang off
-/// this seam or not run at all.
+/// Per-body hook into the native (Cranelift) backend: called once for every
+/// lowered function body, at the only point in the pipeline where the body's
+/// post-perceus [`CoreFn`] and the [`ResolvedPool`] its `RTy`s index are both
+/// alive. An `RTy` is an index into a *per-body* pool that dies when the
+/// [`LoweredBody`] carrying it is consumed, so a post-pass over
+/// [`Emitted::core`] would resolve every type through the wrong (or a dropped)
+/// arena — native codegen must hang off this seam or not run at all.
 ///
 /// The body's [`FuncIdx`](crate::core_ir::FuncIdx) is passed explicitly: it is
-/// the key the native entry table, closure dispatch and the perf map share.
-/// The hook only observes, so it cannot reserve or reorder `Function` entries.
+/// the slot the body owns in `program.functions`/`CoreProgram::fns`, and the
+/// key the native entry table, closure dispatch and the perf map all share.
+/// The hook only observes — it receives shared references and no compiler
+/// handle, so it cannot reserve or reorder `Function` entries, and the
+/// numbering `tests/check_parity.rs` pins is untouched by installing one.
 ///
-/// Fires for declared bodies and for the eta wrappers elaboration mints; never
-/// for module toplevels or `__main__`, never under `check_only`, and only for
-/// the bodies the process-wide `AL_NATIVE` mode selects. Installing a hook
-/// makes `compile_impl` re-lower the whole stdlib from source instead of
-/// seeding the blob, which ships post-emit bytecode with no `CoreFn` to hand
-/// over, so the hook sees every body in the program.
+/// Fires for declared function bodies and for the eta wrappers elaboration
+/// mints; never for module toplevels or `__main__` (always-interpreted glue,
+/// no `FuncIdx` of their own), and never under `check_only`. Every fire is
+/// additionally gated on the process-wide `AL_NATIVE` mode
+/// ([`native::config`](super::native::config)): `off` suppresses the hook
+/// entirely, `native` (the default) fires for every body, and `mix` fires for
+/// a seeded per-function subset — so a backend never sees a body the mode
+/// excluded and need not re-implement the env contract. Stdlib bodies fire
+/// it too: installing a hook makes `compile_impl` re-lower the whole stdlib
+/// from source instead of seeding the precompiled blob (which ships
+/// post-emit bytecode — no `CoreFn`/`ResolvedPool` exists to hand a hook),
+/// so the hook sees every function body in the program, stdlib and user
+/// alike. Only the hook-free paths (plain compile/check, the LSP, `off`
+/// mode) take the seeded shortcut.
 ///
-/// A caller-installed callback so the driver crate — which owns the VM, the
-/// runtime shims and the JIT finalize step — decides what each fire does. This
-/// compiler hands over `(FuncIdx, CoreFn, pool)` and never learns what a
-/// backend is.
+/// A caller-installed callback, even though CLIF construction itself lives in
+/// this crate beside `emit` (`core_ir::clif`): the driver — `crates/al`, which
+/// owns the VM, the runtime shims generated code calls by symbol name, and the
+/// JIT finalize step that resolves them (`vm/jit.rs`) — decides what each fire
+/// does and captures the `JITModule` it accumulates into, then finalizes and
+/// publishes entries into the emitted program's
+/// [`NativeTable`](super::NativeTable) after [`compile_with_native`] returns.
+/// This compiler stays backend-agnostic: it hands over `(FuncIdx, CoreFn,
+/// pool)` and never learns what a backend is.
 pub type NativeHook = Box<dyn FnMut(crate::core_ir::FuncIdx, &CoreFn, &ResolvedPool)>;
 
-/// Placeholder a [`Compiler::walk_tys`] slot holds between its reservation and
-/// its fill. No real `Ty` can take this value: it indexes the engine's node
-/// arena, which never reaches `u32::MAX` entries.
+/// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
+/// entering an expression) and its fill (on leaving it). No `Ty` ever takes this
+/// value: it indexes the engine's node arena, which cannot reach `u32::MAX`
+/// entries. A slot can only still hold it if `compile_expr_inner` unwound.
 const WALK_TY_PENDING: Ty = Ty(u32::MAX);
 
-/// A region with no unfilled slot left. A `WALK_TY_PENDING` reaching the
-/// elaborator would index the engine's node arena out of bounds.
+/// A region with no unfilled slot left in it. Checked wherever a region leaves
+/// the compiler for the elaborator: a `WALK_TY_PENDING` that got that far would
+/// index the engine's node arena out of bounds.
 fn walk_region_is_filled(region: &[WalkStep]) -> bool {
     !region.contains(&WalkStep::Ty(WALK_TY_PENDING))
 }
 
-/// A `close_walk_region` with no matching `open_walk_region`. Aborts in release
-/// too: restoring the wrong region hands a body another body's types.
+/// A `close_walk_region` with no matching `open_walk_region` — a broken walk
+/// invariant. Aborts, in release as well as debug: restoring the wrong region
+/// would silently hand a body another body's types — the desync
+/// [`WalkStep`] exists to make impossible.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -477,9 +660,10 @@ fn walk_region_underflow() -> ! {
     )
 }
 
-/// Toplevel elaboration left module-scope slots queued: the check walk and the
-/// elaborator disagreed about which statements bind at module scope. Aborts in
-/// release too — every later bind would land in the wrong global slot.
+/// Toplevel elaboration finished with module-scope slots still queued — the
+/// check walk and the elaborator disagreed about which statements bind at
+/// module scope. Aborts, in release as well as debug: every bind after the
+/// point of disagreement would silently land in the wrong global slot.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -490,9 +674,10 @@ fn unclaimed_toplevel_slots(n: usize) -> ! {
     )
 }
 
-/// A `Function` was pushed while the elaborator walked, so the `FuncIdx` the
-/// next `FnTable::push` mints no longer names it. Aborts in release too: every
-/// eta wrapper reserved after the stray push would call the wrong function.
+/// Something pushed a `Function` while the elaborator walked — the `FuncIdx`
+/// the next `FnTable::push` mints would stop naming it. Aborts, in release as
+/// well as debug: every eta wrapper reserved after the stray push would
+/// silently call the wrong function.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -503,17 +688,17 @@ fn function_reserved_during_elaboration() -> ! {
     )
 }
 
-/// A `fn(...) {...}` expression the walk closed over: the `Function` reserved
-/// for its body, and the names its frame captured, in the order
+/// A `fn(...) {...}` expression the walk closed over: the `Function` its body
+/// was reserved at, and the names its frame captured — in the order
 /// `Function::capture_count` counts them and `PushCapture` indexes them.
 ///
-/// Lives in the *enclosing* frame's [`Compiler::frame_closures`], since that is
-/// the frame whose elaboration builds the `Atom::Closure`: the capture values
-/// are loads in the enclosing scope, not the lambda's.
+/// Lives in the enclosing frame's [`Compiler::frame_closures`], because that is
+/// the frame whose elaboration has to build the `Atom::Closure`: the capture
+/// *values* are loads in the enclosing scope, not the lambda's.
 pub(super) struct ClosureSite {
-    /// Which lambda. The AST has no node ids, so a span is a node's only
-    /// identity; unique within one body, which is the only scope a site is ever
-    /// looked up in.
+    /// Which lambda. The AST carries no node id, so a span is the only identity
+    /// a node has; within one body it is a unique one, and a site is only ever
+    /// looked up while elaborating the body it was recorded in.
     at: Span,
     func_idx: crate::core_ir::FuncIdx,
     captures: Vec<StrId>,
@@ -521,68 +706,85 @@ pub(super) struct ClosureSite {
 
 /// A function body parked between its typecheck walk and its elaboration.
 ///
-/// The walk fixes everything about the body except its types: which `Function`
-/// slot it owns, which names it captured and at which indices, where its
-/// jump-over sits. Types keep moving until the whole SCC has been generalized,
-/// so `lower` runs last, off this record. Built whole in
-/// [`Compiler::finish_fn_frame`]; no field is ever back-patched.
+/// The walk fixes everything about the body except its *types*: which
+/// `Function` slot it owns, which names it captured and at which indices, and
+/// where its jump-over placeholder sits. Types keep moving until the whole SCC
+/// has been inferred and generalized, so `lower` — the pass that reads them —
+/// runs last, off this record.
+///
+/// Built whole in exactly one place, [`Compiler::finish_fn_frame`], from the
+/// walk half ([`ParkedBody`]) plus the frame half that only becomes final
+/// there. No field is ever back-patched.
 struct DeferredBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
-    /// Cloned, not borrowed: `Compiler` carries no `'ast` lifetime and the
-    /// deferral outlives the `&ast::Expression`. Spans and shape are preserved,
-    /// so `closures` and `walk_tys` still line up with it.
+    /// Cloned rather than borrowed: `Compiler` carries no `'ast` lifetime and
+    /// the deferral outlives the `&ast::Expression` `compile_fn_body` is
+    /// handed. The clone preserves spans, so this body's own
+    /// [`DeferredBody::closures`] still key against it, and preserves shape, so
+    /// [`DeferredBody::walk_tys`] still lines up with it.
     body: ast::Expression,
     body_ty: Ty,
-    /// This body's walk region, consumed positionally by the elaborator. See
-    /// [`Compiler::walk_tys`].
+    /// This body's walk region: the type of every expression the check walk
+    /// entered while walking `body`, in entry order, the root's first. The
+    /// elaborator consumes it positionally. See [`Compiler::walk_tys`].
     walk_tys: Vec<WalkStep>,
-    /// The lambdas written directly inside this body. Swapped into
-    /// [`Compiler::frame_closures`] for its elaboration and dropped with it.
+    /// The lambdas written directly inside this body, moved out of
+    /// [`Compiler::frame_closures`] the moment the walk of this body finished.
+    /// Swapped back in for its elaboration and dropped with it.
     closures: Vec<ClosureSite>,
     /// `local_count` watermark after the params were bound; `Function.locals`
     /// is this maxed with Core's own slot allocation.
     param_slots: i32,
-    /// The placeholder `Function` this body fills in. Reserved in both modes:
-    /// `check_only` still records it on a [`ClosureSite`] and in
-    /// `global_to_func`, and `lower` still bakes it into
-    /// `Atom::Closure`/`CallKnown`.
+    /// Index of the placeholder `Function` this body fills in. Reserved by
+    /// `finish_fn_frame` in *both* modes: a [`ClosureSite`] and `global_to_func`
+    /// record it, and `lower` bakes it into `Atom::Closure`/`CallKnown`, all
+    /// of which happen under `check_only` too.
     func_idx: crate::core_ir::FuncIdx,
-    /// Address of `enter_fn_frame`'s jump-over. Patched once every body parked
-    /// in the region is emitted, so the enclosing stream skips the whole run.
+    /// Address of `enter_fn_frame`'s jump-over. Patched by
+    /// `end_deferred_elaboration` once *every* body parked in the region has
+    /// been emitted, so the enclosing stream skips the whole run.
     jump_over: i32,
-    /// Frame state `resolve_name` needs: a capture must land on the same
-    /// `Denotation::capture` index the walk gave it, and a self-reference on
-    /// the same self denotation.
+    /// The frame state `resolve_name` needs: a captured name must resolve to
+    /// the same `Denotation::capture` index the walk assigned it, and a
+    /// self-reference to the same self-closure/self-toplevel-fn denotation.
     captures: HashMap<StrId, i32>,
     capture_names: Vec<StrId>,
     rigid_ids: HashSet<i32>,
     binding: Option<StrId>,
-    /// The enclosing frames' locals exactly as `resolve_variable` saw them
-    /// during the walk (module scope at index 0). Restored wholesale at
-    /// elaboration time.
+    /// The enclosing frames' locals, exactly as `resolve_variable` saw them
+    /// during the walk (module scope at index 0, then one entry per
+    /// intervening fn frame). Restored wholesale at elaboration time.
     ///
-    /// Truncating this to the module scope is not sound: `current_binding`
-    /// short-circuits before a capture is recorded, so a recursive local lambda
-    /// whose self-name shadows a module-scope decl would re-resolve to
-    /// `SelfGlobal(module_slot)` and push the wrong value where the walk
-    /// emitted `PushSelf`.
+    /// Truncating this to the module scope is *not* sound, even though every
+    /// name reached through an intervening frame was captured by the walk:
+    /// `current_binding == Some(name)` short-circuits before the capture is
+    /// recorded, so a recursive local lambda whose self-name shadows a
+    /// module-scope decl would re-resolve to `SelfGlobal(module_slot)` — a
+    /// `PushGlobal` of the wrong value where the walk emitted `PushSelf`.
     outer_scopes: Vec<Scope>,
-    /// Type-env entries `resolve_name` would otherwise miss: the enclosing
-    /// frames' scopes are long popped by elaboration time. Only two names can
-    /// reach it from outside the module scope — a captured binding, and the
-    /// frame's own self-name. Re-pushed as one scope around the `lower` call.
+    /// Type-env entries `lower`'s `resolve_name` would otherwise miss: the
+    /// enclosing frames' scopes are long popped by elaboration time. Only two
+    /// classes of name can reach `resolve_name` from outside the module scope —
+    /// a captured binding, and the frame's own self-name (`current_binding`,
+    /// which resolves to `Self_`/`SelfGlobal` rather than being captured).
+    /// Everything else the body mentions is either bound by `lower` itself
+    /// (params, `let`s, pattern binds) or lives at module scope, which is still
+    /// open. Re-pushed as one scope around the `lower` call.
     capture_env: Vec<(String, Scheme)>,
 }
 
-/// The walk half of a [`DeferredBody`], carried by value from
-/// [`Compiler::compile_fn_body`] to [`Compiler::finish_fn_frame`], which adds
-/// the frame half (captures, `func_idx`, jump-over) and pushes the complete
-/// record.
+/// The walk half of a [`DeferredBody`]: everything [`Compiler::compile_fn_body`]
+/// knows about the body it just typechecked, carried by value to the matching
+/// [`Compiler::finish_fn_frame`], which adds the frame half (captures,
+/// `func_idx`, jump-over) and pushes the complete `DeferredBody`.
 ///
-/// Being the only thing `compile_fn_body` can return is the point: the phase
-/// boundary is a type, not a convention. The typecheck walk cannot emit a
-/// function body because no `code_start` exists yet for anyone to spell.
+/// There is exactly one outcome, and that is the point: the typecheck walk
+/// cannot emit a function body, because `compile_fn_body` has nothing to hand
+/// `finish_fn_frame` but this record. The phase boundary is a type, not a
+/// convention — no `code_start` exists yet for anyone to spell. The deferred
+/// body appends its code, fills the `Function` entry and patches the
+/// jump-over, in `analyse_module`'s pass 6.
 struct ParkedBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
@@ -593,8 +795,9 @@ struct ParkedBody {
     param_slots: i32,
 }
 
-/// A name resolved to a constructor: what `type_ctor_pattern` needs to slot and
-/// type the pattern's arguments against.
+/// A name resolved to a constructor, as `type_ctor_pattern` needs it: the
+/// facts to slot and type the pattern's arguments against. Produced by
+/// `Compiler::lookup_ctor` / `lookup_ctor_qualified`.
 struct CtorLookup {
     type_name: StrId,
     arity: usize,
@@ -622,20 +825,22 @@ impl CtorLookup {
     }
 }
 
-/// Which toplevel `append_toplevel_init` is emitting. The two differ only in
-/// what happens to the toplevel's tail value and Core body.
+/// Which toplevel `append_toplevel_init` is emitting: the entry file's or an
+/// imported module's. They differ only in what happens to the toplevel's tail
+/// value and Core body.
 enum TopKind {
-    /// `__main__`: the tail stays on the stack for `Halt`, and the Core body is
-    /// kept on `self.core`.
+    /// `__main__`: the tail value stays on the stack for `Halt`, and the Core
+    /// body is kept on `self.core` for consumers of the entry program's IR.
     Entry,
     /// An imported module: its toplevel runs for effect, so the tail is popped.
     Module,
 }
 
-/// Outcome of resolving a `module.member` shape against the imported
-/// qualifiers. Three-state because a non-qualified shape is recoverable (the
-/// caller falls through to its general path) whereas a failed member lookup has
-/// already been diagnosed and must short-circuit.
+/// Outcome of resolving a `module.member` property-access shape against the
+/// imported qualifiers. Three-state because the callee and value positions
+/// diverge on the failure modes: a non-qualified shape is recoverable (the
+/// caller falls through to its general path), whereas a failed member lookup
+/// has already been diagnosed and must short-circuit.
 enum QualifiedMember<'a> {
     /// Not a `qualifier.member` shape (or the qualifier is not imported).
     NotQualified,
@@ -652,23 +857,31 @@ enum QualifiedMember<'a> {
     },
 }
 
-/// A callee that resolved to a plain name or a qualified `module.member`.
+/// A callee that resolved to a plain name or a qualified `module.member`:
+/// the looked-up scheme plus everything `compile_call` needs to dispatch on
+/// the scheme's `ValueKind` and render diagnostics about the callee.
 struct ResolvedCallee<'a> {
     name: &'a str,
     span: Span,
     scheme: Scheme,
     /// Whether the callee has a runtime binding (see `Compiler::has_binding`).
-    /// The module a qualified callee resolved through. Diagnostics render it
-    /// with `Compiler::module_name` — the user-visible name, never the key.
+    has_binding: bool,
+    /// The module the member resolved through, when the callee was a
+    /// qualified `module.member`. Diagnostics render it via
+    /// `Compiler::module_name` — the user-visible name, never the canonical
+    /// key (see the naming-convention note on `module_name`).
+    qualifier: Option<ModuleKey>,
 }
 
 struct CompiledBody {
     iface: ModuleInterface,
     watermark: Watermark,
-    /// Reference-graph data for this module's body, moved into its
-    /// `CachedModule` by `load_module`. The module's type-id range is both
-    /// reserved and recorded inside `compile_module_body`, so its start is
-    /// deliberately not threaded back out here.
+    /// Reference-graph data collected while this module's body was analysed;
+    /// moved into the module's `CachedModule` by `load_module`. The module's
+    /// stable 256-aligned type-id range is allocated *and* its usage recorded
+    /// inside `compile_module_body` itself (via `id_base_for`/`note_id_usage`),
+    /// so the range start is deliberately not threaded back out here.
+    refs: ModuleReferences,
 }
 
 pub fn compile(
@@ -679,10 +892,12 @@ pub fn compile(
     compile_impl(expr, base_dir, false, None, pre, None)
 }
 
-/// [`compile`] with a [`NativeHook`] installed for the duration; see
-/// [`NativeHook`] for the contract. The caller publishes whatever the hook
-/// compiled into the emitted program's [`NativeTable`](super::NativeTable)
-/// after this returns, once the function list is final.
+/// [`compile`], with a [`NativeHook`] installed for the duration: the hook is
+/// called once per lowered function body, paired with the live `ResolvedPool`
+/// its `RTy`s index and keyed by the body's `FuncIdx`. See [`NativeHook`] for
+/// the full contract. The caller publishes whatever the hook compiled into
+/// the emitted program's [`NativeTable`](super::NativeTable) after this
+/// returns — the table is sized once the function list is final.
 pub fn compile_with_native(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
@@ -700,9 +915,10 @@ pub fn check(
     compile_impl(expr, base_dir, true, None, pre, None)
 }
 
-/// Analyse a file *as* a specific stdlib module, so editing `src/std/**/*.al`
-/// does not report `@vm is stdlib-only` / `Result is reserved`. Always
-/// check-only and always from source: the precompiled blob is stale.
+/// Analyse a file *as* a specific stdlib module (used when editing
+/// `src/std/**/*.al` inside the AL repo so the LSP/CLI doesn't report
+/// `@vm is stdlib-only` / `Result is reserved`). Always check-only and always
+/// from source (the user is editing it; the precompiled blob is stale).
 pub fn check_as_module(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
@@ -771,17 +987,22 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
 
 impl Compiler {
     /// The `DefId` of the `Type` named `name` declared in module `path`, read
-    /// from the reference graph's own definitions.
+    /// from the reference graph's own definitions — the single source of truth.
     ///
-    /// Not from `env.definitions`: every record `type Foo {..}` registers a
-    /// same-named `Constructor` that overwrites the `Foo => Type` entry, so
-    /// that lookup yields the constructor and no type occurrence is ever
-    /// recorded. The graph keeps both under one name as distinct `DefId`s.
+    /// It must *not* go through the flat `env.definitions`: every record
+    /// `type Foo {..}` registers a same-named `Constructor` that overwrites the
+    /// earlier `Foo => Type` entry (last-write-wins `IndexMap`), so once the
+    /// defining module is fully analysed that lookup yields the constructor and
+    /// no type occurrence is ever recorded. The graph keeps `Type` and
+    /// `Constructor` as distinct `DefId`s under the same name, so `defs_named`
+    /// resolves the type unambiguously.
     ///
-    /// Same-module lookups read the live collector; a cross-module type reads
-    /// the imported module's persisted `module_refs`. `None` for
-    /// static/hydrated stdlib modules, whose type declaration spans are not
-    /// persisted, so stdlib type goto-def does not work.
+    /// Same-module lookups read the live collector (the type def is emitted
+    /// when its declaration is visited, before any annotation that names it is
+    /// hydrated); a cross-module type reads the imported module's persisted
+    /// `module_refs`. `None` for static/hydrated stdlib modules, whose type
+    /// declaration spans are not persisted (a pre-existing limitation: stdlib
+    /// type goto-def is out of this path's scope).
     fn type_defid_in_module(&self, path: &ModulePath, name: &str) -> Option<DefId> {
         fn pick(mr: &ModuleReferences, name: &str) -> Option<DefId> {
             mr.defs_named(name)
@@ -798,7 +1019,7 @@ impl Compiler {
 }
 
 /// The head of a constructor pattern: `NotFound`, or `io.NotFound` reached
-/// through a module qualifier.
+/// through a module qualifier. One thing, so it travels as one argument.
 struct CtorHead<'a> {
     qualifier: Option<&'a ast::Identifier>,
     name: &'a ast::Identifier,
@@ -814,7 +1035,10 @@ fn compile_impl(
 ) -> CompileResult {
     let mut c = new_compiler(base_dir, check_only);
     c.native_hook = native_hook;
-    // `off` drops the hook outright so no body can fire it.
+    // The AL_NATIVE env contract is applied at program construction whether
+    // or not a backend hook was installed: `config()` reads the env exactly
+    // once process-wide (echoing the mix seed when `AL_NATIVE_SEED` was set),
+    // and `off` drops the hook outright so no body can fire it.
     if super::native::config().mode == super::native::NativeMode::Off {
         c.native_hook = None;
     }
@@ -825,20 +1049,25 @@ fn compile_impl(
         c.current_module = m;
     }
 
-    // Analysing the prelude file itself must not load the prelude on top of it,
-    // or every type becomes a redefinition of itself. Other stdlib modules
-    // still need it for `Result`/`Nil`/etc.
+    // When analysing the prelude file itself, don't load the prelude on top of
+    // it (that would make every type a redefinition of itself). Other stdlib
+    // modules still need the prelude for `Result`/`Nil`/etc.
     let is_prelude_self = as_module.as_deref() == Some(module::al_prelude().as_slice());
     if !is_prelude_self {
         match pre {
             Some(s) if c.native_hook.is_none() => c.seed_static(s),
-            // A native hook must see stdlib bodies, and a body is only visible
-            // at its own `lower`: the blob ships post-emit bytecode with no
-            // `CoreFn`/`ResolvedPool` to hand over. So re-lower the whole
-            // stdlib from source. Eager (every module, not just the entry's
-            // imports) so the function table matches the seeded one entry for
-            // entry — the pipeline is deterministic, so this reproduces the
-            // blob's program prefix, numbering included.
+            // A native hook is installed (and the mode is not `off`): the
+            // backend needs to see stdlib bodies, and a body is only visible
+            // at its own `lower` — the blob ships post-emit bytecode with no
+            // `CoreFn`/`ResolvedPool` to hand the hook. So re-lower the whole
+            // stdlib from source instead of seeding. Eager (every module, not
+            // just the entry's imports) so the function table matches the
+            // seeded one entry for entry: the pipeline is deterministic
+            // (pinned by `precompile_stdlib_is_deterministic`, and by
+            // `relowered_stdlib_reproduces_the_seeded_program` from the
+            // driver's side), so this produces the blob's program prefix,
+            // numbering included. Startup pays the stdlib compile; `off`
+            // dropped the hook above and keeps the seeded fast path.
             Some(_) => {
                 c.register_prelude();
                 let at = Span::DUMMY;
@@ -849,11 +1078,14 @@ fn compile_impl(
                     c.load_module(&ast::ImportPath::canonical(path), at);
                 }
                 // Reset the memos that would otherwise leak across the
-                // stdlib/user boundary. A seeded compile starts with both
+                // stdlib/user boundary: a seeded compile starts with both
                 // empty, so leaving them populated would let user code dedup
                 // constants against stdlib pool entries and resolve stdlib
-                // callees to `CallKnown` where the seeded program reads a
-                // module-init global slot: same semantics, different bytecode.
+                // callees to `CallKnown` where the seeded program reads the
+                // module-init global slot — same semantics, different
+                // bytecode. The relowered program must *be* the seeded one
+                // (`relowered_stdlib_reproduces_the_seeded_program`), so the
+                // native/off split stays a NativeTable, not a program.
                 c.const_dedup.clear();
                 c.global_to_func.clear();
             }
@@ -869,14 +1101,17 @@ fn compile_impl(
             };
         }
     }
-    // `__main__` must include the module-init code already emitted for seeded
-    // stdlib functions, so it starts at 0. The from-source path emits no init
-    // code (al.al has only types and @vm fns), so 0 == code.len() there too.
+    // `__main__` must include any module-init code already emitted (the
+    // `MakeClosure`/`StoreLocal` sequences for pure-AL stdlib functions seeded
+    // by `seed_precompiled`), so it starts at 0. With the from-source path
+    // `register_prelude` emits no init code (al.al has only types and @vm fns)
+    // so 0 == code.len() there too.
     let main_start = 0i32;
-    // Marks for the Core re-emit below. They must sit after `process_imports`,
-    // which compiles imported modules into this same program and entry frame,
-    // and before this file's own `analyse_module`, so they cover exactly the
-    // entry file's output and never an imported module's init.
+    // Marks for the Core re-emit below. They must sit AFTER `process_imports`
+    // (which recursively compiles imported modules into the same `program` /
+    // entry frame) and BEFORE this file's own `analyse_module`, so the range
+    // `[code_mark, ..)` and slots `[slot_base, ..)` cover exactly the entry
+    // file's fused-walk output — never an imported module's init.
     let code_mark;
     let slot_base;
     let top_ty;
@@ -885,15 +1120,17 @@ fn compile_impl(
         c.bump_type_ids_past_reserved();
         code_mark = c.program.code.len();
         slot_base = c.local_count;
-        // Every imported module's bindings are already live in `[0, code_mark)`
-        // and are not re-emitted by the toplevel Core, so drop them or a
-        // shadowing entry-file bind dequeues an import's slot.
+        // `toplevel_binds` accumulated every imported module's bindings during
+        // `process_imports`; those slots are already live in `[0, code_mark)`
+        // and are not re-emitted by the toplevel Core, so drop them so a
+        // shadowing entry-file bind doesn't dequeue an import's slot.
         c.toplevel_binds.clear();
         c.toplevel_decls.clear();
-        // Opened here, not inside `analyse_module`, so the schemes it defines
-        // stay visible through the toplevel elaboration below — otherwise a
-        // `type` decl followed by a ctor use bails on `unbound callee`. Popped
-        // after it.
+        // Entry-file env scope: opened here (not inside `analyse_module`) so
+        // the constructor/fn/const schemes it defines stay visible through
+        // the toplevel elaboration below — otherwise a `type` decl followed
+        // by a ctor use bails on `unbound callee` and the module toplevel
+        // never gets Core. Popped after it.
         c.env.push_scope();
         c.analyse_module(block, None);
         top_ty = c.ty_nil();
@@ -902,37 +1139,47 @@ fn compile_impl(
         slot_base = c.local_count;
         c.env.push_scope();
         // `analyse_module` opens a local scope around a module's statements, so
-        // nested blocks bind as frame temps rather than globals. A bare
-        // expression has no statement walk, so open the same scope here: without
-        // it a `let` in the expression's first nested block would resolve as a
-        // global whose slot `bind_local` never queued and nothing ever pins.
+        // its nested blocks bind at depth 2 and are frame temps, not globals.
+        // A bare expression has no statement walk, so open the same scope here:
+        // without it a `let` in the expression's first nested block (an `if`
+        // arm) would sit at the module's own depth, `resolve_variable` would
+        // call it a global, and a lambda would read a `PushGlobal` slot that
+        // `bind_local` never queued and the elaborator therefore never pins.
         c.push_local_scope();
         // The same phase boundary `analyse_module` puts around its walk: a bare
-        // expression can still contain lambdas, and none may lower or emit
-        // while the expression is being typechecked.
+        // expression program can still contain lambdas, and none of them may
+        // lower or emit while the expression is being typechecked.
         c.begin_deferred_elaboration();
         top_ty = c.compile_expr(expr);
         c.end_deferred_elaboration();
         c.pop_local_scope();
-        // The expression's outermost block is the first the elaborator sees, so
-        // it is elaborated as though it were a module toplevel and will try to
-        // drain the queue. Nothing queued by this compile belongs to it.
+        // A bare expression has no module statement walk, but its outermost
+        // *block* (an `if` arm, say) is still the first one the elaborator
+        // sees, so it is elaborated as though it were a module toplevel and
+        // will try to drain the queue. Nothing this compile queued belongs to
+        // it: seeds and imports bind no name the expression can rebind, and no
+        // walk above ran with `walking_module_statements` set.
         c.toplevel_binds.clear();
         c.toplevel_decls.clear();
     }
 
     // Elaborate the module toplevel, lower it into Core and re-emit the entry
     // frame from it, so `__main__`'s bytecode is Core-derived like every other
-    // body (docs/core-ir-spec.md §Pipeline step 3). Fn bodies already reference
-    // sibling decls via `PushGlobal <slot>`; `ElabCtx::global_slot` stamped the
-    // same slots onto each `TypedBind`, `lower` copied them onto the toplevel
-    // `Let`s, and `emit_toplevel` pins those `Let`s to them, so the entry-frame
-    // `StoreLocal`s line up.
+    // function body (docs/core-ir-spec.md §Pipeline step 3). The elaborator
+    // handles top-level `fn`/`const`/`type`/`import` decls, so it covers real
+    // modules. Fn bodies were already emitted during `analyse_module` and
+    // reference sibling decls via `PushGlobal <slot>` where `<slot>` is Pass 3's
+    // decl-first allocation; `ElabCtx::global_slot` stamped the corresponding
+    // slot onto each `TypedBind`, `lower` copied it onto each toplevel `Let`'s
+    // `CoreBind`, and `emit_toplevel` pins those `Let`s to the same slots (read
+    // back via `CoreExpr::toplevel_globals`) so the entry-frame `StoreLocal`s
+    // line up.
     //
     // Elaboration and lowering run under `check_only` too — only the emit half
-    // is skipped — so `al check` reports a well-typed program the front half
-    // cannot handle. Drained either way, so a check that bailed leaves nothing
-    // behind for the next compile on this `Compiler`.
+    // is skipped. A well-typed program the front half cannot handle has to be
+    // reported by `al check`, not left to blow up at `al run`.
+    // Drained whether or not the entry elaborates, so a `check` that bailed
+    // leaves nothing behind for the next compile on this `Compiler`.
     let walk_tys = c.take_toplevel_walk_tys();
     if let Some(clean) = c.clean_module() {
         let name = c.engine.intern("__main__");
@@ -940,7 +1187,7 @@ fn compile_impl(
         // `[code_mark, base)` — the region the entry frame's first `Jump` hops over.
         let lowered = c.elaborate_then_materialize(clean, None, |c, pool, fns| {
             // A module block was walked statement-by-statement, so nothing
-            // recorded a type for the block itself; a bare expression was
+            // recorded a type for the block itself; a bare expression *was*
             // entered by `compile_expr`, so its region starts with its own.
             match expr {
                 ast::Expression::BlockExpression(block) => {
@@ -949,6 +1196,8 @@ fn compile_impl(
                 _ => typed_ir::elaborate_body(c, pool, fns, name, &[], expr, top_ty, &walk_tys),
             }
         });
+        // The entry frame's own lambdas have been read; the last consumer of
+        // `frame_closures` in this compile is done with it.
         c.frame_closures.clear();
         if !check_only {
             c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry);
@@ -968,20 +1217,21 @@ fn compile_impl(
         code_len: c.program.code.len() as i32 - main_start,
     });
     c.program.entry = c.program.functions.len() as i32 - 1;
-    // The function list is final: size the native-entry table against it so the
-    // backend can publish bodies keyed by the same `FuncIdx`. Empty = interpret.
+    // The function list is final: size the native-entry table against it so
+    // the backend can publish compiled bodies keyed by the same `FuncIdx`
+    // numbering. Slots start empty (= interpret).
     c.program.native = super::NativeTable::new(c.program.functions.len());
 
     if !check_only {
         // Bind the runtime-constructed stdlib values (`Program.templates` /
         // `Program.abi`) and require coverage for every emitted op.
         c.bind_abi();
-    }
-
-    if !check_only {
-        // Jump operands are frame-relative, so fusion needs `functions` to know
-        // which frame owns each instruction; the entry frame owns the rest.
+        // Jump operands are frame-relative, so fusion has to know which frame
+        // owns each instruction: `functions` is that map, and the entry frame
+        // owns everything the bodies do not.
         fuse(&mut c.program.code, &c.program.functions);
+        // Whole-unit native compile accounting, printed under
+        // `AL_NATIVE_DEBUG` and checked against the <100ms budget.
         c.native_stats.log_summary(c.program.code.len());
     }
 
@@ -996,7 +1246,9 @@ fn compile_impl(
     }
 }
 
-/// The compiler state `precompile_stdlib` freezes into the static blob.
+/// The compiler state `precompile_stdlib` freezes into the static blob:
+/// the compiled program plus the scalars a fresh compiler needs to resume
+/// from it.
 pub(crate) struct CompilerParts {
     pub(crate) program: Program,
     pub(crate) prelude: PreludeBindings,
@@ -1006,6 +1258,10 @@ pub(crate) struct CompilerParts {
 }
 
 impl Compiler {
+    // ========================================================================
+    // Precompile accessors (used by `precompile.rs` only)
+    // ========================================================================
+
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.engine.diagnostics
     }
@@ -1030,11 +1286,13 @@ impl Compiler {
         )
     }
 
-    /// Seed from the build-time static stdlib: copy code/functions/constants
-    /// (the VM mutates around them, so they must be owned), hydrate the prelude
-    /// `TypeInfo`s and constructor `Scheme`s into root scope, and keep the blob
-    /// so non-prelude modules hydrate lazily on first import. Nothing is parsed
-    /// or deserialized.
+    /// Seed from the build-time static stdlib. Per-compile work here is
+    /// deliberately minimal: copy code/functions/constants (the VM mutates
+    /// around them so they must be owned), hydrate the dozen prelude
+    /// `TypeInfo`s and constructor `Scheme`s into root scope, and remember the
+    /// `&'static StaticStdlib` so `module_table.get_or_hydrate` can lazily
+    /// pull non-prelude stdlib modules on first import. Nothing is parsed or
+    /// deserialized.
     pub(crate) fn seed_static(&mut self, s: &'static crate::static_ir::StaticStdlib) {
         debug_assert!(self.program.code.is_empty());
         self.static_stdlib = Some(s);
@@ -1042,8 +1300,9 @@ impl Compiler {
         self.prelude = s.prelude.clone();
         self.engine.set_prim_ids(self.prelude.prim_ids());
         self.env.set_next_type_id(s.next_type_id);
-        // The static type arena is the live arena's prefix: every `Ty`/
-        // `ArenaSlice` in a stdlib scheme or typeinfo indexes into it.
+        // The static type arena IS the live arena's prefix — every `Ty`/
+        // `ArenaSlice` in stdlib schemes/typeinfos indexes into it. memcpy
+        // every pool + intern strings.
         self.engine.seed_arena(crate::types::ArenaSeed {
             nodes: s.nodes,
             children: s.children,
@@ -1065,17 +1324,20 @@ impl Compiler {
             self.bind_local(id, slot);
         }
 
-        // Copied eagerly so both the by-name map (annotation resolution) and
-        // the by-id registry (exhaustiveness, field access, hover) hit without
-        // hydration. Seeded below the session watermark, so never truncated and
-        // never overwritten in place.
+        // Stdlib type-infos: copy eagerly so both the by-name map (annotation
+        // resolution) and the by-id registry (nominal lookups: exhaustiveness,
+        // field access, hover) hit without hydration. Seeded below the session
+        // watermark, so they are never truncated and never overwritten in
+        // place (a colliding user type gets its own id and its own entry).
         for (name, idx) in s.typeinfo_by_name {
-            // The env is fresh here, so nothing is overwritten or journaled.
+            let ti = s.typeinfos[idx.0 as usize];
+            // `store_type_info` keeps both registries in lockstep; the env is
             // fresh here, so no overwrite occurs and nothing is journaled.
             self.env.store_type_info(name, ti);
         }
 
-        // Re-export prelude constructor/@vm schemes into root scope.
+        // Re-export prelude constructor/@vm schemes (Some/None/Ok/Err/True/...)
+        // into root scope.
         let key = ModuleKey::prelude();
         if let Some(iface) = self.module_table.get_or_hydrate(&key) {
             let pairs: Vec<_> = iface
@@ -1101,13 +1363,15 @@ impl Compiler {
         false
     }
 
-    // Codegen primitives never consult `check_only`. The frame scaffolding —
-    // jump-over, trailing `Ret`, `Function` entry — is laid down in every mode,
-    // so a `func_idx` denotes the same function under `al check` as under
-    // `al build`. `check_only` truncates the pipeline in exactly one place
-    // (`elaborate_body` returns before `perceus`/`emit`) and skips the toplevel
-    // init and the peephole pass. It is a suffix of the compile, not a second
-    // compilation mode.
+    // ========================================================================
+    // Codegen primitives. None of them consult `check_only`. The frame
+    // scaffolding — the jump-over, the trailing `Ret`, the `Function` entry —
+    // is laid down in every mode, so a `func_idx` denotes the same function
+    // under `al check` as under `al build`. `check_only` truncates the
+    // pipeline at exactly one place (`elaborate_body` returns before
+    // `perceus`/`emit`) and skips the toplevel init and the peephole pass. It
+    // is a suffix of the compile, not a second compilation mode.
+    // ========================================================================
 
     #[inline]
     fn emit(&mut self, o: Op) {
@@ -1121,8 +1385,10 @@ impl Compiler {
     /// Pool `v`, deduplicating against the existing pool.
     ///
     /// The `const_dedup` memo survives `IncrementalSession::reset_to`, which
-    /// truncates `program.constants` without clearing it, so every hit is
-    /// re-validated against the live pool and a stale entry just misses.
+    /// truncates `program.constants` without clearing it. Every hit is therefore
+    /// re-validated against the live pool (`constants.get(idx)` plus a
+    /// `to_bits()` compare): a stale entry either falls out of range or fails
+    /// the compare, and the constant is re-pooled.
     fn add_constant(&mut self, v: Value) -> i32 {
         let bits = v.to_bits();
         if let Some(&idx) = self.const_dedup.get(&bits)
@@ -1137,13 +1403,17 @@ impl Compiler {
         idx
     }
 
+    // Frozen constant-pool helpers: every constant `Value` is built through
+    // `self.frozen` and then pooled.
+
     /// Pool a frozen Int constant.
     fn const_int(&mut self, i: i64) -> i32 {
         let v = self.frozen.int(i).into_value();
         self.add_constant(v)
     }
 
-    /// Pool a frozen string constant (interned: one allocation per contents).
+    /// Pool a frozen string constant (interned: every pool entry with the
+    /// same contents shares one frozen allocation).
     fn const_str(&mut self, s: &str) -> i32 {
         let v = self.frozen.str(s).into_value();
         self.add_constant(v)
@@ -1158,15 +1428,19 @@ impl Compiler {
     pub(super) fn get_or_create_local(&mut self, name: &str) -> i32 {
         let id = self.engine.intern(name);
         if let Some(entry) = self.locals.get(&id).copied() {
-            // A slot bound at a strictly shallower depth is inherited from an
-            // enclosing scope, so shadowing must allocate a fresh one to keep
-            // the outer value alive past the block.
+            // Reuse only if this slot was bound in the *current* block scope.
+            // If it was bound at a strictly shallower depth it is inherited
+            // from an enclosing scope, and shadowing must allocate a fresh
+            // slot so the outer value survives the block.
             let inherited =
                 !self.scope_marks.is_empty() && entry.depth < self.scope_marks.len() as u32;
-            // A module-scope rebind also needs a fresh slot: top-level bindings
-            // live in the entry frame and a closure that captured one reads
-            // that slot at call time, so reusing it would overwrite what the
-            // closure observes. Nested scopes capture by value at
+            // At module scope (no enclosing fn frame) a re-binding must also
+            // get a fresh slot. Top-level bindings live in the entry frame, so
+            // a closure that captured one resolves it to `Global(slot)` and
+            // reads that slot at call time; reusing the slot for the shadow
+            // would overwrite the value the closure observes. AL is immutable-
+            // with-shadowing — each binding is distinct — so the earlier
+            // binding must survive. Nested scopes capture by value at
             // `MakeClosure` time, so same-scope reuse is safe there.
             let module_scope = self.outer_scopes.is_empty();
             if !inherited && !module_scope {
@@ -1178,14 +1452,16 @@ impl Compiler {
         idx
     }
 
-    /// Bind `name` to `slot` in the current scope without publishing the slot to
-    /// the toplevel elaboration. This is the whole of binding for anything whose
-    /// slot reaches the elaborator another way: a top-level declaration (via its
-    /// [`ToplevelDecl`]) and every binding inside a function frame.
+    /// Bind `name` to `slot` in the current scope without publishing the slot
+    /// to the toplevel elaboration. This is the whole of binding for anything
+    /// the elaborator learns a slot for by another route: a top-level
+    /// declaration (whose slot travels on its [`ToplevelDecl`]) and every
+    /// binding inside a function frame.
     ///
-    /// The displaced entry goes on the undo log so `pop_local_scope` can restore
-    /// it. Outside any open block scope there is nothing to unwind, so the log
-    /// entry is skipped.
+    /// The displaced entry goes on the undo log so `pop_local_scope` can
+    /// restore it. Outside any open block scope there is nothing to unwind, so
+    /// the log entry is skipped (the binding is captured by the next scope's
+    /// mark instead).
     fn bind_local_raw(&mut self, name: StrId, slot: i32) {
         let entry = LocalSlot {
             slot,
@@ -1198,29 +1474,37 @@ impl Compiler {
         }
     }
 
-    /// Whether a binding made now lands in the entry frame — the compiler's one
-    /// definition of "global".
+    /// Whether a binding made *now* lands in the entry frame — the one
+    /// definition of "global" the compiler has.
     ///
-    /// No function frame is open, and we are at the module's own local-scope
-    /// depth: `analyse_module` opens exactly one scope, imports and prelude slot
-    /// seeds bind below it at depth 0, and every nested block at module level
-    /// pushes another mark. The bare-expression entry path opens a matching
-    /// scope of its own. Both halves of the global question —
-    /// [`Self::bind_local`]'s queue and `resolve_variable`'s `PushGlobal` — are
-    /// derived from this and recorded on [`LocalSlot::is_global`], so they
-    /// cannot drift apart.
+    /// `outer_scopes.is_empty()` says no function frame is open, and
+    /// `scope_marks.len() <= 1` says we are at the module's own local-scope
+    /// depth: `analyse_module` opens exactly one scope, imports and the
+    /// prelude's slot seeds bind below it at depth 0, and every nested
+    /// block/`if`/`match` at module level pushes another mark. Both halves of
+    /// the global question — [`Self::bind_local`]'s queue and
+    /// `resolve_variable`'s `PushGlobal` — are derived from this, recorded once
+    /// on [`LocalSlot::is_global`], so they cannot drift apart.
+    ///
+    /// Note the bare-expression entry path (`compile` on a non-`BlockExpression`)
+    /// opens a matching scope of its own, so a `let` inside one of its nested
+    /// blocks is a frame temp there too.
     fn binds_a_global(&self) -> bool {
         self.outer_scopes.is_empty() && self.scope_marks.len() <= 1
     }
 
-    /// [`Self::bind_local_raw`], plus: queue a module-scope binding's slot for
-    /// the toplevel elaboration.
+    /// [`Self::bind_local_raw`], plus: if this is a module-scope binding,
+    /// queue its slot for the toplevel elaboration.
     ///
     /// The queue outlives `analyse_module`'s `pop_local_scope`, which the
-    /// `locals` entry does not. Only bindings made by the module's own statement
-    /// walk qualify. That is not a second definition of "global": the queue is
-    /// positional, and the other globals — imports, prelude seeds, declarations
-    /// — reach the elaborator by another route and must not be dequeued.
+    /// `locals` entry does not. Only bindings made by the module's own
+    /// statement walk ([`Self::walking_module_statements`]) at the module's own
+    /// local-scope depth qualify. The extra `walking_module_statements` term is
+    /// not a second definition of "global": the queue is *positional*, and the
+    /// other globals — imports, prelude seeds, `fn`/`const` declarations —
+    /// reach the elaborator by another route (already-stored slots, or their
+    /// own [`ToplevelDecl`]) and must not be dequeued as if they were the
+    /// module's `let`s.
     fn bind_local(&mut self, name: StrId, slot: i32) {
         self.bind_local_raw(name, slot);
         if self.walking_module_statements && self.binds_a_global() {
@@ -1230,9 +1514,11 @@ impl Compiler {
 
     /// Allocate the entry-frame slot for a top-level `fn`/`const` declaration.
     ///
-    /// Never reuses an existing binding's slot — a module-scope rebind must not
-    /// alias a slot a closure already captured by reference — and never queues
-    /// it: a declaration's slot travels on its own [`ToplevelDecl`].
+    /// Unlike [`Self::get_or_create_local`] this never reuses an existing
+    /// binding's slot — a module-scope rebind must not alias the slot a
+    /// closure already captured by reference — and it does not queue the slot
+    /// on [`Self::toplevel_binds`]: a declaration's slot reaches the
+    /// elaborator on its own [`ToplevelDecl`] record instead.
     pub(super) fn alloc_decl_slot(&mut self, name: &str) -> GlobalSlot {
         let id = self.engine.intern(name);
         let idx = self.alloc_temp();
@@ -1241,13 +1527,15 @@ impl Compiler {
     }
 
     /// Take the entry-frame slot [`Self::bind_local`] queued for the next
-    /// module-scope `let`/destructured binding. Positional, not by name: both
-    /// walks visit the module's statements in source order, so a rebound name
-    /// (`x = 1; f = fn() x; x = 2`) hands each binding its own slot. The caller
-    /// stamps the slot onto the binding it is building, and no later pass maps a
-    /// name back to a slot.
+    /// module-scope `let`/destructured binding. Consumed in binding order, and
+    /// the toplevel elaboration visits those bindings in exactly the order the
+    /// check walk bound them — both walk the module's statements in source
+    /// order — so a rebound name (`x = 1; f = fn() x; x = 2`) hands each
+    /// binding its own slot. No name is involved: the caller stamps the slot
+    /// onto the binding it is building ([`crate::typed_ir::TypedBind::global`],
+    /// then `CoreBind::global`), and no later pass maps a name back to a slot.
     ///
-    /// A fn body's elaboration also walks an outermost block, and a `let` there
+    /// Per-fn body elaboration also walks an outermost block; a `let x` there
     /// must not take a module-scope slot. Only a module toplevel runs with no
     /// enclosing frame.
     pub(super) fn take_global_slot(&mut self) -> Option<GlobalSlot> {
@@ -1271,8 +1559,9 @@ impl Compiler {
 
     pub(super) fn pop_local_scope(&mut self) {
         if let Some(mark) = self.scope_marks.pop() {
-            // Unwind in reverse bind order so a name shadowed twice in one
-            // scope lands back on its pre-scope entry.
+            // Unwind in reverse bind order so a name shadowed twice in the
+            // same scope lands back on its pre-scope entry. `mark` is a length
+            // captured at the matching push, so it never exceeds the log.
             debug_assert!(
                 mark <= self.undo_log.len(),
                 "unbalanced push/pop_local_scope"
@@ -1304,8 +1593,9 @@ impl Compiler {
     }
 
     /// Record a let/param/match binding for unused-variable checking. Names
-    /// starting with `_` are exempt. A same-name binding already tracked in this
-    /// scope is reported now: it is shadowed and can no longer be referenced.
+    /// starting with `_` are exempt. If the same name was already tracked in
+    /// this scope and never used, that earlier binding is reported now (it's
+    /// been shadowed and can no longer be referenced).
     pub(super) fn track_binding(&mut self, name: &str, sp: Span) {
         if name.starts_with('_') {
             return;
@@ -1341,7 +1631,8 @@ impl Compiler {
 
     /// Where a name lives in the current frame, as the [`Denotation`] the typed
     /// IR consumes. `None` when the frame does not bind it: a constructor, a
-    /// builtin, or a declaration whose `locals` entry `analyse_module` unwound.
+    /// builtin, or (at a module toplevel) a declaration whose `locals` entry
+    /// `analyse_module` has already unwound.
     fn resolve_variable(&mut self, name: StrId) -> Option<Denotation> {
         self.mark_used(name);
         if let Some(entry) = self.locals.get(&name) {
@@ -1351,25 +1642,33 @@ impl Compiler {
             debug_assert!(*idx >= 0, "capture index is a Vec index");
             return Some(Denotation::capture(CaptureIdx(*idx)));
         }
-        // Innermost-first so inner bindings shadow outer ones. Index 0 is the
-        // entry frame, and its module-scope locals are the program's globals:
-        // `StoreLocal` publishes them, so a nested fn loads them with
-        // `PushGlobal` at call time instead of capturing by value. That is what
-        // makes mutually-recursive top-level fns work.
+        // Search enclosing scopes innermost-first so inner bindings shadow
+        // outer ones. The bottom of the stack (index 0) is always the entry
+        // frame, and its *module-scope* locals are the program's globals:
+        // `StoreLocal` publishes them (see `Op::StoreLocal` in the VM), so a
+        // nested fn loads them with `PushGlobal` at call time instead of
+        // capturing by value. This is what makes mutually-recursive top-level
+        // fns work — the sibling's slot is read at call time, not at
+        // `MakeClosure` time.
         //
-        // A local bound in a nested block/if/match scope at module level is not
-        // a global: it is an ordinary entry-frame temp whose slot the toplevel
-        // Core emit assigns, and nothing guarantees it is stored before a
-        // `PushGlobal` of it runs. Which of the two a name is was decided by
-        // [`Self::binds_a_global`] and recorded on the binding; re-deriving it
-        // here from `depth` is how the loader and the binder came to disagree.
+        // A local bound in a nested block/if/match scope at module level is
+        // *not* a global: it is an ordinary entry-frame temp whose slot the
+        // toplevel Core emit assigns for itself (only module-scope-depth binds
+        // are queued on `toplevel_binds`, see `bind_local`), and nothing
+        // guarantees it is stored before a `PushGlobal` of it runs. Such a
+        // name is captured by value like any other enclosing local — exactly
+        // as it would be inside a fn body. Which of the two a name is was
+        // decided once, by [`Self::binds_a_global`], and recorded on the
+        // binding; re-deriving it here from `depth` is how the loader and the
+        // binder came to disagree on the bare-expression entry path.
         for (i, scope) in self.outer_scopes.iter().enumerate().rev() {
             if let Some(entry) = scope.locals.get(&name) {
                 let is_global = i == 0 && entry.is_global;
                 if self.current_binding == Some(name) {
                     // A top-level fn's self-name resolves to its entry-frame
                     // slot so a value load emits `PushGlobal`; `PushSelf` would
-                    // read the sentinel captures a `CallKnown` frame carries.
+                    // read the sentinel `captures` a `CallKnown` frame carries.
+                    // `Denotation` fixes both halves together.
                     return Some(if is_global {
                         Denotation::self_toplevel_fn(GlobalSlot(entry.slot))
                     } else {
@@ -1397,12 +1696,18 @@ impl Compiler {
         }
     }
 
-    /// The denotation of one of this module's top-level declarations, read off
-    /// the same [`ToplevelDecl`] record its elaborated definition is pinned to.
+    /// The denotation of one of *this module's* top-level declarations, read
+    /// off the same [`ToplevelDecl`] record whose `slot` the elaborated
+    /// definition is pinned to. A linear scan over the module's own decls: a
+    /// handful, walked once per forward reference.
     fn decl_denotation(&self, name: StrId) -> Option<Denotation> {
         let decl = self.toplevel_decls.iter().find(|d| d.name == name)?;
         Some(self.global_denotation(decl.slot))
     }
+
+    // ========================================================================
+    // Diagnostics & LSP recording
+    // ========================================================================
 
     pub(super) fn error(&mut self, msg: String, sp: Span) {
         self.engine
@@ -1417,8 +1722,9 @@ impl Compiler {
     }
 
     /// Mint the proof the elaborator demands, if the module has earned it.
-    /// `None` means some subtree is poisoned and nothing may be elaborated; the
-    /// user has already been told why.
+    /// `None` means some subtree is poisoned and nothing may be elaborated: the
+    /// user has already been told why, and a body the checker rejected is
+    /// closed out empty rather than handed to `typed_ir::elaborate_body`.
     fn clean_module(&self) -> Option<CleanModule> {
         CleanModule::mint(&self.engine.diagnostics)
     }
@@ -1448,8 +1754,9 @@ impl Compiler {
     }
 
     pub(super) fn record(&mut self, name: &str, ty: Ty, sp: Span, doc: Option<String>) {
-        // Only the LSP consumes hover facts. Elsewhere they are resolved and
-        // discarded, so skip the `to_string` + `RawRef` buffering entirely.
+        // Hover facts are only consumed by `IncrementalSession` (the LSP). On
+        // the free `compile`/`check` path they are resolved then discarded, so
+        // skip the `name.to_string()` + `RawRef` buffering entirely there.
         if !self.collect_hover_facts {
             return;
         }
@@ -1465,8 +1772,12 @@ impl Compiler {
 
     /// Resolve a module-path `ArenaSlice` to its stable `ModuleId`, memoised on
     /// the `Copy` slice. The `str_slices` pool is append-only within a compile,
-    /// so a given slice always denotes the same path; the memo is dropped in
-    /// `reset_to`, the one point the pool is rewound.
+    /// so a given slice always denotes the same path (hence the same id); the
+    /// memo is dropped in `reset_to`, the single point the pool is rewound.
+    /// Replaces a per-occurrence `strs_of` (`Vec<String>` + a `String` per
+    /// segment) plus `ref_interner.intern` (a `ModuleKey::of` joined `String`
+    /// and a string-hash probe) with one `ArenaSlice`-keyed probe on a cache
+    /// hit.
     fn module_id_of_slice(&mut self, sl: ArenaSlice<pool::StrSlices>) -> ModuleId {
         if let Some(&id) = self.defid_module_memo.get(&sl) {
             return id;
@@ -1477,45 +1788,54 @@ impl Compiler {
         id
     }
 
-    /// The interned `ModuleId` of `current_module`, via the memoised path slice,
-    /// so the hot recording path neither clones nor re-interns it.
+    /// The interned `ModuleId` of `current_module`, reusing the memoised
+    /// module-path slice so the hot recording path neither clones the
+    /// `ModulePath` nor re-interns it.
     fn current_module_id(&mut self) -> ModuleId {
         let sl = self.current_module_slice();
         self.module_id_of_slice(sl)
     }
 
-    /// Resolve an env-side [`DefinitionLocation`] to a stable reference-graph
-    /// [`DefId`]. The module slice goes through the persistent `ref_interner` so
-    /// the id survives incremental recompiles, and the declaring span is
+    /// Resolve an env-side [`DefinitionLocation`] (declaring span + module
+    /// `ArenaSlice` + [`EntityKind`]) to a stable reference-graph [`DefId`].
+    /// The module slice is re-interned through the persistent `ref_interner`
+    /// so the id survives incremental recompiles, and the declaring span is
     /// reconstructed single-line so a definition's `DefId` is bit-identical to
-    /// the one every occurrence of it targets.
+    /// the `DefId` every occurrence of it targets.
     pub(super) fn defid_of(&mut self, dl: DefinitionLocation) -> DefId {
         let module = self.module_id_of_slice(dl.module);
         DefId::new(module, dl.span(), dl.entity)
     }
 
     /// The [`DefId`] to stash in `current_owner` while a top-level
-    /// `fn`/`const`/`type` body is compiled. Every reference inside that body,
-    /// nested lambdas included, is attributed to this owner.
+    /// `fn`/`const`/`type` body is compiled. Every reference emitted inside
+    /// that body — including inside nested lambdas, which have no `DefId` of
+    /// their own — is attributed to this owner: the def→def edge channel the
+    /// dead-code reachability walk follows.
     pub(super) fn owner_defid(&mut self, name_span: Span, entity: EntityKind) -> DefId {
         let module = self.current_module_slice();
         self.defid_of(DefinitionLocation::new(name_span, module, entity))
     }
 
     /// Record a resolved name occurrence in the current module's collector,
-    /// attributed to `current_owner` (`None` for genuine top-level executed
-    /// code). The owner is the def→def edge the dead-code reachability walk
-    /// follows; without it every reference in a body looks like executed code,
-    /// so anything it names becomes a live root. Recording-only: never touches
-    /// inference, schemes, slots or diagnostics.
+    /// attributed to the definition whose body is currently being compiled
+    /// (`current_owner`; `None` for genuine top-level executed code). The
+    /// owner is the def→def edge channel the dead-code reachability walk
+    /// follows: without it every reference in a `fn`/`const`/`type` body
+    /// looks like top-level executed code, so anything it names is treated as
+    /// a live root and no transitively-dead private definition is ever
+    /// reported. Recording-only: never touches inference, schemes, slots, or
+    /// diagnostics.
     fn record_ref(&mut self, occ: Span, kind: ReferenceKind, target: DefId) {
         self.module_refs
             .add_reference(self.current_owner, Reference::new(occ, kind, target));
     }
 
-    /// Record an occurrence of `kind` at `occ` targeting the value's canonical
-    /// definition, carried on its `Scheme.def`. No-op when the name has none;
-    /// builtins own no definition, so their edges dangle harmlessly.
+    /// Resolve a value name's canonical [`DefinitionLocation`] (carried on its
+    /// `Scheme.def`) to a [`DefId`] and record an occurrence of `kind` at
+    /// `occ`. No-op when the name has no recorded definition; builtins behave
+    /// as external targets (harmless — they own no definition in the graph so
+    /// the edge dangles and never affects reachability).
     fn record_value_use(
         &mut self,
         def: Option<DefinitionLocation>,
@@ -1529,10 +1849,14 @@ impl Compiler {
     }
 
     /// Record a `Qualifier` occurrence for the module alias a qualified member
-    /// use was reached through, so hover and goto-def on the `b` of `b.add(..)`
-    /// reach module `b`. Not a use site: the alias's liveness rides on the
-    /// member's own `Qualified` occurrence, which the caller records. An unknown
-    /// qualifier records nothing.
+    /// use was reached through. The qualifier names the import, not a value:
+    /// the occurrence targets the `ModuleAlias` binding so hover and goto-def
+    /// on the `b` of `b.add(..)` reach module `b`. Non-use-site, so
+    /// find-references / rename / unused-import are unaffected: the alias's
+    /// liveness rides on the member's own `Qualified` occurrence, which the
+    /// caller records. The alias `Definition` was registered under the
+    /// qualifier's name by `process_import`, so no extra bookkeeping is needed
+    /// to find it; an unknown qualifier records nothing.
     fn record_qualifier_use(&mut self, qualifier: &ast::Identifier) {
         if let Some(alias) = self
             .module_refs
@@ -1545,23 +1869,27 @@ impl Compiler {
         }
     }
 
-    /// [`Self::record_value_use`] for type references. No-op when the module has
-    /// no such type (e.g. static/hydrated stdlib modules).
+    /// Resolve a type name in `path`'s module to its canonical `Type`
+    /// definition and record an occurrence of `kind` at `occ`. No-op when the
+    /// module has no such type (e.g. static/hydrated stdlib modules). Mirror of
+    /// [`Self::record_value_use`] for type references.
     fn record_type_use(&mut self, path: &ModulePath, name: &str, occ: Span, kind: ReferenceKind) {
         if let Some(target) = self.type_defid_in_module(path, name) {
             self.record_ref(occ, kind, target);
         }
     }
 
-    /// Record a declaration, plus one `Definition`-kind self-occurrence at the
-    /// declaring name so find-references includes the declaration site.
-    ///
-    /// The `Definition` is last-write-wins on its `DefId` — docs and visibility
-    /// settle on the last write — while the self-occurrence fires only on first
-    /// sight. It is owned by the definition itself rather than `None`, so it is
-    /// never mistaken for executed code and can never bootstrap the def's own
-    /// reachability. Recording-only: never touches inference, schemes, slots or
-    /// diagnostics.
+    /// Record a declaration in the current module's reference collector, plus
+    /// a single `Definition`-kind self-occurrence at the declaring name so
+    /// find-references includes the declaration site. The `Definition` record
+    /// is last-write-wins on its `DefId` (a definition may be re-emitted as
+    /// more is learned about it — docs/visibility settle on the last write);
+    /// the self-occurrence is emitted only on first sight so the declaration
+    /// is not double-counted. The self-occurrence is owned by the definition
+    /// itself (not `None`) so it is never mistaken for top-level executed code
+    /// — a self-edge can never bootstrap a def's own reachability, so a dead
+    /// definition stays dead. Recording-only: never touches inference,
+    /// schemes, slots, or diagnostics.
     pub(super) fn emit_def(
         &mut self,
         dl: DefinitionLocation,
@@ -1584,10 +1912,10 @@ impl Compiler {
     }
 
     /// Register a local binder as an `EntityKind::Value` graph definition so
-    /// goto-def / find-refs / hover resolve on it and its uses. LSP-only: `al
-    /// run`/`al check` never query locals and the dead-code pass ignores
-    /// `Value` defs, so the `collect_hover_facts` gate keeps this off the hot
-    /// path.
+    /// goto-def / find-refs / hover resolve on it and its uses. LSP-only: the
+    /// graph is built on every compile, but `al run`/`al check` never query
+    /// locals, and `EntityKind::Value` defs are ignored by the dead-code pass,
+    /// so the `collect_hover_facts` gate keeps this off the hot path.
     fn emit_value_def(&mut self, sp: Span, name: &str, doc: Option<String>) {
         if self.collect_hover_facts {
             let m = self.current_module_slice();
@@ -1601,10 +1929,11 @@ impl Compiler {
         }
     }
 
-    /// Thin wrappers over the engine's `mk_con` for prelude types, keyed by the
-    /// captured `PreludeBindings` so type identity, not the name string, is the
-    /// source of truth. The nullary ones go through the engine's per-primitive
-    /// cache, so a recompile mints one `Int` node rather than one per literal.
+    /// Thin wrappers over the engine's `mk_con` for prelude types, fed by the
+    /// captured `PreludeBindings` so the type identity (not just the name
+    /// string) is the source of truth where it matters. The nullary ones go
+    /// through the engine's per-primitive cache so a recompile mints one `Int`
+    /// node instead of one per literal.
     #[inline]
     fn ty_prelude(&mut self, r: TypeRef, args: &[Ty]) -> Ty {
         self.engine.mk_con(r.id, r.name, args)
@@ -1640,11 +1969,13 @@ impl Compiler {
 
     /// Hydrate a type annotation through `h`, recording any error and falling
     /// back to a fresh tyvar so inference can continue. Every type name the
-    /// hydrator resolved is drained as an `Unqualified` occurrence, whether
-    /// hydration succeeded or not: a nested name can resolve before a later
-    /// sibling fails. The target is the owning module's canonical `Type`
-    /// definition from the reference graph, never the constructor-clobbered
-    /// `env.definitions`.
+    /// hydrator resolved is drained as an `Unqualified` occurrence of that
+    /// type's declaration — whether hydration succeeded or not, since a nested
+    /// name can resolve before a later sibling fails. The target is the owning
+    /// module's canonical `Type` definition (resolved through the reference
+    /// graph, not the constructor-clobbered `env.definitions`), so an
+    /// occurrence and its declaration share one `DefId`. Recording-only: the
+    /// returned `Ty` is byte-for-byte what the old code returned.
     pub(super) fn hydrate(&mut self, h: &mut Hydrator, t: &ast::TypeIdentifier) -> Ty {
         let result = h.type_from_ast(t, &self.env, &mut self.engine);
         for hit in h.take_type_refs() {
@@ -1676,6 +2007,10 @@ impl Compiler {
         self.hydrate(&mut h, t)
     }
 
+    // ========================================================================
+    // Node dispatch
+    // ========================================================================
+
     pub(super) fn compile_node(&mut self, node: &ast::Node) -> Ty {
         match node {
             ast::Node::Statement(s) => {
@@ -1686,20 +2021,26 @@ impl Compiler {
         }
     }
 
+    // ========================================================================
+    // Statements
+    // ========================================================================
+
     fn compile_statement(&mut self, stmt: &ast::Statement) {
         match stmt {
             ast::Statement::VariableBinding(vb) => {
                 let name = vb.identifier.name.clone();
                 let name_id = self.engine.intern(&name);
 
-                // A module-scope rebind gets a fresh slot, so allocate it
-                // *after* the initializer compiles: otherwise the name would
-                // already resolve to the new, uninitialised slot and `x = x + 1`
-                // would read garbage. The prior binding stays in scope across
-                // the init, which also drives `Self_` resolution for a
-                // self-recursive lambda. A first binding still reserves its slot
-                // up front, so such a lambda can resolve its own name through
-                // the entry frame.
+                // At module scope a re-binding gets a fresh slot (see
+                // `get_or_create_local`), so the slot must be allocated *after*
+                // the initializer compiles — otherwise the name would already
+                // resolve to the new, still-uninitialised slot and an init that
+                // reads the prior binding (e.g. `x = x + 1`) would read garbage.
+                // The prior binding stays in scope across the init, which also
+                // drives `Self_` resolution for a self-recursive lambda. A first
+                // binding still reserves its slot up front so a self-recursive
+                // lambda can resolve its own (not-yet-bound) name through the
+                // entry frame.
                 let defer_slot = self.outer_scopes.is_empty() && self.locals.contains_key(&name_id);
                 if !defer_slot {
                     self.get_or_create_local(&name);
@@ -1710,17 +2051,18 @@ impl Compiler {
                 self.engine.enter_level();
                 let self_ty = self.engine.fresh_var();
                 let init_is_fn = matches!(vb.init, ast::Expression::FunctionExpression(_));
-                // Only pre-bind for recursive lambdas: exposing the name to any
-                // other initializer lets `x = x` infer ⊥ and generalize to ∀A.A,
-                // which is unsound.
+                // Only pre-bind for recursive lambdas. For any other init, exposing
+                // the name to its own initializer lets `x = x` infer ⊥ and generalize
+                // to ∀A.A, which is unsound.
                 if init_is_fn {
                     self.env.define(&name, mono(self_ty));
                 }
 
-                // One-shot, consumed by the lambda's own `enter_fn_frame`.
-                // Mutating `current_binding` here instead leaks into nested and
-                // HOF-arg lambdas, mis-resolving their calls to the enclosing fn
-                // as `Self_` and emitting `CallSelf` against the wrong frame.
+                // Deliver the self-name to the lambda's own frame via a one-shot
+                // consumed by its `enter_fn_frame` — NOT by mutating
+                // `current_binding` here, which leaks into nested / HOF-arg
+                // lambdas and mis-resolves their calls to the enclosing fn as
+                // Self_ (emitting CallSelf against the wrong, live frame).
                 let saved_self = if init_is_fn {
                     self.next_fn_self_name.replace(name_id)
                 } else {
@@ -1801,9 +2143,10 @@ impl Compiler {
             }
             ast::Statement::TypedDiscard(td) => {
                 // `UpperIdent = expr`: assert the init has the named 0-arg type
-                // and discard the value. If the name resolves to a constructor
-                // but not a type (`Some = ...`), say so directly rather than
-                // letting the hydrator report "Unknown type".
+                // and discard the value. A bare `UpperIdent` here names a
+                // *type*, not a value; if the name resolves to a constructor
+                // but not a type (`Some = ...`, `Ok = ...`), say so directly
+                // rather than letting the hydrator report "Unknown type".
                 let name = &td.ty_name.name;
                 let expected = if self.env.lookup_type_info(name).is_none()
                     && matches!(
@@ -1813,8 +2156,9 @@ impl Compiler {
                     self.error(format!("'{name}' is not a type"), td.ty_name.span);
                     self.engine.fresh_var()
                 } else {
-                    // As a no-arg annotation: the hydrator rejects unknown
-                    // names and arity misuse, and records the type occurrence.
+                    // Hydrate the name as a no-arg annotation — the hydrator
+                    // rejects unknown names and arity misuse, and records the
+                    // type occurrence for the reference graph.
                     let ann = ast::TypeIdentifier {
                         kind: ast::TypeKind::NamedType(ast::NamedType {
                             identifier: td.ty_name.clone(),
@@ -1829,9 +2173,11 @@ impl Compiler {
                     .unify_at(expected, init_ty, type_defining_span(&td.init));
             }
             ast::Statement::CtorDestructuringBinding(cdb) => {
-                // `Ctor(p1, ..) = expr`: an irrefutable single-arm destructure,
-                // typed like a one-arm match and then required to be
-                // exhaustive, so only single-constructor types qualify.
+                // `Ctor(p1, ..) = expr` — an irrefutable single-arm destructure.
+                // Lowered like a one-arm match: type the pattern against the
+                // init, bind its names, then require the single pattern to be
+                // exhaustive (so only single-constructor types qualify; a
+                // multi-constructor or nested-optional pattern is refutable).
                 let init_ty = self.compile_expr(&cdb.init);
                 let pattern = cdb.as_pattern();
 
@@ -1857,11 +2203,16 @@ impl Compiler {
                 }
             }
             ast::Statement::ImportDeclaration(_) => {
-                // Already resolved (or rejected) by `process_imports` before the
-                // body walk.
+                // Imports are processed at the start of compilation, before
+                // walking the body. By the time we reach one here it's already
+                // been resolved (or rejected) — nothing left to do.
             }
         }
     }
+
+    // ========================================================================
+    // Modules
+    // ========================================================================
 
     pub(super) fn process_imports(&mut self, block: &ast::BlockExpression) {
         for node in &block.body {
@@ -1875,9 +2226,9 @@ impl Compiler {
         }
     }
 
-    /// A cache-hit dependency reserved its type-id range without contributing to
-    /// `next_type_id` this pass, so bump past every reserved block before the
-    /// entry file allocates ids of its own.
+    /// A cache-hit dependency reserved its id range but contributed nothing to
+    /// `next_type_id` this pass, so bump the entry file past every reserved
+    /// block before it allocates any of its own type ids.
     pub(super) fn bump_type_ids_past_reserved(&mut self) {
         let hw = self.module_table.id_high_water();
         let cur = self.env.next_type_id();
@@ -1887,9 +2238,9 @@ impl Compiler {
     }
 
     fn process_import(&mut self, imp: &ast::ImportDeclaration) {
-        // `canon` is the module's identity: the file it resolved to. Every
-        // downstream key must use it, never `imp.path`, which is only how this
-        // file spelled it.
+        // `canon` is the module's identity — the file it resolved to. Every
+        // downstream key (module table, reference interner, qualifier map) must
+        // use it, never `imp.path`, which is only how *this* file spelled it.
         let Some((canon, key)) = self.load_module(&imp.path, imp.span) else {
             return;
         };
@@ -1910,14 +2261,18 @@ impl Compiler {
                     .unwrap_or_else(|| key.as_str().to_string())
             });
 
-        // The qualifier binding is a `ModuleAlias` definition; the final
-        // module-name segment is an `Import` occurrence and the `as` alias an
-        // `Alias` occurrence, both targeting it, so qualified uses, find-refs
-        // and rename resolve back to this import. The `Import` occ sits at
-        // `imp.path_span` — the final segment only — so the `import` keyword and
-        // earlier segments are not clickable. The alias `Definition` also stores
-        // the declaration span and imported `ModuleId` so unused-import
-        // detection reads them directly.
+        // Reference graph: the qualifier binding is a `ModuleAlias`
+        // definition; the final module-name path segment is an `Import`
+        // occurrence and the `as` alias an `Alias` occurrence, both targeting
+        // it so qualified `q.member` uses, find-references, and rename resolve
+        // back to this import (and the unused-import reachability rule can see
+        // it). The `Import` occ is recorded at `imp.path_span` — the final
+        // segment only — so the `import` keyword and earlier path segments
+        // (`al` / `/` in `import al/string`) are not clickable. The alias
+        // `Definition` also stores the full declaration span (`decl_span`) and
+        // the imported `ModuleId` (`imports_module`) so unused-import detection
+        // reads both directly instead of recovering them from occurrence
+        // geometry.
         let alias_span = imp.alias.as_ref().map_or(imp.span, |a| a.span);
         let cur_path = self.current_module.clone();
         let cur_mid = self.ref_interner.intern(&cur_path);
@@ -1934,10 +2289,12 @@ impl Compiler {
                 imports_module: Some(imported_mid),
             },
         ));
-        // Targets a `DefId` owned by the *imported* module, so goto-def on the
-        // `b` in `import a/b` lands on `b`'s file rather than self-jumping to
-        // the alias binding. find-references, rename and the unused-import rule
-        // all key off the alias `Definition` above and are unaffected.
+        // The module-name segment points at the *imported* module, so its
+        // `Import` occurrence targets a `DefId` owned by that module: goto-def
+        // on the `b` in `import a/b` lands on `b`'s file, not the importing
+        // alias's own binding (a no-op self-jump). find-references / rename / the
+        // unused-import rule all key off the alias `Definition` above, so
+        // retargeting only the occurrence changes nothing for them.
         self.module_refs.add_reference(
             None,
             Reference::new(
@@ -1955,8 +2312,10 @@ impl Compiler {
 
         self.imported_qualifiers.insert(qualifier, key.clone());
 
-        // Collected as owned values while `iface` borrows `module_table`, then
-        // turned into `DefId`s once that borrow has ended.
+        // Per-item occurrences resolved through the imported module's
+        // interface. Collected with owned `DefinitionLocation`s / type names
+        // while `iface` borrows `module_table`, then turned into `DefId`s and
+        // recorded once that borrow has ended.
         let mut item_refs: Vec<(Span, ReferenceKind, DefinitionLocation)> = Vec::new();
         let mut type_item_refs: Vec<(Span, ReferenceKind, String)> = Vec::new();
         for item in &imp.items {
@@ -1968,28 +2327,35 @@ impl Compiler {
             let Some(iface) = self.module_table.get(&key) else {
                 continue;
             };
-            // A record `type Foo {..}` exports both a same-named constructor
+            // A record `type Foo {..}` exports *both* a same-named constructor
             // value and the type itself. They are not mutually exclusive: bind
-            // and record each independently, or the type branch is unreachable
-            // for every record type because the value always matches first.
+            // and record each independently so importing the name serves
+            // value- *and* type-level resolution (goto-def / find-refs /
+            // rename) for both. Resolving the type via an `else if` after the
+            // value branch — as the old code did — made it unreachable for
+            // every record type, since the constructor value always matched
+            // first.
             let val = iface.values.get(&item.name.name).cloned();
             let typ = iface.types.get(&item.name.name).cloned();
             let is_private = iface.private_names.contains(&item.name.name);
             if let Some(ev) = val.clone() {
                 let vdef = ev.scheme.def;
                 // The `X` token of `{X}` / `{X as Y}` always names the imported
-                // The `X` of `{X}` / `{X as Y}` always names the imported
-                // symbol, so it targets X's canonical def: goto-def chains to
-                // the real declaration and renaming X rewrites it. A binding
-                // token, not an evaluating use, hence `ImportItem`.
+                // symbol, so it targets X's canonical def — goto-def on it chains
+                // to the real declaration, and renaming X rewrites it. It is a
+                // binding token, not an evaluating use, hence `ImportItem`.
+                if let Some(dl) = vdef {
                     item_refs.push((item.name.span, ReferenceKind::ImportItem, dl));
                 }
-                // `{X as Y}` introduces a new local name. Y gets its own
-                // `DefId` so its rename class is separate from X's: sharing X's
-                // made renaming X rewrite Y's binder and every Y use, and made
-                // renaming a Y use escape into X's module. Type, kind and slot
-                // are still inherited from X. The `Value` entity keeps Y off the
-                // dead-code surface and out of the symbol outline.
+                // An aliased item `{X as Y}` introduces a *new* local name Y.
+                // Mint Y its own DefId so its rename class is separate from X's:
+                // sharing X's def made renaming X rewrite Y's binder and every Y
+                // use to X's new name (name capture / broken compile), and made
+                // renaming a Y use escape into X's module. Y's env binding and the
+                // `Y` alias token target this local def; type/kind/slot are still
+                // inherited from X. The `Value` entity keeps it off the dead-code
+                // surface (the import's own unused-ness is reported on the
+                // `ModuleAlias`) and out of the symbol outline.
                 if let Some(a) = item.alias.as_ref() {
                     let module = self.current_module_slice();
                     let alias_dl = DefinitionLocation::new(a.span, module, EntityKind::Value);
@@ -2002,8 +2368,9 @@ impl Compiler {
                     );
                     let alias_defid = self.defid_of(alias_dl);
                     let canonical = vdef.map(|dl| self.defid_of(dl));
-                    // goto-def / hover on Y chains to X via `alias_of`; rename
-                    // and find-references stay on this alias.
+                    // goto-def / hover on Y chains to X's real declaration
+                    // via `alias_of`; rename and find-references stay on this
+                    // alias.
                     let def = Definition::new(
                         alias_defid.module,
                         alias_defid.span,
@@ -2025,11 +2392,13 @@ impl Compiler {
                 }
             }
             if let Some(ti) = typ {
-                // Bound unconditionally so annotation hydration resolves it
-                // through this module's env rather than residual global
-                // `type_info` from the dependency's own compile. Its canonical
-                // `Type` `DefId` is resolved after the loop from the imported
-                // module's reference graph.
+                // Bind the imported type unconditionally so annotation
+                // hydration resolves it through this module's env rather than
+                // residual global `type_info` left over from the dependency's
+                // own compile. Its canonical `Type` `DefId` is resolved
+                // (module-aware, after the loop) from the imported module's
+                // reference graph, never the constructor-clobbered
+                // `env.definitions`.
                 self.env.store_type_info(&local_name, ti);
                 type_item_refs.push((
                     item.name.span,
@@ -2067,13 +2436,21 @@ impl Compiler {
             self.record_ref(occ, kind, target);
         }
         for (occ, kind, tyname) in type_item_refs {
-            // The declaring module is the *resolved* file: looking it up under
-            // `imp.path` as written would miss the cache for a relative import
-            // and silently record nothing.
+            // The type's declaring module is the *resolved* file: looking it
+            // up under `imp.path` as written would miss the cache for a
+            // relative import and silently record nothing.
             self.record_type_use(&canon, &tyname, occ, kind);
         }
     }
 
+    /// Load the module `path` names, relative to the *importing* module's
+    /// directory, and return its canonical identity.
+    ///
+    /// Resolution happens **before** the cache is consulted, and the key comes
+    /// from the file we resolved to — never from `path` as written. Keying on
+    /// the written path made `./b` mean one module program-wide: a `sub/mid.al`
+    /// importing `./b` silently received the root's `b.al`. See
+    /// `module::file_module_path`.
     /// How to name a module in a diagnostic: the path the importer wrote
     /// (`./lib`), falling back to the module's own last segment. Never the
     /// canonical key — that is an identity, not a name.
@@ -2084,11 +2461,6 @@ impl Compiler {
         })
     }
 
-    /// Load the module `path` names, relative to the importing module's
-    /// directory, and return its canonical identity. Resolution happens before
-    /// the cache is consulted and the key comes from the file we resolved to,
-    /// never from `path` as written: keying on the written path made `./b` mean
-    /// one module program-wide.
     pub(crate) fn load_module(
         &mut self,
         path: &ast::ImportPath,
@@ -2172,9 +2544,10 @@ impl Compiler {
             child_base,
         );
         let refs = Rc::new(body.refs);
-        // Captured after this module's dependencies have loaded but before its
-        // own body added anything. Only on-disk modules are ever invalidated, so
-        // only they carry one.
+        // The watermark is captured *after* this module's own dependencies have
+        // loaded (compile_module_body does that first) but reflects the arena
+        // state immediately *before* this module's body added anything. Only
+        // on-disk modules are ever invalidated, so only they carry it.
         let origin = match source_path {
             Some(path) => ModuleOrigin::File {
                 source_hash: hash,
@@ -2201,9 +2574,12 @@ impl Compiler {
         Some((canon, key))
     }
 
-    /// Snapshot the enclosing module's per-module state and swap in fresh state
-    /// for compiling `path`'s body, including a fresh `ModuleReferences`
-    /// collector for `leave_module_frame` to hand back.
+    /// Snapshot the enclosing module's per-module state into a `ModuleFrame`
+    /// and swap in fresh state for compiling `path`'s body. A fresh
+    /// `ModuleReferences` collector is installed (the typecheck pass populates
+    /// it; `leave_module_frame` moves the result out for the caller to store
+    /// on the module's `CachedModule`). `module_path_slice` is a memo of
+    /// `current_module`, so it is cleared rather than carried over.
     fn enter_module_frame(
         &mut self,
         path: ModulePath,
@@ -2222,7 +2598,8 @@ impl Compiler {
     }
 
     /// Restore the snapshotted per-module state and return the just-compiled
-    /// module's collected references.
+    /// module's collected references (the `module_refs` value that was live
+    /// between enter and leave).
     fn leave_module_frame(&mut self, old: ModuleFrame) -> ModuleReferences {
         let ModuleFrame {
             module,
@@ -2250,28 +2627,35 @@ impl Compiler {
     ) -> (CompiledBody, Vec<ModuleKey>) {
         let mut iface = ModuleInterface::new(path.clone());
         iface.doc = doc.clone();
-        // Diagnostics pushed between here and `leave_module_frame` have spans in
-        // this module's text, not the entry file's.
+        // Everything pushed from here until `leave_module_frame` was raised
+        // while *this* module (or one of its dependencies, which stamp their
+        // own ranges first in the `process_imports` recursion) was current, so
+        // its spans point into this module's text, not the entry file's.
         let diag_mark = self.engine.diagnostics.len();
         let old = self.enter_module_frame(path, key.clone(), base_dir);
-        // The collector installed above is this module's, so its doc goes on it.
+        // The fresh collector installed above belongs to this module, so its
+        // doc goes here rather than on the enclosing module's.
         self.module_refs.set_doc(doc);
 
         self.process_imports(block);
         let imports: Vec<ModuleKey> = self.imported_qualifiers.values().cloned().collect();
         // Reserve (or reuse) this module's stable 256-aligned type-id range
-        // *before* the watermark is captured, so the watermark's `next_type_id`
-        // is `base`. On invalidation `reset_to` restores it from that watermark,
-        // putting the module back at its own range start, so editing one module
-        // never shifts another's ids. Deps have already reserved their ranges,
-        // so the floor sits past every stdlib and dependency id.
+        // *before* the watermark is captured, so the captured watermark's
+        // `env.next_type_id == base`. On invalidation `reset_to`/`truncate_to`
+        // restores `next_type_id` from that watermark, putting the module back
+        // at its own range start — editing one module never shifts another's
+        // ids. Deps have already loaded (and reserved their ranges) via the
+        // `process_imports` recursion above, so the floor (current
+        // `next_type_id`) already sits past every stdlib + dependency id.
+        // `key` is the same key `load_module` caches this module under.
         let floor = self.env.next_type_id();
         let reservation = self.module_table.id_base_for(&key, floor);
         let base = reservation.base();
         self.env.set_next_type_id(base);
         let watermark = self.watermark();
-        // Reset so they carry only this module's binds, not the dependencies'
-        // that `process_imports` just compiled.
+        // `toplevel_binds`/`toplevel_decls` drive the Core toplevel lower
+        // below; reset them so they carry only *this* module's binds, not
+        // those of the dependencies `process_imports` just compiled.
         self.toplevel_binds.clear();
         self.toplevel_decls.clear();
         let code_mark = self.program.code.len();
@@ -2280,15 +2664,16 @@ impl Compiler {
         self.analyse_module(block, Some(&mut iface));
         self.emit_module_init(&key, block, code_mark, slot_base);
         self.env.pop_scope();
-        // Record real type-id consumption, so `id_high_water` tracks usage and a
-        // spill past `MODULE_TYPE_ID_RANGE` raises `id_range_overflow`.
+        // Record actual type-id consumption so `id_high_water` tracks real
+        // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
+        // `id_range_overflow` for the invalidate-all/reset recovery path.
         let used = self.env.next_type_id().0 - base.0;
         reservation.note_usage(&mut self.module_table, used);
 
         let refs = self.leave_module_frame(old);
-        // Stamp provenance on this module's diagnostics. Dependencies compiled
-        // inside our range already stamped theirs, so only unstamped ones are
-        // ours.
+        // Stamp provenance on every diagnostic this module's compile produced.
+        // Dependencies compiled inside our range have already stamped theirs,
+        // so only still-unstamped (entry-relative) ones become ours.
         for d in &mut self.engine.diagnostics[diag_mark..] {
             if d.source.is_none() {
                 d.source = Some(key.clone());
@@ -2305,14 +2690,18 @@ impl Compiler {
     }
 
     /// Perceus-optimise a just-lowered toplevel and append its Core-derived
-    /// entry-frame init. Shared by `__main__` and every imported module; see
-    /// [`TopKind`] for how the two callers differ.
+    /// entry-frame init. Shared by `__main__` and every imported module.
     ///
-    /// The analysis pass already laid the toplevel's function bodies down in
-    /// `[code_mark, base)`, each behind a jump-over. Overwriting the first of
-    /// those with `Jump base` skips the whole run in one hop and lands on the
-    /// init. The bodies keep their `Function.code_start` addresses and stay
-    /// reachable via `CallKnown`; truncating instead would orphan all of them.
+    /// The analysis pass laid the toplevel's function bodies down in
+    /// `[code_mark, base)`; each is preceded by a jump-over so the enclosing
+    /// stream skips it. Overwriting the first of those with `Jump base` skips
+    /// the whole run in one hop and lands on the Core-derived init, which then
+    /// falls through to the next region. Bodies keep the addresses their
+    /// `Function.code_start` recorded and stay reachable via `CallKnown`;
+    /// truncating instead would orphan every one of them.
+    ///
+    /// See [`TopKind`] for how the two callers differ in their handling of the
+    /// toplevel's tail value.
     fn append_toplevel_init(
         &mut self,
         lowered: LoweredBody,
@@ -2321,16 +2710,19 @@ impl Compiler {
         kind: TopKind,
     ) {
         use crate::core_ir::{emit, perceus};
-        // The elaboration drained the queue the check walk filled. A leftover
-        // means the two walks disagreed about which statements bind at module
-        // scope, which silently mis-slots every bind after that point.
+        // The elaboration that produced `lowered` drained the queue the check
+        // walk filled. A leftover means the two walks disagreed about which
+        // statements bind at module scope — the failure the old name-keyed map
+        // could not represent, and one that silently mis-slots every bind after
+        // the point of disagreement.
         if !self.toplevel_binds.is_empty() {
             unclaimed_toplevel_slots(self.toplevel_binds.len());
         }
         let LoweredBody { core: top, pool } = lowered;
-        // Perceus so temporaries passed into calls are moved. `emit_toplevel`
-        // suppresses the resulting `Drop`/`Reuse` for the pinned globals, whose
-        // last use in the toplevel is not their last use in the program.
+        // Perceus runs so *temporaries* passed into calls are moved (rc==1 in
+        // the callee → its own reuse fires); `emit_toplevel` suppresses the
+        // resulting `Drop`/`Reuse` for the pinned globals, whose last use in
+        // the toplevel is not their last use in the program.
         let top = perceus::perceus(&pool, top);
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{top}", self.engine.str(top.name));
@@ -2338,10 +2730,11 @@ impl Compiler {
         let base = self.program.code.len() as i32;
         let mut out = emit::emit_toplevel(&top.body, slot_base, self);
         // A function body links by plain append because its block starts at its
-        // own `Function.code_start`. This one does not: it is spliced into the
-        // entry frame, whose `code_start` is 0, but starts at `base`. The VM
-        // resolves jumps as `0 + operand`, so rebase by `base`. The one place an
-        // operand is ever rewritten.
+        // own `Function.code_start`. This block does not: it is spliced into the
+        // *entry* frame, whose `code_start` is 0 (it must run the module-init
+        // code that precedes every body), and it starts at `base`. The VM
+        // resolves its jumps as `0 + operand`, so rebase them by `base` here.
+        // This is the one place an operand is ever rewritten.
         emit::relocate(&mut out.code, base);
         self.local_count = self.local_count.max(out.locals);
         if code_mark < base as usize {
@@ -2363,9 +2756,10 @@ impl Compiler {
         code_mark: usize,
         slot_base: i32,
     ) {
-        // Taken, not merely read: the next module's toplevel has `Span`s from its
-        // own file and must not find one of ours at the same offset. Dropped on
-        // the early return too — an unelaborated toplevel has no reader.
+        // This module's toplevel lambdas, and nobody else's. Taken (not merely
+        // read) so the next module's toplevel — whose `Span`s are numbered from
+        // its own file — cannot find one of ours at the same offset. Dropped on
+        // the early return too: an unelaborated toplevel has no reader.
         let sites = std::mem::take(&mut self.frame_closures);
         // This module's toplevel walk region, drained whether or not it is
         // elaborated: the next module's walk must start from an empty one.
@@ -2376,10 +2770,11 @@ impl Compiler {
         self.frame_closures = sites;
         let name = self.engine.intern(key.as_str());
         let nil = self.ty_nil();
-        // Elaborated and lowered under `check_only` too (emit is not), so a
-        // toplevel the front half cannot handle is a diagnostic rather than a
-        // crash at `al run`. The wrappers go down before anyone reads an
-        // address, here `append_toplevel_init`'s `base`.
+        // Elaborated and lowered even under `check_only` (emit is not) so a
+        // module toplevel the front half cannot handle is a diagnostic rather
+        // than a crash at `al run`. Same rule as `elaborate_body`: the wrappers
+        // go down before anyone reads an address, here
+        // `append_toplevel_init`'s `base`.
         let lowered = self.elaborate_then_materialize(clean, None, |c, pool, fns| {
             typed_ir::elaborate_toplevel(c, pool, fns, name, block, nil, &walk_tys)
         });
@@ -2389,8 +2784,9 @@ impl Compiler {
         }
     }
 
-    /// Look up `qualifier.member` for an imported module. Returns the scheme and,
-    /// when the member has a runtime binding, its entry-frame slot.
+    /// Look up a `qualifier.member` reference where `qualifier` is an imported
+    /// module name. Returns the value's scheme and (if it has a runtime
+    /// binding) its slot in the entry frame.
     fn lookup_module_member(
         &mut self,
         module_key: &ModuleKey,
@@ -2420,12 +2816,18 @@ impl Compiler {
         None
     }
 
+    // ========================================================================
+    // Expressions
+    // ========================================================================
+
     /// Typecheck `expr`, appending the type it inferred to the current walk
-    /// region in entry order.
+    /// region in *entry* order.
     ///
-    /// Must stay total over expressions: the elaborator reads this instead of
-    /// re-deriving a type, and enters exactly the expressions this walk entered,
-    /// in the same order. See [`Compiler::walk_tys`].
+    /// The recording is what lets the elaborator — which walks the same AST
+    /// straight after this one, on the same engine — use the typechecker's
+    /// answer rather than re-deriving one. It must stay total over expressions:
+    /// every `Expression` the elaborator can reach is typed here, and the two
+    /// walks enter them in the same order (see [`Compiler::walk_tys`]).
     pub(super) fn compile_expr(&mut self, expr: &ast::Expression) -> Ty {
         let slot = self.reserve_walk_ty();
         let ty = self.compile_expr_inner(expr);
@@ -2440,16 +2842,20 @@ impl Compiler {
         self.walk_tys.len() - 1
     }
 
-    /// Fill the slot [`Self::reserve_walk_ty`] claimed. Indexes rather than
-    /// probes: a slot outside the current region is the desync this table exists
-    /// to prevent, and swallowing the write would let a `WALK_TY_PENDING` reach
-    /// the elaborator.
+    /// Fill the slot [`Self::reserve_walk_ty`] claimed. `compile_expr_inner` may
+    /// have opened and closed a nested region (a lambda body), but it always
+    /// puts the one it found back, so the slot still addresses it.
+    ///
+    /// Indexes rather than probes: a slot outside the current region is the
+    /// region desync this table exists to make impossible, and swallowing the
+    /// write would let a `WALK_TY_PENDING` reach the elaborator.
     fn fill_walk_ty(&mut self, slot: usize, ty: Ty) {
         self.walk_tys[slot] = WalkStep::Ty(ty);
     }
 
     /// Record the check walk's `module.member` verdict for the `left.right`
-    /// shape. `Elab::qualified` consumes it and must not re-derive it.
+    /// shape it is looking at. Consumed by `Elab::qualified`, which must not
+    /// re-derive it — see [`WalkStep::Qualified`].
     fn record_walk_qualified(&mut self, qualified: bool) {
         self.walk_tys.push(WalkStep::Qualified(qualified));
     }
@@ -2475,8 +2881,9 @@ impl Compiler {
         region
     }
 
-    /// Take the module toplevel's region: everything typed outside a function
-    /// body. One elaboration drains it, so the next module starts empty.
+    /// Take the module toplevel's region: everything the walk typed outside a
+    /// function body. Every module's walk fills it and exactly one elaboration
+    /// drains it, so it is empty again for the next.
     fn take_toplevel_walk_tys(&mut self) -> Vec<WalkStep> {
         debug_assert!(
             self.walk_tys_stack.is_empty(),
@@ -2526,9 +2933,9 @@ impl Compiler {
                 last_ty
             }
             ast::Expression::NumberLiteral(nl) => {
-                // `const_number` is the single source of the int/float split and
-                // of the overflow diagnostic; the pooled `Value` itself is
-                // re-interned by the Core emit.
+                // `const_number` is the single source of the int/float split
+                // (and of the overflow diagnostic); the pooled `Value` itself
+                // is re-interned by the Core emit.
                 let v = self.const_number(nl);
                 if v.is_float() {
                     self.engine.icon_float()
@@ -2634,12 +3041,17 @@ impl Compiler {
         }
     }
 
-    /// An `ErrorNode` stands in for a region the parser could not read, so there
-    /// is nothing to check and nothing to elaborate. The parser already reported
-    /// it, but the entry file's parse diagnostics never enter
-    /// `engine.diagnostics`, so restate it here — and only when nothing else has
-    /// already denied the module its [`CleanModule`] proof, which keeps the
-    /// diagnostic set a user sees identical.
+    /// An `ErrorNode` stands in for a region the parser could not read, so it
+    /// has no meaning to check and none to elaborate. Every parser site that
+    /// builds one also records the error, and the entry file's parse
+    /// diagnostics never enter `engine.diagnostics` — so restate it here, but
+    /// only when nothing else has already denied the module its [`CleanModule`]
+    /// proof. That keeps the diagnostic set a user sees identical (the CLI
+    /// stops before checking a file that failed to parse; the LSP publishes
+    /// only the parse errors for such a buffer; an imported module's parse
+    /// errors are folded in before its body is walked) while making the one
+    /// unelaborable form in the language a checked error rather than a bug
+    /// report from a later pass.
     fn error_node(&mut self, err: &ast::ErrorNode) -> Ty {
         if self.clean_module().is_some() {
             self.engine.diagnostics.push(Diagnostic::error(
@@ -2651,9 +3063,11 @@ impl Compiler {
         self.engine.fresh_var()
     }
 
-    /// Compile an expression with an optional expected-type hint. Consulted only
-    /// for fn-literal arguments, so an unannotated lambda param gets a concrete
-    /// type immediately instead of "cannot access field on unknown type".
+    /// Compile an expression with an optional expected-type hint. The hint is
+    /// only consulted for fn-literal arguments where the parameter type is
+    /// known and can be pushed down so unannotated lambda params get a
+    /// concrete type immediately (avoiding "cannot access field on unknown
+    /// type" inside the body).
     pub(super) fn compile_expr_with_hint(
         &mut self,
         expr: &ast::Expression,
@@ -2667,9 +3081,10 @@ impl Compiler {
                 && params.len as usize == fe.params.len()
             {
                 let params: Vec<Ty> = self.engine.children_of(params).to_vec();
-                // This path bypasses `compile_expr`, so claim the lambda's walk
-                // slot here, before its body opens a region of its own, or the
-                // elaborator's next `take_ty` reads the following expression.
+                // This path bypasses `compile_expr`, so claim the lambda's slot
+                // in the walk region here — before its body opens a region of
+                // its own — or the elaborator's next `take_ty` reads the type of
+                // whatever expression follows.
                 let slot = self.reserve_walk_ty();
                 self.engine.enter_level();
                 let ty = self.compile_function_common(
@@ -2687,9 +3102,13 @@ impl Compiler {
         self.compile_expr(expr)
     }
 
-    /// Does this value reference have a runtime binding? Resolving one carries
-    /// the usual `mark_used` and capture side effects; constructors and builtins
-    /// have no plain runtime binding.
+    // ========================================================================
+    // Identifier
+    // ========================================================================
+
+    /// Does this value reference have a runtime binding? `Local`/`ModuleFn`
+    /// resolve the variable (with the usual `mark_used` + capture side
+    /// effects), while constructors and builtins have no plain runtime binding.
     fn has_binding(&mut self, name: &str, kind: &ValueKind) -> bool {
         match kind {
             ValueKind::Local | ValueKind::ModuleFn => {
@@ -2721,7 +3140,8 @@ impl Compiler {
         let ty = self.engine.instantiate(scheme, &self.rigid_ids);
         let kind = scheme.kind;
         let def = scheme.def;
-        // `record` discards this off the LSP path, so skip the probe there.
+        // `record` discards everything on the non-LSP path (see its early
+        // return); skip the doc map probe + clone entirely there.
         let doc = self.doc_if_collecting(name);
         self.record(name, ty, expr.span, doc);
         self.record_value_use(def, expr.span, ReferenceKind::Unqualified);
@@ -2739,9 +3159,10 @@ impl Compiler {
         self.error(msg, sp);
     }
 
-    /// Diagnose a named value used in value position. Constructors and builtins
-    /// are legal — the elaborator synthesises a nullary build or an eta wrapper
-    /// — but a `Local`/`ModuleFn` with no runtime binding is an error.
+    /// Diagnose a named value used in value position. Constructors and
+    /// builtins are legal (the elaborator synthesises a nullary build or an
+    /// eta wrapper — see `typed_ir::eta`); a `Local`/`ModuleFn` with no
+    /// runtime binding is an error.
     fn check_named_value(
         &mut self,
         name: &str,
@@ -2759,6 +3180,10 @@ impl Compiler {
             }
         }
     }
+
+    // ========================================================================
+    // Binary ops
+    // ========================================================================
 
     fn compile_binary(&mut self, expr: &ast::BinaryExpression) -> Ty {
         use ast::BinaryOp;
@@ -2794,8 +3219,13 @@ impl Compiler {
         if is_cmp { self.ty_bool() } else { operand }
     }
 
-    /// Type-check a `<<v:size:kind, ..>>` literal. Each segment's value and its
-    /// runtime size are checked; the encoding itself is Core's job.
+    // ========================================================================
+    // Binary literals  ( `<<v:size:kind, ..>>` )
+    // ========================================================================
+
+    /// Type-check a `<<v:size:kind, ..>>` literal. Every segment's value (and
+    /// its runtime size expression) is checked against the kind's expected
+    /// type; the encoding itself is Core's job.
     fn compile_binary_literal(&mut self, bl: &ast::BinaryLiteral) -> Ty {
         for seg in &bl.segments {
             let vty = self.compile_expr(&seg.value);
@@ -2819,7 +3249,12 @@ impl Compiler {
         }
     }
 
-    /// Compile a run of non-spread array elements against the element type var.
+    // ========================================================================
+    // Array
+    // ========================================================================
+
+    /// Compile a run of non-spread array elements, unifying each with the
+    /// array's element type variable.
     fn compile_array_run(&mut self, elems: &[ast::ArrayElement], elem_var: Ty) {
         for elem in elems {
             if let ast::ArrayElement::Expression(e) = elem {
@@ -2847,10 +3282,15 @@ impl Compiler {
         self.ty_array(elem_var)
     }
 
+    // ========================================================================
+    // Function call
+    // ========================================================================
+
     fn compile_call(&mut self, expr: &ast::FunctionCallExpression) -> Ty {
-        // Resolve the callee first, without emitting anything, so we can dispatch
-        // on `ValueKind` and push its known parameter types into function-literal
-        // arguments.
+        // Resolve the callee to a name + scheme + load action without emitting
+        // anything yet. This lets us dispatch on `ValueKind` for constructors
+        // and builtins, and use the callee's known type to push hints into
+        // function-literal arguments.
         if let Some(ResolvedCallee {
             name,
             span: name_span,
@@ -2860,8 +3300,10 @@ impl Compiler {
         }) = self.resolve_simple_callee(&expr.callee)
         {
             let inst_ty = self.engine.instantiate(&scheme, &self.rigid_ids);
-            // Hover-only; the graph occurrence, with the right
-            // Unqualified/Qualified kind, is emitted in `resolve_simple_callee`.
+            // Hover-only here; the graph occurrence (with the correct
+            // Unqualified/Qualified kind) is emitted in `resolve_simple_callee`.
+            // Skip the doc map probe + clone on the non-LSP path, where
+            // `record` discards it (see its early return).
             let doc = self.doc_if_collecting(name);
             self.record(name, inst_ty, name_span, doc);
 
@@ -2898,8 +3340,9 @@ impl Compiler {
         self.compile_positional_args(callee_ty, &expr.arguments, expr.span)
     }
 
-    /// Type-check a positional argument list against a callee type. Labelled and
-    /// spread arguments are rejected: only constructor calls support them.
+    /// Type-check and emit a positional argument list against a callee type
+    /// using `match_fun_type`. Labeled and spread arguments are rejected here
+    /// since only constructor calls support them.
     fn compile_positional_args(
         &mut self,
         callee_ty: Ty,
@@ -2972,15 +3415,19 @@ impl Compiler {
         }
     }
 
-    /// Resolve a `module.member` shape against the imported qualifiers, note
-    /// whether it has a runtime binding, and record the `Qualified` value-use.
-    /// Shared by the callee and value positions, which diverge only on the
-    /// failure modes — see [`QualifiedMember`].
+    /// Resolve a `module.member` property-access shape against the imported
+    /// qualifiers: look the member up, note whether it has a runtime binding,
+    /// and record the `Qualified` value-use. Shared by the callee position
+    /// (`resolve_simple_callee`) and the value position
+    /// (`compile_property_access`), which diverge only on how they treat the
+    /// two failure modes — see [`QualifiedMember`].
     ///
-    /// The verdict goes into the walk region on the way out: whether the
-    /// qualifier was entered turns on `self.env` as it stands here, and a
-    /// deferred body is elaborated long after, so the elaborator cannot
-    /// re-derive it. `Elab::qualified` consumes exactly one verdict per call.
+    /// The verdict is recorded into the walk region on the way out: whether the
+    /// qualifier was entered is the one traversal decision the elaborator cannot
+    /// re-derive, because it turns on `self.env` as it stands *here* and a
+    /// deferred body is elaborated long after. Both call sites go through this
+    /// wrapper, and `Elab::qualified` consumes exactly one verdict per call, so
+    /// the two walks cannot disagree.
     fn resolve_qualified_member<'a>(
         &mut self,
         pa: &'a ast::PropertyAccessExpression,
@@ -2999,11 +3446,13 @@ impl Compiler {
         let ast::Expression::Identifier(left) = pa.left.as_ref() else {
             return QualifiedMember::NotQualified;
         };
-        // Any value binding of the same name — a decl, a parameter, a `let`, a
-        // match binder — shadows an import's qualifier, and `env` holds exactly
-        // those, so a hit means `left.member` is an ordinary field access.
-        // Checked before the `imported_qualifiers` probe so the shadowed case
-        // records no occurrence either.
+        // An import binds its qualifier at module scope; any value binding of
+        // the same name — a top-level decl, a parameter, a `let`, a match
+        // binder — shadows it. `env` holds exactly those bindings (the
+        // qualifier itself never enters it), so a hit here means `left` names a
+        // value and `left.member` is an ordinary field access, not a qualified
+        // module member. Checked before the `imported_qualifiers` probe so the
+        // shadowed case records no `Qualified`/`Qualifier` occurrence either.
         if self.env.lookup(&left.name).is_some() {
             return QualifiedMember::NotQualified;
         }
@@ -3031,8 +3480,10 @@ impl Compiler {
         }
     }
 
-    /// Best-effort resolution of a callee that is a plain name or `module.name`.
-    /// Anything else falls through to the arbitrary-expression path.
+    /// Best-effort resolution of a callee expression that is a plain name (or
+    /// `module.name`). Returns the looked-up scheme and whether the callee has
+    /// a runtime binding. Anything else falls through to the
+    /// arbitrary-expression path.
     fn resolve_simple_callee<'a>(
         &mut self,
         callee: &'a ast::Expression,
@@ -3040,8 +3491,10 @@ impl Compiler {
         match callee {
             ast::Expression::Identifier(id) => {
                 let scheme = *self.env.lookup(&id.name)?;
-                // This path bypasses `compile_identifier`, so it is the genuine
-                // unqualified-use seam for calls.
+                let has_binding = self.has_binding(&id.name, &scheme.kind);
+                // Unqualified callee `name()` — the genuine unqualified-use
+                // seam for calls (this path bypasses `compile_identifier`).
+                // `record` in `compile_call` is hover-only.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
                 Some(ResolvedCallee {
                     name: &id.name,
@@ -3052,7 +3505,8 @@ impl Compiler {
                 })
             }
             // Qualified callee `module.member()`. Both failure modes mean "no
-            // simple callee"; a failed lookup was already diagnosed.
+            // simple callee" (a failed lookup has already been diagnosed by
+            // `resolve_qualified_member`).
             ast::Expression::PropertyAccessExpression(pa) => {
                 match self.resolve_qualified_member(pa) {
                     QualifiedMember::NotQualified | QualifiedMember::LookupFailed => None,
@@ -3075,8 +3529,9 @@ impl Compiler {
         }
     }
 
-    /// Compile a call whose callee is a data constructor: positional, labelled
-    /// and `..base` record-update forms, reordered into field-declaration order.
+    /// Compile a call where the callee is a data constructor. Handles
+    /// positional, labelled, and `..base` (record-update) argument forms,
+    /// reordering into field-declaration order before emission.
     #[allow(clippy::too_many_arguments)]
     fn compile_ctor_call(
         &mut self,
@@ -3087,17 +3542,19 @@ impl Compiler {
         args: &[ast::CallArg],
         call_span: Span,
     ) -> Ty {
-        // The instantiated scheme is `Fun` for arity > 0 and `Con` for arity 0.
+        // The instantiated scheme is `IFun{params, ret}` for arity>0 or `ICon`
+        // for arity==0. Extract param/result types.
         let r = self.engine.find(inst_ty);
         let (param_tys, result_ty) = match self.engine.node(r) {
             TypeNode::Fun { params, ret } => (self.engine.children_of(params).to_vec(), ret),
             _ => (vec![], r),
         };
 
-        // Partition into a spread base (at most one) and the explicitly-supplied
-        // fields, keyed by declared position. Each expression keeps its
-        // source-argument index, because the walk sub-regions below are spliced
-        // back by that index.
+        // Partition the arguments into a spread base (at most one) and a map
+        // of explicitly-supplied fields keyed by their declared position. Each
+        // expression is paired with its source-argument index so a slotted
+        // value structurally remembers which `args[i]` it came from — the
+        // walk sub-regions below are spliced back by that index.
         let mut spread: Option<(usize, &ast::Expression)> = None;
         for (i, arg) in args.iter().enumerate() {
             if let ast::CallArg::Spread(e) = arg {
@@ -3135,20 +3592,26 @@ impl Compiler {
 
         // Two orders have to hold at once, so the walk splits them.
         //
-        // Checking runs spread-first then in declared-field order: the spread's
-        // `unify_at` solves `result_ty` before any hint is pushed into a
-        // function-literal argument, and diagnostics come out in field order.
+        // *Checking* runs spread-first and then in declared-field order, as it
+        // always has: the spread's `unify_at` solves `result_ty` (and with it
+        // the constructor's type params) before any `compile_expr_with_hint`
+        // pushes a parameter type into a function-literal argument, and the
+        // diagnostics a mistyped argument raises come out in field order.
         //
-        // Recording is source order, because the elaborator spills the arguments
-        // into `Let`s in source order and the walk region is consumed
-        // positionally. So each argument is checked into a sub-region of its own
-        // and the sub-regions are spliced back in source order below. An
-        // argument `slot_ctor_args` did not place is already an arity or label
-        // error; it stays unchecked and contributes no region.
+        // *Recording* is source order: the elaborator's `ctor_call` spills the
+        // arguments into `Let`s in source order before reordering them, and the
+        // walk region is consumed positionally. So each argument is checked into
+        // a sub-region of its own, and the sub-regions are spliced back in
+        // source order below.
+        //
+        // An argument `slot_ctor_args` did not place is an arity or label error
+        // it has already reported — left unchecked, and contributing no region,
+        // exactly as before.
         let slots = &by_pos[..(field_labels_sl.len as usize).min(by_pos.len())];
 
-        // All-positional: `args[i]` is already in slot `i`, so the two orders
-        // coincide and no sub-region is needed.
+        // All-positional: `slot_ctor_args` placed `args[i]` in slot `i`, so the
+        // two orders already coincide and no sub-region is needed. This is every
+        // ctor call that does not name a field or spread a base.
         if args
             .iter()
             .all(|a| matches!(a, ast::CallArg::Positional(_)))
@@ -3197,8 +3660,13 @@ impl Compiler {
         result_ty
     }
 
+    // ========================================================================
+    // Property access
+    // ========================================================================
+
     fn compile_property_access(&mut self, expr: &ast::PropertyAccessExpression) -> Ty {
-        // `module.member` access; qualified calls go through `compile_call`.
+        // `module.member` qualified access (no call — calls are handled in
+        // compile_call via resolve_simple_callee).
         match self.resolve_qualified_member(expr) {
             QualifiedMember::NotQualified => {}
             QualifiedMember::LookupFailed => return self.engine.fresh_var(),
@@ -3211,8 +3679,9 @@ impl Compiler {
             } => {
                 let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
                 self.record(member_name, ty, member_span, None);
-                // Only reaches a diagnostic on the no-runtime-binding path, so
-                // the common case skips the display-name lookup.
+                // Rendered lazily: the qualifier only reaches a diagnostic on
+                // the no-runtime-binding path, so the common (bound) case
+                // skips the display-name lookup entirely.
                 let module = (!has_binding).then(|| self.module_name(&module_key));
                 self.check_named_value(
                     member_name,
@@ -3277,12 +3746,13 @@ impl Compiler {
     }
 
     /// Single source of truth for the nominal `.field` lookup: the slot index a
-    /// `TupleIndex` must address, plus the field's instantiated type. A field is
-    /// projectable only when every variant carries that label at the same
+    /// `TupleIndex` must address, plus the field's instantiated type. A field
+    /// is only projectable when EVERY variant carries that label at the same
     /// position and at a unifiable type.
     ///
-    /// `unify_span` is `Some` on the typecheck path, which still has to unify
-    /// the per-variant field types; `lower` passes `None`.
+    /// `unify_span` is `Some` on the typecheck path, where the per-variant
+    /// field types still have to be unified (and any mismatch reported); the
+    /// lower path passes `None` because typecheck has already run.
     fn field_in_variants(
         &mut self,
         info: TypeInfo,
@@ -3292,8 +3762,9 @@ impl Compiler {
     ) -> Result<(usize, Ty), FieldMismatch> {
         let variants = info.variants().ok_or(FieldMismatch::NotNominal)?;
         let mut found: Option<(usize, Ty)> = None;
-        // Copied out by index rather than `to_vec()`ing the slices, to survive
-        // the `&mut engine` calls in the loop body.
+        // Variant/VariantField are Copy and the pools are append-only, so copy
+        // each entry out by index instead of `to_vec()`ing the slices to
+        // survive the `&mut engine` calls in the loop body.
         for vi in 0..variants.len as usize {
             let v = self.engine.variants_of(variants)[vi];
             let hit = self
@@ -3327,10 +3798,13 @@ impl Compiler {
         found.ok_or(FieldMismatch::NoVariants)
     }
 
-    /// Project `.field` out of a value. The runtime variant is not statically
-    /// known, so every variant of the receiver type must carry that label at the
-    /// same type. Shares [`Compiler::field_in_variants`] with `lower`, so the
-    /// approved slot index and the emitted `TupleIndex` cannot disagree.
+    /// Project `.field` out of a value. Because the runtime value's variant is
+    /// not statically known, the field is only accessible if EVERY variant of
+    /// the receiver type carries a label of that name and at the same type.
+    ///
+    /// Delegates the walk to [`Compiler::field_in_variants`], which lower also
+    /// uses, so the typecheck-approved slot index and the emitted `TupleIndex`
+    /// can never disagree.
     fn compile_field_access(&mut self, receiver_ty: Ty, field: &str, field_span: Span) -> Ty {
         let resolved = self.engine.find(receiver_ty);
         let (type_id, type_name, type_args) = match self.engine.node(resolved) {
@@ -3357,8 +3831,9 @@ impl Compiler {
             }
         };
 
-        // Nominal: the variants come from the type the `Con` node identifies,
-        // never from whatever same-named type a flat name lookup finds first.
+        // Nominal lookup: the receiver's variants come from the type the Con
+        // node identifies, never from whatever same-named type a flat name
+        // lookup would find first.
         let Some(info) = self.env.lookup_type_info_by_id(type_id) else {
             return self.field_access_bail(
                 format!("Type '{}' has no field '{}'", type_name, field),
@@ -3406,13 +3881,18 @@ impl Compiler {
         let qualified = format!("{}.{}", type_name, field);
         let doc = self.doc_if_collecting(&qualified);
         self.record(&qualified, result_ty, field_span, doc);
-        // `Type.field` is a dotted key in `env.definitions`, which no local can
-        // shadow, so goto-def / find-refs / rename and the field-level dead-code
-        // walk all keep working.
+        // `Type.field` is a dotted key in `env.definitions` (no local can
+        // shadow it), so resolving it here is safe and keeps goto-def /
+        // find-references / rename working for record fields, and feeds the
+        // field-level dead-code reachability walk.
         let fdef = self.env.lookup_definition(&qualified);
         self.record_value_use(fdef, field_span, ReferenceKind::Unqualified);
         result_ty
     }
+
+    // ========================================================================
+    // Or expression (Option/Result unwrapping)
+    // ========================================================================
 
     fn compile_or(&mut self, expr: &ast::OrExpression) -> Ty {
         let left_ty = self.compile_expr(&expr.expression);
@@ -3420,8 +3900,9 @@ impl Compiler {
 
         let success_var = self.engine.fresh_var();
 
-        // The `Con` node carries a nominal id, so a user-defined type that
-        // happens to be called "Option"/"Result" can never match.
+        // Determine which prelude type the LHS is. The Con node carries its
+        // nominal id, so user-defined types that happen to be called
+        // "Option"/"Result" can never match.
         let lhs_type_id = match self.engine.node(resolved) {
             TypeNode::Con { id, .. } => id,
             _ => TypeId::NONE,
@@ -3449,7 +3930,8 @@ impl Compiler {
                 ),
                 expr.expression.span(),
             );
-            // Still type-check the body so errors do not cascade.
+            // Best-effort recovery: still type-check the body so downstream
+            // errors are not cascaded.
             self.push_block_scope();
             let _ = self.compile_expr(&expr.body);
             self.pop_block_scope();
@@ -3463,7 +3945,8 @@ impl Compiler {
         self.engine
             .unify_at(expected, left_ty, expr.expression.span());
 
-        // Failure branch, with the `Err` payload bound to the receiver if any.
+        // Failure branch: the recovery body, with the `Err` payload bound to
+        // the receiver when there is one.
         self.push_block_scope();
         if let Some(e) = err_var
             && let Some(recv) = &expr.receiver
@@ -3479,17 +3962,32 @@ impl Compiler {
         success_var
     }
 
+    // ========================================================================
+    // Functions
+    // ========================================================================
+
     /// Typecheck a function body inside a live `enter_fn_frame`/
-    /// `finish_fn_frame` pair with params already bound, and park it. This is the
-    /// seam between the typecheck walk and the Core IR pipeline, and it is a
-    /// hand-off, not a call: the walk produces no bytecode at all.
+    /// `finish_fn_frame` pair with params already bound, and park it. This is
+    /// the single seam between the typecheck [`Self::compile_expr`] walk and
+    /// the Core IR pipeline, and it is a *hand-off*, not a call: the walk is
+    /// where inference, diagnostics, hover facts and reference-graph collection
+    /// happen, and it produces no bytecode at all.
     ///
-    /// The parked body goes through `elaborate_body`→`lower`→`perceus`→`emit` in
-    /// pass 6, once the whole module has been walked, so `lower` reads solved
-    /// types rather than vars inference has not yet pinned down. There is no
+    /// The parked body is handed to `typed_ir::elaborate_body`→
+    /// [`core_ir::lower`](crate::core_ir::lower)→`perceus`→`emit` in pass 6,
+    /// once the whole module has been walked. There is no fallback path and no
     /// error path: the elaborator covers every form a [`CleanModule`] can
-    /// contain. Elaboration and lowering run under `check_only` too — they are
-    /// the only passes that prove a well-typed program is compilable.
+    /// contain, so it returns a [`TypedFn`] rather than a `Result`.
+    ///
+    /// Elaboration and lowering run under `check_only` too (they just stop
+    /// before `emit`): they are the only passes that can prove a well-typed
+    /// program is actually compilable, so `al check` must not skip them.
+    ///
+    /// The Core pipeline does not run here at all: the body is parked in
+    /// `deferred_bodies` and elaborated once the whole module has been walked
+    /// (`analyse_module`'s pass 6), so `lower` reads solved types rather than
+    /// the vars inference has not yet pinned down, and sees the module as a
+    /// whole rather than one SCC at a time.
     ///
     /// Returns `(body_ty, parked)`; see [`ParkedBody`].
     fn compile_fn_body(
@@ -3498,16 +3996,19 @@ impl Compiler {
         param_tys: &[Ty],
         body: &ast::Expression,
     ) -> (Ty, ParkedBody) {
-        // Nested closures re-enter this fn via `compile_function_common` and
-        // park their own bodies, reserving their `Function` entries first.
+        // Typecheck walk. Nested closures encountered here re-enter this fn
+        // (via `compile_function_common`) and park their own bodies + reserve
+        // their `Function` entries before we reserve ours.
         let param_slots = self.local_count;
-        // This body's own walk region. A nested lambda opens another one, so its
+        // This body's own walk region: its expressions, and none of the
+        // enclosing frame's. A nested lambda opens another one here, so its
         // types never land in ours.
         self.open_walk_region();
         let body_ty = self.compile_expr(body);
         let walk_tys = self.close_walk_region();
-        // The slots the walk reserved for pattern binds are dead. Rewind to the
-        // param watermark so `Function.locals` reflects only Core's allocation.
+        // The walk still bumped `local_count` for the pattern binds it
+        // reserved; those slots are dead. Rewind to the param watermark so
+        // `Function.locals` reflects only Core's own slot allocation.
         self.local_count = param_slots;
         debug_assert!(
             self.defer_depth > 0,
@@ -3515,7 +4016,8 @@ impl Compiler {
              the Core pipeline runs after the walk, never during it"
         );
         // An ill-typed body is parked like any other and closed out empty at
-        // drain time, where no `CleanModule` can be minted for it.
+        // drain time, where `CleanModule` cannot be minted for it: the
+        // elaborator is never shown a subtree the checker rejected.
         let name = self
             .current_binding
             .unwrap_or_else(|| self.engine.intern("__anon__"));
@@ -3530,33 +4032,43 @@ impl Compiler {
             body: body.clone(),
             body_ty,
             walk_tys,
-            // Taken here rather than in `finish_fn_frame`, which has already
-            // handed the enclosing frame its own list back.
+            // Everything the walk of *this* body just recorded: the lambdas
+            // written directly inside it. Taken here rather than in
+            // `finish_fn_frame`, which has already handed the enclosing frame
+            // its own list back.
             closures: std::mem::take(&mut self.frame_closures),
             param_slots,
         };
         (body_ty, parked)
     }
 
-    /// Elaborate one already-typechecked body, lower the whole `TypedProgram` it
-    /// produces, and write the bodies of every eta wrapper the elaborator
+    /// Elaborate one already-typechecked body, lower the whole `TypedProgram`
+    /// it produces, and write the bodies of every eta-wrapper the elaborator
     /// appended to it.
     ///
-    /// **The one door into the Core pipeline.** The only caller of
-    /// `typed_ir::elaborate_body`/`elaborate_toplevel`, which are the only
-    /// constructors of the [`TypedProgram`] that `lower`, `perceus` and `emit`
-    /// consume. Consuming a [`CleanModule`] here therefore closes the whole
-    /// pipeline to a module that reported an error — not by convention, but
-    /// because a poisoned module cannot produce the value the passes take.
+    /// **The one door into the Core pipeline.** It is the only place in this
+    /// compiler that calls `typed_ir::elaborate_body`/`elaborate_toplevel`, and
+    /// those two are the only constructors of a [`TypedFn`] — so they are the
+    /// only constructors of the [`TypedProgram`] that `lower`, `perceus` and
+    /// `emit` consume. Consuming a [`CleanModule`] here therefore closes the
+    /// whole pipeline to a module that reported an error: not by convention,
+    /// but because a poisoned module cannot produce the value the passes take.
+    /// (`lower` needs no proof of its own for exactly that reason.)
     ///
-    /// `at` is `Some(func_idx)` for a function body, whose reserved `Function`
-    /// slot fixes its [`FuncIdx`](crate::core_ir::FuncIdx); `None` for a module
-    /// toplevel, which has no index.
+    /// `at` says where the elaborated function belongs in the program it is
+    /// lowered as part of: `Some(func_idx)` for a function body, whose reserved
+    /// `Function` slot fixes its [`FuncIdx`](crate::core_ir::FuncIdx); `None`
+    /// for a module toplevel, which is `TypedProgram::toplevel` and has no
+    /// index. Either way the returned [`LoweredBody`] carries its `CoreFn`.
     ///
-    /// The wrappers are written before the caller reads `current_addr()` as
-    /// `base`, because `base` becomes the body's `Function.code_start`, which
-    /// the VM adds to every jump operand — so it must name the body's first
-    /// instruction. Each wrapper jumps over itself, so the stream falls through.
+    /// The wrappers are written *before* the caller reads `current_addr()` as
+    /// `base`: they are the only instructions an elaboration can add ahead of
+    /// its own body, and `base` becomes the body's `Function.code_start`, which
+    /// the VM adds to every frame-relative jump operand `emit` produced. So
+    /// `base` must name the body's first instruction. Each wrapper is
+    /// self-contained — a `Jump` over its own body, then the body — so the
+    /// surrounding stream falls straight through it. The elaborator itself
+    /// cannot touch `program.code`; the debug assertion below pins that.
     fn elaborate_then_materialize(
         &mut self,
         _clean: CleanModule,
@@ -3587,11 +4099,11 @@ impl Compiler {
     /// Elaborate one body into a whole-module [`TypedProgram`], reserving a
     /// `Function` entry for every eta wrapper the walk minted.
     ///
-    /// `TypedProgram::fns` and `program.functions` are both `FuncIdx`-indexed and
-    /// must agree, so `fns` is padded up to `program.functions.len()` before the
-    /// walk and each wrapper appended past that point gets its `Function`
-    /// reserved here, in order. Nothing else may push a `Function` while the
-    /// walk runs.
+    /// `TypedProgram::fns` is `FuncIdx`-indexed and so is `program.functions`,
+    /// so the two must agree: `fns` is padded up to `program.functions.len()`
+    /// before the walk (`FnTable::push` mints each `FuncIdx` in append order),
+    /// and each wrapper appended past that point gets its `Function` reserved
+    /// here, in order. Nothing else may push a `Function` while the walk runs.
     fn elaborate(
         &mut self,
         at: Option<crate::core_ir::FuncIdx>,
@@ -3604,8 +4116,9 @@ impl Compiler {
         let temps = TempTys::intern(self, &mut pool);
         let nil_ty = self.ty_nil();
         let nil = PreludeTys::resolve_rty(self, &mut pool, nil_ty);
-        // Padding for the `fns` entries an earlier body owns, so the next
-        // `FnTable::push` lands on the `Function` reserved for it below.
+        // The `fns` entries an earlier body already owns. Never lowered into
+        // anything the caller reads — they exist so the next `FnTable::push`
+        // lands on the `Function` reserved for it below.
         let filler = || TypedFn {
             name: crate::types::StrId::NONE,
             params: Vec::new(),
@@ -3652,9 +4165,11 @@ impl Compiler {
             program: TypedProgram {
                 fns: fns.into_vec(),
                 toplevel,
-                // Nothing downstream reads this: the elaborator pooled every
-                // constant straight into `program.constants`, which is the pool
-                // `emit`'s operands and the VM both address.
+                // `lower` copies this verbatim into `CoreProgram::consts` and
+                // nothing downstream of here reads it: the elaborator pooled
+                // every constant straight into `program.constants` through
+                // `ElabCtx::add_const`, and that is the pool `emit`'s operands
+                // and the VM both address.
                 consts: Vec::new(),
                 pool,
                 temps,
@@ -3664,8 +4179,10 @@ impl Compiler {
     }
 
     /// Perceus and emit the eta wrappers `fns[base..]`, back-filling the
-    /// `Function` entries [`Self::elaborate`] reserved for them. They go down
-    /// ahead of the body that named them, each behind a `Jump` over itself.
+    /// `Function` entries [`Self::elaborate`] reserved for them.
+    ///
+    /// They go down ahead of the body that named them, each behind a `Jump`
+    /// over itself, exactly where the old request-and-synthesise path put them.
     fn materialize_eta_wrappers(
         &mut self,
         pool: &ResolvedPool,
@@ -3675,10 +4192,12 @@ impl Compiler {
         use crate::core_ir::{emit, perceus};
         for (i, w) in wrappers.into_iter().enumerate() {
             let w = perceus::perceus(pool, w);
-            // Wrappers own real `Function` slots and are `CallKnown` targets, so
-            // they are native candidates like any declared body. Guarded on
-            // `check_only` here, unlike `elaborate_body`, because a check still
-            // materializes wrappers.
+            // Wrappers own real `Function` slots and are `CallKnown` targets,
+            // so they are native candidates like any declared body; `base + i`
+            // is the `FuncIdx` their reservation in `Self::elaborate` fixed.
+            // Guarded on `check_only` here (unlike `elaborate_body`, which
+            // returned before its hook) because a check still materializes
+            // wrappers. Gated on the `AL_NATIVE` mode like every hook fire.
             let wrapper_idx = crate::core_ir::FuncIdx::from_usize(base + i);
             if !self.check_only
                 && let Some(hook) = self.native_hook.as_mut()
@@ -3705,13 +4224,17 @@ impl Compiler {
     }
 
     /// Run the Core pipeline (elaborate→`lower`→`perceus`→`emit`) over one
-    /// already typechecked body and append its bytecode. Runs in pass 6;
-    /// `func_idx` is the placeholder `Function` the walk reserved and this fills
-    /// in. Under `check_only` the pipeline stops after `lower`, leaving the
-    /// `Function` unfilled for the caller to close out.
+    /// already typechecked body and append its bytecode.
     ///
-    /// The `CleanModule` is the caller's proof that nothing in the module failed
-    /// to typecheck: a poisoned body has no types to elaborate.
+    /// Runs in pass 6, after the whole module has been walked; the only caller
+    /// is [`Self::elaborate_deferred`]. `func_idx` is the placeholder
+    /// `Function` the walk reserved and this fills in. Under `check_only` the
+    /// pipeline stops after `lower` — nothing is emitted and the `Function`
+    /// stays unfilled; the caller closes it out.
+    ///
+    /// The `CleanModule` is the caller's proof that this body typechecked (that
+    /// nothing in the module failed to): a poisoned body has no types to
+    /// elaborate.
     #[allow(clippy::too_many_arguments)]
     fn elaborate_body(
         &mut self,
@@ -3725,7 +4248,8 @@ impl Compiler {
         func_idx: crate::core_ir::FuncIdx,
     ) {
         use crate::core_ir::{emit, perceus};
-        // The elaborator's eta wrappers are written by the helper, ahead of this.
+        // The eta-wrappers the elaborator minted are written by the helper,
+        // ahead of this body.
         let LoweredBody { core, pool, .. } =
             self.elaborate_then_materialize(clean, Some(func_idx), |c, pool, fns| {
                 typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, walk_tys)
@@ -3737,9 +4261,11 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{core}", self.engine.str(name));
         }
-        // The native seam: this body's `RTy`s index `pool`, which dies with this
-        // call — see [`NativeHook`]. Post-perceus, so the hook sees the same
-        // Core IR, Drops and reuse tokens included, that `emit` consumes.
+        // The native-backend seam: this body's `RTy`s index `pool`, which dies
+        // with this call — see [`NativeHook`]. Post-perceus, so the hook sees
+        // the same Core IR (Drops, reuse tokens and all) that `emit` consumes.
+        // Gated on the `AL_NATIVE` mode (off/native/mix); the hook time feeds
+        // the whole-unit budget summary.
         if let Some(hook) = self.native_hook.as_mut()
             && super::native::config().includes(func_idx)
         {
@@ -3749,16 +4275,20 @@ impl Compiler {
             super::native::log_selected(func_idx, self.engine.str(name));
         }
         self.core.fns.push(core.clone());
-        // A plain append: `emit`'s jump operands are relative to `code[0]` of the
-        // block, and `code[0]` lands at `base`, which is exactly the
-        // `Function.code_start` the VM adds back. Nothing may push an instruction
-        // between here and the `extend` below, or `code_start` would no longer
-        // name the block's first instruction.
+        // Linking a body is a plain append: `emit`'s jump operands are relative
+        // to `code[0]` of the block, and `code[0]` lands at `base`, which is
+        // exactly the `Function.code_start` the VM adds back. Nothing may push
+        // an instruction between here and the `extend` below, or `code_start`
+        // would no longer name the block's first instruction. The elaborator
+        // cannot — it appends eta-wrappers to `TypedProgram::fns` rather than
+        // synthesising them — and the one caller that still writes ahead of the
+        // body, `materialize_eta_wrappers`, has already run.
         let base = self.current_addr();
         let out = emit::emit(&core, self);
         self.program.code.extend(out.code);
-        // The walk reserved the `Function` entry but could not fill these fields,
-        // nor write the `Ret`.
+        // The frame is long closed, so this body owns its whole tail: the
+        // `Ret`, and every field of the `Function` entry the walk reserved but
+        // could not fill.
         self.program.code.push(op(Op::Ret));
         let end = self.current_addr();
         let f = &mut self.program.functions[func_idx.index()];
@@ -3767,43 +4297,66 @@ impl Compiler {
         f.code_len = end - base - 1;
     }
 
-    /// Open the elaboration phase boundary: every function body walked until the
-    /// matching [`Self::end_deferred_elaboration`] is parked instead of
+    /// Open the elaboration phase boundary: every function body walked until
+    /// the matching [`Self::end_deferred_elaboration`] is parked instead of
     /// elaborated, and the Core pipeline runs over all of them at once there.
     ///
     /// Exactly two places open one, and between them they cover every body the
-    /// compiler walks: `analyse_module` (around all of pass 5) and
-    /// `compile_impl`'s bare-expression program.
+    /// compiler ever walks: `analyse_module` (around passes 5's whole walk —
+    /// the SCC loop *and* the toplevel lets and bare expressions after it) and
+    /// `compile_impl`'s bare-expression program. `compile_fn_body` asserts it
+    /// is inside one; the assertion is belt-and-braces, since [`ParkedBody`]
+    /// leaves it nothing else to return.
     ///
-    /// The boundary is whole-module and not per-SCC because that is what
-    /// `lower(p: &TypedProgram) -> CoreProgram` needs to exist, and because a
-    /// body's types are only final once its SCC has been generalized: after
-    /// `generalize_top` an unsolved body var has a `Generic` root rather than an
-    /// `Unbound` one, so `lower` never observes a var about to be quantified out
-    /// from under it. It is not an opcode win — `compile_binary` already unifies
-    /// both operands during the walk.
+    /// It is a whole-module boundary and not a per-SCC one because that is what
+    /// `lower(p: &TypedProgram) -> CoreProgram` needs to exist: emit cannot be
+    /// a step of the typecheck walk if the walk's product is the module.
     ///
-    /// Deferral does move code addresses and `program.functions` ordering, so
-    /// `al build`'s output is not byte-identical to the fused compiler's. What
-    /// does not move is which `Function` slot a declared body owns — the
-    /// property `tests/check_parity.rs` pins.
+    /// A body's types are also only final once its SCC has been inferred,
+    /// `leave_level` has run and `generalize_top` has quantified what stayed
+    /// free — draining at the end of the module is strictly later than that.
+    ///
+    /// What this buys, precisely: after `generalize_top`, a body var that
+    /// inference never solved has a `Generic` root rather than an `Unbound`
+    /// one, so `lower` can never observe a var that is about to be quantified
+    /// out from under it. That is what keeps zonking honest — a `Generic`
+    /// root maps to a bound index instead of an invented opaque `Bound`.
+    /// It is not, measurably, an opcode win: on the T0 workload set the opcode
+    /// mix is unchanged (0 typed ops recovered), because `compile_binary`
+    /// already unifies both operands during the walk. The cases the reorder
+    /// newly resolves — a var pinned by a later SCC sibling, or by the
+    /// post-body `unify_at(ret_ty, body_ty)` — exist but move no opcodes there.
+    ///
+    /// Deferral *does* move code addresses and `program.functions` ordering
+    /// relative to the fused pipeline: the module's jump-overs now all precede
+    /// all of its bodies, and an eta-wrapper `Function` is pushed after its
+    /// owner's (reserved during the walk) rather than before it. Both are
+    /// self-consistent — every operand referring to them is computed after the
+    /// fact — but `al build`'s output is not byte-identical to the fused
+    /// compiler's, and an opcode histogram cannot see the difference. What does
+    /// *not* move is which `Function` slot a declared body owns: those are
+    /// reserved by `finish_fn_frame` during the walk, in walk order, in both
+    /// `check` and `build` — the property `tests/check_parity.rs` pins.
     pub(super) fn begin_deferred_elaboration(&mut self) {
         self.defer_depth += 1;
     }
 
-    /// Freeze the value env for every body parked so far, restored around their
-    /// elaboration in [`Self::end_deferred_elaboration`].
+    /// Freeze the value env for every body parked so far, to be restored around
+    /// their elaboration in [`Self::end_deferred_elaboration`].
     ///
     /// Called once, between the declaration walk and the toplevel `let`/bare-
-    /// expression walk. A `DeferredBody`'s frame snapshot fixes only the load a
-    /// free name lowers to; its `Ty` and `ValueKind` still come from `self.env`
-    /// at drain time, and a toplevel `let` rebinds in place. Bodies parked after
-    /// this point need the live env and keep it: they may reference an earlier
-    /// toplevel bind reachable only through `env`.
+    /// expression walk. The frame snapshot a `DeferredBody` carries fixes only
+    /// the *load* a free name lowers to; its `Ty` and `ValueKind` still come
+    /// from `self.env` at drain time, and a toplevel `let` rebinds in place.
+    /// Bodies parked *after* this point (lambdas bound by those very `let`s)
+    /// need the live env and keep it: they may reference an earlier toplevel
+    /// bind that `resolve_variable` resolves to a global rather than a
+    /// capture, so it is reachable only through `env`.
     pub(super) fn pin_deferred_env(&mut self) {
-        // One pin per drain. An imported module is compiled before its importer
-        // opens a region, so `analyse_module` never nests inside another's
-        // deferral and a second pin would index a region not being closed.
+        // One pin per drain: an imported module is compiled by `process_imports`
+        // *before* its importer opens a region, so `analyse_module` never nests
+        // inside another's deferral and a second pin would name body indices
+        // from a region that is not the one being closed.
         debug_assert_eq!(self.defer_depth, 1, "pin outside the module's own region");
         debug_assert!(self.deferred_env_pin.is_none(), "deferred env pinned twice");
         if self.deferred_bodies.is_empty() {
@@ -3813,13 +4366,15 @@ impl Compiler {
     }
 
     /// Close the region opened by [`Self::begin_deferred_elaboration`] and, at
-    /// depth zero, run the Core pipeline over every parked body in walk order —
-    /// innermost closure first, exactly the order the fused pipeline emitted
-    /// them in.
+    /// depth zero, run the Core pipeline over every parked body in walk order
+    /// — innermost closure first, exactly the order the fused pipeline emitted
+    /// them in. This is the module's whole `lower`→`perceus`→`emit` phase: one
+    /// loop, after the typecheck walk, over every body the walk produced.
     ///
-    /// Every jump-over is patched after the whole run, not per body: the bodies
-    /// are emitted contiguously here, so there is no `J_a, body_a, J_b, body_b`
-    /// chain to hop along and each `J` skips the entire run.
+    /// Every jump-over is patched *after* the whole run, not per body: the
+    /// bodies are emitted contiguously here, long after the walk pushed the
+    /// `Jump` placeholders, so there is no `J_a, body_a, J_b, body_b` chain to
+    /// hop along any more. Each `J` skips the entire run.
     pub(super) fn end_deferred_elaboration(&mut self) {
         self.defer_depth -= 1;
         if self.defer_depth > 0 {
@@ -3827,8 +4382,9 @@ impl Compiler {
         }
         let bodies = std::mem::take(&mut self.deferred_bodies);
         let jumps: Vec<i32> = bodies.iter().map(|d| d.jump_over).collect();
-        // Bodies parked before `pin_deferred_env` elaborate against the env the
-        // declaration walk saw; the rest against the live one.
+        // Bodies parked before `pin_deferred_env` (the declaration walk's)
+        // elaborate against the env that walk saw; the rest (lambdas the
+        // toplevel `let` walk parked) against the live one. See the pin's docs.
         let (pinned_upto, mut live_env) = match self.deferred_env_pin.take() {
             Some((n, pinned)) => (n, Some(std::mem::replace(&mut self.env, pinned))),
             None => (0, None),
@@ -3839,12 +4395,14 @@ impl Compiler {
             {
                 self.env = live;
             }
-            // Re-proved per body: an internal error raised while lowering one
-            // body poisons the module for the next.
+            // Re-proved per body, not once for the run: `elaborate_deferred`
+            // consumes the proof, and an internal error raised while lowering
+            // one body poisons the module for the next.
             match self.clean_module() {
-                // A decl in the module failed to typecheck, so there is no typed
-                // IR to lower and the parked bodies may reference unresolved
-                // names. Leave them empty.
+                // A decl in the module failed to typecheck: the parked bodies
+                // may reference names inference never resolved, and there is no
+                // typed IR to lower. Leave them empty, exactly as the fused
+                // pipeline left an ill-typed body empty.
                 None => self.close_empty_deferred(d.func_idx, d.param_slots),
                 Some(clean) => self.elaborate_deferred(d, clean),
             }
@@ -3883,10 +4441,13 @@ impl Compiler {
     /// Swap a [`DeferredBody`]'s frame snapshot into the compiler for its
     /// elaboration, parking the current state in the returned [`ElabFrame`].
     ///
-    /// `resolve_name` reads the frame and must reach the same answers the walk
-    /// did. The whole `outer_scopes` chain is restored, not just the module
-    /// scope: `resolve_variable` short-circuits on `current_binding` while
-    /// scanning it, so `captures` alone cannot answer a self-reference.
+    /// `resolve_name` reads the frame: a captured name must land on the
+    /// `Denotation::capture` index the walk assigned it, a module-scope decl
+    /// must still look like a global, and the frame's self-name must resolve
+    /// to the same self-closure/self-toplevel-fn shape. The last of those is not
+    /// answered by `captures` — `resolve_variable` short-circuits on
+    /// `current_binding` while scanning `outer_scopes` — so the whole chain
+    /// is restored, not just the module scope.
     fn enter_elab_frame(&mut self, d: &mut DeferredBody) -> ElabFrame {
         self.env.push_scope();
         for (name, scheme) in &d.capture_env {
@@ -3905,9 +4466,11 @@ impl Compiler {
             ),
             rigid_ids: std::mem::replace(&mut self.rigid_ids, std::mem::take(&mut d.rigid_ids)),
             current_binding: std::mem::replace(&mut self.current_binding, d.binding.take()),
-            // The lambdas this body wrote. `ElabCtx::closure` only asks about
-            // nodes in the body being elaborated, so the enclosing frame's sites
-            // (and the module toplevel's) are safe from being read by it.
+            // The lambdas this body wrote. `ElabCtx::closure` only ever asks
+            // about a node in the body it is elaborating, so this is the whole
+            // universe of answers for the elaboration — and the enclosing
+            // frame's sites (or the module toplevel's, still waiting to be
+            // elaborated) are safe from being read by it.
             frame_closures: std::mem::replace(
                 &mut self.frame_closures,
                 std::mem::take(&mut d.closures),
@@ -3935,9 +4498,10 @@ impl Compiler {
         self.frame_closures = frame_closures;
     }
 
-    /// Give a parked body that never elaborated the same shape an ill-typed one
-    /// gets: a bare `Ret` and a zero-length `Function`. Its jump-over is patched
-    /// with the rest of the region's, in [`Self::end_deferred_elaboration`].
+    /// Give a parked body that never elaborated the same shape the inline path
+    /// gives an ill-typed one: a bare `Ret` and a zero-length `Function`. The
+    /// jump-over is patched with the rest of the region's, in
+    /// [`Self::end_deferred_elaboration`].
     fn close_empty_deferred(&mut self, func_idx: crate::core_ir::FuncIdx, param_slots: i32) {
         let base = self.current_addr();
         self.program.code.push(op(Op::Ret));
@@ -3947,14 +4511,15 @@ impl Compiler {
         f.code_len = 0;
     }
 
-    /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when the
-    /// lambda is passed directly to a call site with known parameter types; an
-    /// unannotated param then takes the hint rather than a fresh var, so the body
-    /// can immediately do field access.
+    /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when
+    /// the lambda is being passed directly to a call site whose parameter
+    /// types are known; in that case any unannotated parameter is given the
+    /// hinted type rather than a fresh var so the body can immediately do
+    /// field access etc.
     ///
-    /// The [`ClosureSite`] recorded under `span` belongs to the frame this runs
-    /// in — the one whose elaboration builds the `Atom::Closure` and evaluates
-    /// its captures.
+    /// `span` is the lambda's own span: the [`ClosureSite`] recorded under it
+    /// belongs to the frame this runs in — the one whose elaboration builds the
+    /// `Atom::Closure` and evaluates its captures.
     fn compile_function_common(
         &mut self,
         params: &[ast::FunctionParameter],
@@ -4006,14 +4571,15 @@ impl Compiler {
     }
 
     /// Compile a top-level `fn` whose parameter and return types were already
-    /// hydrated in Pass 3. `hydrator` carries the rigid generic ids, so
-    /// `instantiate` leaves annotated type variables intact inside the body, and
-    /// the body's inferred type is unified against the preregistered shape rather
-    /// than the annotations being re-read.
+    /// hydrated in Pass 3. The supplied `hydrator` carries the rigid generic
+    /// ids for any annotated type variables so that `instantiate` inside the
+    /// body leaves them intact, and we unify the body's inferred type against
+    /// the preregistered shape rather than re-reading the annotations.
     ///
-    /// `global_slot` is threaded from Pass 3 so `global_to_func` is keyed by the
-    /// same slot the caller emits `StoreLocal` for, rather than trusting
-    /// `self.locals[name]` to still hold it.
+    /// `global_slot` is this fn's entry-frame slot from `Prepared::Fn`,
+    /// threaded from Pass 3 so `global_to_func` is keyed by the same slot the
+    /// caller emits `StoreLocal` for — no reliance on `self.locals[name]`
+    /// still holding that slot by the time this runs.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn compile_declared_function(
         &mut self,
@@ -4036,29 +4602,36 @@ impl Compiler {
             .unify_at(ret_ty, body_ty, type_defining_span(body));
 
         // `global_to_func` is how the module toplevel's elaboration finds this
-        // fn's body, off the same slot it stores into, in every mode — so the
-        // index must be real under `check_only` too. Take it from
-        // `finish_fn_frame` rather than re-deriving it from
-        // `program.functions.len()`, which matches only by accident.
+        // fn's body (`ElabCtx::fn_of_global`, off the same slot it stores into),
+        // in every mode — so the index has to be a real one under `check_only`
+        // too.
+        // `finish_fn_frame` reserved it; take it from there rather than
+        // re-deriving it from `program.functions.len()`, which is only the
+        // same number by accident of nothing else having pushed since.
         let (func_idx, _) = self.finish_fn_frame(saved, name, params.len(), body_emit);
         self.global_to_func.insert(global_slot, func_idx);
         self.engine.mk_fun(&param_tys, ret_ty)
     }
 
     /// Snapshot the enclosing frame's codegen state, push a fresh inner frame,
-    /// emit the jump-over placeholder that lets execution skip the embedded body,
-    /// and open a new type-env scope.
+    /// emit the jump-over placeholder that lets execution skip the embedded
+    /// body, and open a new type-env scope. Param binding emits no bytecode so
+    /// `func_start` here equals the address after params are bound.
     fn enter_fn_frame(&mut self, binding: Option<&str>) -> FnFrame {
         let binding_id = binding.map(|n| self.engine.intern(n));
-        // Moved as-is, so a nested lambda resolves the enclosing fn's name
-        // through `outer_scopes[0]` at the right slot; depth is irrelevant for
-        // outer-scope resolution. `finish_fn_frame` moves it back.
+        // The enclosing frame's locals already map any preallocated
+        // entry-frame slots (analysis.rs Pass 3); moving the map into
+        // `outer_scopes` as-is lets a nested lambda resolve the enclosing fn
+        // name through outer_scopes[0] at the right slot (depth is irrelevant
+        // for outer-scope resolution). `finish_fn_frame` moves it back.
         self.outer_scopes.push(Scope {
             locals: std::mem::take(&mut self.locals),
         });
-        // Lets the enclosing code stream skip the embedded `Function` body.
-        // Pushed under `check_only` too, which is what makes `jump_over` — and
-        // every `Function` index downstream of it — mode-independent.
+        // The jump-over lets the enclosing code stream (the module's
+        // fn-body run, or an outer body chaining past a nested closure's
+        // body) skip the embedded `Function` body. Pushed in `check_only` too:
+        // it is what makes `jump_over` — and therefore every `Function` index
+        // downstream of it — mode-independent.
         let jump_over = self.current_addr();
         self.program.code.push(op_arg(Op::Jump, 0));
         self.env.push_scope();
@@ -4073,11 +4646,12 @@ impl Compiler {
             binding: match binding_id {
                 Some(id) => self.current_binding.replace(id),
                 None => {
-                    // A lambda has no self-name unless it is the RHS of a
-                    // `name = fn(...)` binding, which stashed that name in
-                    // `next_fn_self_name`. Inheriting the enclosing fn's
-                    // `current_binding` would make a HOF-arg lambda's call to
-                    // the enclosing fn emit `CallSelf` against its own frame.
+                    // A lambda / fn-expression has no self-name UNLESS it is the
+                    // RHS of a `name = fn(...)` binding, which stashes that name
+                    // in `next_fn_self_name` (consumed one-shot here). Inheriting
+                    // the enclosing fn's `current_binding` is wrong: a HOF-arg
+                    // lambda calling the enclosing fn would mis-resolve to Self_
+                    // and emit CallSelf against the lambda's own live frame.
                     std::mem::replace(&mut self.current_binding, self.next_fn_self_name.take())
                 }
             },
@@ -4087,9 +4661,10 @@ impl Compiler {
     }
 
     /// Register a freshly-typed local binding into the type environment, the
-    /// reference graph and the hover record. These must stay in lockstep, so
-    /// every local binder — params, pattern names, the `or`-receiver — funnels
-    /// through here after reserving its slot with `get_or_create_local`.
+    /// dead-code/reference graph, and the hover record, then emit its
+    /// value-def. These steps must stay in lockstep, so every local-binder
+    /// site (params, pattern names, the `or`-receiver) funnels through here
+    /// after reserving its slot with `get_or_create_local`.
     fn register_local_binding(&mut self, name: &str, ty: Ty, sp: Span) {
         let m = self.current_module_slice();
         self.env.define_at(
@@ -4107,14 +4682,15 @@ impl Compiler {
         self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
     }
 
-    /// Close out a function body: reserve its `Function` slot, combine the walk
-    /// half ([`ParkedBody`]) with the frame state that just became final into a
-    /// complete [`DeferredBody`], and restore the enclosing frame and type-env.
-    /// Returns the `func_idx` and captured names so `compile_function_common` can
-    /// record a [`ClosureSite`].
+    /// Close out a function body: reserve its `Function` slot, combine the
+    /// walk half ([`ParkedBody`]) with the frame state that just became final
+    /// into the complete [`DeferredBody`], and restore the enclosing frame
+    /// and type-env. Returns the assigned `func_idx` and captured-name set so
+    /// `compile_function_common` can record a [`ClosureSite`] in the enclosing
+    /// frame.
     ///
     /// No bytecode is written here. The body's `Ret`, its `code_start`/`locals`
-    /// and its jump-over patch all belong to pass 6.
+    /// and its jump-over patch all belong to pass 6, which runs after the walk.
     fn finish_fn_frame(
         &mut self,
         saved: FnFrame,
@@ -4122,22 +4698,25 @@ impl Compiler {
         arity: usize,
         parked: ParkedBody,
     ) -> (crate::core_ir::FuncIdx, Vec<StrId>) {
-        // Taken before the enclosing frame's are moved back over them: the parked
-        // body needs them at elaboration time to resolve its captures and
-        // self-reference exactly as the walk did.
+        // The frame's own name/rigids/captures, taken before the enclosing
+        // frame's are moved back over them: a parked body needs them at
+        // elaboration time to resolve its captures and self-reference exactly
+        // as the walk did.
         let frame_binding = std::mem::replace(&mut self.current_binding, saved.binding);
         let frame_rigids = std::mem::replace(&mut self.rigid_ids, saved.rigid_ids);
         let frame_captures = std::mem::replace(&mut self.captures, saved.captures);
-        // The inner frame's sites left with its `DeferredBody`; hand the
-        // enclosing frame its list back so this lambda can be recorded into it.
+        // The inner frame's own sites left with its `DeferredBody`
+        // (`compile_fn_body`); hand the enclosing frame its list back so the
+        // lambda this closes out can be recorded into it.
         self.frame_closures = saved.closures;
         self.env.pop_scope();
         self.pop_unused_scope();
 
         let captured = std::mem::replace(&mut self.capture_names, saved.capture_names);
-        // Reserved now, so the `func_idx` the `ClosureSite` and `global_to_func`
-        // are about to record is the one the elaborated body fills in. Pass 6 can
-        // still move only `locals`, `code_start` and `code_len`.
+        // Reserve the body's `Function` slot now, so the `func_idx` that
+        // the `ClosureSite` and `global_to_func` are about to record is the one
+        // the elaborated body fills in. `locals`, `code_start` and
+        // `code_len` are the only fields pass 6 can still move.
         self.program.functions.push(Function {
             name: name.into(),
             arity: arity as i32,
@@ -4147,8 +4726,9 @@ impl Compiler {
             code_len: 0,
         });
         let func_idx = crate::core_ir::FuncIdx::from_usize(self.program.functions.len() - 1);
-        // Read after `env.pop_scope()`: a captured name is bound in an enclosing
-        // frame's scope, still open here but gone by elaboration time.
+        // Read after `env.pop_scope()`: a captured name is by
+        // definition bound in an *enclosing* frame's scope, which is
+        // still open here but gone by elaboration time.
         let capture_env = captured
             .iter()
             .chain(frame_binding.iter())
@@ -4180,8 +4760,9 @@ impl Compiler {
             capture_names: captured.clone(),
             rigid_ids: frame_rigids,
             binding: frame_binding,
-            // Read before the `outer_scopes.pop()` below: the exact scope chain
-            // `resolve_variable` walked.
+            // Read before the `outer_scopes.pop()` below: this is the exact
+            // scope chain `resolve_variable` walked, and nothing mutates an
+            // outer frame's map while an inner frame is open.
             outer_scopes: self.outer_scopes.clone(),
             capture_env,
         });
@@ -4190,20 +4771,26 @@ impl Compiler {
         if let Some(scope) = self.outer_scopes.pop() {
             self.locals = scope.locals;
         }
-        // `locals` is restored wholesale, so the inner frame's undo entries must
-        // be dropped, not replayed against the parent.
+        // `locals` is restored wholesale, so the inner frame's undo entries
+        // (params bound in the enclosing mark range, never wrapped by a
+        // `push_local_scope`) must be dropped, not replayed against the parent.
         self.undo_log.truncate(saved.undo_base);
         self.scope_marks.truncate(saved.marks_base);
         self.local_count = saved.local_count;
 
-        // Load-bearing: `resolve_variable` promotes a name this body captured
-        // from further out into the enclosing frame's own capture set, so
-        // transitive captures chain outwards.
+        // Re-resolving each capture in the *enclosing* frame is load-bearing:
+        // `resolve_variable` promotes a name this body captured from further
+        // out into the enclosing frame's own capture set, so transitive
+        // captures chain outwards.
         for &cap_name in &captured {
             let _ = self.resolve_variable(cap_name);
         }
         (func_idx, captured)
     }
+
+    // ========================================================================
+    // Pattern matching
+    // ========================================================================
 
     fn compile_match(&mut self, m: &ast::MatchExpression) -> Ty {
         let subject_ty = self.compile_expr(&m.subject);
@@ -4270,7 +4857,8 @@ impl Compiler {
         result_ty
     }
 
-    /// Bind a pattern's freshly-typed names: a local slot each, through
+    /// Bind a pattern's freshly-typed names (populated by `type_pattern`):
+    /// reserve a local slot for each and funnel it through
     /// [`Self::register_local_binding`].
     fn bind_pattern_initials(&mut self, b: &PatternBindings) {
         for (name, (ty, sp)) in b.bindings() {
@@ -4279,10 +4867,11 @@ impl Compiler {
         }
     }
 
-    /// Type-check the runtime size expression of every `<<..>>` segment in `p`.
-    /// They are operands, not binders, and a later segment's size may name an
-    /// earlier segment's binding (`<<n:8, body:bytes(n)>>`), so this runs after
-    /// [`Self::bind_pattern_initials`].
+    /// Type-check the runtime size expressions of every `<<..>>` segment in
+    /// `p`. They are operands, not binders, and a later segment's size may
+    /// name an earlier segment's binding (`<<n:8, body:bytes(n)>>`), so this
+    /// runs *after* [`Self::bind_pattern_initials`] has brought the pattern's
+    /// names into scope.
     fn type_pattern_sizes(&mut self, p: &ast::Pattern) {
         let mut sizes: Vec<&ast::Expression> = Vec::new();
         p.for_each_binder(ast::OrAlternatives::All, &mut |b| {
@@ -4296,9 +4885,11 @@ impl Compiler {
     }
 
     /// Single source of truth turning a numeric literal's source text into a
-    /// constant `Value`. On overflow or malformed input it emits a diagnostic and
-    /// returns a kind-preserving zero, reachable only on that error branch, so it
-    /// can never masquerade as a valid literal `0`.
+    /// constant `Value`. On i64 overflow / malformed input it emits a real
+    /// diagnostic via [`Compiler::error`] and then returns a kind-preserving
+    /// recovery zero. The recovery value is reachable ONLY on the
+    /// post-diagnostic error branch, so it can never masquerade as a valid
+    /// literal `0`: the compile has already failed.
     fn const_number(&mut self, n: &ast::NumberLiteral) -> Value {
         match number_literal_value(&n.value, &mut self.frozen) {
             Ok(v) => v.into_value(),
@@ -4310,10 +4901,15 @@ impl Compiler {
     }
 }
 
+// ============================================================================
+// Free helpers
+// ============================================================================
+
 /// Whether matching `p` can fail on a value of its own type. Only wildcards,
-/// bare names and tuples of those are irrefutable: a constructor pattern is
+/// bare names, and tuples of those are irrefutable; a constructor pattern is
 /// refutable even for a single-variant type (the tag is still tested), and an
-/// or-pattern is refutable exactly when its last alternative is.
+/// or-pattern is refutable exactly when its last alternative is. Used by the
+/// destructuring-binding statements, which require an irrefutable pattern.
 fn pattern_is_refutable(p: &ast::Pattern) -> bool {
     match p {
         ast::Pattern::Wildcard { .. } | ast::Pattern::Var { .. } => false,
@@ -4323,8 +4919,9 @@ fn pattern_is_refutable(p: &ast::Pattern) -> bool {
     }
 }
 
-/// The span that defines an expression's type for error reporting: a block's
-/// last node, recursively, so a return-type or branch mismatch points at the
+/// The span that "defines" the type of an expression for error reporting:
+/// for a block, the last node (recursively); otherwise the expression's own
+/// span. This focuses a return-type or branch-type mismatch on the actual
 /// value-producing sub-expression rather than the whole `{ ... }`.
 pub fn type_defining_span(expr: &ast::Expression) -> Span {
     match expr {
@@ -4339,9 +4936,13 @@ pub fn type_defining_span(expr: &ast::Expression) -> Span {
 
 /// Why a numeric literal's source text could not be turned into a `Value`.
 ///
-/// Scanner output is always `-?[0-9]+(\.[0-9]+)?`, so only the integer branch
-/// can really fail, on i64 overflow. `InvalidFloat` is kept so the parse is
-/// total over every `&str` rather than depending on that lexical invariant.
+/// The scanner only ever produces numeric literal text matching
+/// `[0-9]+(\.[0-9]+)?`, and the parser only prepends a leading `-` for
+/// negative pattern literals, so the source is always
+/// `-?[0-9]+(\.[0-9]+)?`. The integer branch can therefore fail only on
+/// i64 overflow; the float branch effectively never fails for scanner
+/// output, but `InvalidFloat` is kept so the function is total over every
+/// `&str` rather than silently depending on that lexical invariant.
 enum NumLitError {
     IntOutOfRange,
     InvalidFloat,
@@ -4359,8 +4960,9 @@ impl NumLitError {
         }
     }
 
-    /// Value to substitute so codegen can continue after the diagnostic.
-    /// Kind-preserving, so the compile does not cascade into spurious errors.
+    /// Value to substitute so codegen can continue after the diagnostic has
+    /// been emitted. Kind-preserving so the inferred type still matches user
+    /// intent and the compile doesn't cascade into spurious type errors.
     fn recovery(&self, frozen: &mut FrozenBuilder) -> FrozenConst {
         match self {
             NumLitError::IntOutOfRange => frozen.int(0),
@@ -4369,12 +4971,13 @@ impl NumLitError {
     }
 }
 
-/// Parse a numeric literal's source text into a constant `Value`, built through
-/// the frozen builder like every other program constant.
+/// Parse a numeric literal's source text into a constant `Value`, built
+/// through the frozen builder like every other program constant.
 ///
-/// Total: the partiality is in the return type, so no caller can obtain a
-/// fabricated `Value`. The only `Value`-producing path is
-/// [`Compiler::const_number`], which emits a diagnostic before recovering.
+/// Total: the partiality is lifted into the return type so no caller can
+/// obtain a fabricated `Value` for out-of-domain input. The only
+/// `Value`-producing path for callers is [`Compiler::const_number`], which
+/// emits a diagnostic before recovering.
 fn number_literal_value(s: &str, frozen: &mut FrozenBuilder) -> Result<FrozenConst, NumLitError> {
     if s.contains('.') {
         s.parse()

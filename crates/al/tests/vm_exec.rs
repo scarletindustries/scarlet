@@ -92,8 +92,7 @@ run_case! {
         "[a, b, c]\n[a, , b, ]\n[nodelim]\n",
     ),
 
-    // Binary values compare structurally via `Op::Eq` -> `values_equal` (the Binary
-    // arm). Equal bytes are equal; a single differing byte is not.
+    // `values_equal`'s Binary arm: compare structurally, byte for byte.
     binary_value_equality: (
         "println(<<1, 2, 3>> == <<1, 2, 3>>)\n\
          println(<<1, 2, 3>> == <<1, 2, 4>>)\n\
@@ -101,9 +100,8 @@ run_case! {
         "True\nFalse\nTrue\n",
     ),
 
-    // Concrete `Float` division lowers to `Op::DivFloat`. Normal division divides;
-    // division by zero is *total* (`x / 0.0 == 0.0`), mirroring the integer
-    // `x / 0 == 0` convention, rather than producing Infinity/NaN.
+    // `Op::DivFloat` is total: `x / 0.0 == 0.0`, mirroring the integer
+    // `x / 0 == 0` convention, rather than Infinity/NaN.
     float_division_is_total: (
         "println(7.0 / 2.0)\n\
          println(1.0 / 0.0)\n\
@@ -111,8 +109,7 @@ run_case! {
         "3.5\n0.0\n-3.0\n",
     ),
 
-    // `arr[i]` without `or` lowers to `Op::Index`, yielding `Option`: `Some(elem)`
-    // in bounds, `None` (not a wrap or panic) out of bounds.
+    // `Op::Index` yields `Option`: `None` out of bounds, not a wrap or panic.
     array_index_yields_option: (
         "xs = [10, 20, 30]\n\
          println(xs[1])\n\
@@ -120,10 +117,9 @@ run_case! {
         "Some(20)\nNone\n",
     ),
 
-    // A *capturing* closure that refers to itself by name in value position emits
-    // `Op::PushSelf` on the capture-carrying branch (rebuild from the live frame's
-    // captures, not the cached capture-free closure). `helper` closes over `base`
-    // and hands itself to `apply`; the recursion must still see the captured `base`.
+    // A capturing closure naming itself in value position takes `PushSelf`'s
+    // capture-carrying branch: rebuild from the live frame, not from the
+    // cached capture-free closure, so the recursion still sees `base`.
     capturing_self_referential_closure: (
         "fn apply(f fn(Int) Int, n Int) Int { f(n) }\n\
          fn make(base Int) Int {\n\
@@ -137,8 +133,8 @@ run_case! {
         "42\n7\n",
     ),
 
-    // `println` of nested / record / variant values flows through `vm::inspect`'s
-    // multiline layout in the real binary (main.rs path), not just the unit tests.
+    // `vm::inspect`'s multiline layout through the real binary, not just the
+    // unit tests.
     inspect_multiline_structures_e2e: (
         "type Point {\n\tx Int\n\ty Int\n}\n\
          type Seg {

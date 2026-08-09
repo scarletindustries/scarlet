@@ -711,7 +711,7 @@ mod tests {
     /// The templates point into `_frozen`, so it must outlive them.
     struct Fix {
         _frozen: Arc<FrozenArea>,
-        templates: super::super::templates::Templates,
+        t: H1,
         h: ProcHeap,
     }
 
@@ -729,19 +729,15 @@ mod tests {
             templates,
             abi,
         };
-        let templates = super::super::templates::Templates::resolve(&program, &mut fb);
+        let t = super::super::templates::Templates::resolve(&program, &mut fb)
+            .h1_owned()
+            .expect("fixture binds every H1 slot");
         drop(fb);
         let h = ProcHeap::new();
         Fix {
             _frozen: frozen,
-            templates,
+            t,
             h,
-        }
-    }
-
-    impl Fix {
-        fn t(&self) -> &H1 {
-            self.templates.h1().expect("fixture binds every H1 slot")
         }
     }
 
@@ -752,12 +748,12 @@ mod tests {
 
         fn parse(&mut self, src: &str, off: i64) -> Value {
             let buf = self.bin(src);
-            parse_head(self.t(), &mut self.h, &buf.as_binary().unwrap(), off)
+            parse_head(&self.t, &mut self.h, &buf.as_binary().unwrap(), off)
         }
 
         fn chunk(&mut self, input: &str, off: i64, max: i64) -> Value {
             let buf = self.bin(input);
-            chunk_decode(self.t(), &mut self.h, &buf.as_binary().unwrap(), off, max)
+            chunk_decode(&self.t, &mut self.h, &buf.as_binary().unwrap(), off, max)
         }
     }
 
@@ -783,7 +779,7 @@ mod tests {
     fn parses_simple_get() {
         let mut x = fix();
         let buf = x.bin("GET /path HTTP/1.1\r\nHost: example.com\r\n\r\n");
-        let parsed = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), 0);
+        let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         assert_eq!(payload_bytes(&parsed, 0), b"GET");
         assert_eq!(payload_bytes(&parsed, 1), b"/path");
@@ -802,7 +798,7 @@ mod tests {
     fn header_views_share_backing_zero_copy() {
         let mut x = fix();
         let buf = x.bin("GET / HTTP/1.1\r\nHost:  spaced.example  \r\n\r\n");
-        let parsed = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), 0);
+        let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         let headers = &parsed.as_enum().unwrap().payload()[3];
         let arr = headers.as_array().unwrap();
@@ -884,13 +880,13 @@ mod tests {
     fn skips_leading_empty_line_and_reports_consumed() {
         let mut x = fix();
         let buf = x.bin("\r\nGET / HTTP/1.1\r\n\r\nGET /next HTTP/1.1\r\n\r\n");
-        let parsed = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), 0);
+        let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
         // consumed points just past the first head's blank line.
         let consumed = payload_int(&parsed, 5);
         assert_eq!(consumed, "\r\nGET / HTTP/1.1\r\n\r\n".len() as i64);
         // Parsing again from `consumed` yields the pipelined request.
-        let second = parse_head(x.t(), &mut x.h, &buf.as_binary().unwrap(), consumed);
+        let second = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), consumed);
         assert_eq!(variant_of(&second), "Done");
         assert_eq!(payload_bytes(&second, 1), b"/next");
     }
@@ -1010,7 +1006,7 @@ mod tests {
         let parsed = x.parse(src, 0);
         let headers = parsed.as_enum().unwrap().payload()[3].clone();
         let name_v = x.bin(name);
-        let got = header_get(x.t(), &mut x.h, &headers, &name_v.as_binary().unwrap()).unwrap();
+        let got = header_get(&x.t, &mut x.h, &headers, &name_v.as_binary().unwrap()).unwrap();
         match got.as_enum() {
             Some(e) if e.variant_name() == "Some" => e.payload()[0]
                 .as_binary()
@@ -1038,7 +1034,7 @@ mod tests {
         let parsed = x.parse(src, 0);
         assert_eq!(variant_of(&parsed), "Done", "for {src:?}");
         let headers = parsed.as_enum().unwrap().payload()[3].clone();
-        let f = framing(x.t(), &mut x.h, &headers).unwrap();
+        let f = framing(&x.t, &mut x.h, &headers).unwrap();
         let variant = variant_of(&f);
         let arg = f
             .as_enum()

@@ -185,9 +185,8 @@ pub fn print_diagnostics(
     }
 }
 
-/// [`print_diagnostics`] as a pure function of its inputs (modulo the palette
-/// and editor detection, which read the environment): the full rendered text,
-/// empty when there is nothing to print.
+/// [`print_diagnostics`] as a pure function of its inputs, modulo the palette
+/// and editor detection, which read the environment.
 pub fn render_diagnostics(
     diagnostics: &[Diagnostic],
     source: &str,
@@ -202,8 +201,8 @@ pub fn render_diagnostics(
         link: editor.link_target(file_path),
     };
 
-    // Resolve each distinct foreign source once; `None` is cached too so an
-    // unresolvable module isn't re-probed per diagnostic.
+    // `None` is cached too, so an unresolvable module is not re-probed per
+    // diagnostic.
     let mut resolved: HashMap<&ModuleKey, Option<ResolvedSource>> = HashMap::new();
     for key in diagnostics.iter().filter_map(|d| d.source.as_ref()) {
         resolved.entry(key).or_insert_with(|| {
@@ -228,8 +227,7 @@ pub fn render_diagnostics(
                     let view = SourceView {
                         file_path: &r.file_path,
                         lines: r.text.lines().collect(),
-                        // Reuse the cached link rather than re-canonicalizing
-                        // the same path once per diagnostic.
+                        // Cached, rather than re-canonicalizing per diagnostic.
                         link: r.link.as_ref().map(|l| LinkTarget {
                             editor: l.editor,
                             abs_path: l.abs_path.clone(),

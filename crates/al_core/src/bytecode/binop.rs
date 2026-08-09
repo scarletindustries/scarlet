@@ -1,7 +1,6 @@
-//! Source binary operator → VM opcode selection.
-//!
-//! Codegen-side, so it may lean on the AST and the inferencer; `bytecode::mod`
-//! stays a pure instruction-set definition and re-exports this.
+//! Source binary operator → VM opcode selection. Codegen-side, so it may lean
+//! on the AST and the inferencer; `bytecode::mod` stays a pure instruction-set
+//! definition and re-exports this.
 
 use crate::ast::BinaryOp;
 use crate::bytecode::Op;
@@ -9,12 +8,10 @@ use crate::types::Prim;
 
 /// A binary operator that denotes an *opcode*.
 ///
-/// `&&`/`||` are control flow, not operators: they branch, so the right operand
-/// may never be evaluated. They are absent from this enum, which is why
-/// [`specialize_binop`] returns an `Op` rather than an `Option<Op>` — there is
-/// no operator left for it to have no opcode for. The only way to obtain one is
-/// [`BinopKind::of`], which routes the two short-circuiting forms to
-/// [`ShortCircuitOp`] instead.
+/// `&&`/`||` are absent: they branch, so the right operand may never be
+/// evaluated. That is why [`specialize_binop`] returns `Op`, not `Option<Op>`.
+/// The only constructor is [`BinopKind::of`], which routes the two
+/// short-circuiting forms to [`ShortCircuitOp`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueBinop {
     Add,
@@ -31,8 +28,7 @@ pub enum ValueBinop {
 }
 
 /// The two branching binary forms. Their operands are a condition and a branch
-/// arm, not two values, so the elaborator builds `TypedExpr::And`/`Or` from
-/// them rather than a `TypedExpr::Binary`.
+/// arm, so the elaborator builds `TypedExpr::And`/`Or`, not `TypedExpr::Binary`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortCircuitOp {
     And,
@@ -40,7 +36,7 @@ pub enum ShortCircuitOp {
 }
 
 /// Which of the two a source [`BinaryOp`] is. Total, and the sole constructor
-/// of [`ValueBinop`]: a caller that has one has already proven it is not `&&`/`||`.
+/// of [`ValueBinop`], so holding one proves the operator is not `&&`/`||`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinopKind {
     Value(ValueBinop),
@@ -69,13 +65,10 @@ impl BinopKind {
 }
 
 /// Pick the opcode for an operator, specialized to the operand's prim when
-/// inference has resolved one. An unresolved (still polymorphic) operand keeps
-/// the generic op so the VM's tag-dispatching path handles it. Typed IR
-/// elaboration (`typed_ir::elaborate`) is the only caller — it is the sole
-/// route from source operators to opcodes — so this is where a new
-/// specialization belongs.
-///
-/// Total: every `(ValueBinop, Option<Prim>)` names an opcode.
+/// inference resolved one. A still-polymorphic operand keeps the generic op for
+/// the VM's tag-dispatching path. Total: every `(ValueBinop, Option<Prim>)`
+/// names an opcode. `typed_ir::elaborate` is the only caller, so a new
+/// specialization belongs here.
 pub fn specialize_binop(op: ValueBinop, prim: Option<Prim>) -> Op {
     use ValueBinop as V;
     match (op, prim) {
@@ -117,9 +110,8 @@ pub fn specialize_binop(op: ValueBinop, prim: Option<Prim>) -> Op {
 mod tests {
     use super::*;
 
-    /// The classification is total and the two short-circuiting operators are
-    /// the only ones that leave the `Value` side — so `specialize_binop` can
-    /// never be reached with an operator that has no opcode.
+    /// The classification is total and only `&&`/`||` leave the `Value` side,
+    /// so `specialize_binop` cannot be reached with an opcode-less operator.
     #[test]
     fn every_binary_op_classifies_and_only_and_or_short_circuit() {
         use BinaryOp as B;

@@ -479,12 +479,9 @@ fn assert_200(stream: &mut TcpStream, buf: &mut Vec<u8>, expected: &[u8], ctx: &
     );
 }
 
-/// End-to-end HTTP/1.1 through the pure-AL `al/http` server core: spawn an `al`
-/// server bound to an ephemeral port, drive it with a raw TCP client, and
-/// assert a well-formed 200 with a correct `Content-Length` and body. A second
-/// request is pipelined into the *same* write so the connection driver must
-/// answer it from its carried leftover bytes — exercising keep-alive and the
-/// pipelining handoff without an intervening read.
+/// End-to-end HTTP/1.1 through the pure-AL `al/http` server core. A second
+/// request is pipelined into the same write, so the connection driver must
+/// answer it from carried leftover bytes with no intervening read.
 #[test]
 fn http_server_get_and_keepalive() {
     let proj = Project::new("io_http");
@@ -493,13 +490,10 @@ fn http_server_get_and_keepalive() {
         "http.serve_on(server, fn(_req) http.text('Hello from al/http!'))",
     );
 
-    // The server blocks in its accept loop; spawn it and drive it from a client.
     let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
 
-    // Two HTTP/1.1 GETs in a single write. Both land in one server-side read,
-    // so the connection loop must parse the first, respond, then serve the
-    // second from the carried leftover bytes (keep-alive + pipelining).
+    // Two GETs in one write land in one server-side read.
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     let mut pipelined = Vec::new();
     pipelined.extend_from_slice(request);
@@ -511,17 +505,12 @@ fn http_server_get_and_keepalive() {
         assert_200(&mut stream, &mut buf, b"Hello from al/http!", which);
     }
 
-    // The server loops forever; tear it down now that both requests answered.
     srv.shutdown_clean(stream);
 }
 
-/// End-to-end chunked transfer-encoding decode through the `al/http` server:
-/// a Rust client POSTs a chunked-encoded body (two chunks + trailer) over a
-/// kept-alive connection, the AL handler reads the decoded body and the
-/// trailer, and a SECOND request on the same connection must also succeed —
-/// proving the chunked framing consumed exactly the body + terminator and the
-/// connection did not desync. A third exchange pipelines a chunked POST and a
-/// GET into one write.
+/// Chunked transfer-encoding decode through the `al/http` server. A second
+/// request on the same connection must also succeed, proving the chunked
+/// framing consumed exactly the body plus terminator and did not desync.
 #[test]
 fn http_server_chunked_post_roundtrip() {
     let proj = Project::new("io_http_chunked");
@@ -541,9 +530,8 @@ fn http_server_chunked_post_roundtrip() {
     let srv = spawn_al_server(&proj, &src);
     let mut stream = srv.connect();
 
-    // --- Exchange 1: chunked POST with a trailer ---------------------------
-    // (Single-line byte string: Rust's `\` line continuation strips leading
-    // whitespace, which would corrupt the " world" chunk's leading space.)
+    // Kept on one line: Rust's `\` continuation strips leading whitespace,
+    // which would eat the " world" chunk's leading space.
     let chunked_post: &[u8] = b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\nX-Checksum: abc123\r\n\r\n";
     stream.write_all(chunked_post).expect("write chunked POST");
 
@@ -555,7 +543,7 @@ fn http_server_chunked_post_roundtrip() {
         "chunked POST",
     );
 
-    // --- Exchange 2: the SAME connection must still be in frame ------------
+    // The same connection must still be in frame.
     let get = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     stream.write_all(get).expect("write follow-up GET");
     assert_200(
@@ -565,7 +553,7 @@ fn http_server_chunked_post_roundtrip() {
         "follow-up GET (desync check)",
     );
 
-    // --- Exchange 3: chunked POST + GET pipelined in ONE write -------------
+    // Chunked POST + GET pipelined in one write.
     let mut pipelined = Vec::new();
     pipelined.extend_from_slice(
         b"POST /pipelined HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
@@ -586,8 +574,7 @@ fn http_server_chunked_post_roundtrip() {
         "pipelined GET",
     );
 
-    // --- Malformed chunked body is rejected with 400 -----------------------
-    // (Fresh connection: the 400 closes the current one.)
+    // Fresh connection: the 400 below closes the current one.
     let mut bad_stream = srv.connect();
     bad_stream
         .write_all(
@@ -605,12 +592,9 @@ fn http_server_chunked_post_roundtrip() {
     srv.shutdown_clean(stream);
 }
 
-/// Connection-close semantics end-to-end through the `al/http` server:
-/// an HTTP/1.1 request with `Connection: close` gets a response that
-/// advertises `Connection: close` back (RFC 9112 §9.6) and the server then
-/// closes the socket; an HTTP/1.0 request with `Connection: close, keep-alive`
-/// closes too — the `close` token wins over `keep-alive` whenever present
-/// (RFC 9112 §9.3), so the response must not echo `keep-alive`.
+/// Connection-close semantics through the `al/http` server. A `Connection:
+/// close` request gets `Connection: close` back and then a closed socket (RFC
+/// 9112 §9.6), and `close` wins over a `keep-alive` token (§9.3).
 #[test]
 fn http_server_connection_close_semantics() {
     let proj = Project::new("io_http_close");
@@ -621,7 +605,7 @@ fn http_server_connection_close_semantics() {
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
 
-    // --- HTTP/1.1 + Connection: close --------------------------------------
+    // HTTP/1.1 + Connection: close
     let mut stream = srv.connect();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
@@ -640,7 +624,7 @@ fn http_server_connection_close_semantics() {
         .expect("read after 1.1 close response");
     assert_eq!(n, 0, "server must close after Connection: close");
 
-    // --- HTTP/1.0 + Connection: close, keep-alive ---------------------------
+    // HTTP/1.0 + Connection: close, keep-alive
     let mut stream2 = srv.connect();
     stream2
         .write_all(b"GET / HTTP/1.0\r\nHost: x\r\nConnection: close, keep-alive\r\n\r\n")
@@ -667,11 +651,9 @@ fn http_server_connection_close_semantics() {
 }
 
 /// `body.content_length` is a pub entry point, so a caller may hand it a raw
-/// parsed header value: 0 and negative counts must both terminate immediately
-/// with an empty body (the `n <= 0` pattern socket.read_exact documents)
-/// instead of issuing reads against the socket. Nothing is ever sent on the
-/// connected pair here, so a regression shows up as a read error against the
-/// short deadline (or a hang) rather than `empty empty`.
+/// parsed header value: 0 and negative counts must terminate immediately with
+/// an empty body instead of reading the socket. Nothing is ever sent on the
+/// pair here, so a regression shows up as a read error or a hang.
 #[test]
 fn http_body_content_length_non_positive_terminates() {
     let src = r#"import al/net
@@ -705,13 +687,11 @@ match net.listen('127.0.0.1', 0) {
     run_outputs(src, "empty empty\n");
 }
 
-/// A response body SOURCE that fails before anything was written must yield
-/// the framed 500 (still deliverable — the head never went out), not a
-/// dropped connection. Covers both framing paths: a Fixed body, whose first
-/// pulls happen in take_buffered before any write, and an Unsized body,
-/// probed before its head is serialized. The Fixed case is pipelined behind a
-/// healthy request to prove the batched response ahead of the 500 goes out
-/// with it.
+/// A response body source that fails before anything was written must yield a
+/// framed 500 (the head never went out, so it is still deliverable), not a
+/// dropped connection. Covers both framing paths, Fixed and Unsized. The Fixed
+/// case is pipelined behind a healthy request to prove the batched response
+/// ahead of the 500 still goes out.
 #[test]
 fn http_server_body_source_failure_yields_framed_500() {
     let proj = Project::new("io_http_source_500");
@@ -728,7 +708,7 @@ fn http_server_body_source_failure_yields_framed_500() {
     let srv = spawn_al_server(&proj, &src);
     let mut tmp = [0u8; 64];
 
-    // --- Fixed body source failure, pipelined behind a healthy request -----
+    // Fixed body source failure, pipelined behind a healthy request.
     let mut stream = srv.connect();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /fixed HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -754,7 +734,7 @@ fn http_server_body_source_failure_yields_framed_500() {
     let n = stream.read(&mut tmp).expect("read after fixed-body 500");
     assert_eq!(n, 0, "server must close after the framed 500");
 
-    // --- Unsized body source failure ----------------------------------------
+    // Unsized body source failure.
     let mut stream2 = srv.connect();
     stream2
         .write_all(b"GET /unsized HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -774,8 +754,7 @@ fn http_server_body_source_failure_yields_framed_500() {
 
     drop(stream);
     drop(stream2);
-    // A fresh connection still gets a healthy response: the failed bodies
-    // poisoned nothing beyond their own connections.
+    // The failed bodies poisoned nothing beyond their own connections.
     let mut stream3 = srv.connect();
     stream3
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -816,21 +795,13 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
     )
 }
 
-/// `net.accept` from a process on a scheduler that did NOT run `net.listen`.
+/// `net.accept` from a process on a scheduler that did not run `net.listen`.
+/// The listener is one shared kernel socket, so a connection can never be
+/// queued where nobody accepts.
 ///
-/// This deadlocked: each scheduler used to bind its own `SO_REUSEPORT` socket
-/// lazily on first accept, and a connection routed to a socket nobody accepts
-/// from sits in its backlog forever (on macOS it is worse — the LAST binder
-/// receives every connection). The listener is now one shared kernel socket,
-/// so the state "queued where nobody accepts" is not constructible.
-///
-/// The hang bound makes a regression a red test instead of a wedged suite.
-/// (Against the old design the wedge was probabilistic — placement noise, and
-/// donation of a busy acceptor to an idle scheduler, could rescue a run — so
-/// the *deterministic* discriminator is the unit test
-/// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`,
-/// whose fd-equality assertion fails against a lazily-bound second socket by
-/// construction.)
+/// This test is probabilistic — scheduler placement can rescue a broken run.
+/// The deterministic discriminator is the unit test
+/// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`.
 #[test]
 fn accept_on_a_scheduler_that_did_not_listen() {
     let src = r#"import al/scheduler
@@ -885,10 +856,8 @@ match net.listen('127.0.0.1', 0) {
     }
 }
 
-/// `net.close` on a listener must fail accepts parked on OTHER schedulers,
-/// not leave them parked forever. The old close retired only the calling
-/// scheduler's socket; every peer kept a live one and its parked acceptors
-/// were never woken — the program hung.
+/// `net.close` on a listener must fail accepts parked on other schedulers,
+/// not leave them parked forever.
 #[test]
 fn closing_a_listener_wakes_a_foreign_parked_acceptor() {
     let src = r#"import al/scheduler
@@ -930,9 +899,9 @@ match net.listen('127.0.0.1', 0) {
     );
 }
 
-/// A process's connections close when it ends — the BEAM controlling-process
-/// rule. The child connects and returns WITHOUT `socket.close`; the parent's
-/// read on the peer side must see EOF, not park forever on a leaked fd.
+/// A process's connections close when it ends (the BEAM controlling-process
+/// rule). The child returns without `socket.close`, so the parent's read on
+/// the peer side must see EOF rather than park on a leaked fd.
 #[test]
 fn a_connection_closes_when_its_owner_ends() {
     let src = r#"import al/scheduler
@@ -969,9 +938,9 @@ match net.listen('127.0.0.1', 0) {
     assert!(out.contains("peer closed"), "{out}");
 }
 
-/// `socket.close` must fail a sibling parked reading the same connection —
-/// the connection-level twin of close-wakes-a-parked-acceptor. The reader is
-/// woken, re-runs, misses the table, and gets the stale-socket `NetError`.
+/// `socket.close` must fail a sibling parked reading the same connection. The
+/// reader wakes, re-runs, misses the table, and gets a stale-socket
+/// `NetError`.
 #[test]
 fn closing_a_connection_wakes_a_parked_reader() {
     let src = r#"import al/scheduler
@@ -1019,11 +988,9 @@ match net.listen('127.0.0.1', 0) {
     );
 }
 
-/// A sibling's exit must NOT close a socket it did not create. Ownership
-/// never moves implicitly: an implicit transfer-on-capture was tried and
-/// reverted — it made this exact split reader/writer program's fate depend
-/// on spawn order (the last-spawned sibling's early exit closed the socket
-/// under the live reader).
+/// A sibling's exit must not close a socket it did not create. Ownership never
+/// moves implicitly: transfer-on-capture would make this split reader/writer
+/// program's fate depend on spawn order.
 #[test]
 fn a_siblings_exit_does_not_close_a_foreign_socket() {
     let src = r#"import al/scheduler

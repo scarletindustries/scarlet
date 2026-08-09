@@ -1456,12 +1456,10 @@ impl InferEngine {
 
     // --- Type-parameter substitution / closing ---
 
-    /// Substitute the type-parameters in a `TypeInfo` body template at a
-    /// concrete instantiation `args` (positional, same order as `params`).
-    /// Templates may reference parameters either as `Var(id == params[i].id)`
-    /// (open form, while the originating engine is alive) or as `Bound(i)`
-    /// (closed form, after `close_body` — used by precompiled stdlib types).
-    /// Both resolve to `args[i]`.
+    /// Substitute a `TypeInfo` body template's type parameters at `args`,
+    /// positional in `params` order. A template references a parameter either
+    /// as `Var(params[i].id)` (open) or `Bound(i)` (closed, after
+    /// `close_body`); both resolve to `args[i]`.
     pub fn substitute_type_vars(
         &mut self,
         ty: Ty,
@@ -1479,9 +1477,8 @@ impl InferEngine {
         })
     }
 
-    /// As [`substitute_type_vars`] but the arguments live in the children pool
-    /// (looked up through `e` inside the rewrite closure), so callers that only
-    /// hold an `ArenaSlice` need not materialise a temporary `Vec<Ty>`.
+    /// As `substitute_type_vars`, but the arguments stay in the children pool,
+    /// so an `ArenaSlice` caller needs no temporary `Vec<Ty>`.
     fn substitute_type_vars_slice(
         &mut self,
         ty: Ty,
@@ -1498,9 +1495,8 @@ impl InferEngine {
         })
     }
 
-    /// Rewrite a `TypeInfo` body from open form (`Var(param_id)`) to closed
-    /// form (`Bound(idx)`) so it no longer references engine-local var ids.
-    /// Idempotent.
+    /// Rewrite a `TypeInfo` body from `Var(param_id)` to `Bound(idx)` so it no
+    /// longer references engine-local var ids. Idempotent.
     pub fn close_body(&mut self, ty: Ty, params: ArenaSlice<pool::TypeParams>) -> Ty {
         self.rewrite(ty, &mut |e, n| match n {
             TypeNode::Var(id) => e
@@ -1572,15 +1568,11 @@ impl InferEngine {
         env: Option<&TypeEnv>,
         path: &mut ResolvePath,
     ) -> Type {
-        // Int/Float/String are declared as external in the prelude (so the env
-        // has them for arity checks and go-to-def), but their resolved `Type`
-        // must be `Primitive` so exhaustiveness treats them as infinite-ctor.
-        // `Array` similarly resolves structurally so `[h, ..t]` patterns work.
-        // `Bool` is NOT here — it is a real two-variant `Named` type and falls
-        // through to the env lookup below. Matched by nominal id, not name: a
-        // user-declared `type Int { }` is a distinct type and must not resolve
-        // as `Primitive`. `prim_of` is the single source of the id→primitive
-        // mapping; only `Array` (structural, not a `Prim`) is separate.
+        // Int/Float/String are declared external in the prelude, but must
+        // resolve to `Primitive` so exhaustiveness treats them as having
+        // infinitely many constructors. `Array` resolves structurally so
+        // `[h, ..t]` patterns work. `Bool` deliberately falls through to the
+        // env lookup: it is a real two-variant `Named` type.
         match self.as_prim(id) {
             Some(Prim::Int) => return t_int(),
             Some(Prim::Float) => return t_float(),
@@ -1599,25 +1591,16 @@ impl InferEngine {
             return t_array(elem);
         }
 
-        // Resolve the type's variant info by its NOMINAL id — the identity
-        // carried in the Con node — never by name: a same-named type declared
-        // by whatever file the LSP analysed last must not answer for this one.
+        // By nominal id, never by name: a same-named type from whatever file
+        // the LSP analysed last must not answer for this one.
         let info = env.and_then(|e| e.lookup_type_info_by_id(id));
 
-        // Resolve the type arguments first, then key the recursion guard on the
-        // resolved *instance* (`id` + argument shape), not the bare nominal id.
-        // A type's recursion always flows through its variant fields (expanded
-        // below with the current instance on the path), never through its
-        // arguments, so the arguments need not see the current instance — only
-        // the path so far. Every recursive `resolve_inner` balances its own
-        // enter/exit, so the shared path is back at `mark` after each argument;
-        // the truncate is a defensive no-op. Keying on the instance lets a
-        // finite re-nesting of the same nominal type with distinct arguments —
-        // `Option(Option(Int))` — expand, while a genuine self-recursive field
-        // — `List(t)` inside `List(t)` — is still cut off. (Keying on the bare
-        // id collapses these two cases: it takes the inner `Option` for a
-        // recursive occurrence, leaves it variant-less, and so reports nested
-        // matches as non-exhaustive.)
+        // The recursion guard keys on the resolved instance (id plus argument
+        // shape), not the bare id. Keying on the id alone takes the inner
+        // `Option` of `Option(Option(Int))` for a recursive occurrence, leaves
+        // it variant-less, and reports nested matches as non-exhaustive.
+        // Recursion flows through variant fields, never arguments, so the
+        // arguments only need the path so far.
         let mark = path.stack.len();
         let resolved_args: Vec<Type> = args
             .range()
@@ -1701,31 +1684,24 @@ impl InferEngine {
     }
 }
 
-/// How many times a single nominal type may re-occur along one `resolve` path
-/// before the recursion guard cuts off. [`ResolvePath::would_recurse`] already
-/// cuts off a *genuine* recursive occurrence (same id and same arguments) the
-/// first time it repeats; this bound additionally terminates *non-uniform*
-/// recursive types — e.g. `type Nest(t) { More(Nest((t, t))) Done }` — whose
-/// argument grows at every level and so never produces a repeating instance
-/// key. Cutting off only ever makes the exhaustiveness checker stricter (a
-/// variant-less `Named` lowers to an infinite-constructor type), never unsound,
-/// so the limit sits far above any realistic nesting depth.
+/// How many times one nominal type may re-occur along a `resolve` path before
+/// the guard cuts off. A genuine recursive occurrence is caught by matching
+/// instance keys; this bound also terminates non-uniform recursive types like
+/// `type Nest(t) { More(Nest((t, t))) Done }`, whose argument grows forever.
+/// Cutting off only makes exhaustiveness stricter, never unsound.
 const MAX_NOMINAL_RECURRENCE: usize = 16;
 
-/// The nominal-type instances currently being expanded on the active `resolve`
-/// path. Each entry pairs a type id with a structural key for its resolved
-/// arguments, so the guard can tell a finite re-nesting (`Option(Option(Int))`,
-/// distinct keys) from a true recursive occurrence (`List(t)` inside `List(t)`,
-/// identical keys).
+/// The nominal-type instances being expanded on the active `resolve` path.
+/// Pairing the id with a key for its arguments is what tells a finite
+/// re-nesting apart from a true recursive occurrence.
 #[derive(Default)]
 struct ResolvePath {
     stack: Vec<(TypeId, String)>,
 }
 
 impl ResolvePath {
-    /// Whether expanding `id` with argument shape `args_key` would recurse:
-    /// either that exact instance is already on the path, or this nominal type
-    /// has already recurred [`MAX_NOMINAL_RECURRENCE`] times without repeating.
+    /// Whether that exact instance is already on the path, or this nominal type
+    /// has recurred [`MAX_NOMINAL_RECURRENCE`] times without repeating.
     fn would_recurse(&self, id: TypeId, args_key: &str) -> bool {
         let mut count = 0usize;
         for (i, k) in &self.stack {
@@ -1748,13 +1724,10 @@ impl ResolvePath {
     }
 }
 
-/// Structural key for a constructor's resolved type arguments, used to identify
-/// a nominal-type instance in [`ResolvePath`]. It records each argument's shape
-/// (head constructors and nesting) but never descends into a `Named`'s variant
-/// table: `(id, type_args)` already pins the instance, and the variants are
-/// exactly what resolution is in the middle of computing. Type variables
-/// collapse to one token — distinguishing them could only make the guard cut
-/// off *less*, so merging them keeps it conservative.
+/// Structural key identifying a nominal-type instance in [`ResolvePath`]. It
+/// must not descend into a `Named`'s variant table: `(id, type_args)` already
+/// pins the instance, and the variants are what resolution is mid-computing.
+/// Type variables collapse to one token, which keeps the guard conservative.
 fn type_args_key(args: &[Type]) -> String {
     let mut out = String::new();
     for a in args {
@@ -1808,10 +1781,6 @@ fn write_type_key(t: &Type, out: &mut String) {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1821,9 +1790,8 @@ mod tests {
         HashSet::new()
     }
 
-    /// Mint a rigid generic variable carrying constraint `c`, exactly as
-    /// `generalize` produces from a constrained body var (it flips the unbound
-    /// var to `Generic` in place, preserving the constraint).
+    /// Mint a rigid generic carrying constraint `c`, as `generalize` produces
+    /// from a constrained body var.
     fn constrained_generic(e: &mut InferEngine, c: Constraint) -> Ty {
         e.enter_level();
         let v = e.fresh_constrained_var(c);
@@ -1930,10 +1898,8 @@ mod tests {
 
     #[test]
     fn constraint_not_dropped_against_unconstrained_generic() {
-        // A constrained var must NOT silently link to an unconstrained rigid
-        // generic: doing so discards the numeric/addable requirement, which let
-        // a function doing arithmetic on an annotated polymorphic param pass
-        // type-checking and never propagated the constraint to its scheme.
+        // Linking would discard the requirement, letting a function do
+        // arithmetic on an annotated polymorphic param.
         let mut e = new_engine();
         let n = e.fresh_constrained_var(Constraint::Numeric);
         let (g, _) = e.fresh_generic_var();
@@ -1942,8 +1908,7 @@ mod tests {
 
     #[test]
     fn constraint_not_dropped_when_generic_is_expected() {
-        // Symmetric path: a rigid generic on the `expected` side absorbing a
-        // constrained var must apply the same check.
+        // Symmetric path: the generic on the `expected` side.
         let mut e = new_engine();
         let (g, _) = e.fresh_generic_var();
         let a = e.fresh_constrained_var(Constraint::Addable);
@@ -1952,8 +1917,8 @@ mod tests {
 
     #[test]
     fn constrained_var_links_to_satisfying_generic() {
-        // A `numeric` generic already guarantees `addable` (Int/Float is a
-        // subset of Int/Float/String), so an addable var may link to it.
+        // Int/Float is a subset of Int/Float/String, so numeric guarantees
+        // addable.
         let mut e = new_engine();
         let numeric_generic = constrained_generic(&mut e, Constraint::Numeric);
         let addable = e.fresh_constrained_var(Constraint::Addable);
@@ -1963,8 +1928,7 @@ mod tests {
 
     #[test]
     fn constrained_var_rejects_insufficient_generic() {
-        // An `addable` generic may still be a String, so it does not satisfy a
-        // `numeric` requirement.
+        // An addable generic may still be a String.
         let mut e = new_engine();
         let addable_generic = constrained_generic(&mut e, Constraint::Addable);
         let numeric = e.fresh_constrained_var(Constraint::Numeric);
@@ -2056,10 +2020,8 @@ mod tests {
 
     #[test]
     fn generalize_resolves_linked_vars_in_scheme() {
-        // A monomorphic fn whose param/ret vars are Linked to Int must close
-        // to a scheme with no live Var nodes: stored Schemes outlive
-        // `truncate_to`'s `vars.clear()`, so any surviving var id would read
-        // an unrelated fresh var (or panic OOB) on the next compile.
+        // Stored Schemes outlive `truncate_to`'s `vars.clear()`, so a surviving
+        // var id would read an unrelated fresh var on the next compile.
         let mut e = new_engine();
         e.enter_level();
         let p = e.fresh_var();
@@ -2075,8 +2037,7 @@ mod tests {
 
     #[test]
     fn generalize_resolves_linked_vars_among_unchanged_siblings() {
-        // A linked var next to an already-resolved sibling: the rebuild must
-        // not re-copy the original (link-bearing) child slots.
+        // The rebuild must not re-copy the original link-bearing child slots.
         let mut e = new_engine();
         e.enter_level();
         let v = e.fresh_var();

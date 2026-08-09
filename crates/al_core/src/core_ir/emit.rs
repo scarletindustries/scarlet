@@ -91,15 +91,14 @@ impl FrameLayout {
     }
 }
 
-/// Shift every jump operand in a freshly emitted block by `base`, turning the
-/// function-relative addresses [`emit`] produces into absolute `program.code`
-/// addresses. Call this only for a block whose frame's `code_start` is not the
-/// block's own start address — today that is the module toplevel alone.
+/// Shift every jump operand by `base`, turning [`emit`]'s function-relative
+/// addresses into absolute `program.code` ones. Only for a block whose frame's
+/// `code_start` is not the block's own start address — today that is the
+/// module toplevel alone.
 ///
 /// [`Op::has_jump_target`] is the one authority on which operands are
-/// addresses, and it is an exhaustive match, so a new jump op cannot be added
-/// without classifying it here. It covers the `SwitchTag` table base and the
-/// raw entries of the table itself, which are ordinary `Jump` instructions.
+/// addresses, and it is an exhaustive match, so a new jump op cannot skip
+/// classification.
 pub fn relocate(code: &mut [Instruction], base: i32) {
     if base == 0 {
         return;
@@ -126,29 +125,22 @@ pub fn emit<C: EmitCtx>(f: &CoreFn, ctx: &mut C) -> EmitOut {
 }
 
 /// Lower a bare expression (module toplevel). `slot_base` is the first
-/// entry-frame slot this file may allocate. The slot pinnings for the
-/// top-level `fn`/`const` decls ride the body's own binds
-/// ([`CoreExpr::toplevel_globals`]) — the exact slots `analyse_module`
-/// already handed out. The fn bodies emitted during that walk reference
-/// those slots via `PushGlobal`, so the entry-frame init **must**
-/// `StoreLocal` to the same indices; deriving the pinning here, from the
-/// body being emitted, makes a disagreeing pinning unrepresentable. A
-/// `GlobalSlot` unwraps to a plain frame slot at this point because the
-/// entry frame *is* the global table — this function's premise. Every
-/// other bind (compound-init temporaries, top-level `let`s, expression
-/// spills) is allocated linearly past the preassigned range.
+/// entry-frame slot this file may allocate.
+///
+/// The entry frame *is* the global table. Fn bodies already emitted reference
+/// the top-level decls via `PushGlobal`, so the entry-frame init must
+/// `StoreLocal` to the same indices; the pinnings are read back off the body
+/// being emitted ([`CoreExpr::toplevel_globals`]) so a disagreement is
+/// unrepresentable. Every other bind allocates linearly past that range.
 pub fn emit_toplevel<C: EmitCtx>(body: &CoreExpr, slot_base: i32, ctx: &mut C) -> EmitOut {
     let preassigned = body.toplevel_globals();
     let mut e = Emitter::new(ctx);
     e.scan = Scan::of(body);
-    // The entry frame's `StoreLocal`s double as the program's global-table
-    // init (they freeze the bound graph), so no toplevel bind may be elided
-    // into a `PushConst` alias. The entry frame runs once — there is nothing
-    // to win here anyway.
+    // The entry frame's `StoreLocal`s are the global-table init, so no
+    // toplevel bind may be elided into a `PushConst` alias.
     e.alias_consts = false;
-    // Decl slots are the contiguous `[slot_base, slot_base+N)` range from
-    // `analyse_module` Pass 3; spill temps start immediately after so a linear
-    // `next_slot++` never collides with a pinned slot.
+    // Spill temps start past the pinned decl range, so a linear `next_slot++`
+    // never collides with a pinned slot.
     let spill = preassigned
         .iter()
         .map(|&(_, s)| s.0 + 1)
@@ -159,63 +151,49 @@ pub fn emit_toplevel<C: EmitCtx>(body: &CoreExpr, slot_base: i32, ctx: &mut C) -
         e.preassigned.resize_at_least(id, None);
         e.preassigned[id] = Some(slot.0);
     }
-    // Not `emit_expr`: the entry frame is `__main__`, whose slots *are* the
-    // program's globals — a `TailCall`/`Ret` here would collapse that frame
-    // and clobber every `PushGlobal` the callee (and everything it transitively
-    // calls) performs. The trailing `Halt` the caller appends is the real exit.
+    // Not `emit_expr`: a `TailCall`/`Ret` would collapse the entry frame and
+    // clobber every `PushGlobal` a callee performs. The caller's trailing
+    // `Halt` is the real exit.
     e.emit_expr_in(body, false);
     e.finish()
 }
 
-/// An emitted jump whose operand is not yet known is named by the [`CodeAddr`]
-/// of the instruction itself, and [`Emitter::patch`] resolves it to the offset
-/// emission has since reached. A label *is* a code address — both index the
-/// emitter's own `code` — which is why no jump ever needs the block's eventual
-/// absolute address, and why `code` is a `TiVec<CodeAddr, _>`: nothing but a
-/// `CodeAddr` can subscript it.
+/// An unresolved jump is named by the [`CodeAddr`] of the instruction itself,
+/// and [`Emitter::patch`] resolves it to the offset emission has reached. A
+/// label *is* a code address, which is why no jump needs the block's eventual
+/// absolute address.
 struct Emitter<'a, C: EmitCtx> {
     code: TiVec<CodeAddr, Instruction>,
-    /// `LocalId → stack slot`. Dense (lower mints ids in order) so a vector
-    /// indexed by id, growing on demand, beats a hashmap. `None` (or out of
-    /// range) means the id was never bound — reading it is a compiler bug,
-    /// aborted by [`unbound_local`].
+    /// `LocalId → stack slot`. `None` or out of range means the id was never
+    /// bound, which is a compiler bug ([`unbound_local`]).
     slots: TiVec<LocalId, Option<i32>>,
-    /// `LocalId → pinned slot` for the module-toplevel decl binds; consulted
-    /// by [`Self::bind`] before falling through to `next_slot`. Empty for
+    /// `LocalId → pinned slot` for module-toplevel decl binds. Empty for
     /// ordinary function bodies.
     preassigned: TiVec<LocalId, Option<i32>>,
-    /// `LocalId → constant-pool index` for `let x = Const(c)` binds that were
-    /// elided instead of materialised into a slot: every `PushLocal x` becomes
-    /// `PushConst c`. This is what restores the fused walk's
-    /// `PushLocal s; PushConst k; op` operand shape from ANF — without it every
-    /// literal costs a `PushConst; StoreLocal` pair and no `*IntLC`
-    /// superinstruction can ever form.
+    /// `LocalId → constant-pool index` for elided `let x = Const(c)` binds:
+    /// every `PushLocal x` becomes `PushConst c`. This is what recovers the
+    /// `PushLocal s; PushConst k; op` shape from ANF; without it no `*IntLC`
+    /// superinstruction can form.
     const_of: TiVec<LocalId, Option<i32>>,
-    /// Whole-body facts gathered before emission (use counts, reuse claims,
-    /// which locals must own a real slot).
+    /// Whole-body facts gathered before emission.
     scan: Scan,
-    /// Per-join pending `Goto` jumps, patched in one go when the join's cont
-    /// block is emitted. `Some` while the declaring `LetCont`'s body is being
-    /// emitted (collecting), `None` before declaration and after sealing —
-    /// a `Goto` finding `None` is a scoping bug, aborted by [`unbound_join`].
-    /// Layout makes every `Goto` a forward jump: the cont block sits after
-    /// the body that contains its predecessors.
+    /// Per-join pending `Goto` jumps, patched together when the join's cont
+    /// block is emitted. `Some` only while the declaring `LetCont`'s body is
+    /// being emitted; a `Goto` finding `None` is a scoping bug. Layout makes
+    /// every `Goto` a forward jump.
     joins: TiVec<JoinId, Option<Vec<CodeAddr>>>,
     /// Off for the module toplevel, whose `StoreLocal`s are the global-table
     /// init and must all be emitted.
     alias_consts: bool,
-    /// Function-relative resume ip recorded after each non-tail call
-    /// instruction, in emission order — [`FrameLayout::call_resume_ips`].
     call_resume_ips: Vec<i32>,
     next_slot: i32,
     max_locals: i32,
     ctx: &'a mut C,
 }
 
-/// A `LocalId` reached emission without ever being bound to a slot — a broken
-/// emit invariant. Aborts, in release as well as debug: any slot returned
-/// instead (the old fallback was 0) compiles to a `PushLocal 0` that silently
-/// clobbers or reads parameter 0. Mirrors `lower`'s `read_before_bind`.
+/// A `LocalId` reached emission unbound. Aborts in release too: any slot
+/// returned instead compiles to a `PushLocal 0` that silently reads or
+/// clobbers parameter 0.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -226,11 +204,9 @@ fn unbound_local(id: LocalId) -> ! {
     )
 }
 
-/// A `Goto` named a join that no enclosing `LetCont` is currently collecting
-/// — either never declared, or already sealed (a backward edge). Both are
-/// lowering bugs: a `JoinId` is only meaningful inside its `LetCont`'s body.
-/// Aborts like [`unbound_local`]; any jump emitted instead would land at a
-/// stale or zero offset and execute unrelated code.
+/// A `Goto` named a join no enclosing `LetCont` is collecting: never declared,
+/// or already sealed. Both are lowering bugs, and any jump emitted instead
+/// would land at a stale offset and execute unrelated code.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -241,9 +217,8 @@ fn unbound_join(id: JoinId) -> ! {
     )
 }
 
-/// A `LetCont` declared a `JoinId` that an enclosing `LetCont` is still
-/// collecting. Lowering mints fresh ids, so this is a lowering bug; silently
-/// overwriting the pending vec would send the outer `Goto`s to a stale offset.
+/// A `LetCont` redeclared a `JoinId` an enclosing one is still collecting.
+/// Overwriting the pending vec would send the outer `Goto`s to a stale offset.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -254,11 +229,10 @@ fn redeclared_join(id: JoinId) -> ! {
     )
 }
 
-/// Flatten a typed [`Imm`] to the instruction's raw `i32` operand — the one
-/// point where the tag is erased. `Op::IndexOr` is the only op whose operand
-/// encodes a constant default (`ConstId`, or `-1` for "default was pushed");
-/// any other op/variant pairing is a lowering bug, and aborts rather than
-/// emit an operand the VM would misread.
+/// Flatten a typed [`Imm`] to the raw `i32` operand. `Op::IndexOr` is the only
+/// op whose operand encodes a constant default (or `-1` for "default was
+/// pushed"); any other pairing aborts rather than emit an operand the VM would
+/// misread.
 #[allow(clippy::panic)]
 fn imm_operand(op: Op, imm: Imm) -> i32 {
     match (op, imm) {
@@ -292,8 +266,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         }
     }
 
-    /// Package the finished emission: the code block plus the frame-layout
-    /// facts ([`FrameLayout`]) this run fixed.
     fn finish(self) -> EmitOut {
         EmitOut {
             code: self.code.into_vec(),
@@ -317,10 +289,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         self.code.push(ins);
     }
 
-    /// Push `ins` — whose operand must be a jump target — and return the
-    /// [`CodeAddr`] naming it. The ONE place a label is minted, so every jump
-    /// the emitter writes is address-classified by [`Op::has_jump_target`], the
-    /// same predicate [`relocate`] and the peephole pass consult.
+    /// Push a jump instruction and return the [`CodeAddr`] naming it. The ONE
+    /// place a label is minted, so every jump the emitter writes is classified
+    /// by [`Op::has_jump_target`] — the same predicate [`relocate`] and the
+    /// peephole pass consult.
     fn mint_label(&mut self, ins: Instruction) -> CodeAddr {
         debug_assert!(ins.op.has_jump_target());
         self.code.push(ins)
@@ -343,10 +315,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         }
     }
 
-    /// Allocate a stack slot for `bind` and record the `LocalId → slot` entry.
-    /// A `preassigned` hit (module-toplevel `fn`/`const` decl) uses that slot
-    /// verbatim so the `StoreLocal` matches the `PushGlobal` operand fn bodies
-    /// were already emitted with; every other bind takes the next linear slot.
+    /// Allocate a stack slot for `bind`. A `preassigned` hit uses that slot
+    /// verbatim, so the `StoreLocal` matches the `PushGlobal` operand fn
+    /// bodies were already emitted with.
     fn bind(&mut self, bind: &CoreBind) -> i32 {
         let id = bind.id;
         self.slots.resize_at_least(id, None);
@@ -374,19 +345,16 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             .unwrap_or_else(|| unbound_local(id))
     }
 
-    /// True when `id` is a module-toplevel decl bind pinned to an entry-frame
-    /// slot. Those values are the program's globals — fn bodies read them via
-    /// `PushGlobal` — so a Perceus `Drop`/`Reuse` on them is unsound and is
-    /// suppressed at emit time.
+    /// True when `id` is a module-toplevel decl pinned to an entry-frame slot.
+    /// Those are the program's globals, read by `PushGlobal` for the rest of
+    /// the run, so a Perceus `Drop`/`Reuse` on them is unsound.
     #[inline]
     fn is_pinned(&self, id: LocalId) -> bool {
         self.preassigned.get(id).copied().flatten().is_some()
     }
 
     /// The one place `Op::Drop` is written. A pinned `id` emits nothing:
-    /// globals are never dropped — the entry-frame slot it lives in *is* the
-    /// program's global table, and fn bodies read it via `PushGlobal` for the
-    /// rest of the run.
+    /// globals are never dropped.
     fn emit_drop(&mut self, id: LocalId) {
         if !self.is_pinned(id) {
             self.push(op_arg(Op::Drop, self.slot(id)));
@@ -400,15 +368,14 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         self.const_of.get(id).copied().flatten()
     }
 
-    /// Record every `let x = Const(c)` that nothing addresses by slot, ahead of
-    /// emission: `x`'s reads become `PushConst c` and the `Let` itself emits
-    /// nothing. Done up-front, not on the fly, so a literal sitting between two
-    /// definitions never breaks the [`Self::plan_run`] window spanning it. A
-    /// `PushConst` is context-free, so registering the aliases of every arm of
-    /// every branch in one walk is sound.
+    /// Record every `let x = Const(c)` nothing addresses by slot: `x`'s reads
+    /// become `PushConst c` and the `Let` emits nothing. Done up front, not on
+    /// the fly, so a literal between two definitions never breaks the
+    /// [`Self::plan_run`] window spanning it. A `PushConst` is context-free,
+    /// so walking every branch arm in one pass is sound.
     ///
-    /// Skipped entirely for the module toplevel, whose `StoreLocal`s are the
-    /// program's global-table init and must all be emitted.
+    /// Skipped for the module toplevel, whose `StoreLocal`s are the
+    /// global-table init.
     fn register_const_aliases(&mut self, mut e: &CoreExpr) {
         if !self.alias_consts {
             return;
@@ -456,9 +423,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         matches!(rhs, Atom::Const(_)) && self.const_idx(bind.id).is_some()
     }
 
-    /// `(slot, const)` when `args` is exactly `[local-in-a-slot, aliased-const]`
-    /// and both fit the packed `a: u8` / `b: u16` operand fields — the operand
-    /// shape every `*IntLC` superinstruction expects.
+    /// `(slot, const)` when `args` is `[local-in-a-slot, aliased-const]` and
+    /// both fit the packed `a: u8` / `b: u16` fields — the operand shape every
+    /// `*IntLC` superinstruction expects.
     fn lc_operands(&self, args: &[LocalId]) -> Option<(u8, u16)> {
         let [a, b] = args else { return None };
         if self.const_idx(*a).is_some() {
@@ -637,22 +604,15 @@ fn peel_call_arg_drops<'a>(
     (moved, body)
 }
 
-/// For `drop a; drop b; tail self(args)`: split the drop run into the drops to
-/// emit right here (locals that merely go dead at the tail edge) and the ones
-/// to *sink* past the operand pushes (those that name an argument), plus the
-/// call's arguments.
+/// For `drop a; drop b; tail self(args)`: split the drop run into drops to
+/// emit here (locals that just go dead) and drops to sink past the operand
+/// pushes (those naming an argument), plus the call's arguments.
 ///
-/// `Op::TailCallSelf` keeps its frame — `collapse_tail_frame_self` swaps the
-/// new arguments into the parameter slots and leaves the other locals in place
-/// because those slots *are* the per-frame reuse table — so, unlike every
-/// other tail call (whose frame is drained), it never releases an argument's
-/// source slot. [`perceus::release_self_tail_args`] therefore parks a `Drop`
-/// for each heap argument just before the `Tail`, and it has to land between
+/// `Op::TailCallSelf` keeps its frame, so unlike every other tail call it
+/// never releases an argument's source slot. The sunk drops must land between
 /// the `PushLocal`s and the call: the operand copy keeps the value alive while
-/// the slot's own reference goes, leaving the next iteration's parameter the
-/// sole owner (rc==1) so its `Drop` can hollow the cell for reuse.
-///
-/// [`perceus::release_self_tail_args`]: super::perceus
+/// the slot's reference goes, leaving the next iteration's parameter sole
+/// owner so its `Drop` can hollow the cell for reuse.
 fn split_self_tail_drops(mut e: &CoreExpr) -> Option<(Vec<LocalId>, Vec<LocalId>, &[LocalId])> {
     let mut run: Vec<LocalId> = Vec::new();
     while let CoreExpr::Drop { local, body, .. } = e {
@@ -674,20 +634,16 @@ fn split_self_tail_drops(mut e: &CoreExpr) -> Option<(Vec<LocalId>, Vec<LocalId>
     Some((now, moved, args))
 }
 
-/// Whole-body facts gathered in one pre-pass, before a single instruction is
-/// emitted. Everything here is a *conservative* guard on the two elisions the
-/// emitter performs (constant aliasing and if-condition fusion); a local that
-/// fails any of them simply keeps the plain `StoreLocal`/`PushLocal` shape.
+/// Whole-body facts gathered in one pre-pass. All are conservative guards on
+/// the emitter's two elisions (constant aliasing, if-condition fusion): a
+/// local failing any of them keeps the plain `StoreLocal`/`PushLocal` shape.
 #[derive(Default)]
 struct Scan {
-    /// `Ctor{reuse: Some(x)}` targets. [`peel_call_arg_drops`] must not peel
-    /// such a drop into the callee: the cell is this frame's reuse token, not
-    /// ownership to hand off.
+    /// `Ctor{reuse: Some(x)}` targets. The cell is this frame's reuse token,
+    /// not ownership to hand off, so [`peel_call_arg_drops`] must leave it.
     reuse_claimed: TiVec<LocalId, bool>,
-    /// Locals the emitter addresses *by slot* rather than by pushing them:
-    /// `Match` scrutinees (`emit_payload_binds` re-reads the slot per arm),
-    /// `Drop` targets (`Op::Drop` names a slot), and reuse targets
-    /// (`Op::Reuse` names a slot). These can never be const-aliased.
+    /// Locals the emitter addresses by slot rather than by pushing them:
+    /// `Match` scrutinees, `Drop` targets, reuse targets. Never const-aliased.
     needs_slot: TiVec<LocalId, bool>,
     /// Occurrence count per local, over every operand position in the body.
     uses: TiVec<LocalId, u32>,
@@ -701,12 +657,11 @@ impl Scan {
     }
 
     /// Whether `id` must own a real slot. Out of range means the pre-pass
-    /// never saw `id` at all; the conservative answer keeps its slot.
+    /// never saw it, and the conservative answer keeps the slot.
     fn needs_slot(&self, id: LocalId) -> bool {
         self.needs_slot.get(id).copied().unwrap_or(true)
     }
 
-    /// Occurrence count of `id` over every operand position in the body.
     fn uses(&self, id: LocalId) -> u32 {
         self.uses.get(id).copied().unwrap_or(0)
     }

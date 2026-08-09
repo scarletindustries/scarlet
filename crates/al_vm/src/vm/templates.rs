@@ -103,6 +103,11 @@ impl Templates {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn h1_owned(self) -> Option<H1> {
+        self.h1
+    }
+
     #[inline]
     pub(super) fn h1(&self) -> VmResult<&H1> {
         self.h1
