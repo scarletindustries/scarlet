@@ -1162,3 +1162,84 @@ fn rename_from_library_declaration_rewrites_selective_import_token() {
         "main.al must rewrite the import's binding token and the call: {main_edits:?}"
     );
 }
+
+// `textDocument/completion`: after `alias.` the imported module's public
+// exports appear; a bare position lists the module's own top-level
+// declarations; a dot after a non-module value yields the empty list.
+
+/// Completion labels at (`l`, `c`), sorted as the server returns them.
+fn completion_labels(s: &mut Workspace, uri: &str, l: i32, c: i32) -> Vec<String> {
+    let resp = s.completion_response(&pos(uri, l, c));
+    resp.as_array()
+        .unwrap_or_else(|| panic!("completion must be an array, got {resp}"))
+        .iter()
+        .filter_map(|i| i["label"].as_str().map(str::to_string))
+        .collect()
+}
+
+const COMP_STDLIB: &str = "import al/string\nx = string.\n";
+
+#[test]
+fn completion_after_stdlib_alias_dot_lists_exports() {
+    let (_p, mut s, uri) = open_single("comp_std", COMP_STDLIB);
+
+    // Cursor right after the trailing dot; the statement is a parse error the
+    // recovering parser drops, which completion must survive.
+    let labels = completion_labels(&mut s, &uri, 1, 11);
+    assert!(
+        labels.iter().any(|l| l == "length"),
+        "`string.` must offer al/string's `length`, got {labels:?}"
+    );
+}
+
+const COMP_HELPER: &str = "pub fn greet() String {\n\x20 'hi'\n}\nfn hidden() Int { 1 }\n";
+const COMP_MAIN: &str = "import ./helper\nz = helper.\n";
+
+#[test]
+fn completion_after_file_module_alias_dot_lists_pub_exports_only() {
+    let p = Project::new("comp_file");
+    p.write("helper.al", COMP_HELPER);
+    p.write("main.al", COMP_MAIN);
+    let (mut s, uri) = open(&p, "main.al", COMP_MAIN);
+
+    let labels = completion_labels(&mut s, &uri, 1, 11);
+    assert!(
+        labels.iter().any(|l| l == "greet"),
+        "`helper.` must offer the pub `greet`, got {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "hidden"),
+        "a private fn must not be offered, got {labels:?}"
+    );
+}
+
+const COMP_BARE: &str = "import al/string\npub fn go() Int { 7 }\nx = g\n";
+
+#[test]
+fn completion_at_bare_identifier_lists_declarations_and_aliases() {
+    let (_p, mut s, uri) = open_single("comp_bare", COMP_BARE);
+
+    let (l, c) = cursor(COMP_BARE, "x = g", 1, 5);
+    let labels = completion_labels(&mut s, &uri, l, c);
+    assert!(
+        labels.iter().any(|l| l == "go"),
+        "a bare position must offer the module's own `go`, got {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "string"),
+        "a bare position must offer the `string` import alias, got {labels:?}"
+    );
+}
+
+const COMP_VALUE_DOT: &str = "x = 1\ny = x.\n";
+
+#[test]
+fn completion_after_non_module_dot_is_empty() {
+    let (_p, mut s, uri) = open_single("comp_val", COMP_VALUE_DOT);
+
+    let labels = completion_labels(&mut s, &uri, 1, 6);
+    assert!(
+        labels.is_empty(),
+        "a dot after a plain value must offer nothing, got {labels:?}"
+    );
+}

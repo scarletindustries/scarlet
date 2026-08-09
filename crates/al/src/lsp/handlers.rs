@@ -9,7 +9,8 @@ use crate::reference;
 use crate::span::Span;
 
 use super::wire::{
-    clean_doc_comment, doc_uri, query_module, range_json, symbol_kind, uri_for, workspace_edit_json,
+    clean_doc_comment, completion_item, doc_uri, qualifier_before, query_module, range_json,
+    symbol_kind, uri_for, workspace_edit_json,
 };
 use super::workspace::Workspace;
 
@@ -63,6 +64,80 @@ impl Workspace {
             return json!({ "contents": { "kind": "markdown", "value": value } });
         }
         Json::Null
+    }
+
+    /// `textDocument/completion`: after `alias.`, the imported module's public
+    /// exports; at a bare identifier, the current module's top-level
+    /// declarations. Always an array — an unresolvable position yields an
+    /// empty list, not null, so a client mid-keystroke sees "no items" rather
+    /// than an error.
+    pub fn completion_response(&mut self, params: &Json) -> Json {
+        let empty = Json::Array(Vec::new());
+        let Some((uri, line, col)) = self.resolve_pos(params) else {
+            return empty;
+        };
+        let Some((graph, mid)) = self.graph_module(&uri) else {
+            return empty;
+        };
+        // The completion prefix comes from the buffer, not the graph: a
+        // trailing `alias.` is a parse error the recovering parser dropped, so
+        // no occurrence exists at the cursor to resolve.
+        let qualifier = self.documents.get(&uri).and_then(|text| {
+            let line_text = text.lines().nth(line as usize)?;
+            qualifier_before(line_text, col as usize)
+        });
+
+        let mut items: Vec<Json> = match qualifier {
+            Some(q) => {
+                // Only a module alias completes as a qualifier. A record value
+                // before the dot would need field completion, which needs the
+                // expression's inferred type — not wired up yet.
+                let Some(target) = graph
+                    .module_refs(mid)
+                    .map_or(&[][..], |mr| mr.defs_named(&q))
+                    .iter()
+                    .filter_map(|d| graph.definition(*d))
+                    .find_map(reference::Definition::imports_module)
+                else {
+                    return empty;
+                };
+                let key = graph.module_path(target).map(module::ModuleKey::of);
+                let session = self.session_for(&uri);
+                graph
+                    .defs_in(target)
+                    .filter(|d| d.is_pub && d.entity() != reference::EntityKind::Field)
+                    .map(|d| {
+                        // The type comes from the session's hover table, keyed
+                        // by the export's own declaring span. Absent for
+                        // modules with no recorded facts; the item then shows
+                        // name and kind alone.
+                        let detail = session
+                            .zip(key.as_ref())
+                            .and_then(|(s, k)| {
+                                s.hover(Some(k), d.span().start_line, d.span().start_column)
+                            })
+                            .map(|(_, ty, _)| labelled(&ty, d.param_names()));
+                        completion_item(d, detail)
+                    })
+                    .collect()
+            }
+            // Bare position: the module's own declarations, same surface as
+            // documentSymbol plus module aliases, minus record fields, which
+            // are never bare names.
+            None => graph
+                .defs_in(mid)
+                .filter(|d| d.is_symbol_listable() && d.entity() != reference::EntityKind::Field)
+                .map(|d| {
+                    let detail = self
+                        .session_for(&uri)
+                        .and_then(|s| s.hover(None, d.span().start_line, d.span().start_column))
+                        .map(|(_, ty, _)| labelled(&ty, d.param_names()));
+                    completion_item(d, detail)
+                })
+                .collect(),
+        };
+        items.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));
+        Json::Array(items)
     }
 
     /// `textDocument/definition`: the `{ uri, range }` of the definition under

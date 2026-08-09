@@ -90,6 +90,71 @@ pub(super) fn symbol_kind(e: reference::EntityKind) -> i32 {
     }
 }
 
+/// LSP `CompletionItemKind` wire number for an [`EntityKind`]. Here, not on
+/// `EntityKind`, because `al_core` is protocol-agnostic.
+pub(super) fn completion_kind(e: reference::EntityKind) -> i32 {
+    use reference::EntityKind;
+    match e {
+        EntityKind::Function => 3,
+        EntityKind::Constructor => 4,
+        EntityKind::Field => 5,
+        EntityKind::Value => 6,
+        EntityKind::ModuleAlias => 9,
+        EntityKind::Constant => 21,
+        EntityKind::Type => 22,
+    }
+}
+
+/// One LSP `CompletionItem` for a definition. `detail` carries the rendered
+/// type when the session has one; the doc comment becomes markdown
+/// documentation, cleaned the same way hover cleans it.
+pub(super) fn completion_item(d: &reference::Definition, detail: Option<String>) -> Json {
+    let mut item = json!({
+        "label": d.name,
+        "kind": completion_kind(d.entity()),
+    });
+    if let Some(det) = detail {
+        item["detail"] = json!(det);
+    }
+    if let Some(doc) = &d.doc {
+        item["documentation"] = json!({
+            "kind": "markdown",
+            "value": clean_doc_comment(doc),
+        });
+    }
+    item
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The qualifier of a `q.<partial>` access the completion cursor sits in: skip
+/// back over the identifier being typed, require a `.`, then read the
+/// identifier before it. `None` when the cursor is not in a qualified-access
+/// position; that includes a float literal's dot (`3.`), whose "qualifier"
+/// starts with a digit. `col` counts characters, matching how the rest of the
+/// server treats LSP columns.
+pub(super) fn qualifier_before(line: &str, col: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = col.min(chars.len());
+    while i > 0 && is_ident_char(chars[i - 1]) {
+        i -= 1;
+    }
+    if i == 0 || chars[i - 1] != '.' {
+        return None;
+    }
+    let end = i - 1;
+    let mut start = end;
+    while start > 0 && is_ident_char(chars[start - 1]) {
+        start -= 1;
+    }
+    if start == end || chars[start].is_ascii_digit() {
+        return None;
+    }
+    Some(chars[start..end].iter().collect())
+}
+
 /// JSON-RPC error code for a refused rename. Here, not on `RenameError`,
 /// because `al_core` is protocol-agnostic.
 pub(super) fn rename_error_code(e: &reference::rename::RenameError) -> i32 {
@@ -208,7 +273,40 @@ pub(super) fn clean_doc_comment(doc: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_doc_comment;
+    use super::{clean_doc_comment, qualifier_before};
+
+    #[test]
+    fn qualifier_found_right_after_the_dot() {
+        assert_eq!(qualifier_before("x = http.", 9), Some("http".to_string()));
+    }
+
+    #[test]
+    fn qualifier_found_mid_partial_word() {
+        assert_eq!(
+            qualifier_before("x = http.ge", 11),
+            Some("http".to_string())
+        );
+    }
+
+    #[test]
+    fn no_qualifier_on_a_bare_identifier() {
+        assert_eq!(qualifier_before("x = gre", 7), None);
+    }
+
+    #[test]
+    fn float_literal_dot_is_not_a_qualifier() {
+        assert_eq!(qualifier_before("x = 3.", 6), None);
+    }
+
+    #[test]
+    fn lone_leading_dot_has_no_qualifier() {
+        assert_eq!(qualifier_before(".", 1), None);
+    }
+
+    #[test]
+    fn column_past_end_of_line_clamps() {
+        assert_eq!(qualifier_before("a.", 99), Some("a".to_string()));
+    }
 
     #[test]
     fn soft_wrapped_lines_stay_one_paragraph() {

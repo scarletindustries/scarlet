@@ -118,6 +118,7 @@ impl LspServer {
             "textDocument/didChange" => self.handle_did_change(&params),
             "textDocument/didClose" => self.handle_did_close(&params),
             "textDocument/hover" => self.respond(&id, &params, Workspace::hover_response),
+            "textDocument/completion" => self.respond(&id, &params, Workspace::completion_response),
             "textDocument/definition" => self.respond(&id, &params, Workspace::definition_response),
             "textDocument/references" => self.respond(&id, &params, Workspace::references_response),
             "textDocument/rename" => self.handle_rename(&id, &params),
@@ -232,6 +233,7 @@ impl LspServer {
                 "capabilities": {
                     "textDocumentSync": 1,
                     "hoverProvider": true,
+                    "completionProvider": { "triggerCharacters": ["."] },
                     "definitionProvider": true,
                     "referencesProvider": true,
                     "renameProvider": { "prepareProvider": true },
