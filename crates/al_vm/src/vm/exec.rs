@@ -20,8 +20,8 @@ use crate::bytecode::value::ReuseAddr;
 use crate::bytecode::{
     Op, Value, ValueView, freed_objects_pending, take_freed_objects, values_equal,
 };
+use crate::abi::AbiSlot;
 use crate::heap::ProcHeap;
-use crate::template::VariantTemplate;
 use crate::tivec::Idx;
 use smallvec::SmallVec;
 
@@ -1213,58 +1213,51 @@ impl VM {
 
     // `make_nil`/`make_none` copy prebuilt frozen-area values and allocate
     // nothing. The payload-carrying constructors build one fresh wrapper enum.
+    // All are fallible: the slot may be unbound (front-end bug, `Internal`).
 
     #[inline]
-    pub(super) fn make_nil(&self) -> Value {
-        self.templates.nil.clone()
+    pub(super) fn make_nil(&self) -> VmResult<Value> {
+        self.templates.nullary(AbiSlot::Unit)
     }
 
     #[inline]
-    pub(super) fn make_none(&self) -> Value {
-        self.templates.none.clone()
+    pub(super) fn make_none(&self) -> VmResult<Value> {
+        self.templates.nullary(AbiSlot::OptionNone)
     }
 
     #[inline]
-    pub(super) fn make_some(&mut self, v: Value) -> Value {
-        self.templates
-            .some
-            .clone()
-            .instantiate(&mut self.heap, &[v])
+    pub(super) fn make_some(&mut self, v: Value) -> VmResult<Value> {
+        self.abi_make(AbiSlot::OptionSome, &[v])
     }
 
     #[inline]
-    pub(super) fn make_ok(&mut self, v: Value) -> Value {
-        self.templates.ok.clone().instantiate(&mut self.heap, &[v])
+    pub(super) fn make_ok(&mut self, v: Value) -> VmResult<Value> {
+        self.abi_make(AbiSlot::ResultOk, &[v])
     }
 
     #[inline]
-    pub(super) fn make_err(&mut self, v: Value) -> Value {
-        self.templates.err.clone().instantiate(&mut self.heap, &[v])
+    pub(super) fn make_err(&mut self, v: Value) -> VmResult<Value> {
+        self.abi_make(AbiSlot::ResultErr, &[v])
     }
 
     #[inline]
-    pub(super) fn make_err_nil(&mut self) -> Value {
-        let nil = self.make_nil();
+    pub(super) fn make_err_nil(&mut self) -> VmResult<Value> {
+        let nil = self.make_nil()?;
         self.make_err(nil)
     }
 
-    /// The frozen [`EnumTemplate`] for a stdlib variant, built on first use and
-    /// memoized by template identity, so runtime error construction allocates
-    /// only the enum cell and never the names.
-    pub(super) fn stdlib_template(&mut self, t: &'static VariantTemplate) -> EnumTemplate {
-        let key = t as *const VariantTemplate as usize;
-        if let Some(tpl) = self.template_cache.get(&key) {
-            return tpl.clone();
-        }
-        let tpl = enum_template(&mut self.frozen, t);
-        self.template_cache.insert(key, tpl.clone());
-        tpl
+    /// Instantiate the constructor bound to `slot` around `payload`. The
+    /// template clone is a few words, as the old per-field clone was.
+    #[inline]
+    pub(super) fn abi_make(&mut self, slot: AbiSlot, payload: &[Value]) -> VmResult<Value> {
+        let t = self.templates.get(slot)?.clone();
+        Ok(t.instantiate(&mut self.heap, payload))
     }
 
-    /// A nullary stdlib enum instance.
-    pub(super) fn stdlib_enum(&mut self, t: &'static VariantTemplate) -> Value {
-        let tpl = self.stdlib_template(t);
-        tpl.instantiate(&mut self.heap, &[])
+    /// The pre-built value of a nullary slot.
+    #[inline]
+    pub(super) fn abi_nullary(&self, slot: AbiSlot) -> VmResult<Value> {
+        self.templates.nullary(slot)
     }
 
     /// Concatenate the two strings on top of the stack.

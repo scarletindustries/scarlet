@@ -19,7 +19,6 @@ use std::sync::{Arc, Condvar, Mutex, Once, OnceLock};
 
 use crate::bytecode::{Program, Value};
 use crate::heap::ProcHeap;
-use crate::template::StdlibTemplates;
 
 use super::freeze::FrozenValue;
 use super::lock;
@@ -217,9 +216,6 @@ pub(super) struct Runtime {
     pub program: Arc<Program>,
     /// Entrypoint path followed by every argument after it. Read by `Op::Argv`.
     pub argv: Vec<String>,
-    /// Embedder-supplied templates for every stdlib constructor the VM builds
-    /// on its own. Each scheduler builds its own resolved view at construction.
-    pub stdlib: &'static StdlibTemplates,
     /// Top-level bindings as frozen value words, published when main writes
     /// them. Workers copy them into their own table, gated by
     /// `globals_version`.
@@ -263,7 +259,6 @@ impl Runtime {
     pub fn new(
         program: Arc<Program>,
         argv: Vec<String>,
-        stdlib: &'static StdlibTemplates,
         count: usize,
     ) -> std::io::Result<(Arc<Runtime>, mio::Poll)> {
         let poll = mio::Poll::new()?;
@@ -273,7 +268,6 @@ impl Runtime {
         let runtime = Arc::new(Runtime {
             program,
             argv,
-            stdlib,
             globals: Mutex::new(Vec::new()),
             globals_version: AtomicU64::new(0),
             shared_listeners: Mutex::new(HashMap::new()),
@@ -572,8 +566,8 @@ impl Runtime {
         }
     }
 
-    /// Whether any scheduler other than `me` is idle (parked waiting for
-    /// work). Busy schedulers leave injector seeds to idle ones.
+    /// Whether any scheduler other than `me` is parked. Busy schedulers leave
+    /// injector seeds to idle ones.
     pub fn any_other_idle(&self, me: usize) -> bool {
         self.slots
             .iter()
@@ -582,21 +576,16 @@ impl Runtime {
     }
 
     /// Publish a top-level binding's frozen root to the shared global area.
-    /// This is not at-most-once per slot: `Op::StoreLocal` republishes on
-    /// every entry-frame store, and binary-pattern cursor temps and
-    /// or-pattern alternative bindings store the same slot several times.
-    /// All of a slot's stores happen inside the single top-level statement
-    /// that owns it, before any closure that could read the slot exists, so
-    /// each readable slot reaches its final published value before any
-    /// reader can observe it.
     ///
-    /// The caller has already deep-copied the value graph into the frozen
-    /// area (`freeze::freeze_global` — `rc_publish_graph` with the frozen
-    /// builder as destination), so `frozen` is an immediate or points
-    /// at fully written frozen segments. The table store happens-before the
-    /// `Release` bump of `globals_version`, and readers `Acquire`-load the
-    /// version before touching the table, so a frozen pointer is only ever
-    /// observed after its segment contents are visible.
+    /// A slot may be published several times: `Op::StoreLocal` republishes on
+    /// every entry-frame store. All of a slot's stores happen inside the one
+    /// top-level statement that owns it, before any closure that could read it
+    /// exists, so a reader only ever sees the final value.
+    ///
+    /// The caller must have already deep-copied the graph into the frozen area,
+    /// so `frozen` is an immediate or points at fully written segments. The
+    /// table store happens-before the `Release` bump of `globals_version` that
+    /// readers `Acquire`-load.
     pub fn publish_global(&self, slot: usize, frozen: FrozenValue) {
         {
             let mut g = lock(&self.globals);
@@ -613,27 +602,24 @@ impl Runtime {
         self.live.load(Ordering::Acquire) == 0
     }
 
-    /// Wake one parked scheduler, if any. The parked flag is consumed
-    /// (cleared) by the wake so that back-to-back submissions fan out across
-    /// different schedulers instead of all notifying the same one.
+    /// Wake one parked scheduler. The wake clears its flag, so back-to-back
+    /// submissions fan out instead of all notifying the same one.
     fn wake_one(&self) {
         if let Some(claim) = self.claim_idle_peer() {
             self.release(claim);
         }
     }
 
-    /// Wake every scheduler (empty waker slots — never-spawned workers —
-    /// have no thread to wake and are skipped).
+    /// Wake every scheduler that has a thread.
     fn wake_all(&self) {
         for i in 0..self.slots.len() {
             self.notify(i);
         }
     }
 
-    /// Hand a blocking op to the pool, to be delivered back to scheduler
-    /// `origin` under `job_id`. Reuses a warm worker, else spawns one up to the
-    /// cap; at the cap the job waits for a busy worker to free up (a worker
-    /// re-checks the queue before parking, so it is never stranded).
+    /// Hand a blocking op to the pool, delivered back to scheduler `origin`
+    /// under `job_id`. At the worker cap the job waits; a worker re-checks the
+    /// queue before parking, so it is never stranded.
     pub fn offload(self: &Arc<Self>, origin: usize, job_id: u64, op: BlockingOp) {
         lock(&self.blocking.queue).push_back((job_id, origin, op));
         if self.blocking.idle.load(Ordering::Acquire) > 0 {
@@ -652,7 +638,7 @@ impl Runtime {
             .name("al-blocking".into())
             .spawn(move || blocking_worker_main(rt))
         {
-            // Couldn't spawn: undo the count and let an existing worker take it.
+            // Undo the count and let an existing worker take the job.
             eprintln!("warning: cannot spawn blocking worker ({e})");
             self.blocking.total.fetch_sub(1, Ordering::AcqRel);
             self.blocking.cond.notify_one();
@@ -660,14 +646,13 @@ impl Runtime {
     }
 
     /// Route a finished blocking job back to its scheduler and wake it.
-    /// `origin` issued the job, so its thread and poller exist.
     pub fn deliver_completion(&self, origin: usize, c: Completion) {
         lock(&self.slots[origin].completions).push_back(c);
         self.notify(origin);
     }
 
-    /// Signal blocking workers to exit at program end. Idle workers wake and
-    /// return; with `live == 0` none are mid-op, so nothing is interrupted.
+    /// Signal blocking workers to exit at program end. With `live == 0` none
+    /// are mid-op, so nothing is interrupted.
     pub fn shutdown_blocking(&self) {
         self.blocking.shutdown.store(true, Ordering::Release);
         self.blocking.cond.notify_all();
@@ -675,8 +660,7 @@ impl Runtime {
 }
 
 /// A blocking-pool worker: pull a job, run it, deliver the result, repeat.
-/// Parks *warm* between jobs; exits if it would be the `max_warm + 1`-th idle
-/// worker (reaping a burst) or once shutdown is signalled.
+/// Exits if it would be the `max_warm + 1`-th idle worker, or on shutdown.
 fn blocking_worker_main(rt: Arc<Runtime>) {
     loop {
         let (job_id, origin, op) = {
@@ -689,7 +673,6 @@ fn blocking_worker_main(rt: Arc<Runtime>) {
                 if let Some(job) = q.pop_front() {
                     break job;
                 }
-                // No work: keep at most `max_warm` workers parked, reap the rest.
                 if rt.blocking.idle.load(Ordering::Acquire) >= rt.blocking.max_warm {
                     rt.blocking.total.fetch_sub(1, Ordering::AcqRel);
                     return;
@@ -704,8 +687,7 @@ fn blocking_worker_main(rt: Arc<Runtime>) {
     }
 }
 
-/// Run one blocking op (no locks held). The error is captured `Send` and turned
-/// into a typed `IoError` by the scheduler on delivery.
+/// Run one blocking op, no locks held.
 fn run_blocking(op: BlockingOp) -> BlockingResult {
     match op {
         BlockingOp::ReadFile(path) => {
@@ -722,9 +704,8 @@ fn run_blocking(op: BlockingOp) -> BlockingResult {
     }
 }
 
-/// Resolve a hostname to an IP address via the system resolver (`getaddrinfo`).
-/// Runs on a blocking-pool worker, never a scheduler thread. Returns the first
-/// address the resolver yields.
+/// Resolve a hostname via `getaddrinfo`, taking the first address it yields.
+/// Blocking-pool workers only, never a scheduler thread.
 fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
     use std::net::ToSocketAddrs;
     (host, 0u16)
@@ -739,8 +720,7 @@ fn resolve_host(host: &str) -> std::io::Result<std::net::IpAddr> {
         })
 }
 
-/// How many schedulers to run: `AL_SCHEDULERS` env override, else one per CPU
-/// core.
+/// How many schedulers to run: `AL_SCHEDULERS`, else one per CPU core.
 pub(super) fn scheduler_count() -> usize {
     let from_env = std::env::var("AL_SCHEDULERS")
         .ok()

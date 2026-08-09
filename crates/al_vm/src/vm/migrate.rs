@@ -22,53 +22,32 @@ use crate::bytecode::{SocketValue, Value};
 use super::{Process, VM};
 
 /// Connection fds re-homed out of a scheduler's tables, ready to travel with a
-/// [`Migrant`] or `Seed`. Listeners are not included: the listener socket is
+/// [`Migrant`] or `Seed`. Listeners are excluded: the listener socket is
 /// program-wide (`Runtime.shared_listeners`) and every scheduler registers the
-/// same fd on demand (`VM::ensure_listener`) — there is nothing to move.
+/// same fd on demand (`VM::ensure_listener`).
 pub(super) type DetachedFds = Vec<(i32, TcpStream, u64)>;
 
-/// A process in flight between schedulers: the suspended [`Process`] moved
-/// as-is, alongside the socket fds it references, re-homed out of the donor's
-/// per-scheduler tables for insertion into the destination's.
+/// A process in flight between schedulers.
 pub(super) struct Migrant {
-    /// The suspended process, moved whole — stack, frames, heap untouched.
     pub process: Process,
-    /// Connections the process references (moved — the donor loses them).
-    /// Listeners do not travel: the destination registers the shared socket's
-    /// fd with its own poller on first accept (`VM::ensure_listener`).
+    /// Moved, so the donor loses them.
     pub connections: DetachedFds,
 }
 
-// A migrant crosses an OS-thread boundary, so it must be `Send`. The fd
-// handles are inherently `Send`; the meaningful constraint is
-// `Process: Send`, which must hold by construction — a process owns its
-// memory outright, nothing in it is shared with the donor scheduler.
-//
-// KNOW WHAT THIS GATE CANNOT SEE: `Send` is structural, and a stack region
-// is `Send` as a byte buffer no matter what its bytes name. A raw machine
-// word inside a parked native stack (`Process::parked`) that points at the
-// donor scheduler's `VM` passes this assert and corrupts on resume. That
-// obligation is discharged by the process-stack purity invariant
-// (`vm::stack` module doc) — scheduler state lives in thread-locals that
-// resumed code re-derives — not by this bound. The assert still earns its
-// keep against ordinary regressions (an `Rc`, a non-Send fd wrapper).
+// This assert cannot see everything it needs to. `Send` is structural, and a
+// parked native stack (`Process::parked`) is `Send` as a byte buffer no matter
+// what its words point at — a raw pointer into the donor scheduler's `VM` would
+// pass here and corrupt on resume. That obligation is discharged by the
+// process-stack purity invariant in the `vm::stack` module doc. The assert still
+// catches ordinary regressions like an `Rc` or a non-Send fd wrapper.
 const _: () = crate::assert_send::<Migrant>();
 
-/// Visit every socket reachable from `v` — the one fd-walk shared by every
-/// path that pairs a value graph with the per-scheduler socket tables:
-/// seeding a spawn (`VM::build_seed`), detaching a migrant's fds
-/// ([`process_socket_ids`]), and the donor-side guard (`VM::can_donate_fds`,
-/// which filters to connections).
+/// Visit every socket reachable from `v`. The one fd-walk shared by spawn
+/// seeding, migrant detach, and the donor-side guard.
 ///
-/// The descent is `Value::for_each_child_ref` — the same layout table the
-/// reference-counting engine traces with, so a future value kind decides its
-/// child set in exactly one place instead of being skipped silently here.
-/// This walk is what keeps migration's fd re-homing sound.
-///
-/// It descends into immortal (frozen) subgraphs too: a toplevel binding is
-/// published verbatim (`freeze::freeze_global`), and a socket is an immediate,
-/// so a frozen tuple can carry one. Pruning on `Value::is_immortal` would drop
-/// those fds on the floor.
+/// It must descend into immortal (frozen) subgraphs: a socket is an immediate,
+/// so a frozen tuple can carry one. Pruning on `Value::is_immortal` drops those
+/// fds on the floor.
 pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
     if let Some(s) = v.as_socket() {
         visit(s);
@@ -77,10 +56,9 @@ pub(super) fn for_each_socket(v: &Value, visit: &mut impl FnMut(SocketValue)) {
 }
 
 /// Visit every socket reachable from the process's stack or any frame's
-/// closure. Frames of a recursive function all share one closure object
-/// (see `CallFrame::captures`), so each distinct closure — keyed by its
-/// arena address — is walked once. A socket reachable through several
-/// roots is still visited once per root; callers dedup ids as needed.
+/// closure. Frames of a recursive function share one closure object, so
+/// closures are walked once each by address. A socket reachable from several
+/// roots is still visited once per root; callers dedup ids.
 pub(super) fn for_each_process_socket(p: &Process, visit: &mut impl FnMut(SocketValue)) {
     for v in &p.stack {
         for_each_socket(v, visit);
@@ -96,8 +74,7 @@ pub(super) fn for_each_process_socket(p: &Process, visit: &mut impl FnMut(Socket
     }
 }
 
-/// Every socket id reachable from the process — listeners and connections
-/// alike — deduplicated: the fd set [`VM::detach_fds`] re-homes.
+/// Every socket id reachable from the process, listeners included, deduplicated.
 fn process_socket_ids(p: &Process) -> Vec<i32> {
     let mut ids = Vec::new();
     for_each_process_socket(p, &mut |s| ids.push(s.id));
@@ -107,28 +84,17 @@ fn process_socket_ids(p: &Process) -> Vec<i32> {
 }
 
 impl VM {
-    /// Pre-side-effect donor guard for process migration: may `victim`'s
-    /// connection fds safely leave this scheduler?
+    /// May `victim`'s connection fds safely leave this scheduler? Read-only,
+    /// and must run before any side effect of donation.
     ///
-    /// Donating a process moves every connection socket it references out of
-    /// this scheduler's `tcp_connections` table. That is only safe while the
-    /// fd is quiescent here, so donation must abort if any referenced
-    /// connection id is
+    /// A connection may only move while quiescent here. Donation aborts if a
+    /// referenced id is in `pending_connects` (an in-flight connect whose
+    /// completion handler looks the socket up in this table) or armed in a
+    /// parked sibling's `Wait::Io` fds (that sibling's wake path resolves the
+    /// id through this scheduler's tables and would break silently).
     ///
-    /// - in `pending_connects`: a non-blocking connect on that id is in
-    ///   flight on this scheduler and its completion handler will look the
-    ///   socket up in this table; or
-    /// - armed in a parked sibling's `Wait::Io` fds: the sleeper's poller
-    ///   registration belongs to this scheduler, and moving the fd away would
-    ///   silently break the sleeper — its wake/re-arm path resolves the id
-    ///   through this scheduler's tables.
-    ///
-    /// This check is read-only and runs strictly before any side effect of
-    /// donation (peer claim, fd detach, socket-table mutation), so an
-    /// abort here costs nothing. Listener ids never need guarding: the
-    /// listener socket is shared program-wide (`Runtime.shared_listeners`),
-    /// so a moved process re-resolves the same fd on the destination and the
-    /// donor's leftover registration is just an armed fd with no waiter.
+    /// Listener ids need no guarding: the listener socket is shared
+    /// program-wide, so the destination re-resolves the same fd.
     pub(super) fn can_donate_fds(&self, victim: &Process) -> bool {
         let mut ids = Vec::new();
         for_each_process_socket(victim, &mut |s| {
@@ -148,16 +114,12 @@ impl VM {
         !ids.iter().any(|id| self.io_waiters.contains_key(id))
     }
 
-    /// Re-home every connection fd a suspended process references out of the
-    /// donor's per-scheduler tables, for donation: the process itself moves
-    /// whole; only its connections need detaching so they can travel with it.
+    /// Re-home every connection fd a suspended process references out of this
+    /// scheduler's tables so they can travel with it.
     pub(super) fn detach_fds(&mut self, p: &Process) -> DetachedFds {
-        // Referenced connections travel because the process can still use
-        // them; OWNED connections travel because the process's death must be
-        // able to close them, and death is handled by the scheduler the
-        // process ends on. A connection this process owns but no longer
-        // references (it connected, used, and dropped the value) would
-        // otherwise strand open on the donor forever.
+        // Owned-but-unreferenced connections must travel too. The process's
+        // death closes them, and death happens on whichever scheduler it ends
+        // on, so leaving them here strands them open forever.
         let mut ids = process_socket_ids(p);
         ids.extend(
             self.tcp_connections
@@ -170,25 +132,17 @@ impl VM {
         self.detach_socket_ids(ids)
     }
 
-    /// Move the connections among `ids` out of this scheduler's table — the
-    /// one fd transfer shared by spawn seeding (`VM::build_seed`) and donation
-    /// ([`VM::detach_fds`]). A connection belongs to exactly one scheduler, so
-    /// it is removed here (with a defensive poller delete first — a runnable
-    /// process has nothing armed, so it is normally a no-op) and travels to the
-    /// destination. Listeners among `ids` are left untouched: the listener
-    /// socket is shared program-wide, and the destination registers the same
-    /// fd on first accept, so a captured listener needs no transfer.
-    /// An id with no connection entry is either a listener or dangling (an
-    /// earlier spawn moved it away) and is skipped.
+    /// Move the connections among `ids` out of this scheduler's table. Shared
+    /// by spawn seeding and donation. Listeners in `ids` are left alone, and an
+    /// id with no connection entry (a listener, or one an earlier spawn already
+    /// moved away) is skipped.
     pub(super) fn detach_socket_ids(&mut self, ids: impl IntoIterator<Item = i32>) -> DetachedFds {
         let mut connections: DetachedFds = Vec::new();
         for id in ids {
-            // `evict_connection` also fails anything parked on the id:
-            // donation is guarded by `can_donate_fds` so nothing is armed on
-            // that path, but `build_seed` (scheduler.spawn) is not — a
-            // sibling parked on a captured id would otherwise be unwakeable
-            // forever, with its readiness delivered to a poller that no
-            // longer owns the fd.
+            // `evict_connection` also fails anything parked on the id. Donation
+            // is guarded by `can_donate_fds`, but `build_seed` is not: a sibling
+            // parked on a captured id would be unwakeable forever, its readiness
+            // going to a poller that no longer owns the fd.
             if let Some(conn) = self.evict_connection(id) {
                 connections.push((id, conn.stream, conn.owner));
             }
@@ -196,15 +150,10 @@ impl VM {
         connections
     }
 
-    /// Adopt a bundle of connection fds arriving with a seed or migrant into
-    /// this scheduler's tables — the ONE fd-adoption policy shared by both
-    /// intake paths (`hydrate_seed`, `adopt_migrant`). A poller registration
-    /// failure (e.g. EMFILE) is logged and the process still runs; ops on the
-    /// unwatchable socket surface as `NetError` at use. Adoption is thus
-    /// infallible: an fd-table hiccup during transport never takes the whole
-    /// scheduler down.
-    /// Adopt a bundle of connections, each keeping the owner it arrived
-    /// with — ownership travels with the fd and never changes hands here.
+    /// Adopt connection fds arriving with a seed or migrant. Each keeps the
+    /// owner it arrived with. Infallible by design: a poller registration
+    /// failure is logged and the process still runs, with ops on the
+    /// unwatchable socket surfacing as `NetError` at use.
     pub(super) fn adopt_connections(&mut self, connections: DetachedFds) {
         for (id, c, owner) in connections {
             if let Err(e) = self.track_connection(id, c, owner) {
@@ -213,68 +162,43 @@ impl VM {
         }
     }
 
-    /// Adopt a migrated process: take ownership of its fds and queue the
-    /// moved process as runnable. Nothing is rebuilt — the process arrives
-    /// exactly as it was suspended on the donor.
+    /// Adopt a migrated process: take its fds and queue it runnable.
     ///
-    /// The migrant is already counted in `Runtime::live` (counted at its
-    /// original spawn; donation never decrements), so it is pushed onto the
-    /// run queue directly — never routed through `Runtime::submit`, which
-    /// assumes uncounted work.
-    ///
-    /// The caller must `sync_globals()` before invoking this, exactly as for
-    /// seed hydration, so any top-level bindings the migrant reads exist here.
+    /// The migrant is already counted in `Runtime::live`, so it goes on the run
+    /// queue directly, never through `Runtime::submit`, which assumes uncounted
+    /// work. The caller must `sync_globals()` first so the top-level bindings
+    /// the migrant reads exist here.
     pub(super) fn adopt_migrant(&mut self, m: Migrant) {
         self.adopt_connections(m.connections);
-        // Only non-main runnable processes are eligible for donation, so the
-        // adopted process is never main.
         self.run_queue.push_back(m.process);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Coverage for the two transports between schedulers, and the
-    //! properties each must preserve:
+    //! The two transports between schedulers: migration is a move, spawn is a
+    //! copy. Identity is asserted through `Value::object_addr`, which is stable
+    //! under a `Process` move, so a moved value keeps its exact address and a
+    //! copied one must not.
     //!
-    //! - **Migration is a move**: the process arrives holding its original
-    //!   allocations in the heap that traveled with it — shared captures stay
-    //!   shared, distinct allocations stay distinct, nothing is rebuilt or
-    //!   deduplicated.
-    //! - **Spawn is a copy** (`ProcHeap::spawn`, the spawn-side graph copy
-    //!   entry): sharing in the source graph is sharing in the copy, and the
-    //!   copy aliases nothing in the spawner.
-    //!
-    //! Identity is asserted through `Value::object_addr` (the arena header
-    //! address): slab addresses are stable under a `Process`/`ProcHeap` move,
-    //! so a moved value must keep its exact address, while a copied value
-    //! must land at an address inside the child heap's own spaces.
-    //!
-    //! Semantic end-to-end coverage (real programs migrating mid-run) lives
-    //! in `tests/vm_migration.rs`.
+    //! End-to-end coverage lives in `tests/vm_migration.rs`.
 
     use super::super::{CallFrame, halt_test_vm};
     use super::*;
     use crate::heap::ProcHeap;
 
-    /// A process heap with a pre-granted allocation budget: these tests fill
-    /// the heap directly, with no VM `ensure()` loop staking budgets.
     fn test_heap() -> ProcHeap {
         ProcHeap::new()
     }
 
-    /// The arena header address of a heap-backed value — the identity the
-    /// move/copy assertions compare.
     fn addr(v: &Value) -> usize {
         v.object_addr().expect("heap-backed value")
     }
 
     #[test]
     fn move_is_zero_copy_and_preserves_state() {
-        // Three frames sharing ONE closure, the shape a recursive function
-        // leaves behind. Everything is allocated in the process's own heap —
-        // the heap that migrates with it — so address identity across the
-        // move is exactly the property under test.
+        // Three frames sharing one closure, the shape a recursive function
+        // leaves behind.
         let mut heap = test_heap();
         let cap = Value::str_in(&mut heap, "shared");
         let shared = Value::closure_in(&mut heap, 0, &[Value::small_int(7), cap]);
@@ -323,7 +247,6 @@ mod tests {
 
         let mut donor = halt_test_vm();
         let connections = donor.detach_fds(&p);
-        // No sockets referenced: nothing re-homed.
         assert!(connections.is_empty());
 
         let mut dest = halt_test_vm();
@@ -336,9 +259,8 @@ mod tests {
             .pop_back()
             .expect("the migrant must be queued runnable");
 
-        // The transport is a move, not a copy: every frame still holds the
-        // ORIGINAL closure allocation, at its original address, inside the
-        // heap that traveled with the process.
+        // A move, not a copy: every frame still holds the original closure
+        // allocation at its original address.
         assert!(!q.is_main);
         assert_eq!(q.frames.len(), 3);
         assert!(
@@ -347,8 +269,6 @@ mod tests {
                 .all(|f| f.captures.object_addr() == Some(shared_addr))
         );
 
-        // Each stack slot is the original word: heap-backed slots kept their
-        // exact addresses, and the payloads read back intact through them.
         let moved_addrs: Vec<Option<usize>> = q.stack.iter().map(Value::object_addr).collect();
         assert_eq!(moved_addrs, stack_addrs);
         assert_eq!(q.stack[0].as_int(), Some(1));

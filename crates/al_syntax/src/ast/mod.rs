@@ -320,8 +320,7 @@ pub struct ImportPath {
 }
 
 impl ImportPath {
-    /// Wrap an already-canonical, non-relative path (a stdlib `al/...` path
-    /// or a resolved file identity) as an import with no relative markers.
+    /// Wrap an already-canonical, non-relative path as an import.
     pub fn canonical(names: Vec<String>) -> Self {
         ImportPath {
             leading: Vec::new(),
@@ -532,25 +531,21 @@ pub enum ArrayElement {
     SpreadElement(SpreadElement),
 }
 
-/// The parsed `:spec` suffix of a `<<>>` segment: how the value is encoded
-/// into / decoded from the binary, and how wide it is. An `Int` width is
-/// always in bits, a `Binary` size always in bytes, and `Utf8` never carries
-/// a size — no other combination is expressible.
+/// The parsed `:spec` suffix of a `<<>>` segment. An `Int` width is always in
+/// bits, a `Binary` size always in bytes, and `Utf8` never carries a size.
 #[derive(Debug, Clone)]
 pub enum BinSpec {
-    /// `:N` / `:size(expr)` — an integer of `bits` bits; `None` means the
-    /// default width (8, supplied downstream).
+    /// `:N` / `:size(expr)`. `None` means the default width of 8, supplied
+    /// downstream.
     Int { bits: Option<Expression> },
-    /// `:bytes(expr)` — a sub-binary of `bytes` bytes; `:binary` (`None`)
-    /// consumes the remainder.
+    /// `:bytes(expr)`. `None` is `:binary`, which consumes the remainder.
     Binary { bytes: Option<Expression> },
     /// `:utf8`, or the default for a bare string segment.
     Utf8,
 }
 
 impl BinSpec {
-    /// The runtime size expression, if the spec carries one
-    /// (`:N` / `:size(expr)` / `:bytes(expr)`).
+    /// The runtime size expression, if the spec carries one.
     pub fn size_expr(&self) -> Option<&Expression> {
         match self {
             BinSpec::Int { bits } => bits.as_ref(),
@@ -582,10 +577,8 @@ pub enum Pattern {
         name: Identifier,
     },
     Constructor {
-        /// `io` in `io.NotFound(path)` — the module qualifier the constructor
-        /// was reached through. `None` for a constructor in scope, whether
-        /// declared locally or brought in by `import al/io.{NotFound}`; both
-        /// spellings denote the same constructor.
+        /// `io` in `io.NotFound(path)`. `None` when the constructor is in
+        /// scope; both spellings denote the same constructor.
         qualifier: Option<Identifier>,
         name: Identifier,
         args: Vec<PatternArg>,
@@ -606,8 +599,7 @@ pub enum Pattern {
         span: Span,
     },
     Literal(PatternLiteral),
-    /// `p | q | ..` — at least two alternatives: `first` and the non-empty
-    /// tail the parser accumulated after the first `|`.
+    /// `p | q | ..`. `rest` is non-empty: there are always two or more.
     Or {
         first: Box<Pattern>,
         rest: Vec<Pattern>,
@@ -671,23 +663,20 @@ pub struct BinaryPatternRest {
 /// How [`Pattern::for_each_binder`] treats the alternatives of an or-pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrAlternatives {
-    /// Walk every alternative. Scope analysis needs this: alternatives past
-    /// the first can still contain segment size expressions that reference
-    /// outer names.
+    /// Walk every alternative. Scope analysis needs this: later alternatives
+    /// can hold segment size expressions referencing outer names.
     All,
-    /// Walk only the first alternative. Typing enforces that all
-    /// alternatives bind the identical set, so codegen can take the first
-    /// as canonical.
+    /// Walk only the first. Typing enforces that all alternatives bind the
+    /// identical set, so the first is canonical for codegen.
     First,
 }
 
 /// A binding-relevant site found by [`Pattern::for_each_binder`].
 pub enum PatternBinder<'a> {
-    /// An identifier the pattern binds: a `Var`, an array spread binding,
-    /// or a binary `..rest` binding.
+    /// A `Var`, an array spread binding, or a binary `..rest` binding.
     Name(&'a Identifier),
-    /// A binary segment size expression. Not a binder itself, but it can
-    /// reference outer names, so scope analysis must walk it.
+    /// Not a binder, but it can reference outer names, so scope analysis must
+    /// walk it.
     SizeExpr(&'a Expression),
 }
 
@@ -707,10 +696,8 @@ impl Pattern {
         }
     }
 
-    /// Walk every binding site in this pattern in source order, calling `f`
-    /// with each bound identifier and each binary segment size expression.
-    /// Constructor names are not reported — they are uppercase and can never
-    /// be binders.
+    /// Walk every binding site in source order. Constructor names are not
+    /// reported: they are uppercase and can never be binders.
     pub fn for_each_binder<'a>(
         &'a self,
         or_mode: OrAlternatives,
@@ -829,9 +816,6 @@ mod tests {
         }
     }
 
-    // `Statement::span` delegates to each statement kind, including the
-    // tuple-destructuring and typed-discard forms. Parse a program containing
-    // every statement shape and assert each reports a well-formed span.
     #[test]
     fn statement_span_covers_all_kinds() {
         let src = "import al/array\n\
@@ -874,9 +858,6 @@ mod tests {
         assert!(saw_typed_discard, "no typed-discard statement parsed");
     }
 
-    // `CallArg::span` delegates to the inner expression for positional/spread
-    // args and stretches from the label start to the value end for labeled args.
-    // Each branch also drives `Expression::span` on the `ErrorNode` payload.
     #[test]
     fn call_arg_and_error_node_spans() {
         let err = |s| {
@@ -886,11 +867,9 @@ mod tests {
             })
         };
 
-        // Expression::span on an ErrorNode is its own span.
         let enode = span(0, 0, 0, 3);
         assert_eq!(err(enode).span(), enode);
 
-        // Positional / Spread args delegate to the inner expression.
         assert_eq!(
             CallArg::Positional(err(span(1, 0, 1, 4))).span(),
             span(1, 0, 1, 4)
@@ -900,7 +879,7 @@ mod tests {
             span(2, 1, 2, 7)
         );
 
-        // Labeled spans from the label's start to the value's end.
+        // A labeled arg spans from the label's start to the value's end.
         let labeled = CallArg::Labeled {
             label: Identifier {
                 name: "k".to_string(),

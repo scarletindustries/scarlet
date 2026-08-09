@@ -1,51 +1,23 @@
 //! The compiled program: the instruction set, its 8-byte encoding, and the
-//! [`Program`] container the VM executes.
+//! [`Program`] container the VM executes. This is the whole contract between
+//! a front-end compiler (AL's lives in `al_core`) and the VM.
 //!
-//! This module is the contract between any front-end compiler (AL's lives in
-//! `al_core`) and the VM in this crate: everything needed to describe and
-//! ship a runnable program lives under `bytecode/`. The VM consumes these
-//! types; it never sees a front-end's AST — this crate cannot even name one.
+//! Three facts the rest of the crate leans on:
 //!
-//! # The three load-bearing facts
-//!
-//! 1. **An [`Instruction`] is one aligned 8-byte word** (1B op + 1B `a` +
-//!    2B `b` + 4B operand, `repr(C)`), so the dispatch loop's fetch is a
-//!    single load via [`fetch`]. `a`/`b` reclaim padding bytes for
-//!    superinstructions that need a second and third operand.
-//! 2. **[`Program::constants`] point into [`Program::frozen`]**, the
-//!    `Arc`-held program-wide frozen area. Constants are therefore stable
-//!    raw pointers for the program's whole life, readable from every
+//! 1. An [`Instruction`] is one aligned 8-byte word, so the dispatch loop's
+//!    fetch is a single load via [`fetch`]. `a`/`b` reclaim padding bytes for
+//!    superinstructions needing a second and third operand.
+//! 2. [`Program::constants`] point into [`Program::frozen`], so they are
+//!    stable raw pointers for the program's whole life, readable from every
 //!    scheduler thread, and skipped by every per-process GC.
-//! 3. **`Program` is `Send + Sync`** (asserted below): constants are frozen
-//!    or immediate words and function names are `Arc<str>`s, so a worker
-//!    scheduler thread takes a plain `clone()` of the shared program — no
-//!    owned mirror, no per-thread constant re-hydration.
+//! 3. `Program` is `Send + Sync` (asserted below), so a worker scheduler
+//!    thread takes a plain `clone()` of the shared program.
 //!
-//! Adding an opcode touches five places: (1) [`Op::has_jump_target`]'s
-//! exhaustive match (compile-enforced — a new opcode does not build until its
-//! operand is classified), (2) [`Op::pushes_extra`]'s exhaustive match
-//! (likewise compile-enforced — its stack effect must be classified before
-//! `al_core`'s `core_ir::emit` may hoist or fuse around it), (3) emission in
-//! `al_core`'s compiler, (4) dispatch in the VM's interpreter loop
-//! ([`crate::vm::exec`]), and (5) `al_core::bytecode::builtin_op` name
-//! registration if it is exposed as a `@vm` intrinsic. Heap values the op
-//! builds are reference counted, so it simply allocates its result.
-//!
-//! # Reading order
-//!
-//! | file                | the one thing it does                          |
-//! |---------------------|------------------------------------------------|
-//! | this file           | [`Op`], [`Instruction`], [`Function`],         |
-//! |                     | [`Program`]                                    |
-//! | [`value`]           | the NaN-boxed [`Value`] word, heap object      |
-//! |                     | layouts, the [`Arena`] trait                   |
-//! | [`seq`]             | the persistent RRB vector backing `Array`      |
-//! | [`hamt`]            | the persistent HAMT backing `Map`              |
-//! | [`bits`]            | MSB-first bit-granular primitives over `[u8]`, |
-//! |                     | the single definition of bit addressing        |
-//! | [`native`]          | the compiled-entry table the JIT publishes     |
-//! | `scratch`           | stack-resident `Buf<N>` for assembling         |
-//! |                     | replacement node images                        |
+//! Adding an opcode touches five places: [`Op::has_jump_target`] and
+//! [`Op::pushes_extra`] (both exhaustive, so they fail to compile until you
+//! classify the new op), emission in `al_core`'s compiler, dispatch in
+//! [`crate::vm::exec`], and `al_core::bytecode::builtin_op` if it is exposed
+//! as a `@vm` intrinsic.
 
 pub mod bits;
 pub mod hamt;
@@ -84,9 +56,8 @@ pub enum Op {
     Mod,
     Neg,
 
-    // Typed arithmetic — emitted by `compile_binary` when the operand `Ty`
-    // resolves to a concrete prim post-unification. The generic ops above
-    // remain as the polymorphic fallback.
+    // Typed arithmetic, emitted when the operand type resolves to a concrete
+    // prim. The generic ops above are the polymorphic fallback.
     AddInt,
     SubInt,
     MulInt,
@@ -128,20 +99,19 @@ pub enum Op {
     JumpIfFalse,
     Call,
     TailCall,
-    /// Self-recursive call: `func_idx` is read from the live frame, skipping
-    /// the `PushSelf; pop; match Closure` dance. operand = argc.
+    /// Self-recursive call: `func_idx` comes from the live frame. operand = argc.
     CallSelf,
     TailCallSelf,
-    /// Known-target call: callee is a top-level fn (`capture_count == 0`) whose
+    /// Known-target call: the callee is a capture-free top-level fn whose
     /// `func_idx` is a compile-time immediate, so the callee value is never
-    /// pushed and the pop / closure tag check / heap `func_idx()` read / arity
-    /// check that `Call` pays are all elided. b = argc, operand = func_idx.
+    /// pushed and `Call`'s tag/arity checks are elided. b = argc,
+    /// operand = func_idx.
     CallKnown,
     TailCallKnown,
     Ret,
 
-    // Superinstructions — fused hot sequences from the peephole pass. Packed
-    // operands live in `Instruction.{a,b}`; jump targets stay in `operand`.
+    // Superinstructions fused by the peephole pass. Packed operands live in
+    // `Instruction.{a,b}`; jump targets stay in `operand`.
     /// `stack[base+a] - constants[b]` → push. (PushLocal;PushConst;SubInt)
     SubIntLC,
     /// `stack[base+a] + constants[b]` → push. (PushLocal;PushConst;AddInt)
@@ -157,97 +127,71 @@ pub enum Op {
 
     // Data structures
     MakeArray,
-    /// `[e0, .., e_{n-1}] -> tuple`. `operand` = n.
-    ///
-    /// No reuse variant: `lower` pairs `Drop`/`Reuse` tokens only for
-    /// user-declared constructors, so a tuple never receives one.
+    /// `[e0, .., e_{n-1}] -> tuple`. `operand` = n. No reuse variant: `lower`
+    /// pairs `Drop`/`Reuse` tokens only for user-declared constructors.
     MakeTuple,
     TupleIndex,
     MakeRange,
     Index,
-    /// `[arr, idx, default] -> elem|default` — `arr[idx] or default` where the
-    /// default is a pure atom (a constant or a local read), so evaluating it
-    /// eagerly is free and observationally identical.
-    ///
-    /// Exists because `Index` must build a `Some` box to honour its `Option`
-    /// return, which an immediately-following `or` then destructures and
-    /// throws away: one heap cell per index, measured. A lazier jumping form
-    /// would also cover `or { <expression> }`, at the cost of an `ip` rewrite
-    /// in the middle of an opcode; `lower` simply declines to fuse those.
+    /// `[arr, idx, default] -> elem|default`. Skips the `Some` box `Index`
+    /// must build and an immediately-following `or` then throws away. Only
+    /// fused when the default is a pure atom, so eager evaluation is free;
+    /// `or { <expression> }` is left alone.
     IndexOr,
-    /// `[arr] -> arr[operand]` — unchecked element fetch, index as an
-    /// immediate operand, no `Option` wrapper. Emitted by array-destructuring
-    /// patterns *after* a length check has proven the index in-bounds, so it
-    /// skips the `Some(_)` box/unbox round-trip that `Index; UnwrapEnum` pays
-    /// per element on every stdlib list traversal.
+    /// `[arr] -> arr[operand]` — unchecked fetch, no `Option` wrapper.
+    /// Emitted by array-destructuring patterns only after a length check has
+    /// proven the index in bounds.
     ElemAt,
     ArrayLen,
     ArraySlice,
     ArrayConcat,
     /// `[e0, .., e_{k-1}, ..seq]` — prepend k stack elements onto `seq`
-    /// (`Instruction.operand` = k). Sublinear front-cons; the producer half
-    /// of the old O(n²).
+    /// (`operand` = k). Sublinear front-cons.
     Prepend,
-    /// `[seq, n] -> seq[n..]` — structure-shared tail. The consumer half of
-    /// the old O(n²); replaces `ArraySlice` in `[h, ..rest]` patterns.
+    /// `[seq, n] -> seq[n..]` — structure-shared tail. Replaces `ArraySlice`
+    /// in `[h, ..rest]` patterns.
     SeqDrop,
-    /// `[seq, e] -> seq` with `e` pushed on the back. Totality for
-    /// `[..spread, x]`; no stdlib use today.
+    /// `[seq, e] -> seq` with `e` pushed on the back. No stdlib use today.
     Append,
     GetField,
-    /// `[enum] -> payload[operand]` — as `GetField` but elides the `as_enum()`
-    /// tag check and payload bounds check. Emitted when the scrutinee's type
-    /// is a resolved `Con` and the field index is compiler-computed.
+    /// `[enum] -> payload[operand]` — as `GetField` but without the tag and
+    /// bounds checks. Emitted when the scrutinee type is a resolved `Con`.
     GetFieldUnchecked,
 
     // Tagged values (enums / custom types)
     /// `[type_id, enum_name, variant_name, labels, p0, .., p_{b-1}, reuse?] ->
     /// enum`. `b` = payload arity, `operand` = prehash constant idx. `a` = 1
-    /// when a Perceus reuse token sits on top of the payloads (see
-    /// `MakeTuple`); `a` = 0 is the ordinary alloc path.
+    /// when a Perceus reuse token sits on top of the payloads.
     MakeEnumPayload,
     MatchEnum,
     UnwrapEnum,
     /// `[enum] -> ` — computed jump by variant index. `a` = variant count,
-    /// `operand` = base of a contiguous jump table (`a` consecutive `Jump`
-    /// instructions, one per variant). Emitted for an exhaustive match whose
-    /// scrutinee type is a fully resolved enum, replacing the per-arm
-    /// `Dup; PushConst; MatchEnum; JumpIfFalse` ladder with one indexed jump.
+    /// `operand` = base of a contiguous table of `a` `Jump` instructions, one
+    /// per variant. Emitted for an exhaustive match on a resolved enum.
     SwitchTag,
 
     // Closures
     /// `[cap0, .., cap_{cc-1}, reuse?] -> closure`. `operand` = func_idx.
-    /// `a` = 1 when a Perceus reuse token sits on top of the captures (see
-    /// `MakeTuple`); `a` = 0 is the ordinary alloc path.
+    /// `a` = 1 when a Perceus reuse token sits on top of the captures.
     MakeClosure,
     PushCapture,
     PushSelf,
 
-    // Perceus drop-guided reuse (frame-limited, ICFP'22). The compiler emits
-    // `Drop slot` at a heap value's last use and, when a same-shape constructor
-    // dominates in the same frame, `Reuse slot` before that constructor's
-    // alloc so the dying cell is overwritten in place instead of alloc+free.
-    /// `[]` — operand = local slot. Last use of `stack[base+slot]` in this
-    /// frame: release the frame's reference. If the value is uniquely owned
-    /// (rc==1), do NOT free — the cell stays in the slot as a reusable
-    /// allocation for a following same-shape `Reuse` (the slot itself is the
-    /// per-frame reuse table). If shared or non-heap, the reference is
-    /// dropped normally and the slot is cleared. Push nothing.
+    // Perceus drop-guided reuse (frame-limited, ICFP'22). `core_ir::perceus`
+    // is authoritative.
+    /// `[]` — operand = local slot. Last use of `stack[base+slot]`: release
+    /// the frame's reference. If the value is uniquely owned (rc==1) the cell
+    /// stays in the slot for a following same-shape `Reuse` instead of being
+    /// freed; the slot is the per-frame reuse table. Pushes nothing.
     Drop,
-    /// `[] -> cell|nil` — operand = local slot. If the preceding `Drop` held a
-    /// reusable cell (rc==1) in the slot, push it (ownership transfers) for
-    /// the following `MakeEnumPayload` to overwrite in place; otherwise push
-    /// nil and the constructor allocates fresh. `MakeEnumPayload` is the only
-    /// consumer: `lower` pairs tokens for user-declared constructors, never
-    /// for tuples or closures.
+    /// `[] -> cell|nil` — operand = local slot. Pushes the cell a preceding
+    /// `Drop` parked there, or nil so the constructor allocates fresh.
+    /// `MakeEnumPayload` is the only consumer.
     ///
-    /// A token DOES survive an intervening `Call`. "Frame-limited" (Lorenzen &
-    /// Leijen, ICFP'22) means the *callee* never sees the parked cell — it
-    /// lives in this frame's slot — not that a call clears the token. The
-    /// canonical `map xs f = match xs { Cons(h, t) -> Cons(f h, map t f) }`
-    /// reuses `xs`'s cell across both `f h` and `map t f`; clearing at calls
-    /// would silently delete every reuse in the language. See
-    /// `core_ir::perceus`'s module docs, which are authoritative.
+    /// A token survives an intervening `Call`. "Frame-limited" means the
+    /// callee never sees the parked cell, not that a call clears the token —
+    /// clearing at calls would delete every reuse in
+    /// `map xs f = match xs { Cons(h, t) -> Cons(f h, map t f) }`.
     Reuse,
 
     // String operations
@@ -267,25 +211,20 @@ pub enum Op {
     BinSlice,
     BinAppend,
     /// `[b1, .., bn] -> Binary` — N-ary concatenation (operand = n). Emitted
-    /// for multi-segment `<<>>` literals so an n-segment build copies each
-    /// byte once into a single backing, instead of a `BinAppend` chain that
-    /// re-copies the accumulated prefix per segment (O(n*B)) and discards
-    /// n-1 intermediate boxes. The binary mirror of `StrConcatN`.
+    /// for multi-segment `<<>>` literals; a `BinAppend` chain would re-copy
+    /// the accumulated prefix per segment. The binary mirror of `StrConcatN`.
     BinConcatN,
     BinFromInt,
     BinReadInt,
     BinTake,
     BinReadUtf8,
-    /// `[bin, at_bits, prefix] -> Bool` — whether `bin`'s logical bits starting
-    /// at `at_bits` begin with `prefix`'s logical bits. Out-of-range is `false`,
-    /// never an error. Emitted by `<<>>` pattern codegen for literal segments
-    /// (string literals and coalesced integer-literal runs): one bounds check +
-    /// one byte compare instead of per-byte read/compare ops.
+    /// `[bin, at_bits, prefix] -> Bool` — whether `bin`'s logical bits from
+    /// `at_bits` begin with `prefix`'s. Out-of-range is `false`, never an
+    /// error. Emitted by `<<>>` pattern codegen for literal segments.
     BinMatchPrefix,
-    /// `[bin, at_bits, len_bits] -> Binary` — O(1) sub-view sharing the backing,
-    /// no `Option` wrapper. Emitted by `<<>>` pattern codegen after its own
-    /// bounds check has proven the range valid; `BinSlice` (checked, `Option`)
-    /// remains the public builtin.
+    /// `[bin, at_bits, len_bits] -> Binary` — O(1) sub-view sharing the
+    /// backing, no `Option` wrapper. Emitted by `<<>>` pattern codegen after
+    /// its own bounds check; `BinSlice` is the checked public builtin.
     BinView,
     /// `[haystack, needle, from] -> Option(Int)` — byte-substring search.
     BinIndexOf,

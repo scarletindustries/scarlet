@@ -1,92 +1,67 @@
 //! NaN-boxed runtime value over per-process arena heaps.
 //!
-//! `Value` is an 8-byte word. A regular IEEE-754 `f64` whose bit pattern is
-//! not a quiet-NaN is stored verbatim — `Value::float` clamps every non-finite
-//! input to `0.0`, so a real NaN never enters the box and the entire qNaN
-//! space is free for tagging. Tagged values set the qNaN bits and use the top
-//! 16 bits as a discriminant header; the low 48 bits carry the payload: a
-//! sign-extended small integer, a bool, a socket id, or a **raw pointer into
-//! an arena** (a process heap or the frozen area — user-space pointers fit in
-//! 48 bits on every supported platform). Integers outside the 48-bit signed
-//! range spill to an arena `BigInt` box so the full `i64` domain is preserved.
-//!
-//! There is no `Rc` anywhere in the representation: `Clone`/`Copy`/`Drop` are
-//! plain word copies. Reclamation belongs to the
-//! owning process's copying GC, never to the values themselves.
+//! `Value` is an 8-byte word. A non-quiet-NaN bit pattern is a plain `f64`;
+//! `Value::float` clamps every non-finite input to `0.0`, so a real NaN never
+//! enters the box and the whole qNaN space is free for tagging. A tagged value
+//! sets the qNaN bits, discriminates on the top 16 bits, and carries a
+//! sign-extended small int, a bool, a socket id, or a raw arena pointer in the
+//! low 48 bits. Integers outside that range spill to an arena `BigInt`.
 //!
 //! # Arena object layout
 //!
-//! Every heap-backed value is reference counted: a mortal object is laid out
-//! `[rc word][header word][payload words…]`, and the `Value`'s pointer targets
-//! the *header*, so every header-relative offset is layout-stable. The refcount
-//! sits one word before the header ([`rc_slot`]); `Clone` increments it and
-//! `Drop` frees the object at zero. Frozen (immortal) objects carry **no** rc
-//! prefix — reference counting never touches them.
+//! A mortal object is `[rc word][header word][payload words…]` and a `Value`
+//! points at the *header*, so every header-relative offset is layout-stable.
+//! Frozen (immortal) objects have no rc word.
 //!
-//! The header packs (low bit first):
+//! Header bits, low first:
 //!
 //! ```text
-//! bit 0      header marker: always 1 on a live header (object addresses are
-//!            8-byte aligned, so a stray read of a freed/zeroed slot — bit 0
-//!            clear — is caught by the accessors' debug guard)
-//! bits 1-5   HeapTag (object type)
-//! bit 6      off-heap bit: the payload owns an `Arc<[u8]>` backing (Binary),
-//!            released when the object is freed
-//! bit 7      immortal: the object lives in the frozen area and is never
-//!            reference counted or freed (set at frozen-allocation time)
+//! bit 0      header marker, always 1 (objects are 8-byte aligned, so a read
+//!            of a freed or zeroed slot trips the accessors' debug guard)
+//! bits 1-5   HeapTag
+//! bit 6      off-heap: the payload owns an `Arc<[u8]>` backing (Binary)
+//! bit 7      immortal: lives in the frozen area, never reference counted
 //! bits 8-63  payload length in words
 //! ```
 //!
-//! Payload layouts (word indices within the payload):
+//! Payload layouts:
 //!
 //! - `BigInt`:    `[i64]`
 //! - `Range`:     `[start][end]`
 //! - `Str`:       `[byte_len][UTF-8 bytes inline, zero-padded to a word]`
 //! - `Binary`:    `[arc_data_ptr][arc_len][bit_offset][bit_len]` — the bytes
-//!   stay off-heap in an `Arc<[u8]>` shared zero-copy across
-//!   views/spawn/migration; the box's `Drop` releases the `Arc`
+//!   stay off-heap in an `Arc<[u8]>` shared across views/spawn/migration
 //! - `Tuple`:     `[count][elements…]`
 //! - `Enum`:      `[type_id | variant_idx<<32][hash][enum_name][variant_name][labels][count][payload…]`
-//!   — names/labels are `Str`/`Tuple` values, normally in the frozen area
 //! - `Closure`:   `[func_idx][count][captures…]` — no name; printers resolve
-//!   it through `program.functions[func_idx]` at inspect time
+//!   it through `program.functions[func_idx]`
 //! - `Seq`:       `[len][shift][head][tree][tail]` — persistent-vector root
-//! - `SeqLeaf`:   `[count][elements…]` — vector leaf, 1..=32 elements
+//! - `SeqLeaf`:   `[count][elements…]`, 1..=32 elements
 //! - `SeqBranch`: `[count][shift][cumulative sizes × count][children × count]`
 //!
 //! # Reference counting
 //!
-//! `Value` is **not `Copy`**: cloning a heap value increments its count,
-//! dropping it decrements and frees at zero. Freeing walks an explicit work
-//! list (never native `Drop` recursion, so a deep list cannot overflow the
-//! stack). The graph is acyclic by construction (immutable values, capture by
-//! value, frame-based self-reference), so reference counting is complete with
-//! no cycle collector. Allocation ([`Arena::alloc_words`]) is infallible and
-//! non-moving, so a `Value` in a Rust local is never invalidated by a later
-//! allocation.
+//! `Value` is not `Copy`: cloning a heap value increments its count, dropping
+//! decrements and frees at zero. Freeing walks an explicit work list, so a
+//! deep list cannot overflow the native stack. The graph is acyclic by
+//! construction (immutable values, capture by value, frame-based
+//! self-reference), so there is no cycle collector. [`Arena::alloc_words`] is
+//! infallible and non-moving, so a `Value` in a Rust local is never
+//! invalidated by a later allocation.
 //!
-//! All `unsafe` in the value representation is confined to this file: header
-//! and payload reads/writes behind typed accessors, and the `Arc<[u8]>`
-//! pack/unpack for binary backings. The only escape hatches are a handful of
-//! `pub(crate) unsafe fn`s that hand layout knowledge to `heap::proc_heap` — they
-//! never leave the crate:
+//! All `unsafe` in the value representation is confined to this file behind
+//! typed accessors. The escape hatches for `heap::proc_heap` are:
 //!
 //! - `for_each_child_slot`: the one layout table for object tracing. Its
-//!   `&mut` face `for_each_child` (free-at-zero work list, spawn/freeze graph
-//!   copies — `rc_copy_graph`/`rc_publish_graph`) demands exclusive ownership
-//!   of the object; the safe shared face [`Value::for_each_child_ref`] does
-//!   not, and is the only one that may walk immortal objects.
-//! - `binary_clone_backing` / `binary_drop_backing`: the `Binary` backing
-//!   `Arc`'s ownership — bumped when a binary is copied into a child/frozen
-//!   graph, released when the box is freed.
+//!   `&mut` face `for_each_child` demands exclusive ownership of the object;
+//!   the shared face [`Value::for_each_child_ref`] does not, and is the only
+//!   one that may walk immortal objects.
+//! - `binary_clone_backing` / `binary_drop_backing`: ownership of a `Binary`
+//!   backing `Arc`.
 //!
-//! The `seq` persistent-vector module is fully safe code: it reads nodes
-//! through the typed [`SeqRootRef`] / [`SeqNodeRef`] views and allocates them
-//! through the `seq_root_in` / `seq_leaf_in` / `seq_branch_in` builders
-//! defined here.
+//! The `seq` and `hamt` modules stay fully safe by going through the typed
+//! views and builders defined here.
 
-// Designated unsafe module: NaN-box encoding and raw heap object layout
-// (header/payload reads and writes) live here behind typed safe accessors.
 #![allow(unsafe_code)]
 
 use std::borrow::Cow;
@@ -107,37 +82,30 @@ use super::bits::{copy_bits, get_bit, read_byte, tail_mask};
 pub use super::seq;
 pub use super::seq::SeqIter;
 
-/// Quiet-NaN signature: exponent all-ones, top mantissa bit set. Any word with
-/// these bits set is a tagged value, never a real float.
+/// Quiet-NaN signature. A word carrying it is a tagged value, never a float.
 const QNAN: u64 = 0x7FF8_0000_0000_0000;
 const SIGN: u64 = 0x8000_0000_0000_0000;
 /// Low 48 bits: small-int value, bool, socket id, or heap pointer.
 const PAYLOAD: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-/// Top-16-bit headers for non-float values. All include `QNAN` so the
-/// is-float check is a single mask-and-compare.
+/// Top-16-bit headers for non-float values, all including `QNAN`.
 const HDR_MASK: u64 = 0xFFFF_0000_0000_0000;
 const HDR_INT: u64 = QNAN | 0x0001_0000_0000_0000;
 const HDR_BOOL: u64 = QNAN | 0x0002_0000_0000_0000;
 const HDR_NIL: u64 = QNAN | 0x0003_0000_0000_0000;
 const HDR_SOCKET: u64 = QNAN | 0x0004_0000_0000_0000;
-/// Heap pointer uses the sign bit so `(bits & (SIGN|QNAN)) == (SIGN|QNAN)`
-/// is the heap test — disjoint from the sign-clear immediate headers above.
+/// The sign bit makes `(bits & (SIGN|QNAN)) == (SIGN|QNAN)` the heap test,
+/// disjoint from the sign-clear immediate headers above.
 const HDR_PTR: u64 = SIGN | QNAN;
 
-/// Immortality marker carried in a heap `Value` word itself (bit 0 of the
-/// payload). Arena objects are 8-byte aligned, so a real header pointer has its
-/// low 3 bits clear — bit 0 is free to mark "this value points into the frozen
-/// area" *without dereferencing the object*. This is what makes `Clone`/`Drop`
-/// on a frozen value pure bit math: reference counting never reads frozen
-/// memory, so a frozen value may be dropped in any order relative to the frozen
-/// area itself (no drop-order constraint). The marker is set once by
-/// [`Value::from_object_ptr`] from the object's header bit and then rides along
-/// wherever the word is copied — stack slots, object payloads, globals.
+/// Immortality marker in the `Value` word itself: bit 0 of the payload, free
+/// because arena objects are 8-byte aligned. Reference counting can therefore
+/// skip frozen values without reading frozen memory, so there is no drop-order
+/// constraint against the frozen area. [`Value::from_object_ptr`] sets it once
+/// from the object's header bit; it then rides along with the word.
 const VALUE_IMMORTAL: u64 = 1;
-/// Payload mask for *heap pointers*: the 48-bit payload with the immortality
-/// marker bit cleared, recovering the aligned object address. (Immediate
-/// payloads — ints/bools/sockets — use [`PAYLOAD`]; only pointers are masked.)
+/// Payload mask for heap pointers only: [`PAYLOAD`] minus the immortality
+/// marker, recovering the aligned object address.
 const PTR_PAYLOAD: u64 = PAYLOAD & !VALUE_IMMORTAL;
 
 /// Inclusive bounds of the 48-bit signed small-int range.
@@ -156,8 +124,6 @@ fn decode_socket(bits: u64) -> SocketValue {
     }
 }
 
-// ---- object headers ---------------------------------------------------------
-
 /// Object type stored in the arena header word (bits 1-5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -175,46 +141,33 @@ pub enum HeapTag {
     SeqLeaf = 8,
     /// Vector branch node — interior to a `Seq`, never observed via `kind()`.
     SeqBranch = 9,
-    /// A `Map(k, v)` value. The first payload word is a [`MapBacking`]
-    /// discriminant; the remaining layout is backing-specific. The `Env`
-    /// backing carries no further words and holds no `Value` children — it is
-    /// a zero-copy live view of the host process environment. The `Hamt`
-    /// backing carries `[backing, size, root]`, the root being the trie of
-    /// the nodes below.
+    /// A `Map(k, v)`. Payload word 0 is a [`MapBacking`] discriminant; the
+    /// rest of the layout is backing-specific.
     Map = 10,
-    /// HAMT branch node — `[bitmap, child…]`, one child per set bit of the
-    /// 32-wide `bitmap`. Each child is a pointer to another `HamtBranch`, a
-    /// `HamtEntry`, or a `HamtCollision`. Interior to a `Map`; never observed
-    /// via `kind()`. (See [`super::hamt`].)
+    /// HAMT branch — `[bitmap, child…]`, one child per set bit. Interior to a
+    /// `Map`, never observed via `kind()`. See [`super::hamt`].
     HamtBranch = 11,
-    /// HAMT leaf — `[key, value]`, a single key/value pair. Interior to a
-    /// `Map`; never observed via `kind()`.
+    /// HAMT leaf — `[key, value]`. Interior to a `Map`.
     HamtEntry = 12,
-    /// HAMT collision bucket — `[hash, count, key, value, …]` for the rare set
-    /// of distinct keys sharing one 64-bit hash. Interior to a `Map`; never
-    /// observed via `kind()`.
+    /// HAMT collision bucket — `[hash, count, key, value, …]` for distinct
+    /// keys sharing one 64-bit hash. Interior to a `Map`.
     HamtCollision = 13,
 }
 
-/// How a [`HeapTag::Map`] sources its entries. Stored as the map object's
-/// first payload word. The set is open: further backings (an overlay over the
-/// environment, …) get new discriminants without changing the value's
-/// observable type, which stays `Map(k, v)`.
+/// How a [`HeapTag::Map`] sources its entries. The set is open: a new backing
+/// gets a new discriminant, and the observable type stays `Map(k, v)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u64)]
 pub enum MapBacking {
-    /// Zero-copy live view of the host process environment, typed
-    /// `Map(String, String)`. Reads go straight to `std::env`; nothing is
-    /// materialized and the object holds no `Value` words.
+    /// Live view of the host process environment, typed `Map(String, String)`.
+    /// Reads go straight to `std::env`; the object holds no `Value` words.
     Env = 0,
-    /// An in-memory persistent hash array mapped trie (see [`super::hamt`]).
-    /// The map object carries `[backing, size, root]`; updates path-copy the
-    /// trie and share every untouched subtree with the prior version.
+    /// A persistent hash array mapped trie ([`super::hamt`]). The map object
+    /// carries `[backing, size, root]`.
     Hamt = 1,
 }
 
-/// Decode a [`MapBacking`] discriminant word. Aborts on a corrupt heap (an
-/// unknown discriminant), which correct construction never produces.
+/// Decode a [`MapBacking`] discriminant word. Aborts on an unknown one.
 fn map_backing(word: u64) -> MapBacking {
     match word {
         0 => MapBacking::Env,
@@ -227,9 +180,8 @@ const HEADER_BIT: u64 = 1;
 const HEADER_TAG_SHIFT: u32 = 1;
 const HEADER_TAG_MASK: u64 = 0x1F << HEADER_TAG_SHIFT;
 const HEADER_OFF_HEAP_BIT: u64 = 1 << 6;
-/// Immortal (frozen) marker: the object lives in the frozen area, so reference
-/// counting must never increment, decrement, or free it. Set once at frozen
-/// allocation time (`alloc_obj` via [`Arena::marks_immortal`]).
+/// Immortal (frozen): reference counting must never touch this object. Set at
+/// allocation time via [`Arena::marks_immortal`].
 const HEADER_IMMORTAL_BIT: u64 = 1 << 7;
 const HEADER_LEN_SHIFT: u32 = 8;
 
@@ -242,9 +194,8 @@ fn pack_header(tag: HeapTag, payload_words: usize, off_heap: bool) -> u64 {
         | ((payload_words as u64) << HEADER_LEN_SHIFT)
 }
 
-/// Whether a word is a live object header: every header sets bit 0
-/// ([`HEADER_BIT`]). A debug guard for the header-decoding accessors below —
-/// reading a freed or uninitialized slot (bit 0 clear) trips it.
+/// Whether a word is a live object header. A debug guard: reading a freed or
+/// uninitialized slot trips it.
 #[inline]
 fn header_marks_object(word: u64) -> bool {
     word & HEADER_BIT != 0
@@ -292,16 +243,15 @@ pub(crate) fn header_has_off_heap_link(word: u64) -> bool {
     word & HEADER_OFF_HEAP_BIT != 0
 }
 
-/// Whether the object is immortal (frozen): reference counting must never
-/// touch it. See [`HEADER_IMMORTAL_BIT`].
+/// Whether the object is immortal. See [`HEADER_IMMORTAL_BIT`].
 #[inline]
 fn header_is_immortal(word: u64) -> bool {
     debug_assert!(header_marks_object(word));
     word & HEADER_IMMORTAL_BIT != 0
 }
 
-/// Mark an object's header immortal. Used when publishing a copy of a mortal
-/// graph into the frozen area: the copy must never be reference counted.
+/// Mark an object's header immortal, for a mortal graph copied into the
+/// frozen area.
 ///
 /// # Safety
 /// `obj` must point at a live, non-forwarded object header.
@@ -310,22 +260,15 @@ pub(crate) unsafe fn mark_immortal(obj: *mut u64) {
     unsafe { *obj |= HEADER_IMMORTAL_BIT };
 }
 
-// ---- arenas ------------------------------------------------------------------
-
 /// Allocation interface the value constructors build through: a process heap
-/// (VM paths) or the frozen builder (compile-time constants, globals publish).
-///
-/// `alloc_words` is infallible by contract: the frozen area grows on demand and
-/// a process heap allocates from mimalloc (which aborts internally on OOM).
-/// Allocation never moves existing objects.
+/// or the frozen builder. `alloc_words` is infallible by contract and never
+/// moves existing objects.
 pub trait Arena {
-    /// Allocate `words` words (header + payload) of arena storage, 8-byte
-    /// aligned, stable for the object's lifetime.
+    /// Allocate `words` words (header + payload), 8-byte aligned, at an
+    /// address stable for the object's lifetime.
     fn alloc_words(&mut self, words: usize) -> NonNull<u64>;
 
-    /// Whether objects allocated through this arena are immortal: born with
-    /// the header immortal bit set so reference counting never touches them.
-    /// Process heaps return `false`; the frozen builder overrides to `true`.
+    /// Whether objects from this arena are born immortal.
     fn marks_immortal(&self) -> bool {
         false
     }
@@ -351,8 +294,7 @@ impl Arena for FrozenBuilder {
     }
 }
 
-/// Allocate an object and write its header; payload writes follow at the
-/// returned pointer + 1.
+/// Allocate an object and write its header; the payload starts one word on.
 #[inline]
 fn alloc_obj<A: Arena + ?Sized>(
     a: &mut A,
@@ -370,18 +312,13 @@ fn alloc_obj<A: Arena + ?Sized>(
     obj
 }
 
-/// A Perceus reuse address: a uniquely-owned mortal cell (rc==1) whose
-/// allocation a following constructor will overwrite in place, or `None` for
-/// the fresh-allocate fallback. Opaque so the only way to obtain a `Some` is
-/// [`Value::into_reuse_addr`], which upholds the pointer/rc invariant — the
-/// `*_reuse_in` constructors are therefore safe to call from the
-/// `#![deny(unsafe_code)]` VM crate.
+/// A Perceus reuse address: a uniquely-owned mortal cell (rc==1) a following
+/// constructor will overwrite in place, or `None` to allocate fresh. Opaque,
+/// so only [`Value::into_reuse_addr`] can mint a `Some` — which is what makes
+/// the `*_reuse_in` constructors safe to call from safe code.
 ///
-/// Owns the cell's rc==1 count while held: `Drop` frees the cell, so a token
-/// that never reaches a constructor (e.g. a VM handler erroring out between
-/// popping the token and building) releases its allocation instead of leaking
-/// it. The hot path pays nothing — [`reuse_or_alloc`] consumes the address
-/// via `take`, so a consumed token drops as `None`.
+/// Holds the cell's rc==1 count, and `Drop` frees it, so a token that never
+/// reaches a constructor releases its allocation instead of leaking.
 #[derive(Debug)]
 pub struct ReuseAddr(Option<NonNull<u64>>);
 
@@ -396,11 +333,9 @@ impl ReuseAddr {
 impl Drop for ReuseAddr {
     fn drop(&mut self) {
         if let Some(p) = self.0.take() {
-            // SAFETY: a `Some` address is only produced by `into_reuse_addr`
-            // from a live, uniquely-owned (rc==1) mortal cell that
-            // `hollow_for_reuse` already stripped of children, so freeing the
-            // object is the whole release (`free_object` walks no child
-            // slots, and does drop a Binary's off-heap backing).
+            // SAFETY: a `Some` address names a live rc==1 cell that
+            // `hollow_for_reuse` already stripped of children, so the free is
+            // the whole release.
             unsafe { free_object(p.as_ptr()) };
         }
     }
@@ -408,23 +343,11 @@ impl Drop for ReuseAddr {
 
 /// Allocate a fresh object, or — Perceus reuse — overwrite `reuse` in place.
 ///
-/// A reused cell is a mortal allocation the compiler paired with this
-/// constructor: `Op::Reuse` transferred the frame's uniquely-owned (rc==1)
-/// value onto the operand stack, and the VM handler consumed it via
-/// [`Value::into_reuse_addr`], which forwarded the cell's address here with
-/// its refcount still 1. This writes the new header and leaves rc at 1 (the
-/// constructing handle inherits the count), so the caller writes payload
-/// exactly as it would for a fresh `alloc_obj`.
-///
-/// The cell's old children need no release here: the only producer of a
-/// `Some` address is `Op::Drop` → [`Value::hollow_for_reuse`], which released
-/// them and overwrote every child slot with an immediate at the drop point.
-/// (That is what makes reuse propagate down a recursive chain at all.) A
-/// second `for_each_child` walk would therefore only re-visit sentinels — pure
-/// cost on the hottest constructor path. Debug builds assert the invariant.
-///
-/// `ReuseAddr::none()` is the fresh-allocation path and is identical to
-/// `alloc_obj(a, tag, payload_words, false)`.
+/// A reused cell arrives at rc==1 and keeps that count, so the caller writes
+/// the payload exactly as for a fresh `alloc_obj`. Its old children need no
+/// release: [`Value::hollow_for_reuse`] already released them and wrote
+/// immediates into every child slot, so a second walk would only visit
+/// sentinels. Debug builds assert that.
 #[inline]
 fn reuse_or_alloc<A: Arena + ?Sized>(
     a: &mut A,
@@ -432,17 +355,12 @@ fn reuse_or_alloc<A: Arena + ?Sized>(
     tag: HeapTag,
     payload_words: usize,
 ) -> NonNull<u64> {
-    // `take` consumes the address so the token's `Drop` (the unconsumed-token
-    // backstop) sees `None` and costs nothing here.
     let Some(obj) = reuse.0.take() else {
         return alloc_obj(a, tag, payload_words, false);
     };
-    // SAFETY: `ReuseAddr(Some(_))` is only produced by `into_reuse_addr` from
-    // a uniquely-owned mortal heap value, so `obj` is a live mortal header at
-    // rc==1. The compiler's frame-limited same-shape pairing guarantees its
-    // allocation is `1 + payload_words` words, and `hollow_for_reuse` already
-    // released its children, so overwriting the header and the payload words
-    // is the whole job.
+    // SAFETY: `obj` is a live mortal header at rc==1 whose children are
+    // already released. Its allocation is `1 + payload_words` words because
+    // the compiler only pairs a reuse with a same-shape constructor.
     unsafe {
         debug_assert!(!a.marks_immortal(), "Perceus reuse into a frozen arena");
         debug_assert_eq!(
@@ -463,12 +381,9 @@ fn reuse_or_alloc<A: Arena + ?Sized>(
     obj
 }
 
-// ---- raw payload helpers -----------------------------------------------------
-
 /// SAFETY for all of these: `obj` must point at a live, non-forwarded arena
-/// object of the expected tag; index arithmetic must stay within the payload
-/// length its header declares. Every caller in this file derives `obj` from a
-/// tag-checked `Value`.
+/// object of the expected tag, and indices must stay within the payload length
+/// its header declares.
 #[inline]
 unsafe fn payload_word(obj: *const u64, i: usize) -> u64 {
     unsafe { *obj.add(1 + i) }
@@ -480,17 +395,15 @@ unsafe fn payload_value(obj: *const u64, i: usize) -> Value {
     unsafe { owned_from_bits(payload_word(obj, i)) }
 }
 
-/// Borrow `n` payload words starting at `at` as a `Value` slice. The lifetime
-/// is unbounded; private callers immediately constrain it to a borrow of the
-/// `Value`/view that produced `obj`.
+/// Borrow `n` payload words at `at` as a `Value` slice. The lifetime is
+/// unbounded; callers constrain it to the `Value` that produced `obj`.
 #[inline]
 unsafe fn payload_values<'a>(obj: *const u64, at: usize, n: usize) -> &'a [Value] {
     // SAFETY: `Value` is `repr(transparent)` over `u64`.
     unsafe { std::slice::from_raw_parts(obj.add(1 + at) as *const Value, n) }
 }
 
-/// The UTF-8 contents of a `Str` object. Unbounded lifetime; see
-/// [`payload_values`].
+/// The UTF-8 contents of a `Str`. Unbounded lifetime, as [`payload_values`].
 #[inline]
 unsafe fn str_contents<'a>(obj: *const u64) -> &'a str {
     unsafe {
@@ -501,22 +414,14 @@ unsafe fn str_contents<'a>(obj: *const u64) -> &'a str {
     }
 }
 
-// ---- seq node views and builders ----------------------------------------------
-//
-// Safe windows over the three `Seq` object layouts so the `seq` module
-// contains no unsafe code. Each view constructor performs one header load,
-// dispatches on the tag, and aborts on a wrong tag even in release builds.
-// The views are sound safe functions under two crate invariants: heap values
-// point at live, non-forwarded arena objects, and the count word of every
-// `SeqLeaf`/`SeqBranch` agrees with its header (count = payload - 1, resp.
-// (payload - 2) / 2) because only the builders below write those words and
-// the GC/freeze engines copy objects verbatim. The latter keeps every slice
-// in bounds without per-access clamping (debug builds assert it).
+// Safe windows over the three `Seq` object layouts, so the `seq` module needs
+// no unsafe code. They are sound because heap values point at live objects and
+// because the count word of every `SeqLeaf`/`SeqBranch` agrees with its header
+// — only the builders below write those words, and the GC copies objects
+// verbatim. That is what keeps the slices in bounds with no per-access clamp.
 
-/// Release-mode backstop for a typed node view applied to the wrong kind of
-/// value, or a header/discriminant decoder hitting a corrupt word. This is a
-/// VM bug (or heap corruption), never a user-program condition; out of line so
-/// the tag dispatch in the hot accessors stays small.
+/// Release-mode backstop for a typed view on the wrong tag, or a decoder
+/// hitting a corrupt word. A VM bug or heap corruption, never user input.
 #[cold]
 #[inline(never)]
 pub(crate) fn view_mismatch(kind: &'static str) -> ! {
@@ -524,13 +429,9 @@ pub(crate) fn view_mismatch(kind: &'static str) -> ! {
     std::process::abort()
 }
 
-/// Debug guard for construction through an immortal arena (the frozen
-/// builder): every child stored into a frozen object must itself be an
-/// immediate or immortal — a mortal process-heap pointer frozen into a
-/// constant would outlive its owning heap, violating the frozen area's
-/// no-process-heap-pointers invariant. Called by the child-storing
-/// constructors when [`Arena::marks_immortal`] is true; a no-op in release
-/// builds.
+/// Every child stored into a frozen object must be an immediate or immortal:
+/// a mortal process-heap pointer frozen into a constant would outlive its
+/// heap. Debug builds only.
 #[cold]
 #[inline(never)]
 fn debug_assert_frozen_children<'a>(children: impl IntoIterator<Item = &'a Value>) {
@@ -577,8 +478,7 @@ impl SeqRootRef {
     }
 }
 
-/// Decoded `SeqLeaf` / `SeqBranch` node. The borrowed slices point into the
-/// arena and are tied to the lifetime of the input `Value` handle.
+/// Decoded `SeqLeaf` / `SeqBranch` node, borrowed from the input `Value`.
 pub(crate) enum SeqNodeRef<'a> {
     Leaf(&'a [Value]),
     Branch {
@@ -599,9 +499,7 @@ impl<'a> SeqNodeRef<'a> {
         let header = unsafe { *obj };
         match header_tag(header) {
             HeapTag::SeqLeaf => {
-                // Payload: [count | elems[count]].
-                // SAFETY: tag checked; the builder-written count word bounds
-                // the slice (see the section comment).
+                // SAFETY: tag checked; the count word bounds the slice.
                 unsafe {
                     let n = payload_word(obj, 0) as usize;
                     debug_assert_eq!(1 + n, header_payload_words(header));
@@ -610,8 +508,7 @@ impl<'a> SeqNodeRef<'a> {
             }
             HeapTag::SeqBranch => {
                 // Payload: [count | shift | sizes[count] | children[count]].
-                // SAFETY: tag checked; the builder-written count word bounds
-                // both slices (see the section comment).
+                // SAFETY: tag checked; the count word bounds both slices.
                 unsafe {
                     let n = payload_word(obj, 0) as usize;
                     debug_assert_eq!(2 + 2 * n, header_payload_words(header));
@@ -676,22 +573,16 @@ pub(crate) fn seq_leaf_in<A: Arena + ?Sized>(a: &mut A, items: &[Value]) -> Valu
 }
 
 /// Element count under a seq node: leaf count, or a branch's last cumulative
-/// size. The branch builder's inner loop — unclamped reads keep it as cheap
-/// as the raw layout walk it replaces. In-bounds without a clamp because the
-/// count word of every `SeqLeaf`/`SeqBranch` is written only by
-/// [`seq_leaf_in`]/[`seq_branch_in`] (count = payload - 1, resp.
-/// (payload - 2) / 2) and the GC copies objects verbatim, so
-/// `payload_word(obj, 1 + n)` never passes the payload end — even for a
-/// degenerate empty node.
+/// size. Reads are unclamped — the builder-written count word keeps them in
+/// bounds even for a degenerate empty node.
 #[inline]
 fn seq_node_total(node: &Value) -> u64 {
     if !node.is_heap() {
         view_mismatch("seq");
     }
     let obj = node.heap_obj();
-    // SAFETY: heap values point at live, non-forwarded arena objects; both
-    // arms read within the payload length the builder-written count word
-    // implies (see above).
+    // SAFETY: live arena object; both arms read within the payload length the
+    // count word implies.
     unsafe {
         let header = *obj;
         match header_tag(header) {
@@ -735,17 +626,12 @@ pub(crate) fn seq_branch_in<A: Arena + ?Sized>(
     }
 }
 
-// ---- HAMT nodes --------------------------------------------------------------
-//
-// The arena layer for [`super::hamt`]'s persistent hash map. Three node tags,
-// all interior to a `Map` (Hamt backing) and never observed via `kind()`:
+// The arena layer for [`super::hamt`]. Three node tags, all interior to a
+// `Map` and never observed via `kind()`:
 //
 // - `HamtEntry`     `[key, value]`
 // - `HamtCollision` `[hash, count, key, value, …]` (count ≥ 2 distinct keys)
 // - `HamtBranch`    `[bitmap, child…]` (one child per set bit of `bitmap`)
-//
-// As with the `seq` nodes, the algorithm module is fully safe: it reads
-// through [`HamtNodeRef`] and allocates through the builders here.
 
 /// Decoded HAMT interior node.
 pub(crate) enum HamtNodeRef<'a> {
@@ -771,8 +657,8 @@ impl<'a> HamtNodeRef<'a> {
             view_mismatch("hamt");
         }
         let obj = node.heap_obj();
-        // SAFETY: heap values point at live, non-forwarded arena objects; each
-        // arm reads within the payload length its builder wrote.
+        // SAFETY: live arena object; each arm reads within its builder's
+        // payload length.
         unsafe {
             let header = *obj;
             match header_tag(header) {
@@ -875,17 +761,14 @@ pub(crate) struct HamtMapRef {
 }
 
 impl HamtMapRef {
-    /// The one decoder for the `[backing, size, root]` layout. Release-checks
-    /// the backing discriminant — an `Env` map holds no such words, and
-    /// reading them would be silent garbage.
+    /// The one decoder for the `[backing, size, root]` layout. The backing
+    /// discriminant is release-checked: an `Env` map holds no such words.
     ///
     /// # Safety
-    /// `obj` must point at a live `Map` object header (the tag is the caller's
-    /// proof; the backing is checked here).
+    /// `obj` must point at a live `Map` object header.
     #[inline]
     unsafe fn from_obj(obj: *const u64) -> HamtMapRef {
-        // SAFETY: word 0 is the backing discriminant for every Map layout,
-        // and a Hamt map always carries `[backing, size, root]`.
+        // SAFETY: word 0 is the backing discriminant for every Map layout.
         unsafe {
             if map_backing(payload_word(obj, 0)) != MapBacking::Hamt {
                 view_mismatch("hamt");
@@ -931,12 +814,9 @@ pub(crate) fn hamt_map_in<A: Arena + ?Sized>(a: &mut A, size: usize, root: Value
     }
 }
 
-// ---- Value -------------------------------------------------------------------
-
-/// The universal NaN-boxed value: one machine word. NOT `Copy` — a mortal heap
-/// value owns a reference count, so duplicating it (`Clone`) increments that
-/// count and dropping it decrements (freeing at zero). Immediates and immortal
-/// (frozen) values carry no count, so their `Clone`/`Drop` are free no-ops.
+/// The universal NaN-boxed value: one machine word. Not `Copy` — a mortal heap
+/// value owns a reference count. Immediates and frozen values carry no count,
+/// so their `Clone`/`Drop` are no-ops.
 #[repr(transparent)]
 pub struct Value(u64);
 
@@ -954,8 +834,7 @@ impl Clone for Value {
 impl Drop for Value {
     #[inline]
     fn drop(&mut self) {
-        // Operates on the raw bits so it never constructs another droppable
-        // `Value` (which would recurse). Immediates/immortals are no-ops.
+        // Raw bits, so this never builds another droppable `Value`.
         release_bits(self.0);
     }
 }
@@ -963,9 +842,8 @@ impl Drop for Value {
 const _: () = assert!(std::mem::size_of::<Value>() == 8);
 
 /// Borrowed typed view for many-armed matches. `Int` collapses small ints and
-/// arena `BigInt`s so callers see a single integer arm. Interior vector nodes
-/// (`SeqLeaf`/`SeqBranch`) are unreachable through `kind()` — user values only
-/// ever point at `Seq` roots.
+/// arena `BigInt`s. Interior nodes are unreachable here — user values only
+/// ever point at roots.
 pub enum ValueView<'a> {
     Int(i64),
     Float(f64),

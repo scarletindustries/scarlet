@@ -3,15 +3,13 @@ use crate::span::Span;
 use crate::token::{self, Kind, Token, Trivia};
 
 /// One level of string-interpolation nesting. `brace_depth == 0` means the
-/// scanner is inside the string body; `> 0` means it is inside a `${ ... }`
-/// expression and counts unmatched `{` so nested braces don't prematurely
-/// close the interpolation.
+/// scanner is in the string body; `> 0` means it is inside `${ ... }` and
+/// counts unmatched `{` so a nested brace does not close the interpolation.
 #[derive(Clone, Copy)]
 struct InterpFrame {
     quote: u8,
     brace_depth: u32,
-    // Position of the opening quote, so an unterminated interpolation
-    // abandoned at EOF can be diagnosed at the string it belongs to.
+    // The opening quote, so a string abandoned at EOF is diagnosed there.
     start_line: i32,
     start_column: i32,
 }
@@ -73,11 +71,9 @@ impl Scanner {
         self.input.len() as i32
     }
 
-    // The single, total byte accessor. `pos as usize` of a negative i32 wraps
-    // to a huge value, so `get` returns None for both past-EOF and negative
-    // cursors; the universal `0` EOF sentinel every consumer already treats as
-    // end-of-input is returned in those cases. This makes out-of-bounds reads
-    // unrepresentable rather than a panic.
+    // The only byte accessor, and it is total: a negative `pos` wraps to a huge
+    // usize, so both past-EOF and negative cursors read as the `0` EOF sentinel
+    // every consumer already treats as end of input.
     fn byte_at(&self, pos: i32) -> u8 {
         self.input.get(pos as usize).copied().unwrap_or(0)
     }
@@ -94,11 +90,8 @@ impl Scanner {
             let ch = self.peek_char();
 
             if ch == b' ' || ch == b'\t' {
-                // Whitespace trivia is never read by any consumer (parser and
-                // formatter match only Newline/comment kinds), so don't record
-                // it at all — recording it would force a fresh Vec<Trivia>
-                // allocation for nearly every token, since most tokens follow
-                // a space.
+                // No consumer reads whitespace trivia, and recording it would
+                // allocate a Vec<Trivia> for nearly every token.
                 while self.pos < self.input_len() {
                     let c = self.peek_char();
                     if c != b' ' && c != b'\t' {
@@ -115,8 +108,7 @@ impl Scanner {
                 continue;
             }
 
-            // CRLF line endings: `\r\n` is one logical newline (the `\n`
-            // drives incr_pos line accounting); a lone `\r` is whitespace.
+            // `\r\n` is one logical newline; a lone `\r` is whitespace.
             if ch == b'\r' {
                 self.incr_pos();
                 if self.peek_char() == b'\n' {
@@ -147,8 +139,7 @@ impl Scanner {
                 self.incr_pos(); // skip /
                 self.incr_pos(); // skip *
 
-                // Doc comment if next char is * but NOT followed by /
-                // i.e., /** but not /**/
+                // `/**` opens a doc comment, but `/**/` does not.
                 let opens_doc = self.pos < self.input_len()
                     && self.peek_char() == b'*'
                     && self.byte_at(self.pos + 1) != b'/';
@@ -164,13 +155,12 @@ impl Scanner {
                     self.incr_pos();
                 }
                 if !closed {
-                    // Swallow whatever tail byte the loop bound left unconsumed
-                    // so it isn't re-lexed as a spurious token after the error.
+                    // Swallow the tail byte the loop bound left unconsumed so
+                    // it is not re-lexed as a spurious token after the error.
                     while self.pos < self.input_len() {
                         self.incr_pos();
                     }
-                    // Anchor at the opening `/*`: the cursor is now at EOF, and
-                    // a caret past the end of the file points at nothing.
+                    // Anchor at the opening `/*`; the cursor is at EOF.
                     self.diagnostics.push(Diagnostic::error(
                         Span::point(start_line, start_column),
                         DiagnosticCode::UnexpectedEof,
@@ -179,10 +169,9 @@ impl Scanner {
                 }
 
                 let text = self.slice(start, self.pos);
-                // Only a *closed* `/** … */` is a doc comment. An unterminated
-                // one has swallowed the rest of the file; treating its text as
-                // documentation would attach the whole source to the next
-                // declaration (or, at line 0, to the module itself).
+                // Only a closed `/** … */` is a doc comment. An unterminated one
+                // has swallowed the rest of the file, and would attach it all to
+                // the next declaration.
                 self.pending_trivia.push(if opens_doc && closed {
                     Trivia::DocComment(text)
                 } else {
@@ -211,10 +200,8 @@ impl Scanner {
         self.token_start_line = self.line;
 
         if self.pos >= self.input_len() {
-            // EOF inside `${ ... }` abandons the enclosing string(s): each
-            // frame still on the stack is an unterminated string literal,
-            // diagnosed at its opening quote (the cursor is past the end of
-            // the file, so anchoring here would point at nothing).
+            // EOF inside `${ ... }`: every frame still on the stack is an
+            // unterminated string, diagnosed at its own opening quote.
             while let Some(frame) = self.interp_stack.pop() {
                 self.diagnostics.push(Diagnostic::error(
                     Span::point(frame.start_line, frame.start_column),
@@ -246,11 +233,8 @@ impl Scanner {
         if token::is_name_start(ch) {
             let (start, end) = self.scan_name();
 
-            // Keyword lookup runs on a borrowed slice of the source, so the
-            // common keyword tokens (`if`/`fn`/`match`/...) allocate no String
-            // at all. The name is ASCII by construction (is_name_start /
-            // is_name_continue), so from_utf8 never fails; the `ok()` merely
-            // avoids a deny(expect_used) — a non-UTF-8 slice cannot occur.
+            // Keyword lookup on a borrowed slice, so keywords allocate no
+            // String. Names are ASCII, so `from_utf8` cannot fail here.
             if let Some(keyword_kind) =
                 std::str::from_utf8(&self.input[start as usize..end as usize])
                     .ok()

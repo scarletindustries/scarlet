@@ -1,38 +1,16 @@
 //! Typed IR: the checker's output and `lower`'s only input.
 //!
-//! `ast::Expression` is HIR pretending to be THIR. The typechecker cannot
-//! check `u.id` without resolving the field index, nor `Some(x)` without
-//! resolving the variant — it computes both, throws them away, and `lower`
-//! guesses again from a `Span`-keyed side table. Every bug class found on
-//! 2026-07-09 has that shape.
+//! Every decision the checker made is a *field* on the node — the type, the
+//! resolved field index, the resolved variant, the resolved call target — so
+//! `lower` never re-resolves anything and needs no side table.
 //!
-//! A `TypedExpr` node carries those facts as *fields*:
+//! What is absent matters as much: no `ErrorNode` (a `TypedProgram` is only
+//! built for a diagnostics-clean module, so `lower` is total), no unsolved
+//! type variable (see [`rty`]), and no `Span`.
 //!
-//! * `ty: RTy` on every node — not a lookup, not a `Span` key, and drawn from
-//!   an arena in which an unsolved inference variable is unrepresentable (see
-//!   [`rty`]). There is no "expression with no inferred type" case.
-//! * [`TypedExpr::Field`] carries the resolved field index; `lower` never
-//!   calls `ctor_field`.
-//! * [`TypedExpr::Ctor`] carries the resolved [`VariantRef`] and its arguments
-//!   already reordered into declared-field order; labels and `..base` spreads
-//!   are gone by construction.
-//! * [`TypedCallee`] carries the resolved target; `lower` never calls
-//!   `resolve_name`.
-//! * A constructor or builtin used as a first-class value is an ordinary
-//!   [`TypedFn`] in [`TypedProgram::fns`] referenced by a zero-capture
-//!   [`TypedExpr::Closure`]. Nothing is synthesised into a `Program` mid-lower.
-//!
-//! What is *not* here is as load-bearing as what is:
-//!
-//! * No `ErrorNode` arm. A parse error is a real diagnostic emitted by the
-//!   check phase; a `TypedProgram` is only ever built for a diagnostics-clean
-//!   module, so `lower` has no failure to report and needs no `LowerError`.
-//! * No `Var`-typed anything: see [`rty::ResolvedNode`].
-//! * No `Span`. Nothing downstream of the checker reports on source.
-//!
-//! ANF is still `lower`'s job: this is a tree, not a `Let`-spine. `Match`
-//! patterns keep their nesting because `lower` flattens them into successive
-//! `CorePat` heads (docs/core-ir-spec.md §IR).
+//! This is a tree, not a `Let`-spine: ANF is still `lower`'s job, and `Match`
+//! patterns keep their nesting for `lower` to flatten into `CorePat` heads
+//! (docs/core-ir-spec.md §IR).
 
 pub mod elaborate;
 pub mod elaborate_pat;
@@ -69,26 +47,20 @@ impl std::fmt::Display for BindingId {
     }
 }
 
-/// A slot in the entry (module) frame: what `PushGlobal` addresses. The same
-/// value appears on the *definition* side ([`TypedBind::global`]) and on the
-/// *use* side ([`ValueRef::Global`]), so a def/use mismatch is unspellable and
-/// no consumer ever maps a name back to a slot queue. A module-scope name may
-/// be bound more than once (an import shadowed by a later `let`); each
-/// [`TypedBind`] carries the slot that particular binding lands in.
+/// A slot in the entry (module) frame: what `PushGlobal` addresses. A
+/// module-scope name may be bound more than once (an import shadowed by a later
+/// `let`), so each [`TypedBind`] carries the slot its own binding lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GlobalSlot(pub i32);
 
-/// A slot in the *current* frame: what `PushLocal` addresses. Minted by the
-/// compiler walk's slot allocation (`get_or_create_local`) and unwrapped only
-/// at `PushLocal` emission — a different runtime index space from both
-/// [`GlobalSlot`] (the entry frame) and [`CaptureIdx`] (the closure's capture
-/// array), so handing one where another is wanted is a type error.
+/// A slot in the *current* frame: what `PushLocal` addresses. A different index
+/// space from [`GlobalSlot`] and [`CaptureIdx`], kept distinct so the three
+/// cannot be swapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FrameSlot(pub i32);
 
 /// An index into the current closure's capture array: what `PushCapture`
-/// addresses. Minted where the compiler walk assigns a capture its position in
-/// `capture_names`, and unwrapped only at `PushCapture` emission.
+/// addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CaptureIdx(pub i32);
 
@@ -98,12 +70,8 @@ pub struct TypedBind {
     pub id: BindingId,
     pub name: StrId,
     pub ty: RTy,
-    /// `Some(slot)` when this binding is a module-level `fn`/`const`/`let`/
-    /// destructured name and must land in that entry-frame slot, because fn
-    /// bodies address it by `PushGlobal slot`. The elaborator assigns the slot
-    /// as it walks the module, so this replaces both `LowerCtx::note_decl_bind`
-    /// and the `StrId -> VecDeque<i32>` queue it fed: the slot is in the IR,
-    /// not in a side channel keyed by a name that is not an identity.
+    /// `Some(slot)` when this binding is module-level and must land in that
+    /// entry-frame slot, because fn bodies address it by `PushGlobal slot`.
     pub global: Option<GlobalSlot>,
 }
 
@@ -113,16 +81,13 @@ pub struct TypedBind {
 pub enum ValueRef {
     /// A [`TypedBind`] in the current function.
     Local(BindingId),
-    /// ESCAPE HATCH: a raw frame slot the module walk assigned (a selective
-    /// `import mod.{x}` binding) — `PushLocal slot`. Unlike every other
-    /// variant this index is minted outside the IR and is anchored to no
-    /// [`BindingId`]; it exists only because import bindings are materialised
-    /// by the module walk rather than by the elaborator.
+    /// ESCAPE HATCH: `PushLocal slot` for a raw frame slot the module walk
+    /// assigned (a selective `import mod.{x}` binding). Anchored to no
+    /// [`BindingId`], because import bindings are materialised by the module
+    /// walk rather than by the elaborator.
     Slot(FrameSlot),
-    /// [`GlobalSlot`] in the entry frame — `PushGlobal slot`, the same slot the
-    /// defining [`TypedBind::global`] carries. A top-level `fn` referenced as a
-    /// *value* loads this way even inside itself; self-*calls* are
-    /// [`TypedCallee::SelfRec`].
+    /// `PushGlobal slot`. A top-level `fn` referenced as a *value* loads this
+    /// way even inside itself; self-*calls* are [`TypedCallee::SelfRec`].
     Global(GlobalSlot),
     /// `PushCapture idx` — a value captured from the enclosing frame.
     Capture(CaptureIdx),
@@ -160,9 +125,8 @@ pub enum TypedInterpPart {
 /// One `<<..>>` segment in *value* position. Each yields a `Binary`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBinSeg {
-    /// `v:size` — encode an integer into `bits` bits. `bits` is an `Int`
-    /// expression; the elaborator has already folded the `unit` multiplier and
-    /// the default width into it.
+    /// `v:size` — encode an integer into `bits` bits. The elaborator has
+    /// already folded the `unit` multiplier and the default width into `bits`.
     Int { value: TypedExpr, bits: TypedExpr },
     /// `v:binary` — pass through, or take the leading `bits` bits.
     Binary {
@@ -187,9 +151,8 @@ pub enum PatRest {
 /// One `<<..>>` segment in *pattern* position.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedBinPatSeg {
-    /// `<<'lit'>>` — match the literal's UTF-8 bytes as a prefix. `bits` is
-    /// its width, computed *and pooled* at elaboration time: `lower` advances
-    /// the bit cursor by `PushConst bits`, and has no pool to intern it into.
+    /// `<<'lit'>>` — match the literal's UTF-8 bytes as a prefix. `bits` is its
+    /// width, pooled at elaboration time because `lower` has no pool.
     Utf8Literal { bytes: ConstId, bits: ConstId },
     /// `v:utf8` — one variable-width codepoint.
     Utf8 { value: TypedPat },
@@ -204,8 +167,7 @@ pub enum TypedBinPatSeg {
 }
 
 /// A match pattern with every constructor and literal resolved. Nesting is
-/// preserved: flattening it into `CorePat` heads plus residual `Match`/`Let`
-/// nodes is `lower`'s job.
+/// preserved; flattening it is `lower`'s job.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedPat {
     Wild {
@@ -217,9 +179,8 @@ pub enum TypedPat {
         ty: RTy,
         value: ConstId,
     },
-    /// `fields` has exactly the constructor's arity, in declared-field order;
-    /// a slot no source argument filled (`..` rest, or a labelled subset) is a
-    /// [`TypedPat::Wild`] carrying that field's type.
+    /// `fields` has exactly the constructor's arity, in declared-field order.
+    /// A slot no source argument filled is a [`TypedPat::Wild`].
     Ctor {
         ty: RTy,
         variant: VariantRef,
@@ -234,16 +195,15 @@ pub enum TypedPat {
         /// The element type, projected out of `ty` by the elaborator so
         /// `lower` never asks the pool for `Array(T)`'s `T`.
         elem_ty: RTy,
-        /// `prefix.len()`, pooled. `lower` compares the scrutinee's `ArrayLen`
-        /// against it, and (for `..rest`) `SeqDrop`s by it.
+        /// `prefix.len()`, pooled.
         len: ConstId,
         prefix: Vec<TypedPat>,
         rest: PatRest,
     },
     Bin {
         ty: RTy,
-        /// The `Int` `0`, pooled. `lower`'s `<<>>` walk starts its bit cursor
-        /// there and compares a `:utf8` segment's decoded width against it.
+        /// The `Int` `0`, pooled: `lower`'s `<<>>` walk starts its bit cursor
+        /// there.
         zero: ConstId,
         segs: Vec<TypedBinPatSeg>,
         rest: PatRest,
@@ -284,8 +244,7 @@ pub struct TypedArm {
     pub body: TypedExpr,
 }
 
-/// A typechecked expression. Every node carries its resolved type; every
-/// operation carries the decision the checker made.
+/// A typechecked expression. Every node carries its resolved type.
 ///
 /// There is deliberately no `ErrorNode`, no `Or`-expression (the checker knows
 /// the `Option`/`Result` shape, so it emits the `Match`), and no unresolved
@@ -305,9 +264,9 @@ pub enum TypedExpr {
         ty: RTy,
         place: ValueRef,
     },
-    /// `bind = init; body`. Blocks are right-nested `Let`s, so `ty` (which is
-    /// always `body`'s) is stored rather than recursed for: [`TypedExpr::ty`]
-    /// must be O(1) on a spine thousands of bindings long.
+    /// `bind = init; body`. Blocks are right-nested `Let`s, so `ty` (always
+    /// `body`'s) is stored rather than recursed for: [`TypedExpr::ty`] must be
+    /// O(1) on a spine thousands of bindings long.
     Let {
         ty: RTy,
         bind: TypedBind,

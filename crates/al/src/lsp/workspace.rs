@@ -281,17 +281,9 @@ impl Workspace {
 
         let has_errors = diagnostic::has_errors(&parse_diagnostics);
 
-        // Check the buffer — even when it has parse errors. The recovering
-        // parser (`synchronize()` then resume) hands back a best-effort AST
-        // that drops only the malformed statements, so it still spells every
-        // well-formed declaration; feeding it through the session keeps the
-        // workspace graph populated for the clean parts of a mid-edit buffer.
-        // That is what lets hover / goto-def / find-refs / rename keep working
-        // on a valid symbol while the user is partway through typing something
-        // elsewhere. Skipping the check on any parse error (the previous
-        // behaviour) meant a file that had never parsed cleanly had no session
-        // at all, so every position query — including a rename of an untouched,
-        // perfectly valid def — was refused outright.
+        // Check the buffer even when it has parse errors: the recovering parser
+        // drops only the malformed statements, so the graph stays populated for
+        // the clean parts and position queries keep working mid-edit.
         let ast_expr = ast::Expression::BlockExpression(parsed_ast);
         let file_path = uri_to_path(uri);
         let base_dir = file_path.as_deref().and_then(|p| p.parent());
@@ -299,8 +291,8 @@ impl Workspace {
             .as_deref()
             .and_then(crate::module::detect_stdlib_module);
         let check_result = match &stdlib_module {
-            // Editing stdlib: precompiled blob is stale by definition, so
-            // bypass the session and check from source.
+            // Editing stdlib: the precompiled blob is stale, so bypass the
+            // session and check from source.
             Some(m) => bytecode::check_as_module(&ast_expr, base_dir, m.clone()),
             None => {
                 let root = file_path
@@ -312,13 +304,9 @@ impl Workspace {
                     .entry(root)
                     .or_insert_with(RootState::new)
                     .session;
-                // Mirror the in-memory buffer into the module overlay so a
-                // dependent file's analyse picks up unsaved edits — but only
-                // while it parses cleanly. A half-typed buffer must not become
-                // what every importer resolves against; they keep seeing the
-                // last good version until this one parses again. (The entry's
-                // own graph is built from `ast_expr` below regardless, so the
-                // open file stays renamable either way.)
+                // Mirror the buffer into the module overlay so dependents pick
+                // up unsaved edits, but only while it parses cleanly: importers
+                // keep resolving against the last good version.
                 if !has_errors && let Some(p) = &file_path {
                     session.set_overlay(p.clone(), text.to_string());
                 }
@@ -326,21 +314,15 @@ impl Workspace {
             }
         };
 
-        // Publish the type / unused diagnostics only for a buffer that fully
-        // parsed: the errors a partial AST yields are noise for the region the
-        // user is still typing, and the published set must stay exactly the
-        // parse errors in that case (the graph above is still built either way
-        // — it just isn't surfaced as diagnostics).
+        // Type / unused diagnostics only for a buffer that fully parsed: a
+        // partial AST yields noise for the region still being typed.
         if !has_errors {
             for diag in &check_result.diagnostics {
                 lsp_diagnostics.push(diagnostic_to_json(diag));
             }
 
-            // 4th capability group: unused-import / dead-code diagnostics.
-            // Only the session path builds a reference graph (the stdlib
-            // `check_as_module` path has none), so resolve the entry module
-            // from the session graph and fold its unused diagnostics into the
-            // published set.
+            // Unused-import / dead-code diagnostics. Only the session path
+            // builds a reference graph, so the stdlib path has none.
             if stdlib_module.is_none()
                 && let Some(qm) = query_module(uri)
                 && let Some(graph) = self.graph_for(uri)
@@ -351,24 +333,16 @@ impl Workspace {
             }
         }
 
-        // The session now holds the workspace graph with this file as the
-        // entry module — populated whether or not the buffer fully parsed — so
-        // remember it as the analysed entry. Latching this unconditionally
-        // (rather than only on a clean parse, the root cause of "rename refused
-        // on a clean def") is what stops `ensure_entry` short-circuiting every
-        // position query the moment the buffer holds a syntax error.
+        // Latch the entry unconditionally, parse errors included, or
+        // `ensure_entry` refuses every position query on a buffer with a syntax
+        // error somewhere.
         self.entry_uri = Some(uri.to_string());
 
-        // Persist this entry file's cross-module references workspace-wide,
-        // keyed by the canonical `DefId` each one targets. The next position
-        // query may re-root compilation to one of the files this one imports,
-        // making *it* the entry and dropping this file (an importer is never in
-        // its imports' closure, and is never cached as a module) from the
-        // session graph; without this its reverse edges — e.g. `main.al`'s call
-        // of `lib.greet()`, needed when find-references is driven from `greet`'s
-        // declaration in `lib.al` — would vanish. Refreshed per-file so a
-        // removed import drops its now-stale edges. The session-less stdlib edit
-        // path builds no graph, so it contributes nothing.
+        // Persist this file's cross-module references, keyed by the `DefId`
+        // each targets. A later query may re-root compilation to a file this
+        // one imports, dropping this file from the session graph and with it
+        // the reverse edges find-references needs. Refreshed per file so a
+        // removed import drops its stale edges.
         if stdlib_module.is_none()
             && let Some(p) = &file_path
         {

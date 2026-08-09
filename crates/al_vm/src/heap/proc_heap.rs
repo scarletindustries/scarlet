@@ -63,11 +63,8 @@ impl ProcHeap {
         ProcHeap
     }
 
-    // ---- allocation -------------------------------------------------------
-
     /// Allocate `words` 8-byte words, 8-byte aligned, from the calling thread's
-    /// default heap. The storage is uninitialized. Infallible by the `Arena`
-    /// contract: OOM aborts via [`std::alloc::handle_alloc_error`].
+    /// default heap. The storage is uninitialized. Infallible: OOM aborts.
     #[inline]
     fn alloc_raw(&self, words: usize) -> NonNull<u64> {
         let bytes = words * size_of::<u64>();
@@ -79,10 +76,9 @@ impl ProcHeap {
         }
     }
 
-    /// Allocate storage for one reference-counted object of `words` (header +
-    /// payload) words, reserving the leading refcount slot — initialized to 1 —
-    /// and returning a pointer to the HEADER, so every header-relative offset
-    /// is unchanged. Reclaimed by reference counting (`value::release`).
+    /// Allocate one reference-counted object of `words` header+payload words.
+    /// Returns a pointer to the HEADER, not the refcount slot in front of it,
+    /// so header-relative offsets are unchanged. The count starts at 1.
     #[inline]
     pub fn alloc_object(&self, words: usize) -> NonNull<u64> {
         #[cfg(feature = "alloc-counter")]
@@ -91,32 +87,26 @@ impl ProcHeap {
         // SAFETY: fresh allocation of `RC_PREFIX_WORDS + words` (>= 2) words;
         // the first word is the refcount, the object begins after it.
         unsafe {
-            raw.write(1); // refcount = 1 (the constructing handle)
+            raw.write(1);
             raw.add(RC_PREFIX_WORDS)
         }
     }
 
-    // ---- test instrumentation --------------------------------------------
-
     /// Number of [`alloc_object`](Self::alloc_object) calls on the current
     /// thread since its last [`reset_alloc_count`](Self::reset_alloc_count).
-    /// Used by reuse tests to assert net allocations (e.g. `list.map` on a
-    /// uniquely-owned list must allocate zero fresh cells).
     #[cfg(feature = "alloc-counter")]
     pub fn alloc_count() -> usize {
         ALLOC_COUNT.get()
     }
 
-    /// Reset this thread's [`alloc_count`](Self::alloc_count) to zero. Call
-    /// immediately before the code span whose allocations a test is measuring.
+    /// Reset this thread's [`alloc_count`](Self::alloc_count) to zero.
     #[cfg(feature = "alloc-counter")]
     pub fn reset_alloc_count() {
         ALLOC_COUNT.set(0);
     }
 
     /// Free a single object's allocation. mimalloc recovers the owning heap
-    /// from the pointer's segment metadata, so a free on a different thread than
-    /// the one that allocated (after a migration) is routed to the owning heap.
+    /// from the pointer, so freeing on a different thread is fine.
     ///
     /// # Safety
     /// `addr` must be a live mimalloc allocation that is not freed again.
@@ -126,55 +116,36 @@ impl ProcHeap {
         unsafe { mi_free(addr.as_ptr().cast()) };
     }
 
-    // ---- spawn and frozen publish -----------------------------------------
-
     /// Spawn-side graph copy: deep-copy the closure graph reachable from
     /// `root` into a fresh child heap, returning the child heap and its own
-    /// root. Sharing is preserved, `Binary` backings are shared by `Arc` bump
-    /// (no byte copy), frozen references are shared untouched, and the parent
-    /// graph is left intact. See [`rc_copy_graph`].
-    ///
-    /// Associated (no `&self`): the copy allocates from the *child's* handle;
-    /// the parent heap is neither read nor mutated.
+    /// root. Sharing is preserved, `Binary` backings are shared by `Arc` bump,
+    /// frozen references are shared untouched, and the parent is left intact.
     pub fn spawn(root: &Value) -> (ProcHeap, Value) {
         (ProcHeap, rc_copy_graph(root))
     }
 
-    /// Publish the graph reachable from `root` into the frozen area, returning
-    /// the frozen root — the crate's only mint of a [`FrozenConst`] from an
-    /// arbitrary runtime value. References already in the frozen area are
-    /// shared as-is (a pure passthrough); mortal graphs are deep-copied. See
-    /// [`rc_publish_graph`].
-    ///
-    /// Associated (no `&self`): the copy writes only into `builder`; the source
-    /// process heap is neither read nor mutated.
+    /// Publish the graph reachable from `root` into the frozen area — the
+    /// crate's only mint of a [`FrozenConst`] from an arbitrary runtime value.
+    /// Already-frozen references pass through; mortal graphs are deep-copied.
     pub fn publish_frozen(builder: &mut FrozenBuilder, root: &Value) -> FrozenConst {
         FrozenConst::from_publish(rc_publish_graph(root, builder))
     }
 }
-
-// `ProcHeap` needs no `Drop`: a process's objects are reference-counted, so
-// they are freed as its `Value`s (stack, frames, result) drop at death — there
-// is no per-process heap to tear down.
 
 /// `src address → dst object` map for [`walk_graph`]'s DAG-preserving copy.
 type WalkMap = HashMap<usize, NonNull<u64>>;
 /// BFS queue of freshly copied objects whose child slots still need rewriting.
 type WalkQueue = Vec<NonNull<u64>>;
 
-/// Shallow-copy one node into `arena`, returning the value to store in the
-/// parent slot. Immediates and immortal (frozen) values pass through unchanged
-/// (frozen objects are shared, never copied). A node already copied (a DAG
-/// join) is shared — bumping the existing copy's refcount unless the copy is
-/// frozen, as frozen objects carry no count. A first-seen node is byte-copied
-/// (its child slots still point at the *source* graph; the caller's queue links
-/// them later) and queued.
+/// Shallow-copy one node into `arena`, returning the value for the parent slot.
+/// Immediates and frozen values pass through. An already-copied node is shared,
+/// bumping its count unless the copy is frozen (frozen objects carry none). A
+/// first-seen node is byte-copied and queued; its child slots still point at
+/// the SOURCE graph until [`walk_graph`] rewrites them.
 ///
-/// The destination discipline is the arena's own: [`Arena::marks_immortal`]
-/// says whether its allocations are frozen (no refcount prefix, never counted)
-/// or mortal (refcount prefix, born at 1). Taking the allocator as an `Arena`
-/// rather than a bare closure plus a flag makes the two impossible to mismatch,
-/// and each caller still monomorphizes to exactly the code it needs.
+/// [`Arena::marks_immortal`] decides refcount prefix or not. Taking the
+/// allocator as an `Arena` rather than a closure plus a flag makes the two
+/// impossible to mismatch.
 #[inline]
 fn copy_node_into<A: Arena>(
     src: &Value,
@@ -199,14 +170,13 @@ fn copy_node_into<A: Arena>(
     }
     // SAFETY: `src` is a live heap object; its header gives its total size.
     let words = unsafe { header_total_words(*src_obj) };
-    let d = arena.alloc_words(words); // mortal: refcount = 1 (this first reference)
+    let d = arena.alloc_words(words);
     // SAFETY: `d` has `words` header+payload words; copy the image verbatim,
-    // then share the off-heap Arc backing if this is a Binary box (which the
-    // frozen area, if that is the destination, then holds for the program's life).
+    // then share the off-heap Arc backing if this is a Binary box.
     unsafe {
         if immortal {
             // A frozen cell is shared across threads and can never be lazily
-            // hashed, so hash the (single-owner) source now: the copy below
+            // hashed, so hash the single-owner source now; the copy below
             // carries the cached word into the frozen image.
             freeze_enum_hash(src_obj);
         }
@@ -225,22 +195,18 @@ fn copy_node_into<A: Arena>(
 }
 
 /// Breadth-first graph-copy driver shared by [`rc_copy_graph`] and
-/// [`rc_publish_graph`]. `copy_one` shallow-copies one node — passing through
-/// immediates/immortals, sharing already-seen nodes via `map`, and pushing each
-/// first-seen copy onto `queue` with its child slots still holding verbatim
-/// *source* pointer bits. The driver then walks the queue, rewriting each
-/// copy's child slots in place. No native recursion, so a deep graph cannot
-/// overflow the stack.
+/// [`rc_publish_graph`]. `copy_one` shallow-copies a node and queues it with
+/// its child slots still holding source pointer bits; the driver then walks
+/// the queue rewriting those slots. No native recursion, so a deep graph
+/// cannot overflow the stack.
 fn walk_graph(
     root: &Value,
     mut copy_one: impl FnMut(&Value, &mut WalkMap, &mut WalkQueue) -> Value,
 ) -> Value {
     thread_local! {
-        /// Per-thread scratch for [`walk_graph`]: the `src → dst` address map
-        /// and BFS queue, cleared and reused per call so a spawn/publish does
-        /// not pay two fresh allocations plus O(nodes) rehash growth.
-        /// `walk_graph` is non-reentrant (its `copy_one` callbacks never
-        /// spawn/publish), so one per-thread pair is sound.
+        /// Per-thread scratch, reused per call to avoid two fresh allocations
+        /// and O(nodes) rehash growth. Sound only because `walk_graph` is
+        /// non-reentrant: its `copy_one` callbacks never spawn or publish.
         static WALK_SCRATCH: RefCell<(WalkMap, WalkQueue)>
             = RefCell::new((WalkMap::new(), WalkQueue::new()));
     }
@@ -268,27 +234,18 @@ fn walk_graph(
     })
 }
 
-/// Deep-copy the value graph reachable from `root` into a fresh process heap,
-/// returning the copied root. A single Clone pass with no native recursion (an
-/// explicit queue links children, so a deep graph cannot overflow the stack).
-/// It
-///
-/// - preserves sharing — a DAG stays a DAG — via a `src → dst` address map;
-/// - sets each copy's refcount to its in-graph reference count (one per edge);
-/// - shares immortal (frozen) objects without copying them;
-/// - shares `Binary` byte backings by bumping their `Arc` (no byte copy).
+/// Deep-copy the value graph reachable from `root` into a fresh process heap.
+/// A DAG stays a DAG, frozen objects are shared not copied, and `Binary` byte
+/// backings are shared by bumping their `Arc`.
 fn rc_copy_graph(root: &Value) -> Value {
     walk_graph(root, |v, map, queue| {
         copy_node_into(v, map, queue, &mut ProcHeap)
     })
 }
 
-/// Deep-copy the graph reachable from `root` into the frozen `builder`,
-/// returning the frozen root. A single pass with an explicit queue (no native
-/// recursion), preserving sharing via a `src → dst` map, sharing already-frozen
-/// subgraphs, and bumping `Binary` Arc backings (which the frozen area then
-/// holds forever). Frozen copies carry NO refcount prefix and are marked
-/// immortal, so reference counting never touches them.
+/// Deep-copy the graph reachable from `root` into the frozen `builder`. Frozen
+/// copies carry NO refcount prefix and are marked immortal, so reference
+/// counting never touches them.
 fn rc_publish_graph(root: &Value, builder: &mut FrozenBuilder) -> Value {
     walk_graph(root, |v, map, queue| copy_node_into(v, map, queue, builder))
 }
@@ -326,8 +283,8 @@ mod tests {
         assert_eq!(ProcHeap::alloc_count(), 2);
         ProcHeap::reset_alloc_count();
         assert_eq!(ProcHeap::alloc_count(), 0);
-        // SAFETY: `a`/`b` are live allocations; back up over the RC prefix to
-        // the block start before freeing.
+        // SAFETY: `a`/`b` are live; back up over the RC prefix to the block
+        // start before freeing.
         unsafe {
             ProcHeap::free_raw(a.sub(RC_PREFIX_WORDS));
             ProcHeap::free_raw(b.sub(RC_PREFIX_WORDS));
@@ -336,9 +293,8 @@ mod tests {
 
     #[test]
     fn many_alloc_free_round_trips() {
-        // Reference counting frees each object individually; there is no
-        // wholesale heap destroy. Many alloc/free pairs must not corrupt the
-        // shared default heap.
+        // There is no wholesale heap destroy, so many individual alloc/free
+        // pairs must not corrupt the shared default heap.
         let h = ProcHeap::new();
         for i in 0..10_000u64 {
             let p = h.alloc_raw(8);

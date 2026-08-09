@@ -1442,9 +1442,8 @@ fn wrap_lets(lets: Vec<(TypedBind, TypedExpr)>, tail: TypedExpr) -> TypedExpr {
 /// the `Bound(i) → RTy` substitution that specialises its field types.
 ///
 /// `Cons`'s scheme returns `List(Bound(k))`; used at `List(Int)` the map is
-/// `{k ↦ Int}`. When `at` is not a `Con` — an undetermined scrutinee — the map
-/// is empty and the fields stay polymorphic, which is exactly the dynamic
-/// handling `ResolvedNode::Bound` prescribes.
+/// `{k ↦ Int}`. When `at` is not a `Con` the map is empty and the fields stay
+/// polymorphic.
 fn bound_subst(pool: &ResolvedPool, ret: RTy, at: RTy) -> HashMap<u32, RTy> {
     let mut m = HashMap::new();
     let formals: SmallVec<[RTy; 4]> = pool.con_args(ret).into();
@@ -1510,8 +1509,7 @@ mod tests {
 
     /// `Cons(head: a, tail: List(a))` used at `List(Int)` must give its fields
     /// `Int` and `List(Int)` — the fact Perceus needs to emit a `Drop` for the
-    /// tail. `lower` got this by unifying into the engine; here it is a pure
-    /// substitution over the pool.
+    /// tail.
     #[test]
     fn a_ctors_fields_specialise_to_the_type_it_is_used_at() {
         let mut p = pool();

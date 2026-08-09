@@ -437,15 +437,13 @@ mod tests {
         assert_eq!(take_freed_objects(), 1, "old BigInt must be freed");
         assert_eq!(frame[1].to_bits(), Value::small_int(7).to_bits());
 
-        // Storing over the `enter_frame!` zero-fill releases an immediate —
-        // a dynamic no-op, bit-identical to the interpreter.
+        // Releasing an immediate is a dynamic no-op.
         take_freed_objects();
         f(frame_base(&mut frame), Value::small_int(9).to_bits());
         assert_eq!(take_freed_objects(), 0);
         assert_eq!(frame[1].to_bits(), Value::small_int(9).to_bits());
 
-        // The frame now holds immediates only; forget instead of dropping so
-        // the already-freed BigInt is not double-released.
+        // Forget, not drop: the BigInt above was already freed.
         std::mem::forget(frame);
     }
 
@@ -472,11 +470,9 @@ mod tests {
             assert_eq!(*rc_slot((bits & NATIVE_PTR_MASK) as *const u64), 1);
         }
         take_freed_objects();
-        drop(frame); // Vec drop releases the frame's reference, freeing it.
+        drop(frame);
         assert_eq!(take_freed_objects(), 1);
     }
-
-    // ---- boxing ---------------------------------------------------------
 
     #[test]
     fn unbox_int_decodes_small_and_spilled_words() {
@@ -509,11 +505,9 @@ mod tests {
         });
         let f: extern "C" fn(i64, i64) -> u64 = unsafe { std::mem::transmute(code) };
 
-        // In range: identical bits to `Value::small_int`, no allocation.
         for i in [0i64, 5, -5, (1 << 47) - 1, -(1 << 47)] {
             assert_eq!(f(0, i), Value::small_int(i).to_bits(), "{i}");
         }
-        // Past the range: the spill shim's BigInt, round-tripping the i64.
         for i in [(1i64 << 47), i64::MAX, i64::MIN] {
             let bits = f(0, i);
             let v = unsafe { Value::from_bits(bits) };
@@ -528,8 +522,7 @@ mod tests {
         let (_m, code) = jit(2, 1, |b, _release, _box| {
             let block = b.current_block().unwrap();
             let (a, bb) = (b.block_params(block)[0], b.block_params(block)[1]);
-            // `a < b` boxed, then decoded back and re-boxed: exercises both
-            // directions through the exact `Value::bool` words.
+            // Boxed, decoded, re-boxed: exercises both directions.
             let flag = b.ins().icmp(IntCC::SignedLessThan, a, bb);
             let boxed = box_bool(b, &facts, flag);
             let truth = bool_is_true(b, &facts, boxed);
@@ -542,8 +535,6 @@ mod tests {
         assert_eq!(f(1, 1), Value::bool(false).to_bits());
     }
 
-    // ---- retain ---------------------------------------------------------
-
     #[test]
     fn retain_matches_owned_from_bits() {
         let (_m, code) = jit(1, 0, |b, _release, _box| {
@@ -553,12 +544,11 @@ mod tests {
         });
         let f: extern "C" fn(u64) = unsafe { std::mem::transmute(code) };
 
-        // Immediates: untouched, never dereferenced.
+        // Immediates must never be dereferenced.
         f(Value::small_int(7).to_bits());
         f(Value::nil().to_bits());
         f(Value::bool(true).to_bits());
 
-        // Mortal heap: rc 1 -> 2 (balanced by an extra release below).
         let mut h = ProcHeap::new();
         let v = Value::int_in(&mut h, i64::MAX);
         f(v.to_bits());
@@ -573,14 +563,10 @@ mod tests {
         std::mem::forget(v); // saturated: intentionally permanent
     }
 
-    // ---- the parity scenario -------------------------------------------
-
-    /// `let %2 = AddInt(%0, %1)` compiled with this module's helpers, run
-    /// against the same frame the interpreter sequence
-    /// `PushLocal 0; PushLocal 1; AddInt; StoreLocal 2` produces: the frame
-    /// words must come out bit-identical (immediates) or value-identical
-    /// with matching allocation traffic (spills), including the release of
-    /// the slot's previous word.
+    /// `let %2 = AddInt(%0, %1)` compiled here, run against the same frame the
+    /// interpreter sequence `PushLocal 0; PushLocal 1; AddInt; StoreLocal 2`
+    /// produces. Frame words must come out bit-identical (immediates) or
+    /// value-identical with matching allocation traffic (spills).
     #[test]
     fn store_through_add_matches_the_interpreter_frame() {
         let facts = value_bits();
@@ -600,8 +586,7 @@ mod tests {
         });
         let f: extern "C" fn(i64, i64) = unsafe { std::mem::transmute(code) };
 
-        // The interpreter's effect on the frame, in Rust: clone operands,
-        // wrapping-add the decoded i64s, box via int_in, store over slot 2.
+        // The interpreter's effect on the frame, in Rust.
         let interp = |frame: &mut [Value]| {
             let a = frame[0].clone();
             let b = frame[1].clone();
@@ -610,7 +595,7 @@ mod tests {
             frame[2] = Value::int_in(&mut h, r);
         };
 
-        // Small + small -> small: strict bit equality of the whole frame.
+        // small + small -> small: strict bit equality of the whole frame.
         let mk = |a: i64, b: i64| {
             vec![
                 Value::small_int(a),
@@ -629,8 +614,8 @@ mod tests {
             assert_eq!(n.to_bits(), o.to_bits());
         }
 
-        // Small + small -> spill: same value/shape/traffic; the two BigInt
-        // boxes are distinct allocations, so compare decoded payloads.
+        // small + small -> spill: the two BigInt boxes are distinct
+        // allocations, so compare decoded payloads.
         let (mut native, mut oracle) = (mk((1 << 47) - 1, 1), mk((1 << 47) - 1, 1));
         take_freed_objects();
         f(frame_base(&mut native), 0);
@@ -643,8 +628,7 @@ mod tests {
         assert!(native[2].is_heap() && oracle[2].is_heap());
         assert!(native[2].is_unique(), "spilled result owns rc 1");
 
-        // Overwriting a previous iteration's spilled word releases it —
-        // both backends free exactly one object.
+        // Overwriting a spilled word releases it: both backends free one.
         let mut native2 = vec![
             Value::small_int(1),
             Value::small_int(2),

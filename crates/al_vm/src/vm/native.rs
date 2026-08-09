@@ -58,6 +58,11 @@ pub(super) fn set_current_vm(vm: *mut VM) {
 /// The VM last published on this thread, null on a non-scheduler thread.
 /// Only the shim trampoline should dereference it; the caller owns the
 /// aliasing obligations.
+//
+// `inline(never)`: callers may sit on a process stack whose frame spans a
+// park; an inlined TLS read could be computed pre-park and resumed stale on
+// another scheduler. A real call re-derives the slot on the current thread.
+#[inline(never)]
 pub fn current_vm() -> *mut VM {
     CURRENT_VM.with(std::cell::Cell::get)
 }

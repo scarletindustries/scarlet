@@ -4,8 +4,9 @@
 //! interpreter, schedulers and JIT ([`vm`]).
 //!
 //! This crate must never depend on a language crate; Cargo enforces it. Any
-//! front end that produces a [`bytecode::Program`] and a
-//! [`template::StdlibTemplates`] table can run here.
+//! front end that produces a [`bytecode::Program`] — including its
+//! `templates`/`abi` tables binding the [`abi::AbiSlot`] outcomes its emitted
+//! ops construct — can run here.
 
 #![cfg_attr(
     not(test),

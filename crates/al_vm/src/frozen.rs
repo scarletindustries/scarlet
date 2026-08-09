@@ -1,83 +1,42 @@
 //! Frozen shared area: program-wide constants + write-once globals.
 //!
-//! A [`FrozenArea`] is a set of append-only word segments that are:
+//! A [`FrozenArea`] is a set of append-only word segments. Every word is
+//! written once, by the allocating [`FrozenBuilder`], before any pointer to it
+//! escapes. Frozen objects are immortal, so refcounting skips them and nothing
+//! is ever freed. Segment storage is a boxed slice that never moves, so a raw
+//! pointer into it stays valid until the program ends.
 //!
-//! - **immutable once written** — every word is written exactly once, by the
-//!   allocating [`FrozenBuilder`], before any pointer to it escapes;
-//! - **never reclaimed** — frozen objects are marked immortal, so reference
-//!   counting never touches them: they carry no refcount prefix and are never
-//!   freed, living for the whole program;
-//! - **stable for the program lifetime** — segment storage is a separately
-//!   boxed slice whose heap allocation never moves or reallocates, and the
-//!   area itself is `Arc`-held by the runtime, so a raw pointer into a
-//!   segment stays valid until the program ends;
-//! - **never runs destructors** — segments store raw `u64` words, so when
-//!   the area is finally dropped at process exit the words drop as plain
-//!   integers. Any *owning* pointer written into a segment (e.g. the
-//!   `Arc<[u8]>` backing of a frozen binary, whose strong count is bumped at
-//!   freeze time) is therefore never released: the count it holds leaks for
-//!   the program's life. That leak is the price of pointers that must stay
-//!   valid forever, and it is why writers must only ever store owners they
-//!   intend to keep alive until exit.
+//! Segments hold raw `u64` words and run no destructors. An *owning* pointer
+//! written into one (the `Arc<[u8]>` backing of a frozen binary, say) is never
+//! released — its strong count leaks for the program's life. Only store owners
+//! you mean to keep alive until exit.
 //!
-//! Writers:
+//! # Publication protocol
 //!
-//! - hydration builds program literals/constants through an explicit
-//!   `&mut FrozenBuilder` while the program is being loaded;
-//! - publishing a top-level binding deep-copies the global's value graph
-//!   into the area through the `al` crate's `vm::freeze::freeze_global`
-//!   (`rc_publish_graph` with a builder as destination). The
-//!   subsequent `Runtime::publish_global` does no copying: it only stores
-//!   the already-frozen word into the shared table and release-bumps
-//!   `globals_version`.
+//! Allocation hands out disjoint word ranges under the area's mutex, but
+//! contents are written outside the lock and readers never lock at all. Sound
+//! only because:
 //!
-//! # Publication protocol (the frozen invariant)
+//! 1. the builder fully initializes an object before its pointer is shared
+//!    with another thread;
+//! 2. cross-thread publication rides an existing release/acquire edge —
+//!    `globals_version` in `crates/al/src/vm`, or the handoff that distributes
+//!    the program itself;
+//! 3. published words are never written again.
 //!
-//! Allocation hands out disjoint word ranges under the area's mutex, but the
-//! contents are written through the returned raw pointer *outside* the lock,
-//! and readers never lock at all — they just dereference. That is sound
-//! because of a write-once + happens-before discipline:
+//! So a frozen pointer must never be shared through a channel or table that
+//! lacks such an edge.
 //!
-//! 1. the builder fully initializes every word of an object **before** the
-//!    pointer is shared with any other thread;
-//! 2. cross-thread publication piggybacks on an existing release/acquire
-//!    edge: runtime globals are stored into the shared table and then
-//!    `globals_version` is bumped with `Release`; a scheduler `Acquire`-loads
-//!    the version before reading the table (`Runtime::publish_global` /
-//!    `Vm::sync_globals` in `crates/al/src/vm`). Observing the version bump
-//!    therefore makes the segment contents visible. Hydration-time constants
-//!    are published by the thread/channel handoff that distributes the
-//!    program itself, which synchronizes the same way;
-//! 3. after publication the words are never written again, so unlocked reads
-//!    can never race a write.
+//! # Why this module keeps `unsafe`
 //!
-//! A frozen pointer must consequently never be shared through a channel or
-//! table that lacks such an edge — `globals_version` (or an equivalent
-//! synchronizing handoff) is the only publication door.
-//!
-//! # Why this module keeps `unsafe` (designated unsafe module)
-//!
-//! The remaining unsafe here is the segment writes themselves: callers fill
-//! their allocated word range through the returned raw pointer (e.g. the
-//! `copy_nonoverlapping` in [`FrozenBuilder::alloc_from`], or the `Arena`
-//! object constructors in `bytecode::value`). These writes must stay
-//! raw-pointer writes and must NOT be rewritten as `&mut`-slice writes:
-//! every segment is one boxed slice shared by many allocations, and earlier
-//! allocations in the same slice may already be published — concurrently
-//! read by other threads with no lock. Forming `&mut seg.words[..]` (or any
-//! `&mut` reaching into the slice) would assert exclusive access over those
-//! published words and alias the readers, which is undefined behavior even
-//! if the code only writes to its own disjoint range. `UnsafeCell` plus raw
-//! pointers is the only sound way to express "write my disjoint range while
-//! other ranges of the same allocation are being read", so this module is a
-//! designated unsafe module behind safe public APIs:
-//! [`FrozenBuilder::alloc`] and [`FrozenBuilder::alloc_from`] are safe fns —
-//! the publication protocol above is a usage discipline for soundness of
-//! *later* reads, not a memory-safety precondition of calling them.
+//! Segment writes go through raw pointers and must stay that way. One boxed
+//! slice backs many allocations, and earlier ones may already be published and
+//! read by other threads with no lock. Forming `&mut seg.words[..]` would
+//! assert exclusive access over those published words and alias the readers —
+//! UB even if the write only touches its own disjoint range. `UnsafeCell` plus
+//! raw pointers is the only sound way to express that, so this is a designated
+//! unsafe module behind safe public APIs.
 
-// Designated unsafe module: the segment allocator writes through raw pointers
-// because earlier allocations in the same boxed slice may already be read by
-// other threads (see the aliasing rationale above).
 #![allow(unsafe_code)]
 
 use std::cell::UnsafeCell;
@@ -91,9 +50,8 @@ use indexmap::{Equivalent, IndexMap};
 
 use crate::bytecode::{Value, enum_hash_with_payload, enum_name_prefix_hash};
 
-/// Initial segment capacity in words (32 KiB). Small programs stay in one
-/// segment; segment capacities double from here so the segment list stays
-/// short (O(log total) segments) and `contains` range checks stay cheap.
+/// Initial segment capacity in words (32 KiB). Capacities double from here so
+/// the segment list stays short and `contains` range checks stay cheap.
 const DEFAULT_SEGMENT_WORDS: usize = 4096;
 
 /// Ceiling for the doubling growth, in words (8 MiB). A single allocation
@@ -101,19 +59,12 @@ const DEFAULT_SEGMENT_WORDS: usize = 4096;
 const MAX_SEGMENT_WORDS: usize = 1 << 20;
 
 /// One append-only segment. The words live in a separately boxed slice, so
-/// growing the segment *list* (a `Vec` re-allocation) moves this struct but
-/// never the words — raw pointers into `words` are stable for the life of
-/// the segment, and segments are never dropped while the area lives.
-///
-/// `UnsafeCell` is what makes the one-time initializing write through a
-/// shared `FrozenArea` defined behavior; the absence of a *data race* comes
-/// from the publication protocol in the module docs (disjoint ranges handed
-/// out under the mutex, write-once before publication, release/acquire on
-/// publication).
+/// growing the segment *list* moves this struct but never the words: raw
+/// pointers into `words` stay valid for the life of the area.
 struct FrozenSegment {
     words: Box<[UnsafeCell<u64>]>,
-    /// Bump index: words below `used` are allocated (their contents may
-    /// still be in flight on the allocating thread until publication).
+    /// Bump index. Words below it are allocated, but their contents may still
+    /// be in flight on the allocating thread until publication.
     used: usize,
 }
 
@@ -131,13 +82,12 @@ impl FrozenSegment {
 }
 
 /// The program-wide frozen area. Created once at program load, shared as
-/// `Arc<FrozenArea>` by the runtime, every scheduler, and the hydration
-/// path. See the module docs for the immutability/publication invariants.
+/// `Arc<FrozenArea>` by the runtime, every scheduler, and the hydration path.
+/// See the module docs for the immutability/publication invariants.
 pub struct FrozenArea {
     segments: Mutex<Vec<FrozenSegment>>,
 }
 
-// Shared across every scheduler thread by construction.
 const _: () = crate::assert_send_sync::<FrozenArea>();
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -151,11 +101,9 @@ impl FrozenArea {
         }
     }
 
-    /// An append handle. Multiple builders may exist: one for hydration, one
-    /// long-lived builder per `Vm` (used for every runtime freeze), plus
-    /// ad-hoc ones for one-off freezes. The area's mutex serializes their
-    /// bumps, and the ranges they receive are disjoint, so their content
-    /// writes can proceed in parallel without synchronization.
+    /// An append handle. Several may coexist over one area: the mutex
+    /// serializes their bumps and the ranges they get are disjoint, so their
+    /// content writes proceed in parallel without synchronization.
     pub fn builder(self: &Arc<Self>) -> FrozenBuilder {
         FrozenBuilder {
             area: Arc::clone(self),
@@ -166,9 +114,8 @@ impl FrozenArea {
         }
     }
 
-    /// Whether `ptr` points into allocated frozen storage. Reference counting
-    /// never consults this — immortal objects are skipped via the header bit;
-    /// it exists for debug assertions and tests.
+    /// Whether `ptr` points into allocated frozen storage. For debug
+    /// assertions and tests only; refcounting skips immortals via a header bit.
     pub fn contains(&self, ptr: *const u64) -> bool {
         let addr = ptr as usize;
         let segments = lock(&self.segments);
@@ -192,11 +139,8 @@ impl FrozenArea {
         lock(&self.segments).iter().map(|s| s.words.len()).sum()
     }
 
-    /// Bump-allocate `words` words. Appends a new segment when the open
-    /// (last) one is full; earlier segments are never touched again, which
-    /// is what makes the area append-only.
-    // Cold path: `expect` over `new_unchecked` costs nothing here and turns
-    // a hypothetical null segment base into a panic instead of UB.
+    /// Bump-allocate `words` words. Appends a new segment when the last one is
+    /// full; earlier segments are never touched again.
     #[allow(clippy::expect_used)]
     fn alloc(&self, words: usize) -> NonNull<u64> {
         assert!(words > 0, "frozen allocation must be at least one word");
@@ -206,8 +150,7 @@ impl FrozenArea {
         {
             let at = seg.used;
             seg.used += words;
-            // SAFETY: `at + words <= capacity`, so the offset stays in
-            // bounds of the boxed slice.
+            // SAFETY: `at + words <= capacity`, so the offset stays in bounds.
             let ptr = unsafe { seg.base().add(at) };
             return NonNull::new(ptr).expect("frozen segment base is non-null");
         }
@@ -244,13 +187,11 @@ impl fmt::Debug for FrozenArea {
 
 /// A constant `Value` with frozen provenance: an immediate, or a pointer into
 /// a frozen area — never a mortal process-heap object. Minted only by
-/// [`FrozenBuilder`]'s constant methods and the crate's frozen-publish engine
-/// ([`crate::heap::ProcHeap::publish_frozen`], which deep-copies mortal
-/// graphs into the area), so the aggregate constructors ([`FrozenBuilder::tuple`],
-/// [`FrozenBuilder::enum_`]) can require `FrozenConst` children: storing a
-/// mortal value into a frozen constant — a release-mode dangling pointer once
-/// the owning process heap dies — is a type error instead of a debug-only
-/// assertion.
+/// [`FrozenBuilder`]'s constant methods and
+/// [`crate::heap::ProcHeap::publish_frozen`], so the aggregate constructors can
+/// require `FrozenConst` children. Storing a mortal value into a frozen
+/// constant — a dangling pointer once the owning process heap dies — is then a
+/// type error rather than a debug-only assertion.
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct FrozenConst(Value);

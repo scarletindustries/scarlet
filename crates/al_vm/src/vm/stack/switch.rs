@@ -246,6 +246,13 @@ pub unsafe extern "C" fn run_on_stack_raw(
 /// Must be called while running on a process stack entered through
 /// [`run_on_stack`] on this thread (so `SCHED_SP` is live); `f` must not
 /// unwind and must return without moving the stack pointer.
+//
+// `inline(never)`: the compiler assumes a function never changes threads,
+// so if this body is inlined into a caller whose frame spans a park, the
+// TLS address for SCHED_SP can be computed before the park and restored —
+// stale — by the cross-thread resume. A real call re-derives it from the
+// thread pointer at execution time, on whichever thread is running now.
+#[inline(never)]
 pub unsafe fn call_on_sched_stack(f: Entry, arg: *mut c_void) -> u64 {
     let sched_sp = SCHED_SP.with(Cell::get);
     debug_assert!(
@@ -802,6 +809,16 @@ mod tests {
         static THREAD_TAG: AtomicU64 = const { AtomicU64::new(0) };
     }
 
+    /// The sanctioned way to read TLS from code that spans a park: a real
+    /// call, so the address is re-derived on the executing thread. Read
+    /// inline and the compiler may compute the TLS address before the park
+    /// and restore it — stale — across a cross-thread resume, which is the
+    /// very bug this test exists to catch in the runtime, not in itself.
+    #[inline(never)]
+    fn read_thread_tag() -> u64 {
+        THREAD_TAG.with(|t| t.load(Ordering::Relaxed))
+    }
+
     struct CrossState {
         sched: SavedContext,
         proc: SavedContext,
@@ -827,12 +844,12 @@ mod tests {
     unsafe extern "C" fn cross_entry(arg: *mut c_void) -> u64 {
         let st = unsafe { &*arg.cast::<CrossState>() };
         // Read this thread's tag, park, read again after resume.
-        let before = THREAD_TAG.with(|t| t.load(Ordering::Relaxed));
+        let before = read_thread_tag();
         assert_eq!(before, 0xA);
         let stp = arg.cast::<CrossState>();
         unsafe { swap_context(&raw mut (*stp).proc, &raw const st.sched) };
         // Resumed — on thread B. Re-derivation must observe B, not A.
-        let after = THREAD_TAG.with(|t| t.load(Ordering::Relaxed));
+        let after = read_thread_tag();
         st.seen_tag.store(after, Ordering::Relaxed);
         // The load-bearing half: a shim call from the resumed process stack.
         // This is what a compiled body does first, and it reads SCHED_SP. If

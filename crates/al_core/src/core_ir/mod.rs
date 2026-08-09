@@ -1,10 +1,8 @@
-//! Core IR: typed A-Normal Form sitting between the typechecked AST and the
-//! bytecode emitter. Every subexpression is a `Let`-bound `LocalId`, so
-//! last-use / drop / reuse are computable by a linear backward scan (Perceus,
-//! ICFP'22 frame-limited) instead of the forward-emit Nop-hole hedging that
-//! regressed bench_typed. All optimisation passes in
-//! `docs/type-directed-memory-design.md` are Core→Core; type erasure happens
-//! exactly once at Core→bytecode. See `docs/core-ir-spec.md`.
+//! Core IR: typed A-Normal Form between the typechecked AST and the bytecode
+//! emitter. Every subexpression is a `Let`-bound `LocalId`, so last-use, drop
+//! and reuse fall out of a linear backward scan (Perceus, ICFP'22
+//! frame-limited). Optimisation passes are Core→Core; type erasure happens once
+//! at Core→bytecode. See `docs/core-ir-spec.md`.
 
 pub mod clif;
 pub mod emit;
@@ -21,101 +19,76 @@ use crate::typed_ir::{GlobalSlot, RTy};
 use crate::types::StrId;
 use al_vm::newtype_index;
 
-// ── Operand spaces ─────────────────────────────────────────────────────────
-// The `u32`-shaped index spaces a bytecode operand can hold, and which the
-// compiler must never confuse: a `ConstId` may not subscript the local table,
-// and only a `CodeAddr` names an instruction. Each is a `crate::tivec::Idx`, so
-// the `TiVec` it indexes rejects the others outright — the mismatch is a type
-// error rather than a wrong-but-plausible instruction.
-//
-// `GlobalSlot` (the entry-frame stack space) lives in `typed_ir`, where it is
-// minted; the frame-local slot space is `bytecode::compiler`'s.
+// The index spaces a bytecode operand can hold. Each is a `crate::tivec::Idx`,
+// so the `TiVec` it indexes rejects the others at compile time. `GlobalSlot`
+// (entry-frame stack space) is minted in `typed_ir`; frame-local slots belong
+// to `bytecode::compiler`.
 
 newtype_index!(
     /// Dense per-function local index. Minted by `lower` in evaluation order so
-    /// a backward scan over the `Let` spine sees ids monotonically decrease.
-    /// Distinct from the AST's `StrId` bindings and from bytecode stack slots —
-    /// mapping to slots is `emit`'s job.
+    /// a backward scan over the `Let` spine sees ids decrease monotonically.
     pub struct LocalId("%")
 );
 
 newtype_index!(
-    /// Index into `CoreProgram.consts`. Literals are lowered to constants once
-    /// at `lower` time so `Atom` stays operand-only.
+    /// Index into `CoreProgram.consts`.
     pub struct ConstId("c")
 );
 
 newtype_index!(
-    /// Labelled-continuation index, scoped to one lowered body (function or
-    /// toplevel). Minted by `lower` wherever a fallible match needs a shared
-    /// failure continuation: [`CoreExpr::LetCont`] declares it and
-    /// [`CoreExpr::Goto`] transfers to it. Names *code*, never a value —
-    /// distinct from `LocalId` so a join label can never subscript the local
-    /// table.
+    /// Labelled-continuation index, scoped to one lowered body. Declared by
+    /// [`CoreExpr::LetCont`], transferred to by [`CoreExpr::Goto`]. Names code,
+    /// never a value.
     pub struct JoinId("j")
 );
 
-// `FuncIdx` — the `CoreProgram.fns` / `Program.functions` / `TypedProgram::fns`
-// numbering, shared by all three — lives in `al_vm` (the runtime stores it in
-// closures and the native-entry table) and is re-exported here where it is
-// minted (`FnTable::push`, the compiler's `finish_fn_frame`).
+// `FuncIdx` numbers `CoreProgram.fns`, `Program.functions` and
+// `TypedProgram::fns` alike. It lives in `al_vm` because the runtime stores it
+// in closures and the native-entry table.
 pub use al_vm::FuncIdx;
 
 newtype_index!(
-    /// A **function-relative** instruction offset: an index into the block one
-    /// `emit` call produces. Jump operands are exactly this (the VM adds the
-    /// frame's `Function.code_start` back), which is why the emitter never
-    /// spells an absolute `program.code` address. `emit::relocate` is the one
-    /// place a block's offsets are shifted onto an absolute stream, and it
-    /// takes the base as a plain `i32` because that base belongs to the
-    /// program, not to any block.
+    /// A function-relative instruction offset. Jump operands are exactly this;
+    /// the VM adds `Function.code_start` back, so the emitter never spells an
+    /// absolute `program.code` address. `emit::relocate` is the only place a
+    /// block's offsets move onto the absolute stream.
     pub struct CodeAddr("@")
 );
 
 impl CodeAddr {
-    /// The jump-operand encoding: `emit` writes this into `Instruction.operand`
-    /// and the VM reads it back relative to `Function.code_start`.
+    /// The jump-operand encoding, read back by the VM relative to
+    /// `Function.code_start`.
     #[inline]
     pub fn to_operand(self) -> i32 {
         self.0 as i32
     }
 
-    /// The address of the following instruction — the `SwitchTag` jump table
-    /// sits at `switch.next()`. Arithmetic on addresses stays inside the type.
+    /// The address of the following instruction. A `SwitchTag` jump table sits
+    /// at `switch.next()`.
     #[inline]
     pub fn next(self) -> CodeAddr {
         CodeAddr(self.0 + 1)
     }
 }
 
-/// A typed local binding. Carries a [`RTy`] — an index into the
-/// `ResolvedPool` the elaborator built, in which an unsolved inference
-/// variable is unrepresentable. Perceus therefore cannot be handed a type that
-/// answers `is_heap` `false` merely because inference lost it.
+/// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
+/// where an unsolved inference variable is unrepresentable, so Perceus cannot
+/// be handed a type that answers `is_heap` `false` because inference lost it.
 #[derive(Debug, Clone)]
 pub struct CoreBind {
     pub id: LocalId,
     pub ty: RTy,
-    /// `Some(slot)` when this bind is a module-toplevel `fn`/`const`/`let`/
-    /// destructured name and must land in that entry-frame slot: the fn bodies
-    /// the check walk already emitted address it as `PushGlobal <slot>`, so the
-    /// entry frame's `StoreLocal` has to agree.
+    /// `Some(slot)` when this bind is a module-toplevel decl that must land in
+    /// that entry-frame slot: already-emitted fn bodies address it as
+    /// `PushGlobal <slot>`, so the entry frame's `StoreLocal` has to agree.
     ///
-    /// Copied verbatim from [`crate::typed_ir::TypedBind::global`]. It lives on
-    /// the bind rather than in a `CoreProgram`-level `Vec<(LocalId, i32)>`
-    /// because every later pass rewrites binds: a parallel `LocalId`-keyed
-    /// table desyncs the moment one renumbers or drops a bind, whereas a field
-    /// travels with the binding it describes. `emit_toplevel` derives the
-    /// pinning itself from the body it emits
-    /// ([`CoreExpr::toplevel_globals`]) — it takes no pinning argument, so a
-    /// pinning that disagrees with the IR is unrepresentable.
+    /// On the bind rather than in a `LocalId`-keyed side table, which would
+    /// desync the moment a pass renumbers or drops a bind.
     pub global: Option<GlobalSlot>,
 }
 
 impl CoreBind {
-    /// Fresh bind, pinned to no slot. `lower` mints every bind through this
-    /// and pins [`Self::global`] afterwards on the module-toplevel decls whose
-    /// [`crate::typed_ir::TypedBind::global`] named one.
+    /// Fresh bind, pinned to no slot. `lower` pins [`Self::global`] afterwards.
     pub fn new(id: LocalId, ty: RTy) -> Self {
         CoreBind {
             id,
@@ -125,11 +98,9 @@ impl CoreBind {
     }
 }
 
-/// Resolved constructor identity captured at lowering time so `emit` need not
-/// re-consult the `TypeEnv`. `type_name`/`variant_name` feed
-/// `enum_name_prefix_hash`; `type_id`/`variant_idx` feed the packed header
-/// constant. Shape equality (`type_id`, `variant_idx`, arity) is what Perceus
-/// pairs drops against.
+/// Resolved constructor identity, captured at lowering so `emit` need not
+/// re-consult the `TypeEnv`. Perceus pairs drops on shape equality:
+/// `type_id`, `variant_idx`, arity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRef {
     pub type_id: TypeId,
@@ -138,10 +109,8 @@ pub struct VariantRef {
     pub variant_name: StrId,
 }
 
-/// Heap-cell shape for Perceus reuse pairing: a `Drop` of one shape may only
-/// hand its cell to a `Ctor` of the *same* shape (same header tag, same
-/// payload word count) so `reuse_or_alloc` can overwrite in place without a
-/// resize. Captured on the `Drop` node so pairing is a pure IR walk.
+/// Heap-cell shape for Perceus reuse pairing. A `Drop` may only hand its cell
+/// to a `Ctor` of the same shape, so the overwrite needs no resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReuseShape {
     pub tag: HeapTag,
@@ -167,19 +136,16 @@ pub enum Callee {
     Local(LocalId),
 }
 
-/// A [`Atom::PrimOp`]'s immediate operand, tagged with its meaning. `lower`
-/// names the variant at each construction site; [`emit`] is the single point
-/// that flattens it to the instruction's `i32` operand — so a `ConstId` can
-/// never be read as an argc, nor the pushed-default sentinel as an index.
+/// A [`Atom::PrimOp`]'s immediate operand, tagged with its meaning. `emit` is
+/// the single point that flattens it to the instruction's `i32`, so a `ConstId`
+/// can never be read as an argc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Imm {
-    /// The op carries no immediate (arithmetic/compare — encoded as 0).
+    /// No immediate; encoded as 0.
     None,
-    /// A field/slot index: `TupleIndex`, `GetField`, `PushGlobal`,
-    /// `PushCapture`, `ElemAt`, ...
+    /// A field or slot index.
     Index(u16),
-    /// An argument count: `MakeArray`, `MakeTuple`, `StrConcatN`,
-    /// `BinConcatN`, `Prepend`, `Append`.
+    /// An argument count.
     Argc(u32),
     /// `Op::IndexOr` with a constant default riding in the operand.
     Const(ConstId),
@@ -214,20 +180,15 @@ pub enum Atom {
         /// followed by `MakeEnumPayload a=1`; `None` allocates fresh.
         reuse: Option<LocalId>,
     },
-    /// A primitive VM operation. `op` is the bytecode `Op` directly so
-    /// `emit(Let{rhs=PrimOp})` is `PushLocal args; op{operand=imm}; StoreLocal`.
-    /// `imm` is the instruction's immediate operand, tagged with its meaning
-    /// (see [`Imm`]). `lower` sets it; `emit::imm_operand` is the one place it
-    /// becomes the raw `i32` — and asserts the op/variant pairing there.
+    /// A primitive VM operation. `op` is the bytecode `Op` directly, so this
+    /// emits as `PushLocal args; op{operand=imm}; StoreLocal`.
     PrimOp {
         op: Op,
         args: Vec<LocalId>,
         imm: Imm,
     },
-    /// `PushLocal captures; MakeClosure func_idx`. `func_idx` and the capture
-    /// set are resolved at lowering time from the fused walk's `Function`
-    /// entry — the nested body itself has already been lowered/emitted
-    /// recursively via `compile_fn_body`, so `emit` need only reference it.
+    /// `PushLocal captures; MakeClosure func_idx`. The nested body was already
+    /// lowered and emitted by `compile_fn_body`, so `emit` only references it.
     Closure {
         func_idx: FuncIdx,
         captures: Vec<LocalId>,
@@ -239,7 +200,7 @@ pub enum Atom {
 }
 
 impl Atom {
-    /// A `PrimOp` with no immediate (the common case for arithmetic/compare).
+    /// A `PrimOp` with no immediate.
     pub fn prim(op: Op, args: Vec<LocalId>) -> Self {
         Atom::PrimOp {
             op,
@@ -248,10 +209,8 @@ impl Atom {
         }
     }
 
-    /// The locals this atom reads, in push order — a `Call` yields its
-    /// arguments and then a dynamic callee. `Ctor`'s `reuse` is *not* an
-    /// operand: it names the slot the constructor overwrites, not a value
-    /// pushed onto the stack.
+    /// The locals this atom reads, in push order. `Ctor`'s `reuse` is not one:
+    /// it names a slot to overwrite, not a value pushed on the stack.
     pub fn operands(&self) -> impl Iterator<Item = LocalId> + '_ {
         let (pushed, trailing): (&[LocalId], Option<LocalId>) = match self {
             Atom::Local(x) => (&[], Some(*x)),
@@ -272,9 +231,8 @@ impl Atom {
     }
 }
 
-/// Lowered match-arm pattern. Nesting is flattened by `lower` into successive
-/// `Match` nodes, so a `Ctor` arm binds its fields as fresh locals and the
-/// arm body handles any deeper structure.
+/// Lowered match-arm pattern. `lower` flattens nesting into successive `Match`
+/// nodes, so a `Ctor` arm binds its fields as fresh locals.
 #[derive(Debug, Clone)]
 pub enum CorePat {
     Wild,
@@ -314,39 +272,30 @@ pub enum CoreExpr {
         rhs: Atom,
         body: Box<CoreExpr>,
     },
-    /// `let bind = <join>; body` where `<join>` is itself a control-flow tree
-    /// (an `If`/`Match`/short-circuit in operand position). Every `Tail` inside
-    /// `join` is a *value*, not a return: `emit` lowers each to leave-on-stack
-    /// then jump-to-merge, then `StoreLocal bind`. Kept distinct from `Let` so
-    /// `rhs: Atom` stays operand-only (Perceus's linear scan depends on that).
+    /// `let bind = <join>; body` where `join` is a control-flow tree in operand
+    /// position. Every `Tail` inside `join` is a value, not a return. Kept
+    /// distinct from `Let` so `rhs: Atom` stays operand-only, which Perceus's
+    /// linear scan depends on.
     LetJoin {
         bind: CoreBind,
         join: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
-    /// Declares the zero-arity labelled continuation `cont`, in scope for
-    /// every `Goto(id)` inside `body`. Unlike `LetJoin` — a *value* join,
-    /// evaluated unconditionally inline then stored — `cont` runs only when a
-    /// failure edge in `body` fires, may be entered from many such edges, and
-    /// is itself in tail position (its result is the expression's result).
-    /// Zero arity suffices because `cont` references only locals bound
-    /// strictly before this node, and this node dominates every `Goto` to
-    /// `id`. `lower` mints one per fallible match-arm suffix so each arm body
-    /// is lowered exactly once and failure edges become `Goto`s instead of
-    /// re-lowered copies of the remaining arms.
+    /// Declares the zero-arity continuation `cont`, in scope for every
+    /// `Goto(id)` in `body`. Unlike `LetJoin` it runs only when a failure edge
+    /// fires, may be entered from many edges, and sits in tail position. Zero
+    /// arity works because `cont` reads only locals bound before this node, and
+    /// this node dominates every `Goto` to `id`.
     LetCont {
         id: JoinId,
         cont: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
-    /// Inserted by `perceus` at the last use of `local`: releases the frame's
-    /// reference and — when the cell is uniquely owned — parks the hollowed
-    /// allocation in `local`'s slot for a paired `Ctor{reuse}` to overwrite.
-    /// `shape` is `Some` when the allocation size is statically known (rhs was
-    /// a `Ctor`, or an arm pattern proved the variant) and thus reusable;
-    /// `None` for heap locals of unknown arity (e.g. a `Call` result of a
-    /// multi-variant enum), which drop for RC correctness but never pair.
-    /// Lowers to `Op::Drop slot` regardless.
+    /// Inserted by `perceus` at the last use of `local`. Releases the frame's
+    /// reference and, when the cell is uniquely owned, parks the hollowed
+    /// allocation for a paired `Ctor{reuse}`. `shape` is `Some` only when the
+    /// allocation size is statically known; `None` drops for RC correctness but
+    /// never pairs. Lowers to `Op::Drop slot` either way.
     Drop {
         local: LocalId,
         shape: Option<ReuseShape>,
@@ -365,12 +314,9 @@ pub enum CoreExpr {
     },
     /// Tail position: return value or tail call.
     Tail(Atom),
-    /// Terminal transfer to the continuation an enclosing [`CoreExpr::LetCont`]
-    /// declared for this `JoinId`. Legal only in tail position — it stands
-    /// where a `Tail` could, never in operand position — so it carries no
-    /// value: the continuation's own tail produces the result. `emit` lowers
-    /// it to a jump to the continuation's label; many `Goto`s may share one
-    /// label.
+    /// Transfer to the continuation an enclosing [`CoreExpr::LetCont`] declared
+    /// for this `JoinId`. Legal only in tail position, so it carries no value.
+    /// Many `Goto`s may share one label.
     Goto(JoinId),
 }
 

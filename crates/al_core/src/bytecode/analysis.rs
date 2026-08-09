@@ -1,11 +1,9 @@
 //! Module top level: the multi-pass declaration analysis that fronts the
 //! compiler's fused infer+emit pass.
 //!
-//! Top-level declarations are mutually recursive and order-free — a fn may
-//! call a fn defined below it, a type may mention a type defined below it —
-//! so bodies cannot simply be compiled in source order. `analyse_module`
-//! makes the order explicit in passes, each establishing one kind of fact
-//! before the next pass needs it:
+//! Top-level declarations are mutually recursive and order-free, so bodies
+//! cannot be compiled in source order. `analyse_module` makes the order
+//! explicit in passes, each establishing one fact before the next needs it:
 //!
 //! | pass | does                                                          |
 //! |------|---------------------------------------------------------------|
@@ -20,33 +18,22 @@
 //! |      | the non-declaration nodes                                     |
 //! | 6    | elaborate every parked body to Core IR and bytecode           |
 //!
-//! Pass 5 hands each body to `compiler.rs` (`compile_declared_function` /
-//! `compile_expr_with_hint`). Members of one SCC are inferred at a single
-//! engine level against their pre-registered signatures and generalized
-//! together afterwards, so mutual recursion typechecks monomorphically
-//! inside the group and polymorphically outside it. Non-declaration nodes
-//! (let bindings, bare expressions) run last, in source order.
+//! One SCC's members are inferred at a single engine level against their
+//! pre-registered signatures and generalized together, so mutual recursion
+//! typechecks monomorphically inside the group and polymorphically outside.
 //!
-//! Pass 6 is a *phase boundary*, not a step of pass 5. The whole of pass 5 is
-//! bracketed by one `begin_deferred_elaboration`/`end_deferred_elaboration`
-//! pair, so no body — declared fn, nested lambda, or a lambda bound by a
-//! toplevel `let` — is lowered or emitted while the module is being
-//! typechecked. Pass 6 is the single loop that drains them.
-//!
-//! Two things make that boundary worth having. Types: the fused pipeline
-//! lowered a body while the SCC around it was still being inferred, handing
-//! `lower` a var that `generalize_top` or a later sibling was about to move.
-//! Shape: with emit hoisted out of the walk, the walk's product is the module
-//! as a whole, which is what `lower(p: &TypedProgram) -> CoreProgram` consumes
-//! — a per-SCC drain could only ever have fed it one SCC at a time.
+//! Pass 6 is a phase boundary, not a step of pass 5: all of pass 5 sits inside
+//! one `begin_deferred_elaboration`/`end_deferred_elaboration` pair, so no
+//! body is lowered while the module is still being typechecked. That is what
+//! `lower(p: &TypedProgram) -> CoreProgram` needs — the whole module at once,
+//! with every var already resolved.
 //!
 //! # Invariant: per-decl data is positional, never name-keyed
 //!
-//! Data computed in an early pass and consumed in a later one (`Prepared`,
-//! `PreparedType`) is carried in `Vec`s built one-to-one with the decl
-//! lists and indexed positionally. Keying by name desyncs the moment two
-//! decls share a name — the decl list keeps both while a map keeps one —
-//! so that bug class is kept unrepresentable here.
+//! Data computed in an early pass and read in a later one (`Prepared`,
+//! `PreparedType`) rides in `Vec`s built one-to-one with the decl lists.
+//! Keying by name desyncs the moment two decls share a name: the decl list
+//! keeps both, a map keeps one.
 
 use std::collections::{HashMap, HashSet};
 
@@ -66,10 +53,6 @@ use crate::types::{
     AddedTypeVar, AnnotationContext, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme,
     StrId, Ty, TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
 };
-
-// ---------------------------------------------------------------------------
-// Top-level decl wrapper for the call-graph nodes.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 enum Decl<'a> {
@@ -96,8 +79,8 @@ impl<'a> Decl<'a> {
         }
     }
 
-    /// The declaration's position in the module block's `body`. This — not its
-    /// name — is what the toplevel elaboration schedules on.
+    /// The declaration's position in the module block's `body`. This, not the
+    /// name, is what the toplevel elaboration schedules on.
     fn node(&self) -> usize {
         match *self {
             Decl::Fn { node, .. } | Decl::Const { node, .. } => node,

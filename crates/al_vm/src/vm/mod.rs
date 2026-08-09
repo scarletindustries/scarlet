@@ -417,13 +417,11 @@ pub struct VM {
     /// is shallow where it matters (constants are frozen words pointing
     /// into the shared `program.frozen`).
     program: Program,
-    templates: PreludeTemplates,
-    /// Frozen stdlib enum templates memoized by `VariantTemplate` identity.
-    template_cache: HashMap<usize, EnumTemplate>,
+    templates: Templates,
     /// Builder over the program's frozen area, kept for runtime freezing of
-    /// stdlib templates (`stdlib_template`) built on demand (error values).
-    /// Field order is not load-bearing: frozen `Value`s are immortal, so their
-    /// `Drop` never reads the frozen area (see `VALUE_IMMORTAL`).
+    /// published globals. Field order is not load-bearing: frozen `Value`s
+    /// are immortal, so their `Drop` never reads the frozen area (see
+    /// `VALUE_IMMORTAL`).
     frozen: FrozenBuilder,
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
@@ -573,22 +571,21 @@ pub struct VM {
 ///
 /// Built with no command-line arguments; `process.argv` returns an empty
 /// array. Use [`new_vm_with_argv`] to make program arguments visible.
-pub fn new_vm(program: Program, stdlib: &'static StdlibTemplates) -> VmResult<VM> {
-    new_vm_with_argv(program, stdlib, Vec::new())
+pub fn new_vm(program: Program) -> VmResult<VM> {
+    new_vm_with_argv(program, Vec::new())
 }
 
 /// Build the VM that runs `program` as scheduler 0, exposing `argv` (the
 /// entrypoint path followed by the arguments passed after it) to
-/// `process.argv`. `stdlib` is the embedder's table of every constructor
-/// the VM builds unprompted (I/O results, protocol values) — the runtime's
-/// only knowledge of a front end's stdlib.
-pub fn new_vm_with_argv(
-    program: Program,
-    stdlib: &'static StdlibTemplates,
-    argv: Vec<String>,
-) -> VmResult<VM> {
-    let (runtime, poll) = Runtime::new(Arc::new(program), argv, stdlib, sched::scheduler_count())
-        .map_err(VmError::Io)?;
+/// `process.argv`. The program's `templates`/`abi` tables are the runtime's
+/// only knowledge of a front end's stdlib; they are validated here, once.
+pub fn new_vm_with_argv(program: Program, argv: Vec<String>) -> VmResult<VM> {
+    program
+        .abi
+        .validate(&program.templates)
+        .map_err(|e| VmError::Internal(Cow::Owned(e)))?;
+    let (runtime, poll) =
+        Runtime::new(Arc::new(program), argv, sched::scheduler_count()).map_err(VmError::Io)?;
     Ok(vm_for_runtime(runtime, 0, poll))
 }
 
@@ -603,7 +600,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
     // stays shared — only the vectors copy).
     let program = (*runtime.program).clone();
     let mut frozen = program.frozen.builder();
-    let templates = PreludeTemplates::new(&mut frozen, runtime.stdlib);
+    let templates = Templates::resolve(&program, &mut frozen);
     // The global (literal) area is sized by the entry function: top-level
     // bindings are its "locals", mirrored into this table as they are written.
     let globals_len = program
@@ -615,7 +612,6 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
         program,
         templates,
         frozen,
-        template_cache: HashMap::new(),
         heap: ProcHeap::new(),
         stack: Vec::new(),
         frames: Vec::new(),
@@ -1394,6 +1390,10 @@ fn nil_value(h: &mut ProcHeap, nil_id: crate::TypeId) -> Value {
 /// tables, run queue — and never execute the program.
 #[cfg(test)]
 fn halt_test_vm() -> VM {
+    let frozen = Arc::new(crate::frozen::FrozenArea::new());
+    let mut fb = frozen.builder();
+    let (templates, abi) = crate::template::test_fixture::build(&mut fb);
+    drop(fb);
     let program = Program {
         constants: Vec::new(),
         functions: vec![Function {
@@ -1406,9 +1406,10 @@ fn halt_test_vm() -> VM {
         }],
         code: vec![op(Op::Halt)],
         entry: 0,
-        frozen: Arc::new(crate::frozen::FrozenArea::new()),
+        frozen,
         native: Default::default(),
+        templates,
+        abi,
     };
-    new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
-        .expect("test VM construction must succeed")
+    new_vm(program).expect("test VM construction must succeed")
 }
