@@ -240,23 +240,21 @@ pub enum Op {
     /// `[n, radix] -> Binary` — render an Int as ASCII (radix 10/16).
     BinFromIntAscii,
 
-    // HTTP/1.1 protocol ops (al/http/h1, al/http/headers). The byte scanning
-    // and value assembly run in native code, while every protocol
-    // *decision* (framing precedence, keep-alive, 100-continue) stays in AL.
-    /// `[buf, off] -> Parsed` — parse one request head (request line + header
-    /// block) from `buf` at byte offset `off`. Pushes an `al/http/h1.Parsed`:
-    /// `Done(method, target, version, headers, consumed)` / `NeedMore` /
-    /// `Bad(status)`. Method, target, and header names/values are zero-copy
-    /// views into `buf`'s backing.
+    // HTTP/1.1 protocol ops (al/http/h1, al/http/headers). Byte scanning and
+    // value assembly are native; every protocol decision (framing precedence,
+    // keep-alive, 100-continue) stays in AL.
+    /// `[buf, off] -> Parsed` — parse one request head from `buf` at byte
+    /// offset `off`. Pushes `Done(method, target, version, headers,
+    /// consumed)` / `NeedMore` / `Bad(status)`, with method, target and header
+    /// names/values as zero-copy views into `buf`'s backing.
     HttpParseHead,
     /// `[headers] -> Framing` — RFC 7230 §3.3.3 body framing over an
     /// `Array(Header)`: `NoBody` / `Length(n)` / `Chunked` / `Invalid(status)`.
     HttpFraming,
-    /// `[buf, off, max] -> ChunkBody` — decode a chunked transfer-encoded body
-    /// from `buf` at byte offset `off`, refusing to decode more than `max`
-    /// bytes. Pushes an `al/http/h1.ChunkBody`: `ChunkedDone(body, trailers,
-    /// consumed)` / `ChunkedNeedMore` / `ChunkedBad(status)`. The decoded body
-    /// is one owned binary; trailer names/values are zero-copy views.
+    /// `[buf, off, max] -> ChunkBody` — decode a chunked body from `buf` at
+    /// byte offset `off`, refusing to decode more than `max` bytes. Pushes
+    /// `ChunkedDone(body, trailers, consumed)` / `ChunkedNeedMore` /
+    /// `ChunkedBad(status)`; trailer names/values are zero-copy views.
     HttpChunkDecode,
     /// `[headers, name] -> Option(Binary)` — value of the first header whose
     /// name matches `name` ASCII-case-insensitively.
@@ -289,53 +287,46 @@ pub enum Op {
     TcpAccept,
     TcpConnect,
     TcpRead,
-    /// Read with an absolute monotonic-ms deadline:
-    /// `[sock, max, deadline_ms] -> Result(Binary, NetError)`. Parks until data
-    /// arrives, the peer closes, or the deadline passes (then `Err`).
+    /// `[sock, max, deadline_ms] -> Result(Binary, NetError)` — parks until
+    /// data arrives, the peer closes, or the absolute monotonic-ms deadline
+    /// passes (then `Err`).
     TcpReadUntil,
     TcpWrite,
-    /// Vectored write: `[sock, Array(Binary)] -> Result(Nil, NetError)` in one
-    /// writev syscall.
+    /// `[sock, Array(Binary)] -> Result(Nil, NetError)` in one writev syscall.
     TcpWriteParts,
     TcpClose,
     TcpCloseServer,
     TcpLocalAddr,
-    /// `[host] -> Result(IpAddress, NetError)` — resolve a hostname to an IP
-    /// address. IP literals return immediately; hostnames offload to the
-    /// blocking pool so the syscall never stalls the scheduler. (al/net.resolve)
+    /// `[host] -> Result(IpAddress, NetError)`. IP literals return
+    /// immediately; hostnames offload to the blocking pool so the syscall
+    /// never stalls the scheduler. (al/net.resolve)
     DnsResolve,
-    /// `[String] -> Option(IpAddress)` — parse an IP literal, `None` on
-    /// anything else. The only supported constructor for `IpAddress`.
-    /// (al/net/address.parse)
+    /// `[String] -> Option(IpAddress)` — the only constructor for
+    /// `IpAddress`. (al/net/address.parse)
     IpParse,
 
     // Concurrency (al/scheduler)
     /// Spawn a lightweight process running the popped closure.
     ProcessSpawn,
-    /// Spawn the popped closure pinned to the current scheduler — the child
-    /// runs on the core that spawned it and any sockets it captured stay in
-    /// place (no fd move, no cross-core handoff). Used by the per-core accept
-    /// loop so a connection is handled on the core that accepted it.
+    /// Spawn the popped closure pinned to the current scheduler, so captured
+    /// sockets stay put (no fd move, no cross-core handoff).
     SpawnLocal,
     /// Spawn one copy of the popped closure pinned to every live scheduler.
-    /// Drives the shared-nothing accept fan-out: each core runs its own
-    /// acceptor against its own `SO_REUSEPORT` socket.
+    /// Drives the accept fan-out: one acceptor per `SO_REUSEPORT` socket.
     SpawnOnEach,
     /// Park the current process for `ms` milliseconds.
     Sleep,
     /// Push milliseconds elapsed since a process-global monotonic epoch (Int).
     Monotonic,
 
-    /// Push the program's command-line arguments as an `Array(String)`: the
-    /// entrypoint path followed by every argument given after it on the
-    /// command line. (al/process.argv)
+    /// Push an `Array(String)` of the entrypoint path followed by every
+    /// argument after it on the command line. (al/process.argv)
     Argv,
 
     // Maps (al/map). A `Map(k, v)` is an opaque heap value with a pluggable
-    // backing; the only backing today is the zero-copy process-environment
-    // view produced by `EnvMap`. Read ops dispatch on the backing.
-    /// Push a `Map(String, String)` that reads through to the process
-    /// environment — no environment data is copied. (al/process.env)
+    // backing; read ops dispatch on the backing.
+    /// Push a `Map(String, String)` reading through to the process
+    /// environment, copying nothing. (al/process.env)
     EnvMap,
     /// `[map, key] -> Option(v)` — look up a key. (al/map.get)
     MapGet,
@@ -361,20 +352,16 @@ pub enum Op {
 }
 
 impl Op {
-    /// True when this op's `operand` is an instruction index — absolute in
-    /// [`Program::code`], function-relative inside a block `core_ir::emit`
-    /// has just produced — rather than a constant id, slot, count, or
-    /// function index. Jump-patching, peephole fusion and
-    /// `core_ir::emit::relocate` all key off this, so it is the ONE authority
-    /// on which operands are addresses.
-    ///
-    /// The match is exhaustive on purpose: a new opcode does not compile until
-    /// its operand is classified here, rather than defaulting to "not an
-    /// address" and silently surviving relocation unshifted.
+    /// True when this op's `operand` is an instruction index rather than a
+    /// constant id, slot, count, or function index. Jump patching, peephole
+    /// fusion and `core_ir::emit::relocate` all key off this, so it is the
+    /// single authority on which operands are addresses. The match is
+    /// exhaustive so a new opcode cannot default to "not an address" and
+    /// silently survive relocation unshifted.
     pub const fn has_jump_target(self) -> bool {
         match self {
             // `SwitchTag`'s operand is the jump-table base; the table's own
-            // entries are ordinary `Jump`s, covered by the first arm.
+            // entries are ordinary `Jump`s.
             Op::Jump | Op::JumpIfFalse | Op::JumpGeIntLC | Op::JumpNeIntLC | Op::SwitchTag => true,
 
             Op::PushConst
@@ -529,16 +516,12 @@ impl Op {
         }
     }
 
-    /// True when this op's lowering is not "push args, dispatch, exactly one
-    /// value on the stack": `Print` leaves nothing (emit appends `PushNil`)
-    /// and `BinReadUtf8` leaves two words (emit appends `MakeTuple 2`).
-    /// `core_ir::emit`'s operand hoisting and if-condition fusion both treat
-    /// a primop as a single-value expression, so they key off this and it is
-    /// the ONE authority on which primops break that shape.
-    ///
-    /// The match is exhaustive on purpose: a new opcode does not compile
-    /// until its stack effect is classified here, rather than defaulting to
-    /// "one value" and silently miscompiling around hoisting/fusion.
+    /// True when this op does not leave exactly one value on the stack:
+    /// `Print` leaves none, `BinReadUtf8` leaves two. `core_ir::emit`'s
+    /// operand hoisting and if-condition fusion treat a primop as a
+    /// single-value expression, so they key off this. The match is exhaustive
+    /// so a new opcode cannot default to "one value" and silently miscompile
+    /// around hoisting and fusion.
     pub const fn pushes_extra(self) -> bool {
         match self {
             Op::Print | Op::BinReadUtf8 => true,
@@ -698,15 +681,14 @@ impl Op {
         }
     }
 }
-/// A single bytecode instruction. `a`/`b` are packed sub-operands that reclaim
-/// the 3 bytes of padding between `op` and `operand`; single-operand ops leave
-/// them zero. Layout: 1B op + 1B a + 2B b + 4B operand = 8B, `Copy`.
+/// A single bytecode instruction: 1B op + 1B a + 2B b + 4B operand = 8B.
+/// `a`/`b` are packed sub-operands reclaiming padding; single-operand ops
+/// leave them zero.
 ///
-/// `repr(C)` pins the field order so `as_u64`/`from_u64` are sound; the
-/// dispatch loop fetches via that path so the per-instruction read stays a
-/// single 8-byte load even when the loop and this type live in different
-/// crates (LLVM's load-combine pass otherwise misses it across the boundary
-/// — costs ~30% on `bench_heavy.al`).
+/// `repr(C)` pins the field order so the u64 round-trip in [`fetch`] is
+/// sound. The dispatch loop must fetch through that path: across a crate
+/// boundary LLVM's load-combine misses the struct read, costing ~30% on
+/// `bench_heavy.al`.
 #[derive(Debug, Clone, Copy)]
 #[repr(C, align(8))]
 pub struct Instruction {
@@ -723,26 +705,21 @@ const _: () = assert!(std::mem::align_of::<Instruction>() == 8);
 /// for why the dispatch loop must go through this rather than `code[i]`.
 ///
 /// Returns `None` when `i` is out of bounds.
-// Designated unsafe scope: the bounded u64-load + transmute below is the one
-// unsafe site in this module. Measured safe alternatives, both rejected
-// (bench_heavy.al, best-of-N, 2026-06): plain `code.get(i).copied()` on this
-// struct +19%; `repr(transparent)` u64 newtype with shift accessors +8-11%
-// even with an unsafe op decode, +18% fully safe via num_enum — LLVM
-// schedules the dispatch loop worse against shift extraction than against
-// SROA'd struct fields, so the packed-newtype "zero-cost" theory fails.
+// Safe alternatives were measured and rejected on bench_heavy.al:
+// `code.get(i).copied()` +19%, a `repr(transparent)` u64 newtype with shift
+// accessors +8-11% (+18% fully safe). LLVM schedules the dispatch loop worse
+// against shift extraction than against SROA'd struct fields.
 #[allow(unsafe_code)]
 #[inline(always)]
 pub fn fetch(code: &[Instruction], i: usize) -> Option<Instruction> {
     if i >= code.len() {
         return None;
     }
-    // SAFETY: `i < code.len()` is checked above, so the read is in-bounds.
-    // `repr(C, align(8))` + `repr(u8)` on `Op` + the size/align asserts
-    // pin `Instruction` to a fully-initialized 8-byte POD, so reading the slice
-    // as `[u64]` is sound and transmuting one element back recovers the same
-    // `Instruction` (the `Op` byte is valid because it came from `code`). The
-    // u64-then-transmute path is the point — it forces one `ldr` where SROA on
-    // a direct struct copy would otherwise emit four separate field loads.
+    // SAFETY: `i < code.len()` is checked above. `repr(C, align(8))` plus the
+    // size/align asserts pin `Instruction` to a fully-initialized 8-byte POD,
+    // so reading it as u64 and transmuting back recovers the same value; the
+    // `Op` byte is valid because it came from `code`. Going through u64
+    // forces one load where SROA would emit four field loads.
     unsafe {
         let raw = *code.as_ptr().cast::<u64>().add(i);
         Some(std::mem::transmute::<u64, Instruction>(raw))
@@ -765,16 +742,12 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub code: Vec<Instruction>,
     pub entry: i32,
-    /// The program-wide frozen area the `constants`
-    /// were built into by the compiler / hydration `FrozenBuilder`. `Arc`-held
-    /// here so the area lives exactly as long as the program that points into
-    /// it; every scheduler's clone of the program shares the same area.
+    /// The frozen area `constants` point into. `Arc`-held so it outlives
+    /// every scheduler's clone of the program.
     pub frozen: Arc<crate::frozen::FrozenArea>,
-    /// Compiled-function entry points, one slot per `functions` entry and
-    /// indexed by the same `FuncIdx` numbering. `Arc`-backed like `frozen`,
-    /// so every scheduler's clone of the program consults one table. Sized
-    /// by [`compiler`] once the function list is final; an empty table (the
-    /// default) means "interpret everything". See [`native`].
+    /// Compiled-function entry points, one slot per `functions` entry under
+    /// the same `FuncIdx` numbering. An empty table means interpret
+    /// everything. See [`native`].
     pub native: NativeTable,
     /// Constructors the VM may instantiate, interned into `frozen` by the
     /// front end. Indexed by the `abi` table below.
@@ -784,9 +757,8 @@ pub struct Program {
     pub abi: crate::template::AbiTable,
 }
 
-// Worker scheduler threads clone the shared program (load-bearing fact 3):
-// constants are frozen/immediate words, names are `Arc<str>`, the area is
-// `Arc<FrozenArea>`. This must stay thread-shareable.
+// Worker scheduler threads clone the shared program, so it must stay
+// thread-shareable.
 const _: () = crate::assert_send_sync::<Program>();
 
 pub fn op(o: Op) -> Instruction {

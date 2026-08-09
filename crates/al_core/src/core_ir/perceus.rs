@@ -847,13 +847,6 @@ mod tests {
     /// `dot_loop` shape: two 3-arity ctors, consumed by a Call, then a
     /// tail-self recursion. Loop-carried reuse pairs each ctor with the
     /// previous iteration's dropped cell.
-    ///
-    /// ```text
-    /// fn loop(%0, %1)
-    ///   let %2 = Ctor(..3); let %3 = Ctor(..3)
-    ///   let %4 = call fn#7(%2, %3)      ; %2,%3 last use; drops land here
-    ///   if %0 then ret %1 else ret self(%0, %4)
-    /// ```
     #[test]
     fn loop_carried_reuse_across_tail_self() {
         let mut pool = pool();
@@ -895,8 +888,7 @@ mod tests {
         assert!(find_drop(&f.body, local(3)));
     }
 
-    /// Without a self-tail edge nothing loop-carries: same body ending in a
-    /// plain return leaves the ctor unpaired.
+    /// Without a self-tail edge nothing loop-carries.
     #[test]
     fn no_loop_carry_without_tail_self() {
         let mut pool = pool();
@@ -931,8 +923,8 @@ mod tests {
         assert_eq!(count_drops(&f.body), 0);
     }
 
-    /// Heap local from a `Call` rhs (unknown arity) still drops — RC
-    /// correctness — but with `shape: None`, so it never pairs.
+    /// A heap local from a `Call` rhs still drops, but with `shape: None`
+    /// (unknown arity), so it never pairs.
     #[test]
     fn call_result_drops_without_shape() {
         let mut pool = pool();
@@ -967,9 +959,8 @@ mod tests {
         );
     }
 
-    /// Ownership equalisation at an `If` join: a local live into one branch
-    /// only is dropped at the head of the other, so both paths release it
-    /// exactly once.
+    /// A local live into one `If` branch only drops at the head of the other,
+    /// so both paths release it exactly once.
     #[test]
     fn if_join_equalises_ownership() {
         let mut pool = pool();
@@ -998,13 +989,9 @@ mod tests {
         assert_eq!(count_drops(els), 1, "els drops %0 at head");
     }
 
-    /// A rigid quantified variable (`fn id(x) { x }`'s param) is genuinely
-    /// polymorphic: its representation is unknown, so it is handled
-    /// dynamically and emits no `Drop`. This is the *only* non-heap answer
-    /// that is not a primitive — the `Var` arm that used to suppress `Drop`
-    /// for a type inference had merely lost is unrepresentable in
-    /// [`ResolvedPool`], so a dead nominal bind (below) can no longer be
-    /// silently skipped.
+    /// A rigid quantified variable has unknown representation, is handled
+    /// dynamically, and emits no `Drop`. It is the only non-heap answer that is
+    /// not a primitive; a dead nominal bind still drops.
     #[test]
     fn bound_is_not_heap_but_a_nominal_is() {
         let mut pool = pool();
@@ -1036,8 +1023,6 @@ mod tests {
     fn shape_mismatch_does_not_pair() {
         let mut pool = pool();
         let t = con(&mut pool, 99);
-        // let %1 = Ctor(%0,%0) [arity 2]; use %1 in PrimOp; drop %1 [arity 2];
-        // tail Ctor(%2,%2,%2) [arity 3] — mismatch, no reuse.
         let f = perceus(
             &pool,
             func(
@@ -1062,12 +1047,9 @@ mod tests {
         );
     }
 
-    /// Join-edge ownership equalisation, the `if_join_equalises_ownership`
-    /// discipline extended to `Goto` edges: `%0` is live into the shared cont
-    /// (its return value), `%2` is not. The `Goto` edge drops `%2` before the
-    /// jump and must NOT drop `%0` (the cont consumes it); the non-`Goto`
-    /// path drops `%0` itself. Every owned local is released exactly once on
-    /// every path — before the edge or inside the cont, never both.
+    /// Ownership equalisation across `Goto` edges: `%0` is live into the shared
+    /// cont, `%2` is not. Every owned local is released exactly once on every
+    /// path, before the edge or inside the cont, never both.
     #[test]
     fn goto_edges_equalise_ownership() {
         let mut pool = pool();
@@ -1115,9 +1097,8 @@ mod tests {
         assert!(!find_drop(els, local(2)), "els returns %2:\n{}", f.body);
     }
 
-    /// A local whose last use is inside the shared cont drops there, per
-    /// path, exactly once — covering every entering edge — and no edge drops
-    /// it before its `Goto`.
+    /// A local whose last use is inside the shared cont drops there, once, and
+    /// no edge drops it before its `Goto`.
     #[test]
     fn drop_inside_shared_cont_not_on_edges() {
         let mut pool = pool();
@@ -1161,9 +1142,8 @@ mod tests {
         );
     }
 
-    /// A reuse token parked before the `LetCont` pairs with a `Ctor` on the
-    /// fallthrough path but never with one inside the cont: a shared cont is
-    /// entered from many edges, so its token stack starts empty.
+    /// A token parked before the `LetCont` pairs on the fallthrough path but
+    /// never inside the cont, whose token stack starts empty.
     #[test]
     fn cont_enters_with_empty_reuse_stack() {
         let mut pool = pool();

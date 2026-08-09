@@ -324,13 +324,10 @@ impl CoreExpr {
     /// The `(bind, entry-frame slot)` pairs pinned on this expression's
     /// outermost `Let`/`LetJoin` spine, in binding order.
     ///
-    /// Meaningful on a module toplevel, where `lower` copied
-    /// [`crate::typed_ir::TypedBind::global`] onto each decl's [`CoreBind`];
-    /// module decls are spine bindings by construction, so the walk steps
-    /// through the `Drop`s Perceus interleaves and stops at the first join
-    /// point. `emit_toplevel` derives its pinning from the body it emits via
-    /// this walk — it takes no pinning argument, so a pinning that disagrees
-    /// with the IR is unrepresentable.
+    /// Meaningful on a module toplevel, where module decls are spine bindings
+    /// by construction. The walk steps over the `Drop`s Perceus interleaves and
+    /// stops at the first join point. `emit_toplevel` takes no pinning
+    /// argument, so a pinning that disagrees with the IR cannot exist.
     pub fn toplevel_globals(&self) -> Vec<(LocalId, GlobalSlot)> {
         let mut out = Vec::new();
         let mut cur = self;
@@ -371,10 +368,9 @@ pub struct CoreProgram {
 }
 
 impl Default for CoreProgram {
-    /// The empty program: no functions, a toplevel that returns nil. The nil
-    /// lives in `consts` so the invariant every consumer leans on — the
-    /// toplevel only references `ConstId`s below `consts.len()` — holds for
-    /// the default exactly as it does for every lowered program.
+    /// No functions, a toplevel returning nil. The nil lives in `consts` so the
+    /// default keeps the invariant every consumer leans on: every referenced
+    /// `ConstId` is below `consts.len()`.
     fn default() -> Self {
         CoreProgram {
             fns: Vec::new(),
@@ -384,16 +380,12 @@ impl Default for CoreProgram {
     }
 }
 
-// ── Display ────────────────────────────────────────────────────────────────
-// Golden-test printer (`crates/al/tests/core_ir.rs`). Indentation encodes the
-// `Let` spine; ids print as `%n`, constants as `cN`, so snapshots are stable
-// across string-interner churn. An `RTy` prints as `:N` — its raw index into
-// the `ResolvedPool`, which this module cannot resolve structurally (it holds
-// no pool). That index shifts whenever the elaborator allocates a different
-// number of nodes ahead of it, so the golden harness renumbers `:N` → `:tK`
-// per snapshot before comparing (`normalize_tys`); the raw index stays here
-// for debug printing, where it is the thing you actually want to see. Hence
-// `Display for RTy` prints the bare number: the `:` sigil is this printer's.
+// Printer for the golden tests in `crates/al/tests/core_ir.rs`. Ids print as
+// `%n` and constants as `cN` so snapshots survive string-interner churn. An
+// `RTy` prints as `:N`, its raw pool index, which shifts whenever the
+// elaborator allocates a different number of nodes before it — the harness
+// renumbers those per snapshot (`normalize_tys`). The `:` sigil belongs to this
+// printer, not to `Display for RTy`.
 
 impl fmt::Display for CoreBind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -494,8 +486,8 @@ impl fmt::Display for Indented<'_> {
             }
             Ok(())
         };
-        // Walk the Let-spine iteratively so deep chains do not recurse on the
-        // Rust stack (a lowered function body is one long spine).
+        // Iterative: a lowered body is one long spine, and recursing it would
+        // blow the Rust stack.
         let mut cur = e;
         loop {
             pad(f, depth)?;
@@ -583,8 +575,7 @@ impl fmt::Display for CoreProgram {
     }
 }
 
-/// Fixture builders shared by the `core_ir` test modules (`emit`, `lower`,
-/// `perceus`, and this module's own tests).
+/// Fixture builders shared by the `core_ir` test modules.
 #[cfg(test)]
 pub(crate) mod testkit {
     use super::*;
@@ -629,8 +620,7 @@ pub(crate) mod testkit {
         }
     }
 
-    /// Minimal [`EmitCtx`] double: ints pool in push order, every name
-    /// resolves to `"T"`, and `variant_count` decides `SwitchTag` vs the
+    /// Minimal [`EmitCtx`] double. `variant_count` decides `SwitchTag` vs the
     /// `MatchEnum` ladder.
     pub struct Ctx {
         pub consts: Vec<i64>,

@@ -867,41 +867,32 @@ pub struct SocketValue {
 }
 
 impl Value {
-    // ---- raw bits ------------------------------------------------------------
-
-    /// The raw NaN-box bits, by borrow (so reading them never moves or drops a
-    /// non-`Copy` value). Pairs with `from_bits` for low-level value plumbing.
+    /// The raw NaN-box bits, by borrow. Pairs with `from_bits`.
     #[inline(always)]
     pub fn to_bits(&self) -> u64 {
         self.0
     }
 
-    /// Reconstitute a value from raw bits WITHOUT taking a reference: the
-    /// resulting `Value` is an un-counted alias.
+    /// Reconstitute a value from raw bits without taking a reference: the
+    /// result is an un-counted alias.
     ///
     /// # Safety
-    /// `bits` must be either an immediate encoding or the tagged address of a
-    /// live object header with a refcount the caller is transferring ownership
-    /// of. Storing the result into an owning slot, or letting it drop, will
-    /// mis-count unless the caller balances it (e.g. `store_child`, or
-    /// `mem::forget`). Fabricating heap-pointer bits that do not reference a
-    /// live object makes later accessor calls undefined; the only sound bit
-    /// sources are `to_bits`/`from_object_ptr`.
+    /// `bits` must be an immediate, or the address of a live object header
+    /// whose count the caller is transferring. Storing the result or letting
+    /// it drop mis-counts unless the caller balances it. The only sound bit
+    /// sources are `to_bits` and `from_object_ptr`.
     #[inline(always)]
     pub unsafe fn from_bits(bits: u64) -> Value {
         Value(bits)
     }
 
-    /// Box a pointer to an arena object's header word as a heap value, carrying
-    /// the immortality marker derived from the object's header. Reading the
-    /// header here is the *only* time immortality is read from memory;
-    /// thereafter it lives in the value word (see [`VALUE_IMMORTAL`]).
+    /// Box a pointer to an object header as a heap value. The only place
+    /// immortality is read from memory; afterwards it lives in the value word
+    /// (see [`VALUE_IMMORTAL`]).
     ///
     /// # Safety
-    /// `obj` must point at a live, fully constructed object header (its header
-    /// word written) — the tail of a constructor or a graph copy. The returned
-    /// `Value` takes ownership of one reference count on a mortal object; the
-    /// caller must not also drop the count it came from.
+    /// `obj` must point at a live header whose header word is written. The
+    /// result takes ownership of one reference count.
     #[inline]
     pub unsafe fn from_object_ptr(obj: NonNull<u64>) -> Value {
         let addr = obj.as_ptr() as usize as u64;
@@ -916,8 +907,7 @@ impl Value {
         Value(HDR_PTR | addr | marker)
     }
 
-    /// The arena object address (header word) of a heap-backed value, with the
-    /// immortality marker masked off.
+    /// The object header address of a heap value, marker masked off.
     #[inline(always)]
     pub fn object_addr(&self) -> Option<usize> {
         if self.is_heap() {
@@ -927,34 +917,23 @@ impl Value {
         }
     }
 
-    /// Visit every immediate child `Value` of `self` — the safe, read-only
-    /// face of the layout table `for_each_child_slot` holds, for callers
-    /// that walk a value graph without touching it. Non-heap values have no
-    /// children. Interior nodes (a `Seq`'s leaves and branches, a HAMT's
-    /// branches and entries) are descended through transparently, so the
-    /// visited children include ones that [`Value::kind`] hides behind a
-    /// root; a caller that recurses here sees every `Value` in the graph.
-    ///
-    /// The callback receives a shared reference, so the walk is sound on
-    /// objects nothing owns exclusively — immortal frozen objects shared by
-    /// every scheduler thread, in particular — and the callback may recurse
-    /// into other arena objects (the arena never moves and this walk never
-    /// writes).
+    /// Visit every immediate child `Value` of `self` — the read-only face of
+    /// [`for_each_child_slot`]. Interior nodes that [`Value::kind`] hides
+    /// behind a root are visited too, so recursing here reaches every `Value`
+    /// in the graph. The callback gets a shared reference, so this is the one
+    /// walk that is sound on frozen objects shared across threads.
     #[inline]
     pub fn for_each_child_ref(&self, mut f: impl FnMut(&Value)) {
         if !self.is_heap() {
             return;
         }
-        // SAFETY: a heap value points at a live arena object header, and the
-        // slot pointers are only ever reborrowed as `&Value` — never `&mut` —
-        // so the walk cannot conflict with a shared reference (an
-        // `EnumRef::payload`, a `ClosureRef::captures`) into the same slot.
+        // SAFETY: live object header, and the slots are only ever reborrowed
+        // as `&Value`, so this cannot conflict with another shared borrow.
         unsafe { for_each_child_slot(self.heap_obj(), &mut |p: *mut Value| f(&*p)) }
     }
 
     /// The heap object header this value points at. Public for the native
-    /// backend's tests (`al_core::core_ir`), which pair it with [`rc_slot`]
-    /// to assert on refcounts of JIT-manipulated cells.
+    /// backend's tests, which pair it with [`rc_slot`].
     #[inline(always)]
     pub fn heap_obj(&self) -> *const u64 {
         debug_assert!(self.is_heap());
@@ -977,58 +956,44 @@ impl Value {
         self.heap_tag() == Some(tag)
     }
 
-    /// Whether this value is an immortal (frozen) heap object — one reference
-    /// counting must never increment, decrement, or free. Immediates return
-    /// `false` (they need no reclamation; callers test `is_heap()` anyway).
-    ///
-    /// A pure bit test: immortality rides in the value word ([`VALUE_IMMORTAL`]),
-    /// so this never dereferences the object. That is what frees `Clone`/`Drop`
-    /// of a frozen value from any dependence on the frozen area still being
-    /// mapped — there is no drop-order constraint.
+    /// Whether this is an immortal (frozen) heap object. Immediates are
+    /// `false`. A pure bit test that never dereferences the object, so
+    /// `Clone`/`Drop` of a frozen value does not need the area still mapped.
     #[inline(always)]
     pub fn is_immortal(&self) -> bool {
         self.is_heap() && (self.0 & VALUE_IMMORTAL != 0)
     }
 
-    /// Whether this heap value is uniquely owned — its refcount is exactly 1 —
-    /// so a Perceus reuse may overwrite its allocation in place. Immediates and
-    /// immortal (frozen) values return `false`: they carry no refcount slot and
-    /// are never eligible for reuse.
+    /// Whether this heap value's refcount is exactly 1, so a Perceus reuse may
+    /// overwrite it in place. Immediates and frozen values are `false`.
     #[inline(always)]
     pub fn is_unique(&self) -> bool {
         if !self.is_heap() || self.is_immortal() {
             return false;
         }
-        // SAFETY: a mortal heap object carries a refcount slot one word before
-        // its header (`rc_slot`); the count is initialized at allocation.
+        // SAFETY: a mortal heap object has an initialized refcount slot.
         unsafe { *rc_slot(self.heap_obj()) == 1 }
     }
 
-    /// Perceus `Op::Drop` on a uniquely-owned cell: release every child in
-    /// place (each decref runs its own free-at-zero traversal) and overwrite
-    /// its slot with a non-heap sentinel, leaving the allocation "hollow" —
-    /// header intact, rc still 1, no live children. A following same-shape
-    /// constructor overwrites it via [`reuse_or_alloc`], whose second
-    /// `for_each_child` release is then a no-op on the sentinels. Hollowing at
-    /// the drop point (not at the constructor) is what makes reuse propagate:
-    /// the recursive `map(t, f)` receives `t` at rc==1 only because the parent
-    /// cons released its child ref *before* the call. No-op on shared /
-    /// immortal / immediate values (caller releases those normally).
+    /// Perceus `Op::Drop` on a uniquely-owned cell: release every child and
+    /// write a sentinel into its slot, leaving the allocation hollow — header
+    /// intact, rc still 1. A same-shape constructor then overwrites it via
+    /// [`reuse_or_alloc`]. Hollowing here rather than at the constructor is
+    /// what makes reuse propagate down a recursive chain: the callee sees its
+    /// argument at rc==1 only because the parent released its ref first.
+    /// No-op on shared, immortal, and immediate values.
     pub fn hollow_for_reuse(&mut self) {
         if !self.is_unique() {
             return;
         }
-        // SAFETY: rc==1 makes this the sole owner, so mutating the payload
-        // in place is sound.
+        // SAFETY: rc==1 makes this the sole owner.
         unsafe { hollow_children(self.heap_obj() as *mut u64) }
     }
 
-    /// Consume a Perceus reuse token pushed by `Op::Reuse`. The token is
-    /// either a uniquely-owned mortal heap value (rc==1) — its cell is to be
-    /// overwritten in place — or `nil` (allocate fresh). On reuse the value's
-    /// one reference count transfers to the returned [`ReuseAddr`]: the caller
-    /// passes it to a `*_reuse_in` constructor, whose result inherits the
-    /// count. On `none` the token drops as a no-op (nil / immortal).
+    /// Consume a Perceus reuse token pushed by `Op::Reuse`: either an rc==1
+    /// mortal heap value, or `nil` to allocate fresh. The reference count
+    /// transfers to the returned [`ReuseAddr`], and from there to whatever
+    /// `*_reuse_in` constructor consumes it.
     #[inline(always)]
     pub fn into_reuse_addr(self) -> ReuseAddr {
         if !self.is_heap() || self.is_immortal() {
@@ -1036,13 +1001,10 @@ impl Value {
         }
         debug_assert!(self.is_unique(), "reuse token must be uniquely owned");
         let addr = NonNull::new(self.heap_obj() as *mut u64);
-        // Ownership of the rc==1 count now lives in the raw address; don't
-        // let `Drop` decrement it.
+        // The count now lives in the raw address.
         std::mem::forget(self);
         ReuseAddr(addr)
     }
-
-    // ---- classifiers ----------------------------------------------------------
 
     #[inline(always)]
     pub fn is_float(&self) -> bool {
@@ -1083,8 +1045,6 @@ impl Value {
         (SMALL_INT_MIN..=SMALL_INT_MAX).contains(&i)
     }
 
-    // ---- immediate constructors ------------------------------------------------
-
     /// An integer known to be in the 48-bit immediate range: lengths, counts,
     /// codepoints. Arithmetic results that may exceed it must use `int_in`.
     #[inline(always)]
@@ -1097,8 +1057,7 @@ impl Value {
     }
     #[inline(always)]
     pub fn float(f: f64) -> Value {
-        // AL has no NaN/Inf in its value space; collapse to 0.0 so a real NaN
-        // never collides with the tag space.
+        // AL has no NaN/Inf, and a real NaN would collide with the tag space.
         let f = if f.is_finite() { f } else { 0.0 };
         Value(f.to_bits())
     }
@@ -1120,11 +1079,8 @@ impl Value {
         Value(HDR_SOCKET | listener | s.id as u32 as u64)
     }
 
-    // ---- arena constructors -----------------------------------------------------
-    //
-    // All of these allocate (never collect) and require the caller to have
-    // ensured capacity for process heaps. Worst-case sizes are documented for
-    // the VM's `ensure` computations.
+    // These allocate but never collect, so process-heap callers must have
+    // ensured capacity. Worst-case sizes are documented for `ensure`.
 
     /// Full-range integer; spills to a 2-word `BigInt` box outside the
     /// immediate range. Worst-case allocation: 2 words.
@@ -1154,8 +1110,8 @@ impl Value {
             let p = obj.as_ptr().add(1);
             p.write(blen as u64);
             if blen > 0 {
-                // Zero the final data word first so padding bytes are
-                // deterministic, then copy the contents over it.
+                // Zero the last word first, so padding bytes are
+                // deterministic.
                 p.add(payload - 1).write(0);
                 std::ptr::copy_nonoverlapping(s.as_ptr(), p.add(1) as *mut u8, blen);
             }
@@ -1163,17 +1119,15 @@ impl Value {
         }
     }
 
-    /// Concatenate `parts` into a fresh arena Str, writing each slice directly
-    /// into the payload so the caller need not stage through a host `String`.
-    /// Allocation: `2 + total_len.div_ceil(8)` words.
+    /// Concatenate `parts` into a fresh arena Str with no host `String` in
+    /// between. Allocation: `2 + total_len.div_ceil(8)` words.
     pub fn str_from_parts_in<A: Arena + ?Sized>(a: &mut A, parts: &[&str]) -> Value {
         let blen: usize = parts.iter().map(|s| s.len()).sum();
         let payload = 1 + blen.div_ceil(8);
         let obj = alloc_obj(a, HeapTag::Str, payload, false);
-        // SAFETY: payload sized for the length word plus the padded bytes;
-        // header written by `alloc_obj`. `alloc_words` never collects, so
-        // `parts` that borrow existing arena Strs remain valid across the
-        // allocation, and the fresh object never overlaps them.
+        // SAFETY: payload sized for the length word plus the padded bytes.
+        // `alloc_words` never collects, so `parts` borrowed from existing
+        // arena Strs stay valid, and the new object never overlaps them.
         unsafe {
             let p = obj.as_ptr().add(1);
             p.write(blen as u64);
@@ -1223,10 +1177,8 @@ impl Value {
         }
     }
 
-    /// A `Map(String, String)` that reads through to the host process
-    /// environment. Allocation: 2 words (header + backing discriminant); no
-    /// environment data is copied — the entries are served live from
-    /// `std::env` on each lookup.
+    /// A `Map(String, String)` reading through to the host environment.
+    /// Allocation: 2 words; entries are served live from `std::env`.
     pub fn env_map_in<A: Arena + ?Sized>(a: &mut A) -> Value {
         let obj = alloc_obj(a, HeapTag::Map, 1, false);
         // SAFETY: freshly allocated 1-word payload for the backing tag; header
@@ -1257,21 +1209,16 @@ impl Value {
         }
     }
 
-    /// Construct an enum value from prebuilt name/label values: `enum_name`
-    /// and `variant_name` must be `Str` values, `labels` a `Tuple` of `Str`s
-    /// (normally all pointing into the frozen area, shared by every instance
-    /// of the variant). Allocation: `7 + payload.len()` words.
+    /// Construct an enum from prebuilt name/label values: `enum_name` and
+    /// `variant_name` must be `Str`s and `labels` a `Tuple` of `Str`s,
+    /// normally frozen and shared by every instance of the variant.
+    /// Allocation: `7 + payload.len()` words.
     ///
     /// `hash` MUST equal
     /// `enum_hash_with_payload(enum_name_prefix_hash(enum_name, variant_name), payload)`.
-    /// It is stored verbatim as the cached structural hash that
-    /// [`EnumRef::hash`] exposes and equality uses as a fast-reject: two enums
-    /// whose cached hashes differ are declared unequal without comparing
-    /// payloads. A wrong hash therefore makes structurally equal enums
-    /// silently compare unequal — nothing checks it after construction.
-    /// Callers either reuse a hash precomputed for the variant's frozen names
-    /// (the VM path) or go through [`Value::enum_with_names_in`], which
-    /// computes it.
+    /// Nothing checks it after construction, and equality fast-rejects on it,
+    /// so a wrong hash makes equal enums silently compare unequal. Use
+    /// [`Value::enum_with_names_in`] if you do not already have the hash.
     #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn enum_in<A: Arena + ?Sized>(
@@ -1338,9 +1285,9 @@ impl Value {
         }
     }
 
-    /// Convenience constructor that also allocates the name strings and label
-    /// tuple in `a` and computes the value hash. Test/hydration helper — VM
-    /// paths reuse frozen name values via [`Value::enum_in`].
+    /// Also allocates the name strings and label tuple and computes the hash.
+    /// A test/hydration helper; VM paths reuse frozen names via
+    /// [`Value::enum_in`].
     pub fn enum_with_names_in<A: Arena + ?Sized>(
         a: &mut A,
         type_id: TypeId,
@@ -1371,22 +1318,18 @@ impl Value {
         Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
     }
 
-    /// Whole-buffer binary copied from a borrowed slice: a single
-    /// allocation+copy into the shared backing (`Arc::<[u8]>::from(&[u8])`),
-    /// unlike going through a `Vec<u8>` which copies twice.
+    /// Whole-buffer binary copied from a slice: one allocation and one copy,
+    /// where going through a `Vec<u8>` would copy twice.
     #[inline]
     pub fn binary_from_slice_in<A: Arena + ?Sized>(a: &mut A, bytes: &[u8]) -> Value {
         let bit_len = (bytes.len() as u64) * 8;
         Value::binary_from_arc_in(a, Arc::from(bytes), bit_len)
     }
 
-    /// Whole-buffer binary that is the concatenation of N byte windows,
-    /// copied directly into the freshly allocated shared backing: one
-    /// allocation, each source byte copied exactly once (no intermediate
-    /// `Vec`). Every window but the last must be whole bytes; the last holds
-    /// the trailing bits of `bit_len`, so its final byte may carry
-    /// neighbouring bits from a shared backing past `bit_len` — they are
-    /// masked to zero here. This is `Op::BinConcatN`'s byte-aligned fast path.
+    /// Whole-buffer binary concatenating N byte windows: one allocation, each
+    /// source byte copied once. Every window but the last must be whole bytes.
+    /// The last window's final byte may carry a neighbouring view's bits past
+    /// `bit_len`; those are masked to zero here.
     pub fn binary_concat_parts_in<A: Arena + ?Sized>(
         a: &mut A,
         parts: &[&[u8]],
@@ -1397,10 +1340,8 @@ impl Value {
         let mut uninit = Arc::new_uninit_slice(n);
         #[allow(clippy::expect_used)]
         let dst = Arc::get_mut(&mut uninit).expect("freshly allocated Arc is unique");
-        // SAFETY: `dst` is exactly `n` bytes (the summed part lengths); the
-        // copies are laid back-to-back so they stay in bounds and together
-        // initialise every byte, and the tail mask only touches the last
-        // byte when one exists.
+        // SAFETY: `dst` is exactly `n` bytes; the copies lie back-to-back, so
+        // together they initialise every byte and stay in bounds.
         unsafe {
             let base = dst.as_mut_ptr() as *mut u8;
             let mut p = base;
@@ -1419,9 +1360,7 @@ impl Value {
         Value::binary_from_arc_in(a, backing, bit_len)
     }
 
-    /// Whole-buffer binary (bit offset 0) over an already-shared backing with
-    /// no byte copy — the `Arc` is shared, exactly as the spawn/migration
-    /// zero-copy paths require.
+    /// Whole-buffer binary over an already-shared backing, no byte copy.
     #[inline]
     pub fn binary_from_arc_in<A: Arena + ?Sized>(
         a: &mut A,
@@ -1433,9 +1372,7 @@ impl Value {
     }
 
     /// A zero-copy sub-view `[bit_offset, bit_offset + bit_len)` into a shared
-    /// backing buffer. `Op::BinSlice`/`Op::BinTake` produce slices in O(1)
-    /// through this: only the 6-word arena box is allocated; the backing `Arc`
-    /// is shared and only the offset/length differ.
+    /// backing. Only the 6-word box is allocated, so slicing is O(1).
     pub fn binary_view_in<A: Arena + ?Sized>(
         a: &mut A,
         backing: Arc<[u8]>,
@@ -1464,8 +1401,6 @@ impl Value {
         seq::from_slice(a, items)
     }
 
-    // ---- accessors ---------------------------------------------------------
-
     #[inline(always)]
     pub fn as_int(&self) -> Option<i64> {
         if self.is_small_int() {
@@ -1477,15 +1412,10 @@ impl Value {
             None
         }
     }
-    /// Int payload of a value the bytecode compiler has statically proven to
-    /// be an int (the typed `*Int` opcode fast paths) — hence "typed", not
-    /// "unchecked": misuse is never undefined behavior.
-    ///
-    /// The int precondition is the caller's responsibility, but the tag is
-    /// still inspected, the precondition is debug-asserted, and in a release
-    /// build a non-int falls back to 0 instead of reading garbage. That zero
-    /// fallback only keeps misuse memory-safe; reaching it is a compiler bug,
-    /// so callers must never rely on it.
+    /// Int payload of a value the compiler has proven to be an int (the typed
+    /// `*Int` opcodes). "Typed", not "unchecked": misuse is never undefined
+    /// behavior. A non-int falls back to 0 in release, which only keeps misuse
+    /// memory-safe — reaching it is a compiler bug.
     #[inline(always)]
     pub fn as_int_typed(&self) -> i64 {
         debug_assert!(self.is_int());
@@ -1503,9 +1433,8 @@ impl Value {
             None
         }
     }
-    /// Float payload under the same contract as [`Value::as_int_typed`]:
-    /// the float precondition is debug-asserted, and release-build misuse is
-    /// memory-safe but yields garbage (the raw NaN-box bits as an `f64`).
+    /// Float payload under [`Value::as_int_typed`]'s contract: misuse is
+    /// memory-safe but yields the raw NaN-box bits as an `f64`.
     #[inline(always)]
     pub fn as_float_typed(&self) -> f64 {
         debug_assert!(self.is_float());
@@ -1600,14 +1529,10 @@ impl Value {
             None
         }
     }
-    /// Payload field `idx` of a value the bytecode compiler has statically
-    /// proven to be an enum with at least `idx + 1` fields (the
-    /// `GetFieldUnchecked` opcode). Both preconditions are debug-asserted.
-    /// A wrong-tag value falls back to `nil` in release (memory-safe, like
-    /// [`Value::as_int_typed`]'s zero); an out-of-bounds `idx` on a real
-    /// enum is *not* guarded in release — the compiler must never emit one.
-    /// Direct word read at the field's offset — no `EnumRef`, no count
-    /// read, no bounds check.
+    /// Payload field `idx` of a value the compiler has proven to be an enum
+    /// with more than `idx` fields (`GetFieldUnchecked`). A wrong tag falls
+    /// back to `nil` in release, but an out-of-bounds `idx` on a real enum is
+    /// NOT guarded there — the compiler must never emit one.
     #[inline(always)]
     pub fn enum_field_typed(&self, idx: usize) -> Value {
         debug_assert!(self.as_enum().is_some_and(|e| idx < e.payload().len()));
@@ -1620,8 +1545,7 @@ impl Value {
         }
     }
 
-    /// Borrowed many-armed view. `BigInt` is folded into `Int` so callers see
-    /// a single integer arm.
+    /// Borrowed many-armed view, folding `BigInt` into `Int`.
     #[inline]
     pub fn kind(&self) -> ValueView<'_> {
         if self.is_small_int() {
@@ -1703,17 +1627,13 @@ impl fmt::Debug for Value {
     }
 }
 
-// ---- typed views ---------------------------------------------------------------
-
-/// Borrowed view of a `Binary` arena box: a `bit_len`-bit window starting at
-/// `bit_offset` within a shared `Arc<[u8]>` backing. Addressing is MSB-first —
-/// the bit-level operations live in the `al` crate's `vm::binary` module.
+/// Borrowed view of a `Binary` box: a `bit_len`-bit MSB-first window at
+/// `bit_offset` in a shared `Arc<[u8]>` backing.
 ///
-/// Because the backing is shared between views, the trailing partial byte may
-/// carry bits that belong to a neighbouring view, so those bits are NOT
-/// guaranteed zero. Equality ([`BinaryRef::bits_eq`]) and hashing
-/// ([`hash_value`]) are therefore defined over the LOGICAL bits only (full
-/// bytes plus the masked partial tail).
+/// Since the backing is shared, the trailing partial byte may carry a
+/// neighbouring view's bits and is NOT guaranteed zero. Equality
+/// ([`BinaryRef::bits_eq`]) and hashing ([`hash_value`]) are therefore defined
+/// over the logical bits only.
 #[derive(Clone, Copy)]
 pub struct BinaryRef<'a> {
     obj: *const u64,
@@ -1721,15 +1641,11 @@ pub struct BinaryRef<'a> {
 }
 
 /// Reconstruct the fat pointer to a `Binary` box's `Arc<[u8]>` backing from
-/// its two raw-parts payload words (`Arc::into_raw` data pointer in word 0,
-/// slice length in word 1). This is the single place that knows that
-/// encoding: every backing access — [`BinaryRef::backing`],
-/// [`BinaryRef::backing_arc`], [`binary_clone_backing`],
-/// [`binary_drop_backing`] — reconstructs through it.
+/// its two payload words. The single place that knows that encoding.
 ///
 /// # Safety
 ///
-/// `obj` must point at a live `Binary` arena box whose Arc words are intact.
+/// `obj` must point at a live `Binary` box whose Arc words are intact.
 #[inline]
 unsafe fn binary_backing_raw(obj: *const u64) -> *const [u8] {
     unsafe {
@@ -1739,9 +1655,8 @@ unsafe fn binary_backing_raw(obj: *const u64) -> *const [u8] {
     }
 }
 
-/// Reborrow the box's backing `Arc` without consuming the strong count the
-/// box owns. The guard must never be dropped as a plain `Arc` (that would
-/// double-release the box's count); callers only clone through it.
+/// Reborrow the backing `Arc` without consuming the count the box owns.
+/// Dropping the guard as a plain `Arc` would double-release it.
 ///
 /// # Safety
 ///
@@ -1762,26 +1677,21 @@ impl<'a> BinaryRef<'a> {
         // SAFETY: as above.
         unsafe { payload_word(self.obj, 3) }
     }
-    /// The full shared backing buffer (not just this view's window).
+    /// The full shared backing buffer, not just this view's window.
     #[inline]
     pub fn backing(&self) -> &'a [u8] {
-        // SAFETY: the box owns one strong count on the backing `Arc`, which
-        // the off-heap sweep releases only when the box is unreachable, so the
-        // bytes outlive any borrow of the box.
+        // SAFETY: the box holds a strong count released only when it is
+        // freed, so the bytes outlive any borrow of it.
         unsafe { &*binary_backing_raw(self.obj) }
     }
-    /// Clone the backing `Arc` (refcount bump, no byte copy) — for building
-    /// derived views.
+    /// Clone the backing `Arc` — a count bump, no byte copy.
     pub fn backing_arc(&self) -> Arc<[u8]> {
-        // SAFETY: constructed from a tag-checked Binary value, so the Arc
-        // words are intact; the clone takes its own strong count.
+        // SAFETY: tag-checked Binary, so the Arc words are intact.
         unsafe { Arc::clone(&binary_backing_reborrow(self.obj)) }
     }
 
-    /// The complete logical bytes (the first `bit_len / 8` bytes; any partial
-    /// trailing byte is excluded). Borrows the backing with no copy when the
-    /// view starts on a byte boundary — the common case — and otherwise
-    /// re-aligns the bits into a fresh buffer.
+    /// The whole logical bytes, excluding any partial trailing byte. Borrows
+    /// the backing when the view is byte-aligned, else re-aligns into a copy.
     #[inline]
     pub fn full_bytes(&self) -> Cow<'a, [u8]> {
         let full = (self.bit_len() / 8) as usize;
@@ -1795,21 +1705,19 @@ impl<'a> BinaryRef<'a> {
         }
     }
 
-    /// Materialise the logical bits into a fresh, bit-offset-0 buffer of
-    /// `bit_len.div_ceil(8)` bytes with the trailing partial byte masked to
-    /// zero. COLD path — bit-unaligned views and `binary.append`/`inspect`.
+    /// Materialise the logical bits into a fresh offset-0 buffer with the
+    /// partial trailing byte masked to zero. Cold path.
     pub fn to_aligned_vec(&self) -> Vec<u8> {
         let (bit_offset, bit_len) = (self.bit_offset(), self.bit_len());
         let mut out = vec![0u8; bit_len.div_ceil(8) as usize];
-        // `copy_bits` writes exactly `bit_len` bits into a zeroed buffer, so the
-        // trailing padding bits stay zero — no explicit tail mask needed.
+        // `copy_bits` writes exactly `bit_len` bits into a zeroed buffer, so
+        // no explicit tail mask is needed.
         copy_bits(&mut out, 0, self.backing(), bit_offset, bit_len);
         out
     }
 
-    /// Whether this value's logical bits, starting at bit `at`, begin with all
-    /// of `prefix`'s logical bits. Out of range is `false`, never an error.
-    /// The all-byte-aligned case is a single slice compare (memcmp).
+    /// Whether the logical bits at `at` begin with all of `prefix`'s. Out of
+    /// range is `false`, never an error.
     pub fn starts_with_at(&self, at: u64, prefix: &BinaryRef<'_>) -> bool {
         if at + prefix.bit_len() > self.bit_len() {
             return false;
@@ -1828,15 +1736,13 @@ impl<'a> BinaryRef<'a> {
         (0..prefix.bit_len()).all(|i| get_bit(sb, abs + i) == get_bit(pb, prefix.bit_offset() + i))
     }
 
-    /// Logical-bit equality: same `bit_len` and identical logical contents,
-    /// regardless of backing identity or offsets.
+    /// Logical-bit equality, regardless of backing identity or offsets.
     pub fn bits_eq(&self, other: &BinaryRef<'_>) -> bool {
         if self.bit_len() != other.bit_len() {
             return false;
         }
         let bit_len = self.bit_len();
-        // Both views start on a byte boundary (the overwhelmingly common
-        // case): compare full bytes directly, then the masked partial tail.
+        // Both byte-aligned: compare full bytes, then the masked tail.
         if self.bit_offset().is_multiple_of(8) && other.bit_offset().is_multiple_of(8) {
             let full = (bit_len / 8) as usize;
             let s = (self.bit_offset() / 8) as usize;
@@ -1879,10 +1785,8 @@ impl<'a> ClosureRef<'a> {
     }
 }
 
-/// Borrowed view of a `Map` arena object. The map's entries are not exposed
-/// inline: only the backing kind is observable here, and each backing serves
-/// its own reads (the VM dispatches on [`MapRef::backing`]). The `Env` backing
-/// holds no `Value` words at all.
+/// Borrowed view of a `Map` object. Entries are not exposed here; the VM
+/// dispatches reads on [`MapRef::backing`].
 #[derive(Clone, Copy)]
 pub struct MapRef<'a> {
     obj: *const u64,
@@ -1898,18 +1802,16 @@ impl MapRef<'_> {
     }
 
     /// Decoded `[size, root]` of a `Hamt`-backed map. The backing is
-    /// release-checked by [`HamtMapRef::from_obj`] — an `Env` map holds no
-    /// such words.
+    /// release-checked, since an `Env` map holds no such words.
     #[inline]
     pub(crate) fn as_hamt(&self) -> HamtMapRef {
-        // SAFETY: a MapRef is only constructed from a tag-checked Map value.
+        // SAFETY: a MapRef comes only from a tag-checked Map value.
         unsafe { HamtMapRef::from_obj(self.obj) }
     }
 }
 
-/// Borrowed view of an `Enum` arena object. Names and labels are `Str`/`Tuple`
-/// values (normally frozen); `hash` is the precomputed structural hash used as
-/// an equality fast-reject.
+/// Borrowed view of an `Enum` object. Names and labels are `Str`/`Tuple`
+/// values, normally frozen.
 #[derive(Clone, Copy)]
 pub struct EnumRef<'a> {
     obj: *const u64,
@@ -1923,37 +1825,28 @@ impl<'a> EnumRef<'a> {
         TypeId(unsafe { payload_word(self.obj, 0) as u32 as i32 })
     }
     /// Declaration-order index of this value's constructor within its type.
-    /// Packed into the high half of word 0 alongside `type_id`; read by
-    /// `Op::SwitchTag` to turn an exhaustive match into one indexed jump.
+    /// `Op::SwitchTag` reads it to turn an exhaustive match into one jump.
     #[inline]
     pub fn variant_idx(&self) -> u16 {
         // SAFETY: constructed from a tag-checked Enum value.
         unsafe { (payload_word(self.obj, 0) >> 32) as u16 }
     }
-    /// See [`freeze_enum_hash`]: the publish path hashes a cell before it is
-    /// marked immortal, so a frozen cell always carries a nonzero hash and
-    /// the lazy-write guard below is never the load-bearing protection for
-    /// one (it exists for the 2^-64 true-zero case and for defence).
-    /// The raw stored hash word: `0` means "not computed yet" — enum cells
-    /// built on a process heap defer hashing to first use. Frozen cells
-    /// always carry their build-time hash.
+    /// The raw stored hash word; `0` means "not computed yet". Heap cells
+    /// defer hashing to first use. Frozen cells always carry a build-time
+    /// hash, because [`freeze_enum_hash`] runs before they are marked
+    /// immortal.
     #[inline]
     fn stored_hash(&self) -> u64 {
         // SAFETY: as above.
         unsafe { payload_word(self.obj, 1) }
     }
 
-    /// The value hash, computed on first use and cached in the cell.
-    ///
-    /// Construction outnumbers hashing by orders of magnitude on a server's
-    /// hot path — every `Ok`/`Err`/`Response` is constructed, almost none is
-    /// ever a map key or equality operand — so eagerly hashing the payload at
-    /// construction was a measured ~5% of a keep-alive request. The in-place
-    /// cache write is sound because a process heap has exactly one owner
-    /// thread (shared-nothing); a frozen cell — shared across threads — is
-    /// never written here, because it always carries a nonzero build-time
-    /// hash. A true hash of `0` (one in 2^64) is recomputed per read rather
-    /// than cached.
+    /// The value hash, computed on first use and cached in the cell. Hashing
+    /// eagerly at construction measured ~5% of a keep-alive request, since
+    /// almost no constructed enum is ever a map key. The in-place write is
+    /// sound because a process heap has one owner thread, and a frozen cell —
+    /// shared across threads — always has a nonzero hash already. A true hash
+    /// of `0` is recomputed per read.
     pub fn hash(&self) -> u64 {
         let stored = self.stored_hash();
         if stored != 0 {
@@ -1961,8 +1854,7 @@ impl<'a> EnumRef<'a> {
         }
         let prefix = enum_name_prefix_hash(self.enum_name(), self.variant_name());
         let h = enum_hash_with_payload(prefix, self.payload());
-        // SAFETY: tag-checked Enum cell; word 1 is the hash slot. The header
-        // read mirrors `payload_word`'s layout (header at word 0).
+        // SAFETY: tag-checked Enum cell; word 1 is the hash slot.
         unsafe {
             if h != 0 && !header_is_immortal(*self.obj) {
                 (self.obj as *mut u64).add(2).write(h);
@@ -1997,8 +1889,7 @@ impl<'a> EnumRef<'a> {
         // SAFETY: as above.
         unsafe { str_contents(self.variant_name_value().heap_obj()) }
     }
-    /// Field labels (`Str` values) parallel to `payload()`; empty for nullary
-    /// constructors.
+    /// Field labels parallel to `payload()`; empty for nullary constructors.
     #[inline]
     pub fn field_labels(&self) -> &'a [Value] {
         let labels = self.labels_value();
@@ -2038,36 +1929,30 @@ impl<'a> SeqRef<'a> {
     pub fn get(&self, i: usize) -> Option<Value> {
         seq::get(self.root, i)
     }
-    /// Iterate the elements front to back. The returned iterator owns the
-    /// root's section nodes (a few reference bumps), so it is self-contained.
+    /// Iterate front to back. The iterator owns the root's section nodes.
     pub fn iter(&self) -> SeqIter {
         SeqIter::new(self.root)
     }
 }
 
-// ---- object tracing -------------------------------------------------------------
-
 /// The sole layout table for object tracing: yield a raw pointer to every
-/// payload slot of `obj` that holds a `Value`. Raw payload words (lengths,
-/// hashes, Arc parts) are skipped. Callers turn the slot pointer into whatever
-/// reference they are entitled to — [`for_each_child`] takes `&mut` (the
-/// free-at-zero work list, the spawn/freeze copies), [`Value::for_each_child_ref`]
-/// takes `&` (read-only graph walks).
+/// payload slot of `obj` that holds a `Value`, skipping raw words (lengths,
+/// hashes, Arc parts). Callers reborrow the slot as they are entitled to —
+/// [`for_each_child`] as `&mut`, [`Value::for_each_child_ref`] as `&`.
 ///
-/// Generic (not `dyn`) in the callback and `#[inline]`: this walk sits under
-/// every free-at-zero traversal and every Perceus hollow, so the tag `match`
-/// and the per-child call must fold into the caller. An indirect call per
+/// Generic and `#[inline]` rather than `dyn`: this sits under every
+/// free-at-zero traversal and every Perceus hollow, and an indirect call per
 /// visited word cost ~9% of `bench_typed`.
 ///
 /// # Safety
 ///
-/// `obj` must point at a live arena object header. The slot pointers are only
-/// valid for the duration of the walk; forming a `&mut Value` from one
-/// additionally requires that no other reference to that slot is live.
+/// `obj` must point at a live arena object header. The slot pointers live only
+/// for the walk, and a `&mut Value` additionally requires that no other
+/// reference to that slot is live.
 #[inline]
 pub(crate) unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, f: &mut F) {
-    // SAFETY (whole body): the header declares the payload length; every slot
-    // index below stays within it per the layouts in the module docs.
+    // SAFETY (whole body): every slot index stays within the payload length
+    // the header declares, per the layouts in the module docs.
     unsafe {
         let h = *obj;
         debug_assert!(header_marks_object(h));
@@ -2079,9 +1964,7 @@ pub(crate) unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, 
         };
         match header_tag(h) {
             HeapTag::BigInt | HeapTag::Range | HeapTag::Str | HeapTag::Binary => {}
-            // A map's children depend on its backing: `Env` holds none, `Hamt`
-            // points at one root node (`[backing, size, root]`; `size` is a raw
-            // count, not a `Value`).
+            // `Env` holds no children; `Hamt` points at one root node.
             HeapTag::Map => match map_backing(*p) {
                 MapBacking::Env => {}
                 MapBacking::Hamt => visit(2, 1, f),
@@ -2121,34 +2004,28 @@ pub(crate) unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, 
     }
 }
 
-/// Visit every child `Value` of `obj` as `&mut`, in place — the mutating face
-/// of [`for_each_child_slot`]. Used by the free-at-zero work list (to release
-/// children) and by the spawn/freeze graph copies (to rewrite copied slots).
+/// The mutating face of [`for_each_child_slot`]: visit every child as `&mut`.
 ///
 /// # Safety
 ///
-/// `obj` must point at a live arena object header that the caller owns
-/// exclusively (a private mortal object, never a shared immortal one), and the
-/// callback must only rewrite the visited slot — no reads of other arena state
-/// mid-walk, since the visited slot is uniquely borrowed for the call.
+/// `obj` must be a live object header the caller owns exclusively — a private
+/// mortal object, never a shared immortal one — and the callback must only
+/// rewrite the visited slot, never read other arena state mid-walk.
 #[inline]
 pub(crate) unsafe fn for_each_child<F: FnMut(&mut Value)>(obj: *mut u64, f: &mut F) {
-    // SAFETY: forwarded from this function's own contract; the slot pointers
-    // the core yields are in-bounds payload words of a live object, and the
-    // caller's exclusive ownership makes the `&mut` unique.
+    // SAFETY: forwarded from this function's own contract; exclusive
+    // ownership is what makes the `&mut` unique.
     unsafe { for_each_child_slot(obj as *const u64, &mut |p: *mut Value| f(&mut *p)) }
 }
 
-/// Bump the backing `Arc` of the `Binary` box at `obj` by one strong count.
-/// The spawn/freeze graph copies call this when copying a box while the source
-/// stays live: afterwards the source box and the copy each own one count.
+/// Bump the backing `Arc` of the `Binary` box at `obj`, so a graph copy and
+/// its live source each own a count.
 ///
 /// # Safety
 ///
-/// `obj` must point at a live `Binary` arena box whose Arc words are intact.
+/// `obj` must point at a live `Binary` box whose Arc words are intact.
 pub(crate) unsafe fn binary_clone_backing(obj: *const u64) {
-    // SAFETY (forget): the clone's strong count is the bump being handed to
-    // the copied box; nothing must release it here.
+    // SAFETY (forget): the clone's count is handed to the copied box.
     unsafe {
         let h = *obj;
         debug_assert!(header_marks_object(h));
@@ -2157,16 +2034,16 @@ pub(crate) unsafe fn binary_clone_backing(obj: *const u64) {
     }
 }
 
-/// Release the backing `Arc` owned by the `Binary` box at `obj`. The off-heap
-/// sweep calls this exactly once per condemned (unforwarded) box.
+/// Release the backing `Arc` owned by the `Binary` box at `obj`, exactly once
+/// per box.
 ///
 /// # Safety
 ///
-/// `obj` must point at a `Binary` arena box whose Arc words are intact and
-/// whose strong count has not already been released for this box.
+/// `obj` must point at a `Binary` box whose Arc words are intact and whose
+/// count has not already been released.
 pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
-    // No reborrow guard here: this is the one place that CONSUMES the box's
-    // strong count, so the reconstructed Arc is dropped for real.
+    // No reborrow guard: this is the one place that consumes the box's
+    // count, so the reconstructed Arc is dropped for real.
     unsafe {
         let h = *obj;
         debug_assert!(header_marks_object(h));
@@ -2175,31 +2052,23 @@ pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
     }
 }
 
-// ---- reference counting -----------------------------------------------------
+// A mortal object's refcount word sits immediately BEFORE its header, and
+// every `Value` points at the header, so header-relative offsets are identical
+// for counted and immortal objects. The count is the number of live `Value`
+// handles; allocation initializes it to 1. Immortal objects have no such word,
+// and every counting path gates on `is_immortal()` first.
 //
-// A reference-counted (mortal) heap object carries a refcount word immediately
-// BEFORE its header — `[rc][header][payload…]` — and every `Value` points at
-// the HEADER, so all header-relative offsets (constructors, accessors,
-// `for_each_child`) are byte-identical to a non-counted object. The count is
-// the number of live `Value` handles to the object; allocation initializes it
-// to 1 (the constructing handle). Immortal (frozen) objects have NO such word
-// and are never counted — every counting path gates on `is_immortal()` first.
-//
-// Reclamation is COMPLETE without a cycle collector because al's heap is
-// acyclic by construction: values are immutable, closures capture by value with
-// no backpatch, self-reference resolves through the live call frame (`PushSelf`/
-// `CallSelf`), and mutual recursion resolves through the immortal global table.
-// A future construct that can tie a heap cycle would leak under this scheme —
-// it would need a cycle collector (i.e. the tracing GC this replaced).
+// Reclamation is complete without a cycle collector only because the heap is
+// acyclic by construction: immutable values, capture by value with no
+// backpatch, self-reference through the live call frame, mutual recursion
+// through the immortal global table. A construct that could tie a heap cycle
+// would leak here.
 
-/// Words reserved before a mortal object's header for its refcount. The
-/// allocation starts here; the object pointer is this many words after it.
+/// Words reserved before a mortal object's header for its refcount.
 pub(crate) const RC_PREFIX_WORDS: usize = 1;
 
-/// The refcount slot — also the allocation start — of a mortal heap object:
-/// the word immediately before its header. Public for the native backend's
-/// tests (`al_core::core_ir`), which assert on refcounts of JIT-manipulated
-/// cells.
+/// The refcount slot, also the allocation start: the word before the header.
+/// Public for the native backend's tests.
 ///
 /// # Safety
 /// `obj` must be a mortal (non-immortal) heap object pointer.
@@ -2208,8 +2077,8 @@ pub unsafe fn rc_slot(obj: *const u64) -> *mut u64 {
     unsafe { (obj as *mut u64).sub(RC_PREFIX_WORDS) }
 }
 
-/// Increment a mortal object's refcount, saturating at `u64::MAX` (a saturated
-/// count is treated as permanently live; it is unreachable in practice).
+/// Increment a mortal object's refcount. A saturated count is permanently
+/// live and never freed.
 ///
 /// # Safety
 /// `obj` must be a mortal heap object with an initialized refcount slot.
@@ -2221,9 +2090,8 @@ pub(crate) unsafe fn rc_increment(obj: *const u64) {
     }
 }
 
-/// Decrement a mortal object's refcount; return `true` when it reaches zero
-/// (the caller must then free the object). A saturated count never decrements
-/// and never reports zero.
+/// Decrement a mortal object's refcount; `true` means the caller must now free
+/// it. A saturated count never decrements.
 ///
 /// # Safety
 /// `obj` must be a mortal heap object with an initialized refcount slot.
@@ -2239,23 +2107,20 @@ pub(crate) unsafe fn rc_decrement_is_zero(obj: *const u64) -> bool {
     }
 }
 
-/// Free a single mortal object's storage, first releasing any off-heap `Arc`
-/// backing it owns. Does NOT touch the object's `Value` children — the caller
-/// (the [`release`] work list) has already decremented them.
+/// Free one mortal object, releasing any off-heap `Arc` it owns. Does NOT
+/// touch its `Value` children — the caller has already decremented them.
 ///
 /// # Safety
-/// `obj` must be a live mortal heap object with no remaining references, not
-/// freed before, allocated through a `ProcHeap` so `mi_free` reclaims it.
+/// `obj` must be a live, unreferenced, not-yet-freed mortal heap object
+/// allocated through a `ProcHeap`.
 #[inline]
 unsafe fn free_object(obj: *mut u64) {
     unsafe {
         if header_has_off_heap_link(*obj) {
             binary_drop_backing(obj);
         }
-        // Poison the whole block (refcount slot + header + payload) before
-        // freeing so a use-after-free is loud, not silent: a stale read of the
-        // header trips `header_marks_object` (bit 0 is now clear) and a stale
-        // decref underflows the zeroed refcount. Debug builds only.
+        // Poison the block so a use-after-free is loud: a stale header read
+        // trips `header_marks_object` and a stale decref underflows.
         #[cfg(debug_assertions)]
         {
             let words = RC_PREFIX_WORDS + header_total_words(*obj);
@@ -2270,30 +2135,24 @@ unsafe fn free_object(obj: *mut u64) {
 }
 
 thread_local! {
-    /// Reusable scratch for the iterative free-at-zero traversal, so a `Drop`
-    /// never allocates. al runs one scheduler per thread and the traversal is
-    /// non-reentrant (it triggers no further `Value` drops), so one per-thread
-    /// buffer — empty between releases — is sound.
+    /// Reusable scratch for the free-at-zero traversal, so a `Drop` never
+    /// allocates. Sound as one buffer per thread because the traversal is
+    /// non-reentrant and empty between releases.
     static DROP_STACK: RefCell<Vec<*mut u64>> = const { RefCell::new(Vec::new()) };
 
-    /// Objects freed by reference counting on this thread since the last
-    /// [`take_freed_objects`]. The VM drains it at call checkpoints to charge a
-    /// process for bulk reclamation, so a large cascading free preempts at the
-    /// next call instead of stalling the scheduler.
+    /// Objects freed on this thread since the last [`take_freed_objects`]. The
+    /// VM drains it at call checkpoints to charge a process for reclamation, so
+    /// a large cascading free preempts instead of stalling the scheduler.
     static FREED_OBJECTS: Cell<u64> = const { Cell::new(0) };
 
-    /// Running total of frees drained through [`take_freed_objects`] since
-    /// the last [`reset_freed_objects_total`]. The drain is a scheduler
-    /// checkpoint (rare), so accumulating here adds nothing to the per-free
-    /// path; parity tests read it to assert every allocation on a run was
-    /// freed exactly once (`ProcHeap::alloc_count == freed_objects_total`),
-    /// no matter which backend — interpreter or native — did the freeing.
+    /// Running total of drained frees since the last
+    /// [`reset_freed_objects_total`]. Parity tests assert every allocation was
+    /// freed exactly once, whichever backend did the freeing.
     static FREED_OBJECTS_TOTAL: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Reclamation done on this thread since the last call: the count of objects
-/// freed, reset to zero. See [`FREED_OBJECTS`]. The drained count also feeds
-/// the running [`freed_objects_total`].
+/// Objects freed on this thread since the last call, reset to zero. Also
+/// feeds [`freed_objects_total`].
 #[inline]
 pub fn take_freed_objects() -> u64 {
     let n = FREED_OBJECTS.with(|c| c.replace(0));
@@ -2304,37 +2163,29 @@ pub fn take_freed_objects() -> u64 {
 }
 
 /// Objects freed on this thread since the last [`take_freed_objects`], without
-/// resetting. One thread-local read — the call-checkpoint fast path peeks this
-/// and only drains when it crosses the charging threshold.
+/// resetting. The call checkpoint peeks this before deciding to drain.
 #[inline]
 pub fn freed_objects_pending() -> u64 {
     FREED_OBJECTS.with(|c| c.get())
 }
 
 /// Every object freed on this thread since the last
-/// [`reset_freed_objects_total`], including frees not yet drained by
-/// [`take_freed_objects`]. Test instrumentation for the heap-balance parity
-/// gate: on a run whose result holds no heap objects, this must equal
-/// `ProcHeap::alloc_count` once the VM is dropped.
+/// [`reset_freed_objects_total`], drained or not. Test instrumentation: it
+/// must equal `ProcHeap::alloc_count` once the VM is dropped.
 pub fn freed_objects_total() -> u64 {
     FREED_OBJECTS_TOTAL.with(|c| c.get()) + FREED_OBJECTS.with(|c| c.get())
 }
 
-/// Zero this thread's [`freed_objects_total`] (and the undrained
-/// [`FREED_OBJECTS`] balance feeding it). Call immediately before the code
-/// span whose frees a test is measuring, alongside
-/// `ProcHeap::reset_alloc_count`.
+/// Zero this thread's [`freed_objects_total`]. Call alongside
+/// `ProcHeap::reset_alloc_count`, right before the span being measured.
 pub fn reset_freed_objects_total() {
     FREED_OBJECTS_TOTAL.with(|c| c.set(0));
     FREED_OBJECTS.with(|c| c.set(0));
 }
 
-/// Store `child` into the object slot at `slot`, taking a new reference to it
-/// (the slot becomes an owner). This is the constructor side of the net-zero
-/// rule: a constructor `store_child`s each operand it *borrows* (incref), and
-/// the caller later drops the operands it still owns (decref) — so the object
-/// ends up owning exactly the references it holds. Immediate/immortal children
-/// are written without a count change.
+/// Store a *borrowed* `child` into an object slot, taking a new reference. The
+/// caller keeps its own and drops it later, so the object ends up owning
+/// exactly the references it holds. Use [`move_child`] for owned arguments.
 ///
 /// # Safety
 /// `slot` must be a writable object payload word; `child` a valid value.
@@ -2347,9 +2198,8 @@ pub(crate) unsafe fn store_child(slot: *mut u64, child: &Value) {
     unsafe { slot.write(child.0) };
 }
 
-/// Move an *owned* value into an object slot, transferring its reference (no
-/// count change): the slot inherits the ownership the caller gives up. Use this
-/// for by-value constructor arguments; use [`store_child`] for borrowed ones.
+/// Move an *owned* value into an object slot, transferring its reference with
+/// no count change.
 ///
 /// # Safety
 /// `slot` must be a writable object payload word.
@@ -2359,17 +2209,15 @@ pub(crate) unsafe fn move_child(slot: *mut u64, child: Value) {
     std::mem::forget(child); // ownership now lives in the slot
 }
 
-/// Build an *owned* (counted) value from raw bits: increments the count of a
-/// mortal heap object so the returned `Value` is a real reference its holder
-/// will drop. Unlike [`Value::from_bits`] (a bare alias), this is safe to drop.
+/// Build an owned (counted) value from raw bits. Unlike [`Value::from_bits`],
+/// which yields a bare alias, the result is safe to drop.
 ///
 /// # Safety
 /// `bits` must come from a live value (`to_bits`/`from_object_ptr`).
 #[inline]
 pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
-    // Take a reference only for a mortal heap value (heap, marker clear). Both
-    // tests are pure bit math — immortal and immediate values need no count and
-    // their object is never read.
+    // Pure bit math: immortal and immediate values need no count, and their
+    // object is never read.
     if bits & (SIGN | QNAN) == (SIGN | QNAN) && bits & VALUE_IMMORTAL == 0 {
         // SAFETY: mortal heap bits point at a live object with a refcount slot.
         unsafe { rc_increment((bits & PTR_PAYLOAD) as *const u64) };
@@ -2377,25 +2225,18 @@ pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
     Value(bits)
 }
 
-/// Release one reference held as raw value bits. For a mortal heap object whose
-/// count reaches zero, free it and transitively release everything it uniquely
-/// owns — iteratively, through an explicit work list, so a deep graph (e.g. a
-/// long cons list) cannot overflow the native stack the way recursive `Drop`
-/// would. Immediates and immortal (frozen) values are no-ops. Takes raw bits
-/// (not a `Value`) so it never constructs another droppable value.
+/// Release one reference held as raw value bits, freeing at zero and
+/// transitively releasing everything the object uniquely owns. Iterative, so a
+/// long cons list cannot overflow the native stack. Takes bits, not a `Value`,
+/// so it never builds another droppable value.
 ///
-/// This is the single hottest function in the VM: every `Value` drop, every
-/// overwritten stack slot, every Perceus `Op::Drop` and every hollowed child
-/// goes through it, and the overwhelming majority are immediates or frozen
-/// constants. So the two bit tests and the decrement inline into the caller,
-/// and only the free-at-zero traversal — which needs the thread-local work list
-/// — stays behind an out-of-line `#[cold]` call.
+/// The hottest function in the VM, and the overwhelming majority of calls are
+/// immediates or frozen constants — hence the two bit tests and the decrement
+/// inline, with only the free-at-zero traversal behind a `#[cold]` call.
 #[inline]
 pub(crate) fn release_bits(bits: u64) {
-    // Mortal-heap test, pure bit math: bail for immediates (not heap) and for
-    // immortal/frozen values (marker set). Crucially this NEVER reads the
-    // object, so a frozen value can be released after its frozen area is already
-    // gone — there is no drop-order constraint between values and the area.
+    // Pure bit math, and crucially it never reads the object: a frozen value
+    // can be released after its frozen area is gone.
     if bits & (SIGN | QNAN) != (SIGN | QNAN) || bits & VALUE_IMMORTAL != 0 {
         return;
     }
@@ -2408,17 +2249,12 @@ pub(crate) fn release_bits(bits: u64) {
     unsafe { release_at_zero(obj) };
 }
 
-// ---- native-backend layout facts ---------------------------------------------
-//
-// The Cranelift backend bakes these into generated code. They are derived from
-// the same private constants the interpreter uses so the two backends cannot
-// drift if the NaN-box layout changes.
+// The Cranelift backend bakes these into generated code. Derived from the same
+// private constants the interpreter uses, so the two backends cannot drift.
 
-/// Mask for the dynamic mortal-heap drop gate the native backend emits inline:
-/// `bits & NATIVE_MORTAL_GATE_MASK == NATIVE_MORTAL_HEAP_BITS` is true exactly
-/// for mortal heap values (heap tag set, immortality marker clear) — one AND
-/// plus one CMP, never reading memory. This is [`release_bits`]' fast-path
-/// test, exported as bit constants.
+/// Mask for the mortal-heap drop gate the native backend emits inline:
+/// `bits & NATIVE_MORTAL_GATE_MASK == NATIVE_MORTAL_HEAP_BITS`. This is
+/// [`release_bits`]' fast-path test, exported as bit constants.
 pub const NATIVE_MORTAL_GATE_MASK: u64 = SIGN | QNAN | VALUE_IMMORTAL;
 /// Expected gate result for a mortal heap value; see [`NATIVE_MORTAL_GATE_MASK`].
 pub const NATIVE_MORTAL_HEAP_BITS: u64 = SIGN | QNAN;
@@ -2431,10 +2267,8 @@ pub const NATIVE_RC_BYTE_OFFSET: i32 = -((RC_PREFIX_WORDS as i32) * 8);
 pub const NATIVE_RELEASE_AT_ZERO_SYMBOL: &str = "al_native_release_at_zero";
 
 /// [`release_at_zero`] behind an `extern "C"` ABI for JIT-compiled code. The
-/// native drop sequence inlines the gate + saturation guard + decrement and
-/// calls this only when the count reaches zero, so every native free routes
-/// through the interpreter's own release path and `FREED_OBJECTS` accounting
-/// (reclamation charging, exact-allocation-count tests) stays identical.
+/// native drop sequence inlines everything up to the zero test and calls this
+/// only at zero, so `FREED_OBJECTS` accounting stays identical across backends.
 ///
 /// # Safety
 /// `obj` must be a live mortal heap object whose refcount just reached zero,
@@ -2447,13 +2281,10 @@ pub unsafe extern "C" fn native_release_at_zero(obj: *mut u64) {
 /// Symbol name JIT modules register [`native_hollow_for_reuse`] under.
 pub const NATIVE_HOLLOW_FOR_REUSE_SYMBOL: &str = "al_native_hollow_for_reuse";
 
-/// [`Value::hollow_for_reuse`]'s child-release walk behind an `extern "C"`
-/// ABI for JIT-compiled code. The native reuse-drop sequence inlines the
-/// mortal-heap gate and the rc==1 uniqueness test and calls this only on a
-/// uniquely-owned cell: children are released in place (their frees route
-/// through the interpreter's own release path, so `FREED_OBJECTS` accounting
-/// stays identical) and the hollowed allocation — header intact, rc still 1 —
-/// stays parked in its frame slot for a paired reuse constructor.
+/// [`Value::hollow_for_reuse`]'s child-release walk behind an `extern "C"` ABI
+/// for JIT-compiled code. The native sequence inlines the gate and the rc==1
+/// test and calls this only on a uniquely-owned cell; the hollowed allocation
+/// stays parked in its frame slot for the paired reuse constructor.
 ///
 /// # Safety
 /// `obj` must be a live, uniquely-owned (rc == 1) mortal heap object
@@ -2462,18 +2293,12 @@ pub unsafe extern "C" fn native_hollow_for_reuse(obj: *mut u64) {
     unsafe { hollow_children(obj) }
 }
 
-/// Release every mortal heap child of `obj` in place, overwriting each with
-/// an immediate sentinel — the shared body of [`Value::hollow_for_reuse`] and
-/// its native face [`native_hollow_for_reuse`]. `for_each_child` visits
-/// exactly the child-typed words per the header's tag; assigning through the
-/// `&mut Value` view drops the old child (one decref) and writes an
-/// immediate.
+/// Release every mortal heap child of `obj`, overwriting each slot with an
+/// immediate sentinel. Shared by [`Value::hollow_for_reuse`] and
+/// [`native_hollow_for_reuse`].
 ///
-/// Immediates and frozen children own nothing, so there is no reference to
-/// give back — and the paired constructor rewrites every child word of a
-/// same-shape cell regardless. Skipping their stores keeps the hollow of an
-/// all-scalar record (the `dot_loop` bench shape: three `Int` fields plus
-/// three immortal name words) down to the walk itself.
+/// Immediate and frozen children are skipped: they own no reference to give
+/// back, and the paired constructor rewrites every child word anyway.
 ///
 /// # Safety
 /// `obj` must be a live, uniquely-owned (rc == 1) mortal heap object.
@@ -2487,17 +2312,14 @@ unsafe fn hollow_children(obj: *mut u64) {
     }
 }
 
-/// Free `obj` — whose refcount just hit zero — and everything it transitively
-/// owns. Out-of-line and `#[cold]`: keeping the thread-local `DROP_STACK`
-/// access out of [`release_bits`] is what lets its fast path inline.
+/// Free `obj`, whose refcount just hit zero, and everything it transitively
+/// owns. Out of line so [`release_bits`]' fast path can inline without the
+/// thread-local access.
 ///
-/// Freeing one object drives *at most one* child to zero in the overwhelmingly
-/// common cases (a value with no heap children; a list/chain spine; a tree node
-/// whose children outlive it because a `Drop` released the parent first). Those
-/// need no work list at all: the loop below just walks the chain. Only when a
-/// single object orphans a *second* child — the branching free of a whole tree
-/// — does it fall back to [`release_pending`] and the thread-local stack, which
-/// is what keeps the traversal iterative rather than recursive.
+/// The common cases (no heap children, a list spine, a node whose children
+/// outlive it) drive at most one child to zero, so the loop below just walks
+/// the chain with no work list. Only a second orphaned child falls back to
+/// [`release_pending`].
 ///
 /// # Safety
 /// `obj` must be a live mortal heap object at count 0, not yet freed.
@@ -2509,12 +2331,10 @@ unsafe fn release_at_zero(mut obj: *mut u64) {
         "drop stack must be empty between releases"
     );
     loop {
-        // The first child driven to zero continues the chain in this frame;
-        // any further ones spill onto the work list.
         let mut next: *mut u64 = std::ptr::null_mut();
         let mut spilled = false;
-        // SAFETY: `obj` is a mortal heap object at count 0 awaiting free; its
-        // child slots stay live until `free_object`.
+        // SAFETY: `obj` is at count 0 awaiting free; its child slots stay
+        // live until `free_object`.
         unsafe {
             for_each_child(obj, &mut |child: &mut Value| {
                 if !child.is_heap() || child.is_immortal() {
@@ -2534,9 +2354,8 @@ unsafe fn release_at_zero(mut obj: *mut u64) {
             free_object(obj);
         }
         if spilled {
-            // SAFETY: `next` is non-null whenever `spilled` (it is set by the
-            // first zero-child, the spill by a later one) and names a mortal
-            // object at count 0, as does every pointer already on the stack.
+            // SAFETY: `spilled` implies `next` is set, and it and every
+            // stacked pointer name a mortal object at count 0.
             return unsafe { release_pending(next) };
         }
         if next.is_null() {
@@ -2546,12 +2365,11 @@ unsafe fn release_at_zero(mut obj: *mut u64) {
     }
 }
 
-/// Drain the thread-local work list, starting from `seed`. Reached only from
-/// [`release_at_zero`]'s branching case.
+/// Drain the thread-local work list, starting from `seed`.
 ///
 /// # Safety
-/// `seed` and every pointer already on `DROP_STACK` must be a live mortal heap
-/// object at count 0, not yet freed.
+/// `seed` and every pointer on `DROP_STACK` must be a live mortal heap object
+/// at count 0, not yet freed.
 #[cold]
 #[inline(never)]
 unsafe fn release_pending(seed: *mut u64) {
@@ -2559,8 +2377,7 @@ unsafe fn release_pending(seed: *mut u64) {
         let mut stack = cell.borrow_mut();
         stack.push(seed);
         while let Some(obj) = stack.pop() {
-            // SAFETY: every queued pointer is a mortal heap object at count 0
-            // awaiting free; its child slots stay live until we free it.
+            // SAFETY: every queued pointer is at count 0 awaiting free.
             unsafe {
                 for_each_child(obj, &mut |child: &mut Value| {
                     if child.is_heap() && !child.is_immortal() {
@@ -2576,8 +2393,6 @@ unsafe fn release_pending(seed: *mut u64) {
     });
 }
 
-// ---- hashing ------------------------------------------------------------------
-
 const HASH_BASIS: u64 = 0xcbf29ce484222325;
 
 #[inline]
@@ -2586,8 +2401,7 @@ fn fnv1a_combine(h: u64, val: u64) -> u64 {
 }
 
 /// Fold each byte into the hash. [`hash_value`] and [`enum_name_prefix_hash`]
-/// must agree byte-for-byte for the cached enum hash fast-reject to hold, so
-/// both fold byte runs through this one helper.
+/// must agree byte-for-byte, so both fold through this one helper.
 #[inline]
 fn fnv1a_bytes(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -2596,26 +2410,18 @@ fn fnv1a_bytes(mut h: u64, bytes: &[u8]) -> u64 {
     h
 }
 
-/// Number of leading elements folded into a sequence hash. The stored hash is a
-/// fast-reject filter for value equality, not a cryptographic digest, so
-/// sampling a bounded prefix (plus the length) keeps hashing O(1) for a compact
-/// `Range` — `Some(0..n)` must not walk the whole range at build time — while
-/// staying collision-resistant enough to reject mismatched payloads cheaply.
+/// Leading elements folded into a sequence hash. The hash is only an equality
+/// fast-reject, so a bounded prefix plus the length keeps hashing O(1) —
+/// `Some(0..n)` must not walk the whole range.
 const SEQ_HASH_SAMPLE: usize = 32;
 
-/// Number of leading and trailing bytes folded into a `Str`/`Binary` hash.
-/// Like [`SEQ_HASH_SAMPLE`], the stored hash is only an equality fast-reject,
-/// so hashing the length plus a bounded prefix and suffix keeps enum
-/// construction O(1) in payload size — wrapping a multi-megabyte read buffer
-/// in `Ok(...)` must not re-walk the whole buffer. Payloads at most twice the
-/// sample are hashed in full.
+/// Leading and trailing bytes folded into a `Str`/`Binary` hash, for the same
+/// reason as [`SEQ_HASH_SAMPLE`]: wrapping a multi-megabyte buffer in `Ok(..)`
+/// must not re-walk it. Payloads up to twice the sample hash in full.
 const BYTES_HASH_SAMPLE: usize = 64;
 
-/// Hash `len` logical bytes via `byte_at`: every byte when `len` is at most
-/// twice the sample, otherwise a leading and trailing [`BYTES_HASH_SAMPLE`]
-/// window. Callers fold the length in separately (`Str` folds byte length,
-/// `Binary` folds bit length), so equal contents hash equally and differing
-/// lengths fast-reject.
+/// Hash `len` logical bytes via `byte_at`, sampling per [`BYTES_HASH_SAMPLE`].
+/// Callers fold the length in separately, so differing lengths fast-reject.
 #[inline]
 fn fnv1a_bytes_sampled(mut h: u64, len: usize, mut byte_at: impl FnMut(usize) -> u8) -> u64 {
     if len <= 2 * BYTES_HASH_SAMPLE {
@@ -2633,11 +2439,9 @@ fn fnv1a_bytes_sampled(mut h: u64, len: usize, mut byte_at: impl FnMut(usize) ->
     h
 }
 
-/// The `i`-th logical byte of a bit-unaligned binary view (bits
-/// `bit_offset + 8*i .. bit_offset + 8*i + 8` of `backing`, MSB-first).
-/// Bits past the end of `backing` read as zero; callers mask any partial
-/// tail through [`tail_mask`], which zeroes exactly those padding bits —
-/// matching [`BinaryRef::to_aligned_vec`].
+/// The `i`-th logical byte of a bit-unaligned binary view, MSB-first. Bits
+/// past the end of `backing` read as zero; callers mask a partial tail through
+/// [`tail_mask`], matching [`BinaryRef::to_aligned_vec`].
 #[inline]
 fn logical_byte(backing: &[u8], bit_offset: u64, i: usize) -> u8 {
     read_byte(backing, bit_offset + 8 * i as u64)
@@ -2648,11 +2452,9 @@ fn hash_int(i: i64) -> u64 {
     fnv1a_combine(HASH_BASIS, i as u64)
 }
 
-/// The [`hash_value`] of a `Str` holding `s`, computable without a `Value`:
-/// length plus a sampled byte prefix/suffix, so equal strings hash equally and
-/// hashing stays O(1) in string size. The `Str` arm of `hash_value` delegates
-/// here, so string contents hash one way everywhere (in particular, the `Env`
-/// map fold hashes host strings exactly like arena `Str` values).
+/// The [`hash_value`] of a `Str` holding `s`, computable without a `Value`.
+/// The `Str` arm delegates here, so host strings and arena `Str`s hash the
+/// same way — which is what the `Env` map fold relies on.
 #[inline]
 fn hash_str(s: &str) -> u64 {
     let bytes = s.as_bytes();
@@ -2660,21 +2462,17 @@ fn hash_str(s: &str) -> u64 {
     fnv1a_bytes_sampled(h, bytes.len(), |i| bytes[i])
 }
 
-/// Per-entry combine for a map's order-independent entry fold. Both map
-/// backings fold `map_entry_hash` of every entry with `wrapping_add`
-/// ([`super::hamt::hamt_hash`] and [`env_map_hash`]), so maps holding equal
-/// entries hash identically regardless of backing or insertion order.
+/// Per-entry combine for a map's order-independent fold. Both backings fold
+/// every entry through this with `wrapping_add`, so equal maps hash equally
+/// regardless of backing or insertion order.
 #[inline]
 pub(crate) fn map_entry_hash(key_hash: u64, value_hash: u64) -> u64 {
     key_hash.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ value_hash
 }
 
-/// Order-independent entry fold of the `Env` map view — the live process
-/// environment as `(String, String)` pairs. Entries not valid UTF-8 (key or
-/// value) are invisible to the `Map(String, String)` view, so they are
-/// skipped, matching the VM's `Env` reads. The environment is written only
-/// before the program starts (nothing in the runtime mutates it), so the fold
-/// is stable for the program's lifetime.
+/// Entry fold of the `Env` map view. Non-UTF-8 entries are invisible to a
+/// `Map(String, String)`, so they are skipped, matching the VM's `Env` reads.
+/// Nothing in the runtime mutates the environment, so the fold is stable.
 fn env_map_hash() -> u64 {
     let mut acc = 0u64;
     for (k, v) in std::env::vars_os() {
@@ -2685,14 +2483,11 @@ fn env_map_hash() -> u64 {
     acc
 }
 
-/// Structural equality of the live process-environment view against a
-/// HAMT-backed map: the same entry count, and every HAMT entry is a
-/// `(Str, Str)` pair present in the environment with an equal value. Count
-/// equality plus containment is a bijection because HAMT keys are distinct.
-/// Non-UTF-8 environment entries are excluded, as in [`env_map_hash`].
-/// The environment is snapshotted once — probing per entry via `env::var`
-/// would be an O(env) scan per key and case-insensitive on Windows, where a
-/// HAMT with case-variant duplicate keys could falsely compare equal.
+/// Structural equality of the `Env` view against a HAMT map: equal counts
+/// plus containment, which is a bijection because HAMT keys are distinct.
+/// The environment is snapshotted rather than probed per key: `env::var` is an
+/// O(env) scan and is case-insensitive on Windows, where a HAMT with
+/// case-variant keys could then compare equal.
 fn env_equals_hamt(m: MapRef<'_>) -> bool {
     let env: std::collections::HashMap<String, String> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
@@ -2703,12 +2498,9 @@ fn env_equals_hamt(m: MapRef<'_>) -> bool {
     })
 }
 
-/// Hash a sequence from its length and a bounded prefix of its element hashes.
-/// A `Range(s, e)` and the array it materialises to (`[s, s+1, …, e-1]`) have
-/// the same length and the same leading elements, so they hash identically.
-/// That keeps the `Range == Array` equivalence in `values_equal` consistent
-/// with the precomputed enum hash without ever iterating the full (possibly
-/// enormous) range.
+/// Hash a sequence from its length and a bounded prefix of element hashes. A
+/// `Range` and the array it materialises to agree on both, so they hash
+/// identically without ever iterating a huge range.
 #[inline]
 fn hash_sequence(len: usize, elem_hashes: impl Iterator<Item = u64>) -> u64 {
     let mut h = fnv1a_combine(HASH_BASIS, len as u64);
@@ -2718,19 +2510,16 @@ fn hash_sequence(len: usize, elem_hashes: impl Iterator<Item = u64>) -> u64 {
     h
 }
 
-/// Equality worklist. Inline capacity covers ordinary nesting (a few tuple /
-/// enum levels) so the common comparison never touches the host allocator —
-/// `values_equal` runs on every map probe, so a malloc per comparison would be
-/// a real cost.
+/// Equality worklist. The inline capacity covers ordinary nesting, so the
+/// common comparison never mallocs — `values_equal` runs on every map probe.
 pub(super) type EqPending = SmallVec<[(Value, Value); 16]>;
 
-/// Decide a pair without descending: bit-identical words and same-kind scalar
-/// views resolve here. `None` means the pair needs the worklist (heap
-/// composites, and cross-kind pairs like Range vs Array).
+/// Decide a pair without descending. `None` means it needs the worklist:
+/// heap composites, and cross-kind pairs like Range vs Array.
 #[inline]
 fn decide_flat(x: &Value, y: &Value) -> Option<bool> {
-    // Bit-identical words are always equal: immediates are their value, heap
-    // words name the same object, and a real NaN never enters the box.
+    // Bit-identical words are always equal, since a real NaN never enters
+    // the box.
     if x.0 == y.0 {
         return Some(true);
     }
@@ -2744,10 +2533,9 @@ fn decide_flat(x: &Value, y: &Value) -> Option<bool> {
     }
 }
 
-/// One child pair of the value being compared: decide it in place when it is
-/// flat, otherwise defer it to the worklist. Shared by every composite arm of
-/// [`pair_equal`] and by [`super::hamt::hamts_equal`] so map entry values join
-/// the same worklist instead of recursing.
+/// Decide one child pair in place if it is flat, else defer it to the
+/// worklist. Shared with [`super::hamt::hamts_equal`], so map entry values
+/// join the same worklist instead of recursing.
 #[inline]
 pub(super) fn eq_defer(pending: &mut EqPending, x: &Value, y: &Value) -> bool {
     match decide_flat(x, y) {
@@ -2759,14 +2547,10 @@ pub(super) fn eq_defer(pending: &mut EqPending, x: &Value, y: &Value) -> bool {
     }
 }
 
-/// Stream the pairwise elements of two equal-length slices: scalar pairs are
-/// decided in place (a mismatch returns `false` immediately, without visiting
-/// the rest), and only pairs that need descent go onto the worklist. Unequal
-/// lengths decide `false` without visiting any element. The deferred pairs are
-/// reversed in place so the driver's `pop` compares them left-to-right, which
-/// keeps `pending` at O(depth) for chain shapes (a composite head is compared
-/// and released before the tail is descended) instead of accumulating one
-/// deferred head per level.
+/// Stream two equal-length slices pairwise: scalars decide in place, and a
+/// mismatch stops without visiting the rest. Deferred pairs are reversed so
+/// the driver's `pop` compares them left-to-right, which keeps `pending` at
+/// O(depth) for chain shapes instead of one deferred head per level.
 fn push_pairs(pending: &mut EqPending, a: &[Value], b: &[Value]) -> bool {
     let start = pending.len();
     let all = a.len() == b.len() && a.iter().zip(b).all(|(x, y)| eq_defer(pending, x, y));
@@ -2776,29 +2560,23 @@ fn push_pairs(pending: &mut EqPending, a: &[Value], b: &[Value]) -> bool {
     }
 }
 
-/// Normalised element count of the half-open range `s..e` (0 for `e <= s`).
-/// Saturating so wide ranges like `i64::MIN..i64::MAX` cap at `i64::MAX`
-/// instead of overflowing. Shared by [`values_equal`], [`hash_value`], and the
-/// VM sequence ops so all Range/Array cross-paths agree on one length.
+/// Element count of the half-open range `s..e`, 0 for `e <= s` and saturating
+/// at `i64::MAX`. Shared by equality, hashing and the VM sequence ops so every
+/// Range/Array cross-path agrees on one length.
 #[inline]
 pub fn range_len(s: i64, e: i64) -> i64 {
     e.saturating_sub(s).max(0)
 }
 
-/// AL structural equality — the semantics of `==`. Lives here (not in the VM)
-/// because it is the partner of [`hash_value`] and both are needed by
-/// [`super::hamt`] to key the persistent map. Ranges and arrays compare by
-/// their elements; maps compare structurally regardless of internal order or
-/// backing — an `Env`-backed map (the live view of the process environment)
-/// equals a HAMT holding exactly the environment's entries.
+/// AL structural equality — the semantics of `==`. Lives here as the partner
+/// of [`hash_value`]; [`super::hamt`] needs both to key the persistent map.
+/// Ranges and arrays compare element-wise, and maps compare structurally
+/// regardless of order or backing, so an `Env` map equals a HAMT holding
+/// exactly the environment's entries.
 ///
-/// Iterative, like `release_at_zero`: child pairs (enum payloads, tuple
-/// elements, closure captures, array elements, map entry values) go onto an
-/// explicit worklist instead of the native stack, so arbitrarily deep values —
-/// a 100k-deep user-defined cons list, or a value nested 100k deep through map
-/// values — cannot overflow it. (Map *keys* are compared by fresh
-/// `values_equal` calls inside the HAMT probe, but each such call is itself
-/// iterative, so keys do not stack native frames per nesting level either.)
+/// Iterative: child pairs go onto an explicit worklist, so a 100k-deep cons
+/// list cannot overflow the native stack. Map keys are compared by fresh
+/// `values_equal` calls, each itself iterative.
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     let mut pending = EqPending::new();
     if !pair_equal(a, b, &mut pending) {
@@ -2812,17 +2590,14 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     true
 }
 
-/// One step of [`values_equal`]: decide the pair outright, or push its child
-/// pairs onto `pending` for the driver loop to compare.
+/// One step of [`values_equal`]: decide the pair, or push its children.
 fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
     if let Some(eq) = decide_flat(a, b) {
         return eq;
     }
     match (a.kind(), b.kind()) {
         (ValueView::Enum(ae), ValueView::Enum(be)) => {
-            // Cached-hash inequality is a cheap "not equal"; an uncomputed
-            // side skips the shortcut rather than paying two payload walks
-            // to avoid the one structural walk below.
+            // A cheap "not equal"; an uncomputed side just skips it.
             let (ha, hb) = (ae.stored_hash(), be.stored_hash());
             (ha == 0 || hb == 0 || ha == hb)
                 && ae.type_id() == be.type_id()
@@ -2833,10 +2608,7 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
             x.func_idx() == y.func_idx() && push_pairs(pending, x.captures(), y.captures())
         }
         (ValueView::Array(aa), ValueView::Array(ba)) => {
-            // Streamed like push_pairs: a scalar mismatch stops the walk at
-            // that element, and an all-scalar array never grows the worklist.
-            // Deferred pairs are reversed so the driver compares them
-            // left-to-right (see push_pairs).
+            // As push_pairs, including the reverse.
             let start = pending.len();
             let all = aa.len() == ba.len()
                 && aa
@@ -2877,11 +2649,7 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
         }
         (ValueView::Map(am), ValueView::Map(bm)) => match (am.backing(), bm.backing()) {
             (MapBacking::Hamt, MapBacking::Hamt) => super::hamt::hamts_equal(am, bm, pending),
-            // Two `Env` views read through to the same live process
-            // environment.
             (MapBacking::Env, MapBacking::Env) => true,
-            // Cross-backing: compare the environment's entries against the
-            // HAMT's, entry-wise.
             (MapBacking::Env, MapBacking::Hamt) => env_equals_hamt(bm),
             (MapBacking::Hamt, MapBacking::Env) => env_equals_hamt(am),
         },
@@ -2889,12 +2657,9 @@ fn pair_equal(a: &Value, b: &Value, pending: &mut EqPending) -> bool {
     }
 }
 
-/// Equality fast-reject hash: `values_equal` values must hash identically;
-/// unequal values may collide. It feeds the cached enum hash
-/// ([`enum_hash_with_payload`]) that gates the enum arm of equality, so every
-/// arm folds exactly the components equality inspects — leaving a component
-/// out is sound (collisions only) but forfeits the fast-reject for payloads
-/// that differ in that component.
+/// Equality fast-reject hash: `values_equal` values must hash identically,
+/// unequal ones may collide. Every arm folds exactly what equality inspects;
+/// omitting a component is sound but forfeits the fast-reject for it.
 pub fn hash_value(v: &Value) -> u64 {
     let mut h = HASH_BASIS;
     match v.kind() {
@@ -2902,9 +2667,7 @@ pub fn hash_value(v: &Value) -> u64 {
             h = fnv1a_combine(h, i as u64);
         }
         ValueView::Float(f) => {
-            // `+0.0` and `-0.0` are `values_equal` but have distinct bit
-            // patterns; normalise signed zero so the hash respects equality
-            // (the enum-equality arm gates on the cached payload hash).
+            // `+0.0` and `-0.0` are `values_equal` but differ in bits.
             let bits = if f == 0.0 { 0 } else { f.to_bits() };
             h = fnv1a_combine(h, bits);
         }
@@ -2925,12 +2688,9 @@ pub fn hash_value(v: &Value) -> u64 {
             h = hash_sequence(len, (start..end).map(hash_int));
         }
         ValueView::Binary(bin) => {
-            // Hash the LOGICAL bits so it stays consistent with
-            // `BinaryRef::bits_eq`: the bit length, sampled full bytes, then
-            // the masked partial tail. Byte-aligned views hash straight off
-            // the backing; bit-unaligned views extract logical bytes on the
-            // fly. Both fold the same logical byte values, so aligned and
-            // unaligned views of equal bits hash identically.
+            // The logical bits only, to stay consistent with `bits_eq`:
+            // aligned views hash straight off the backing, unaligned ones
+            // extract logical bytes, and both fold the same values.
             let (bit_offset, bit_len) = (bin.bit_offset(), bin.bit_len());
             let backing = bin.backing();
             let full = (bit_len / 8) as usize;
@@ -2950,16 +2710,13 @@ pub fn hash_value(v: &Value) -> u64 {
             }
         }
         ValueView::Tuple(t) => {
-            // Tuples compare element-wise, so they hash like arrays: length
-            // plus a sampled element prefix. A tuple is never `values_equal`
-            // to an array, so sharing the sequence shape risks only a
-            // harmless cross-type collision.
+            // Like arrays, since they compare element-wise. A tuple is never
+            // `values_equal` to an array, so the shared shape only collides.
             h = hash_sequence(t.len(), t.iter().map(hash_value));
         }
         ValueView::Closure(c) => {
-            // Closure equality is the function index plus element-wise
-            // capture equality; fold both so closures over different
-            // environments fast-reject.
+            // Both halves of closure equality, so different captures
+            // fast-reject.
             h = fnv1a_combine(h, c.func_idx() as u64);
             for cap in c.captures() {
                 h = fnv1a_combine(h, hash_value(cap));
@@ -2975,12 +2732,8 @@ pub fn hash_value(v: &Value) -> u64 {
             h = fnv1a_combine(h, 0);
         }
         ValueView::Map(m) => {
-            // Maps compare structurally across backings (`values_equal`), so
-            // both backings fold every entry through the same order-independent
-            // [`map_entry_hash`] combine — and the backing tag itself is NOT
-            // folded: an `Env` view and a HAMT holding the same entries must
-            // hash identically. `wrapping_add` keeps the cross-entry fold
-            // commutative, so insertion order does not matter either.
+            // The backing tag is deliberately NOT folded: an `Env` view and
+            // a HAMT with the same entries must hash identically.
             h = h.wrapping_add(match m.backing() {
                 MapBacking::Hamt => super::hamt::hamt_hash(m),
                 MapBacking::Env => env_map_hash(),
@@ -2990,23 +2743,17 @@ pub fn hash_value(v: &Value) -> u64 {
     h
 }
 
-/// Hash of the constant name prefix (`enum_name` then `variant_name`). These
-/// bytes are compile-time constants, so the compiler computes this once per
-/// constructor site and the VM folds payloads into it via
-/// [`enum_hash_with_payload`] instead of re-walking the name bytes on every
-/// construction.
-/// Compute-and-cache an Enum cell's hash in place if still unset.
+/// Compute and cache an Enum cell's hash in place if still unset.
 ///
-/// Called by the publish path on the (still-mortal, single-owner) SOURCE cell
-/// right before its image is copied and frozen: a frozen cell is shared
-/// across threads and must never be lazily written afterwards, so the hash
-/// must ride into the frozen image. Hashing the source rather than the copy
-/// makes the result independent of graph-copy order — the copy inherits the
-/// cached word verbatim. Non-enum tags and already-hashed cells are no-ops.
+/// The publish path calls this on the still-mortal SOURCE cell before its
+/// image is frozen: a frozen cell is shared across threads and must never be
+/// written lazily, so the hash has to ride into the frozen image. Hashing the
+/// source rather than the copy also makes the result independent of graph-copy
+/// order. Non-enum tags and already-hashed cells are no-ops.
 ///
 /// # Safety
-/// `obj` must point at a live heap object (header word first) that the
-/// calling thread owns exclusively — the cell may be written.
+/// `obj` must point at a live heap object the calling thread owns exclusively
+/// — the cell may be written.
 pub unsafe fn freeze_enum_hash(obj: *const u64) {
     unsafe {
         if header_tag(*obj) == HeapTag::Enum {
@@ -3019,6 +2766,9 @@ pub unsafe fn freeze_enum_hash(obj: *const u64) {
     }
 }
 
+/// Hash of the name prefix alone. The names are compile-time constants, so
+/// the compiler computes this once per constructor site and the VM folds
+/// payloads into it via [`enum_hash_with_payload`].
 pub fn enum_name_prefix_hash(enum_name: &str, variant_name: &str) -> u64 {
     let h = fnv1a_bytes(HASH_BASIS, enum_name.as_bytes());
     fnv1a_bytes(h, variant_name.as_bytes())
@@ -3039,8 +2789,6 @@ mod tests {
     use super::*;
     use crate::heap::ProcHeap;
 
-    /// A test heap big enough that no test allocation ever fails (tests run
-    /// without a collector; capacity stands in for the VM's ensure()).
     fn test_heap() -> ProcHeap {
         ProcHeap::new()
     }
@@ -3050,23 +2798,20 @@ mod tests {
         use crate::frozen::FrozenArea;
         use std::sync::Arc;
 
-        // A heap object built in a process heap is mortal (reference-counted).
         let mut h = test_heap();
         let mortal = Value::int_in(&mut h, i64::MAX); // BigInt box
         assert!(mortal.is_heap());
         assert!(!mortal.is_immortal());
 
-        // The same shape built into the frozen area is immortal.
         let area = Arc::new(FrozenArea::new());
         let mut b = area.builder();
         let frozen = b.int(i64::MAX).into_value();
         assert!(frozen.is_heap());
         assert!(frozen.is_immortal());
-        // Tag/length are still decoded correctly with bit 7 set.
+        // Tag/length still decode correctly with bit 7 set.
         assert_eq!(frozen.heap_tag(), Some(HeapTag::BigInt));
         assert_eq!(frozen.as_int(), Some(i64::MAX));
 
-        // Immediates are never immortal (and never heap).
         assert!(!Value::small_int(7).is_immortal());
         assert!(!Value::nil().is_immortal());
     }
@@ -3096,7 +2841,6 @@ mod tests {
                 _ => panic!("expected Int view"),
             }
         }
-        // In-range ints stay immediate through int_in.
         assert!(!Value::int_in(&mut h, 7).is_heap());
     }
 
@@ -3107,7 +2851,6 @@ mod tests {
             assert_eq!(v.as_float(), Some(f));
             assert!(v.is_float());
         }
-        // Non-finite clamps to 0.0.
         assert_eq!(Value::float(f64::NAN).as_float(), Some(0.0));
         assert_eq!(Value::float(f64::INFINITY).as_float(), Some(0.0));
         assert_eq!(Value::float(f64::NEG_INFINITY).as_float(), Some(0.0));
@@ -3213,7 +2956,6 @@ mod tests {
         let b = v.as_binary().unwrap();
         assert_eq!(&*b.full_bytes(), &[0xAB, 0xCD, 0xEF][..]);
         assert_eq!(b.bit_offset(), 0);
-        // A partial tail byte from a shared backing gets its low bits masked.
         let v2 = Value::binary_concat_parts_in(&mut h, &[&[0xAB], &[0xFF]], 11);
         let b2 = v2.as_binary().unwrap();
         assert_eq!(b2.bit_len(), 11);
@@ -3227,13 +2969,11 @@ mod tests {
         let mut h = test_heap();
         let backing: Arc<[u8]> = Arc::from(vec![0xAB, 0xCD, 0xEF, 0x01]);
         let whole = Value::binary_from_arc_in(&mut h, Arc::clone(&backing), 32);
-        // One count here + one in the box.
         assert_eq!(Arc::strong_count(&backing), 2);
         let slice = Value::binary_view_in(&mut h, whole.as_binary().unwrap().backing_arc(), 8, 16);
         assert_eq!(Arc::strong_count(&backing), 3);
         let s = slice.as_binary().unwrap();
         assert_eq!(&*s.full_bytes(), &[0xCD, 0xEF][..]);
-        // Logical equality across different views/offsets.
         let same = Value::binary_in(&mut h, vec![0xCD, 0xEF]);
         assert!(s.bits_eq(&same.as_binary().unwrap()));
         assert!(!s.bits_eq(&whole.as_binary().unwrap()));
@@ -3242,7 +2982,6 @@ mod tests {
             hash_value(&same),
             "equal logical bits must hash identically"
         );
-        // starts_with_at: byte-aligned fast path and bounds.
         assert!(whole.as_binary().unwrap().starts_with_at(8, &s));
         assert!(!whole.as_binary().unwrap().starts_with_at(32, &s));
     }
@@ -3252,10 +2991,9 @@ mod tests {
         let mut h = test_heap();
         let backing: Arc<[u8]> = Arc::from(vec![9u8; 16]);
         let b1 = Value::binary_from_arc_in(&mut h, Arc::clone(&backing), 128);
-        // The box owns a count alongside our local handle.
         assert_eq!(Arc::strong_count(&backing), 2);
         let a1 = b1.object_addr().unwrap();
-        // SAFETY: `a1` is a live Binary box; exercise the dup/drop helpers.
+        // SAFETY: `a1` is a live Binary box.
         unsafe {
             assert!(header_has_off_heap_link(*(a1 as *const u64)));
             binary_clone_backing(a1 as *const u64);
@@ -3263,8 +3001,7 @@ mod tests {
             binary_drop_backing(a1 as *const u64);
             assert_eq!(Arc::strong_count(&backing), 2);
         }
-        // Dropping the box value releases its Arc count by reference counting:
-        // the box's `free_object` runs `binary_drop_backing` at zero.
+        // `free_object` runs `binary_drop_backing` at zero.
         drop(b1);
         assert_eq!(Arc::strong_count(&backing), 1);
     }
@@ -3282,13 +3019,9 @@ mod tests {
         assert_eq!(header_tag(hb), HeapTag::Binary);
     }
 
-    /// The Perceus in-place contract, at the `reuse_or_alloc` level: hollowing
-    /// a uniquely-owned cell releases its children, and a same-shape rebuild
-    /// then overwrites that exact allocation with rc still 1.
-    ///
-    /// Exercised through the *enum* constructor because that is the only
-    /// reachable reuse path: `lower` pairs `Drop`/`Reuse` tokens for
-    /// user-declared constructors, never for tuples or closures.
+    /// The Perceus in-place contract. Exercised through the enum constructor
+    /// because that is the only reachable reuse path: `lower` pairs
+    /// `Drop`/`Reuse` only for user-declared constructors.
     #[test]
     fn perceus_reuse_overwrites_in_place_and_releases_old_children() {
         let mut h = test_heap();
@@ -3299,7 +3032,7 @@ mod tests {
         let addr = old.object_addr().unwrap();
         assert!(old.is_unique());
 
-        let _ = take_freed_objects(); // reset the counter
+        let _ = take_freed_objects();
         old.hollow_for_reuse();
         let freed = take_freed_objects();
         assert!(
@@ -3307,8 +3040,6 @@ mod tests {
             "hollowing must release the payload children, freed {freed}"
         );
 
-        // `Op::Reuse` pops the hollowed cell; a same-shape constructor builds
-        // in place, inheriting its rc==1.
         let en = Value::str_in(&mut h, "E");
         let vn = Value::str_in(&mut h, "V");
         let labels = Value::tuple_in(&mut h, &[]);
@@ -3318,7 +3049,6 @@ mod tests {
         assert_eq!(new.object_addr().unwrap(), addr, "same allocation reused");
         assert!(new.is_unique(), "rc stays 1 across reuse");
 
-        // A nil token falls back to a fresh allocation.
         let en2 = Value::str_in(&mut h, "E");
         let vn2 = Value::str_in(&mut h, "V");
         let labels2 = Value::tuple_in(&mut h, &[]);
@@ -3336,8 +3066,8 @@ mod tests {
         assert_ne!(fresh.object_addr().unwrap(), addr);
     }
 
-    /// Cross-backing map equality: the `Env` view equals a HAMT holding
-    /// exactly the environment's entries, and equal maps hash identically.
+    /// The `Env` view equals a HAMT holding the same entries, and hashes
+    /// the same.
     #[test]
     fn env_map_equals_hamt_with_same_entries() {
         use crate::bytecode::hamt;
@@ -3362,7 +3092,6 @@ mod tests {
             "equal values hash identically"
         );
 
-        // A differing entry breaks equality both ways.
         let kv = Value::str_in(&mut h, "__al_env_eq_test_key__");
         let vv = Value::str_in(&mut h, "x");
         let hash = hash_value(&kv);
@@ -3371,9 +3100,8 @@ mod tests {
         assert!(!values_equal(&m2, &env));
     }
 
-    /// Guards the worklist rewrite of [`values_equal`]: comparing two equal
-    /// ~100k-deep cons chains overflowed the native stack when equality
-    /// recursed through enum payloads.
+    /// Guards the worklist in [`values_equal`]: recursing through enum
+    /// payloads overflowed the native stack at this depth.
     #[test]
     fn values_equal_deep_enum_chain_is_iterative() {
         let mut h = test_heap();
@@ -3397,16 +3125,12 @@ mod tests {
         let b = deep(&mut h, 99_999);
         assert!(values_equal(&a, &b), "equal deep chains compare equal");
         assert_eq!(hash_value(&a), hash_value(&b));
-        // A chain differing only at the innermost element is unequal (the
-        // cached hash already differs at the root).
         let c = deep(&mut h, -1);
         assert!(!values_equal(&a, &c));
     }
 
-    /// Guards the map arm of the worklist rewrite: entry values are deferred
-    /// onto the shared worklist, so a value nested ~100k deep through map
-    /// values (`{k: {k: …}}`) compares without stacking native frames per
-    /// nesting level.
+    /// Guards the map arm of the worklist: `{k: {k: …}}` nested this deep
+    /// must compare without a native frame per level.
     #[test]
     fn values_equal_deep_map_nesting_is_iterative() {
         use crate::bytecode::hamt;
@@ -3425,14 +3149,12 @@ mod tests {
         let a = deep(&mut h, 1);
         let b = deep(&mut h, 1);
         assert!(values_equal(&a, &b), "equal deep map nests compare equal");
-        // Nests differing only at the innermost value are unequal.
         let c = deep(&mut h, 2);
         assert!(!values_equal(&a, &c));
     }
 
-    /// The `Drop` backstop: a reuse token that never reaches a constructor
-    /// (e.g. a VM handler erroring out after popping it) frees its hollow
-    /// cell instead of leaking it.
+    /// A reuse token that never reaches a constructor frees its hollow cell
+    /// instead of leaking it.
     #[test]
     fn unconsumed_reuse_addr_frees_its_cell_on_drop() {
         let mut h = test_heap();
@@ -3447,7 +3169,6 @@ mod tests {
             1,
             "dropping an unconsumed token frees the hollow cell"
         );
-        // The `none` token drops as a no-op.
         drop(ReuseAddr::none());
     }
 
@@ -3471,7 +3192,7 @@ mod tests {
             ]
         );
 
-        // Enum: names + labels + payload are traced; type_id/hash/count are not.
+        // Names, labels and payload are traced; type_id/hash/count are not.
         let e = Value::enum_with_names_in(
             &mut h,
             TypeId(2),
@@ -3487,7 +3208,7 @@ mod tests {
         }
         assert_eq!(count, 3 + 1, "enum_name, variant_name, labels, payload[0]");
 
-        // Binary: no traced children (Arc words must never be visited).
+        // No traced children: the Arc words must never be visited.
         let b = Value::binary_in(&mut h, vec![1, 2, 3]);
         let mut none = 0;
         unsafe {
@@ -3495,7 +3216,6 @@ mod tests {
         }
         assert_eq!(none, 0);
 
-        // Str: bytes are not values.
         let mut none = 0;
         unsafe {
             for_each_child(s.object_addr().unwrap() as *mut u64, &mut |_| none += 1);
@@ -3508,7 +3228,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<Value>(), 8);
         let mut h = test_heap();
         let v = Value::str_in(&mut h, "copy");
-        let w = v.clone(); // a reference-counting clone (incref)
+        let w = v.clone();
         assert_eq!(v.as_str(), Some("copy"));
         assert_eq!(w.as_str(), Some("copy"));
     }
@@ -3527,8 +3247,6 @@ mod tests {
         assert_eq!(a.len(), 2);
         assert_eq!(a.get(1).unwrap().as_tuple().unwrap().len(), 2);
     }
-
-    // ---- seq ----------------------------------------------------------------
 
     fn ints(n: usize) -> Vec<Value> {
         (0..n as i64).map(Value::small_int).collect()
@@ -3609,7 +3327,6 @@ mod tests {
             let mut model: Vec<Value> = items.clone();
             model[i] = marker.clone();
             assert_matches_model(&updated, &model);
-            // Persistence: the original is untouched.
             assert_eq!(seq::get(&root, i).unwrap().as_int(), Some(i as i64));
         }
         assert!(seq::update(&mut h, &root, 1100, marker.clone()).is_none());
@@ -3627,7 +3344,6 @@ mod tests {
             assert_matches_model(&t, &items[..cut]);
             assert_matches_model(&s, &items[cut..]);
         }
-        // Slicing a pushed-onto vector (head buffer present).
         let mut pushed = root;
         for i in 0..40i64 {
             pushed = seq::push_front(&mut h, &pushed, Value::small_int(-1 - i));
@@ -3666,7 +3382,7 @@ mod tests {
         }
 
         // Repeated concatenation must keep the tree shallow (the RRB
-        // rebalancing invariant): depth stays logarithmic, lookups stay fast.
+        // rebalancing invariant).
         let mut h = ProcHeap::new();
         let piece_items = ints(7);
         let mut root = seq::empty_in(&mut h);
@@ -3677,8 +3393,8 @@ mod tests {
             model.extend_from_slice(&piece_items);
         }
         assert_matches_model(&root, &model);
-        // 2100 elements; a balanced 32-ary tree of that size has depth 3.
-        // Allow the E_MAX slack a couple of extra levels, no more.
+        // 2100 elements: a balanced 32-ary tree is depth 3, and E_MAX slack
+        // buys a couple of levels, no more.
         let root_obj = root.object_addr().unwrap() as *const u64;
         let shift = unsafe { *root_obj.add(2) } as usize;
         assert!(
@@ -3689,7 +3405,6 @@ mod tests {
 
     #[test]
     fn seq_randomized_ops_match_vec_model() {
-        // Deterministic LCG so failures reproduce.
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut rng = move || {
             state = state
@@ -3701,10 +3416,9 @@ mod tests {
         let mut model: Vec<Value> = Vec::new();
         let mut root = seq::empty_in(&mut h);
         for step in 0..600 {
-            // Rebuild into a fresh arena periodically, exercising from_slice
-            // round-trips. Drop the old root (releasing its tree) BEFORE the old
-            // heap is destroyed — reference counting requires a heap outlive the
-            // values pointing into it. `model` holds only immediates.
+            // Rebuild into a fresh arena periodically. The old root must be
+            // dropped BEFORE its heap: a heap has to outlive the values
+            // pointing into it. `model` holds only immediates.
             if step % 64 == 63 {
                 drop(std::mem::replace(&mut root, Value::nil()));
                 h = ProcHeap::new();
@@ -3777,8 +3491,6 @@ mod tests {
 
     #[test]
     fn seq_structural_sharing_on_push() {
-        // A push_back shares the existing tree (path copy only) and leaves the
-        // original version intact (persistence).
         let mut h = ProcHeap::new();
         let items = ints(100_000);
         let root = seq::from_slice(&mut h, &items);
@@ -3786,8 +3498,6 @@ mod tests {
         assert_eq!(seq::len(&root), 100_000, "original version unchanged");
         assert_eq!(seq::len(&v2), 100_001);
     }
-
-    // ---- hashing -------------------------------------------------------------
 
     #[test]
     fn hash_stable_across_int_repr() {
@@ -3799,9 +3509,8 @@ mod tests {
         assert_eq!(hash_value(&big), fnv1a_combine(HASH_BASIS, i64::MAX as u64));
     }
 
-    // A range and the array it materialises to are `values_equal`, so they must
-    // hash identically — otherwise the precomputed enum hash fast-rejects equal
-    // values like `Some(0..3) == Some([0, 1, 2])`.
+    // Otherwise the precomputed enum hash fast-rejects equal values like
+    // `Some(0..3) == Some([0, 1, 2])`.
     #[test]
     fn range_hashes_like_its_materialized_array() {
         let mut h = test_heap();
@@ -3815,7 +3524,6 @@ mod tests {
                 "range {s}..{e} must hash like its materialised array"
             );
         }
-        // Equivalence holds when nested inside another sequence, too.
         let r = Value::range_in(&mut h, 0, 4);
         let nested_range = Value::array_in(&mut h, &[r]);
         let inner: Vec<Value> = (0..4).map(Value::small_int).collect();
@@ -3824,8 +3532,7 @@ mod tests {
         assert_eq!(hash_value(&nested_range), hash_value(&nested_arr));
     }
 
-    // Regression: `+0.0` and `-0.0` are `values_equal` (`0.0 == -0.0` in IEEE
-    // 754) but have distinct bit patterns; the hash must respect equality.
+    // Regression: `+0.0` and `-0.0` are `values_equal` but differ in bits.
     #[test]
     fn signed_zero_hashes_equal() {
         assert_eq!(
@@ -3845,8 +3552,8 @@ mod tests {
         );
     }
 
-    // Regression: hashing a range must not iterate it — `Some(0..i64::MAX)`
-    // must hash in bounded time. Reaching the asserts at all proves it.
+    // Regression: hashing a range must not iterate it. Reaching the asserts
+    // at all proves it.
     #[test]
     fn hashing_a_huge_range_is_constant_time() {
         let mut h = test_heap();
@@ -3857,10 +3564,8 @@ mod tests {
         assert_eq!(hash_value(&empty_range), hash_value(&empty_arr));
     }
 
-    // The sampled Str/Binary hash must still reject payloads that differ only
-    // outside the prefix sample: the length and the trailing sample are both
-    // folded in, so a flipped last byte or a one-byte extension changes the
-    // hash even for payloads far larger than the sample.
+    // The sampled Str/Binary hash must still reject payloads differing only
+    // outside the prefix sample, since length and tail are folded in too.
     #[test]
     fn sampled_hash_rejects_tail_and_length_differences() {
         let mut h = test_heap();
@@ -3883,10 +3588,8 @@ mod tests {
         assert_ne!(hash_value(&ba), hash_value(&bc));
     }
 
-    // Aligned and bit-unaligned views over the same logical bits are
-    // `bits_eq`, so they must hash identically — both for payloads small
-    // enough to hash in full and for ones large enough that the hash samples
-    // a prefix and suffix, with and without a partial trailing byte.
+    // Aligned and bit-unaligned views of the same logical bits are `bits_eq`,
+    // so they must hash identically — sampled or not, partial tail or not.
     #[test]
     fn unaligned_binary_hashes_like_aligned() {
         let mut h = test_heap();
@@ -3895,8 +3598,8 @@ mod tests {
             let bit_len = (len as u64) * 8 - dropped_bits;
             let aligned = Value::binary_bits_in(&mut h, bytes.clone(), bit_len);
             for shift in 1u32..8 {
-                // The same bit stream shifted right by `shift` bits, viewed
-                // at bit_offset = shift: identical logical bits.
+                // The same bit stream shifted right, viewed at bit_offset
+                // = shift: identical logical bits.
                 let mut backing = vec![0u8; len + 1];
                 for (i, &b) in bytes.iter().enumerate() {
                     backing[i] |= b >> shift;

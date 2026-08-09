@@ -279,7 +279,6 @@ mod tests {
         let elem = moved_arr.get(1).expect("array element");
         assert_eq!(elem.as_str(), Some("four"));
 
-        // Frame metadata survived intact.
         let meta: Vec<_> = q
             .frames
             .iter()
@@ -288,16 +287,10 @@ mod tests {
         assert_eq!(meta, vec![(0, 0, 3, 0), (1, 10, 5, 2), (1, 10, 7, 4)]);
     }
 
-    /// Collect the distinct heap objects reachable from `v`, keyed by arena
-    /// address (`Value::object_addr`). Sharing shows up as an object
-    /// referenced many times but collected once, so comparing the source's
-    /// count with the copy's pins "sharing preserved exactly": duplicating a
-    /// shared object inflates the copy's count, deduplicating
-    /// equal-but-distinct objects deflates it. The walk descends through
-    /// interior nodes too (a `Seq`'s leaves, a HAMT's branches), so it counts
-    /// every arena object in the graph — the same granularity on both sides,
-    /// which is all the comparison needs. No address is ever compared *across*
-    /// the two graphs.
+    /// Collect the distinct heap objects reachable from `v`, keyed by address.
+    /// Comparing the source's count with the copy's pins sharing exactly:
+    /// duplicating a shared object inflates the count, deduplicating
+    /// equal-but-distinct objects deflates it.
     fn distinct_heap_nodes(v: &Value, out: &mut Vec<usize>) {
         let Some(a) = v.object_addr() else { return };
         if out.contains(&a) {
@@ -309,9 +302,8 @@ mod tests {
 
     #[test]
     fn move_keeps_distinct_capture_allocations_distinct() {
-        // Two frames holding equal-but-DISTINCT closure allocations: the
-        // transport must never canonicalize equal values into one
-        // allocation — it moves words, it does not rebuild by value.
+        // Two frames holding equal but distinct closure allocations: the
+        // transport moves words and must never canonicalize by value.
         let mut heap = test_heap();
         let cap_a = Value::str_in(&mut heap, "same");
         let a = Value::closure_in(&mut heap, 1, &[cap_a]);
@@ -357,13 +349,8 @@ mod tests {
         });
         let q = dest.run_queue.pop_back().expect("queued migrant");
 
-        // Each frame still holds its own original allocation, both inside
-        // the heap that traveled with the process...
         assert_eq!(q.frames[0].captures.object_addr(), Some(a_addr));
         assert_eq!(q.frames[1].captures.object_addr(), Some(b_addr));
-        // ...and the two equal closures were not collapsed into one
-        // (`a_addr != b_addr` above; the addresses did not change). The
-        // payloads read back intact through the moved handles.
         let qa = q.frames[0].captures.as_closure().expect("closure");
         let qb = q.frames[1].captures.as_closure().expect("closure");
         assert_eq!(qa.func_idx(), 1);
@@ -374,19 +361,9 @@ mod tests {
 
     #[test]
     fn seed_copy_preserves_sharing_without_dedup_or_aliasing() {
-        // The spawn-side copy (`ProcHeap::spawn`, the spawn-side graph copy entry
-        // point) is the one cross-scheduler transport that copies a value
-        // graph. Its required properties:
-        //
-        // - a node referenced twice travels as ONE allocation referenced
-        //   twice (shared captures stay shared), and
-        // - two distinct-but-equal allocations stay DISTINCT (the copy's
-        //   `src → dst` map is keyed by identity, never by value).
-        //
-        // The graph must live in the spawner's own spaces: the copy
-        // classifies pointers by address range and leaves frozen/foreign
-        // pointers untouched, so a graph allocated anywhere else would be
-        // skipped, not copied.
+        // The graph must live in the spawner's own spaces: `ProcHeap::spawn`
+        // classifies pointers by address range and leaves frozen or foreign
+        // ones untouched, so a graph allocated elsewhere is skipped, not copied.
         let mut spawner = test_heap();
         let cap = Value::str_in(&mut spawner, "cap");
         let shared = Value::array_in(&mut spawner, &[Value::small_int(1), cap]);
@@ -399,16 +376,12 @@ mod tests {
 
         let (_child_heap, copy) = ProcHeap::spawn(&root);
 
-        // The spawner's graph is untouched (Clone-mode copy restores every
-        // forwarded header): same objects at the same addresses.
+        // The spawner's graph is untouched: the copy restores every forwarded
+        // header.
         let mut src_after = Vec::new();
         distinct_heap_nodes(&root, &mut src_after);
         assert_eq!(src_after, src_nodes);
 
-        // Sharing preserved exactly: the copy has the same distinct-object
-        // count as the source. Losing the sharing of `shared` (referenced by
-        // captures 0 and 1) would inflate the count; deduplicating the equal
-        // `twin` would deflate it.
         let mut copy_nodes = Vec::new();
         distinct_heap_nodes(&copy, &mut copy_nodes);
         assert_eq!(
@@ -417,8 +390,7 @@ mod tests {
             "the copy must preserve sharing exactly — no duplication, no dedup"
         );
 
-        // No aliasing: every copied object is a fresh allocation, disjoint
-        // from the source graph (both are live here, so addresses don't reuse).
+        // Both graphs are live here, so addresses cannot be reused.
         for &a in &copy_nodes {
             assert!(
                 !src_nodes.contains(&a),
@@ -426,15 +398,13 @@ mod tests {
             );
         }
 
-        // The sharing structure inside the copy mirrors the source: captures
-        // 0 and 1 are one allocation, the equal twin at 2 is another.
+        // Captures 0 and 1 are one allocation; the equal twin at 2 is another.
         let cl = copy.as_closure().expect("copied closure");
         assert_eq!(cl.func_idx(), 0);
         let caps = cl.captures();
         assert_eq!(addr(&caps[0]), addr(&caps[1]));
         assert_ne!(addr(&caps[0]), addr(&caps[2]));
 
-        // And the payload survived the trip.
         for v in [&caps[0], &caps[2]] {
             let arr = v.as_array().expect("array capture");
             assert_eq!(arr.len(), 2);
@@ -451,9 +421,8 @@ mod tests {
 
         let mut donor = halt_test_vm();
 
-        // One listener (stays put — not transferred), one established
-        // connection (moved), and a dangling id 3 whose fd an earlier spawn
-        // already moved away.
+        // A listener (stays put), an established connection (moves), and a
+        // dangling id 3 whose fd an earlier spawn already moved away.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let bind_addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(bind_addr).expect("connect");
@@ -468,8 +437,7 @@ mod tests {
         );
 
         let socket = |id, is_listener| Value::socket(SocketValue { id, is_listener });
-        // Id 2 appears on the stack AND in a frame's closure captures: the
-        // walk must still move its fd exactly once.
+        // Id 2 is on the stack and in a frame's captures: its fd must move once.
         let mut heap = test_heap();
         let captures = Value::closure_in(&mut heap, 0, &[socket(2, false)]);
         let p = Process {
@@ -492,17 +460,11 @@ mod tests {
 
         let connections = donor.detach_fds(&p);
 
-        // The listener does not travel: the donor keeps its clone of the
-        // shared socket, and any other scheduler registers the same fd on
-        // first accept.
         assert!(donor.tcp_listeners.contains_key(&1));
-        // The connection moved exactly once; the donor lost it. The dangling
-        // id 3 was skipped entirely.
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].0, 2);
         assert!(donor.tcp_connections.is_empty());
 
-        // Adoption takes only the moved connection; no listener is carried.
         let mut dest = halt_test_vm();
         dest.adopt_migrant(Migrant {
             process: p,
@@ -512,7 +474,6 @@ mod tests {
         assert!(dest.tcp_connections.contains_key(&2));
         assert_eq!(dest.run_queue.len(), 1);
 
-        // The moved frame's closure socket is untouched.
         let q = dest.run_queue.pop_back().expect("queued migrant");
         let cl = q.frames[0]
             .captures

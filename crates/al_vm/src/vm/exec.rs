@@ -27,8 +27,8 @@ use smallvec::SmallVec;
 
 use super::poll::monotonic_now_ms;
 use super::{
-    CallFrame, EnumTemplate, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult,
-    enum_template, f64_str, freeze, inspect, value_type_name,
+    CallFrame, IO_REDUCTION_COST, REDUCTION_BUDGET, Step, VM, VmError, VmResult, f64_str, freeze,
+    inspect, value_type_name,
 };
 
 /// Objects freed per reduction charged by [`VM::charge_reclamation`]. Tuned so
@@ -513,7 +513,8 @@ impl VM {
                 }
                 Op::StoreLocal => store_local!(instr),
                 Op::PushNil => {
-                    self.stack.push(self.make_nil());
+                    let nil = self.make_nil()?;
+                    self.stack.push(nil);
                 }
                 Op::PushTrue => {
                     self.stack.push(Value::bool(true));

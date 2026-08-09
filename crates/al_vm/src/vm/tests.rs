@@ -1,8 +1,6 @@
-//! Tests for the VM front door: opcode goldens driven through whole
-//! programs (`run_fn`), `inspect` layout pins, `values_equal` semantics,
-//! and the scheduler's timer-wake and donation-guard edges. The fixture
-//! helpers shared with sibling modules' tests (`halt_test_vm`,
-//! `nil_value`) live in `mod.rs`.
+//! Tests for the VM front door: opcode goldens run through whole programs,
+//! `inspect` layout pins, `values_equal` semantics, and the scheduler's
+//! timer-wake and donation-guard edges. Shared fixtures live in `mod.rs`.
 
 use std::time::Duration;
 
@@ -11,10 +9,8 @@ use crate::bytecode::values_equal;
 use crate::bytecode::{Instruction, SocketValue, op, op_ab, op_arg};
 use crate::frozen::FrozenArea;
 
-// A single-function Program ("main", arity 0, no captures) over the given
-// constants and code, with `locals` preallocated local slots. Constants
-// are built through the program's own frozen builder, exactly as the
-// compiler builds them.
+// A single-function Program ("main", arity 0, no captures). Constants go
+// through the program's own frozen builder, as the compiler does it.
 fn single_fn_program(
     constants: impl FnOnce(&mut FrozenBuilder) -> Vec<Value>,
     code: Vec<Instruction>,
@@ -40,12 +36,9 @@ fn single_fn_program(
     }
 }
 
-// Build a single-function `Program` with `locals` preallocated local slots,
-// run it to completion, and return the value left on top of the stack.
-// Mirrors the entry-frame setup in `VM::run` (base_slot 0, locals zeroed), so
-// `local[i]` lives at stack slot `i`. The VM is returned alongside the
-// value because the value may point into main's arena, which the VM owns
-// (see `VM::run`): callers must keep the VM bound while consuming the value.
+// Run a single-function program and return the top of stack. `local[i]` lives
+// at stack slot `i`, as in `VM::run`. The VM comes back too because the value
+// may point into its heap: keep it bound while reading the value.
 fn run_fn(
     constants: impl FnOnce(&mut FrozenBuilder) -> Vec<Value>,
     code: Vec<Instruction>,
@@ -57,8 +50,8 @@ fn run_fn(
     )
     .expect("vm must construct");
     let value = vm.run().expect("vm must run without panicking or erroring");
-    // `value` first: it lives in `vm`'s heap, so it must drop (decref) before
-    // the VM's heap is destroyed (tuple fields drop in declaration order).
+    // `value` first: tuple fields drop in declaration order, and it must
+    // decref before the VM's heap is destroyed.
     (value, vm)
 }
 
@@ -68,9 +61,8 @@ fn ints(h: &mut ProcHeap, xs: &[i64]) -> Value {
     Value::array_in(h, &elems)
 }
 
-// Only closures read the function table when rendering, so every fixture
-// except `inspect_closure_renders_name` (which calls `super::inspect` with
-// a real program) renders against an empty one. Shadows `vm::inspect`.
+// Shadows `vm::inspect`. Only closures read the function table, so an empty
+// program suffices everywhere except `inspect_closure_renders_name`.
 fn inspect(v: &Value) -> String {
     super::inspect(v, &Program::default())
 }
@@ -124,13 +116,9 @@ fn test_values_equal() {
     assert!(values_equal(&range, &arr));
 }
 
-// Regression: the Range arms of the safe-indexing opcodes computed
-// `start + idx` (and lengths as `end - start`) with unchecked i64
-// arithmetic. A non-zero-start range indexed near i64::MAX overflowed:
-// debug panicked ("attempt to add with overflow"), release wrapped and
-// returned a wrong, in-bounds-looking value instead of None. Indexing is a
-// total Option op, so an overflowing index must read as out-of-bounds, and
-// range length must saturate rather than wrap.
+// Regression: indexing a Range is a total Option op, so an index that
+// overflows `start + idx` must read as out of bounds, and a range length must
+// saturate rather than wrap.
 #[test]
 fn range_index_and_len_do_not_overflow() {
     // `(5..10)[idx]` via Op::Index.
@@ -154,18 +142,15 @@ fn range_index_and_len_do_not_overflow() {
             0,
         )
     };
-    // In-bounds indexing is unchanged. Each result points into its VM's
-    // arena, so the VM stays bound while the value is read.
     let (some, _vm) = index_at(2);
     let some = some.as_enum().expect("index returns an Option enum");
     assert_eq!(some.payload()[0].as_int(), Some(7));
-    // 5 + i64::MAX overflows i64; the result must be None, not a wrapped
-    // value that spuriously passes the `< end` bound.
+    // 5 + i64::MAX overflows; the result must be None, not a wrapped value
+    // that spuriously passes the `< end` bound.
     let (none, _vm) = index_at(i64::MAX);
     assert!(none.as_enum().expect("Option enum").payload().is_empty());
 
-    // `len(i64::MIN..i64::MAX)` via Op::ArrayLen: `end - start` overflows,
-    // so the length must saturate to i64::MAX instead of panicking/wrapping.
+    // `end - start` overflows, so the length must saturate to i64::MAX.
     let (len, _vm) = run_fn(
         |f| vec![f.int(i64::MIN).into_value(), f.int(i64::MAX).into_value()],
         vec![
@@ -179,8 +164,7 @@ fn range_index_and_len_do_not_overflow() {
     );
     assert_eq!(len.as_int(), Some(i64::MAX));
 
-    // values_equal's Range length arithmetic must not overflow on extreme
-    // bounds either.
+    // values_equal's own length arithmetic must not overflow either.
     let mut h = ProcHeap::new();
     let ra = Value::range_in(&mut h, i64::MIN, i64::MAX);
     let rb = Value::range_in(&mut h, i64::MIN, i64::MAX);
@@ -192,11 +176,9 @@ fn build_some(h: &mut ProcHeap, payload: Value) -> Value {
     ev(h, 7, "Option", "Some", &["value"], vec![payload])
 }
 
-// Regression: wrapping a range in a constructor (`Some(0..n)`) eagerly folds
-// the payload hash via `enum_hash_with_payload`. Hashing the range must be
-// O(1), and must still match the hash of the array it materialises to, so
-// the `ae.hash == be.hash` fast-reject in `values_equal` never drops an
-// equal pair. Pre-fix this hashed every element and hung on a large range.
+// Constructing `Some(0..n)` folds the payload hash eagerly. Hashing a range
+// must be O(1) and must still match the hash of the array it materialises to,
+// or `values_equal`'s hash fast-reject drops an equal pair.
 #[test]
 fn enum_with_range_payload_equals_materialized_and_builds_fast() {
     let mut h = ProcHeap::new();
@@ -209,24 +191,19 @@ fn enum_with_range_payload_equals_materialized_and_builds_fast() {
         "Some(0..4) must equal Some([0, 1, 2, 3])"
     );
 
-    // Building this hung before the fix: the range payload was hashed
-    // element by element across ~9.2e18 values. Reaching the asserts proves
-    // construction is bounded.
+    // Reaching the asserts is the test: hashing this element by element would
+    // run over ~9.2e18 values.
     let huge_range = Value::range_in(&mut h, 0, i64::MAX);
     let huge = build_some(&mut h, huge_range);
     assert!(values_equal(&huge, &huge));
     assert!(!values_equal(&huge, &from_range));
 }
 
-// Regression (signed-zero congruence): `+0.0` and `-0.0` are `values_equal`
-// (`0.0 == -0.0` in IEEE 754), so congruence (`a == b => f(a) == f(b)`)
-// demands `Some(0.0) == Some(-0.0)`. The enum-equality arm gates on the
-// cached payload hash (`ae.hash == be.hash` as a necessary precondition);
-// hashing a signed zero by its raw bits fast-rejected the equal pair. `-0.0`
-// is reachable from ordinary code via unary `-` (`Op::NegFloat`).
+// `0.0 == -0.0`, so congruence demands `Some(0.0) == Some(-0.0)`. Enum
+// equality gates on the cached payload hash, so a signed zero must not be
+// hashed by its raw bits. `-0.0` is reachable via unary `-`.
 #[test]
 fn enum_with_signed_zero_payload_is_congruent() {
-    // Premise: the scalar payloads compare equal.
     assert!(values_equal(&Value::float(0.0), &Value::float(-0.0)));
 
     let mut h = ProcHeap::new();
@@ -242,11 +219,8 @@ fn enum_with_signed_zero_payload_is_congruent() {
     assert!(!values_equal(&pos, &one));
 }
 
-// The peephole pass fuses `PushLocal a; PushConst b; AddInt` into a single
-// `AddIntLC` whose result is `local[a] + constants[b]`. Loop goldens exercise
-// it only when fusion fires; nothing pins the fused op's actual result or its
-// overflow edge. AddIntLC uses `wrapping_add`, so overflow is total — it wraps
-// rather than panicking.
+// The peephole pass fuses `PushLocal a; PushConst b; AddInt` into `AddIntLC`.
+// It uses `wrapping_add`, so overflow wraps rather than panicking.
 #[test]
 fn superinstr_add_int_lc_adds_local_and_const_with_wrapping() {
     // local[0] = constants[0]; AddIntLC pushes local[0] + constants[1].
@@ -295,8 +269,7 @@ fn superinstr_sub_int_lc_subtracts_const_from_local_with_wrapping() {
 }
 
 // Run a fused `local[0] <jump_op> constants[1]` branch and report whether it
-// was taken. The taken target (ip 5) and the fall-through (ip 3) push
-// distinct markers, so the return value reveals which path executed.
+// was taken. Each path pushes a distinct marker.
 fn jump_lc_taken(jump_op: Op, local: i64, c: i64) -> bool {
     let (r, _vm) = run_fn(
         move |f| {
@@ -321,10 +294,8 @@ fn jump_lc_taken(jump_op: Op, local: i64, c: i64) -> bool {
     r.as_int() == Some(1)
 }
 
-// `PushLocal a; PushConst b; LtInt; JumpIfFalse t` fuses to `JumpGeIntLC`: a
-// zero-stack-traffic branch taken iff `local[a] >= constants[b]`, jumping to
-// the absolute target in `operand` (the VM computes `operand - code_start`).
-// Pins both the `>=` semantics (incl. the equal boundary) and the retarget.
+// `PushLocal a; PushConst b; LtInt; JumpIfFalse t` fuses to `JumpGeIntLC`,
+// taken iff `local[a] >= constants[b]`.
 #[test]
 fn superinstr_jump_ge_int_lc_branches_and_retargets() {
     let taken = |local: i64, c: i64| jump_lc_taken(Op::JumpGeIntLC, local, c);
@@ -348,8 +319,8 @@ fn superinstr_jump_ne_int_lc_branches_and_retargets() {
     assert!(taken(-1, 1), "-1 != 1 takes the branch");
 }
 
-// Build an enum Value with the same payload-folded hash the VM computes, so
-// it is usable with `values_equal` as well as `inspect`.
+// An enum Value carrying the same payload-folded hash the VM computes, so it
+// works with `values_equal` as well as `inspect`.
 fn ev(
     h: &mut ProcHeap,
     type_id: i32,
@@ -361,8 +332,8 @@ fn ev(
     Value::enum_with_names_in(h, crate::TypeId(type_id), 0, en, vn, labels, &payload)
 }
 
-// A function value renders as `<fn#name>`, the name resolved through
-// `program.functions[func_idx]` — it is not stored in the closure.
+// A function value renders as `<fn#name>`. The name comes from
+// `program.functions[func_idx]`; the closure does not store it.
 #[test]
 fn inspect_closure_renders_name() {
     let mut program = single_fn_program(|_| Vec::new(), Vec::new(), 0);
@@ -387,9 +358,7 @@ fn inspect_socket_renders_kind_and_id() {
     assert_eq!(inspect(&listener), "<listener#2>");
 }
 
-// An array of all-simple leaves whose single-line form would exceed 80
-// columns wraps six values per line (not one-per-line, and not flat). Pins
-// the exact 6-per-line layout in `inspect_impl`.
+// An all-simple array too wide for one line wraps at six values per line.
 #[test]
 fn inspect_long_simple_array_wraps_six_per_line() {
     let mut h = ProcHeap::new();
@@ -406,15 +375,14 @@ fn inspect_long_simple_array_wraps_six_per_line() {
     assert_eq!(lines.len(), 7);
 }
 
-// A short all-simple array stays on one line (the <= 80 fast path).
+// A short all-simple array stays on one line.
 #[test]
 fn inspect_short_array_stays_flat() {
     let mut h = ProcHeap::new();
     assert_eq!(inspect(&ints(&mut h, &[1, 2, 3])), "[1, 2, 3]");
 }
 
-// An array whose children are themselves containers (not "simple") expands
-// one element per line via `block`.
+// An array of containers expands one element per line.
 #[test]
 fn inspect_nested_array_expands_per_line() {
     let mut h = ProcHeap::new();
@@ -423,9 +391,8 @@ fn inspect_nested_array_expands_per_line() {
     assert_eq!(inspect(&arr), "[\n  [1, 2],\n  [3, 4]\n]");
 }
 
-// A record (constructor named after its type, with field labels) prints
-// `T{ a: .., b: .. }` inline when its fields are simple, and as a multiline
-// `T {` block when a field is itself a record.
+// A record prints `T{ a: .., b: .. }` inline when its fields are simple, and
+// as a `T {` block when a field is itself a record.
 #[test]
 fn inspect_record_inline_and_multiline() {
     let mut h = ProcHeap::new();
@@ -450,8 +417,8 @@ fn inspect_record_inline_and_multiline() {
     );
 }
 
-// A positional sum-type variant prints `Variant(..)`, expanding to a
-// multiline block when a payload element is itself a non-simple value.
+// A positional variant prints `Variant(..)`, expanding when a payload element
+// is not simple.
 #[test]
 fn inspect_variant_inline_and_multiline() {
     let mut h = ProcHeap::new();
@@ -464,8 +431,7 @@ fn inspect_variant_inline_and_multiline() {
     assert_eq!(inspect(&node), "Node(\n  Leaf(1),\n  Leaf(2)\n)");
 }
 
-// Tuples: empty renders `()`; a tuple containing a non-simple element
-// expands one element per line.
+// Empty tuples render `()`; a non-simple element expands one per line.
 #[test]
 fn inspect_tuple_empty_and_multiline() {
     let mut h = ProcHeap::new();
@@ -476,9 +442,8 @@ fn inspect_tuple_empty_and_multiline() {
     assert_eq!(inspect(&t), "(\n  1,\n  [2, 3, 4]\n)");
 }
 
-// `values_equal` treats a Range and an Array as equal iff they enumerate the
-// same elements: a length difference and an element difference must both
-// compare unequal, in either operand order.
+// A Range equals an Array iff they enumerate the same elements, in either
+// operand order.
 #[test]
 fn values_equal_range_vs_array() {
     let mut h = ProcHeap::new();
@@ -497,8 +462,7 @@ fn values_equal_range_vs_array() {
     assert!(!values_equal(&c, &range));
 }
 
-// `values_equal` on Binary compares the bytes; equal-length differing bytes
-// are unequal.
+// `values_equal` on Binary compares the bytes.
 #[test]
 fn values_equal_binary() {
     let mut h = ProcHeap::new();
@@ -520,9 +484,8 @@ fn values_equal_socket() {
     assert!(!values_equal(&sock(5, false), &sock(5, true)));
 }
 
-// Slicing a Range past its length is a runtime error (the indices are not
-// bounds-checked at compile time), not a silent wrap or empty result. The
-// VM aborts with a message naming the range length.
+// Slicing a Range past its length is a runtime error, not a wrap or an empty
+// result. Slice indices are not checked at compile time.
 #[test]
 fn array_slice_range_out_of_bounds_errors() {
     // (0..5)[2..99]
@@ -556,10 +519,7 @@ fn array_slice_range_out_of_bounds_errors() {
     );
 }
 
-// --- Scheduler: timer wake and donation guard ---
-
-// A placeholder suspended process. wake_due_timers only moves it between the
-// parked store and the run queue; it is never resumed.
+// A placeholder suspended process, never resumed.
 fn parked_process() -> Process {
     Process {
         heap: ProcHeap,
@@ -579,12 +539,9 @@ fn park_wait(vm: &mut VM, wait: Wait) -> u64 {
     vm.park(wait, parked_process())
 }
 
-// The native-boundary scratch — frame floor, remaining slice budget,
-// in-flight status payload — is process state, not scheduler state: a
-// context switch carries it away with the suspended process and leaves the
-// scheduler clean. A floor leaked to the next process would end that
-// process's computation at its first `Ret` to the leaked depth, declared
-// Done mid-computation with an intermediate stack value as its result.
+// The native-boundary scratch is process state, not scheduler state. A frame
+// floor leaked to the next process would end its computation at the first
+// `Ret` to that depth, declaring it Done with an intermediate stack value.
 #[test]
 fn scheduler_scratch_travels_with_the_process() {
     let mut vm = halt_test_vm();
@@ -617,9 +574,8 @@ fn scheduler_scratch_travels_with_the_process() {
     ));
 }
 
-// A deadline-only Wait is a pure timer: it must not
-// wake before its instant, and must wake once the instant has passed, while
-// a not-yet-due timer stays parked.
+// A deadline-only Wait must not wake before its instant, and must wake once it
+// has passed.
 #[test]
 fn deadline_only_wait_wakes_after_its_duration() {
     let mut vm = halt_test_vm();
@@ -653,11 +609,9 @@ fn deadline_only_wait_wakes_after_its_duration() {
     assert_eq!(vm.parked.len(), 1);
 }
 
-// A Wait carrying both a readable interest and a deadline (the read_within
-// shape) lives in `parked` and leaves a deadline entry in `timer_heap`. If
-// the fd fires first, drain_io_events removes the parked entry but the heap
-// entry remains — now stale. When that stale deadline later comes due,
-// wake_due_timers must drop it: no spurious wake, no panic on the absent id.
+// A Wait with both an fd interest and a deadline leaves a timer-heap entry
+// behind when the fd fires first. `wake_due_timers` must drop that stale entry:
+// no spurious wake, no panic on the absent id.
 #[test]
 fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
     let mut vm = halt_test_vm();
@@ -667,9 +621,7 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
     );
     assert_eq!(vm.timer_heap.len(), 1);
 
-    // Simulate the fd firing first: the parked entry is removed and its
-    // process queued (as drain_io_events would), but the timer heap still
-    // holds the now-stale deadline id.
+    // The fd fires first, as drain_io_events would handle it.
     let (_wait, p) = vm.park_remove(id).expect("parked entry present");
     vm.run_queue.push_back(p);
     assert!(vm.parked.is_empty());
@@ -693,10 +645,9 @@ fn fd_wake_leaves_stale_timer_entry_that_wake_due_timers_discards() {
     );
 }
 
-// The pre-side-effect donation guard: a victim referencing a connection id
-// that is mid-connect (`pending_connects`) or armed by a parked sibling's
-// `Wait` must not be donated; quiescent connections and listeners (which
-// are shared program-wide, never moved) are always donatable.
+// A victim referencing a connection id that is mid-connect or armed by a
+// parked sibling must not be donated. Quiescent connections and listeners
+// always can be.
 #[test]
 fn donation_fd_guard_blocks_entangled_connections() {
     let mut vm = halt_test_vm();
@@ -716,10 +667,8 @@ fn donation_fd_guard_blocks_entangled_connections() {
     // A quiescent connection is donatable.
     assert!(vm.can_donate_fds(&victim(sock(7, false))));
 
-    // Listener ids never need guarding, even while armed by a parked
-    // accept — the listener socket is shared program-wide, so a moved
-    // process resolves the same fd wherever it lands and the parked accept
-    // still wakes on the donor (armed fd, no waiter: dropped by design).
+    // A listener socket is shared program-wide, so a moved process resolves
+    // the same fd wherever it lands. No guarding needed even while armed.
     park_wait(&mut vm, Wait::readable(3));
     assert!(vm.can_donate_fds(&victim(sock(3, true))));
 
@@ -732,7 +681,7 @@ fn donation_fd_guard_blocks_entangled_connections() {
     let arr = Value::array_in(&mut h, &[sock(7, false)]);
     assert!(!vm.can_donate_fds(&victim(arr)));
 
-    // ... and through a frame's closure captures, not just the stack.
+    // ... and through a frame's closure captures.
     let closure = Value::closure_in(&mut h, 0, &[sock(7, false)]);
     let framed = Process {
         heap: h,
@@ -763,11 +712,9 @@ fn donation_fd_guard_blocks_entangled_connections() {
     assert!(vm.can_donate_fds(&victim(sock(8, false))));
 }
 
-// Donation targeting must skip workers that never spawned. A worker
-// `ensure_workers` failed to start publishes a load of 0 forever, so a
-// load-only scan would always prefer it — and a migrant donated there
-// would sit in an inbox no thread drains. The marker for "spawned" is a
-// filled poller slot.
+// Donation must skip workers that never spawned. Such a worker publishes a
+// load of 0 forever, so a load-only scan would always prefer it and the
+// migrant would sit in an inbox no thread drains.
 #[test]
 fn donation_skips_never_spawned_workers() {
     use std::sync::atomic::Ordering;
@@ -780,9 +727,8 @@ fn donation_skips_never_spawned_workers() {
         3,
     )
     .expect("runtime must construct");
-    // Worker 1 spawned (slot filled, busier); worker 2's spawn failed
-    // (slot empty, permanent load 0) — the state ensure_workers leaves
-    // behind on partial failure.
+    // Worker 1 spawned and is busier; worker 2's spawn failed, leaving an
+    // empty slot and a permanent load of 0.
     let poll = mio::Poll::new().expect("poller must construct");
     let waker = mio::Waker::new(poll.registry(), poll::WAKER_TOKEN).expect("waker must construct");
     let _ = rt.slots[1].waker.set(Arc::new(waker));

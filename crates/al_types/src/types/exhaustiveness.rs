@@ -7,12 +7,9 @@ use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::rc::Rc;
 
-/// Per-check constructor-name interner. Every ctor name (real variants plus
-/// the synthetic `lit:`/`#bin:`/`range:`/`#tuple` names) is mapped to a dense
-/// u32 id once at the public entry points, so the matrix recursion compares
-/// and stores integers instead of `String`s and seen-ctor membership is a
-/// bitset lookup. Ids 0 and 1 are pre-reserved for the array constructors so
-/// `get_type_ctors` and `pat_to_string` can refer to them without a lookup.
+/// Per-check constructor-name interner, covering real variants and the
+/// synthetic `lit:`/`#bin:`/`range:`/`#tuple` names. Ids 0 and 1 are reserved
+/// for the array constructors, so `new` must insert `[]` then `::` first.
 #[derive(Debug)]
 struct Interner(IndexSet<String>);
 
@@ -39,10 +36,7 @@ impl Interner {
     }
 }
 
-/// Bitset over interner ids. Ids are dense and small (one per distinct ctor
-/// name in the match + subject type), so membership is a single word probe.
-/// Built once per `is_useful`/`find_witness_vec` recursion level; the inline
-/// `SmallVec` word keeps the ≤64-id case (the norm) allocation-free.
+/// Bitset over interner ids, built once per recursion level.
 #[derive(Debug, Default)]
 struct CtorIdSet {
     words: SmallVec<[u64; 1]>,
@@ -64,11 +58,9 @@ impl CtorIdSet {
     }
 }
 
-/// Lowered pattern used by the matrix recursion: ctor names are interner ids
-/// and sub-pattern lists are `Rc`-shared, so the row clones performed by
-/// `specialize`/`default_matrix`/`is_useful` are refcount bumps instead of deep
-/// copies of the pattern subtree. Built once per arm by `UsefulnessMatrix::lower`
-/// and then borrowed by `is_useful`/`push`/`find_missing`.
+/// Lowered pattern used by the matrix recursion. Sub-pattern lists are
+/// `Rc`-shared so the row clones in `specialize`/`default_matrix` are refcount
+/// bumps, not deep copies.
 #[derive(Debug, Clone)]
 pub enum Pat {
     Wildcard,
@@ -80,9 +72,8 @@ pub enum Pat {
 struct CtorInfo {
     id: u32,
     arity: usize,
-    /// Field labels in declaration order (parallel to `types`). Empty for
-    /// constructors without named fields (array `::`/`[]`, tuples). Used by
-    /// `lower_pattern` to slot labeled pattern args into declaration order.
+    /// Field labels in declaration order, parallel to `types`. Empty for
+    /// constructors without named fields (array `::`/`[]`, tuples).
     labels: Vec<String>,
     types: Vec<RcType>,
 }
@@ -90,9 +81,8 @@ struct CtorInfo {
 impl CtorInfo {
     /// Constructor absent from the subject type's table (literals, binary
     /// shapes, ranges, type-error fallout). Payload types are unknown, so
-    /// every column is `Infinite` — keeping `types` parallel to `arity`, the
-    /// invariant every table-built `CtorInfo` maintains and `specialize`
-    /// asserts.
+    /// every column is `Infinite`; `types` must stay as long as `arity`, which
+    /// `specialize` asserts.
     fn opaque(id: u32, arity: usize) -> Self {
         CtorInfo {
             id,
@@ -115,55 +105,43 @@ impl TypeCtors {
     }
 }
 
-/// Synthetic constructor name for an n-ary tuple. Kept in lockstep with the
-/// lowering in `lower_pattern` so the matrix algorithm sees a single ctor per
-/// tuple arity.
+/// Synthetic constructor name for an n-ary tuple: one ctor per tuple arity.
 fn tuple_ctor_name(n: usize) -> String {
     format!("#tuple{}", n)
 }
 
-/// Element type plus a lazily-built `[[], ::]` constructor table. The table is
-/// filled on the first `get_type_ctors` call and then borrowed on every
-/// subsequent recursion level, so an M-arm match over cons-depth-D array
-/// patterns builds the table O(D) times instead of O(M×D). The `::` tail slot
-/// is a fresh `ArrayType` (same element, empty cell) rather than a
-/// self-reference, so no `Rc` cycle is introduced.
+/// Element type plus a lazily-built `[[], ::]` constructor table. The `::`
+/// tail slot holds a fresh `ArrayType` rather than a self-reference, so there
+/// is no `Rc` cycle.
 #[derive(Debug)]
 struct ArrayType {
     element: RcType,
     ctors: OnceCell<TypeCtors>,
 }
 
-/// Interned, structurally-shared projection of `type_def::Type` carrying only
-/// what the usefulness matrix needs: the constructor set of a nominal/array/
-/// tuple type. Lowered from a `&Type` once in `UsefulnessMatrix::new`, with
-/// ctor names interned into that checker's `Interner` as part of the
-/// lowering. `Named`/`Tuple` store their fully-built `TypeCtors` behind an
-/// `Rc`, and `Array` caches its `[[], ::]` table behind a `OnceCell`, so
-/// `get_type_ctors` — called once per recursion level — borrows the table
-/// instead of re-allocating ctor names/labels/types each time.
+/// Projection of `type_def::Type` carrying only what the usefulness matrix
+/// needs: a type's constructor set, shared behind `Rc` so `get_type_ctors` can
+/// borrow it at every recursion level. Lowered once in `UsefulnessMatrix::new`.
 ///
-/// `type_def::Type` itself can't hold the `Rc` — it is built with struct
-/// literals in the inferencer — so the interning is local to this module.
+/// `type_def::Type` cannot hold the `Rc` (the inferencer builds it with struct
+/// literals), so this stays local to the module.
 #[derive(Debug, Clone)]
 enum RcType {
-    /// No finite constructor set: primitives, functions, type variables, and
-    /// opaque/unresolved nominal types (empty variant table). Also used as the
-    /// placeholder for sub-patterns whose type could not be resolved from the
-    /// surrounding context. `get_type_ctors` reports these as `infinite`, so a
-    /// wildcard arm is required.
+    /// No finite constructor set: primitives, functions, type variables,
+    /// opaque nominal types, and sub-patterns whose type did not resolve. A
+    /// wildcard arm is always required for these.
     Infinite,
     Array(Rc<ArrayType>),
-    /// Constructor table in declaration order. Non-empty by construction (an
-    /// empty variant table lowers to `Infinite`).
+    /// Constructor table in declaration order. Non-empty: an empty variant
+    /// table lowers to `Infinite`.
     Named(Rc<TypeCtors>),
     /// Single synthetic `#tupleN` ctor whose `types` are the element types.
     Tuple(Rc<TypeCtors>),
 }
 
-/// One-time O(type-size) lowering of a `&Type` into the shared `RcType` graph.
-/// `Type::Named.variants` already carries field types substituted for the
-/// concrete `type_args`, so no environment lookup is needed here.
+/// Lower a `&Type` into the shared `RcType` graph. `Type::Named.variants`
+/// already has field types substituted for the concrete `type_args`, so no
+/// environment lookup is needed.
 fn rc_type(t: &Type, interner: &mut Interner) -> RcType {
     match t {
         Type::Primitive { .. } | Type::Function { .. } | Type::Var { .. } => RcType::Infinite,
@@ -239,10 +217,9 @@ fn get_type_ctors(t: &RcType) -> Cow<'_, TypeCtors> {
     }
 }
 
-/// Persistent singly-linked stack. Cloning is an `Rc` refcount bump and the
-/// tail is structurally shared, so `specialize`/`default_matrix` prepend
-/// O(arity) new nodes onto an existing row's tail instead of copying its
-/// O(width) suffix into a fresh `Vec` on every recursion step of `is_useful`.
+/// Persistent singly-linked stack: cloning is a refcount bump, so
+/// `specialize`/`default_matrix` prepend O(arity) nodes onto a shared tail
+/// instead of copying an O(width) suffix per recursion step.
 #[derive(Debug)]
 struct Stack<T>(Option<Rc<StackNode<T>>>);
 
@@ -279,8 +256,7 @@ impl<T> Stack<T> {
 }
 
 impl<T: Clone> Stack<T> {
-    /// `[items[0], items[1], ..] ++ tail`. O(items.len()) node allocs; the
-    /// tail is shared by refcount.
+    /// `items ++ tail`.
     fn prepend(items: &[T], tail: &Self) -> Self {
         items
             .iter()
@@ -294,10 +270,9 @@ impl<T: Clone> Stack<T> {
     }
 }
 
-/// A matrix row: the pattern for each remaining column. Column types are the
-/// same for every row in a given matrix (they evolve in lockstep with the
-/// query row), so they are carried once alongside the query in `is_useful` /
-/// `find_witness_vec` rather than duplicated per row.
+/// A matrix row: the pattern for each remaining column. Every row in a matrix
+/// shares the same column types, so those are carried once alongside the query
+/// rather than per row.
 type PatStack = Stack<Pat>;
 type TypeStack = Stack<RcType>;
 
@@ -332,9 +307,8 @@ impl PatternMatrix {
         seen
     }
 
-    /// Visit every row's first column with Or-patterns recursively flattened,
-    /// so `f` only ever sees `Wildcard` or `Ctor` heads. Shared iteration core
-    /// for `specialize` and `default_matrix`.
+    /// Visit every row's first column with Or-patterns flattened, so `f` only
+    /// ever sees `Wildcard` or `Ctor` heads.
     fn for_each_head(&self, mut f: impl FnMut(&Pat, &PatStack)) {
         fn go(p: &Pat, rest: &PatStack, f: &mut impl FnMut(&Pat, &PatStack)) {
             match p {
@@ -354,9 +328,8 @@ impl PatternMatrix {
     }
 
     fn specialize(&self, ctor: &CtorInfo) -> PatternMatrix {
-        // Every caller prepends `ctor.types` onto the type stack in lockstep
-        // with the `ctor.arity` pattern columns pushed here; a mismatch would
-        // silently misalign the two stacks.
+        // Callers prepend `ctor.types` onto the type stack in lockstep with
+        // the columns pushed here; a mismatch misaligns the two stacks.
         debug_assert!(ctor.arity == ctor.types.len());
         let mut result = PatternMatrix::default();
         self.for_each_head(|head, rest| match head {
@@ -414,10 +387,9 @@ fn is_useful(m: &PatternMatrix, pats: &PatStack, types: &TypeStack) -> bool {
             }
         }
         Pat::Ctor { id, args } => {
-            // Constructors absent from the type's table (literals, binary
-            // shapes, ranges, type-error fallout) get an opaque fallback with
-            // one `Infinite` type per arg, keeping the pattern and type
-            // stacks column-aligned through the recursion.
+            // A constructor absent from the type's table gets an opaque
+            // fallback with one `Infinite` type per arg, which keeps the
+            // pattern and type stacks column-aligned.
             let fallback;
             let ctor_info = match type_ctors.find(*id) {
                 Some(c) => c,
@@ -461,9 +433,8 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
         None
     } else {
         // Maranget: recurse on the default matrix for the remaining columns
-        // FIRST — a wildcard row in the matrix may still constrain later
-        // columns, so padding them with `_` (as an early return would) can
-        // yield a witness that overlaps an existing arm.
+        // FIRST. A wildcard row may still constrain later columns, so padding
+        // them with `_` yields a witness that overlaps an existing arm.
         let rest = find_witness_vec(&m.default_matrix(), rest_types)?;
         let head = type_ctors
             .ctors
@@ -478,18 +449,15 @@ fn find_witness_vec(m: &PatternMatrix, types: &TypeStack) -> Option<Vec<Pat>> {
     }
 }
 
-/// Canonical key for a `<<>>` pattern's shape. Two binary patterns lower to the
-/// same key iff they are guaranteed to match the same set of `Binary` values, so
-/// the matrix algorithm flags exact-shape duplicates as unreachable while still
-/// treating `Binary` as infinite (a wildcard / `else` arm is required for
-/// exhaustiveness). Dynamic sizes and non-literal segment values are keyed by
-/// span so we never emit a false-positive unreachable error.
+/// Canonical key for a `<<>>` pattern's shape. Two binary patterns share a key
+/// only if they match the same set of `Binary` values, which is what lets the
+/// matrix flag exact-shape duplicates as unreachable. Dynamic sizes and
+/// non-literal segment values are keyed by span so they never collide.
 ///
-/// The encoding must be INJECTIVE: string segment values can contain the
-/// delimiter chars (`,`, kind chars `i`/`b`/`u`, digits), so they are
-/// length-prefixed (`s<len>:<value>`) rather than quoted — otherwise two
-/// structurally different patterns could share a key and one would be
-/// falsely flagged unreachable.
+/// The encoding must stay INJECTIVE. String segment values can contain the
+/// delimiters (`,`, the kind chars `i`/`b`/`u`, digits), so they are
+/// length-prefixed; without that, two different patterns share a key and one
+/// is falsely reported unreachable.
 fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
     use std::fmt::Write;
     let mut key = String::from("#bin:");
@@ -505,9 +473,8 @@ fn bin_pattern_key(segments: &[ast::BinSegmentPat], has_rest: bool) -> String {
                 let _ = write!(key, "@{}:{}", sp.start_line, sp.start_column);
             }
         }
-        // The kind char also fixes the size's unit: 'i' widths are bits,
-        // 'b' sizes are bytes, so `<<x:16>>` and `<<x:bytes(16)>>` cannot
-        // share a key.
+        // The kind char also fixes the size's unit ('i' bits, 'b' bytes), so
+        // `<<x:16>>` and `<<x:bytes(16)>>` cannot share a key.
         match &seg.spec {
             ast::BinSpec::Int { .. } => key.push('i'),
             ast::BinSpec::Binary { .. } => key.push('b'),
@@ -611,15 +578,11 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
             let pat_args: Rc<[Pat]> = match type_ctors.find(id) {
                 Some(ctor) => {
                     // Slot args into field-DECLARATION order with the same
-                    // `slot_labeled` the typechecker and elaborator use: any
-                    // slot left empty (including those covered by a `..` rest)
-                    // becomes a wildcard. Lowering in source order instead
-                    // would permute the usefulness matrix relative to real
-                    // match semantics, yielding unsound false-exhaustiveness
-                    // (and false positives) whenever labels name fields out of
-                    // order. Slotting errors are dropped: the typechecker has
-                    // already reported them, and the unplaced arg's slot
-                    // degrades to a wildcard here.
+                    // `slot_labeled` the typechecker and elaborator use; empty
+                    // slots become wildcards. Source order would permute the
+                    // matrix against real match semantics and report a
+                    // non-exhaustive match as exhaustive. Slotting errors are
+                    // dropped — the typechecker already reported them.
                     let fields: Vec<Option<&str>> = (0..ctor.types.len())
                         .map(|i| ctor.labels.get(i).map(String::as_str))
                         .collect();
@@ -639,8 +602,8 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
                         })
                         .collect()
                 }
-                // Unresolved type / unknown constructor: typing already reported
-                // the error. Lower args in source order as a best effort.
+                // Unknown constructor: typing already reported the error, so
+                // lower args in source order as a best effort.
                 None => args
                     .iter()
                     .map(|a| {
@@ -678,9 +641,8 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
             } else {
                 &RcType::Infinite
             };
-            // Build a cons-list right-to-left. A spread element terminates the
-            // chain with a wildcard tail (matches any remaining list, including
-            // empty); otherwise the chain ends in `[]`.
+            // Cons-list, right to left. A spread ends the chain in a wildcard
+            // tail; otherwise it ends in `[]`.
             let mut acc = nullary(EMPTY_LIST_ID);
             for el in elements.iter().rev() {
                 match el {
@@ -698,11 +660,9 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
             acc
         }
         ast::Pattern::Binary { segments, rest, .. } => {
-            // `<<..rest>>` with no leading segments matches every Binary value.
-            // Any other shape (fixed-width segments, or `<<>>`) constrains
-            // length and/or content and cannot exhaust the infinite Binary
-            // value space on its own — lower it to an opaque ctor so a
-            // wildcard / `else` arm is still required.
+            // `<<..rest>>` with no leading segments matches every Binary. Any
+            // other shape constrains length or content, so it lowers to an
+            // opaque ctor and a wildcard arm is still required.
             if segments.is_empty() && rest.is_some() {
                 Pat::Wildcard
             } else {
@@ -721,11 +681,9 @@ fn lower_pattern(p: &ast::Pattern, t: &RcType, interner: &mut Interner) -> Pat {
     }
 }
 
-/// Incremental usefulness checker for a single match expression. The compiler
-/// pushes each unguarded arm once after its usefulness check, so N arms cost
-/// O(N) row constructions instead of the O(N²) incurred by rebuilding the
-/// matrix from a `&[Pat]` slice on every arm. The interner lives for the whole
-/// match, so each arm's ctor names are interned exactly once.
+/// Incremental usefulness checker for one match expression. The compiler
+/// pushes each unguarded arm once after checking it, so N arms cost O(N) row
+/// constructions rather than rebuilding the matrix per arm.
 #[derive(Debug)]
 pub struct UsefulnessMatrix {
     matrix: PatternMatrix,
@@ -744,10 +702,8 @@ impl UsefulnessMatrix {
         }
     }
 
-    /// Lower an `ast::Pattern` into the interned `Pat` form used by the matrix
-    /// algorithm, against this checker's subject type. Ctor names are interned
-    /// here, once, so `is_useful`/`push`/`find_missing` can borrow the result
-    /// without re-walking the tree.
+    /// Lower an `ast::Pattern` against this checker's subject type. Ctor names
+    /// are interned here, once.
     pub fn lower(&mut self, p: &ast::Pattern) -> Pat {
         lower_pattern(p, &self.subject_type, &mut self.interner)
     }
@@ -762,10 +718,9 @@ impl UsefulnessMatrix {
         self.matrix.rows.push(PatStack::one(pat.clone()));
     }
 
-    /// Return a rendered witness pattern the given arms fail to cover, or
-    /// `None` if they are exhaustive. Independent of `is_useful`/`push` — the
-    /// arms passed here (typically the unguarded subset) form their own
-    /// matrix; this checker's incremental matrix is not consulted.
+    /// A rendered witness pattern the given arms fail to cover, or `None` if
+    /// they are exhaustive. The arms passed here form their own matrix; this
+    /// checker's incremental matrix is not consulted.
     pub fn find_missing<'a>(&self, patterns: impl IntoIterator<Item = &'a Pat>) -> Option<String> {
         let mut matrix = PatternMatrix::default();
         for p in patterns {
@@ -787,8 +742,7 @@ mod tests {
     use super::*;
     use crate::type_def::{self, FieldDef, TypeId, t_int, t_named, t_tuple};
 
-    /// Test-only string-keyed pattern; interned into a `Pat` against a
-    /// specific `UsefulnessMatrix` before use.
+    /// Test-only string-keyed pattern, interned into a `Pat` before use.
     #[derive(Debug, Clone)]
     enum SPat {
         Wildcard,
@@ -857,8 +811,7 @@ mod tests {
         t_named(TypeId(id), name, vec![], variants)
     }
 
-    /// `Bool` is no longer a primitive; build the same `Named` shape the
-    /// real prelude produces so the matrix tests exercise the variant path.
+    /// `Bool` is not a primitive: the same `Named` shape the prelude produces.
     fn t_bool() -> Type {
         t_enum(99, "Bool", vec![("True", vec![]), ("False", vec![])])
     }
@@ -944,10 +897,8 @@ mod tests {
         assert_exhaustive(&pats, &t);
     }
 
-    /// `(True, _)` and `(_, True)` miss exactly `(False, False)`. The
-    /// incomplete-signature branch of `find_witness_vec` used to short-circuit
-    /// with `(False, _)`, which overlaps arm 2 — recursing on the default
-    /// matrix first yields the precise witness.
+    /// `(True, _)` and `(_, True)` miss exactly `(False, False)`, not the
+    /// overlapping `(False, _)`.
     #[test]
     fn tuple_witness_recurses_default_matrix() {
         let t = t_tuple(vec![t_bool(), t_bool()]);
@@ -959,8 +910,7 @@ mod tests {
         assert_witness(&pats, &t, "(False, False)");
     }
 
-    /// `[]` ∪ `[True, ..]` miss any list whose head is `False`; the witness's
-    /// cons chain is walked so the head renders, not a blanket `[_, ..]`.
+    /// The witness's cons chain is walked so the head renders, not `[_, ..]`.
     #[test]
     fn array_witness_renders_cons_head() {
         let t = type_def::t_array(t_bool());
@@ -973,7 +923,6 @@ mod tests {
 
     #[test]
     fn nested_option_option_int_missing_some_none() {
-        // Option(Option(Int)): cover Some(Some(_)) and None → missing Some(None)
         let t = t_option(t_option(t_int()));
         let pats = vec![
             ctor("Some", vec![ctor("Some", vec![SPat::Wildcard])]),
@@ -1038,7 +987,6 @@ mod tests {
 
     #[test]
     fn or_pattern_useful_if_any_alt_useful() {
-        // Or in the test row goes through is_useful's PatOr branch: useful if any alt is.
         let mut m = UsefulnessMatrix::new(t_bool());
         m.push_s(&ctor("True", vec![]));
         let new = SPat::Or {
@@ -1085,8 +1033,8 @@ mod tests {
         assert_witness(&[ctor("Leaf", vec![])], &t, "Node(_, _)");
     }
 
-    /// Opaque prelude `Binary` — Named with no variants → infinite in
-    /// `get_type_ctors`, mirroring how the real prelude registers it.
+    /// Opaque prelude `Binary`: Named with no variants, so `get_type_ctors`
+    /// reports it infinite.
     fn t_binary() -> Type {
         t_enum(98, "Binary", vec![])
     }
@@ -1192,10 +1140,8 @@ mod tests {
         assert!(m.is_useful(&p2));
     }
 
-    /// Segment string values can contain the key's delimiter chars. Before
-    /// the length-prefixed encoding, `<<"a'i8,'b":int>>` and
-    /// `<<"a":int-8, "b":int>>` both keyed as `#bin:'a'i8,'b'i,`, so the
-    /// second (structurally different) pattern was falsely redundant.
+    /// Segment string values can contain the key's delimiter chars, so two
+    /// different patterns must not share a key.
     #[test]
     fn binary_string_key_is_injective() {
         let str_lit = |v: &str| {
@@ -1217,10 +1163,9 @@ mod tests {
         assert!(m.is_useful(&p2));
     }
 
-    /// An unknown constructor (type-error fallout) with args must keep the
-    /// pattern and type stacks column-aligned: the old empty-`types` fallback
-    /// exhausted the type stack early and reported every duplicate arm as
-    /// useful.
+    /// An unknown constructor with args must keep the pattern and type stacks
+    /// column-aligned, or the type stack runs out early and every duplicate
+    /// arm looks useful.
     #[test]
     fn unknown_ctor_with_args_duplicate_is_redundant() {
         let mut m = UsefulnessMatrix::new(t_int());
@@ -1275,11 +1220,9 @@ mod tests {
         )
     }
 
-    /// `lower` must slot labeled constructor args into field-DECLARATION
-    /// order, mirroring the compiler's `slot_ctor_args` and the runtime
-    /// matcher. Lowering in source order permuted the usefulness matrix, so a
-    /// non-exhaustive match looked exhaustive (unsound) and a genuinely
-    /// exhaustive one looked incomplete.
+    /// `lower` must slot labeled args into field-DECLARATION order, matching
+    /// the compiler's `slot_ctor_args` and the runtime matcher. Source order
+    /// makes a non-exhaustive match look exhaustive.
     #[test]
     fn lower_slots_labeled_args_in_declaration_order() {
         let pair = pair_bool_bool();
@@ -1294,17 +1237,13 @@ mod tests {
         };
 
         // `Pair(b: True, ..)` ∪ `Pair(a: False, ..)` MISS (a: True, b: False).
-        // Source-order lowering read arm 1 as (a: True, b: _) → false
-        // exhaustiveness (this returned `None` before the fix).
         let unsound = [
             pair_pat(&[("b", "True")], true),
             pair_pat(&[("a", "False")], true),
         ];
         assert_eq!(missing(&unsound).as_deref(), Some("Pair(True, False)"));
 
-        // Genuinely exhaustive; the third arm names fields in reverse order.
-        // Source-order lowering read it as a duplicate of arm 2 and reported a
-        // bogus missing case (this returned `Some(...)` before the fix).
+        // Exhaustive; the third arm names its fields in reverse order.
         let exhaustive = [
             pair_pat(&[("a", "True"), ("b", "True")], false),
             pair_pat(&[("a", "True"), ("b", "False")], false),

@@ -1,27 +1,21 @@
 //! Per-program native-code entry table: the dispatch surface between the
 //! interpreter and JIT-compiled function bodies.
 //!
-//! [`NativeTable`] is a fixed-size slice of code-pointer slots, one per
-//! [`Program::functions`](super::Program::functions) entry and indexed by the
-//! same [`FuncIdx`] numbering (`CoreProgram.fns` / `Program.functions` /
-//! `TypedProgram::fns` share it — see `core_ir/mod.rs`). A populated slot
-//! means "this function has a compiled body: call it instead of
-//! interpreting"; an empty slot means the bytecode is the only body. Bytecode
-//! is kept for every function regardless — it is the fallback and the
+//! [`NativeTable`] is one code-pointer slot per
+//! [`Program::functions`](super::Program::functions) entry, indexed by the same
+//! [`FuncIdx`] numbering that `CoreProgram.fns` and `TypedProgram::fns` use. A
+//! populated slot means "call this instead of interpreting". Bytecode is kept
+//! for every function regardless: it is the fallback and the
 //! resume-after-suspension path.
 //!
-//! The slice lives behind an `Arc`, so cloning the owning [`Program`]
-//! (each worker scheduler runs a private clone, load-bearing fact 3 of
-//! `bytecode/mod.rs`) shares one table: an entry published by the load-time
-//! compile pass is visible to every scheduler. Slots are [`AtomicPtr`]s
-//! rather than `Option<fn>`s so the table can be sized when the function
-//! list is final and populated afterwards, without threading `&mut Program`
-//! through the backend.
+//! The slice is behind an `Arc`, so every worker scheduler's private [`Program`]
+//! clone shares one table. Slots are [`AtomicPtr`]s so the table can be sized
+//! once the function list is final and populated afterwards, without threading
+//! `&mut Program` through the backend.
 //!
-//! The pointers stored here address one shared, immortal executable mapping:
-//! compiled code is never freed (processes migrate across scheduler threads
-//! mid-flight, so no thread can prove a code address unreachable). That is
-//! what makes handing raw code pointers across threads sound.
+//! Compiled code is never freed — processes migrate across scheduler threads
+//! mid-flight, so no thread can prove a code address unreachable. That is what
+//! makes handing raw code pointers across threads sound.
 //!
 //! [`Program`]: super::Program
 
@@ -31,77 +25,58 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::FuncIdx;
 use crate::tivec::Idx;
 
-/// One-word status a native entry returns to its caller (native or
-/// trampoline). It round-trips the interpreter's step outcomes across the
-/// `extern "C"` boundary: any status other than [`NativeStatus::Done`]
-/// unwinds every native frame by plain returns, and the trampoline then does
-/// exactly what the interpreter's dispatch loop does today (yield to the
-/// scheduler, suspend-and-park, or raise). All process state needed to act
-/// on the status — the parked wait, the pending error — is already recorded
-/// in the VM by the shim that produced it; the status itself carries none.
+/// One-word status a native entry returns to its caller. Anything other than
+/// [`NativeStatus::Done`] unwinds every native frame by plain returns, and the
+/// trampoline then does what the interpreter's dispatch loop would. The status
+/// carries no payload: the shim that produced it already recorded the parked
+/// wait or pending error in the VM.
 ///
-/// `repr(u64)` with pinned discriminants: JIT-compiled code materialises
-/// these exact machine words in the return register, so the values are ABI,
-/// not an implementation detail.
+/// The discriminants are ABI, not an implementation detail — JIT-compiled code
+/// materialises these exact machine words in the return register.
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeStatus {
-    /// The function ran to completion; its result is in the frame slot the
-    /// calling convention assigns. The caller's frame is the top frame again.
+    /// Ran to completion; the result is in the frame slot the calling
+    /// convention assigns.
     Done = 0,
     /// Reduction budget exhausted. The yielding frame's `ip` names its resume
-    /// point (0 = re-enter from the top); the scheduler re-runs the process
-    /// later exactly as it does for an interpreter yield.
+    /// point (0 = re-enter from the top).
     Yield = 1,
-    /// A callee parked the process on I/O or a timer. The whole native call
-    /// chain unwinds; resume re-enters the interpreter at the parked frame's
-    /// `ip`.
+    /// A callee parked the process on I/O or a timer. Resume re-enters the
+    /// interpreter at the parked frame's `ip`.
     Parked = 2,
-    /// A runtime error was raised. The VM's pending-error state carries the
-    /// error value; native frames just unwind.
+    /// A runtime error was raised; the VM holds the error value.
     Error = 3,
-    /// A cross-function tail call collapsed the top frame in place (the
-    /// interpreter's `TailCallKnown` frame surgery); the trampoline driving
-    /// the returning function must now dispatch the *new* top frame. Compiled
-    /// code returns this verbatim — a tail call site is
-    /// `return al_rt_tail_call(...)` — so tail chains unwind to one driver
-    /// loop instead of stacking machine frames. Unlike the other statuses it
-    /// never reaches the interpreter boundary: every entry invocation runs
-    /// under a trampoline that consumes it.
+    /// A cross-function tail call collapsed the top frame in place, so the
+    /// trampoline must dispatch the NEW top frame. Tail chains therefore
+    /// unwind to one driver loop instead of stacking machine frames. Never
+    /// reaches the interpreter boundary: every entry invocation runs under a
+    /// trampoline that consumes it.
     TailCall = 4,
 }
 
-/// The compiled-code context: what the pinned register (x86_64 r15,
-/// aarch64 x21) points at for the duration of a compiled body, and the
-/// argument every [`NativeEntry`] receives. `#[repr(C)]` because the field
-/// offsets are ABI — generated code bakes them in as load offsets
-/// ([`NativeCtx::VM_OFFSET`]); this is the spike's `SpikeProc` shape.
+/// What the pinned register (x86_64 r15, aarch64 x21) points at while a
+/// compiled body runs, and the argument every [`NativeEntry`] receives.
+/// `repr(C)` because generated code bakes the field offsets in as load offsets.
 ///
-/// The indirection exists for exactly one reason: nothing scheduler-derived
-/// may be resident in a compiled frame across a suspension point. The VM
-/// pointer therefore lives HERE, re-published by every entry invocation
-/// (`VM::call_native`), and compiled code loads it fresh immediately before
-/// each runtime call — a parked frame carries neither the VM nor the ctx,
-/// and a resume on another scheduler reads that scheduler's VM by
-/// construction.
+/// The indirection exists so nothing scheduler-derived is resident in a
+/// compiled frame across a suspension point. The VM pointer lives here,
+/// re-published by every `VM::call_native`, and compiled code reloads it before
+/// each runtime call — so a resume on another scheduler reads that scheduler's
+/// VM by construction.
 #[repr(C)]
 #[derive(Debug)]
 pub struct NativeCtx {
-    /// Offset 0. The reduction budget compiled checkpoints will decrement
-    /// in place once reds checks move into generated code (the
-    /// cold-fragment step); until then shims spend the VM's own counter and
-    /// this field is dormant. Offset 0 is deliberate: the hottest load.
+    /// Offset 0, the hottest load. Dormant today: shims spend the VM's own
+    /// counter until reds checks move into generated code.
     pub reds: i64,
-    /// Offset 8. This scheduler's `&mut VM`, opaque at codegen time (the
-    /// front end cannot name the type). Re-published per entry; read per
-    /// runtime call.
+    /// Offset 8. This scheduler's `&mut VM`, opaque at codegen time.
     pub vm: *mut core::ffi::c_void,
 }
 
 impl NativeCtx {
-    /// Load offsets baked into generated code (`core_ir::clif`). Changing
-    /// the struct without these is silent memory corruption — hence repr(C)
-    /// and the constants living beside the fields.
+    /// Load offsets baked into generated code (`core_ir::clif`). Reordering
+    /// the fields without updating these is silent memory corruption.
     pub const REDS_OFFSET: i32 = 0;
     pub const VM_OFFSET: i32 = 8;
 
@@ -120,30 +95,23 @@ impl Default for NativeCtx {
 }
 
 /// The compiled-function calling convention: arguments are already in the
-/// callee's frame slots (the interpreter layout — args at
-/// `[base_slot, base_slot + arity)`), the `CallFrame` is pushed, and the
-/// entry runs against the scheduler state behind `ctx`.
-///
-/// `ctx` is a [`NativeCtx`], passed as an opaque pointer so both sides of
-/// the boundary cast through this one alias. The entry's prologue moves it
-/// into the pinned register; the VM it names is behind
-/// [`NativeCtx::VM_OFFSET`] and only shims dereference that.
+/// callee's frame slots (`[base_slot, base_slot + arity)`, the interpreter
+/// layout) and the `CallFrame` is pushed before the entry runs. `ctx` is a
+/// [`NativeCtx`], opaque so both sides cast through this one alias; the
+/// prologue moves it into the pinned register.
 pub type NativeEntry = extern "C" fn(ctx: *mut core::ffi::c_void) -> NativeStatus;
 
-/// The per-program entry table. See the module docs for the sharing and
-/// lifetime story.
-///
-/// `Clone` is shallow (one more `Arc` handle to the same slots) — that is
-/// the point: per-scheduler `Program` clones must observe one table.
+/// The per-program entry table. `Clone` is shallow on purpose: per-scheduler
+/// `Program` clones must observe one table.
 #[derive(Clone, Default)]
 pub struct NativeTable {
     entries: Arc<[AtomicPtr<()>]>,
 }
 
 impl NativeTable {
-    /// A table with `fn_count` empty slots. Size it from the *final*
-    /// `Program::functions` length — [`FuncIdx`] is minted against that
-    /// numbering, and this table must never perturb or outgrow it.
+    /// A table with `fn_count` empty slots. Size it from the FINAL
+    /// `Program::functions` length; [`FuncIdx`] is minted against that
+    /// numbering.
     pub fn new(fn_count: usize) -> NativeTable {
         NativeTable {
             entries: (0..fn_count)
@@ -161,26 +129,20 @@ impl NativeTable {
         self.entries.is_empty()
     }
 
-    /// Publish `entry` as `fn_idx`'s compiled body. Called by the load-time
-    /// compile pass after the JIT finalises the function's code; panics if
-    /// `fn_idx` is outside the numbering the table was sized for, because
-    /// that means the caller compiled against a different function list.
+    /// Publish `entry` as `fn_idx`'s compiled body. Panics if `fn_idx` is
+    /// outside the numbering the table was sized for — that means the caller
+    /// compiled against a different function list.
     ///
-    /// `Release` pairs with [`NativeTable::get`]'s `Acquire`: a scheduler
-    /// that observes the pointer also observes the finalised code and icache
-    /// flush that happened before the store.
+    /// `Release` pairs with [`NativeTable::get`]'s `Acquire`: a scheduler that
+    /// observes the pointer also observes the finalised code and icache flush.
     pub fn set(&self, fn_idx: FuncIdx, entry: NativeEntry) {
         self.entries[fn_idx.index()].store(entry as *mut (), Ordering::Release);
     }
 
     /// The compiled body for `fn_idx`, or `None` when the function is
-    /// interpreter-only. Out-of-range indices are `None`, not a panic: a
-    /// REPL session grows `Program::functions` past a table sized for an
-    /// earlier line, and those newer functions simply interpret.
-    ///
-    /// The one `unsafe` here reverses `set`'s `NativeEntry -> *mut ()` cast;
-    /// non-null slots are written only by `set`, so the pointer is always a
-    /// valid `NativeEntry`.
+    /// interpreter-only. Out-of-range is `None`, not a panic: a REPL session
+    /// grows `Program::functions` past a table sized for an earlier line, and
+    /// those newer functions simply interpret.
     #[inline]
     #[allow(unsafe_code)]
     pub fn get(&self, fn_idx: FuncIdx) -> Option<NativeEntry> {
@@ -188,8 +150,8 @@ impl NativeTable {
         if ptr.is_null() {
             None
         } else {
-            // Non-null slots are written only by `set`, which takes a
-            // `NativeEntry`; the transmute reverses that cast.
+            // SAFETY: non-null slots are written only by `set`, which takes a
+            // `NativeEntry`; this reverses that cast.
             Some(unsafe { std::mem::transmute::<*mut (), NativeEntry>(ptr) })
         }
     }
@@ -210,23 +172,17 @@ impl std::fmt::Debug for NativeTable {
     }
 }
 
-// ============================================================================
-// AL_NATIVE / AL_NATIVE_SEED: the mode contract
-// ============================================================================
-
-/// What `AL_NATIVE` asked for. Read exactly once per process, at program
-/// construction — the compile pass consults [`config`] before its first body
-/// materialises. See [`config`] for the seed and stderr rules.
+/// What `AL_NATIVE` asked for. Read exactly once per process. See [`config`]
+/// for the seed and stderr rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NativeMode {
     /// Interpret everything; no function is handed to the native backend.
     Off,
-    /// Compile every eligible function (the default when `AL_NATIVE` is
-    /// unset).
+    /// Compile every eligible function. The default when `AL_NATIVE` is unset.
     #[default]
     Native,
-    /// Compile a seeded random per-function subset, for shaking out
-    /// native/interpreter boundary bugs.
+    /// Compile a seeded random subset, to shake out native/interpreter
+    /// boundary bugs.
     Mix,
 }
 
@@ -240,20 +196,17 @@ impl NativeMode {
     }
 }
 
-/// The process-wide native-backend configuration: the mode plus the seed
-/// that fixes `mix`'s per-function subset.
+/// The process-wide native-backend configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeConfig {
     pub mode: NativeMode,
-    /// Subset seed. Meaningful only under [`NativeMode::Mix`]; zero
-    /// otherwise.
+    /// Subset seed. Meaningful only under [`NativeMode::Mix`]; zero otherwise.
     pub seed: u64,
 }
 
 /// The outcome of parsing the two env values, side-effect free so tests can
-/// drive it without touching the process environment. `seed: None` under
-/// `Mix` means "draw from entropy"; [`config`] fills it in and knows not to
-/// echo a seed nobody chose.
+/// drive it without touching the process environment. `seed: None` under `Mix`
+/// means "draw from entropy".
 struct Parsed {
     mode: NativeMode,
     seed: Option<u64>,
@@ -294,10 +247,9 @@ fn parse(mode: Option<&str>, seed: Option<&str>) -> Parsed {
 }
 
 /// The process-wide config, reading `AL_NATIVE` / `AL_NATIVE_SEED` on first
-/// use and never again. In `mix` mode the seed is echoed to stderr only when
-/// `AL_NATIVE_SEED` was explicitly set — a default run's stderr stays empty
-/// (golden tests assert it), and `mix` without a chosen seed stays quiet too
-/// so the whole suite can run under `AL_NATIVE=mix` unchanged.
+/// use and never again. The seed is echoed to stderr only when `AL_NATIVE_SEED`
+/// was explicitly set: golden tests assert an empty stderr, and the whole suite
+/// must run under `AL_NATIVE=mix` unchanged.
 pub fn config() -> &'static NativeConfig {
     static CONFIG: std::sync::OnceLock<NativeConfig> = std::sync::OnceLock::new();
     CONFIG.get_or_init(|| {
@@ -331,8 +283,7 @@ fn entropy_seed() -> u64 {
 }
 
 impl NativeConfig {
-    /// Whether the mode selects `idx` for native compilation — the gate the
-    /// compile pass applies before firing its native hook. Deterministic in
+    /// Whether the mode selects `idx` for native compilation. Deterministic in
     /// `(seed, idx)`, so a `mix` run reproduces from its printed seed.
     pub fn includes(&self, idx: FuncIdx) -> bool {
         match self.mode {
@@ -357,17 +308,15 @@ pub fn debug() -> bool {
     *DEBUG.get_or_init(|| std::env::var_os("AL_NATIVE_DEBUG").is_some())
 }
 
-/// One debug line per selected function, so a `mix` subset (or `native`'s
-/// full sweep) is observable: which functions the mode handed to the backend.
+/// One debug line per selected function, so a `mix` subset is observable.
 pub fn log_selected(idx: FuncIdx, name: &str) {
     if debug() {
         eprintln!("al-native: selected {idx} {name}");
     }
 }
 
-/// Whole-unit accounting for the compile-all-at-load pass: how many bodies
-/// the mode selected and how long the native hook spent on them, checked
-/// against the <100ms-per-unit budget.
+/// Whole-unit accounting for the compile-all-at-load pass, checked against the
+/// 100ms-per-unit budget.
 #[derive(Debug, Default)]
 pub struct UnitStats {
     pub selected: usize,
@@ -532,7 +481,7 @@ mod mode_tests {
         let picks: Vec<bool> = (0..256).map(|i| a.includes(FuncIdx(i))).collect();
         let again: Vec<bool> = (0..256).map(|i| b.includes(FuncIdx(i))).collect();
         assert_eq!(picks, again);
-        // Neither empty nor everything: the subset actually mixes.
+        // Neither empty nor everything.
         assert!(picks.iter().any(|&p| p));
         assert!(picks.iter().any(|&p| !p));
     }
@@ -555,19 +504,11 @@ mod mode_tests {
 /// Call a JIT entry, preserving the pinned register the JIT clobbers.
 ///
 /// `enable_pinned_reg` gives generated code the pinned register (r15 on
-/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list:
-/// `cranelift-codegen/src/isa/x64/abi.rs` reads `R15 => !enable_pinned_reg`,
-/// and the aarch64 backend does the same for x21. So a compiled entry's
-/// prologue writes the register and no epilogue puts it back — while every
-/// Rust caller on the path is entitled by the platform ABI to assume it
-/// survives. This shim restores that assumption at the one door where it is
-/// violated, and it lives here because it is part of the [`NativeEntry`]
-/// contract itself: anyone who calls an entry needs it, so the ABI owns it
-/// rather than any one caller.
-///
-/// It is the only asm outside `vm::stack`. The VM's process-stack switching
-/// lives in `vm::stack::switch`; this is deliberately not that — it is one
-/// register bracket around one indirect call, with no stack manipulation.
+/// x86_64, x21 on aarch64) by dropping it from Cranelift's callee-save list, so
+/// a compiled entry's prologue writes it and no epilogue puts it back — while
+/// every Rust caller on the path is entitled by the platform ABI to assume it
+/// survives. This restores that assumption. It belongs to the [`NativeEntry`]
+/// contract, not to any one caller, because anyone calling an entry needs it.
 ///
 /// # Safety
 /// `entry` must be a finalized JIT entry and `ctx` a live context of the
@@ -580,8 +521,7 @@ pub unsafe extern "C" fn call_entry_preserving_pinned(
     entry: NativeEntry,
 ) -> NativeStatus {
     // rdi = ctx, rsi = entry. Entry rsp is 8 (mod 16); one push makes it 0,
-    // which is what the callee's `call` requires. The return value rides in
-    // rax and is never touched.
+    // which is what the callee's `call` requires.
     core::arch::naked_asm!("push r15", "call rsi", "pop r15", "ret")
 }
 

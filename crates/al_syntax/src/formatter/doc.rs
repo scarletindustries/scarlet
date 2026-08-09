@@ -5,13 +5,9 @@ use unicode_width::UnicodeWidthChar;
 
 const TAB_WIDTH: isize = 4;
 
-/// A layout document. The representation is private: the layout engine relies
-/// on invariants only the constructors in this module maintain (most notably
-/// that a `Group`'s subtree contains a hard newline iff its `Breaks` is
-/// `Always` or `Hugging` — `Always` is never chosen for a hardline-free
-/// subtree, and `Hugging` is built only by `delimited_hug`, whose hugged
-/// final item provably hard-breaks), so a `Doc` can be built solely via
-/// `text`, `line`, `group`, `group_willing`, `hardline`, and friends.
+/// A layout document. The representation is private because the engine relies
+/// on an invariant only these constructors keep: a `Group`'s subtree contains a
+/// hard newline iff its `Breaks` is `Always` or `Hugging`.
 #[derive(Debug, Clone)]
 pub struct Doc(DocInner);
 
@@ -19,21 +15,17 @@ pub struct Doc(DocInner);
 enum DocInner {
     Nil,
     /// Literal text, guaranteed newline-free: `text()` splits multi-line
-    /// strings into one `Text` per line joined by `RawNewline`s. `width` is
-    /// the display-column count, precomputed so `fits` probes pay O(1) per
-    /// visit instead of re-decoding UTF-8 on every probe.
+    /// strings into one `Text` per line joined by `RawNewline`s. `width` is the
+    /// display-column count, precomputed so `fits` probes stay O(1) per visit.
     Text {
         s: Cow<'static, str>,
         width: isize,
     },
-    /// A newline embedded in literal text (a multi-line `/* … */` block
-    /// comment). Unlike `HardLine` it emits no indent — the text's own
-    /// continuation lines must render verbatim — but it still forces every
-    /// enclosing group to break and ends the line for width probes.
+    /// A newline embedded in literal text (a multi-line `/* … */` comment).
+    /// Unlike `HardLine` it emits no indent, because the text's continuation
+    /// lines must render verbatim.
     RawNewline,
     /// Soft break. Flat → `unbroken`; broken → `broken` then newline+indent.
-    /// `width` is the display-column count of `unbroken`, precomputed so the
-    /// flat rendering and width probes share `Text`'s column convention.
     Break {
         broken: &'static str,
         unbroken: &'static str,
@@ -44,9 +36,7 @@ enum DocInner {
     /// Increase the indent (in tab stops) for the wrapped doc.
     Nest(isize, Box<Doc>),
     /// Like `Nest`, but the indent applies only when the enclosing group is
-    /// broken. A flat (hugging) rendering keeps the wrapped doc at the current
-    /// indent so a hugged item's own block nests from the group's base indent
-    /// rather than one level deeper.
+    /// broken, so a hugged item's block nests from the group's base indent.
     NestIfBroken(isize, Box<Doc>),
     /// Try to fit on one line; if that exceeds the width budget, render with
     /// every contained `Break` broken.
@@ -56,9 +46,8 @@ enum DocInner {
     },
     /// A hugged trailing item: the block-shaped last element of a delimited
     /// list (`f(a, fn() { … })`). Width probes treat its hard newlines as the
-    /// natural end of the line — the way trailing broken content is treated —
-    /// rather than as proof that the enclosing content cannot render flat. It
-    /// always renders broken, so groups inside it re-probe their own widths.
+    /// natural end of the line rather than as proof that the enclosing content
+    /// cannot render flat. It always renders broken.
     Hug(Box<Doc>),
     Concat(Vec<Doc>),
 }
@@ -69,29 +58,25 @@ impl Doc {
     }
 }
 
-/// How willing a group is to be the point where its line breaks. This is what
-/// `fits` consults when a group appears in the content trailing the group
-/// being probed. Private: `Always` is valid only when the subtree contains a
-/// hard newline and `Hugging` only for `delimited_hug`'s shape, so groups are
-/// built via `group`/`group_willing`, which establish those invariants.
+/// How willing a group is to be the point where its line breaks. `fits`
+/// consults this when a group appears in the content trailing the group being
+/// probed. Private: `Always` is valid only for a subtree with a hard newline
+/// and `Hugging` only for `delimited_hug`'s shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Breaks {
     /// Contains a hard newline: never renders flat, so the line provably ends
     /// inside it.
     Always,
-    /// Block-shaped (`{ … }`): a natural end for the line. Width probes of
-    /// earlier content assume the line ends at its first break rather than
-    /// breaking that earlier content.
+    /// Block-shaped (`{ … }`): a natural end for the line, so width probes of
+    /// earlier content assume the line ends at its first break.
     Willingly,
-    /// List-shaped (`(a, b, c)`): breaks only when its own contents do not
-    /// fit. Width probes of earlier content count it at full flat width, so
-    /// the earlier content breaks first to make room for it.
+    /// List-shaped (`(a, b, c)`): breaks only when its own contents do not fit.
+    /// Width probes count it at full flat width, so earlier content breaks
+    /// first to make room for it.
     Reluctantly,
     /// List-shaped with a hugged, hard-breaking final item
-    /// (`f(a, fn() { … })`): the line provably ends inside it like `Always`,
-    /// but it breaks one-item-per-line only when its head — everything up to
-    /// the final item's first newline — does not fit. Otherwise the final item
-    /// hugs the delimiters and absorbs the break.
+    /// (`f(a, fn() { … })`): ends the line like `Always`, but goes
+    /// one-item-per-line only when its head does not fit.
     Hugging,
 }
 
@@ -113,9 +98,8 @@ pub fn text(s: impl Into<Cow<'static, str>>) -> Doc {
     if !s.contains('\n') {
         return single_line_text(s);
     }
-    // Multi-line text (a `/* … */` block comment spanning lines) is split
-    // into one Text per line joined by RawNewlines, so column accounting
-    // resumes from the last line and enclosing groups see the hard break.
+    // One Text per line joined by RawNewlines, so column accounting resumes
+    // from the last line and enclosing groups see the hard break.
     let mut parts: Vec<Doc> = Vec::new();
     match s {
         Cow::Borrowed(s) => {
@@ -187,8 +171,7 @@ pub fn nest(tabs: isize, d: Doc) -> Doc {
     Doc(DocInner::Nest(tabs, Box::new(d)))
 }
 
-/// Indent that applies only in the broken layout. A hugging (flat) rendering
-/// keeps the contents at the current indent.
+/// Indent that applies only in the broken layout.
 fn nest_if_broken(tabs: isize, d: Doc) -> Doc {
     if tabs == 0 {
         return d;
@@ -202,8 +185,7 @@ fn hug(d: Doc) -> Doc {
 }
 
 pub fn group(d: Doc) -> Doc {
-    // Idempotent: an already-grouped doc keeps its own Breaks. Only explicit
-    // group_as() calls override an inner Group's Breaks.
+    // Idempotent: an already-grouped doc keeps its own Breaks.
     if matches!(d.0, DocInner::Group { .. }) {
         return d;
     }
@@ -211,8 +193,7 @@ pub fn group(d: Doc) -> Doc {
 }
 
 /// Group that breaks willingly: block-shaped (`{ … }`), a natural end for the
-/// line, so width probes of earlier content assume the line ends at its first
-/// break instead of breaking that earlier content.
+/// line. See `Breaks::Willingly`.
 pub fn group_willing(d: Doc) -> Doc {
     group_as(Breaks::Willingly, d)
 }
@@ -220,11 +201,8 @@ pub fn group_willing(d: Doc) -> Doc {
 fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d.0 {
         DocInner::Text { .. } | DocInner::Nil => d,
-        // A hugging group's layout is already decided: its hugged final item
-        // provably hard-breaks, so rebuilding it with the caller's `breaks`
-        // would land on `Always` and silently turn the hug into per-item
-        // breaks. Overriding a hug is never meaningful — the hug already ends
-        // the line — so keep the group as-is.
+        // Rebuilding a hugging group with the caller's `breaks` would land on
+        // `Always` and silently turn the hug into per-item breaks.
         DocInner::Group {
             breaks: Breaks::Hugging,
             ..
@@ -245,10 +223,8 @@ fn group_as(breaks: Breaks, d: Doc) -> Doc {
     }
 }
 
-/// Whether the doc, used as the trailing element of a line, provides the
-/// line's natural end: it provably hard-breaks, or it is a block-shaped group
-/// that breaks willingly at its opening delimiter. Content before such a doc
-/// never needs to break on its behalf.
+/// Whether the doc, as the trailing element of a line, provides the line's
+/// natural end. Content before such a doc never breaks on its behalf.
 pub fn ends_line(d: &Doc) -> bool {
     matches!(
         d.0,
@@ -267,8 +243,7 @@ fn contains_hardline(d: &Doc) -> bool {
         DocInner::HardLine(_) | DocInner::RawNewline => true,
         DocInner::Nest(_, inner) | DocInner::NestIfBroken(_, inner) => contains_hardline(inner),
         // A hugged item's hard newlines are real for every group except the
-        // hugging group itself (which accounts for them via `Breaks::Hugging`),
-        // so enclosing groups still break around it.
+        // hugging group itself, so enclosing groups still break around it.
         DocInner::Hug(inner) => contains_hardline(inner),
         DocInner::Group { breaks, .. } => matches!(breaks, Breaks::Always | Breaks::Hugging),
         DocInner::Concat(ds) => ds.iter().any(contains_hardline),
@@ -304,8 +279,8 @@ pub fn join(items: Vec<Doc>, sep: Doc) -> Doc {
         return nil();
     }
     // Peel a Concat separator into its parts so each of the N-1 separators
-    // pushes the (alloc-free) leaf parts directly instead of cloning the
-    // wrapper Vec that `concat` would immediately flatten and drop.
+    // pushes leaf parts directly instead of cloning a wrapper Vec that
+    // `concat` would immediately flatten and drop.
     let sep_parts: &[Doc] = match &sep.0 {
         DocInner::Concat(v) => v,
         DocInner::Nil => &[],
@@ -358,9 +333,9 @@ pub fn delimited(open: &'static str, items: Vec<Doc>, close: &'static str) -> Do
 /// ```
 ///
 /// The earlier items and the final item's first line must fit on the current
-/// line; otherwise the whole list falls back to the one-item-per-line layout
-/// of `delimited`. When the final item renders flat anyway (or an earlier item
-/// hard-breaks, leaving nothing to hug onto), this is exactly `delimited`.
+/// line; otherwise this falls back to `delimited`. It is also exactly
+/// `delimited` when the final item renders flat, or when an earlier item
+/// hard-breaks and leaves nothing to hug onto.
 pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static str) -> Doc {
     let Some(last) = items.pop() else {
         return text(format!("{open}{close}"));
@@ -382,10 +357,9 @@ pub fn delimited_hug(open: &'static str, mut items: Vec<Doc>, close: &'static st
     })
 }
 
-/// Like `delimited`, but emits no trailing comma when broken across lines.
-/// For comma-separated groups whose final element is a `..` rest marker: the
-/// parser rejects a comma after `..` (rest must be last), so a wrapped pattern
-/// must end `..\n<close>` rather than `..,\n<close>`.
+/// Like `delimited`, but emits no trailing comma when broken across lines. For
+/// groups whose final element is a `..` rest marker: the parser rejects a comma
+/// after `..`, so a wrapped pattern must end `..\n<close>`.
 pub fn delimited_no_trailing(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     delimited_with(open, items, close, d![text(","), line()], line0())
 }
@@ -423,8 +397,7 @@ pub fn hard_list_bare(open: &'static str, items: Vec<Doc>, close: &'static str) 
 }
 
 /// Comma-separated when the list fits on one line; one per line with **no**
-/// commas when it breaks. A newline already separates the items, so a comma
-/// there is noise — and the parser accepts either.
+/// commas when it breaks. The parser accepts either.
 pub fn delimited_commas_when_flat(open: &'static str, items: Vec<Doc>, close: &'static str) -> Doc {
     delimited_with(open, items, close, break_("", ", "), line0())
 }
@@ -474,8 +447,7 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
     let mut out = String::new();
     let mut col: isize = 0;
     let mut work: VecDeque<(isize, Mode, &Doc)> = VecDeque::new();
-    // Scratch stack for `fits` — hoisted here so every width probe reuses the
-    // same allocation instead of a fresh Vec per Group.
+    // Hoisted so every width probe reuses one allocation.
     let mut probe: Vec<(isize, Mode, &Doc)> = Vec::new();
     work.push_back((0, Mode::Broken, doc));
 
@@ -509,8 +481,7 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                 col = indent * TAB_WIDTH;
             }
             DocInner::RawNewline => {
-                // No indent: the surrounding text's continuation line renders
-                // verbatim from column zero.
+                // No indent: the continuation line renders verbatim.
                 out.push('\n');
                 col = 0;
             }
@@ -526,10 +497,9 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                 work.push_front((indent, mode, inner));
             }
             DocInner::Hug(inner) => {
-                // A hugged item always renders broken: its hard newlines are
-                // real, and the groups inside it must re-probe their own widths
-                // because the enclosing group's flat probe stopped at the hug
-                // rather than walking its whole subtree.
+                // A hugged item always renders broken, and the groups inside it
+                // must re-probe their own widths: the enclosing group's flat
+                // probe stopped at the hug instead of walking its subtree.
                 work.push_front((indent, Mode::Broken, inner));
             }
             DocInner::Group { doc: inner, breaks } => {
@@ -537,13 +507,10 @@ pub fn layout(doc: &Doc, max_width: isize) -> String {
                     // A hard newline inside makes flat rendering impossible.
                     Mode::Broken
                 } else if mode == Mode::Flat {
-                    // Flat propagation (Lindig "Strictly Pretty"): if we are already
-                    // inside a group rendered Flat, the enclosing group's `fits`
-                    // probe already walked this whole subtree as Flat and proved it
-                    // fits. Flat is irreversible, so re-probing here is guaranteed to
-                    // return true — skip it. This collapses the all-fits case from
-                    // O(D^2) (one `fits` per nested group, each rescanning its
-                    // descendants) to O(D).
+                    // Flat propagation (Lindig, "Strictly Pretty"). The
+                    // enclosing group's probe already proved this subtree fits
+                    // flat, so re-probing would always say yes. Skipping it
+                    // takes the all-fits case from O(D^2) to O(D).
                     Mode::Flat
                 } else if fits(
                     max_width - col,
@@ -584,7 +551,7 @@ fn str_width(s: &str) -> isize {
         w += if c == '\t' {
             TAB_WIDTH
         } else {
-            // Real terminal columns: CJK/emoji count 2, combining marks 0.
+            // Terminal columns: CJK/emoji count 2, combining marks 0.
             c.width().unwrap_or(0) as isize
         };
     }
@@ -592,17 +559,12 @@ fn str_width(s: &str) -> isize {
 }
 
 /// Whether a group rendered flat leaves the rest of its line within
-/// `remaining` columns.
+/// `remaining` columns. `seed` is the group's contents, probed flat; `rest` is
+/// the pending work after it, in its already-decided modes.
 ///
-/// `seed` is the group's contents, probed in Flat mode. `rest` is the pending
-/// work that follows the group, in its already-decided modes. Including the
-/// trailing work is what lets an early group break for the line as a whole:
-/// without it, `f(a, b) or e -> g(c)` keeps `f(a, b)` flat and dumps the
-/// overflow onto `g`, the last (and worst) place on the line to break.
-///
-/// The probe succeeds as soon as the line provably ends — a broken-mode
-/// `Break`, or a hard newline in the trailing work — and fails as soon as the
-/// width is exhausted.
+/// Including the trailing work is what lets an early group break for the line
+/// as a whole: without it, `f(a, b) or e -> g(c)` keeps `f(a, b)` flat and
+/// dumps the overflow onto `g`, the worst place on the line to break.
 fn fits<'d>(
     mut remaining: isize,
     seed: (isize, Mode, &'d Doc),

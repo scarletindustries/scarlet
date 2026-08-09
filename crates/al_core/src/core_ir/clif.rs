@@ -1,139 +1,73 @@
 //! Core → CLIF: the native (Cranelift) backend beside [`emit`](super::emit).
 //!
-//! This is the second consumer of Core IR. Where `emit` lowers a post-perceus
-//! [`CoreFn`] to bytecode, [`plan`] + [`compile`] lower the *same* body to a
-//! Cranelift function with the [`NativeEntry`](crate::bytecode::NativeEntry)
-//! signature (`extern "C" fn(vmx) -> NativeStatus`), keeping the
-//! interpreter's frame layout so per-function fallback, preemption and
-//! migration work unchanged (see `native_frame`).
+//! [`plan`] + [`compile`] lower the same post-perceus [`CoreFn`] that `emit`
+//! turns into bytecode, producing a
+//! [`NativeEntry`](crate::bytecode::NativeEntry) (`extern "C" fn(vmx) ->
+//! NativeStatus`). The interpreter's frame layout is kept, so per-function
+//! fallback, preemption and migration work unchanged.
 //!
-//! # Two phases, one seam
+//! # Two phases
 //!
-//! An `RTy` indexes a per-body [`ResolvedPool`] that dies right after the
-//! body is lowered, so everything type-directed must happen inside the
-//! compiler's [`NativeHook`](crate::bytecode::NativeHook), where
-//! `(CoreFn, &ResolvedPool)` are both alive. Everything else — constants,
-//! the JIT module, the finalize step — only exists after the compile
-//! finishes. Hence:
+//! An `RTy` indexes a per-body [`ResolvedPool`] that dies as soon as the body
+//! is lowered, so everything type-directed must happen inside the compiler's
+//! [`NativeHook`](crate::bytecode::NativeHook), where both `CoreFn` and the
+//! pool are alive. Constants, the JIT module and finalize only exist after
+//! the compile finishes.
 //!
-//! - [`plan`] (hook time): the coverage gate plus the type-directed facts
-//!   (which locals the pool proves `Int`), captured with a clone of the
-//!   post-perceus body into a pool-independent [`NativePlan`].
-//! - [`compile`] (after the compile, before VM construction): resolves the
-//!   plan's constants against the finished `Program.constants`, re-derives
-//!   the frame layout, builds the CLIF and defines it into the caller's
-//!   [`Module`]. The caller (the `al` crate) finalizes the module and
-//!   publishes the entry into the program's `NativeTable`.
+//! - [`plan`] (hook time): coverage gate plus the pool-derived facts, saved
+//!   with a clone of the body into a pool-independent [`NativePlan`].
+//! - [`compile`] (post-compile): resolves constants, re-derives the frame
+//!   layout, builds the CLIF, defines it into the caller's [`Module`]. The
+//!   caller finalizes and publishes into the program's `NativeTable`.
 //!
-//! # The frame layout is emit's, not re-invented
+//! # The frame layout is emit's
 //!
-//! Compiled code must leave every live frame slot holding the value the
-//! interpreter's bytecode would at the same point, because any suspension
-//! resumes the frame *interpreted* at its stored bytecode ip. The slot
-//! numbering and the per-call resume ips are whatever `emit` decided
-//! ([`FrameLayout`]); [`compile`] recovers them by running `emit` over the
-//! plan's body with [`LayoutCtx`], a context that answers the one shaping
-//! question a gated body can ask — `bool_variant`, with the plan's captured
-//! prelude handles, the compiler's own — and whose other answers are never
-//! consulted: the coverage gate rejects every remaining construct whose
-//! emitted shape depends on `EmitCtx` (non-Bool constructors, enum
-//! matches), so the layout-only run and the real emission agree instruction
-//! for instruction. The same argument makes the recorded
-//! [`FrameLayout::call_resume_ips`] line up with this module's walk: both
-//! backends meet the call atoms in identical order (spine order, `LetJoin`
-//! join before body, `LetCont` body before cont, arms in order).
+//! A suspension resumes the frame *interpreted* at its stored bytecode ip, so
+//! every live slot must hold what the interpreter's bytecode would hold at
+//! that point. [`compile`] recovers emit's slot numbering and resume ips by
+//! re-running `emit` with [`LayoutCtx`]. That run agrees with the real
+//! emission instruction for instruction because the gate rejects every
+//! construct whose emitted shape depends on `EmitCtx` beyond `bool_variant`
+//! and `switch_variant_count`, both of which the plan captured. The recorded
+//! [`FrameLayout::call_resume_ips`] line up for the same reason: both
+//! backends meet call atoms in one order (spine order, `LetJoin` join before
+//! body, `LetCont` body before cont, arms in order).
 //!
 //! # Coverage (stage A0)
 //!
-//! A body compiles natively iff **every** node is covered; otherwise the
-//! whole function interprets (the gate returns `None`, the table slot stays
-//! empty, bytecode remains the body). Covered:
-//!
-//! - `Let` / `LetJoin` / `LetCont` / `Goto` / `Drop` / `If` / `Tail`;
-//! - `Match` whose arms are `Int`/`Bool` literals, Bool constructor heads
-//!   (`True`/`False` — the scrutinee word compares against the head's
-//!   immediate encoding), enum constructor heads (a `SwitchTag`-shaped jump
-//!   table when the match is an exhaustive all-constructor switch — see
-//!   [`Gate::switch_shape`] — a `MatchEnum`-shaped tag-word compare ladder
-//!   otherwise, payload binds via unchecked field reads either way, and an
-//!   outlined `NativeStatus::Error` trap standing in for the interpreter's
-//!   `Halt`), a binder, or a wildcard;
-//! - `Atom::Ctor` of a Bool head: `True`/`False` are the two Bool
-//!   immediates (`PushTrue`/`PushFalse` parity — no heap cell, a perceus
-//!   reuse pairing ignored exactly as `emit_ctor`'s Bool path ignores it);
-//! - `Atom::Ctor` of any other (enum) constructor — `Op::Reuse` +
-//!   `Op::MakeEnumPayload` parity: when the paired `Drop` parked a hollowed
-//!   cell (rc == 1), the payload is written in place; otherwise the cold
-//!   `al_shim_enum_alloc` shim allocates the one fresh cell, hash word 0
-//!   (lazy). The site's pooled header constants (packed id, names, labels)
-//!   are read back from the emitted bytecode at compile time
-//!   ([`enum_ctor_sites`]);
-//! - `Atom::Local`, `Atom::Const` of a non-heap (immediate) constant,
-//!   `Atom::Call` on a known target, self, or a closure-valued local
-//!   (`Callee::Local` — the dynamic-call shim resolves the closure's
-//!   `func_idx` against the same entry table), `Atom::Closure` (the
-//!   `MakeClosure` allocation; the *referenced* body compiles or interprets
-//!   independently — one that reads its captures carries `PushCapture` /
-//!   `PushSelf` primops, which stay uncovered), and `Atom::PrimOp` for the
-//!   typed Int arithmetic/comparison family (`AddInt` … `NeqInt`), `Not`,
-//!   the polymorphic comparisons when the pool proves both operands
-//!   `Int`, `TupleIndex` when the pool proves the receiver a wide-enough
-//!   tuple, and `GetFieldUnchecked` (the checker's own field proof plus
-//!   `enum_field_typed`'s dynamic heap gate).
+//! All or nothing: one uncovered node makes the whole function interpret. The
+//! covered set is [`Gate`]'s arms.
 //!
 //! # Value representation and RC parity
 //!
-//! Every local's canonical home is its frame slot, written at its binding
-//! exactly where the interpreter's `StoreLocal` runs (old word released
-//! through the same mortal-heap gate). Within the function a local also
-//! lives in registers: the boxed word always, plus a raw `i64` view where
-//! an Int op consumes it. Where the pool proves `Int`, results stay raw
-//! between ops and are NaN-boxed only at slot writes and call boundaries,
-//! with the interpreter's exact spill rule (`al_shim_int_box` past the
-//! 47-bit range). Ownership mirrors the interpreter: a slot owns one
-//! reference; a consuming use of a slotted local (call argument, stored
-//! copy, returned value) takes its own via an inline dup — the
-//! register-resident twin of `PushLocal`'s clone. A slotless local is a
-//! single-use operand temp (that is why emit elided its slot), so its one
-//! owned word transfers to its one consumer.
+//! A local's canonical home is its frame slot, written where the
+//! interpreter's `StoreLocal` runs. In registers it also keeps the boxed
+//! word, plus a raw `i64` view where an Int op consumes it; proven-`Int`
+//! results stay raw between ops and NaN-box only at slot writes and call
+//! boundaries, spilling past the 47-bit range exactly as the interpreter
+//! does. A slot owns one reference, so a consuming use of a slotted local
+//! takes its own via an inline dup. A slotless local is a single-use operand
+//! temp, so its one owned word transfers to its one consumer.
 //!
-//! Every RC sequence is type-directed through each local's [`Repr`], the
-//! plan-time classification of its binding's `RTy` (the pool dies with the
-//! hook, so the facts are captured then): dup/drop compile to *nothing*
-//! where the type proves the value an immediate (`Float`, `Bool`, `Nil`),
-//! open with the `VALUE_IMMORTAL` bit-0 test alone where it proves a heap
-//! cell (strings, arrays, binaries, tuples, closures — `SIGN|QNAN`
-//! statically set), and keep the interpreter's full dynamic mortal-heap
-//! mask everywhere the types cannot prove a representation (`Int` and its
-//! `BigInt` spill, rigid type variables, and the remaining nominal types —
-//! heap enums are indistinguishable from the immediate-represented `Socket`
-//! by `TypeId` alone). Elision never changes counts the
-//! interpreter would touch: a dynamic gate on a proven immediate is dead
-//! code, and the strengthened gate reads the same rc slot the full one
-//! would — `FREED_OBJECTS` accounting and the exact-allocation-count tests
-//! see identical traffic.
+//! RC sequences are type-directed through each local's [`Repr`]. Elision
+//! never changes a count the interpreter would touch: a dynamic gate on a
+//! proven immediate is dead code, and a strengthened gate reads the same rc
+//! slot, so `FREED_OBJECTS` accounting sees identical traffic.
 //!
-//! A reusable `Drop` (`shape: Some`) mirrors the interpreter's `Op::Drop`
-//! exactly: a uniquely-owned cell is hollowed (children released via the
-//! `hollow_for_reuse` shim) and parked in its slot for a paired
-//! `Ctor { reuse }`; a shared one releases the frame's reference and zeroes
-//! the slot. A call argument's last-use `Drop` is peeled to between the
-//! operand copies and the call (emit's `peel_call_arg_drops`, mirrored),
-//! so the callee is the sole owner and reuse propagates down a recursive
-//! chain exactly as interpreted. One deliberate divergence, observable
-//! only through allocation timing, never through values: a `shape: None`
-//! `Drop` releases a uniquely-owned cell immediately (the interpreter
-//! hollows it and frees at `Ret`) — sound because no `Reuse` ever pairs
-//! with a shapeless drop.
+//! A reusable `Drop` (`shape: Some`) mirrors `Op::Drop` exactly. A call
+//! argument's last-use `Drop` is peeled to between the operand copies and the
+//! call (emit's `peel_call_arg_drops`, mirrored) so the callee is sole owner
+//! and reuse propagates down a recursive chain. One deliberate divergence,
+//! observable only in allocation timing: a `shape: None` `Drop` releases a
+//! uniquely-owned cell immediately where the interpreter hollows it and frees
+//! at `Ret`. Sound because no `Reuse` ever pairs with a shapeless drop.
 //!
 //! # Runtime symbols
 //!
-//! Generated code reaches the runtime by NAME (`Linkage::Import`); the `al`
-//! crate registers every `(name, address)` pair with the `JITBuilder` and
-//! Cranelift binds them at finalize. The names and signatures here must
-//! match the shim tables in `crates/al` (`vm::native::rt_symbols`,
-//! `vm::native_shims::shim_symbols`) and the imports its `vm::jit`
-//! declares.
+//! Generated code reaches the runtime by NAME (`Linkage::Import`). The names
+//! and signatures below must match the shim tables in `crates/al`
+//! (`vm::native::rt_symbols`, `vm::native_shims::shim_symbols`) and the
+//! imports `vm::jit` declares.
 
 use std::collections::{HashMap, HashSet};
 
@@ -162,8 +96,6 @@ use crate::type_def::TypeId;
 use crate::typed_ir::{RTy, ResolvedNode, ResolvedPool};
 use crate::types::{Prim, StrId};
 
-// ---- runtime symbol names (the crates/al contract) -------------------------
-
 const SYM_RT_CALL: &str = "al_rt_call";
 const SYM_RT_TAIL_CALL: &str = "al_rt_tail_call";
 const SYM_RT_PUSH_FRAME: &str = "al_rt_push_frame";
@@ -190,76 +122,52 @@ const SYM_HTTP_SERIALIZE_HEAD: &str = "al_shim_http_serialize_head";
 const SYM_HTTP_FRAMING: &str = "al_shim_http_framing";
 const SYM_PUSH_GLOBAL: &str = "al_shim_push_global";
 
-// ============================================================================
-// plan: the hook-time half (coverage gate + type-directed facts)
-// ============================================================================
-
-/// A gated body, captured pool-independently at hook time. Everything
-/// [`compile`] needs that only the per-body [`ResolvedPool`] could answer is
-/// resolved here; the `CoreFn` clone is the same post-perceus IR `emit`
-/// consumes for the bytecode body.
+/// A gated body, captured pool-independently at hook time. Everything only
+/// the per-body [`ResolvedPool`] could answer is resolved here.
 pub struct NativePlan {
     pub func_idx: FuncIdx,
     fun: CoreFn,
-    /// `Bool`'s constructor identity, for the `True`/`False` heads the gate
-    /// admitted — codegen re-asks the polarity question at each head.
     bools: BoolCtors,
-    /// Per-local representation class (params, binds, pattern binds), the
-    /// type-directed-emit facts captured from each binding's `RTy` while the
-    /// pool is alive: which locals may keep a raw unboxed `i64` view (and so
-    /// admit the polymorphic comparisons and integer-literal match arms),
-    /// and how strong an RC gate each local's dup/drop sites need.
+    /// Per-local representation class, captured from each binding's `RTy`
+    /// while the pool is alive.
     reprs: TiVec<LocalId, Repr>,
-    /// Variant count per enum type the body switch-matches over — the
-    /// plan-time stand-in for `EmitCtx::switch_variant_count`, recovered
-    /// from the match shape itself (see [`Gate::switch_shape`]). Keyed by
-    /// `TypeId`, the canonical identity of a nominal type within one
-    /// program. Both the layout re-emission and codegen answer the
-    /// `SwitchTag`-vs-ladder question from this map, so they cannot
-    /// disagree with each other.
+    /// The plan-time stand-in for `EmitCtx::switch_variant_count`, recovered
+    /// from the match shape itself (see [`Gate::switch_shape`]). Both the
+    /// layout re-emission and codegen answer the `SwitchTag`-vs-ladder
+    /// question from this map, so they cannot disagree.
     switch_counts: HashMap<TypeId, u8>,
 }
 
 /// The representation class a local's `RTy` proves, deciding its unboxed
-/// register views and how much of the RC machinery its dup/drop sites can
-/// statically skip. Derived from [`ResolvedPool`] facts plus the prelude's
-/// nominal identities — nothing here guesses: every arm is backed by a
-/// `value.rs` invariant, and anything the types cannot prove stays
-/// [`Repr::Dyn`] (full dynamic gates, always correct).
+/// register views and how much RC machinery its dup/drop sites can skip.
+/// Every arm is backed by a `value.rs` invariant; anything the types cannot
+/// prove stays [`Repr::Dyn`], which is always correct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Repr {
     /// Proven `Int`: keeps a raw unboxed `i64` view between ops. RC stays
-    /// dynamic — a value past the 47-bit small-int range spills to a mortal
-    /// heap `BigInt` box.
+    /// dynamic, since a value past the 47-bit range spills to a heap
+    /// `BigInt`.
     Int,
-    /// Proven immediate: `Float` (AL floats are finite f64 bit patterns —
-    /// `Value::float` collapses NaN/Inf — so the `QNAN` tag space is never
-    /// theirs) and `Bool` (`HDR_BOOL`), which are never heap — a Bool ctor
-    /// compiles to `PushTrue`/`PushFalse`, so no Bool cell ever exists. Dup
-    /// and drop compile to nothing. `Nil` deliberately does NOT qualify: a
-    /// `Nil()` constructor goes through `MakeEnumPayload` like any other
-    /// nullary ctor and allocates a *mortal heap enum* (only the frozen
-    /// prelude constant is an immediate), so a Nil-typed local can own a
-    /// live refcount — eliding its gates double-frees (the
-    /// `socket_address` `Err(Nil)` shape).
+    /// Proven immediate: `Float` and `Bool`, never heap. Dup and drop compile
+    /// to nothing. `Nil` deliberately does NOT qualify: a `Nil()` constructor
+    /// allocates a mortal heap enum like any other nullary ctor (only the
+    /// frozen prelude constant is an immediate), so a Nil-typed local can own
+    /// a live refcount and eliding its gates double-frees.
     Immediate,
-    /// Proven heap cell: strings, arrays, binaries, tuples and `fn` values,
-    /// whose constructors always allocate (`str_in`/`array_in`/`binary_in`/
-    /// `tuple_in`/`closure_in`) — `SIGN|QNAN` are statically set, so RC
-    /// gates reduce to the `VALUE_IMMORTAL` bit-0 test
-    /// ([`RcGate::ProvenHeap`]).
+    /// Proven heap cell: strings, arrays, binaries, tuples, `fn` values.
+    /// `SIGN|QNAN` are statically set, so RC gates reduce to the
+    /// `VALUE_IMMORTAL` bit-0 test.
     Heap,
-    /// No static proof: a rigid type variable (`Bound`), or a nominal type
-    /// whose values may still be immediates (`Socket` is `HDR_SOCKET`, and
-    /// user enums share `ResolvedNode::Con` with it). Full dynamic
-    /// mortal-heap gate.
+    /// No static proof: a rigid type variable, or a nominal type whose values
+    /// may still be immediates (`Socket` and user enums are both
+    /// `ResolvedNode::Con`). Full dynamic mortal-heap gate.
     #[default]
     Dyn,
 }
 
-/// The prelude type identities [`classify`] needs beyond the pool's prims:
-/// `Bool` values are VM immediates and `Binary`'s are heap cells, which no
-/// `RTy` node can reveal (they are ordinary `Con`s there).
+/// The prelude identities [`classify`] needs beyond the pool's prims. `Bool`
+/// and `Binary` are ordinary `Con`s in an `RTy`, so the pool cannot reveal
+/// that one is an immediate and the other a heap cell.
 #[derive(Clone, Copy)]
 struct ReprTys {
     bool: TypeRef,
@@ -275,8 +183,7 @@ impl ReprTys {
     }
 }
 
-/// Classify one `RTy` into its representation class — the single place the
-/// type facts are turned into codegen decisions.
+/// The single place type facts become codegen decisions.
 fn classify(pool: &ResolvedPool, tys: ReprTys, t: RTy) -> Repr {
     match pool.node(t) {
         ResolvedNode::Con { id, .. } => match pool.prims().prim_of(id) {
@@ -293,11 +200,9 @@ fn classify(pool: &ResolvedPool, tys: ReprTys, t: RTy) -> Repr {
 }
 
 /// `Bool`'s nominal identity, captured from the prelude at plan time. The
-/// pool alone cannot tell `Bool` from a heap enum (see [`Repr::Dyn`]), but
-/// its constructor heads are VM immediates (`PushTrue`/`PushFalse` — no
-/// heap cell), so with these handles the gate, the layout re-emission and
-/// codegen can all answer the polarity question exactly as the compiler's
-/// `EmitCtx::bool_variant` does (same `is` guards — they cannot disagree).
+/// pool alone cannot tell `Bool` from a heap enum, but its heads are VM
+/// immediates, so the gate, the layout re-emission and codegen all answer
+/// polarity exactly as `EmitCtx::bool_variant` does.
 #[derive(Clone, Copy)]
 struct BoolCtors {
     bool: TypeRef,
@@ -312,8 +217,7 @@ impl BoolCtors {
         }
     }
 
-    /// `EmitCtx::bool_variant`, verbatim (bridges.rs): `None` for a
-    /// non-`Bool` type, otherwise whether the variant is `True`.
+    /// `EmitCtx::bool_variant`, verbatim (bridges.rs).
     fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool> {
         if !self.bool.is(tid) {
             return None;
@@ -326,11 +230,9 @@ impl BoolCtors {
     }
 }
 
-/// Gate `f` for native coverage and capture its type-directed facts.
-/// `None` means the body is not covered at stage A0 and interprets; the
-/// decision is total (no partial compilation — a single uncovered node
-/// rejects the whole function). `prelude` supplies `Bool`'s identity, which
-/// no `RTy` in the pool can: `True`/`False` heads are covered as immediates.
+/// Gate `f` for native coverage and capture its type-directed facts. `None`
+/// means the body interprets. The decision is total: one uncovered node
+/// rejects the whole function.
 pub fn plan(
     func_idx: FuncIdx,
     f: &CoreFn,
@@ -368,9 +270,8 @@ impl NativePlan {
         self.repr_of(id) == Repr::Int
     }
 
-    /// The RC gate a dup/drop of `id`'s *current value* needs: `None` when
-    /// the type proves an immediate (statically elided), the immortal-bit
-    /// test when it proves a heap cell, the full dynamic gate otherwise.
+    /// The RC gate a dup/drop of `id`'s current value needs. `None` means
+    /// the type proves an immediate and the gate is elided entirely.
     fn rc_gate(&self, id: LocalId) -> Option<RcGate> {
         match self.repr_of(id) {
             Repr::Immediate => None,
@@ -381,9 +282,8 @@ impl NativePlan {
 }
 
 /// What a covered `PrimOp` lowers to. The typed `*Int` opcodes carry their
-/// own type proof (the bytecode compiler emits them only when unification
-/// proved both operands `Int`); the polymorphic comparisons need the pool's
-/// proof, which the gate demands.
+/// own type proof; the polymorphic comparisons need the pool's, which the
+/// gate demands.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NOp {
     Add,
@@ -396,9 +296,9 @@ enum NOp {
     Not,
 }
 
-/// The covered op set and its lowering, shared by the gate, the use scan
-/// and codegen so they cannot disagree. `poly` marks the polymorphic
-/// comparisons, whose operands the gate must prove `Int` through the pool.
+/// The covered op set and its lowering, shared by the gate, the use scan and
+/// codegen so they cannot disagree. The bool marks the polymorphic
+/// comparisons, whose operands the gate must prove `Int`.
 fn nop_of(op: Op) -> Option<(NOp, bool)> {
     let typed = |n| Some((n, false));
     let poly = |n| Some((n, true));
@@ -431,9 +331,8 @@ struct Gate<'a> {
     bools: BoolCtors,
     tys: ReprTys,
     reprs: TiVec<LocalId, Repr>,
-    /// Each recorded local's full `RTy`, for the gate clauses that need more
-    /// than its [`Repr`] (a `TupleIndex` receiver's width). Pool-relative, so
-    /// this lives and dies with the gate — never with the plan.
+    /// Each recorded local's full `RTy`, for gate clauses needing more than
+    /// its [`Repr`]. Pool-relative, so it dies with the gate, not the plan.
     local_tys: TiVec<LocalId, Option<RTy>>,
     switch_counts: HashMap<TypeId, u8>,
 }
@@ -450,20 +349,16 @@ impl Gate<'_> {
         self.local_tys.get(id).copied().flatten()
     }
 
-    /// The plan-time half of emit's `switch_plan`: does this match compile
-    /// to a `SwitchTag`, and over how many variants? Without the compiler's
-    /// type table the variant count is recovered from the match itself: an
-    /// all-constructor match with every variant distinct is exhaustive (the
-    /// checker enforces exhaustiveness, and payload binds are irrefutable),
-    /// so its arm count *is* the type's variant count — the value the real
-    /// `EmitCtx::switch_variant_count` returns. `Bool` (whose scrutinee is
-    /// an immediate with no tag word — the real context answers `None`)
-    /// never switches, and >255 variants overflow `SwitchTag.a` on both
-    /// sides (an exhaustive match over such a type has >255 arms). Any
-    /// other all-constructor shape (a duplicated or out-of-range variant)
-    /// is a ladder under the real context too: `switch_plan`'s own
-    /// arms-vs-count and seen-tag checks fail it regardless of the count
-    /// answered, so leaving it out of the map cannot diverge.
+    /// The plan-time half of emit's `switch_plan`: does this match compile to
+    /// a `SwitchTag`, and over how many variants?
+    ///
+    /// Without the compiler's type table the variant count comes from the
+    /// match itself. An all-constructor match with every variant distinct is
+    /// exhaustive, so its arm count *is* the type's variant count, which is
+    /// what `EmitCtx::switch_variant_count` returns. `Bool` never switches
+    /// (immediate scrutinee, no tag word) and >255 variants overflow
+    /// `SwitchTag.a` on both sides. Any other all-constructor shape ladders
+    /// under the real context too, so omitting it here cannot diverge.
     fn switch_shape(&self, arms: &[(CorePat, CoreExpr)]) -> Option<(TypeId, u8)> {
         if arms.is_empty() || arms.len() > 255 {
             return None;
@@ -495,9 +390,8 @@ impl Gate<'_> {
         self.reprs.get(id).copied().unwrap_or_default() == Repr::Int
     }
 
-    /// The pool proves `id` an `Array` — the type whose runtime inhabitants
-    /// are exactly the persistent tree and the lazy `Range`, the two shapes
-    /// the seq shims are total over.
+    /// The pool proves `id` an `Array`: a persistent tree or a lazy `Range`,
+    /// the two shapes the seq shims are total over.
     fn is_array(&self, id: LocalId) -> bool {
         match self.ty_of(id) {
             Some(t) => matches!(
@@ -522,11 +416,9 @@ impl Gate<'_> {
     fn atom(&self, a: &Atom) -> Option<()> {
         match a {
             Atom::Local(_) | Atom::Const(_) => Some(()),
-            // Unchecked field reads. `TupleIndex` elides the interpreter's
-            // (unreachable-on-typed-code) bounds/type errors, so the pool
-            // must prove the receiver a tuple wide enough for the index;
-            // `GetFieldUnchecked` carries the checker's own field proof and
-            // keeps `enum_field_typed`'s dynamic heap gate at codegen.
+            // `TupleIndex` elides the interpreter's bounds/type errors, so
+            // the pool must prove the receiver a wide-enough tuple.
+            // `GetFieldUnchecked` carries the checker's own field proof.
             Atom::PrimOp {
                 op: Op::TupleIndex,
                 args,
@@ -543,38 +435,32 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Index(_),
             } => (args.len() == 1).then_some(()),
-            // `PushGlobal` reads the entry frame's slot: top-level
-            // `fn`/`const`/`let` bindings, written once by `__main__` before
-            // any body that reads them runs. One shim call (the global area
-            // is a `Vec` with no ABI-stable base), same owned clone the
-            // interpreter's arm performs.
+            // `PushGlobal` reads the entry frame's slot, written once by
+            // `__main__` before any body that reads it runs. A shim call: the
+            // global area is a `Vec` with no ABI-stable base.
             Atom::PrimOp {
                 op: Op::PushGlobal,
                 args,
                 imm: Imm::Index(_),
             } => args.is_empty().then_some(()),
-            // A bare Bool head materialized by `&&`/`||` lowering: its word
-            // is a compile-time immediate constant (`emit_ctor`'s Bool-path
-            // parity — no heap cell, no operand).
+            // A bare Bool head from `&&`/`||` lowering: a compile-time
+            // immediate constant, no heap cell, no operand.
             Atom::PrimOp {
                 op: Op::PushTrue | Op::PushFalse,
                 args,
                 imm: Imm::None,
             } => args.is_empty().then_some(()),
-            // Aggregate literals: one allocator-shim call over an owned
-            // element buffer (`Op::MakeArray`/`Op::MakeTuple` parity). The
-            // argc immediate and the operand list must agree — `lower`
-            // guarantees it, and codegen reads only the list.
+            // One allocator-shim call over an owned element buffer. `lower`
+            // guarantees argc matches the operand list; codegen reads only
+            // the list.
             Atom::PrimOp {
                 op: Op::MakeArray | Op::MakeTuple,
                 args,
                 imm: Imm::Argc(n),
             } => (args.len() == *n as usize).then_some(()),
-            // Seq extension: `args[0]` (Append) / `args[k]` (Prepend) is
-            // the sequence, the rest the pushed elements. The shims elide
-            // the interpreter's non-sequence error, so the pool must prove
-            // the sequence operand `Array` (tree or lazy range — the shapes
-            // the shims are total over).
+            // `args[0]` (Append) / `args[k]` (Prepend) is the sequence, the
+            // rest the pushed elements. The shims elide the interpreter's
+            // non-sequence error, so the pool must prove it an `Array`.
             Atom::PrimOp {
                 op: Op::Append,
                 args,
@@ -585,11 +471,10 @@ impl Gate<'_> {
                 args,
                 imm: Imm::Argc(k),
             } => (args.len() == *k as usize + 1 && self.is_array(args[*k as usize])).then_some(()),
-            // The pure HTTP whole-ops: parse/classify/validate/serialize
-            // over proven `Binary`/`Int`/`Array(Header)` operands. Their
-            // only interpreter error is a shape check the proofs make
-            // unreachable; parking/IO ops (`TcpRead*`/`TcpWrite*`) are NOT
-            // in this family — suspension cannot cross a native frame.
+            // The pure HTTP whole-ops over proven operands. Their only
+            // interpreter error is a shape check the proofs make unreachable.
+            // The parking IO ops are deliberately not here: suspension cannot
+            // cross a native frame.
             Atom::PrimOp {
                 op: Op::HttpParseHead,
                 args,
@@ -625,10 +510,8 @@ impl Gate<'_> {
                 }
                 _ => None,
             },
-            // Whole-op length reads, total under the same proofs: `ArrayLen`
-            // elides the interpreter's type error on a proven `Array` (the
-            // gate stays narrower than `seq_len`'s Tuple arm — no stdlib
-            // body lengths a tuple), `BinByteSize` on a proven `Binary`.
+            // Length reads, total under the same proofs. Narrower than
+            // `seq_len`, which also accepts a Tuple; no stdlib body needs it.
             Atom::PrimOp {
                 op: Op::ArrayLen,
                 args,
@@ -655,22 +538,16 @@ impl Gate<'_> {
                 }
                 Some(())
             }
-            // Every callee kind is covered: known/self dispatch through the
-            // entry table directly, and a dynamic callee's closure word is
-            // handed to the `al_rt_call_value` shim, which performs the
-            // interpreter's `Op::Call` checks and dispatch.
+            // Known/self dispatch through the entry table; a dynamic callee
+            // goes to `al_rt_call_value`, which does the interpreter's
+            // `Op::Call` checks and dispatch.
             Atom::Call { .. } => Some(()),
-            // `MakeClosure` is one allocator-shim call; the closure's own
-            // body gates independently (capture reads are `PushCapture` /
-            // `PushSelf` primops, which `nop_of` rejects).
+            // One allocator-shim call. The closure's own body gates
+            // independently, and its capture reads are uncovered primops.
             Atom::Closure { .. } => Some(()),
-            // `True`/`False` construct VM immediates — `emit_ctor`'s Bool
-            // path is one `PushTrue`/`PushFalse`, no heap cell, any perceus
-            // reuse pairing ignored. Every other constructor takes the
-            // enum-ctor path: in-place reuse of the paired dropped cell, or
-            // the cold `al_shim_enum_alloc` shim; its header constants are
-            // read back from the emitted bytecode at compile time
-            // (`enum_ctor_sites`).
+            // `True`/`False` are VM immediates: no heap cell, any perceus
+            // reuse pairing ignored. Every other constructor reuses the
+            // paired dropped cell or calls `al_shim_enum_alloc`.
             Atom::Ctor {
                 variant, fields, ..
             } => {
@@ -696,8 +573,8 @@ impl Gate<'_> {
                     e = body;
                 }
                 CoreExpr::LetCont { cont, body, .. } => {
-                    // A cont references only locals bound strictly before
-                    // this node, so walking it here sees them recorded.
+                    // A cont references only locals bound before this node,
+                    // so walking it here sees them recorded.
                     self.expr(cont)?;
                     e = body;
                 }
@@ -709,10 +586,9 @@ impl Gate<'_> {
                 CoreExpr::Match { arms, .. } => {
                     if let Some((tid, count)) = self.switch_shape(arms) {
                         // Two full matches over one type must agree on its
-                        // variant count; a mismatch means a non-exhaustive
-                        // all-constructor match slipped past the checker —
-                        // fall back to the interpreter rather than emit a
-                        // wrong table.
+                        // variant count. A mismatch means a non-exhaustive
+                        // match slipped past the checker, so interpret rather
+                        // than emit a wrong jump table.
                         if *self.switch_counts.entry(tid).or_insert(count) != count {
                             return None;
                         }
@@ -721,11 +597,9 @@ impl Gate<'_> {
                         match pat {
                             CorePat::Wild | CorePat::Lit(_) => {}
                             CorePat::Bind(b) => self.record(b),
-                            // Bool's heads compare as immediates (`PushTrue`
-                            // / `PushFalse; Eq` in the emitted ladder) and
-                            // are always nullary; enum heads bind their
-                            // payload fields (`UnwrapEnum` parity) whether
-                            // the match switches or ladders.
+                            // Bool's heads compare as immediates and are
+                            // always nullary; enum heads bind their payload
+                            // fields whether the match switches or ladders.
                             CorePat::Ctor { variant, fields } => {
                                 if self.bools.polarity(variant).is_some() {
                                     if !fields.is_empty() {
@@ -750,9 +624,8 @@ impl Gate<'_> {
 }
 
 /// Diagnostic mirror of [`Gate`]: walks a whole body without short-circuiting
-/// and names every node the A0 gate rejects. Test-only — the compile path uses
-/// [`plan`], whose decision this mirrors clause for clause (a body with no
-/// reasons here is exactly a body `plan` accepts).
+/// and names every node the gate rejects. Mirrors [`plan`] clause for clause,
+/// so a body with no reasons here is exactly a body `plan` accepts.
 #[cfg(test)]
 pub(crate) mod gate_diag {
     use super::*;
@@ -949,15 +822,9 @@ pub(crate) mod gate_diag {
     }
 }
 
-// ============================================================================
-// compile: the post-compile half (layout, constants, CLIF)
-// ============================================================================
-
-/// One compiled body, defined (but not yet finalized) into the caller's
-/// module. The caller finalizes the module and publishes
-/// `get_finalized_function(func_id)` into the program's `NativeTable`;
-/// `clif` feeds `al dis --native`, `code_size` (with the finalized address)
-/// the perf-map writer.
+/// One compiled body, defined but not yet finalized into the caller's module.
+/// The caller finalizes and publishes `get_finalized_function(func_id)` into
+/// the program's `NativeTable`.
 pub struct CompiledBody {
     pub func_idx: FuncIdx,
     pub func_id: FuncId,
@@ -965,16 +832,11 @@ pub struct CompiledBody {
     pub code_size: u32,
 }
 
-/// The `EmitCtx` for the layout-only re-emission. On a gated body the only
-/// answers that shape the emitted stream are `bool_variant` and
-/// `switch_variant_count`: the first comes from the plan's captured prelude
-/// handles — the compiler's own — and the second from the plan's captured
-/// variant counts ([`Gate::switch_shape`]), which equal the real context's
-/// answers for every type the gate admitted a switch over (and `None`, a
-/// ladder on both sides, everywhere else). So the layout run takes exactly
-/// the branches the real emission took, and slot assignment and call-resume
-/// ips come out identical. The interning answers never shape the stream —
-/// they only fill operands — so their stand-ins are constants.
+/// The `EmitCtx` for the layout-only re-emission. On a gated body only
+/// `bool_variant` and `switch_variant_count` shape the emitted stream, and
+/// both come from the plan, so this run takes exactly the branches the real
+/// emission took. The interning answers only fill operands, never branch, so
+/// their stand-ins are constants.
 struct LayoutCtx<'a> {
     bools: BoolCtors,
     switch_counts: &'a HashMap<TypeId, u8>,
@@ -1001,9 +863,8 @@ impl EmitCtx for LayoutCtx<'_> {
     }
 }
 
-/// A resolved constant: its stable immediate bits plus the decoded views
-/// codegen may bake into instruction immediates. Only non-heap constants
-/// resolve — an immediate's bits are position-independent, whereas a frozen
+/// A resolved constant: stable bits plus the decoded views codegen bakes into
+/// instruction immediates. Only non-heap constants resolve, since a frozen
 /// heap constant's word is an address.
 struct ConstVal {
     bits: u64,
@@ -1011,8 +872,7 @@ struct ConstVal {
     boolean: Option<bool>,
 }
 
-/// `ConstId → ConstVal` for every constant the body references. Keyed by
-/// `ConstId`'s raw index, which is the canonical identity of a pooled
+/// Keyed by `ConstId`'s raw index, the canonical identity of a pooled
 /// constant within one program.
 type ConstMap = std::collections::HashMap<u32, ConstVal>;
 
@@ -1035,9 +895,8 @@ fn resolve_const(consts: &[Value], c: super::ConstId, map: &mut ConstMap) -> Opt
     Some(())
 }
 
-/// Collect and resolve every constant the body references. `None` rejects
-/// the body (a heap constant, or an id outside the pool — both mean the
-/// A0 gate's "Const must be an immediate" clause fails).
+/// Collect and resolve every constant the body references. `None` rejects the
+/// body: a heap constant, or an id outside the pool.
 fn resolve_consts(fun: &CoreFn, consts: &[Value]) -> Option<ConstMap> {
     let mut map = ConstMap::new();
     let mut stack = vec![&fun.body];
@@ -1086,34 +945,26 @@ fn resolve_consts(fun: &CoreFn, consts: &[Value]) -> Option<ConstMap> {
     Some(map)
 }
 
-// ---- enum constructor sites -------------------------------------------------
-
-/// One non-Bool `Atom::Ctor` site, in body walk order (emit's own): the
-/// header words codegen bakes as instruction immediates. `packed` is the
-/// `type_id | variant_idx << 32` word; `enum_name` / `variant_name` are the
-/// bits of the pooled frozen `Str` constants the interpreter's own
-/// `PushConst`es use — pointer-identical, program-lifetime words. `labels`
-/// is a frozen `Tuple` of the variant's field-label `Str`s, built into the
-/// program's frozen area at compile time: the value-level twin of the
-/// tuple the interpreter's per-VM `label_cache` freezes at the first
-/// construction (equal contents; nothing compares labels by pointer).
+/// One non-Bool `Atom::Ctor` site, in emit's walk order: the header words
+/// codegen bakes as instruction immediates. `packed` is
+/// `type_id | variant_idx << 32`; the names are the same frozen `Str` words
+/// the interpreter's `PushConst`es use. `labels` is a frozen `Tuple` of the
+/// field-label `Str`s, equal in contents to what the interpreter's per-VM
+/// `label_cache` builds. Nothing compares labels by pointer.
 #[derive(Clone, Copy)]
 struct EnumCtorSite {
     packed: u64,
     enum_name: u64,
     variant_name: u64,
     labels: u64,
-    /// Whether the real emission put an `Op::Reuse` before the make
-    /// (`MakeEnumPayload.a == 1`) — `reuse: Some(_)` minus emit's pinning
-    /// exception, read back rather than re-derived so the two backends
-    /// cannot disagree.
+    /// Whether the real emission put an `Op::Reuse` before the make. Read
+    /// back rather than re-derived so the two backends cannot disagree.
     reuse: bool,
 }
 
-/// Collect the body's `Ctor` atoms in emit's walk order (`Let` spine,
-/// `LetJoin` join before body, `LetCont` body before cont, `If` then before
-/// else, arms in order — the order codegen walks too, which is what lets
-/// [`BodyGen`]'s ctor cursor pair sites with atoms).
+/// Collect the body's `Ctor` atoms in emit's walk order, which is also
+/// codegen's. That shared order is what lets [`BodyGen`]'s ctor cursor pair
+/// sites with atoms.
 fn collect_ctor_atoms<'a>(e: &'a CoreExpr, out: &mut Vec<(&'a VariantRef, usize)>) {
     let mut e = e;
     let atom = |a: &'a Atom, out: &mut Vec<(&'a VariantRef, usize)>| {
@@ -1158,30 +1009,23 @@ fn collect_ctor_atoms<'a>(e: &'a CoreExpr, out: &mut Vec<(&'a VariantRef, usize)
     }
 }
 
-/// Recover every non-Bool ctor site's header constants from the *emitted*
-/// bytecode — the one place they exist after the hook: `emit_ctor` pooled
-/// them through the compiler's `EmitCtx` and baked their ids into the
-/// body's instruction stream, which the finished program carries verbatim.
-/// (The peephole pass rewrites only `PushLocal; PushConst; IntOp` windows;
-/// a construct header's four `PushConst`s and the field pushes are followed
-/// by `Reuse`/`MakeEnumPayload`, never an Int op, so the site survives
-/// fusion untouched.) The k-th `MakeEnumPayload` in code order is the k-th
-/// non-Bool ctor atom in walk order — both orders are emit's own walk.
+/// Recover every non-Bool ctor site's header constants from the emitted
+/// bytecode, the one place they exist after the hook. The k-th
+/// `MakeEnumPayload` in code order is the k-th non-Bool ctor atom in walk
+/// order, because both orders are emit's own walk. The peephole pass cannot
+/// disturb this: it rewrites only `PushLocal; PushConst; IntOp` windows, and
+/// a ctor header is always followed by `Reuse`/`MakeEnumPayload`.
 ///
-/// The label tuples are frozen into the *program's* area, so the words
-/// baked into compiled code live exactly as long as the program (and the
-/// module holding the code).
+/// Label tuples are frozen into the *program's* area, so the words baked into
+/// compiled code live as long as the program.
 ///
-/// `None` — never expected; every clause checks an emit invariant — falls
-/// back to interpreting the body, the same fail-soft as a heap constant.
+/// `None` is never expected — every clause checks an emit invariant — and
+/// falls back to interpreting the body.
 ///
-/// `freeze` controls the label-tuple side effect: with a builder, each
-/// site's field-label array is interned into the program's frozen area and
-/// its bits stored in `labels`; without one the array is only validated
-/// (every element is a `Str`) and `labels` is left zero. [`native_set`]
-/// runs the gate pass without a builder so the frozen area is written
-/// exactly once — by [`compile`]'s real pass — instead of orphaning a
-/// second immortal tuple per ctor site.
+/// `freeze` controls the label-tuple side effect. Without a builder the array
+/// is only validated and `labels` stays zero. [`native_set`] runs the gate
+/// pass that way so the frozen area is written exactly once, by [`compile`],
+/// instead of orphaning a second immortal tuple per site.
 fn enum_ctor_sites(
     plan: &NativePlan,
     program: &crate::bytecode::Program,
@@ -1260,17 +1104,14 @@ fn enum_ctor_sites(
     Some(sites)
 }
 
-/// Per-local use facts gathered before codegen: which locals need a raw
-/// `i64` view (operands of Int ops, scrutinees of integer-literal arms) and
-/// which are used as value words at all (everything else). A slotless local
-/// with only Int-op uses skips boxing entirely — the register-allocated
-/// arithmetic chain the backend exists for.
+/// Per-local use facts gathered before codegen: which locals need a raw `i64`
+/// view and which are used as value words. A slotless local with only Int-op
+/// uses skips boxing entirely.
 struct Uses {
     int: TiVec<LocalId, bool>,
     word: TiVec<LocalId, u32>,
-    /// `Ctor { reuse: Some(x) }` targets — emit's `Scan::reuse_claimed` twin,
-    /// guarding [`peel_call_arg_drops`] the same way so the two backends peel
-    /// identically.
+    /// `Ctor { reuse: Some(x) }` targets. Emit's `Scan::reuse_claimed` twin,
+    /// guarding [`peel_call_arg_drops`] so both backends peel identically.
     reuse_claimed: TiVec<LocalId, bool>,
 }
 
@@ -1313,9 +1154,7 @@ impl Uses {
             Atom::Local(x) => self.need_word(*x),
             Atom::Const(_) => {}
             Atom::PrimOp { op, args, .. } => match op {
-                // Field reads consume the receiver's boxed word; aggregate
-                // constructors and the seq/binary whole-op shims consume one
-                // owned word per operand.
+                // One owned word per operand.
                 Op::TupleIndex
                 | Op::GetFieldUnchecked
                 | Op::MakeArray
@@ -1345,8 +1184,8 @@ impl Uses {
                         self.need_word(*headers);
                     }
                 }
-                // `PushGlobal` reads the entry frame, not a local: no operand
-                // to demand a view of. The Bool heads are nullary constants.
+                // `PushGlobal` reads the entry frame, not a local; the Bool
+                // heads are nullary constants. Neither has an operand.
                 Op::PushGlobal | Op::PushTrue | Op::PushFalse => {}
                 _ => match nop_of(*op) {
                     Some((NOp::Not, _)) => {
@@ -1375,9 +1214,8 @@ impl Uses {
                     self.need_word(x);
                 }
             }
-            // A Bool head has no field operands; an enum constructor
-            // consumes one owned word per field. Its reuse slot is not an
-            // operand — codegen reads it through the frame slot directly.
+            // One owned word per field. The reuse slot is not an operand:
+            // codegen reads it through the frame slot directly.
             Atom::Ctor { fields, reuse, .. } => {
                 for &x in fields {
                     self.need_word(x);
@@ -1420,17 +1258,16 @@ impl Uses {
                             if cv.boolean.is_some() {
                                 // Bool words compare as bits.
                             } else if cv.int.is_some() {
-                                // A numeric comparison must decode the
-                                // scrutinee, which is sound only when the
-                                // pool proved it Int (a spilled BigInt still
-                                // decodes; anything else must not).
+                                // Decoding the scrutinee is sound only when
+                                // the pool proved it Int. A spilled BigInt
+                                // still decodes; anything else must not.
                                 if !plan.is_int(*scrut) {
                                     return None;
                                 }
                                 self.need_int(*scrut);
                             } else {
-                                // Nil/other literal arms are not covered:
-                                // their equality is not a bit comparison.
+                                // Other literal arms are uncovered: their
+                                // equality is not a bit comparison.
                                 return None;
                             }
                         }
@@ -1448,9 +1285,8 @@ impl Uses {
     }
 }
 
-/// Codegen reached a node the gate should have rejected, or asked for a
-/// view the use scan should have provided — a backend bug. Aborts like
-/// emit's `unbound_local`.
+/// Codegen reached a node the gate should have rejected, or asked for a view
+/// the use scan should have provided. A backend bug.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -1461,10 +1297,9 @@ fn unsupported_node(what: &str) -> ! {
     )
 }
 
-/// The declared runtime imports, one `FuncRef` per symbol, ready to call.
-/// Signatures must match the shims in `crates/al` (and its `vm::jit`
-/// declarations — Cranelift rejects conflicting redeclarations, so a drift
-/// fails loudly at declare time).
+/// The declared runtime imports, one `FuncRef` per symbol. Signatures must
+/// match the shims in `crates/al` and its `vm::jit` declarations. Cranelift
+/// rejects conflicting redeclarations, so drift fails at declare time.
 struct RtRefs {
     release: ir::FuncRef,
     hollow: ir::FuncRef,
@@ -1612,11 +1447,9 @@ fn declare_imports<M: Module>(
     })
 }
 
-/// Collect every statically-known call target the body reaches (either call
-/// position): each `Callee::Known(f)`, plus `self_idx` where a
-/// `Callee::Self_` appears — covered bodies never read captures, so a self
-/// call dispatches like a known call to the body's own `FuncIdx`. The
-/// resulting set feeds [`declare_native_peers`].
+/// Every statically-known call target the body reaches, for
+/// [`declare_native_peers`]. `Callee::Self_` counts as a known call to
+/// `self_idx`: covered bodies never read captures.
 fn known_callees(self_idx: FuncIdx, fun: &CoreFn) -> HashSet<FuncIdx> {
     let mut out = HashSet::new();
     let mut stack = vec![&fun.body];
@@ -1672,12 +1505,9 @@ fn known_callees(self_idx: FuncIdx, fun: &CoreFn) -> HashSet<FuncIdx> {
 }
 
 /// Declare a `FuncRef` for every native peer this body statically calls,
-/// under the same `al_fn_{idx}` name and [`NativeEntry`] signature each
-/// peer's own [`compile`] declares — cranelift dedupes the module-level
-/// declaration, so this is just claiming a per-function `FuncRef` for the
-/// direct native→native `call`/`return_call` sites to target. A callee not
-/// in `native` (interpreter-only or unknown) gets no entry: those sites fall
-/// back to the trampoline shims.
+/// under the same `al_fn_{idx}` name and signature the peer's own [`compile`]
+/// declares. A callee outside `native` gets no entry and falls back to the
+/// trampoline shims.
 fn declare_native_peers<M: Module>(
     module: &mut M,
     func: &mut ir::Function,
@@ -1701,13 +1531,10 @@ fn declare_native_peers<M: Module>(
     Ok(peers)
 }
 
-/// The set of `FuncIdx`s whose [`compile`] will define a body — every plan
-/// that also passes the compile-time-only gates (a heap constant, an
-/// uncovered literal arm, an `enum_ctor_sites` invariant miss make
-/// [`compile`] return `Ok(None)` and the body interprets). This is the
-/// `native` set the direct native→native call sites consult: a body outside
-/// it must not be a peer, or its `al_fn_{idx}` symbol stays undefined and
-/// `finalize_definitions` fails.
+/// The `FuncIdx`s whose [`compile`] will actually define a body: plans that
+/// also pass the compile-time-only gates. Direct native→native call sites
+/// must consult this. Naming a body outside it as a peer leaves its
+/// `al_fn_{idx}` symbol undefined and `finalize_definitions` fails.
 pub fn native_set(plans: &[NativePlan], program: &crate::bytecode::Program) -> HashSet<FuncIdx> {
     let consts: &[Value] = &program.constants;
     plans
@@ -1725,13 +1552,10 @@ pub fn native_set(plans: &[NativePlan], program: &crate::bytecode::Program) -> H
 /// Lower one planned body to CLIF and define it into `module` under the
 /// [`NativeEntry`](crate::bytecode::NativeEntry) signature.
 ///
-/// `program` is the finished program: its constant pool (which the plan's
-/// `ConstId`s index) and its emitted bytecode, from which each enum
-/// constructor site's pooled header constants are read back
-/// ([`enum_ctor_sites`]). Returns `Ok(None)` when a compile-time-only gate
-/// clause fails (a heap constant, an uncovered literal arm): the body
-/// simply stays interpreted. The error side is the module's own
-/// (declaration/definition failure), boxed to keep the result word-sized.
+/// `program` must be the finished program: the plan's `ConstId`s index its
+/// constant pool, and each ctor site's header constants are read back out of
+/// its emitted bytecode. `Ok(None)` means a compile-time-only gate clause
+/// failed and the body stays interpreted. `Err` is the module's own failure.
 pub fn compile<M: Module>(
     module: &mut M,
     plan: &NativePlan,
@@ -1789,13 +1613,8 @@ pub fn compile<M: Module>(
     }))
 }
 
-// ============================================================================
-// codegen
-// ============================================================================
-
-/// Where an expression delivers its value: `Ret` is function-tail position
-/// (`al_rt_ret` + `return Done` / a tail call), `Merge` is `LetJoin` operand
-/// position (jump to the merge block with the boxed word).
+/// Where an expression delivers its value: function-tail position, or a jump
+/// to a `LetJoin` merge block with the boxed word.
 #[derive(Clone, Copy)]
 enum Dest {
     Ret,
@@ -1812,11 +1631,9 @@ struct AtomVal {
 struct BodyGen<'a> {
     b: FunctionBuilder<'a>,
     plan: &'a NativePlan,
-    /// Per-function `FuncRef`s for the native peers this body statically
-    /// calls (see [`declare_native_peers`]) — the direct-call targets a
-    /// `Callee::Known` site emits when its callee is in the JIT round's
-    /// native set. A `Known` callee absent here (interpreter-only, or gated
-    /// out by [`native_set`]) falls back to the `al_rt_*` trampoline.
+    /// Direct-call targets for `Callee::Known` sites whose callee is in this
+    /// JIT round's native set. A `Known` callee absent here falls back to the
+    /// `al_rt_*` trampoline.
     peers: HashMap<FuncIdx, ir::FuncRef>,
     layout: FrameLayout,
     uses: Uses,
@@ -1833,18 +1650,16 @@ struct BodyGen<'a> {
     joins: TiVec<JoinId, Option<ir::Block>>,
     loop_head: ir::Block,
     /// Cursor into [`FrameLayout::call_resume_ips`], advanced once per
-    /// non-tail call in walk order — the same order emit recorded them in.
+    /// non-tail call in walk order, the order emit recorded them in.
     resume_cursor: usize,
-    /// Non-Bool constructor sites in walk order, paired with `Atom::Ctor`s
-    /// by [`Self::next_ctor_site`]'s cursor — the ctor twin of the
-    /// resume-ip cursor.
+    /// Non-Bool constructor sites in walk order, paired with `Atom::Ctor`s by
+    /// [`Self::next_ctor_site`]'s cursor.
     ctor_sites: Vec<EnumCtorSite>,
     ctor_cursor: usize,
 }
 
 impl<'a> BodyGen<'a> {
-    /// Entry-block prologue: bind `vmx`, fetch the frame base, load the
-    /// parameters out of their slots, then open the self-tail loop header.
+    /// Entry-block prologue, ending with the self-tail loop header open.
     #[allow(clippy::too_many_arguments)]
     fn prologue(
         mut b: FunctionBuilder<'a>,
@@ -1861,13 +1676,11 @@ impl<'a> BodyGen<'a> {
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         b.seal_block(entry);
-        // The context argument (`NativeCtx`) moves straight into the pinned
-        // register (x86_64 r15 / aarch64 x21) and every use re-reads it from
-        // there (`Self::ctx`/`Self::vmx`). It must never live in the frame
-        // as an ordinary spillable value: a frame that holds a
-        // scheduler-derived word and then parks resumes on whatever
-        // scheduler wakes it, handing the old scheduler's pointer to a shim
-        // — cross-thread mutation of one VM.
+        // The `NativeCtx` argument goes into the pinned register and every
+        // use re-reads it from there. It must never live in the frame as a
+        // spillable value: a parked frame resumes on whatever scheduler wakes
+        // it, and a stale scheduler pointer means cross-thread mutation of
+        // one VM.
         let ctx = b.block_params(entry)[0];
         b.ins().set_pinned_reg(ctx);
         let vm = b
@@ -1907,19 +1720,16 @@ impl<'a> BodyGen<'a> {
         g
     }
 
-    /// The context pointer ([`NativeCtx`]), re-read from the pinned
-    /// register at every use. Deliberately NOT a cached `ir::Value`: a
-    /// cached value is an ordinary SSA name regalloc may spill into the
-    /// frame and keep live across calls — the exact word that must never
-    /// survive into a parked frame.
+    /// The context pointer, re-read from the pinned register at every use.
+    /// Deliberately not a cached `ir::Value`: regalloc may spill one into the
+    /// frame, and this word must never survive into a parked frame.
     fn ctx(&mut self) -> ir::Value {
         self.b.ins().get_pinned_reg(self.ptr_ty)
     }
 
-    /// The scheduler's VM for shim calls, loaded from the context
-    /// immediately before each use ([`NativeCtx::VM_OFFSET`]) and never
-    /// earlier: the load-per-call is what makes a resumed frame read the
-    /// resuming scheduler's VM instead of a stale one.
+    /// The scheduler's VM for shim calls. Loaded immediately before each use
+    /// and never earlier, so a resumed frame reads the resuming scheduler's
+    /// VM instead of a stale one.
     fn vmx(&mut self) -> ir::Value {
         let ctx = self.ctx();
         self.b.ins().load(
@@ -1935,8 +1745,8 @@ impl<'a> BodyGen<'a> {
         for p in &g.plan.fun.params {
             let slot = g.slot_of(p.id);
             let w = g.load_slot(slot);
-            // Registers only: the slot already owns this word (`enter_frame!`
-            // put the argument there); re-storing would release its reference.
+            // Registers only: the slot already owns this word, so re-storing
+            // would release its reference.
             g.def_regs(
                 p.id,
                 AtomVal {
@@ -1951,8 +1761,8 @@ impl<'a> BodyGen<'a> {
     }
 
     fn run(mut self) {
-        // Split borrow: the walk takes `&mut self` while iterating the plan's
-        // body, so the body pointer must not run through `self`.
+        // Split borrow: the walk takes `&mut self`, so the body pointer must
+        // not run through `self`.
         let body: &CoreExpr = &self.plan.fun.body;
         self.expr(body, Dest::Ret);
         if self.resume_cursor != self.layout.call_resume_ips.len() {
@@ -1965,7 +1775,6 @@ impl<'a> BodyGen<'a> {
         self.b.finalize();
     }
 
-    // ---- frame-slot access -------------------------------------------------
 
     fn slot_of(&self, id: LocalId) -> i32 {
         match self.layout.slot(id) {
@@ -1979,22 +1788,19 @@ impl<'a> BodyGen<'a> {
         FrameSlots::new(&self.layout, base).load_slot(&mut self.b, slot)
     }
 
-    /// `StoreLocal` parity: release the old word, store the new (which must
-    /// carry an owned reference — the slot takes it).
+    /// `StoreLocal` parity: release the old word, store the new. `bits` must
+    /// carry an owned reference; the slot takes it.
     fn store_slot(&mut self, slot: i32, bits: ir::Value) {
         let base = self.b.use_var(self.base);
         FrameSlots::new(&self.layout, base).store_slot(&mut self.b, slot, bits, self.fns.release);
     }
 
-    /// [`Self::store_slot`] for `id`'s own slot, with the release of the old
-    /// word statically elided where `id`'s type proves it can only ever be
-    /// an immediate. Slots are per-local (emit's `bind` never shares one),
-    /// so the old word is either the frame's `small_int(0)` fill, the zero a
-    /// `Drop` left, or an earlier value of `id` itself — for an
-    /// [`Repr::Immediate`] local every case is an immediate and the release
-    /// gate is dead code. A [`Repr::Heap`] local must keep the *dynamic*
-    /// gate here: the fill/`Drop` zeros are immediates, so the proven-heap
-    /// gate would dereference them.
+    /// [`Self::store_slot`] for `id`'s own slot, eliding the old-word release
+    /// where `id`'s type proves an immediate. Slots are per-local, so the old
+    /// word is the frame fill, a `Drop` zero, or an earlier value of `id`.
+    /// A [`Repr::Heap`] local must still keep the *dynamic* gate: the fill and
+    /// `Drop` zeros are immediates, which a proven-heap gate would
+    /// dereference.
     fn store_local_slot(&mut self, id: LocalId, slot: i32, bits: ir::Value) {
         if self.plan.repr_of(id) == Repr::Immediate {
             let base = self.b.use_var(self.base);
@@ -2013,7 +1819,6 @@ impl<'a> BodyGen<'a> {
         FrameSlots::new(&self.layout, base).store_slot_no_release(&mut self.b, slot, zero);
     }
 
-    // ---- local registers ----------------------------------------------------
 
     fn word_of(&mut self, id: LocalId) -> ir::Value {
         match self.words.get(id).copied().flatten() {
@@ -2029,13 +1834,9 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// An *owned* word for a consuming use (call argument, stored copy,
-    /// returned value). A slotted local keeps its slot's reference and hands
-    /// out a retained copy — `PushLocal`'s clone; a slotless local is a
-    /// single-use temp whose one owned word transfers. The retain is
-    /// type-directed: statically elided where `id`'s type proves an
-    /// immediate, immortal-bit-gated where it proves a heap cell, the full
-    /// dynamic gate elsewhere.
+    /// An owned word for a consuming use. A slotted local keeps its slot's
+    /// reference and hands out a retained copy; a slotless local is a
+    /// single-use temp whose one owned word transfers.
     fn owned_word(&mut self, id: LocalId) -> ir::Value {
         let w = self.word_of(id);
         if self.layout.slot(id).is_some()
@@ -2046,18 +1847,16 @@ impl<'a> BodyGen<'a> {
         w
     }
 
-    /// The owned value word a whole-op shim returned: the word view as is,
-    /// the int view through the dynamic unbox (a shim result carries no
-    /// static Int proof at this seam, so the decode stays total).
+    /// The owned word a whole-op shim returned. The int view goes through the
+    /// dynamic unbox: a shim result carries no static Int proof.
     fn opaque_result(&mut self, call: ir::Inst, want_int: bool) -> AtomVal {
         let r = self.b.inst_results(call)[0];
         let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, r));
         AtomVal { word: Some(r), int }
     }
 
-    /// Record a binding's produced value: write it through to its frame slot
-    /// (where it has one — the slot takes the word's owned reference), and
-    /// define the register views its uses demand.
+    /// Record a binding's produced value: write it to its frame slot, which
+    /// takes the owned reference, and define the register views uses demand.
     fn def_local(&mut self, id: LocalId, val: AtomVal) {
         if let Some(slot) = self.layout.slot(id) {
             let Some(w) = val.word else {
@@ -2068,18 +1867,15 @@ impl<'a> BodyGen<'a> {
         self.def_regs(id, val);
     }
 
-    /// Define a local's register views without touching its frame slot — for
-    /// values the slot *already* owns (parameters at entry, the self-tail
-    /// argument words after their explicit stores). Going through
-    /// [`Self::def_local`] instead would re-store the word, and the releasing
-    /// store would release the very reference the slot holds.
+    /// Define a local's register views without touching its frame slot, for
+    /// values the slot already owns. [`Self::def_local`] would re-store the
+    /// word, releasing the very reference the slot holds.
     ///
-    /// One Variable per view for the body's whole lifetime: a *re*definition
-    /// (the self-tail back-edge rebinding the parameters) must `def_var` the
-    /// existing Variable, so the uses already emitted at the loop head
-    /// resolve to the back-edge values through SSA construction. A fresh
-    /// Variable per definition would leave the loop reading the entry values
-    /// forever.
+    /// One Variable per view for the body's whole lifetime. A redefinition
+    /// (the self-tail back-edge rebinding parameters) must `def_var` the
+    /// existing Variable so uses already emitted at the loop head resolve to
+    /// the back-edge values. A fresh Variable would leave the loop reading the
+    /// entry values forever.
     fn def_regs(&mut self, id: LocalId, val: AtomVal) {
         if let Some(w) = val.word {
             self.words.resize_at_least(id, None);
@@ -2116,7 +1912,6 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    // ---- atoms ---------------------------------------------------------------
 
     /// Evaluate a non-call atom. `want_word` asks for an owned boxed word,
     /// `want_int` for the raw `i64` view.
@@ -2155,20 +1950,18 @@ impl<'a> BodyGen<'a> {
                 let [recv] = args.as_slice() else {
                     unsupported_node("TupleIndex arity")
                 };
-                // The gate proved the receiver a Tuple wide enough, so the
-                // word is a heap Tuple cell (`[count][elements…]`) and
-                // element `i` is payload word `1 + i` — `t[idx].clone()`
-                // with the interpreter's bounds/type errors statically
+                // The gate proved a wide-enough Tuple, so the word is a heap
+                // cell `[count][elements…]` and element `i` is payload word
+                // `1 + i`. The interpreter's bounds/type errors are
                 // unreachable under that proof.
                 let w = self.word_of(*recv);
                 let obj = self.b.ins().band_imm(w, NATIVE_PTR_MASK as i64);
                 let f = self.load_payload_word(obj, 1 + *i as usize);
                 self.field_result(f, want_word, want_int)
             }
-            // The interpreter's `Op::PushGlobal`. The shim hands back the
-            // global area's word borrowed; `field_result` takes the reference
-            // only where this use keeps one, which is the same ownership the
-            // interpreter's `globals[slot].clone()` produces.
+            // The shim hands back the global area's word borrowed;
+            // `field_result` retains only where this use keeps it, matching
+            // the interpreter's `globals[slot].clone()`.
             Atom::PrimOp {
                 op: Op::PushGlobal,
                 imm: Imm::Index(slot),
@@ -2180,8 +1973,7 @@ impl<'a> BodyGen<'a> {
                 let w = self.b.inst_results(call)[0];
                 self.field_result(w, want_word, want_int)
             }
-            // The Bool heads `&&`/`||` lowering materializes: one iconst of
-            // the immediate's bits, `emit`'s `PushTrue`/`PushFalse` parity.
+            // One iconst of the immediate's bits.
             Atom::PrimOp {
                 op: op @ (Op::PushTrue | Op::PushFalse),
                 ..
@@ -2199,9 +1991,7 @@ impl<'a> BodyGen<'a> {
                     int: None,
                 }
             }
-            // Seq extension and whole-op length shims, all `Imm::None` /
-            // `Imm::Argc` shapes the gate proved total: owned operands in,
-            // owned result out.
+            // Owned operands in, owned result out.
             Atom::PrimOp {
                 op: op @ (Op::Append | Op::Prepend),
                 args,
@@ -2224,8 +2014,7 @@ impl<'a> BodyGen<'a> {
                     int: None,
                 }
             }
-            // The pure HTTP whole-ops: owned operands in (the Int views raw),
-            // one shim call, owned result out.
+            // Owned operands in, Int views raw, one shim call.
             Atom::PrimOp {
                 op: Op::HttpParseHead,
                 args,
@@ -2308,10 +2097,8 @@ impl<'a> BodyGen<'a> {
                 let int = want_int.then(|| unbox_int(&mut self.b, &self.facts, r));
                 AtomVal { word: Some(r), int }
             }
-            // `Op::MakeArray`/`Op::MakeTuple` parity: spill the owned element
-            // words and let the shim build the aggregate in the process heap
-            // (releasing the transferred references, the interpreter's
-            // build-then-truncate).
+            // Spill the owned element words; the shim builds the aggregate in
+            // the process heap and releases the transferred references.
             Atom::PrimOp {
                 op: op @ (Op::MakeArray | Op::MakeTuple),
                 args,
@@ -2342,11 +2129,10 @@ impl<'a> BodyGen<'a> {
                 let [recv] = args.as_slice() else {
                     unsupported_node("GetFieldUnchecked arity")
                 };
-                // `enum_field_typed` parity: the checker proved the field
-                // exists (payload word `6 + i`, `EnumRef::payload`), and the
-                // release interpreter still gates on the value being a heap
-                // cell, answering nil otherwise — mirror that gate so a
-                // non-heap word is never dereferenced.
+                // The checker proved the field exists at payload word
+                // `6 + i`, but `enum_field_typed` still gates on the value
+                // being a heap cell and answers nil otherwise. Mirror that
+                // gate so a non-heap word is never dereferenced.
                 let w = self.word_of(*recv);
                 let heap_b = self.b.create_block();
                 let merge = self.b.create_block();
@@ -2380,7 +2166,7 @@ impl<'a> BodyGen<'a> {
                             unsupported_node("Not arity")
                         };
                         // Only two Bool words exist and they differ in bit 0,
-                        // so logical negation is a one-bit flip of the word.
+                        // so negation is a one-bit flip.
                         let w = self.word_of(*x);
                         let flipped = self.b.ins().bxor_imm(w, 1);
                         if want_int {
@@ -2420,9 +2206,8 @@ impl<'a> BodyGen<'a> {
                         };
                         let a = self.int_of(*x);
                         let bv = self.int_of(*y);
-                        // Wrapping two's-complement, the interpreter's own
-                        // totality; `/` and `%` route through the shims that
-                        // reproduce its x/0 = 0 and x%0 = x rules.
+                        // Wrapping two's-complement. `/` and `%` route
+                        // through shims for the x/0 = 0, x%0 = x rules.
                         let r = match nop {
                             NOp::Add => self.b.ins().iadd(a, bv),
                             NOp::Sub => self.b.ins().isub(a, bv),
@@ -2442,11 +2227,9 @@ impl<'a> BodyGen<'a> {
                 }
             }
             Atom::Closure { func_idx, captures } => {
-                // `MakeClosure` parity: one owned reference per capture
-                // transfers into the shim (the interpreter's capture pushes),
+                // One owned reference per capture transfers into the shim,
                 // which copies them into the fresh cell and releases the
-                // transferred words — its `closure_in`-then-truncate. The
-                // returned word owns the one reference to the cell.
+                // transferred words. The result owns the cell's one reference.
                 let buf = self.arg_buffer(captures);
                 let fi = self
                     .b
@@ -2473,10 +2256,8 @@ impl<'a> BodyGen<'a> {
                     unsupported_node("int view of a constructor");
                 }
                 match self.plan.bools.polarity(variant) {
-                    // `True`/`False` are the two Bool immediates
-                    // (`PushTrue`/`PushFalse` parity) — no allocation, and a
-                    // perceus reuse pairing is ignored exactly as
-                    // `emit_ctor`'s Bool path ignores it.
+                    // No allocation, and a perceus reuse pairing is ignored
+                    // exactly as `emit_ctor`'s Bool path ignores it.
                     Some(polarity) => {
                         let bits = if polarity {
                             self.facts.bool_true
@@ -2488,11 +2269,9 @@ impl<'a> BodyGen<'a> {
                             int: None,
                         }
                     }
-                    // An enum constructor: in-place reuse of the paired
-                    // dropped cell where one is parked, the cold allocator
-                    // shim otherwise. Runs regardless of demand — it
-                    // allocates (or consumes the parked cell), and the
-                    // result word carries the cell's one owned reference.
+                    // Runs regardless of demand: it allocates or consumes the
+                    // parked cell, and the result carries the cell's one owned
+                    // reference.
                     None => {
                         let site = self.next_ctor_site();
                         let w = self.emit_enum_ctor(site, fields, *reuse);
@@ -2507,8 +2286,7 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// Package an Int result: the raw value always, the boxed word (with the
-    /// interpreter's spill rule) only when a use wants it.
+    /// The raw value always, the boxed word only when a use wants it.
     fn int_result(&mut self, raw: ir::Value, want_word: bool) -> AtomVal {
         let word = want_word.then(|| {
             let vmx = self.vmx();
@@ -2520,9 +2298,7 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// Payload word `i` of the heap object headed at `obj` —
-    /// `payload_word(obj, i)` (the header is word 0, the payload starts one
-    /// word past it).
+    /// Payload word `i` of the object at `obj`. Word 0 is the header.
     fn load_payload_word(&mut self, obj: ir::Value, word: usize) -> ir::Value {
         self.b.ins().load(
             types::I64,
@@ -2532,11 +2308,8 @@ impl<'a> BodyGen<'a> {
         )
     }
 
-    /// Package a field/element word read out of a heap cell: retained where
-    /// an owned word is wanted (the register twin of the interpreter's
-    /// payload clone — the cell's own slot keeps its reference), decoded
-    /// where a raw Int view is demanded (the cell keeps the word alive
-    /// through a spilled `BigInt` load).
+    /// Package a field word read out of a heap cell. Retained where an owned
+    /// word is wanted, since the cell keeps its own reference.
     fn field_result(&mut self, f: ir::Value, want_word: bool, want_int: bool) -> AtomVal {
         if want_word {
             native_frame::emit_retain(&mut self.b, f);
@@ -2556,7 +2329,6 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    // ---- constructors ----------------------------------------------------------
 
     fn next_ctor_site(&mut self) -> EnumCtorSite {
         let Some(&site) = self.ctor_sites.get(self.ctor_cursor) else {
@@ -2566,11 +2338,9 @@ impl<'a> BodyGen<'a> {
         site
     }
 
-    /// `Op::MakeEnumPayload`'s allocation path: owned field words spill into
-    /// a buffer (the operand pushes) and the cold `al_shim_enum_alloc` shim
-    /// builds the cell — one `ProcHeap` allocation, header words per
-    /// `Value::enum_reuse_in`'s layout, hash word 0 (lazy), the transferred
-    /// field references released by the shim (the interpreter's truncate).
+    /// `Op::MakeEnumPayload`'s allocation path: owned field words spill into a
+    /// buffer and `al_shim_enum_alloc` builds the cell, releasing the
+    /// transferred field references.
     fn enum_alloc(&mut self, site: &EnumCtorSite, fields: &[LocalId]) -> ir::Value {
         let buf = self.arg_buffer(fields);
         let packed = self.b.ins().iconst(types::I64, site.packed as i64);
@@ -2586,16 +2356,11 @@ impl<'a> BodyGen<'a> {
         self.b.inst_results(call)[0]
     }
 
-    /// A non-Bool `Atom::Ctor` — `Op::Reuse` + `Op::MakeEnumPayload`
-    /// parity. Without a paired reuse (`site.reuse` reads the emitted
-    /// `MakeEnumPayload.a`, so pinning agrees with emit by construction)
-    /// the cell is allocated by the shim. With one, the candidate transfers
-    /// out of its slot (`Op::Reuse`'s `mem::replace` with `small_int(0)`);
-    /// a uniquely-owned mortal cell — the invariant `Op::Drop` established
-    /// when it parked one, re-checked exactly like `Value::is_unique` — is
-    /// overwritten in place, anything else (the zero a shared `Drop` left)
-    /// is dropped like the interpreter's non-reusable candidate and the
-    /// shim allocates fresh.
+    /// A non-Bool `Atom::Ctor`, mirroring `Op::Reuse` + `Op::MakeEnumPayload`.
+    /// `site.reuse` reads the emitted `MakeEnumPayload.a`, so pinning agrees
+    /// with emit by construction. With a reuse, the candidate transfers out of
+    /// its slot; a uniquely-owned mortal cell is overwritten in place and
+    /// anything else falls back to a fresh allocation.
     fn emit_enum_ctor(
         &mut self,
         site: EnumCtorSite,
@@ -2678,7 +2443,6 @@ impl<'a> BodyGen<'a> {
         self.b.block_params(merge)[0]
     }
 
-    // ---- calls ----------------------------------------------------------------
 
     fn next_resume(&mut self) -> i32 {
         let Some(&ip) = self.layout.call_resume_ips.get(self.resume_cursor) else {
@@ -2970,7 +2734,6 @@ impl<'a> BodyGen<'a> {
         self.b.ins().return_(&[status]);
     }
 
-    // ---- drops ----------------------------------------------------------------
 
     /// `Op::Drop` for a covered body, `reusable` = the IR node carried a
     /// `ReuseShape`.
@@ -3074,7 +2837,6 @@ impl<'a> BodyGen<'a> {
         self.b.switch_to_block(done_block);
     }
 
-    // ---- expressions ------------------------------------------------------------
 
     fn expr(&mut self, mut e: &CoreExpr, dst: Dest) {
         loop {
@@ -3653,7 +3415,6 @@ mod tests {
     use crate::typed_ir::RTy;
     use crate::types::PrimIds;
 
-    // ---- a pool that proves Int ------------------------------------------
 
     fn int_pool() -> (ResolvedPool, RTy) {
         let mut pool = ResolvedPool::new(PrimIds {
@@ -3704,7 +3465,6 @@ mod tests {
         LocalId(i)
     }
 
-    // ---- the mock runtime: a miniature VM behind the shim ABI -------------
 
     struct FnMeta {
         arity: usize,
@@ -4208,7 +3968,6 @@ mod tests {
         panic!("http shim called from a clif unit test")
     }
 
-    // ---- harness ----------------------------------------------------------
 
     struct Jit {
         // Keeps the executable mapping alive for the entries' lifetime.
@@ -4370,7 +4129,6 @@ mod tests {
         (vm.stack.pop().unwrap(), yields)
     }
 
-    // ---- real-emission program builder (enum-ctor tests) --------------------
 
     /// An `EmitCtx` that pools constants for real — the compiler's
     /// `intern_*` behavior over a test-owned frozen area — so the emitted
@@ -4450,7 +4208,6 @@ mod tests {
         program
     }
 
-    // ---- IR builders --------------------------------------------------------
 
     fn let_(id: u32, ty: RTy, rhs: Atom, body: CoreExpr) -> CoreExpr {
         CoreExpr::Let {
@@ -4564,7 +4321,6 @@ mod tests {
         ]
     }
 
-    // ---- gate -----------------------------------------------------------------
 
     #[test]
     fn gate_accepts_the_a0_shapes_and_rejects_the_rest() {
@@ -4676,7 +4432,6 @@ mod tests {
         assert!(ok.is_some());
     }
 
-    // ---- execution ------------------------------------------------------------
 
     #[test]
     fn straight_line_return_of_a_constant() {

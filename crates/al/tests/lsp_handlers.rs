@@ -1,12 +1,7 @@
-//! Handler-layer coverage for the LSP server. The reference-graph rewrite's
-//! regressions all hid because the existing `references.rs` suite drives the
-//! `IncrementalSession` query API directly, never the handlers the editor
-//! actually calls. These tests close that gap: they boot a real `Workspace`
-//! (the LSP server's state, decoupled from stdio), open a document through the
-//! same path `textDocument/didOpen` takes, and assert on the JSON each query
-//! *returns* — the seam the handlers were refactored to expose
-//! (`hover_response` / `definition_response` / `references_response` /
-//! `rename_response` / `prepare_rename_response`).
+//! Handler-layer coverage for the LSP server. `references.rs` drives the
+//! `IncrementalSession` query API; these boot a real `Workspace`, open a
+//! document the way `textDocument/didOpen` does, and assert on the JSON each
+//! `*_response` returns.
 
 use al::lsp::Workspace;
 use serde_json::{Value as Json, json};
@@ -14,8 +9,8 @@ use serde_json::{Value as Json, json};
 mod common;
 use common::{Project, cursor};
 
-/// `file://`-form URI for `name` inside `p`, matching the non-percent-decoded
-/// shape the server's own path<->uri round-trip produces for repo-local files.
+/// `file://`-form URI for `name` inside `p`, in the non-percent-decoded shape
+/// the server's own path/uri round-trip produces.
 fn uri_of(p: &Project, name: &str) -> String {
     format!("file://{}", p.dir.join(name).display())
 }
@@ -48,9 +43,7 @@ fn refs_at(s: &mut Workspace, uri: &str, l: i32, c: i32, include_decl: bool) -> 
     s.references_response(&params)
 }
 
-/// Boot a workspace rooted at `p`, open `name` (with contents `src`) as a
-/// client tab, and hand back the workspace plus the document URI ready to
-/// query.
+/// Boot a workspace rooted at `p` and open `name` as a client tab.
 fn open(p: &Project, name: &str, src: &str) -> (Workspace, String) {
     let mut s = Workspace::new();
     s.add_workspace_root(p.dir.clone());
@@ -59,8 +52,8 @@ fn open(p: &Project, name: &str, src: &str) -> (Workspace, String) {
     (s, uri)
 }
 
-/// Boot a workspace over a fresh single-file project (`src` written as `a.al`)
-/// and open it. The `Project` is returned so its temp dir outlives the server.
+/// Open `src` as `a.al` in a fresh project. The `Project` comes back so its
+/// temp dir outlives the server.
 fn open_single(tag: &str, src: &str) -> (Project, Workspace, String) {
     let p = Project::new(tag);
     p.write("a.al", src);
@@ -70,15 +63,13 @@ fn open_single(tag: &str, src: &str) -> (Project, Workspace, String) {
 
 const SRC: &str = "pub fn greet() Int { 7 }\nx = greet()\nprintln(x)\n";
 
-/// The refactored handlers compute and return their response JSON; the thin
-/// wrappers only forward it to the wire. This drives every position query
-/// through the seam and checks the happy-path shapes plus the "no result"
-/// convention (`Json::Null`, wire-equivalent to the old `send_null_response`).
+/// Every position query's happy-path shape, plus the "no result" convention of
+/// `Json::Null`.
 #[test]
 fn seam_round_trips_position_queries() {
     let (_p, mut s, uri) = open_single("seam", SRC);
 
-    // hover on the declaration name -> a markdown block naming the symbol.
+    // hover on the declaration name.
     let (l, c) = cursor(SRC, "greet", 1, 1);
     let hov = s.hover_response(&pos(&uri, l, c));
     let md = hov["contents"]["value"]
@@ -86,7 +77,7 @@ fn seam_round_trips_position_queries() {
         .expect("hover returns markdown contents");
     assert!(md.contains("greet"), "hover should name the symbol: {md:?}");
 
-    // goto-def on the *use* of greet -> the declaration's location (line 0).
+    // goto-def on the use of greet lands on the declaration, line 0.
     let (l, c) = cursor(SRC, "greet", 2, 1);
     let def = s.definition_response(&pos(&uri, l, c));
     assert_eq!(
@@ -96,24 +87,20 @@ fn seam_round_trips_position_queries() {
     );
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
 
-    // find-refs on the declaration -> a JSON *array* (the decl plus its one
-    // use), never null when a definition resolves there.
+    // find-refs on a resolved definition is an array, never null.
     let (l, c) = cursor(SRC, "greet", 1, 1);
     let refs = s.references_response(&pos(&uri, l, c));
     let arr = refs.as_array().expect("references is an array");
     assert!(arr.len() >= 2, "expected decl + use, got {arr:?}");
 
-    // "no result" answers null: both an empty position payload and a position
-    // sitting on nothing collapse to Json::Null.
+    // An empty payload and a position on nothing both answer null.
     assert!(s.definition_response(&json!({})).is_null());
     assert!(s.hover_response(&pos(&uri, 99, 99)).is_null());
 
-    // the session accessor is wired for an open non-stdlib document (Bug 1
-    // joins the inferred type onto hover through it).
+    // Hover joins its type through the session accessor.
     assert!(s.session_for(&uri).is_some());
 
-    // rename / prepareRename are reachable through the seam and return the
-    // declared shapes; their *behaviour* is pinned by the Bug-4 tests.
+    // Reachable through the seam; behaviour is pinned further down.
     let _ = s.prepare_rename_response(&pos(&uri, 0, 7));
     let _ = rename_at(&mut s, &uri, 0, 7, "greet2");
 }
@@ -121,11 +108,8 @@ fn seam_round_trips_position_queries() {
 const TYPED: &str =
     "pub fn answer() Int {\n  base = 42\n  base\n}\npub fn run() Int {\n  answer()\n}\n";
 
-/// Bug 1: the hover handler must surface the *inferred type*, not only the
-/// entity kind. Pre-fix `hover_response` rendered just `name` + `*kind*` and
-/// the type-join path (`session_for(uri)` -> `IncrementalSession::hover`) was
-/// orphaned — no caller. The markdown must now read `name : <Type>` at a local
-/// binder, at a *use* of it, and carry the function type at a call site.
+/// Hover must surface the inferred type, not only the entity kind: at a local
+/// binder, at a use of it, and as a function type at a call site.
 #[test]
 fn hover_markdown_includes_inferred_type() {
     let (_p, mut s, uri) = open_single("hovertype", TYPED);
@@ -137,7 +121,7 @@ fn hover_markdown_includes_inferred_type() {
             .to_string()
     };
 
-    // local binder `base = 42` -> the joined type, not just the kind.
+    // local binder `base = 42`.
     let (l, c) = cursor(TYPED, "base", 1, 1);
     let at_binder = md(&mut s, l, c);
     assert!(
@@ -145,7 +129,7 @@ fn hover_markdown_includes_inferred_type() {
         "binder hover must show the inferred type: {at_binder:?}"
     );
 
-    // a later *use* of `base` -> still typed.
+    // a later use of `base`.
     let (l, c) = cursor(TYPED, "base", 2, 1);
     let at_use = md(&mut s, l, c);
     assert!(
@@ -153,8 +137,7 @@ fn hover_markdown_includes_inferred_type() {
         "use-site hover must show the inferred type: {at_use:?}"
     );
 
-    // a call of the top-level fn -> its function type joins in (independent of
-    // the local-def emission, so this pins the type join even on graph defs).
+    // a call of the top-level fn, which pins the join on a graph def.
     let (l, c) = cursor(TYPED, "answer", 2, 1);
     let at_call = md(&mut s, l, c);
     assert!(
@@ -163,28 +146,13 @@ fn hover_markdown_includes_inferred_type() {
     );
 }
 
-// ============================================================================
-// Bug 4 — rename refused on clean user defs.
-//
-// `analyze_text` only ran the session check (which builds the workspace graph
-// and latches `entry_uri`) inside its `if !has_errors` block, so a buffer that
-// carried a parse error never produced a session at all: `ensure_entry`
-// returned false and *every* position query — hover, goto-def, find-refs and,
-// most visibly, rename — short-circuited to null before the graph was ever
-// consulted. The cruel part is that the symbol being renamed is itself
-// perfectly well-formed; the user is merely mid-edit somewhere else in the
-// file (an unterminated expression, a half-typed line), and the editor reports
-// "The element can't be renamed" for a clean, untouched top-level fn or local.
-//
-// Each test below opens a buffer whose declarations are clean but which ends in
-// a syntax error, and asserts the clean def is still renamable — fail-before
-// (null), pass-after. A genuinely error-free buffer was always renamable, so
-// it would not distinguish the fix.
-// ============================================================================
+// A buffer holding a parse error somewhere must still answer position queries
+// about the parts that are clean. Every test below ends its source in a syntax
+// error; an error-free buffer would not distinguish the behaviour.
 
-/// `helper` (decl + two call sites on lines 0–2) is well-formed; the trailing
-/// line is a deliberate parse error standing in for an in-progress edit. The
-/// recovering parser drops only that line, so the graph still spells `helper`.
+/// `helper` is well-formed; the trailing line is a deliberate parse error
+/// standing in for an in-progress edit. The recovering parser drops only that
+/// line.
 const BUG4_FN_SRC: &str =
     "fn helper() Int { 1 }\nx = helper()\ny = helper()\nprintln(x + y)\nbroken @#$\n";
 
@@ -192,7 +160,7 @@ const BUG4_FN_SRC: &str =
 fn bug4_prepare_rename_top_level_fn_yields_range_and_placeholder() {
     let (_p, mut s, uri) = open_single("b4_prepare_fn", BUG4_FN_SRC);
 
-    // Cursor inside the `helper` declaration name.
+    // Cursor in the `helper` declaration name.
     let (l, c) = cursor(BUG4_FN_SRC, "helper", 1, 1);
     let resp = s.prepare_rename_response(&pos(&uri, l, c));
 
@@ -253,7 +221,7 @@ fn bug4_rename_top_level_fn_rewrites_def_and_all_refs() {
         .and_then(Json::as_array)
         .expect("edits keyed by the open file's uri");
 
-    // Declaration + the two call sites = three rewrites, every one -> "renamed".
+    // Declaration plus two call sites.
     assert_eq!(
         edits.len(),
         3,
@@ -274,16 +242,8 @@ fn bug4_rename_top_level_fn_rewrites_def_and_all_refs() {
     );
 }
 
-// ============================================================================
-// Bug 2 — goto-def / find-refs dead on locals.
-//
-// Before the fix the four local-binder sites (`let` binding, `or`-receiver,
-// fn parameter, pattern binder) recorded their *use* occurrences but never an
-// `add_definition` for the binder, so `ReferenceGraph::definition(target)`
-// returned `None` and `definition_at` / `references_to` (which both resolve
-// through it) answered nothing. These pin the handler-layer behaviour for a
-// local variable, a function parameter, find-references, and shadowing.
-// ============================================================================
+// goto-def / find-refs on locals: a local variable, a function parameter,
+// find-references, and shadowing.
 
 const BUG2_SRC: &str = "pub fn add(lhs Int, rhs Int) Int {\n\
 \x20 lhs + rhs\n\
@@ -311,9 +271,8 @@ fn start(result: &Json) -> (i64, i64) {
     )
 }
 
-/// Open `BUG2_SRC` in a project named `tag`, put the cursor on the `use_nth`
-/// occurrence of `needle`, and assert goto-def resolves to the `binder_nth`
-/// occurrence (the binder's identifier span) in the same file.
+/// Assert goto-def from the `use_nth` occurrence of `needle` lands on the
+/// `binder_nth` occurrence in the same file.
 fn assert_goto_def_lands(tag: &str, needle: &str, use_nth: usize, binder_nth: usize) {
     let (_p, mut s, uri) = open_single(tag, BUG2_SRC);
 
@@ -375,9 +334,7 @@ fn bug2_find_refs_on_local_binder_includes_uses() {
 fn bug2_shadowed_binding_resolves_inner_then_outer() {
     let (_p, mut s, uri) = open_single("b2_shadow", BUG2_SRC);
 
-    // `shadow`: outer `x = 1`, then `f = fn(x Int) x + 1` whose body's `x` is
-    // the lambda parameter, then `x + f(2)` whose `x` is the outer binding.
-    // `x` is a single-column identifier, so the cursor sits *on* it (`into` 0).
+    // `x` is one column wide, so the cursor sits on it (`into` 0).
     let (il, ic) = cursor(BUG2_SRC, "x", 3, 0); // `x + 1` inside the lambda
     let (ol, oc) = cursor(BUG2_SRC, "x", 4, 0); // `x` in `x + f(2)`
     let inner = s.definition_response(&pos(&uri, il, ic));
@@ -406,14 +363,9 @@ fn bug2_shadowed_binding_resolves_inner_then_outer() {
     );
 }
 
-// ============================================================================
-// Bug 3 — every token of an `import a/b` was clickable, all to no effect.
-//
-// Only the final module-name segment should be a goto-def target, and it must
-// open the *imported* module: the sibling file for `import ./x`, nothing for an
-// embedded `al/*` (there is no on-disk file to open — never fabricate one). The
-// `import` keyword and any non-final path segment resolve to nothing.
-// ============================================================================
+// In `import a/b` only the final segment is a goto-def target, and it opens the
+// imported module: the sibling file for `import ./x`, nothing for an embedded
+// `al/*`, which has no on-disk file. Every other token resolves to nothing.
 
 const BUG3_HELPER: &str = "pub fn greet() String {\n\x20 'hi'\n}\n";
 const BUG3_MAIN: &str = "import ./helper\n\
@@ -422,9 +374,7 @@ x = helper.greet()\n\
 y = string.length(x)\n\
 println(y)\n";
 
-/// Boot a server over a project carrying both `BUG3_HELPER` (as `helper.al`)
-/// and `BUG3_MAIN` (as `main.al`), open `main.al`, and return the server + its
-/// URI ready to query the import declarations.
+/// A two-file project with `main.al` open, ready to query its imports.
 fn bug3_project() -> (Project, Workspace, String) {
     let p = Project::new("b3_import");
     p.write("helper.al", BUG3_HELPER);
@@ -437,8 +387,7 @@ fn bug3_project() -> (Project, Workspace, String) {
 fn bug3_goto_def_on_import_segment_opens_the_module() {
     let (_p, mut s, uri) = bug3_project();
 
-    // `import ./helper` — clicking the `helper` segment opens helper.al, NOT
-    // the importing line itself.
+    // The `helper` segment opens helper.al, not the importing line.
     let (l, c) = cursor(BUG3_MAIN, "helper", 1, 1); // 1st `helper` = the path
     let def = s.definition_response(&pos(&uri, l, c));
     let target = def["uri"]
@@ -449,8 +398,7 @@ fn bug3_goto_def_on_import_segment_opens_the_module() {
         "`import ./helper` must jump to helper.al, got {target}"
     );
 
-    // `import al/string` is embedded stdlib: there is no editable file, so the
-    // segment resolves to nothing rather than to a fabricated location.
+    // Embedded stdlib has no editable file, so never fabricate a location.
     let (l, c) = cursor(BUG3_MAIN, "string", 1, 1); // 1st `string` = the path
     let def = s.definition_response(&pos(&uri, l, c));
     assert!(
@@ -463,18 +411,10 @@ fn bug3_goto_def_on_import_segment_opens_the_module() {
 fn bug3_import_keyword_and_non_final_segment_are_not_clickable() {
     let (_p, mut s, uri) = bug3_project();
 
-    // `import a/b` is not a rename target anywhere. Bug 3 narrowed the `Import`
-    // *occurrence* to the final segment only, but the alias `Definition` still
-    // spans the whole declaration — so the `import` keyword, the `./` and `/`
-    // separators, and any non-final segment fall solely under that wide span.
-    // Pre-fix `prepareRename` there returned the entire-line range and `rename`
-    // executed, silently overwriting `import a/b` with the new name and
-    // corrupting the file; only `definition_response` had the compensating
-    // `ModuleAlias` suppression, so this very test (def-only) shipped green
-    // while the rename surface stayed broken. Renaming would also orphan every
-    // qualified `q.member` use (it targets the remote member, not the alias).
-    // So at each such position all three handlers must decline: goto-def null,
-    // prepareRename null, and rename never an edit (null, or refused with Err).
+    // `import a/b` is not a rename target anywhere. The alias `Definition`
+    // spans the whole declaration, so a rename there would overwrite the
+    // `import` line, and every qualified `q.member` use would be orphaned. All
+    // three handlers must decline at each such position.
     let refused = |s: &mut Workspace, l: i32, c: i32| {
         assert!(
             s.definition_response(&pos(&uri, l, c)).is_null(),
@@ -510,11 +450,8 @@ fn bug3_import_keyword_and_non_final_segment_are_not_clickable() {
     let (l, c) = cursor(BUG3_MAIN, "/string", 1, 0); // the `/`
     refused(&mut s, l, c);
 
-    // The *final* segment is the one navigable token (it opens the imported
-    // file, asserted in `bug3_goto_def_on_import_segment_opens_the_module`) —
-    // but navigable is not renamable: you rename the file, not the import. Both
-    // the resolvable sibling (`helper`) and the embedded-stdlib (`string`)
-    // final segments must still refuse prepareRename and rename.
+    // The final segment is navigable but not renamable: you rename the file,
+    // not the import.
     for (l, c) in [
         cursor(BUG3_MAIN, "helper", 1, 1),
         cursor(BUG3_MAIN, "string", 1, 1),
@@ -532,26 +469,12 @@ fn bug3_import_keyword_and_non_final_segment_are_not_clickable() {
     }
 }
 
-// ============================================================================
-// Symbol surface — local bindings excluded from documentSymbol / workspace
-// symbol, yet still resolvable.
-//
-// Bug 2 is the first code to record `EntityKind::Value` binders (locals,
-// parameters, pattern binders) as graph definitions, so goto-def / find-refs /
-// rename now work on them. But the two symbol *projections* — `documentSymbol`
-// (the editor outline) and `workspace/symbol` (the Cmd-T picker) — must stay a
-// list of a module's structural declarations; a flood of every local in every
-// function body is noise. Both handler loops therefore filter on
-// `Definition::is_symbol_listable`. Dropping that one filter keeps every other
-// test in the suite green — they all probe the result with `.any()` / `.find()`
-// — while wrecking the outline, exactly the silent-untested-regression class
-// these handler-layer tests exist to catch. The two below assert at the handler
-// layer that the structural decls are listed, the `Value` binders are not, and
-// that the exclusion is *projection-only*: a local kept out of the symbol
-// surface is still a resolvable definition (find-refs / rename on locals are
-// pinned by the Bug-2 / Bug-4 tests; this guards that the symbol filter never
-// reached into resolution).
-// ============================================================================
+// `documentSymbol` and `workspace/symbol` must list a module's structural
+// declarations only, filtering `EntityKind::Value` binders out through
+// `Definition::is_symbol_listable`. Every other test in the suite probes with
+// `.any()` / `.find()`, so dropping that filter would stay green here while
+// wrecking the outline. The exclusion is projection-only: a local kept out of
+// the symbol surface is still a resolvable definition.
 
 const SYMSURFACE_SRC: &str = "pub fn scale(factor Int) Int {\n\
 \x20 doubled = factor * 2\n\
@@ -572,7 +495,7 @@ fn document_symbol_lists_top_level_fns_not_locals() {
         .unwrap_or_else(|| panic!("documentSymbol must be an array, got {resp}"));
     let names: Vec<&str> = syms.iter().filter_map(|x| x["name"].as_str()).collect();
 
-    // Both top-level fns are listed, as `SymbolKind::Function` (12).
+    // `SymbolKind::Function` is 12.
     for fname in ["scale", "run"] {
         assert!(
             syms.iter()
@@ -581,8 +504,7 @@ fn document_symbol_lists_top_level_fns_not_locals() {
         );
     }
 
-    // Neither the local binder nor the parameter leaks in — not by name, and
-    // not as the `SymbolKind::Value` (13) every `EntityKind::Value` maps to.
+    // Neither by name nor as `SymbolKind::Value`, which is 13.
     for local in ["factor", "doubled"] {
         assert!(
             !names.contains(&local),
@@ -608,12 +530,12 @@ fn workspace_symbol_query_skips_locals_keeps_decls() {
             .collect()
     };
 
-    // A query matching a top-level fn surfaces it …
+    // A top-level fn is surfaced …
     assert!(
         ws(&mut s, "scale").iter().any(|n| n == "scale"),
         "workspace/symbol must surface the top-level fn `scale`"
     );
-    // … but a query matching a local binder or a parameter returns nothing.
+    // … but a local binder or parameter is not.
     assert!(
         ws(&mut s, "doubled").is_empty(),
         "workspace/symbol must not surface the local `doubled`: {:?}",
@@ -625,8 +547,7 @@ fn workspace_symbol_query_skips_locals_keeps_decls() {
         ws(&mut s, "factor")
     );
 
-    // Projection-only: the local kept out of the symbol surface is still a
-    // resolvable definition — goto-def on its use lands on the binder span.
+    // Still resolvable: goto-def on its use lands on the binder span.
     let (l, c) = cursor(SYMSURFACE_SRC, "doubled", 2, 1); // use in `doubled + 1`
     let def = s.definition_response(&pos(&uri, l, c));
     assert!(
@@ -641,29 +562,15 @@ fn workspace_symbol_query_skips_locals_keeps_decls() {
     );
 }
 
-// ============================================================================
-// Cross-module handler surface — goto-def into another file, rename across two.
-//
-// Every handler test above is single-file, so two seams stay unexercised at the
-// layer the editor actually calls:
-//   * `uri_for`'s *cross-module* branch — a `def.defid.module` that is a
-//     different on-disk module, mapped to its file via
-//     `reference::module_uri` (the same-file tests only hit the
-//     `*path == req_mod` -> request-URI branch, and Bug 3 hits the distinct
-//     import-segment path via `import_target_at`); and
-//   * `workspace_edit_json` shaping a `changes` map keyed by 2+ file URIs (the
-//     Bug-4 rename asserts a single-key map).
-// `references.rs` pins both at the `IncrementalSession` layer; these pin the
-// `Workspace` handler JSON. A two-file project: `lib.al` declares `greet`,
-// `main.al` imports it and calls `lib.greet()`.
-// ============================================================================
+// Cross-module handler surface, which the single-file tests above never reach:
+// `uri_for`'s cross-module branch, and a `changes` map keyed by two file URIs.
+// `lib.al` declares `greet`; `main.al` imports it and calls `lib.greet()`.
 
 const XMOD_LIB: &str = "pub fn greet() Int { 7 }\n";
 const XMOD_MAIN: &str = "import ./lib\nx = lib.greet()\nprintln(x)\n";
 
-/// Boot a server over a project carrying `lib.al` + `main.al`, open both as
-/// client tabs (lib first, so `main.al` is the last-analysed entry), and return
-/// the server plus both URIs ready to query the cross-module `lib.greet()` use.
+/// Open both files as client tabs, lib first, so `main.al` is the
+/// last-analysed entry.
 fn xmod_project() -> (Project, Workspace, String, String) {
     let p = Project::new("xmod_handler");
     p.write("lib.al", XMOD_LIB);
@@ -688,13 +595,9 @@ fn location_in(arr: &[Json], want: &str) -> (i64, i64) {
     start(hits[0])
 }
 
-/// First-query portion shared by every cross-module find-references test:
-/// queries references on `greet` from `query_uri` (either the qualified use in
-/// main.al or the declaration in lib.al) with `includeDeclaration: true` and
-/// asserts the result is a Location[] whose URIs span exactly lib.al and
-/// main.al. Returns the locations plus the queried (line, character) so
-/// `assert_refs_span_lib_and_main` can layer on the exact-span assertions and
-/// the `includeDeclaration: false` re-query.
+/// Query references on `greet` from `query_uri` with `includeDeclaration` and
+/// assert the URIs span exactly lib.al and main.al. Returns the locations and
+/// the queried position so callers can layer on more assertions.
 fn assert_refs_uris_span_lib_and_main(
     s: &mut Workspace,
     query_uri: &str,
@@ -722,8 +625,8 @@ fn assert_refs_uris_span_lib_and_main(
     (arr.clone(), l, c)
 }
 
-/// The two `greet` positions every cross-module span test pins: the declaration
-/// identifier in lib.al and the `greet` token of `lib.greet()` in main.al.
+/// The declaration identifier in lib.al, and the `greet` token of
+/// `lib.greet()` in main.al.
 fn greet_spans() -> ((i64, i64), (i64, i64)) {
     let at = |src| {
         let (l, c) = cursor(src, "greet", 1, 0);
@@ -738,13 +641,9 @@ fn one_at(items: &[Json], want: (i64, i64), what: &str) {
     assert_eq!(start(&items[0]), want, "{what} span: {items:?}");
 }
 
-/// Full shared assertion block for the cross-module find-references tests that
-/// pin exact spans. On top of the URI-set check above, asserts:
-///   * the result holds exactly two locations — the declaration's identifier
-///     in lib.al (line 0) and the `greet` token of `lib.greet()` in main.al
-///     (line 1), never the `lib` qualifier;
-///   * re-querying with `includeDeclaration: false` drops the declaration,
-///     leaving only the main.al use — an array, never empty/null.
+/// Exactly two locations, the lib.al declaration and the main.al use, never the
+/// `lib` qualifier. Re-querying without `includeDeclaration` leaves only the
+/// use, as an array.
 fn assert_refs_span_lib_and_main(
     s: &mut Workspace,
     query_uri: &str,
@@ -787,11 +686,8 @@ fn assert_refs_span_lib_and_main(
     );
 }
 
-/// Shared assertion block for the cross-module rename tests. The WorkspaceEdit
-/// `changes` map must be keyed by exactly lib.al and main.al, each holding one
-/// edit — the declaration's identifier in lib.al (line 0) and the `greet` token
-/// of `lib.greet()` in main.al (line 1), never the `lib` qualifier — and every
-/// edit must substitute exactly `new_name`.
+/// The `changes` map is keyed by lib.al and main.al, each with one edit at
+/// `greet`, never at the `lib` qualifier, each substituting `new_name`.
 fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, new_name: &str) {
     let changes = resp
         .get("changes")
@@ -834,9 +730,8 @@ fn assert_rename_spans_lib_and_main(resp: &Json, main_uri: &str, lib_uri: &str, 
 fn cross_module_goto_def_returns_the_other_files_uri() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Click the `greet` of `lib.greet()` in main.al (a qualified member use).
-    // goto-def must cross the module boundary and land on the declaration in
-    // lib.al — a *different* file's URI than the one the request came from.
+    // The `greet` of `lib.greet()` must resolve to lib.al, a different file
+    // from the one the request came from.
     let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
     let def = s.definition_response(&pos(&main_uri, l, c));
     assert!(
@@ -860,8 +755,7 @@ fn cross_module_goto_def_returns_the_other_files_uri() {
         "the definition lives in another file, not the requesting one"
     );
 
-    // It lands exactly on `greet`'s declaring identifier: line 0, the `g` of
-    // `pub fn greet` (column 7).
+    // Landing on the `g` of `pub fn greet`, line 0 column 7.
     let decl = cursor(XMOD_LIB, "greet", 1, 0);
     assert_eq!(
         start(&def),
@@ -874,9 +768,8 @@ fn cross_module_goto_def_returns_the_other_files_uri() {
 fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Rename driven from the qualified use in main.al. The WorkspaceEdit must
-    // rewrite both the declaration in lib.al and the use in main.al, so its
-    // `changes` map is keyed by two distinct file URIs.
+    // Driven from the qualified use in main.al, so `changes` is keyed by two
+    // distinct file URIs.
     let (l, c) = cursor(XMOD_MAIN, "greet", 1, 1);
     let resp = rename_at(&mut s, &main_uri, l, c, "salute")
         .expect("a cross-module rename of a user fn must be allowed, not refused");

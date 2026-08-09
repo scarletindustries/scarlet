@@ -1,39 +1,24 @@
 //! The stack-switch primitives: the only module in the crate that moves the
-//! machine stack pointer. Everything here is `global_asm!`-free hand-rolled
-//! `naked_asm!` — no Rust frame exists inside a switch, so there is nothing
-//! the compiler could miscompile around it.
+//! machine stack pointer. All hand-rolled `naked_asm!`, so no Rust frame exists
+//! inside a switch. Cranelift's own `stack_switch` instruction is not used: it
+//! is x64-only and emits `ALL_CLOBBERS`.
 //!
-//! Both supported arches are implemented in full (x86_64 SysV, aarch64
-//! AAPCS64); the test suite runs on both and the asm is not cfg'd away.
-//!
-//! Why hand-rolled rather than Cranelift's own `stack_switch` IR
-//! instruction: that instruction is x64-only (`isa/aarch64/` has zero hits),
-//! requires `stack_switch_model=basic` (defaults `none`), and its emission
-//! is `ALL_CLOBBERS`. Hand-rolled asm covers both arches and clobbers
-//! nothing.
-//!
-//! # Ownership rule (stated once, from the Stage-1 spec)
-//!
-//! *The C stack is owned by the OS thread; the process stack is owned by the
-//! `Process`. The stack pointer points at the process stack **only** between
+//! Ownership rule: the C stack belongs to the OS thread, the process stack to
+//! the `Process`. The stack pointer points at the process stack ONLY between
 //! [`run_on_stack`]'s switch-in and its switch-out (or the matching
-//! [`swap_context`]), and never while any Rust frame is live above it.*
+//! [`swap_context`]), and never while a Rust frame is live above it.
 //!
-//! # Contracts the asm relies on
+//! Three contracts the asm relies on:
 //!
-//! - **Alignment.** Cranelift requires 16-byte stack alignment
-//!   unconditionally, and SysV requires `rsp % 16 == 0` immediately before a
-//!   `call` so the callee sees `rsp ≡ 8 (mod 16)` at its first instruction
-//!   (AAPCS64: `sp ≡ 0 (mod 16)` always). Region tops are 16-aligned
-//!   ([`super::slab::StackHandle::top`]) and every switch below re-aligns
-//!   before its call; `alignment_contract` in the tests pins this.
-//! - **The old stack pointer is saved on the stack being entered**, not in
-//!   scheduler-side state: that is what makes a parked stack self-contained
-//!   and migratable — resuming needs nothing from the thread that parked it.
-//! - **The pinned register** (x86_64: r15, the only register Cranelift's
-//!   `enable_pinned_reg` offers; aarch64: x21, Cranelift's aarch64 pinned
-//!   register) is loaded with the process pointer on entry. It is
-//!   callee-saved in both ABIs, so ordinary Rust shims preserve it for free.
+//! - Alignment. SysV wants `rsp % 16 == 0` right before a `call`, so the callee
+//!   sees `rsp ≡ 8 (mod 16)`; AAPCS64 wants `sp ≡ 0 (mod 16)` always. Region
+//!   tops are 16-aligned and every switch re-aligns before its call.
+//!   `alignment_contract` in the tests pins this.
+//! - The old stack pointer is saved on the stack being ENTERED, not in
+//!   scheduler-side state. That is what makes a parked stack migratable:
+//!   resuming needs nothing from the thread that parked it.
+//! - The pinned register (x86_64 r15, aarch64 x21) holds the process pointer on
+//!   entry. It is callee-saved in both ABIs, so Rust shims preserve it free.
 
 #![allow(unsafe_code)]
 
@@ -48,10 +33,9 @@ use std::ptr;
 pub type Entry = unsafe extern "C" fn(*mut c_void) -> u64;
 
 /// A parked computation: the stack pointer of a suspended stack whose top
-/// frames are the callee-saved registers [`swap_context`] pushed. Plain
-/// data — everything else the resume needs lives *on* the parked stack,
-/// which is what makes the pair (stack region, `SavedContext`) a complete,
-/// self-contained continuation.
+/// frames are the callee-saved registers [`swap_context`] pushed. Everything
+/// else the resume needs lives ON the parked stack, so the pair (stack region,
+/// `SavedContext`) is a complete continuation.
 #[repr(C)]
 #[derive(Debug)]
 pub struct SavedContext {
@@ -59,11 +43,10 @@ pub struct SavedContext {
 }
 
 // SAFETY: the sp names memory inside a stack region owned by the same
-// `Process` that owns this context; moving both to another OS thread moves
-// exclusive ownership of everything the sp can reach. This impl is one half
-// of the process-stack purity invariant (see the module doc in `stack`):
-// it is sound ONLY while no word on the parked stack names anything owned
-// by the scheduler that parked it.
+// `Process` that owns this context, so moving both to another OS thread moves
+// exclusive ownership of everything the sp can reach. Sound ONLY while no word
+// on the parked stack names anything owned by the scheduler that parked it
+// (the process-stack purity invariant, see `vm::stack`).
 unsafe impl Send for SavedContext {}
 
 impl SavedContext {
@@ -77,26 +60,22 @@ impl SavedContext {
 }
 
 thread_local! {
-    /// The scheduler C-stack switch point, published by [`run_on_stack`] on
-    /// every entry: the value the stack pointer had the instant it left the
-    /// C stack. Everything below it on the C stack is dead space, which is
-    /// exactly what [`call_on_sched_stack`] runs shims on. Thread-local
-    /// because it names scheduler-owned memory: it must be re-read after
-    /// every suspension point, never carried in a frame or a register
-    /// (process-stack purity), so a process resumed on another scheduler
-    /// switches to *that* scheduler's C stack by construction.
+    /// The value the stack pointer had the instant it left the C stack,
+    /// published by [`run_on_stack`]. Everything below it is dead space, which
+    /// is what [`call_on_sched_stack`] runs shims on. Thread-local because it
+    /// names scheduler-owned memory: it must be re-read after every suspension
+    /// point, never carried in a frame or register, so a process resumed on
+    /// another scheduler switches to THAT scheduler's C stack.
     static SCHED_SP: Cell<*mut u8> = const { Cell::new(ptr::null_mut()) };
 }
 
-/// Run `entry(arg)` with the stack pointer moved onto a process stack and
-/// the process pointer pinned (r15 / x21). This is the process ↔ scheduler
-/// switch for the ordinary, non-parking path: `entry` runs to completion and
-/// its return switches back. The scheduler-side switch point is saved on the
-/// process stack (self-containment) *and* published to this thread's
-/// [`SCHED_SP`] for [`call_on_sched_stack`].
+/// Run `entry(arg)` with the stack pointer moved onto a process stack and the
+/// process pointer pinned (r15 / x21). The non-parking path: `entry` runs to
+/// completion and its return switches back. The switch point is saved on the
+/// process stack AND published to this thread's [`SCHED_SP`].
 ///
-/// All callee-saved registers are saved on the *caller's* (scheduler's)
-/// stack — they describe the scheduler's frames, not the process's.
+/// Callee-saved registers go on the CALLER's stack — they describe the
+/// scheduler's frames, not the process's.
 ///
 /// # Safety
 /// `new_sp` must be the 16-aligned top of a live, writable region with
@@ -110,14 +89,11 @@ pub unsafe fn run_on_stack(
     arg: *mut c_void,
 ) -> u64 {
     let sched_slot = SCHED_SP.with(Cell::as_ptr);
-    // Entries NEST: a shim runs on the C stack, re-enters the interpreter,
-    // and the interpreter calls a compiled body, which lands here again. The
-    // inner entry publishes a switch point deeper down the C stack; without
-    // restoring the outer one on the way out, a *flat* loop of
+    // Entries NEST, and the inner one publishes a switch point deeper down the
+    // C stack. Without restoring the outer one on the way out, a flat loop of
     // native->shim->interp->native round-trips would republish one frame-pair
-    // lower every iteration and walk the scheduler's thread stack to death —
-    // with no guard page there to name it. Depth must be a stack discipline,
-    // not a ratchet.
+    // lower every iteration and walk the scheduler's thread stack to death,
+    // with no guard page there to catch it.
     let prev = SCHED_SP.with(Cell::get);
     let restore = RestoreSchedSp(prev);
     // SAFETY: forwarded contract; `sched_slot` is this thread's live TLS
@@ -127,9 +103,9 @@ pub unsafe fn run_on_stack(
     out
 }
 
-/// Puts the enclosing entry's switch point back, on every exit path
-/// including an abort-in-progress — a leaked inner switch point is a silent
-/// stack walk, so this must not depend on reaching the end of a function.
+/// Puts the enclosing entry's switch point back on every exit path, including
+/// an abort in progress. A leaked inner switch point is a silent stack walk, so
+/// this must not depend on reaching the end of a function.
 struct RestoreSchedSp(*mut u8);
 
 impl Drop for RestoreSchedSp {
@@ -151,11 +127,9 @@ pub unsafe extern "C" fn run_on_stack_raw(
     arg: *mut c_void,
     saved_sp_out: *mut *mut u8,
 ) -> u64 {
-    // rdi = proc, rsi = new_sp, rdx = entry, rcx = arg, r8 = saved_sp_out
-    //
-    // Entry rsp ≡ 8 (mod 16); six pushes (48 bytes) keep it ≡ 8. new_sp is
-    // 16-aligned; `sub rsp, 16` leaves rsp ≡ 0 at the call, so the callee
-    // sees ≡ 8 — a normal SysV entry.
+    // rdi = proc, rsi = new_sp, rdx = entry, rcx = arg, r8 = saved_sp_out.
+    // Entry rsp ≡ 8 (mod 16); six pushes keep it ≡ 8. new_sp is 16-aligned, so
+    // `sub rsp, 16` leaves rsp ≡ 0 at the call and the callee sees ≡ 8.
     naked_asm!(
         "push rbx",
         "push rbp",
@@ -194,10 +168,9 @@ pub unsafe extern "C" fn run_on_stack_raw(
     arg: *mut c_void,
     saved_sp_out: *mut *mut u8,
 ) -> u64 {
-    // x0 = proc, x1 = new_sp, x2 = entry, x3 = arg, x4 = saved_sp_out
-    //
-    // sp stays 16-aligned throughout (AAPCS64 hardware requirement). The
-    // callee-saved set is x19-x28, x29 (fp), x30 (lr), d8-d15: 160 bytes.
+    // x0 = proc, x1 = new_sp, x2 = entry, x3 = arg, x4 = saved_sp_out.
+    // sp stays 16-aligned throughout. Callee-saved set: x19-x28, x29, x30,
+    // d8-d15 — 160 bytes.
     naked_asm!(
         "stp x29, x30, [sp, #-160]!",
         "stp x19, x20, [sp, #16]",
@@ -233,14 +206,10 @@ pub unsafe extern "C" fn run_on_stack_raw(
     )
 }
 
-/// Run `f(arg)` back on the scheduler's C stack — the shim bracket
-/// (`enter_runtime`/`leave_runtime`, C4): every Rust shim a compiled body
-/// calls runs here, so the process stack only ever holds Cranelift frames,
+/// Run `f(arg)` back on the scheduler's C stack. Every Rust shim a compiled
+/// body calls runs here, so the process stack only ever holds Cranelift frames,
 /// whose sizes Cranelift reports at compile time. The target sp is this
-/// thread's [`SCHED_SP`] switch point; everything below it on the C stack is
-/// dead space belonging to no live frame. This wrapper is the single place a
-/// scheduler-owned address enters compiled-code-adjacent execution, and a
-/// call through it can never be parked.
+/// thread's [`SCHED_SP`]. A call through here can never be parked.
 ///
 /// # Safety
 /// Must be called while running on a process stack entered through
@@ -264,40 +233,29 @@ pub unsafe fn call_on_sched_stack(f: Entry, arg: *mut c_void) -> u64 {
     unsafe { call_on_c_stack_raw(sched_sp, f, arg) }
 }
 
-/// Resume a parked context, publishing THIS thread's switch point first.
+/// Resume a parked context, publishing THIS thread's switch point first. The
+/// only sanctioned way to enter a [`SavedContext`].
 ///
-/// [`swap_context`] is the raw register/sp exchange: it restores the
-/// callee-saved registers the parked context saved, including the pinned
-/// register and — critically — leaving [`SCHED_SP`] untouched. A process
-/// parked on scheduler A and resumed on scheduler B would therefore run with
-/// B's TLS still holding whatever switch point B's last *completed*
-/// `run_on_stack` left behind, which sits ABOVE B's current C-stack depth.
-/// The resumed body's first [`call_on_sched_stack`] would then set
-/// `rsp` to that stale address and the shim's frames would overwrite every
-/// live frame beneath it — including the one that called us. Re-reading a
-/// stale thread-local is not re-derivation.
-///
-/// This is the only sanctioned way to enter a [`SavedContext`]: it saves the
-/// current context into `save`, publishes the switch point that `save`
-/// occupies, and hands control to `resume`.
+/// Raw [`swap_context`] leaves [`SCHED_SP`] untouched. A process parked on
+/// scheduler A and resumed on B would then run with B's TLS holding the switch
+/// point B's last COMPLETED `run_on_stack` left behind, which sits above B's
+/// current C-stack depth; the resumed body's first [`call_on_sched_stack`]
+/// would set `rsp` there and overwrite every live frame beneath it.
 ///
 /// # Safety
 /// As [`swap_context`]: both pointers must be valid, `resume` must name a
 /// context parked by this module, and the resumed stack must be live.
 pub unsafe fn resume_on_stack(save: *mut SavedContext, resume: *const SavedContext) {
     let sched_slot = SCHED_SP.with(Cell::as_ptr);
-    // The switch point must be the sp this thread parks at, which only the
-    // asm can see — it is the very value `swap_context` writes into `save`.
-    // Publishing anything computable from Rust here is wrong: `save` itself
-    // is a `SavedContext` living in some *caller's* frame, which on a
-    // migrated resume is a frame on the wrong thread's stack entirely.
+    // Only the asm can see the sp this thread parks at, so the asm must publish
+    // it. Anything computable from Rust here is wrong: `save` lives in some
+    // caller's frame, which on a migrated resume is the wrong thread's stack.
     // SAFETY: forwarded contract; `sched_slot` is this thread's live TLS slot.
     unsafe { resume_context_raw(save, resume, sched_slot) }
 }
 
 /// [`swap_context`] plus one store: publish the parking sp as this thread's
-/// [`SCHED_SP`] switch point. This is the resume half of the C4 contract —
-/// everything below the returned sp is dead C stack that a shim may use.
+/// [`SCHED_SP`]. Everything below it is dead C stack a shim may use.
 ///
 /// # Safety
 /// As [`swap_context`]; additionally `sched_slot` must be valid to write.

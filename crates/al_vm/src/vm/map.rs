@@ -51,8 +51,8 @@ impl VM {
             }
         };
         let result = match found {
-            Some(v) => self.make_some(v),
-            None => self.make_none(),
+            Some(v) => self.make_some(v)?,
+            None => self.make_none()?,
         };
         self.stack.push(result);
         Ok(())

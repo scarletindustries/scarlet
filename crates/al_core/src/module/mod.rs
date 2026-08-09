@@ -13,10 +13,9 @@ use crate::types::{Scheme, TypeInfo};
 
 pub mod stdlib;
 
-// Module *identity* — `ModulePath`, `ModuleKey`, the canonical path
-// functions, and `ResolveError` — lives in `al_syntax::module_path` (a
-// `Diagnostic` carries the key of the module it points into). Re-exported
-// here, where resolution mints the keys.
+// Module identity lives in `al_syntax::module_path` because a `Diagnostic`
+// carries the key of the module it points into. Re-exported here, where
+// resolution mints the keys.
 pub use al_syntax::module_path::{
     ModuleKey, ModulePath, ResolveError, al_prelude, file_module_path, is_resolved_file, is_stdlib,
     main_module,
@@ -24,12 +23,10 @@ pub use al_syntax::module_path::{
 
 const STDLIB_MARKER: &str = include_str!("../std/.al-stdlib-root");
 
-/// Walk up from `near` looking for `src/std/.al-stdlib-root` whose content
-/// matches the value embedded at build time; on a hit, return the `src/std`
-/// directory (the stdlib source root). The marker is a fixed UUID that never
-/// changes, so editing stdlib files doesn't break detection and a non-AL
-/// project can't accidentally match. Shared by [`detect_stdlib_module`]
-/// (file → module path) and the LSP's inverse mapping (module path → file).
+/// Walk up from `near` for a `src/std/.al-stdlib-root` marker matching the one
+/// embedded at build time; on a hit return the `src/std` directory. The marker
+/// is a fixed UUID, so editing stdlib files cannot break detection and an
+/// unrelated project cannot accidentally match.
 pub fn find_stdlib_root(near: &Path) -> Option<PathBuf> {
     let near = near.canonicalize().ok()?;
     let mut dir = near.parent()?.to_path_buf();
@@ -46,9 +43,9 @@ pub fn find_stdlib_root(near: &Path) -> Option<PathBuf> {
     }
 }
 
-/// If `file` is a stdlib source file inside the AL compiler repo itself,
-/// return its module path so the compiler can analyse it *as* that module
-/// (allowing `@vm`/external and suppressing prelude-redefinition errors).
+/// If `file` is a stdlib source file inside the AL compiler repo itself, its
+/// module path, so the compiler can analyse it *as* that module: `@vm`/external
+/// allowed, prelude-redefinition errors suppressed.
 pub fn detect_stdlib_module(file: &Path) -> Option<ModulePath> {
     let file = file.canonicalize().ok()?;
     let std_root = find_stdlib_root(&file)?;
@@ -69,11 +66,10 @@ pub fn detect_stdlib_module(file: &Path) -> Option<ModulePath> {
     Some(segs)
 }
 
-/// Recursively collect every `.al` source file under `dir` into `out`.
-/// Uses each entry's `file_type()` (no extra stat; symlinks are never
-/// followed, so a symlink cycle can't wedge the walk), skips VCS/build/dep
-/// directories (dotdirs, `target`, `node_modules`), and silently ignores
-/// unreadable entries instead of aborting the whole walk.
+/// Recursively collect every `.al` source file under `dir` into `out`. Skips
+/// dotdirs, `target` and `node_modules`, and ignores unreadable entries rather
+/// than aborting. Reads `file_type()` so symlinks are never followed and a
+/// symlink cycle cannot wedge the walk.
 pub fn collect_al_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -106,21 +102,18 @@ pub struct ExportedValue {
     /// A function's parameter names, in order. Empty for anything else.
     ///
     /// Documentation, not semantics: al rejects labelled arguments outside a
-    /// constructor call, so a parameter's name never reaches a call site.
-    /// Putting it in `TypeNode::Fun` would force unification to decide whether
-    /// `fn(path String)` equals `fn(p String)` — and either the label is dead
-    /// weight in every unification, or renaming a parameter breaks callers.
-    /// Constructor field labels *are* semantic, and live in the type
-    /// (`ValueKind::Constructor { field_labels }`). These do not.
+    /// constructor call, so a parameter name never reaches a call site and must
+    /// stay out of `TypeNode::Fun` — otherwise unification would have to decide
+    /// whether `fn(path String)` equals `fn(p String)`. Constructor field
+    /// labels *are* semantic and live in the type instead.
     pub param_names: Vec<String>,
-    /// The declaration's own doc comment. Carried across module boundaries so
-    /// hovering `io.read_text` in another file shows its prose.
+    /// The declaration's own doc comment, carried across module boundaries.
     pub doc: Option<String>,
 }
 
-/// What an importer sees of a compiled module: its `pub` types and values,
-/// and the names of its non-`pub` items so we can give a "private" error
-/// rather than "not found" when one is referenced.
+/// What an importer sees of a compiled module: its `pub` types and values, plus
+/// the names of its non-`pub` items so a reference to one gets a "private"
+/// error rather than "not found".
 #[derive(Debug, Clone)]
 pub struct ModuleInterface {
     pub path: ModulePath,
@@ -130,10 +123,8 @@ pub struct ModuleInterface {
     /// in iteration order into the reproducible stdlib blob.
     pub private_names: BTreeSet<String>,
     /// The module's own doc comment: the `/** */` block at line 0 of its
-    /// source. `None` for a module without one. Unlike every other doc in the
-    /// language, this one is carried through the precompiled stdlib blob
-    /// (`SModule::doc`) and re-seeded onto the reference graph by
-    /// `synth_refs_from_interface`, so hovering `al/scheduler` shows its prose.
+    /// source. Unlike every other doc, this one is carried through the
+    /// precompiled stdlib blob so hovering `al/scheduler` shows its prose.
     pub doc: Option<String>,
 }
 
@@ -149,10 +140,9 @@ impl ModuleInterface {
     }
 }
 
-/// Width of the type-id range reserved for each user module. A module's
-/// nominal type ids are allocated from `[id_base, id_base + RANGE)`; the
-/// next module starts at the next multiple. This keeps type ids stable when
-/// an unrelated earlier module is recompiled — see `ModuleTable::id_base_for`.
+/// Width of the type-id range reserved for each user module: its nominal type
+/// ids come from `[id_base, id_base + RANGE)`. Keeps type ids stable when an
+/// unrelated earlier module is recompiled.
 pub const MODULE_TYPE_ID_RANGE: i32 = 256;
 
 /// Round `n` up to the next multiple of `MODULE_TYPE_ID_RANGE`.
@@ -160,19 +150,15 @@ const fn align_to_range(n: i32) -> i32 {
     n + (MODULE_TYPE_ID_RANGE - n % MODULE_TYPE_ID_RANGE) % MODULE_TYPE_ID_RANGE
 }
 
-/// Proof that [`ModuleTable::id_base_for`] reserved a type-id range. Carries
-/// the range start together with whether an existing assignment was reused,
-/// so the pair can never be mismatched across the gap between reserving the
-/// range and recording its usage: [`Self::note_usage`] consumes the token.
+/// Proof that [`ModuleTable::id_base_for`] reserved a type-id range, carrying
+/// the range start and whether an existing assignment was reused so the two
+/// cannot be mismatched. [`Self::note_usage`] consumes the token.
 #[must_use = "hand the reservation back via note_usage once ids are allocated"]
 pub struct IdRangeReservation {
     base: TypeId,
-    /// `true` when an existing assignment was reused. A fresh allocation is
-    /// always at `id_high_water`, so a first-compile overflow (deps allocate
-    /// before importer) only spills into unallocated space and `note_usage`
-    /// simply pushes `id_high_water` past it; a reused-range overflow may
-    /// collide with a sibling's already-assigned block and so raises
-    /// `id_range_overflow`.
+    /// `true` when an existing assignment was reused. A fresh allocation sits
+    /// at `id_high_water`, so overflowing it only spills into unallocated
+    /// space; overflowing a reused range may collide with a sibling's block.
     reused: bool,
 }
 
@@ -182,12 +168,9 @@ impl IdRangeReservation {
         self.base
     }
 
-    /// Record that the module allocated `used` type ids from this range. On a
-    /// reused range, allocating past `MODULE_TYPE_ID_RANGE` may collide with a
-    /// sibling's already-assigned block, so the overflow flag is raised; on a
-    /// fresh range the spillover is into unallocated space. Either way the
-    /// high-water mark is bumped past actual usage so the next fresh
-    /// allocation skips the spillover.
+    /// Record that the module allocated `used` type ids from this range.
+    /// Overflowing a reused range raises the overflow flag; either way the
+    /// high-water mark is bumped past the spillover.
     pub fn note_usage(self, table: &mut ModuleTable, used: i32) {
         if used > MODULE_TYPE_ID_RANGE {
             if self.reused {
@@ -200,26 +183,19 @@ impl IdRangeReservation {
     }
 }
 
-/// Where a cached module came from. The variant determines which pieces of
-/// incremental-recompilation bookkeeping exist: only on-disk `File` modules
-/// have a source path to re-hash and a watermark to truncate to; `Embedded`
-/// stdlib compiled from `&'static str` never changes; `Hydrated` stdlib was
-/// deserialised from the precompiled blob and has no source at all.
+/// Where a cached module came from, and so which incremental bookkeeping it
+/// has: only `File` modules have a source path to re-hash and a watermark to
+/// truncate to. `Embedded` stdlib comes from `&'static str` and never changes;
+/// `Hydrated` stdlib came from the precompiled blob and has no source.
 ///
-/// Reference-graph data (`refs`): every definition declared in the module and
-/// every name occurrence inside it, filled by the typecheck pass. Persisting
-/// it here — alongside `iface`/`dependents` — is what lets a cross-module
-/// reference into this module survive an unrelated recompile, and dropping the
-/// `CachedModule` on invalidation drops its references with it so a rebuilt
-/// workspace graph can never have a dangling reverse edge. `Rc` so
-/// `build_reference_graph` re-inserting an unchanged module into the workspace
-/// graph on every `check` is a refcount bump, not a deep copy. `Hydrated`
-/// modules carry none — their definitions are synthesised lazily from the
-/// hydrated `ModuleInterface` at workspace-graph build time (the stdlib's
-/// precompiled `Scheme.def` already carries the real declaration span).
+/// `refs` holds the module's definitions and occurrences. Storing them here is
+/// what lets a cross-module reference survive an unrelated recompile, and
+/// dropping the `CachedModule` drops them, so a rebuilt workspace graph cannot
+/// have a dangling reverse edge. `Hydrated` modules carry none: their
+/// definitions are synthesised from the interface at graph-build time.
 #[derive(Debug)]
-// One instance per cached module, moved only at insert; the size gap between
-// `Hydrated` and `File` costs nothing that boxing wouldn't add back in derefs.
+// One instance per cached module, moved only at insert; boxing would add
+// derefs and save nothing.
 #[allow(clippy::large_enum_variant)]
 pub enum ModuleOrigin {
     Hydrated,
@@ -229,20 +205,15 @@ pub enum ModuleOrigin {
     File {
         /// FNV-1a of the source bytes this interface was built from.
         source_hash: u64,
-        /// `(mtime, len)` of the on-disk source as of the last time its
-        /// content was hashed and found to match `source_hash`; `None` until
-        /// a hash-equal stat has been observed. Lives here — next to the hash
-        /// it gates — so evicting or replacing the `CachedModule`
-        /// structurally drops its stat gate with it. See
-        /// [`ModuleTable::source_changed`] for the gating protocol.
+        /// `(mtime, len)` as of the last time the content hashed equal to
+        /// `source_hash`; `None` until then. Lives next to the hash it gates so
+        /// evicting the `CachedModule` drops the gate with it. See
+        /// [`ModuleTable::source_changed`].
         stat: Option<(std::time::SystemTime, u64)>,
-        /// Snapshot of every arena/pool length immediately *before* this
-        /// module's body was analysed. On invalidation the engine truncates
-        /// back to the minimum watermark across the invalidated set, which by
-        /// construction also discards every module compiled after that point.
+        /// Every arena/pool length immediately *before* this module's body was
+        /// analysed.
         watermark: Watermark,
-        /// Resolved on-disk path; re-hashed by `IncrementalSession` on the
-        /// next check.
+        /// Resolved on-disk path.
         path: PathBuf,
         refs: Rc<ModuleReferences>,
     },
@@ -250,11 +221,9 @@ pub enum ModuleOrigin {
 
 /// A loaded module plus the bookkeeping needed for incremental recompilation.
 ///
-/// The per-module nominal type-id range is deliberately *not* stored here.
-/// `ModuleTable::id_bases` is the single source of truth for it, because that
-/// map must survive `CachedModule` eviction: recompiling a module after an
-/// unrelated module's closure has been dropped still has to hand out the same
-/// type ids, which a field dropped on invalidation could never guarantee.
+/// The per-module type-id range is deliberately not stored here.
+/// `ModuleTable::id_bases` owns it, because it must survive eviction:
+/// recompiling a module has to hand out the same type ids it had before.
 #[derive(Debug)]
 pub struct CachedModule {
     pub iface: ModuleInterface,
@@ -280,8 +249,8 @@ impl CachedModule {
         }
     }
 
-    /// Arena watermark captured before this module's body was analysed.
-    /// `None` for embedded/hydrated modules — they are never invalidated.
+    /// Arena watermark captured before this module's body was analysed. `None`
+    /// for embedded/hydrated modules, which are never invalidated.
     pub fn watermark(&self) -> Option<Watermark> {
         match &self.origin {
             ModuleOrigin::File { watermark, .. } => Some(*watermark),
@@ -306,30 +275,27 @@ pub struct ModuleTable {
     loaded: IndexMap<ModuleKey, CachedModule>,
     loading: HashSet<ModuleKey>,
     /// When the binary carries a static stdlib, `get_or_hydrate` falls through
-    /// to `s.lookup_module(key)` on a `loaded` miss and caches the result.
+    /// to it on a `loaded` miss and caches the result.
     static_fallback: Option<&'static crate::static_ir::StaticStdlib>,
-    /// In-memory document overrides (LSP unsaved buffers). Module resolution
-    /// prefers these over `fs::read_to_string`.
+    /// In-memory document overrides (LSP unsaved buffers), preferred over
+    /// `fs::read_to_string`.
     overlays: HashMap<PathBuf, String>,
-    /// Incremented every time a module body is actually compiled (not on cache
-    /// hit). Test/telemetry only.
+    /// Module bodies actually compiled, not counting cache hits. Telemetry only.
     compile_count: u32,
-    /// Per-module type-id range starts. Assigned on a module's first compile
-    /// and *retained across cache eviction* so a recompile hands out the same
-    /// nominal type ids. Only cleared by `reset_id_bases` (overflow fallback).
+    /// Per-module type-id range starts, retained across cache eviction so a
+    /// recompile hands out the same nominal type ids. Only `reset_id_bases`
+    /// clears it.
     id_bases: HashMap<ModuleKey, TypeId>,
-    /// Lowest type id not covered by any allocated `id_base` range; the next
-    /// fresh `id_base_for` rounds up from `max(floor, id_high_water)`.
+    /// Lowest type id not covered by any allocated range.
     id_high_water: TypeId,
     /// Set when a recompiled module allocated past its reserved range and may
-    /// have collided with a later module's ids. `IncrementalSession` reacts by
-    /// performing a full invalidate on the next `check`.
+    /// have collided with a later module's ids. `IncrementalSession` reacts with
+    /// a full invalidate on the next `check`.
     id_range_overflow: bool,
 }
 
-/// Hand-written (`TypeId` deliberately has no `Default`): `id_high_water`
-/// starts at the `NONE` sentinel — no id range reserved yet, the same state
-/// [`reset_id_bases`](ModuleTable::reset_id_bases) restores.
+/// Hand-written because `TypeId` has no `Default`: `id_high_water` starts at
+/// the `NONE` sentinel, the same state `reset_id_bases` restores.
 impl Default for ModuleTable {
     fn default() -> Self {
         ModuleTable {
@@ -432,19 +398,10 @@ impl ModuleTable {
 
     /// Has cached module `key`'s source changed since its interface was built?
     ///
-    /// Called for every cached user module on every `IncrementalSession::check`
-    /// (i.e. per LSP keystroke), so it must be cheap when nothing changed. An
-    /// unsaved-buffer overlay has no stable mtime, so it is hashed directly
-    /// (the in-memory copy is small and authoritative). The disk path is
-    /// stat-gated: when `(mtime, len)` is byte-identical to the tuple recorded
-    /// the last time the content was hashed equal, the file is taken to be
-    /// unchanged and the read + FNV hash is skipped — turning an
-    /// O(sum of all dependency file sizes) read+hash per keystroke into
-    /// O(#dependencies) `stat` calls. On a stat miss the hash is still the
-    /// source of truth: the file is read and hashed, the tuple refreshed so a
-    /// content-preserving `touch` doesn't re-read forever, and the rare
-    /// same-`(mtime, len)` content edit is additionally covered by the LSP
-    /// `didChangeWatchedFiles` -> `invalidate_path` path.
+    /// Runs per LSP keystroke for every cached user module, so the unchanged
+    /// case is stat-gated: an unmoved `(mtime, len)` skips the read and hash.
+    /// An edit that preserves both is missed here and covered instead by the
+    /// LSP's `didChangeWatchedFiles` -> `invalidate_path`.
     pub fn source_changed(&mut self, key: &ModuleKey) -> bool {
         let (path, expected_hash, cached_stat) = match self.loaded.get(key).map(|cm| &cm.origin) {
             Some(ModuleOrigin::File {
@@ -456,13 +413,12 @@ impl ModuleTable {
             _ => return false,
         };
 
-        // Unsaved editor buffer: in-memory copy is authoritative and small;
-        // there is no stable on-disk mtime to gate on.
+        // An unsaved buffer has no stable mtime to gate on, and the in-memory
+        // copy is authoritative.
         if let Some(t) = self.overlays.get(&path) {
             return source_hash(t) != expected_hash;
         }
 
-        // Disk-backed: skip the read + hash when (mtime, len) is unchanged.
         let stat = file_stat(&path);
         if stat.is_some() && cached_stat == stat {
             return false;
@@ -492,17 +448,14 @@ impl ModuleTable {
         }
     }
 
-    /// Iterate every cached module — user *and* hydrated stdlib. Used to merge
-    /// all surviving modules' references into the workspace `ReferenceGraph`.
+    /// Iterate every cached module, user and hydrated stdlib alike.
     pub fn loaded_modules(&self) -> impl Iterator<Item = (&ModuleKey, &CachedModule)> {
         self.loaded.iter()
     }
 
-    /// The persisted per-module reference data for the module whose canonical
-    /// path is `path` (e.g. an interface's `path`), if it was compiled from
-    /// source this session. `None` for static/hydrated stdlib modules (their
-    /// definitions are synthesised lazily from the interface). Lookup-not-mint:
-    /// a non-canonical path simply misses.
+    /// Persisted reference data for the module whose *canonical* path is
+    /// `path`. Lookup, not mint: a non-canonical path simply misses. `None`
+    /// for hydrated stdlib modules, which carry none.
     pub fn module_refs_by_path(&self, path: &ModulePath) -> Option<&ModuleReferences> {
         self.loaded
             .get(&ModuleKey::of(path))
@@ -510,12 +463,11 @@ impl ModuleTable {
             .map(Rc::as_ref)
     }
 
-    /// Reserve (or re-find) the type-id range for `key`, allocating a fresh
+    /// Reserve or re-find the type-id range for `key`, allocating a fresh
     /// 256-aligned range on first request. `floor` is the caller's current
-    /// `next_type_id` so the first user module's range sits past every stdlib
-    /// id. Returns a token carrying the range start plus whether an existing
-    /// assignment was reused; once the module's body has allocated its ids,
-    /// hand the token back via [`IdRangeReservation::note_usage`].
+    /// `next_type_id`, so the first user module lands past every stdlib id.
+    /// Hand the returned token back via [`IdRangeReservation::note_usage`] once
+    /// the module's body has allocated its ids.
     pub fn id_base_for(&mut self, key: &ModuleKey, floor: TypeId) -> IdRangeReservation {
         if let Some(&b) = self.id_bases.get(key) {
             return IdRangeReservation {

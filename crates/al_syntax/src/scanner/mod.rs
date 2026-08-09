@@ -252,7 +252,7 @@ impl Scanner {
             return self.new_token(Kind::PuncArrow);
         }
 
-        // Must do this check before checking for numbers
+        // Must come before the number check.
         if ch == b'.' && self.peek_char() == b'.' {
             self.incr_pos();
             return self.new_token(Kind::PuncDotdot);
@@ -263,10 +263,9 @@ impl Scanner {
         }
 
         if is_quote(ch) {
-            // Single pass: build the literal body while watching for `$`. On
-            // seeing `${` / `$ident` we rewind to just after the opening quote
-            // and hand off to the interp scanner, so plain (non-interpolated)
-            // strings — the common case — are scanned once instead of twice.
+            // Build the literal body while watching for `$`. On `${` or
+            // `$ident`, rewind to the opening quote and hand off to the interp
+            // scanner, so a plain string is scanned once instead of twice.
             let start_pos = self.pos;
             let start_col = self.column;
             let start_line = self.line;
@@ -277,9 +276,8 @@ impl Scanner {
                 let next = self.peek_char();
 
                 if next == 0 || next == b'\n' || next == b'\r' {
-                    // Anchor at the opening quote (one byte before the body
-                    // start): the cursor sits at the line end / EOF, away from
-                    // the string that is actually broken.
+                    // Anchor at the opening quote, one byte before the body:
+                    // the cursor sits at the line end or EOF.
                     self.diagnostics.push(Diagnostic::error(
                         Span::point(start_line, start_col - 1),
                         DiagnosticCode::ParseError,
@@ -307,8 +305,8 @@ impl Scanner {
                 }
 
                 if next == b'\\' {
-                    // None leaves the terminator unconsumed; the check at the
-                    // top of the loop then reports the unterminated string.
+                    // `None` leaves the terminator unconsumed, so the loop top
+                    // reports the unterminated string.
                     if let Some(b) = self.scan_escape_sequence() {
                         result.push(b);
                     }
@@ -404,9 +402,8 @@ impl Scanner {
     }
 
     // Advance past the rest of a name and return its `[start, end)` byte range.
-    // The first byte is already consumed by the caller, so the name begins one
-    // byte back. Names are ASCII (is_name_continue), so byte offsets are char
-    // offsets and `pos - 1` is always >= 0 here.
+    // The caller has already consumed the first byte, so the name starts at
+    // `pos - 1`. Names are ASCII, so byte offsets are column offsets.
     fn scan_name(&mut self) -> (i32, i32) {
         let start = self.pos - 1;
         while token::is_name_continue(self.peek_char()) {
@@ -469,14 +466,11 @@ impl Scanner {
         self.pos += 1;
     }
 
-    // Every recognized escape denotes a single ASCII byte, so this returns
-    // the byte directly instead of allocating a String per escape. An unknown
-    // escape recovers by yielding the escaped byte itself (preserving any
-    // following raw UTF-8 continuation bytes) after reporting a diagnostic.
+    // Every escape denotes one ASCII byte. An unknown escape reports a
+    // diagnostic and yields the escaped byte itself.
     //
-    // Returns None — WITHOUT consuming — when the backslash sits at EOF or a
-    // line ending, so the caller's unterminated-string check still sees the
-    // terminator instead of the escape swallowing it.
+    // Returns `None` WITHOUT consuming when the backslash sits at EOF or a line
+    // ending, so the caller still sees the terminator.
     fn scan_escape_sequence(&mut self) -> Option<u8> {
         let peeked = self.peek_char();
         if peeked == 0 || peeked == b'\n' || peeked == b'\r' {
@@ -510,9 +504,8 @@ impl Scanner {
             let ch = self.peek_char();
 
             if ch == 0 || ch == b'\n' || ch == b'\r' {
-                // Anchor at the opening quote — the frame carries its position
-                // exactly for this. The cursor is at the line end / EOF, which
-                // points away from the string that is actually broken.
+                // Anchor at the opening quote the frame carries; the cursor is
+                // at the line end or EOF.
                 let anchor = self
                     .interp_stack
                     .last()
@@ -562,8 +555,8 @@ impl Scanner {
             self.incr_pos();
 
             if ch == b'\\' {
-                // None leaves the terminator unconsumed; the check at the
-                // top of the loop then reports the unterminated string.
+                // `None` leaves the terminator unconsumed, so the loop top
+                // reports the unterminated string.
                 if let Some(b) = self.scan_escape_sequence() {
                     result.push(b);
                 }
@@ -580,8 +573,8 @@ fn is_quote(c: u8) -> bool {
 }
 
 fn utf8(bytes: Vec<u8>) -> String {
-    // Source is UTF-8 by construction; degrade with replacement chars rather
-    // than aborting the compiler if a slice ever lands off a char boundary.
+    // Source is UTF-8, but degrade with replacement chars rather than abort if
+    // a slice ever lands off a char boundary.
     String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
@@ -632,8 +625,8 @@ mod tests {
         kinds
     }
 
-    // Inlined rather than include_str!'d from examples/: these tests assert an
-    // exact token vector, which would otherwise freeze the example corpus.
+    // Inlined rather than read from examples/: these assert an exact token
+    // vector, which would otherwise freeze the example corpus.
     const HELLO_SRC: &str = "// Hello world, plus string interpolation with ${}.\n\nprintln('hello, world')\n\nname = 'AL'\nprintln('hello from ${name}')\nprintln('2 + 2 = ${2 + 2}')\n";
 
     const FIZZBUZZ_SRC: &str = "fn fizzbuzz(n Int) String {\n\tmatch (n % 3, n % 5) {\n\t\t(0, 0) -> 'FizzBuzz'\n\t\t(0, _) -> 'Fizz'\n\t\t(_, 0) -> 'Buzz'\n\t\telse -> '${n}'\n\t}\n}\n\nfn run(n Int, last Int) Nil {\n\tif n > last {\n\t\tNil\n\t} else {\n\t\tprintln(fizzbuzz(n))\n\t\trun(n + 1, last)\n\t}\n}\n\nrun(1, 20)\n";
@@ -809,7 +802,7 @@ mod tests {
 
     #[test]
     fn test_gt_lt_do_not_overconsume() {
-        // Regression: V scanner had a bug where > and < always consumed the next char.
+        // Regression: `>` and `<` used to always consume the next char.
         let ks = kinds("a>b");
         assert_eq!(ks, vec![ident("a"), PuncGt, ident("b"), Eof]);
         let ks = kinds("a<b");
@@ -843,7 +836,6 @@ mod tests {
         let (toks, _) = scan("123 4.56 1..5");
         assert_tok(&toks, 0, num("123"));
         assert_tok(&toks, 1, num("4.56"));
-        // 1..5 -> number(1), dotdot, number(5)
         assert_tok(&toks, 2, num("1"));
         assert_tok(&toks, 3, PuncDotdot);
         assert_tok(&toks, 4, num("5"));
@@ -947,7 +939,7 @@ mod tests {
     fn test_lone_backtick_no_crash() {
         let (toks, diags) = scan("`");
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
-        // completing scan_all without abort/hang IS the proof
+        // Completing scan_all without a hang is the proof.
         assert_eq!(*ks.last().unwrap(), Eof);
         assert!(ks.iter().any(|k| matches!(k, Error(_))));
         assert!(!diags.is_empty());
@@ -968,14 +960,13 @@ mod tests {
 
     #[test]
     fn test_backtick_then_eof_terminates() {
-        // bare backtick at true EOF exercises the incr_pos-at-EOF path
+        // A bare backtick at true EOF exercises the incr_pos-at-EOF path.
         assert_eq!(*kinds("a`").last().unwrap(), Eof);
     }
 
     #[test]
     fn test_float_then_range() {
-        // Regression: `1.5..10` used to backtrack over the first `.` and lex
-        // as [1][.][5][..][10]. It must lex as [1.5][..][10].
+        // Regression: `1.5..10` used to lex as [1][.][5][..][10].
         let (toks, _) = scan("1.5..10");
         assert_tok(&toks, 0, num("1.5"));
         assert_tok(&toks, 1, PuncDotdot);
@@ -994,8 +985,7 @@ mod tests {
 
     #[test]
     fn test_bare_dollar_is_not_interpolation() {
-        // A `$` not followed by `{` or an identifier start is a literal char,
-        // so the scanner must not classify the string as interpolated.
+        // A `$` not followed by `{` or a name start is a literal char.
         let (toks, _) = scan("'a$5'");
         assert_tok(&toks, 0, lit("a$5"));
         assert_tok(&toks, 1, Eof);
@@ -1010,8 +1000,7 @@ mod tests {
 
     #[test]
     fn test_backslash_at_newline_is_unterminated_not_unknown_escape() {
-        // The `\` must not consume the newline: the string is reported as
-        // unterminated (once, at the line end) and the next line still lexes.
+        // The `\` must not consume the newline, or the next line is lost.
         let (toks, diags) = scan("x = 'abc\\\ny = 1");
         assert!(
             diags
@@ -1075,8 +1064,8 @@ mod tests {
 
     #[test]
     fn test_string_cannot_swallow_half_a_crlf() {
-        // An unterminated string ends at the \r; the \r\n then scans as one
-        // newline instead of leaving a stray \n or \r token behind.
+        // An unterminated string ends at the `\r`, and the `\r\n` still scans
+        // as one newline rather than leaving a stray token.
         let (toks, diags) = scan("x = 'abc\r\ny = 1");
         assert!(
             diags
@@ -1103,8 +1092,8 @@ mod tests {
 
     #[test]
     fn test_unterminated_interp_string_content_reports_at_opening_quote() {
-        // The `${b}` closes, then the trailing content runs into EOF: the
-        // error is anchored at the opening quote (column 4), not at EOF.
+        // The `${b}` closes, then the trailing content runs into EOF. The
+        // error still anchors at the opening quote, column 4.
         let (_, diags) = scan("x = 'a${b} cd");
         let unterminated: Vec<_> = diags
             .iter()
@@ -1122,8 +1111,8 @@ mod tests {
 
     #[test]
     fn test_unterminated_interpolation_reports_at_opening_quote() {
-        // EOF inside `${...}` used to abandon the interp frame silently:
-        // `x = '${abc` produced no diagnostic at all while `x = 'abc` did.
+        // Regression: EOF inside `${...}` used to abandon the frame silently,
+        // with no diagnostic at all.
         let (toks, diags) = scan("x = '${abc");
         assert_eq!(*toks.last().map(|t| t.kind.clone()).as_ref().unwrap(), Eof);
         let unterminated: Vec<_> = diags
@@ -1156,8 +1145,7 @@ mod tests {
 
     #[test]
     fn test_unknown_escape_sequence_diagnostic() {
-        // `\q` is not a recognized escape; the scanner reports it but recovers,
-        // still emitting a well-formed string token for the rest of the input.
+        // An unknown escape is reported, then recovered from.
         let (toks, diags) = scan("x = \"a\\qb\"");
         let ks: Vec<Kind> = toks.into_iter().map(|t| t.kind).collect();
         assert_eq!(*ks.last().unwrap(), Eof);

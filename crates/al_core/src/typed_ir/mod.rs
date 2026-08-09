@@ -317,19 +317,17 @@ pub enum TypedExpr {
     },
     /// `recv.field`, with the field index the checker resolved.
     ///
-    /// `checked` selects `GetField` over `GetFieldUnchecked`: a projection out
-    /// of a `..base` spread must verify the tag, whereas a field access whose
-    /// receiver type admits the field across every variant, and a destructure
-    /// whose tag exhaustiveness has proven, need not.
+    /// `checked` selects `GetField` over `GetFieldUnchecked`: only a projection
+    /// out of a `..base` spread has to verify the tag at runtime.
     Field {
         ty: RTy,
         recv: Box<TypedExpr>,
         idx: u32,
         checked: bool,
     },
-    /// `args` is exactly the variant's arity, in declared-field order. Labels
-    /// are reordered and `..base` spreads expanded into [`TypedExpr::Field`]
-    /// projections by the elaborator.
+    /// `args` is exactly the variant's arity, in declared-field order. The
+    /// elaborator has reordered labels and expanded `..base` spreads into
+    /// [`TypedExpr::Field`] projections.
     Ctor {
         ty: RTy,
         variant: VariantRef,
@@ -370,9 +368,7 @@ pub enum TypedExpr {
         segs: Vec<TypedBinSeg>,
     },
     /// `MakeClosure func_idx` over the captured values. An eta-expanded
-    /// constructor or builtin (`map(Some, xs)`) is this node with no captures,
-    /// pointing at a [`TypedFn`] the elaborator already put in
-    /// [`TypedProgram::fns`].
+    /// constructor or builtin (`map(Some, xs)`) is this node with no captures.
     Closure {
         ty: RTy,
         func_idx: FuncIdx,
@@ -397,10 +393,8 @@ pub enum TypedExpr {
 }
 
 impl TypedExpr {
-    /// The resolved type of this expression. Total by construction — this
-    /// exhaustive match is the guard: a new arm cannot be added without one.
-    /// Every arm is a field read, so this never recurses and never walks a
-    /// `Let` spine.
+    /// The resolved type of this expression. Every arm is a field read, so this
+    /// never recurses and never walks a `Let` spine.
     pub fn ty(&self) -> RTy {
         match self {
             TypedExpr::Const { ty, .. }
@@ -437,55 +431,29 @@ impl TypedExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFn {
     pub name: StrId,
-    /// Each parameter carries the [`BindingId`] the elaborator minted for it,
-    /// so a body reference names the id actually stored here rather than
-    /// trusting a numbering convention.
     pub params: Vec<TypedBind>,
     pub ret: RTy,
     pub body: TypedExpr,
     /// Number of [`BindingId`]s minted in this function, params included, so a
     /// consumer can size a dense `BindingId → LocalId` map with a `Vec`.
     ///
-    /// Minted **per function, by the elaborator**, and never by anything
-    /// downstream: [`elaborate::Elab`] holds the counter, hands out
-    /// `BindingId(0..n)` in the order the body binds them (params first), and
-    /// writes the final `n` here.
-    ///
-    /// The counter is not global because nothing wants it to be: a `BindingId`
-    /// is only ever read against the `TypedFn` that minted it (`lower` builds
-    /// one `Vec<LocalId>` of length `binds` per function), and a per-function
-    /// dense range is what makes that `Vec` an index rather than a map. A
-    /// nested closure is a *separate* [`TypedFn`] in [`TypedProgram::fns`] with
-    /// its own range starting at zero; it reaches an enclosing binding through
-    /// [`ValueRef::Capture`], never through the enclosing function's ids.
+    /// The counter is per function, not global: a nested closure is a separate
+    /// [`TypedFn`] whose ids restart at zero and which reaches an enclosing
+    /// binding through [`ValueRef::Capture`].
     pub binds: u32,
 }
 
 /// A whole module, typechecked. The only input `lower` takes.
 ///
-/// `lower(p: &TypedProgram) -> CoreProgram` needs nothing else: no engine to
-/// resolve a type against, no `Program` to append to, no side table to miss.
+/// It **owns** its type pool and constant pool rather than borrowing the
+/// compiler's, so the elaborator can hand the finished program over by value
+/// and `lower` can take `&self`.
 ///
-/// # Ownership
-///
-/// A `TypedProgram` **owns** its two arenas — the type pool and the constant
-/// pool — rather than borrowing the compiler's. Both are compile-local:
-///
-/// * [`Self::pool`] is created empty per compile and dies at the end of it.
-///   The `CoreProgram` it typed does **not** — that lives on `Compiler::core`
-///   and outlives the arena. So the `RTy`s a surviving `CoreFn::ret_ty` or
-///   `CoreBind::ty` still carries are opaque handles into a pool that no
-///   longer exists: nothing may re-interpret a lowered function's types after
-///   emit, and there is no pool on the `Compiler` for a `Watermark` entry to
-///   truncate against — which is why `Compiler::reset_to` must `clear()`
-///   `core.fns` outright rather than truncate it.
-/// * [`Self::consts`] is the compiler's constant pool, moved in. See its doc:
-///   `ConstId`s are stable through `lower`, so it moves back out again.
-///
-/// Neither is borrowed, because the borrow would have to be `&mut`: the
-/// elaborator interns into both while it walks, and it also holds `&mut` on the
-/// inference engine it is reading types out of. Owning them lets the elaborator
-/// hand the finished program over by value and lets `lower` take `&self`.
+/// [`Self::pool`] dies at the end of the compile but the `CoreProgram` it typed
+/// does not, so an `RTy` on a surviving `CoreFn::ret_ty` names a pool that no
+/// longer exists. Nothing may re-interpret a lowered function's types after
+/// emit, and `Compiler::reset_to` must `clear()` `core.fns` outright rather
+/// than truncate against a pool it does not have.
 #[derive(Debug, Clone)]
 pub struct TypedProgram {
     /// Top-level functions, nested closures, and eta-wrappers, indexed by the
@@ -495,41 +463,20 @@ pub struct TypedProgram {
     /// The module's initialiser — top-level declarations in dependency order
     /// followed by its statements. `params` is empty.
     pub toplevel: TypedFn,
-    /// The program's constant pool: **the compiler's own pool**, not a copy of
-    /// it and not a second pool merged at emit.
+    /// The compiler's own constant pool, moved in — not a copy, and not a
+    /// second pool merged at emit.
     ///
-    /// A [`ConstId`] is a `PushConst` operand. There is exactly one numbering,
-    /// established when the elaborator pools a literal
-    /// ([`elaborate::ElabCtx::add_const`] and friends, which are the compiler's
-    /// `add_constant`), and it survives untouched all the way to the VM:
-    ///
-    /// 1. the elaborator pools into `Program::constants` and moves it here;
-    /// 2. `lower` copies it **verbatim** — it neither appends nor reorders, so
-    ///    `CoreProgram::consts` is this vector;
-    /// 3. the compiler adopts `CoreProgram::consts` back into
-    ///    `Program::constants` wholesale — an assignment, not a merge, and the
-    ///    `Value::to_bits` dedup map stays valid because nothing moved.
-    ///
-    /// Step 2 is what makes `lower` `&mut`-free: interning is a mutation, so
-    /// every constant a lowered body pushes must already be a [`ConstId`] on
-    /// the node being lowered. The ones with no source literal behind them are
-    /// pooled by the elaborator all the same and carried on the node that needs
-    /// them — `TypedPat::Array`'s `len`, `TypedPat::Bin`'s `zero`, and
-    /// `TypedBinPatSeg::Utf8Literal`'s `bits`.
-    ///
-    /// A separate pool merged at emit would have to renumber, and `ConstId`s
-    /// are already baked into `TypedExpr::Const`, `TypedPat::Lit`,
-    /// `TypedBinPatSeg::Utf8Literal` and the eta-wrappers' construct headers,
-    /// whose pool order `emit` observes. `typed_program_consts_are_stable_ids`
-    /// pins the identity that makes step 3 sound.
+    /// `lower` copies it verbatim and the compiler adopts it back wholesale, so
+    /// a [`ConstId`] means the same thing from elaboration to the VM. That is
+    /// what keeps `lower` `&mut`-free: every constant a lowered body pushes
+    /// must already be pooled and carried on the node, including the ones with
+    /// no source literal behind them (`TypedPat::Array`'s `len`,
+    /// `TypedPat::Bin`'s `zero`, `TypedBinPatSeg::Utf8Literal`'s `bits`).
+    /// Pinned by `typed_program_consts_are_stable_ids`.
     pub consts: Vec<Value>,
-    /// The arena every [`RTy`] in the program indexes. Owned, append-only
-    /// during elaboration, immutable afterwards.
-    ///
-    /// `lower` never reads it — it moves `RTy`s around opaquely and gets the
-    /// handful it must *name* from [`Self::temps`], which is why `lower_fn`
-    /// takes no pool. `perceus` reads it (`is_heap`) by shared
-    /// borrow of `program.pool`, and `emit` erases types entirely.
+    /// The arena every [`RTy`] in the program indexes. Append-only during
+    /// elaboration, immutable afterwards. `lower` never reads it; `perceus`
+    /// reads it for `is_heap`, and `emit` erases types entirely.
     pub pool: ResolvedPool,
     /// Types for the locals `lower` mints that no source expression names.
     pub temps: TempTys,
@@ -539,16 +486,10 @@ pub struct TypedProgram {
 /// an array pattern's length check, a `<<>>` walk's bit cursor, an
 /// interpolation's stringified parts.
 ///
-/// Those locals have no [`TypedExpr`] to read a type off, and the pool is
-/// immutable by the time `lower` runs, so the elaborator interns them once and
-/// hands them over. This is what lets `lower` take `&TypedProgram` rather than
-/// `&mut ResolvedPool`: it never needs to name a type the elaborator did not
-/// already resolve.
-///
-/// Only `perceus` reads these (via `is_heap`); `emit` erases types.
-/// They must therefore be the *real* prelude nodes — `Bool` is a nominal
-/// non-primitive and so is heap-shaped, exactly as the inference engine
-/// reported it before this arena existed.
+/// Those locals have no [`TypedExpr`] to read a type off and the pool is
+/// immutable by the time `lower` runs, so the elaborator interns them up front.
+/// They must be the *real* prelude nodes: `perceus` asks `is_heap` about them,
+/// and `Bool` is a nominal non-primitive and so heap-shaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TempTys {
     pub int: RTy,
@@ -561,18 +502,11 @@ pub struct TempTys {
 
 impl TempTys {
     /// Intern the five nodes into `pool`, once per compile, before any body is
-    /// elaborated.
-    ///
-    /// Each comes from the enclosing compilation's *real* prelude type through
-    /// the same [`PreludeTys::resolve_rty`] bridge every other node crosses —
-    /// nothing here is a synthetic node invented to stand in for one. That
-    /// matters because `perceus` reads these: `Bool` and `Binary` are nominal
-    /// non-primitives (not in `PrimIds`), so [`ResolvedPool::is_heap`] answers
-    /// `true` for them, exactly as `InferEngine`-era `is_heap` did.
-    ///
-    /// `int_pair` has no prelude `Ty` to resolve — it is `Op::BinReadUtf8`'s
-    /// result, a shape the VM has but the source language never spells — so it
-    /// is built structurally from the `Int` node just resolved.
+    /// elaborated. Each comes from the real prelude type through
+    /// [`PreludeTys::resolve_rty`], never a synthetic stand-in, so `Bool` and
+    /// `Binary` stay outside `PrimIds` and [`ResolvedPool::is_heap`] answers
+    /// `true` for them. `int_pair` has no prelude `Ty` — the source language
+    /// never spells `Op::BinReadUtf8`'s result — so it is built structurally.
     pub fn intern<C: PreludeTys>(ctx: &mut C, pool: &mut ResolvedPool) -> TempTys {
         let t = ctx.ty_int();
         let int = ctx.resolve_rty(pool, t);
@@ -600,17 +534,13 @@ mod tests {
     use crate::type_def::TypeId;
     use crate::types::{InferEngine, NullaryPrim, Prim, PrimIds, StrId, Ty, new_engine};
 
-    /// The prelude registers its type heads with 1-based ids and records only
-    /// `Int`/`Float`/`String`/`Array` as [`PrimIds`]; `Bool` and `Binary` are
-    /// ordinary nominal types whose ids fall outside that set.
+    /// `Bool` and `Binary` are ordinary nominal types, so their ids fall
+    /// outside [`PrimIds`].
     const BOOL_ID: TypeId = TypeId(5);
     const BINARY_ID: TypeId = TypeId(6);
 
-    /// A [`PreludeTys`] over a real [`InferEngine`], seeded the way the
-    /// prelude seeds one, so [`TempTys::intern`] can be driven for what it
-    /// actually produces rather than for what a hand-built struct literal
-    /// restates. `PreludeTys` is exactly the seam `intern` needs, so nothing
-    /// here stubs a method it cannot reach.
+    /// A [`PreludeTys`] over a real [`InferEngine`], seeded the way the prelude
+    /// seeds one.
     struct PreludeCtx {
         eng: InferEngine,
     }
@@ -649,15 +579,8 @@ mod tests {
         }
     }
 
-    /// [`TempTys::intern`]'s contract, behaviourally: the nodes it hands
-    /// `perceus` are the *real* prelude ones, so `Bool` and `Binary` — nominal
-    /// types outside `PrimIds` — are heap-shaped and keep the `Drop` every
-    /// `Op::Eq` result temp got before this arena existed. `int_pair` is the
-    /// structural `(Int, Int)` `Op::BinReadUtf8` returns.
-    ///
-    /// Driven through the constructor rather than restated as a struct
-    /// literal: a prelude that gave `Bool` a `PrimIds` id would silently stop
-    /// `perceus` emitting those `Drop`s, and this is the assertion that fails.
+    /// A prelude that gave `Bool` a `PrimIds` id would silently stop `perceus`
+    /// emitting `Drop`s for it. This is the assertion that fails.
     #[test]
     fn interned_temps_are_the_shapes_perceus_expects() {
         let mut ctx = PreludeCtx::new();
@@ -682,10 +605,7 @@ mod tests {
     }
 
     /// A pool holding the five [`TempTys`] nodes with the shapes
-    /// [`TempTys::intern`] gives them — `Bool`/`Binary` nominal, so outside
-    /// `PrimIds` — but reachable without an `ElabCtx` to borrow. That the
-    /// constructor really produces these shapes is pinned separately, by
-    /// [`interned_temps_are_the_shapes_perceus_expects`].
+    /// [`TempTys::intern`] gives them, but reachable without an `ElabCtx`.
     fn pool_and_temps() -> (ResolvedPool, TempTys) {
         let mut p = ResolvedPool::new(PrimIds::default());
         let prims = p.prims();
@@ -720,9 +640,8 @@ mod tests {
         vs.iter().map(|v| v.to_bits()).collect()
     }
 
-    /// DECISION (2), pinned behaviourally: `TypedProgram::consts` is not a
-    /// second pool that emit merges — it is *the* pool, and lowering preserves
-    /// every `ConstId` in it.
+    /// `TypedProgram::consts` is not a second pool that emit merges: lowering
+    /// preserves every `ConstId` in it.
     #[test]
     fn typed_program_consts_are_stable_ids() {
         let (pool, temps) = pool_and_temps();
@@ -770,9 +689,8 @@ mod tests {
     }
 
     /// The constants `lower` needs but no source literal spells (here an array
-    /// pattern's length check) are pooled by the elaborator and carried on the
-    /// node — `TypedPat::Array`'s `len`. So the pool cannot grow: `lower` has
-    /// nothing to intern with, which is what lets it take `&TypedProgram`.
+    /// pattern's length check) are carried on the node, so the pool cannot grow
+    /// during lowering.
     #[test]
     fn lower_cannot_mint_a_constant_the_elaborator_did_not_pool() {
         let (pool, temps) = pool_and_temps();
@@ -785,9 +703,7 @@ mod tests {
         };
         let (pool, arr_ty) = array;
 
-        // `match xs { [_, _] -> 1, _ -> 0 }` — the array arm needs the length
-        // constant 2, which the elaborator pooled as `ConstId(0)`; the arm
-        // bodies are `ConstId(1)` and `ConstId(2)`.
+        // `match xs { [_, _] -> 1, _ -> 0 }`
         let scrut = TypedExpr::Var {
             ty: arr_ty,
             place: ValueRef::Slot(FrameSlot(0)),

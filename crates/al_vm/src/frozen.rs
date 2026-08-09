@@ -207,11 +207,9 @@ impl FrozenConst {
         self.0
     }
 
-    /// Crate-internal mint for the frozen-publish engine
-    /// ([`crate::heap::ProcHeap::publish_frozen`]), whose roots are frozen by
-    /// construction. Deliberately not public: outside this crate a
-    /// `FrozenConst` can only come from a `FrozenBuilder` method or
-    /// `publish_frozen`, both of which build into a frozen area.
+    /// Crate-internal mint for [`crate::heap::ProcHeap::publish_frozen`], whose
+    /// roots are frozen by construction. Not public, so outside this crate a
+    /// `FrozenConst` can only come from something that built into an area.
     pub(crate) fn from_publish(v: Value) -> FrozenConst {
         debug_assert!(
             !v.is_heap() || v.is_immortal(),
@@ -228,17 +226,13 @@ fn frozen_values(items: &[FrozenConst]) -> &[Value] {
     unsafe { std::slice::from_raw_parts(items.as_ptr().cast::<Value>(), items.len()) }
 }
 
-/// Intern table for string-aggregate constants, keyed by the aggregate's
-/// string contents. An `IndexMap` (not `HashMap`) so lookups can probe with
-/// a borrowed `&[&str]` via [`Equivalent`] — the owned key is only built on
-/// a miss.
+/// Intern table for string-aggregate constants, keyed by contents. An
+/// `IndexMap`, not a `HashMap`, so lookups can probe with a borrowed
+/// `&[&str]` via [`Equivalent`] and only build the owned key on a miss.
 type StrAggregateMap = IndexMap<Box<[Box<str>]>, Value>;
 
-/// Borrowed lookup key for [`StrAggregateMap`]. Hashes identically to the
-/// stored `Box<[Box<str>]>` (both are the slice hash: length prefix, then
-/// each element's `str` hash) and compares by contents, so
-/// [`FrozenBuilder::intern_str_aggregate`] can probe the table without
-/// allocating the owned key first.
+/// Borrowed lookup key for [`StrAggregateMap`]. Must hash identically to the
+/// stored `Box<[Box<str>]>` and compare by contents.
 struct BorrowedStrs<'a>(&'a [&'a str]);
 
 impl Hash for BorrowedStrs<'_> {
@@ -253,57 +247,40 @@ impl Equivalent<Box<[Box<str>]>> for BorrowedStrs<'_> {
     }
 }
 
-/// Append handle to a [`FrozenArea`]. Hydration threads one through the
-/// compiler as `&mut FrozenBuilder` so write access to the frozen area is
-/// visible in signatures; `rc_publish_graph` takes one as its destination when
-/// publishing a global. Several builders coexist over one area (see
+/// Append handle to a [`FrozenArea`], and the construction door for every
+/// program constant. Hydration threads one through the compiler as
+/// `&mut FrozenBuilder`; `rc_publish_graph` takes one as its destination when
+/// publishing a global. Several coexist over one area (see
 /// [`FrozenArea::builder`]).
 ///
-/// Beyond the raw word allocator, the builder is the construction door for
-/// every program constant (the constant methods below): it interns string
-/// contents so each distinct name/label gets one canonical frozen
-/// allocation *per builder*, shared by every constant-pool entry built
-/// through it — and through them by every runtime enum/closure cloned out
-/// of the pool. The intern tables map contents to the canonical frozen
-/// `Value` (the allocation's frozen pointer).
-///
-/// Interning is per-builder, not per-area: the same contents frozen
-/// through two different builders (say a hydration constant and a runtime
-/// `publish_global` of the same string) yield two distinct frozen
-/// allocations. That is by design — interning is purely a space
-/// optimization, and no correctness property depends on interned strings
-/// sharing an address. Equality, hashing, and pattern matching all compare
-/// string contents, never pointers, so cross-builder duplicates are
-/// invisible to the program.
+/// String contents are interned, so each distinct name/label gets one
+/// canonical frozen allocation *per builder*. Per-builder, not per-area:
+/// the same string frozen through two builders yields two allocations. That is
+/// fine — interning is only a space optimization, and equality, hashing and
+/// pattern matching all compare contents, never pointers.
 pub struct FrozenBuilder {
     /// The frozen area these interned `Value`s point into. Field order is not
-    /// load-bearing: the interned values are immortal, and an immortal `Value`'s
-    /// `Clone`/`Drop` is pure bit math that never dereferences the object (see
-    /// `VALUE_IMMORTAL` in `bytecode::value`), so they may drop in any order
-    /// relative to the area.
+    /// load-bearing: an immortal `Value`'s `Clone`/`Drop` is pure bit math and
+    /// never dereferences the object, so they may drop in any order relative
+    /// to the area.
     area: Arc<FrozenArea>,
     /// Canonical frozen `Str` constant per distinct contents.
     strs: HashMap<Box<str>, Value>,
-    /// Boxed-Int interning. A small int is an immediate and dedups by bits;
-    /// a big one (outside ±2^47) is a frozen allocation, and the constant
-    /// pool's dedup keys on `to_bits()` — a *pointer* for boxed values — so
-    /// without this map every use of the same big int pooled a fresh copy.
-    /// Enum-variant prefix hashes are big ints minted at every `Ok(..)` /
-    /// `Err(..)` construction site, which made the pool mostly duplicates.
+    /// Boxed-Int interning. A big int (outside ±2^47) is a frozen allocation,
+    /// and the constant pool's dedup keys on `to_bits()` — a *pointer* for
+    /// boxed values — so without this map every use pooled a fresh copy.
     ints: HashMap<i64, Value>,
-    /// Canonical frozen all-string array constant (enum field-label list
-    /// pool entries) per distinct contents.
+    /// Canonical frozen all-string array constant per distinct contents.
     str_arrays: StrAggregateMap,
-    /// Canonical frozen `Tuple`-of-`Str` label list per distinct contents
-    /// (the labels reference stored inside enum objects).
+    /// Canonical frozen `Tuple`-of-`Str` label list per distinct contents.
     label_tuples: StrAggregateMap,
 }
 
 impl FrozenBuilder {
     /// Allocate `words` zero-initialized words and return a pointer to the
-    /// first. The pointer is 8-byte aligned and stable for the program
-    /// lifetime. The caller must fully initialize the words before letting
-    /// the pointer escape this thread (module docs, "Publication protocol").
+    /// first, 8-byte aligned and stable for the program lifetime. The caller
+    /// must fully initialize the words before letting the pointer escape this
+    /// thread (module docs, "Publication protocol").
     pub fn alloc(&mut self, words: usize) -> NonNull<u64> {
         self.area.alloc(words)
     }
@@ -323,37 +300,20 @@ impl FrozenBuilder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Constant `Value` construction (compiler + hydration)
-// ---------------------------------------------------------------------------
-//
-// Program literals/constants are built exclusively through these methods:
-// the compiler owns a builder for the program it is emitting, and the stdlib
-// hydration path (`StaticStdlib::hydrate_program`) receives one as an
-// explicit `&mut FrozenBuilder`. This is what makes `Program` `Send + Sync`:
-// every constant `Value` is an immediate or points into the program's frozen
-// area, never into a process heap.
-//
-// Each method writes the constant's `[header][payload…]` object image into
-// the area through the builder's `Arena` impl (the `Value::*_in`
-// constructors in `bytecode::value`) and returns a [`FrozenConst`] holding
-// the frozen pointer; immediates (int/float/bool/nil) have no backing words and
-// the methods exist so constant construction uniformly goes through the
-// builder. String contents — and label lists — are interned, so every
-// constant-pool entry naming the same string (enum names, variant names,
-// field labels) shares one canonical frozen allocation, and runtime values
-// cloned out of the pool keep pointing at it.
+// Program literals/constants are built exclusively through these methods,
+// which is what makes `Program` `Send + Sync`: every constant `Value` is an
+// immediate or points into the program's frozen area, never into a process
+// heap.
 impl FrozenBuilder {
-    /// A frozen Int constant. Small ints are immediates (no backing
-    /// allocation); the method exists so constant construction uniformly
-    /// goes through the builder.
+    /// A frozen Int constant. Small ints are immediates with no backing
+    /// allocation; the method exists so construction uniformly goes through
+    /// the builder.
     pub fn int(&mut self, i: i64) -> FrozenConst {
         if let Some(v) = self.ints.get(&i) {
             return FrozenConst(v.clone());
         }
         let v = Value::int_in(self, i);
-        // Only a boxed int (outside the NaN-box small range) needs interning;
-        // an immediate already dedups by bits in the pool.
+        // An immediate already dedups by bits in the pool.
         if !Value::fits_small_int(i) {
             self.ints.insert(i, v.clone());
         }
@@ -370,10 +330,8 @@ impl FrozenBuilder {
         FrozenConst(Value::bool(b))
     }
 
-    /// A frozen string constant: one canonical `Value` per distinct
-    /// contents per program. Enum/variant names and field labels all resolve
-    /// through here, so every compile-time occurrence of the same name
-    /// points at the same frozen allocation.
+    /// A frozen string constant: one canonical `Value` per distinct contents
+    /// per builder. Enum/variant names and field labels all resolve here.
     pub fn str(&mut self, s: &str) -> FrozenConst {
         if let Some(v) = self.strs.get(s) {
             return FrozenConst(v.clone());
@@ -383,17 +341,14 @@ impl FrozenBuilder {
         FrozenConst(v)
     }
 
-    /// A frozen all-string array constant (enum field-label lists). Interned
-    /// as a unit: every construction site of the same variant shares one
-    /// array allocation, and each element shares the canonical interned
-    /// string.
+    /// A frozen all-string array constant (enum field-label lists), interned
+    /// as a unit.
     pub fn str_array(&mut self, items: &[&str]) -> FrozenConst {
         FrozenConst(self.intern_str_aggregate(items, |b| &mut b.str_arrays, Value::array_in))
     }
 
-    /// A frozen tuple constant. Children carry frozen provenance by type: a
-    /// mortal heap element — which would violate the area's
-    /// no-process-heap-pointers invariant — cannot be passed here.
+    /// A frozen tuple constant. Children carry frozen provenance by type, so a
+    /// mortal heap element cannot be passed here.
     pub fn tuple(&mut self, items: Vec<FrozenConst>) -> FrozenConst {
         FrozenConst(Value::tuple_in(self, frozen_values(&items)))
     }
@@ -403,11 +358,8 @@ impl FrozenBuilder {
         FrozenConst(Value::binary_bits_in(self, bytes, bit_len))
     }
 
-    /// A frozen enum constant. The names and field labels are interned so
-    /// they point at the area's canonical allocations; the hash is computed
-    /// exactly the way the VM computes it at construction so equality keeps
-    /// working. `payload` children carry frozen provenance by type, as for
-    /// [`FrozenBuilder::tuple`].
+    /// A frozen enum constant. The hash must be computed exactly the way the
+    /// VM computes it at construction, or equality breaks.
     pub fn enum_(
         &mut self,
         type_id: crate::TypeId,
@@ -434,21 +386,15 @@ impl FrozenBuilder {
         ))
     }
 
-    /// The canonical frozen labels reference for enum objects. An enum
-    /// object's labels word holds a `Tuple` whose elements are all `Str`
-    /// values — the shape [`Value::enum_in`] requires for its `labels`
-    /// argument. The tuple is interned as a unit so every constant of the
-    /// same variant shares one allocation.
+    /// The canonical frozen labels reference for enum objects: a `Tuple` of
+    /// `Str`, the shape [`Value::enum_in`] requires for its `labels` argument.
     fn label_tuple(&mut self, labels: &[&str]) -> Value {
         self.intern_str_aggregate(labels, |b| &mut b.label_tuples, Value::tuple_in)
     }
 
-    /// Shared interning loop for the string-aggregate constants
-    /// ([`FrozenBuilder::str_array`] and label tuples): look up the contents
-    /// in the chosen intern table, and on a miss intern each element string,
-    /// build the aggregate with `construct`, and cache it. `map` selects the
-    /// table rather than borrowing it up front so `self` stays free for the
-    /// element interning in between.
+    /// Shared interning loop for the string-aggregate constants. `map` selects
+    /// the table by callback rather than borrowing it up front so `self` stays
+    /// free for the element interning in between.
     fn intern_str_aggregate(
         &mut self,
         items: &[&str],
@@ -517,8 +463,7 @@ mod tests {
             allocs.push((p, tag, len));
         }
         assert!(area.segment_count() > 1, "growth should append segments");
-        // Every earlier pointer still reads back its exact contents: nothing
-        // moved when later segments were appended.
+        // Every earlier pointer still reads back its exact contents.
         for (p, tag, len) in allocs {
             unsafe { check(p, tag, len) };
             assert!(area.contains(p.as_ptr()));
@@ -544,11 +489,9 @@ mod tests {
         let area = Arc::new(FrozenArea::new());
         let mut b = area.builder();
         let p = b.alloc(4);
-        // Interior word: in.
         assert!(area.contains(unsafe { p.as_ptr().add(3) }));
-        // One past the used range: out (segment slack is not "frozen" yet).
+        // One past the used range: segment slack is not "frozen" yet.
         assert!(!area.contains(unsafe { p.as_ptr().add(4) }));
-        // Unrelated pointers: out.
         let stack_word = 0u64;
         assert!(!area.contains(&raw const stack_word));
         assert!(!area.contains(std::ptr::null()));
@@ -609,11 +552,10 @@ mod tests {
         );
     }
 
-    /// The cross-thread publication contract from the module docs, in the
-    /// exact shape the runtime uses for globals: writer fills an object,
-    /// stores its pointer in a slot, then bumps a version with `Release`;
-    /// reader `Acquire`-loads the version and may then dereference every
-    /// pointer published below it without locks.
+    /// The publication protocol in the shape the runtime uses for globals:
+    /// writer fills an object, stores its pointer, bumps a version with
+    /// `Release`; reader `Acquire`-loads the version and dereferences without
+    /// locks.
     #[test]
     fn publication_via_version_release_acquire() {
         let area = Arc::new(FrozenArea::new());
@@ -646,8 +588,6 @@ mod tests {
                     while seen < v {
                         let addr = slots[seen].load(Ordering::Relaxed);
                         let p = NonNull::new(addr as *mut u64).unwrap();
-                        // The Acquire above makes the writer's segment
-                        // contents visible — no locks on the read side.
                         unsafe { check(p, seen as u64, 1 + seen % 5) };
                         seen += 1;
                     }
@@ -660,16 +600,12 @@ mod tests {
         reader.join().unwrap();
     }
 
-    /// The frozen object address of a heap-backed constant, for identity
-    /// assertions: interning must hand out the *same allocation*, not just
-    /// equal contents.
+    /// The frozen object address of a heap-backed constant: interning must hand
+    /// out the *same allocation*, not just equal contents.
     fn addr(v: &Value) -> usize {
         v.object_addr().expect("constant should be heap-backed")
     }
 
-    /// Distinct constant-pool entries naming the same string must share one
-    /// canonical allocation in the frozen area — the interning foundation
-    /// that [`enum_names_and_labels_point_into_the_frozen_area`] builds on.
     #[test]
     fn str_constants_intern_to_one_allocation() {
         let area = Arc::new(FrozenArea::new());
@@ -685,8 +621,7 @@ mod tests {
         );
         assert_ne!(addr(a1.value()), addr(other.value()));
         assert!(area.contains(addr(a1.value()) as *const u64));
-        // Interning means no second allocation: the area holds exactly the
-        // words of "Some" and "None".
+        // A repeat allocates nothing.
         let words = area.words_used();
         b.str("Some");
         assert_eq!(area.words_used(), words);
@@ -706,15 +641,13 @@ mod tests {
         );
         assert_ne!(addr(l1.value()), addr(l3.value()));
         assert!(area.contains(addr(l1.value()) as *const u64));
-        // Elements share the canonical interned strings.
         let elem = l1.value().as_array().unwrap().get(0).unwrap();
         assert_eq!(elem.as_str(), Some("host"));
         assert_eq!(addr(&elem), addr(b.str("host").value()));
     }
 
-    /// Enum constants built through the builder carry interned names/labels:
-    /// every variant constructed from compile-time constants shares the
-    /// area's canonical string and label-tuple allocations.
+    /// Enum constants carry interned names/labels: two constants of the same
+    /// variant share the canonical string and label-tuple allocations.
     #[test]
     fn enum_names_and_labels_point_into_the_frozen_area() {
         let area = Arc::new(FrozenArea::new());
@@ -742,7 +675,6 @@ mod tests {
         assert_eq!(e1.variant_name(), "Basic");
         assert_eq!(e1.field_labels()[1].as_str(), Some("pass"));
         assert_eq!(e1.hash(), e2.hash());
-        // Names and the labels tuple are canonical frozen allocations.
         assert_eq!(addr(&e1.enum_name_value()), addr(&e2.enum_name_value()));
         assert_eq!(
             addr(&e1.variant_name_value()),

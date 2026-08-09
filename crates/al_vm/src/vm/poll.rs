@@ -277,14 +277,30 @@ impl VM {
     /// Wake a parked process with a value built in its own context: `p` is made
     /// current so `build` allocates in its arena with its stack and frames as
     /// GC roots. The one place that invariant is enforced.
-    fn wake_with(&mut self, p: Process, build: impl FnOnce(&mut Self) -> Value) {
+    fn wake_with(
+        &mut self,
+        p: Process,
+        build: impl FnOnce(&mut Self) -> VmResult<Value>,
+    ) -> VmResult<()> {
         let interrupted = self.suspend_current();
         self.resume(p);
-        let value = build(self);
+        let result = build(self);
+        // Restore scheduler state before propagating a build failure so the
+        // error surfaces through the normal top-level path.
+        let value = match result {
+            Ok(v) => v,
+            Err(e) => {
+                let woken = self.suspend_current();
+                self.run_queue.push_back(woken);
+                self.resume(interrupted);
+                return Err(e);
+            }
+        };
         self.stack.push(value);
         let woken = self.suspend_current();
         self.run_queue.push_back(woken);
         self.resume(interrupted);
+        Ok(())
     }
 
     /// Move parked processes whose I/O is ready or whose timer has expired
@@ -332,18 +348,18 @@ impl VM {
         self.drain_io_events(timeout)?;
         self.wake_due_timers();
         // A completion notify may be what ended the wait above.
-        self.drain_completions();
+        self.drain_completions()?;
         Ok(())
     }
 
     /// Deliver finished blocking-pool jobs, waking the process parked under
     /// each `job_id`. Returns whether anything was woken. Whatever process was
     /// current is detached around the delivery and restored after.
-    pub(super) fn drain_completions(&mut self) -> bool {
+    pub(super) fn drain_completions(&mut self) -> VmResult<bool> {
         let drained: Vec<Completion> = {
             let mut q = lock(&self.runtime.slots[self.scheduler_index].completions);
             if q.is_empty() {
-                return false;
+                return Ok(false);
             }
             q.drain(..).collect()
         };
@@ -352,10 +368,10 @@ impl VM {
             let Some((_wait, p)) = self.park_remove(c.job_id) else {
                 continue;
             };
-            self.wake_with(p, |vm| vm.completion_result(c.result));
+            self.wake_with(p, |vm| vm.completion_result(c.result))?;
             woke = true;
         }
-        woke
+        Ok(woke)
     }
 
     /// Construct a blocking-pool result in the current process's heap. A

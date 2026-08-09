@@ -92,8 +92,8 @@ impl VM {
             .as_int()
             .and_then(|idx| self.seq_elem(&arr_val, idx));
         let v = match elem {
-            Some(elem) => self.make_some(elem),
-            None => self.make_none(),
+            Some(elem) => self.make_some(elem)?,
+            None => self.make_none()?,
         };
         self.stack.push(v);
         Ok(())

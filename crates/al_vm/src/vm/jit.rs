@@ -1,50 +1,23 @@
 //! JIT module construction and runtime-symbol resolution: the layering seam
 //! between `al_core`'s CLIF construction and this crate's runtime.
 //!
-//! # The layering decision, documented
+//! `al_core` depends on this crate, never the reverse, but compiled bodies
+//! must call runtime services owned here. Runtime symbols therefore cross
+//! the crate boundary **by name**: CLIF emitted anywhere declares them
+//! `Linkage::Import` under the canonical names in [`runtime_symbols`], which
+//! [`jit_module`] registers with the `JITBuilder`, and Cranelift binds them
+//! during relocation in [`finalize_into`] — at finalize time, not Rust link
+//! time. Adding a runtime call is one shim, one [`runtime_symbols`] entry,
+//! one [`RuntimeFns`] import.
 //!
-//! `al_core` (the front end, where CLIF construction lives) depends on this
-//! crate, never the reverse — yet JIT-compiled bodies must call runtime
-//! services on both sides of that boundary: this crate owns the value
-//! layout, its release path (`al_native_release_at_zero`), and the
-//! interpreter-parity shims ([`native_shims`](super::native_shims)), while
-//! codegen itself runs in `al_core`. Of the two seams the design allows —
-//! CLIF construction living wholly in `al_core` with symbols resolved late,
-//! or a per-body callback hook the embedder installs — the compiler driver
-//! forced the *hook* for codegen placement: `compile_with_native`'s
-//! `NativeHook` (both in `al_core::bytecode`) fires at the only point where
-//! a body's post-perceus `CoreFn` and its per-body `ResolvedPool` are both
-//! alive, and its docs record why codegen hangs off that seam.
-//!
-//! Symbol resolution is the *other half* of the seam, and it is what this
-//! module pins down: **runtime symbols cross the crate boundary by NAME.**
-//! CLIF emitted anywhere (including this crate's own helpers, e.g.
-//! [`native_rc::emit_dynamic_drop`](crate::native_rc)) refers to
-//! runtime functions as `Linkage::Import` declarations under the canonical
-//! names collected in [`runtime_symbols`]; no crate ever links against the
-//! other's functions directly. [`jit_module`] registers every
-//! `(name, address)` pair with the `JITBuilder`
-//! ([`JITBuilder::symbol`]), and Cranelift resolves the names during
-//! relocation when [`finalize_into`] runs `finalize_definitions` — i.e. at
-//! finalize time, not at Rust link time. Adding a runtime call is therefore
-//! one shim + one entry in [`runtime_symbols`] + one import in
-//! [`RuntimeFns`]; the A1/A2 shim families extend this table without
-//! touching the mechanism.
-//!
-//! # Code lifetime
-//!
-//! One [`JITModule`] holds one executable mapping shared by every scheduler:
-//! entry pointers published into the program's
-//! [`NativeTable`](crate::bytecode::NativeTable) are raw code addresses,
-//! and processes migrate across scheduler threads mid-flight, so the mapping
-//! is immortal. `cranelift-jit` only unmaps through the explicit (unsafe)
-//! `free_memory` — which nothing here calls — so dropping the module after
-//! [`finalize_into`] leaks the code pages by design.
+//! One [`JITModule`] holds one executable mapping shared by every scheduler.
+//! Published entry pointers are raw code addresses and processes migrate
+//! across scheduler threads mid-flight, so the mapping must be immortal:
+//! nothing calls `free_memory`, and dropping the module after
+//! [`finalize_into`] leaks the code pages deliberately.
 
-// Designated unsafe module: publishing a finalized code address as a typed
-// [`NativeEntry`] is a transmute from `*const u8`, justified by the
-// signature check `finalize_into` performs against every published
-// declaration.
+// Publishing a finalized code address as a typed `NativeEntry` transmutes a
+// `*const u8`, justified by `finalize_into`'s signature check.
 #![allow(unsafe_code)]
 
 use crate::FuncIdx;
@@ -60,20 +33,18 @@ use cranelift_module::{FuncId, Linkage, Module, ModuleError, default_libcall_nam
 
 use super::{native, native_shims, perf_map};
 
-/// Why JIT construction or publication failed. Every `JitError` is
-/// recoverable by the same fallback: leave the [`NativeTable`] slots empty
-/// and interpret (bytecode exists for every function regardless). Not every
-/// failure surfaces as a `JitError`, though — an unresolved runtime symbol
-/// panics inside `finalize_definitions` (cranelift-jit aborts with "can't
-/// resolve symbol", naming it) rather than returning an error; the
-/// correspondence test in this module is what keeps that path unreachable.
+/// Why JIT construction or publication failed. Every variant is recoverable
+/// the same way: leave the [`NativeTable`] slots empty and interpret.
+///
+/// An unresolved runtime symbol is not one of these — cranelift-jit panics
+/// inside `finalize_definitions` instead. The correspondence test in this
+/// module keeps that path unreachable.
 #[derive(Debug)]
 pub enum JitError {
     /// The host has no Cranelift backend, or ISA construction failed.
     Host(String),
     /// Declaration, definition or finalization failed inside the module.
-    /// Boxed: `ModuleError` is >100 bytes and would fatten every
-    /// `Result<_, JitError>` on the compile path.
+    /// Boxed because `ModuleError` is >100 bytes.
     Module(Box<ModuleError>),
     /// [`finalize_into`] was handed a function not declared with the
     /// [`NativeEntry`] signature; publishing it would type-confuse every
@@ -103,13 +74,9 @@ impl From<ModuleError> for JitError {
 }
 
 /// Every runtime symbol JIT-compiled code may reference, as
-/// `(canonical name, shim address)` pairs — the complete resolution table
-/// [`jit_module`] registers: the value layout's release/reuse path
-/// ([`crate::bytecode::value`]) plus the interpreter-parity shims. The
-/// names are the contract [`RuntimeFns::declare`]'s imports resolve against;
-/// a symbol present here but never declared is harmless, a declared name
-/// missing here panics inside `finalize_definitions` naming the symbol —
-/// the correspondence test below is what keeps that path unreachable.
+/// `(canonical name, shim address)` pairs. [`RuntimeFns::declare`]'s imports
+/// resolve against these names. An unused entry is harmless; a declared name
+/// missing here panics inside `finalize_definitions`.
 pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
     let mut syms = vec![
         (
@@ -126,37 +93,28 @@ pub fn runtime_symbols() -> Vec<(&'static str, *const u8)> {
     syms
 }
 
-/// Build the one JIT module compiled bodies are defined into: host-native
-/// ISA, with every [`runtime_symbols`] pair pre-registered so imports
-/// resolve by name at finalize time.
+/// Build the one JIT module compiled bodies are defined into, with every
+/// [`runtime_symbols`] pair pre-registered.
 ///
 /// Errors only when the host has no Cranelift backend; the caller's fallback
 /// is to interpret everything.
 pub fn jit_module() -> Result<JITModule, JitError> {
     let mut flags = settings::builder();
-    // JIT'd code and the shims live at arbitrary addresses in one process:
-    // calls must go through absolute addresses, not colocated PLT-style
-    // stubs, and PIC buys nothing for never-relocated code.
+    // JIT'd code and the shims sit at arbitrary addresses in one process, so
+    // calls need absolute addresses rather than colocated PLT-style stubs.
     for (name, value) in [
         ("use_colocated_libcalls", "false"),
         ("is_pic", "false"),
-        // Real register allocation is where the backend's win lives; the
-        // whole compile unit is small enough that "speed" stays well inside
-        // the load-time budget.
         ("opt_level", "speed"),
-        // Compiled frames will eventually live on 256K per-process stacks
-        // with one guard page ([`super::stack`]). A frame larger than a page
-        // does a single unprobed `sub rsp, N` that can step clean over the
-        // guard, landing its first local write in the NEXT process's stack —
-        // silent corruption, no fault. Probing defaults off in Cranelift and
-        // costs ~0 while frame parity keeps frames tiny; it must already be
-        // on before anything makes frames big.
+        // Compiled frames live on 256K per-process stacks with one guard
+        // page ([`super::stack`]). Without probing, a frame bigger than a
+        // page does one `sub rsp, N` that steps clean over the guard and
+        // writes into the next process's stack: silent corruption, no fault.
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
-        // The context argument lives in the pinned register (r15/x21) for
-        // the whole body and is re-read at every use, never spilled — a
-        // frame must not hold a scheduler-derived word across a suspension
-        // point (the stage-2 plan's F1 fix).
+        // The context argument stays in the pinned register (r15/x21) and is
+        // re-read at every use. A frame must never hold a scheduler-derived
+        // word across a suspension point.
         ("enable_pinned_reg", "true"),
     ] {
         flags
@@ -174,10 +132,9 @@ pub fn jit_module() -> Result<JITModule, JitError> {
     Ok(JITModule::new(builder))
 }
 
-/// The [`NativeEntry`] signature in CLIF terms:
-/// `extern "C" fn(vmx: *mut c_void) -> NativeStatus`, i.e. one pointer
-/// parameter and one `i64` status return. Written down once so body
-/// declarations and [`finalize_into`]'s check cannot drift apart.
+/// The [`NativeEntry`] signature in CLIF terms: one pointer parameter, one
+/// `i64` status return. Written once so body declarations and
+/// [`finalize_into`]'s check cannot drift apart.
 pub fn native_entry_signature(module: &JITModule) -> Signature {
     let mut sig = module.make_signature();
     sig.params
@@ -187,10 +144,8 @@ pub fn native_entry_signature(module: &JITModule) -> Signature {
 }
 
 /// The declared runtime imports, one `FuncId` per shim, ready for
-/// `declare_func_in_func` at CLIF-emission sites. Declaring them once up
-/// front keeps every signature beside the name it belongs to; Cranelift
-/// dedupes repeat declarations, so calling [`RuntimeFns::declare`] is
-/// idempotent per module.
+/// `declare_func_in_func` at CLIF-emission sites. Cranelift dedupes repeat
+/// declarations, so [`RuntimeFns::declare`] is idempotent per module.
 pub struct RuntimeFns {
     /// `al_native_release_at_zero(obj)` — the cold free-at-zero call the
     /// inline drop gate branches to
@@ -221,16 +176,15 @@ pub struct RuntimeFns {
     /// totality.
     pub mod_int: FuncId,
     /// `al_rt_enter_interp(vmx) -> status` — run the already-pushed callee
-    /// frame under the interpreter's frame floor (call kind 2, used directly
-    /// only when the emitter has done its own frame handshake).
+    /// frame under the interpreter's frame floor. Used directly only when the
+    /// emitter has done its own frame handshake.
     pub enter_interp: FuncId,
     /// `al_rt_call(vmx, target, resume_ip, args, argc, out) -> status` —
-    /// known call, kinds 1 and 2: frame handshake, entry checkpoint,
-    /// table dispatch with frame-floor fallback, result to `out` on `Done`.
+    /// known call: frame handshake, entry checkpoint, table dispatch with
+    /// frame-floor fallback, result to `out` on `Done`.
     pub rt_call: FuncId,
     /// `al_rt_tail_call(vmx, target, args, argc) -> status` — cross-function
-    /// tail call: collapse in place, checkpoint, `TailCall` to the driver.
-    /// Compiled tail sites are `return al_rt_tail_call(...)`.
+    /// tail call. Compiled tail sites are `return al_rt_tail_call(...)`.
     pub rt_tail_call: FuncId,
     /// `al_rt_checkpoint(vmx) -> status` — the reds checkpoint at a
     /// self-tail-call back-edge (`Done` = keep looping, `Yield` = unwind
@@ -277,16 +231,12 @@ impl RuntimeFns {
     }
 }
 
-/// One compiled body handed to [`finalize_into`]: the entry-table slot it
-/// publishes to, the module-level function carrying the definition, and the
-/// metadata the [`perf_map`] writer needs. `func_id` must name a *defined*
-/// function, not a bare declaration — the definer constructs a `JitDef` only
-/// after a successful `define_function`, and [`finalize_into`] relies on
-/// that. [`JITModule`] exposes no code-size
-/// accessor after finalization, so the definer captures `code_size` while it
-/// still holds the compiled context
-/// (`ctx.compiled_code().unwrap().code_info().total_size` right after
-/// `define_function`).
+/// One compiled body handed to [`finalize_into`].
+///
+/// `func_id` must name a *defined* function, not a bare declaration:
+/// construct a `JitDef` only after a successful `define_function`.
+/// [`JITModule`] exposes no code-size accessor after finalization, so
+/// `code_size` must be captured from the compiled context at that same point.
 pub struct JitDef {
     pub fn_idx: FuncIdx,
     pub func_id: FuncId,
@@ -296,23 +246,17 @@ pub struct JitDef {
     pub code_size: u32,
 }
 
-/// The finalize step: resolve every pending relocation (this is where the
-/// [`runtime_symbols`] names bind to their shim addresses), then publish
-/// each def's code address into the program's entry table — and, under
-/// `AL_PERF_MAP=1`, one `/tmp/perf-<pid>.map` symbol line per def
-/// ([`perf_map`]), since this is the moment code addresses become final.
+/// Resolve every pending relocation (where [`runtime_symbols`] names bind to
+/// their shim addresses), then publish each def's code address into the
+/// program's entry table, plus a [`perf_map`] line under `AL_PERF_MAP=1`.
 ///
-/// Every published declaration is checked against
-/// [`native_entry_signature`] first — refusing a mismatched signature here
-/// keeps the `*const u8` → [`NativeEntry`] transmute below sound for every
-/// later `table.get` caller. The signature check cannot see whether a
-/// declaration carries a definition — cranelift keeps that private — so a
-/// declared-but-never-defined `func_id` panics in `get_finalized_function`
-/// rather than returning an error; [`JitDef`]'s contract (constructed only
-/// from a successful `define_function`) is what rules that out.
-/// The module must be kept alive (or dropped
-/// *without* `free_memory`, which leaks the mapping — see the module docs)
-/// for as long as the table's pointers can run, i.e. forever.
+/// Every declaration is checked against [`native_entry_signature`] first;
+/// that check is what keeps the `*const u8` → [`NativeEntry`] transmute
+/// sound for later `table.get` callers. It cannot see whether a declaration
+/// carries a definition, so a declared-but-never-defined `func_id` panics in
+/// `get_finalized_function`; [`JitDef`]'s contract rules that out.
+///
+/// The module must outlive the table's pointers, i.e. forever.
 pub fn finalize_into(
     module: &mut JITModule,
     defs: &[JitDef],
@@ -331,8 +275,8 @@ pub fn finalize_into(
     for def in defs {
         let code = module.get_finalized_function(def.func_id);
         // SAFETY: `code` is the finalized body of a function declared with
-        // `native_entry_signature` (checked above), which is `NativeEntry`'s
-        // ABI by construction; the mapping is immortal (module docs).
+        // `native_entry_signature`, checked above, which is `NativeEntry`'s
+        // ABI; the mapping is immortal.
         let entry = unsafe { std::mem::transmute::<*const u8, NativeEntry>(code) };
         table.set(def.fn_idx, entry);
         perf_map::record(code as usize, def.code_size as usize, &def.name);
@@ -393,16 +337,11 @@ mod tests {
                 "duplicate runtime symbol {name}"
             );
         }
-        // Every import `RuntimeFns` declares resolves against this table:
-        // a declared name missing from `runtime_symbols` would only panic
-        // inside `finalize_definitions`, so pin the correspondence here.
-        //
-        // Each row pins one import's whole ABI chain: the typed fn-pointer
-        // coercion makes a shim-signature edit a compile error here, the
-        // CLIF types are asserted against what `RuntimeFns::declare`
-        // declared, and the declared name must resolve to that exact
-        // address in `runtime_symbols()` — so neither side of the
-        // Rust-shim / CLIF-import contract can drift silently.
+        // A declared name missing from `runtime_symbols` would only show up
+        // as a panic inside `finalize_definitions`, so pin the whole ABI
+        // chain here: the typed fn-pointer coercion turns a shim-signature
+        // edit into a compile error, the CLIF types are checked against the
+        // declaration, and the name must resolve to that exact address.
         let mut module = jit_module().unwrap();
         let fns = RuntimeFns::declare(&mut module).unwrap();
         let ptr = module.target_config().pointer_type();
@@ -553,9 +492,8 @@ mod tests {
         }
     }
 
-    /// The seam end-to-end: CLIF calls `al_shim_int_box` by name, the
-    /// builder-registered symbol resolves at finalize, and the executed code
-    /// spills exactly like the interpreter's boxing.
+    /// CLIF calls `al_shim_int_box` by name, the registered symbol resolves
+    /// at finalize, and the executed code spills like the interpreter does.
     #[test]
     fn by_name_import_resolves_to_the_registered_shim() {
         let mut module = jit_module().unwrap();
@@ -591,12 +529,9 @@ mod tests {
         assert_eq!(spilled.as_int(), Some(i64::MAX));
     }
 
-    /// The by-name composition the layering exists for: CLIF emitted by a
-    /// helper (`emit_dynamic_drop`) calling a runtime symbol
-    /// (`al_native_release_at_zero`) it never links against, compiled and
-    /// resolved through this module + registry, with frees landing in the
-    /// shared `FREED_OBJECTS` accounting. This is exactly how `al_core`'s
-    /// CLIF construction reaches the runtime.
+    /// CLIF emitted by `emit_dynamic_drop` calls a runtime symbol it never
+    /// links against, resolved through this registry. The same path
+    /// `al_core`'s CLIF construction takes to reach the runtime.
     #[test]
     fn front_end_emitted_clif_resolves_through_this_registry() {
         let mut module = jit_module().unwrap();

@@ -61,8 +61,8 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
+use crate::abi::{self, AbiSlot};
 use crate::bytecode::{BinaryRef, SocketValue, Value};
-use crate::template::VariantTemplate;
 
 use super::poll::{EPOCH, Wait, monotonic_now_ms};
 use super::sched::BlockingOp;
@@ -93,10 +93,9 @@ impl VM {
         *reds -= IO_REDUCTION_COST;
         let bin_v = self.pop_binary("io.write_file")?;
         let path_v = self.pop_str("io.write_file")?;
-        if let Some(v) = self.reject_unaligned(
-            bin_ref(&bin_v).bit_len(),
-            self.runtime.stdlib.io_error.unaligned_binary,
-        ) {
+        if let Some(v) =
+            self.reject_unaligned(bin_ref(&bin_v).bit_len(), AbiSlot::FsUnalignedBinary)?
+        {
             self.stack.push(v);
             return Ok(None);
         }
@@ -132,7 +131,7 @@ impl VM {
                 is_listener: true,
             }))
         });
-        self.push_net(res);
+        self.push_net(res)?;
         Ok(())
     }
 
@@ -144,7 +143,7 @@ impl VM {
         let accept_res = self.listener(sv.id).and_then(TcpListener::accept);
         match accept_res {
             Ok((conn, peer)) => {
-                let v = self.adopt_connection(conn, peer);
+                let v = self.adopt_connection(conn, peer)?;
                 self.stack.push(v);
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -154,7 +153,7 @@ impl VM {
                 self.frame_mut().ip = ip - 1;
                 return Ok(Some(Step::Parked(Wait::readable(sv.id))));
             }
-            Err(e) => self.push_net(Err(e)),
+            Err(e) => self.push_net(Err(e))?,
         }
         Ok(None)
     }
@@ -175,7 +174,7 @@ impl VM {
         match start_connect(&addr) {
             // Local connects can complete immediately.
             Ok(ConnectStart::Connected(stream)) => {
-                let v = self.adopt_connection(stream, addr);
+                let v = self.adopt_connection(stream, addr)?;
                 self.stack.push(v);
             }
             Ok(ConnectStart::Pending(socket)) => {
@@ -190,10 +189,10 @@ impl VM {
                         return Ok(Some(Step::Parked(Wait::connecting(id))));
                     }
                     // Unwatchable means unwakeable: report instead of parking.
-                    Err(e) => self.push_net(Err(e)),
+                    Err(e) => self.push_net(Err(e))?,
                 }
             }
-            Err(e) => self.push_net(Err(e)),
+            Err(e) => self.push_net(Err(e))?,
         }
         Ok(None)
     }
@@ -208,7 +207,7 @@ impl VM {
         let sv = connection_socket(&sock_val, "socket.read")?;
         let (max, read_res) = self.socket_read(sv.id, max);
         match read_res {
-            Ok(n) => self.push_read_ok(n),
+            Ok(n) => self.push_read_ok(n)?,
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 // Nothing to read yet: park until readable, then
                 // re-run this instruction.
@@ -217,7 +216,7 @@ impl VM {
                 self.frame_mut().ip = ip - 1;
                 return Ok(Some(Step::Parked(Wait::readable(sv.id))));
             }
-            Err(e) => self.push_net(Err(e)),
+            Err(e) => self.push_net(Err(e))?,
         }
         Ok(None)
     }
@@ -242,12 +241,12 @@ impl VM {
             // that arrived as the clock ran out are never discarded.
             // A zero-byte read is a peer close, reported as
             // Ok(Closed), exactly as `socket.read` does.
-            Ok(n) => self.push_read_ok(n),
+            Ok(n) => self.push_read_ok(n)?,
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if monotonic_now_ms() >= deadline_ms {
                     // The deadline passed with nothing to read.
-                    let timed_out = self.stdlib_enum(self.runtime.stdlib.net_error.timed_out);
-                    let err = self.make_err(timed_out);
+                    let timed_out = self.abi_nullary(AbiSlot::NetEtimedout)?;
+                    let err = self.make_err(timed_out)?;
                     self.stack.push(err);
                 } else {
                     // Re-push the args unchanged and re-run on wake.
@@ -268,7 +267,7 @@ impl VM {
                     ))));
                 }
             }
-            Err(e) => self.push_net(Err(e)),
+            Err(e) => self.push_net(Err(e))?,
         }
         Ok(None)
     }
@@ -280,10 +279,9 @@ impl VM {
         let bin_v = self.pop_binary("socket.write")?;
         let sock_val = self.pop()?;
         let sv = connection_socket(&sock_val, "socket.write")?;
-        if let Some(v) = self.reject_unaligned(
-            bin_ref(&bin_v).bit_len(),
-            self.runtime.stdlib.net_error.unaligned_binary,
-        ) {
+        if let Some(v) =
+            self.reject_unaligned(bin_ref(&bin_v).bit_len(), AbiSlot::NetUnalignedBinary)?
+        {
             self.stack.push(v);
             return Ok(None);
         }
@@ -302,8 +300,8 @@ impl VM {
             self.frame_mut().ip = ip - 1;
             return Ok(Some(Step::Parked(Wait::writable(sv.id))));
         }
-        let nil = self.make_nil();
-        self.push_net(result.map(|_| nil));
+        let nil = self.make_nil()?;
+        self.push_net(result.map(|_| nil))?;
         Ok(None)
     }
 
@@ -338,8 +336,8 @@ impl VM {
             }
         }
         if unaligned {
-            let e = self.stdlib_enum(self.runtime.stdlib.net_error.unaligned_binary);
-            let err = self.make_err(e);
+            let e = self.abi_nullary(AbiSlot::NetUnalignedBinary)?;
+            let err = self.make_err(e)?;
             self.stack.push(err);
             return Ok(None);
         }
@@ -368,8 +366,8 @@ impl VM {
             self.frame_mut().ip = ip - 1;
             return Ok(Some(Step::Parked(Wait::writable(sv.id))));
         }
-        let nil = self.make_nil();
-        self.push_net(result.map(|_| nil));
+        let nil = self.make_nil()?;
+        self.push_net(result.map(|_| nil))?;
         Ok(None)
     }
 
@@ -378,8 +376,8 @@ impl VM {
         // Ok(Nil) only.
         let sv = self.pop_connection("socket.close")?;
         drop(self.evict_connection(sv.id));
-        let nil = self.make_nil();
-        let v = self.make_ok(nil);
+        let nil = self.make_nil()?;
+        let v = self.make_ok(nil)?;
         self.stack.push(v);
         Ok(())
     }
@@ -392,8 +390,8 @@ impl VM {
         // accept fails before `net.close` even returns.
         self.runtime.retire_listener(self.scheduler_index, sv.id);
         self.process_retired_listeners();
-        let nil = self.make_nil();
-        let v = self.make_ok(nil);
+        let nil = self.make_nil()?;
+        let v = self.make_ok(nil)?;
         self.stack.push(v);
         Ok(())
     }
@@ -465,9 +463,11 @@ impl VM {
     pub(super) fn tcp_local_addr(&mut self) -> VmResult<()> {
         // Ok(SocketAddress) or a NetError.
         let sv = self.pop_listener("net.local_addr")?;
-        let res = self.listener_addr(sv.id);
-        let res = res.map(|a| self.templates.socket_address(&mut self.heap, a));
-        self.push_net(res);
+        let res = match self.listener_addr(sv.id) {
+            Ok(a) => Ok(self.templates.socket_address(&mut self.heap, a)?),
+            Err(e) => Err(e),
+        };
+        self.push_net(res)?;
         Ok(())
     }
 
@@ -476,10 +476,10 @@ impl VM {
         let s_v = self.pop_str("address.parse")?;
         let v = match str_ref(&s_v).parse::<std::net::IpAddr>() {
             Ok(ip) => {
-                let ip_val = self.templates.ip_address(&mut self.heap, ip);
-                self.make_some(ip_val)
+                let ip_val = self.templates.ip_address(&mut self.heap, ip)?;
+                self.make_some(ip_val)?
             }
-            Err(_) => self.make_none(),
+            Err(_) => self.make_none()?,
         };
         self.stack.push(v);
         Ok(())
@@ -491,8 +491,8 @@ impl VM {
         let host = str_ref(&host_v);
         if let Ok(addr) = host.parse::<std::net::IpAddr>() {
             // An IP literal needs no resolution.
-            let ip_val = self.templates.ip_address(&mut self.heap, addr);
-            let v = self.make_ok(ip_val);
+            let ip_val = self.templates.ip_address(&mut self.heap, addr)?;
+            let v = self.make_ok(ip_val)?;
             self.stack.push(v);
             return Ok(None);
         }
@@ -531,7 +531,7 @@ impl VM {
     ) -> VmResult<()> {
         let f = self.pop()?;
         spawn(self, f)?;
-        let nil = self.make_nil();
+        let nil = self.make_nil()?;
         self.stack.push(nil);
         *reds -= IO_REDUCTION_COST;
         Ok(())
@@ -539,7 +539,7 @@ impl VM {
 
     pub(super) fn sleep(&mut self, ip: i32) -> VmResult<Option<Step>> {
         let ms = self.pop_int("scheduler.sleep")?;
-        let nil = self.make_nil();
+        let nil = self.make_nil()?;
         self.stack.push(nil);
         if ms > 0 {
             // The Nil result is already pushed, so on wake the
@@ -579,60 +579,31 @@ impl VM {
             .ok_or_else(stale_socket)
     }
 
-    /// Build an `al/net/error.NetError` from a socket/connect
-    /// `std::io::Error`, mapping the raw OS errno to the matching variant.
-    /// Anything without a named variant becomes the typed `Errno(code)`
-    /// residual — never a string.
-    pub(super) fn net_error_value(&mut self, e: &std::io::Error) -> Value {
-        let t = match e.raw_os_error() {
-            Some(libc::ETIMEDOUT) => self.runtime.stdlib.net_error.timed_out,
-            Some(libc::ECONNREFUSED) => self.runtime.stdlib.net_error.connection_refused,
-            Some(libc::ECONNRESET) => self.runtime.stdlib.net_error.connection_reset,
-            Some(libc::ECONNABORTED) => self.runtime.stdlib.net_error.connection_aborted,
-            Some(libc::ENOTCONN) => self.runtime.stdlib.net_error.not_connected,
-            Some(libc::EPIPE) => self.runtime.stdlib.net_error.broken_pipe,
-            Some(libc::EADDRINUSE) => self.runtime.stdlib.net_error.addr_in_use,
-            Some(libc::EADDRNOTAVAIL) => self.runtime.stdlib.net_error.addr_not_available,
-            Some(libc::ENETDOWN) => self.runtime.stdlib.net_error.network_down,
-            Some(libc::ENETUNREACH) => self.runtime.stdlib.net_error.network_unreachable,
-            Some(libc::EHOSTUNREACH) => self.runtime.stdlib.net_error.host_unreachable,
-            Some(libc::EACCES) => self.runtime.stdlib.net_error.permission_denied,
-            _ => {
-                let errno = errno_of(e);
-                let tpl = self.stdlib_template(self.runtime.stdlib.net_error.errno);
-                return tpl.instantiate(&mut self.heap, &[errno]);
+    /// Build the `NetError` for a socket/connect `std::io::Error`. Errnos
+    /// without a dedicated class become the typed `Errno(code)` residual —
+    /// never a string.
+    pub(super) fn net_error_value(&mut self, e: &std::io::Error) -> VmResult<Value> {
+        match abi::classify_net(e) {
+            abi::NetFailure::Bare(slot) => self.abi_nullary(slot),
+            abi::NetFailure::Errno(code) => {
+                self.abi_make(AbiSlot::NetErrnoOther, &[Value::small_int(code as i64)])
             }
-        };
-        self.stdlib_enum(t)
+        }
     }
 
-    /// Build an `al/io.IoError` from a filesystem `std::io::Error`, tagging
-    /// path-bearing variants with `path`. Unnamed kinds become `Errno(code)`.
-    pub(super) fn io_error_value(&mut self, e: &std::io::Error, path: &str) -> Value {
-        let t = match e.raw_os_error() {
-            Some(libc::ENOENT) => self.runtime.stdlib.io_error.not_found,
-            Some(libc::EACCES) => self.runtime.stdlib.io_error.permission_denied,
-            Some(libc::EEXIST) => self.runtime.stdlib.io_error.already_exists,
-            Some(libc::ENOTDIR) => self.runtime.stdlib.io_error.not_a_directory,
-            Some(libc::EISDIR) => self.runtime.stdlib.io_error.is_a_directory,
-            Some(libc::EROFS) => self.runtime.stdlib.io_error.read_only_filesystem,
-            Some(libc::ELOOP) => self.runtime.stdlib.io_error.filesystem_loop,
-            Some(libc::ENOSPC) => {
-                return self.stdlib_enum(self.runtime.stdlib.io_error.storage_full);
+    /// Build the `IoError` for a filesystem `std::io::Error`, tagging
+    /// path-bearing classes with `path`.
+    pub(super) fn io_error_value(&mut self, e: &std::io::Error, path: &str) -> VmResult<Value> {
+        match abi::classify_fs(e) {
+            abi::FsFailure::Path(slot) => {
+                let path_v = Value::str_in(&mut self.heap, path);
+                self.abi_make(slot, &[path_v])
             }
-            Some(libc::EDQUOT) => {
-                return self.stdlib_enum(self.runtime.stdlib.io_error.quota_exceeded);
+            abi::FsFailure::Bare(slot) => self.abi_nullary(slot),
+            abi::FsFailure::Errno(code) => {
+                self.abi_make(AbiSlot::FsErrnoOther, &[Value::small_int(code as i64)])
             }
-            Some(libc::EFBIG) => self.runtime.stdlib.io_error.file_too_large,
-            _ => {
-                let errno = errno_of(e);
-                let tpl = self.stdlib_template(self.runtime.stdlib.io_error.errno);
-                return tpl.instantiate(&mut self.heap, &[errno]);
-            }
-        };
-        let tpl = self.stdlib_template(t);
-        let path_v = Value::str_in(&mut self.heap, path);
-        tpl.instantiate(&mut self.heap, &[path_v])
+        }
     }
 
     // --- I/O helpers ---------------------------------------------------------
@@ -657,18 +628,16 @@ impl VM {
     /// otherwise the first `n` bytes of the scratch buffer are copied out and
     /// wrapped as `Data(bin)`.
     #[inline]
-    fn push_read_ok(&mut self, n: usize) {
+    fn push_read_ok(&mut self, n: usize) -> VmResult<()> {
         let read = if n == 0 {
-            self.templates.read_closed.clone()
+            self.abi_nullary(AbiSlot::ReadClosed)?
         } else {
             let bin = Value::binary_from_slice_in(&mut self.heap, &self.read_scratch[..n]);
-            self.templates
-                .read_data
-                .clone()
-                .instantiate(&mut self.heap, &[bin])
+            self.abi_make(AbiSlot::ReadData, &[bin])?
         };
-        let ok = self.make_ok(read);
+        let ok = self.make_ok(read)?;
         self.stack.push(ok);
+        Ok(())
     }
 
     /// Zero-copy view box over `bin` minus its first `skip` bytes — the
@@ -686,38 +655,35 @@ impl VM {
     /// to listen/connect (an `Int` port unchecked-`as u16` would silently wrap).
     #[cold]
     fn push_invalid_port(&mut self) -> VmResult<()> {
-        let e = self.stdlib_enum(self.runtime.stdlib.net_error.invalid_port);
-        let err = self.make_err(e);
+        let e = self.abi_nullary(AbiSlot::NetInvalidPort)?;
+        let err = self.make_err(e)?;
         self.stack.push(err);
         Ok(())
     }
 
     /// Push `Ok(v)` or a typed `NetError` built from the socket `io::Error`.
     #[inline]
-    fn push_net(&mut self, r: std::io::Result<Value>) {
+    fn push_net(&mut self, r: std::io::Result<Value>) -> VmResult<()> {
         let v = match r {
-            Ok(v) => self.make_ok(v),
+            Ok(v) => self.make_ok(v)?,
             Err(err) => {
-                let e = self.net_error_value(&err);
-                self.make_err(e)
+                let e = self.net_error_value(&err)?;
+                self.make_err(e)?
             }
         };
         self.stack.push(v);
+        Ok(())
     }
 
     /// If `bits` is not byte-aligned, the error to push — built from the
-    /// caller's `unaligned` template (`NetError`/`IoError`).
+    /// caller's unaligned-binary slot (`NetError`/`IoError`).
     #[inline]
-    fn reject_unaligned(
-        &mut self,
-        bits: u64,
-        unaligned: &'static VariantTemplate,
-    ) -> Option<Value> {
+    fn reject_unaligned(&mut self, bits: u64, unaligned: AbiSlot) -> VmResult<Option<Value>> {
         if bits.is_multiple_of(8) {
-            return None;
+            return Ok(None);
         }
-        let e = self.stdlib_enum(unaligned);
-        Some(self.make_err(e))
+        let e = self.abi_nullary(unaligned)?;
+        Ok(Some(self.make_err(e)?))
     }
 
     /// Allocate a socket id that is unique across every scheduler: the
@@ -781,11 +747,11 @@ impl VM {
         &mut self,
         stream: TcpStream,
         peer: std::net::SocketAddr,
-    ) -> Value {
+    ) -> VmResult<Value> {
         // A blocking socket in a nonblocking event loop stalls the whole
         // scheduler on the first read/write; refuse it as `Err(NetError)`.
         if let Err(e) = stream.set_nonblocking(true) {
-            let err = self.net_error_value(&e);
+            let err = self.net_error_value(&e)?;
             return self.make_err(err);
         }
         // Small request/response exchanges should not sit in Nagle's buffer
@@ -796,23 +762,16 @@ impl VM {
         // ends, the connection closes. Ownership never moves implicitly.
         let owner = self.current_pid;
         if let Err(e) = self.track_connection(id, stream, owner) {
-            let err = self.net_error_value(&e);
+            let err = self.net_error_value(&e)?;
             return self.make_err(err);
         }
         let handle = Value::socket(SocketValue {
             id,
             is_listener: false,
         });
-        let v = self.templates.make_socket(&mut self.heap, handle, peer);
+        let v = self.templates.make_socket(&mut self.heap, handle, peer)?;
         self.make_ok(v)
     }
-}
-
-/// The raw OS errno (or 0 if the error carries none), as the `Errno(code)`
-/// residual's payload. An errno always fits the small-int range.
-#[inline]
-fn errno_of(e: &std::io::Error) -> Value {
-    Value::small_int(e.raw_os_error().unwrap_or(0) as i64)
 }
 
 /// `Some(port as u16)` iff `port` is a valid TCP/UDP port. AL's `Int` is

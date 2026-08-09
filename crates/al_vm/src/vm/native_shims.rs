@@ -1,48 +1,23 @@
-//! Interpreter-parity runtime shims for natively compiled Int arithmetic.
+//! Runtime shims compiled code calls, matching the interpreter's semantics.
 //!
-//! Inside a compiled function a proven-`Int` value lives as a raw `i64` in
-//! registers, which is exact parity with the interpreter: its arithmetic arms
-//! (`bin_int!` in `exec.rs`) also operate on the full `i64` domain — decode
-//! with `as_int_typed`, apply a `wrapping_*` op, re-box with `push_int`.
-//! Boxing only matters at the seams, and the seams are what these shims
-//! cover:
+//! A proven-`Int` value lives as a raw `i64` in registers, so only the boxing
+//! seams need help. AL Ints are 47-bit NaN-boxed immediates: a result outside
+//! `[-2^47, 2^47)` spills to an arena `BigInt`, and an Int-typed frame slot may
+//! already hold one. Compiled code inlines the fast paths and branches here on
+//! the cold side.
 //!
-//! - **Spill.** AL Ints are 47-bit-payload NaN-boxed immediates; a result
-//!   outside `[-2^47, 2^47)` boxes to an arena `BigInt`
-//!   ([`VM::boxed_int`](super::VM) → `Value::int_in`). Compiled code inlines
-//!   the `fits_small_int` range check after every arithmetic op and branches
-//!   to [`al_shim_int_box`] on the cold side.
-//! - **Unbox.** An Int-typed operand loaded from a frame slot may be a
-//!   `BigInt` box rather than a small-int immediate. Compiled code inlines
-//!   the small-int decode and branches to [`al_shim_int_unbox`] otherwise.
-//! - **Div/Mod edge cases.** The interpreter is total: `x / 0 == 0`,
-//!   `x % 0 == x`, and `MIN / -1` / `MIN % -1` wrap (`wrapping_div` /
-//!   `wrapping_rem`, i.e. `MIN` and `0`). A bare `sdiv`/`srem` instruction
-//!   would trap on both edges, so compiled code either inlines the guards or
-//!   calls [`al_shim_div_int`] / [`al_shim_mod_int`]. There is no error
-//!   path: like the interpreter's `Op::DivInt`/`Op::ModInt`, these never
-//!   raise.
-//! - **Whole-op fallback.** The `al_shim_{add,sub,mul,neg,div,mod}_int_val`
-//!   shims reproduce a complete interpreter handler over value *bits*:
-//!   decode both operands, release the references the caller transfers
-//!   (mirroring the interpreter's operand pops), apply the op, box the
-//!   result. They are the one-call cold path when an operand is already
-//!   boxed and the emitter does not want to reassemble unbox/op/box inline.
+//! Div and mod are total like the interpreter (`x / 0 == 0`, `x % 0 == x`,
+//! `MIN / -1` wraps), where a bare `sdiv`/`srem` would trap.
 //!
-//! Reference-count accounting matches the interpreter exactly: operand
-//! drops go through `Value::drop` (`release_bits`), so `BigInt` frees land
-//! in the same `FREED_OBJECTS` accounting the interpreter's pops feed, and
-//! results are boxed by the same `VM::boxed_int` the interpreter's
-//! `push_int` uses.
+//! The `al_shim_*_int_val` shims are the one-call cold path over value bits:
+//! decode, release the operand references the caller transfers, apply, re-box.
 //!
-//! Generated code reaches these functions by symbol: the JIT finalize step
-//! registers every [`shim_symbols`] pair with the builder
-//! (`JITBuilder::symbol`), so the front end's CLIF construction can name them
-//! without a dependency on this crate.
+//! Generated code finds these by symbol name; the JIT registers every
+//! [`shim_symbols`] pair, so the CLIF emitter names them without depending on
+//! this crate.
 
-// Designated unsafe module: generated code cannot pass `&mut VM` or `Value`,
-// so the boundary works in raw pointers and raw NaN-box bits; every shim's
-// safety contract states the ownership it assumes.
+// Generated code cannot pass `&mut VM` or `Value`, so this boundary works in
+// raw pointers and raw NaN-box bits.
 #![allow(unsafe_code)]
 
 use crate::TypeId;
@@ -51,40 +26,36 @@ use crate::bytecode::{Value, ValueView, seq};
 
 use super::VM;
 
-/// Escape raw bits from an owned value without running its destructor: the
-/// reference count the value carries transfers to the returned bits.
+/// Escape raw bits from an owned value without running its destructor. The
+/// reference it carries transfers to the returned bits.
 #[inline]
 fn into_bits(v: Value) -> u64 {
     std::mem::ManuallyDrop::new(v).to_bits()
 }
 
-/// Truncating division with the interpreter's totality: `x / 0 == 0` and
-/// `MIN / -1 == MIN` (wraps instead of trapping). Mirrors `Op::DivInt`.
+/// Truncating division, total like `Op::DivInt`: `x / 0 == 0`, `MIN / -1`
+/// wraps instead of trapping.
 #[inline]
 fn div_int(a: i64, b: i64) -> i64 {
     if b == 0 { 0 } else { a.wrapping_div(b) }
 }
 
-/// Remainder with the interpreter's totality: `x % 0 == x` (not an error)
-/// and `MIN % -1 == 0` (wraps instead of trapping). The result takes the
-/// dividend's sign, as `wrapping_rem` does. Mirrors `Op::ModInt`.
+/// Remainder, total like `Op::ModInt`: `x % 0 == x`, `MIN % -1 == 0`. The
+/// result takes the dividend's sign.
 #[inline]
 fn mod_int(a: i64, b: i64) -> i64 {
     if b == 0 { a } else { a.wrapping_rem(b) }
 }
 
-/// Shared body of the whole-op shims: decode both operands, release the
-/// operand references the caller transferred (the interpreter's pops drop
-/// theirs the same way), apply `op` over the full `i64` domain, and box the
-/// result through [`VM::boxed_int`](super::VM).
+/// Shared body of the whole-op shims.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `a` and `b` must
-/// each be the bits of an Int-typed `Value` (small-int immediate or live
-/// `BigInt` box) whose reference the caller owns and transfers to this call.
+/// each be the bits of an Int-typed `Value` whose reference the caller owns
+/// and transfers to this call.
 unsafe fn bin_int_val(vmx: *mut VM, a: u64, b: u64, op: impl FnOnce(i64, i64) -> i64) -> u64 {
-    // SAFETY: ownership of both operand references is transferred per the
-    // contract above; the drops below balance them exactly once.
+    // SAFETY: both operand references are transferred per the contract above;
+    // the drops below balance them exactly once.
     let (a, b) = unsafe { (Value::from_bits(a), Value::from_bits(b)) };
     let r = op(a.as_int_typed(), b.as_int_typed());
     drop(a);
@@ -94,14 +65,9 @@ unsafe fn bin_int_val(vmx: *mut VM, a: u64, b: u64, op: impl FnOnce(i64, i64) ->
     into_bits(vm.boxed_int(r))
 }
 
-/// Box a full-range `i64` as an Int value, spilling past the 47-bit
-/// immediate range to an arena `BigInt` — the interpreter's `push_int`
-/// boxing, minus the stack push. Compiled code inlines the
-/// `fits_small_int` fast path and calls this only on the spill side, but
-/// the shim is total either way.
-///
-/// The returned bits carry one owned reference (freshly allocated for a
-/// spill); the caller must store or release it exactly once.
+/// Box a full-range `i64` as an Int value, spilling past the 47-bit immediate
+/// range to an arena `BigInt`. The returned bits carry one owned reference the
+/// caller must store or release exactly once.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`.
@@ -112,12 +78,8 @@ pub unsafe extern "C" fn al_shim_int_box(vmx: *mut VM, i: i64) -> u64 {
     into_bits(vm.boxed_int(i))
 }
 
-/// Decode an Int-typed value's bits to the full `i64` — `as_int_typed`
-/// behind the C ABI. Compiled code inlines the small-int decode (sign-extend
-/// the 48-bit payload) and calls this only when the value is a `BigInt` box,
-/// but the shim is total either way.
-///
-/// Borrow-only: the caller keeps its reference; no count moves.
+/// Decode an Int-typed value's bits to the full `i64`. Borrow-only: the caller
+/// keeps its reference.
 ///
 /// # Safety
 /// `bits` must be the bits of an Int-typed `Value`; a `BigInt` box must be
@@ -130,8 +92,7 @@ pub unsafe extern "C" fn al_shim_int_unbox(bits: u64) -> i64 {
     v.as_int_typed()
 }
 
-/// `Op::AddInt` over value bits: wrapping `i64` add, result re-boxed (spills
-/// past the immediate range). Consumes both operand references.
+/// `Op::AddInt` over value bits. Consumes both operand references.
 ///
 /// # Safety
 /// As [`bin_int_val`].
@@ -161,8 +122,7 @@ pub unsafe extern "C" fn al_shim_mul_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
     unsafe { bin_int_val(vmx, a, b, i64::wrapping_mul) }
 }
 
-/// `Op::DivInt` over value bits ([`div_int`] semantics). Consumes both
-/// operand references.
+/// `Op::DivInt` over value bits. Consumes both operand references.
 ///
 /// # Safety
 /// As [`bin_int_val`].
@@ -172,8 +132,7 @@ pub unsafe extern "C" fn al_shim_div_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
     unsafe { bin_int_val(vmx, a, b, div_int) }
 }
 
-/// `Op::ModInt` over value bits ([`mod_int`] semantics). Consumes both
-/// operand references.
+/// `Op::ModInt` over value bits. Consumes both operand references.
 ///
 /// # Safety
 /// As [`bin_int_val`].
@@ -183,17 +142,17 @@ pub unsafe extern "C" fn al_shim_mod_int_val(vmx: *mut VM, a: u64, b: u64) -> u6
     unsafe { bin_int_val(vmx, a, b, mod_int) }
 }
 
-/// `Op::NegInt` over value bits: wrapping negation (`MIN` stays `MIN`),
-/// result re-boxed (`-SMALL_INT_MIN` spills — the immediate range is
-/// asymmetric). Consumes the operand reference.
+/// `Op::NegInt` over value bits: wrapping negation, so `MIN` stays `MIN` and
+/// `-SMALL_INT_MIN` spills (the immediate range is asymmetric). Consumes the
+/// operand reference.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `a` must be the
 /// bits of an Int-typed `Value` whose reference the caller transfers.
 #[cold]
 pub unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64 {
-    // SAFETY: ownership of the operand reference is transferred per the
-    // contract above; the drop balances it exactly once.
+    // SAFETY: the operand reference is transferred per the contract above; the
+    // drop balances it exactly once.
     let a = unsafe { Value::from_bits(a) };
     let r = a.as_int_typed().wrapping_neg();
     drop(a);
@@ -202,29 +161,15 @@ pub unsafe extern "C" fn al_shim_neg_int_val(vmx: *mut VM, a: u64) -> u64 {
     into_bits(vm.boxed_int(r))
 }
 
-/// `Op::MakeEnumPayload`'s allocation path behind the C ABI: build a tagged
-/// enum cell in the running process heap — one `ProcHeap` allocation, exactly
-/// the interpreter's (`Value::enum_reuse_in` with no reuse candidate). Cold:
-/// compiled constructor sites take their in-place reuse fast path inline and
-/// call here only when a fresh cell is needed.
-///
-/// The header words mirror `VM::make_enum_payload` bit for bit:
-///
-/// - `packed` is the compile-time `type_id | variant_idx << 32` word the
-///   emitter baked (the interpreter reads the same value from its pooled Int
-///   constant).
-/// - `enum_name` / `variant_name` / `labels` are the *bits* of frozen
-///   constants (two `Str`s and a `Tuple` of `Str`s), baked as instruction
-///   immediates — immortal words whose clone/drop is free, stored into the
-///   cell verbatim like the interpreter's constant-pool pushes.
-/// - The hash word is written `0`: 0-means-unhashed is load-bearing
-///   (`EnumRef::hash` computes and caches lazily; constructing is orders of
-///   magnitude more common than hashing).
+/// `Op::MakeEnumPayload`'s allocation path behind the C ABI. Must mirror
+/// `VM::make_enum_payload` bit for bit: `packed` is the emitter's
+/// `type_id | variant_idx << 32` word, the name and label bits are frozen
+/// immortal constants stored verbatim, and the hash word is written `0`
+/// because 0 means "not yet hashed" to `EnumRef::hash`.
 ///
 /// `payload` points at `len` value words, each carrying one owned reference
-/// the caller transfers (its operand pushes); the construction takes the
-/// cell's own reference per field and this shim releases the transferred
-/// ones — the interpreter's build-then-truncate, in the same order.
+/// the caller transfers. The cell takes its own reference per field and this
+/// shim releases the transferred ones.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `enum_name` and
@@ -242,14 +187,11 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
     payload: *const u64,
     len: i64,
 ) -> u64 {
-    // The interpreter's decode of the packed header constant, bit for bit
-    // (`make_enum_payload`: `TypeId(packed as i32)`, `(packed >> 32) as u16`).
     let type_id = TypeId(packed as i32);
     let variant_idx = (packed >> 32) as u16;
     let n = len as usize;
-    // SAFETY: immortal frozen constants per the contract above — treating
-    // the bits as owned is sound because immortal clone/drop never touches
-    // memory; `move_child` stores the words verbatim.
+    // SAFETY: immortal frozen constants per the contract above. Treating the
+    // bits as owned is sound because immortal clone/drop never touches memory.
     let (en, vn, lb) = unsafe {
         (
             Value::from_bits(enum_name),
@@ -258,9 +200,8 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
         )
     };
     debug_assert!(en.is_immortal() && vn.is_immortal() && lb.is_immortal());
-    // SAFETY: `payload` points at `n` initialized value words (`Value` is
-    // repr(transparent) over u64); borrowed here — the construction takes
-    // its own reference per field (`store_child`).
+    // SAFETY: `payload` points at `n` initialized value words and `Value` is
+    // repr(transparent) over u64. Borrowed: the cell takes its own reference.
     let fields: &[Value] = if n == 0 {
         &[]
     } else {
@@ -268,7 +209,6 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
     };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
-    // Hash 0 = not yet hashed; see the doc comment.
     let v = Value::enum_reuse_in(
         &mut vm.heap,
         ReuseAddr::none(),
@@ -280,24 +220,16 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
         lb,
         fields,
     );
-    // The interpreter's `stack.truncate(base)`: release the operand
-    // references the caller transferred.
     for i in 0..n {
-        // SAFETY: each word carries one owned reference, released exactly
-        // once here.
+        // SAFETY: each word carries one owned reference, released once here.
         drop(unsafe { Value::from_bits(payload.add(i).read()) });
     }
     into_bits(v)
 }
 
-/// `Op::MakeArray` behind the C ABI: build a persistent array in the running
-/// process heap from `len` element words, exactly the interpreter's
-/// `VM::make_array` (`Value::array_in` over the operand slice, then the
-/// truncate that releases the operand references).
-///
-/// `elems` points at `len` value words, each carrying one owned reference the
-/// caller transfers; the construction takes the array's own reference per
-/// element and this shim releases the transferred ones.
+/// `Op::MakeArray` behind the C ABI. `elems` points at `len` value words, each
+/// carrying one owned reference the caller transfers; the array takes its own
+/// reference per element and this shim releases the transferred ones.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `elems` must point
@@ -306,9 +238,8 @@ pub unsafe extern "C" fn al_shim_enum_alloc(
 #[cold]
 pub unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len: i64) -> u64 {
     let n = len as usize;
-    // SAFETY: `elems` points at `n` initialized value words (`Value` is
-    // repr(transparent) over u64); borrowed here — the construction takes
-    // its own reference per element.
+    // SAFETY: `elems` points at `n` initialized value words and `Value` is
+    // repr(transparent) over u64. Borrowed: the array takes its own reference.
     let vals: &[Value] = if n == 0 {
         &[]
     } else {
@@ -318,15 +249,13 @@ pub unsafe extern "C" fn al_shim_make_array(vmx: *mut VM, elems: *const u64, len
     let vm = unsafe { &mut *vmx };
     let v = Value::array_in(&mut vm.heap, vals);
     for i in 0..n {
-        // SAFETY: each word carries one owned reference, released exactly
-        // once here.
+        // SAFETY: each word carries one owned reference, released once here.
         drop(unsafe { Value::from_bits(elems.add(i).read()) });
     }
     into_bits(v)
 }
 
-/// `Op::MakeTuple` behind the C ABI — [`al_shim_make_array`] over
-/// `Value::tuple_in`, the interpreter's `VM::make_tuple`.
+/// `Op::MakeTuple` behind the C ABI: [`al_shim_make_array`] over `tuple_in`.
 ///
 /// # Safety
 /// Same contract as [`al_shim_make_array`].
@@ -343,18 +272,15 @@ pub unsafe extern "C" fn al_shim_make_tuple(vmx: *mut VM, elems: *const u64, len
     let vm = unsafe { &mut *vmx };
     let v = Value::tuple_in(&mut vm.heap, vals);
     for i in 0..n {
-        // SAFETY: each word carries one owned reference, released exactly
-        // once here.
+        // SAFETY: each word carries one owned reference, released once here.
         drop(unsafe { Value::from_bits(elems.add(i).read()) });
     }
     into_bits(v)
 }
 
-/// `VM::seq_root`, total: the coverage gate only admits these ops on a
-/// *proven* `Array`-typed operand, whose runtime inhabitants are a
-/// persistent tree or a lazy `Range` — the interpreter's error arm is
-/// statically unreachable, so a stray value passes through untouched
-/// (debug builds assert instead).
+/// `VM::seq_root`, made total. The coverage gate only admits these ops on a
+/// proven `Array`-typed operand, so the interpreter's error arm is
+/// unreachable; a stray value passes through untouched.
 fn seq_root_total(vm: &mut VM, v: Value) -> Value {
     match v.kind() {
         ValueView::Array(_) => v,
@@ -366,10 +292,9 @@ fn seq_root_total(vm: &mut VM, v: Value) -> Value {
     }
 }
 
-/// `Op::ArrayLen` (`VM::seq_len`) behind the C ABI, on a proven
-/// `Array`-typed word: tree and lazy-range lengths, boxed like the
-/// interpreter's `push_int` (a range's length can exceed the small-int
-/// payload). The transferred reference is released.
+/// `Op::ArrayLen` behind the C ABI, on a proven `Array`-typed word. The result
+/// is boxed because a lazy range's length can exceed the small-int payload.
+/// The transferred reference is released.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `seq` must carry
@@ -392,8 +317,8 @@ pub unsafe extern "C" fn al_shim_seq_len(vmx: *mut VM, seq: u64) -> u64 {
     into_bits(vm.boxed_int(n))
 }
 
-/// `Op::BinByteSize` (`VM::bin_byte_size`) behind the C ABI, on a proven
-/// `Binary`-typed word. The transferred reference is released.
+/// `Op::BinByteSize` behind the C ABI, on a proven `Binary`-typed word. The
+/// transferred reference is released.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `bin` must carry
@@ -414,11 +339,9 @@ pub unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
     into_bits(vm.boxed_int(n))
 }
 
-/// `Op::Append` (`VM::seq_append`) behind the C ABI: `buf[0]` is the
-/// sequence, `buf[1..len]` the pushed elements, the interpreter's operand
-/// order. Builds `push_back` by `push_back` over the persistent tree
-/// (materializing a lazy range first), then releases every transferred
-/// reference — the interpreter's read-in-place-then-truncate.
+/// `Op::Append` behind the C ABI. `buf[0]` is the sequence and `buf[1..len]`
+/// the pushed elements, matching the interpreter's operand order. Every
+/// transferred reference is released.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `buf` must point
@@ -426,8 +349,8 @@ pub unsafe extern "C" fn al_shim_bin_byte_size(vmx: *mut VM, bin: u64) -> u64 {
 /// and transfers to this call.
 pub unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: i64) -> u64 {
     let n = len as usize;
-    // SAFETY: `buf` points at `n` initialized value words, borrowed here;
-    // the tree takes its own reference per element (`push_back` clones).
+    // SAFETY: `buf` points at `n` initialized value words, borrowed here; the
+    // tree takes its own reference per element.
     let words: &[Value] = unsafe { std::slice::from_raw_parts(buf.cast::<Value>(), n) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
@@ -436,17 +359,15 @@ pub unsafe extern "C" fn al_shim_seq_append(vmx: *mut VM, buf: *const u64, len: 
         root = seq::push_back(&mut vm.heap, &root, e.clone());
     }
     for i in 0..n {
-        // SAFETY: each word carries one owned reference, released exactly
-        // once here.
+        // SAFETY: each word carries one owned reference, released once here.
         drop(unsafe { Value::from_bits(buf.add(i).read()) });
     }
     into_bits(root)
 }
 
-/// `Op::Prepend` (`VM::seq_prepend`) behind the C ABI: `buf[..len-1]` are
-/// the elements in source order, `buf[len-1]` the sequence — the
-/// interpreter's operand order. `push_front` in reverse so the final order
-/// is `[e0, .., ek-1, ..seq]`, then releases every transferred reference.
+/// `Op::Prepend` behind the C ABI. `buf[..len-1]` are the elements in source
+/// order and `buf[len-1]` the sequence, matching the interpreter's operand
+/// order. Pushes front in reverse so the result is `[e0, .., ek-1, ..seq]`.
 ///
 /// # Safety
 /// Same contract as [`al_shim_seq_append`].
@@ -461,19 +382,15 @@ pub unsafe extern "C" fn al_shim_seq_prepend(vmx: *mut VM, buf: *const u64, len:
         root = seq::push_front(&mut vm.heap, &root, e.clone());
     }
     for i in 0..n {
-        // SAFETY: each word carries one owned reference, released exactly
-        // once here.
+        // SAFETY: each word carries one owned reference, released once here.
         drop(unsafe { Value::from_bits(buf.add(i).read()) });
     }
     into_bits(root)
 }
 
-/// `Op::HttpParseHead` (`VM::http_parse_head`) behind the C ABI: parse a
-/// request head out of a proven `Binary`-typed buffer at `off`. Infallible
-/// on the Rust side — malformed input comes back as an AL enum value — so
-/// the only interpreter error this elides is the pop's type check, which
-/// the gate's Binary/Int proofs make unreachable. The transferred buffer
-/// reference is released; the result carries its own.
+/// `Op::HttpParseHead` behind the C ABI: parse a request head out of a proven
+/// `Binary`-typed buffer at `off`. Infallible here, since malformed input comes
+/// back as an AL enum value. The transferred buffer reference is released.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `buf` must carry
@@ -488,10 +405,9 @@ pub unsafe extern "C" fn al_shim_http_parse_head(vmx: *mut VM, buf: u64, off: i6
     into_bits(r)
 }
 
-/// `Op::HttpHeadersValid` (`VM::http_headers_valid`) behind the C ABI, on a
-/// proven `Array(Header)`-typed word. Pure — the result is a Bool
-/// immediate; the shape error the interpreter can raise is unreachable
-/// under the proof (debug builds assert, release answers `false`).
+/// `Op::HttpHeadersValid` behind the C ABI, on a proven `Array(Header)`-typed
+/// word. The shape error is unreachable under the proof; release answers
+/// `false`.
 ///
 /// # Safety
 /// `headers` must carry one owned reference the caller transfers.
@@ -506,9 +422,8 @@ pub unsafe extern "C" fn al_shim_http_headers_valid(headers: u64) -> u64 {
     into_bits(r)
 }
 
-/// `Op::HttpHeaderHas` (`VM::http_header_has`) behind the C ABI, on proven
-/// `Array(Header)` + `Binary` words. Pure Bool result; both transferred
-/// references released.
+/// `Op::HttpHeaderHas` behind the C ABI, on proven `Array(Header)` + `Binary`
+/// words. Both transferred references are released.
 ///
 /// # Safety
 /// `headers` and `name` must each carry one owned reference the caller

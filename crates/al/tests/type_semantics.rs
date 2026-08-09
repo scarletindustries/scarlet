@@ -7,10 +7,6 @@
 mod common;
 use common::{check_ok, check_rejects, run_outputs};
 
-// ===========================================================================
-// `type` keyword — definitions
-// ===========================================================================
-
 run_case! {
     type_keyword_single_variant: (
         "type User { User(name String, age Int) }\n\
@@ -46,10 +42,6 @@ reject_case! {
     unlabeled_field_in_def_is_rejected:
         ("type Wrap { Wrap(Int) }\nx = Wrap(1)\n", "constructor fields must be labeled"),
 }
-
-// ===========================================================================
-// Constructors are functions
-// ===========================================================================
 
 run_case! {
     some_call_is_ordinary_call: (
@@ -90,10 +82,6 @@ run_case! {
     block_is_grouping: ("println({1 + 2} * 3)\n", "9\n"),
 }
 
-// ===========================================================================
-// Array index returns Option
-// ===========================================================================
-
 run_case! {
     index_returns_option: (
         "xs = [10, 20, 30]\n\
@@ -111,11 +99,8 @@ reject_case! {
 
 #[test]
 fn index_negative_returns_none() {
-    // A negative index hits the `idx >= 0` guard in `Op::Index`, a path
-    // distinct from the positive out-of-bounds case
-    // (`xs[9]`): instead of `arr.get` returning `None`, the guard itself
-    // rejects the access. Both `-1` and a large negative magnitude yield the
-    // `None` Option, while a valid in-bounds index still boxes `Some`.
+    // A negative index is rejected by `Op::Index`'s own `idx >= 0` guard, a
+    // different path from the out-of-bounds `arr.get` returning `None`.
     run_outputs(
         "xs = [10, 20, 30]\n\
          println(xs[-1])\n\
@@ -125,15 +110,9 @@ fn index_negative_returns_none() {
     );
 }
 
-// ===========================================================================
-// Array slicing `xs[start..end]` (Op::ArraySlice)
-// ===========================================================================
-
 #[test]
 fn slice_in_bounds_returns_subarray() {
-    // `xs[start..end]` is the half-open sub-array, itself an `Array(Int)` (not
-    // an `Option`). Indexing back into the slice confirms its exact contents
-    // and length: `[20, 30, 40]` has elements at 0..3, so index 3 is `None`.
+    // A slice is an `Array(Int)`, not an `Option`.
     run_outputs(
         "xs = [10, 20, 30, 40, 50]\n\
          s = xs[1..4]\n\
@@ -145,16 +124,10 @@ fn slice_in_bounds_returns_subarray() {
     );
 }
 
-// ===========================================================================
-// Ranges are first-class Array(Int) values
-// ===========================================================================
-
 #[test]
 fn range_as_value_materializes() {
-    // A bare `start..end` is a first-class `Array(Int)`; printing it
-    // materializes the half-open sequence. `3..3` is empty (start == end) and
-    // `5..2` is empty too — a reversed range saturates to length 0, never a
-    // negative length or a crash.
+    // A bare `start..end` is a first-class `Array(Int)`. A reversed range
+    // saturates to length 0 rather than a negative length or a crash.
     run_outputs(
         "println(0..5)\n\
          println(3..3)\n\
@@ -162,10 +135,6 @@ fn range_as_value_materializes() {
         "[0, 1, 2, 3, 4]\n[]\n[]\n",
     );
 }
-
-// ===========================================================================
-// `.field` totality
-// ===========================================================================
 
 run_case! {
     field_access_total_across_variants: (
@@ -176,10 +145,6 @@ run_case! {
         "al\nanthropic\n",
     ),
 }
-
-// ===========================================================================
-// Recursive and mutually-recursive types/functions
-// ===========================================================================
 
 ok_case! {
     recursive_type_compiles: (
@@ -203,18 +168,6 @@ run_case! {
         "2\n",
     ),
 }
-
-// ===========================================================================
-// Exhaustiveness of self-nested generic types — Option(Option(_)), Result(...)
-//
-// The exhaustiveness checker resolves a matched type into its variant set
-// before lowering it. A recursion guard keyed only on the nominal type id
-// mistook the *inner* `Option` of `Option(Option(_))` for a recursive
-// occurrence of the outer one, left it variant-less, and so demanded a
-// wildcard arm for an already-exhaustive match. The guard is now keyed on the
-// resolved instance, so a finite re-nesting expands while genuine recursion is
-// still cut off.
-// ===========================================================================
 
 ok_case! {
     nested_option_match_is_exhaustive: (
@@ -255,9 +208,7 @@ ok_case! {
 }
 
 reject_case! {
-    /// Dropping `Some(None)` is genuinely non-exhaustive, and now that the inner
-    /// `Option`'s variants are known the witness names it exactly instead of
-    /// collapsing to `Some(_)`.
+    /// The witness names the missing inner variant, not just `Some(_)`.
     nested_option_missing_inner_arm_reports_precise_witness: (
         "x = Some(Some(5))\n\
          r = match x {\n\
@@ -315,10 +266,6 @@ run_case! {
     ),
 }
 
-// ===========================================================================
-// Exhaustiveness — variants and fields
-// ===========================================================================
-
 reject_case! {
     unreachable_arm_is_error: (
         "fn f(b Bool) Int {\n\
@@ -356,10 +303,6 @@ run_case! {
     ),
 }
 
-// ===========================================================================
-// `or` typing
-// ===========================================================================
-
 reject_case! {
     or_on_non_option_result_is_rejected:
         ("x = 5 or 0\nprintln(x)\n", "'or' requires the left side to be Option(_) or Result(_, _)"),
@@ -375,10 +318,6 @@ run_case! {
         "42\n-1\n",
     ),
 }
-
-// ===========================================================================
-// Rigid type variables
-// ===========================================================================
 
 reject_case! {
     /// Body returns concrete `Int` where signature promised `a`.
@@ -397,10 +336,6 @@ run_case! {
     ),
 }
 
-// ===========================================================================
-// Positional vs labeled construction
-// ===========================================================================
-
 run_case! {
     positional_construction: (
         "type Pair { Pair(fst Int, snd Int) }\n\
@@ -417,10 +352,6 @@ run_case! {
         "1\n2\n",
     ),
 }
-
-// ===========================================================================
-// Constructor record-update: `Ctor(..base, field: newval)`
-// ===========================================================================
 
 #[test]
 fn ctor_record_update_overrides_and_projects() {
@@ -641,10 +572,6 @@ fn vm_attribute_stdlib_only() {
     check_rejects("@nope\nfn f() Nil { Nil }\n", "Unknown attribute '@nope'");
 }
 
-// ===========================================================================
-// PreludeBindings + Bool-as-enum + pure-AL stdlib
-// ===========================================================================
-
 #[test]
 fn bool_is_a_normal_two_ctor_type() {
     run_outputs(
@@ -820,10 +747,6 @@ fn binary_literal_and_pattern_e2e() {
     );
 }
 
-// ===========================================================================
-// `Ctor(..) = expr` — irrefutable constructor destructure (single-arm match)
-// ===========================================================================
-
 run_case! {
     ctor_destructure_single_variant_ok: (
         "type Box { Box(value Int) }\n\
@@ -865,10 +788,6 @@ reject_case! {
     ),
 }
 
-// ===========================================================================
-// `TypeName = expr` — typed discard (assert expr's type, drop the value)
-// ===========================================================================
-
 run_case! {
     typed_discard_nil_println_ok: ("Nil = println('x')\n", "x\n"),
 }
@@ -898,17 +817,6 @@ fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
                println(pick([1, 2, 3]))\n";
     run_outputs(src, "222\n111\n");
 }
-
-// ===========================================================================
-// Inferred (unannotated) types must reach `lower`
-//
-// `lower` used to re-derive types by re-instantiating each constructor's and
-// module function's scheme, so a match on an *inferred* scrutinee saw
-// `Option(?a)` where the typechecker had `Option(User)`. An unresolved `?a` is
-// not a `Con`, so the field lookup found nothing and lowering aborted — on
-// programs `al check` had accepted. Both shapes work with an annotated
-// scrutinee, which is what hid this.
-// ===========================================================================
 
 #[test]
 fn field_access_through_a_constructor_inferred_scrutinee() {
