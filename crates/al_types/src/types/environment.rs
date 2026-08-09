@@ -4,14 +4,11 @@ use super::infer::{ArenaSlice, Scheme, StrId, Ty, pool};
 use crate::type_def::TypeId;
 use al_syntax::span::Span;
 
-/// What a definition *is*, stamped on every [`DefinitionLocation`]. Drives
-/// LSP symbol kinds and the unused/dead-code rules (e.g. a `ModuleAlias` is
-/// "unused" when no `Qualified` reference targets it). Defined here — the
-/// inference env keys constructor/field metadata on it — and re-exported by
-/// `al_core::reference`, whose graph keys `DefId` on it, so both share one
-/// kind vocabulary with no conversion seam. It must stay `Copy` so
-/// `DefinitionLocation`, and therefore `Scheme`, stays `Copy` and the
-/// precompiled stdlib keeps emitting `&'static [Scheme]` directly.
+/// What a definition *is*, stamped on every [`DefinitionLocation`]. Drives LSP
+/// symbol kinds and the unused/dead-code rules. Lives here and is re-exported
+/// by `al_core::reference` so the inference env and the reference graph share
+/// one kind vocabulary with no conversion seam. Must stay `Copy` so `Scheme`
+/// stays `Copy` and the precompiled stdlib can emit `&'static [Scheme]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntityKind {
     /// A `let`/parameter/match binder — a local value.
@@ -32,8 +29,7 @@ pub enum EntityKind {
 }
 
 impl EntityKind {
-    /// Human-readable noun for this kind, used in the hover panel and the
-    /// unused/dead-code hint message.
+    /// Human-readable noun, for the hover panel and the unused-code hint.
     pub fn noun(self) -> &'static str {
         match self {
             EntityKind::Value => "value",
@@ -47,18 +43,15 @@ impl EntityKind {
     }
 
     /// Whether goto-definition on a target of this kind should navigate. A
-    /// `ModuleAlias` definition spans the whole `import` declaration, so
-    /// resolving it would be a no-op self-jump; the final path segment is
-    /// handled separately as an `Import` occurrence.
+    /// `ModuleAlias` spans the whole `import`, so jumping to it is a no-op;
+    /// the final path segment is handled as an `Import` occurrence instead.
     pub fn is_navigable(self) -> bool {
         !matches!(self, EntityKind::ModuleAlias)
     }
 }
 
-/// The canonical definition site of a name: its source span, the interned path
-/// of the module that owns it, and what kind of entity it is. `module` is an
-/// `ArenaSlice` into `InferEngine.str_slices` (never a `Vec<String>`) so this
-/// struct — and `Scheme`, which embeds it — stays `Copy`.
+/// The canonical definition site of a name. `module` is an `ArenaSlice`, never
+/// a `Vec<String>`, so this struct and the `Scheme` embedding it stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefinitionLocation {
     pub line: i32,
@@ -81,9 +74,9 @@ impl DefinitionLocation {
     }
 
     /// The declaring-name span this location was built from. A declaring
-    /// identifier is always single-line, so the reconstructed span is exactly
-    /// the one [`Self::new`] was handed — keeping a definition's `DefId` equal
-    /// to the `DefId` every occurrence of it targets.
+    /// identifier is always single-line, so this reconstructs exactly what
+    /// [`Self::new`] was handed, keeping a definition's `DefId` equal to the
+    /// one every occurrence targets.
     pub fn span(&self) -> Span {
         Span {
             start_line: self.line,
@@ -94,22 +87,21 @@ impl DefinitionLocation {
     }
 }
 
-/// A type parameter on a nominal type. `id` is the Generic var id minted by the
-/// hydrator at Pass 1; `name` is kept for diagnostics and display.
+/// A type parameter on a nominal type. `name` is for diagnostics only.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeParam {
     pub name: StrId,
-    /// Engine-local var id. For types loaded from a `StaticStdlib` it is the
-    /// build-time engine's original var id — dangling in the live engine, but
-    /// never matched: `close_body` rewrote every body ref to `Bound(idx)`
-    /// before flattening, and inference only compares live `Var` ids.
+    /// Engine-local var id, minted by the hydrator at Pass 1. For types loaded
+    /// from a `StaticStdlib` this is the build-time engine's id: dangling in
+    /// the live engine, but never matched, since `close_body` rewrote every
+    /// body ref to `Bound(idx)` before flattening.
     pub id: i32,
 }
 
-/// A field of a constructor variant in template form. `ty` is a `Ty` containing
-/// `Var(id)` references to the owning type's `TypeParam` ids (or `Bound(idx)`
-/// after `close_body`), so callers substitute concrete arguments via the
-/// inference engine without round-tripping through `type_def::Type`.
+/// A field of a constructor variant in template form. `ty` holds `Var(id)`
+/// refs to the owning type's `TypeParam` ids, or `Bound(idx)` after
+/// `close_body`, so callers substitute arguments through the inference engine
+/// without round-tripping through `type_def::Type`.
 #[derive(Debug, Clone, Copy)]
 pub struct VariantField {
     pub label: StrId,
@@ -123,16 +115,15 @@ pub struct Variant {
     pub fields: ArenaSlice<pool::VariantFields>,
 }
 
-/// The body of a registered type. Separated from the head so that Pass 1 can
-/// register all heads (allocating ids and arities) before any body is hydrated
-/// in Pass 4, which is what makes mutually-recursive type declarations work.
+/// The body of a registered type. Separate from the head so Pass 1 can register
+/// every head before Pass 4 hydrates any body, which is what makes
+/// mutually-recursive type declarations work.
 #[derive(Debug, Clone, Copy)]
 pub enum TypeBody {
-    /// Head registered but body not yet hydrated. Reading variants/target in
-    /// this state is a compiler bug.
+    /// Head registered, body not yet hydrated. Reading variants/target in this
+    /// state is a compiler bug.
     Unresolved,
-    /// `type Name(params) { Ctor(label Type, ...) ... }` — `variants` →
-    /// `InferEngine.variants`.
+    /// `type Name(params) { Ctor(label Type, ...) ... }`
     Custom {
         variants: ArenaSlice<pool::Variants>,
     },
@@ -142,12 +133,9 @@ pub enum TypeBody {
     External,
 }
 
-/// Canonical record for a user-defined nominal type. `name` is the canonical
-/// name as declared (which may differ from the local binding under
-/// `import {X as Y}`).
-///
+/// Canonical record for a user-defined nominal type. `name` is the name as
+/// declared, which may differ from the local binding under `import {X as Y}`.
 /// `Copy` so the precompiled stdlib emits `&'static [TypeInfo]` directly.
-/// `module`/`type_params` slice into engine pools; `name` is a `StrId`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
     pub id: TypeId,
@@ -160,13 +148,12 @@ pub struct TypeInfo {
 }
 
 impl TypeInfo {
-    /// Number of type parameters. Used by the hydrator's arity check when a
-    /// type is referenced in an annotation.
+    /// Number of type parameters, for the hydrator's arity check.
     pub fn arity(&self) -> usize {
         self.type_params.len as usize
     }
 
-    /// Convenience accessor for the variant slice when the body is `Custom`.
+    /// The variant slice when the body is `Custom`.
     pub fn variants(&self) -> Option<ArenaSlice<pool::Variants>> {
         match self.body {
             TypeBody::Custom { variants } => Some(variants),
@@ -175,19 +162,16 @@ impl TypeInfo {
     }
 }
 
-/// One in-place modification of a flat-map entry that already existed when it
-/// was written. The flat maps (`type_info` / `definitions` / `docs`) roll back
-/// by truncating to a recorded length, which cannot undo an insert that
-/// REPLACED an existing entry — `IndexMap::insert` keeps the entry at its
-/// original (possibly pre-watermark) index, so a later truncation never
-/// reaches it. Without this journal, an entry file declaring `type Parsed`
-/// would permanently clobber the seeded stdlib `Parsed` for the rest of an
-/// LSP session. Every overwrite is recorded here and replayed (newest first)
-/// by `truncate_to` before the length truncation.
+/// One in-place replacement of an entry that already existed. The flat maps
+/// roll back by truncating to a length, which cannot undo a replace:
+/// `IndexMap::insert` keeps the entry at its original, possibly pre-watermark,
+/// index. Without this journal an entry file declaring `type Parsed` would
+/// clobber the seeded stdlib `Parsed` for the rest of an LSP session.
+/// `truncate_to` replays these newest-first before truncating.
 #[derive(Debug, Clone)]
 enum Overwrite {
-    /// A root-scope `define` that replaced an existing entry. Defines inside
-    /// an open scope roll back through `scope_undo` instead.
+    /// A root-scope `define` that replaced an existing entry. Defines inside an
+    /// open scope roll back through `scope_undo` instead.
     Binding(String, Scheme),
     TypeInfo(String, TypeInfo),
     TypeInfoById(TypeId, TypeInfo),
@@ -197,33 +181,28 @@ enum Overwrite {
 
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    /// Flat name → scheme map. Nested lexical scopes are implemented via the
-    /// `scope_undo`/`scope_marks` undo log below rather than a stack of
-    /// per-scope `IndexMap`s, so `push_scope`/`pop_scope` allocate nothing for
-    /// the common empty scope and `lookup` is a single hash probe instead of
-    /// O(scope depth). Same pattern as `Compiler::locals`.
+    /// Flat name → scheme map. Nested scopes live in the `scope_undo` log below
+    /// rather than a stack of per-scope maps, so an empty scope allocates
+    /// nothing and `lookup` is one hash probe. Same pattern as
+    /// `Compiler::locals`.
     ///
-    /// All five maps below are private: every overwrite MUST go through the
-    /// journaling mutators (`define`, `store_type_info`, `store_definition`,
-    /// `store_doc`) or `truncate_to` cannot restore the clobbered entry.
+    /// Every map here is private: an overwrite MUST go through the journaling
+    /// mutators (`define`, `store_type_info`, `store_definition`, `store_doc`)
+    /// or `truncate_to` cannot restore the clobbered entry.
     bindings: IndexMap<String, Scheme>,
-    /// For every `define` while at least one scope is open, `(entry index,
-    /// value before this define)`. `pop_scope` replays entries above the top
-    /// mark newest-first: `Some` restores the shadowed value in place; `None`
-    /// pops the entry (which is always the last — new keys are appended, and
-    /// reverse replay removes them in reverse append order, so `pop()` is
-    /// exact and index order is never perturbed).
+    /// For every `define` with a scope open, `(entry index, prior value)`.
+    /// `pop_scope` replays newest-first: `Some` restores in place, `None` pops
+    /// the entry, which is always the last one, so index order is never
+    /// perturbed.
     scope_undo: Vec<(usize, Option<Scheme>)>,
     /// `scope_undo.len()` captured at each `push_scope`.
     scope_marks: Vec<usize>,
-    /// Type lookup by SOURCE name — annotation resolution only, where lexical
-    /// shadowing (an entry's `type Parsed` over the stdlib's) is the correct
-    /// semantics. Semantic lookups (exhaustiveness, field access, hover
-    /// resolution) must go through `type_info_by_id` instead.
+    /// Type lookup by SOURCE name. Annotation resolution only, where lexical
+    /// shadowing is the correct semantics. Exhaustiveness, field access and
+    /// hover must go through `type_info_by_id` instead.
     type_info: IndexMap<String, TypeInfo>,
-    /// Type lookup by NOMINAL id — the identity carried in `TypeNode::Con`.
-    /// Ids are allocator-unique, so entries here are never overwritten in
-    /// place by a name collision; rollback is plain truncation.
+    /// Type lookup by NOMINAL id, the identity carried in `TypeNode::Con`. Ids
+    /// are allocator-unique, so no name collision can overwrite an entry here.
     type_info_by_id: IndexMap<TypeId, TypeInfo>,
     definitions: IndexMap<String, DefinitionLocation>,
     docs: IndexMap<String, String>,
@@ -242,10 +221,9 @@ impl TypeEnv {
 
     pub fn watermark(&self) -> EnvWatermark {
         EnvWatermark {
-            // Root-scope binding count: every `None` undo entry is a key that
-            // was appended while a nested scope was open, so subtracting them
-            // yields exactly what `bindings.len()` would be after popping all
-            // scopes — i.e. the persistent root layer `truncate_to` truncates.
+            // Every `None` undo entry is a key appended while a nested scope
+            // was open, so subtracting them gives `bindings.len()` as it would
+            // be after popping all scopes: the persistent root layer.
             root_scope: self.bindings.len()
                 - self.scope_undo.iter().filter(|(_, p)| p.is_none()).count(),
             type_info: self.type_info.len(),
@@ -258,8 +236,7 @@ impl TypeEnv {
     }
 
     pub fn truncate_to(&mut self, w: &EnvWatermark) {
-        // Discard all nested scopes: unwind the undo log fully so `bindings`
-        // holds exactly the root-scope state, then truncate that by length.
+        // Unwind the undo log fully so `bindings` holds only root-scope state.
         self.scope_marks.clear();
         for (idx, prev) in self.scope_undo.drain(..).rev() {
             match prev {
@@ -270,11 +247,8 @@ impl TypeEnv {
                 }
             }
         }
-        // Undo in-place overwrites first (newest first, so the oldest value of
-        // a multiply-overwritten key wins), then truncate by length. A
-        // restored entry that itself sits above the truncation point is
-        // removed again by the truncation — the replay is still correct, just
-        // transient.
+        // Newest-first, so the oldest value of a multiply-overwritten key wins.
+        // A restored entry above the truncation point is removed again below.
         while self.journal.len() > w.journal {
             match self.journal.pop() {
                 Some(Overwrite::Binding(name, s)) => {
@@ -305,10 +279,8 @@ impl TypeEnv {
 }
 
 /// Rollback payload for [`TypeEnv::truncate_to`]. Deliberately not `Ord`:
-/// `Watermark`'s ordering key excludes this
-/// field so `EnvWatermark`'s field set can change without silently perturbing
-/// which cached module `Watermark::earlier` picks during invalidation (on an
-/// ordering tie, `earlier`/`later` merge this payload field-wise instead).
+/// `Watermark`'s ordering key excludes it, so this field set can change without
+/// perturbing which module `Watermark::earlier` picks on invalidation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvWatermark {
     pub root_scope: usize,
@@ -320,10 +292,8 @@ pub struct EnvWatermark {
     pub next_type_id: TypeId,
 }
 
-/// The empty-env watermark. Hand-written rather than derived so
-/// `next_type_id` matches [`new_env`]'s starting id of 1 — `TypeId` has no
-/// `Default` precisely because a derive would silently manufacture the
-/// `TypeId::NONE` sentinel here.
+/// Hand-written, not derived, so `next_type_id` matches [`new_env`]'s starting
+/// id of 1: a derive would manufacture the `TypeId::NONE` sentinel here.
 impl Default for EnvWatermark {
     fn default() -> Self {
         EnvWatermark {
@@ -373,8 +343,8 @@ impl TypeEnv {
     }
 
     pub fn define(&mut self, name: &str, scheme: Scheme) {
-        // Probe by borrow first so shadowing an existing name (params, `let`
-        // rebinds, match-arm vars) never allocates a fresh key `String`.
+        // Probe by borrow first so shadowing an existing name never allocates
+        // a fresh key `String`.
         let (idx, prev) = if let Some((idx, _, slot)) = self.bindings.get_full_mut(name) {
             (idx, Some(std::mem::replace(slot, scheme)))
         } else {
@@ -384,11 +354,8 @@ impl TypeEnv {
         if !self.scope_marks.is_empty() {
             self.scope_undo.push((idx, prev));
         } else if let Some(prev) = prev {
-            // Root-scope overwrite: `truncate_to`'s by-length truncation
-            // cannot undo an in-place replace, so journal it exactly like the
-            // flat maps do. Cold path — only root-level shadowing (e.g. a
-            // module redefining a prelude name) reaches here; every define
-            // inside a function body has a scope open.
+            // By-length truncation cannot undo an in-place replace, so journal
+            // it. Cold: every define inside a function body has a scope open.
             self.journal
                 .push(Overwrite::Binding(name.to_string(), prev));
         }

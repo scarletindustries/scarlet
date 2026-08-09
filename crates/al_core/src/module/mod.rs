@@ -520,20 +520,12 @@ impl ModuleTable {
     }
 
     /// Remove `key` and every transitive dependent from the cache and return
-    /// the earliest watermark among them (the truncation target).
+    /// the earliest watermark among them, the truncation target.
     ///
-    /// Only the dependent closure is *logically* invalidated: every module's
-    /// `id_base` survives in `id_bases`, so when an unrelated later module is
-    /// recompiled it receives the same type ids it had before. Those later
-    /// modules must still be dropped from `loaded` here — the caller truncates
-    /// every arena to `min_wm`, after which their cached `ArenaSlice`/`Ty`
-    /// indices would dangle — but that recompile is id-stable.
-    ///
-    /// Reference-graph coherence: an evicted `CachedModule` takes its
-    /// `module_refs` (definitions + occurrences) with it. The workspace
-    /// `ReferenceGraph` is rebuilt from the surviving `loaded` set on every
-    /// `IncrementalSession::check`, so an invalidated module's reverse edges
-    /// are recomputed from scratch and can never dangle into evicted state.
+    /// Modules compiled *after* that watermark are also dropped, because the
+    /// caller truncates every arena to it and their cached `ArenaSlice`/`Ty`
+    /// indices would dangle. Their recompile is still id-stable: `id_bases`
+    /// survives eviction.
     pub fn invalidate(&mut self, key: &ModuleKey) -> Option<Watermark> {
         use std::collections::VecDeque;
         let mut closure: HashSet<ModuleKey> = HashSet::new();
@@ -620,7 +612,6 @@ pub struct ResolvedModule {
 /// `base_dir` is the directory of the importing file, used for `./` and `../`
 /// relative imports.
 pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedModule, ResolveError> {
-    // Relative: leading `.` / `..` markers.
     if path.is_relative() {
         let Some(base) = base_dir else {
             return Err(ResolveError::NoBaseDir);
@@ -659,16 +650,14 @@ pub fn resolve(path: &ImportPath, base_dir: Option<&Path>) -> Result<ResolvedMod
     resolve_canonical(&path.names)
 }
 
-/// Resolve a canonical, non-relative module path — a resolved on-disk file
-/// identity ([`file_module_path`]), a stdlib path, or a bare name. This is
-/// the form module paths take in the reference graph, so the LSP's
-/// module-to-URI translation enters here.
+/// Resolve a canonical, non-relative module path: a [`file_module_path`]
+/// identity, a stdlib path, or a bare name. This is the form paths take in the
+/// reference graph, so the LSP's module-to-URI translation enters here.
 pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveError> {
-    // Already resolved: a canonical file identity.
     if is_resolved_file(path) {
         let key = ModuleKey::of(path);
-        // Rebuild the on-disk path with the platform separator; the key's
-        // '/'-join form is cache identity only.
+        // Rebuild with the platform separator; the key's '/'-join form is
+        // cache identity only.
         let p = PathBuf::from(format!("{}.al", path.join(std::path::MAIN_SEPARATOR_STR)));
         return if p.is_file() {
             Ok(ResolvedModule {
@@ -681,7 +670,6 @@ pub fn resolve_canonical(path: &ModulePath) -> Result<ResolvedModule, ResolveErr
         };
     }
 
-    // Stdlib: any path rooted at `al`.
     if is_stdlib(path) {
         let key = ModuleKey::of(path);
         return match stdlib::lookup(key.as_str()) {
@@ -719,9 +707,6 @@ mod tests {
         d
     }
 
-    // A real stdlib source file inside this very repo is detected as its module
-    // path so the compiler can analyse it *as* that module. The marker file
-    // itself is not a module, and an unrelated path matches nothing.
     #[test]
     fn detect_stdlib_module_resolves_repo_std_files() {
         let array = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/al/array.al"));
@@ -746,9 +731,6 @@ mod tests {
         assert_eq!(detect_stdlib_module(&outside), None);
     }
 
-    // `collect_al_files` recurses into normal subdirectories, takes only `.al`
-    // files, and skips dotdirs / `target` / `node_modules`. A missing directory
-    // yields nothing rather than erroring.
     #[test]
     fn collect_al_files_filters_and_recurses() {
         let root = unique_dir("collect");
@@ -775,7 +757,6 @@ mod tests {
             "should collect only a.al and sub/c.al; got {out:?}"
         );
 
-        // Unreadable / missing directory: silent, leaves `out` untouched.
         let mut missing = Vec::new();
         collect_al_files(&root.join("does-not-exist"), &mut missing);
         assert!(missing.is_empty());
@@ -790,11 +771,8 @@ mod tests {
         }
     }
 
-    // `resolve` routes `al/*` to embedded source, relative paths against a base
-    // dir (with `.`/`..` navigation), and errors clearly otherwise.
     #[test]
     fn resolve_stdlib_relative_and_errors() {
-        // Embedded stdlib: source, canonical path, and key all line up.
         match resolve(&rel(&[], &["al", "array"]), None) {
             Ok(r) => {
                 assert!(matches!(r.source, ModuleSource::Embedded(_)));
@@ -808,7 +786,6 @@ mod tests {
             Err(ResolveError::NoSuchStdlibModule(_))
         ));
 
-        // Relative import with no base dir cannot be resolved.
         assert!(matches!(
             resolve(&rel(&[RelSeg::CurrentDir], &["foo"]), None),
             Err(ResolveError::NoBaseDir)
@@ -820,7 +797,6 @@ mod tests {
         std::fs::write(base.join("b.v2.al"), "").unwrap();
         std::fs::create_dir_all(base.join("sub")).unwrap();
 
-        // `./foo` from base; the canonical key comes from the resolved file.
         match resolve(&rel(&[RelSeg::CurrentDir], &["foo"]), Some(&base)) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
@@ -833,7 +809,6 @@ mod tests {
             }
             other => panic!("expected ./foo to resolve to a file, got {other:?}"),
         }
-        // `../bar` from base/sub climbs to base/bar.al.
         match resolve(
             &rel(&[RelSeg::ParentDir], &["bar"]),
             Some(&base.join("sub")),
@@ -844,8 +819,7 @@ mod tests {
             }) => assert_eq!(p, base.join("bar.al")),
             other => panic!("expected ../bar to resolve, got {other:?}"),
         }
-        // A dot in the module name is part of the name: `./b.v2` resolves to
-        // `b.v2.al` (appending `.al`), not `b.al` (replacing the suffix).
+        // A dot in the module name is part of the name.
         match resolve(&rel(&[RelSeg::CurrentDir], &["b.v2"]), Some(&base)) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
@@ -853,19 +827,15 @@ mod tests {
             }) => assert_eq!(p, base.join("b.v2.al")),
             other => panic!("expected ./b.v2 to resolve to b.v2.al, got {other:?}"),
         }
-        // A relative path to a non-existent file is FileNotFound, carrying
-        // the probed filesystem path.
         match resolve(&rel(&[RelSeg::CurrentDir], &["ghost"]), Some(&base)) {
             Err(ResolveError::FileNotFound(p)) => assert_eq!(p, base.join("ghost.al")),
             other => panic!("expected ./ghost to be FileNotFound, got {other:?}"),
         }
-        // Bare names (no `al` root, not relative) are reserved -> BareName.
         assert!(matches!(
             resolve(&rel(&[], &["somepkg"]), None),
             Err(ResolveError::BareName(_))
         ));
 
-        // A canonical file identity resolves back to its on-disk file.
         match resolve_canonical(&file_module_path(&base.join("foo.al")).unwrap()) {
             Ok(ResolvedModule {
                 source: ModuleSource::File(p),
@@ -877,7 +847,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // `ModuleTable` loading/insert/iterate lifecycle.
     #[test]
     fn module_table_loading_and_insert_lifecycle() {
         let mut t = ModuleTable::new();
@@ -887,7 +856,6 @@ mod tests {
         assert!(t.is_loading(&foo));
 
         t.insert_hydrated(foo.clone(), ModuleInterface::new(vec!["foo".to_string()]));
-        // insert_hydrated clears the loading mark and makes the interface visible.
         assert!(!t.is_loading(&foo));
         assert!(t.get(&foo).is_some());
 
@@ -896,9 +864,6 @@ mod tests {
         assert_eq!(loaded.len(), 1);
     }
 
-    // `source_changed`: false for unknown keys and for hydrated (no-path)
-    // modules; for a disk-backed module, false when the bytes match the cached
-    // hash and true once the backing file is deleted.
     #[test]
     fn source_changed_paths() {
         let mut t = ModuleTable::new();
@@ -914,7 +879,6 @@ mod tests {
         );
         assert!(!t.source_changed(&stat));
 
-        // A disk-backed module: unchanged then vanished.
         let dir = unique_dir("srcchanged");
         let path = dir.join("m.al");
         let body = "x = 1\n";

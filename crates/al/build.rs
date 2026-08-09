@@ -41,7 +41,6 @@ fn main() {
     )
     .unwrap();
 
-    emit_stdlib_templates(&mut src, &pre, &engine);
     emit_pools(&mut src, &pools);
 
     writeln!(
@@ -138,90 +137,6 @@ fn emit_nums<T: std::fmt::Display>(out: &mut String, name: &str, ty: &str, items
 
 fn emit_strs<S: AsRef<str>>(out: &mut String, name: &str, items: &[S]) {
     emit_static_slice(out, name, "&str", items.iter().map(|s| q(s.as_ref())));
-}
-
-/// `PascalCase` → `SCREAMING_SNAKE` for generated const identifiers.
-fn screaming_snake(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    let mut prev_lower = false;
-    for c in s.chars() {
-        if c.is_uppercase() && prev_lower {
-            out.push('_');
-        }
-        out.extend(c.to_uppercase());
-        prev_lower = c.is_lowercase() || c.is_ascii_digit();
-    }
-    out
-}
-
-/// Emit a `VariantTemplate` static for every constructor of every stdlib type,
-/// nested in `pub mod stdlib`. The const path (`stdlib::net::SOCKET_ADDRESS`)
-/// is the binding surface: Rust referencing one fails to compile if the AL
-/// definition is renamed or removed.
-fn emit_stdlib_templates(out: &mut String, pre: &PrecompileOutput, eng: &InferEngine) {
-    // Collected first, then sorted, so nested `mod` blocks for paths like
-    // `net/socket` come out in one pass.
-    let mut entries: Vec<(Vec<&str>, String)> = Vec::new();
-    for (key, iface) in &pre.blob.interfaces {
-        let segs: Vec<&str> = if key == "al" {
-            vec!["prelude"]
-        } else if let Some(rest) = key.strip_prefix("al/") {
-            rest.split('/').collect()
-        } else {
-            continue;
-        };
-        for (type_name, ti) in &iface.types {
-            let Some(variants) = ti.variants() else {
-                continue;
-            };
-            for (variant_idx, v) in eng.variants[variants.range()].iter().enumerate() {
-                let variant_name = eng.str(v.name);
-                let labels: Vec<String> = eng.variant_fields[v.fields.range()]
-                    .iter()
-                    .map(|f| q(eng.str(f.label)))
-                    .collect();
-                let line = format!(
-                    "pub static {}: VariantTemplate = VariantTemplate {{ \
-                     type_id: {}, variant_idx: {}, type_name: {}, variant_name: {}, labels: &[{}] }};",
-                    screaming_snake(variant_name),
-                    tid(ti.id),
-                    variant_idx,
-                    q(type_name),
-                    q(variant_name),
-                    labels.join(", "),
-                );
-                entries.push((segs.clone(), line));
-            }
-        }
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    writeln!(out, "pub mod stdlib {{").unwrap();
-    writeln!(out, "    use al_core::{{VariantTemplate, TypeId}};").unwrap();
-    let mut open: Vec<&str> = Vec::new();
-    for (segs, line) in &entries {
-        // Close mods until `open` is a prefix of `segs`.
-        while !segs.starts_with(&open) {
-            open.pop();
-            writeln!(out, "    {:indent$}}}", "", indent = 4 * open.len()).unwrap();
-        }
-        // Open mods down to `segs`.
-        for seg in &segs[open.len()..] {
-            writeln!(
-                out,
-                "    {:indent$}pub mod {seg} {{ use super::*;",
-                "",
-                indent = 4 * open.len()
-            )
-            .unwrap();
-            open.push(seg);
-        }
-        writeln!(out, "    {:indent$}{line}", "", indent = 4 * open.len()).unwrap();
-    }
-    while open.pop().is_some() {
-        writeln!(out, "    {:indent$}}}", "", indent = 4 * open.len()).unwrap();
-    }
-    writeln!(out, "}}").unwrap();
 }
 
 fn emit_prelude(out: &mut String, p: &PreludeBindings) {

@@ -24,6 +24,5 @@ pub mod vm;
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/stdlib_generated.rs"));
 }
-/// `STDLIB` is the build-time precompiled stdlib; `stdlib` is the generated
-/// module of typed template handles.
-pub use generated::{STDLIB, stdlib};
+/// The build-time precompiled stdlib, zero-cost `static` data.
+pub use generated::STDLIB;

@@ -666,7 +666,6 @@ impl Scan {
         self.uses.get(id).copied().unwrap_or(0)
     }
 
-    /// Whether some `Ctor{reuse: Some(id)}` in the body claims `id`'s cell.
     fn reuse_claimed(&self, id: LocalId) -> bool {
         self.reuse_claimed.get(id).copied().unwrap_or(false)
     }
@@ -695,8 +694,8 @@ impl Scan {
 
     fn atom(&mut self, a: &Atom) {
         a.for_each_operand(|id| self.use_(id));
-        // `reuse` is not an operand: it names the slot `Op::Reuse` reads, which
-        // must therefore survive as a real slot.
+        // `reuse` is not an operand: it names the slot `Op::Reuse` reads, so
+        // that slot must survive.
         if let Atom::Ctor { reuse: Some(r), .. } = a {
             self.use_(*r);
             self.claim(*r);
@@ -749,16 +748,13 @@ impl Scan {
 }
 
 impl<'a, C: EmitCtx> Emitter<'a, C> {
-    // ── expressions ───────────────────────────────────────────────────────
-
     fn emit_expr(&mut self, e: &CoreExpr) {
         self.emit_expr_in(e, true);
     }
 
-    /// Walk the Let/Drop spine iteratively; only Match/If arms recurse.
-    /// `tail` distinguishes function-tail position (each `Tail(a)` emits `Ret`
-    /// / `TailCall*`) from `LetJoin` operand position (each `Tail(a)` leaves
-    /// the value on the stack for the merge-point `StoreLocal`).
+    /// `tail` distinguishes function-tail position, where each `Tail(a)` emits
+    /// `Ret`/`TailCall*`, from `LetJoin` operand position, where it leaves the
+    /// value on the stack for the merge-point `StoreLocal`.
     fn emit_expr_in(&mut self, mut e: &CoreExpr, tail: bool) {
         loop {
             match e {
@@ -769,11 +765,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                         e = body;
                         continue;
                     }
-                    // `let c = cmp(..); if c { .. }` — the comparison's only
-                    // consumer is the branch it feeds, so leave the Bool on the
-                    // stack instead of round-tripping it through a slot. This
-                    // is also what lets `Op::JumpNeIntLC` / `Op::JumpGeIntLC`
-                    // form at all.
+                    // `let c = cmp(..); if c { .. }`: the comparison's only
+                    // consumer is the branch, so leave the Bool on the stack.
+                    // This is also what lets `Op::JumpNeIntLC` form.
                     if let CoreExpr::If {
                         cond, then, els, ..
                     } = &**body
@@ -784,9 +778,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                         self.emit_cond_if(rhs, then, els, tail);
                         return;
                     }
-                    // `let a = n+1; let b = n+2; C(.., a, b)` — compute `a`/`b`
-                    // straight onto the operand stack at their push positions,
-                    // the way the fused AST walk did. Slot-free.
+                    // `let a = n+1; let b = n+2; C(.., a, b)`: compute `a`/`b`
+                    // straight onto the operand stack, owning no slot.
                     if let Some((defs, consumer)) = self.plan_run(e) {
                         match consumer {
                             Consumer::Bound(cb, crhs, cbody) => {
@@ -809,11 +802,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     self.push(op_arg(Op::StoreLocal, slot));
                     e = body;
                 }
-                // Body first, then the cont as a labelled block after it;
-                // every `Goto` collected while emitting the body is patched to
-                // that one label. NOT the `LetJoin` shape above: control only
-                // reaches the cont through a `Goto` edge, so there is no
-                // unconditional inline evaluation and no `StoreLocal` merge.
+                // Body first, then the cont as a labelled block after it, with
+                // every collected `Goto` patched to that one label. NOT the
+                // `LetJoin` shape above: control only reaches the cont through
+                // a `Goto`, so there is no inline evaluation and no merge.
                 CoreExpr::LetCont { id, cont, body } => {
                     self.joins.resize_at_least(*id, None);
                     if self.joins[*id].is_some() {
@@ -822,20 +814,18 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     self.joins[*id] = Some(Vec::new());
                     let mark = self.next_slot;
                     self.emit_expr_in(body, tail);
-                    // In value position the body's normal completion falls
-                    // through with its value on the stack and must skip the
-                    // cont block; in tail position every body exit is its own
-                    // `Ret`/`TailCall*`, and a diverging body only jumps away
-                    // ([`diverges`]), so a skip jump could never execute.
+                    // In value position the body falls through with its value
+                    // and must skip the cont block. In tail position every
+                    // body exit is its own `Ret`/`TailCall*`, so a skip jump
+                    // could never execute.
                     let skip = (!tail && !diverges(body)).then(|| self.jump(Op::Jump));
                     let pending = match self.joins[*id].take() {
                         Some(p) => p,
                         None => unbound_join(*id),
                     };
                     self.patch_all(&pending);
-                    // The cont references only locals bound strictly before
-                    // this node, so the body's temps are dead on every `Goto`
-                    // edge and the cont may reuse their slots.
+                    // The cont only references locals bound before this node,
+                    // so the body's temps are dead on every `Goto` edge.
                     self.next_slot = mark;
                     self.emit_expr_in(cont, tail);
                     self.next_slot = mark;
@@ -846,8 +836,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 }
                 CoreExpr::Drop { local, body, .. } => {
                     // `drop arg…; tail self(args)`: the arg releases belong
-                    // between the operand pushes and `TailCallSelf`, which
-                    // keeps the frame and so never drains them itself.
+                    // between the pushes and `TailCallSelf`, which keeps its
+                    // frame and so never drains them itself.
                     if tail && let Some((now, moved, args)) = split_self_tail_drops(e) {
                         for x in now {
                             self.emit_drop(x);
@@ -874,10 +864,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                     self.emit_atom(atom, tail, &[]);
                     return;
                 }
-                // A terminal jump to the join's cont block, which is emitted
-                // (and this label patched) when the declaring `LetCont` seals.
-                // Carries no value in either mode: the cont's own tail
-                // produces the result this position owes.
+                // A terminal jump to the join's cont block, patched when the
+                // declaring `LetCont` seals. It carries no value: the cont's
+                // own tail produces the result this position owes.
                 CoreExpr::Goto(id) => {
                     let j = self.jump(Op::Jump);
                     match self.joins.get_mut(*id) {
@@ -890,9 +879,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         }
     }
 
-    /// Emit `let bind = rhs` and return where the spine continues. A `Call` rhs
-    /// additionally peels the operands' `Drop`s out of `body` into the call
-    /// itself, so the continuation is `body` past those drops.
+    /// Emit `let bind = rhs` and return where the spine continues. A `Call`
+    /// rhs peels the operands' `Drop`s out of `body` into the call, so the
+    /// continuation is `body` past those drops.
     fn emit_bound_atom<'e>(
         &mut self,
         bind: &CoreBind,
@@ -900,10 +889,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         body: &'e CoreExpr,
         defs: &[Def],
     ) -> &'e CoreExpr {
-        // Allocate the slot *before* the rhs so a loop-carried `reuse %n` on
-        // `let %n = Ctor(..)` (Perceus self-slot preference) can address it. On
-        // the first iteration the slot reads nil and `Reuse` falls through to
-        // alloc.
+        // Allocate the slot BEFORE the rhs so a loop-carried `reuse %n` on
+        // `let %n = Ctor(..)` can address it. On the first iteration the slot
+        // reads nil and `Reuse` falls through to alloc.
         let slot = self.bind(bind);
         let rest = if let Atom::Call { callee, args } = rhs {
             let cid = if let Callee::Local(id) = callee {
@@ -928,12 +916,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         !self.is_pinned(id) && !self.scan.needs_slot(id) && self.scan.uses(id) == 1
     }
 
-    /// Emit `then`/`els` after the already-emitted conditional jump at
-    /// `else_j`. Both arms restart slot allocation from the current mark: they
-    /// are mutually exclusive, so their temps may overlap. In tail position
-    /// there is no merge jump to emit: every tail arm ends in its own
-    /// `Ret`/`TailCall*`, so a jump after it could never execute. Likewise a
-    /// diverging arm ([`diverges`]) only exits via `Goto`.
+    /// Emit `then`/`els` after the conditional jump at `else_j`. Both arms
+    /// restart slot allocation from the current mark: they are mutually
+    /// exclusive, so their temps may overlap. A tail or diverging arm gets no
+    /// merge jump — it could never execute.
     fn emit_branches(&mut self, else_j: CodeAddr, then: &CoreExpr, els: &CoreExpr, tail: bool) {
         let mark = self.next_slot;
         self.emit_expr_in(then, tail);
@@ -961,9 +947,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         self.emit_branches(else_j, then, els, tail);
     }
 
-    /// `Op::JumpNeIntLC` / `Op::JumpGeIntLC` for `local {==,<} const`, with the
-    /// *inverted* sense: the fused op jumps when the source condition is false,
-    /// exactly like the `JumpIfFalse` it replaces. Returns the label to patch.
+    /// `Op::JumpNeIntLC` / `Op::JumpGeIntLC` for `local {==,<} const`. The
+    /// sense is inverted: the fused op jumps when the source condition is
+    /// false, like the `JumpIfFalse` it replaces.
     fn emit_lc_jump(&mut self, rhs: &Atom) -> Option<CodeAddr> {
         let Atom::PrimOp {
             op: prim,
@@ -982,24 +968,21 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         Some(self.mint_label(op_ab(fused, slot, k, 0)))
     }
 
-    /// The longest suffix of the pure-`Let` run starting at `e` whose binds are
-    /// exactly, and in the same order as, a subsequence of the operands of the
-    /// consumer that follows the run. Those binds are [`Def`]s: the emitter
-    /// skips their slots and recomputes them at their operand position.
+    /// The longest suffix of the pure-`Let` run at `e` whose binds are, in the
+    /// same order, a subsequence of the following consumer's operands. Those
+    /// binds become [`Def`]s: no slot, recomputed at their operand position.
     ///
-    /// Order-preservation is the whole safety argument. Each bind is used once,
-    /// in the consumer, so no bind in the run feeds another; hoisting them into
-    /// the operand pushes keeps their relative order, and the only instructions
-    /// that overtake them are `PushLocal`/`PushConst`, which have no effects.
-    /// Anything that fails the check — a `Ctor`/`Call` in the run, a bind read
-    /// twice, operands permuted relative to the definitions — trims the run
-    /// (possibly to nothing) and those `Let`s emit their `StoreLocal` as usual.
+    /// Order preservation is the whole safety argument. Each bind is used once
+    /// in the consumer, so no bind feeds another; hoisting keeps their relative
+    /// order and only effect-free `PushLocal`/`PushConst` overtake them.
+    /// Anything failing the check trims the run and emits `StoreLocal` as
+    /// usual.
     fn plan_run<'e>(&self, e: &'e CoreExpr) -> Option<(Vec<Def<'e>>, Consumer<'e>)> {
         let mut run: Vec<Def<'e>> = Vec::new();
         let mut cur = e;
         while let CoreExpr::Let { bind, rhs, body } = cur {
-            // A const-aliased `Let` emits nothing, so it neither joins the run
-            // nor ends it.
+            // A const-aliased `Let` emits nothing, so it neither joins nor
+            // ends the run.
             if self.is_const_alias(bind, rhs) {
                 cur = body;
                 continue;
@@ -1020,10 +1003,10 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             CoreExpr::Tail(a) => (Consumer::Tail(a), consumer_operands(a)?),
             _ => return None,
         };
-        // Walk the run backwards, matching each bind against a strictly earlier
-        // operand position than the one before it; the first miss ends the
-        // suffix. A surviving prefix means this `Let` is not hoistable — emit it
-        // normally and re-plan from the next one, which then starts at `start`.
+        // Walk backwards, matching each bind against a strictly earlier
+        // operand position than the last; the first miss ends the suffix. A
+        // surviving prefix means this `Let` is not hoistable, so emit it
+        // normally and re-plan from the next one.
         let mut start = run.len();
         let mut limit = ops.len();
         for i in (0..run.len()).rev() {
@@ -1042,9 +1025,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     }
 
     /// Leave the atom's value on top of the stack. In tail position a `Call`
-    /// lowers to its `Tail*` opcode (which is itself the return); every other
+    /// lowers to its `Tail*` opcode, which is itself the return; every other
     /// atom is followed by `Ret`. `defs` are the operand definitions inlined
-    /// into this atom's operand pushes (see [`Self::plan_run`]).
+    /// into this atom's pushes (see [`Self::plan_run`]).
     fn emit_atom(&mut self, a: &Atom, tail: bool, defs: &[Def]) {
         // `local ± const` collapses three dispatches into one.
         if let Atom::PrimOp {
@@ -1086,13 +1069,13 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             } => {
                 self.push_args(args, defs);
                 self.push(op_arg(*prim, imm_operand(*prim, *imm)));
-                // `Print` consumes and pushes nothing; supply the `()` here so
-                // the enclosing StoreLocal / Ret has a value.
+                // `Print` pushes nothing; supply the `()` so the enclosing
+                // StoreLocal / Ret has a value.
                 if *prim == Op::Print {
                     self.push(op(Op::PushNil));
                 }
-                // `BinReadUtf8` pushes two values (codepoint, nbits); Core sees
-                // it as a single `(Int, Int)` tuple so `Let` binds one local.
+                // `BinReadUtf8` pushes (codepoint, nbits); Core sees one
+                // `(Int, Int)` tuple, so `Let` binds one local.
                 if *prim == Op::BinReadUtf8 {
                     self.push(op_arg(Op::MakeTuple, 2));
                 }
@@ -1123,10 +1106,9 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         }
     }
 
-    /// `moved` is the set of last-use args whose frame reference must be
-    /// released *between* the arg pushes and the call — so the callee, not
-    /// this frame, is the sole owner and its Perceus `Drop` sees rc==1. See
-    /// [`peel_call_arg_drops`].
+    /// `moved` is the last-use args whose frame reference must be released
+    /// between the pushes and the call, so the callee is sole owner and its
+    /// Perceus `Drop` sees rc==1. See [`peel_call_arg_drops`].
     fn emit_call(
         &mut self,
         callee: Callee,
@@ -1136,9 +1118,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         defs: &[Def],
     ) {
         self.push_args(args, defs);
-        // Push a dynamic callee before the moved-drops so its own last-use
-        // `Drop` (peeled alongside the args') releases the slot without
-        // touching the already-stacked closure word.
+        // Push a dynamic callee before the moved drops, so its own last-use
+        // `Drop` releases the slot without touching the stacked closure word.
         if let Callee::Local(id) = callee {
             self.push_operand(id, defs);
         }
@@ -1164,21 +1145,18 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 self.push(op_arg(o, argc));
             }
         }
-        // The interpreter's `enter_frame!` stores the post-increment ip —
-        // the instruction after the call — into the caller frame; record
-        // that ip so a native caller can store the identical value
-        // ([`FrameLayout::call_resume_ips`]). Tail calls collapse the frame
-        // and store no resume point.
+        // `enter_frame!` stores the post-increment ip into the caller frame;
+        // record it so a native caller stores the identical value. Tail calls
+        // collapse the frame and store no resume point.
         if !tail {
             self.call_resume_ips.push(self.here().to_operand());
         }
     }
 
-    /// Push the four-constant construct header + payload fields, then
-    /// `MakeEnumPayload{a=reuse?, b=arity, operand=prehash}`. When Perceus
-    /// paired the constructor with a dropped cell (`reuse = Some(slot)`), an
-    /// `Op::Reuse slot` sits between the payloads and the make so `a=1` and
-    /// the VM overwrites the cell in place.
+    /// Push the four header constants and the payload fields, then
+    /// `MakeEnumPayload{a=reuse?, b=arity, operand=prehash}`. With a Perceus
+    /// `reuse`, an `Op::Reuse slot` sits between the payloads and the make, so
+    /// `a=1` and the VM overwrites the cell in place.
     fn emit_ctor(
         &mut self,
         v: &VariantRef,
@@ -1218,8 +1196,6 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         self.push(op_ab(Op::MakeEnumPayload, a, fields.len() as u16, ph_c));
     }
 
-    // ── match ─────────────────────────────────────────────────────────────
-
     fn emit_match(&mut self, scrut: LocalId, arms: &[(CorePat, CoreExpr)], tail: bool) {
         if let Some((count, tags)) = self.switch_plan(arms) {
             self.emit_switch(scrut, arms, count, &tags, tail);
@@ -1229,9 +1205,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
     }
 
     /// A match lowers to `SwitchTag` when every arm is a `Ctor` head of the
-    /// same enum, each variant appears exactly once, and the enum is
-    /// switch-eligible per [`EmitCtx::switch_variant_count`]. Payload binds
-    /// in Core are always irrefutable, so no fail edge exists.
+    /// same enum, each variant appears once, and the enum is switch-eligible.
+    /// Core payload binds are always irrefutable, so there is no fail edge.
     fn switch_plan(&self, arms: &[(CorePat, CoreExpr)]) -> Option<(u8, Vec<u16>)> {
         if arms.is_empty() {
             return None;
@@ -1273,8 +1248,8 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
         tail: bool,
     ) {
         self.push_local(scrut);
-        // The table sits immediately after the `SwitchTag` itself; like every
-        // other target this offset is function-relative.
+        // The table sits right after the `SwitchTag`; the offset is
+        // function-relative like every other target.
         let table_base = self.here().next();
         self.push(op_ab(Op::SwitchTag, count, 0, table_base.to_operand()));
         let table: Vec<CodeAddr> = (0..count).map(|_| self.jump(Op::Jump)).collect();
@@ -1288,8 +1263,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 self.emit_payload_binds(scrut_slot, fields);
             }
             self.emit_expr_in(body, tail);
-            // A tail arm ends in `Ret`/`TailCall*`, and a diverging arm only
-            // exits via `Goto`; a merge jump after either is unreachable.
+            // A merge jump after a tail or diverging arm is unreachable.
             if !tail && !diverges(body) {
                 ends.push(self.jump(Op::Jump));
             }
@@ -1336,8 +1310,7 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
                 CorePat::Wild => None,
             };
             self.emit_expr_in(body, tail);
-            // A tail arm ends in `Ret`/`TailCall*`, and a diverging arm only
-            // exits via `Goto`; a merge jump after either is unreachable.
+            // A merge jump after a tail or diverging arm is unreachable.
             if !tail && !diverges(body) {
                 ends.push(self.jump(Op::Jump));
             }
@@ -1346,20 +1319,16 @@ impl<'a, C: EmitCtx> Emitter<'a, C> {
             }
             self.next_slot = mark;
         }
-        // Match fell through: exhaustiveness bug — halt rather than propagate
-        // nil. Unreachable when the source match was exhaustive (checked at
-        // lowering); a fallthrough here means a checker or lowering defect,
-        // and stopping the VM beats returning a nil that flows onward.
+        // Unreachable when the source match was exhaustive. Reaching it means
+        // a checker or lowering defect, and halting beats returning a nil that
+        // flows onward.
         self.push(op(Op::Halt));
         self.patch_all(&ends);
     }
 
-    /// `PushLocal scrut; UnwrapEnum; StoreLocal fN-1; …; StoreLocal f0` —
-    /// spill the payload words into fresh slots for `fields`. Used by both
-    /// the `SwitchTag` fast path and the `MatchEnum` ladder after the tag has
-    /// been proven. Perceus-inserted `Drop`/`Reuse` for the scrutinee cell
-    /// live in the arm body itself (a Core→Core insertion), so — unlike the
-    /// old AST emitter — this helper does not emit them.
+    /// Spill the payload words into fresh slots for `fields`, once the tag is
+    /// proven. Perceus `Drop`/`Reuse` for the scrutinee cell live in the arm
+    /// body, so this does not emit them.
     fn emit_payload_binds(&mut self, scrut_slot: i32, fields: &[CoreBind]) {
         if fields.is_empty() {
             return;
@@ -1442,11 +1411,9 @@ mod tests {
         assert_eq!(out.code[1].operand, 7);
     }
 
-    /// The [`FrameLayout`] the native backend consumes must state exactly
-    /// what this emission did: params own slots 0.., a stored local owns the
-    /// `StoreLocal` operand's slot, elided locals own none, and every
-    /// non-tail call records the interpreter's resume ip (the instruction
-    /// after the call — `enter_frame!` stores the post-increment ip).
+    /// The [`FrameLayout`] must state exactly what this emission did: params
+    /// own slots 0.., a stored local owns its `StoreLocal` slot, elided locals
+    /// own none, and every non-tail call records its resume ip.
     #[test]
     fn frame_layout_mirrors_the_emitted_frame() {
         // let %2 = call fn#7(%0, %1); let %3 = AddInt(%2, %0);
@@ -1470,15 +1437,14 @@ mod tests {
         let mut cx = ctx(None);
         let out = emit(&f, &mut cx);
 
-        // Params take slots 0..arity — the interpreter's argument layout.
+        // Params take slots 0..arity, the interpreter's argument layout.
         assert_eq!(out.layout.slot(LocalId(0)), Some(0));
         assert_eq!(out.layout.slot(LocalId(1)), Some(1));
         assert_eq!(out.layout.slot(LocalId(2)), Some(2));
         assert_eq!(out.layout.locals, out.locals);
 
-        // One non-tail call: its resume ip names the instruction after the
-        // `CallKnown` (the `StoreLocal` the interpreter resumes at). The
-        // trailing self-call is a tail call and records nothing.
+        // The one non-tail call's resume ip names the instruction after the
+        // `CallKnown`. The trailing self-call records nothing.
         assert_eq!(out.layout.call_resume_ips.len(), 1);
         let ip = out.layout.call_resume_ips[0];
         assert_eq!(out.code[ip as usize - 1].op, Op::CallKnown);
@@ -1490,8 +1456,7 @@ mod tests {
     }
 
     /// A `let x = <const>` whose reads became `PushConst` owns no slot, and
-    /// the layout must say so — the native backend keeps such locals in
-    /// registers only, matching a frame the interpreter never wrote.
+    /// the layout must say so: the native backend keeps it in registers only.
     #[test]
     fn frame_layout_elides_const_aliases() {
         // let %1 = c0; ret AddInt(%0, %1)
@@ -1576,8 +1541,8 @@ mod tests {
         assert_eq!(out.code[1].operand, 2); // table base: relative, right after the SwitchTag
         assert_eq!(out.code[2].op, Op::Jump);
         assert_eq!(out.code[3].op, Op::Jump);
-        // The table's own entries are relative too, and land on distinct arm
-        // bodies past the table itself — each arm here is `PushConst; Ret`.
+        // The table's entries are relative too, and land on distinct arm
+        // bodies past the table itself.
         let (a0, a1) = (out.code[2].operand, out.code[3].operand);
         assert_ne!(a0, a1);
         for arm in [a0, a1] {
@@ -1602,15 +1567,13 @@ mod tests {
     }
 
     /// The relative→absolute bridge is exactly "add `base` to jump operands":
-    /// opcodes and every non-jump operand are untouched, so a block emitted
-    /// today at base 0 and relocated is byte-identical to what the old
-    /// `emit(f, base)` produced, whose jump operands were larger by `base`.
+    /// opcodes and non-jump operands are untouched.
     #[test]
     fn relocate_shifts_only_jump_operands() {
         const B: i32 = 100;
 
-        // A `SwitchTag` fixture: table base + raw table entries + arm-end
-        // `Jump`s, i.e. every operand shape that must move.
+        // A `SwitchTag` fixture: table base, raw table entries and arm-end
+        // `Jump`s — every operand shape that must move.
         let arms = vec![
             (
                 CorePat::Ctor {
@@ -1648,8 +1611,8 @@ mod tests {
             RTy(0),
         );
         // A `JumpNeIntLC` fixture: `let k = 7; let c = EqInt(%0, k); if c`.
-        // The fused `*IntLC` jump is the one label `jump()` does not emit — it
-        // carries `a`/`b` operands, so `emit_lc_jump` mints it directly.
+        // The fused jump carries `a`/`b` operands, so it is the one label
+        // `jump()` does not emit — `emit_lc_jump` mints it directly.
         let fused = func(
             vec![bind(0)],
             CoreExpr::Let {
@@ -1691,9 +1654,7 @@ mod tests {
         }
     }
 
-    /// `LetCont` lays out its body first and the cont as one labelled block
-    /// after it; every `Goto` is a forward `Jump` to that label, and many
-    /// predecessors share it.
+    /// Every `Goto` is a forward `Jump` to the one shared cont label.
     #[test]
     fn letcont_gotos_share_one_label_after_the_body() {
         use super::super::JoinId;
@@ -1739,9 +1700,8 @@ mod tests {
         assert_eq!(out.code[4].operand, 6);
     }
 
-    /// In value position (a `LetJoin` operand) the body's normal completion
-    /// must jump over the cont block so both paths meet at the merge-point
-    /// `StoreLocal` with exactly one value on the stack.
+    /// In value position the body must jump over the cont block so both paths
+    /// meet at the merge `StoreLocal` with exactly one value on the stack.
     #[test]
     fn letcont_in_value_position_skips_the_cont_block() {
         use super::super::JoinId;

@@ -105,9 +105,13 @@ impl Compiler {
 
         for &(slot, module, type_name, ctor) in BINDINGS {
             let key = ModuleKey::of(&module.iter().map(|s| s.to_string()).collect());
-            // Only modules this program loaded: an unimported module's ops
-            // were never emitted, so its slots may stay unbound.
-            let Some(iface) = self.module_table.get(&key) else {
+            // Resolve through the static-stdlib fallback too: with a
+            // precompiled stdlib every module's bytecode rides in the program
+            // whether or not this compile imported it, so its constructors
+            // must be bound. Only a truly unresolvable module (from-source
+            // compile that never loaded it) may stay unbound — its ops were
+            // never emitted.
+            let Some(iface) = self.module_table.get_or_hydrate(&key) else {
                 continue;
             };
             // From here on the module is present, so a missing type or

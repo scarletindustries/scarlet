@@ -1,17 +1,14 @@
-//! Native HTTP/1.1 request-head parsing, body-framing analysis, header lookup,
-//! and response-head serialization — the byte-scanning hot paths behind
-//! `al/http/h1` and `al/http/headers`.
+//! The byte-scanning hot paths behind `al/http/h1` and `al/http/headers`:
+//! request-head parsing, body framing, header lookup, response-head
+//! serialization.
 //!
-//! The split: the *scan*
-//! (find CRLF/SP/colon, build zero-copy field views) runs in native code, while
-//! every protocol *decision* (keep-alive, 100-continue, response framing) stays
-//! in AL. The grammar and every reject here mirror what the AL reference
-//! parser enforced, status codes included; `crates/al/tests/programs/http_parse.al`
-//! locks that contract.
+//! The scan runs here; every protocol decision (keep-alive, 100-continue,
+//! response framing) stays in AL. The grammar and every reject status must
+//! match the AL reference parser;
+//! `crates/al/tests/programs/http_parse.al` locks that contract.
 //!
-//! All views returned to AL share the request buffer's backing `Arc` — parsing
-//! a head allocates only the result values (method/target/name/value views,
-//! `Header` records, the headers array), never intermediate copies.
+//! Views returned to AL share the request buffer's backing `Arc`, so parsing a
+//! head allocates only the result values.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -25,13 +22,11 @@ use crate::template::EnumTemplate;
 use super::templates::H1;
 use super::{VmError, VmResult, int_to_ascii, parse_uint_ascii};
 
-/// Total request-head size cap (request line + all header fields), mirrored by
-/// `al/http/h1`'s docs. A head that grows past this without completing is
-/// rejected rather than buffered forever.
+/// Total request-head size cap, request line plus all header fields. Also
+/// documented in `al/http/h1`.
 const MAX_HEAD: usize = 65536;
 
-/// The closed set of HTTP status codes this parser rejects with. Typed so a
-/// stray literal (`04`, `41`) is a compile error, not a wire-level surprise.
+/// The closed set of HTTP status codes this parser rejects with.
 #[derive(Clone, Copy)]
 #[repr(i64)]
 enum Reject {
@@ -43,19 +38,13 @@ enum Reject {
     VersionNotSupported = 505,
 }
 
-// ---------------------------------------------------------------------------
-// Parsed / Framing / Option constructors over the prelude templates
-// ---------------------------------------------------------------------------
-
 // Prebuilt frozen `NeedMore` variants are cloned at call sites; payload-carrying
-// rejects instantiate into the current process arena under the caller's ensured
-// budget (status codes always fit the small-int payload).
+// rejects instantiate into the current process arena.
 fn reject(tpl: &EnumTemplate, a: &mut ProcHeap, status: Reject) -> Value {
     tpl.instantiate(a, &[Value::small_int(status as i64)])
 }
 
-/// The `(name, value)` payload values of an `al/http/headers.Header`,
-/// borrowed from `h`'s enum arena storage.
+/// The `(name, value)` payload values of an `al/http/headers.Header`.
 fn header_fields(h: &Value) -> Option<(&Value, &Value)> {
     let payload = h.as_enum()?.payload();
     match (payload.first(), payload.get(1)) {
@@ -65,7 +54,7 @@ fn header_fields(h: &Value) -> Option<(&Value, &Value)> {
 }
 
 /// The logical bytes of a header-field payload value, or `None` if it is not a
-/// byte-aligned `Binary` (well-typed programs never hit that).
+/// byte-aligned `Binary`.
 fn field_bytes(v: &Value) -> Option<std::borrow::Cow<'_, [u8]>> {
     v.as_binary().map(|b| b.full_bytes())
 }
@@ -75,12 +64,9 @@ fn not_headers(op: &'static str) -> VmError {
     VmError::internal(format!("{op}: expected an Array(Header)"))
 }
 
-/// Walk an `Array(Header)`, invoking `f(name_bytes, value)` for each entry
-/// after validating the array/record/binary shape. `f` returns `Break(b)` to
-/// short-circuit (yielding `Ok(Some(b))`) or `Continue` to keep going
-/// (yielding `Ok(None)` at the end). All "not a headers array" shape errors
-/// are constructed here, so callers only see well-shaped `(name, value)`
-/// pairs.
+/// Walk an `Array(Header)`, calling `f(name_bytes, value)` per entry after
+/// validating the shape. Every "not a headers array" error is built here, so
+/// callers only see well-shaped pairs.
 fn for_each_header<B>(
     headers: &Value,
     op: &'static str,
@@ -97,12 +83,10 @@ fn for_each_header<B>(
     Ok(None)
 }
 
-/// A byte-aligned window over a `Binary`'s backing storage: `backing[base ..
-/// base+len]` is the logical byte content the AL caller sees. Socket buffers
-/// are always byte-aligned views, which share the backing `Arc` zero-copy; a
-/// bit-unaligned buffer (hand-built via `<<>>`) is materialized into an
-/// aligned copy so views built over the window point into that copy instead
-/// of the original.
+/// A byte-aligned window over a `Binary`: `backing[base .. base+len]` is what
+/// the AL caller sees. Socket buffers are byte-aligned and share the backing
+/// `Arc`. A bit-unaligned buffer (hand-built with `<<>>`) is copied into an
+/// aligned buffer, so views over the window point at the copy.
 struct ByteWindow {
     backing: Arc<[u8]>,
     base: usize,
@@ -127,14 +111,13 @@ impl ByteWindow {
         }
     }
 
-    /// The window's logical bytes.
     #[inline]
     fn bytes(&self) -> &[u8] {
         &self.backing[self.base..self.base + self.len]
     }
 
-    /// A zero-copy binary view over `n` bytes at offset `start` of this
-    /// window (offsets are AL-visible, i.e. relative to `base`).
+    /// A zero-copy binary view over `n` bytes at offset `start`. Offsets are
+    /// AL-visible, so relative to `base`.
     fn view(&self, a: &mut ProcHeap, start: usize, n: usize) -> Value {
         Value::binary_view_in(
             a,
@@ -144,10 +127,6 @@ impl ByteWindow {
         )
     }
 }
-
-// ---------------------------------------------------------------------------
-// Request-head parser
-// ---------------------------------------------------------------------------
 
 /// Parse one request head out of `bin` starting at byte offset `off`, pushing
 /// an `al/http/h1.Parsed` value.
@@ -160,18 +139,17 @@ pub(super) fn parse_head(
     parse_head_window(t, a, &ByteWindow::of(bin), off)
 }
 
-/// Every offset below is relative to `win` (the AL-visible binary), so the
-/// `consumed` offset and the returned views line up with the offsets the AL
-/// caller passed in.
+/// Every offset here is relative to `win`, the AL-visible binary, so
+/// `consumed` and the returned views line up with the caller's offsets.
 fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Value {
     let bytes = win.bytes();
     let mut off = (off.max(0) as usize).min(win.len);
     let head_start = off;
 
-    // Request line: skip a leading empty line (RFC 7230 §3.5), then split
-    // METHOD SP request-target SP HTTP-version at the first CRLF. RFC says "at
-    // least one" leading empty line SHOULD be tolerated; cap at four so a
-    // stream of bare CRLFs cannot hold the connection open forever.
+    // Skip leading empty lines (RFC 7230 §3.5), then split
+    // METHOD SP request-target SP HTTP-version at the first CRLF. The RFC wants
+    // at least one tolerated; cap at four so a stream of bare CRLFs cannot hold
+    // the connection open forever.
     let eol = loop {
         match find_crlf(bytes, off) {
             None => {
@@ -212,9 +190,8 @@ fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Va
         _ => return reject(&t.parsed_bad, a, Reject::VersionNotSupported),
     };
 
-    // Header block: one field per CRLF-terminated line, ended by a blank line.
-    // The size cap measures from the request-line start, so the whole head
-    // (request line + every field) shares MAX_HEAD.
+    // The cap measures from the request-line start, so the whole head shares
+    // MAX_HEAD.
     let (headers, flags, consumed) = match parse_header_block(
         t,
         a,
@@ -233,8 +210,7 @@ fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Va
     let target = win.view(a, sp1 + 1, sp2 - sp1 - 1);
     let headers = Value::array_in(a, &headers);
     let flags = if flags == HeadFlags::default() {
-        // The common head names neither field; share the frozen all-false
-        // record instead of allocating one per request.
+        // Share the frozen all-false record instead of one per request.
         t.head_flags_none.clone()
     } else {
         t.head_flags.instantiate(
@@ -262,8 +238,7 @@ fn parse_head_window(t: &H1, a: &mut ProcHeap, win: &ByteWindow, off: i64) -> Va
 /// The `Connection`/`Expect` token-list answers an HTTP/1.1 server needs from
 /// every request head, recorded by `parse_header_block` while it already has
 /// each field's trimmed name and value in hand. Raw findings, not decisions:
-/// `close` outranking `keep_alive`, and the per-version default, stay in
-/// `al/http/h1.should_close`.
+/// precedence lives in `al/http/h1.should_close`.
 #[derive(Default, Clone, Copy, PartialEq)]
 struct HeadFlags {
     conn_close: bool,
@@ -271,10 +246,9 @@ struct HeadFlags {
     expect_100_continue: bool,
 }
 
-/// Whether `value` carries `token` as one of its comma-separated elements,
-/// matching `al/http/headers.has_token`: elements are OWS-trimmed, compared
-/// case-insensitively, and empty elements (`a,,b`, a trailing comma, an empty
-/// value) are ignored rather than matching an empty token.
+/// Whether `value` carries `token` as one of its comma-separated elements.
+/// Must match `al/http/headers.has_token`: elements are OWS-trimmed, compared
+/// case-insensitively, and empty elements never match.
 fn has_token(value: &[u8], token: &[u8]) -> bool {
     value.split(|&b| b == b',').any(|el| {
         let el = trim_ows(el);
@@ -299,22 +273,18 @@ fn trim_ows(mut el: &[u8]) -> &[u8] {
 /// Outcome of parsing one CRLF-terminated header block (request-head fields
 /// or chunked-body trailers).
 enum HeaderBlock {
-    /// The parsed fields, the connection/expectation tokens seen among them,
-    /// and the offset just past the blank line that ended the block.
+    /// Fields, tokens seen among them, and the offset past the blank line.
     Done(Vec<Value>, HeadFlags, usize),
     NeedMore,
     Bad(Reject),
 }
 
 /// Parse a header block at `start`: one field per CRLF-terminated line, ended
-/// by a blank line. Obs-fold (a continuation line starting with SP/HTAB) and
-/// whitespace between the field name and the colon are rejected — both are
-/// request-smuggling vectors different parsers disagree on (RFC 7230 §3.2.4).
+/// by a blank line. Obs-fold and whitespace before the colon are rejected;
+/// both are request-smuggling vectors parsers disagree on (RFC 7230 §3.2.4).
 ///
-/// `cap_start`/`cap`/`over_cap_status` bound the block: the request head
-/// measures from the request-line start (MAX_HEAD → 431); a chunked body's
-/// trailer block measures from the block itself. A block that grows past the
-/// cap without completing is rejected rather than buffered forever.
+/// `cap_start`/`cap`/`over_cap_status` bound the block. A request head
+/// measures from the request-line start; a trailer block from itself.
 fn parse_header_block(
     t: &H1,
     a: &mut ProcHeap,
@@ -353,7 +323,6 @@ fn parse_header_block(
         if colon == pos || is_ows(bytes[colon - 1]) {
             return HeaderBlock::Bad(Reject::BadRequest);
         }
-        // Field value with optional whitespace trimmed from both ends.
         let mut vstart = colon + 1;
         while vstart < crlf && is_ows(bytes[vstart]) {
             vstart += 1;
@@ -362,10 +331,8 @@ fn parse_header_block(
         while vend > vstart && is_ows(bytes[vend - 1]) {
             vend -= 1;
         }
-        // The name and the trimmed value are already in hand, so the token
-        // lists every request consults are answered here rather than by a
-        // later walk of the whole field list per question. A trailer block's
-        // findings are dropped by its caller (RFC 9110 §6.5.1).
+        // Answer the token questions here, while the trimmed value is in hand,
+        // rather than re-walking the field list once per question.
         let name_bytes = &bytes[pos..colon];
         if name_bytes.eq_ignore_ascii_case(b"connection") {
             let value_bytes = &bytes[vstart..vend];
@@ -395,17 +362,11 @@ fn find_crlf(bytes: &[u8], from: usize) -> Option<usize> {
     memchr::memmem::find(&bytes[from..], b"\r\n").map(|rel| from + rel)
 }
 
-// ---------------------------------------------------------------------------
-// Body framing (RFC 7230 §3.3.3)
-// ---------------------------------------------------------------------------
-
-/// Decide how the message body is framed, pushing an `al/http/h1.Framing`.
-/// `Transfer-Encoding: chunked` (the sole/final coding, case-insensitive)
-/// frames the body as `Chunked`. Transfer-Encoding alongside Content-Length
-/// is a smuggling conflict (400); any other transfer coding is unimplemented
-/// (501) — never silently ignored. Multiple Content-Length fields, a
-/// non-digit / overflowing value, or a redundant leading zero ("007") are all
-/// rejected (400).
+/// Decide how the message body is framed (RFC 7230 §3.3.3), pushing an
+/// `al/http/h1.Framing`. Only `Transfer-Encoding: chunked` as the sole coding
+/// is `Chunked`. Transfer-Encoding alongside Content-Length is a smuggling
+/// conflict (400); any other coding is unimplemented (501). A duplicated,
+/// non-digit, overflowing, or leading-zero Content-Length is a 400.
 pub(super) fn framing(
     t: &H1,
     a: &mut ProcHeap,
@@ -435,15 +396,12 @@ pub(super) fn framing(
         Ok(ControlFlow::<()>::Continue(()))
     })?;
     if !matches!(te, Seen::Zero) {
-        // Transfer-Encoding next to Content-Length is the classic
-        // request-smuggling conflict: reject before looking at the coding.
+        // The smuggling conflict: reject before looking at the coding.
         if !matches!(cl, Seen::Zero) {
             return Ok(reject(&t.framing_invalid, a, Reject::BadRequest));
         }
-        // Only "chunked" as the sole transfer coding is decodable. A coding
-        // list ("gzip, chunked"), a repeated TE field, or anything that is not
-        // exactly "chunked" changes the body framing in ways this server does
-        // not implement → 501, never silently ignored.
+        // A coding list, a repeated TE field, or anything that is not exactly
+        // "chunked" must be 501, never silently ignored.
         if let Seen::Once(v) = &te
             && let Some(vb) = field_bytes(v)
             && vb.eq_ignore_ascii_case(b"chunked")
@@ -472,27 +430,18 @@ pub(super) fn framing(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Chunked transfer-encoding decoder (RFC 7230 §4.1)
-// ---------------------------------------------------------------------------
-
-/// Longest accepted chunk-size line (hex size + extensions, before its CRLF).
-/// Real sizes are a handful of hex digits; anything growing past this without
-/// a CRLF is hostile or garbage, never legitimate.
+/// Longest accepted chunk-size line, hex size plus extensions, before its CRLF.
 const MAX_CHUNK_SIZE_LINE: usize = 4096;
 
-/// Trailer-block cap, mirroring the request head's `MAX_HEAD` (→ 431).
 const MAX_TRAILER_BLOCK: usize = MAX_HEAD;
 
-/// Decode a chunked transfer-encoded body from `bin` starting at byte offset
-/// `off`, refusing to decode more than `max` body bytes. Pushes an
-/// `al/http/h1.ChunkBody` value.
+/// Decode a chunked body (RFC 7230 §4.1) from `bin` at byte offset `off`,
+/// refusing more than `max` body bytes. Pushes an `al/http/h1.ChunkBody`.
 ///
-/// Incremental like `parse_head`: `ChunkedNeedMore` means the buffer does not
-/// yet hold the complete body + terminator; the AL driver reads more bytes and
-/// calls again with the same offset (each call re-scans — state lives in the
-/// buffer, not in the VM). `consumed` on `ChunkedDone` is the offset just past
-/// the final CRLF, i.e. the start of the next pipelined request.
+/// Incremental like `parse_head`: on `ChunkedNeedMore` the AL driver reads more
+/// bytes and calls again with the same offset. Every call re-scans, since state
+/// lives in the buffer, not the VM. `consumed` on `ChunkedDone` is the start of
+/// the next pipelined request.
 pub(super) fn chunk_decode(
     t: &H1,
     a: &mut ProcHeap,
@@ -514,20 +463,17 @@ fn chunk_decode_window(
     let off = (off.max(0) as usize).min(win.len);
     let max = max.max(0);
 
-    // Structural scan first: walk the chunk framing recording each data range
-    // without copying a byte, so a NeedMore return (the common case while the
-    // body streams in) costs O(chunk count), not O(decoded bytes). The body is
-    // copied exactly once, into an exact-size Vec, only when the terminator
-    // and trailers are fully present.
+    // Scan the framing recording data ranges without copying, so the common
+    // NeedMore return costs O(chunk count), not O(decoded bytes). The body is
+    // copied once, only when the terminator and trailers are all present.
     let mut pos = off;
     let mut total: i64 = 0;
     let mut segments: Vec<(usize, usize)> = Vec::new();
 
     loop {
-        // ---- chunk-size line: 1*HEXDIG [;extensions] CRLF ------------------
+        // Chunk-size line: 1*HEXDIG [;extensions] CRLF.
         let Some(eol) = find_crlf(bytes, pos) else {
-            // No CRLF yet. A line already over the cap can never become valid;
-            // otherwise wait for more bytes.
+            // A line already over the cap can never become valid.
             return if win.len - pos > MAX_CHUNK_SIZE_LINE {
                 reject(&t.chunked_bad, a, Reject::BadRequest)
             } else {
@@ -538,18 +484,16 @@ fn chunk_decode_window(
             return reject(&t.chunked_bad, a, Reject::BadRequest);
         }
         let line = &bytes[pos..eol];
-        // Chunk extensions (";name=value") are legal and ignored; the size is
-        // everything before the first ';'. The size itself is strict 1*HEXDIG —
-        // no sign, no whitespace — and overflow comes back as None.
+        // Chunk extensions are legal and ignored; the size is everything before
+        // the first ';', strict 1*HEXDIG, with overflow coming back as None.
         let size_end = memchr::memchr(b';', line).unwrap_or(line.len());
         let Some(size) = parse_uint_ascii(&line[..size_end], Radix::Hex) else {
             return reject(&t.chunked_bad, a, Reject::BadRequest);
         };
 
         if size == 0 {
-            // ---- terminator: optional trailer block, ended by a blank line --
-            // The trailer grammar and smuggling rejects are exactly the request
-            // head's; the cap measures from the trailer block itself.
+            // Terminator: an optional trailer block ended by a blank line. Same
+            // grammar as the request head, capped from the block itself.
             let trailer_start = eol + 2;
             return match parse_header_block(
                 t,
@@ -560,9 +504,8 @@ fn chunk_decode_window(
                 MAX_TRAILER_BLOCK,
                 Reject::HeaderFieldsTooLarge,
             ) {
-                // Any Connection/Expect tokens the block recorded are dropped:
-                // a trailer field carries no connection or expectation
-                // semantics (RFC 9110 §6.5.1).
+                // Tokens the trailer block recorded are dropped: a trailer field
+                // carries no connection or expectation semantics (RFC 9110 §6.5.1).
                 HeaderBlock::Done(trailers, _, consumed) => {
                     let mut body: Vec<u8> = Vec::with_capacity(total as usize);
                     for &(start, end) in &segments {
@@ -578,14 +521,13 @@ fn chunk_decode_window(
             };
         }
 
-        // ---- decoded-size cap: checked BEFORE the data is accepted ---------
-        // The check is in i64 space so a hostile 16-hex-digit size cannot wrap.
+        // Cap the decoded size before accepting data, in i64 space so a hostile
+        // 16-hex-digit size cannot wrap.
         if total.saturating_add(size) > max {
             return reject(&t.chunked_bad, a, Reject::PayloadTooLarge);
         }
         let size = size as usize;
 
-        // ---- chunk data + its trailing CRLF --------------------------------
         let data_start = eol + 2;
         let Some(data_end) = data_start.checked_add(size) else {
             return reject(&t.chunked_bad, a, Reject::BadRequest);
@@ -594,8 +536,7 @@ fn chunk_decode_window(
             return t.chunked_need_more.clone();
         }
         if &bytes[data_end..data_end + 2] != b"\r\n" {
-            // The size said the data ends here; if a CRLF does not follow, the
-            // framing is lying. Never resynchronize — reject.
+            // The size lied about where the data ends. Never resynchronize.
             return reject(&t.chunked_bad, a, Reject::BadRequest);
         }
         segments.push((data_start, data_end));
@@ -603,10 +544,6 @@ fn chunk_decode_window(
         pos = data_end + 2;
     }
 }
-
-// ---------------------------------------------------------------------------
-// Header lookup
-// ---------------------------------------------------------------------------
 
 /// The value of the first header whose name matches (ASCII-case-insensitive).
 /// `op` names the caller for error messages.
@@ -634,7 +571,6 @@ pub(super) fn header_get(
     name: &BinaryRef<'_>,
 ) -> VmResult<Value> {
     Ok(match find_header(headers_val, name, "headers.get")? {
-        // The view itself is shared; only the Some wrapper is fresh.
         Some(hvalue) => t.some.instantiate(a, &[hvalue]),
         None => t.none.clone(),
     })
@@ -787,7 +723,6 @@ mod tests {
             variant_of(&parsed.as_enum().unwrap().payload()[2]),
             "Http11"
         );
-        // consumed == whole buffer
         assert_eq!(
             payload_int(&parsed, 5),
             buf.as_binary().unwrap().bit_len() as i64 / 8
@@ -805,10 +740,8 @@ mod tests {
         assert_eq!(arr.len(), 1);
         let h = arr.get(0).unwrap();
         let (name, value) = header_fields(&h).unwrap();
-        // OWS around the value is trimmed; the name keeps its case.
         assert_eq!(field_bytes(name).unwrap().as_ref(), b"Host");
         assert_eq!(field_bytes(value).unwrap().as_ref(), b"spaced.example");
-        // Zero-copy: the view's backing is the request buffer's backing.
         let nb = name.as_binary().expect("expected binary");
         assert!(std::ptr::eq(
             nb.backing().as_ptr(),
@@ -882,7 +815,6 @@ mod tests {
         let buf = x.bin("\r\nGET / HTTP/1.1\r\n\r\nGET /next HTTP/1.1\r\n\r\n");
         let parsed = parse_head(&x.t, &mut x.h, &buf.as_binary().unwrap(), 0);
         assert_eq!(variant_of(&parsed), "Done");
-        // consumed points just past the first head's blank line.
         let consumed = payload_int(&parsed, 5);
         assert_eq!(consumed, "\r\nGET / HTTP/1.1\r\n\r\n".len() as i64);
         // Parsing again from `consumed` yields the pipelined request.
