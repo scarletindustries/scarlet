@@ -4,8 +4,7 @@ use std::rc::Rc;
 use super::keywords::Keyword;
 
 /// Token kind. Text-bearing tokens carry their text as a payload, so an
-/// identifier without a name (or a name without an identifier) cannot be
-/// constructed. `Rc<str>` keeps `Kind` cheap to clone; equality and hashing
+/// identifier without a name cannot be constructed. Equality and hashing
 /// compare the text itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -54,10 +53,7 @@ pub enum Kind {
     PuncMod,
 }
 
-/// Display for diagnostics, not source reconstruction: the payload for
-/// text-bearing kinds, the fixed spelling for punctuation/operators/keywords,
-/// and a human-readable description for `Eof` and the interpolation
-/// delimiters (which have no single spelling). No quoting — error sites that
+/// For diagnostics, not source reconstruction. Unquoted; error sites that
 /// want quotes add their own.
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -114,10 +110,8 @@ impl fmt::Display for Kind {
 mod tests {
     use super::Kind;
 
-    /// Every `Kind` whose `Display` output is its fixed source spelling.
-    /// Kept in step with an exhaustive match over `Kind`, so adding a
-    /// variant fails to compile until it is classified below — and
-    /// classifying it as fixed-spelling means adding it to this list.
+    /// Every `Kind` whose `Display` output is its fixed source spelling. The
+    /// exhaustive match below forces a new variant to be classified here.
     fn fixed_spelling_kinds() -> Vec<Kind> {
         let mut kinds = vec![
             Kind::LogicalAnd,
@@ -211,10 +205,8 @@ mod tests {
         kinds
     }
 
-    /// Mirrors `keyword_roundtrip` in `keywords.rs`: the fixed spellings in
-    /// `Kind`'s `Display` are hand-maintained separately from the scanner's
-    /// dispatch, so scan each spelling with the real scanner and require the
-    /// exact same kind back.
+    /// `Display`'s spellings are maintained separately from the scanner's
+    /// dispatch, so scan each one back and require the same kind.
     #[test]
     fn fixed_spelling_roundtrip() {
         for kind in fixed_spelling_kinds() {

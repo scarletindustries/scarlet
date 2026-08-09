@@ -1,10 +1,7 @@
-//! The LSP server's workspace state and analysis, decoupled from stdio
-//! transport. A [`Workspace`] holds every open/indexed buffer, the per-root
-//! incremental compiler sessions, and the cross-module reverse-edge index; it
-//! answers position queries and computes diagnostics but never reads stdin or
-//! writes stdout — the transport layer in `mod.rs` does that. Tests construct
-//! a `Workspace` directly (no `BufReader<Stdin>` in the type) and drive the
-//! same query surface the editor calls.
+//! The LSP server's workspace state and analysis: every open/indexed buffer,
+//! the per-root incremental sessions, and the cross-module reverse-edge index.
+//! Answers position queries and computes diagnostics but never touches stdio;
+//! the transport layer in `mod.rs` does that.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,40 +23,27 @@ use super::wire::{
 use super::xrefs::{RootState, Xref};
 
 pub struct Workspace {
-    /// Every known `.al` buffer's text, keyed by URI. The reference graph
-    /// (built by the incremental session and carried on every `CompileResult`)
-    /// is the single source of truth for hover / goto-def / find-refs / rename
-    /// / symbols, so a document only needs its text for re-analysis and overlay
-    /// mirroring.
+    /// Every known `.al` buffer's text, keyed by URI. Text only: the session's
+    /// reference graph answers hover / goto-def / find-refs / rename.
     pub(super) documents: HashMap<String, String>,
-    /// Roots reported by the client at `initialize` (and updated by
-    /// `didChangeWorkspaceFolders`). Used to bucket files into sessions.
+    /// Roots reported by the client, used to bucket files into sessions.
     pub(super) workspace_roots: Vec<PathBuf>,
     /// One [`RootState`] per workspace root, keyed by the matching entry in
-    /// `workspace_roots`, or an empty path for files opened outside any root.
+    /// `workspace_roots`, or an empty path for files outside any root.
     pub(super) roots: HashMap<PathBuf, RootState>,
-    /// Latched once the one-time recursive workspace scan has run, so cross-
-    /// module references resolve workspace-wide rather than only within the
-    /// open file's import closure.
+    /// Latched once the one-time recursive workspace scan has run.
     pub(super) scanned: bool,
-    /// URI of the document last analysed as the compilation entry. A query
-    /// for a different document re-analyses it first so its module is keyed
-    /// as the entry (`main`) in its session's workspace graph before we
-    /// query it.
+    /// URI of the document last analysed as the compilation entry. A query for
+    /// a different document re-analyses it first, so its module is keyed as the
+    /// entry (`main`) in its session's graph.
     pub(super) entry_uri: Option<String>,
-    /// URIs the client actually has open in an editor tab. Distinct from
-    /// `documents`, which also holds the whole-workspace index produced by the
-    /// one-time scan: diagnostics are published only for members of this set,
-    /// and a watched-file change re-analyses only these, so opening a single
-    /// file can't flood the Problems panel with errors for files (example
-    /// demos, stdlib) the user never opened.
+    /// URIs the client has open in a tab, a subset of `documents` (which also
+    /// holds the whole-workspace scan). Only these get published diagnostics or
+    /// get re-analysed on a watched-file change.
     pub(super) open: HashSet<String>,
-    /// Diagnostics computed as a side effect of a position query re-rooting the
-    /// entry (see [`ensure_entry`](Self::ensure_entry)) on a client-open file,
-    /// staged for the transport layer to publish. Before the transport split
-    /// `analyze_text` published inline; without this an importer's Problems
-    /// panel goes stale after an in-memory edit to one of its imports until the
-    /// importer itself is edited.
+    /// Diagnostics produced when a position query re-roots the entry, staged
+    /// for the transport layer to publish. Without them an importer's Problems
+    /// panel goes stale after an in-memory edit to one of its imports.
     pub(super) pending_diagnostics: Vec<(String, Vec<Json>)>,
 }
 
@@ -77,27 +61,21 @@ impl Workspace {
     }
 
     /// Test seam: register a workspace root, as the client's `initialize`
-    /// `workspaceFolders`/`rootUri` would, so files under it bucket into one
-    /// session and cross-module queries resolve workspace-wide.
+    /// would.
     pub fn add_workspace_root(&mut self, root: PathBuf) {
         self.workspace_roots.push(root);
     }
 
-    /// Open `uri` with `text` as a client tab and analyse it — the body of
-    /// `textDocument/didOpen`, also exposed so a handler-layer test can drive
-    /// a document into the reference graph / session before querying it.
-    /// Returns the diagnostics to publish for `uri` (always: an opened file is
-    /// by definition in `open`).
+    /// Body of `textDocument/didOpen`: open `uri` as a client tab, analyse it,
+    /// and return the diagnostics to publish.
     pub fn open_document(&mut self, uri: &str, text: &str) -> Vec<Json> {
         self.documents.insert(uri.to_string(), text.to_string());
         self.open.insert(uri.to_string());
         self.analyze_document(uri, text)
     }
 
-    /// Body of `textDocument/didClose`: `uri` is no longer a client tab.
-    /// Re-syncs the workspace index to disk (a closed tab whose file still
-    /// exists stays indexed) or forgets a truly-gone file and purges its
-    /// persisted reverse edges.
+    /// Body of `textDocument/didClose`. Re-syncs the index to disk, or forgets
+    /// a truly-gone file and purges its persisted reverse edges.
     pub(super) fn close_document(&mut self, uri: &str) {
         self.open.remove(uri);
         let path = uri_to_path(uri);
@@ -116,10 +94,9 @@ impl Workspace {
         }
     }
 
-    /// Apply one `workspace/didChangeWatchedFiles` change to the workspace
-    /// state: invalidate the owning session's cache for the file, and on
-    /// deletion drop its reverse edges and indexed text so find-references /
-    /// rename stop reporting occurrences in a file that no longer exists.
+    /// Apply one `workspace/didChangeWatchedFiles` change: invalidate the
+    /// owning session's cache, and on deletion drop the file's reverse edges so
+    /// find-references stops reporting occurrences in a file that is gone.
     pub(super) fn invalidate_watched(&mut self, uri: &str, ty: FileChangeType) {
         let Some(path) = uri_to_path(uri) else {
             return;
@@ -136,9 +113,7 @@ impl Workspace {
         }
     }
 
-    /// Re-analyse every client-open document (their imports may have changed
-    /// underneath them after a watched-file invalidation) and return each
-    /// file's fresh diagnostics for the transport layer to publish.
+    /// Re-analyse every client-open document and return its fresh diagnostics.
     pub(super) fn reanalyze_open(&mut self) -> Vec<(String, Vec<Json>)> {
         let open: Vec<(String, String)> = self
             .open
@@ -153,10 +128,8 @@ impl Workspace {
             .collect()
     }
 
-    /// Ensure `uri` is the document currently analysed as the compilation
-    /// entry, so its module is keyed predictably in the graph, then report
-    /// whether a graph is available to query. Re-analysis is cheap: the
-    /// session keeps every imported/cached module from the last check.
+    /// Make `uri` the document analysed as the compilation entry, then report
+    /// whether a graph is available to query.
     pub(super) fn ensure_entry(&mut self, uri: &str) -> bool {
         if self.entry_uri.as_deref() != Some(uri) {
             let text = self.documents.get(uri).cloned();
@@ -170,33 +143,22 @@ impl Workspace {
         self.entry_uri.as_deref() == Some(uri) && self.graph_for(uri).is_some()
     }
 
-    /// Drain the diagnostics staged by [`ensure_entry`](Self::ensure_entry) for
-    /// the transport layer to publish alongside the query response. Exposed as
-    /// a test seam so `lsp_handlers.rs` can pin the re-root republish that the
-    /// transport split originally dropped.
+    /// Drain the diagnostics staged by [`ensure_entry`](Self::ensure_entry), to
+    /// publish alongside the query response.
     pub fn take_pending_diagnostics(&mut self) -> Vec<(String, Vec<Json>)> {
         std::mem::take(&mut self.pending_diagnostics)
     }
 
     /// The workspace reference graph held by the session that owns `uri`.
-    /// An in-repo stdlib file is checked via `check_as_module` (no session,
-    /// because the precompiled blob is stale) so it has no graph and graph
-    /// features no-op for it; cross-module goto-def *into* `al/*` from a
-    /// normal file still works via the session graph's synthesised stdlib
-    /// defs.
+    /// `None` for an in-repo stdlib file: it has no session, so graph features
+    /// no-op on it. Goto-def *into* `al/*` from a normal file still works.
     pub(super) fn graph_for(&self, uri: &str) -> Option<&reference::ReferenceGraph> {
         Some(self.session_for(uri)?.reference_graph())
     }
 
-    /// The persistent compiler session that owns `uri`: it buckets the file
-    /// into its workspace root and returns that root's session, with an
-    /// in-repo stdlib carve-out (those files are
-    /// checked via `check_as_module`, so they have no session and
-    /// session-backed features no-op for them). Where `graph_for` exposes
-    /// only the identity-level reference graph, this hands back the session
-    /// itself so handlers can reach its type-aware queries — e.g.
-    /// `IncrementalSession::hover`, which joins the inferred type onto the
-    /// graph's name/kind for the hover response.
+    /// The persistent compiler session owning `uri`, for handlers that need its
+    /// type-aware queries rather than just the reference graph. `None` for
+    /// in-repo stdlib files, which have no session.
     pub fn session_for(&self, uri: &str) -> Option<&bytecode::IncrementalSession> {
         let path = uri_to_path(uri)?;
         if module::detect_stdlib_module(&path).is_some() {
@@ -206,13 +168,10 @@ impl Workspace {
         self.roots.get(&root).map(|r| &r.session)
     }
 
-    /// The module path the queried file's defs/occurrences are keyed under for
-    /// position queries. An open file that another workspace file *imports*
-    /// resolves to the canonical module its callers reference (e.g.
-    /// `["." , "lib"]`), so a query driven from its own declaration shares the
-    /// `DefId` every caller's reverse edge targets — instead of the bare `main`
-    /// entry identity a re-rooted analysis would otherwise assign it. Falls back
-    /// to [`query_module`] (the file's stdlib path, or the `main` entry).
+    /// The module path the queried file's defs are keyed under. An imported
+    /// file resolves to the canonical module its callers reference, so a query
+    /// from its own declaration shares the `DefId` their reverse edges target
+    /// rather than the `main` entry identity a re-rooted analysis would assign.
     pub(super) fn query_module_path(&self, uri: &str) -> ModulePath {
         if let Some(path) = uri_to_path(uri)
             && module::detect_stdlib_module(&path).is_none()
@@ -225,8 +184,7 @@ impl Workspace {
     }
 
     /// [`graph_for`](Self::graph_for) plus the interned module id of
-    /// [`query_module_path`](Self::query_module_path) in one step: the shared
-    /// guard pair every position-based responder runs after `resolve_pos`.
+    /// [`query_module_path`](Self::query_module_path) in one step.
     pub(super) fn graph_module(
         &self,
         uri: &str,
@@ -236,25 +194,17 @@ impl Workspace {
         Some((graph, mid))
     }
 
-    /// Shared preamble for the position-based query responders. Re-analyses
-    /// the requested document as the compilation entry (mutating) but does
-    /// NOT answer the request: it returns `None` and lets the caller fold
-    /// that into its own "no result" reply (`Json::Null`, wire-equivalent to
-    /// the old `send_null_response`). A success guarantees `graph_for(&uri)`
-    /// is `Some` for the caller to re-fetch (kept out of the return to
-    /// sidestep the `&mut self`/`&graph` split).
+    /// Shared preamble for the position-based query responders: re-analyses the
+    /// document as the entry. `Some` guarantees `graph_for(&uri)` is `Some`,
+    /// which the caller re-fetches to avoid a `&mut self` / `&graph` overlap.
     pub(super) fn resolve_pos(&mut self, params: &Json) -> Option<(String, i32, i32)> {
         let (uri, line, col) = extract_position_params(params)?;
         self.ensure_entry(&uri).then_some((uri, line, col))
     }
 
-    /// Dependent-file callers of `def`, persisted across re-rooting: an
-    /// importer of the queried file is never inside its imports' closure, so
-    /// the session graph rooted at that file cannot carry these reverse edges
-    /// — their true URIs are stored directly (see [`WorkspaceXrefs`]). Only
-    /// reference sites are surfaced — real uses plus the `{item}` tokens of a
-    /// selective import, which rename must rewrite; the declaration's own
-    /// self-occurrence and `Import`/`Alias` bindings are not.
+    /// Dependent-file callers of `def`, persisted across re-rooting because an
+    /// importer is never inside its imports' closure. Only reference sites:
+    /// real uses and selective-import `{item}` tokens, which rename rewrites.
     pub(super) fn dependent_callers(
         &self,
         uri: &str,

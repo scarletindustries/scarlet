@@ -1,65 +1,16 @@
 //! AST → Typed IR: the elaborator's skeleton and its expression arms.
 //!
-//! This is the *resolution* half of what `core_ir::lower` does today. Lowering
-//! currently answers two unrelated questions in one walk: "what does this
-//! expression mean" — which field index, which variant, which callee, which
-//! typed opcode — and "in what order are its subexpressions evaluated" (ANF).
-//! Only the first needs the typechecker. Moving it here leaves `lower` a total
-//! function from a `TypedProgram` to Core IR.
+//! Resolution only — which field index, which variant, which callee, which
+//! typed opcode. Evaluation order (ANF) is `core_ir::lower`'s job. Patterns are
+//! [`super::elaborate_pat`]'s; this module implements its [`PatCtx`] seam.
 //!
-//! Every node this produces carries an [`RTy`] drawn from the [`ResolvedPool`]
-//! the caller owns. The only bridge from a live inference `Ty` into that pool
-//! is [`PreludeTys::resolve_rty`] (a [`super::zonk::Zonker`]). Past that bridge the
-//! elaborator never consults the union-find: `Int + Int` selects `AddInt`
-//! because [`ResolvedPool::prim_of`] says `Int`, and a constructor's field types
-//! come from substituting the use site's type arguments into the constructor's
-//! resolved signature — not from unifying inside the engine.
+//! Every node carries an [`RTy`] from the caller's [`ResolvedPool`].
+//! [`PreludeTys::resolve_rty`] is the only bridge from a live inference `Ty`
+//! into that pool; past it the elaborator never consults the union-find.
 //!
-//! ## What the elaborator decides, and lowering therefore cannot
-//!
-//! * `+` on two `Int`s is `Op::AddInt`: [`TypedExpr::Binary`] has no
-//!   unspecialised form to fall back to.
-//! * `u.id` is a field *index*, and `Some(x)` is a `VariantRef` whose arguments
-//!   are already in declared-field order — labels reordered, `..base` spreads
-//!   expanded into tag-checked projections.
-//! * `x or d` has no [`TypedExpr`] arm at all: it is a [`TypedExpr::Match`] over
-//!   the `Option`/`Result` shape [`ElabCtx::or_shape`] reports.
-//! * A constructor or builtin in value position is a zero-capture
-//!   [`TypedExpr::Closure`] over an eta wrapper appended to the program's `fns`.
-//!
-//! Patterns are [`super::elaborate_pat`]'s job; this module implements its
-//! [`PatCtx`] seam. Name resolution is [`super::resolve::Denotation`]'s.
-//!
-//! ## Totality
-//!
-//! [`elaborate_body`] and [`elaborate_toplevel`] return a [`TypedFn`]. They have
-//! no error case — which is what makes [`super::TypedProgram`], and therefore
-//! `lower`, `perceus` and `emit`, total: there is no half-built function for a
-//! caller to discard, and no internal-error diagnostic for a user to see.
-//!
-//! Three things pay for that.
-//!
-//! * **The proof.** Elaboration only ever runs on a module the check walk left
-//!   free of error diagnostics (`bytecode::compiler`'s `CleanModule`, which
-//!   `elaborate_then_materialize` consumes). Every question the elaborator asks
-//!   the walk — the type at a span, the denotation of a name, the field index of
-//!   a `.field` — the walk has already answered, or it would have reported an
-//!   error and denied the proof. That includes [`ast::ErrorNode`], the one form
-//!   with no elaboration at all: `compile_expr` restates the parse error, so no
-//!   clean module contains one.
-//! * **Types that make the question unaskable.** `&&`/`||` are not
-//!   [`ValueBinop`](crate::bytecode::ValueBinop)s, so `specialize_binop` cannot be
-//!   handed an operator that has no opcode. A [`CtorPat`] has exactly one field
-//!   type per declared label or it is not a `CtorPat`, so a constructor's
-//!   payload cannot be built with a field type missing. Both were poison sites;
-//!   neither is spellable now.
-//! * **[`elaborator_bug`]** for what is left: a question the walk did not
-//!   answer means the proof above is broken. That is a bug in a pass that has
-//!   already run, not a bad program, and it aborts rather than emitting bytecode
-//!   for a body it could not build.
-//!
-//! An *unsolved* type variable is explicitly not one of those: see
-//! [`super::zonk::Zonker::zonk_or_opaque`].
+//! Elaboration is total. It only runs on a module the check walk left free of
+//! error diagnostics, so every question it asks already has an answer. When one
+//! does not, [`elaborator_bug`] aborts.
 
 use std::collections::HashMap;
 
@@ -83,16 +34,10 @@ use crate::span::Span;
 use crate::types::{Prim, StrId, Ty};
 
 /// One scheduled node of a block: its index in the block's `body`, and — for a
-/// top-level `fn`/`const` — the entry-frame slot its binding must land in. The
-/// two travel together, so a declaration cannot be scheduled at one slot and
-/// defined at another.
+/// top-level `fn`/`const` — the entry-frame slot its binding must land in.
 type Step = (usize, Option<GlobalSlot>);
 
 /// The `Option`/`Result` shape behind an `or`-expression's left-hand side.
-///
-/// `lower` used to ask for this because it built the `Match` itself; now the
-/// elaborator does, and `TypedExpr` has no `Or`-expression arm for `lower` to
-/// misinterpret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrShape {
     /// The failure variant (`None`/`Err`).
@@ -104,22 +49,10 @@ pub struct OrShape {
     pub err_has_payload: bool,
 }
 
-/// The check walk did not answer a question elaboration had to ask, so the
-/// module's `CleanModule` proof is wrong — see this module's *Totality* section.
-///
-/// This is not a diagnostic and no program reaches it. A user-facing error
-/// would already have denied the proof, and every other pass in the pipeline
-/// (`lower`, `perceus`, `emit`) consumes a [`super::TypedProgram`] and is total.
-/// So reaching here is a broken invariant, not a bad program, and the compiler
-/// aborts rather than emitting bytecode for a body it could not build.
-///
-/// `why` names the question, e.g. `"field access"`.
-///
-/// A `panic` in a compiler is a last resort, and the crate denies them; this one
-/// is deliberate. There is no value to return (`-> !`) and no user to address:
-/// the alternative — a diagnostic asking the user to report a bug in a program
-/// that is correct — is the escape hatch the `TypedProgram` pipeline exists to
-/// close, and reinstating it would let a real regression hide behind a message.
+/// Abort: the check walk did not answer a question elaboration had to ask, so
+/// the module's clean-module proof is wrong. `why` names the question, e.g.
+/// `"field access"`. No program reaches this — a user-facing error would have
+/// denied the proof first.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -131,12 +64,9 @@ pub fn elaborator_bug(why: &'static str, span: Span) -> ! {
 }
 
 /// The prelude types a caller can name without a source expression to read
-/// them off, plus the one bridge that resolves them into a pool.
-///
-/// Split from [`ElabCtx`] because [`super::TempTys::intern`] needs exactly
-/// this and nothing else: it runs before any body is elaborated, so a context
-/// that can answer these five questions is enough to build the temp arena —
-/// no constant pool, no name resolution, no walk replay.
+/// them off, plus the one bridge that resolves them into a pool. Split from
+/// [`ElabCtx`] because [`super::TempTys::intern`] needs exactly this much and
+/// runs before any body is elaborated.
 pub trait PreludeTys {
     /// Resolve a live inference `Ty` into `pool`. Total: an undetermined type is
     /// operationally a polymorphic one (`Zonker::zonk_or_opaque`).
@@ -148,14 +78,11 @@ pub trait PreludeTys {
     fn ty_binary(&mut self) -> Ty;
 }
 
-/// Services the elaborator needs from the enclosing compilation: the same seam
-/// `core_ir::lower::LowerCtx` is today, minus everything that existed only to
-/// serve ANF, plus [`PreludeTys::resolve_rty`].
+/// Services the elaborator needs from the enclosing compilation.
 ///
-/// There is deliberately no `engine()`. The elaborator runs inside the check
-/// phase, but everything it *decides* it decides against the pool; the engine
-/// appears only behind [`PreludeTys::resolve_rty`], which is where an unsolved
-/// variable becomes an honest opaque type rather than a silent `false`.
+/// There is deliberately no `engine()`: everything the elaborator decides it
+/// decides against the pool, and the engine is reachable only behind
+/// [`PreludeTys::resolve_rty`].
 pub trait ElabCtx: PreludeTys {
     fn intern(&mut self, s: &str) -> StrId;
     fn str(&self, id: StrId) -> &str;
@@ -173,73 +100,48 @@ pub trait ElabCtx: PreludeTys {
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId;
 
     /// Resolve a call/value name to `(instantiated_ty, denotation)`, or `None`
-    /// when unbound. The [`Denotation`] is already position-aware: the walk
-    /// hands back the pair of loads, not a raw slot the elaborator has to
-    /// reinterpret.
+    /// when unbound.
     fn resolve_name(&mut self, name: &str) -> Option<(Ty, Denotation)>;
     /// Resolve a `qualifier.member` name. `span` is the member's, for the
-    /// internal-error report should the module's interface turn out to be
-    /// missing the runtime binding the check walk resolved.
+    /// internal-error report.
     fn resolve_qualified(
         &mut self,
         qual: &str,
         member: &str,
         span: Span,
     ) -> Option<(Ty, Denotation)>;
-    /// Field index for `.field` on a receiver of `receiver` type — the
-    /// across-all-variants check the check walk already ran.
+    /// Field index for `.field` on a receiver of `receiver` type.
     fn ctor_field(&mut self, receiver: Ty, field: &str) -> Option<(u32, Ty)>;
     /// Declared field-label order of the variant `v` constructs.
     ///
-    /// Keyed on the [`VariantRef`] the walk already resolved, not on a source
-    /// name: `mod.Ctor(..)` names a constructor that is *not* in scope under its
-    /// bare name, so a name lookup here would miss one the check walk accepted.
+    /// Keyed on the [`VariantRef`] the walk resolved, not on a source name:
+    /// `mod.Ctor(..)` is not in scope under its bare name, so a name lookup
+    /// would miss a constructor the check walk accepted.
     fn ctor_labels(&mut self, v: VariantRef) -> Option<Vec<StrId>>;
     /// The `(func_idx, captures)` the check walk assigned to the
-    /// `FunctionExpression` at `span`, which must be one written directly inside
-    /// the body being elaborated — the only lambdas this elaboration can reach.
+    /// `FunctionExpression` at `span`, which must be written directly inside
+    /// the body being elaborated.
     fn closure(&mut self, span: Span) -> Option<(FuncIdx, Vec<StrId>)>;
-    /// The function body the check walk emitted for the module-scope binding at
-    /// `slot`, i.e. a top-level `fn` declaration. `None` for a slot holding a
-    /// plain value.
-    ///
-    /// This is what a `fn` *declaration* has instead of a [`Self::closure`]
-    /// entry: its identity at runtime is the entry-frame slot the toplevel
-    /// spine stores it into ([`TypedBind::global`]), so def and use cannot name
-    /// different functions.
+    /// The function body the check walk emitted for the top-level `fn`
+    /// declaration bound at `slot`. `None` for a slot holding a plain value.
     fn fn_of_global(&self, slot: GlobalSlot) -> Option<FuncIdx>;
-    /// The module's own top-level `fn`/`const` declarations: `(index of the
-    /// declaration's node in the module block's `body`, its entry-frame slot)`,
-    /// in SCC-visit order, dependencies first.
+    /// The module's own top-level `fn`/`const` declarations as `(index in the
+    /// module block's `body`, entry-frame slot)`, in SCC-visit order.
     ///
-    /// This both *schedules* the toplevel spine — a forward-referenced `const`
-    /// must be stored before it is read, so decls are not walked in source
-    /// order — and hands each declaration the slot the check walk already gave
-    /// it. One pair, so a decl cannot be scheduled at one slot and defined at
-    /// another.
-    ///
-    /// Empty for a caller that has no module toplevel to schedule, including a
-    /// function body's outermost block: source order is then used and no bind
-    /// is a global.
+    /// Order matters: a forward-referenced `const` must be stored before it is
+    /// read, so decls are not walked in source order. Empty when there is no
+    /// module toplevel to schedule (including a function body's outermost
+    /// block), which degenerates to source order with no globals.
     fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
         Vec::new()
     }
     /// The entry-frame slot the module walk allocated for the *next*
-    /// module-scope `let`/destructured binding, or `None` when the block being
-    /// elaborated is not a module toplevel.
+    /// module-scope `let`/destructured binding, or `None` outside a module
+    /// toplevel.
     ///
-    /// The elaborator reads the allocation rather than inventing it: the check
-    /// walk hands out the slots and emits every fn body against
-    /// `PushGlobal <slot>` before the toplevel is elaborated. Each call
-    /// *consumes* one binding, in the order both walks visit the module's
-    /// statements, so a name rebound at module scope (`x = 1; f = fn() x;
-    /// x = 2`) gets a distinct slot per binding without anyone keying on the
-    /// name — which is not an identity here.
-    ///
-    /// The answer lands in [`TypedBind::global`] and is never looked up again:
-    /// no name-keyed queue survives into `lower`, `perceus` or `emit`.
-    /// Required rather than defaulted — an `ElabCtx` that allocates entry-frame
-    /// slots and forgets to answer here would silently mis-store every global.
+    /// Each call consumes one binding, in the order both walks visit the
+    /// module's statements. That is what gives `x = 1; f = fn() x; x = 2` a
+    /// distinct slot per binding without keying on the name.
     fn next_global_slot(&mut self) -> Option<GlobalSlot>;
     /// `Option`/`Result` shape for `expr or default`.
     fn or_shape(&mut self, lhs_ty: Ty) -> Option<OrShape>;
@@ -247,18 +149,14 @@ pub trait ElabCtx: PreludeTys {
     fn ty_nil(&mut self) -> Ty;
 }
 
-/// One step of the check walk, recorded in entry order and replayed positionally
-/// by the elaborator.
+/// One step of the check walk, recorded in entry order and replayed
+/// positionally by the elaborator.
 ///
-/// The walk and the elaborator traverse the same AST, and the elaborator is only
-/// correct if it enters *exactly* the nodes the walk entered. Two things can make
-/// them disagree: the type of a node, and whether a `name.field` shape is a
-/// qualified module member (whose qualifier neither walk enters) or an ordinary
-/// field access (whose receiver both do). The first is a value only the walk
-/// knows; the second is a decision only the walk may make — it depends on the
-/// value env at the point of the access, which has moved on by the time a
-/// deferred body is elaborated. So the walk records both, and the elaborator
-/// reads rather than re-derives.
+/// The two walks traverse the same AST and the elaborator is only correct if it
+/// enters exactly the nodes the walk entered. Both recorded facts are things it
+/// must not re-derive: the type of a node, and whether a `name.field` shape is a
+/// qualified module member (whose qualifier neither walk enters) or a field
+/// access (whose receiver both do).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalkStep {
     /// The type the walk inferred for the expression it entered here.
@@ -268,15 +166,12 @@ pub enum WalkStep {
     Qualified(bool),
 }
 
-/// Elaborate `body` into a [`TypedFn`]. `params` are already inferred; each
-/// gets a fresh [`TypedBind`] the returned function carries. Eta wrappers the
-/// body needs are appended to `fns`.
+/// Elaborate `body` into a [`TypedFn`]. Eta wrappers the body needs are
+/// appended to `fns`.
 ///
-/// This is also how the entry file's `__main__` is elaborated when it is a bare
-/// expression rather than a module block; a block goes through
-/// [`elaborate_toplevel`], because the two differ in exactly one thing — whether
-/// the check walk entered the body node itself, and so whether `walk_tys` starts
-/// with its type.
+/// A module block goes through [`elaborate_toplevel`] instead: the check walk
+/// never entered the block node itself, so `walk_tys` does not start with its
+/// type.
 #[allow(clippy::too_many_arguments)]
 pub fn elaborate_body<C: ElabCtx>(
     ctx: &mut C,
@@ -293,9 +188,8 @@ pub fn elaborate_body<C: ElabCtx>(
     })
 }
 
-/// Elaborate a module's top level: an imported module's initialiser. Callers
-/// hold a `BlockExpression`, not an `Expression`, so this runs [`Elab::block`]
-/// directly; it is otherwise [`elaborate_body`] with no parameters.
+/// Elaborate a module's top level: an imported module's initialiser.
+/// [`elaborate_body`] with no parameters, over a `BlockExpression`.
 pub fn elaborate_toplevel<C: ElabCtx>(
     ctx: &mut C,
     pool: &mut ResolvedPool,
@@ -305,8 +199,6 @@ pub fn elaborate_toplevel<C: ElabCtx>(
     ret_ty: Ty,
     walk_tys: &[WalkStep],
 ) -> TypedFn {
-    // No `expr_as`: a module toplevel is walked statement-by-statement, so the
-    // check walk never entered the block itself and recorded no type for it.
     elaborate_fn(ctx, pool, fns, name, &[], ret_ty, walk_tys, |el| {
         el.block(block, ret_ty)
     })
@@ -335,10 +227,8 @@ fn elaborate_fn<C: ElabCtx>(
         })
         .collect();
     let body = f(&mut el);
-    // The walk typed exactly the expressions this elaboration entered. A
-    // leftover entry means one walk visited a node the other did not, which is
-    // a silent mistyping of everything after it — the same class of bug the
-    // span-keyed table hid, and the reason this table is positional.
+    // A leftover entry means one walk visited a node the other did not, which
+    // silently mistypes everything after it.
     if el.cursor != el.walk_tys.len() {
         elaborator_bug("body left the check walk's types unconsumed", Span::DUMMY);
     }
@@ -356,12 +246,10 @@ fn elaborate_fn<C: ElabCtx>(
 pub struct Elab<'a, C: ElabCtx> {
     ctx: &'a mut C,
     pool: &'a mut ResolvedPool,
-    /// The program's function table. Eta wrappers are appended here; nothing is
-    /// ever appended to a `Program`'s instruction stream mid-walk.
+    /// The program's function table. Eta wrappers are appended here.
     fns: &'a mut FnTable,
-    /// What the check walk saw in this body, in the order it saw it: the type of
-    /// every expression it entered, and every `name.field` verdict it reached.
-    /// Read strictly in order — never indexed by span, never searched.
+    /// What the check walk saw in this body, in the order it saw it. Read
+    /// strictly in order — never indexed by span, never searched.
     walk_tys: &'a [WalkStep],
     /// How much of [`Self::walk_tys`] has been consumed. `elaborate_fn` checks
     /// it reached the end.
@@ -375,41 +263,27 @@ pub struct Elab<'a, C: ElabCtx> {
     names: Vec<(StrId, BindingId)>,
     /// [`StrId::NONE`]: binds no source name reaches (an argument spill, a tuple
     /// projection, an `or`-expression's unwrapped payload). `lower` reads it
-    /// back off [`TypedBind::name`] to tell an operand temp — free to collapse
-    /// into whatever it aliases — from a `let` the source wrote, which owns
-    /// its frame slot.
+    /// back off [`TypedBind::name`] to tell an operand temp it may collapse
+    /// from a `let` the source wrote, which owns its frame slot.
     anon: StrId,
     /// Every eta wrapper's parameters share this name; it is only displayed.
     eta_param: StrId,
-    /// `Nil`'s resolved type: what an empty block, a statement-terminated
-    /// block, and a constructor call the checker already reported as
-    /// under-applied evaluate to.
     nil: RTy,
-    /// True until the first [`Self::block`] call, exactly as `lower`'s
-    /// `at_toplevel` was. That block is the module's own toplevel when the
-    /// entry file's `__main__` or an imported module's initialiser is being
-    /// elaborated; every nested block (an `if` arm, an inner `{..}`) sees
-    /// `false`. Gates decl scheduling and [`Self::module_scope`].
+    /// True until the first [`Self::block`] call. Gates decl scheduling and
+    /// [`Self::module_scope`].
     ///
-    /// It starts `true` for a *function* body too. That body's outermost block
-    /// is not a module toplevel, but the elaborator cannot tell the difference
-    /// — `__main__` arrives through the same [`elaborate_body`] — and it does
-    /// not need to: whether a name is really a module-scope binding is
-    /// [`ElabCtx::global_slot`]'s answer, and it answers `None` for every name
-    /// bound outside the entry frame. Deciding it here instead would drop the
-    /// entry module's globals on the floor.
+    /// It also starts `true` for a function body, whose outermost block is not
+    /// a module toplevel. That is harmless: whether a name is really
+    /// module-scope is [`ElabCtx::next_global_slot`]'s answer, and deciding it
+    /// here instead would drop the entry module's globals on the floor.
     at_toplevel: bool,
-    /// True while walking the statements of a toplevel block. A source-named
-    /// bind minted under it takes whatever [`TypedBind::global`]
-    /// [`ElabCtx::global_slot`] hands out; a nested block clears it for its own
-    /// body and restores it after, so in `x = { y = 1; y }` `y` can never be
-    /// mistaken for the module-scope binding of a name `x`'s initialiser
-    /// shadows.
+    /// True while walking the statements of a toplevel block. A nested block
+    /// clears it and restores it after, so in `x = { y = 1; y }` `y` is never
+    /// mistaken for a module-scope binding.
     module_scope: bool,
     /// Span of the `match` whose arms are being elaborated. The [`PatCtx`] seam
-    /// carries no spans — `elaborate_pat` asks for a tuple element's or an
-    /// array's element type by [`RTy`] alone — so this is the only location an
-    /// internal error raised from those queries can be attributed to.
+    /// carries no spans, so this is the only location an internal error raised
+    /// from a pattern query can be attributed to.
     pat_span: Span,
 }
 
@@ -446,21 +320,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         TypedExpr::Nil { ty: self.nil }
     }
 
-    // ── types ──────────────────────────────────────────────────────────────
-
     /// Bridge an inference `Ty` into the pool.
     fn resolve(&mut self, t: Ty) -> RTy {
         self.ctx.resolve_rty(&mut *self.pool, t)
     }
 
     /// The type the check walk inferred for the expression this walk is about
-    /// to enter. Called exactly once per entered expression, from
-    /// [`Self::expr`] / [`Self::expr_as`], which is what keeps the two walks in
-    /// step.
-    ///
-    /// Running out means the elaborator entered an expression the check walk
-    /// did not — the two walks have drifted apart, and every type after the
-    /// drift would be somebody else's.
+    /// to enter. Called exactly once per entered expression, which is what
+    /// keeps the two walks in step.
     fn take_ty(&mut self, at: Span) -> Ty {
         let Some(&WalkStep::Ty(t)) = self.walk_tys.get(self.cursor) else {
             elaborator_bug("expression with no inferred type", at)
@@ -473,12 +340,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// is looking at: `true` when `left` names an imported module and neither
     /// walk enters it.
     ///
-    /// Recorded rather than re-derived. The decision turns on the value env at
-    /// the point of the access — an `import ./one` followed by `one = Box(..)`
-    /// makes a later `one.go` a field read — and by the time a deferred body is
-    /// elaborated that env has moved on. Re-asking would let the two walks enter
-    /// a different number of expressions, and every entry after the
-    /// disagreement would belong to another node.
+    /// Never re-derive this. The decision turns on the value env at the point
+    /// of the access — `import ./one` followed by `one = Box(..)` makes a later
+    /// `one.go` a field read — and that env has moved on by the time a deferred
+    /// body is elaborated.
     fn take_qualified(&mut self, at: Span) -> bool {
         let Some(&WalkStep::Qualified(q)) = self.walk_tys.get(self.cursor) else {
             elaborator_bug("property access with no recorded qualifier verdict", at)
@@ -487,13 +352,9 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         q
     }
 
-    /// The type of the expression the walk enters *next*, without entering it.
-    ///
-    /// The three callers need a sub-expression's type before elaborating it
-    /// (a property access's receiver, an `or`'s left side, a `match`
-    /// scrutinee), and in each the check walk entered that sub-expression
-    /// first — so it is the entry under the cursor. Entering it (via
-    /// [`Self::expr`]) still consumes it.
+    /// The type of the expression the walk enters *next*, without consuming it.
+    /// Valid only where the check walk entered that sub-expression first: a
+    /// property access's receiver, an `or`'s left side, a `match` scrutinee.
     fn peek_ty(&mut self, at: Span) -> Ty {
         let Some(&WalkStep::Ty(t)) = self.walk_tys.get(self.cursor) else {
             elaborator_bug("sub-expression with no inferred type", at)
@@ -507,31 +368,22 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// Everything a constructor's use site needs, with its field types
-    /// specialised to `at`'s type arguments.
+    /// specialised to `at`'s type arguments. When `at` is opaque (an
+    /// undetermined scrutinee) a field type stays `Bound` and is handled
+    /// dynamically.
     ///
-    /// The constructor's scheme is resolved once, its return type's arguments
-    /// aligned against `at`'s, and the resulting `Bound(i) → RTy` substitution
-    /// applied to its parameters. This replaces `lower`'s `ctor_field_tys`,
-    /// which achieved the same by *unifying into the engine* — a mutation of
-    /// inference state performed by a pass that had supposedly finished
-    /// inferring. When `at` is opaque (an undetermined scrutinee) a field type
-    /// stays `Bound` and is handled dynamically, exactly as before.
-    /// The pattern path, where a constructor is always named bare: `mod.C(x)` is
-    /// not a pattern the parser accepts.
+    /// The bare-name path. Qualified constructors go through [`Self::ctor_of`];
+    /// `mod.C(x)` is not a pattern the parser accepts.
     fn ctor_at(&mut self, name: &str, at: RTy, span: Span) -> Option<CtorPat> {
         let (scheme, den) = self.ctx.resolve_name(name)?;
         self.ctor_of(scheme, den, at, span)
     }
 
-    /// The call path, which takes the denotation the callee walk *already*
-    /// resolved rather than re-deriving it from a name. A qualified constructor
-    /// (`mod.Ctor(x)`) has no bare name to re-resolve, and re-resolving one that
-    /// does would instantiate its scheme a second time.
+    /// As [`Self::ctor_at`], but from the denotation the callee walk already
+    /// resolved. A qualified constructor has no bare name to re-resolve, and
+    /// re-resolving one that does would instantiate its scheme twice.
     ///
     /// `None` means exactly one thing: `den` does not denote a constructor.
-    /// Once it does, every remaining question has an answer, and a missing or
-    /// mismatched label list is a compiler bug rather than a reason to hand the
-    /// caller a pattern that matches everything.
     fn ctor_of(&mut self, scheme: Ty, den: Denotation, at: RTy, span: Span) -> Option<CtorPat> {
         let (variant, arity) = den.as_ctor()?;
         let Some(labels) = self.ctx.ctor_labels(variant) else {
@@ -550,15 +402,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             }
             None => params.to_vec(),
         };
-        // `CtorPat::from_parts` is the seam that used to be `or_poison(fty,
-        // "constructor field")`: rather than handing a caller a `Nil` for the
-        // field it cannot type, it checks the three independently-derived
-        // widths against each other and aborts on a disagreement. Every caller
-        // then indexes nothing — it zips the slots against `field_tys()`.
+        // `from_parts` checks the three independently-derived widths against
+        // each other and aborts on a disagreement, so callers can zip the slots
+        // against `field_tys()` without indexing.
         Some(CtorPat::from_parts(variant, arity, labels, field_tys, span))
     }
-
-    // ── binds and names ────────────────────────────────────────────────────
 
     fn new_bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
         let id = BindingId(self.next_bind);
@@ -568,18 +416,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             id,
             name,
             ty,
-            // The entry-frame slot of a module-level bind comes from the module
-            // walk's allocation, via `scoped_bind`; every other bind is a frame
-            // local. See `TypedBind::global`.
             global: None,
         }
     }
 
     /// A bind for a module-scope `let`: it takes the next entry-frame slot the
-    /// check walk queued, so def and use carry the same [`GlobalSlot`] and
-    /// nothing downstream maps a name back to a slot. A destructured name
-    /// takes its slot in [`Self::irrefutable`] instead, and a declaration's
-    /// rides on its [`ElabCtx::toplevel_decls`] record.
+    /// check walk queued, so def and use carry the same [`GlobalSlot`]. A
+    /// destructured name takes its slot in [`Self::irrefutable`] instead, and a
+    /// declaration's rides on its [`ElabCtx::toplevel_decls`] record.
     fn scoped_bind(&mut self, name: StrId, ty: RTy) -> TypedBind {
         let mut b = self.new_bind(name, ty);
         if self.module_scope {
@@ -621,21 +465,17 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
     }
 
-    // ── expressions ────────────────────────────────────────────────────────
-
     /// Elaborate `e` where the surrounding context fixes the result type — a
     /// function's tail, an `if` arm, a `match` arm's body. Control-flow forms
     /// take `result_ty` rather than their own inferred type, because a function
     /// body's block has no type of its own to recover.
-    ///
-    /// The check walk entered `e` too, so its type is consumed here either way.
     pub fn expr_as(&mut self, e: &ast::Expression, result_ty: Ty) -> TypedExpr {
         let own = self.take_ty(e.span());
         self.dispatch(e, own, result_ty)
     }
 
     /// Elaborate `e` in value position: its type is the one the check walk
-    /// inferred for it, and it is also the type of whatever it evaluates to.
+    /// inferred for it.
     pub fn expr(&mut self, e: &ast::Expression) -> TypedExpr {
         let own = self.take_ty(e.span());
         self.dispatch(e, own, own)
@@ -655,8 +495,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             E::OrExpression(oe) => self.or_expr(oe, result),
             E::BinaryExpression(be) => match BinopKind::of(be.op) {
                 BinopKind::ShortCircuit(sc) => self.short_circuit(be, sc, result),
-                // Not control flow: its own type is its type, and `result` only
-                // agrees with it.
                 BinopKind::Value(op) => self.binary(be, op, own),
             },
 
@@ -695,7 +533,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                         start: Box::new(self.expr(&r.start)),
                         end: Box::new(self.expr(&r.end)),
                     },
-                    // `Index` yields `Option(elem)` — that shape is what lets
+                    // `Index` yields `Option(elem)`, which is what lets
                     // `xs[i] or d` resolve.
                     other => TypedExpr::Index {
                         ty,
@@ -724,9 +562,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 self.closure(fe.span, ty)
             }
             E::BinaryLiteral(bl) => self.binary_literal(bl, own),
-            // The parser builds one only where it also records a parse error,
-            // and `compile_expr` restates that error — so no module that earned
-            // its `CleanModule` proof carries one.
             E::ErrorNode(err) => elaborator_bug("error node", err.span),
         }
     }
@@ -759,7 +594,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// A resolved name in value position. `ty` is the use site's solved type;
-    /// `scheme` is the (freshly instantiated, unsolved) type `resolve_name`
+    /// `scheme` is the freshly instantiated, unsolved type `resolve_name`
     /// returned, and is only consulted when `ty` cannot type the node.
     fn value_of(
         &mut self,
@@ -781,18 +616,15 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// A non-nullary constructor or a builtin referenced as a first-class value
-    /// (`map(Some, xs)`): a zero-capture closure over a wrapper `TypedFn` this
-    /// walk appends to the program. Nothing is emitted mid-pass.
+    /// (`map(Some, xs)`): a zero-capture closure over a wrapper `TypedFn`
+    /// appended to the program.
     ///
-    /// The wrapper is typed from `ty` — the *use site's* type, which the check
-    /// walk solved — and not from `scheme`, which is a fresh `instantiate` of
-    /// the constructor's or builtin's polymorphic type whose variables nothing
-    /// has bound. Zonking that scheme turns each unsolved variable into an
-    /// opaque [`ResolvedNode::Bound`], and `Bound` is not heap-shaped, so a
-    /// wrapper typed from it would be Perceus-annotated as if every parameter
-    /// were a scalar: `map(Some, xs)` would synthesise
-    /// `(Bound k) -> Option(Bound k)` and drop nothing. `scheme` is only a
-    /// fallback for the capture path, where the use site *is* the scheme.
+    /// Type the wrapper from `ty`, the use site's solved type, not from
+    /// `scheme`. Zonking an unsolved scheme yields opaque
+    /// [`ResolvedNode::Bound`] parameters, which are not heap-shaped, so
+    /// Perceus would annotate the wrapper as all-scalar and drop nothing.
+    /// `scheme` is only a fallback for the capture path, where the use site
+    /// *is* the scheme.
     fn eta(&mut self, name: StrId, target: EtaTarget, scheme: Ty, ty: RTy, at: Span) -> TypedExpr {
         let f = FnRTy::of(self.pool, ty).or_else(|| {
             let sig = self.ctx.resolve_rty(&mut *self.pool, scheme);
@@ -805,17 +637,15 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// An operator that denotes an opcode. `op` is a [`ValueBinop`], so `&&`/`||`
-    /// — which branch, and whose right operand may never be evaluated — cannot
-    /// arrive here: [`BinopKind::of`] routes them to [`Self::short_circuit`].
-    /// That is what lets `specialize_binop` return an `Op` and not an option.
+    /// cannot arrive here — [`BinopKind::of`] routes them to
+    /// [`Self::short_circuit`]. That is what lets `specialize_binop` return an
+    /// `Op` and not an option.
     fn binary(&mut self, be: &ast::BinaryExpression, op: ValueBinop, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
         let lhs = self.expr(&be.left);
         let rhs = self.expr(&be.right);
-        // The operand's type is the checker's, so `Int + Int` selects `AddInt`
-        // even when nothing was annotated. `None` is a genuinely polymorphic
-        // operand (`fn add(a, b) { a + b }` is `Addable a => (a, a) -> a`) and
-        // the dynamic op is the correct choice.
+        // `None` is a genuinely polymorphic operand (`fn add(a, b) { a + b }`
+        // is `Addable a => (a, a) -> a`); the dynamic op is correct there.
         let prim = self.pool.prim_of(lhs.ty());
         TypedExpr::Binary {
             ty,
@@ -880,25 +710,20 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// A `fn(...) { ... }` expression: the body is already checked, parked and
-    /// assigned a `func_idx`, and the walk recorded its free-name set on the
-    /// frame this elaboration is running in. Load each capture in the current
-    /// scope. (A named `fn` *declaration* goes through `fn_of_global` instead —
-    /// it is not an expression and has no captures.)
+    /// assigned a `func_idx`, and the walk recorded its free-name set. A named
+    /// `fn` *declaration* goes through `fn_of_global` instead.
     fn closure(&mut self, span: Span, ty: RTy) -> TypedExpr {
         let Some((func_idx, cap_names)) = self.ctx.closure(span) else {
             elaborator_bug("nested closure", span)
         };
         let mut captures = Vec::with_capacity(cap_names.len());
         for cn in cap_names {
-            // A capture is a name from *this* scope (or its enclosing frame);
-            // resolve it exactly like an identifier reference.
             if let Some(bid) = self.lookup_name(cn) {
                 captures.push(self.var(bid));
                 continue;
             }
             let name = self.ctx.str(cn).to_owned();
             let Some((t, den)) = self.ctx.resolve_name(&name) else {
-                // The walk recorded this name *because* it resolved it.
                 elaborator_bug("nested closure capture", span)
             };
             let cty = self.resolve(t);
@@ -937,11 +762,9 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// `qualifier.member` as a module reference, or `None` when it is an
     /// ordinary field access.
     ///
-    /// The verdict is the check walk's, replayed off [`Self::walk_tys`] — see
-    /// [`Self::take_qualified`]. Every caller of this must correspond to a
-    /// `resolve_qualified_member` call in the check walk, in the same order:
-    /// a property access entered as an expression, and a call's property-access
-    /// callee (which the walk resolves before it enters anything).
+    /// Every call here must correspond to a `resolve_qualified_member` call in
+    /// the check walk, in the same order: a property access entered as an
+    /// expression, and a call's property-access callee.
     fn qualified(
         &mut self,
         left: &ast::Expression,
@@ -951,8 +774,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         if !self.take_qualified(at) {
             return None;
         }
-        // The walk only says `true` for the `name.field` shape, and only after
-        // resolving the member against the module's interface.
         let (ast::Expression::Identifier(qual), ast::PropertyKey::Field(member)) = (left, right)
         else {
             elaborator_bug("qualified member on a non-`name.field` shape", at)
@@ -969,8 +790,8 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 
     fn property(&mut self, pa: &ast::PropertyAccessExpression, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
-        // `qualifier.member` module reference? The check walk resolved it the
-        // same way and never entered the qualifier, so neither does this.
+        // A module reference: the check walk never entered the qualifier, so
+        // neither does this.
         if let Some((mty, den, sid)) = self.qualified(&pa.left, &pa.right, pa.span) {
             return self.value_of(den, sid, mty, ty, pa.span);
         }
@@ -978,17 +799,14 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let recv = Box::new(self.expr(&pa.left));
         match &pa.right {
             ast::PropertyKey::TupleIndex(num) => {
-                // The check walk parsed this same text to find the element's
-                // type, and rejected the tuple index it could not.
                 let Ok(idx) = num.value.parse::<u32>() else {
                     elaborator_bug("tuple index", pa.span)
                 };
                 TypedExpr::TupleIndex { ty, recv, idx }
             }
             ast::PropertyKey::Field(field) => {
-                // The receiver's type came from the checker, so it is a
-                // resolved `Con` and `ctor_field` finds the field. The access
-                // is admitted across every variant, so the tag needs no check.
+                // The check walk admits the access across every variant, so the
+                // tag needs no check.
                 let Some((idx, _)) = self.ctx.ctor_field(recv_ty, &field.name) else {
                     elaborator_bug("field access", pa.span)
                 };
@@ -1014,8 +832,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                     .iter()
                     .map(|a| match a {
                         ast::CallArg::Positional(e) => self.expr(e),
-                        // The check walk admits labels and spreads only on
-                        // constructor calls, and this callee is not one.
                         ast::CallArg::Labeled { .. } | ast::CallArg::Spread(_) => elaborator_bug(
                             "labeled or spread argument on a non-constructor callee",
                             fc.span,
@@ -1042,7 +858,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 if let Some((mty, den, _)) = self.qualified(&pa.left, &pa.right, pa.span) {
                     return self.resolved_callee(Some((mty, den)), pa.span);
                 }
-                // A computed callee `expr.field(...)`: evaluate, dynamic-call.
                 Callee::Value(TypedCallee::Dynamic(Box::new(self.expr(e))))
             }
             _ => Callee::Value(TypedCallee::Dynamic(Box::new(self.expr(e)))),
@@ -1064,14 +879,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     /// order; a `..base` spread fills every unsupplied slot with a projection
     /// out of `base`.
     ///
-    /// Spread projections always use the tag-checked form, even when the enum
-    /// has a single variant and the check is statically redundant: Core carries
-    /// no variant-count facts, and the check is one compare against a value
-    /// already in a register.
+    /// Spread projections always use the tag-checked form: Core carries no
+    /// variant-count facts, so a single-variant enum cannot be recognised here.
     ///
     /// When any argument is labeled or spread, every supplied argument is bound
-    /// to a `Let` in *source* order first: reordering them into field order
-    /// would otherwise reorder their side effects.
+    /// to a `Let` in *source* order first, or reordering them into field order
+    /// would reorder their side effects.
     fn ctor_call(
         &mut self,
         scheme: Ty,
@@ -1119,25 +932,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         }
 
         let (by_pos, errors) = slot_labeled(&cp.slot_fields(), supplied);
-        // The check walk slotted these same args with the same `slot_labeled`
-        // and reported every error it returned; a clean module reslots with
-        // none. An error here means the two walks disagree about the call.
         if !errors.is_empty() {
             elaborator_bug("constructor arguments the check walk mis-slotted", at)
         }
-        // Exactly `arity` slots and exactly `arity` field types: the zip pairs
-        // each unfilled slot with the type of the field it projects.
         let field_tys: SmallVec<[RTy; 4]> = cp.field_tys().into();
         let mut fields: Vec<TypedExpr> = Vec::with_capacity(arity);
         for (i, (slot, fty)) in by_pos.into_iter().zip(field_tys).enumerate() {
             match slot {
                 Some(v) => fields.push(v),
                 None => {
-                    // A slot no argument filled reads from `..base`. With no
-                    // spread it is an arity error the check walk reports, so a
-                    // clean module cannot reach here — filling the slot with a
-                    // guessed `Nil` would hand Perceus a non-heap type for a
-                    // possibly-heap field.
+                    // A slot no argument filled reads from `..base`.
                     let Some(base) = spread else {
                         elaborator_bug("constructor field with no argument and no spread", at)
                     };
@@ -1167,26 +971,22 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// `expr or body` (with optional receiver). There is no `Or`-expression in
-    /// the typed IR: the checker knows the `Option`/`Result` shape, so it emits
-    /// the `Match` those variants describe.
+    /// the typed IR: this emits the `Match` the `Option`/`Result` variants
+    /// describe.
     fn or_expr(&mut self, oe: &ast::OrExpression, result_ty: Ty) -> TypedExpr {
         let ty = self.resolve(result_ty);
         let lhs_ty = self.peek_ty(oe.expression.span());
         let lhs_rty = self.resolve(lhs_ty);
         let lhs = self.expr(&oe.expression);
         let Some(shape) = self.ctx.or_shape(lhs_ty) else {
-            // The check walk types `expr or default` only when `expr` is an
-            // `Option`/`Result`, and reports it when it is not.
             elaborator_bug("or-expression on non-Option/Result", oe.span)
         };
         // Success arm: `Ok(v)`/`Some(v)` → v.
         let ok_bind = self.new_bind(self.anon, ty);
         let ok_body = self.var(ok_bind.id);
-        // Failure arm: bind the payload (`Result`) or drop it (`Option`), then
-        // evaluate `body`.
         let (fail_fields, body) = if shape.err_has_payload {
-            // `Result(_, E)`'s payload is its second type argument. It must be
-            // the real `E`: `err` may be a heap value the recovery body drops.
+            // The payload type must be the real `E`: `err` may be a heap value
+            // the recovery body drops.
             let Some(ety) = self.pool.con_arg(lhs_rty, 1) else {
                 elaborator_bug("or-expression on a non-generic Result", oe.span)
             };
@@ -1237,16 +1037,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let scrut_ty = self.peek_ty(me.subject.span());
         let scrut_rty = self.resolve(scrut_ty);
         let scrut = Box::new(self.expr(&me.subject));
-        // Arm bodies re-enter `expr`, which may elaborate a nested `match`;
-        // save and restore rather than assign, so an error raised after the
-        // inner arms are done still names this `match`.
+        // Save and restore rather than assign: an arm body may hold a nested
+        // `match`, and an error raised after it still names this one.
         let outer = std::mem::replace(&mut self.pat_span, me.span);
         let arms = elaborate_arms(self, scrut_rty, &me.arms);
         self.pat_span = outer;
         TypedExpr::Match { ty, scrut, arms }
     }
-
-    // ── blocks ─────────────────────────────────────────────────────────────
 
     /// A block is a right-nested `Let`/`Seq` spine ending in its tail
     /// expression, or [`TypedExpr::Nil`] when it ends in a statement.
@@ -1255,18 +1052,15 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     pub fn block(&mut self, be: &ast::BlockExpression, result_ty: Ty) -> TypedExpr {
         let is_top = std::mem::replace(&mut self.at_toplevel, false);
         // Module toplevel: `fn`/`const` decls are order-free and mutually
-        // recursive. The check walk initialises them in dependency (SCC) order
-        // and only then runs the non-decl nodes; walking `be.body` in raw
-        // source order would read a forward reference before it is stored.
+        // recursive, so they run in the check walk's dependency (SCC) order.
+        // Raw source order would read a forward reference before it is stored.
         let seq: Vec<Step> = if is_top {
             self.decl_schedule(be.body.len(), be.span)
         } else {
             (0..be.body.len()).map(|i| (i, None)).collect()
         };
         let mark = self.names.len();
-        // Only this block's own statements bind globals. A block nested in one
-        // of their initialisers (`x = { y = 1; y }`) restores `false` here, so
-        // its `y` stays a frame local.
+        // Only this block's own statements bind globals.
         let outer = std::mem::replace(&mut self.module_scope, is_top);
         let e = self.block_nodes(&seq, &be.body, result_ty, be.span);
         self.module_scope = outer;
@@ -1285,16 +1079,12 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let mut placed = vec![false; len];
         let mut seq: Vec<Step> = Vec::with_capacity(len);
         for &(idx, slot) in &decls {
+            // Either abort is a silent miscompile if it is allowed through: a
+            // duplicate initialises two globals from one node, and an
+            // out-of-range index means the walks disagree about the module.
             match placed.get_mut(idx) {
                 Some(p) if !*p => *p = true,
-                // A duplicate index elaborates the decl twice — two globals
-                // initialised from one node, with every reader wired to
-                // whichever slot the second pass claimed. A silent miscompile.
                 Some(_) => elaborator_bug("toplevel decl scheduled twice", span),
-                // A decl the check walk saw but this block does not have: the
-                // two disagree about what module they are walking. Dropping it
-                // would de-globalise a `const` whose slot every already-emitted
-                // fn body reads by `PushGlobal` — a silent miscompile.
                 None => elaborator_bug("toplevel decl node out of range", span),
             }
             seq.push((idx, Some(slot)));
@@ -1308,11 +1098,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// Elaborate a block's statements into a right-nested `Let`/`Seq` spine.
-    ///
-    /// Built with a loop and folded once, not by recursing per statement: a
-    /// module toplevel is one spine node per declaration and real modules run
-    /// to thousands. `lower`, which consumes the spine, is iterative for the
-    /// same reason.
+    /// See [`Frame`] for why this loops instead of recursing per statement.
     fn block_nodes(
         &mut self,
         seq: &[Step],
@@ -1328,9 +1114,6 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 break self.nil_expr();
             };
             let Some(node) = body.get(idx) else {
-                // Every schedule index is bounds-checked by `decl_schedule` or
-                // ranges over `body` itself; a miss means the schedule was
-                // built against a different block.
                 elaborator_bug("block schedule index out of range", span)
             };
             match node {
@@ -1363,18 +1146,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
     }
 
     /// Append this statement's spine frames, in evaluation order. `global` is
-    /// the entry-frame slot [`Self::decl_schedule`] paired with this node —
-    /// always `Some` for a top-level `fn`/`const` of a module toplevel, `None`
-    /// for everything else. A `let` takes its slot from [`Self::scoped_bind`]
-    /// instead: it has no declaration to hang one on.
+    /// the entry-frame slot [`Self::decl_schedule`] paired with this node:
+    /// `Some` only for a top-level `fn`/`const`. A `let` takes its slot from
+    /// [`Self::scoped_bind`] instead.
     fn statement(&mut self, s: &ast::Statement, global: Option<GlobalSlot>, out: &mut Vec<Frame>) {
         match s {
             ast::Statement::VariableBinding(vb) => {
                 let sid = self.ctx.intern(&vb.identifier.name);
                 let init = self.expr(&vb.init);
-                // A module-scope `let` is a global: the lambdas the check walk
-                // compiled read it via `PushGlobal <slot>`, so it needs its own
-                // pinned bind. Inner-block `let`s stay collapsible.
+                // A module-scope `let` needs a pinned bind: already-compiled
+                // lambdas read it via `PushGlobal <slot>`.
                 let bind = self.scoped_bind(sid, init.ty());
                 self.bind_name(sid, bind.id);
                 out.push(Frame::Let(bind, init));
@@ -1399,17 +1180,16 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
                 // `@vm` fns carry no AL body and no runtime binding.
                 ast::Declaration::Function(fd) if matches!(fd.body, ast::FnBody::Vm(_)) => {}
                 ast::Declaration::Function(fd) => {
-                    // A `fn` *declaration* is not an expression, so the walk
+                    // A `fn` declaration is not an expression, so the walk
                     // recorded no type for its span; its scheme is in the env.
                     let Some((fn_ty, _)) = self.ctx.resolve_name(&fd.identifier.name) else {
                         elaborator_bug("unbound fn declaration", fd.span)
                     };
                     let fr = self.resolve(fn_ty);
                     let sid = self.ctx.intern(&fd.identifier.name);
-                    // The bind comes first: its `GlobalSlot` *is* the decl's
+                    // The bind comes first: its `GlobalSlot` is the decl's
                     // identity, and the closure it initialises is whatever
-                    // function the walk emitted for that slot. A top-level fn
-                    // captures nothing — siblings are `PushGlobal`.
+                    // function the walk emitted for that slot.
                     let bind = self.decl_bind(sid, fr, global);
                     let Some(func_idx) = bind.global.and_then(|g| self.ctx.fn_of_global(g)) else {
                         elaborator_bug("fn declaration with no emitted body", fd.span)
@@ -1463,18 +1243,13 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
             ast::Pattern::Var { name } => {
                 let sid = self.ctx.intern(&name.name);
                 self.bind_name(sid, src);
-                // Binding the name to `src` is all a local needs: names
-                // resolve through `self.names` by `BindingId`, never by the
-                // bind's recorded name, so shadowing works even though the
-                // projection bind stays anonymous and `lower` is free to
-                // collapse it into its initialiser.
+                // A local needs nothing more: names resolve by `BindingId`, so
+                // the projection bind can stay anonymous and collapsible.
                 //
-                // A module-scope destructured name adopts the source name and
-                // a global slot, just like a top-level `let`: fn bodies read
-                // it via `PushGlobal <slot>`, and `lower` pins a global bind
-                // to a slot of its own. `src` is the projection's own bind —
-                // each caller mints one per field, and no other name reaches
-                // it — so the adoption pins exactly one bind per source name.
+                // A module-scope destructured name instead adopts the source
+                // name and a global slot, like a top-level `let`. `src` is the
+                // projection's own bind, one per field, so exactly one bind is
+                // pinned per source name.
                 let Some((b, _)) = lets.iter_mut().find(|(b, _)| b.id == src) else {
                     elaborator_bug("destructured name with no projection bind", name.span)
                 };
@@ -1537,7 +1312,7 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
 }
 
 /// Pattern elaboration's view of the walk. Every type crossing this seam is an
-/// [`RTy`]: a `fresh_var()` cannot reach a `TypedPat`.
+/// [`RTy`], so a `fresh_var()` cannot reach a `TypedPat`.
 impl<C: ElabCtx> PatCtx for Elab<'_, C> {
     fn intern(&mut self, name: &str) -> StrId {
         self.ctx.intern(name)
@@ -1577,10 +1352,8 @@ impl<C: ElabCtx> PatCtx for Elab<'_, C> {
         self.int_rty()
     }
 
-    /// A `None` from [`Elab::ctor_at`] means the pattern names no constructor,
-    /// which a diagnostics-clean module cannot do. Wildcarding it would make
-    /// the arm match everything and drop its bindings on the floor, so it
-    /// aborts — exactly as `Elab::ctor_call` and `Elab::irrefutable` do.
+    /// Aborts on `None`: wildcarding an unresolved constructor pattern would
+    /// make the arm match everything and drop its bindings.
     fn resolve_ctor_pat(&mut self, name: &str, scrut: RTy) -> CtorPat {
         let span = self.pat_span;
         match self.ctor_at(name, scrut, span) {

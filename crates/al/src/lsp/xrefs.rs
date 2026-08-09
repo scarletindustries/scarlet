@@ -4,9 +4,8 @@ use crate::bytecode;
 use crate::reference;
 use crate::span::Span;
 
-/// One dependent-file occurrence of a cross-module definition, captured with
-/// its true file URI so it survives a later analysis that makes a *different*
-/// file the compilation entry.
+/// One dependent-file occurrence of a cross-module definition. Carries its own
+/// URI so it survives a later analysis rooted at a different file.
 #[derive(Clone)]
 pub(super) struct Xref {
     pub(super) uri: String,
@@ -14,23 +13,13 @@ pub(super) struct Xref {
     pub(super) kind: reference::ReferenceKind,
 }
 
-/// Workspace-wide reverse edges that the session's per-entry reference graph
-/// cannot retain on its own.
-///
-/// A position query re-roots compilation to the queried file, so that file
-/// becomes the entry module (`main`) and only its own import closure is in the
-/// session graph. A file's *importers* are never in its closure (import edges
-/// point the other way) and are never cached as modules, so their references
-/// into it — e.g. `main.al`'s call of `lib.greet()` when the query is driven
-/// from `greet`'s declaration in `lib.al` — would otherwise vanish whenever
-/// `lib.al` is the entry.
-///
-/// After every analysis we record the entry file's cross-module uses here,
-/// keyed by the canonical [`reference::DefId`] each one targets (a cached
-/// module's `DefId` is stable across re-roots because the session interner is
-/// append-only). `by_file` lets a re-analysis of one file replace exactly its
-/// own contribution, so a removed import stops resolving — keeping the index
-/// coherent with incremental edits.
+/// Workspace-wide reverse edges the session's per-entry reference graph cannot
+/// retain. A position query re-roots compilation at the queried file, and a
+/// file's importers are never in its own import closure, so their references
+/// into it would vanish. Every analysis records the entry file's cross-module
+/// uses here, keyed by target [`reference::DefId`] (stable across re-roots: the
+/// session interner is append-only). `by_file` lets a re-analysis of one file
+/// replace exactly its own contribution.
 #[derive(Default)]
 pub(super) struct WorkspaceXrefs {
     by_def: HashMap<reference::DefId, Vec<Xref>>,
@@ -38,8 +27,7 @@ pub(super) struct WorkspaceXrefs {
 }
 
 impl WorkspaceXrefs {
-    /// Replace `uri`'s entire contribution with `found` (each entry a canonical
-    /// target plus the occurrence's span/kind in `uri`).
+    /// Replace `uri`'s entire contribution with `found`.
     pub(super) fn refresh(
         &mut self,
         uri: &str,
@@ -77,8 +65,7 @@ impl WorkspaceXrefs {
 
 /// Per-workspace-root state: the persistent compiler session (reused across
 /// `didChange` so unchanged imports stay cached) and its cross-module reverse
-/// edges (see [`WorkspaceXrefs`]). Kept together so a root added/removed at
-/// runtime can never leave one populated without the other.
+/// edges. Kept together so neither can outlive the other.
 pub(super) struct RootState {
     pub(super) session: bytecode::IncrementalSession,
     pub(super) xrefs: WorkspaceXrefs,

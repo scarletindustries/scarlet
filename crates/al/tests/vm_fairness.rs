@@ -1,25 +1,15 @@
 //! Reduction-accounting fairness, pinned.
 //!
-//! The preemption contract these tests pin (see `exec.rs`): every function
-//! application — including a `TailCallSelf` back-edge — costs one reduction
-//! from a REDUCTION_BUDGET of 4000, and exhaustion yields the process. At a
-//! self-tail back-edge the yield happens *after* the frame collapse, so the
-//! suspended frame is exactly `ip = 0` with the next iteration's arguments
-//! already in the locals: resume re-enters the function from the top and the
-//! loop continues correctly. Any alternative execution backend must reproduce
-//! this observable behavior bit-for-bit — same yield points, same
-//! frame-at-yield shape — which is what makes these assertions
-//! backend-independent: they run the `al` binary with the ambient
-//! environment, so an execution-mode env toggle set by the harness applies
-//! here too.
+//! The contract (see `exec.rs`): every function application, `TailCallSelf`
+//! back-edges included, costs one reduction from a budget of 4000, and
+//! exhaustion yields. A self-tail yields *after* the frame collapse, so the
+//! suspended frame is `ip = 0` with the next iteration's arguments already in
+//! locals.
 //!
-//! Fairness is asserted through ORDER, never timing: under `AL_SCHEDULERS=1`
-//! the scheduler is FIFO round-robin (a yielded process goes to the back of
-//! the run queue), so a lightweight sibling finishing *before* a
-//! million-iteration self-tail spinner is only possible if the spinner was
-//! preempted at its back-edges. If the reduction checkpoint were missing, the
-//! spinner would run to completion in one slice and the order would invert —
-//! a deterministic failure, not a flake.
+//! Fairness is asserted through ORDER, never timing. Under `AL_SCHEDULERS=1`
+//! scheduling is FIFO round-robin, so a light sibling finishing before a
+//! million-iteration spinner is only possible if the spinner was preempted.
+//! A missing checkpoint inverts the order deterministically, never flakily.
 
 use std::process::{Command, Stdio};
 
@@ -30,9 +20,8 @@ use common::wait_or_kill;
 use al::dis;
 use al::{STDLIB, ast, bytecode, parser, scanner};
 
-/// Run `al run <prog>` pinned to one scheduler and return stdout. One
-/// scheduler means no parallelism: interleaving can only come from
-/// reduction-budget preemption, which is exactly what these tests observe.
+/// Run `al run <prog>` pinned to one scheduler and return stdout. With no
+/// parallelism, interleaving can only come from reduction-budget preemption.
 fn run_single_scheduler(tag: &str, src: &str) -> String {
     let proj = Project::new(tag);
     let prog = proj.dir.join("prog.al");
@@ -65,11 +54,9 @@ fn pos(stdout: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("missing line {needle:?} in stdout:\n{stdout}"))
 }
 
-/// Assert `src`'s function `name` compiles with a `TailCallSelf` back-edge.
-/// The fairness assertions below are only meaningful if the spinner really
-/// is a self-tail loop — a codegen change that turned it into plain
-/// recursion would blow the stack or shift the yield points, and this guard
-/// names the actual culprit instead.
+/// Assert `src`'s function `name` compiles to a `TailCallSelf` back-edge.
+/// The fairness assertions below mean nothing if it compiles to plain
+/// recursion instead, so fail here and name the real culprit.
 fn assert_self_tail(src: &str, name: &str) {
     let mut sc = scanner::new_scanner(src.to_string());
     let p = parser::new_parser(&mut sc);
@@ -85,9 +72,8 @@ fn assert_self_tail(src: &str, name: &str) {
     );
 }
 
-/// The canonical spinner: a million self-tail iterations, ~250 preemptions
-/// at REDUCTION_BUDGET=4000. A lightweight sibling spawned *after* it must
-/// still finish first under one scheduler — the pinned fairness property.
+/// A million self-tail iterations, ~250 preemptions. A light sibling spawned
+/// after it must still finish first under one scheduler.
 #[test]
 fn self_tail_spinner_yields_to_lightweight_sibling() {
     let src = r#"import al/scheduler
@@ -126,11 +112,9 @@ println('main done')
     );
 }
 
-/// Resume-from-the-top correctness across many preemptions: the suspended
-/// frame at a self-tail yield holds the *next* iteration's arguments, so an
-/// accumulator threaded through the loop witnesses every one of the ~500
-/// suspend/resume cycles. A backend that yielded with stale locals — or
-/// resumed anywhere but ip 0 — prints the wrong sum, deterministically.
+/// An accumulator threaded through the loop witnesses every one of the ~500
+/// suspend/resume cycles. Yielding with stale locals, or resuming anywhere
+/// but ip 0, prints the wrong sum.
 #[test]
 fn self_tail_accumulator_survives_preemption() {
     let heavy_n: u64 = 2_000_000;

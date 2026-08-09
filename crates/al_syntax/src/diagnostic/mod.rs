@@ -11,10 +11,9 @@ pub enum Severity {
     Hint,
 }
 
-/// Machine-readable discriminator for a diagnostic. Consumers that need to
-/// react to a *class* of diagnostic (e.g. the REPL detecting incomplete input)
-/// match on this instead of substring-matching `message`, so rewording a
-/// message can never silently change downstream behaviour.
+/// Machine-readable discriminator for a diagnostic. Consumers match on this
+/// instead of substring-matching `message`, so rewording a message cannot
+/// change downstream behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCode {
     /// Parser or scanner hit end-of-input while more tokens were required.
@@ -23,8 +22,7 @@ pub enum DiagnosticCode {
     TypeError,
     ModuleError,
     UnusedBinding,
-    /// Secondary note pointing at another source location involved in a
-    /// prior diagnostic (e.g. "first defined here").
+    /// Secondary note pointing at another location (e.g. "first defined here").
     RelatedLocation,
 }
 
@@ -34,11 +32,9 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub code: DiagnosticCode,
     pub message: String,
-    /// Which module's text `span` points into. `None` means the entry file —
-    /// the source the compile was invoked on. Constructors default to `None`;
-    /// `compile_module_body` stamps every diagnostic raised while an imported
-    /// module is being compiled with that module's key, so the printer never
-    /// renders a span from module A against file B's text.
+    /// Which module's text `span` points into; `None` means the entry file.
+    /// `compile_module_body` stamps this on every diagnostic it raises, so the
+    /// printer never renders module A's span against file B's text.
     pub source: Option<crate::module_path::ModuleKey>,
 }
 

@@ -1,15 +1,12 @@
 //! Pattern type-checking (no codegen): [`Compiler::type_pattern`] and the
-//! constructor lookup/argument-slotting helpers it leans on. Split out of
-//! `mod.rs` along its section banner; every method here is part of the same
-//! `impl Compiler` pass and shares its state.
+//! constructor lookup and argument-slotting helpers it leans on.
 
 use super::*;
 
 impl Compiler {
     /// Type-check a pattern against `expected`, recording bound names in `b`.
-    /// Emits no bytecode. Returns `false` if any unification or binding step
-    /// failed; the caller propagates this so that exhaustiveness/usefulness
-    /// checks (which assume well-typed patterns) can be skipped.
+    /// Emits no bytecode. `false` means ill-typed: the caller must propagate it
+    /// so exhaustiveness checks, which assume well-typed patterns, are skipped.
     #[must_use = "a false result means the pattern is ill-typed and must be propagated"]
     pub(super) fn type_pattern(
         &mut self,
@@ -26,12 +23,9 @@ impl Compiler {
                 let bin_ty = self.ty_binary();
                 let mut ok = self.engine.unify_at(expected, bin_ty, *span);
                 for seg in segments {
-                    // A string-literal Utf8 segment (`<<'GET ', ..>>`) matches
-                    // its encoded bytes as a prefix; it binds nothing and has
-                    // no value type to check. Other Int / Utf8 segments bind an
-                    // integer (a value or a codepoint); Binary segments bind a
-                    // sub-binary. Size expressions are operands, not bindings,
-                    // and are checked by `type_pattern_sizes` once every name
+                    // A string-literal Utf8 segment (`<<'GET ', ..>>`) binds
+                    // nothing. Size expressions are operands, not bindings, and
+                    // `type_pattern_sizes` checks them later, once every name
                     // this pattern binds is in scope.
                     if seg.utf8_literal().is_some() {
                         continue;
@@ -54,8 +48,7 @@ impl Compiler {
             ast::Pattern::Var { name } => b.bind(&name.name, expected, name.span, &mut self.engine),
             ast::Pattern::Literal(lit) => {
                 let (lit_ty, sp) = match lit {
-                    // `const_number` is what raises the out-of-range / malformed
-                    // diagnostic; the pooled `Value` itself is Core's business.
+                    // `const_number` raises the out-of-range/malformed error.
                     ast::PatternLiteral::Number(n) => {
                         let v = self.const_number(n);
                         let ty = if v.is_float() {
@@ -73,9 +66,7 @@ impl Compiler {
                 let int_t = self.ty_int();
                 let mut ok = self.engine.unify_at(expected, int_t, *span);
                 for bound in [start, end] {
-                    // `const_number` raises the out-of-range / malformed
-                    // diagnostic itself; float classification comes from the
-                    // parsed value, same as the `Literal` arm above.
+                    // `const_number` raises the out-of-range/malformed error.
                     let v = self.const_number(bound);
                     if v.is_float() {
                         self.error(
@@ -154,13 +145,9 @@ impl Compiler {
                 b,
             ),
             ast::Pattern::Or { first, rest, .. } => {
-                // Scope the canonical binding set to this or-pattern: `enter_or`
-                // pushes a frame whose first alternative establishes the
-                // canonical set; `finish` pops it and folds the bound names
-                // into the enclosing frame so a sibling binding after the
-                // or-pattern still sees them for duplicate detection. Each
-                // non-first alternative takes ownership of the scope and only
-                // its completeness check hands the scope back.
+                // The first alternative establishes the canonical binding set;
+                // `finish` folds the names into the enclosing frame so a later
+                // sibling binding still sees them for duplicate detection.
                 let mut or = b.enter_or();
                 let mut ok = self.type_pattern(first, expected, &mut or.sink());
                 for alt in rest {
@@ -181,21 +168,12 @@ impl Compiler {
         CtorLookup::from_scheme(*self.env.lookup(name)?)
     }
 
-    /// `io.NotFound` — the same constructor `import al/io.{NotFound}` would
-    /// bring into scope, reached through the module qualifier instead. Returns
-    /// `None` when the qualifier is unknown, the member is missing, or it is
-    /// not a constructor — and each failure path emits its own diagnostic
-    /// before returning, so the caller must only short-circuit on `None`,
-    /// never report again.
-    ///
-    /// A private (or `opaque`-hidden) constructor is reported here, so
-    /// `match e { id.Id(n) -> n }` gives the same error `id.Id(1)` already
-    /// gives as an expression.
+    /// Resolve `io.NotFound` through the module qualifier. Every `None` path
+    /// has already reported its own diagnostic, so the caller must only
+    /// short-circuit, never report again.
     fn lookup_ctor_qualified(&mut self, qual: &str, name: &str, span: Span) -> Option<CtorLookup> {
-        // Every failure below must report. A silent `None` leaves the module
-        // error-free, so `CleanModule` is minted and the elaborator — which has
-        // no diagnostics to fall back on — aborts on a program `al check`
-        // accepted.
+        // A silent `None` would leave the module error-free, mint a
+        // `CleanModule`, and abort the elaborator on a program `al check` took.
         let Some(key) = self.imported_qualifiers.get(qual).cloned() else {
             self.error(
                 format!("Unknown module qualifier '{qual}' — did you `import` it?"),
@@ -245,8 +223,7 @@ impl Compiler {
     ) -> bool {
         let CtorHead { qualifier, name } = head;
         let ctor = match qualifier {
-            // `lookup_ctor_qualified` reports its own diagnostic: it knows
-            // whether the member is missing, private, or not a constructor.
+            // `lookup_ctor_qualified` reports its own diagnostic.
             Some(q) => match self.lookup_ctor_qualified(&q.name, &name.name, name.span) {
                 Some(f) => f,
                 None => return false,
@@ -280,10 +257,9 @@ impl Compiler {
             let doc = self.doc_if_collecting(&qualified);
             self.record(&qualified, inst, name.span, doc);
         }
-        // Mirror the expression path: a qualified pattern (`io.NotFound(x)`)
-        // records a `Qualified` member occurrence plus a `Qualifier` occurrence
-        // on the module alias, so unused-import liveness and rename see modules
-        // referenced only from patterns.
+        // A qualified pattern records the member use AND a use of the module
+        // alias, so unused-import liveness and rename see modules referenced
+        // only from patterns. Must mirror the expression path.
         match qualifier {
             Some(q) => {
                 self.record_value_use(scheme.def, name.span, ReferenceKind::Qualified);
@@ -296,10 +272,9 @@ impl Compiler {
         match self.engine.node(r) {
             TypeNode::Fun { params, ret } => {
                 let params: Vec<Ty> = self.engine.children_of(params).to_vec();
-                // Bidirectional pivot: unify the constructor's return type with
-                // the expected subject type FIRST so that the param types share
-                // type-variable cells with the subject and recursing into args
-                // refines the subject's type.
+                // Unify the constructor's return type with the expected subject
+                // type FIRST, so the param types share type-variable cells with
+                // the subject and recursing into args refines it.
                 let mut ok = self.engine.unify_at(expected, ret, span);
 
                 let (by_pos, args_ok) = self.slot_ctor_args(
@@ -348,11 +323,10 @@ impl Compiler {
         }
     }
 
-    /// Slot positional + labelled constructor args into field-declaration
-    /// order with [`slot_labeled`], rendering its too-many-positional /
-    /// unknown-label / duplicate-field errors as diagnostics, plus a
-    /// missing-fields diagnostic when `missing` is `Some((span, hint))`.
-    /// Shared by ctor calls and patterns.
+    /// Slot positional and labelled constructor args into field-declaration
+    /// order with [`slot_labeled`], rendering its errors as diagnostics plus a
+    /// missing-fields one when `missing` is `Some((span, hint))`. Shared by
+    /// ctor calls and patterns.
     pub(super) fn slot_ctor_args<'a, T>(
         &mut self,
         name: &str,
@@ -362,16 +336,13 @@ impl Compiler {
         missing: Option<(Span, &str)>,
     ) -> (SmallVec<[Option<&'a T>; 4]>, bool) {
         // Interning up front releases the `&mut engine` borrow before the
-        // `str_ids_of` slice is taken. Each item carries its own span, so the
-        // errors `slot_labeled` hands back point at the offending argument
-        // without re-indexing this sequence.
+        // `str_ids_of` slice is taken.
         type Item<'a, T> = (Option<StrId>, (&'a T, Span));
         let items: SmallVec<[Item<'a, T>; 4]> = args
             .map(|(l, v, sp)| (l.map(|l| self.engine.intern(&l.name)), (v, sp)))
             .collect();
-        // One declared-fields description, exactly `arity` long: `slot_labeled`
-        // sizes its slots and resolves labels from this same slice, so the
-        // label table cannot disagree with the arity inside it.
+        // Exactly `arity` long: `slot_labeled` sizes its slots and resolves
+        // labels from this one slice, so the two cannot disagree.
         let field_ids: SmallVec<[StrId; 4]> =
             SmallVec::from_slice(self.engine.str_ids_of(field_labels));
         let fields: SmallVec<[Option<StrId>; 4]> =

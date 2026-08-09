@@ -1,16 +1,9 @@
-//! `al dis` — the emitted bytecode, as text.
+//! `al dis` — the emitted bytecode, as text. A debugging view, not a stable
+//! format.
 //!
-//! A debugging view, not a stable format: it renders whatever the compiler
-//! just produced, and nothing consumes it. It lives in the binary crate rather
-//! than `al_core` for that reason — a disassembler is not part of the
-//! compiler's contract with the VM.
-//!
-//! Operand meaning is *not* recovered from a table of opcode names. A table
-//! rots the moment an opcode is added, and silently: the new op renders with a
-//! misread operand and nobody notices. The only classification used here is
-//! [`Op::has_jump_target`], whose wildcard-free match already fails to compile
-//! until a new opcode is placed on one side of it. Everything else prints the
-//! raw operand, which is honest.
+//! Operands are printed raw rather than decoded per opcode. The only
+//! classification used is [`Op::has_jump_target`], which has no wildcard arm,
+//! so a new opcode fails to compile until it is placed.
 
 use std::fmt::Write as _;
 
@@ -20,9 +13,7 @@ use crate::tivec::Idx as _;
 use crate::vm::inspect;
 use crate::vm::jit;
 
-/// Column at which the `;` comment starts.
-/// Render `program` as text: a header, each function's code, then the
-/// constant pool.
+/// Render `program` as text: header, each function's code, then constants.
 pub fn disassemble(program: &Program) -> String {
     render(program, None)
 }
@@ -32,16 +23,12 @@ pub fn disassemble_fn(program: &Program, needle: &str) -> String {
     render(program, Some(needle))
 }
 
-/// `--native <fn>`: the bytecode listing for functions matching `needle`,
-/// each compiled body followed by its CLIF and finalized machine-code size.
+/// `--native <fn>`: the bytecode listing for functions matching `needle`, each
+/// compiled body followed by its CLIF and machine-code size.
 ///
-/// `plans` are the hook-captured [`NativePlan`]s for every body the
-/// `AL_NATIVE` mode selected and the A0 gate admitted — so this renders what
-/// the runtime would actually compile, not a hypothetical. A matching
-/// bytecode function without a plan gets a note instead of a listing. The
-/// code size comes from defining the body into a real host-ISA module (the
-/// same flags the runtime JIT uses), so it is the size of the machine code
-/// the VM would execute; nothing is finalized or run here.
+/// `plans` are the [`NativePlan`]s the runtime would actually compile. Bodies
+/// are defined into a real host-ISA module to get the size, but nothing is
+/// finalized or run.
 pub fn disassemble_native(
     program: &Program,
     needle: &str,
@@ -102,8 +89,7 @@ fn render(program: &Program, only: Option<&str>) -> String {
         program.entry,
     );
 
-    // Functions are emitted in compilation order, but nothing promises their
-    // code is contiguous or ordered, so index by `code_start` explicitly.
+    // Nothing promises function bodies are contiguous or in index order.
     let mut fns: Vec<(usize, &Function)> = program.functions.iter().enumerate().collect();
     fns.sort_by_key(|(_, f)| f.code_start);
 
@@ -145,15 +131,9 @@ fn render(program: &Program, only: Option<&str>) -> String {
 
 /// One instruction: `  0007  JumpIfFalse   a=0 b=0 op=4    ; -> 0004 (+4)`.
 ///
-/// All three fields print, always. Suppressing a zero would lie: `PushLocal`
-/// reads slot 0, `SubIntLC` reads local `a=0`. Which fields an opcode *uses* is
-/// knowable only from a table of opcode names, and such a table rots silently
-/// the moment an opcode is added — so this prints the instruction word as it
-/// is, and lets the reader consult `Op`'s docs.
-///
-/// `ip` is function-relative, which is also what a jump operand holds: the VM
-/// assigns it straight to `ip`. A jump therefore renders as a function-relative
-/// target and a delta, never as an absolute address. None exists.
+/// All three fields always print, including zeros, since which ones an opcode
+/// uses is not knowable here. `ip` and jump operands are function-relative;
+/// there is no absolute address to print.
 fn line(program: &Program, ip: i32, instr: &Instruction, code_len: i32) -> String {
     let fields = format!("a={} b={} op={}", instr.a, instr.b, instr.operand);
     let mut s = format!(
@@ -171,10 +151,9 @@ fn line(program: &Program, ip: i32, instr: &Instruction, code_len: i32) -> Strin
             instr.operand,
             instr.operand - ip
         );
-        // A target outside the function is only reachable through a bug — a
-        // jump is intra-function by construction. `emit` does leave one at
-        // exactly `code_len` when both arms of an `if` return: the merge point
-        // is unreachable, so nothing ever lands there.
+        // Jumps are intra-function, so an out-of-range target is a bug. The one
+        // legal edge case is exactly `code_len`: `emit` leaves that when both
+        // arms of an `if` return and the merge point is unreachable.
         if instr.operand < 0 || instr.operand > code_len {
             let _ = write!(comment, "  !! outside 0..{code_len}");
         } else if instr.operand == code_len {
@@ -183,8 +162,6 @@ fn line(program: &Program, ip: i32, instr: &Instruction, code_len: i32) -> Strin
     } else if instr.op == Op::PushConst
         && let Some(c) = program.constants.get(instr.operand as usize)
     {
-        // The one operand whose meaning needs no table: the VM indexes
-        // `constants` with it directly.
         let _ = write!(comment, "{}", inspect(c, program));
     }
 

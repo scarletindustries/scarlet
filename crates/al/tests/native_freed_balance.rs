@@ -1,24 +1,17 @@
 //! FREED_OBJECTS balance: the heap-accounting half of the native/interpreter
-//! parity contract, on bench_typed-shaped programs.
+//! parity contract.
 //!
-//! Every heap object a run allocates (`ProcHeap::alloc_object`) must be freed
-//! exactly once through `free_object` — the single reclamation point both
-//! backends share (`release`, `native_release_at_zero`, and the reuse path's
-//! child releases all land there, each bumping `FREED_OBJECTS`). A native
-//! body that skips a drop (leak), double-drops (the poison check catches the
-//! crash but not a silently absorbed count), or allocates outside
+//! Every object a run allocates must be freed exactly once through
+//! `free_object`, the one reclamation point both backends share. A native
+//! body that skips a drop, double-drops, or allocates outside
 //! `ProcHeap::alloc_object` breaks the equality even when the program's
-//! *output* is still correct — which is exactly why output parity alone is
-//! not the gate.
+//! output is still correct, which is why output parity alone is not the gate.
 //!
-//! These tests run the VM in-process (like vm_exec's Perceus reuse tests) so
-//! they can read the two thread-local counters around the run: allocations
-//! from `ProcHeap::alloc_count`, frees from `freed_objects_total` (fed by
-//! every `take_freed_objects` drain plus the undrained remainder). Native
-//! code is published for real — `clif::plan` hook, `clif::compile`,
-//! `finalize_into` — the same three steps `main.rs` performs, so whatever
-//! subset of the program the coverage gate admits runs natively and the
-//! interpreter runs the rest; the balance must hold across the mix.
+//! The VM runs in-process so the tests can read the thread-local counters
+//! around the run. Native code is published for real (`clif::plan` hook,
+//! `clif::compile`, `finalize_into` — what `main.rs` does), so the gate's
+//! covered subset runs natively and the rest interprets; the balance must
+//! hold across the mix.
 
 mod common;
 
@@ -33,9 +26,8 @@ use al::tivec::Idx as _;
 use al::{bytecode, vm};
 
 /// Pin `AL_NATIVE=native` before the process-wide config is first read, so
-/// these tests exercise the native backend no matter which mode the outer
-/// `cargo test` run inherited (same pattern as `native_hook.rs`). Every
-/// `#[test]` in this binary calls this before compiling anything.
+/// these tests exercise the native backend whatever mode `cargo test`
+/// inherited. Every `#[test]` here calls this before compiling anything.
 fn pin_native_mode() {
     static PIN: std::sync::Once = std::sync::Once::new();
     PIN.call_once(|| {
@@ -45,16 +37,14 @@ fn pin_native_mode() {
     });
 }
 
-/// Serializes the balance tests. The counters are thread-local so parallel
-/// tests would not corrupt each other, but serializing keeps each run's
-/// alloc/free ledger attributable to exactly one program when a failure has
-/// to be diagnosed.
+/// Serializes the balance tests so each alloc/free ledger is attributable to
+/// exactly one program. The counters are thread-local, so this is for
+/// diagnosability, not correctness.
 static BALANCE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Compile `src` with the Cranelift backend hooked in, JIT every plan the
-/// coverage gate admitted, and publish the entries into the program's
-/// `NativeTable` — the in-process equivalent of `main.rs::publish_native`.
-/// Returns the program plus the names of the natively published functions.
+/// Compile `src` with the Cranelift backend hooked in and publish every JIT
+/// entry: the in-process equivalent of `main.rs::publish_native`. Returns the
+/// program plus the names of the natively published functions.
 fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
     pin_native_mode();
     let ast = common::parse(src);
@@ -96,15 +86,13 @@ fn compile_with_backend(src: &str) -> (bytecode::Program, Vec<String>) {
     vm::jit::finalize_into(&mut module, &defs, &program.native).expect("finalize jit module");
     let names = defs.into_iter().map(|d| d.name).collect();
     // Dropping the module keeps the executable mapping alive (vm::jit's
-    // code-lifetime contract), so the published entries outlive this frame.
+    // code-lifetime contract), so the entries outlive this frame.
     (program, names)
 }
 
-/// Run `src` (native published) to completion, assert the Int result, and
-/// assert the heap ledger balances: allocations during the run == objects
-/// freed by the run plus VM teardown. The program must leave its result as
-/// an immediate and bind nothing at toplevel, so nothing heap-allocated
-/// legitimately outlives the VM.
+/// Run `src` to completion and assert both the Int result and that allocs
+/// equal frees. `src` must return an immediate and bind nothing at toplevel,
+/// or something heap-allocated legitimately outlives the VM.
 fn run_balanced(tag: &str, src: &str, expect: i64) -> Vec<String> {
     let _g = BALANCE_LOCK.lock().unwrap();
     let (program, native_fns) = compile_with_backend(src);
@@ -131,13 +119,9 @@ fn run_balanced(tag: &str, src: &str, expect: i64) -> Vec<String> {
     native_fns
 }
 
-/// `examples/bench_typed.al`'s function set — enum ctors + match (`build`/
-/// `sum`), Bool constructor heads (`is_even`/`is_odd`), record ctors + field
-/// projection (`dot`/`dot_loop` with its loop-carried reuse pair) — plus
-/// `fact`, an Int-only body the A0 gate already admits, so at least one
-/// function is natively published even while A1 coverage is landing. The
-/// toplevel is a single expression: no globals survive the run, so the
-/// ledger must close exactly.
+/// `examples/bench_typed.al`'s function set, plus `fact` so at least one body
+/// is guaranteed native under the A0 gate. The toplevel is a single
+/// expression: no globals survive, so the ledger must close exactly.
 const BENCH_TYPED_SHAPE: &str = "\
 type Tree {\n\
 \tLeaf(value Int)\n\
@@ -186,8 +170,7 @@ sum(build(8)) + dot_loop(500, 0) + fact(12) + { if is_even(1000) { 1 } else { 0 
 
 #[test]
 fn freed_objects_balance_on_bench_typed_shape() {
-    // sum(build(8)) = 2^8 leaves of 1; dot_loop(N,0) = Σ 3n²+15n+14;
-    // fact(12); is_even(1000) = True → 1.
+    // sum(build(8)) = 2^8 leaves of 1; dot_loop(N,0) = Σ 3n²+15n+14.
     let n: i64 = 500;
     let dot = 3 * (n * (n + 1) * (2 * n + 1) / 6) + 15 * (n * (n + 1) / 2) + 14 * n;
     let fact12: i64 = (1..=12).product();
@@ -200,10 +183,9 @@ fn freed_objects_balance_on_bench_typed_shape() {
     );
 }
 
-/// The Perceus list scaffold from vm_exec, exercised both ways through one
-/// balance ledger. Reuse must not distort the ledger: a hollowed cell
-/// (unique drop parked for the next same-shape ctor) is one allocation and,
-/// when finally released, one free — while its released children each count.
+/// The Perceus list scaffold from vm_exec. A hollowed cell parked for reuse
+/// is still one allocation and one eventual free; its released children each
+/// count separately.
 const LIST_SRC: &str = "\
 type List {\n\
 \tLNil\n\
@@ -228,8 +210,8 @@ fn double(x Int) Int { x * 2 }\n";
 
 #[test]
 fn freed_objects_balance_on_unique_reuse_chain() {
-    // Ten re-maps of a uniquely owned 100-cell list: the in-place reuse path
-    // (rc==1 hollow + same-shape ctor) dominates. Σ1..100 = 5050, doubled 10×.
+    // Ten re-maps of a uniquely owned 100-cell list, so the in-place reuse
+    // path dominates. Σ1..100 = 5050, doubled 10 times.
     let src = format!(
         "{LIST_SRC}\
          fn chain(xs List, k Int) List {{\n\
@@ -250,9 +232,7 @@ fn freed_objects_balance_on_unique_reuse_chain() {
 #[test]
 fn freed_objects_balance_on_shared_fallback() {
     // `xs` stays live across the map, so every cell is rc>=2 at its drop
-    // site: the reuse gate fails, the shared-drop path (decrement, no free)
-    // runs per cell, and the ctor allocates fresh. All local to `share`, so
-    // everything is reclaimed by the run itself.
+    // site: the reuse gate fails and the shared-drop path runs instead.
     let src = format!(
         "{LIST_SRC}\
          fn share(n Int) Int {{\n\

@@ -837,6 +837,12 @@ pub struct Program {
     /// by [`compiler`] once the function list is final; an empty table (the
     /// default) means "interpret everything". See [`native`].
     pub native: NativeTable,
+    /// Constructors the VM may instantiate, interned into `frozen` by the
+    /// front end. Indexed by the `abi` table below.
+    pub templates: crate::tivec::TiVec<crate::abi::TemplateIdx, crate::template::EnumTemplate>,
+    /// Which template answers each [`AbiSlot`](crate::abi::AbiSlot) — the
+    /// runtime's only knowledge of a front end's stdlib.
+    pub abi: crate::template::AbiTable,
 }
 
 // Worker scheduler threads clone the shared program (load-bearing fact 3):

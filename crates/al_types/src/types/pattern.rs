@@ -5,34 +5,30 @@ use indexmap::IndexMap;
 use super::infer::{InferEngine, Ty};
 use al_syntax::span::Span;
 
-/// Which stage of an or-pattern a frame is in. The canonical set only exists
-/// once the first alternative has been fully typed, so it lives inside
-/// `Checking` — reading it while still establishing is a compile error, not a
-/// silently-empty `HashSet`.
+/// Which stage of an or-pattern a frame is in. The canonical set lives inside
+/// `Checking` so it cannot be read before the first alternative established it.
 enum OrPhase {
-    /// The first alternative is being typed; `seen` accumulates the names it
-    /// binds. The first `enter_alternative` freezes them as canonical.
+    /// Typing the first alternative; `seen` is what it binds so far. The first
+    /// `enter_alternative` freezes those as canonical.
     Establishing { seen: HashSet<String> },
     /// Past the first alternative: every branch must re-bind exactly
-    /// `canonical`; `seen` tracks what the current branch has bound so far.
+    /// `canonical`.
     Checking {
         canonical: HashSet<String>,
         seen: HashSet<String>,
     },
 }
 
-/// One level of or-pattern nesting on the [`PatternBindings`] stack.
-/// `boundary` is `initial.len()` at `enter_or` time, used only on the bottom
-/// frame to distinguish names bound *before* any or-pattern from names an
-/// or-pattern's first alternative introduced.
+/// One level of or-pattern nesting. `boundary` is `initial.len()` at `enter_or`
+/// time; only the bottom frame uses it, to tell names bound before any
+/// or-pattern from names its first alternative introduced.
 struct OrFrame {
     boundary: usize,
     phase: OrPhase,
 }
 
 impl OrFrame {
-    /// Names the current path through this or-pattern has bound, regardless
-    /// of phase.
+    /// Names the current path through this or-pattern has bound.
     fn seen(&self) -> &HashSet<String> {
         match &self.phase {
             OrPhase::Establishing { seen } | OrPhase::Checking { seen, .. } => seen,
@@ -46,13 +42,11 @@ impl OrFrame {
     }
 }
 
-/// Accumulator for variable bindings introduced by a pattern. The compiler
-/// runs `type_pattern` against the write view ([`sink`](Self::sink)), then
-/// reads [`bindings`](Self::bindings) to allocate locals and populate the
-/// type environment before compiling the arm body. Or-patterns push an
-/// [`OrFrame`] so nesting — including an or-pattern inside a *non-first*
-/// alternative of an enclosing or — is handled by the stack rather than by
-/// the caller carrying a save/restore token.
+/// Accumulator for the variable bindings a pattern introduces. The compiler
+/// runs `type_pattern` against [`sink`](Self::sink), then reads
+/// [`bindings`](Self::bindings) to allocate locals before compiling the arm
+/// body. Nesting is handled by the [`OrFrame`] stack, not by a save/restore
+/// token the caller carries.
 pub struct PatternBindings {
     frames: Vec<OrFrame>,
     initial: IndexMap<String, (Ty, Span)>,

@@ -18,8 +18,7 @@ pub struct Token {
     pub leading_trivia: Vec<Trivia>,
 }
 
-/// Displays the token's source text (see [`Kind`]'s `Display`). Unquoted:
-/// error sites that want quotes add their own.
+/// The token's source text, unquoted. Error sites add their own quotes.
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.kind)

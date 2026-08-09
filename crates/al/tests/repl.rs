@@ -1,8 +1,7 @@
-//! The REPL, driven as a subprocess over stdin. It had no tests, which is how
-//! a wrong-answer bug lived in it: the compiler keys expression types on
-//! `Span`, and `Span` carries no file or line-offset identity, so replaying
-//! *parsed* entries (whose spans all restart at line 1) let two same-shaped
-//! entries collide. Replaying source text instead makes spans unique.
+//! The REPL, driven as a subprocess over stdin. The compiler keys expression
+//! types on `Span`, which carries no file identity, so the REPL must replay
+//! source text (spans stay unique) and not parsed entries (spans all restart
+//! at line 1 and collide).
 
 mod common;
 
@@ -10,9 +9,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Feed `entries` to `al repl` on stdin, one per line, and return stdout.
-///
-/// Bounded and reaped: the REPL exits on EOF, but a wedged one must fail this
-/// test rather than hang the suite and outlive the runner.
+/// Bounded so a wedged REPL fails the test instead of hanging the suite.
 fn repl(entries: &str) -> String {
     let bin = env!("CARGO_BIN_EXE_al");
     let mut child = Command::new(bin)
@@ -22,7 +19,7 @@ fn repl(entries: &str) -> String {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn al repl");
-    // Dropping stdin closes it, which is the REPL's EOF and its exit signal.
+    // Dropping stdin is the REPL's EOF, and its exit signal.
     {
         let mut stdin = child.stdin.take().expect("stdin");
         stdin.write_all(entries.as_bytes()).expect("write stdin");
@@ -37,10 +34,7 @@ fn repl(entries: &str) -> String {
 }
 
 /// `'x' + 'y'` and `100 + 200` occupy the identical `Span` when each entry is
-/// parsed on its own. With AST replay the second entry's `Int` overwrote the
-/// first's `String`, `specialize_binop` chose `AddInt`, and the VM ran an
-/// integer add over two heap strings — printing `0` in release and tripping a
-/// `debug_assert` in debug.
+/// parsed on its own, so the second must not retype the first.
 #[test]
 fn a_later_entry_does_not_retype_an_earlier_one() {
     let out = repl("const a = 'x' + 'y'\nconst b = 100 + 200\nprintln(a)\n");
@@ -57,8 +51,7 @@ fn definitions_persist_across_entries() {
     assert!(out.contains('3'), "want 3, got:\n{out}");
 }
 
-/// A bare expression is a value the user already saw; replaying it would
-/// repeat its effects on every later entry.
+/// Replaying a bare expression would repeat its effects on every later entry.
 #[test]
 fn a_bare_expression_is_not_replayed() {
     let out = repl("println('once')\nprintln('twice')\n");

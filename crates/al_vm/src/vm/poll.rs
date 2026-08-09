@@ -1,58 +1,36 @@
-//! Parking and wake-up: how a blocked process sleeps and what brings it
-//! back.
+//! Parking and wake-up: how a blocked process sleeps and what brings it back.
 //!
-//! When an opcode cannot make progress (an `accept` with no pending
-//! connection, a `read` on an empty socket, a `sleep`, a blocking-pool
-//! offload), it returns `Step::Parked` carrying a [`Wait`] — the complete
-//! description of what the process is waiting for. The scheduler stashes
-//! the suspended process under a fresh wait id, records its deadline (if
-//! any) in the VM's lazy-deletion timer heap, and on each scheduling pause
-//! this module delivers whatever became ready — I/O events, due timers,
-//! blocking-pool completions — back onto the run queue
-//! ([`VM::poll_parked`]).
+//! An opcode that cannot progress returns `Step::Parked` with a [`Wait`]. The
+//! process is stashed under a fresh wait id and [`VM::poll_parked`] delivers
+//! whatever became ready — I/O events, due timers, blocking-pool completions —
+//! back onto the run queue.
 //!
-//! Parking arms nothing: every socket is registered with the OS poller
-//! (kqueue/epoll via `mio`) once, when it enters this scheduler's tables
-//! (`track_listener`/`track_connection`/`track_pending`), with every
-//! interest it can ever park on, and stays registered until it leaves
-//! them. The poller is edge-triggered, so a registration with no parked
-//! wait behind it costs nothing in steady state; its events are dropped
-//! by the drain.
+//! Parking arms nothing. A socket is registered with the poller once, when it
+//! enters this scheduler's tables, with every interest it can ever park on.
 //!
-//! Edge-triggering loses no wakeups because of PARK-AFTER-PROBE: **for
-//! every fd, a park on it is immediately preceded, on this same OS thread,
-//! by a syscall on it that returned `WouldBlock`, with no `Poll::poll` on
-//! this thread's poller in between — and this poller is drained only by
-//! this thread.** The kernel's ready list is the latch: an edge that fires
-//! after the probe sits in this poller until the drain, which runs strictly
-//! after the park is registered. That sequencing is the whole proof. (It is
-//! NOT the case that a dropped edge is "re-announced at the next
-//! transition" — kernels re-sample level at report time, so a dropped
-//! event's readiness may never be announced again. Do not add a
-//! `poll_parked` call between a `WouldBlock` and its park, and do not let
-//! any other thread drain this poller: either edit re-opens the classic
-//! lost-wakeup, which Go/Tokio need a per-fd readiness latch to close.)
+//! PARK-AFTER-PROBE, the reason edge-triggering loses no wakeups: a park on an
+//! fd is always immediately preceded, on this same OS thread, by a syscall on
+//! that fd returning `WouldBlock`, with no `Poll::poll` in between, and only
+//! this thread drains this poller. An edge firing after the probe then sits in
+//! the kernel's ready list until a drain that runs after the park is
+//! registered. A dropped edge is NOT re-announced later, so do not add a
+//! `poll_parked` between a `WouldBlock` and its park, and do not drain this
+//! poller from another thread. Either reopens the classic lost wakeup.
 //!
-//! Invariants this module maintains:
+//! Invariants:
 //!
-//! - **A wait wakes exactly once.** Whichever of its conditions fires
-//!   first (fd readiness or deadline) removes the park.
-//! - **Timer entries are lazily deleted.** A park with a deadline pushes
-//!   one `(deadline, id)` entry and never removes it eagerly; a popped
-//!   entry whose id is gone (or re-keyed) is discarded. The nearest live
-//!   deadline is therefore an O(log n) peek, and stale entries cost one
-//!   pop each.
-//! - **Wake-time construction runs in the woken process's context.** A
-//!   completion or finished connect builds its result value in that
-//!   process's own heap with its own stack/frames as roots —
-//!   `drain_completions`/`drain_io_events` swap the process in around the
-//!   construction, exactly like a context switch.
-//! - **Registered fds outlive their registration.** Sockets stay in the
-//!   VM's tables while armed; close deregisters before dropping.
+//! - A wait wakes exactly once; the first of fd readiness or deadline removes
+//!   the park.
+//! - Timer entries are lazily deleted. A popped entry whose id is gone or
+//!   re-keyed is discarded, so the nearest live deadline is an O(log n) peek.
+//! - Wake-time value construction runs with the woken process swapped in, so
+//!   allocation lands in its heap with its stack and frames as GC roots.
+//! - A socket stays registered while it is in the VM's tables; close
+//!   deregisters before dropping.
 //!
-//! [`EPOCH`] also lives here: the process-global monotonic origin that
-//! `Op::Monotonic` readings and `socket.read_within` deadlines share, so
-//! an absolute deadline means the same instant on every scheduler.
+//! [`EPOCH`] is the process-global monotonic origin shared by `Op::Monotonic`
+//! and `socket.read_within`, so an absolute deadline means the same instant on
+//! every scheduler.
 
 use std::cmp::Reverse;
 use std::io::{self, ErrorKind};
@@ -72,23 +50,19 @@ use super::{Process, VM, VmError, VmResult, lock};
 /// How a parked I/O wait resumes once one of its sockets is ready.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WakeAction {
-    /// Resume wherever the op left `ip`. Covers both the syscall-retry waits
-    /// (accept/read/write set `ip - 1` to re-run) and `Sleep` (which leaves
-    /// `ip` at the next instruction with its result already on the stack).
+    /// Resume wherever the op left `ip`. Retry waits set `ip - 1` to re-run;
+    /// `Sleep` leaves `ip` past itself with its result already on the stack.
     Rerun,
-    /// Complete the pending non-blocking connect on the wait's fd: on wake
-    /// `VM::finish_connect` builds the result and pushes it directly onto the
-    /// process's stack instead of re-running the instruction.
+    /// `VM::finish_connect` builds the result and pushes it onto the process's
+    /// stack instead of re-running the instruction.
     CompleteConnect,
 }
 
-/// What a parked process is waiting for. The variants are the exhaustive set
-/// of wake sources — a wait is exactly one of them, so an offload can never
-/// carry socket interests or a deadline, and a pure timer never has fds.
+/// What a parked process is waiting for. Exactly one wake source per wait.
 #[derive(Debug)]
 pub(super) enum Wait {
-    /// Socket readiness on `fd`, optionally bounded by a deadline; whichever
-    /// fires first wakes the process, and `action` says how it resumes.
+    /// Socket readiness on `fd`, optionally bounded by a deadline. Whichever
+    /// fires first wakes the process.
     Io {
         fd: i32,
         deadline: Option<Instant>,
@@ -96,16 +70,14 @@ pub(super) enum Wait {
     },
     /// A pure timer: wake at this instant, resume at the next instruction.
     Timer(Instant),
-    /// A blocking-pool job. The op is `Some` on the way into [`VM::park`],
-    /// which hands it to the pool keyed by the fresh wait id and stores the
-    /// spent `None` as the wake marker; only the job's completion can wake it.
+    /// A blocking-pool job. `Some` on the way into [`VM::park`], which hands
+    /// the op to the pool keyed by the wait id and leaves `None` behind.
     Offload(Option<BlockingOp>),
 }
 
 impl Wait {
     /// Park until socket `id` becomes ready, then re-run the instruction.
-    /// Interest direction was fixed when the socket was registered with the
-    /// poller; the wait itself only names the fd.
+    /// Interest direction was fixed at registration; a wait only names the fd.
     pub(super) fn rerun_on(id: i32) -> Self {
         Wait::Io {
             fd: id,
@@ -142,9 +114,8 @@ impl Wait {
         Wait::Timer(deadline)
     }
 
-    /// Park until socket `id` becomes readable or `deadline` passes, whichever
-    /// comes first, then re-run the instruction (which re-derives whether data
-    /// arrived or the read timed out).
+    /// Park until socket `id` is readable or `deadline` passes, then re-run the
+    /// instruction, which re-derives which of the two happened.
     pub(super) fn read_with_deadline(id: i32, deadline: Instant) -> Self {
         Wait::Io {
             fd: id,
@@ -153,15 +124,14 @@ impl Wait {
         }
     }
 
-    /// Park until the blocking pool finishes a job, with no I/O interest and no
-    /// deadline — only the job's completion can wake it. The op is handed to the
-    /// pool when the park is registered, so its job id matches the wait id.
+    /// Park until the blocking pool finishes a job. Nothing else can wake it.
+    /// The job id is the wait id.
     pub(super) fn offloaded(op: BlockingOp) -> Self {
         Wait::Offload(Some(op))
     }
 
-    /// The instant this wait must wake by, if it has one. Timer-heap entries
-    /// are validated against this to discard stale ones.
+    /// The instant this wait must wake by. Timer-heap entries are validated
+    /// against it to spot stale ones.
     fn deadline(&self) -> Option<Instant> {
         match self {
             Wait::Io { deadline, .. } => *deadline,
@@ -171,37 +141,27 @@ impl Wait {
     }
 }
 
-/// The token every scheduler's [`mio::Waker`] registers under: `notify()`
-/// events carry it, and the event drains skip it — a wake delivers no I/O,
-/// it only ends the wait. Socket ids are small positive `i32`s, so the
-/// token can never collide with a socket registration.
+/// The token every scheduler's [`mio::Waker`] registers under. Drains skip it:
+/// a wake ends the wait but delivers no I/O. Socket ids are small positive
+/// `i32`s, so it cannot collide with a socket registration.
 pub(super) const WAKER_TOKEN: Token = Token(usize::MAX);
 
-/// Event-buffer capacity for one poll call, same for the parked-I/O drain
-/// and the idle wait.
+/// Event-buffer capacity for one poll call.
 pub(super) const EVENTS_CAPACITY: usize = 1024;
 
-/// Process-global monotonic epoch, lazily pinned to the first `Instant::now()`
-/// any monotonic reading observes so every reading shares one origin. Reused by
-/// `Op::Monotonic` and the deadline math behind `socket.read_within`.
+/// Process-global monotonic origin, pinned to the first reading taken.
 pub(super) static EPOCH: OnceLock<Instant> = OnceLock::new();
 
-/// Milliseconds elapsed since the process-global monotonic [`EPOCH`], clamped
-/// into `i64`. Saturating rather than panicking on overflow — the epoch would
-/// have to predate the process by ~292 million years to exceed `i64::MAX`.
+/// Milliseconds since [`EPOCH`], saturating at `i64::MAX`.
 pub(super) fn monotonic_now_ms() -> i64 {
     let ms = EPOCH.get_or_init(Instant::now).elapsed().as_millis();
     ms.min(i64::MAX as u128) as i64
 }
 
 impl VM {
-    /// Register `fd` with the poller under socket `id`, with every interest
-    /// the socket can ever park on. Registration is per-socket, not per-park:
-    /// it is made once when the fd enters this scheduler's tables and lives
-    /// until the fd leaves them ([`VM::poller_deregister`]); parking arms
-    /// nothing. An fd number that is somehow still registered (a close that
-    /// bypassed deregistration, then kernel fd reuse) is re-registered under
-    /// the new id.
+    /// Register `fd` under socket `id` with every interest it can ever park on.
+    /// An fd number still registered from a stale entry (a close that skipped
+    /// deregistration, then kernel fd reuse) is re-registered under the new id.
     fn poller_register(&self, fd: RawFd, id: i32, interests: mio::Interest) -> io::Result<()> {
         let registry = self.poll.registry();
         registry
@@ -215,19 +175,15 @@ impl VM {
             })
     }
 
-    /// Drop `fd` from the poller. An fd that was never registered (or is
-    /// already deregistered) is silently ignored. Paths that close or hand
-    /// off a socket call this before dropping it so a stale registration
-    /// never outlives its fd.
+    /// Drop `fd` from the poller, ignoring an fd that was never registered.
+    /// Call before closing or handing off a socket.
     pub(super) fn poller_deregister(&self, fd: RawFd) {
         let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
     }
 
-    /// Register the shared listener with this scheduler's poller and remember
-    /// the clone. Idempotent per scheduler: an id already present keeps its
-    /// existing entry — it is the same `Arc`, the same fd, the same
-    /// registration. Each scheduler's poller holds its own independent
-    /// readiness for the shared fd, so an accept parked here wakes here.
+    /// Register the shared listener with this scheduler's poller. Idempotent.
+    /// Each scheduler's poller holds its own readiness for the shared fd, so an
+    /// accept parked here wakes here.
     pub(super) fn track_listener(
         &mut self,
         id: i32,
@@ -241,10 +197,9 @@ impl VM {
         Ok(())
     }
 
-    /// Adopt a connection into this scheduler's table, watched for both
-    /// readability and writability — the interests its reads and writes can
-    /// park on. On registration failure the connection is dropped (closed),
-    /// never tabled: a socket that cannot wake its parks must not exist.
+    /// Adopt a connection into this scheduler's table, watched for read and
+    /// write readiness. A registration failure drops the connection rather than
+    /// tabling a socket that could never wake its parks.
     pub(super) fn track_connection(
         &mut self,
         id: i32,
@@ -266,22 +221,17 @@ impl VM {
         Ok(())
     }
 
-    /// Adopt an in-progress non-blocking connect, watched for the
-    /// writability that signals completion. Failure drops the socket,
-    /// exactly as [`VM::track_connection`].
+    /// Adopt an in-progress non-blocking connect, watched for the writability
+    /// that signals completion.
     pub(super) fn track_pending(&mut self, id: i32, socket: socket2::Socket) -> io::Result<()> {
         self.poller_register(socket.as_raw_fd(), id, mio::Interest::WRITABLE)?;
         self.pending_connects.insert(id, socket);
         Ok(())
     }
 
-    /// Stash a suspended process under a fresh wait id and register every side
-    /// effect its `Wait` implies: I/O fds are indexed in `io_waiters` (so an
-    /// event finds its waiters by lookup, not a scan), a deadline is pushed
-    /// onto the lazy-deletion timer heap, and an offload is dispatched to the
-    /// blocking pool keyed by the same id. Returns the allocated wait id. This
-    /// is the sole entry into `parked`, so those side effects cannot be
-    /// forgotten by a caller.
+    /// Stash a suspended process under a fresh wait id and register the side
+    /// effects its `Wait` implies: the `io_waiters` reverse index, the timer
+    /// heap, the blocking-pool dispatch. The only way into `parked`.
     pub(super) fn park(&mut self, mut wait: Wait, p: Process) -> u64 {
         let id = self.next_wait_id;
         self.next_wait_id += 1;
@@ -297,9 +247,9 @@ impl VM {
             }
             Wait::Timer(d) => self.timer_heap.push(Reverse((*d, id))),
             Wait::Offload(op) => {
-                // Invariant: `Wait::offloaded` is the only constructor and always
-                // yields `Some`; `None` here would mean no job is dispatched and
-                // the process hangs forever, so fail loudly rather than swallow.
+                // `Wait::offloaded` is the only constructor and always yields
+                // `Some`. A `None` would dispatch no job and hang the process
+                // forever, so panic instead of swallowing it.
                 #[allow(clippy::expect_used)]
                 let op = op.take().expect("offload park carries an op");
                 self.runtime.offload(self.scheduler_index, id, op);
@@ -309,9 +259,8 @@ impl VM {
         id
     }
 
-    /// Remove a park, dropping its entries from the socket reverse index.
-    /// Every wake path goes through here so `io_waiters` stays in lockstep
-    /// with `parked`.
+    /// Remove a park and its socket reverse-index entries. Every wake path goes
+    /// through here so `io_waiters` stays in lockstep with `parked`.
     pub(super) fn park_remove(&mut self, id: u64) -> Option<(Wait, Process)> {
         let (wait, p) = self.parked.remove(&id)?;
         if let Wait::Io { fd, .. } = &wait
@@ -325,11 +274,9 @@ impl VM {
         Some((wait, p))
     }
 
-    /// Wake a parked process with a value built in its own context: swap `p`
-    /// in as current so `build` allocates in its arena with its stack/frames
-    /// as GC roots, push the result, then queue it and restore whatever was
-    /// current before. The one place the "wake-time construction runs in the
-    /// woken process's context" invariant is enforced.
+    /// Wake a parked process with a value built in its own context: `p` is made
+    /// current so `build` allocates in its arena with its stack and frames as
+    /// GC roots. The one place that invariant is enforced.
     fn wake_with(&mut self, p: Process, build: impl FnOnce(&mut Self) -> Value) {
         let interrupted = self.suspend_current();
         self.resume(p);
@@ -347,27 +294,22 @@ impl VM {
     /// nearest timer deadline, or a `notify()` from another scheduler all end
     /// it — then returns so the caller can re-check for remote work.
     pub(super) fn poll_parked(&mut self, block: bool) -> VmResult<()> {
-        // Before the parked-empty early-out: retiring a listener matters even
-        // with nothing parked locally (this scheduler's registration and Arc
-        // clone must go so the shared fd can actually close).
+        // Must run before the parked-empty early-out: this scheduler's
+        // registration and Arc clone have to go before the shared fd can close,
+        // even with nothing parked here.
         let retired_woke = self.process_retired_listeners();
         if self.parked.is_empty() {
             return Ok(());
         }
 
-        // Deliver any finished blocking-pool jobs, then wake due timers. A
-        // retire wake counts: it put a runnable process on `run_queue`, and a
-        // blocking wait here would strand it behind an idle poller.
+        // A retire wake counts as a wake: it queued a runnable process, and
+        // blocking below would strand it behind an idle poller.
         let mut woke = retired_woke | self.drain_completions();
         woke |= self.wake_due_timers();
 
-        // The reverse index is non-empty exactly when some park has a socket
-        // interest, so this check is O(1) rather than a scan of every park.
         let waiting_on_io = !self.io_waiters.is_empty();
 
         if !block || woke {
-            // Non-blocking (or something already woke): just drain any ready
-            // I/O events and return.
             if waiting_on_io {
                 self.drain_io_events(Some(Duration::ZERO))?;
             }
@@ -376,7 +318,7 @@ impl VM {
 
         // One blocking wait, bounded by the nearest live timer deadline. The
         // poller is used even for timer-only waits so `notify()` can interrupt
-        // it. Stale heap tops (ids already woken on I/O) are dropped as we look.
+        // it. Stale heap tops are dropped while looking.
         let next_deadline = loop {
             let Some(&Reverse((deadline, id))) = self.timer_heap.peek() else {
                 break None;
@@ -394,15 +336,9 @@ impl VM {
         Ok(())
     }
 
-    /// Deliver finished blocking-pool jobs: for each completion, resume the
-    /// process parked under its `job_id` with the result constructed
-    /// scheduler-side into that process's own heap.
-    /// Returns whether anything was woken.
-    ///
-    /// The woken process is made *current* for the construction, so its heap
-    /// is the allocation target. Whatever was current when the drain ran — a
-    /// yielded process at a `Step::Yield` poll, or the empty placeholder
-    /// between slices — is detached around the delivery and restored after.
+    /// Deliver finished blocking-pool jobs, waking the process parked under
+    /// each `job_id`. Returns whether anything was woken. Whatever process was
+    /// current is detached around the delivery and restored after.
     pub(super) fn drain_completions(&mut self) -> bool {
         let drained: Vec<Completion> = {
             let mut q = lock(&self.runtime.slots[self.scheduler_index].completions);
@@ -422,9 +358,8 @@ impl VM {
         woke
     }
 
-    /// Construct a blocking-pool result in the current process's heap — the
-    /// woken process `drain_completions` just installed. A completion carries
-    /// only `Send` raw data (bytes, `io::Error`s), never a `Value`.
+    /// Construct a blocking-pool result in the current process's heap. A
+    /// completion carries only `Send` raw data, never a `Value`.
     fn completion_result(&mut self, result: BlockingResult) -> Value {
         match result {
             BlockingResult::ReadFile { path, result } => match result {
@@ -460,10 +395,8 @@ impl VM {
         }
     }
 
-    /// Wake parked processes whose deadline has passed, draining the
-    /// lazy-deletion timer heap. A popped entry whose id is no longer parked —
-    /// or whose live deadline no longer matches — was already woken on I/O and
-    /// is silently discarded.
+    /// Wake parked processes whose deadline has passed. A popped entry whose id
+    /// is gone, or whose live deadline no longer matches, already woke on I/O.
     pub(super) fn wake_due_timers(&mut self) -> bool {
         let now = Instant::now();
         let mut woke = false;
@@ -473,14 +406,13 @@ impl VM {
             }
             self.timer_heap.pop();
             if !matches!(self.parked.get(&id), Some((w, _)) if w.deadline() == Some(deadline)) {
-                // Stale: the park already woke on I/O (or was re-keyed). Drop it.
                 continue;
             }
             let Some((_wait, p)) = self.park_remove(id) else {
                 continue;
             };
-            // The deadline beat the fd; its registration belongs to the
-            // socket, not this wait, so there is nothing to disarm.
+            // Nothing to disarm: an fd's registration belongs to the socket,
+            // not to this wait.
             self.run_queue.push_back(p);
             woke = true;
         }
@@ -490,10 +422,8 @@ impl VM {
     /// Wait on the poller for at most `timeout` (None = until something
     /// happens) and wake every process parked on a socket that became ready.
     fn drain_io_events(&mut self, timeout: Option<Duration>) -> VmResult<()> {
-        // Take the VM's reusable buffer out for the iteration (the wake paths
-        // below need `&mut self`); `poll()` clears it, so no per-call
-        // allocation. The capacity-0 placeholder left behind allocates
-        // nothing.
+        // Take the reusable buffer out because the wake paths below need
+        // `&mut self`. The capacity-0 placeholder allocates nothing.
         let mut events = std::mem::replace(&mut self.poll_events, mio::Events::with_capacity(0));
         if let Err(e) = self.poll.poll(&mut events, timeout) {
             self.poll_events = events;
@@ -501,13 +431,11 @@ impl VM {
         }
         for ev in events.iter() {
             if ev.token() == WAKER_TOKEN {
-                // A `notify()` from another scheduler: it only ends the
-                // wait, there is no I/O behind it.
+                // A `notify()` from another scheduler. No I/O behind it.
                 continue;
             }
             let key = ev.token().0 as i32;
-            // The reverse index hands over this socket's waiters directly.
-            // Clone first — `park_remove` edits the index.
+            // Clone first: `park_remove` edits the index.
             let Some(woken) = self.io_waiters.get(&key).cloned() else {
                 continue;
             };
@@ -516,11 +444,8 @@ impl VM {
                     continue;
                 };
                 match wait {
-                    // A finished connect delivers its result directly onto the
-                    // woken process's stack; the connect instruction is not
-                    // re-run. `wake_with` swaps the process in so the result
-                    // is built in its own arena with its stack/frames as GC
-                    // roots, exactly as for blocking-pool completions.
+                    // A finished connect pushes its result straight onto the
+                    // woken process's stack; the instruction is not re-run.
                     Wait::Io {
                         fd,
                         action: WakeAction::CompleteConnect,
@@ -533,9 +458,8 @@ impl VM {
                     | Wait::Timer(_)
                     | Wait::Offload(_) => self.run_queue.push_back(p),
                 }
-                // The fd's registration stays armed: it belongs to the
-                // socket, which remains in the tables. An event with no
-                // parked wait behind it lands in this loop and is dropped.
+                // The fd stays registered: the registration belongs to the
+                // socket, which is still in the tables.
             }
         }
         self.poll_events = events;
@@ -545,14 +469,12 @@ impl VM {
     /// Complete a pending non-blocking connect whose socket became writable:
     /// either adopt the connection or report the error it ended with.
     fn finish_connect(&mut self, id: i32) -> Value {
-        // Budget the whole result up front in the (just-resumed) woken
-        // process's arena: the adopted Ok(Socket) graph or a NetError.
         let Some(socket) = self.pending_connects.remove(&id) else {
             let aborted = self.stdlib_enum(self.runtime.stdlib.net_error.connection_aborted);
             return self.make_err(aborted);
         };
         self.poller_deregister(socket.as_raw_fd());
-        // Writability after EINPROGRESS means the connect finished; SO_ERROR
+        // Writability after EINPROGRESS means the connect finished. SO_ERROR
         // says whether it succeeded.
         match socket.take_error() {
             Ok(None) => {

@@ -1,6 +1,4 @@
 //! LSP wire helpers: JSON shaping, URI/path translation, protocol constants.
-//! Nothing here holds state; every function is a pure mapping between the
-//! compiler's domain types and the JSON-RPC wire format.
 
 use std::path::{Path, PathBuf};
 
@@ -11,9 +9,7 @@ use crate::module::{self, ModulePath};
 use crate::reference;
 use crate::span::Span;
 
-/// LSP `FileChangeType` (didChangeWatchedFiles). The wire encodes these as
-/// bare integers; parsing them into a closed enum here means the invalidation
-/// logic matches on names, not `== 3` sprinkled at call sites.
+/// LSP `FileChangeType` (didChangeWatchedFiles), sent on the wire as an int.
 #[repr(i64)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FileChangeType {
@@ -40,9 +36,8 @@ pub(super) fn uri_to_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(&*decoded))
 }
 
-/// Decode an LSP `WorkspaceFolder[]` (array of `{uri, name}`) into filesystem
-/// paths, skipping malformed or non-`file://` entries. `None` / non-array
-/// yields an empty vec.
+/// Decode an LSP `WorkspaceFolder[]` into filesystem paths, skipping malformed
+/// or non-`file://` entries.
 pub(super) fn folder_paths(v: Option<&Json>) -> Vec<PathBuf> {
     v.and_then(Json::as_array)
         .into_iter()
@@ -51,9 +46,8 @@ pub(super) fn folder_paths(v: Option<&Json>) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Pick the workspace root that owns `path`. With nested roots (rare but
-/// permitted by LSP) the deepest one wins so a sub-project gets its own
-/// session. Files outside every root share the empty-path session.
+/// Pick the workspace root that owns `path`. LSP permits nested roots; the
+/// deepest wins. Files outside every root share the empty-path session.
 pub(super) fn root_for(roots: &[PathBuf], path: &Path) -> PathBuf {
     roots
         .iter()
@@ -81,8 +75,8 @@ pub(super) fn extract_position_params(params: &Json) -> Option<(String, i32, i32
     Some((uri, line, col))
 }
 
-/// LSP `SymbolKind` wire number for an [`EntityKind`]. Lives here rather than
-/// on `EntityKind` because `al_core` is protocol-agnostic.
+/// LSP `SymbolKind` wire number for an [`EntityKind`]. Here, not on
+/// `EntityKind`, because `al_core` is protocol-agnostic.
 pub(super) fn symbol_kind(e: reference::EntityKind) -> i32 {
     use reference::EntityKind;
     match e {
@@ -96,10 +90,8 @@ pub(super) fn symbol_kind(e: reference::EntityKind) -> i32 {
     }
 }
 
-/// JSON-RPC error code for a refused rename: `InvalidParams` (-32602) for a
-/// bad `newName`, `RequestFailed` (-32803) for a resolvable-but-refused
-/// position. Lives here rather than on `RenameError` because `al_core` is
-/// protocol-agnostic.
+/// JSON-RPC error code for a refused rename. Here, not on `RenameError`,
+/// because `al_core` is protocol-agnostic.
 pub(super) fn rename_error_code(e: &reference::rename::RenameError) -> i32 {
     use reference::rename::RenameError;
     match e {
@@ -123,19 +115,15 @@ pub(super) fn diagnostic_to_json(diag: &diagnostic::Diagnostic) -> Json {
 }
 
 /// The module a queried file's defs/occurrences are keyed under in the graph:
-/// its stdlib path when it is an in-repo stdlib file, otherwise the entry
-/// module (`main`) it was last analysed as.
+/// its stdlib path for an in-repo stdlib file, else the entry module `main`.
 pub(super) fn query_module(uri: &str) -> Option<ModulePath> {
     let p = uri_to_path(uri)?;
     Some(module::detect_stdlib_module(&p).unwrap_or_else(module::main_module))
 }
 
-/// Translate a graph `ModuleId` back to a file URI, relative to the
-/// requesting file (mirror of `uri_to_path`). The requesting file's own
-/// module maps to its request URI (the entry module is bare and `resolve`
-/// deliberately can't locate it); in-repo stdlib targets resolve against the
-/// stdlib root so goto-def lands on the real declaration; everything else
-/// goes through `module::resolve_canonical` via `reference::module_uri`.
+/// Translate a graph `ModuleId` back to a file URI, relative to the requesting
+/// file. The requesting file's own module must short-circuit to the request
+/// URI: the entry module is bare, so `resolve` cannot locate it.
 pub(super) fn uri_for(
     graph: &reference::ReferenceGraph,
     request_uri: &str,
@@ -156,8 +144,7 @@ pub(super) fn uri_for(
     reference::module_uri(graph, module).ok()
 }
 
-/// Shape a pure `WorkspaceEdit` (computed in `al_core`, which has no
-/// `serde_json`) into the LSP wire JSON.
+/// Shape a `WorkspaceEdit` into the LSP wire JSON.
 pub(super) fn workspace_edit_json(we: &reference::rename::WorkspaceEdit) -> Json {
     let mut changes = serde_json::Map::new();
     for (uri, edits) in &we.changes {
@@ -188,27 +175,23 @@ pub(super) fn range_json(span: &Span) -> Json {
     })
 }
 
-/// Strip a `/** … */` block's delimiters and leading `*` gutter, leaving the
-/// author's line structure intact. The lines are joined with a single `\n`, not
-/// a blank line: markdown already folds soft-wrapped lines into one paragraph,
-/// treats a blank line as a paragraph break, and keeps a 4-space-indented run
-/// as a code block. Inserting a blank line between every line would instead
-/// render each source line as its own paragraph and shred indented examples.
+/// Strip a `/** … */` block's delimiters and leading `*` gutter, keeping the
+/// author's line structure. Lines join with a single `\n`, not a blank line:
+/// markdown already folds soft-wrapped lines into one paragraph, and blank
+/// lines would shred indented code blocks.
 pub(super) fn clean_doc_comment(doc: &str) -> String {
     let doc = doc.trim();
     let mut content = doc.strip_prefix("/*").unwrap_or(doc);
     if let Some(rest) = content.strip_suffix("*/") {
-        // A `**/` closer leaves its gutter `*` behind. Strip the run only when
-        // it abuts the delimiter, so a line of markdown `***` before a newline
-        // survives.
+        // A `**/` closer leaves its gutter `*` behind. Strip only the run
+        // abutting the delimiter, so a markdown `***` line survives.
         content = rest.trim_end_matches('*');
     }
     let content = content.trim();
 
     let mut cleaned: Vec<String> = Vec::new();
     for line in content.split('\n') {
-        // Only the gutter is trimmed; indentation after `* ` is the author's
-        // (a code block depends on it).
+        // Trim only the gutter; indentation after `* ` is the author's code block.
         let gutter = line.trim_start_matches([' ', '\t']);
         let rest = match gutter.strip_prefix('*') {
             Some(r) => r.strip_prefix(' ').unwrap_or(r),
@@ -216,7 +199,6 @@ pub(super) fn clean_doc_comment(doc: &str) -> String {
         };
         cleaned.push(rest.trim_end().to_string());
     }
-    // `/**` and `*/` each contribute an empty gutter line of their own.
     while cleaned.last().is_some_and(String::is_empty) {
         cleaned.pop();
     }
@@ -240,8 +222,6 @@ mod tests {
         assert_eq!(got, "Title.\n\nBody.");
     }
 
-    /// Indentation after the `*` gutter is the author's: a 4-space run is a
-    /// markdown code block and must survive verbatim.
     #[test]
     fn indented_code_block_survives() {
         let got = clean_doc_comment("/**\n * Example:\n *\n *     new(15, 1)\n */");
@@ -256,15 +236,12 @@ mod tests {
         );
     }
 
-    /// A `**/` closer leaves a gutter `*` behind the `*/` the naive strip
-    /// removes.
     #[test]
     fn double_star_closer_leaves_no_stray_gutter() {
         assert_eq!(clean_doc_comment("/** Doc. **/"), "Doc.");
         assert_eq!(clean_doc_comment("/**\n * Doc.\n **/"), "Doc.");
     }
 
-    /// …but a markdown thematic break on its own line is content, not a gutter.
     #[test]
     fn trailing_markdown_rule_survives() {
         assert_eq!(clean_doc_comment("/**\n * a\n * ***\n*/"), "a\n***");

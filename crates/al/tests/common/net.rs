@@ -1,7 +1,7 @@
-//! Shared harness for tests that spawn an `al` subprocess as a TCP server and
-//! drive it from a Rust client. The server binds `127.0.0.1:0` and prints
-//! `listening <ip>:<port>` as its first line; [`spawn_al_server`] parses that
-//! announcement, so the client can only ever reach the server's own listener.
+//! Harness for tests that spawn an `al` subprocess as a TCP server and drive
+//! it from a Rust client. The server binds `127.0.0.1:0` and prints
+//! `listening <ip>:<port>` first; parsing that announcement means the client
+//! can only ever reach the server's own listener.
 
 use std::io::Read;
 use std::net::TcpStream;
@@ -10,11 +10,9 @@ use std::time::Duration;
 
 use super::{Project, wait_or_kill};
 
-/// A spawned `al` server subprocess plus the port it announced. The `Drop`
-/// impl kills and reaps the child, so a test that panics between spawn and
-/// teardown never leaks a forever-looping server process. Consuming methods
-/// (`shutdown_clean`, `wait_or_kill`) `take` the child first so `Drop` is a
-/// no-op after them.
+/// A spawned `al` server subprocess plus the port it announced. `Drop` kills
+/// and reaps the child so a panicking test leaks no server. Consuming methods
+/// `take` the child first, making `Drop` a no-op after them.
 pub struct AlServer {
     child: Option<Child>,
     pub port: u16,
@@ -35,9 +33,8 @@ impl AlServer {
         connect(self.port)
     }
 
-    /// Tear down a forever-looping server: drop the client connection, kill the
-    /// child, and assert it neither reported a serve failure on stdout nor
-    /// panicked on stderr.
+    /// Tear down a forever-looping server and assert it neither reported a
+    /// serve failure nor panicked.
     pub fn shutdown_clean(mut self, stream: TcpStream) {
         drop(stream);
         let mut child = self.child.take().unwrap();
@@ -57,8 +54,7 @@ impl AlServer {
         wait_or_kill(self.child.take().unwrap(), secs)
     }
 
-    /// Bounded wait asserting a clean exit; dumps both streams on failure and
-    /// returns captured stdout.
+    /// Bounded wait asserting a clean exit; returns captured stdout.
     pub fn wait_ok(self, secs: u64) -> String {
         let out = self.wait_or_kill(secs);
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -71,13 +67,11 @@ impl AlServer {
     }
 }
 
-/// Read the spawned server's first stdout line — the `listening <ip>:<port>`
-/// announcement it prints once `net.listen` has bound port 0 — and return the
-/// kernel-assigned port. The line is read byte-at-a-time so nothing past the
-/// newline is consumed, and the pipe is handed back to `child` so
-/// `wait_with_output` still collects the rest of stdout. A reader thread plus
-/// a receive timeout turns a server that wedges before announcing into a test
-/// failure instead of a hung suite.
+/// Return the kernel-assigned port from the server's `listening <ip>:<port>`
+/// first line. Read byte-at-a-time so nothing past the newline is consumed,
+/// and the pipe is handed back so `wait_with_output` still gets the rest. The
+/// reader thread plus receive timeout turns a wedged server into a failure
+/// instead of a hung suite.
 pub fn read_announced_port(child: &mut Child) -> u16 {
     fn die(child: &mut Child, msg: String) -> ! {
         child.kill().ok();
@@ -99,7 +93,6 @@ pub fn read_announced_port(child: &mut Child) -> u16 {
                 _ => break,
             }
         }
-        // The receiver may have timed out and gone; nothing to do then.
         let _ = tx.send((stdout, line));
     });
     let Ok((stdout, line)) = rx.recv_timeout(Duration::from_secs(30)) else {
@@ -121,11 +114,9 @@ pub fn read_announced_port(child: &mut Child) -> u16 {
     }
 }
 
-/// Connect to the port a spawned server announced. The listener is bound
-/// before the announcement is printed, so a single attempt succeeds — the
-/// kernel completes the handshake from the backlog even before the server
-/// calls accept. The 10s read timeout makes a wedged server fail the test
-/// instead of hanging it.
+/// Connect to the port a spawned server announced. One attempt suffices: the
+/// listener is bound before the announcement, so the kernel completes the
+/// handshake from the backlog even before the server calls accept.
 pub fn connect(port: u16) -> TcpStream {
     let stream = TcpStream::connect(("127.0.0.1", port))
         .unwrap_or_else(|e| panic!("connect to announced port {port}: {e}"));
@@ -135,13 +126,9 @@ pub fn connect(port: u16) -> TcpStream {
     stream
 }
 
-/// Write `src` to `server.al` in `proj`, spawn `al run` on it with piped
-/// output, and wait for it to announce its port. Every server source binds
-/// `127.0.0.1:0` and prints `listening <ip>:<port>` (via `net.local_addr`) as
-/// its first line; parsing that announcement before connecting means the
-/// client can only ever reach the server's own listener — there is no
-/// reserved-port handoff for a concurrent test to race. Call
-/// [`AlServer::connect`] to open a client stream.
+/// Write `src` to `server.al` in `proj`, spawn `al run` on it, and wait for
+/// the announced port. `src` must bind `127.0.0.1:0` and print
+/// `listening <ip>:<port>` as its first line.
 pub fn spawn_al_server(proj: &Project, src: &str) -> AlServer {
     let prog = proj.dir.join("server.al");
     std::fs::write(&prog, src).unwrap();

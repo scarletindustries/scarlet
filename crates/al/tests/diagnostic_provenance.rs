@@ -1,7 +1,5 @@
-//! Diagnostic source-file provenance: a type error raised while checking an
-//! *imported* module carries a span into that module's text, so it must be
-//! stamped with the module's key and rendered against the module's file — not
-//! caret-sliced out of the entry file's (unrelated) text.
+//! An error from an imported module carries a span into that module's text, so
+//! it must render against that module's file, not the entry file.
 
 mod common;
 use common::{Project, module_key};
@@ -10,8 +8,8 @@ use std::path::PathBuf;
 
 use al::{ast, bytecode, diagnostic, module, parser, scanner};
 
-/// The resolver the CLI uses: a stamped `ModuleKey` is an on-disk module (the
-/// key is its canonical path, `.al` stripped) or an embedded stdlib module.
+/// The resolver the CLI uses: a `ModuleKey` names an on-disk module (its
+/// canonical path with `.al` stripped) or an embedded stdlib module.
 fn resolve(key: &module::ModuleKey) -> Option<(PathBuf, String)> {
     let path: module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
     match module::resolve_canonical(&path).ok()?.source {
@@ -70,17 +68,15 @@ fn imported_module_type_error_renders_against_that_modules_text() {
 
     let out = diagnostic::render_diagnostics(&result.diagnostics, entry_src, "main.al", &resolve);
 
-    // Header names the imported module's file, not the entry.
     assert!(
         out.contains("lib.al:"),
         "diagnostic location does not name lib.al:\n{out}"
     );
-    // The snippet is sliced from lib.al's text...
     assert!(
         out.contains("\"not an int\""),
         "snippet not taken from lib.al's text:\n{out}"
     );
-    // ...and not from the entry file, whose line 2 sits at the same span.
+    // The entry file's line 2 sits at the same span, so a wrong slice looks plausible.
     assert!(
         !out.contains("_x = lib.broken"),
         "snippet wrongly sliced from the entry file's text:\n{out}"
@@ -96,8 +92,6 @@ fn unresolvable_source_prints_location_but_never_a_snippet() {
     let result = check_project(&p, entry_src);
     assert!(!result.success(), "expected the lib type error to surface");
 
-    // A resolver with no answer: header + location only, no caret into the
-    // entry file's text.
     let out = diagnostic::render_diagnostics(&result.diagnostics, entry_src, "main.al", &|_| None);
     assert!(
         !out.contains("_x = lib.broken") && !out.contains("import ./lib"),

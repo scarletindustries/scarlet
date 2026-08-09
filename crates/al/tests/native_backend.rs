@@ -1,12 +1,8 @@
-//! The native (Cranelift) backend's behavioral contract, pinned end-to-end
-//! against the interpreter as the differential oracle.
-//!
-//! Every test here runs the same program twice — `AL_NATIVE=off` (interpret
-//! everything) and `AL_NATIVE=native` (compile every eligible function) — and
-//! asserts the observable output is byte-for-byte identical. The env vars are
-//! set explicitly per child, overriding whatever mode the surrounding
-//! `cargo test` run inherited, so these tests pin the *cross-mode* contract
-//! no matter which mode the rest of the suite is exercising.
+//! The native (Cranelift) backend's contract, pinned against the interpreter
+//! as a differential oracle: every test runs one program under
+//! `AL_NATIVE=off` and `AL_NATIVE=native` and demands identical output. The
+//! env vars are set per child, so the mode `cargo test` inherited is
+//! irrelevant.
 
 mod common;
 
@@ -40,7 +36,7 @@ fn run_al_env(args: &[&str], envs: &[(&str, &str)]) -> AlOutput {
 }
 
 /// Run `src` under one AL_NATIVE mode. `schedulers` pins AL_SCHEDULERS when
-/// the test's scheduling shape matters (fairness, park/resume).
+/// the test's scheduling shape matters.
 fn run_mode(
     proj: &Project,
     name: &str,
@@ -59,9 +55,8 @@ fn run_mode(
     run_al_env(&["run", &path], &envs)
 }
 
-/// The oracle: off vs native must be observably identical — same stdout, same
-/// exit code, and a clean (empty) stderr in both modes. Returns the shared
-/// stdout for follow-up exact-value assertions.
+/// The oracle: same stdout, same exit code, empty stderr in both modes.
+/// Returns the shared stdout for follow-up assertions.
 fn assert_parity(tag: &str, src: &str, schedulers: Option<u32>) -> String {
     let proj = Project::new(tag);
     let off = run_mode(&proj, "prog.al", src, "off", schedulers);
@@ -98,13 +93,9 @@ fn assert_parity(tag: &str, src: &str, schedulers: Option<u32>) -> String {
     off.stdout
 }
 
-/// (a) interp -> native -> interp -> native sandwich.
-///
-/// The toplevel is always interpreted (strings, println). `outer` and `leaf`
-/// are Int-only and native-eligible; `middle` builds an array (`Atom::Ctor`,
-/// outside A0 coverage) so it must interpret. The call chain therefore
-/// crosses the boundary in both directions twice, exercising the
-/// interp->native entry and the native->interpreter-only frame-floor shim.
+/// (a) interp -> native -> interp -> native sandwich. `outer`/`leaf` are
+/// Int-only so they compile; `middle` builds an array so it must interpret.
+/// The chain crosses the boundary in both directions twice.
 #[test]
 fn sandwich_interp_native_interp_returns_correct_results() {
     let src = "import al/array
@@ -129,13 +120,9 @@ println(outer(6))
     assert_eq!(out, "403920\n");
 }
 
-/// (b) a native caller whose interpreted callee PARKS.
-///
-/// `pause` calls the @vm sleep op, so it interprets; `caller` is
-/// native-eligible. When `pause` parks, the suspension must unwind through
-/// `caller`'s native frame (Status return, no native frame surviving the
-/// park) and the resume must re-enter with `x` — a local bound *before* the
-/// parking call and used after it — intact in its frame slot.
+/// (b) a native caller whose interpreted callee parks. The suspension must
+/// unwind through `caller`'s native frame, and the resume must find `x` —
+/// bound before the parking call, used after it — intact in its frame slot.
 #[test]
 fn native_caller_parks_and_resumes_through_interpreted_callee() {
     let src = "import al/scheduler
@@ -158,14 +145,10 @@ println(caller(4, 321))
     assert_eq!(out, "8647\n");
 }
 
-/// (c) scheduling fairness: reds accounting parity.
-///
-/// One scheduler, two processes. The first spins in a self-tail loop —
-/// natively, a compiled loop back-edge — for thousands of reduction budgets;
-/// the second just prints. If the native back-edge checkpoints reductions
-/// like the interpreter's TailCallSelf does, the spinner yields long before
-/// finishing and the sibling's line lands first. A native loop that never
-/// yields inverts the order (and is exactly the starvation this pins).
+/// (c) scheduling fairness. One scheduler; a self-tail spinner and a printer.
+/// The compiled loop back-edge must checkpoint reductions like the
+/// interpreter's TailCallSelf, or the spinner starves the sibling and the
+/// output order inverts.
 #[test]
 fn fairness_native_self_tail_loop_yields_to_sibling() {
     let src = "import al/scheduler
@@ -188,14 +171,9 @@ scheduler.spawn_local(fn() {
     );
 }
 
-/// (d) Int overflow spill parity past ±2^47.
-///
-/// AL Ints are NaN-boxed with a 47-bit payload; past that they spill to a
-/// boxed representation, and arithmetic wraps at i64 exactly like the
-/// interpreter's AddInt/SubInt/MulInt (`wrapping_*`). Every line below
-/// crosses the spill boundary or the i64 wrap, and the expected strings are
-/// the interpreter's own output — pinned literally so *both* modes are held
-/// to the semantics, not just to each other.
+/// (d) Int overflow spill parity past ±2^47, where Ints leave the NaN-box
+/// payload, and at the i64 wrap. The expected strings are pinned literally so
+/// both modes are held to the semantics, not just to each other.
 #[test]
 fn int_overflow_spill_is_identical_native_vs_off() {
     let src = "fn fact(n Int, acc Int) Int {
@@ -227,8 +205,6 @@ println(12345678901 * 987654321)
     );
 }
 
-// ---- (e) differential fuzz smoke ------------------------------------------
-
 /// xorshift64 — deterministic, seedable, no dependency.
 struct Rng(u64);
 
@@ -250,7 +226,7 @@ impl Rng {
 }
 
 /// Constants straddling the NaN-box payload boundary and the i64 wrap, so
-/// random programs hit the spill and overflow paths, not just small ints.
+/// generated programs hit the spill and overflow paths.
 const BOUNDARY: [i64; 8] = [
     140737488355327,
     140737488355328,
@@ -262,9 +238,8 @@ const BOUNDARY: [i64; 8] = [
     999999937,
 ];
 
-/// Render an Int literal as an operand. Negative literals are wrapped as
-/// `{0 - n}` so they slot into any operand position without a unary-minus
-/// precedence question.
+/// Render an Int literal as an operand. Negatives become `{0 - n}` so they
+/// slot into any position regardless of unary-minus precedence.
 fn lit(v: i64) -> String {
     if v < 0 {
         format!("{{0 - {}}}", (v as i128).unsigned_abs())
@@ -284,17 +259,11 @@ fn operand(r: &mut Rng, temps: usize) -> String {
     }
 }
 
-/// Shared preamble prepended to every fuzz program: an enum with mixed-arity
-/// variants, a recursive linked list, and helpers whose bodies are the A1
-/// heap shapes — `Atom::Ctor` (fresh alloc in `mk_pick`/`chain_build`, in-place
-/// reuse in `chain_map`), `CorePat::Ctor` variant dispatch with payload binds,
-/// closure parameters called dynamically, and two reuse-loop shapes:
-/// `spin_reuse` constructs inline and consumes per iteration, so its reuse
-/// slot crosses the self-tail back-edge (the `dot_loop` pairing), while
-/// `spin_step`'s match arms reconstruct the matched enum and self-tail-recurse,
-/// putting `Reuse`+`MakeEnumPayload` right before `TailCallSelf` (the
-/// `collapse_tail_frame_self` pairing). The generated `fN` bodies and the
-/// toplevel call into these at random operands.
+/// Shared preamble for every fuzz program: helpers covering the heap shapes
+/// the generated bodies call into — enum construction and variant dispatch
+/// with payload binds, dynamically called closure parameters, and two reuse
+/// loops (`spin_reuse` carries its reuse slot across a self-tail back-edge;
+/// `spin_step` puts `Reuse` right before `TailCallSelf`).
 const PREAMBLE: &str = "\
 type Pick {\n\
 \tOne(x Int)\n\
@@ -358,24 +327,17 @@ fn spin_step(p Pick, n Int, acc Int) Int {\n\
 \t}\n\
 }\n";
 
-/// A small positive literal for loop/list lengths, keeping recursion depth
-/// and iteration counts bounded (operands may be huge boundary constants,
-/// so counts are never drawn from `operand`).
+/// A small positive literal for loop/list lengths. Counts never come from
+/// `operand`, which can yield huge boundary constants.
 fn small_count(r: &mut Rng) -> u64 {
     1 + r.below(24)
 }
 
-/// One generated function: a chain of let-bound statements over Int operands
-/// — binops (division and modulo are total in AL: x/0=0, x%0=x, so nothing
-/// needs guarding), if-over-comparison, match on Int literals, enum
-/// constructor + variant matches (payload binds over a runtime-selected
-/// variant), closures capturing locals and called dynamically, reuse-loop
-/// (both spin_reuse's back-edge slot and spin_step's match-reconstruct) and
-/// list-map calls into the preamble, and known calls to previously
-/// generated functions. Every temp and both params fold into the returned
-/// sum (AL errors on unused bindings), and each function past the first
-/// opens with a call to its predecessor so cross-function calls are always
-/// present.
+/// One generated function: a chain of let-bound statements over Int
+/// operands. Division and modulo need no guard — they are total in AL
+/// (x/0=0, x%0=x). Every temp and both params fold into the returned sum,
+/// since AL errors on unused bindings, and each function past the first opens
+/// with a call to its predecessor.
 fn gen_fn(r: &mut Rng, idx: usize) -> String {
     let mut body = String::new();
     let stmts = 4 + r.below(7) as usize;
@@ -403,8 +365,8 @@ fn gen_fn(r: &mut Rng, idx: usize) -> String {
                 operand(r, t),
                 operand(r, t)
             ),
-            // Enum ctor at a runtime-selected variant, immediately consumed
-            // by an exhaustive variant match with payload binds.
+            // Enum ctor at a runtime-selected variant, consumed by an
+            // exhaustive match with payload binds.
             6 => format!(
                 "match mk_pick({}, {}, {}) {{\n\
                  \t\tOne(x) -> x + {}\n\
@@ -418,8 +380,7 @@ fn gen_fn(r: &mut Rng, idx: usize) -> String {
                 operand(r, t),
                 operand(r, t)
             ),
-            // A closure capturing surrounding locals, bound and called twice
-            // dynamically within a block.
+            // A closure over surrounding locals, called twice dynamically.
             7 => format!(
                 "{{\n\t\tg = fn(x Int) x * {{ {} }} + {}\n\t\tg({}) + g({})\n\t}}",
                 operand(r, t),
@@ -427,16 +388,14 @@ fn gen_fn(r: &mut Rng, idx: usize) -> String {
                 operand(r, t),
                 operand(r, t)
             ),
-            // Loop-carried reuse: inline ctor + match-consume per iteration,
-            // the reuse slot crossing spin_reuse's self-tail back-edge.
+            // Loop-carried reuse across spin_reuse's self-tail back-edge.
             8 => format!(
                 "spin_reuse({}, {}, {})",
                 small_count(r),
                 operand(r, t),
                 operand(r, t)
             ),
-            // Build a list, map it through a capturing closure (Cons-for-Cons
-            // reuse in chain_map), fold it back to an Int.
+            // Cons-for-Cons reuse in chain_map, folded back to an Int.
             9 => format!(
                 "chain_sum(chain_map(chain_build({}, {}), fn(x Int) x * {} + {{ {} }}))",
                 small_count(r),
@@ -444,9 +403,7 @@ fn gen_fn(r: &mut Rng, idx: usize) -> String {
                 1 + r.below(9),
                 operand(r, t)
             ),
-            // Match-reconstruct reuse: spin_step's arms rebuild the matched
-            // enum and self-tail-recurse (Reuse right before TailCallSelf),
-            // seeded with a runtime-selected variant.
+            // Match-reconstruct reuse: Reuse right before TailCallSelf.
             10 => format!(
                 "spin_step(mk_pick({}, {}, {}), {}, {})",
                 operand(r, t),
@@ -472,11 +429,9 @@ fn gen_fn(r: &mut Rng, idx: usize) -> String {
     format!("fn f{idx}(a Int, b Int) Int {{\n{body}}}\n")
 }
 
-/// One whole program: the heap-shape preamble, 2-3 chained functions,
-/// toplevel prints of the last one at random constant arguments, and one
-/// print that composes every preamble shape (enum ctor/match, closure,
-/// list-map reuse, both reuse loops) so no program skips the A1 coverage
-/// even when the per-statement dice never landed on those shapes.
+/// One whole program: the preamble, 2-3 chained functions, prints of the last
+/// at random arguments, and one print composing every preamble shape so no
+/// program skips that coverage when the per-statement dice miss it.
 fn gen_program(r: &mut Rng) -> String {
     let nfns = 2 + r.below(2) as usize;
     let mut src = String::from(PREAMBLE);
@@ -508,11 +463,9 @@ fn gen_program(r: &mut Rng) -> String {
     src
 }
 
-/// (e) ~200 seeded random small programs — Int expressions plus the A1 heap
-/// shapes (enum ctor/variant match, closures, list-map and loop-carried
-/// reuse): native output must equal the interpreter's byte-for-byte.
-/// Deterministic — the seed is fixed, and any divergence panics with the
-/// program index and full source so the case reproduces exactly.
+/// (e) ~200 seeded random programs; native output must equal the
+/// interpreter's. The seed is fixed, and a divergence panics with the program
+/// index and full source.
 #[test]
 fn differential_fuzz_native_matches_interpreter() {
     const SEED: u64 = 0x5eed_a10c_0de5_eed1;
@@ -546,11 +499,8 @@ fn differential_fuzz_native_matches_interpreter() {
     }
 }
 
-/// (f) `al dis <file> --native fib` prints the CLIF (and works at all).
-///
-/// The CLIF body is the contract — `block0` is the entry block every
-/// non-trivial compiled function has, and the function's name must appear so
-/// the listing is attributable.
+/// (f) `al dis <file> --native fib` prints a CLIF listing: the function's
+/// name, and the `block0` every non-trivial compiled function has.
 #[test]
 fn dis_native_prints_clif_for_fib() {
     let proj = Project::new("native_dis");

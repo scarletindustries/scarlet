@@ -1,10 +1,7 @@
 //! The persistent hash array mapped trie behind the in-memory `Map` backing.
 //!
-//! ## Shape
-//!
-//! A `Map` (Hamt backing) is a thin root `[backing, size, root]` over a tree of
-//! three arena node kinds (built and read through the typed layer in
-//! [`super::value`]):
+//! A `Map` is a thin root `[backing, size, root]` over three arena node kinds,
+//! built and read through the typed layer in [`super::value`]:
 //!
 //! ```text
 //!   HamtBranch [ bitmap | child… ]   one child per set bit; the bit chosen at
@@ -16,19 +13,13 @@
 //!   HamtCollision [ hash | count | key value … ]   ≥2 distinct keys, one hash
 //! ```
 //!
-//! Keys are placed by [`hash_value`]; the trie consumes 5 hash bits per level
-//! (32-way branches), so a lookup or update visits O(log₃₂ n) nodes. Two
-//! distinct keys whose full 64-bit hashes are equal share a `HamtCollision`
-//! bucket, compared with [`values_equal`] — the same `==` the language exposes.
+//! Keys are placed by [`hash_value`]. Two distinct keys whose full 64-bit
+//! hashes are equal share a `HamtCollision` bucket, compared with
+//! [`values_equal`] — the same `==` the language exposes.
 //!
-//! ## Persistence
-//!
-//! Like the `seq` vector, nodes are reference-counted arena objects; "mutation"
-//! is *path copying* — [`insert`]/[`remove`] allocate replacements only for the
-//! O(log₃₂ n) nodes on the root-to-leaf path and share every untouched subtree
-//! with the previous version. A shared node carries one count per referrer, so
-//! a previous version stays valid (`next = map.set(m, k, v)` leaves `m`
-//! untouched) and a version's exclusive nodes are freed as it drops.
+//! Nodes are reference-counted arena objects and "mutation" is path copying:
+//! [`insert`]/[`remove`] allocate only the O(log₃₂ n) nodes on the root-to-leaf
+//! path and share every untouched subtree, so earlier versions stay valid.
 
 use super::value::{
     Arena, EqPending, HamtMapRef, HamtNodeRef, MapRef, Value, eq_defer, hamt_branch_in,
@@ -43,9 +34,7 @@ const MASK: u64 = 0x1F;
 /// surviving keys must have equal hashes and go to a `HamtCollision`.
 const MAX_DEPTH: usize = 13;
 
-/// Scratch buffer for assembling a replacement branch's children before handing
-/// them to `hamt_branch_in`. A branch has at most `WIDTH` children (one per
-/// bitmap bit). See [`super::scratch`].
+/// Scratch buffer for a replacement branch's children, at most `WIDTH` of them.
 type Buf = super::scratch::Buf<WIDTH>;
 
 /// The 5-bit slot a hash selects at `shift`.
@@ -66,8 +55,6 @@ fn bit(hash: u64, shift: u32) -> u32 {
 fn compact(bitmap: u32, bit: u32) -> usize {
     (bitmap & (bit - 1)).count_ones() as usize
 }
-
-// ---- construction & reads ----------------------------------------------------
 
 /// The empty map.
 pub fn empty<A: Arena + ?Sized>(a: &mut A) -> Value {
@@ -129,8 +116,8 @@ fn try_for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value) -> bool) ->
             true
         }
         HamtNodeRef::Branch { children, .. } => {
-            // `children` aliases the arena; this read never allocates, so the
-            // borrow stays valid for the whole walk.
+            // `children` aliases the arena. Sound because this read never
+            // allocates, so the borrow stays valid for the whole walk.
             for child in children {
                 if !try_for_each_entry(child, f) {
                     return false;
@@ -141,8 +128,7 @@ fn try_for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value) -> bool) ->
     }
 }
 
-/// Visit every `(key, value)`. Used for iteration (`keys`/`values`/`to_list`)
-/// and structural hashing.
+/// Visit every `(key, value)`.
 fn for_each_entry(node: &Value, f: &mut impl FnMut(Value, Value)) {
     try_for_each_entry(node, &mut |k, v| {
         f(k, v);
@@ -165,8 +151,6 @@ pub fn collect_entries(map: &Value) -> Vec<(Value, Value)> {
     for_each_entry(&m.root, &mut |k, v| out.push((k, v)));
     out
 }
-
-// ---- insert ------------------------------------------------------------------
 
 /// `map` with `key` bound to `value` — a new map sharing all untouched
 /// subtrees. Overwrites an existing binding (size unchanged) or adds a new one.
@@ -201,7 +185,7 @@ fn node_insert<A: Arena + ?Sized>(
                 (hamt_entry_in(a, key, value), false)
             } else {
                 // Two distinct keys at this slot: grow a subtree that separates
-                // them by their differing hash bits (or a collision if equal).
+                // them by their differing hash bits.
                 (
                     split(a, node, hash_value(&ek), key, value, hash, shift),
                     true,
@@ -224,8 +208,7 @@ fn node_insert<A: Arena + ?Sized>(
                     }
                 }
             } else {
-                // The new key shares this branch path with the bucket but has a
-                // different hash: separate them deeper.
+                // Same branch path, different hash: separate them deeper.
                 (split(a, node, chash, key, value, hash, shift), true)
             }
         }
@@ -263,9 +246,8 @@ fn split<A: Arena + ?Sized>(
     shift: u32,
 ) -> Value {
     if shift as usize >= MAX_DEPTH * BITS as usize {
-        // Hashes are fully consumed and equal: a collision bucket. `left` is an
-        // entry here (a collision would have absorbed the new key upstream
-        // where its hash matched).
+        // Hashes fully consumed and equal. `left` is an entry: a collision
+        // would have absorbed the new key upstream, where its hash matched.
         return merge_into_collision(a, left, lhash, rkey, rvalue);
     }
     let li = slot(lhash, shift);
@@ -294,8 +276,6 @@ fn merge_into_collision<A: Arena + ?Sized>(
 ) -> Value {
     let (lk, lv) = match HamtNodeRef::of(left) {
         HamtNodeRef::Entry { key, value } => (key, value),
-        // Only entries reach the full depth as `left`: a collision absorbs new
-        // keys at its own level via the `chash == hash` arm above.
         _ => unreachable_collision(),
     };
     hamt_collision_in(a, hash, &[lk, lv, rkey, rvalue])
@@ -306,8 +286,6 @@ fn merge_into_collision<A: Arena + ?Sized>(
 fn unreachable_collision() -> ! {
     unreachable!("hamt split reached full depth with a non-entry node")
 }
-
-// ---- remove ------------------------------------------------------------------
 
 /// The outcome of removing a key from a subtree.
 enum Removed {
@@ -353,7 +331,7 @@ fn node_remove<A: Arena + ?Sized>(
             Some(i) => {
                 let mut np = pairs.to_vec();
                 np.drain(i..i + 2);
-                // Two keys collided; one left collapses the bucket to an entry.
+                // One key left collapses the bucket back to a plain entry.
                 if np.len() == 2 {
                     let k = np.remove(0);
                     let v = np.remove(0);
@@ -372,9 +350,8 @@ fn node_remove<A: Arena + ?Sized>(
             match node_remove(a, &children[i], key, hash, shift + BITS) {
                 Removed::Absent => Removed::Absent,
                 Removed::Node(child) => {
-                    // A single-child branch whose sole child collapsed to a
-                    // leaf collapses too, so the chain of one-child branches
-                    // built by `split` unwinds all the way up on remove.
+                    // Collapse too, so the chain of one-child branches `split`
+                    // built unwinds all the way up.
                     if children.len() == 1 && is_leaf(&child) {
                         return Removed::Node(child);
                     }
@@ -389,8 +366,8 @@ fn node_remove<A: Arena + ?Sized>(
                     if nbitmap == 0 {
                         return Removed::Empty;
                     }
-                    // Collapse a branch that now holds a single leaf so equal
-                    // maps keep a canonical shape and depth stays minimal.
+                    // Collapse a branch down to its single surviving leaf, so
+                    // equal maps always have the same shape.
                     if children.len() == 2 {
                         let survivor = &children[1 - i];
                         if is_leaf(survivor) {
@@ -412,18 +389,14 @@ fn is_leaf(node: &Value) -> bool {
     !matches!(HamtNodeRef::of(node), HamtNodeRef::Branch { .. })
 }
 
-// ---- structural hash & equality (called from `super::value`) -----------------
-
-/// Order-independent hash of a HAMT's entries. The caller has already
-/// dispatched on `MapBacking::Hamt`; folded into [`super::value::hash_value`].
+/// Order-independent hash of a HAMT's entries.
 pub fn hamt_hash(m: MapRef<'_>) -> u64 {
     let mut acc = 0u64;
     let root = m.as_hamt().root;
     for_each_entry(&root, &mut |k, v| {
-        // Per-entry hash combines key and value; the cross-entry fold is
-        // commutative so insertion order does not matter. `map_entry_hash` is
-        // shared with the `Env` backing's fold so equal maps hash identically
-        // across backings.
+        // The fold must stay commutative so insertion order does not matter,
+        // and `map_entry_hash` must stay shared with the `Env` backing's fold
+        // so equal maps hash identically across backings.
         acc = acc.wrapping_add(map_entry_hash(hash_value(&k), hash_value(&v)));
     });
     acc
@@ -431,18 +404,15 @@ pub fn hamt_hash(m: MapRef<'_>) -> u64 {
 
 /// Whether a HAMT-backed map holds exactly `size` entries, every one of which
 /// satisfies `f`. Serves the cross-backing (`Env` vs `Hamt`) arm of
-/// [`super::value::values_equal`], which probes the process environment per
-/// entry instead of materializing it.
+/// [`super::value::values_equal`].
 pub fn hamt_matches(m: MapRef<'_>, size: usize, mut f: impl FnMut(Value, Value) -> bool) -> bool {
     let h = m.as_hamt();
     h.size == size && try_for_each_entry(&h.root, &mut f)
 }
 
-/// Structural equality of two HAMT-backed maps. The caller has already
-/// dispatched on `MapBacking::Hamt` for both sides. Entry values are deferred
-/// onto the caller's `values_equal` worklist (`pending`) rather than compared
-/// by a nested `values_equal` call, so maps nested through their values do not
-/// stack native frames per level.
+/// Structural equality of two HAMT-backed maps. Entry values are deferred onto
+/// the caller's `values_equal` worklist rather than compared by a nested call,
+/// so deeply nested maps do not stack one native frame per level.
 pub fn hamts_equal(a: MapRef<'_>, b: MapRef<'_>, pending: &mut EqPending) -> bool {
     let (a, b) = (a.as_hamt(), b.as_hamt());
     if a.size != b.size {
@@ -615,13 +585,9 @@ mod tests {
         assert!(!values_equal(&a, &c));
     }
 
-    // ---- collision-bucket tests ------------------------------------------
-    //
-    // The `HamtCollision` path needs two distinct keys sharing a full 64-bit
-    // hash. No deterministic pair of small-int keys collides for real, so
-    // these tests stage the collision by injecting the same `hash` for
-    // different keys — faithful because `insert`/`get`/`remove` only ever see
-    // the hash the caller passes.
+    // No pair of small-int keys really collides, so the collision tests below
+    // inject the same `hash` for different keys. Faithful because
+    // `insert`/`get`/`remove` only ever see the hash the caller passes.
 
     /// `set`, but with an injected hash instead of `hash_value(k)`.
     fn set_h(h: &mut ProcHeap, m: &Value, k: i64, v: i64, hash: u64) -> Value {
@@ -681,8 +647,8 @@ mod tests {
         assert_eq!(size(&m), 1);
         assert_eq!(lookup_h(&m, 1, hash), None);
         assert_eq!(lookup_h(&m, 2, hash), Some(20));
-        // The two-key bucket collapsed to a plain entry, and the single-child
-        // branch chain `split` built above it unwound with it.
+        // The bucket collapsed to a plain entry, and the single-child branch
+        // chain `split` built above it unwound with it.
         let root = HamtMapRef::of(&m).root;
         assert!(matches!(HamtNodeRef::of(&root), HamtNodeRef::Entry { .. }));
     }

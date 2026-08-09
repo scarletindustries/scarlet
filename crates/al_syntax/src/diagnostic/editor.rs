@@ -6,8 +6,7 @@ use std::sync::OnceLock;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 /// A JetBrains IDE, identified by the URL scheme its protocol handler
-/// registers (`idea://`, `pycharm://`, ...). Captured at detection time so
-/// links open in the product that is actually running.
+/// registers (`idea://`, `pycharm://`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JetbrainsIde {
     scheme: &'static str,
@@ -29,9 +28,8 @@ const fn jetbrains(scheme: &'static str) -> Editor {
     Editor::Jetbrains(JetbrainsIde { scheme })
 }
 
-/// Exact lowercase executable basename → editor, shared by both detectors.
-/// Substring matching would false-positive on unrelated names (`encoder`,
-/// `barcode`, `xcode` all contain "code").
+/// Exact lowercase executable basename → editor. Matching must stay exact:
+/// `encoder`, `barcode` and `xcode` all contain "code".
 const EDITORS_BY_BASENAME: &[(&str, Editor)] = &[
     ("code", Editor::Vscode),
     ("code-insiders", Editor::VscodeInsiders),
@@ -67,15 +65,9 @@ fn match_basename(cmd: &str) -> Option<Editor> {
     lookup_basename(&base)
 }
 
-/// Match a $VISUAL/$EDITOR value, which may contain a full path and/or flags.
-/// Three forms, tried in order:
-/// - quoted command with flags: `"/Applications/.../bin/code" -w` — the
-///   quoted span is the command;
-/// - unquoted command with flags: `/usr/local/bin/code --wait` — the first
-///   whitespace token is the command;
-/// - unquoted flag-free path containing spaces:
-///   `/Applications/Sublime Text.app/.../bin/subl` — the whole value is the
-///   command, matched as a fallback.
+/// Match a $VISUAL/$EDITOR value, which may carry a path and/or flags. The
+/// whole value is retried as a fallback because a flag-free path can itself
+/// contain spaces (`/Applications/Sublime Text.app/.../bin/subl`).
 fn match_env_var(value: &str) -> Option<Editor> {
     let value = value.trim();
     let cmd = if let Some(rest) = value.strip_prefix('"') {
@@ -89,9 +81,9 @@ fn match_env_var(value: &str) -> Option<Editor> {
         .or_else(|| match_basename(value))
 }
 
-/// Match a `ps -o comm=` line by its exact lowercase basename. No whitespace
-/// split here: comm values are argument-free but may themselves contain
-/// spaces (`sublime text`, `code - insiders`).
+/// Match a `ps -o comm=` line by its exact lowercase basename. Do not split on
+/// whitespace: comm values take no arguments but may contain spaces
+/// (`sublime text`, `code - insiders`).
 fn match_process_name(comm: &str) -> Option<Editor> {
     match_basename(comm.trim())
 }
@@ -131,9 +123,8 @@ fn detect_editor_uncached() -> Option<Editor> {
         })
 }
 
-/// Everything except `/` — over-encoding is harmless, but `/` must survive so
-/// `scheme://file/abs/path` keeps its path segments and the editor's URL handler
-/// sees the intended authority/path split.
+/// Encode everything but `/`, which must survive so the editor's URL handler
+/// still sees the path segments.
 const PATH_ENCODE: &AsciiSet = &NON_ALPHANUMERIC.remove(b'/');
 
 pub fn build_editor_url(editor: Editor, abs_path: &str, line: i32, col: i32) -> String {
@@ -166,7 +157,7 @@ mod tests {
             Some(Editor::Vscode)
         );
         assert_eq!(match_process_name("Zed"), Some(Editor::Zed));
-        // Substring false-positives that the old contains-based matcher hit:
+        // Substring false positives:
         assert_eq!(match_process_name("encoder"), None);
         assert_eq!(match_process_name("barcode-scanner"), None);
         assert_eq!(match_process_name("Xcode"), None);
@@ -184,12 +175,12 @@ mod tests {
             Some(Editor::Vscode)
         );
         assert_eq!(match_env_var("PyCharm"), Some(jetbrains("pycharm")));
-        // Unquoted flag-free macOS path containing spaces:
+        // Unquoted flag-free path containing spaces:
         assert_eq!(
             match_env_var("/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl"),
             Some(Editor::Sublime)
         );
-        // Quoted macOS path with flags:
+        // Quoted path with flags:
         assert_eq!(
             match_env_var(
                 "\"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code\" -w"
@@ -200,7 +191,7 @@ mod tests {
             match_env_var("'/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl' -w"),
             Some(Editor::Sublime)
         );
-        // Substring false-positives that the old contains-based matcher hit:
+        // Substring false positives:
         assert_eq!(match_env_var("encoder"), None);
         assert_eq!(match_env_var("/opt/xcode/bin/edit"), None);
         assert_eq!(match_env_var("nvim"), None);

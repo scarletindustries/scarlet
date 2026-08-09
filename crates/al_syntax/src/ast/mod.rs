@@ -1,8 +1,7 @@
 use crate::span::Span;
 
-/// Generates the delegating `span()` / `span_mut()` accessors for a node enum
-/// whose variants each wrap a single struct with a `span: Span` field. The
-/// variant list is the one place to touch when a variant is added.
+/// Delegating `span()` / `span_mut()` for an enum whose variants each wrap a
+/// single struct with a `span: Span` field.
 macro_rules! impl_span {
     ($enum:ident: $($variant:ident),+ $(,)?) => {
         impl $enum {
@@ -20,10 +19,6 @@ macro_rules! impl_span {
         }
     };
 }
-
-// ============================================================================
-// Literals and Basic Nodes
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub struct StringLiteral {
@@ -61,20 +56,15 @@ pub struct Identifier {
     pub span: Span,
 }
 
-/// `@name` or `@name(arg, arg, ...)` ahead of a declaration. Args are bare
-/// identifiers (no expressions) — every current attribute takes either nothing
-/// or a single op-key, and keeping the grammar this narrow means the parser
-/// never has to guess whether `@x(a + b)` is an attribute or an error.
+/// `@name` or `@name(arg, ...)` ahead of a declaration. Args are bare
+/// identifiers, never expressions, so the parser never has to guess whether
+/// `@x(a + b)` is an attribute or an error.
 #[derive(Debug, Clone)]
 pub struct Attribute {
     pub name: Identifier,
     pub args: Vec<Identifier>,
     pub span: Span,
 }
-
-// ============================================================================
-// Type Annotations
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub enum TypeKind {
@@ -158,10 +148,6 @@ impl UnaryOp {
     }
 }
 
-// ============================================================================
-// Statements (do not produce values)
-// ============================================================================
-
 #[derive(Debug, Clone)]
 pub struct VariableBinding {
     pub doc: Option<String>,
@@ -187,9 +173,9 @@ pub struct TupleDestructuringBinding {
     pub span: Span,
 }
 
-/// `UpperIdent = expr` at statement position: assert that `expr` has the
-/// named type and discard the value. The name must resolve to a 0-arg type
-/// (not a constructor); the init is type-checked against it and popped.
+/// `UpperIdent = expr` at statement position: assert `expr` has the named type
+/// and discard the value. The name must resolve to a 0-arg type, not a
+/// constructor.
 #[derive(Debug, Clone)]
 pub struct TypedDiscard {
     pub ty_name: Identifier,
@@ -411,10 +397,6 @@ impl Statement {
     }
 }
 
-// ============================================================================
-// Expressions (produce values)
-// ============================================================================
-
 #[derive(Debug, Clone)]
 pub struct FunctionExpression {
     pub return_type: Option<TypeIdentifier>,
@@ -601,10 +583,6 @@ pub struct BinaryLiteral {
     pub segments: Vec<BinSegment>,
     pub span: Span,
 }
-
-// ============================================================================
-// Patterns (used in match arms and destructuring bindings)
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub enum Pattern {
@@ -802,10 +780,6 @@ impl Pattern {
         }
     }
 }
-
-// ============================================================================
-// Sum Types
-// ============================================================================
 
 #[derive(Debug, Clone)]
 pub enum Expression {

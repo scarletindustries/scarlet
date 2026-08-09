@@ -1,67 +1,25 @@
-//! Build-time stdlib precompilation. `precompile_stdlib` runs the full
-//! parse/analyse/codegen pipeline over `src/std/**` once at `cargo build` time
-//! (via `crates/al/build.rs`); `static_ir::flatten` then lowers the result to
-//! pool-of-array form which build.rs emits as Rust source. At runtime
-//! `Compiler::seed_static` consults that generated `&'static StaticStdlib` —
-//! nothing is parsed or deserialized.
-//!
-//! Because this runs inside `build.rs`, any error in `al.al` or a stdlib
-//! module surfaces as a *cargo build* failure with the diagnostic text — the
-//! `PreludeBindings::capture` shape assertions become a compile-time contract.
-//!
-//! # What the blob may freeze
+//! Build-time stdlib precompilation. `crates/al/build.rs` runs
+//! `precompile_stdlib` over `src/std/**`, `static_ir::flatten` lowers the
+//! result to pool-of-array form, and build.rs emits that as Rust source. At
+//! runtime `Compiler::seed_static` reads the generated `&'static
+//! StaticStdlib` — nothing is parsed or deserialized. Any stdlib error is a
+//! `cargo build` failure.
 //!
 //! Every index the blob carries is frozen into `.rodata` and can never be
-//! re-minted, so it may only point into an arena the blob *also* carries.
-//! Exactly one arena family qualifies: the `InferEngine` pools, enumerated by
-//! [`crate::types::EnginePoolWatermark`] and copied wholesale by
-//! `static_ir::flatten`. A stdlib `Scheme`/`TypeInfo` holds `Ty`s and
-//! `ArenaSlice`s into them; `seed_static` memcpys them back as the live
-//! engine's prefix, which is why those indices stay valid.
+//! re-minted, so it may only point into an arena the blob also carries. Only
+//! the `InferEngine` pools qualify: `flatten` copies them wholesale and
+//! `seed_static` memcpys them back as the live engine's prefix. A
+//! compile-local arena must never appear. The post-inference `ResolvedPool`
+//! stays out because the stdlib is frozen after `emit`, not before `lower`, so
+//! no stdlib body is ever re-lowered from the blob. Pinned by
+//! `blob_freezes_exactly_the_engine_pools` and
+//! `precompile_output_carries_no_resolved_pool` below.
 //!
-//! A *compile-local* arena — one minted and dropped inside a single
-//! `compile()` — must never appear here. The post-inference resolved-type pool
-//! (`RTy`/`ResolvedPool`) is compile-local, and it stays out of the blob
-//! because **the stdlib is frozen after `emit`, not before `lower`**:
-//! `PrecompiledBlob::program` is finished bytecode, and `seed_static` installs
-//! it directly. No stdlib body is ever re-lowered *from the blob*, so no
-//! stdlib `RTy` ever needs to exist in it. `build.rs`'s dependency set is
-//! unaffected. Pinned by `blob_freezes_exactly_the_engine_pools` below and by
-//! `crates/al/tests/arena_rewind.rs::stdlib_bodies_are_never_relowered`.
-//! (The native-backend path needs stdlib `CoreFn`s and therefore does not
-//! seed at all: with a hook installed, `compile_impl` recompiles the stdlib
-//! from source — reproducing this blob's program exactly, by the determinism
-//! below — rather than the blob growing a pool to carry.)
-//!
-//! # Why the return type is `(PrecompileOutput, InferEngine)` and nothing else
-//!
-//! That pair *is* the decision. The elaborator mints a fresh `ResolvedPool`
-//! per compile ([`crate::typed_ir::zonk::pool_for`], i.e.
-//! `ResolvedPool::new(eng.prim_ids())`) and drops it once elaboration and emit
-//! for that compile have finished; it is never a field of
-//! [`crate::bytecode::compiler::Compiler`] and never reachable from
-//! `PrecompileOutput`, so no `RTy` can be spelled in the generated `.rodata`.
-//! (`bytecode::session` states the same invariant from the rewind side: there
-//! is no pool on the `Compiler` to truncate a `ConstId`'s types against.)
-//! `precompile_output_carries_no_resolved_pool` destructures both halves of
-//! the artifact exhaustively — adding a field to carry the pool stops that
-//! test compiling, which is the point.
-//!
-//! # Determinism is a correctness property, not a nicety
-//!
-//! Every index in the blob (a `Ty`, an `ArenaSlice`, a `code_start`, a
-//! `func_idx`) is minted by one `precompile_stdlib()` run and then frozen. The
-//! elaborator resolves types through hash-keyed memo tables; if any of them
-//! leaked iteration order into arena allocation order, two builds of the same
-//! source would produce two different — individually consistent, mutually
-//! incompatible — blobs, and `cargo build` would be irreproducible.
-//! `precompile_stdlib_is_deterministic` runs the whole pipeline twice and
-//! compares the flattened artifacts.
-//!
-//! Jump operands are whatever `emit` produced; the blob copies `code` verbatim
-//! and `seed_static` installs it as the program's prefix, so function-relative
-//! operands survive the freeze without a relocation pass — nothing in this
-//! module rewrites an operand.
+//! Determinism is a correctness property. Two builds of the same source must
+//! mint identical indices or `cargo build` is irreproducible, and silently so
+//! — each blob is internally consistent. `precompile_stdlib_is_deterministic`
+//! runs the pipeline twice. Jump operands are function-relative, so `code` is
+//! copied verbatim and nothing here rewrites an operand.
 
 use std::collections::BTreeSet;
 
@@ -82,14 +40,12 @@ use crate::types::{InferEngine, TypeBody, TypeInfo};
 pub struct PrecompileOutput {
     pub blob: PrecompiledBlob,
     pub prelude: PreludeBindings,
-    /// `BTreeSet` so iteration is sorted: `flatten` copies it verbatim into
-    /// the reproducible stdlib blob, which `is_reserved` binary-searches.
+    /// `BTreeSet` so `flatten` copies it out sorted; `is_reserved` binary-searches.
     pub reserved: BTreeSet<String>,
     pub next_type_id: crate::type_def::TypeId,
 }
 
-/// The variable-size data: module interfaces, the global type table, and the
-/// stdlib bytecode/functions/constants. Flattened by `static_ir::flatten`.
+/// The variable-size data, flattened by `static_ir::flatten`.
 #[derive(Debug, Clone)]
 pub struct PrecompiledBlob {
     pub interfaces: IndexMap<String, ModuleInterface>,
@@ -98,10 +54,9 @@ pub struct PrecompiledBlob {
     pub local_count: i32,
 }
 
-/// Compile the entire embedded stdlib (prelude + every `al/*.al` module) and
-/// snapshot the resulting state. Returns the `InferEngine` alongside so
-/// `flatten` can copy its `nodes`/`children`/`strings` arenas wholesale —
-/// every `Ty` in the output indexes into that arena.
+/// Compile the whole embedded stdlib and snapshot the result. The
+/// `InferEngine` comes back too: every `Ty` in the output indexes its arenas,
+/// which `flatten` copies wholesale.
 pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
     let mut c = new_compiler(None, false);
 
@@ -118,14 +73,11 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
         c.take_module_table().into_iter().collect();
     let mut type_info = c.take_type_info();
 
-    // Close every TypeInfo body so its `Var(param_id)` refs become `Bound(idx)`.
-    // This mints new arena nodes, so it must happen on the same engine whose
-    // arena `flatten` is about to snapshot. `iface.types` entries alias the
-    // same engine pools (they were copied from `env.type_info`), so closing
-    // via `type_info` covers Custom bodies (their fields live in the shared
-    // engine.variant_fields arena); an Alias body's target is stored on the
-    // TypeInfo struct itself, so each interface copy is closed separately
-    // below.
+    // Close every TypeInfo body so `Var(param_id)` becomes `Bound(idx)`. This
+    // mints arena nodes, so it must run on the engine `flatten` will snapshot.
+    // Custom bodies are shared through `engine.variant_fields`, but an Alias
+    // target lives on the `TypeInfo` itself, so each interface copy needs its
+    // own pass.
     let (parts, mut engine) = c.into_parts();
     for ti in type_info.values_mut() {
         close_type_info(&mut engine, ti);
@@ -163,8 +115,8 @@ pub fn precompile_stdlib() -> Result<(PrecompileOutput, InferEngine), String> {
 fn close_type_info(engine: &mut InferEngine, ti: &mut TypeInfo) {
     match ti.body {
         TypeBody::Custom { variants } => {
-            // The fields live in `engine.variant_fields`; rewrite their `ty`
-            // in place. Distinct types occupy disjoint slices.
+            // Distinct types occupy disjoint `variant_fields` slices, so
+            // rewriting `ty` in place is safe.
             for v in variants.range() {
                 let fields = engine.variants[v].fields;
                 for f in fields.range() {
@@ -178,9 +130,8 @@ fn close_type_info(engine: &mut InferEngine, ti: &mut TypeInfo) {
                 target: engine.close_body(target, ti.type_params),
             };
         }
-        // External bodies have nothing to close; an Unresolved body reaching
-        // the freeze means a stdlib type declaration never got its body filled
-        // in — freezing it would bake the placeholder into `.rodata`.
+        // Unresolved here means a stdlib type declaration never got a body,
+        // and freezing would bake the placeholder into `.rodata`.
         TypeBody::External => {}
         TypeBody::Unresolved => panic!(
             "type body still unresolved at stdlib freeze: {}",
@@ -217,19 +168,15 @@ fn bail_on_errors(c: &Compiler, label: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // `precompile_stdlib` is the build.rs entry point: it parses, type-checks
-    // and code-gens the entire embedded stdlib from scratch (no static
-    // fallback). At runtime this never executes — the binary's `.rodata` is the
-    // flattened result — so the only place it is exercised is here and in
-    // `build.rs`. A regression in any stdlib module, the prelude, or the
-    // `TypeBody`-closing pass would surface as an `Err` here.
+    // The only place `precompile_stdlib` runs outside build.rs, so this is
+    // where a regression in a stdlib module, the prelude, or the
+    // `TypeBody`-closing pass shows up.
     #[test]
     fn precompile_stdlib_succeeds_and_has_expected_shape() {
         let (out, engine) =
             precompile_stdlib().expect("stdlib must precompile without diagnostics");
 
-        // Every embedded `al/*` module compiled into an interface, keyed by its
-        // slash-joined path. `all_modules()` (module/stdlib.rs) discovers these.
+        // Keyed by slash-joined path; `module/stdlib.rs` discovers these.
         for key in [
             "al/array",
             "al/string",
@@ -263,9 +210,8 @@ mod tests {
             assert!(array.values.contains_key(f), "al/array should export '{f}'");
         }
 
-        // The al/http stack compiled with its spec-fixed public surface. These
-        // names are the contract the H1 server core is built on;
-        // a renamed or dropped export would silently break the connection driver.
+        // The contract the H1 server core is built on: renaming or dropping
+        // one of these silently breaks the connection driver.
         let expected_exports: &[(&str, &[&str])] = &[
             (
                 "al/http",
@@ -296,16 +242,13 @@ mod tests {
             }
         }
 
-        // The shared program carries real code: functions, instructions and a
-        // constant pool. The entry index is in range.
         let prog = &out.blob.program;
         assert!(!prog.functions.is_empty(), "stdlib has no functions");
         assert!(!prog.code.is_empty(), "stdlib emitted no bytecode");
         assert!((prog.entry as usize) < prog.functions.len());
 
-        // Prelude bindings resolved to distinct, real type ids and correctly
-        // shaped constructors. These are the contract `PreludeBindings::capture`
-        // enforces; assert it held end-to-end.
+        // The contract `PreludeBindings::capture` enforces, checked
+        // end-to-end.
         let p = &out.prelude;
         assert_eq!(p.int.name, "Int");
         assert_eq!(p.option.name, "Option");
@@ -324,12 +267,10 @@ mod tests {
             "Some/None are distinct variants"
         );
 
-        // Type ids handed to the first user module must sit past every stdlib
-        // id, so next_type_id is strictly positive.
+        // The first user module's ids must sit past every stdlib id.
         assert!(out.next_type_id.0 > 0, "next_type_id should be positive");
 
-        // The prelude reserves its own constructor/type names so a user can't
-        // shadow them.
+        // A user must not be able to shadow these.
         for name in ["True", "False", "Some", "None", "Ok", "Err"] {
             assert!(
                 out.reserved.contains(name),
@@ -337,8 +278,6 @@ mod tests {
             );
         }
 
-        // The returned engine's arena is non-empty (every `Ty` in the snapshot
-        // indexes into it) and the close-bodies pass minted nodes onto it.
         assert!(!engine.nodes.is_empty(), "engine arena is empty");
         assert!(
             !engine.strings.is_empty(),
@@ -346,16 +285,10 @@ mod tests {
         );
     }
 
-    /// The frozen-blob seam. `flatten` snapshots the engine's arenas so that
-    /// every `Ty`/`ArenaSlice` baked into `.rodata` still resolves once
-    /// `seed_static` memcpys them back. `EnginePoolWatermark` is the canonical
-    /// enumeration of those arenas — the same list `Compiler::reset_to` rewinds
-    /// — so it is destructured exhaustively here: adding a pool to the engine
-    /// fails to compile this test until someone decides whether the blob must
-    /// carry it. That is the guard for the spec's assumption that the
-    /// post-inference resolved-type pool is compile-local; were it ever hung
-    /// off the engine, this line would force the question rather than silently
-    /// shipping dangling `RTy`s.
+    /// `EnginePoolWatermark` is destructured exhaustively on purpose: adding
+    /// a pool to the engine stops this compiling until someone decides whether
+    /// the blob must carry it, rather than silently shipping dangling
+    /// indices.
     #[test]
     fn blob_freezes_exactly_the_engine_pools() {
         use crate::static_ir::flatten::flatten;
@@ -382,34 +315,23 @@ mod tests {
         assert_eq!(flat.type_params.len(), type_params);
         assert_eq!(flat.variant_fields.len(), variant_fields);
         assert_eq!(flat.variants.len(), variants);
-        // `str_pool` is the one pool that *grows* past the engine's: function
-        // and module names intern after the verbatim prefix. Only the prefix
-        // may be indexed by a frozen `StrId`.
+        // `str_pool` is the one pool that grows past the engine's: only its
+        // prefix may be indexed by a frozen `StrId`.
         assert!(
             flat.str_pool.len() >= strings,
             "str_pool must extend engine.strings, never truncate it"
         );
 
-        // The blob is frozen *after* emit: it ships bytecode, not IR. This is
-        // precisely why no resolved-type pool needs serialising — `lower` never
-        // runs over a stdlib body at runtime.
+        // The blob ships bytecode, not IR, which is why no resolved-type
+        // pool needs serialising.
         assert!(!flat.code.is_empty(), "stdlib froze no bytecode");
         assert!(!flat.functions.is_empty(), "stdlib froze no functions");
     }
 
-    /// The other half of the same guard, on the other side of `flatten`.
-    /// `PrecompileOutput` is everything build.rs is handed; it is destructured
-    /// exhaustively here, as is the `PrecompiledBlob` inside it. A future
-    /// `pool: ResolvedPool` field — the natural way to start serialising
-    /// resolved types — stops this test compiling, forcing the author to
-    /// confront the spec's third assumption rather than quietly freezing
-    /// indices into an arena `seed_static` never restores.
-    ///
-    /// The decision this pins: **the artifact must NOT carry a
-    /// `ResolvedPool`.** It is compile-local — the elaborator mints one per
-    /// compile (`zonk::pool_for`) and drops it after emit; it is never a field
-    /// of `Compiler` — and no stdlib body is re-lowered at runtime
-    /// (`arena_rewind.rs`), so no stdlib `RTy` outlives the build.
+    /// The other half of that guard: the artifact must not carry a
+    /// `ResolvedPool`. Adding one stops this exhaustive destructuring from
+    /// compiling, rather than quietly freezing indices into an arena
+    /// `seed_static` never restores.
     #[test]
     fn precompile_output_carries_no_resolved_pool() {
         let (out, _engine) = precompile_stdlib().expect("stdlib must precompile");
@@ -433,13 +355,8 @@ mod tests {
         assert!(local_count > 0, "stdlib init occupies entry-frame slots");
     }
 
-    /// Every index the blob carries — `Ty`, `ArenaSlice`, `code_start`,
-    /// `func_idx`, constant-pool slot — is minted by one `precompile_stdlib()`
-    /// run and then frozen into `.rodata`. Two runs over identical source must
-    /// therefore agree exactly: a hash-keyed memo in the elaborator that leaked
-    /// iteration order into arena allocation order would make `cargo build`
-    /// irreproducible, and would do it *silently* (each blob is internally
-    /// consistent; only a rebuild disagrees).
+    /// Two runs over identical source must agree exactly, or `cargo build` is
+    /// irreproducible — silently, since each blob is internally consistent.
     #[test]
     fn precompile_stdlib_is_deterministic() {
         use crate::static_ir::flatten::flatten;
@@ -448,8 +365,6 @@ mod tests {
         let (b, eb) = precompile_stdlib().expect("stdlib must precompile");
         let (fa, fb) = (flatten(&a, &ea), flatten(&b, &eb));
 
-        // Bytecode: opcode and all three operand fields, instruction for
-        // instruction. This is what a relative-operand emitter must keep stable.
         let instrs = |f: &crate::static_ir::flatten::FlatPools| {
             f.code
                 .iter()
@@ -479,8 +394,8 @@ mod tests {
         };
         assert_eq!(fns(&fa), fns(&fb), "function table is nondeterministic");
 
-        // The type arena. `Ty`s frozen into stdlib `Scheme`s index it by
-        // position, so a reordering here is a silently-wrong blob.
+        // Frozen `Ty`s index the node arena by position, so a reordering
+        // here is a silently-wrong blob.
         fn dbg<T: std::fmt::Debug>(v: &[T]) -> Vec<String> {
             v.iter().map(|x| format!("{x:?}")).collect()
         }

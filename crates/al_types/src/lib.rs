@@ -1,12 +1,7 @@
-//! AL's type layer: the HM inference engine ([`types::infer`]), the type
-//! environment and definitions ([`type_def`]), exhaustiveness checking, and
-//! the generic labelled-slot matcher ([`slots`]) shared by the typechecker
-//! and the elaborator.
+//! AL's type layer: HM inference, type definitions, exhaustiveness checking,
+//! and the labelled-slot matcher shared by the typechecker and elaborator.
 //!
-//! Depends on `al_syntax` (it types the AST) and `al_vm` (nominal
-//! [`TypeId`](al_vm::TypeId)s and `Op` for `@vm` intrinsic schemes) — but
-//! not on the compiler: lowering, elaboration, and codegen live above this
-//! crate in `al_core`.
+//! May depend on `al_syntax` and `al_vm`, never on the compiler (`al_core`).
 
 #![cfg_attr(
     not(test),

@@ -1,56 +1,29 @@
 //! Bit-for-bit interpreter frame layout for the native (Cranelift) backend.
 //!
-//! Compiled code keeps the interpreter's frame layout **bit-for-bit**: a
-//! function's locals live in process-stack slots at `frame.base_slot` (the
-//! `Vec<Value>` the VM already owns), and machine registers hold values only
-//! *within* a function, between suspension points. At every call site and
-//! reduction checkpoint the `(stack, frames)` pair must be bit-identical to
-//! the interpreter's state at that bytecode ip — that invariant is what makes
-//! suspension, migration, per-function fallback and the
-//! interpreter-as-differential-oracle work unchanged.
+//! Compiled code keeps the interpreter's frame layout exactly: locals live in
+//! process-stack slots at `frame.base_slot`, and registers hold values only
+//! within a function. At every call site and reduction checkpoint
+//! `(stack, frames)` must be bit-identical to the interpreter's state at that
+//! bytecode ip — that is what keeps suspension, migration, per-function
+//! fallback and the interpreter-as-oracle working.
 //!
-//! This module is the layout half of that contract: the CLIF sequences that
-//! read and write frame slots with the interpreter's exact semantics, and the
-//! NaN-box transitions between a slot's value word and the raw register
-//! payload compiled code computes with. The layout facts themselves — which
-//! slot each `LocalId` occupies and the bytecode resume ip of every call
-//! site — are recorded by `emit` while it lowers the same body to bytecode
-//! ([`FrameLayout`]), so the two backends cannot disagree by construction.
+//! This module holds the CLIF sequences that read and write frame slots, and
+//! the NaN-box transitions between a slot's value word and the raw register
+//! payload. Which slot each `LocalId` owns comes from [`FrameLayout`], which
+//! `emit` records while lowering the same body to bytecode, so the two
+//! backends cannot disagree.
 //!
-//! The parity rules, mapped to the interpreter's own code:
+//! Two rules a caller must respect:
 //!
-//! - **slot read** ([`FrameSlots::load`]): the value word at
-//!   `stack[base_slot + slot]`, exactly what `PushLocal` copies. The register
-//!   copy is a *borrow* — `PushLocal`'s transient clone is consumed by the
-//!   instruction that pops it, so at the next boundary no extra reference
-//!   exists in either backend. Anything that outlives the expression
-//!   (ownership handed to a callee frame, a stored slot, a returned value)
-//!   must take its own reference via [`emit_retain`].
-//! - **slot write** ([`FrameSlots::store`]): `StoreLocal`'s
-//!   `self.stack[slot] = v` — the old word's reference is released (the same
-//!   dynamic mortal-heap gate the interpreter's `release_bits` fast path
-//!   performs, via [`native_rc::emit_dynamic_drop`]), then the new word is
-//!   stored. Compiled code stores through to the slot at the point the
-//!   interpreter's `StoreLocal` executes, so between boundaries the frame
-//!   never lags: dead locals keep the stale value the interpreter's frame
-//!   also holds, and branch arms that share a slot (emit rewinds `next_slot`
-//!   across mutually-exclusive arms) leave whichever arm ran, bit-identical.
-//! - **boxing** ([`box_int`]/[`box_small_int`]/[`box_bool`]): a register
-//!   value is NaN-boxed only when it crosses into a frame slot or a call
-//!   boundary. Int results box through the interpreter's own spill rule —
-//!   in the 47-bit immediate range `HDR_INT | payload`, past it a heap
-//!   `BigInt` allocated by the `al_shim_int_box` shim
-//!   ([`NATIVE_INT_BOX_SYMBOL`]), which is `VM::boxed_int` behind the C ABI.
-//! - **unboxing** ([`unbox_int`]): `as_int_typed` inlined — the small-int
-//!   sign-extension on the hot path, the `BigInt` payload load (one word at
-//!   `obj + 8`) on the cold one. An Int-typed slot may legitimately hold a
-//!   spilled `BigInt`, so typed code must never assume the immediate form.
+//! - A loaded slot word is a **borrow**. Anything that outlives the expression
+//!   (a callee's argument, a stored slot, a returned value) must take its own
+//!   reference via [`emit_retain`].
+//! - An Int-typed slot may hold a spilled `BigInt`, so typed code must never
+//!   assume the immediate form.
 //!
-//! The frame-base pointer handed to [`FrameSlots`] is
-//! `&mut stack[frame.base_slot]`, minted by the VM-side shims. It is only
-//! valid until the value stack can reallocate — i.e. up to the next runtime
-//! call that pushes — so the emitter must re-derive it after every such call;
-//! that discipline belongs to the calling convention, not to this module.
+//! The frame-base pointer handed to [`FrameSlots`] goes stale as soon as the
+//! value stack can reallocate (any runtime call that pushes). Re-deriving it
+//! is the calling convention's job, not this module's.
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{self, InstBuilder, MemFlagsData, types};
@@ -62,31 +35,24 @@ use super::native_rc::{emit_dynamic_drop, emit_dynamic_dup};
 use crate::bytecode::Value;
 use crate::bytecode::value::NATIVE_PTR_MASK;
 
-/// Symbol name the JIT finalize step registers the Int spill shim under
-/// (`crates/al`'s `al_shim_int_box`: `extern "C" fn(vmx, i64) -> u64`,
-/// the interpreter's `push_int` boxing minus the stack push). [`box_int`]
-/// emits a call to a declared reference resolved against this name.
+/// Symbol the JIT finalize step registers the Int spill shim under
+/// (`crates/al`'s `al_shim_int_box`: `extern "C" fn(vmx, i64) -> u64`).
 pub const NATIVE_INT_BOX_SYMBOL: &str = "al_shim_int_box";
 
 /// NaN-box layout facts compiled code bakes into instruction immediates.
 ///
-/// Derived through `Value`'s public constructors rather than re-spelling the
-/// private header constants, so the native backend cannot drift from the
-/// interpreter if the encoding changes: `int_header` *is*
-/// `Value::small_int(0)`, `payload_mask` is the bits `small_int(-1)` sets on
-/// top of it, and so on.
+/// Derived through `Value`'s public constructors, not by re-spelling the
+/// private header constants, so the encoding cannot drift between backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValueBits {
-    /// Header of a small-int immediate; also the zero-fill word
-    /// (`Value::small_int(0)`) `enter_frame!` writes into non-argument slots.
+    /// Small-int header; also the zero-fill word `enter_frame!` writes into
+    /// non-argument slots.
     pub int_header: u64,
-    /// Selects the 16 header bits: `(bits & header_mask) == int_header` is
-    /// the interpreter's `is_small_int`.
+    /// `(bits & header_mask) == int_header` is `is_small_int`.
     pub header_mask: u64,
     /// Selects the 48-bit immediate payload.
     pub payload_mask: u64,
-    /// `Value::bool(false)` — also the Bool header, so
-    /// `bool_false | (b as u64)` boxes a flag.
+    /// `Value::bool(false)`, also the Bool header: `bool_false | flag` boxes.
     pub bool_false: u64,
     /// `Value::bool(true)`.
     pub bool_true: u64,
@@ -108,11 +74,9 @@ pub fn value_bits() -> ValueBits {
     }
 }
 
-/// The native backend addressed a local that owns no frame slot — emit
-/// elided it (const alias / operand-stack temp), so there is nothing in the
-/// frame to read or write. The coverage gate must keep such locals in
-/// registers; reaching this is a backend bug, aborted like emit's own
-/// `unbound_local`.
+/// The backend addressed a local `emit` elided (const alias / stack temp), so
+/// no frame slot exists. The coverage gate must keep such locals in registers;
+/// reaching this is a backend bug.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -123,14 +87,12 @@ fn slotless_local(id: LocalId) -> ! {
     )
 }
 
-/// Frame-slot access against the interpreter's layout: the value word of
-/// local `id` lives at `base + 8 * layout.slot(id)`, where `base` is
-/// `&mut stack[frame.base_slot]` for the running frame.
+/// Frame-slot access: local `id`'s word lives at `base + 8 * layout.slot(id)`,
+/// where `base` is `&mut stack[frame.base_slot]` for the running frame.
 ///
-/// `base` is an SSA `i64` holding that pointer. It goes stale whenever the
-/// value stack may reallocate (any runtime call that pushes); the body
-/// emitter re-derives it after every such call and constructs a fresh
-/// `FrameSlots` — this type is deliberately cheap and `Copy` for that reason.
+/// `base` goes stale whenever the value stack may reallocate, so the body
+/// emitter re-derives it after every pushing call and builds a fresh
+/// `FrameSlots`. Cheap and `Copy` for that reason.
 #[derive(Clone, Copy)]
 pub struct FrameSlots<'a> {
     layout: &'a FrameLayout,
@@ -150,8 +112,7 @@ impl<'a> FrameSlots<'a> {
         }
     }
 
-    /// Read `stack[base_slot + slot]` — `PushLocal`'s value word, borrowed
-    /// (see the module docs for the retain rule).
+    /// Read `stack[base_slot + slot]`, borrowed (see the module docs).
     pub fn load_slot(&self, b: &mut FunctionBuilder, slot: i32) -> ir::Value {
         b.ins()
             .load(types::I64, MemFlagsData::trusted(), self.base, slot * 8)
@@ -163,16 +124,13 @@ impl<'a> FrameSlots<'a> {
     }
 
     /// Write `stack[base_slot + slot] = bits` with `StoreLocal`'s semantics:
-    /// the old word's reference is released first (dynamic mortal-heap gate;
-    /// frees route through `release_at_zero` so `FREED_OBJECTS` accounting
-    /// stays identical), then the new word is stored. `bits` must carry an
-    /// owned reference — the slot takes it, exactly as `StoreLocal` takes
-    /// the popped value's.
+    /// release the old word, then store. `bits` must carry an owned reference
+    /// — the slot takes it.
     ///
     /// `release_at_zero` is a declared reference to the
     /// [`NATIVE_RELEASE_AT_ZERO_SYMBOL`](crate::bytecode::value::NATIVE_RELEASE_AT_ZERO_SYMBOL)
-    /// import. The builder ends up in a fresh sealed block (the release gate
-    /// branches); codegen continues there.
+    /// import. The release gate branches, so the builder ends up in a fresh
+    /// sealed block; codegen continues there.
     pub fn store_slot(
         &self,
         b: &mut FunctionBuilder,
@@ -196,13 +154,10 @@ impl<'a> FrameSlots<'a> {
         self.store_slot(b, self.slot_of(id), bits, release_at_zero)
     }
 
-    /// Raw slot write, no release of the old word. Bit-identical to
-    /// [`FrameSlots::store_slot`] **only** when the slot provably still holds
-    /// an immediate (the `enter_frame!` zero-fill, a Bool/Nil, an unspilled
-    /// Int) — releasing an immediate is a dynamic no-op, so skipping the gate
-    /// changes nothing. A function containing a self-tail loop re-stores its
-    /// slots every iteration over possibly-heap words and must use the
-    /// releasing store.
+    /// Raw slot write, no release of the old word. Correct **only** when the
+    /// slot provably still holds an immediate (the `enter_frame!` zero-fill, a
+    /// Bool/Nil, an unspilled Int). A self-tail loop re-stores its slots over
+    /// possibly-heap words every iteration and must use the releasing store.
     pub fn store_slot_no_release(&self, b: &mut FunctionBuilder, slot: i32, bits: ir::Value) {
         b.ins()
             .store(MemFlagsData::trusted(), bits, self.base, slot * 8);
@@ -214,28 +169,25 @@ impl<'a> FrameSlots<'a> {
     }
 }
 
-/// NaN-box an `i64` known to be in the 47-bit immediate range:
-/// `HDR_INT | (payload & PAYLOAD)` — `Value::small_int` in two instructions.
-/// Arithmetic results that may leave the range must use [`box_int`].
+/// NaN-box an `i64` known to be in the 47-bit immediate range. Arithmetic
+/// results that may leave the range must use [`box_int`].
 pub fn box_small_int(b: &mut FunctionBuilder, facts: &ValueBits, payload: ir::Value) -> ir::Value {
     let masked = b.ins().band_imm(payload, facts.payload_mask as i64);
     b.ins().bor_imm(masked, facts.int_header as i64)
 }
 
-/// Sign-extend a small-int word's 48-bit payload — `small_int_value`'s
-/// `<< 16 >> 16`. Meaningful only when the word is a small-int immediate.
+/// Sign-extend a small-int word's 48-bit payload. Meaningful only when the
+/// word really is a small-int immediate.
 pub fn unbox_small_int(b: &mut FunctionBuilder, bits: ir::Value) -> ir::Value {
     let shifted = b.ins().ishl_imm(bits, 16);
     b.ins().sshr_imm(shifted, 16)
 }
 
-/// Decode an Int-typed value word to the full `i64` — `as_int_typed`
-/// inlined. The small-int sign-extension is the fall-through path; a spilled
-/// `BigInt` box takes the cold branch and loads its one-word payload
-/// (`payload_word(obj, 0)`, at byte offset 8 past the header pointer).
+/// Decode an Int-typed value word to the full `i64` — `as_int_typed` inlined.
+/// A spilled `BigInt` takes the cold branch.
 ///
-/// The current block is terminated; on return the builder is positioned in a
-/// sealed merge block whose parameter is the decoded `i64`.
+/// Terminates the current block; on return the builder sits in a sealed merge
+/// block whose parameter is the decoded `i64`.
 pub fn unbox_int(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) -> ir::Value {
     let big = b.create_block();
     let merge = b.create_block();
@@ -258,17 +210,14 @@ pub fn unbox_int(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) ->
     b.block_params(merge)[0]
 }
 
-/// NaN-box a full-range `i64` result with the interpreter's spill rule
-/// (`push_int` minus the push): in the immediate range, [`box_small_int`]
-/// inline; past it, a cold call to the `al_shim_int_box` import
-/// ([`NATIVE_INT_BOX_SYMBOL`]) allocating the arena `BigInt`. The returned
-/// word carries one owned reference either way (ownership of an immediate is
-/// free).
+/// NaN-box a full-range `i64` with the interpreter's spill rule: inline in the
+/// immediate range, otherwise a cold call to the `al_shim_int_box` import
+/// ([`NATIVE_INT_BOX_SYMBOL`]). The returned word carries one owned reference
+/// either way.
 ///
-/// `int_box`'s signature is `(i64 vmx, i64 payload) -> i64 bits`; `vmx` is
-/// the opaque VM pointer the entry received. The current block is
-/// terminated; on return the builder is positioned in a sealed merge block
-/// whose parameter is the boxed word.
+/// `int_box`'s signature is `(i64 vmx, i64 payload) -> i64 bits`, `vmx` being
+/// the opaque VM pointer the entry received. Terminates the current block; on
+/// return the builder sits in a sealed merge block holding the boxed word.
 pub fn box_int(
     b: &mut FunctionBuilder,
     facts: &ValueBits,
@@ -298,38 +247,30 @@ pub fn box_int(
     b.block_params(merge)[0]
 }
 
-/// NaN-box an `i8` flag (an `icmp` result) as a Bool value word:
-/// `HDR_BOOL | flag` — `Value::bool` in two instructions.
+/// NaN-box an `i8` flag (an `icmp` result) as a Bool value word.
 pub fn box_bool(b: &mut FunctionBuilder, facts: &ValueBits, flag: ir::Value) -> ir::Value {
     let wide = b.ins().uextend(types::I64, flag);
     b.ins().bor_imm(wide, facts.bool_false as i64)
 }
 
-/// Whether a Bool value word is `true` — one comparison against the exact
-/// `Value::bool(true)` word. Only two Bool words exist, so this is total on
-/// Bool-typed values; it is *not* the interpreter's `is_truthy` (which
-/// raises on non-Bool), so the coverage gate must have proven the type.
+/// Whether a Bool value word is `true`. Total on Bool-typed values, but not
+/// the interpreter's `is_truthy` (which raises on non-Bool), so the coverage
+/// gate must have proven the type first.
 pub fn bool_is_true(b: &mut FunctionBuilder, facts: &ValueBits, bits: ir::Value) -> ir::Value {
     b.ins().icmp_imm(IntCC::Equal, bits, facts.bool_true as i64)
 }
 
-/// Take one owned reference to a value word — the interpreter's
-/// `owned_from_bits`, inlined. The sequence itself lives with its drop twin
-/// in [`native_rc::emit_dynamic_dup`]; this alias names its role in the
-/// frame contract: emitted where compiled code hands a borrowed register
-/// copy to an ownership-taking consumer (a callee's argument slot, a stored
-/// slot, a returned value) while the frame slot keeps its own reference —
-/// the register-resident twin of `PushLocal`'s clone.
+/// Take one owned reference to a value word. Emitted where compiled code hands
+/// a borrowed register copy to an ownership-taking consumer while the frame
+/// slot keeps its own reference.
 ///
-/// The current block is terminated; on return the builder is positioned in a
-/// fresh sealed block where codegen continues.
+/// Terminates the current block; on return the builder sits in a fresh sealed
+/// block where codegen continues.
 pub fn emit_retain(b: &mut FunctionBuilder, bits: ir::Value) {
     emit_dynamic_dup(b, bits);
 }
 
-// Tests drive JIT-compiled code and inspect raw refcount words, which is
-// inherently `unsafe extern "C"` territory; the unsafety is confined to this
-// test module, mirroring `native_rc`'s tests.
+// Tests drive JIT-compiled code and read raw refcount words.
 #[allow(unsafe_code)]
 #[cfg(test)]
 mod tests {
@@ -345,20 +286,16 @@ mod tests {
     };
     use crate::heap::ProcHeap;
 
-    // ---- harness --------------------------------------------------------
-
-    /// The Int spill shim under test: `VM::boxed_int` lives in the VM crate,
-    /// but it is `Value::int_in` against the process heap, which is what the
-    /// production `al_shim_int_box` also reduces to. `vmx` is unused — the
-    /// generated code must still thread it (the production shim needs it).
+    /// Stand-in for the Int spill shim: the production `al_shim_int_box` also
+    /// reduces to `Value::int_in` against the process heap. `vmx` is unused
+    /// here but the generated code must still thread it.
     unsafe extern "C" fn test_int_box(_vmx: i64, i: i64) -> u64 {
         let mut h = ProcHeap::new();
         std::mem::ManuallyDrop::new(Value::int_in(&mut h, i)).to_bits()
     }
 
-    /// JIT one exported function built by `build`. The module registers the
-    /// two runtime symbols the emission helpers reference (`release_at_zero`
-    /// and the Int spill shim); `build` receives their declared `FuncRef`s.
+    /// JIT one exported function built by `build`, which receives declared
+    /// `FuncRef`s for `release_at_zero` and the Int spill shim.
     fn jit(
         params: usize,
         returns: usize,

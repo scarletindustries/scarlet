@@ -1,16 +1,10 @@
 use indexmap::IndexMap;
 use std::fmt;
 
-// `TypeId` — the nominal identity a tagged runtime value carries in its
-// header — lives in `al_vm` and is re-exported here where it is minted
-// ([`TypeEnv::register_type_head`](crate::types::TypeEnv::register_type_head)
-// allocates one per declaration).
 pub use al_vm::TypeId;
 
-/// Names of the *structural* prelude types — those whose `Type` is not
-/// `Named` (because exhaustiveness/array-pattern handling needs the dedicated
-/// shape). These four are the only prelude name strings outside
-/// `bytecode::prelude_bindings`.
+/// Names of the prelude types that are not `Type::Named`. The only prelude
+/// name strings outside `bytecode::prelude_bindings`.
 pub mod prim_names {
     pub const INT: &str = "Int";
     pub const FLOAT: &str = "Float";
@@ -35,9 +29,8 @@ impl PrimitiveKind {
     }
 }
 
-/// A labelled field of a constructor variant in the substituted
-/// `Type::Named` form consumed by exhaustiveness/field-access. The template
-/// form stored in `TypeInfo` is `environment::VariantField`, not this.
+/// A labelled field of a constructor variant, already substituted. The
+/// unsubstituted template form is `environment::VariantField`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldDef {
     pub label: String,
@@ -56,11 +49,9 @@ pub enum Type {
         params: Vec<Type>,
         ret: Box<Type>,
     },
-    /// A user-defined nominal type. `variants` carries the constructor set with
-    /// field types already substituted for `type_args`, so consumers like
-    /// exhaustiveness checking and field access need no further environment
-    /// lookups. A "struct" is the single-variant case whose constructor name
-    /// equals the type name.
+    /// A user-defined nominal type. `variants` has field types already
+    /// substituted for `type_args`, so consumers need no environment lookup.
+    /// A struct is the single-variant case whose ctor name is the type name.
     Named {
         id: TypeId,
         name: String,

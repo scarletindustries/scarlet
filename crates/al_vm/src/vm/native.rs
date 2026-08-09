@@ -1,78 +1,38 @@
-//! The VM half of the native calling convention: how JIT-compiled function
-//! bodies and the interpreter hand a running process back and forth.
+//! The VM half of the native calling convention: how JIT-compiled bodies and
+//! the interpreter hand a running process back and forth.
 //!
-//! The ABI itself — the [`NativeStatus`] word and the [`NativeEntry`]
-//! signature `extern "C" fn(vmx: *mut c_void) -> NativeStatus` — is defined
-//! once in [`crate::bytecode::native`] beside the per-program entry
-//! table; the front end compiles bodies but cannot name the VM, so `vmx` is
-//! opaque there. This module pins down what `vmx` actually is (`&mut VM`,
-//! see [`VM::call_native`]) and round-trips the status word to the
-//! interpreter's `VmResult<Step>` outcomes.
+//! The ABI ([`NativeStatus`], [`NativeEntry`]) is declared in
+//! [`crate::bytecode::native`], where the VM cannot be named, so the entry's
+//! `vmx` argument is opaque there. This module pins it down as `&mut VM` and
+//! round-trips the status word to `VmResult<Step>`.
 //!
-//! The value-passing convention has no C-level arguments or return: the
-//! caller has already installed the callee's [`CallFrame`](super::CallFrame)
-//! and placed the arguments in the callee's frame slots at
-//! `[base_slot, base_slot + arity)` — exactly the layout `enter_frame!`
-//! produces in the interpreter (`exec.rs`) — and on [`NativeStatus::Done`]
-//! the callee has already applied the interpreter's return protocol
-//! (`stack.truncate(base_slot)`, push result, pop frame). Compiled code
-//! keeps the interpreter's frame layout bit-for-bit, which is what makes
-//! per-function fallback, preemption, and process migration work unchanged.
+//! Values do not cross as C arguments. The caller installs the callee's
+//! [`CallFrame`](super::CallFrame) and leaves the arguments in slots
+//! `[base_slot, base_slot + arity)`, and a `Done` callee has already applied
+//! the interpreter's return protocol. Compiled code keeps the interpreter's
+//! frame layout bit-for-bit; that is what makes per-function fallback,
+//! preemption and process migration work unchanged.
 //!
-//! Two of the four outcomes carry a payload the one-word status cannot
-//! ([`Step::Parked`]'s `Wait`, and a `VmError`); [`VM::status_from_outcome`]
-//! parks the payload in the VM while the status word unwinds the native
-//! frames — every runtime call a compiled body makes that can suspend
-//! compiles to `status = call(...); if status != Done { return status; }` —
-//! and [`VM::outcome_from_status`] rehydrates it at the trampoline, which
-//! then suspends, yields, or raises exactly as the interpreter's dispatch
-//! loop does today. Resume re-enters at the top frame's `frame.ip`, which
-//! for a native function is a resume-point index (`0` = enter from the top).
+//! `Parked` and `Error` carry a payload the one-word status cannot, so
+//! [`VM::status_from_outcome`] parks it in the VM while the status unwinds
+//! the native frames, and [`VM::outcome_from_status`] rehydrates it at the
+//! trampoline. Every suspending call compiles to
+//! `status = call(...); if status != Done { return status; }`. Resume
+//! re-enters at the top frame's `ip`, which for a native function is a
+//! resume-point index (`0` = from the top).
 //!
-//! The reverse direction — a compiled body calling an interpreter-only
-//! function — goes through [`al_rt_enter_interp`], which runs
-//! `execute_slice` with a *frame floor* at the caller's depth and encodes
-//! the slice's outcome as the same status word. That shim is why the whole
-//! unwind protocol must exist even though stage-A0 compiled code cannot
-//! park by construction: an interpreted *callee* of a native caller can
-//! park (the ten `io.rs` ops), and its `Parked` has to unwind the native
-//! machine frames above it by plain returns before the scheduler can
-//! `suspend_current` + `park` the process.
+//! The `al_rt_*` shims below are the runtime half of each call shape a
+//! compiled body can make, reached by symbol (see [`rt_symbols`]): known
+//! call, dynamic call, cross-function tail call, self-tail back-edge, and
+//! the fall back to the interpreter ([`al_rt_enter_interp`], which runs
+//! `execute_slice` under a frame floor at the caller's depth). A tail call
+//! returns [`NativeStatus::TailCall`] to [`VM::drive_top_frame`], which
+//! dispatches the collapsed frame, so tail chains run on a flat machine
+//! stack.
 //!
-//! # The five call kinds
-//!
-//! Every call a compiled body makes is one of five shapes; the `al_rt_*`
-//! shims below are the runtime half of each, reached by symbol like the
-//! [`native_shims`](super::native_shims) table (see [`rt_symbols`]):
-//!
-//! 1. **native → native (known):** [`al_rt_call`] — the caller's resume ip
-//!    is stored in its own frame, the callee `CallFrame` is pushed exactly
-//!    as `enter_frame!` does (capture-free sentinel, zeroed locals), the
-//!    entry-table hit is called directly, and the returned status is tested:
-//!    `Done` continues with the result, anything else unwinds.
-//! 2. **native → interpreter-only fn:** the same [`al_rt_call`], whose
-//!    table miss runs the callee under [`al_rt_enter_interp`]'s frame floor.
-//! 3. **native → @vm op:** stage A2. The registry seam is already in place —
-//!    one shim + one `(name, address)` row in the symbol table + one import
-//!    (`vm::jit::RuntimeFns`) per op, nothing structural.
-//! 4. **RC helpers:** stage A1 (`al_native_release_at_zero` and the value
-//!    shims exist; A0 bodies only reach them through the dynamic drop gate).
-//! 5. **tail calls:** a *self*-tail call is a native loop back-edge whose
-//!    reds checkpoint is [`al_rt_checkpoint`] (yield resumes from the top —
-//!    the frame's locals already are the next iteration's arguments, the
-//!    interpreter's `TailCallSelf` contract). A *cross-function* tail call
-//!    is trampoline-mediated: [`al_rt_tail_call`] collapses the caller frame
-//!    in place (the `TailCallKnown` surgery) and returns
-//!    [`NativeStatus::TailCall`], which the caller returns verbatim; the
-//!    driver loop ([`VM::drive_top_frame`]) that invoked the function then
-//!    dispatches the collapsed frame, so arbitrarily long tail chains run on
-//!    a flat machine stack.
-//!
-//! Reduction parity across the boundary lives in `VM::native_reds`: entering
-//! a function charges one reduction (plus accrued reclamation debt) exactly
-//! like the interpreter's `checkpoint!`, whether the entry is a call, a tail
-//! call, or a self-tail back-edge, and exhaustion yields with the callee
-//! frame consistent at `ip == 0`.
+//! `VM::native_reds` keeps reduction parity: entering a function charges one
+//! reduction plus accrued reclamation debt, exactly like the interpreter's
+//! `checkpoint!`, and exhaustion yields with the callee frame at `ip == 0`.
 
 use crate::FuncIdx;
 use crate::bytecode::{NativeEntry, NativeStatus, Value};
@@ -82,84 +42,54 @@ use super::poll::Wait;
 use super::{CallFrame, Step, VM, VmError, VmResult};
 
 thread_local! {
-    /// The scheduler's VM for this OS thread, re-published at the top of
-    /// every `scheduler_loop` iteration (C1 scaffolding). When compiled
-    /// code stops carrying `vmx` in its frames — the machine-stack plan —
-    /// every shim re-derives the VM from here instead, so a frame parked on
-    /// thread A and resumed on thread B reads B's scheduler by
-    /// construction; the migration corruption (a spilled `&mut VM` crossing
-    /// threads inside a parked frame) becomes unrepresentable. Dormant
-    /// today: nothing reads it yet except through [`current_vm`].
+    /// The scheduler's VM for this OS thread, re-published every
+    /// `scheduler_loop` iteration. Nothing reads it yet except
+    /// [`current_vm`]; it exists so shims can re-derive the VM instead of
+    /// trusting a `vmx` spilled into a frame that may resume on another
+    /// thread.
     static CURRENT_VM: std::cell::Cell<*mut VM> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
-/// Publish `vm` as this scheduler thread's VM. Called once per
-/// `scheduler_loop` iteration; the pointer is stable for the VM's lifetime,
-/// so the repeated store is a discipline (re-derive after every suspension
-/// point), not a correctness need today.
+/// Publish `vm` as this scheduler thread's VM.
 pub(super) fn set_current_vm(vm: *mut VM) {
     CURRENT_VM.with(|c| c.set(vm));
 }
 
-/// The VM last published on this thread. Null before the first
-/// `scheduler_loop` iteration (or on a non-scheduler thread); the caller
-/// owns the resulting aliasing obligations — this is the re-derivation
-/// seam, and only the shim trampoline should ever dereference it.
+/// The VM last published on this thread, null on a non-scheduler thread.
+/// Only the shim trampoline should dereference it; the caller owns the
+/// aliasing obligations.
 pub fn current_vm() -> *mut VM {
     CURRENT_VM.with(std::cell::Cell::get)
 }
 
 /// The payload half of a [`NativeStatus::Parked`]/[`NativeStatus::Error`],
 /// parked in the VM while the status word unwinds the native frames above
-/// it. At most one is in flight per process: the trampoline consumes it
-/// before the process suspends or the error propagates.
+/// it. At most one is in flight per process.
 ///
-/// Always handled boxed: the variants are wide (a `Wait`, a `VmError`), the
-/// slot is empty except mid-unwind, and the slot lives on every `Process` —
-/// inline it would cost every parked process the payload's full width in
-/// RSS (measured +76 B/proc at 100k parked). One allocation per park/error
-/// unwind is noise next to the park itself.
+/// Always boxed: the slot lives on every `Process` and is empty except
+/// mid-unwind, so inlining these wide variants cost +76 B per parked process.
 pub(super) enum NativePending {
     Parked(Wait),
     Error(VmError),
 }
 
 impl VM {
-    /// Invoke a compiled function body. The one place the entry's context
-    /// is minted: `ctx.vm` is re-published as this scheduler's `&mut VM` on
-    /// every invocation — the C1 re-derivation store, the reason a frame
-    /// resumed on another scheduler can only ever observe that scheduler's
-    /// VM — and the entry (or a shim it calls) is the only thing that
-    /// dereferences it for the duration of the call.
+    /// Invoke a compiled function body. The caller must have pushed the
+    /// callee `CallFrame` and left the arguments in
+    /// `[base_slot, base_slot + arity)`.
     ///
-    /// The caller must have completed the frame handshake first: callee
-    /// `CallFrame` pushed, arguments in `[base_slot, base_slot + arity)`.
-    ///
-    /// Entered through [`call_entry_preserving_pinned`], which is the whole
-    /// reason this is sound: `enable_pinned_reg` (jit.rs) hands the JIT the
-    /// pinned register (x86_64 r15 / aarch64 x21) by *removing it from
-    /// Cranelift's callee-save set* — every compiled entry writes it and
-    /// never restores it. That register is callee-saved under SysV/AAPCS64,
-    /// so Rust callers legitimately keep live values in it across this call.
-    /// The shim brackets the indirect call with a save/restore, which is the
-    /// contract the ABI already promised and the JIT silently stopped
-    /// keeping. Without it the clobber lands in whichever caller's frame is
-    /// unlucky — `execute_slice_budgeted` is 105 KB of register pressure and
-    /// pushes the pinned register in its own prologue — and the symptom is a
-    /// wrong answer, in release, with no test failing.
-    ///
-    /// `#[inline(never)]` is kept as a memory barrier: the entry reaches the
-    /// VM only through the pointer stored in `native_ctx`, and while that
-    /// escape is visible to LLVM's capture analysis, keeping the boundary
-    /// opaque costs nothing and makes the reload obvious in the disassembly.
-    /// It is NOT what makes the pinned register safe — that is the shim. An
-    /// earlier revision believed the opposite and shipped the clobber.
+    /// Must go through [`call_entry_preserving_pinned`]. `enable_pinned_reg`
+    /// (jit.rs) gives the JIT the pinned register (x86_64 r15 / aarch64 x21)
+    /// by dropping it from Cranelift's callee-save set, so compiled entries
+    /// clobber a register the platform ABI says is callee-saved. The shim
+    /// saves and restores it around the indirect call. Without it a Rust
+    /// caller's live value is silently corrupted in release with no test
+    /// failing.
     #[inline(never)]
     pub(super) fn call_native(&mut self, entry: NativeEntry) -> NativeStatus {
         self.native_ctx.vm = (self as *mut VM).cast();
-        // SAFETY: `entry` is a finalized JIT entry registered in the native
-        // table for this program, and the pointer is to this VM's live
-        // `native_ctx` — the two arguments the shim forwards unchanged.
+        // SAFETY: `entry` is a finalized JIT entry from this program's native
+        // table, and the pointer is to this VM's live `native_ctx`.
         #[allow(unsafe_code)]
         unsafe {
             crate::bytecode::native::call_entry_preserving_pinned(
@@ -169,17 +99,15 @@ impl VM {
         }
     }
 
-    /// Encode a slice outcome as the one-word [`NativeStatus`] native
-    /// frames unwind with, parking any payload (`Wait`, `VmError`) in the
-    /// VM for [`VM::outcome_from_status`] to rehydrate.
+    /// Encode a slice outcome as a [`NativeStatus`], parking any payload in
+    /// the VM for [`VM::outcome_from_status`] to rehydrate.
     pub(super) fn status_from_outcome(&mut self, outcome: VmResult<Step>) -> NativeStatus {
         match outcome {
             Ok(Step::Done) => NativeStatus::Done,
             Ok(Step::Yield) => NativeStatus::Yield,
             Ok(Step::Parked(wait)) => {
-                // A pending payload is consumed by the trampoline before any
-                // new suspension can be produced; a leftover here means a
-                // native frame swallowed a non-Done status.
+                // A leftover payload means a native frame swallowed a
+                // non-Done status instead of unwinding with it.
                 debug_assert!(self.native_pending.is_none());
                 self.native_pending = Some(Box::new(NativePending::Parked(wait)));
                 NativeStatus::Parked
@@ -192,8 +120,8 @@ impl VM {
         }
     }
 
-    /// Decode a [`NativeStatus`] returned by native code back into the
-    /// interpreter's outcome, rehydrating the pending payload.
+    /// Decode a [`NativeStatus`] back into an interpreter outcome,
+    /// rehydrating the pending payload.
     pub(super) fn outcome_from_status(&mut self, status: NativeStatus) -> VmResult<Step> {
         match status {
             NativeStatus::Done => Ok(Step::Done),
@@ -210,9 +138,8 @@ impl VM {
                     "native code returned NativeStatus::Error with no pending error",
                 )),
             },
-            // Consumed by `drive_top_frame`; every entry invocation runs
-            // under that trampoline, so this arm firing means a native frame
-            // forwarded a status it was required to drive.
+            // `drive_top_frame` consumes this; reaching here means a native
+            // frame forwarded a status it was required to drive.
             NativeStatus::TailCall => Err(VmError::internal(
                 "NativeStatus::TailCall escaped its trampoline",
             )),
@@ -220,14 +147,10 @@ impl VM {
     }
 
     /// [`al_rt_enter_interp`]'s body: run the interpreter until the frame
-    /// the native caller pushed returns, then encode the slice's outcome as
-    /// the status word the native frames unwind with.
+    /// the native caller pushed returns, then encode the outcome as a status.
     fn enter_interp(&mut self) -> NativeStatus {
-        // Re-entries nest (native → interp → native → interp …); each
-        // restores the floor it found, so by the time a non-`Done` status
-        // has unwound every native frame and reached `scheduler_loop`, the
-        // floor is back at 0 — the whole-process floor the next slice (and
-        // the resume-after-park slice) runs under.
+        // Re-entries nest, and each restores the floor it found, so once a
+        // non-Done status has unwound to `scheduler_loop` the floor is 0.
         let saved = self.native_floor;
         debug_assert!(
             self.frames.len() > saved,
@@ -235,23 +158,16 @@ impl VM {
         );
         self.native_floor = self.frames.len() - 1;
         let floor = self.native_floor;
-        // The nested slice resumes the caller's remaining budget — the
-        // interp side of the `native_reds` contract — and its `Done` exit
-        // writes the remainder back, so a native fn looping over interpreted
-        // callees yields exactly as often as the all-interpreted program.
+        // The nested slice spends the caller's remaining budget, so a native
+        // fn looping over interpreted callees yields as often as the
+        // all-interpreted program would.
         let outcome = self.execute_slice_budgeted(self.native_reds);
         self.native_floor = saved;
         match outcome {
-            // `Ret` popped the callee chain back to the floor: the callee
-            // returned, and the return protocol is already applied (operands
-            // truncated, result on top of the stack) — exactly the state a
-            // `Done` promises the native caller.
             Ok(Step::Done) if self.frames.len() == floor => NativeStatus::Done,
-            // `Step::Done` away from the floor is `Op::Halt`, which only
-            // `__main__`'s body carries — and `__main__` is frame 0,
-            // always-interpreted glue that can never sit above a native
-            // caller. Unreachable by construction; refuse rather than hand
-            // the native caller a stack it no longer owns.
+            // Done away from the floor is `Op::Halt`, which only `__main__`
+            // carries, and `__main__` can never sit above a native caller.
+            // Refuse rather than hand the caller a stack it no longer owns.
             Ok(Step::Done) => self.status_from_outcome(Err(VmError::internal(
                 "process halted under a native caller",
             ))),
@@ -259,12 +175,9 @@ impl VM {
         }
     }
 
-    /// The reds checkpoint on the native side of the boundary — the exact
-    /// twin of the interpreter's `checkpoint!`: one reduction per function
-    /// application, plus whatever reclamation debt accrued since the last
-    /// checkpoint. Returns true when the budget is spent and the caller must
-    /// yield; the caller is responsible for leaving the top frame consistent
-    /// at its resume point first.
+    /// The native twin of the interpreter's `checkpoint!`. Returns true when
+    /// the budget is spent and the caller must yield; the caller must leave
+    /// the top frame consistent at its resume point first.
     fn native_checkpoint(&mut self) -> bool {
         let mut reds = self.native_reds - 1;
         self.charge_reclamation(&mut reds);
@@ -272,10 +185,8 @@ impl VM {
         reds <= 0
     }
 
-    /// `enter_frame!`'s non-tail branch for a known capture-free target (the
-    /// `call_known!` shape): push the callee `CallFrame` over the `arity`
-    /// argument words already on the stack top and zero-fill the remaining
-    /// locals. The caller has stored its own resume ip already.
+    /// `enter_frame!`'s non-tail branch for a known capture-free target.
+    /// The caller must have stored its own resume ip already.
     fn push_known_frame(&mut self, target: i32) {
         let func = &self.program.functions[target as usize];
         let (arity, locals, code_start) = (func.arity, func.locals, func.code_start);
@@ -294,10 +205,8 @@ impl VM {
     }
 
     /// `enter_frame!`'s tail branch for a known capture-free target (the
-    /// `TailCallKnown` surgery): drop the caller's slots, slide the `arity`
-    /// argument words down to its base, retarget the frame in place, and
-    /// zero-fill the remaining locals. The collapsed frame is consistent at
-    /// `ip == 0`, so a yield right after resumes the *callee* from the top.
+    /// `TailCallKnown` surgery). The collapsed frame is left at `ip == 0`, so
+    /// a yield right after resumes the callee from the top.
     fn collapse_known_frame(&mut self, target: i32) {
         let func = &self.program.functions[target as usize];
         let (arity, locals, code_start) = (func.arity, func.locals, func.code_start);
@@ -309,21 +218,18 @@ impl VM {
         f.func_idx = target;
         f.code_start = code_start;
         f.ip = 0;
-        // The sentinel a capture-free callee carries; assigning it releases
-        // the caller's closure handle, as the interpreter's tail branch does.
+        // Assigning the capture-free sentinel releases the caller's closure
+        // handle, as the interpreter's tail branch does.
         f.captures = Value::small_int(0);
         for _ in arity..locals {
             self.stack.push(Value::small_int(0));
         }
     }
 
-    /// The trampoline: drive the top frame to a boundary status — a native
-    /// entry when the table covers its function, the frame-floor interpreter
-    /// otherwise — consuming [`NativeStatus::TailCall`] by re-dispatching
-    /// the collapsed frame. Every native entry invocation goes through here
-    /// (both the interp→native seam and [`al_rt_call`]), which is what keeps
-    /// cross-function tail chains on a flat machine stack and guarantees
-    /// `TailCall` never crosses the interpreter boundary.
+    /// The trampoline: drive the top frame to a boundary status, consuming
+    /// [`NativeStatus::TailCall`] by re-dispatching the collapsed frame.
+    /// Every native entry invocation must go through here, which is what
+    /// keeps tail chains flat and `TailCall` off the interpreter boundary.
     pub(super) fn drive_top_frame(&mut self) -> NativeStatus {
         loop {
             let idx = FuncIdx::from_usize(self.frame().func_idx as usize);
@@ -337,10 +243,9 @@ impl VM {
         }
     }
 
-    /// The `Op::Call`/`Op::TailCall` callee checks: the value must be a
-    /// closure and its function's arity must match the argument count. The
-    /// resolved `func_idx` is the dispatch key the entry table (and the
-    /// interpreter) share.
+    /// The `Op::Call`/`Op::TailCall` callee checks: closure value, matching
+    /// arity. Returns the `func_idx` both the entry table and the
+    /// interpreter dispatch on.
     fn dynamic_target(&self, callee: &Value, argc: i64) -> VmResult<i32> {
         let Some(cl) = callee.as_closure() else {
             return Err(VmError::internal("call target is not a function"));
@@ -355,10 +260,9 @@ impl VM {
         Ok(target)
     }
 
-    /// `enter_frame!`'s non-tail branch for a dynamic callee (the `Op::Call`
-    /// shape): resolve the closure's target, push the callee `CallFrame`
-    /// with the closure value itself as its `captures` handle — one word
-    /// moved, no captures clone, exactly the interpreter's `Op::Call`.
+    /// `enter_frame!`'s non-tail branch for a dynamic callee. The closure
+    /// value itself becomes the frame's `captures` handle: one word moved,
+    /// no captures clone, as in the interpreter's `Op::Call`.
     fn push_closure_frame(&mut self, callee: Value, argc: i64) -> VmResult<()> {
         let target = self.dynamic_target(&callee, argc)?;
         let func = &self.program.functions[target as usize];
@@ -377,11 +281,9 @@ impl VM {
         Ok(())
     }
 
-    /// `enter_frame!`'s tail branch for a dynamic callee (`Op::TailCall`):
-    /// same checks, collapse the caller's frame in place, the closure value
-    /// becoming the collapsed frame's `captures` handle (assigning it
-    /// releases the caller's own handle, as the interpreter's tail branch
-    /// does).
+    /// `enter_frame!`'s tail branch for a dynamic callee. Assigning the
+    /// closure as the collapsed frame's `captures` releases the caller's own
+    /// handle, as the interpreter's tail branch does.
     fn collapse_closure_frame(&mut self, callee: Value, argc: i64) -> VmResult<()> {
         let target = self.dynamic_target(&callee, argc)?;
         let func = &self.program.functions[target as usize];
@@ -400,18 +302,15 @@ impl VM {
         Ok(())
     }
 
-    /// [`al_rt_call`]'s body once the argument words are on the stack:
-    /// store the caller's resume ip, install the callee frame, then
-    /// checkpoint + dispatch ([`Self::drive_pushed_callee`]).
+    /// [`al_rt_call`]'s body once the argument words are on the stack.
     fn rt_call(&mut self, target: i32, resume_ip: i32, out: *mut u64) -> NativeStatus {
         self.frame_mut().ip = resume_ip;
         self.push_known_frame(target);
         self.drive_pushed_callee(out)
     }
 
-    /// [`al_rt_call_value`]'s body: as [`Self::rt_call`], but the callee is
-    /// an owned closure value resolved through [`Self::push_closure_frame`];
-    /// its `Op::Call` checks surface as an error status.
+    /// [`al_rt_call_value`]'s body. A failed callee check surfaces as an
+    /// error status.
     fn rt_call_value(
         &mut self,
         callee: Value,
@@ -426,14 +325,12 @@ impl VM {
         self.drive_pushed_callee(out)
     }
 
-    /// The shared non-tail-call tail: charge the entry checkpoint, drive the
-    /// freshly pushed callee frame, and on `Done` pop the result out to the
-    /// native caller.
+    /// Charge the entry checkpoint, drive the freshly pushed callee frame,
+    /// and on `Done` pop the result out to the native caller.
     #[allow(unsafe_code)] // one write into the caller-provided out-slot
     fn drive_pushed_callee(&mut self, out: *mut u64) -> NativeStatus {
-        // Entry checkpoint, `checkpoint!`-parity: the callee frame is fully
-        // consistent (ip == 0, args in slots), so exhaustion is a plain
-        // unwind and resume re-enters the callee from the top.
+        // The callee frame is already consistent at ip 0, so exhaustion is a
+        // plain unwind and resume re-enters it from the top.
         if self.native_checkpoint() {
             return NativeStatus::Yield;
         }
@@ -441,9 +338,7 @@ impl VM {
         if status != NativeStatus::Done {
             return status;
         }
-        // The return protocol left the result on the stack top (the callee's
-        // old base slot); hand it to the native caller's out-slot. Ownership
-        // of the reference moves with the bits.
+        // Ownership of the reference moves with the bits.
         match self.stack.pop() {
             Some(result) => {
                 // SAFETY: `out` is the caller's result slot per
@@ -458,11 +353,8 @@ impl VM {
     }
 }
 
-/// Move `argc` argument value words from the native caller's scratch onto
-/// the value stack — the state `Op::Call*` sites are in when `enter_frame!`
-/// runs. Ownership of each reference transfers with its bits (the native
-/// caller forgets them), so there is no rc traffic, exactly like the
-/// interpreter whose args are already on the stack.
+/// Move `argc` argument words from the native caller's scratch onto the
+/// value stack. Ownership transfers with the bits, so there is no rc traffic.
 ///
 /// # Safety
 /// `args` must be valid for `argc` reads of owned value words (it may be
@@ -480,29 +372,17 @@ unsafe fn push_args(vm: &mut VM, args: *const u64, argc: i64) {
     }
 }
 
-/// Call an interpreter-only function from a compiled body — call kind 2 of
-/// the convention's five ("native → interpreter-only fn").
+/// Call an interpreter-only function from a compiled body.
 ///
-/// The caller completes the same frame handshake as for a native callee
-/// (own resume ip stored in its own frame, callee `CallFrame` pushed,
-/// arguments in `[base_slot, base_slot + arity)`), then calls this instead
-/// of a table entry. The interpreter runs the callee with a frame floor at
-/// the caller's depth: a `Ret` back down to the floor ends the slice with
-/// [`NativeStatus::Done`] and the callee's result on top of the stack.
+/// The caller completes the same frame handshake as for a native callee,
+/// then calls this instead of a table entry. The interpreter runs the callee
+/// with a frame floor at the caller's depth: a `Ret` down to the floor ends
+/// the slice with [`NativeStatus::Done`] and the result on the stack top.
 ///
-/// Any suspension inside the callee — a park in one of the ten `io.rs` ops,
-/// a reduction-budget yield — comes back as a non-`Done` status, which the
-/// caller's `if status != Done { return status; }` unwinding propagates:
-/// no native frame survives it. The suspended continuation is entirely
-/// `(stack, frames)`; on wake the process resumes in `execute_slice`, the
-/// parked frame finishes interpreted, and when it `Ret`s into the native
-/// caller's frame the interpreter carries on with that frame's *bytecode*
-/// at the stored resume ip — compiled code keeps the interpreter frame
-/// layout bit-for-bit, so the bytecode picks up exactly where the machine
-/// code left off.
-///
-/// Generated code reaches this by symbol ([`enter_interp_symbol`]), like
-/// the [`native_shims`](super::native_shims) table.
+/// A suspension inside the callee comes back as a non-`Done` status and no
+/// native frame survives it. On wake the parked frame finishes interpreted,
+/// and the native caller's frame then continues as *bytecode* from its
+/// stored resume ip.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`, with the callee
@@ -510,35 +390,22 @@ unsafe fn push_args(vm: &mut VM, args: *const u64, argc: i64) {
 /// live for the duration of the call.
 #[allow(unsafe_code)] // the designated native→interp re-entry point; contract above
 pub unsafe extern "C" fn al_rt_enter_interp(vmx: *mut VM) -> NativeStatus {
-    // SAFETY: `vmx` is the running scheduler's live VM per the contract
-    // above; the exclusive borrow lasts exactly this call, mirroring the
-    // `&mut VM` the interp→native seam lent to the compiled code.
+    // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     vm.enter_interp()
 }
 
-/// The re-entry shim as a `(symbol name, address)` pair for JIT symbol
-/// registration (`JITBuilder::symbol`), alongside
-/// [`native_shims::shim_symbols`](super::native_shims::shim_symbols).
+/// The re-entry shim as a `(symbol name, address)` pair for
+/// `JITBuilder::symbol`.
 pub fn enter_interp_symbol() -> (&'static str, *const u8) {
     ("al_rt_enter_interp", al_rt_enter_interp as *const u8)
 }
 
-/// Call a known capture-free function from a compiled body — call kinds 1
-/// and 2 of the convention's five. `target` is the callee's `FuncIdx`,
-/// `resume_ip` the caller's own bytecode resume point (the instruction
-/// after the corresponding call, so a suspension under the callee resumes
-/// the caller's remainder *interpreted*), and `args`/`argc` the argument
-/// value words, ownership transferring in.
-///
-/// The shim performs the interpreter's whole `CallKnown` sequence: resume ip
-/// into the caller frame, argument push, `enter_frame!`-equivalent callee
-/// frame, the entry reds checkpoint, then dispatch — the entry-table hit
-/// directly, the miss under [`al_rt_enter_interp`]'s frame floor — driving
-/// any tail chain the callee unwinds with. On [`NativeStatus::Done`] the
-/// callee's result word is written to `out` (ownership to the caller) and
-/// the caller's frame is the top frame again; any other status unwinds:
-/// `status = al_rt_call(...); if status != Done { return status; }`.
+/// Call a known capture-free function from a compiled body: the whole
+/// interpreter `CallKnown` sequence behind the C ABI. `resume_ip` is the
+/// caller's own *bytecode* resume point, so a suspension under the callee
+/// resumes the caller's remainder interpreted. `args` ownership transfers
+/// in; on `Done` the result word is written to `out`.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM` (no other reference
@@ -560,15 +427,10 @@ pub unsafe extern "C" fn al_rt_call(
     vm.rt_call(target as i32, resume_ip as i32, out)
 }
 
-/// Call a *dynamic* callee from a compiled body — the `Op::Call` half of
-/// call kinds 1 and 2. `callee` is an owned closure value word (the
-/// interpreter's popped callee): the shim resolves its `func_idx`, checks
-/// the arity, and installs it as the callee frame's `captures` handle, so a
-/// capture-carrying body finds its environment exactly where `PushCapture`
-/// expects it. Dispatch then consults the same entry table as a known call
-/// — a native-covered closure body runs native, anything else interprets
-/// under the frame floor. A non-closure callee or an arity mismatch surfaces
-/// as [`NativeStatus::Error`] with the interpreter's own message.
+/// Call a dynamic callee from a compiled body. `callee` is an owned closure
+/// word; it is installed as the callee frame's `captures` handle, where
+/// `PushCapture` expects to find the environment. A non-closure callee or an
+/// arity mismatch surfaces as [`NativeStatus::Error`].
 ///
 /// # Safety
 /// As [`al_rt_call`], plus: `callee` must be the bits of a `Value` whose
@@ -591,17 +453,11 @@ pub unsafe extern "C" fn al_rt_call_value(
     vm.rt_call_value(callee, resume_ip as i32, argc, out)
 }
 
-/// The frame handshake half of a direct native→native call — [`al_rt_call`]
-/// up to but not including `drive_top_frame`. Pushes the argument words,
-/// stores the caller's resume ip, installs the callee `CallFrame` (the
-/// `enter_frame!` push), and charges the entry checkpoint. The callee frame
-/// is bit-identical to the interpreter's at ip 0, so on
-/// [`NativeStatus::Yield`] the caller unwinds and re-entry runs the callee
-/// from the top; on [`NativeStatus::Done`] the caller emits a direct machine
-/// call to the peer's `NativeEntry` and hands the returned status to
-/// [`al_rt_direct_result`]. Together the pair is exactly `al_rt_call` with
-/// the trampoline's table lookup and indirect dispatch replaced by a
-/// statically-resolved call.
+/// The frame-handshake half of a direct native→native call: [`al_rt_call`]
+/// up to but not including `drive_top_frame`. On `Done` the caller emits a
+/// direct machine call to the peer's `NativeEntry` and hands the status to
+/// [`al_rt_direct_result`]. The pair is `al_rt_call` with the table lookup
+/// and indirect dispatch replaced by a statically resolved call.
 ///
 /// # Safety
 /// As [`al_rt_call`], minus `out`.
@@ -625,16 +481,12 @@ pub unsafe extern "C" fn al_rt_push_frame(
     NativeStatus::Done
 }
 
-/// The return-path half of a direct native→native call: `status` is what
-/// the peer's `NativeEntry` returned. On [`NativeStatus::Done`] the callee's
-/// `al_rt_ret` left the result on the stack top; pop it out to the caller's
-/// result slot exactly as [`VM::drive_pushed_callee`] does. A
-/// [`NativeStatus::TailCall`] is consumed here — the callee tail-called out,
-/// so drive the collapsed frame to completion under the trampoline (the same
-/// loop `al_rt_call` would have run) — never propagated: the caller's
-/// `CallFrame` is under the collapsed one, so unwinding on `TailCall` would
-/// leave it stranded. Any other status passes through to the caller's
-/// mechanical unwind.
+/// The return-path half of a direct native→native call. `status` is what the
+/// peer's `NativeEntry` returned; on `Done` the result is popped into `out`.
+///
+/// [`NativeStatus::TailCall`] must be consumed here, never propagated: the
+/// caller's `CallFrame` sits under the collapsed one, so unwinding on it
+/// would strand that frame.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `out` must be
@@ -658,8 +510,7 @@ pub unsafe extern "C" fn al_rt_direct_result(
     }
     match vm.stack.pop() {
         Some(result) => {
-            // SAFETY: `out` is the caller's result slot per the contract,
-            // valid for one u64 write.
+            // SAFETY: `out` is valid for one u64 write per the contract.
             unsafe { out.write(std::mem::ManuallyDrop::new(result).to_bits()) };
             NativeStatus::Done
         }
@@ -669,16 +520,12 @@ pub unsafe extern "C" fn al_rt_direct_result(
     }
 }
 
-/// Cross-function tail call from a compiled body — call kind 5's
-/// trampoline-mediated form. Pushes the argument words, collapses the
-/// caller's frame into the callee in place (the interpreter's
-/// `TailCallKnown` surgery), charges the reds checkpoint, and returns
-/// either [`NativeStatus::Yield`] (budget spent; the collapsed frame is
-/// consistent at `ip == 0`, so resume enters the callee from the top) or
+/// Cross-function tail call from a compiled body: the interpreter's
+/// `TailCallKnown` surgery behind the C ABI. Returns
 /// [`NativeStatus::TailCall`] for the driver that invoked the caller to
-/// dispatch. A tail call site compiles to
-/// `return al_rt_tail_call(...)` — the caller's machine frame is gone
-/// before the callee runs, so tail chains never stack.
+/// dispatch, or `Yield` if the budget ran out (collapsed frame at `ip == 0`).
+/// A tail-call site compiles to `return al_rt_tail_call(...)`, so the
+/// caller's machine frame is gone before the callee runs.
 ///
 /// # Safety
 /// As [`al_rt_call`], minus `out` — a tail caller never sees the result.
@@ -700,11 +547,9 @@ pub unsafe extern "C" fn al_rt_tail_call(
     NativeStatus::TailCall
 }
 
-/// Dynamic cross-function tail call — `Op::TailCall`'s surgery behind the C
-/// ABI: the caller's frame collapses into the closure's function in place,
-/// the closure value becoming the collapsed frame's `captures` handle. The
-/// caller returns the status verbatim (`return al_rt_tail_call_value(...)`),
-/// so the driver that invoked it dispatches the collapsed frame.
+/// Dynamic cross-function tail call: `Op::TailCall`'s surgery behind the C
+/// ABI, the closure becoming the collapsed frame's `captures` handle. The
+/// caller returns the status verbatim.
 ///
 /// # Safety
 /// As [`al_rt_call_value`], minus `out` — a tail caller never sees the
@@ -731,13 +576,9 @@ pub unsafe extern "C" fn al_rt_tail_call_value(
     NativeStatus::TailCall
 }
 
-/// `Op::MakeClosure`'s allocation for a compiled body: build a closure cell
-/// over `func_idx` from `count` capture words. Each capture word transfers
-/// one owned reference in; the cell takes its own copy of each (the
-/// interpreter's `closure_in` over the pushed captures) and the transferred
-/// references are released — push-then-truncate, minus the stack traffic.
-/// The returned bits carry the one owned reference to the fresh cell, whose
-/// allocation lands in the same `ProcHeap` accounting as the interpreter's.
+/// `Op::MakeClosure` for a compiled body. Each capture word transfers one
+/// owned reference in; the cell takes its own copy and the transferred
+/// references are released. The returned bits carry one owned reference.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `caps` must be
@@ -753,8 +594,7 @@ pub unsafe extern "C" fn al_rt_make_closure(
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     let n = count.max(0) as usize;
-    // SAFETY: `Value` is `repr(transparent)` over its u64 bits, so the
-    // caller's words read as a borrowed value slice for the copy.
+    // SAFETY: `Value` is `repr(transparent)` over its u64 bits.
     let borrowed: &[Value] = if n == 0 {
         &[]
     } else {
@@ -762,26 +602,20 @@ pub unsafe extern "C" fn al_rt_make_closure(
     };
     let v = Value::closure_in(&mut vm.heap, func_idx as i32, borrowed);
     for i in 0..n {
-        // SAFETY: releases exactly the one reference each word transferred
-        // in — the interpreter's `stack.truncate` after `closure_in`.
+        // SAFETY: releases the one reference each word transferred in.
         drop(unsafe { Value::from_bits(caps.add(i).read()) });
     }
     std::mem::ManuallyDrop::new(v).to_bits()
 }
 
-/// The reds checkpoint at a *self*-tail-call back-edge — call kind 5's
-/// native-loop form. The compiled loop has already written the next
-/// iteration's arguments into the frame's argument slots (and left
-/// `stack.len() == base_slot + locals`, the `TailCallSelf` frame shape), so
-/// on exhaustion the frame is made resumable by pointing `ip` at 0 and the
-/// unwind is a plain return: re-entry re-runs the function from the top
-/// with the already-updated arguments, exactly the interpreter's
-/// `TailCallSelf` + `checkpoint!` behaviour. [`NativeStatus::Done`] means
-/// "keep looping".
+/// The reds checkpoint at a self-tail-call back-edge.
+/// [`NativeStatus::Done`] means keep looping; `Yield` points `ip` at 0 so
+/// re-entry re-runs the function with the already-updated arguments.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`, its top frame the
-/// compiled function's, in the back-edge state described above.
+/// compiled function's, with the next iteration's arguments already written
+/// into the argument slots and `stack.len() == base_slot + locals`.
 #[allow(unsafe_code)] // the self-tail back-edge seam; contract above
 pub unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
@@ -793,13 +627,9 @@ pub unsafe extern "C" fn al_rt_checkpoint(vmx: *mut VM) -> NativeStatus {
     NativeStatus::Done
 }
 
-/// The address of the top frame's first slot (`stack[base_slot]`), the base
-/// compiled code reads its arguments and writes its frame-slot locals
-/// through — `Value` is a `repr(transparent)` u64, so slot `i` is the word
-/// at `base + 8*i`. The pointer is invalidated by anything that can grow
-/// the value stack (any `al_rt_*` call shim), so compiled code re-fetches
-/// it after every such seam, mirroring how the interpreter re-hoists its
-/// frame state after calls.
+/// The address of the top frame's first slot; slot `i` is the word at
+/// `base + 8*i`. Any `al_rt_*` call shim can grow the value stack and
+/// invalidate this, so compiled code must re-fetch it after every such call.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM` with the compiled
@@ -809,17 +639,14 @@ pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     let base = vm.frame().base_slot;
-    // SAFETY: `base_slot < stack.len()` for a live frame; the cast is sound
-    // because `Value` is `repr(transparent)` over its u64 bits.
+    // SAFETY: `base_slot < stack.len()` for a live frame, and `Value` is
+    // `repr(transparent)` over its u64 bits.
     unsafe { vm.stack.as_mut_ptr().add(base).cast::<u64>() }
 }
 
-/// The compiled epilogue — `ret!`'s stack surgery behind the C ABI: pop the
-/// frame, truncate the operand stack to its base (releasing the frame's
-/// remaining locals, exactly the interpreter's decref-on-truncate), and
-/// push the result. The entry then returns [`NativeStatus::Done`], leaving
-/// the state every caller of the convention expects: caller frame on top,
-/// result on the stack top. Ownership of `result` transfers in.
+/// The compiled epilogue: `ret!`'s stack surgery behind the C ABI. Leaves
+/// the caller frame on top with the result on the stack top. Ownership of
+/// `result` transfers in.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM` with the returning
@@ -828,8 +655,8 @@ pub unsafe extern "C" fn al_rt_frame_base(vmx: *mut VM) -> *mut u64 {
 pub unsafe extern "C" fn al_rt_ret(vmx: *mut VM, result: u64) {
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
-    // A compiled body only runs with its frame installed, so the pop cannot
-    // miss; degrade to a no-op rather than unwind across the C boundary.
+    // Unreachable with a frame installed; degrade to a no-op rather than
+    // unwind across the C boundary.
     let Some(frame) = vm.frames.pop() else {
         debug_assert!(false, "al_rt_ret with no active call frame");
         return;
@@ -837,14 +664,11 @@ pub unsafe extern "C" fn al_rt_ret(vmx: *mut VM, result: u64) {
     vm.stack.truncate(frame.base_slot);
     // SAFETY: `result` is an owned value word per the contract.
     vm.stack.push(unsafe { Value::from_bits(result) });
-    // `frame` drops here, releasing its captures handle like `ret!`'s
-    // popped frame does.
+    // `frame` drops here, releasing its captures handle.
 }
 
-/// Every `al_rt_*` boundary shim, as `(symbol name, address)` pairs for JIT
-/// symbol registration — the call-kind half of the registry seam, beside
-/// [`native_shims::shim_symbols`](super::native_shims::shim_symbols). A2's
-/// @vm-op shims extend the same tables: one shim, one row, one import.
+/// Every `al_rt_*` boundary shim as a `(symbol name, address)` pair for JIT
+/// symbol registration.
 pub fn rt_symbols() -> [(&'static str, *const u8); 11] {
     [
         enter_interp_symbol(),
@@ -869,10 +693,6 @@ mod tests {
     use super::super::halt_test_vm;
     use super::*;
 
-    // The C1 re-derivation seam: CURRENT_VM is per OS thread — a value
-    // published on one scheduler thread is invisible on another, which is
-    // the property that makes "re-derive after every suspension point"
-    // migration-safe.
     #[test]
     fn current_vm_is_thread_local() {
         let mut vm = halt_test_vm();
@@ -946,17 +766,13 @@ mod tests {
         ));
     }
 
-    // A stand-in native entry: proves the signature crosses a real C-ABI
-    // call and that `call_native` hands over a non-null context. Reading
-    // the VM out of it is [`vm_from_ctx`]'s job in the stubs below.
     extern "C" fn yield_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
         assert!(!ctx.is_null());
         NativeStatus::Yield
     }
 
-    /// What a compiled prologue does with its argument: the entry receives
-    /// a [`crate::bytecode::NativeCtx`] and the VM lives behind its `vm`
-    /// field — stubs must read it the same way generated code does.
+    /// Reads the VM out of the entry's `NativeCtx` the way a compiled
+    /// prologue does.
     fn vm_from_ctx(ctx: *mut core::ffi::c_void) -> *mut VM {
         unsafe { (*ctx.cast::<crate::bytecode::NativeCtx>()).vm.cast() }
     }
@@ -975,11 +791,8 @@ mod tests {
 
     use super::super::{CallFrame, new_vm};
 
-    // A two-function program for driving `al_rt_enter_interp` directly:
-    // fn 0 ("main", the entry) is a single `Halt` at address 0 — the
-    // stand-in *bytecode* body for the native-caller frame, exercised only
-    // by the resume-after-park path — and fn 1 ("callee") is `callee` at
-    // addresses [1, 1 + len).
+    // fn 0 ("main") is a single `Halt`, standing in for the native caller's
+    // bytecode body; fn 1 is `callee` at addresses [1, 1 + len).
     fn caller_callee_program(constants: Vec<Value>, callee: Vec<Instruction>) -> Program {
         let callee_len = callee.len() as i32;
         let mut code = vec![op(Op::Halt)];
@@ -1012,9 +825,8 @@ mod tests {
     }
 
     // The frame shape a native caller leaves right before its
-    // `al_rt_enter_interp` call: its own frame below (resume ip already
-    // stored — here 0, pointing at main's `Halt` as the stand-in resume
-    // body), the interpreted callee's freshly pushed frame on top.
+    // `al_rt_enter_interp` call: its own frame below with the resume ip
+    // stored, the interpreted callee's fresh frame on top.
     fn vm_with_callee_pushed(constants: Vec<Value>, callee: Vec<Instruction>) -> VM {
         let mut vm = new_vm(
             caller_callee_program(constants, callee),
@@ -1046,8 +858,6 @@ mod tests {
         );
         let status = unsafe { al_rt_enter_interp(&raw mut vm) };
         assert_eq!(status, NativeStatus::Done);
-        // The return protocol is already applied: callee frame popped, the
-        // caller's frame on top again, result on top of the stack.
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.stack.len(), 1);
         assert_eq!(vm.stack[0].to_bits(), Value::small_int(42).to_bits());
@@ -1057,45 +867,35 @@ mod tests {
 
     #[test]
     fn interp_callee_park_unwinds_and_resume_finishes_interpreted() {
-        // callee: sleep(1ms) — parks via the io.rs protocol — then return
-        // the nil the wake left on top.
+        // callee: sleep(1ms), then return the nil the wake left on top.
         let mut vm = vm_with_callee_pushed(
             vec![Value::small_int(1)],
             vec![op_arg(Op::PushConst, 0), op(Op::Sleep), op(Op::Ret)],
         );
         let status = unsafe { al_rt_enter_interp(&raw mut vm) };
-        // The park surfaces as the status word; the native frames above
-        // unwind with it by plain returns. The floor is back at 0 and the
-        // parked continuation is entirely (stack, frames): the callee frame
-        // is intact, `ip` on its bytecode resume point (the `Ret` after
-        // `Sleep`).
+        // The parked continuation is entirely (stack, frames): callee frame
+        // intact, `ip` on the `Ret` after `Sleep`.
         assert_eq!(status, NativeStatus::Parked);
         assert_eq!(vm.native_floor, 0);
         assert_eq!(vm.frames.len(), 2);
         assert_eq!(vm.frames[1].ip, 2);
-        // The trampoline half: rehydrate exactly the step whose
-        // `scheduler_loop` arm does `suspend_current` + `park` today.
         match vm.outcome_from_status(status) {
             Ok(Step::Parked(Wait::Timer(_))) => {}
             _ => panic!("expected the sleep's timer park back"),
         }
-        // Resume-after-park re-enters the interpreter: the callee finishes
-        // (returns the nil `sleep` pushed), and the native caller's frame
-        // continues as bytecode from its stored resume ip — here main's
-        // `Halt`, which ends the process with the callee's result on top.
+        // Resume finishes the callee interpreted, then the native caller's
+        // frame continues as bytecode from its stored resume ip.
         let resumed = vm.execute_slice().expect("resume must not error");
         assert!(matches!(resumed, Step::Done));
         assert_eq!(vm.stack.len(), 1);
-        // `sleep` pushes the VM's Nil enum (a frozen template word), not the
-        // raw immediate — compare against the same constructor.
+        // `sleep` pushes the VM's Nil enum, not the raw immediate.
         assert_eq!(vm.stack[0].to_bits(), vm.make_nil().to_bits());
     }
 
     #[test]
     fn interp_callee_yield_unwinds_with_a_resumable_frame() {
-        // callee: an infinite self-tail loop — exhausts the reduction budget
-        // and yields at the back-edge checkpoint with `ip == 0` (re-enter
-        // from the top), the TailCallSelf frame-at-yield contract.
+        // callee: an infinite self-tail loop, so it yields at the back-edge
+        // checkpoint with `ip == 0`.
         let mut vm = vm_with_callee_pushed(Vec::new(), vec![op_arg(Op::TailCallSelf, 0)]);
         let status = unsafe { al_rt_enter_interp(&raw mut vm) };
         assert_eq!(status, NativeStatus::Yield);
@@ -1107,7 +907,7 @@ mod tests {
 
     #[test]
     fn interp_callee_error_unwinds_with_its_payload() {
-        // callee: `Sleep` over an empty stack — a runtime error.
+        // callee: `Sleep` over an empty stack.
         let mut vm = vm_with_callee_pushed(Vec::new(), vec![op(Op::Sleep), op(Op::Ret)]);
         let status = unsafe { al_rt_enter_interp(&raw mut vm) };
         assert_eq!(status, NativeStatus::Error);
@@ -1120,9 +920,8 @@ mod tests {
 
     #[test]
     fn nested_re_entry_restores_the_outer_floor() {
-        // As if an outer native→interp re-entry (floor 1) is on the machine
-        // stack and the interpreted code under it called back into native
-        // code, which now calls a further interpreted callee.
+        // As if an outer re-entry (floor 1) is on the machine stack and the
+        // native code under it now calls a further interpreted callee.
         let mut vm = vm_with_callee_pushed(
             vec![Value::small_int(7)],
             vec![op_arg(Op::PushConst, 0), op(Op::Ret)],
@@ -1150,15 +949,12 @@ mod tests {
         assert!(!addr.is_null());
     }
 
-    // ---- The call kinds: al_rt_call / al_rt_tail_call / al_rt_checkpoint --
-
     use std::mem::ManuallyDrop;
 
     use crate::bytecode::NativeTable;
 
-    /// A program whose entry (fn 0, "main") is `[Nop, Halt]` — ip 1 is a
-    /// realistic non-zero resume point — plus the given functions, laid out
-    /// consecutively: fn i+1 gets `(arity, locals, body)`.
+    /// Entry fn 0 ("main") is `[Nop, Halt]`, so ip 1 is a realistic non-zero
+    /// resume point; fn i+1 gets `(arity, locals, body)`.
     fn program_with(constants: Vec<Value>, fns: Vec<(i32, i32, Vec<Instruction>)>) -> Program {
         let mut code = vec![op(Op::Nop), op(Op::Halt)];
         let mut functions = vec![Function {
@@ -1193,9 +989,8 @@ mod tests {
         }
     }
 
-    /// A VM over `program` in the state a *native caller* runs in: main's
-    /// frame installed (the stand-in native caller — its bytecode is the
-    /// resume fallback), the boundary reds counter seeded.
+    /// A VM in the state a native caller runs in: main's frame installed as
+    /// the stand-in caller, boundary reds counter seeded.
     fn native_caller_vm(program: Program, reds: i32) -> VM {
         let mut vm = new_vm(program, &crate::template::test_fixture::TEST_STDLIB)
             .expect("test VM must construct");
@@ -1214,9 +1009,7 @@ mod tests {
         ManuallyDrop::new(unsafe { Value::from_bits(bits) }).as_int_typed()
     }
 
-    /// A compiled body stand-in for `fn add_five(n) { n + 5 }`: reads its
-    /// argument through the frame base, applies the return protocol via
-    /// `al_rt_ret`, reports `Done` — the callee side of call kind 1.
+    /// A compiled body stand-in for `fn add_five(n) { n + 5 }`.
     extern "C" fn add_five_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
         let vm: *mut VM = vm_from_ctx(ctx);
         let base = unsafe { al_rt_frame_base(vm) };
@@ -1239,12 +1032,10 @@ mod tests {
 
         assert_eq!(status, NativeStatus::Done);
         assert_eq!(small(out), 42);
-        // The caller's frame is the top frame again, its resume ip stored;
-        // the result left the stack through the out-slot.
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.frames[0].ip, 1);
         assert_eq!(vm.stack.len(), 0);
-        // Entry checkpoint parity: exactly one reduction charged.
+        // Exactly one reduction charged, matching the interpreter.
         assert_eq!(vm.native_reds, 99);
     }
 
@@ -1281,9 +1072,7 @@ mod tests {
         let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
 
         // The budget died at the entry checkpoint: the callee never ran, but
-        // its frame is fully consistent (ip 0, argument in its slot, locals
-        // zero-filled) — resume re-enters it from the top, like the
-        // interpreter's `checkpoint!` after `enter_frame!`.
+        // its frame is consistent, so resume re-enters it from the top.
         assert_eq!(status, NativeStatus::Yield);
         assert_eq!(vm.frames.len(), 2);
         assert_eq!(vm.frames[0].ip, 1);
@@ -1295,9 +1084,8 @@ mod tests {
         assert_eq!(small(vm.stack[1].to_bits()), 0);
     }
 
-    /// A compiled body stand-in for `fn f1(n) { f2(n + 1) }` with the call
-    /// in tail position: the cross-function tail-call site compiles to
-    /// `return al_rt_tail_call(...)`.
+    /// A compiled body stand-in for `fn f1(n) { f2(n + 1) }`, the call in
+    /// tail position.
     extern "C" fn tail_to_f2_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
         let vm: *mut VM = vm_from_ctx(ctx);
         let base = unsafe { al_rt_frame_base(vm) };
@@ -1325,15 +1113,13 @@ mod tests {
         let mut out = 0u64;
         let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
 
-        // f1's machine frame returned `TailCall` before f2 ran; the driver
-        // loop inside `al_rt_call` dispatched the collapsed frame (f2, here
-        // through the frame floor) and only `Done` came back out.
+        // f1 returned `TailCall` before f2 ran; the driver loop inside
+        // `al_rt_call` dispatched the collapsed frame, so only `Done` escapes.
         assert_eq!(status, NativeStatus::Done);
         assert_eq!(small(out), 42);
         assert_eq!(vm.frames.len(), 1);
         assert_eq!(vm.stack.len(), 0);
-        // Two applications, two reductions: the call and the tail call —
-        // the interpreter's `CallKnown` + `TailCallKnown` charge.
+        // Two applications, two reductions: the call and the tail call.
         assert_eq!(vm.native_reds, 98);
     }
 
@@ -1346,8 +1132,7 @@ mod tests {
                 (1, 1, vec![op_arg(Op::PushLocal, 0), op(Op::Ret)]),
             ],
         );
-        // Budget 2: the entry checkpoint takes it to 1, the tail-call
-        // checkpoint to 0 — the yield lands exactly at the tail edge.
+        // Budget 2 puts the yield exactly at the tail edge.
         let mut vm = native_caller_vm(program, 2);
         vm.program
             .native
@@ -1357,9 +1142,8 @@ mod tests {
         let mut out = 0u64;
         let status = unsafe { al_rt_call(&raw mut vm, 1, 1, args.as_ptr(), 1, &raw mut out) };
 
-        // The caller frame was already collapsed into the callee, so the
-        // suspension is the interpreter's TailCallKnown-then-yield state:
-        // top frame is f2 at ip 0 with its argument in place.
+        // The caller frame was already collapsed, so the top frame is f2 at
+        // ip 0 with its argument in place.
         assert_eq!(status, NativeStatus::Yield);
         assert_eq!(vm.frames.len(), 2);
         assert_eq!(vm.frames[1].func_idx, 2);
@@ -1367,8 +1151,6 @@ mod tests {
         assert_eq!(vm.frames[1].base_slot, 0);
         assert_eq!(vm.stack.len(), 1);
         assert_eq!(small(vm.stack[0].to_bits()), 42);
-        // Resume finishes the program: f2 returns interpreted, main's
-        // bytecode halts with the result on top.
         let resumed = vm.execute_slice().expect("resume must not error");
         assert!(matches!(resumed, Step::Done));
         assert_eq!(vm.stack.len(), 1);
@@ -1392,8 +1174,7 @@ mod tests {
         assert_eq!(vm.native_reds, 4);
         assert_eq!(vm.frames[1].ip, 9);
 
-        // Exhaustion: yield with the frame resumable from the top — the
-        // locals are the next iteration's arguments (TailCallSelf shape).
+        // Exhaustion: yield with the frame resumable from the top.
         vm.native_reds = 1;
         assert_eq!(
             unsafe { al_rt_checkpoint(&raw mut vm) },
@@ -1403,9 +1184,8 @@ mod tests {
         assert!(vm.native_reds <= 0);
     }
 
-    /// A compiled body stand-in for `fn f1() { loop { f2() } }`: calls the
-    /// interpreter-only f2 forever. The yield must come out of the *shared*
-    /// slice budget, not a fresh one per native→interp re-entry.
+    /// A compiled body stand-in for `fn f1() { loop { f2() } }` over an
+    /// interpreter-only f2.
     extern "C" fn call_interp_forever_entry(ctx: *mut core::ffi::c_void) -> NativeStatus {
         let vm: *mut VM = vm_from_ctx(ctx);
         loop {
@@ -1414,15 +1194,13 @@ mod tests {
             if status != NativeStatus::Done {
                 return status;
             }
-            // The result is a small int; forgetting the bits releases nothing.
         }
     }
 
     #[test]
     fn interp_callee_spends_the_native_callers_budget() {
         // f1: native, loops calling f2. f2: interpreter-only, one `CallKnown`
-        // to f3 per invocation — each spends one reduction *inside* the
-        // interpreter. f3: returns a constant.
+        // to f3 per invocation. f3: returns a constant.
         let program = program_with(
             vec![Value::small_int(7)],
             vec![
@@ -1445,12 +1223,10 @@ mod tests {
 
         let status = vm.drive_top_frame();
 
-        // Each iteration costs two reductions — `al_rt_call`'s entry
-        // checkpoint plus f2's `CallKnown` checkpoint — so a budget of 10
-        // dies at interpreter parity, mid-callee on the fifth iteration:
-        // the `checkpoint!` after f3's frame was entered. Were each
-        // re-entry a fresh interpreter budget, the yield would instead land
-        // on the tenth entry checkpoint with f2's frame (ip 0) on top.
+        // Each iteration costs two reductions, so a budget of 10 dies
+        // mid-callee on the fifth. If each native→interp re-entry got a
+        // fresh budget, the yield would land on the tenth entry checkpoint
+        // with f2's frame on top instead.
         assert_eq!(status, NativeStatus::Yield);
         assert_eq!(vm.frames.len(), 4);
         assert_eq!(vm.frames.last().unwrap().func_idx, 3);
@@ -1464,7 +1240,6 @@ mod tests {
     fn make_closure_transfers_capture_ownership() {
         let mut vm = halt_test_vm();
         let big = Value::int_in(&mut vm.heap, i64::MAX); // rc 1
-        // Transfer one extra reference in as the capture word.
         let word = ManuallyDrop::new(big.clone()).to_bits(); // rc 2
         take_freed_objects();
         let bits = unsafe { al_rt_make_closure(&raw mut vm, 7, &word, 1) };
@@ -1476,8 +1251,7 @@ mod tests {
             assert_eq!(cr.captures().len(), 1);
             assert_eq!(cr.captures()[0].as_int(), Some(i64::MAX));
         }
-        // Net ownership transfer: the shim's internal retain/release pair
-        // cancels, nothing freed yet.
+        // The shim's internal retain/release pair cancels: nothing freed yet.
         assert_eq!(take_freed_objects(), 0);
         drop(cl); // frees the cell, releasing its capture reference
         drop(big); // the last reference to the box
@@ -1513,8 +1287,7 @@ mod tests {
         assert_eq!(vm.frames[0].ip, 1);
         assert_eq!(vm.stack.len(), 0);
         assert_eq!(vm.native_reds, 99);
-        // The frame pop released the callee handle — the closure's only
-        // reference — so the cell is already freed.
+        // The frame pop released the closure's only reference.
         assert_eq!(take_freed_objects(), 1);
     }
 
@@ -1523,7 +1296,7 @@ mod tests {
         let program = program_with(Vec::new(), vec![(1, 1, vec![op(Op::Halt)])]);
         let mut vm = native_caller_vm(program, 100);
 
-        // Not a closure: the interpreter's `Op::Call` type error.
+        // Not a closure.
         let mut out = 0u64;
         let status = unsafe {
             al_rt_call_value(

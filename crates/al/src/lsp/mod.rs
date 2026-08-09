@@ -1,9 +1,6 @@
-//! LSP stdio transport. [`LspServer`] owns a [`Workspace`] and a stdin
-//! reader; it decodes JSON-RPC frames, dispatches each method to the matching
-//! `Workspace` query/mutation, and writes responses/notifications to stdout.
-//! All language-server *state* — buffers, sessions, the reference graph, the
-//! reverse-edge index — lives on `Workspace`, so tests construct a `Workspace`
-//! directly and never touch stdin/stdout.
+//! LSP stdio transport: decode JSON-RPC frames, dispatch to [`Workspace`],
+//! write responses back. All server state lives on `Workspace`, so tests build
+//! one directly and never touch stdin/stdout.
 
 use std::io::{self, BufRead, BufReader, Read as _, Write};
 
@@ -18,10 +15,8 @@ pub use workspace::Workspace;
 
 use wire::{FileChangeType, doc_uri, folder_paths, rename_error_code, uri_to_path};
 
-/// Outcome of one framed stdin read: a full message body, or clean EOF (the
-/// client closed the pipe). Distinguishing EOF in the type — instead of the
-/// old `running: bool` side-field flipped from inside `read_message` — makes
-/// `run()`'s exit condition local to its own loop.
+/// Outcome of one framed stdin read: a message body, or the client closed the
+/// pipe.
 enum Incoming {
     Message(String),
     Eof,
@@ -110,8 +105,7 @@ impl LspServer {
         self.log(&format!("Received: {method}"));
 
         match method.as_str() {
-            // Response to a server→client request (e.g. registerCapability).
-            // No method field; nothing to dispatch.
+            // A response to a server→client request has no method field.
             "" => {}
             "initialize" => self.handle_initialize(&id, &params),
             "initialized" => self.handle_initialized(),
@@ -139,9 +133,8 @@ impl LspServer {
             }
             "workspace/didChangeWatchedFiles" => self.handle_did_change_watched_files(&params),
             _ => {
-                // An unknown *request* (id present) must be answered or the
-                // client waits forever; an unknown *notification* is just
-                // logged (JSON-RPC forbids replying to a notification).
+                // An unknown request must be answered or the client waits
+                // forever; JSON-RPC forbids replying to a notification.
                 if !matches!(id, Json::Null) {
                     self.send_error(&id, -32601, &format!("method not found: {method}"));
                 } else {
@@ -161,11 +154,9 @@ impl LspServer {
         self.send_message(&response.to_string());
     }
 
-    /// Compute a request's result on the workspace with `f` and send it as the
-    /// response. Any diagnostics the query's re-root staged (see
-    /// [`Workspace::ensure_entry`]) are published first, so an open importer's
-    /// Problems panel refreshes against an in-memory dependency edit as soon as
-    /// it is queried — the pre-split `analyze_text` published inline.
+    /// Run `f` on the workspace and send its result. Diagnostics the query's
+    /// re-root staged (see [`Workspace::ensure_entry`]) go out first, so an
+    /// open importer's problem list refreshes on an edited dependency.
     fn respond(&mut self, id: &Json, params: &Json, f: fn(&mut Workspace, &Json) -> Json) {
         let result = f(&mut self.ws, params);
         for (uri, diags) in self.ws.take_pending_diagnostics() {
@@ -224,15 +215,9 @@ impl LspServer {
         eprintln!("[AL LSP] {msg}");
     }
 
-    // ========================================================================
-    // Handlers
-    // ========================================================================
-
     fn handle_initialize(&mut self, id: &Json, params: &Json) {
-        // Multi-root: prefer `workspaceFolders` (array of {uri,name}); fall
-        // back to legacy single `rootUri`. A client may send neither when a
-        // loose file is opened, in which case every file lands in the
-        // empty-root session.
+        // Prefer `workspaceFolders`, fall back to legacy `rootUri`. A client
+        // opening a loose file sends neither; that file gets the empty root.
         let folders = params.get("workspaceFolders");
         if folders.is_some_and(Json::is_array) {
             self.ws.workspace_roots.extend(folder_paths(folders));
@@ -264,10 +249,9 @@ impl LspServer {
     }
 
     fn handle_initialized(&self) {
-        // File-watch capability can only be registered dynamically (LSP spec
-        // forbids static registration for didChangeWatchedFiles). Ask the
-        // client to watch every .al file so external edits — git checkout,
-        // formatter, another editor — invalidate the incremental session.
+        // didChangeWatchedFiles has no static registration in the LSP spec, so
+        // ask for the .al watch dynamically. External edits (git checkout,
+        // formatter) must invalidate the incremental session.
         self.send_request(
             json!("al/watchers"),
             "client/registerCapability",
@@ -291,11 +275,9 @@ impl LspServer {
         }
         let added = folder_paths(event.and_then(|e| e.get("added")));
         self.ws.workspace_roots.extend(added.iter().cloned());
-        // A folder added after the initial scan would never be indexed
-        // (the `scanned` latch makes `ensure_workspace_scanned` early
-        // return), leaving its modules invisible to cross-module queries.
-        // Index it now. Before the first scan, the pending
-        // `ensure_workspace_scanned` will cover it from `workspace_roots`.
+        // The `scanned` latch makes `ensure_workspace_scanned` early-return, so
+        // a folder added after the first scan must be indexed here or its
+        // modules stay invisible to cross-module queries.
         if self.ws.scanned {
             for r in &added {
                 self.ws.index_root(r);
@@ -318,12 +300,8 @@ impl LspServer {
                 FileChangeType::from_wire(change.get("type").and_then(|v| v.as_i64()).unwrap_or(2));
             self.ws.invalidate_watched(uri, ty);
         }
-        // Re-analyse only the client-open documents (their imports may have
-        // changed underneath them); the sessions invalidated above make the
-        // re-check pick up the new sources. Driving this off the full
-        // `documents` map would re-typecheck the entire workspace index on
-        // every external `.al` change (formatter run, git checkout, save from
-        // another editor).
+        // Only the client-open documents. Driving this off the full `documents`
+        // map would re-typecheck the whole workspace on every external edit.
         for (uri, diags) in self.ws.reanalyze_open() {
             self.publish_diagnostics(&uri, diags);
         }

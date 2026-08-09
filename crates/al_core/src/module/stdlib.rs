@@ -7,9 +7,9 @@ pub fn lookup(path: &str) -> Option<&'static str> {
         .and_then(|f| f.contents_utf8())
 }
 
-/// Every stdlib module path other than the prelude itself, sorted for
-/// deterministic precompilation order.
-#[allow(clippy::expect_used)] // the const glob literal failing is a bug here, not a runtime condition
+/// Every stdlib module path except the prelude, sorted so precompilation order
+/// is deterministic.
+#[allow(clippy::expect_used)] // a bad glob literal is a build-time bug, not a runtime condition
 pub fn all_modules() -> Vec<crate::module::ModulePath> {
     let mut out: Vec<_> = STD
         .find("al/**/*.al")

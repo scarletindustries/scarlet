@@ -1,7 +1,5 @@
-/// Non-token source between tokens. The scanner drops horizontal whitespace
-/// entirely (no consumer reads it), so only these four shapes exist. A
-/// `Newline` carries no text — it is counted, never printed — so making it a
-/// bare unit variant means the common case allocates nothing.
+/// Non-token source between tokens. The scanner drops horizontal whitespace,
+/// so only these four shapes exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trivia {
     Newline,

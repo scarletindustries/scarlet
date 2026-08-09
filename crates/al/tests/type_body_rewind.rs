@@ -1,11 +1,6 @@
-//! Regression: a cached file-module's `TypeInfo` bodies (variant field
-//! templates, alias targets) outlive an incremental rewind, but the engine's
-//! `vars` table does not — `InferEngine::truncate_to` clears it wholesale.
-//! Bodies stored in open `Var(param_id)` form therefore dangled: the next
-//! check's `substitute_type_vars` chased a cleared (or re-minted) var slot
-//! and panicked or resolved to garbage. Bodies are now closed to `Bound(idx)`
-//! at registration (`close_body` in `bytecode/analysis.rs`), exactly as the
-//! precompiled stdlib's are.
+//! Regression: cached `TypeInfo` bodies outlive an incremental rewind but the
+//! engine's `vars` table does not, so bodies must be closed to `Bound(idx)` at
+//! registration (`close_body` in `bytecode/analysis.rs`), not left as `Var`.
 
 use al::bytecode::IncrementalSession;
 
@@ -20,9 +15,8 @@ fn cached_module_type_bodies_survive_rewinds() {
         "pub type Box(a) {\n\tMk(v a)\n}\npub type Pair(a) = (a, a)\npub fn wrap(x Int) Box(Int) { Mk(x) }\n",
     );
 
-    // Exercises every consumer of the cached bodies: the alias target
-    // (annotation hydration), the variant field template (field access), and
-    // exhaustiveness/pattern elaboration (the single-ctor match).
+    // Exercises every consumer of the cached bodies: alias target, variant
+    // field template, and pattern elaboration.
     let entry = |k: i64| {
         format!(
             "import ./lib.{{Box, Pair, Mk, wrap}}\n\n\
@@ -35,10 +29,8 @@ fn cached_module_type_bodies_survive_rewinds() {
 
     let mut s = IncrementalSession::new(&al::STDLIB);
     for i in 0..4 {
-        // Edit only the ENTRY: `lib` stays cached below the rewind watermark
-        // while the rewind clears the engine's `vars` table, so each re-check
-        // substitutes into lib's stored type bodies with no live vars behind
-        // an open template.
+        // Only the entry changes, so `lib` stays cached below the rewind
+        // watermark while the rewind clears the engine's `vars` table.
         let r = s.check(&parse(&entry(i)), Some(&p.dir));
         assert!(
             r.success(),

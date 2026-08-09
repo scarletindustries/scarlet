@@ -104,9 +104,7 @@ struct FmtArgs {
 }
 
 /// Resolve a diagnostic's module provenance to (path, text) so it renders
-/// against the file its span actually points into. A stamped `ModuleKey` is
-/// either an on-disk module (the key is its canonical path, `.al` stripped)
-/// or an embedded stdlib module, both of which `resolve_canonical` handles.
+/// against the file its span actually points into.
 fn resolve_diagnostic_source(key: &al::module::ModuleKey) -> Option<(PathBuf, String)> {
     let path: al::module::ModulePath = key.as_str().split('/').map(str::to_string).collect();
     match al::module::resolve_canonical(&path).ok()?.source {
@@ -151,7 +149,7 @@ fn compile_source(
 ) -> bytecode::CompileResult {
     let path = Path::new(entrypoint);
     let base_dir = path.parent();
-    // Editing the AL repo's own stdlib: analyse as that module so `@vm`/
+    // Editing the AL repo's own stdlib: analyse as that module so `@vm` and
     // external are permitted and prelude self-redefinition is suppressed.
     let result = match al::module::detect_stdlib_module(path) {
         Some(m) => bytecode::check_as_module(expr, base_dir, m),
@@ -184,8 +182,7 @@ fn find_al_files(path: &str) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-// BUGFIX: V's main.v uses 0-indexed line/col for files but +1 for stdin; the
-// rust port emits 1-indexed consistently.
+/// Spans are 0-indexed; `fmt` output is 1-indexed for both files and stdin.
 fn render_fmt_diagnostic(path: impl std::fmt::Display, d: &diagnostic::Diagnostic) -> String {
     let line = d.span.start_line + 1;
     let col = d.span.start_column + 1;
@@ -221,9 +218,9 @@ fn read_file_or_die(path: &str) -> String {
 }
 
 fn main() -> process::ExitCode {
-    // clap is the parser and command model only — all help/version/error/man
-    // output is rendered by `al::cli`. Intercept the meta flags before clap so
-    // they work without satisfying required args (`al run --help`).
+    // clap is the parser and command model only; `al::cli` renders all
+    // help/version/error/man output. The meta flags are intercepted before clap
+    // so they work without satisfying required args (`al run --help`).
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let cmd = Cli::command();
 
@@ -277,9 +274,8 @@ fn main() -> process::ExitCode {
             let file = read_file_or_die(&args.entrypoint);
             let expr = parse_source(&file, &args.entrypoint);
             if let Some(needle) = &args.native {
-                // Capture a plan for every body the AL_NATIVE mode selects and
-                // the coverage gate admits. Names are matched after compile —
-                // the hook sees interned ids, the emitted program the names.
+                // Names are matched after compile: the hook sees interned ids,
+                // the emitted program has the names.
                 let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
                 let sink = Rc::clone(&plans);
                 let result = compile_source(&expr, &file, &args.entrypoint, move |e, base, pre| {
@@ -358,12 +354,9 @@ fn cmd_run(args: RunArgs) {
         println!();
     }
 
-    // The native backend's load-time compile: the hook captures a plan for
-    // every body the AL_NATIVE mode selects and the coverage gate admits
-    // (none under `off` — the compiler suppresses the hook), and
-    // `publish_native` below turns the plans into machine code once the
-    // program (and its constant pool, which the plans' ConstIds index) is
-    // final.
+    // The hook only captures plans; `publish_native` turns them into machine
+    // code afterwards, because the plans' ConstIds index the constant pool and
+    // that is not final until the compile finishes.
     let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
     let sink = Rc::clone(&plans);
     let result = compile_source(&expr, &file, &args.entrypoint, move |e, base, pre| {
@@ -383,7 +376,6 @@ fn cmd_run(args: RunArgs) {
     };
     publish_native(plans.take(), &emitted.program);
 
-    // argv[0] is the entrypoint path; the rest are the program's own arguments.
     let mut argv = Vec::with_capacity(args.args.len() + 1);
     argv.push(args.entrypoint.clone());
     argv.extend(args.args.iter().cloned());
@@ -398,9 +390,8 @@ fn cmd_run(args: RunArgs) {
 
 /// JIT every hook-captured plan into one immortal module and publish the
 /// entries into the program's [`NativeTable`](bytecode::NativeTable). Any
-/// failure falls back to interpretation by leaving slots empty — bytecode
-/// exists for every function regardless — with a diagnostic only under
-/// `AL_NATIVE_DEBUG` (a default run's stderr stays empty).
+/// failure leaves slots empty and falls back to the bytecode, printing only
+/// under `AL_NATIVE_DEBUG` so a default run's stderr stays empty.
 fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
     use al::tivec::Idx as _;
     if plans.is_empty() {
@@ -456,8 +447,8 @@ fn publish_native(plans: Vec<clif::NativePlan>, program: &bytecode::Program) {
             plans.len(),
         );
     }
-    // Dropping the module keeps the executable mapping alive (see vm::jit's
-    // code-lifetime docs): the published entries stay valid forever.
+    // Dropping the module keeps the executable mapping alive (see vm::jit), so
+    // the published entries stay valid forever.
 }
 
 fn cmd_fmt(args: FmtArgs) {
@@ -481,8 +472,7 @@ fn cmd_fmt(args: FmtArgs) {
                 process::exit(1);
             }
             formatter::FormatResult::CommentsLost { comment } => {
-                // Formatter bug: pass the input through untouched so no
-                // comment is ever deleted, and fail loudly.
+                // Pass the input through untouched so no comment is deleted.
                 eprintln!(
                     "formatter bug: formatting would delete the comment `{comment}`; input left unchanged"
                 );
@@ -491,8 +481,7 @@ fn cmd_fmt(args: FmtArgs) {
                 process::exit(1);
             }
             formatter::FormatResult::OutputInvalid { detail } => {
-                // Formatter bug: pass the input through untouched so valid
-                // source is never replaced with broken code, and fail loudly.
+                // Pass the input through so valid source is never replaced.
                 eprintln!("formatter bug: {detail}; input left unchanged");
                 print!("{content}");
                 let _ = io::stdout().flush();
@@ -605,8 +594,8 @@ fn cmd_upgrade(version: Option<String>) -> Result<(), String> {
     };
 
     let asset_name = format!("al-{os_name}-{arch}");
-    // Download next to the target so `fs::rename` is same-device (temp_dir is
-    // often tmpfs on Linux, which would make the rename fail with EXDEV).
+    // Download next to the target so the rename is same-device; temp_dir is
+    // often tmpfs on Linux, which fails with EXDEV.
     let tmp_path = current_exe.with_extension("new");
     let download_url = format!("https://github.com/alii/al/releases/download/{tag}/{asset_name}");
 

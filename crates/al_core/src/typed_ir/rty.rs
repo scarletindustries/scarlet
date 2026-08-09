@@ -1,41 +1,26 @@
 //! Resolved types: the post-inference arena in which an unsolved variable is
 //! unrepresentable.
 //!
-//! `types::Ty` indexes `InferEngine.nodes`, a *mutable* arena whose `TypeNode`
-//! carries a `Var` arm. Anything holding a `Ty` can therefore be handed the
-//! output of `fresh_var()` and cannot tell it apart from a type the checker
-//! actually solved — which is precisely how 22 invented types hid inside
-//! `lower`.
+//! [`ResolvedNode`] has no `Var` arm, unlike inference's `types::TypeNode`, so
+//! a consumer can never mistake a fresh variable for a solved type. The only
+//! bridge in is `zonk_or_opaque`, which turns a surviving variable into a
+//! `Bound` and reports that it did.
 //!
-//! [`RTy`] indexes a [`ResolvedPool`] instead. [`ResolvedNode`] has no `Var`
-//! arm, so every consumer's match is total and every answer is a decision
-//! rather than an accident:
-//!
-//! * `Bound(i)` is an *honestly* polymorphic type — a rigid quantified
-//!   variable. `fn id(x) { x }` must dispatch dynamically, and `is_heap`
-//!   answering `false` for it is correct, not a miss.
-//! * A surviving inference variable cannot reach here: the only bridge into
-//!   this arena is `zonk_or_opaque`, which encodes it as its own `Bound` and
-//!   reports that it did so.
-//!
-//! The pool is compile-local: it is built by the elaborator and consumed by
-//! `lower`/`perceus`/`emit`, all of which run within one compilation.
+//! The pool is compile-local: built by the elaborator, consumed by
+//! `lower`/`perceus`/`emit`.
 
 use crate::type_def::TypeId;
 use crate::types::{Prim, PrimIds, StrId};
 
 /// How many arguments a function type, constructor, or eta wrapper takes.
 ///
-/// Its own type because it is compared against things that look just like it:
-/// `eta_wrapper` asserts a constructor's *declared* field count equals the
-/// arity of its *instantiated* function type, and a payload of the wrong width
-/// is a silently corrupt heap value, not a crash.
+/// A newtype because it gets compared against other bare counts, and a payload
+/// of the wrong width corrupts a heap value silently instead of crashing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Arity(pub u16);
 
 impl Arity {
-    /// The arity of a parameter/field list. The one constructor that is not a
-    /// literal, so a `len()` cast lives here rather than at each call site.
+    /// The arity of a parameter/field list.
     #[inline]
     #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
     pub fn of<T>(items: &[T]) -> Self {
@@ -49,25 +34,21 @@ impl std::fmt::Display for Arity {
     }
 }
 
-/// Index into [`ResolvedPool::nodes`]. Meaningful only relative to the pool
-/// that minted it, exactly as `Ty` is to its engine — but the two indices are
-/// different types, so an inference-world `Ty` cannot be spelled where an
-/// `RTy` is wanted.
+/// Index into [`ResolvedPool::nodes`]. Only meaningful for the pool that
+/// minted it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RTy(pub u32);
 
 impl std::fmt::Display for RTy {
-    /// Prints the bare pool index. Core IR spells a type as `:{ty}` (`:7`),
-    /// and the golden harness in `crates/al/tests/core_ir.rs` renumbers those
-    /// `:N` sigils per snapshot — a prefix here would break that scan for no
-    /// gain, since the sigil already says which arena the index belongs to.
+    /// Bare index, no prefix: the golden harness in
+    /// `crates/al/tests/core_ir.rs` renumbers core IR's `:N` sigils by scanning
+    /// for digits after the colon.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-/// A contiguous run of child [`RTy`]s in [`ResolvedPool::children`] — the
-/// arguments of a `Con`, the parameters of a `Fun`, the elements of a `Tuple`.
+/// A contiguous run of child [`RTy`]s in [`ResolvedPool::children`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RSlice {
     pub start: u32,
@@ -78,17 +59,14 @@ impl RSlice {
     pub const EMPTY: RSlice = RSlice { start: 0, len: 0 };
 }
 
-/// A fully-resolved type node. Mirrors `types::TypeNode` minus its `Var` arm:
-/// that omission is the whole point of this module.
+/// A fully-resolved type node. `types::TypeNode` minus its `Var` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolvedNode {
-    /// A rigid quantified variable, indexing the enclosing scheme's
-    /// quantifier list. Genuine polymorphism; the value's representation is
-    /// not statically known, so it stays dynamic.
+    /// A rigid quantified variable, indexing the enclosing scheme's quantifier
+    /// list. Its representation is not statically known.
     Bound(u32),
-    /// `Name(args...)`. `id` is the nominal identity; `name` is for display
-    /// only — never for semantics (a user's `type Parsed` is not
-    /// `al/http/h1.Parsed`).
+    /// `Name(args...)`. `id` is the identity; `name` is display only, never
+    /// semantics (a user's `type Parsed` is not `al/http/h1.Parsed`).
     Con {
         id: TypeId,
         name: StrId,
@@ -100,11 +78,9 @@ pub enum ResolvedNode {
     Tuple { elems: RSlice },
 }
 
-/// Immutable arena of resolved types, owned by a `TypedProgram`.
-///
-/// Construction is append-only and happens once, in the elaborator. There is
-/// no `find`, no union-find, and no mutation after the program is built: an
-/// `RTy` read twice yields the same node forever.
+/// Append-only arena of resolved types, owned by a `TypedProgram`. No
+/// union-find and no mutation after the elaborator builds it, so an `RTy`
+/// always reads back the same node.
 #[derive(Debug, Clone)]
 pub struct ResolvedPool {
     nodes: Vec<ResolvedNode>,
@@ -170,8 +146,7 @@ impl ResolvedPool {
         self.alloc(ResolvedNode::Tuple { elems })
     }
 
-    /// The node `t` names. Panics only on an `RTy` from a different pool,
-    /// which the elaborator never produces.
+    /// The node `t` names. Panics on an `RTy` from a different pool.
     #[allow(clippy::indexing_slicing)]
     pub fn node(&self, t: RTy) -> ResolvedNode {
         self.nodes[t.0 as usize]
@@ -227,8 +202,7 @@ impl ResolvedPool {
         self.prims.prim_of(id)
     }
 
-    /// The primitive `t` denotes, if any. Total: a `Bound` is not a primitive,
-    /// and there is no unsolved-variable case to mis-answer.
+    /// The primitive `t` denotes, if any.
     pub fn prim_of(&self, t: RTy) -> Option<Prim> {
         match self.node(t) {
             ResolvedNode::Con { id, .. } => self.as_prim(id),
@@ -238,10 +212,8 @@ impl ResolvedPool {
 
     /// Whether a value of type `t` occupies a Perceus-managed heap cell.
     ///
-    /// The `Bound` arm answers `false` because a rigid quantified variable is
-    /// genuinely polymorphic: its representation is not known here and the
-    /// value must be handled dynamically. There is no `Var` arm, so this can
-    /// no longer answer `false` merely because inference lost the type.
+    /// `Bound` answers `false`: its representation is unknown here, so the
+    /// value is handled dynamically.
     pub fn is_heap(&self, t: RTy) -> bool {
         match self.node(t) {
             ResolvedNode::Con { id, .. } => self.as_prim(id).is_none(),
@@ -264,8 +236,7 @@ mod tests {
         })
     }
 
-    /// Core IR's `:{ty}` sigil (`core_ir::mod`'s `Display`) must render as
-    /// `:7`, not `:r7` — the golden harness parses the digits after the colon.
+    /// Core IR's `:{ty}` sigil must render as `:7`, not `:r7`.
     #[test]
     fn rty_prints_the_bare_pool_index() {
         assert_eq!(RTy(0).to_string(), "0");
@@ -284,8 +255,7 @@ mod tests {
         assert_eq!(p.prim_of(string), Some(Prim::String));
         assert!(!p.is_heap(int));
         assert!(!p.is_heap(float));
-        // Strings are heap-allocated values at runtime, but they are not
-        // Perceus cells: `is_heap` mirrors the RC-managed-cell question.
+        // Strings are heap-allocated at runtime but are not Perceus cells.
         assert!(!p.is_heap(string));
     }
 

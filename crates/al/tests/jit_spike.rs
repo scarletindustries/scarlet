@@ -1,20 +1,6 @@
-//! JIT spike: prove a trivial Cranelift-JIT'd function actually *executes* on
-//! this host before anything is built on top of the native backend.
-//!
-//! On aarch64-apple-darwin this is the load-bearing check that cranelift-jit's
-//! MAP_JIT + W^X handling (pthread_jit_write_protect_np toggling around code
-//! writes) works end-to-end: define CLIF, compile, finalize into an executable
-//! mapping, and *call* the resulting pointer. If any of that is broken, these
-//! fail immediately instead of surfacing as a mystery crash deep inside the
-//! real backend.
-//!
-//! Three escalating spikes:
-//!   1. straight-line arithmetic (`add`)
-//!   2. control flow with a loop back-edge (`sum_to`) — the shape self-tail
-//!      calls lower to
-//!   3. a JIT'd caller invoking a Rust `extern "C"` shim registered by NAME
-//!      via `JITBuilder::symbol` — the runtime-shim seam the calling
-//!      convention depends on
+//! JIT spike: prove a Cranelift-JIT'd function actually executes on this host.
+//! On aarch64-apple-darwin this checks cranelift-jit's MAP_JIT / W^X handling,
+//! so a broken toolchain fails here rather than inside the real backend.
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
@@ -23,8 +9,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 
-/// A `JITBuilder` configured for the host, the same way the real backend
-/// constructs one: native ISA, non-PIC, no colocated libcalls.
+/// A `JITBuilder` configured the same way the real backend configures one.
 fn host_jit_builder() -> JITBuilder {
     let mut flags = settings::builder();
     flags.set("use_colocated_libcalls", "false").unwrap();
@@ -87,9 +72,8 @@ fn jit_loop_back_edge_executes() {
         .declare_function("spike_sum_to", Linkage::Export, &sig)
         .unwrap();
 
-    // sum_to(n) = n + (n-1) + ... + 1, as an explicit loop: the CLIF shape a
-    // self-tail-recursive AL function compiles to (header block params are the
-    // next iteration's args).
+    // sum_to(n) as an explicit loop: the CLIF shape a self-tail-recursive AL
+    // function compiles to.
     ctx.func.signature = sig;
     {
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
@@ -166,8 +150,7 @@ fn jit_calls_rust_shim_registered_by_name() {
         .declare_function("spike_call_shim", Linkage::Export, &sig)
         .unwrap();
 
-    // f(x) = shim(shim(x)) — two calls so the return value of one call feeds
-    // the argument of the next, not just a pass-through.
+    // f(x) = shim(shim(x)): two calls so one call's result feeds the next.
     ctx.func.signature = sig;
     {
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);

@@ -1,9 +1,6 @@
-//! Core IR ↔ Compiler bridges.
-//!
-//! The Core IR passes (`lower`, `emit`) are compiler-agnostic and speak to
-//! the enclosing compilation through the [`crate::core_ir::emit::EmitCtx`]
-//! and [`ElabCtx`] traits; `Compiler` provides the concrete impls here
-//! rather than exposing its fields to `core_ir`.
+//! `Compiler`'s impls of the traits `core_ir` speaks to the enclosing
+//! compilation through ([`crate::core_ir::emit::EmitCtx`], [`ElabCtx`]), kept
+//! here so `core_ir` never sees the compiler's fields.
 
 use super::*;
 use crate::typed_ir::PreludeTys;
@@ -39,8 +36,8 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
     }
     fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
         let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
-        // `Bool` is unboxed at the VM level so its scrutinee has no tag word;
-        // >255 variants overflow the `SwitchTag.a` byte.
+        // `Bool` is unboxed, so its scrutinee has no tag word; past 255
+        // variants the `SwitchTag.a` byte overflows.
         if self.prelude.bool.is(tid) || n > 255 {
             None
         } else {
@@ -55,10 +52,8 @@ impl crate::core_ir::emit::EmitCtx for Compiler {
     }
 }
 
-/// `emit` asked for the variant labels of a type that has no variants — a
-/// broken emit invariant. Aborts, in release as well as debug: any constant
-/// returned instead (the old fallback was pool index 0) silently ships the
-/// wrong labels. Mirrors `emit`'s `unbound_local`.
+/// `emit` asked for the labels of a type with no variants. Aborts in release
+/// too: any constant returned instead ships the wrong labels.
 #[allow(clippy::unreachable)]
 #[cold]
 #[inline(never)]
@@ -70,20 +65,13 @@ fn labels_of_variantless_type(tid: TypeId) -> ! {
 }
 
 impl PreludeTys for Compiler {
-    /// The one bridge from a live inference `Ty` into the program's `RTy` pool.
-    /// Total: `zonk_or_opaque` encodes a variable inference never solved as a
-    /// fresh `Bound` rather than failing, because "undetermined" and "rigidly
-    /// polymorphic" are the same operational fact downstream.
+    /// The one bridge from a live inference `Ty` into the program's `RTy`
+    /// pool. Total: an unsolved variable becomes a fresh `Bound`.
     ///
-    /// A `Zonker` memoises only within one call, and the elaborator asks for a
-    /// type per *node*: without a cache across calls the five `Int`s of `1 + 2
-    /// * 3` become five structurally identical pool nodes, and every consumer
-    /// that keys off an `RTy` (a `Drop` shape, a golden snapshot's `:tN`) stops
-    /// seeing that they are one type. Only a *fully solved* type is cached —
-    /// `zonk_or_opaque` reports when it invented an opaque `Bound`, and a
-    /// variable that is unsolved now may be solved by a later body, so such a
-    /// node must not be remembered. `rty_cache` is keyed by union-find root
-    /// and belongs to the pool `elaborate` opened, which clears it.
+    /// The cache is what makes structurally identical types share one pool
+    /// node, so consumers keyed off an `RTy` can tell they are one type. Only
+    /// fully solved types may be cached: a variable unsolved now can be solved
+    /// by a later body. Keyed by union-find root; cleared with the pool.
     fn resolve_rty(&mut self, pool: &mut ResolvedPool, t: Ty) -> RTy {
         let root = self.engine.find(t);
         if let Some(&r) = self.rty_cache.get(&root) {
@@ -116,8 +104,8 @@ impl ElabCtx for Compiler {
     fn str(&self, id: StrId) -> &str {
         self.engine.str(id)
     }
-    // `program.constants` is `ConstId`-addressed, so pooling during an
-    // elaboration moves no address, and the elaborator writes no code at all.
+    // Safe mid-elaboration: `program.constants` is `ConstId`-addressed, so
+    // pooling moves no address.
     fn add_const(&mut self, v: Value) -> crate::core_ir::ConstId {
         crate::core_ir::ConstId(self.add_constant(v) as u32)
     }
@@ -139,22 +127,15 @@ impl ElabCtx for Compiler {
         let kind = scheme.kind;
         let ty = self.engine.instantiate(scheme, &self.rigid_ids);
         let id = self.engine.intern(name);
-        // Always consulted, even for a constructor or a builtin: it is what
-        // marks the name used for the unused-binding diagnostic, and what
-        // records a capture when a nested frame reads an enclosing local.
-        // `Denotation::from_kind` then discards the place for the two kinds
-        // that have no runtime binding.
+        // Called even for constructors and builtins, for its side effects:
+        // marking the name used, and recording a capture.
         let place = self.resolve_variable(id);
         let den = match (Denotation::from_kind(kind, id), place) {
             (Some(fixed), _) => fixed,
             (None, Some(place)) => place,
-            // `analyse_module` unwinds `self.locals` before the `__main__`
-            // elaboration runs, so a decl's own name is only findable on its
-            // `ToplevelDecl`. Reached for an intra-SCC forward ref (a dependee
-            // is already bound in the elaborator's own scope and never gets
-            // here). A name the type env knows but no decl carries is a broken
-            // invariant — a `self_closure` fallback would silently compile a
-            // reference to the wrong value.
+            // `analyse_module` unwinds `self.locals` before `__main__`
+            // elaborates, so a toplevel decl's own name is only findable on
+            // its `ToplevelDecl`. Reached for an intra-SCC forward ref.
             (None, None) if self.outer_scopes.is_empty() => match self.decl_denotation(id) {
                 Some(den) => den,
                 None => typed_ir::elaborator_bug(
@@ -179,11 +160,8 @@ impl ElabCtx for Compiler {
         let ty = self.engine.instantiate(&scheme, &self.rigid_ids);
         let local_slot = ev.local_slot;
         let sid = self.engine.intern(member);
-        // `@vm` builtins and re-exported constructors have no `local_slot`;
-        // their `ValueKind` alone denotes them. Anything else the exporter
-        // must have given a slot — a member without one is a broken exporter
-        // invariant, and answering with a placeholder here would emit a load
-        // of the wrong value.
+        // `@vm` builtins and re-exported constructors carry no `local_slot`;
+        // their `ValueKind` alone denotes them. Everything else must have one.
         let den = match Denotation::from_kind(scheme.kind, sid) {
             Some(fixed) => fixed,
             None => match local_slot {
@@ -208,10 +186,8 @@ impl ElabCtx for Compiler {
             .ok()?;
         Some((idx as u32, fty))
     }
-    /// Read the labels off the *type*, by `VariantRef`, rather than off the
-    /// constructor's scheme by name. `mod.Ctor(..)` resolves through
-    /// `resolve_qualified` and its bare name is not in `env`, so a name lookup
-    /// answered `None` for a call the check walk had accepted.
+    /// Labels come off the type by `VariantRef`, not off the constructor's
+    /// scheme by name: a `mod.Ctor(..)` bare name is not in `env`.
     fn ctor_labels(&mut self, v: crate::core_ir::VariantRef) -> Option<Vec<StrId>> {
         let info = self.env.lookup_type_info_by_id(v.type_id)?;
         let variants = info.variants()?;
@@ -228,9 +204,8 @@ impl ElabCtx for Compiler {
         )
     }
     fn closure(&mut self, span: Span) -> Option<(crate::core_ir::FuncIdx, Vec<StrId>)> {
-        // The frame's own lambdas, a handful at most: a linear scan over the
-        // list the frame owns, not a probe into a table keyed by a span that
-        // any module could have minted.
+        // A scan over the frame's own lambdas, a handful at most. A table
+        // keyed by span would collide across modules.
         self.frame_closures
             .iter()
             .find(|s| s.at == span)
@@ -243,10 +218,9 @@ impl ElabCtx for Compiler {
         self.take_global_slot()
     }
     fn toplevel_decls(&self) -> Vec<(usize, GlobalSlot)> {
-        // A fn body's outermost block is elaborated by the same code path as a
-        // module toplevel, and it is not one: its node indices address its own
-        // body, not the module's. Only a module toplevel runs with no
-        // enclosing frame — the same guard `take_global_slot` uses.
+        // A fn body's outermost block takes the same code path but is not a
+        // module toplevel: its node indices address its own body. Only a
+        // module toplevel runs with no enclosing frame.
         if !self.outer_scopes.is_empty() {
             return Vec::new();
         }

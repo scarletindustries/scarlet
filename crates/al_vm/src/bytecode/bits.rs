@@ -1,10 +1,8 @@
 //! MSB-first bit-granular primitives over `[u8]`.
 //!
-//! Bits are addressed big-endian within each byte: bit `i` lives at byte
-//! `i / 8`, position `7 - (i % 8)`. This is the single definition of that
-//! addressing — the `Binary` value layout, the VM's bit-string ops, and the
-//! bit-pattern hasher all read and write bits through here, so a change to the
-//! bit order (or a fix to the two-byte splice) has exactly one edit site.
+//! Bit `i` lives at byte `i / 8`, position `7 - (i % 8)`. This is the only
+//! definition of that addressing: `Binary` layout, the VM's bit-string ops and
+//! the bit-pattern hasher all go through here.
 
 /// Read bit `i` (MSB-first). Caller guarantees `i / 8` is in bounds.
 #[inline]
@@ -13,8 +11,7 @@ pub fn get_bit(bytes: &[u8], i: u64) -> u8 {
 }
 
 /// Write bit `i` (MSB-first) to `bit & 1`. Caller guarantees `i / 8` is in
-/// bounds. The target bit is cleared first, so this is a true overwrite (not
-/// an OR) and is safe on a non-zero destination.
+/// bounds. Overwrites rather than ORs, so a non-zero destination is fine.
 #[inline]
 pub fn set_bit(bytes: &mut [u8], i: u64, bit: u8) {
     let idx = (i / 8) as usize;
@@ -22,11 +19,9 @@ pub fn set_bit(bytes: &mut [u8], i: u64, bit: u8) {
     bytes[idx] = (bytes[idx] & !(1 << shift)) | ((bit & 1) << shift);
 }
 
-/// Read the 8 bits starting at bit `at` as one byte, MSB-first. Any bit at or
-/// past the end of `bytes` reads as **zero** — both source bytes are fetched
-/// with `.get()`, never a panicking index — so a read whose window straddles
-/// or lies entirely past the buffer end is well-defined. Callers that need
-/// strict bounds mask the result through [`tail_mask`].
+/// Read the 8 bits starting at bit `at` as one byte, MSB-first. Bits past the
+/// end of `bytes` read as zero rather than panicking; callers needing strict
+/// bounds mask through [`tail_mask`].
 #[inline]
 pub fn read_byte(bytes: &[u8], at: u64) -> u8 {
     let idx = (at / 8) as usize;
@@ -41,10 +36,8 @@ pub fn read_byte(bytes: &[u8], at: u64) -> u8 {
 }
 
 /// MSB-first mask selecting the logical bits of a partial trailing byte, or
-/// `None` when `bit_len` is a whole number of bytes. This is the single
-/// definition of "the masked partial tail": aligned-vec materialisation,
-/// logical-bit equality, and the value hasher all mask through it, which is
-/// what keeps equality and hashing consistent over the same logical bits.
+/// `None` when `bit_len` is a whole number of bytes. Equality and hashing both
+/// mask through this, which is what keeps them consistent.
 #[inline]
 pub fn tail_mask(bit_len: u64) -> Option<u8> {
     let rem = (bit_len % 8) as u32;
@@ -55,14 +48,10 @@ pub fn tail_mask(bit_len: u64) -> Option<u8> {
     }
 }
 
-/// Copy `n` logical bits of `src` starting at bit `src_at` into `dst` starting
-/// at bit `dst_at` (MSB-first). Caller guarantees `dst` holds bits
-/// `[dst_at, dst_at + n)` and `src` holds bits `[src_at, src_at + n)`; unlike
-/// [`read_byte`], an out-of-window access panics. When *both* `dst_at` and
-/// `src_at` are multiples of 8, the whole-byte prefix is a `memcpy` and only
-/// the ragged tail takes the per-bit loop; any unaligned start copies the
-/// entire span bit by bit. Writes overwrite (not OR), so `dst` need not be
-/// pre-zeroed.
+/// Copy `n` bits of `src` at `src_at` into `dst` at `dst_at` (MSB-first).
+/// Caller guarantees both windows are in bounds; unlike [`read_byte`], an
+/// out-of-window access panics. Writes overwrite rather than OR, so `dst` need
+/// not be pre-zeroed.
 pub fn copy_bits(dst: &mut [u8], dst_at: u64, src: &[u8], src_at: u64, n: u64) {
     let mut done = 0u64;
     if dst_at.is_multiple_of(8) && src_at.is_multiple_of(8) {
@@ -80,15 +69,14 @@ pub fn copy_bits(dst: &mut [u8], dst_at: u64, src: &[u8], src_at: u64, n: u64) {
 mod tests {
     use super::*;
 
-    /// Extract `n` bits at `at` into a fresh zeroed buffer — the shape callers
-    /// use to materialise a bit-string view.
+    /// Extract `n` bits at `at` into a fresh zeroed buffer.
     fn extract(src: &[u8], at: u64, n: u64) -> Vec<u8> {
         let mut out = vec![0u8; n.div_ceil(8) as usize];
         copy_bits(&mut out, 0, src, at, n);
         out
     }
 
-    /// Concatenate two bit-strings, as `bin_concat_n` does into its backing.
+    /// Concatenate two bit-strings, as `bin_concat_n` does.
     fn concat(a: &[u8], a_bits: u64, b: &[u8], b_bits: u64) -> Vec<u8> {
         let mut out = vec![0u8; (a_bits + b_bits).div_ceil(8) as usize];
         copy_bits(&mut out, 0, a, 0, a_bits);
@@ -109,14 +97,12 @@ mod tests {
 
     #[test]
     fn copy_bits_leaves_partial_tail_untouched() {
-        // 3 bits from bit 0 of 1111_1111 → 1110_0000; the 5 tail bits of the
-        // zeroed destination are not written.
+        // 3 bits from bit 0 of 1111_1111 → 1110_0000; the 5 tail bits stay 0.
         assert_eq!(extract(&[0xFF], 0, 3), vec![0b1110_0000]);
     }
 
     #[test]
     fn copy_bits_overwrites_rather_than_ors() {
-        // A non-zero destination: the copied span is replaced, and only it.
         let mut dst = [0xFF, 0xFF];
         copy_bits(&mut dst, 4, &[0x00], 0, 8);
         assert_eq!(dst, [0b1111_0000, 0b0000_1111]);

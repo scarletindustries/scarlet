@@ -1,9 +1,7 @@
 use std::io::IsTerminal;
 
-/// Decide whether to emit ANSI color for the given stream. Honors the de-facto
-/// standards: `NO_COLOR` (non-empty disables, per no-color.org) and
-/// `CLICOLOR_FORCE` (non-empty, non-"0" forces on even when piped); otherwise
-/// on only when the stream is a real terminal.
+/// Whether to emit ANSI color for `s`. `NO_COLOR` beats `CLICOLOR_FORCE`, which
+/// beats the terminal check.
 fn color_enabled(s: &impl IsTerminal) -> bool {
     if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
         return false;
@@ -14,10 +12,8 @@ fn color_enabled(s: &impl IsTerminal) -> bool {
     s.is_terminal()
 }
 
-/// Resolved ANSI palette. Every field is either a real escape sequence or an
-/// empty string, decided once based on the environment so call sites can
-/// interpolate unconditionally. The private `enabled` field means a `Palette`
-/// can only be built here, so it can never lie about whether color is on.
+/// Resolved ANSI palette. Every field is an escape sequence or the empty
+/// string, so call sites interpolate without checking.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub reset: &'static str,
@@ -58,7 +54,6 @@ const OFF: Palette = Palette {
     enabled: false,
 };
 
-/// OSC 8 hyperlink open/close sequences (terminated with BEL).
 const OSC8_OPEN: &str = "\x1b]8;;";
 const OSC8_CLOSE: &str = "\x07";
 
@@ -79,9 +74,8 @@ impl Palette {
         self.enabled
     }
 
-    /// Render `text` as an OSC 8 terminal hyperlink to `url`, styled with the
-    /// palette's link colors. When the palette is disabled, returns `text`
-    /// unchanged so piped output stays free of escape sequences.
+    /// Render `text` as an OSC 8 terminal hyperlink to `url`. Returns `text`
+    /// bare when color is off.
     pub fn hyperlink(&self, url: &str, text: &str) -> String {
         if self.enabled {
             format!(

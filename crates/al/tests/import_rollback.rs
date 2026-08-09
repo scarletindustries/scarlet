@@ -1,16 +1,12 @@
 //! Regression: an `IncrementalSession` must roll back the entry file's
-//! selective-import bindings between checks. `env.type_info` is a flat map (not
-//! a scope stack), so a `import m.{Type}` binding written by `process_imports`
-//! used to be captured in the `last_entry` watermark; the next check's
-//! `reset_to` then preserved it, so removing or renaming the import left the old
-//! name still resolving to a stale `TypeInfo` with no diagnostic.
+//! selective-import bindings between checks. `env.type_info` is a flat map, so
+//! a binding left above the `last_entry` watermark keeps resolving after the
+//! import is removed or renamed.
 
 mod common;
 use common::{Project, checked_with, recheck};
 
-/// Shared rollback check: `lib.al` exports `Color`, `entry1` imports and uses
-/// it (must type-check), then `entry2` drops the import but keeps the use
-/// (must fail with an `expected_diag` diagnostic).
+/// `entry1` must check clean; `entry2` must then fail with `expected_diag`.
 fn assert_import_rolled_back(tag: &str, entry1: &str, entry2: &str, expected_diag: &str) {
     let p = Project::new(tag);
     p.write("lib.al", "pub type Color { Color }\n");
@@ -38,7 +34,6 @@ fn removed_selective_type_import_stops_resolving() {
 
 #[test]
 fn removed_aliased_type_import_stops_resolving() {
-    // The local name `Hue` is the import alias of `Color`.
     assert_import_rolled_back(
         "importrollbackalias",
         "import ./lib.{Color as Hue}\nfn paint(_c Hue) Int { 1 }\n_x = paint\n",
@@ -49,9 +44,8 @@ fn removed_aliased_type_import_stops_resolving() {
 
 #[test]
 fn kept_selective_type_import_keeps_resolving_across_checks() {
-    // The rollback drops the entry's imported `Color` between checks, so each
-    // check must re-bind it from the persistent cached module interface. A check
-    // that keeps the import must keep type-checking — repeatedly.
+    // The rollback drops `Color` between checks, so each check must re-bind it
+    // from the cached module interface.
     let p = Project::new("importrollbackkept");
     p.write("lib.al", "pub type Color { Color }\n");
 

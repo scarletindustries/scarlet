@@ -1,18 +1,14 @@
-//! Strongly-typed handles to every prelude type and constructor the compiler
-//! is allowed to know about. Captured exactly once after `src/std/al.al` loads;
-//! every later identity check compares against the ids here, never against a
-//! string literal. If `al.al` drifts from what Rust expects, `capture` returns
-//! an `Err` describing the mismatch instead of letting it surface as a confused
-//! unify error downstream.
+//! Handles to every prelude type and constructor the compiler may know about.
+//! Captured once after `src/std/al.al` loads; later identity checks compare
+//! ids here, never string literals. Drift in `al.al` becomes a `capture` error
+//! rather than a confused unify failure downstream.
 
 use crate::type_def::TypeId;
 use crate::types::{Scheme, TypeEnv, ValueKind};
 
-/// Prelude type and constructor names. This module is the ONLY place these
-/// strings may appear in compiler-side Rust; everything else compares against
-/// captured `PreludeBindings` ids. The four structural-primitive names are
-/// re-exported from `type_def::prim_names` so the InferType→Type resolver
-/// (which cannot depend on `bytecode/`) shares the same constants.
+/// Prelude type and constructor names. The ONLY place these strings may appear
+/// in compiler-side Rust. The four primitive names come from
+/// `type_def::prim_names`, which the InferType→Type resolver also uses.
 pub mod names {
     pub use crate::type_def::prim_names::{ARRAY, FLOAT, INT, STRING};
     pub const BOOL: &str = "Bool";
@@ -31,7 +27,7 @@ pub mod names {
 #[derive(Debug, Clone, Copy)]
 pub struct TypeRef {
     /// Compare via [`TypeRef::is`], never `==`: a pre-capture binding holds
-    /// `TypeId::NONE` and a bare comparison has no guard against it.
+    /// `TypeId::NONE`, which `==` would match.
     pub id: TypeId,
     pub name: &'static str,
 }
@@ -45,17 +41,15 @@ impl TypeRef {
     }
 
     /// Whether `id` is this prelude type. Guards on `id != NONE` so a
-    /// pre-capture (all-zero) binding never falsely matches — see
-    /// `PreludeBindings::default`.
+    /// pre-capture binding never falsely matches.
     #[inline]
     pub fn is(&self, id: TypeId) -> bool {
         id != TypeId::NONE && id == self.id
     }
 }
 
-// Deliberately no PartialEq: like `TypeRef`, equality on a pre-capture
-// (all-`TypeId::NONE`) binding would falsely match. Identity checks go
-// through [`CtorRef::is`], which guards on `type_id != TypeId::NONE`.
+// No PartialEq on purpose: equality on a pre-capture binding would match.
+// Identity goes through `CtorRef::is`.
 #[derive(Debug, Clone, Copy)]
 pub struct CtorRef {
     pub type_id: TypeId,
@@ -71,17 +65,14 @@ impl CtorRef {
     };
 
     /// Whether `(type_id, variant_idx)` is this prelude constructor. Guards on
-    /// `type_id != NONE` so a pre-capture (all-zero) binding never falsely
-    /// matches — the same guard as [`TypeRef::is`].
+    /// `type_id != NONE` so a pre-capture binding never falsely matches.
     #[inline]
     pub fn is(&self, type_id: TypeId, variant_idx: u16) -> bool {
         type_id != TypeId::NONE && type_id == self.type_id && variant_idx == self.variant_idx
     }
 }
 
-/// Why [`PreludeBindings::capture`] rejected the loaded prelude. Each variant
-/// names the exact `al.al` drift; `Display` renders the message the compiler
-/// reports.
+/// Why [`PreludeBindings::capture`] rejected the loaded prelude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreludeCaptureError {
     MissingType(&'static str),
@@ -99,9 +90,8 @@ pub enum PreludeCaptureError {
     },
 }
 
-/// What `capture` actually found bound to a constructor name — carried by
-/// [`PreludeCaptureError::CtorShape`] so the diagnostic reports the drift
-/// itself, not just the expectation.
+/// What `capture` found bound to a constructor name, so the diagnostic can
+/// report the drift and not just the expectation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CtorFound {
     /// The name is bound, but not to a constructor (e.g. shadowed by a `let`).
@@ -148,12 +138,10 @@ impl std::fmt::Display for PreludeCaptureError {
     }
 }
 
-/// Declares every `PreludeBindings` field exactly once. Expands to the struct,
-/// its `Default` (all-zero ids so it can exist before the prelude loads — see
-/// `compile_impl` analysing `al.al` itself), `capture()`, and the
-/// `(field_name, value)` iterators `build.rs` walks to emit the baked
-/// `const PRELUDE`. Identity checks go through `TypeRef::is`, which guards on
-/// `id != TypeId::NONE` so a zero binding never falsely matches.
+/// Declares every `PreludeBindings` field once. Expands to the struct, its
+/// all-zero `Default` (needed while `al.al` itself is being analysed),
+/// `capture()`, and the field iterators `build.rs` walks to bake `const
+/// PRELUDE`.
 macro_rules! prelude_bindings {
     (
         types: [ $( $tf:ident = ($tn:ident, $ta:literal) ),* $(,)? ],
@@ -175,9 +163,7 @@ macro_rules! prelude_bindings {
         }
 
         impl PreludeBindings {
-            /// Name/arity of every prelude type binding. Exists for the
-            /// capture-error tests below, which register the types without
-            /// their constructors.
+            /// Name/arity of every prelude type binding, for the tests below.
             #[cfg(test)]
             const TYPE_NAMES: &[(&str, usize)] = &[$( (names::$tn, $ta) ),*];
 
@@ -233,9 +219,7 @@ macro_rules! prelude_bindings {
             }
 
             /// Nominal ids for the four structural primitives the inference
-            /// engine recognises directly. Single source of truth for
-            /// `InferEngine::set_prim_ids` — adding a fifth primitive is one
-            /// edit here plus one field on `PrimIds`.
+            /// engine recognises directly.
             pub fn prim_ids(&self) -> crate::types::PrimIds {
                 crate::types::PrimIds {
                     int: self.int.id,
@@ -285,9 +269,7 @@ mod tests {
         assert_eq!(err.to_string(), "prelude: type 'Int' is required");
     }
 
-    /// Registers every prelude type with the correct arity (so type lookups
-    /// pass) but no constructors. Tests below layer constructor bindings on
-    /// top to exercise the constructor failure modes.
+    /// Every prelude type at the right arity, but no constructors.
     fn env_with_prelude_types() -> (crate::types::TypeEnv, TypeId) {
         let mut env = new_env();
         let mut bool_id = TypeId::NONE;
@@ -323,10 +305,8 @@ mod tests {
         );
     }
 
-    /// Broken `al.al` (e.g. `True` deleted) must surface as a clean compile
-    /// error, not a panic or a confused unify failure later. This test edits
-    /// nothing on disk; it asserts the *shape* of the message that
-    /// `register_prelude` would emit if `True` were missing.
+    /// A deleted prelude constructor must surface as a clean compile error,
+    /// not a panic or a later unify failure.
     #[test]
     fn missing_ctor_message() {
         let (env, _) = env_with_prelude_types();
@@ -335,10 +315,8 @@ mod tests {
         assert_eq!(err.to_string(), "prelude: constructor 'True' is required");
     }
 
-    /// A constructor that exists but with the wrong shape (here: `True` with
-    /// arity 1 instead of 0) must report what was FOUND, not just what was
-    /// expected — that is the difference between a drift diagnosis and a
-    /// guessing game.
+    /// A constructor of the wrong shape must report what was found, not just
+    /// what was expected.
     #[test]
     fn ctor_shape_mismatch_message() {
         let (mut env, bool_id) = env_with_prelude_types();
@@ -365,8 +343,7 @@ mod tests {
         );
     }
 
-    /// `True` bound to something that is not a constructor at all (e.g.
-    /// shadowed by a value binding) is the third drift; the message names it.
+    /// `True` shadowed by a non-constructor binding.
     #[test]
     fn ctor_not_a_constructor_message() {
         let (mut env, _) = env_with_prelude_types();
@@ -388,9 +365,8 @@ mod tests {
         );
     }
 
-    /// A prelude type declared with the wrong number of parameters (e.g.
-    /// `type Array` instead of `type Array(a)`) must fail here, not surface as
-    /// a confused unify error the first time an array literal is typed.
+    /// A prelude type at the wrong arity must fail here, not as a unify error
+    /// the first time an array literal is typed.
     #[test]
     fn type_arity_mismatch_message() {
         let mut env = new_env();

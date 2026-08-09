@@ -1,11 +1,9 @@
 //! Flatten a `PrecompileOutput` into the pool-of-arrays form that build.rs
-//! emits as Rust source. With every type-side struct now `Copy` and backed by
-//! `InferEngine` side-pools, this is a wholesale snapshot of those pools plus
-//! per-module export tables and the program; nothing is restructured.
+//! emits as Rust source: a wholesale snapshot of the `InferEngine` side-pools
+//! plus per-module export tables and the program.
 //!
-//! `panic!` is the correct failure mode here: this code only executes inside
-//! `build.rs`, where a panic surfaces as a `cargo build` error with the message
-//! attached. The crate-wide `clippy::panic` deny is for the runtime path.
+//! `panic!` is fine here — this only runs inside `build.rs`, where a panic is
+//! a `cargo build` error. The crate-wide `clippy::panic` deny targets runtime.
 #![allow(clippy::panic)]
 
 use indexmap::IndexMap;
@@ -17,8 +15,8 @@ use crate::precompile::PrecompileOutput;
 use crate::type_def::TypeId;
 use crate::types::InferEngine;
 
-/// Owned counterpart of `StaticStdlib` — `Vec`s (and owned values) instead of
-/// `&'static` borrows, field for field. Only [`flatten`] constructs one, fully.
+/// Owned counterpart of `StaticStdlib`: `Vec`s instead of `&'static` borrows,
+/// field for field.
 #[derive(Debug)]
 pub struct FlatPools {
     pub str_pool: Vec<String>,
@@ -53,9 +51,8 @@ pub struct FlatPools {
     str_intern: IndexMap<String, StrIdx>,
 }
 
-/// Slice whose `len` is the pool-length delta since `start` — structurally in
-/// agreement with what the push loop actually appended, whatever that loop
-/// skipped or filtered.
+/// Slice whose `len` is the pool-length delta since `start`, so it matches
+/// whatever the push loop actually appended.
 fn slice_since<T>(pool_len_after: usize, start: u32) -> Slice<T> {
     Slice::new(start, pool_len_after as u32 - start)
 }
@@ -87,12 +84,10 @@ impl FlatPools {
     }
 
     fn push_scheme(&mut self, s: Scheme) -> SchemeIdx {
-        // `s.def` (the declaring `DefinitionLocation`) is preserved: its
-        // `module` `ArenaSlice` indexes the static string-slice pool, which
-        // `seed_static` memcpies back as the live arena's prefix, so the
-        // location stays valid after hydration. This is what lets cross-module
-        // goto-def / find-references land inside a precompiled `al/*` module
-        // (`synth_refs_from_interface` reads it back).
+        // `s.def` is kept as-is: its `module` slice indexes the static
+        // string-slice pool, which `seed_static` memcpies back as the live
+        // arena's prefix, so it stays valid after hydration. That is what lets
+        // goto-def land inside a precompiled `al/*` module.
         let i = SchemeIdx(self.schemes.len() as u32);
         self.schemes.push(s);
         i
@@ -128,8 +123,8 @@ impl FlatPools {
             });
         }
         let values = slice_since(self.sexport_pool.len(), v_start);
-        // `private_names` is a `BTreeSet`: iteration is sorted by type, so
-        // interning in that order is reproducible build to build.
+        // `private_names` is a `BTreeSet`, so this interning order is
+        // reproducible build to build.
         let private_names = self.push_str_slice(iface.private_names.iter().cloned());
         let doc = iface.doc.as_deref().map(|d| self.intern(d));
         self.modules.push((
@@ -176,12 +171,10 @@ impl FlatPools {
 }
 
 pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
-    // The engine's pools are the basis of ours; seed them first so every
-    // `StrId`/`ArenaSlice` embedded in the snapshot stays valid. Additional
-    // strings (function/module names) intern after.
-    // str_pool prefix must equal engine.strings verbatim so embedded StrId
-    // indices stay valid; direct copy makes that structural instead of relying
-    // on engine.strings being dupe-free.
+    // The `str_pool` prefix must equal `engine.strings` verbatim so embedded
+    // `StrId` indices stay valid; copying directly makes that structural
+    // instead of relying on `engine.strings` being dupe-free. Later names
+    // (functions, modules) intern after the prefix.
     let mut p = FlatPools {
         str_pool: engine.strings.iter().cloned().collect(),
         str_slice_pool: Vec::new(),
@@ -203,8 +196,7 @@ pub fn flatten(out: &PrecompileOutput, engine: &InferEngine) -> FlatPools {
         functions: Vec::new(),
         constants: Vec::new(),
         prelude: out.prelude.clone(),
-        // `reserved` is a `BTreeSet`, so this comes out sorted (build.rs
-        // relies on binary_search over the emitted slice).
+        // `BTreeSet`, so this comes out sorted; build.rs binary_searches it.
         reserved: out.reserved.iter().cloned().collect(),
         next_type_id: out.next_type_id,
         local_count: out.blob.local_count,
@@ -253,26 +245,22 @@ mod tests {
     use super::*;
     use crate::precompile::precompile_stdlib;
 
-    // `flatten` lowers a `PrecompileOutput` to the pool-of-arrays form build.rs
-    // serialises; like `precompile_stdlib` it only ever runs at build time, so
-    // this is the sole non-build exercise of it. Assert it is *lossless*:
-    // every program field reconstructs exactly, and the type-arena pools are
-    // copied wholesale from the engine so embedded `Ty`/`StrId` stay valid.
+    // `flatten` otherwise only runs at build time, so this is its sole
+    // non-build exercise. Asserts it is lossless.
     #[test]
     fn flatten_is_lossless_over_the_precompiled_stdlib() {
         let (out, engine) = precompile_stdlib().expect("stdlib must precompile");
         let p = flatten(&out, &engine);
         let prog = &out.blob.program;
 
-        // The type arena and side-pools are snapshotted verbatim — any `Ty`
-        // index in a flattened `Scheme`/`TypeInfo` still points at the same
-        // node after hydration only if these are byte-for-byte copies.
+        // A `Ty` index in a flattened `Scheme`/`TypeInfo` points at the same
+        // node after hydration only if these pools are byte-for-byte copies.
         assert_eq!(p.nodes.len(), engine.nodes.len(), "nodes not copied 1:1");
         assert_eq!(p.children.len(), engine.children.len());
         assert_eq!(p.variants.len(), engine.variants.len());
         assert_eq!(p.variant_fields.len(), engine.variant_fields.len());
-        // The string pool is seeded with the engine's strings as its prefix so
-        // every pre-existing `StrId` keeps its meaning; later names append.
+        // Engine strings are the pool's prefix, so pre-existing `StrId`s keep
+        // their meaning.
         assert!(p.str_pool.len() >= engine.strings.len());
         assert!(
             p.str_pool
@@ -281,7 +269,6 @@ mod tests {
                 .eq(engine.strings.iter())
         );
 
-        // Functions round-trip: count, interned name, and every scalar field.
         assert_eq!(p.functions.len(), prog.functions.len());
         for (sf, f) in p.functions.iter().zip(&prog.functions) {
             assert_eq!(
@@ -296,8 +283,7 @@ mod tests {
             assert_eq!(sf.code_len, f.code_len);
         }
 
-        // Code round-trips instruction-for-instruction (Instruction isn't
-        // PartialEq, so compare each decoded field).
+        // `Instruction` isn't `PartialEq`, so compare each decoded field.
         assert_eq!(p.code.len(), prog.code.len());
         for (a, b) in p.code.iter().zip(&prog.code) {
             assert_eq!(a.op, b.op);
@@ -306,8 +292,6 @@ mod tests {
             assert_eq!(a.operand, b.operand);
         }
 
-        // Constants round-trip: each flattened `SConst` decodes back to the
-        // original scalar / string / string-array value.
         assert_eq!(p.constants.len(), prog.constants.len());
         for (sc, v) in p.constants.iter().zip(&prog.constants) {
             match (sc, v.kind()) {
@@ -336,8 +320,7 @@ mod tests {
             }
         }
 
-        // Every interface became a flattened module, keyed identically and
-        // emitted in sorted order (build.rs relies on binary_search on it).
+        // build.rs binary_searches the emitted module table.
         let keys: Vec<&String> = p.modules.iter().map(|(k, _)| k).collect();
         let mut sorted = keys.clone();
         sorted.sort();
@@ -350,7 +333,7 @@ mod tests {
         }
 
         // The module doc is what hover shows for `al/scheduler`, which is
-        // never recompiled; declaration docs travel on `SExport::doc`.
+        // never recompiled.
         for (k, iface) in &out.blob.interfaces {
             let (_, m) = p.modules.iter().find(|(mk, _)| mk == k).unwrap();
             let flat = m.doc.map(|i| p.str_pool[i.0 as usize].as_str());
@@ -364,19 +347,14 @@ mod tests {
         let doc = p.str_pool[sched.doc.expect("al/scheduler has a module doc").0 as usize].as_str();
         assert!(doc.contains("Lightweight processes."));
 
-        // The standalone type-info table covers every entry by name.
         assert_eq!(p.typeinfo_by_name.len(), out.blob.type_info.len());
 
-        // `reserved` (also build.rs-only) is the reserved names in sorted
-        // order, losslessly.
         let mut sorted = p.reserved.clone();
         sorted.sort();
         assert_eq!(p.reserved, sorted, "reserved names must come out sorted");
         assert_eq!(p.reserved.len(), out.reserved.len());
         assert!(p.reserved.iter().any(|r| r == "Some"));
 
-        // The prelude bindings, next type id, and stdlib local count travel
-        // with the pools — `FlatPools` mirrors every `StaticStdlib` field.
         assert_eq!(p.next_type_id, out.next_type_id);
         assert_eq!(p.local_count, out.blob.local_count);
         for ((n, a), (m, b)) in p.prelude.type_fields().zip(out.prelude.type_fields()) {

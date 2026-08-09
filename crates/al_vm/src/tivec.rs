@@ -1,27 +1,14 @@
-//! Typed indices ([`Idx`]) and the index-typed vector that consumes them
-//! ([`TiVec`]).
-//!
-//! The compiler juggles half a dozen `u32`-shaped operand spaces — local ids,
-//! constant-pool slots, function indices, code addresses — and every one of
-//! them used to be a bare integer. Nothing stopped a `ConstId` being passed
-//! where a `FuncIdx` was wanted, or a jump operand being used to index
-//! `program.functions`. `TiVec<I, T>` closes that hole from the container
-//! side: the *only* way to subscript one is with its own index type, so a
-//! mismatch is a type error rather than a wrong-but-plausible instruction.
-//!
-//! [`TiVec::push`] returns the index it just filled, and [`TiVec::next_idx`]
-//! names the index a push *would* fill. Together they replace the
-//! `let i = v.len() as I; v.push(x)` idiom that silently breaks whenever a
-//! caller hands over a vector numbered from somewhere other than zero.
+//! Typed indices ([`Idx`]) and the vector that only they can subscript
+//! ([`TiVec`]). Keeps the compiler's many `u32` operand spaces (local ids,
+//! constant slots, function indices, code addresses) from mixing.
 
 use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
-/// A dense index into a [`TiVec`]. Implementors are newtypes over an unsigned
-/// integer; the round-trip `Idx::from_usize(i).index() == i` must hold for
-/// every `i` a program can actually allocate.
+/// A dense index into a [`TiVec`]. `Idx::from_usize(i).index() == i` must hold
+/// for every `i` a program can allocate.
 pub trait Idx: Copy + Eq + Ord + Hash + fmt::Debug {
     fn from_usize(i: usize) -> Self;
     fn index(self) -> usize;
@@ -29,10 +16,8 @@ pub trait Idx: Copy + Eq + Ord + Hash + fmt::Debug {
 
 /// `Vec<T>` that can only be subscripted by `I`.
 ///
-/// The `PhantomData<fn(I) -> I>` makes `TiVec` invariant in `I` — irrelevant
-/// for the concrete newtype indices used here — while neither borrowing nor
-/// owning an `I`, so `TiVec` inherits `Send`/`Sync`/auto-traits from `T`
-/// alone.
+/// The `fn(I) -> I` phantom neither owns nor borrows an `I`, so auto-traits
+/// come from `T` alone.
 pub struct TiVec<I: Idx, T> {
     raw: Vec<T>,
     _idx: PhantomData<fn(I) -> I>,
@@ -54,9 +39,8 @@ impl<I: Idx, T> TiVec<I, T> {
         self.raw.is_empty()
     }
 
-    /// The index [`Self::push`] would return. Minting an index this way — not
-    /// from `len() as u32` at a call site that may not own the whole table — is
-    /// what keeps producer and consumer numbering in step.
+    /// The index [`Self::push`] would return. Mint indices here, not from
+    /// `len() as u32` at a call site that may not own the whole table.
     pub fn next_idx(&self) -> I {
         I::from_usize(self.raw.len())
     }
@@ -89,24 +73,17 @@ impl<I: Idx, T> TiVec<I, T> {
         &self.raw
     }
 
-    /// The elements at `start..`, as a plain read-only slice — for consumers
-    /// that walk a suffix (e.g. everything appended past a base index).
-    /// Returning `&[T]` erases the typed index, but a shared slice can
-    /// neither grow the table nor replace an entry, so no index is minted or
-    /// misdirected through it.
+    /// The elements at `start..`, for consumers that walk a suffix.
     pub fn tail_from(&self, start: I) -> &[T] {
         &self.raw[start.index()..]
     }
 
-    /// Drop the typed-index wrapper. Used at the boundaries where a plain
-    /// `Vec` is what the consumer (the VM's `Program`, a test) wants.
+    /// Drop the typed-index wrapper, for consumers that want a plain `Vec`.
     pub fn into_vec(self) -> Vec<T> {
         self.raw
     }
 
     /// Grow with `fill` until `i` is a valid index. No-op when it already is.
-    /// The grow-on-demand idiom for a sparse dense-index table, hoisted out of
-    /// its call sites so the `+ 1` is written once.
     pub fn resize_at_least(&mut self, i: I, fill: T)
     where
         T: Clone,
@@ -169,11 +146,6 @@ impl<'a, I: Idx, T> IntoIterator for &'a TiVec<I, T> {
 
 /// Declare a `pub struct Name(pub u32)` dense index with its [`Idx`] impl and
 /// a `Display` of `"<prefix><n>"`.
-///
-/// A macro rather than four hand-written copies because the *whole point* of
-/// these types is that they behave identically and are not interchangeable: a
-/// hand-written `index()` that forgot a cast would reintroduce exactly the
-/// class of bug the newtype exists to remove.
 #[macro_export]
 macro_rules! newtype_index {
     ($(#[$m:meta])* $vis:vis struct $name:ident($prefix:literal)) => {
@@ -232,9 +204,8 @@ mod tests {
         assert_eq!(v.as_slice(), &[1, 9, 9]);
     }
 
-    /// The point of the whole module: `B` cannot subscript a `TiVec<A, _>`.
-    /// Enforced by the type checker, so all this test can do is pin the two
-    /// index spaces as distinct types with the same representation.
+    /// `B` cannot subscript a `TiVec<A, _>`. The type checker enforces that, so
+    /// this only pins the two spaces as distinct types with one representation.
     #[test]
     fn distinct_index_spaces_do_not_unify() {
         let a = A(7);

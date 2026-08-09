@@ -1,9 +1,5 @@
-//! AL's embedding of the language-agnostic VM (`al_vm::vm`): everything the
-//! runtime exports, plus constructors that wire in [`STDLIB_TEMPLATES`] — the
-//! build.rs-generated table of every stdlib constructor the VM builds
-//! unprompted (I/O results, `NetError` variants, HTTP protocol values). This
-//! module is the one place AL's stdlib identities meet the runtime; the VM
-//! itself cannot name them.
+//! AL's embedding of the language-agnostic VM. The one place AL's stdlib
+//! identities meet the runtime; the VM itself cannot name them.
 
 pub use al_vm::vm::*;
 
@@ -15,9 +11,8 @@ use al_vm::template::{
 
 use crate::stdlib;
 
-/// The AL stdlib's constructor table, assembled from the build.rs-generated
-/// `stdlib::*` statics. One home per template — `VM::stdlib_template`
-/// memoizes on the address.
+/// The AL stdlib's constructor table. Each template must have exactly one
+/// home here: `VM::stdlib_template` memoizes on the address.
 pub static STDLIB_TEMPLATES: StdlibTemplates = StdlibTemplates {
     prelude: PreludeVariants {
         nil: &stdlib::prelude::NIL,

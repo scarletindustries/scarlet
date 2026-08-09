@@ -1,28 +1,7 @@
-//! The compiler side of the bytecode boundary: everything that *produces* a
-//! runnable [`Program`] from AL source. The instruction set, the [`Program`]
-//! container, the NaN-boxed [`value`], and the heap all live in `al_vm` —
-//! the language-agnostic runtime crate — and are re-exported here at their
-//! historical paths, so `al_core::bytecode::*` remains the one import for
-//! both halves of the contract.
-//!
-//! # Reading order
-//!
-//! | file                | the one thing it does                          |
-//! |---------------------|------------------------------------------------|
-//! | `al_vm::bytecode`   | [`Op`], [`Instruction`], [`Function`],         |
-//! |                     | [`Program`] — the ISA the VM executes          |
-//! | [`compiler`]        | AST → `Program`: HM inference fused with       |
-//! |                     | bytecode emission                              |
-//! | [`binop`]           | binary-operator kind classification +          |
-//! |                     | post-unification specialization to typed ops   |
-//! | `session`           | LSP layer: `IncrementalSession`, `Watermark`   |
-//! |                     | rollback, reference-graph finalization         |
-//! | `peephole`          | superinstruction fusion over the emitted code  |
-//! | `analysis`          | module top level: multi-pass declaration       |
-//! |                     | analysis (type heads → aliases → slots →       |
-//! |                     | ctors → SCC inference)                         |
-//! | `prelude` /         | load `src/std/al.al` into every compile;       |
-//! | [`prelude_bindings`]| capture strongly-typed handles to its names    |
+//! The compiler side of the bytecode boundary: everything that produces a
+//! runnable [`Program`] from AL source. The ISA, [`Program`], the NaN-boxed
+//! `value` and the heap live in `al_vm` and are re-exported here, so
+//! `al_core::bytecode::*` is the one import for both halves of the contract.
 
 mod analysis;
 pub mod binop;
@@ -38,10 +17,9 @@ pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use session::{HoverFact, IncrementalSession, Watermark};
 
-/// Resolve an `@vm(name)` intrinsic key to its VM opcode. This is the ONE
-/// place the string→Op mapping lives; analysis calls it while registering the
-/// stdlib so an unknown key is a well-located compile error at the annotation
-/// rather than an `Internal:` fallthrough during codegen.
+/// Resolve an `@vm(name)` intrinsic key to its VM opcode. The only
+/// string→Op mapping; analysis calls it while registering the stdlib so an
+/// unknown key errors at the annotation, not during codegen.
 pub fn builtin_op(name: &str) -> Option<Op> {
     Some(match name {
         "println" => Op::Print,

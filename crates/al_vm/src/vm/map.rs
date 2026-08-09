@@ -1,28 +1,15 @@
 //! The `al/map` builtins over the opaque [`Map`](ValueView::Map) value.
 //!
-//! A `Map(k, v)` is a heap value whose representation is chosen by its
-//! [`MapBacking`]:
-//!
-//! - [`MapBacking::Env`] — a zero-copy live view of the host process
-//!   environment, typed `Map(String, String)`. Reads ([`get`](VM::map_get),
-//!   [`has`](VM::map_has), …) go straight to `std::env`; nothing is
-//!   materialized until — and only what — a lookup asks for. A *write*
-//!   (`set`/`delete`) has nowhere to go in the environment, so it first
-//!   materializes the whole environment into a HAMT and updates that.
-//! - [`MapBacking::Hamt`] — an in-memory persistent hash array mapped trie
-//!   ([`crate::bytecode::hamt`]). `set`/`delete` path-copy the trie and share
-//!   every untouched subtree, so the prior map stays valid.
+//! A map is either [`MapBacking::Hamt`] (a persistent trie) or
+//! [`MapBacking::Env`] (a live view of the process environment, typed
+//! `Map(String, String)`). Env reads hit `std::env` directly; an env write has
+//! nowhere to go, so it materializes the environment into a HAMT first.
 //!
 //! Every op here is a pure stack transformation: it never parks and never
-//! touches `ip`. Allocation is reference-counted — an op pops its operands and
-//! builds its result; HAMT writes path-copy and share untouched subtrees, and
-//! the environment view materializes a host-side snapshot whose strings live
-//! off-arena.
+//! touches `ip`.
 //!
-//! Environment entries that are not valid UTF-8 (key or value) are invisible
-//! to every op: an AL `String` is UTF-8, so a non-representable entry simply
-//! does not belong to the `Map(String, String)` view. This keeps the read ops
-//! and the materialized-on-write copy mutually consistent.
+//! Non-UTF-8 environment entries are invisible to every op, which keeps reads
+//! and the materialized-on-write copy consistent.
 
 use crate::bytecode::{MapBacking, Value, ValueView, hamt, hash_value};
 
@@ -54,14 +41,12 @@ impl VM {
                 let val = self.peek_env_lookup(0);
                 let _key = self.pop()?;
                 let _map = self.pop()?;
-                // Build the result string fresh from the host snapshot.
                 val.map(|s| Value::str_in(&mut self.heap, &s))
             }
             MapBacking::Hamt => {
                 let hash = hash_value(self.peek_at_or(0)?);
                 let key = self.pop()?;
                 let map = self.pop()?;
-                // The stored value already lives in the arena; `Some` shares it.
                 hamt::get(&map, &key, hash)
             }
         };
@@ -109,10 +94,8 @@ impl VM {
         self.map_collect("map.to_list", Proj::Pairs)
     }
 
-    /// Shared body of `keys`/`values`/`to_list`: project each entry per
-    /// `proj` into an `Array`. HAMT entries are shared; environment strings
-    /// are built fresh. Only the array spine (and, for `Pairs`, one tuple per
-    /// entry) is new.
+    /// Shared body of `keys`/`values`/`to_list`: project each entry per `proj`
+    /// into an `Array`.
     fn map_collect(&mut self, op: &'static str, proj: Proj) -> VmResult<()> {
         let items: Vec<Value> = match self.map_backing_at(0, op)? {
             MapBacking::Env => {
@@ -169,8 +152,6 @@ impl VM {
         let value = self.pop()?;
         let key = self.pop()?;
         let map = self.pop()?;
-        // A write to the environment view has nowhere to go, so materialize the
-        // whole environment into a HAMT and update that instead.
         let base = match backing {
             MapBacking::Hamt => map,
             MapBacking::Env => self.build_env_hamt(&env_entries()),
@@ -196,8 +177,7 @@ impl VM {
         Ok(())
     }
 
-    /// Build a HAMT holding `entries` (an environment snapshot), allocating the
-    /// entry strings and the trie.
+    /// Build a HAMT holding `entries`, an environment snapshot.
     fn build_env_hamt(&mut self, entries: &[(String, String)]) -> Value {
         let mut map = hamt::empty(&mut self.heap);
         for (k, v) in entries {
@@ -209,8 +189,7 @@ impl VM {
         map
     }
 
-    /// The backing of the map operand `d` slots below the top, read without
-    /// popping.
+    /// The backing of the map operand `d` slots below the top, without popping.
     fn map_backing_at(&self, d: usize, op: &'static str) -> VmResult<MapBacking> {
         let v = self.peek_at_or(d)?;
         match v.kind() {
@@ -219,9 +198,8 @@ impl VM {
         }
     }
 
-    /// Look up the string key `d` slots below the top against the process
-    /// environment, returning the value if both the key and its value are
-    /// valid UTF-8. Used by the `Env` read ops.
+    /// Look up the string key `d` slots below the top in the process
+    /// environment. `None` unless both key and value are valid UTF-8.
     fn peek_env_lookup(&self, d: usize) -> Option<String> {
         let key = self.peek_at(d).and_then(|v| v.as_str())?;
         std::env::var(key).ok()
@@ -236,10 +214,9 @@ enum Proj {
     Pairs,
 }
 
-/// Snapshot the process environment as the UTF-8 `(key, value)` pairs that the
-/// `Map(String, String)` view exposes. `std::env::vars` would panic on a
-/// non-UTF-8 entry, so walk `vars_os` and drop anything not representable as an
-/// AL `String`.
+/// Snapshot the process environment as UTF-8 `(key, value)` pairs.
+/// `std::env::vars` panics on a non-UTF-8 entry, so walk `vars_os` and drop
+/// what an AL `String` cannot hold.
 fn env_entries() -> Vec<(String, String)> {
     std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))

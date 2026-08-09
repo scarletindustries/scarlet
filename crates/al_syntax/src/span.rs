@@ -7,10 +7,9 @@ pub struct Span {
 }
 
 impl Span {
-    /// A synthetic placeholder span for generated / prelude / test AST that has
-    /// no source location. Deliberately empty (`start == end`) so it can never
-    /// [`contain`](Span::contains) any point — synthetic nodes must not win
-    /// position queries (hover/goto/references) at the start of a file.
+    /// Placeholder span for generated / prelude / test AST with no source
+    /// location. Empty (`start == end`) so it contains no point and cannot win
+    /// a hover/goto/references query at the start of a file.
     pub const DUMMY: Span = Span {
         start_line: 0,
         start_column: 0,
@@ -38,8 +37,7 @@ impl Span {
         }
     }
 
-    /// `(start, end)` as `(line, column)` pairs; all span geometry compares
-    /// these lexicographically.
+    /// `(start, end)` as `(line, column)` pairs, compared lexicographically.
     fn endpoints(&self) -> ((i32, i32), (i32, i32)) {
         (
             (self.start_line, self.start_column),
@@ -47,19 +45,15 @@ impl Span {
         )
     }
 
-    /// Half-open containment: `[start, end)` in (line, column) order. A
-    /// [`Span::point`] `(l, c)` (end column `c + 1`) therefore contains exactly
-    /// column `c` on line `l`.
+    /// Half-open containment: `[start, end)` in (line, column) order.
     pub fn contains(&self, line: i32, col: i32) -> bool {
         let (start, end) = self.endpoints();
         let p = (line, col);
         start <= p && p < end
     }
 
-    /// A monotone "width" key used to pick the tightest of several spans
-    /// containing a point. Ordered lexicographically as `(line-span,
-    /// col-span)`, so any single-line span sorts before any multi-line one;
-    /// exact width is irrelevant, only the ordering is.
+    /// Ordering key for picking the tightest of several spans containing a
+    /// point. Only the ordering matters, not the numbers.
     pub fn width(&self) -> (i32, i32) {
         (
             self.end_line - self.start_line,
@@ -67,18 +61,16 @@ impl Span {
         )
     }
 
-    /// Whether `self` lies fully inside `outer` (both half-open, `(line, col)`
-    /// order). Used to tell an imported item's *binding* occurrence — which the
-    /// compiler records inside the `import` declaration's span — apart from a
-    /// real *use* of that imported name elsewhere in the module.
+    /// Whether `self` lies fully inside `outer`. Tells an imported item's
+    /// binding occurrence (recorded inside the `import` declaration's span)
+    /// apart from a real use of that name elsewhere.
     pub fn within(&self, outer: &Span) -> bool {
         let (i_start, i_end) = self.endpoints();
         let (o_start, o_end) = outer.endpoints();
         o_start <= i_start && i_end <= o_end
     }
 
-    /// The smallest `Span` covering both `self` and `other` (`(line, col)`
-    /// order). Makes no assumption about which span comes first.
+    /// The smallest `Span` covering both, in either order.
     pub fn union(&self, other: &Span) -> Span {
         let (a_start, a_end) = self.endpoints();
         let (b_start, b_end) = other.endpoints();

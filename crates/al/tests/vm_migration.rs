@@ -1,10 +1,7 @@
-// Multi-scheduler smoke coverage: programs that fan CPU-bound processes out
-// across two schedulers (`AL_SCHEDULERS=2`). With several runnable processes
-// and an idle peer, the yield path donates run-queue processes to the other
-// scheduler, so every worker (stack, frames, captures, heap) is moved whole
-// to another scheduler mid-execution. The assertions are purely
-// semantic — exact output lines, not timing — so a migration bug shows up as
-// corrupted/missing output or a hang, never as flakiness on a loaded machine.
+// Multi-scheduler smoke coverage. With several runnable processes and an idle
+// peer, the yield path donates run-queue processes to the other scheduler, so
+// a worker is moved whole (stack, frames, captures, heap) mid-execution.
+// Assertions are on exact output lines, never timing.
 
 use std::process::{Command, Stdio};
 
@@ -13,10 +10,8 @@ use common::Project;
 use common::wait_or_kill;
 
 /// Run `al run <prog>` with `AL_SCHEDULERS=<schedulers>` and capture output.
-/// A generous wall-clock cap turns a scheduler deadlock (e.g. a donated
-/// process lost in transit, or a claimed-but-never-notified peer sleeping
-/// forever) into a test failure instead of a hung CI job. The cap is an
-/// anti-hang guard only; no assertion depends on how fast the run finishes.
+/// The wall-clock cap only turns a scheduler deadlock into a failure instead
+/// of a hung CI job; no assertion depends on how fast the run finishes.
 fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String {
     let prog = proj.dir.join("prog.al");
     std::fs::write(&prog, src).unwrap();
@@ -46,9 +41,7 @@ fn run_al_with_schedulers(proj: &Project, src: &str, schedulers: u32) -> String 
 }
 
 /// Assert `stdout` is exactly the lines of `expected` modulo order. Process
-/// completion order across schedulers is nondeterministic, so the comparison
-/// is on the sorted multiset of lines: every expected line appears exactly
-/// once, nothing extra, nothing duplicated, nothing torn mid-line.
+/// completion order across schedulers is nondeterministic.
 fn assert_lines_unordered(stdout: &str, expected: &[String], context: &str) {
     let mut got: Vec<&str> = stdout.lines().collect();
     got.sort_unstable();
@@ -60,8 +53,7 @@ fn assert_lines_unordered(stdout: &str, expected: &[String], context: &str) {
     );
 }
 
-/// Reference fibonacci mirroring the al program's `fib`, so expected outputs
-/// are computed rather than hand-pinned.
+/// Mirrors the al program's `fib`, so expected outputs are computed.
 fn fib(n: u64) -> u64 {
     if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
 }
@@ -80,20 +72,16 @@ fn fib(n) {
 
 "#;
 
-/// Prepend [`FIB_PREAMBLE`] to `body`, run it under `schedulers` schedulers
-/// in a fresh project named `tag`, and return stdout.
+/// Prepend [`FIB_PREAMBLE`] to `body` and run it in a fresh project.
 fn run_fib_program(tag: &str, schedulers: u32, body: &str) -> String {
     let proj = Project::new(tag);
     run_al_with_schedulers(&proj, &format!("{FIB_PREAMBLE}{body}"), schedulers)
 }
 
-/// Shared runner for the CPU-bound smoke tests: `spawns` workers each compute
-/// `fib(base + i % modulo)` — tens of thousands of reductions
-/// (REDUCTION_BUDGET is 4000), so every worker is preempted many times and
-/// sits in a run queue while a sibling runs — and print a per-id line whose
-/// value pins the *result* of the computation: a process whose
-/// stack/frames/captures were corrupted in transit prints the wrong number
-/// (or crashes), it doesn't just reorder.
+/// `spawns` workers each compute `fib(base + i % modulo)`. Sized well past
+/// the 4000-reduction budget so every worker is preempted many times and sits
+/// in a run queue while a sibling runs. Printing the result, not just the id,
+/// is what catches a process corrupted in transit.
 fn cpu_bound_smoke(tag: &str, schedulers: u32, spawns: u64, base: u64, modulo: u64) {
     let body = format!(
         r#"fn work(i) {{
@@ -118,30 +106,24 @@ println('main done')
     );
 }
 
-/// Eight CPU-bound workers under two schedulers — exactly the run-queue state
-/// the donation policy migrates.
+/// Eight CPU-bound workers under two schedulers: the run-queue state the
+/// donation policy migrates.
 #[test]
 fn cpu_bound_spawns_complete_correctly_under_two_schedulers() {
     cpu_bound_smoke("sched2_smoke", 2, 8, 20, 4);
 }
 
-/// Same workload pinned to one scheduler. With a single scheduler there is
-/// never an idle peer, so the donation path must stay completely inert; the
-/// program must still finish with identical output. Guards against the
-/// migration machinery breaking the degenerate single-core configuration.
+/// Same workload on one scheduler, where there is never an idle peer: the
+/// donation path must stay inert and the output must be identical.
 #[test]
 fn cpu_bound_spawns_complete_correctly_under_one_scheduler() {
     cpu_bound_smoke("sched1_smoke", 1, 6, 19, 3);
 }
 
-/// Deep recursion across a migration boundary: one heavyweight worker
-/// (`fib(26)`, hundreds of preemptions) racing several light siblings under
-/// two schedulers. If migration moves a process whose frame stack is many
-/// recursive activations deep — all sharing one closure — any error in frame
-/// metadata (ip/base_slot/captures wiring) or in the moved state derails the
-/// recursion and the final value comes out wrong. The single deep worker is
-/// the likeliest donation victim since it outlives every sibling in the run
-/// queue.
+/// Deep recursion across a migration boundary. The heavy worker outlives
+/// every sibling, so it is the likeliest donation victim; any error in the
+/// moved frame metadata (ip/base_slot/captures) derails the recursion and the
+/// final value comes out wrong.
 #[test]
 fn deep_recursive_worker_survives_two_schedulers() {
     let stdout = run_fib_program(
@@ -159,15 +141,10 @@ array.each(1..6, fn(i) scheduler.spawn(fn() println('light ${i} ${fib(18)}')))
     assert_lines_unordered(&stdout, &expected, "deep recursion, AL_SCHEDULERS=2");
 }
 
-/// Migration while holding loaded globals. Top-level bindings are published
-/// once into the program-wide frozen area; loading one is a plain copy of the
-/// frozen word, so a `Value` loaded from the globals table must stay valid on
-/// whatever scheduler the process lands on — nothing it points at may be
-/// scheduler-local. Each worker loads the globals into locals FIRST, then
-/// burns tens of thousands of reductions (many preemptions, so the loaded
-/// words sit on a run-queue process's stack across donations), and only then
-/// prints them. A frozen pointer that dangled in transit shows up as corrupt
-/// output or a crash, never as flakiness.
+/// Migration while holding loaded globals. A `Value` copied out of the
+/// globals table must stay valid on whatever scheduler the process lands on,
+/// so nothing it points at may be scheduler-local. Each worker loads the
+/// globals first, burns many reductions, then prints them.
 #[test]
 fn migrated_process_keeps_loaded_globals_valid() {
     let stdout = run_fib_program(

@@ -1,202 +1,110 @@
-//! Precomputed templates for prelude and stdlib enum values — how the VM
-//! builds `Some(x)`, `Ok(x)`, `NetError` variants, HTTP `Parsed` values,
-//! and the like without ever re-interning a name.
+//! The VM's resolved view of [`Program::abi`](crate::bytecode::Program::abi):
+//! one [`EnumTemplate`] per bound slot, cloned out at VM init.
 //!
-//! An [`EnumTemplate`] is the constant part of one variant, computed once:
-//! frozen `Str` values for the enum and variant names, a frozen labels
-//! tuple, and the compile-time name-prefix hash. Instantiating it folds
-//! the payload into that hash and allocates exactly one enum cell — the
-//! names are stored as single reference words into the frozen area
-//! (program-lifetime stable, shared by every process; see
-//! [`crate::frozen`]).
-//!
-//! [`PreludeTemplates`] is the fixed set every VM carries, built at init
-//! through the program's frozen builder. Nullary values (`Nil`, `None`,
-//! the HTTP `NeedMore`/`NoBody`/`Chunked` markers) are pre-built whole in
-//! the frozen area: pushing one is a word copy that allocates nothing.
-//! Stdlib variants outside this fixed set (error values) go through
-//! `VM::stdlib_template`, which builds and memoizes an [`EnumTemplate`]
-//! on first use against the same frozen area.
+//! Unbound slots stay `None`. Reaching one at runtime means the front end
+//! emitted an op it did not bind, so it surfaces as [`VmError::Internal`].
 
-use crate::bytecode::{Arena, Value};
-use crate::frozen::FrozenBuilder;
-use crate::template::{StdlibTemplates, VariantTemplate};
+use std::borrow::Cow;
 
-/// One prelude/stdlib enum variant, precomputed for cheap construction: the
-/// frozen name and label values (program-lifetime stable, shared by every
-/// instance) and the compile-time name-prefix hash, completed per instance
-/// by folding the payload in. Plain words — copying a template costs
-/// nothing and borrows nothing.
-#[derive(Clone)]
-pub(super) struct EnumTemplate {
-    type_id: crate::TypeId,
-    variant_idx: u16,
-    /// Frozen `Str` value of the enum type name.
-    enum_name: Value,
-    /// Frozen `Str` value of the variant name.
-    variant_name: Value,
-    /// Frozen `Tuple`-of-`Str` value of the field labels.
-    labels: Value,
+use crate::abi::AbiSlot;
+use crate::bytecode::Program;
+use crate::template::EnumTemplate;
+
+use super::{VmError, VmResult};
+
+/// Every bound constructor, indexed by slot.
+pub(super) struct Templates {
+    slots: Vec<Option<EnumTemplate>>,
+    /// The HTTP/1 group, resolved whole so the scanners stay infallible.
+    pub(super) h1: Option<H1>,
+    /// The all-false `HeadFlags`, pre-built in the frozen area so the common
+    /// parse copies a word instead of allocating.
+    pub(super) head_flags_none: Option<crate::bytecode::Value>,
 }
 
-impl EnumTemplate {
-    /// Build an instance carrying `payload` in `a`. Names and labels are
-    /// frozen references, never copied.
-    pub(super) fn instantiate<A: Arena + ?Sized>(&self, a: &mut A, payload: &[Value]) -> Value {
-        // Lazy: see `EnumRef::hash` — 0 means "computed on first use".
-        let hash = 0u64;
-        Value::enum_in(
-            a,
-            self.type_id,
-            self.variant_idx,
-            hash,
-            self.enum_name.clone(),
-            self.variant_name.clone(),
-            self.labels.clone(),
-            payload,
-        )
-    }
-}
-
-/// Precomputed prelude enum templates. The constant-shape parts (frozen
-/// names, labels, name-prefix hashes) are built once at VM init into the
-/// program's frozen area; hot paths instantiate against them instead of
-/// rebuilding names. Variant-only values (Nil, None, NeedMore, NoBody,
-/// Chunked) are pre-built IN the frozen area, so pushing one is a single
-/// word copy and allocates nothing.
-pub(super) struct PreludeTemplates {
-    pub(super) nil: Value,
-    pub(super) none: Value,
-    pub(super) some: EnumTemplate,
-    pub(super) ok: EnumTemplate,
-    pub(super) err: EnumTemplate,
-    pub(super) ip_v4: EnumTemplate,
-    pub(super) ip_v6: EnumTemplate,
-    pub(super) socket_address: EnumTemplate,
-    pub(super) socket: EnumTemplate,
-    pub(super) read_data: EnumTemplate,
-    pub(super) read_closed: Value,
-    // HTTP protocol templates (al/http/h1, al/http/headers), used by the
-    // native scanners in `vm::http`.
+/// The constructors the `vm::http` scanners build.
+pub(super) struct H1 {
     pub(super) header: EnumTemplate,
-    pub(super) version_http10: Value,
-    pub(super) version_http11: Value,
+    pub(super) http10: EnumTemplate,
+    pub(super) http11: EnumTemplate,
     pub(super) head_flags: EnumTemplate,
-    /// The all-false `HeadFlags`, pre-built whole in the frozen area. The
-    /// overwhelming majority of request heads carry neither `Connection` nor
-    /// `Expect`, so the common parse copies this word instead of allocating a
-    /// record the caller immediately reads three `False`s out of.
-    pub(super) head_flags_none: Value,
     pub(super) parsed_done: EnumTemplate,
-    pub(super) parsed_need_more: Value,
+    pub(super) parsed_need_more: EnumTemplate,
     pub(super) parsed_bad: EnumTemplate,
-    pub(super) framing_no_body: Value,
+    pub(super) framing_no_body: EnumTemplate,
     pub(super) framing_length: EnumTemplate,
-    pub(super) framing_chunked: Value,
+    pub(super) framing_chunked: EnumTemplate,
     pub(super) framing_invalid: EnumTemplate,
     pub(super) chunked_done: EnumTemplate,
-    pub(super) chunked_need_more: Value,
+    pub(super) chunked_need_more: EnumTemplate,
     pub(super) chunked_bad: EnumTemplate,
 }
 
-/// Convert a build.rs-emitted `stdlib::*` template into the runtime form:
-/// intern its names and labels in the frozen area and precompute the
-/// name-prefix hash.
-pub(super) fn enum_template(fb: &mut FrozenBuilder, t: &VariantTemplate) -> EnumTemplate {
-    let labels = t.labels.iter().map(|l| fb.str(l)).collect();
-    EnumTemplate {
-        type_id: t.type_id,
-        variant_idx: t.variant_idx,
-        enum_name: fb.str(t.type_name).into_value(),
-        variant_name: fb.str(t.variant_name).into_value(),
-        labels: fb.tuple(labels).into_value(),
-    }
-}
+impl Templates {
+    pub(super) fn resolve(program: &Program, fb: &mut crate::frozen::FrozenBuilder) -> Self {
+        let get = |slot: AbiSlot| -> Option<EnumTemplate> {
+            program.abi.get(slot).map(|i| program.templates[i].clone())
+        };
+        let slots: Vec<Option<EnumTemplate>> = AbiSlot::ALL.iter().map(|&s| get(s)).collect();
 
-/// A nullary stdlib enum value pre-built in the frozen area: pushing it is a
-/// word copy, shared by every process for the program lifetime.
-fn frozen_enum_value(fb: &mut FrozenBuilder, t: &VariantTemplate) -> Value {
-    debug_assert!(
-        t.labels.is_empty(),
-        "frozen_enum_value requires a nullary variant: {}::{}",
-        t.type_name,
-        t.variant_name
-    );
-    let tpl = enum_template(fb, t);
-    tpl.instantiate(fb, &[])
-}
+        let h1 = (|| {
+            Some(H1 {
+                header: get(AbiSlot::H1Header)?,
+                http10: get(AbiSlot::H1Http10)?,
+                http11: get(AbiSlot::H1Http11)?,
+                head_flags: get(AbiSlot::H1HeadFlags)?,
+                parsed_done: get(AbiSlot::H1ParsedDone)?,
+                parsed_need_more: get(AbiSlot::H1ParsedNeedMore)?,
+                parsed_bad: get(AbiSlot::H1ParsedBad)?,
+                framing_no_body: get(AbiSlot::H1FramingNoBody)?,
+                framing_length: get(AbiSlot::H1FramingLength)?,
+                framing_chunked: get(AbiSlot::H1FramingChunked)?,
+                framing_invalid: get(AbiSlot::H1FramingInvalid)?,
+                chunked_done: get(AbiSlot::H1ChunkedDone)?,
+                chunked_need_more: get(AbiSlot::H1ChunkedNeedMore)?,
+                chunked_bad: get(AbiSlot::H1ChunkedBad)?,
+            })
+        })();
 
-impl PreludeTemplates {
-    /// Build the fixed template set from the embedder-supplied stdlib table —
-    /// the VM's one source for the constructors its opcodes build unprompted.
-    pub(super) fn new(fb: &mut FrozenBuilder, stdlib: &'static StdlibTemplates) -> Self {
-        let head_flags = enum_template(fb, stdlib.http.head_flags);
-        // Immediates, so the frozen record owns no mortal children.
-        let head_flags_none = head_flags.instantiate(
-            fb,
-            &[Value::bool(false), Value::bool(false), Value::bool(false)],
-        );
-        PreludeTemplates {
-            nil: frozen_enum_value(fb, stdlib.prelude.nil),
-            none: frozen_enum_value(fb, stdlib.prelude.none),
-            some: enum_template(fb, stdlib.prelude.some),
-            ok: enum_template(fb, stdlib.prelude.ok),
-            err: enum_template(fb, stdlib.prelude.err),
-            ip_v4: enum_template(fb, stdlib.net_address.v4),
-            ip_v6: enum_template(fb, stdlib.net_address.v6),
-            socket_address: enum_template(fb, stdlib.net_address.socket_address),
-            socket: enum_template(fb, stdlib.net_socket.socket),
-            read_data: enum_template(fb, stdlib.net_socket.data),
-            read_closed: frozen_enum_value(fb, stdlib.net_socket.closed),
-            header: enum_template(fb, stdlib.http.header),
-            version_http10: frozen_enum_value(fb, stdlib.http.http10),
-            version_http11: frozen_enum_value(fb, stdlib.http.http11),
-            head_flags,
+        let head_flags_none = h1.as_ref().map(|h| {
+            // Immediates, so the frozen record owns no mortal children.
+            h.head_flags.instantiate(
+                fb,
+                &[
+                    crate::bytecode::Value::bool(false),
+                    crate::bytecode::Value::bool(false),
+                    crate::bytecode::Value::bool(false),
+                ],
+            )
+        });
+
+        Templates {
+            slots,
+            h1,
             head_flags_none,
-            parsed_done: enum_template(fb, stdlib.http.parsed_done),
-            parsed_need_more: frozen_enum_value(fb, stdlib.http.parsed_need_more),
-            parsed_bad: enum_template(fb, stdlib.http.parsed_bad),
-            framing_no_body: frozen_enum_value(fb, stdlib.http.framing_no_body),
-            framing_length: enum_template(fb, stdlib.http.framing_length),
-            framing_chunked: frozen_enum_value(fb, stdlib.http.framing_chunked),
-            framing_invalid: enum_template(fb, stdlib.http.framing_invalid),
-            chunked_done: enum_template(fb, stdlib.http.chunked_done),
-            chunked_need_more: frozen_enum_value(fb, stdlib.http.chunked_need_more),
-            chunked_bad: enum_template(fb, stdlib.http.chunked_bad),
         }
     }
 
-    /// Build an `al/net/address.IpAddress` (`V4`/`V6`) from a
-    /// `std::net::IpAddr`.
-    pub(super) fn ip_address<A: Arena + ?Sized>(&self, a: &mut A, ip: std::net::IpAddr) -> Value {
-        let tpl = if ip.is_ipv6() {
-            self.ip_v6.clone()
-        } else {
-            self.ip_v4.clone()
-        };
-        let text = Value::str_in(a, &ip.to_string());
-        tpl.instantiate(a, &[text])
+    #[inline]
+    pub(super) fn get(&self, slot: AbiSlot) -> VmResult<&EnumTemplate> {
+        match &self.slots[slot.index()] {
+            Some(t) => Ok(t),
+            None => Err(unbound(slot)),
+        }
     }
 
-    /// Build an `al/net/address.SocketAddress` from a `std::net::SocketAddr`.
-    pub(super) fn socket_address<A: Arena + ?Sized>(
-        &self,
-        a: &mut A,
-        addr: std::net::SocketAddr,
-    ) -> Value {
-        let ip = self.ip_address(a, addr.ip());
-        self.socket_address
-            .instantiate(a, &[ip, Value::small_int(addr.port() as i64)])
+    #[inline]
+    pub(super) fn h1(&self) -> VmResult<&H1> {
+        match &self.h1 {
+            Some(h) => Ok(h),
+            None => Err(unbound(AbiSlot::H1ParsedDone)),
+        }
     }
+}
 
-    /// Build an `al/net.Socket` record wrapping `conn` with its peer address.
-    pub(super) fn make_socket<A: Arena + ?Sized>(
-        &self,
-        a: &mut A,
-        conn: Value,
-        peer: std::net::SocketAddr,
-    ) -> Value {
-        let peer = self.socket_address(a, peer);
-        self.socket.instantiate(a, &[conn, peer])
-    }
+fn unbound(slot: AbiSlot) -> VmError {
+    VmError::Internal(Cow::Owned(format!(
+        "ABI slot {} is unbound: the front end emitted an op that constructs it",
+        slot.name()
+    )))
 }

@@ -1,12 +1,10 @@
-//! Static-stdlib representation. The live `Scheme`/`TypeInfo`/`ValueKind`/
-//! `TypeBody`/`Variant`/`VariantField`/`TypeParam`/`QuantVar` are all `Copy`
-//! and const-constructible (every variable-length field is an `ArenaSlice`
-//! into an `InferEngine` pool), so the precompiled stdlib emits them directly
-//! as `&'static [_]` — there is no S-prefixed mirror of the type IR.
+//! Static-stdlib representation: the runtime-value side (`SFunction`/`SConst`,
+//! whose live counterparts carry `Rc`s), the per-module export tables, and the
+//! `StaticStdlib` handle bundling every pool slice for `seed_static`.
 //!
-//! What remains here is the runtime-value side (`SFunction`/`SConst`, whose
-//! live counterparts carry `Rc`s), the per-module export tables, and the
-//! `StaticStdlib` handle that bundles every pool slice for `seed_static`.
+//! The type IR has no S-prefixed mirror: `Scheme`, `TypeInfo`, `Variant` and
+//! friends are already `Copy` and const-constructible, so the precompiled
+//! stdlib emits them directly as `&'static [_]`.
 
 pub mod flatten;
 
@@ -17,24 +15,19 @@ use crate::bytecode::{Function, Instruction, PreludeBindings, Value};
 use crate::frozen::FrozenBuilder;
 use crate::module::{ExportedValue, ModuleInterface};
 use crate::type_def::TypeId;
-// Re-exported for the generated stdlib file: build.rs emits `SExport`
-// literals whose `local_slot` field Debug-prints as `Some(GlobalSlot(n))`,
-// and the generated code glob-imports this module.
+// build.rs Debug-prints `Some(GlobalSlot(n))` into the generated stdlib file,
+// which glob-imports this module.
 pub use crate::typed_ir::GlobalSlot;
 use crate::types::{
     QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
 };
 
-// `VariantTemplate` — the static descriptor for one stdlib constructor,
-// emitted by build.rs as `stdlib::<module>::<CTOR>` consts — lives in `al_vm`
-// (the VM instantiates them) and is re-exported here where flattening
-// produces them.
+// Defined in `al_vm` (the VM instantiates them); re-exported here, where
+// flattening produces them.
 pub use al_vm::VariantTemplate;
 
-/// Index into [`StaticStdlib::str_pool`]. Distinct from the engine-side
-/// `StrId`: `str_pool` extends `engine.strings` past its verbatim prefix with
-/// names interned during flattening, so a `StrIdx` is not always a valid
-/// `StrId`.
+/// Index into [`StaticStdlib::str_pool`]. Not interchangeable with a `StrId`:
+/// `str_pool` extends `engine.strings` with names interned while flattening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StrIdx(pub u32);
 
@@ -46,11 +39,9 @@ pub struct SchemeIdx(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeInfoIdx(pub u32);
 
-/// Half-open `[start, start+len)` index into the sibling pool whose element
-/// type is `T`, so a slice can only index the pool it was minted against.
-/// Distinct from `ArenaSlice` only in width (`u32` len vs `u16`) since
-/// string-slice pools can exceed 65 535 entries while type-argument lists
-/// cannot.
+/// Half-open `[start, start+len)` index into the pool of `T`, so a slice can
+/// only index the pool it was minted against. Differs from `ArenaSlice` only
+/// in len width: string-slice pools can exceed 65 535 entries.
 #[derive(Debug)]
 pub struct Slice<T> {
     pub start: u32,
@@ -58,8 +49,7 @@ pub struct Slice<T> {
     _marker: PhantomData<T>,
 }
 
-// Manual impls: a derive would bound `T: Clone`/`T: Copy`, which the
-// `PhantomData` doesn't require.
+// Manual, because a derive would bound `T: Clone`/`T: Copy`.
 impl<T> Clone for Slice<T> {
     fn clone(&self) -> Self {
         *self
@@ -88,10 +78,9 @@ pub struct SExport {
     pub name: StrIdx,
     pub scheme: SchemeIdx,
     pub local_slot: Option<GlobalSlot>,
-    /// `str_slice_pool` range of `str_pool` indices: the function's parameter
-    /// names, in order.
+    /// The function's parameter names, in order.
     pub param_names: Slice<StrIdx>,
-    /// `str_pool` index of the declaration's doc comment, if it has one.
+    /// The declaration's doc comment, if it has one.
     pub doc: Option<StrIdx>,
 }
 
@@ -107,9 +96,7 @@ pub struct SModule {
     pub values: Slice<SExport>,
     pub private_names: Slice<StrIdx>,
     pub path: Slice<StrIdx>,
-    /// `str_pool` index of the module-level doc comment (the `/** */` block
-    /// at the top of the file), if there is one. Declaration docs travel on
-    /// [`SExport::doc`].
+    /// The module-level doc comment. Declaration docs live on [`SExport::doc`].
     pub doc: Option<StrIdx>,
 }
 
@@ -130,8 +117,7 @@ pub enum SConst {
     Bool(bool),
     Str(StrIdx),
     StrArray(Slice<StrIdx>),
-    /// A binary literal: `bit_len` logical bits whose `bit_len.div_ceil(8)`
-    /// bytes live in `byte_pool` at the given slice (bit offset 0).
+    /// A binary literal: bytes in `byte_pool`, plus its logical bit length.
     Binary(Slice<u8>, u64),
 }
 
@@ -142,8 +128,8 @@ pub struct StaticStdlib {
     pub str_slice_pool: &'static [StrIdx],
     pub byte_pool: &'static [u8],
 
-    /// The type arena and side-pools — the same `Copy` types the live engine
-    /// uses, so `seed_static` is a memcpy and consumers read them directly.
+    /// The type arena and side-pools, in the live engine's own types, so
+    /// `seed_static` is a memcpy.
     pub nodes: &'static [TypeNode],
     pub children: &'static [Ty],
     pub quants: &'static [QuantVar],
@@ -219,10 +205,8 @@ impl StaticStdlib {
     }
 
     /// Hydrate the precompiled stdlib's code/functions/constants into live
-    /// form. Program literals/constants are built through the explicit
-    /// `frozen` builder: string constants and label
-    /// lists intern to the frozen area's canonical allocations, shared with
-    /// everything else the same program compiles.
+    /// form. Constants go through `frozen` so strings and label lists intern
+    /// to the same allocations as the rest of the program.
     pub fn hydrate_program(
         &self,
         frozen: &mut FrozenBuilder,
