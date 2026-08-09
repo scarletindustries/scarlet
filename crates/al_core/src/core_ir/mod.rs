@@ -10,16 +10,16 @@ pub mod clif;
 pub mod emit;
 pub mod lower;
 pub mod native_frame;
-pub mod native_rc;
+pub use al_vm::native_rc;
 pub mod perceus;
 
 use std::fmt;
 
 use crate::bytecode::{HeapTag, Op, Value};
-use crate::newtype_index;
 use crate::type_def::TypeId;
 use crate::typed_ir::{GlobalSlot, RTy};
 use crate::types::StrId;
+use al_vm::newtype_index;
 
 // ── Operand spaces ─────────────────────────────────────────────────────────
 // The `u32`-shaped index spaces a bytecode operand can hold, and which the
@@ -55,24 +55,11 @@ newtype_index!(
     pub struct JoinId("j")
 );
 
-newtype_index!(
-    /// Index into `CoreProgram.fns` / `Program.functions` / `TypedProgram::fns`
-    /// — one numbering, shared by all three. Minted only where the `Function`
-    /// slot it names is reserved (`FnTable::push`, the compiler's
-    /// `finish_fn_frame`); everything downstream carries it opaquely until
-    /// [`FuncIdx::to_operand`] writes it into a `CallKnown`/`MakeClosure`
-    /// immediate.
-    pub struct FuncIdx("fn#")
-);
-
-impl FuncIdx {
-    /// The call/closure-operand encoding: the `i32` immediate `Op::CallKnown`
-    /// and `Op::MakeClosure` carry.
-    #[inline]
-    pub fn to_operand(self) -> i32 {
-        self.0 as i32
-    }
-}
+// `FuncIdx` — the `CoreProgram.fns` / `Program.functions` / `TypedProgram::fns`
+// numbering, shared by all three — lives in `al_vm` (the runtime stores it in
+// closures and the native-entry table) and is re-exported here where it is
+// minted (`FnTable::push`, the compiler's `finish_fn_frame`).
+pub use al_vm::FuncIdx;
 
 newtype_index!(
     /// A **function-relative** instruction offset: an index into the block one

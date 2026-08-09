@@ -25,18 +25,11 @@ use crate::types::{
     QuantVar, Scheme, StrId, Ty, TypeInfo, TypeNode, TypeParam, Variant, VariantField,
 };
 
-/// Static descriptor for one stdlib constructor (type id, type/variant name,
-/// field labels), emitted by build.rs as `stdlib::<module>::<CTOR>` consts so a
-/// rename in the AL source surfaces as a Rust compile error at the VM usage
-/// site rather than silently constructing a mismatched value.
-#[derive(Debug)]
-pub struct VariantTemplate {
-    pub type_id: TypeId,
-    pub variant_idx: u16,
-    pub type_name: &'static str,
-    pub variant_name: &'static str,
-    pub labels: &'static [&'static str],
-}
+// `VariantTemplate` — the static descriptor for one stdlib constructor,
+// emitted by build.rs as `stdlib::<module>::<CTOR>` consts — lives in `al_vm`
+// (the VM instantiates them) and is re-exported here where flattening
+// produces them.
+pub use al_vm::VariantTemplate;
 
 /// Index into [`StaticStdlib::str_pool`]. Distinct from the engine-side
 /// `StrId`: `str_pool` extends `engine.strings` past its verbatim prefix with

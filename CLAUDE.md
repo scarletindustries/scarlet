@@ -4,9 +4,11 @@ Before committing, `cargo fmt` and `cargo clippy --all-targets` should both be c
 
 Be sparse when adding comments in the code. Do not add unnecessary comments. Do add comments when explaining larger, more complicated code paths. Especially in things like the parser and compiler or vm.
 
-The AST is defined in `src/ast/mod.rs`. When changing AST shape, also update `src/parser/mod.rs` (construction), `src/formatter/mod.rs` (rendering — a field the formatter drops silently rewrites the user's program), `src/bytecode/compiler.rs` (typecheck), and `src/typed_ir/elaborate*.rs` (which lowers it).
+Crate layout: `crates/al_vm` is the language-agnostic runtime (bytecode ISA, NaN-boxed values, heap, frozen area, interpreter/schedulers/JIT under `al_vm::vm`) and must never depend on any language crate — Cargo enforces this, keep it that way. `crates/al_syntax` is the syntax layer (span, token, scanner, parser, AST, formatter, diagnostics, module identity) and depends on nothing in the workspace. `crates/al_types` is the type layer (HM inference, type_def, exhaustiveness) over `al_syntax` + `al_vm`. `crates/al_core` is the compiler (typed_ir, core_ir, bytecode emission, module resolution, LSP session) and re-exports the lower layers at their historical paths (`al_core::parser`, `al_core::types`, `al_core::heap`, ...). `crates/al` is the driver (CLI, REPL, LSP); its `al::vm` module wires the generated stdlib template table (`STDLIB_TEMPLATES`) into `al_vm::vm` — the VM constructs stdlib values (Ok/Err, NetError, HTTP types) only through that injected table.
 
-The HM type inferencer lives in `src/types/infer.rs`. Type definitions are in `src/type_def/mod.rs`. Exhaustiveness checking is in `src/types/exhaustiveness.rs`.
+The AST is defined in `crates/al_syntax/src/ast/mod.rs`. When changing AST shape, also update `al_syntax`'s `parser/mod.rs` (construction) and `formatter/mod.rs` (rendering — a field the formatter drops silently rewrites the user's program), plus `al_core`'s `bytecode/compiler/` (typecheck) and `typed_ir/elaborate*.rs` (which lowers it).
+
+The HM type inferencer lives in `crates/al_types/src/types/infer.rs`. Type definitions are in `type_def/mod.rs`. Exhaustiveness checking is in `types/exhaustiveness.rs`.
 
 For the VSCode extension in `extension/`, use Bun for package management and running scripts (e.g., `bun install`, `bun run compile`).
 

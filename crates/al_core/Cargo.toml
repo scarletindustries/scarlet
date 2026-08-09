@@ -4,18 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Instruments `ProcHeap::alloc_object` with a per-thread counter so tests can
-# assert net allocations (Perceus reuse). Enabled only from `al`'s
-# [dev-dependencies]; with `resolver = "2"` that keeps it out of `cargo build`,
-# so the release binary carries no counter.
-#
-# It has to be a feature rather than `cfg(test)`: the tests that read it are
-# `al`'s integration tests, where `al_core` is a plain dependency and its
-# `cfg(test)` is false. They cannot move into `al_core` either — the VM they
-# drive lives in `al`.
-alloc-counter = []
+# Forwarded to `al_vm` — see its manifest. Kept here so a dependant can turn
+# the counter on through either crate.
+alloc-counter = ["al_vm/alloc-counter"]
 
 [dependencies]
+al_syntax = { path = "../al_syntax" }
+al_types = { path = "../al_types" }
+al_vm = { path = "../al_vm" }
 indexmap = { workspace = true }
 cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
@@ -25,6 +21,4 @@ cranelift-native = { workspace = true }
 smallvec = "1.15"
 petgraph = "0.8"
 include_dir = { version = "0.7", features = ["glob"] }
-libmimalloc-sys = { version = "0.1.49", features = ["v2"] }
 percent-encoding = "2"
-unicode-width = "0.1"

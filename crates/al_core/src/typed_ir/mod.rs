@@ -39,7 +39,7 @@ pub mod elaborate_pat;
 pub mod eta;
 pub mod resolve;
 pub mod rty;
-pub(crate) mod slots;
+pub(crate) use al_types::slots;
 pub mod zonk;
 
 pub use elaborate::{

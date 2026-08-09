@@ -13,6 +13,7 @@ name = "al"
 version = "0.1.0"
 dependencies = [
  "al_core",
+ "al_vm",
  "clap",
  "clap_mangen",
  "cranelift-codegen",
@@ -20,15 +21,9 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
- "indexmap",
- "libc",
- "memchr",
- "mio",
  "percent-encoding",
  "rustyline",
  "serde_json",
- "smallvec",
- "socket2",
  "ureq",
 ]
 
@@ -36,6 +31,9 @@ dependencies = [
 name = "al_core"
 version = "0.1.0"
 dependencies = [
+ "al_syntax",
+ "al_types",
+ "al_vm",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -43,11 +41,45 @@ dependencies = [
  "cranelift-native",
  "include_dir",
  "indexmap",
- "libmimalloc-sys",
  "percent-encoding",
  "petgraph",
  "smallvec",
+]
+
+[[package]]
+name = "al_syntax"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
  "unicode-width",
+]
+
+[[package]]
+name = "al_types"
+version = "0.1.0"
+dependencies = [
+ "al_syntax",
+ "al_vm",
+ "indexmap",
+ "smallvec",
+]
+
+[[package]]
+name = "al_vm"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "indexmap",
+ "libc",
+ "libmimalloc-sys",
+ "memchr",
+ "mio",
+ "smallvec",
+ "socket2",
 ]
 
 [[package]]
