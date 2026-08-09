@@ -776,48 +776,27 @@ fn cross_module_rename_rewrites_decl_and_use_across_two_files() {
     assert_rename_spans_lib_and_main(&resp, &main_uri, &lib_uri, "salute");
 }
 
-/// The third cross-module handler seam: `references_response` shaping a flat
-/// `Location[]` whose entries span 2+ file URIs. goto-def returns a single
-/// location and rename a `changes` map; find-refs is the only handler emitting
-/// an array of locations, with its own dedup, `include_decl` arm, and
-/// per-reference `uri_for` loop. Driven from the qualified use `lib.greet()` in
-/// main.al, the use is same-module (request-URI branch) while the declaration's
-/// module is lib.al — a *different* file — so the `include_decl` arm routes it
-/// through `uri_for`'s cross-module branch and the result must carry both files'
-/// URIs. `references.rs::find_references_across_modules` pins this at the
-/// `IncrementalSession` layer; nothing pinned the `Workspace` JSON.
+/// `references_response` is the only handler emitting an array of locations,
+/// with its own dedup, `include_decl` arm, and per-reference `uri_for` loop.
 #[test]
 fn cross_module_find_references_spans_decl_and_use_across_files() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Cursor on the `greet` token of `lib.greet()` in main.al: the use is
-    // same-module (request-URI branch) while the declaration is reached
-    // cross-module through the `include_decl` arm.
+    // The use is same-module while the declaration is reached cross-module
+    // through the `include_decl` arm.
     assert_refs_span_lib_and_main(&mut s, &main_uri, &main_uri, &lib_uri);
 }
 
-// ============================================================================
-// Find-references / rename driven from a *library* file's own declaration.
-//
-// `cross_module_find_references_spans_decl_and_use_across_files` drives the
-// query from the *use* site in the importer (main.al), where the importer is
-// the analysed entry so its reverse edge into lib.al is live. The mirror case —
-// the user clicks the declaration in the imported file (lib.al) and asks "who
-// calls this?" — was broken: a position query re-roots compilation to lib.al,
-// so lib.al becomes the entry (module `main`) and main.al, which imports lib.al
-// (not vice-versa), falls outside lib.al's import closure. main.al's reverse
-// edge to `greet` was only ever transient to main.al's own analysis and was
-// never persisted, so find-references from lib.al's declaration returned only
-// the declaration itself and rename rewrote only lib.al — silently leaving
-// every caller untouched.
-// ============================================================================
+// The mirror of the tests above: the query starts at the declaration in the
+// imported file. That re-roots compilation to lib.al, and main.al imports
+// lib.al rather than the reverse, so main.al falls outside lib.al's import
+// closure and its reverse edge must come from persisted xrefs.
 
 #[test]
 fn find_references_from_library_declaration_includes_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Cursor on greet's DECLARATION in lib.al (`pub fn greet`, line 0). Pre-fix
-    // this returned only the lib.al declaration, dropping main.al's caller.
+    // Cursor on greet's declaration in lib.al.
     assert_refs_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }
 
@@ -825,8 +804,7 @@ fn find_references_from_library_declaration_includes_dependent_callers() {
 fn rename_from_library_declaration_rewrites_dependent_callers() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
 
-    // Rename driven from greet's DECLARATION in lib.al. The WorkspaceEdit must
-    // rewrite both the declaration in lib.al and the call site in main.al.
+    // Driven from greet's declaration in lib.al.
     let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
     let resp = rename_at(&mut s, &lib_uri, l, c, "salute")
         .expect("a rename driven from a library declaration must be allowed");
@@ -835,12 +813,9 @@ fn rename_from_library_declaration_rewrites_dependent_callers() {
 
 #[test]
 fn find_references_from_library_declaration_when_only_library_is_open() {
-    // Robustness: the caller (main.al) is never opened as a client tab — only
-    // the one-time workspace scan analyses it. The dependent-file reverse edge
-    // must still be recorded then, so find-references driven from lib.al's
-    // declaration surfaces main.al's call even though lib.al is the only open
-    // (and therefore last-analysed entry) buffer. This pins that the fix is not
-    // order-dependent on an importer being the entry at query time.
+    // main.al is never opened as a tab, so only the one-time workspace scan
+    // analyses it. The reverse edge must be recorded then, not just when an
+    // importer happens to be the entry at query time.
     let p = Project::new("xmod_lib_only");
     p.write("lib.al", XMOD_LIB);
     p.write("main.al", XMOD_MAIN);
@@ -850,27 +825,20 @@ fn find_references_from_library_declaration_when_only_library_is_open() {
     let main_uri = uri_of(&p, "main.al");
     s.open_document(&lib_uri, XMOD_LIB);
 
-    // Only the URI set is pinned here: what matters is that the never-opened
-    // main.al caller shows up at all. Exact spans and the includeDeclaration
-    // arm are covered by the tests above, where both files are open.
+    // Only the URI set: what matters is that the never-opened caller appears.
     assert_refs_uris_span_lib_and_main(&mut s, &lib_uri, &main_uri, &lib_uri);
 }
 
-// Before the transport split, `analyze_text` published diagnostics inline for
-// any client-open URI it re-analysed — including when a position query
-// re-rooted the entry. The split made `analyze_text` return the diags and
-// `ensure_entry` dropped them, so an open importer's Problems panel went stale
-// after an in-memory edit to a dependency until the importer itself was
-// edited. This pins the restored behaviour: a re-root of an open file stages
-// its diagnostics for the transport layer to publish.
+// A position query that re-roots the entry to another open file must stage
+// that file's diagnostics for the transport layer, or its Problems panel goes
+// stale after an in-memory edit to a dependency.
 #[test]
 fn position_query_reroot_stages_diagnostics_for_open_file() {
     let (_p, mut s, main_uri, lib_uri) = xmod_project();
     // Both open; entry is main (last opened). Nothing staged yet.
     assert!(s.take_pending_diagnostics().is_empty());
 
-    // Hover in lib.al re-roots the entry to lib. lib is open, so its diags
-    // (empty — clean file) are staged for publish.
+    // Hover in lib.al re-roots the entry to lib, so lib's diags stage.
     let (l, c) = cursor(XMOD_LIB, "greet", 1, 1);
     s.hover_response(&pos(&lib_uri, l, c));
     let staged = s.take_pending_diagnostics();
@@ -880,7 +848,7 @@ fn position_query_reroot_stages_diagnostics_for_open_file() {
         "re-rooting an open file stages its diagnostics"
     );
 
-    // Drained: a second query on the same (now-entry) file re-roots nothing.
+    // A second query on the now-entry file re-roots nothing.
     s.hover_response(&pos(&lib_uri, l, c));
     assert!(s.take_pending_diagnostics().is_empty());
 
@@ -894,16 +862,12 @@ fn position_query_reroot_stages_diagnostics_for_open_file() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Module doc comments: hover + goto-def on a module name.
-// ---------------------------------------------------------------------------
-
-/// The `/** */` at line 0 is `b.al`'s *module* doc, not `add`'s.
+/// The `/** */` at line 0 is `b.al`'s module doc, not `add`'s.
 const MODDOC_B: &str = "/**\n * Adds numbers together.\n */\npub fn add(a, b) {\n  a + b\n}\n";
 
 const MODDOC_A: &str = "import ./b\n\nprintln(b.add(10, 20))\n";
 
-/// The `examples/a.al` + `examples/b.al` demo pair, opened as `a.al`.
+/// The `a.al` + `b.al` demo pair, opened as `a.al`.
 fn moddoc_project() -> (Project, Workspace, String) {
     let p = Project::new("moddoc");
     p.write("b.al", MODDOC_B);
@@ -923,7 +887,7 @@ fn hover_md(s: &mut Workspace, uri: &str, l: i32, c: i32) -> String {
 fn hover_on_module_alias_shows_the_module_doc() {
     let (_p, mut s, uri) = moddoc_project();
 
-    // The `b` of `b.add(10, 20)` — a `Qualifier` occurrence on the import.
+    // The `b` of `b.add(10, 20)`, a `Qualifier` occurrence on the import.
     let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
     let md = hover_md(&mut s, &uri, l, c);
     assert!(
@@ -953,8 +917,7 @@ fn hover_on_module_alias_shows_the_module_doc() {
 fn goto_def_on_module_alias_opens_the_module_file() {
     let (_p, mut s, uri) = moddoc_project();
 
-    // cmd+click the `b` of `b.add(10, 20)` -> b.al at 0:0, the same
-    // destination the `b` of `import ./b` already resolves to.
+    // The `b` of `b.add(10, 20)` opens b.al at 0:0.
     let (l, c) = cursor(MODDOC_A, "b.add", 1, 0);
     let def = s.definition_response(&pos(&uri, l, c));
     let target = def["uri"]
@@ -967,8 +930,8 @@ fn goto_def_on_module_alias_opens_the_module_file() {
     assert_eq!(def["range"]["start"]["line"].as_i64(), Some(0));
     assert_eq!(def["range"]["start"]["character"].as_i64(), Some(0));
 
-    // The `import` keyword still resolves to nothing (the alias `Definition`
-    // spans the whole declaration; jumping there would be a self-jump).
+    // The alias `Definition` spans the whole declaration, so jumping to the
+    // `import` keyword would be a self-jump.
     let (l, c) = cursor(MODDOC_A, "import", 1, 1);
     assert!(
         s.definition_response(&pos(&uri, l, c)).is_null(),
@@ -976,8 +939,8 @@ fn goto_def_on_module_alias_opens_the_module_file() {
     );
 }
 
-/// A `/** */` at line 0 of the *entry* file is the module's doc, so the first
-/// declaration below it must not inherit it in the editor either.
+/// A `/** */` at line 0 is the module's doc, so the first declaration below it
+/// must not inherit it.
 #[test]
 fn module_doc_is_not_attached_to_the_first_declaration() {
     let src = "/** Module prose. */\npub fn greet() Int { 7 }\nprintln(greet())\n";
@@ -992,9 +955,8 @@ fn module_doc_is_not_attached_to_the_first_declaration() {
     );
 }
 
-/// A local binding shadows the import alias: the `b` of `b.x` names the
-/// `Point`, not module `b`. Goto-def must land on the binder, and hover must
-/// not claim the position is a module.
+/// A local binding shadows the import alias, so the `b` of `b.x` names the
+/// `Point`, not module `b`.
 const SHADOW_A: &str = "import ./b\n\
 type Point {\n\
 \x20 Point(x Int)\n\
@@ -1012,7 +974,7 @@ fn qualifier_occurrence_respects_a_shadowing_local() {
     p.write("a.al", SHADOW_A);
     let (mut s, uri) = open(&p, "a.al", SHADOW_A);
 
-    // The `b` of `b.x` inside `get` — a parameter, not the module alias.
+    // The `b` of `b.x` inside `get` is a parameter, not the module alias.
     let (l, c) = cursor(SHADOW_A, "b.x", 1, 0);
     let def = s.definition_response(&pos(&uri, l, c));
     let target = def["uri"]
@@ -1044,9 +1006,8 @@ fn qualifier_occurrence_respects_a_shadowing_local() {
     );
 }
 
-/// Find-all-references on a module alias lists the qualifier occurrences: the
-/// `b` of `b.add(..)` is a reference to the import, even though it is not the
-/// *use site* the unused-import rule keys off.
+/// The `b` of `b.add(..)` is a reference to the import, even though it is not
+/// the use site the unused-import rule keys off.
 #[test]
 fn find_refs_on_module_alias_lists_the_qualifier() {
     let (_p, mut s, uri) = moddoc_project();
@@ -1072,13 +1033,8 @@ fn find_refs_on_module_alias_lists_the_qualifier() {
     assert_eq!(with_decl.as_array().map(Vec::len), Some(2));
 }
 
-// ---------------------------------------------------------------------------
-// Stdlib module docs: carried through the precompiled blob.
-// ---------------------------------------------------------------------------
-
 /// `al/scheduler` is seeded from the static blob and never re-compiled, so its
-/// module doc reaches hover only via `SModule::doc` ->
-/// `ModuleInterface::doc` -> `synth_refs_from_interface`.
+/// module doc reaches hover only through `synth_refs_from_interface`.
 #[test]
 fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
     let src = "import al/scheduler as s\n\ns.spawn(fn() { Nil })\n";
@@ -1096,17 +1052,11 @@ fn hover_on_a_stdlib_module_alias_shows_its_module_doc() {
     );
 }
 
-// ── Parameter labels and declaration docs in hover ─────────────────────────
-//
-// A function's parameter names are documentation: al rejects labelled
-// arguments outside a constructor call, so a name never reaches a call site
-// and must not live in `Type::Function` (unification would then have to decide
-// whether `fn(path String)` equals `fn(p String)` — either the label is dead
-// weight, or renaming a parameter breaks callers). They ride beside the type,
-// on `Definition::param_names`, and are rendered only at the hover boundary.
-//
-// Constructor field labels *are* semantic and already live in the type; hover
-// mirrors them so `NotFound` reads the same way.
+// A function's parameter names are documentation, not part of its type: they
+// ride on `Definition::param_names` and are rendered only at hover. Putting
+// them in `Type::Function` would force unification to decide whether
+// `fn(path String)` equals `fn(p String)`. Constructor field labels are
+// semantic and do live in the type; hover mirrors them so they read the same.
 
 #[test]
 fn hover_shows_a_functions_parameter_names() {
@@ -1132,8 +1082,7 @@ fn hover_shows_parameter_names_across_the_stdlib_blob() {
     );
 }
 
-/// A constructor's labels come from `ValueKind::Constructor.field_labels` —
-/// already in the type, mirrored onto the definition for rendering.
+/// A constructor's labels come from `ValueKind::Constructor.field_labels`.
 #[test]
 fn hover_shows_a_constructors_field_labels() {
     let src = "import al/io.{NotFound}\n\nfn f(e IoError) String {\n\tmatch e {\n\t\tNotFound(p) -> p\n\t\telse -> ''\n\t}\n}\nprintln(1)\n";
@@ -1145,8 +1094,8 @@ fn hover_shows_a_constructors_field_labels() {
     );
 }
 
-/// Declaration doc comments never crossed a module boundary before: the blob
-/// carried only the *module* doc. Now `ExportedValue::doc` rides along.
+/// A declaration's doc comment must cross a module boundary, carried by
+/// `ExportedValue::doc`.
 #[test]
 fn hover_shows_a_declaration_doc_from_another_module() {
     let p = Project::new("hover_xmod_doc");
@@ -1168,12 +1117,9 @@ fn hover_shows_a_declaration_doc_from_another_module() {
     );
 }
 
-/// Rename driven from the library declaration when the importer binds the
-/// symbol through a *selective* import (`import ./lib.{greet}`). The importer's
-/// persisted xrefs must carry the `{greet}` binding token (an `ImportItem`
-/// reference site, not a use) as well as the unqualified call — dropping the
-/// token would ship `import ./lib.{greet}` referencing a renamed symbol, a
-/// broken program.
+/// With a selective import, the importer's persisted xrefs must carry the
+/// `{greet}` binding token as well as the call. Dropping the token leaves the
+/// import naming a symbol that no longer exists.
 #[test]
 fn rename_from_library_declaration_rewrites_selective_import_token() {
     const LIB: &str = "pub fn greet() Int { 7 }\n";
@@ -1184,7 +1130,7 @@ fn rename_from_library_declaration_rewrites_selective_import_token() {
     let (mut s, lib_uri) = open(&p, "lib.al", LIB);
     let main_uri = uri_of(&p, "main.al");
 
-    // Rename driven from greet's DECLARATION in lib.al.
+    // Driven from greet's declaration in lib.al.
     let (l, c) = cursor(LIB, "greet", 1, 1);
     let resp = rename_at(&mut s, &lib_uri, l, c, "salute")
         .expect("a rename driven from a library declaration must be allowed");

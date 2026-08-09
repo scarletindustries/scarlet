@@ -16,10 +16,8 @@ enum ParseContext {
     MatchArms,
 }
 
-/// Result of `synchronize()`: whether recovery stopped at the start of the
-/// next item inside the current construct, or ran through and consumed the
-/// construct's closing delimiter. Callers must handle `ConsumedCloser` by
-/// popping their own context and skipping the trailing `eat(close)`.
+/// Where `synchronize()` stopped. On `ConsumedCloser` the caller must pop its
+/// own context and skip its trailing `eat(close)`.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SyncOutcome {
@@ -27,11 +25,8 @@ enum SyncOutcome {
     ConsumedCloser,
 }
 
-/// Where [`Parser::recover_in_arm`] left the parser after a failed pattern,
-/// guard, `->`, or body inside a `match` arm. `ConsumedCloser` means recovery
-/// ate the match's `}` (the caller must stop and skip its own `eat`);
-/// `AtCloseBrace`/`AtArrow` mean recovery stopped just before that token;
-/// `Resume` means it stopped at the start of a plausible next arm.
+/// Where [`Parser::recover_in_arm`] left the parser. `ConsumedCloser` means it
+/// ate the match's `}`, so the caller must stop and skip its own `eat`.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArmRecovery {
@@ -41,10 +36,8 @@ enum ArmRecovery {
     Resume,
 }
 
-/// A parsed source file: its top-level body, the module doc comment (a `/** */`
-/// block that is the very first thing in the file — see
-/// [`Parser::take_module_doc`]), and everything the scanner/parser complained
-/// about.
+/// A parsed source file: top-level body, module doc comment, and every
+/// scanner/parser diagnostic.
 pub struct ParseResult {
     pub ast: ast::BlockExpression,
     pub doc: Option<String>,
@@ -59,10 +52,9 @@ pub struct Parser {
     prev_token_end_line: i32,
     prev_token_end_column: i32,
     depth: u32,
-    /// Index of the token whose leading trivia gave up the module doc comment
-    /// (always the first token, when the file opens with one). Set by
-    /// [`Parser::take_module_doc`] so [`Parser::extract_doc_comment`] skips
-    /// that comment instead of re-attaching it to the first declaration.
+    /// Token whose leading trivia gave up the module doc comment, so
+    /// [`Parser::extract_doc_comment`] skips it instead of re-attaching it to
+    /// the first declaration.
     module_doc_token: Option<usize>,
 }
 
@@ -75,10 +67,9 @@ pub fn new_parser_from_tokens(
     mut tokens: Vec<Token>,
     scanner_diagnostics: Vec<Diagnostic>,
 ) -> Parser {
-    // The parser's advance() refuses to move past the last token and every
-    // loop exits on Eof, so the token stream must end with one. The scanner
-    // always appends it; enforce the invariant here so a hand-built stream
-    // that forgot the terminator cannot send the parser out of bounds.
+    // Every loop exits on Eof, so the stream must end with one. The scanner
+    // always appends it; enforce it here so a hand-built stream that forgot
+    // the terminator cannot send the parser out of bounds.
     if tokens.last().map(|t| &t.kind) != Some(&Kind::Eof) {
         let span = tokens.last().map_or(Span::DUMMY, |t| {
             Span::point(t.span.end_line, t.span.end_column)
@@ -101,10 +92,9 @@ pub fn new_parser_from_tokens(
     }
 }
 
-// Checks whether a token begins a type annotation in let/const binding position.
-// Lowercase identifiers are NOT type-starts here: free type variables are
-// meaningless in let/const annotations. Function param and return positions
-// DO admit lowercase type variables and use `at_loose_type_start` instead.
+// Whether a token begins a type annotation in let/const binding position.
+// Lowercase identifiers do not count: free type variables are meaningless
+// there. Param and return positions admit them and use `at_loose_type_start`.
 fn is_type_start_token(tok: &Token) -> bool {
     match &tok.kind {
         Kind::Keyword(Keyword::Fn) => true,
@@ -114,26 +104,19 @@ fn is_type_start_token(tok: &Token) -> bool {
     }
 }
 
-// Bounds recursive-descent depth so that pathologically nested input
-// (`((((…`, `!!!!…`, `(T,(T,…` nested types, `S(S(S(…`) becomes a normal parse error
-// instead of overflowing the native stack and aborting the process. Since
-// the parser is the sole AST producer, bounding it here transitively bounds
-// every downstream AST walker (compiler, formatter, inferencer).
+// Bounds recursive-descent depth so pathologically nested input is a parse
+// error instead of a native stack overflow. The parser is the sole AST
+// producer, so this transitively bounds every downstream AST walker.
 //
-// 128 mirrors serde_json's RECURSION_LIMIT: it must be small enough that the
-// deepest native-frame path (an expression level descends ~7 frames through
-// the precedence chain per depth unit) cannot overflow the smallest stack
-// the parser runs on — notably the ~2 MiB libtest thread — before the guard
-// trips. It is still far above any real program (examples peak at bracket
-// depth ~5; the effective paren cap is ~42 levels).
+// 128 must stay small enough that the deepest native-frame path (~7 frames per
+// depth unit through the precedence chain) cannot overflow the ~2 MiB libtest
+// thread before the guard trips. Real programs peak around bracket depth 5.
 const MAX_PARSE_DEPTH: u32 = 128;
 
 impl Parser {
-    // Runs `f` one recursion level deeper, rejecting input that nests past
-    // MAX_PARSE_DEPTH. The depth counter is decremented unconditionally after
-    // `f` returns (no `?` between the increment and decrement), so it stays
-    // exactly balanced on both the Ok and Err paths — error recovery
-    // (synchronize() then continue) always resumes at the correct depth.
+    // Runs `f` one level deeper. No `?` between increment and decrement, so
+    // the counter stays balanced on the Err path and error recovery resumes at
+    // the right depth.
     fn with_recursion_guard<T>(&mut self, f: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
@@ -156,12 +139,10 @@ impl Parser {
         }
     }
 
-    // Runs `f` with `ctx` on the context stack, popping unconditionally on
-    // both the Ok and Err paths so a `?` inside `f` cannot leave a stale
-    // context behind (which would misdirect every later `synchronize()`).
-    // Use this for constructs that propagate errors via `?`; constructs that
-    // recover in place (block/array/match) still use push/pop directly
-    // because they must act on the SyncOutcome from their `synchronize()`.
+    // Pops on both the Ok and Err paths, so a `?` inside `f` cannot leave a
+    // stale context to misdirect a later `synchronize()`. Constructs that
+    // recover in place (block/array/match) still push/pop directly, because
+    // they must act on their own `SyncOutcome`.
     fn with_context<T>(
         &mut self,
         ctx: ParseContext,
@@ -188,9 +169,8 @@ impl Parser {
     }
 
     fn add_error(&mut self, message: String) {
-        // Every parse error funnels through here after a failed `eat`; when the
-        // parser is stuck on the EOF token the error is by construction an
-        // unexpected-EOF, so tag it structurally rather than by message text.
+        // Stuck on EOF means the error is an unexpected-EOF by construction,
+        // so tag it structurally rather than by message text.
         let code = if self.kind() == Kind::Eof {
             DiagnosticCode::UnexpectedEof
         } else {
@@ -232,10 +212,7 @@ impl Parser {
     }
 
     // Skips tokens until a plausible resumption point for the current context.
-    // The #[must_use] outcome tells the caller whether recovery consumed the
-    // context's closing delimiter: on `ConsumedCloser` the caller must pop its
-    // own context and skip its trailing `eat(close)`. `synchronize` never
-    // touches the context stack itself — the frame that pushed always pops.
+    // Never touches the context stack: the frame that pushed always pops.
     fn synchronize(&mut self) -> SyncOutcome {
         let ctx = self.current_context();
         let mut iterations = 0u32;
@@ -311,9 +288,8 @@ impl Parser {
         SyncOutcome::AtItem
     }
 
-    // Shared error-recovery step inside a `match` arm (failed pattern, guard,
-    // `->`, or body): record the diagnostic, synchronize, and classify where
-    // recovery landed so each call site is a small match on the variant.
+    // Error recovery inside a `match` arm: record, synchronize, and classify
+    // where recovery landed.
     fn recover_in_arm(&mut self, err: String) -> ArmRecovery {
         self.add_error(err);
         if self.synchronize() == SyncOutcome::ConsumedCloser {
@@ -326,9 +302,8 @@ impl Parser {
         }
     }
 
-    // Shared error-recovery step for top-level and block node loops: record the
-    // diagnostic, skip to a synchronization point, and produce an error node
-    // standing in for the unparseable region.
+    // Error recovery for top-level and block node loops: record, synchronize,
+    // and produce an error node for the unparseable region.
     fn recover_node(&mut self, err: String, span: Span) -> (ast::Node, SyncOutcome) {
         self.add_error(err.clone());
         let outcome = self.synchronize();
@@ -357,9 +332,7 @@ impl Parser {
     }
 
     // Consumes the current token and returns its text when `extract` matches
-    // its kind. Text-bearing kinds carry their text as a payload, so a matched
-    // token always has text — there is no "identifier without a literal" state
-    // to defend against.
+    // its kind.
     fn eat_payload(
         &mut self,
         message: &str,
@@ -420,11 +393,9 @@ impl Parser {
             .any(|t| matches!(t, Trivia::Newline))
     }
 
-    /// The doc comment attached to the declaration about to be parsed: the
-    /// first `/** */` in the current token's leading trivia. When that token
-    /// also donated the *module* doc (`module_doc_token`), the first one is
-    /// already spoken for, so the declaration takes the next one — a file that
-    /// opens with a module doc and a decl doc back to back keeps both.
+    /// The first `/** */` in the current token's leading trivia. If that token
+    /// also donated the module doc, the declaration takes the next one, so a
+    /// file opening with both keeps both.
     fn extract_doc_comment(&self) -> Option<String> {
         let taken = usize::from(self.module_doc_token == Some(self.index));
         self.cur()
@@ -438,13 +409,10 @@ impl Parser {
             .cloned()
     }
 
-    /// The module doc comment: a `/** */` block that begins on line 0, i.e. is
-    /// the very first thing in the file. Trivia carries no span, but the
-    /// scanner emits a `Newline` for every line break and drops only
-    /// horizontal whitespace — so "no `Newline` (and nothing else) precedes it
-    /// in the first token's leading trivia" is exactly "starts on line 0".
-    /// Records the donating token so `extract_doc_comment` cannot hand the
-    /// same comment to the first declaration as well.
+    /// The module doc comment: a `/** */` block starting on line 0. Trivia
+    /// carries no span, but the scanner emits a `Newline` per line break and
+    /// drops only horizontal whitespace, so "first in the leading trivia" is
+    /// exactly "starts on line 0".
     fn take_module_doc(&mut self) -> Option<String> {
         let doc = match self.cur().leading_trivia.first() {
             Some(Trivia::DocComment(text)) => text.clone(),
@@ -454,8 +422,8 @@ impl Parser {
         Some(doc)
     }
 
-    // Parses `open` then zero or more comma-separated items then `close`.
-    // Allows a trailing comma.
+    // `open` then zero or more comma-separated items then `close`. Allows a
+    // trailing comma.
     fn parse_comma_list<T>(
         &mut self,
         open: Kind,
@@ -478,11 +446,9 @@ impl Parser {
 
     /// Items inside a type body: one per line. `noun` names them in the error.
     ///
-    /// A newline is the separator, not merely permitted whitespace — the
-    /// formatter has always emitted one per line, so accepting
-    /// `type User { age Int username String }` only let source drift from what
-    /// `al fmt` produces. A comma at a separator position is a hard error: the
-    /// items are self-delimiting, so the comma carries no information.
+    /// The newline is the separator, not merely permitted whitespace, so
+    /// source cannot drift from what `al fmt` emits. A comma at a separator
+    /// position is a hard error: the items are self-delimiting.
     fn parse_line_separated_list<T>(
         &mut self,
         close: Kind,
@@ -517,8 +483,8 @@ impl Parser {
     /// )
     /// ```
     ///
-    /// Only a same-line list without commas is rejected: nothing marks where
-    /// one field ends, and the reader is left counting words.
+    /// Only a same-line list without commas is rejected: nothing would mark
+    /// where one field ends.
     fn parse_field_list<T>(
         &mut self,
         close: Kind,
@@ -548,10 +514,9 @@ impl Parser {
         is_type_start_token(self.cur())
     }
 
-    // Scan forward from the token after current for a depth-0 `=` before a
-    // depth-0 newline. Distinguishes `x Type = ...` / `x = ...` (binding) from
-    // `xs[0]` / `Ctor(args)` (expression) without the brittle type-start
-    // heuristic that misfires on uppercase constructors and `(` tuple types.
+    // Look ahead for a depth-0 `=` before a depth-0 newline: tells `x Type =`
+    // / `x =` (binding) from `xs[0]` / `Ctor(args)` (expression). A type-start
+    // heuristic instead would misfire on uppercase ctors and `(` tuple types.
     fn is_binding_ahead(&self) -> bool {
         let mut depth = 0i32;
         let mut i = self.index + 1;
@@ -578,9 +543,8 @@ impl Parser {
         false
     }
 
-    // Takes `self` by value: parsing moves the diagnostics into the result,
-    // so a parser cannot be run twice (the second run would silently report
-    // an empty program with no diagnostics).
+    // By value: parsing moves the diagnostics out, so a parser cannot be run
+    // twice (the second run would report an empty program, silently).
     pub fn parse_program(mut self) -> ParseResult {
         let program_span = self.current_span();
         let doc = self.take_module_doc();
@@ -672,10 +636,8 @@ impl Parser {
             }
             Kind::Identifier(name) if self.is_binding_ahead() => {
                 if is_type_name(&name) {
-                    // Uppercase ident with a depth-0 `=` ahead. Only commit
-                    // to the statement forms when the token immediately
-                    // after the name is `=` (TypedDiscard) or `(` (ctor
-                    // destructure); anything else (e.g. `Foo.Bar = ..`)
+                    // Only commit to a statement when the token right after
+                    // the name is `=` or `(`; anything else (`Foo.Bar = ..`)
                     // falls through to expression parsing.
                     match self.peek_next() {
                         Some(Kind::PuncEquals) => {
@@ -730,9 +692,9 @@ impl Parser {
         Ok(left)
     }
 
-    // Binary-operator precedence ladder, loosest first. Each level is parsed
-    // as a left-associative chain over the next-tighter level. Range is spliced
-    // between comparison (3) and additive (4); past the table we hit unary.
+    // Binary-operator precedence ladder, loosest first; each level is a
+    // left-associative chain over the next. Range splices in at RANGE_LEVEL;
+    // past the table comes unary.
     const PRECEDENCE: &[&[(Kind, ast::BinaryOp)]] = &[
         &[(Kind::LogicalOr, ast::BinaryOp::Or)],
         &[(Kind::LogicalAnd, ast::BinaryOp::And)],
@@ -757,8 +719,6 @@ impl Parser {
         ],
     ];
 
-    // Range is spliced into the precedence chain between PRECEDENCE[RANGE_LEVEL]
-    // (comparison) and PRECEDENCE[RANGE_LEVEL + 1] (additive); see parse_range.
     const RANGE_LEVEL: usize = 3;
 
     fn parse_binary_expression(&mut self) -> PResult<ast::Expression> {
@@ -782,9 +742,8 @@ impl Parser {
             .find(|(k, _)| *k == self.kind())
             .map(|(k, op)| (k.clone(), *op))
         {
-            // A `-` on a fresh line is the start of a new unary expression, not
-            // a continuation of an additive chain (P4). Only level 4 has
-            // PuncMinus, so this guard is inert elsewhere.
+            // A `-` on a fresh line starts a new unary expression rather than
+            // continuing an additive chain (P4).
             if tok == Kind::PuncMinus && self.has_newline_before_current() {
                 break;
             }
@@ -801,9 +760,8 @@ impl Parser {
         Ok(left)
     }
 
-    // Range sits between comparison and additive so that `-5..5` parses as
-    // `(-5)..(5)` (unary binds tighter via additive→multiplicative→unary) and
-    // `a+b..c+d` parses as `(a+b)..(c+d)`.
+    // Range sits between comparison and additive so `-5..5` parses as
+    // `(-5)..(5)` and `a+b..c+d` as `(a+b)..(c+d)`.
     fn parse_range(&mut self) -> PResult<ast::Expression> {
         let left = self.parse_level(Self::RANGE_LEVEL + 1)?;
 
@@ -853,10 +811,8 @@ impl Parser {
                     expr = self.parse_dot_expression(expr)?;
                 }
                 Kind::PuncOpenParen => {
-                    // Newline before `(` terminates the postfix chain so that
-                    //   f
-                    //   (a, b)
-                    // is two expressions, not a call (P7).
+                    // A newline before `(` ends the postfix chain, so `f`
+                    // then `(a, b)` is two expressions, not a call (P7).
                     if self.has_newline_before_current() {
                         break;
                     }
@@ -1002,14 +958,14 @@ impl Parser {
                 let spread_span = self.current_span();
                 self.eat(Kind::PuncDotdot)?;
 
-                // Bare `..` (followed by `]`, `,` or `else`) is a parse error
-                // in an array literal — spreads there always carry a value.
+                // A spread in an array literal always carries a value, so a
+                // bare `..` is an error.
                 if matches!(
                     self.kind(),
                     Kind::PuncCloseBracket | Kind::PuncComma | Kind::Keyword(Keyword::Else)
                 ) {
                     if self.kind() == Kind::Keyword(Keyword::Else) {
-                        self.advance(); // skip the erroneous 'else' token
+                        self.advance();
                     }
                     let msg = "Expected expression after `..` in array literal".to_string();
                     self.error_at(spread_span, msg.clone());
@@ -1069,10 +1025,8 @@ impl Parser {
         }))
     }
 
-    // `<<seg, seg, ..>>` bit-string literal. Each segment is a value expression
-    // optionally followed by `:` and a size spec; a bare segment is an 8-bit
-    // Int (so `<<1, 2, 3>>` is three bytes), except a bare string which is its
-    // UTF-8 bytes (so `<<'GET '>>` needs no `:utf8`).
+    // `<<seg, seg, ..>>` bit-string literal. A bare segment is an 8-bit Int,
+    // except a bare string, which is its UTF-8 bytes.
     fn parse_binary_literal(&mut self) -> PResult<ast::Expression> {
         let start = self.current_span();
         let segments = self.parse_comma_list(Kind::BinOpen, Kind::BinClose, |p| {
@@ -1094,16 +1048,14 @@ impl Parser {
         }))
     }
 
-    // Parses the optional `: size_spec` suffix of a `<<>>` segment. Grammar:
+    // The optional `: size_spec` suffix of a `<<>>` segment:
     //   :N          -> N bits, Int
     //   :size(expr) -> expr bits, Int (dynamic)
     //   :bytes(expr)-> expr bytes, Binary slice
     //   :binary     -> remaining bytes, Binary
-    //   :utf8       -> string literal: its UTF-8 bytes; otherwise one
-    //                  codepoint (pattern) / whole string (expr), Utf8
-    // Absent spec -> default 8-bit Int (size left None; codegen supplies 8),
-    // except string segments (`value_is_string`) which default to Utf8: a bare
-    // string means its UTF-8 bytes, not a single 8-bit Int.
+    //   :utf8       -> UTF-8 bytes
+    // Absent: 8-bit Int with size left None (codegen supplies 8), except when
+    // `value_is_string`, which defaults to Utf8.
     fn parse_bin_size_spec(&mut self, value_is_string: bool) -> PResult<ast::BinSpec> {
         if self.kind() != Kind::PuncColon {
             return Ok(if value_is_string {
@@ -1203,9 +1155,9 @@ impl Parser {
             return Err("'if' requires an 'else' branch".to_string());
         }
         self.eat(Kind::Keyword(Keyword::Else))?;
-        // Recurse through the guarded wrapper so each `else if` re-enters the
-        // depth guard — otherwise the chain recurses at constant depth and a
-        // long `else if` ladder overflows the native stack (uncatchable).
+        // Through the guarded wrapper so each `else if` re-enters the depth
+        // guard; otherwise a long ladder recurses at constant depth and
+        // overflows the native stack.
         let else_body = if self.kind() == Kind::Keyword(Keyword::If) {
             self.parse_if_expression()?
         } else {
@@ -1250,9 +1202,9 @@ impl Parser {
                             break 'arms;
                         }
                         ArmRecovery::AtCloseBrace => break,
-                        // Recovery stopped at this arm's `->`: fall through with
-                        // a placeholder so the body still parses and the loop
-                        // advances instead of re-erroring on the same token.
+                        // Stopped at this arm's `->`: use a placeholder so the
+                        // body still parses and the loop advances instead of
+                        // re-erroring on the same token.
                         ArmRecovery::AtArrow => ast::Pattern::Wildcard { span: err_span },
                         ArmRecovery::Resume => continue,
                     }
@@ -1333,10 +1285,6 @@ impl Parser {
         }))
     }
 
-    // ------------------------------------------------------------------------
-    // Patterns
-    // ------------------------------------------------------------------------
-
     fn parse_pattern(&mut self) -> PResult<ast::Pattern> {
         let start = self.current_span();
         let first = self.parse_pattern_range()?;
@@ -1375,8 +1323,8 @@ impl Parser {
         Ok(first)
     }
 
-    /// Range pattern bounds must be number literals; anything else is
-    /// diagnosed and replaced with a `0` placeholder for recovery.
+    /// Range pattern bounds must be number literals; anything else errors and
+    /// becomes a `0` placeholder for recovery.
     fn require_number_bound(&mut self, p: ast::Pattern) -> ast::NumberLiteral {
         match p {
             ast::Pattern::Literal(ast::PatternLiteral::Number(n)) => n,
@@ -1395,8 +1343,8 @@ impl Parser {
         self.with_recursion_guard(Self::parse_pattern_atom_inner)
     }
 
-    /// Is the token *after* the current one an uppercase (type/constructor)
-    /// name? Used to tell `io.NotFound` from any other dotted form.
+    /// Whether the token after the current one is an uppercase name. Tells
+    /// `io.NotFound` from any other dotted form.
     fn peek_is_type_name(&self) -> bool {
         self.tokens
             .get(self.index + 1)
@@ -1450,11 +1398,9 @@ impl Parser {
                 if name == "_" {
                     return Ok(ast::Pattern::Wildcard { span: id_span });
                 }
-                // `io.NotFound(path)` — a constructor reached through a module
-                // qualifier, so the constructor need not be imported by name.
-                // Only a lowercase qualifier followed by an uppercase member is
-                // one; `p.field` is not a pattern, so there is nothing to
-                // disambiguate against.
+                // `io.NotFound(path)`: a ctor reached through a module
+                // qualifier, so it need not be imported by name. `p.field` is
+                // not a pattern, so nothing else can look like this.
                 if !is_type_name(&name) && self.kind() == Kind::PuncDot && self.peek_is_type_name()
                 {
                     self.eat(Kind::PuncDot)?;

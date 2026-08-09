@@ -1,45 +1,20 @@
 //! Inline reference-count sequences for the native (Cranelift) backend:
 //! the dup (retain) and drop (release) halves of Perceus, as CLIF.
 //!
-//! The gate in front of the rc-slot access is type-directed ([`RcGate`]):
+//! The gate in front of the rc-slot access is type-directed ([`RcGate`]).
+//! A statically-unboxed type (Float/Bool/Nil) gets no sequence at all. A type
+//! proven to be a heap cell has `SIGN|QNAN` already set, so only the
+//! `VALUE_IMMORTAL` bit-0 test remains ([`RcGate::ProvenHeap`]). Everything
+//! else takes the full mortal-heap mask ([`RcGate::Dynamic`]), the same bit
+//! math as the interpreter's `retain_bits`/`release_bits`.
 //!
-//! - Dup and drop on a statically-unboxed type (Float/Bool/Nil) compile to
-//!   **nothing** — the caller simply emits no sequence.
-//! - A type the pool proves is always a heap cell (strings, arrays, tuples,
-//!   closures, payload-carrying enums) has `SIGN|QNAN` statically set, so
-//!   its gate reduces to the `VALUE_IMMORTAL` bit-0 test
-//!   ([`RcGate::ProvenHeap`]).
-//! - Everything else — `Int`, whose values past the 47-bit small-int range
-//!   spill to a heap `BigInt` box, rigid type variables, and nominal types
-//!   that may be represented immediately — takes the full dynamic
-//!   mortal-heap mask ([`RcGate::Dynamic`]), the same pure-bit-math test as
-//!   the interpreter's `retain_bits`/`release_bits` fast paths.
+//! Immortal objects carry no refcount prefix, so the immortal test precedes
+//! every rc-slot access under either gate; neither sequence ever dereferences
+//! a non-mortal word.
 //!
-//! Immortal objects carry **no** refcount prefix, so a `VALUE_IMMORTAL`
-//! bit-0 test precedes every rc-slot access under *either* gate (the
-//! dynamic mask folds it in); neither sequence ever dereferences a
-//! non-mortal word.
-//!
-//! ```text
-//!   band  bits, SIGN|QNAN|IMMORTAL          ; mortal-heap gate:
-//!   icmp  ==    SIGN|QNAN                   ;   one AND + one CMP, no load
-//! (mortal)
-//!   load  rc, [obj-8]                       ; saturation guard: a count of
-//!   icmp  ==    -1  -> skip                 ;   u64::MAX is permanently live
-//!                                           ;   (rc_increment's saturating_add
-//!                                           ;   / rc_decrement_is_zero's early
-//!                                           ;   return, bit for bit)
-//! dup:                                      | drop:
-//!   inc + store                             |   dec + store
-//!                                           | (zero, cold block)
-//!                                           |   call native_release_at_zero(obj)
-//! ```
-//!
-//! Frees route through the interpreter's own `#[cold]` `release_at_zero`
-//! (via its `extern "C"` shim), so `FREED_OBJECTS` accounting — and with it
-//! `charge_reclamation` fairness and the exact-allocation-count tests — stays
-//! identical between backends. Dup never calls out: the increment is four
-//! inline instructions past the gate.
+//! Frees route through the interpreter's own `release_at_zero` shim, so
+//! `FREED_OBJECTS` accounting (and `charge_reclamation` fairness with it)
+//! stays identical between backends. Dup never calls out.
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{self, InstBuilder, MemFlagsData, types};
@@ -50,30 +25,23 @@ use crate::bytecode::value::{
 };
 
 /// The `VALUE_IMMORTAL` bit: the one bit by which the mortal-gate mask
-/// exceeds its expected result. A proven-heap word already satisfies the
-/// `SIGN|QNAN` half of the mask, leaving only this test.
+/// exceeds its expected result.
 const IMMORTAL_BIT: u64 = NATIVE_MORTAL_GATE_MASK & !NATIVE_MORTAL_HEAP_BITS;
 
 /// How much of the mortal-heap gate the type proof lets an RC sequence skip.
-/// The statically-elided case has no variant: a caller with proof that the
-/// value is an immediate emits no sequence at all.
+/// There is no variant for a proven immediate: that caller emits no sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RcGate {
-    /// No static proof of heapness: the full mortal-heap mask
-    /// (`SIGN|QNAN|VALUE_IMMORTAL`), exactly `release_bits`/`retain_bits`.
+    /// The full mortal-heap mask, exactly `release_bits`/`retain_bits`.
     Dynamic,
-    /// The type proves the word is a heap cell (`SIGN|QNAN` statically
-    /// set), so only the `VALUE_IMMORTAL` bit-0 test remains before the
-    /// rc-slot access.
+    /// The word is known to be a heap cell, so only the `VALUE_IMMORTAL`
+    /// bit-0 test remains.
     ProvenHeap,
 }
 
-/// Emit the mortal test for `bits` at `gate` strength: branch to `rc_block`
-/// when the word is a mortal heap cell (rc slot present), `done_block`
-/// otherwise. Seals `rc_block`; pure bit math either way — immortal and
-/// immediate values must never be dereferenced. Public for the native
-/// backend's fused sequences (the reuse-drop's uniqueness test in
-/// `al_core::core_ir::clif`) that open with the same gate.
+/// Emit the mortal test for `bits`: branch to `rc_block` when the word is a
+/// mortal heap cell, `done_block` otherwise. Seals `rc_block`. Public because
+/// `al_core::core_ir::clif`'s fused reuse-drop opens with the same gate.
 pub fn emit_mortal_gate(
     builder: &mut FunctionBuilder,
     bits: ir::Value,
@@ -109,18 +77,15 @@ pub fn emit_dynamic_drop(
     emit_drop(builder, bits, release_at_zero, RcGate::Dynamic);
 }
 
-/// Emit the drop (release) sequence for the NaN-boxed value word `bits` (an
-/// `i64` SSA value), gated at `gate` strength. Used for `CoreExpr::Drop` and
-/// slot releases on any type that is not statically unboxed — in particular
-/// `Int`, whose values may have spilled to a heap `BigInt`.
+/// Emit the drop (release) sequence for the NaN-boxed value word `bits`,
+/// gated at `gate` strength.
 ///
 /// `release_at_zero` must be a declared reference to
-/// [`crate::bytecode::value::native_release_at_zero`] (one pointer-sized
-/// argument, no return), resolved at JIT finalize time under
-/// [`crate::bytecode::value::NATIVE_RELEASE_AT_ZERO_SYMBOL`].
+/// [`crate::bytecode::value::native_release_at_zero`]: one pointer-sized
+/// argument, no return.
 ///
-/// The current block is terminated; on return the builder is positioned in a
-/// new, sealed merge block where codegen continues.
+/// Terminates the current block and leaves the builder in a new, sealed
+/// merge block.
 pub fn emit_drop(
     builder: &mut FunctionBuilder,
     bits: ir::Value,
@@ -135,8 +100,8 @@ pub fn emit_drop(
 
     emit_mortal_gate(builder, bits, gate, rc_block, done_block);
 
-    // Saturation guard: a count of u64::MAX is permanently live and never
-    // decrements (mirrors `rc_decrement_is_zero`).
+    // A count of u64::MAX is permanently live and never decrements, as in
+    // `rc_decrement_is_zero`.
     builder.switch_to_block(rc_block);
     let obj = builder.ins().band_imm(bits, NATIVE_PTR_MASK as i64);
     let rc = builder.ins().load(
@@ -176,22 +141,14 @@ pub fn emit_dynamic_dup(builder: &mut FunctionBuilder, bits: ir::Value) {
     emit_dup(builder, bits, RcGate::Dynamic);
 }
 
-/// Emit the dup (retain) for the NaN-boxed value word `bits` (an `i64` SSA
-/// value), gated at `gate` strength: take one owned reference, exactly
-/// `rc_increment` behind the mortal gate. Emitted at every Perceus dup site
-/// — wherever compiled code hands a borrowed register copy to an
-/// ownership-taking consumer (a callee's argument slot, a stored slot, a
-/// returned value, a constructor field or closure capture) while the frame
-/// slot keeps its own reference — the register-resident twin of
-/// `PushLocal`'s clone.
+/// Emit the dup (retain) for the NaN-boxed value word `bits`, gated at
+/// `gate` strength: take one owned reference, exactly `rc_increment` behind
+/// the mortal gate. Emitted wherever compiled code hands a borrowed register
+/// copy to an ownership-taking consumer while the frame slot keeps its own
+/// reference.
 ///
-/// Matches `rc_increment`'s saturation bit for bit: a count of `u64::MAX`
-/// is permanently live and stays put. Immediates and immortal words pass
-/// through untouched (the gate precedes the rc-slot access — immortal
-/// objects have no rc prefix).
-///
-/// The current block is terminated; on return the builder is positioned in a
-/// new, sealed block where codegen continues.
+/// Terminates the current block and leaves the builder in a new, sealed
+/// block.
 pub fn emit_dup(builder: &mut FunctionBuilder, bits: ir::Value, gate: RcGate) {
     let rc_block = builder.create_block();
     let bump_block = builder.create_block();
@@ -199,8 +156,7 @@ pub fn emit_dup(builder: &mut FunctionBuilder, bits: ir::Value, gate: RcGate) {
 
     emit_mortal_gate(builder, bits, gate, rc_block, done_block);
 
-    // Saturation guard mirrors `rc_increment`'s `saturating_add(1)`: a
-    // count of u64::MAX is permanently live and stays put.
+    // Mirrors `rc_increment`'s `saturating_add(1)`: u64::MAX stays put.
     builder.switch_to_block(rc_block);
     let obj = builder.ins().band_imm(bits, NATIVE_PTR_MASK as i64);
     let rc = builder.ins().load(
@@ -226,9 +182,7 @@ pub fn emit_dup(builder: &mut FunctionBuilder, bits: ir::Value, gate: RcGate) {
     builder.switch_to_block(done_block);
 }
 
-// Tests drive JIT-compiled code and touch raw refcount words — inherently
-// `unsafe extern "C"` territory, confined to this test module like the
-// crate's other designated-unsafe modules.
+// These tests drive JIT-compiled code and touch raw refcount words.
 #[allow(unsafe_code)]
 #[cfg(test)]
 mod tests {
@@ -321,8 +275,7 @@ mod tests {
             unsafe { drop_gate(v.to_bits()) };
         }
 
-        // A frozen (immortal) BigInt has no refcount slot; the gate must not
-        // touch it.
+        // A frozen BigInt has no refcount slot.
         use crate::frozen::FrozenArea;
         use std::sync::Arc;
         let area = Arc::new(FrozenArea::new());
@@ -380,8 +333,7 @@ mod tests {
             unsafe { dup_gate(v.to_bits()) };
         }
 
-        // A frozen (immortal) value has no refcount slot; the gate must not
-        // touch it — bit 0 (VALUE_IMMORTAL) precedes the rc-slot access.
+        // A frozen value has no refcount slot.
         use crate::frozen::FrozenArea;
         use std::sync::Arc;
         let area = Arc::new(FrozenArea::new());
@@ -399,9 +351,8 @@ mod tests {
         let (_m, dup_gate) = jit_dup_gate();
         let mut h = ProcHeap::new();
 
-        // Same starting count on twin mortal objects: one bumped by the
-        // JIT-compiled dup, the other by the interpreter's `rc_increment` —
-        // the resulting counts must be identical, saturation included.
+        // Twin objects: one bumped by the JIT-compiled dup, the other by the
+        // interpreter's `rc_increment`. Counts must match, saturation included.
         let starts = [1u64, 2, 5, u64::MAX - 1, u64::MAX];
         take_freed_objects();
         for start in starts {
@@ -427,8 +378,6 @@ mod tests {
         assert_eq!(take_freed_objects(), 2 * starts.len() as u64);
     }
 
-    // ---- the proven-heap (immortal-bit-only) gate -------------------------
-
     fn jit_proven_drop() -> (JITModule, unsafe extern "C" fn(u64)) {
         jit_rc_seq(|b, bits, release| emit_drop(b, bits, release, RcGate::ProvenHeap))
     }
@@ -437,9 +386,8 @@ mod tests {
         jit_rc_seq(|b, bits, _release| emit_dup(b, bits, RcGate::ProvenHeap))
     }
 
-    /// An immortal heap word has no rc prefix; the proven-heap gate's
-    /// remaining `VALUE_IMMORTAL` bit-0 test must keep both sequences off
-    /// its rc slot.
+    /// An immortal heap word has no rc prefix, so the proven-heap gate's
+    /// remaining bit-0 test must keep both sequences off its rc slot.
     #[test]
     fn proven_heap_gate_skips_immortal_values() {
         let (_m1, drop_gate) = jit_proven_drop();
@@ -459,8 +407,7 @@ mod tests {
     }
 
     /// On a mortal heap cell the proven-heap sequences count exactly like
-    /// the dynamic ones: dup bumps, drop decrements and frees at zero
-    /// through `release_at_zero`.
+    /// the dynamic ones.
     #[test]
     fn proven_heap_gate_counts_like_dynamic() {
         let (_m1, drop_gate) = jit_proven_drop();

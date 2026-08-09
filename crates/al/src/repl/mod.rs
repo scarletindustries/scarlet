@@ -15,8 +15,8 @@ pub fn run(version: &str) {
 
     let mut input_buffer = String::new();
     let mut continuation = false;
-    // Source of every entry that defined something, replayed verbatim ahead of
-    // the current one. Source, not AST: see `eval_input`.
+    // Source of every entry that defined something, replayed verbatim ahead
+    // of the current one. Source, not AST: see `eval_input`.
     let mut prelude = String::new();
     let mut rl = match DefaultEditor::new() {
         Ok(e) => e,
@@ -32,8 +32,7 @@ pub fn run(version: &str) {
         let line = match rl.readline(prompt) {
             Ok(l) => l,
             Err(ReadlineError::Interrupted) => {
-                // Ctrl-C: abandon the current (possibly multi-line) entry and
-                // return to a fresh prompt without exiting.
+                // Ctrl-C abandons the current entry without exiting.
                 println!("^C");
                 input_buffer.clear();
                 continuation = false;
@@ -102,12 +101,10 @@ enum EvalOutcome {
 
 /// Compile `prelude ++ input` as one source text and run it.
 ///
-/// The prelude is *source*, not a `Vec<ast::Node>` cloned from earlier turns.
-/// Each turn is scanned on its own, so every retained entry's spans would
-/// restart at line 1 and two same-shaped lines would occupy the identical
-/// `Span` — and the compiler keys its expression types on `Span`. Replaying
-/// text instead makes every span unique by construction, and points
-/// diagnostics at the entry that actually produced them.
+/// The prelude must stay *source*, not retained AST: each turn is scanned on
+/// its own, so retained nodes would all restart their spans at line 1 and two
+/// same-shaped lines would share a `Span` — which the compiler keys
+/// expression types on. Replaying text makes every span unique.
 fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
     // Parse the entry alone first: only its diagnostics belong to the user,
     // and an unterminated form must ask for another line rather than replay.
@@ -147,8 +144,8 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
     }
 
     let Some(emitted) = result.emitted else {
-        // A successful non-check compile always emits; reaching here means
-        // the stdlib seed itself failed, which the diagnostics above covered.
+        // A successful non-check compile always emits, so reaching here
+        // means the stdlib seed failed and was already reported.
         return EvalOutcome::Failed;
     };
     let program = emitted.program;
@@ -163,10 +160,9 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
     let run_result = match v.run() {
         Ok(val) => val,
         Err(err) => {
-            // Per `VM::run`'s contract, an errored run leaks its scheduler
-            // runtime (worker and blocking-pool threads); the REPL accepts
-            // one such leak per errored evaluation to keep the session
-            // alive. A worker-side error still exits the whole process.
+            // Per `VM::run`'s contract an errored run leaks its scheduler
+            // threads. The REPL accepts one leak per errored evaluation to
+            // keep the session alive.
             eprintln!("Runtime error: {}", err);
             return EvalOutcome::Failed;
         }
@@ -174,9 +170,8 @@ fn eval_input(input: &str, prelude: &str) -> EvalOutcome {
 
     println!("{}", vm::inspect(&run_result, v.program()));
 
-    // Replay an entry only if it bound or declared something; a bare
-    // expression is a value the user already saw, and re-running it every
-    // turn would repeat its effects.
+    // Replay only entries that bound or declared something: re-running a
+    // bare expression every turn would repeat its effects.
     let defines = probe
         .ast
         .body

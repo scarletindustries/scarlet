@@ -444,7 +444,7 @@ fn vm_for_runtime(runtime: Arc<Runtime>, index: usize, poll: mio::Poll) -> VM {
     // `program.frozen`, which stays shared.
     let program = (*runtime.program).clone();
     let mut frozen = program.frozen.builder();
-    let templates = Templates::resolve(&program, &mut frozen);
+    let templates = Templates::resolve(&program.abi, &program.templates, &mut frozen);
     // The entry function sizes the global area: top-level bindings are its
     // "locals", mirrored into this table as they are written.
     let globals_len = program

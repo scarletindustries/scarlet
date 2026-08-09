@@ -2396,13 +2396,11 @@ impl<'a> BodyGen<'a> {
         self.b.seal_block(inplace);
         self.b.seal_block(miss);
 
-        // In place: `reuse_or_alloc` over a hollowed same-shape cell. The
-        // header is byte-identical by the shape-pairing invariant (same
-        // tag, same word count) and left as is; every other word is
-        // (re)written — hash 0 included, so the cell's old cached hash
-        // cannot leak into the new value. The old name/label/payload slots
-        // hold the sentinels `hollow_for_reuse` wrote, so plain stores are
-        // the whole job (no releases).
+        // In place over a hollowed same-shape cell. The header is
+        // byte-identical by the shape-pairing invariant and left alone; every
+        // other word is rewritten, hash 0 included, so the old cached hash
+        // cannot leak into the new value. The name/label/payload slots hold
+        // `hollow_for_reuse`'s sentinels, so plain stores suffice.
         self.b.switch_to_block(inplace);
         let packed = self.b.ins().iconst(types::I64, site.packed as i64);
         self.b.ins().store(MemFlagsData::trusted(), packed, obj, 8);
@@ -2417,9 +2415,8 @@ impl<'a> BodyGen<'a> {
         let n = self.b.ins().iconst(types::I64, fields.len() as i64);
         self.b.ins().store(MemFlagsData::trusted(), n, obj, 48);
         for (i, &fld) in fields.iter().enumerate() {
-            // `store_child` parity: the cell takes its own reference — a
-            // slotted field's word is retained (type-directed, exactly
-            // `owned_word`), a slotless one transfers.
+            // The cell takes its own reference: a slotted field is retained,
+            // a slotless one transfers.
             let fw = self.owned_word(fld);
             self.b
                 .ins()
@@ -2427,8 +2424,7 @@ impl<'a> BodyGen<'a> {
         }
         self.b.ins().jump(merge, &[w.into()]);
 
-        // Miss: `Op::Reuse` drops a non-reusable candidate (the zero fill
-        // no-ops the gate) and pushes nil; the make allocates fresh.
+        // Miss: drop the non-reusable candidate and allocate fresh.
         self.b.switch_to_block(miss);
         emit_drop(&mut self.b, w, self.fns.release, RcGate::Dynamic);
         let fresh = self.enum_alloc(&site, fields);
@@ -2463,9 +2459,8 @@ impl<'a> BodyGen<'a> {
         self.b.ins().stack_addr(self.ptr_ty, ss, 0)
     }
 
-    /// Return `status` when it is not `Done`, continue otherwise — the
-    /// mechanical unwinding that keeps every native frame droppable at a
-    /// suspension. Leaves the builder in the continue block.
+    /// Return `status` unless it is `Done`, which keeps every native frame
+    /// droppable at a suspension. Leaves the builder in the continue block.
     fn unwind_unless_done(&mut self, status: ir::Value) {
         let cont = self.b.create_block();
         let bail = self.b.create_block();
@@ -2482,21 +2477,15 @@ impl<'a> BodyGen<'a> {
         self.b.switch_to_block(cont);
     }
 
-    /// A non-tail call: for a known callee that is itself native the
-    /// `al_rt_call` sequence is split around a direct machine `call` to the
-    /// peer entry (frame handshake and entry checkpoint via
-    /// `al_rt_push_frame`, then the direct call, then `al_rt_direct_result`
-    /// for the return path — bit-identical frame state at every seam, only
-    /// the trampoline's table lookup and indirect dispatch elided). A known
-    /// callee outside the native set, or a dynamic callee, keeps the
-    /// `al_rt_call`/`al_rt_call_value` trampoline unchanged. Returns the
-    /// callee's owned result word.
+    /// A non-tail call, returning the callee's owned result word. A known
+    /// native callee splits the `al_rt_call` sequence around a direct machine
+    /// call to the peer entry; frame state is bit-identical at every seam,
+    /// only the table lookup and indirect dispatch are elided. Anything else
+    /// keeps the trampoline.
     ///
-    /// `moved` are the peeled last-use drops of the call's own operands
-    /// ([`peel_call_arg_drops`]): they run after the operand copies are
-    /// taken but *before* the call, so the callee — not this frame — is the
-    /// sole owner and its Perceus `Drop` sees rc==1, exactly the
-    /// interpreter's push-then-drop-then-`Call` order.
+    /// `moved` are [`peel_call_arg_drops`]'s peeled last-use drops. They must
+    /// run after the operand copies but *before* the call, so the callee is
+    /// sole owner and its Perceus `Drop` sees rc==1.
     fn call_value(
         &mut self,
         callee: Callee,
@@ -2505,16 +2494,11 @@ impl<'a> BodyGen<'a> {
     ) -> ir::Value {
         let resume = self.next_resume();
         let buf = self.arg_buffer(args);
-        // Emit's operand order: args, then a dynamic callee, then the
-        // peeled drops — the copies keep the values alive while the slots'
-        // own references go. The dispatch word is resolved before the drops:
-        // a `Known`/`Self_` target as an immediate (covered bodies never
-        // read captures — `PushCapture`/`PushSelf` are uncovered ops — so
-        // self dispatches like a known call to the body's own `FuncIdx`), a
-        // dynamic callee as an owned closure word — the interpreter's popped
-        // callee, which becomes the callee frame's `captures` handle; the
-        // shim resolves its `func_idx` against the same entry table and
-        // performs the `Op::Call` checks.
+        // Emit's operand order: args, then a dynamic callee, then the peeled
+        // drops. The dispatch word must be resolved before the drops. `Self_`
+        // is an immediate like `Known`, since covered bodies never read
+        // captures. A dynamic callee is an owned closure word that becomes
+        // the callee frame's `captures` handle.
         let dispatch = match callee {
             Callee::Known(f) => {
                 let t = self.b.ins().iconst(types::I64, i64::from(f.to_operand()));
@@ -2535,17 +2519,12 @@ impl<'a> BodyGen<'a> {
         let n = self.b.ins().iconst(types::I64, args.len() as i64);
         let status = match dispatch {
             Ok((fi, t)) => match self.peers.get(&fi).copied() {
-                // Direct native→native (call kind 1): `al_rt_push_frame` is
-                // `al_rt_call` up to but not including `drive_top_frame`
-                // (resume ip, `enter_frame!` push, entry checkpoint — the
-                // callee frame is bit-identical to the interpreter's at
-                // ip 0, so a `Yield` here resumes the callee from the top).
-                // The direct call is the peer's own `NativeEntry` under the
-                // same `(vmx) -> status` ABI; `al_rt_direct_result` is the
-                // trampoline's Done tail (pop the result the callee's
-                // `al_rt_ret` left on the stack top), consuming a `TailCall`
-                // by driving the collapsed chain — `drive_top_frame` inside
-                // `al_rt_call` would have done the same.
+                // Direct native→native. `al_rt_push_frame` is `al_rt_call`
+                // up to but not including `drive_top_frame`, leaving the
+                // callee frame bit-identical to the interpreter's at ip 0, so
+                // a `Yield` here resumes the callee from the top.
+                // `al_rt_direct_result` is the trampoline's Done tail and
+                // drives a collapsed `TailCall` chain.
                 Some(entry) => {
                     let vmx = self.vmx();
                     let push = self
@@ -2554,8 +2533,8 @@ impl<'a> BodyGen<'a> {
                         .call(self.fns.rt_push_frame, &[vmx, t, r, buf, n]);
                     let s = self.b.inst_results(push)[0];
                     self.unwind_unless_done(s);
-                    // Peer entries take the CTX (they are NativeEntry, not
-                    // shims): each prologue re-pins and re-loads its own vm.
+                    // Peer entries are NativeEntry, not shims: they take the
+                    // ctx and re-pin and re-load their own vm.
                     let ctx = self.ctx();
                     let direct = self.b.ins().call(entry, &[ctx]);
                     let s = self.b.inst_results(direct)[0];
@@ -2596,19 +2575,13 @@ impl<'a> BodyGen<'a> {
 
     /// A cross-function tail call.
     ///
-    /// The frame is collapsed in place via `al_rt_tail_call` (the
-    /// interpreter's `TailCallKnown` surgery + reds checkpoint) either way.
-    /// What differs is who dispatches the collapsed frame: when the callee
-    /// is itself native *and* the entry signature's calling convention
-    /// admits Cranelift `return_call`, the shim's `TailCall` status becomes
-    /// a direct `return_call` into the peer — the driver's trampoline hop is
-    /// skipped and mutual native tail chains stay in machine code without
-    /// stacking C frames. Cranelift only permits `return_call` under
-    /// `CallConv::Tail`; the `NativeEntry` signature is extern-C (the
-    /// platform default), so today `supports_tail_calls()` is `false` and
-    /// the fallback below — return the status verbatim for the driver to
-    /// dispatch — is what runs. The direct path is written so a later move
-    /// of the entry signature to `CallConv::Tail` lights it up unchanged.
+    /// `al_rt_tail_call` collapses the frame in place either way. Who
+    /// dispatches it differs: a native callee under a calling convention that
+    /// admits Cranelift `return_call` gets a direct `return_call`, keeping
+    /// mutual native tail chains in machine code. Cranelift permits
+    /// `return_call` only under `CallConv::Tail`, and `NativeEntry` is
+    /// extern-C, so today `supports_tail_calls()` is false and only the
+    /// fallback runs.
     fn tail_call_known(&mut self, target: FuncIdx, args: &[LocalId]) {
         let buf = self.arg_buffer(args);
         let t = self
@@ -2642,10 +2615,9 @@ impl<'a> BodyGen<'a> {
         self.b.ins().return_(&[status]);
     }
 
-    /// A cross-function *dynamic* tail call: as [`Self::tail_call_known`],
-    /// with the owned closure word standing in for the immediate target
-    /// (`Op::TailCall` parity — the collapsed frame takes the closure as its
-    /// `captures` handle).
+    /// [`Self::tail_call_known`] with an owned closure word instead of an
+    /// immediate target. The collapsed frame takes it as its `captures`
+    /// handle.
     fn tail_call_value(&mut self, callee: LocalId, args: &[LocalId]) {
         let buf = self.arg_buffer(args);
         let cw = self.owned_word(callee);
@@ -2659,13 +2631,10 @@ impl<'a> BodyGen<'a> {
         self.b.ins().return_(&[status]);
     }
 
-    /// A self-tail call: the native loop back-edge. Mirrors the
-    /// interpreter's `TailCallSelf` order exactly — take owned copies of the
-    /// argument words (the operand pushes), run the argument-slot drops
-    /// perceus parked before the tail (they release the slots' own
-    /// references while the copies keep the values alive), swap the copies
-    /// into the parameter slots, then checkpoint: `Done` loops, anything
-    /// else unwinds with the frame resumable at ip 0 (the shim resets it).
+    /// The native loop back-edge, in the interpreter's `TailCallSelf` order:
+    /// copy the argument words, run the parked argument-slot drops, swap the
+    /// copies into the parameter slots, checkpoint. Anything but `Done`
+    /// unwinds with the frame resumable at ip 0.
     fn self_tail(&mut self, args: &[LocalId], moved_drops: &[(LocalId, bool)]) {
         let params: Vec<LocalId> = self.plan.fun.params.iter().map(|p| p.id).collect();
         if args.len() != params.len() {
@@ -2690,8 +2659,7 @@ impl<'a> BodyGen<'a> {
             self.store_local_slot(p, slot, words[i]);
         }
         for (i, &p) in params.iter().enumerate() {
-            // Registers only: the store above already handed the slot its
-            // owned word.
+            // Registers only: the store above handed the slot its owned word.
             self.def_regs(
                 p,
                 AtomVal {
@@ -2703,16 +2671,11 @@ impl<'a> BodyGen<'a> {
         let vmx = self.vmx();
         let call = self.b.ins().call(self.fns.rt_checkpoint, &[vmx]);
         let status = self.b.inst_results(call)[0];
-        // `base` is a raw pointer INTO the scheduler's `VM::stack` Vec — a
-        // scheduler-derived word, and the checkpoint is a suspension point.
-        // Today the yield unwinds by status return and the body is re-entered
-        // from the top, which refetches; the moment a checkpoint parks in
-        // place (Stage 2d) a loop-carried `base` would resume pointing into
-        // the *parking* scheduler's Vec on whatever thread adopts the
-        // process. That is the F1 hazard verbatim, and the landmine sits
-        // exactly where the next commit steps. Refetch unconditionally: it is
-        // one call on a path that just made one, and it makes the loop-carried
-        // value scheduler-clean by construction rather than by argument.
+        // `base` points into the scheduler's `VM::stack` Vec, and the
+        // checkpoint is a suspension point. Refetch unconditionally so the
+        // loop-carried value is scheduler-clean by construction: if a
+        // checkpoint ever parks in place, a stale `base` would resume
+        // pointing into the parking scheduler's Vec.
         let vmx = self.vmx();
         let refetch = self.b.ins().call(self.fns.rt_frame_base, &[vmx]);
         let nb = self.b.inst_results(refetch)[0];
@@ -2729,38 +2692,26 @@ impl<'a> BodyGen<'a> {
         self.b.ins().return_(&[status]);
     }
 
-    /// `Op::Drop` for a covered body, `reusable` = the IR node carried a
+    /// `Op::Drop` for a covered body. `reusable` means the IR node carried a
     /// `ReuseShape`.
     ///
-    /// Non-reusable (`shape: None`) drops never pair with a `Reuse`, so the
-    /// slot's reference is released through the type-directed mortal gate
-    /// (see [`NativePlan::rc_gate`]) and the slot zeroed — where the
-    /// interpreter would hollow a uniquely-owned cell and free it at `Ret`,
-    /// freeing now is observationally identical.
+    /// A non-reusable drop never pairs with a `Reuse`, so it releases through
+    /// the mortal gate and zeroes the slot. Freeing now instead of at `Ret`
+    /// like the interpreter is observationally identical.
     ///
-    /// Reusable drops mirror the interpreter's `Op::Drop` exactly: behind the
-    /// mortal-heap gate, a uniquely-owned cell (rc == 1) is hollowed — its
-    /// children released now via the `hollow_for_reuse` shim — and *parked in
-    /// its frame slot* for a paired `Ctor { reuse }` to overwrite in place;
-    /// hollowing at the drop point is what lets reuse propagate down a
-    /// recursive chain. A shared (or immortal / immediate) value instead
-    /// releases the frame's reference and zeroes the slot, so the paired
-    /// reuse sees no candidate and allocates fresh. The slot survives a
-    /// self-tail back-edge untouched (only parameter slots are re-stored), so
-    /// loop-carried reuse of non-argument locals works exactly like
-    /// `collapse_tail_frame_self`, which leaves non-argument locals in place.
+    /// A reusable drop hollows a uniquely-owned cell and parks it *in its
+    /// frame slot* for a paired `Ctor { reuse }`. Hollowing at the drop point
+    /// is what lets reuse propagate down a recursive chain. A shared value
+    /// releases and zeroes instead, so the paired reuse allocates fresh. The
+    /// slot survives a self-tail back-edge untouched, matching
+    /// `collapse_tail_frame_self`.
     fn drop_local(&mut self, id: LocalId, reusable: bool) {
         let slot = self.slot_of(id);
-        // The slot holds `id`'s own value here (a local is dropped at most
-        // once per path, after its binding store), so the RC gate is
-        // type-directed: elided when the type proves an immediate, the
-        // immortal-bit test when it proves a heap cell, the full dynamic
-        // mask otherwise.
+        // The slot holds `id`'s own value here: a local is dropped at most
+        // once per path, after its binding store.
         let Some(gate) = self.plan.rc_gate(id) else {
-            // Proven immediate: no reference to release, no cell to park —
-            // the interpreter's `Op::Drop` also just clears the slot
-            // (immediates are never unique), so a paired `Reuse` sees no
-            // candidate and allocates fresh.
+            // Proven immediate: nothing to release or park. Immediates are
+            // never unique, so the interpreter also just clears the slot.
             self.store_slot_zero(slot);
             return;
         };
@@ -2778,8 +2729,7 @@ impl<'a> BodyGen<'a> {
         let clear_block = self.b.create_block();
         let done_block = self.b.create_block();
 
-        // Mortal gate at the type-directed strength: pure bit math, never
-        // reads the object.
+        // Pure bit math; never reads the object.
         native_rc::emit_mortal_gate(&mut self.b, w, gate, rc_block, clear_block);
 
         // Uniqueness: rc == 1 means the frame is the sole owner.
@@ -2798,16 +2748,15 @@ impl<'a> BodyGen<'a> {
         self.b.seal_block(hollow_block);
         self.b.seal_block(shared_block);
 
-        // Unique: release the children now, park the hollowed cell — the
-        // slot already holds it, so the slot is left untouched.
+        // Unique: release the children now and park the hollowed cell. The
+        // slot already holds it.
         self.b.switch_to_block(hollow_block);
         self.b.ins().call(self.fns.hollow, &[obj]);
         self.b.ins().jump(done_block, &[]);
 
-        // Shared: release the frame's reference. rc >= 2 here (rc == 1 took
-        // the hollow path), so the decrement can never reach zero and no
-        // free-at-zero call is needed; the saturation guard still applies
-        // (a count of u64::MAX is permanently live and never decrements).
+        // Shared: rc >= 2 here, since rc == 1 took the hollow path, so the
+        // decrement can never reach zero and no free-at-zero call is needed.
+        // A saturated count is permanently live and never decrements.
         self.b.switch_to_block(shared_block);
         let saturated = self.b.ins().icmp_imm(IntCC::Equal, rc, -1);
         self.b
@@ -2837,9 +2786,7 @@ impl<'a> BodyGen<'a> {
                 CoreExpr::Let { bind, rhs, body } => {
                     if let Atom::Call { callee, args } = rhs {
                         // Peel the operands' last-use drops out of `body`
-                        // into the call (emit's `peel_call_arg_drops`), so
-                        // the callee sees rc==1 and reuse propagates down a
-                        // recursive chain.
+                        // into the call so the callee sees rc==1.
                         let dyn_callee = match callee {
                             Callee::Local(x) => Some(*x),
                             Callee::Known(_) | Callee::Self_ => None,
@@ -2857,8 +2804,8 @@ impl<'a> BodyGen<'a> {
                         continue;
                     } else {
                         // A `Closure` rhs must run regardless of demand: it
-                        // allocates (allocation-count parity) and its result
-                        // word carries an owned reference the slot must take.
+                        // allocates, and its result carries an owned
+                        // reference the slot must take.
                         let want_word = self.layout.slot(bind.id).is_some()
                             || self.uses.word_uses(bind.id) > 0
                             || matches!(rhs, Atom::Closure { .. });
@@ -2887,7 +2834,7 @@ impl<'a> BodyGen<'a> {
                     let cb = self.b.create_block();
                     self.joins.resize_at_least(*id, None);
                     self.joins[*id] = Some(cb);
-                    // Body first, cont after — emit's order, which the
+                    // Body first, cont after: emit's order, which the
                     // resume-ip cursor depends on.
                     self.expr(body, dst);
                     self.b.switch_to_block(cb);
@@ -2895,9 +2842,9 @@ impl<'a> BodyGen<'a> {
                 }
                 CoreExpr::Drop { .. } => {
                     // `drop x…; tail self(args)` releases argument slots
-                    // between the operand copies and the frame swap; mirror
-                    // emit's split so a dropped argument's value survives
-                    // into its copy.
+                    // between the operand copies and the frame swap. Mirror
+                    // emit's split so a dropped argument survives into its
+                    // copy.
                     if matches!(dst, Dest::Ret)
                         && let Some((now, moved, args)) = split_self_tail(e)
                     {
@@ -2917,8 +2864,8 @@ impl<'a> BodyGen<'a> {
                     cond, then, els, ..
                 } => {
                     let w = self.word_of(*cond);
-                    // The typechecker proves the condition Bool; only two
-                    // Bool words exist, so truthiness is one comparison.
+                    // The condition is proven Bool and only two Bool words
+                    // exist, so truthiness is one comparison.
                     let t = self
                         .b
                         .ins()
@@ -3003,9 +2950,8 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// A `CorePat::Bind` binder takes the scrutinee's value: an owned word
-    /// (plus the raw int view where one exists) defined through the binder's
-    /// slot and registers — the register twin of the arm's `StoreLocal`.
+    /// A `CorePat::Bind` binder takes the scrutinee's value: an owned word,
+    /// plus the raw int view where one exists.
     fn bind_scrutinee(&mut self, scrut: LocalId, binder: LocalId) {
         let w = self.owned_word(scrut);
         let int = self
@@ -3017,11 +2963,9 @@ impl<'a> BodyGen<'a> {
         self.def_local(binder, AtomVal { word: Some(w), int });
     }
 
-    /// emit's `switch_plan`, answered from the plan's captured variant
-    /// counts ([`Gate::switch_shape`]) so codegen takes the `SwitchTag`
-    /// table exactly when the emitted bytecode (and the layout re-emission,
-    /// which reads the same map) did. The checks mirror `switch_plan`
-    /// clause for clause.
+    /// emit's `switch_plan`, answered from the plan's captured variant counts
+    /// so codegen takes the `SwitchTag` table exactly when the emitted
+    /// bytecode did. Mirrors `switch_plan` clause for clause.
     fn switch_tags(&self, arms: &[(CorePat, CoreExpr)]) -> Option<Vec<u16>> {
         if arms.is_empty() {
             return None;
@@ -3055,13 +2999,9 @@ impl<'a> BodyGen<'a> {
     }
 
     /// The `SwitchTag` fast path: one indexed jump through a table of arm
-    /// blocks, payload binds per arm — emit's `emit_switch`. The eligible
-    /// shape (exhaustive, all constructor heads of one enum) proves the
-    /// scrutinee an enum cell; a non-heap word (where the interpreter's
-    /// `SwitchTag` raises an internal error) and an out-of-table tag (its
-    /// debug-only invariant) both take the outlined cold trap, which
-    /// surfaces `NativeStatus::Error` — the interpreter-Halt analogue the
-    /// ladder's no-arm fallthrough also uses.
+    /// blocks. The eligible shape proves the scrutinee an enum cell, so a
+    /// non-heap word or an out-of-table tag takes the outlined cold trap and
+    /// surfaces `NativeStatus::Error`.
     fn match_switch(
         &mut self,
         scrut: LocalId,
@@ -3082,8 +3022,7 @@ impl<'a> BodyGen<'a> {
         self.b.seal_block(dispatch);
         self.b.switch_to_block(dispatch);
         let obj = self.b.ins().band_imm(sw, NATIVE_PTR_MASK as i64);
-        // Enum payload word 0 is `type_id | variant_idx << 32`; the tag is
-        // its high half (`EnumRef::variant_idx`, `as u16` included).
+        // Enum payload word 0 is `type_id | variant_idx << 32`.
         let w0 = self.load_payload_word(obj, 0);
         let hi = self.b.ins().ushr_imm(w0, 32);
         let tag64 = self.b.ins().band_imm(hi, 0xFFFF);
@@ -3122,13 +3061,9 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// Spill the matched cell's payload into the pattern's field binds —
-    /// emit's `UnwrapEnum; StoreLocal fN-1 … f0` (payload fields start at
-    /// payload word 6, `EnumRef::payload`). Each field word is retained at
-    /// its bind's type-directed gate strength (the interpreter's payload
-    /// clone); the bind's slot takes the owned reference through
-    /// [`Self::def_local`], which also derives a raw Int view where one is
-    /// demanded.
+    /// Spill the matched cell's payload into the pattern's field binds.
+    /// Payload fields start at payload word 6. Each word is retained at its
+    /// bind's gate strength and the bind's slot takes the reference.
     fn bind_payload(&mut self, obj: ir::Value, fields: &[CoreBind]) {
         for (i, bind) in fields.iter().enumerate() {
             let f = self.load_payload_word(obj, 6 + i);
@@ -3145,10 +3080,9 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// The `MatchEnum`/`Eq` compare ladder: arms in order, each refutable
-    /// head a branch, a binder or wildcard irrefutable. Arms behind an
-    /// irrefutable one are dead but still walked (in detached blocks) so the
-    /// resume-ip cursor stays aligned with emit, which emits them too.
+    /// The compare ladder: arms in order, each refutable head a branch.
+    /// Arms behind an irrefutable one are dead but still walked, in detached
+    /// blocks, so the resume-ip cursor stays aligned with emit.
     fn match_ladder(&mut self, scrut: LocalId, arms: &[(CorePat, CoreExpr)], dst: Dest) {
         let sw = self.word_of(scrut);
         let mut matched = false;
@@ -3156,9 +3090,8 @@ impl<'a> BodyGen<'a> {
             if matched {
                 let dead = self.b.create_block();
                 self.b.switch_to_block(dead);
-                // A dead arm's binders must still be defined before its body
-                // is walked, or a binder reference in the dead body would
-                // abort compilation.
+                // A dead arm's binders must still be defined, or a binder
+                // reference in the dead body aborts compilation.
                 if let CorePat::Bind(bind) = pat {
                     self.bind_scrutinee(scrut, bind.id);
                 }
@@ -3180,9 +3113,8 @@ impl<'a> BodyGen<'a> {
                     let flag = if boolean.is_some() {
                         self.b.ins().icmp_imm(IntCC::Equal, sw, bits as i64)
                     } else if let Some(k) = int {
-                        // Numeric equality over the decoded value, so a
-                        // spilled BigInt scrutinee still matches its literal
-                        // (`values_equal` parity).
+                        // Compare decoded values, so a spilled BigInt
+                        // scrutinee still matches its literal.
                         let si = self.int_of(scrut);
                         self.b.ins().icmp_imm(IntCC::Equal, si, k)
                     } else {
@@ -3208,11 +3140,9 @@ impl<'a> BodyGen<'a> {
                 }
                 CorePat::Ctor { variant, fields } => {
                     if let Some(polarity) = self.plan.bools.polarity(variant) {
-                        // A Bool head: the scrutinee word is one of the two
-                        // Bool immediates, so the arm test is a bit compare
-                        // against the head's encoding (`PushTrue`/
-                        // `PushFalse; Eq` parity), no heap involvement and
-                        // no payload binds (the heads are nullary).
+                        // The scrutinee is one of the two Bool immediates, so
+                        // the test is a bit compare. Bool heads are nullary,
+                        // so there are no payload binds.
                         let bits = if polarity {
                             self.facts.bool_true
                         } else {
@@ -3228,13 +3158,11 @@ impl<'a> BodyGen<'a> {
                         self.expr(body, dst);
                         self.b.switch_to_block(next_b);
                     } else {
-                        // An enum head — `MatchEnum` parity in one packed
-                        // compare: within a type, variant index and variant
-                        // name are interchangeable identities, so enum
-                        // payload word 0 (`type_id | variant_idx << 32`,
-                        // written by every enum constructor) decides the arm
-                        // without touching the name words. The heap gate
-                        // mirrors `as_enum`'s `None` ⇒ no match.
+                        // One packed compare against payload word 0
+                        // (`type_id | variant_idx << 32`), which every enum
+                        // constructor writes, so the name words are never
+                        // touched. The heap gate mirrors `as_enum`'s
+                        // `None` meaning no match.
                         let arm_b = self.b.create_block();
                         let next_b = self.b.create_block();
                         let tag_b = self.b.create_block();
@@ -3263,9 +3191,8 @@ impl<'a> BodyGen<'a> {
             }
         }
         if !matched {
-            // Ladder fell through: an exhaustiveness bug, where the
-            // interpreter halts (`Op::Halt`). Surface it as an error status;
-            // the VM reports "Error with no pending error" instead of
+            // Fell through: an exhaustiveness bug, where the interpreter
+            // halts. Surface an error status so the VM reports it instead of
             // executing garbage.
             let err = self
                 .b
@@ -3276,9 +3203,7 @@ impl<'a> BodyGen<'a> {
     }
 }
 
-/// The resume-ip cursor and the Core walk disagreed about how many non-tail
-/// calls the body contains — the two backends walked the same IR
-/// differently, a backend bug.
+/// The two backends walked the same IR differently. A backend bug.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -3289,9 +3214,7 @@ fn resume_walk_mismatch() -> ! {
     )
 }
 
-/// The ctor-site cursor and the Core walk disagreed about how many non-Bool
-/// constructor atoms the body contains — a backend bug, same family as
-/// [`resume_walk_mismatch`].
+/// [`resume_walk_mismatch`] for constructor sites.
 #[allow(clippy::panic)]
 #[cold]
 #[inline(never)]
@@ -3302,23 +3225,19 @@ fn ctor_walk_mismatch() -> ! {
     )
 }
 
-/// A run of peeled `Drop`s: each local paired with its reuse eligibility
-/// (`shape.is_some()`) for [`BodyGen::drop_local`].
+/// Peeled `Drop`s, each local paired with its reuse eligibility.
 type DropRun = Vec<(LocalId, bool)>;
 
-/// For `let r = call f(args); drop a; drop b; …body` where `a`,`b` ∈ `args`
-/// (or `= callee` for a dynamic call): emit's `peel_call_arg_drops`,
-/// mirrored so both backends transfer ownership into the callee at the same
-/// sites. The peeled drops run between the operand copies and the call
-/// ([`BodyGen::call_value`]); a drop whose local some `Ctor{reuse}` in this
-/// body claims is *not* peeled — the cell is this frame's reuse token — and
-/// each carries its reuse eligibility for [`BodyGen::drop_local`].
+/// Emit's `peel_call_arg_drops`, mirrored so both backends transfer ownership
+/// into the callee at the same sites. For
+/// `let r = call f(args); drop a; …body` with `a` in `args`, the drops move
+/// to between the operand copies and the call.
 ///
-/// A drop whose local a directly-following `tail self(..)` passes again is
-/// also *not* peeled (emit's rule): `perceus::release_self_tail_args` parked
-/// it for the back-edge, and it must stay for [`split_self_tail`] to run
-/// after the tail's operand copies. Peeling it would release the slot's
-/// reference before the back-edge re-reads the local.
+/// Two exceptions, both emit's. A drop whose local some `Ctor{reuse}` claims
+/// is not peeled: the cell is this frame's reuse token. A drop whose local a
+/// directly-following `tail self(..)` passes again is not peeled either;
+/// peeling would release the slot's reference before the back-edge re-reads
+/// the local.
 fn peel_call_arg_drops<'a>(
     body: &'a CoreExpr,
     args: &[LocalId],
@@ -3361,13 +3280,10 @@ fn peel_call_arg_drops<'a>(
     (moved, body)
 }
 
-/// `drop a; drop b; …; tail self(args)` — emit's `split_self_tail_drops`
-/// shape: partition the run into drops to run before the copies (`now`,
-/// locals merely dead at the edge) and drops of the call's own arguments
-/// (`moved`, which must run after the copies are taken). Mirrored here so
-/// a dropped argument's value survives into its copy exactly as the
-/// interpreter's push-then-drop order guarantees. Each drop carries its
-/// reuse eligibility (`shape.is_some()`) for [`BodyGen::drop_local`].
+/// Emit's `split_self_tail_drops`: partition `drop a; …; tail self(args)`
+/// into drops that run before the operand copies and drops of the call's own
+/// arguments, which must run after. That order is what keeps a dropped
+/// argument's value alive into its copy.
 fn split_self_tail(mut e: &CoreExpr) -> Option<(DropRun, DropRun, &[LocalId])> {
     let mut run: DropRun = Vec::new();
     while let CoreExpr::Drop { local, shape, body } = e {
@@ -3419,16 +3335,16 @@ mod tests {
         (pool, int)
     }
 
-    /// The Bool nominal id the test prelude assigns — distinct from the
-    /// `int_pool` primitive ids and from `testkit::variant()`'s `TypeId(0)`.
+    /// Distinct from the `int_pool` prim ids and `testkit::variant()`'s
+    /// `TypeId(0)`.
     const BOOL_TID: TypeId = TypeId(5);
 
     /// The Binary nominal id the test prelude assigns.
     const BIN_TID: TypeId = TypeId(6);
 
-    /// A captured-prelude stand-in: `Bool` is `BOOL_TID` with `True` at
-    /// variant 0 and `False` at variant 1 (the real prelude's order); every
-    /// other binding stays pending, so nothing else falsely matches.
+    /// A captured-prelude stand-in. `True` at variant 0 and `False` at 1 is
+    /// the real prelude's order; every other binding stays pending so nothing
+    /// else falsely matches.
     fn test_prelude() -> PreludeBindings {
         PreludeBindings {
             bool: TypeRef {
@@ -3471,8 +3387,7 @@ mod tests {
         reds: i64,
         budget: i64,
         yields: usize,
-        /// What the mock hands each entry, exactly as `VM::call_native`
-        /// does: `ctx.vm` re-published per invocation, pointing back here.
+        /// Re-published per invocation, as `VM::call_native` does.
         ctx: NativeCtx,
     }
 
@@ -3480,9 +3395,8 @@ mod tests {
         func: usize,
         base: usize,
         ip: i32,
-        /// The frame's closure handle (a sentinel immediate for known
-        /// calls); dropped with the frame, releasing its reference like the
-        /// real `CallFrame`.
+        /// A sentinel immediate for known calls. Dropped with the frame,
+        /// releasing its reference like the real `CallFrame`.
         captures: Value,
     }
 
@@ -3511,8 +3425,7 @@ mod tests {
             }
         }
 
-        /// `drive_top_frame`'s mock: run native entries, consuming
-        /// `TailCall` by re-dispatching the collapsed frame.
+        /// `drive_top_frame`'s mock, consuming `TailCall` by re-dispatching.
         fn drive(&mut self) -> u64 {
             loop {
                 let func = self.frames.last().unwrap().func;
@@ -3524,14 +3437,11 @@ mod tests {
             }
         }
 
-        /// Mirrors `VM::call_native`, including the pinned-register bracket
-        /// that makes it sound: `enable_pinned_reg` drops the pinned
-        /// register (x86_64 r15 / aarch64 x21) from Cranelift's callee-save
-        /// set, so a compiled entry writes it and never restores it — while
-        /// this caller's ABI says it survives. Without the bracket the
-        /// harness measures a VM whose registers the entry silently ate.
-        /// `#[inline(never)]` is kept as a memory barrier only; it is not
-        /// what makes the register safe.
+        /// Mirrors `VM::call_native`, including the pinned-register bracket.
+        /// `enable_pinned_reg` drops that register from Cranelift's
+        /// callee-save set, so a compiled entry clobbers it while this
+        /// caller's ABI says it survives. `#[inline(never)]` is a barrier
+        /// only; it is not what makes the register safe.
         #[inline(never)]
         fn call_entry(vm: &mut TestVm, entry: NativeEntry) -> NativeStatus {
             vm.ctx.vm = (vm as *mut TestVm).cast();
@@ -3549,7 +3459,7 @@ mod tests {
     extern "C" fn t_frame_base(vmx: *mut core::ffi::c_void) -> *mut u64 {
         let vm = vm_of(vmx);
         let base = vm.frames.last().unwrap().base;
-        // SAFETY: `Value` is repr(transparent) over its u64 bits and
+        // SAFETY: `Value` is repr(transparent) over u64 and
         // `base < stack.len()` for a live frame.
         unsafe { vm.stack.as_mut_ptr().add(base).cast::<u64>() }
     }
@@ -3778,9 +3688,7 @@ mod tests {
         if b == 0 { 0 } else { a.wrapping_div(b) }
     }
 
-    /// `al_shim_enum_alloc`'s mock, over the test VM's heap: identical
-    /// construction (`Value::enum_reuse_in`, hash 0) and the same
-    /// transferred-reference release.
+    /// `al_shim_enum_alloc`'s mock, over the test VM's heap.
     unsafe extern "C" fn t_enum_alloc(
         vmx: *mut core::ffi::c_void,
         packed: u64,
@@ -3951,10 +3859,9 @@ mod tests {
         }
     }
 
-    /// Stand-in for the HTTP shims: no clif unit test drives them (they wrap
-    /// `crates/al`'s parser, exercised end-to-end by the goldens and the io
-    /// suite under `AL_NATIVE=native`), but every compiled body declares all
-    /// imports, so finalize needs *an* address per symbol.
+    /// Stand-in for the HTTP shims. No clif unit test drives them, but every
+    /// compiled body declares all imports, so finalize needs an address per
+    /// symbol.
     extern "C" fn t_http_unused() -> u64 {
         panic!("http shim called from a clif unit test")
     }
@@ -3982,9 +3889,8 @@ mod tests {
         jit_with(fns, pool, program)
     }
 
-    /// [`jit`] against a full test `Program` — the enum-ctor tests need
-    /// one, since `compile` reads each site's header constants back from
-    /// the program's emitted bytecode (see [`ctor_program`]).
+    /// [`jit`] against a full test `Program`, which the enum-ctor tests need:
+    /// `compile` reads header constants back from the emitted bytecode.
     fn jit_with(fns: &[CoreFn], pool: &ResolvedPool, program: crate::bytecode::Program) -> Jit {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
@@ -4119,10 +4025,8 @@ mod tests {
         (vm.stack.pop().unwrap(), yields)
     }
 
-    /// An `EmitCtx` that pools constants for real — the compiler's
-    /// `intern_*` behavior over a test-owned frozen area — so the emitted
-    /// bytecode carries genuine ctor header constants for
-    /// [`enum_ctor_sites`] to read back.
+    /// An `EmitCtx` that pools constants for real, so the emitted bytecode
+    /// carries genuine ctor header constants for [`enum_ctor_sites`].
     struct PoolingCtx {
         fb: crate::frozen::FrozenBuilder,
         consts: Vec<Value>,
@@ -4165,9 +4069,8 @@ mod tests {
         }
     }
 
-    /// Emit `fns` for real into a test `Program`: pooled constants, per-fn
-    /// code regions, one frozen area shared with the program (so the label
-    /// tuples `compile` freezes live exactly as long as the baked code).
+    /// Emit `fns` for real into a test `Program`. The frozen area is shared
+    /// with the program, so `compile`'s label tuples outlive the baked code.
     fn ctor_program(fns: &[CoreFn], base_consts: &[Value]) -> crate::bytecode::Program {
         use std::sync::Arc;
         let area = Arc::new(crate::frozen::FrozenArea::new());
@@ -4429,12 +4332,10 @@ mod tests {
         assert_eq!(yields, 0);
     }
 
-    /// A Nil-typed value must keep dynamic RC gates: `Nil()` constructors
-    /// heap-allocate through `MakeEnumPayload` like any nullary ctor, so
-    /// classifying Nil as an immediate elides the dup on a consuming use of
-    /// a slotted Nil local and double-frees (the `socket_address`
-    /// `Err(Nil)` shape). Only `Bool` (whose ctors are `PushTrue`/
-    /// `PushFalse` — no cell) may claim `Repr::Immediate` among nominals.
+    /// A Nil-typed value must keep dynamic RC gates. `Nil()` heap-allocates
+    /// like any nullary ctor, so classifying it immediate elides the dup on a
+    /// consuming use and double-frees. Among nominals only `Bool` may claim
+    /// `Repr::Immediate`.
     #[test]
     fn nil_typed_values_are_not_immediates() {
         let mut pool = ResolvedPool::new(PrimIds {
@@ -4451,9 +4352,8 @@ mod tests {
         assert_eq!(classify(&pool, tys, boolean), Repr::Immediate);
     }
 
-    /// Aggregate literals through the allocator shims: `[c, x]` and
-    /// `(c, x)` built from a constant and a param, contents and refcounts
-    /// checked through the returned value.
+    /// Aggregate literals through the allocator shims, checking contents and
+    /// refcounts through the returned value.
     #[test]
     fn make_array_and_tuple_literals() {
         let (pool, int) = int_pool();
@@ -4489,9 +4389,8 @@ mod tests {
         assert_eq!(t[1].as_int(), Some(9));
     }
 
-    /// The seq/binary whole-op shims: `[2, x]` appended and prepended one
-    /// element each, then measured; a binary's byte size through its shim.
-    /// The seq binds are Array-typed so the gate's proofs hold.
+    /// The seq/binary whole-op shims. The seq binds are Array-typed so the
+    /// gate's proofs hold.
     #[test]
     fn seq_extension_and_length_shims() {
         let (mut pool, int) = int_pool();
@@ -4593,13 +4492,10 @@ mod tests {
         }
     }
 
-    /// A known callee that is itself native compiles to a direct
-    /// `ins().call(peer_funcref, [vmx])`, not the `al_rt_call` trampoline:
-    /// same-module functions are `colocated` in the CLIF ext-func table
-    /// (that flag is `linkage.is_final()`, true only for module-defined
-    /// functions), so the peer's presence there is the direct-call proof.
-    /// Recompiling the same body with the callee outside the native set
-    /// falls back to the trampoline: no colocated ext-func remains.
+    /// A known native callee compiles to a direct call, not the trampoline.
+    /// Same-module functions are `colocated` in the CLIF ext-func table, so a
+    /// colocated entry is the direct-call proof; recompiling with the callee
+    /// outside the native set leaves none.
     #[test]
     fn known_native_callee_is_a_direct_call_not_the_trampoline() {
         let (pool, int) = int_pool();
@@ -4827,9 +4723,8 @@ mod tests {
         assert_eq!(go(false), 1);
     }
 
-    /// A two-variant test enum, `Option`-shaped (variant 0 carries one
-    /// field, variant 1 is nullary) — distinct from the prelude ids and
-    /// `testkit::variant()`'s `TypeId(0)`.
+    /// A two-variant `Option`-shaped test enum, distinct from the prelude
+    /// ids and `testkit::variant()`'s `TypeId(0)`.
     const ENUM_TID: TypeId = TypeId(10);
 
     fn enum_val(heap: &mut ProcHeap, variant_idx: u16, payload: &[Value]) -> Value {
@@ -4877,8 +4772,7 @@ mod tests {
         let et = pool.mk_con(ENUM_TID, StrId(0), &[]);
         let f = unwrap_fn(et, int);
         // The gate recovered the variant count from the exhaustive
-        // all-constructor shape — the layout re-emission and codegen both
-        // take the `SwitchTag` table off this map.
+        // all-constructor shape.
         let p = plan(FuncIdx(0), &f, &pool, &test_prelude()).unwrap();
         assert_eq!(p.switch_counts.get(&ENUM_TID), Some(&2));
 
@@ -4895,18 +4789,16 @@ mod tests {
             run(&j, 0, std::slice::from_ref(&none), 1 << 40).0.as_int(),
             Some(0)
         );
-        // Retains balanced: the runs freed nothing (the frame's release on
-        // return matched the argument clone), and our handles still free
-        // their cells.
+        // Retains balanced: the runs freed nothing, and our handles still
+        // free their cells.
         assert_eq!(take_freed_objects(), 0);
         drop(some);
         drop(none);
         assert!(take_freed_objects() > 0);
     }
 
-    /// The payload bind takes its *own* reference (the interpreter's
-    /// `UnwrapEnum` clone): a returned heap payload must outlive the cell it
-    /// was read from.
+    /// The payload bind takes its own reference: a returned heap payload must
+    /// outlive the cell it was read from.
     #[test]
     fn match_payload_bind_retains_the_field() {
         let (mut pool, int) = int_pool();
@@ -5453,10 +5345,9 @@ mod tests {
         }
     }
 
-    /// The producer side of `Op::Drop`'s reuse semantics: a `shape: Some`
-    /// drop of a uniquely-owned cell hollows it — children released at the
-    /// drop point via the `hollow_for_reuse` shim — and parks the cell in
-    /// its slot, so the paired ctor rewrites it in place without allocating.
+    /// A `shape: Some` drop of a uniquely-owned cell hollows it, releasing
+    /// children at the drop point, and parks it in its slot so the paired
+    /// ctor rewrites it in place.
     #[test]
     fn reusable_drop_hollows_a_unique_cell_and_parks_it_for_the_ctor() {
         let (mut pool, int) = int_pool();
@@ -5466,10 +5357,8 @@ mod tests {
         let mut vm = hand_vm(&j, 1 << 40);
 
         // A mortal heap child proves the hollow released it: the outside
-        // reference goes back to rc == 1 only if the drop ran the walk. The
-        // name/label words are frozen constants — exactly what a ctor-built
-        // cell carries — so the hollow's walk over them is a no-op and only
-        // the payload child is released.
+        // reference returns to rc == 1 only if the walk ran. The name/label
+        // words are frozen, so the walk over them is a no-op.
         let child = Value::int_in(&mut vm.heap, i64::MAX);
         let area = std::sync::Arc::new(crate::frozen::FrozenArea::new());
         let mut fb = area.builder();
@@ -5510,9 +5399,9 @@ mod tests {
         assert_eq!(e.payload()[0].as_int(), Some(41));
     }
 
-    /// A `shape: Some` drop of a *shared* cell must not hollow: the other
-    /// owner still sees the children. It releases exactly the frame's
-    /// reference and clears the slot, so the paired ctor allocates fresh.
+    /// A `shape: Some` drop of a shared cell must not hollow: the other owner
+    /// still sees the children. It releases the frame's reference and clears
+    /// the slot, so the paired ctor allocates fresh.
     #[test]
     fn reusable_drop_of_a_shared_cell_releases_and_clears_the_slot() {
         let (mut pool, int) = int_pool();
@@ -5557,8 +5446,7 @@ mod tests {
         assert_eq!(r.payload()[0].as_int(), Some(41));
     }
 
-    /// Field references transfer like the interpreter's: a slotted field is
-    /// retained for the cell (slot keeps its own), and dropping the cell
+    /// A slotted field is retained for the cell, and dropping the cell
     /// releases exactly the references it took.
     #[test]
     fn enum_ctor_field_references_balance() {

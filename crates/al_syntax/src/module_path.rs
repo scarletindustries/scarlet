@@ -1,53 +1,41 @@
-//! Module *identity*: the canonical path segments a module is known by and
-//! the [`ModuleKey`] every cache and graph must key on. Identity lives in
-//! `al_syntax` because a [`Diagnostic`](crate::diagnostic::Diagnostic)
-//! carries the key of the module it points into; module *resolution* (the
-//! table, caching, import handling) stays in `al_core::module` and builds
-//! on these types.
+//! Module identity: the canonical path segments a module is known by and the
+//! [`ModuleKey`] every cache and graph must key on. It lives here because a
+//! [`Diagnostic`](crate::diagnostic::Diagnostic) carries the key of the
+//! module it points into. Module *resolution* stays in `al_core::module`.
 
 use std::path::{Path, PathBuf};
 
 pub type ModulePath = Vec<String>;
 
-/// A module's canonical cache key. Unique because a resolved on-disk module's
-/// identity is its canonical file path (see [`file_module_path`]).
+/// A module's canonical cache key: for an on-disk module, its canonical file
+/// path (see [`file_module_path`]).
 ///
-/// Keying on the import *as written* was a wrong-answer bug: `./b` from two
-/// different directories both key as `"b"`, so the second import silently
-/// received the first module. That is why this is a type and not a `String`:
-/// a `ModuleKey` can only be minted from a canonical identity — a resolved
-/// on-disk file, a stdlib path (whose written form *is* its identity), the
-/// prelude, or the entry `main` module — so keying `al_core`'s
-/// `ModuleTable` or an id range with an unresolved written path no longer
-/// typechecks.
+/// A type rather than a `String` so it can only be minted from a canonical
+/// identity. Keying on the import as written is a wrong-answer bug: `./b`
+/// from two different directories both key as `"b"`, and the second import
+/// silently receives the first module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModuleKey(String);
 
 impl ModuleKey {
-    /// The one place segments become a key. Public for exactly two callers
-    /// — `al_core`'s module resolver (which mints from canonical segments)
-    /// and its reference interner (whose graph stores only canonical paths,
-    /// so joining them *is* their key form); every other caller must go
-    /// through a canonicalizing constructor below, so a key can never be
-    /// built from a path as the user wrote it.
+    /// The one place segments become a key. Only callers that already hold
+    /// canonical segments may use it; everyone else goes through a
+    /// canonicalizing constructor below.
     pub fn of(path: &ModulePath) -> Self {
         ModuleKey(path.join("/"))
     }
 
     /// Key of the on-disk module at `p` (see [`file_module_path`]).
     ///
-    /// Panics if `p` has no absolute form (empty path / unfetchable cwd);
-    /// callers hand in real on-disk paths, for which that cannot happen.
-    /// Fallible resolution goes through [`resolve`] instead.
-    #[allow(clippy::expect_used)] // asserting the documented precondition above
+    /// Panics if `p` has no absolute form. Use [`resolve`] where that is
+    /// possible.
+    #[allow(clippy::expect_used)]
     pub fn for_file(p: &Path) -> Self {
         Self::of(&file_module_path(p).expect("on-disk module path has an absolute form"))
     }
 
-    /// Key of a stdlib module addressed by its written `al/...` path — the
-    /// one written form that *is* canonical (there is no on-disk identity to
-    /// resolve to; [`resolve_canonical`]'s embedded branch mints from it
-    /// verbatim).
+    /// Key of a stdlib module by its written `al/...` path, the one written
+    /// form that is already canonical.
     pub fn for_stdlib(path: &ModulePath) -> Self {
         debug_assert!(is_stdlib(path), "not a stdlib path: {path:?}");
         Self::of(path)
@@ -63,11 +51,9 @@ impl ModuleKey {
         Self::of(&main_module())
     }
 
-    /// Escape hatch for the LSP string boundary (`module_or_uri` parameters):
-    /// wraps the caller's string verbatim, with no canonicalization. This is
-    /// lookup-not-mint — it exists so an externally supplied string can
-    /// *address* entries keyed by real `ModuleKey`s; never insert into a
-    /// cache under a key built here.
+    /// Escape hatch for the LSP string boundary: wraps the string verbatim,
+    /// no canonicalization. Lookup only — never insert into a cache under a
+    /// key built here.
     pub fn from_lookup_str(s: &str) -> Self {
         ModuleKey(s.to_string())
     }
@@ -83,29 +69,21 @@ impl std::fmt::Display for ModuleKey {
     }
 }
 
-/// The identity of an on-disk module: the segments of its canonicalized path,
-/// `.al` stripped. [`ModuleKey`] joins them back into an absolute path, so the
-/// key is globally unique; the last segment is still the module's name, so
-/// `path.last()` reads `util` and not a temp directory.
+/// The identity of an on-disk module: the segments of its absolute path with
+/// `.al` stripped. `path.last()` is still the module's name.
 ///
-/// The first segment marks it as resolved and keeps it distinct from a
-/// stdlib path (`["al", "io"]`) or a bare name (`["b"]`):
-/// on Unix an absolute path yields an empty first segment
-/// (`"/a/b" -> ["", "a", "b"]`); on Windows it is the drive/UNC prefix
-/// (`"C:\a\b" -> ["C:", "a", "b"]`). The prefix MUST be kept — dropping it
-/// would merge `C:\proj\b.al` with `D:\proj\b.al`, the same
-/// different-files-one-key collision this identity exists to prevent.
+/// The first segment is the root marker (empty on Unix, the drive/UNC prefix
+/// on Windows) and keeps a resolved path distinct from a stdlib path or a
+/// bare name. Do not drop it: without it `C:\proj\b.al` and `D:\proj\b.al`
+/// collide on one key.
 ///
 /// Errs with [`ResolveError::UnresolvablePath`] when `p` has no absolute
-/// form (an empty path, or an unfetchable cwd) — such a file has no
-/// canonical identity, and falling back to the path as given would mint a
-/// relative "identity" that violates the invariant above.
+/// form; falling back to the path as given would mint a relative identity.
 pub fn file_module_path(p: &Path) -> Result<ModulePath, ResolveError> {
-    // Absolute and lexically normalised — deliberately NOT `canonicalize()`,
-    // which resolves symlinks. On macOS a temp dir is `/var/...` but canonical
-    // `/private/var/...`, so canonicalising here made the LSP hand the editor
-    // two different URIs for one project: the entry as opened, its imports as
-    // resolved. Identity must agree with the path the editor is using.
+    // Lexically normalised, deliberately not `canonicalize()`, which resolves
+    // symlinks. On macOS a temp dir is `/var/...` but canonically
+    // `/private/var/...`, which made the LSP hand the editor two different
+    // URIs for one project. Identity must match the path the editor uses.
     let abs =
         std::path::absolute(p).map_err(|_| ResolveError::UnresolvablePath(p.to_path_buf()))?;
     let mut out: Vec<String> = Vec::new();
@@ -132,20 +110,16 @@ pub fn file_module_path(p: &Path) -> Result<ModulePath, ResolveError> {
     Ok(out)
 }
 
-/// `true` for a [`file_module_path`] — the identity of an already-resolved
-/// on-disk module, as opposed to an import path as the user wrote it. The
-/// marker is the first segment: empty (Unix root), ending in `:` (a Windows
-/// drive prefix, `C:` / `\\?\C:`), or starting with `\\` (UNC / device).
-/// A written import's first name segment never matches any (its relative
-/// markers are typed `ast::RelSeg`s and cannot appear here at all).
+/// `true` for a [`file_module_path`] rather than an import path as written.
+/// The marker is the first segment: empty (Unix root), ending in `:` (a
+/// Windows drive prefix), or starting with `\\` (UNC / device).
 pub fn is_resolved_file(path: &ModulePath) -> bool {
     path.first()
         .is_some_and(|s| s.is_empty() || s.ends_with(':') || s.starts_with(r"\\"))
 }
 
-/// `true` for the standard library / prelude / `@vm` intrinsics: any module
-/// whose path is rooted at `al`. Those declarations are immutable from a
-/// user's project and must never be rewritten.
+/// `true` for any module rooted at `al`: stdlib, prelude, `@vm` intrinsics.
+/// Those declarations must never be rewritten from a user's project.
 pub fn is_stdlib(path: &ModulePath) -> bool {
     path.first().map(String::as_str) == Some("al")
 }
@@ -160,26 +134,21 @@ pub fn main_module() -> ModulePath {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// The import resolved to an on-disk location, but no file is there.
-    /// Carries the filesystem path that was probed.
+    /// No file at the resolved location. Carries the path probed.
     FileNotFound(PathBuf),
-    /// The file exists but `std::path::absolute` failed for it (an empty
-    /// path, or an unfetchable cwd), so it has no canonical identity to key
-    /// on. See [`file_module_path`].
+    /// The file exists but has no absolute form, so no canonical identity to
+    /// key on. See [`file_module_path`].
     UnresolvablePath(PathBuf),
-    /// An `al/...` path that names no embedded stdlib module. Carries the
-    /// module path as written (there is no filesystem path to show).
+    /// An `al/...` path naming no embedded stdlib module.
     NoSuchStdlibModule(ModulePath),
     NoBaseDir,
-    /// A bare module name that is neither `al/*` nor `./`/`../`-relative.
-    /// Reserved for a future package manager; distinct from the not-found
-    /// errors so the diagnostic can suggest `use "./name"` instead.
+    /// A bare module name, neither `al/*` nor `./`-relative. Distinct from
+    /// the not-found errors so the diagnostic can suggest `use "./name"`.
     BareName(String),
 }
 
-/// The one user-facing rendering of each resolution failure; every consumer
-/// (compiler diagnostics, `ModuleUriError`) delegates here rather than
-/// wording its own copy.
+/// The one user-facing wording of each resolution failure; every consumer
+/// delegates here.
 impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

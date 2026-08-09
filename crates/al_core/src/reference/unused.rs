@@ -338,8 +338,7 @@ mod tests {
         add_def(&mut em, entry, "go", 1, EntityKind::Function, true);
         g.insert_module(em);
 
-        // A private, unreachable def in another module must NOT surface when
-        // diagnosing the entry module (prelude/@vm/library defs live here).
+        // Prelude/@vm/library defs live here; they must never surface.
         let mut lm = ModuleReferences::new(lib);
         add_def(&mut lm, lib, "secret", 1, EntityKind::Function, false);
         g.insert_module(lm);
@@ -542,12 +541,9 @@ mod tests {
         assert!(g.unused_diagnostics(bare).is_empty());
     }
 
-    /// Mirrors production `Compiler::emit_def`, which records a
-    /// `K::Definition` self-occurrence (`owner == None`,
-    /// `target == the def`) for every top-level fn/const/type. Such
-    /// self-occurrences must NOT be treated as entry-body reachability roots
-    /// (the `entry_toplevel_roots` kind filter) — otherwise every top-level
-    /// definition roots itself and no dead private code is ever reported.
+    /// `Compiler::emit_def` records a `K::Definition` self-occurrence with
+    /// `owner == None` for every top-level declaration. Those must not root
+    /// the entry body, or every definition roots itself.
     #[test]
     fn unused_diag_definition_self_occurrence_does_not_root_dead_code() {
         let (mut g, m, mut mr) = main_graph();
@@ -556,7 +552,6 @@ mod tests {
         let used = add_def(&mut mr, m, "used", 3, EntityKind::Function, false);
         let dead = add_def(&mut mr, m, "dead", 5, EntityKind::Function, false);
 
-        // emit_def's self-occurrence for every top-level def (owner None).
         for d in [api, used, dead] {
             mr.add_reference(None, Reference::new(d.span, K::Definition, d));
         }
@@ -570,10 +565,9 @@ mod tests {
         assert_eq!(d.span, dead.span);
     }
 
-    /// Registers a plain `import a/b` alias named `name` in `mr` at `line`,
-    /// with the production shape: the `Definition` (with `imports_module`
-    /// stored) plus its `Definition` self-occurrence and the `Import`
-    /// occurrence whose target is owned by the *imported* module.
+    /// A plain `import a/b` alias in the production shape: the `Definition`,
+    /// its self-occurrence, and the `Import` occurrence whose target is owned
+    /// by the imported module.
     fn add_plain_import(
         mr: &mut ModuleReferences,
         m: ModuleId,
@@ -604,19 +598,14 @@ mod tests {
         alias
     }
 
-    /// Production shape of `import a/b` + `b.foo()`: the call records a
-    /// `Qualified` occurrence whose target is the *remote* `foo` def (owned by
-    /// `a/b`) plus a `Qualifier` occurrence on the `b` identifier targeting
-    /// *this alias*. The `Qualifier` edge is what keeps the import alive; the
-    /// import must not be reported as unused, and dropping the use must flag
-    /// it again.
+    /// `import a/b` + `b.foo()`: the `Qualifier` occurrence on `b` is what
+    /// keeps the import alive. Dropping the use must flag it again.
     #[test]
     fn unused_diag_plain_qualified_import_recovers_use() {
         let build = |with_use: bool| {
             let (mut g, m, mut mr) = main_graph();
             let lib = g.intern_module(&mp(&["a", "b"]));
 
-            // `a/b` defines pub `foo` (+ its emit_def self-occurrence).
             let foo = def(lib, 1, 3, 6, EntityKind::Function);
             let mut lib_mr = ModuleReferences::new(lib);
             lib_mr.add_definition(Definition::new(
@@ -635,8 +624,6 @@ mod tests {
             let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
             mr.add_reference(None, Reference::new(run.span, K::Definition, run));
             if with_use {
-                // `b.foo()` — the `Qualified` member occurrence targets the
-                // remote `foo`; the `Qualifier` occurrence targets the alias.
                 add_ref(&mut mr, Some(run), (3, 16, 17), K::Qualifier, alias);
                 add_ref(&mut mr, Some(run), (3, 18, 21), K::Qualified, foo);
             }
@@ -650,22 +637,19 @@ mod tests {
             "a plain qualified import whose member is used must not be flagged"
         );
 
-        // Drop the use: the import is genuinely unused again and IS flagged
-        // (the check is still live, not just disabled).
+        // Drop the use: the check is still live, not just disabled.
         let (g, m) = build(false);
         assert_eq!(sole_unused(&g, m).message, "unused import `b`");
     }
 
-    /// Two plain qualified imports where only one is used: the unused one must
-    /// still be flagged. The used import's `Qualifier` occurrence targets that
-    /// alias alone, so it can never mask the genuinely-unused sibling.
+    /// Two plain qualified imports, one used: the used one's `Qualifier`
+    /// occurrence names its own alias, so it cannot mask its sibling.
     #[test]
     fn unused_diag_one_of_two_plain_qualified_imports_still_flagged() {
         let (mut g, m, mut mr) = main_graph();
         let lib_b = g.intern_module(&mp(&["a", "b"]));
         let lib_c = g.intern_module(&mp(&["a", "c"]));
 
-        // `a/c` defines pub `used`; `a/b` defines pub `foo` (never used here).
         let used = def(lib_c, 1, 3, 7, EntityKind::Function);
         let mut c_mr = ModuleReferences::new(lib_c);
         c_mr.add_definition(Definition::new(
@@ -696,7 +680,6 @@ mod tests {
         add_plain_import(&mut mr, m, "b", 1, lib_b);
         let alias_c = add_plain_import(&mut mr, m, "c", 2, lib_c);
         let run = add_def(&mut mr, m, "run", 3, EntityKind::Function, true);
-        // `c.used()` — `Qualifier` on the `c` alias + `Qualified` into `a/c`.
         add_ref(&mut mr, Some(run), (3, 16, 17), K::Qualifier, alias_c);
         add_ref(&mut mr, Some(run), (3, 18, 24), K::Qualified, used);
         g.insert_module(mr);
@@ -709,12 +692,9 @@ mod tests {
         );
     }
 
-    /// Two aliases importing the SAME module (`import a/b` + `import a/b as
-    /// bb`) where only `bb` is used: exactly the untouched `b` is flagged.
-    /// Attribution by *target module* cannot tell the two apart — the
-    /// pre-`Qualifier`-edge heuristic kept any alias alive whenever *some*
-    /// qualified use resolved into its imported module, so `bb.foo()` wrongly
-    /// suppressed `import a/b`'s hint. The direct alias edge does not.
+    /// Two aliases of the SAME module, only `bb` used: exactly `b` is flagged.
+    /// Attribution by target module cannot tell the two apart, so the liveness
+    /// edge has to name the alias.
     #[test]
     fn unused_diag_two_aliases_of_same_module_only_unused_one_flagged() {
         let (mut g, m, mut mr) = main_graph();
@@ -752,11 +732,8 @@ mod tests {
         assert_eq!(d.span, alias_b.span);
     }
 
-    /// An import used only as the qualifier of a constructor *pattern*
-    /// (`case x { b.Ctor(..) -> ... }`): the pattern records a `Qualified`
-    /// member occurrence on the remote constructor plus a `Qualifier`
-    /// occurrence on the alias — exactly like the expression path — so the
-    /// import is not flagged.
+    /// An import used only as a constructor *pattern*'s qualifier records the
+    /// same occurrences as the expression path, so it is not flagged.
     #[test]
     fn unused_diag_alias_used_only_from_pattern_qualifier_is_kept() {
         let (mut g, m, mut mr) = main_graph();

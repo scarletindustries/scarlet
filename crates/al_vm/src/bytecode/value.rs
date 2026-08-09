@@ -50,17 +50,11 @@
 //! invalidated by a later allocation.
 //!
 //! All `unsafe` in the value representation is confined to this file behind
-//! typed accessors. The escape hatches for `heap::proc_heap` are:
-//!
-//! - `for_each_child_slot`: the one layout table for object tracing. Its
-//!   `&mut` face `for_each_child` demands exclusive ownership of the object;
-//!   the shared face [`Value::for_each_child_ref`] does not, and is the only
-//!   one that may walk immortal objects.
-//! - `binary_clone_backing` / `binary_drop_backing`: ownership of a `Binary`
-//!   backing `Arc`.
-//!
-//! The `seq` and `hamt` modules stay fully safe by going through the typed
-//! views and builders defined here.
+//! typed accessors; `seq` and `hamt` go through the views and builders here.
+//! The escape hatches for `heap::proc_heap` are `for_each_child_slot` (the one
+//! layout table for tracing; its `&mut` face demands exclusive ownership, so
+//! only the shared [`Value::for_each_child_ref`] may walk immortal objects)
+//! and `binary_clone_backing`/`binary_drop_backing`.
 
 #![allow(unsafe_code)]
 
@@ -1210,9 +1204,8 @@ impl Value {
     }
 
     /// Construct an enum from prebuilt name/label values: `enum_name` and
-    /// `variant_name` must be `Str`s and `labels` a `Tuple` of `Str`s,
-    /// normally frozen and shared by every instance of the variant.
-    /// Allocation: `7 + payload.len()` words.
+    /// `variant_name` must be `Str`s and `labels` a `Tuple` of `Str`s, normally
+    /// frozen. Allocation: `7 + payload.len()` words.
     ///
     /// `hash` MUST equal
     /// `enum_hash_with_payload(enum_name_prefix_hash(enum_name, variant_name), payload)`.
@@ -1936,19 +1929,15 @@ impl<'a> SeqRef<'a> {
 }
 
 /// The sole layout table for object tracing: yield a raw pointer to every
-/// payload slot of `obj` that holds a `Value`, skipping raw words (lengths,
-/// hashes, Arc parts). Callers reborrow the slot as they are entitled to —
-/// [`for_each_child`] as `&mut`, [`Value::for_each_child_ref`] as `&`.
-///
-/// Generic and `#[inline]` rather than `dyn`: this sits under every
-/// free-at-zero traversal and every Perceus hollow, and an indirect call per
-/// visited word cost ~9% of `bench_typed`.
+/// payload slot of `obj` that holds a `Value`, skipping raw words. Callers
+/// reborrow as they are entitled to — [`for_each_child`] as `&mut`,
+/// [`Value::for_each_child_ref`] as `&`. Generic rather than `dyn` because an
+/// indirect call per visited word cost ~9% of `bench_typed`.
 ///
 /// # Safety
-///
 /// `obj` must point at a live arena object header. The slot pointers live only
-/// for the walk, and a `&mut Value` additionally requires that no other
-/// reference to that slot is live.
+/// for the walk, and a `&mut Value` also requires no other live reference to
+/// that slot.
 #[inline]
 pub(crate) unsafe fn for_each_child_slot<F: FnMut(*mut Value)>(obj: *const u64, f: &mut F) {
     // SAFETY (whole body): every slot index stays within the payload length
@@ -2053,16 +2042,15 @@ pub(crate) unsafe fn binary_drop_backing(obj: *const u64) {
 }
 
 // A mortal object's refcount word sits immediately BEFORE its header, and
-// every `Value` points at the header, so header-relative offsets are identical
-// for counted and immortal objects. The count is the number of live `Value`
-// handles; allocation initializes it to 1. Immortal objects have no such word,
-// and every counting path gates on `is_immortal()` first.
+// every `Value` points at the header, so header-relative offsets are the same
+// for counted and immortal objects. Immortal objects have no such word, and
+// every counting path gates on `is_immortal()` first.
 //
-// Reclamation is complete without a cycle collector only because the heap is
+// There is no cycle collector, which is complete only because the heap is
 // acyclic by construction: immutable values, capture by value with no
 // backpatch, self-reference through the live call frame, mutual recursion
 // through the immortal global table. A construct that could tie a heap cycle
-// would leak here.
+// would leak.
 
 /// Words reserved before a mortal object's header for its refcount.
 pub(crate) const RC_PREFIX_WORDS: usize = 1;
@@ -2228,11 +2216,9 @@ pub(crate) unsafe fn owned_from_bits(bits: u64) -> Value {
 /// Release one reference held as raw value bits, freeing at zero and
 /// transitively releasing everything the object uniquely owns. Iterative, so a
 /// long cons list cannot overflow the native stack. Takes bits, not a `Value`,
-/// so it never builds another droppable value.
-///
-/// The hottest function in the VM, and the overwhelming majority of calls are
-/// immediates or frozen constants — hence the two bit tests and the decrement
-/// inline, with only the free-at-zero traversal behind a `#[cold]` call.
+/// so it never builds another droppable value. The hottest function in the VM,
+/// and nearly every call is an immediate or a frozen constant — hence the
+/// `#[cold]` split.
 #[inline]
 pub(crate) fn release_bits(bits: u64) {
     // Pure bit math, and crucially it never reads the object: a frozen value
@@ -2294,11 +2280,9 @@ pub unsafe extern "C" fn native_hollow_for_reuse(obj: *mut u64) {
 }
 
 /// Release every mortal heap child of `obj`, overwriting each slot with an
-/// immediate sentinel. Shared by [`Value::hollow_for_reuse`] and
-/// [`native_hollow_for_reuse`].
-///
-/// Immediate and frozen children are skipped: they own no reference to give
-/// back, and the paired constructor rewrites every child word anyway.
+/// immediate sentinel. Immediate and frozen children are skipped: they own no
+/// reference to give back, and the paired constructor rewrites every child
+/// word anyway.
 ///
 /// # Safety
 /// `obj` must be a live, uniquely-owned (rc == 1) mortal heap object.
@@ -2314,12 +2298,9 @@ unsafe fn hollow_children(obj: *mut u64) {
 
 /// Free `obj`, whose refcount just hit zero, and everything it transitively
 /// owns. Out of line so [`release_bits`]' fast path can inline without the
-/// thread-local access.
-///
-/// The common cases (no heap children, a list spine, a node whose children
-/// outlive it) drive at most one child to zero, so the loop below just walks
-/// the chain with no work list. Only a second orphaned child falls back to
-/// [`release_pending`].
+/// thread-local access. The common cases orphan at most one child, so the loop
+/// below just walks the chain; only a second orphan falls back to
+/// [`release_pending`] and its work list.
 ///
 /// # Safety
 /// `obj` must be a live mortal heap object at count 0, not yet freed.
@@ -2743,13 +2724,10 @@ pub fn hash_value(v: &Value) -> u64 {
     h
 }
 
-/// Compute and cache an Enum cell's hash in place if still unset.
-///
-/// The publish path calls this on the still-mortal SOURCE cell before its
-/// image is frozen: a frozen cell is shared across threads and must never be
-/// written lazily, so the hash has to ride into the frozen image. Hashing the
-/// source rather than the copy also makes the result independent of graph-copy
-/// order. Non-enum tags and already-hashed cells are no-ops.
+/// Compute and cache an Enum cell's hash if still unset. The publish path
+/// calls this on the still-mortal source cell before freezing its image: a
+/// frozen cell is shared across threads and must never be written lazily.
+/// Non-enum tags and already-hashed cells are no-ops.
 ///
 /// # Safety
 /// `obj` must point at a live heap object the calling thread owns exclusively

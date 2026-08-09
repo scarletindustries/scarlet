@@ -1,9 +1,8 @@
-//! The native-backend seam: `bytecode::compile_with_native` fires its hook
-//! once per lowered function body, at the one point in the pipeline where the
-//! body's post-perceus `CoreFn` and the `ResolvedPool` its `RTy`s index are
-//! both alive, keyed by the same `FuncIdx` numbering as the emitted
-//! `Program.functions` table — and installing a hook must not perturb that
-//! numbering (the invariant `check_parity.rs` pins for check vs build).
+//! `bytecode::compile_with_native` fires its hook once per lowered function
+//! body, at the one point where the body's post-perceus `CoreFn` and the
+//! `ResolvedPool` its `RTy`s index are both alive, keyed by the same
+//! `FuncIdx` numbering as `Program.functions`. Installing a hook must not
+//! perturb that numbering.
 
 mod common;
 
@@ -14,11 +13,9 @@ use al::tivec::Idx;
 use al::types::Prim;
 use common::parse;
 
-/// What the hook recorded for one body: its `FuncIdx`, its arity, and the
-/// prims its param/return `RTy`s resolve to *through the pool it arrived
-/// with*. Resolving them inside the hook is the point of the test: an `RTy`
-/// is an index into a per-body pool, so a hook handed the wrong (or an
-/// already-dropped) pool would panic or misresolve here.
+/// What the hook recorded for one body. The prims are resolved inside the
+/// hook, through the pool it arrived with: an `RTy` indexes a per-body pool,
+/// so a wrong or dropped pool panics or misresolves right there.
 #[derive(Debug, Clone, PartialEq)]
 struct Seen {
     idx: usize,
@@ -28,14 +25,8 @@ struct Seen {
 }
 
 /// Pin `AL_NATIVE=native` before the process-wide config is first read.
-/// These tests assert the hook *fires*; inheriting `off` (which suppresses
-/// the hook) or `mix` (which fires it for a random subset) from the suite's
-/// outer environment would make them fail for reasons that have nothing to
-/// do with the seam under test. `Once` runs the write exactly once, before
-/// any thread can reach a `config()` read through `compile_with_native`.
-///
-/// Every `#[test]` in this binary calls this as its first line (idempotent
-/// via `Once`); new tests must do the same before compiling anything.
+/// Inheriting `off` or `mix` from the outer environment would stop the hook
+/// firing. Every `#[test]` here must call this as its first line.
 fn pin_native_mode() {
     static PIN: std::sync::Once = std::sync::Once::new();
     PIN.call_once(|| {
@@ -65,8 +56,7 @@ fn compile_recording(source: &str) -> (al::bytecode::Program, Vec<Seen>) {
         result.diagnostics
     );
     let program = result.emitted.expect("compile emits").program;
-    // The compiler dropped its `NativeHook` box when the compile finished, so
-    // the recording is exclusively ours again.
+    // The compiler dropped its `NativeHook` box, so the recording is ours.
     let seen = Rc::try_unwrap(seen).expect("hook released").into_inner();
     (program, seen)
 }
@@ -107,9 +97,8 @@ fn hook_fires_per_body_keyed_by_program_func_idx() {
     }
 
     let name_of = |s: &Seen| program.functions[s.idx].name.to_string();
-    // The hook now sees stdlib bodies too (they precede the user program in
-    // the function table, and the stdlib has its own fns named `add`), so
-    // the user's bodies are the *last* bearers of these names.
+    // Stdlib bodies precede the user program and the stdlib has its own
+    // `add`, so the user's bodies are the last bearers of these names.
     let add = seen
         .iter()
         .rfind(|s| name_of(s) == "add")
@@ -119,8 +108,7 @@ fn hook_fires_per_body_keyed_by_program_func_idx() {
         .rfind(|s| name_of(s) == "twice")
         .expect("hook saw `twice`");
 
-    // The RTys resolved through the pool the hook was handed: this is the
-    // type-directed-emit contract A0 builds on (prove Int, emit unboxed).
+    // The RTys resolved through the pool the hook was handed.
     assert_eq!(add.param_prims, vec![Some(Prim::Int), Some(Prim::Int)]);
     assert_eq!(add.ret_prim, Some(Prim::Int));
     assert_eq!(twice.param_prims, vec![Some(Prim::Int)]);
@@ -158,17 +146,14 @@ fn toplevel_glue_is_never_hooked() {
     );
 }
 
-/// The re-lowering contract behind the stdlib unlock: installing a hook makes
-/// `compile_impl` recompile the whole stdlib from source instead of seeding
-/// the precompiled blob — and determinism makes that recompile reproduce the
-/// seeded program *exactly*. Function table (names, arities, captures, code
-/// spans), instruction stream, entry index and constant pool must all agree,
-/// or the native path would be running a different program than `off` does.
+/// Installing a hook makes `compile_impl` recompile the whole stdlib from
+/// source instead of seeding the precompiled blob. That recompile must
+/// reproduce the seeded program exactly, or the native path runs a different
+/// program than `off` does.
 #[test]
 fn relowered_stdlib_reproduces_the_seeded_program() {
     pin_native_mode();
-    // Imports pull real stdlib modules (and their transitive deps) so the
-    // comparison covers module init glue, not just the prelude.
+    // Real imports, so the comparison covers module init glue too.
     let src = r#"
 import al/array
 import al/string
@@ -212,8 +197,8 @@ println(string.length('hello'))
     };
     assert_eq!(code(&relowered), code(&seeded), "bytecode diverges");
 
-    // `Value`'s Debug renders logically (no addresses), so frozen heap
-    // constants built at runtime compare equal to the blob's.
+    // `Value`'s Debug renders logically, with no addresses, so runtime-built
+    // frozen constants compare equal to the blob's.
     let consts = |p: &al::bytecode::Program| -> Vec<String> {
         p.constants.iter().map(|v| format!("{v:?}")).collect()
     };

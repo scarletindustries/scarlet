@@ -448,10 +448,9 @@ pub unsafe extern "C" fn al_shim_http_header_has(headers: u64, name: u64) -> u64
     into_bits(r)
 }
 
-/// `Op::HttpSerializeHead` (`VM::http_serialize_head`) behind the C ABI:
-/// one fresh binary over the serialized head. Proofs: `code` Int (passed
-/// unboxed), `reason` Binary, `headers` Array(Header) — the shape error is
-/// unreachable (debug asserts, release answers nil).
+/// `Op::HttpSerializeHead` behind the C ABI: one fresh binary over the
+/// serialized head. `code` is passed unboxed. The shape error is unreachable
+/// under the proofs; release answers nil.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `reason` and
@@ -476,10 +475,9 @@ pub unsafe extern "C" fn al_shim_http_serialize_head(
     into_bits(r)
 }
 
-/// `Op::HttpFraming` (`VM::http_framing`) behind the C ABI, on a proven
-/// `Array(Header)`-typed word: classify the body framing (`Length(Int)` is
-/// the only fresh allocation). The shape error is unreachable under the
-/// proof (debug asserts, release answers nil).
+/// `Op::HttpFraming` behind the C ABI, on a proven `Array(Header)`-typed word:
+/// classify the body framing. The shape error is unreachable under the proof;
+/// release answers nil.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`; `headers` must
@@ -501,41 +499,34 @@ pub unsafe extern "C" fn al_shim_http_framing(vmx: *mut VM, headers: u64) -> u64
     into_bits(r)
 }
 
-/// Truncating division on unboxed `i64`s with the interpreter's `Op::DivInt`
-/// totality — see [`div_int`]. Pure; safe to call from anywhere.
+/// [`div_int`] on unboxed `i64`s.
 pub extern "C" fn al_shim_div_int(a: i64, b: i64) -> i64 {
     div_int(a, b)
 }
 
-/// Remainder on unboxed `i64`s with the interpreter's `Op::ModInt` totality
-/// — see [`mod_int`]. Pure; safe to call from anywhere.
+/// [`mod_int`] on unboxed `i64`s.
 pub extern "C" fn al_shim_mod_int(a: i64, b: i64) -> i64 {
     mod_int(a, b)
 }
 
-/// `Op::PushGlobal`: the entry frame's slot `slot`, **borrowed**. Top-level
-/// `fn`/`const`/`let` bindings live in the scheduler-shared global area,
-/// written once before any body that reads them runs and never reassigned, so
-/// the returned word stays live for the program — the caller takes its own
-/// reference only where it keeps one (`field_result`'s retain), exactly as the
-/// interpreter's arm clones out of the same borrow. The array is a `Vec` with
-/// no ABI-stable base, hence a shim rather than an inline load.
+/// `Op::PushGlobal`: the entry frame's slot `slot`, borrowed. Globals are
+/// written once before any body reads them and never reassigned, so the word
+/// stays live for the program; the caller retains only where it keeps one. A
+/// shim rather than an inline load because the array is a `Vec` with no
+/// ABI-stable base.
 ///
 /// # Safety
 /// `vmx` must point at the running scheduler's live `VM`, and `slot` must be
-/// in range for its global area — both guaranteed by the emitter, which copies
-/// the operand from the bytecode the checker already validated. The returned
-/// word is borrowed: it carries no reference the caller owns.
+/// in range for its global area; the emitter guarantees both. The returned
+/// word carries no reference the caller owns.
 pub unsafe extern "C" fn al_shim_push_global(vmx: *mut VM, slot: i64) -> u64 {
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     vm.globals[slot as usize].to_bits()
 }
 
-/// Every shim, as `(symbol name, address)` pairs for JIT symbol
-/// registration (`JITBuilder::symbol`). The names here are the contract the
-/// CLIF emitter's `declare`d externals resolve against; keep the two sides
-/// sourced from this one table.
+/// Every shim as `(symbol name, address)` for `JITBuilder::symbol`. These
+/// names are what the CLIF emitter's declared externals resolve against.
 pub fn shim_symbols() -> [(&'static str, *const u8); 23] {
     [
         ("al_shim_push_global", al_shim_push_global as *const u8),
@@ -586,7 +577,6 @@ mod tests {
     const SMALL_MIN: i64 = -(1i64 << 47);
     const SMALL_MAX: i64 = (1i64 << 47) - 1;
 
-    // Decode a result's bits and release the reference the shim returned.
     fn unbox_and_release(bits: u64) -> i64 {
         unsafe { Value::from_bits(bits) }.as_int_typed()
     }
@@ -653,15 +643,14 @@ mod tests {
         let mut vm = halt_test_vm();
         let vmp = &raw mut vm;
 
-        // Small operands whose sum leaves the immediate range: BigInt spill.
+        // A sum that leaves the immediate range spills to BigInt.
         let a = Value::small_int(SMALL_MAX).to_bits();
         let b = Value::small_int(1).to_bits();
         let r = unsafe { al_shim_add_int_val(vmp, a, b) };
         assert!(is_bigint(r));
         assert_eq!(unbox_and_release(r), SMALL_MAX + 1);
 
-        // A boxed operand at i64::MAX: wraps to i64::MIN like the
-        // interpreter's wrapping_add, staying a BigInt.
+        // A boxed operand at i64::MAX wraps to i64::MIN, staying a BigInt.
         let a = into_bits(Value::int_in(&mut vm.heap, i64::MAX));
         let b = Value::small_int(1).to_bits();
         let r = unsafe { al_shim_add_int_val(vmp, a, b) };
@@ -701,8 +690,8 @@ mod tests {
         let r = unsafe { al_shim_mod_int_val(vmp, a, b) };
         assert_eq!(r, Value::small_int(0).to_bits());
 
-        // x / 0 == 0 and x % 0 == x, even for a boxed x — the mod result is
-        // a fresh box, exactly like the interpreter's pop-then-push_int.
+        // x / 0 == 0 and x % 0 == x even for a boxed x; the mod result is a
+        // fresh box.
         let a = into_bits(Value::int_in(&mut vm.heap, i64::MAX));
         let b = Value::small_int(0).to_bits();
         let r = unsafe { al_shim_div_int_val(vmp, a, b) };
@@ -726,7 +715,6 @@ mod tests {
         assert!(is_bigint(r));
         assert_eq!(unbox_and_release(r), -SMALL_MIN);
 
-        // i64::MIN negates to itself (wrapping), like the interpreter.
         let a = into_bits(Value::int_in(&mut vm.heap, i64::MIN));
         let r = unsafe { al_shim_neg_int_val(vmp, a) };
         assert_eq!(unbox_and_release(r), i64::MIN);
@@ -742,7 +730,7 @@ mod tests {
         let mut vm = halt_test_vm();
         let vmp = &raw mut vm;
 
-        // Frozen name/label constants, exactly what the emitter bakes.
+        // Frozen name/label constants, what the emitter bakes.
         let area = Arc::new(FrozenArea::new());
         let mut fb = area.builder();
         let en = fb.str("Shape").into_value();
@@ -755,8 +743,7 @@ mod tests {
 
         let packed: u64 = 42u64 | (1u64 << 32);
         let a = Value::small_int(7).to_bits();
-        // A boxed field proves the reference transfer: the cell must take
-        // its own count and the shim must release the transferred one.
+        // A boxed field proves the reference transfer.
         let b = into_bits(Value::int_in(&mut vm.heap, i64::MAX));
         let payload = [a, b];
 
@@ -772,8 +759,7 @@ mod tests {
                 2,
             )
         };
-        // Building the cell frees nothing: the transferred field references
-        // moved into it.
+        // Nothing freed: the transferred field references moved into the cell.
         assert_eq!(take_freed_objects(), 0);
 
         let v = unsafe { Value::from_bits(bits) };
@@ -786,10 +772,9 @@ mod tests {
         assert_eq!(e.payload()[0].as_int(), Some(7));
         assert_eq!(e.payload()[1].as_int(), Some(i64::MAX));
 
-        // Lazy hash: the word is written 0 and computed on first use.
+        // The hash word is written 0 and computed on first use.
         assert_ne!(v.as_enum().unwrap().hash(), 0);
 
-        // Dropping the one reference frees the cell and its boxed field.
         drop(v);
         assert_eq!(take_freed_objects(), 2);
     }

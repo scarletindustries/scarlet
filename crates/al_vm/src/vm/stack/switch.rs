@@ -266,8 +266,8 @@ unsafe extern "C" fn resume_context_raw(
     resume: *const SavedContext,
     sched_slot: *mut *mut u8,
 ) {
-    // rdi = save, rsi = resume, rdx = sched_slot. Identical to swap_context
-    // but for `mov [rdx], rsp`: the saved sp IS the switch point.
+    // rdi = save, rsi = resume, rdx = sched_slot. Identical to swap_context but
+    // for `mov [rdx], rsp`: the saved sp IS the switch point.
     naked_asm!(
         "push rbp",
         "push rbx",
@@ -368,12 +368,10 @@ pub unsafe extern "C" fn call_on_c_stack_raw(c_sp: *mut u8, f: Entry, arg: *mut 
     )
 }
 
-/// Symmetric context switch — the park and the resume are the same
-/// operation. Saves the callee-saved registers and the return address on the
-/// *current* stack, records the resulting sp in `save`, then installs the sp
-/// from `resume` and returns into whatever [`swap_context`] (or
-/// [`prepare_stack`] seed) produced it. The call "returns" when some later
-/// swap resumes `save`.
+/// Symmetric context switch: park and resume are the same operation. Saves the
+/// callee-saved registers and return address on the CURRENT stack, records the
+/// resulting sp in `save`, then installs the sp from `resume`. The call
+/// "returns" when some later swap resumes `save`.
 ///
 /// # Safety
 /// `resume` must hold a context produced by a prior `swap_context` save or
@@ -411,7 +409,7 @@ pub unsafe extern "C" fn swap_context(save: *mut SavedContext, resume: *const Sa
 #[unsafe(naked)]
 pub unsafe extern "C" fn swap_context(save: *mut SavedContext, resume: *const SavedContext) {
     // x0 = save, x1 = resume. Frame layout (160 bytes): [+0] x29, [+8] x30,
-    // [+16..] x19-x28, [+96..] d8-d15. `ret` continues at the restored x30.
+    // [+16..] x19-x28, [+96..] d8-d15.
     naked_asm!(
         "stp x29, x30, [sp, #-160]!",
         "stp x19, x20, [sp, #16]",
@@ -441,17 +439,14 @@ pub unsafe extern "C" fn swap_context(save: *mut SavedContext, resume: *const Sa
     )
 }
 
-/// The landing pad a fresh context's first [`swap_context`] returns into:
-/// moves the seeded entry/arg out of callee-saved registers and calls the
-/// entry. A prepared entry must never return — it parks with
-/// [`swap_context`] and is resumed by construction; if it does return there
-/// is no frame below it to return to, so trap immediately rather than
-/// walk off the stack.
+/// The landing pad a fresh context's first [`swap_context`] returns into.
+/// A prepared entry must never return: there is no frame below it, so the
+/// trailing trap is deliberate.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn context_bootstrap() {
     // Seeded by prepare_stack: r14 = entry, r13 = arg. On landing rsp ≡ 8
-    // (mod 16) — a normal entry — so one push realigns for the call.
+    // (mod 16), so one push realigns for the call.
     naked_asm!("mov rdi, r13", "sub rsp, 8", "call r14", "ud2")
 }
 
@@ -511,10 +506,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // §5.4/4 — the callee observes the ABI's entry alignment on the
-    // switched stack: rsp ≡ 8 (mod 16) on x86_64 (return address pushed),
-    // sp ≡ 0 (mod 16) on aarch64. A naked probe returns the raw sp before
-    // any prologue can hide it.
+    // A naked probe returns the raw sp before any prologue can hide it.
     #[cfg(target_arch = "x86_64")]
     #[unsafe(naked)]
     unsafe extern "C" fn sp_probe(_arg: *mut c_void) -> u64 {
@@ -541,9 +533,6 @@ mod tests {
         pool.release(h);
     }
 
-    // §5.4/1 — run on a switched stack, write a sentinel through the arg,
-    // return a value; sp is implicitly proven restored by returning here,
-    // and the callee-saved contract is proven by the sentinel test below.
     unsafe extern "C" fn write_and_return(arg: *mut c_void) -> u64 {
         unsafe { *arg.cast::<u64>() = 0xC0FFEE };
         0xF00D
@@ -567,10 +556,8 @@ mod tests {
         pool.release(h);
     }
 
-    // §5.4/1's register half — every callee-saved register round-trips a
-    // known value across the whole switch cycle. The checker is itself
-    // naked: it plants sentinels, calls `f` (which does a full
-    // run_on_stack), and returns a bitmask of corrupted registers.
+    // Plants sentinels in every callee-saved register, calls `f` (a full
+    // run_on_stack), and returns a bitmask of the corrupted ones.
     #[cfg(target_arch = "x86_64")]
     #[unsafe(naked)]
     unsafe extern "C" fn callee_saved_survive(f: unsafe extern "C" fn() -> u64) -> u64 {
@@ -622,8 +609,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[unsafe(naked)]
     unsafe extern "C" fn callee_saved_survive(f: unsafe extern "C" fn() -> u64) -> u64 {
-        // Sentinel x19-x28 and d8/d15 (the ends of the fp range), call f,
-        // OR a bit per corrupted register into x0.
+        // Sentinels x19-x28 and d8/d15, the ends of the fp range.
         naked_asm!(
             "stp x29, x30, [sp, #-96]!",
             "stp x19, x20, [sp, #16]",
@@ -714,8 +700,7 @@ mod tests {
         assert_eq!(corrupted, 0, "bitmask of corrupted callee-saved registers");
     }
 
-    // §5.4/2 — park on a process stack and resume it: locals on the parked
-    // stack survive byte-for-byte across the suspension.
+    // Locals on a parked stack must survive byte-for-byte across suspension.
     struct ParkState {
         main: SavedContext,
         proc: SavedContext,
@@ -724,13 +709,11 @@ mod tests {
 
     unsafe extern "C" fn parking_entry(arg: *mut c_void) -> u64 {
         let st = unsafe { &mut *arg.cast::<ParkState>() };
-        // Locals that must survive the park, byte-for-byte.
         let a: u64 = 0xAAAA_BBBB_CCCC_DDDD;
         let b: [u8; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
         st.log.push(1);
-        // Park: switch back to the scheduler context.
         unsafe { swap_context(&raw mut st.proc, &raw const st.main) };
-        // Resumed. The parked frame's locals are intact.
+        // Resumed. The parked frame's locals must be intact.
         assert_eq!(a, 0xAAAA_BBBB_CCCC_DDDD);
         assert_eq!(b, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
         st.log.push(2);
@@ -750,19 +733,16 @@ mod tests {
         };
         let seeded = unsafe { prepare_stack(h.top(), parking_entry, (&raw mut st).cast()) };
         st.proc = seeded;
-        // First swap starts the entry; it parks and control returns here.
+        // The first swap starts the entry; it parks and control returns here.
         unsafe { swap_context(&raw mut st.main, &raw const st.proc) };
         assert_eq!(st.log, vec![1]);
-        // Resume; it checks its locals, logs, parks again.
         unsafe { swap_context(&raw mut st.main, &raw const st.proc) };
         assert_eq!(st.log, vec![1, 2]);
         pool.release(h);
     }
 
-    // §5.4/3 — the F1 regression shape: park on thread A, move the whole
-    // parked continuation to thread B, resume there. The resumed code must
-    // see thread B's thread-local state, never a value captured on A —
-    // scheduler-derived state is re-derived after every suspension point.
+    // Park on thread A, move the parked continuation to thread B, resume
+    // there. The resumed code must see B's thread-local state, never A's.
     thread_local! {
         static THREAD_TAG: AtomicU64 = const { AtomicU64::new(0) };
     }
@@ -781,16 +761,13 @@ mod tests {
         sched: SavedContext,
         proc: SavedContext,
         seen_tag: AtomicU64,
-        /// Address of a local inside a shim invoked via
-        /// `call_on_sched_stack` AFTER the cross-thread resume. It must land
-        /// on the resuming thread's C stack; if the resume did not republish
-        /// the switch point it lands on the parking thread's, which is the
-        /// bug.
+        /// Address of a local inside a shim invoked after the cross-thread
+        /// resume. It must land on the resuming thread's C stack.
         shim_local: AtomicU64,
     }
 
-    /// Runs on the C stack via `call_on_sched_stack`; reports the address of
-    /// one of its own locals so the caller can tell whose C stack it got.
+    /// Reports the address of one of its own locals, so the caller can tell
+    /// whose C stack it ran on.
     unsafe extern "C" fn where_am_i(arg: *mut c_void) -> u64 {
         let probe = 0u64;
         let st = unsafe { &*arg.cast::<CrossState>() };
@@ -801,18 +778,16 @@ mod tests {
 
     unsafe extern "C" fn cross_entry(arg: *mut c_void) -> u64 {
         let st = unsafe { &*arg.cast::<CrossState>() };
-        // Read this thread's tag, park, read again after resume.
         let before = read_thread_tag();
         assert_eq!(before, 0xA);
         let stp = arg.cast::<CrossState>();
         unsafe { swap_context(&raw mut (*stp).proc, &raw const st.sched) };
-        // Resumed — on thread B. Re-derivation must observe B, not A.
+        // Resumed on thread B; re-derivation must observe B, not A.
         let after = read_thread_tag();
         st.seen_tag.store(after, Ordering::Relaxed);
-        // The load-bearing half: a shim call from the resumed process stack.
-        // This is what a compiled body does first, and it reads SCHED_SP. If
-        // the resume did not republish it, this switches to thread A's stale
-        // switch point and scribbles over thread B's live frames.
+        // A shim call from the resumed process stack, which is what a compiled
+        // body does first. It reads SCHED_SP: if the resume did not republish
+        // it, this scribbles over thread B's live frames.
         unsafe { call_on_sched_stack(where_am_i, arg) };
         unsafe { swap_context(&raw mut (*stp).proc, &raw const st.sched) };
         unreachable!("parked context resumed after the test ended");
@@ -834,18 +809,17 @@ mod tests {
         THREAD_TAG.with(|t| t.store(0xA, Ordering::Relaxed));
         unsafe { resume_on_stack(&raw mut st.sched, &raw const st.proc) };
 
-        // Hand the parked continuation (stack + context) to thread B and
-        // resume it there — the same plain move a migrating Process makes.
-        // Addresses cross as integers so no `&mut` aliases the state the
-        // parked context itself writes through.
+        // Hand the parked continuation to thread B and resume it there, the
+        // same plain move a migrating Process makes. Addresses cross as
+        // integers so no `&mut` aliases what the parked context writes through.
         let sched_addr = (&raw mut st.sched) as usize;
         let proc_addr = (&raw const st.proc) as usize;
         let b_frame = std::sync::atomic::AtomicU64::new(0);
         std::thread::scope(|s| {
             s.spawn(|| {
                 THREAD_TAG.with(|t| t.store(0xB, Ordering::Relaxed));
-                // A local in THIS thread's frame: the yardstick for "B's C
-                // stack". The resumed shim must land near it, not near A's.
+                // The yardstick for "B's C stack": the resumed shim must land
+                // near this, not near A's frames.
                 let here = 0u64;
                 b_frame.store((&raw const here) as u64, Ordering::Relaxed);
                 unsafe {
@@ -862,9 +836,7 @@ mod tests {
             "resumed code must observe the resuming thread's state"
         );
         // Thread stacks are megabytes apart; same-stack frames are within a
-        // few KB. Before resume_on_stack published the switch point, the shim
-        // ran on thread A's stack and this distance was enormous — or the
-        // TLS was null and release built `mov rsp, 0`.
+        // few KB.
         let shim = st.shim_local.load(Ordering::Relaxed);
         let b = b_frame.load(Ordering::Relaxed);
         assert!(shim != 0, "the shim never ran");
@@ -876,8 +848,8 @@ mod tests {
         pool.release(h);
     }
 
-    // The C4 bracket: a shim call from a process stack runs on the C stack
-    // (above the switch point) and returns to the process stack.
+    // A shim call from a process stack must run on the C stack, above the
+    // switch point, and return to the process stack.
     static C_STACK_SP: AtomicU64 = AtomicU64::new(0);
     static PROC_STACK_SP: AtomicU64 = AtomicU64::new(0);
 

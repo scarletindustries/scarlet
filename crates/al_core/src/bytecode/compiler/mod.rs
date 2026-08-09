@@ -222,11 +222,10 @@ pub(super) struct Scope {
 pub(super) struct LocalSlot {
     pub(super) slot: i32,
     pub(super) depth: u32,
-    /// Recorded by [`Compiler::binds_a_global`] at bind time: this name lives
-    /// in the entry frame, so a nested body loads it with `PushGlobal <slot>`
-    /// rather than capturing it. `resolve_variable` reads this field instead of
-    /// re-deriving the predicate from `depth`, so the binder and the loader
-    /// cannot disagree about which names are globals.
+    /// This name lives in the entry frame, so a nested body loads it with
+    /// `PushGlobal <slot>` instead of capturing it. Decided once at bind time
+    /// by [`Compiler::binds_a_global`]; `resolve_variable` must read this
+    /// rather than re-derive it from `depth`.
     pub(super) is_global: bool,
 }
 
@@ -405,9 +404,9 @@ pub struct Compiler {
     // --- Type inference state ---
     pub(super) engine: InferEngine,
     pub(super) env: TypeEnv,
-    /// Generic var ids that are rigid for the body currently being checked
-    /// (the type parameters from a `fn`'s annotation). `instantiate` callers
-    /// pass this so those ids are not freshened inside the body.
+    /// Generic var ids rigid for the body being checked (a `fn` annotation's
+    /// type parameters). `instantiate` callers pass it so those ids are not
+    /// freshened inside the body.
     pub(super) rigid_ids: HashSet<i32>,
     pub(super) recorded: Vec<RawRef>,
     /// Transient reference-graph collector for the module *currently* being
@@ -866,21 +865,18 @@ struct ResolvedCallee<'a> {
     scheme: Scheme,
     /// Whether the callee has a runtime binding (see `Compiler::has_binding`).
     has_binding: bool,
-    /// The module the member resolved through, when the callee was a
-    /// qualified `module.member`. Diagnostics render it via
-    /// `Compiler::module_name` — the user-visible name, never the canonical
-    /// key (see the naming-convention note on `module_name`).
+    /// The module a qualified callee resolved through. Diagnostics render it
+    /// with `Compiler::module_name` — the user-visible name, never the key.
     qualifier: Option<ModuleKey>,
 }
 
 struct CompiledBody {
     iface: ModuleInterface,
     watermark: Watermark,
-    /// Reference-graph data collected while this module's body was analysed;
-    /// moved into the module's `CachedModule` by `load_module`. The module's
-    /// stable 256-aligned type-id range is allocated *and* its usage recorded
-    /// inside `compile_module_body` itself (via `id_base_for`/`note_id_usage`),
-    /// so the range start is deliberately not threaded back out here.
+    /// Reference-graph data for this module's body, moved into its
+    /// `CachedModule` by `load_module`. The module's type-id range is both
+    /// reserved and recorded inside `compile_module_body`, so its start is
+    /// deliberately not threaded back out here.
     refs: ModuleReferences,
 }
 
@@ -1331,8 +1327,7 @@ impl Compiler {
         // place (a colliding user type gets its own id and its own entry).
         for (name, idx) in s.typeinfo_by_name {
             let ti = s.typeinfos[idx.0 as usize];
-            // `store_type_info` keeps both registries in lockstep; the env is
-            // fresh here, so no overwrite occurs and nothing is journaled.
+            // The env is fresh here, so nothing is overwritten or journaled.
             self.env.store_type_info(name, ti);
         }
 
@@ -2340,10 +2335,10 @@ impl Compiler {
             let is_private = iface.private_names.contains(&item.name.name);
             if let Some(ev) = val.clone() {
                 let vdef = ev.scheme.def;
-                // The `X` token of `{X}` / `{X as Y}` always names the imported
-                // symbol, so it targets X's canonical def — goto-def on it chains
-                // to the real declaration, and renaming X rewrites it. It is a
-                // binding token, not an evaluating use, hence `ImportItem`.
+                // The `X` of `{X}` / `{X as Y}` always names the imported
+                // symbol, so it targets X's canonical def: goto-def chains to
+                // the real declaration and renaming X rewrites it. A binding
+                // token, not an evaluating use, hence `ImportItem`.
                 if let Some(dl) = vdef {
                     item_refs.push((item.name.span, ReferenceKind::ImportItem, dl));
                 }
@@ -3492,9 +3487,8 @@ impl Compiler {
             ast::Expression::Identifier(id) => {
                 let scheme = *self.env.lookup(&id.name)?;
                 let has_binding = self.has_binding(&id.name, &scheme.kind);
-                // Unqualified callee `name()` — the genuine unqualified-use
-                // seam for calls (this path bypasses `compile_identifier`).
-                // `record` in `compile_call` is hover-only.
+                // This path bypasses `compile_identifier`, so it is the genuine
+                // unqualified-use seam for calls.
                 self.record_value_use(scheme.def, id.span, ReferenceKind::Unqualified);
                 Some(ResolvedCallee {
                     name: &id.name,

@@ -1,33 +1,22 @@
 //! Freezing value graphs into the program-wide frozen area.
 //!
-//! Publishing a global deep-copies the binding's whole value graph into the
-//! [`FrozenArea`](crate::frozen::FrozenArea) through [`freeze_global`], which
-//! is [`ProcHeap::publish_frozen`] — `crate::heap`'s `rc_publish_graph` with
-//! the frozen builder as the destination. Frozen objects are verbatim images of
-//! arena objects (same header, same payload layout — but carrying no refcount
-//! prefix and marked immortal), so the published root word *is* a `Value`:
-//! every scheduler's globals table holds these words and `Op::PushGlobal`
-//! pushes one with zero copying.
+//! Publishing a global deep-copies the binding's value graph into the
+//! [`FrozenArea`](crate::frozen::FrozenArea). Frozen objects are verbatim
+//! images of arena objects, minus the refcount prefix and marked immortal, so
+//! the published root word *is* a `Value` and `Op::PushGlobal` pushes it with
+//! zero copying.
 //!
-//! Sharing is preserved by a `src → frozen` address map: a subtree referenced
-//! twice is frozen once and both referrers point at the same frozen words. A
-//! pointer already immortal (a constant-pool name, an already-published global
-//! referenced by a newer one) is shared as-is — the frozen area never copies
-//! out of itself. The source graph is untouched (it is only read, not moved),
-//! so the publishing process keeps running on its own values.
+//! Sharing is preserved by a `src -> frozen` address map, and an
+//! already-immortal pointer is shared as-is: the area never copies out of
+//! itself. Freezing a binary copies only its arena box and bumps the backing
+//! `Arc`, a strong count the frozen box then holds for the rest of the
+//! program because the area never runs destructors.
 //!
-//! Binary backings stay off-heap and zero-copy: freezing a binary copies
-//! only its arena box and bumps the backing `Arc` — a strong count the
-//! frozen box holds for the rest of the program, because the frozen area is
-//! never collected and never runs destructors — the price of an area
-//! whose pointers must stay valid for the whole program.
-//!
-//! Threading: publication runs on the thread that owns the source values; the
-//! destination is the append-only frozen area and the source is only read (not
-//! moved), so source pointers stay valid throughout the copy.
+//! Publication runs on the thread owning the source values, and the source is
+//! only read, never moved, so its pointers stay valid throughout the copy.
 
-// Designated unsafe module: the `Send`/`Sync` impls for `FrozenValue` rest on
-// the frozen-area publication protocol documented on the type.
+// The `Send`/`Sync` impls for `FrozenValue` rest on the publication protocol
+// documented on the type.
 #![allow(unsafe_code)]
 
 use crate::bytecode::Value;
@@ -37,49 +26,38 @@ use crate::heap::ProcHeap;
 /// A published global: the root of a fully-written frozen value graph (or
 /// an immediate), as a raw NaN-box word.
 ///
-/// Publication order makes the word safe to share: `publish_global` is
-/// handed the word only after [`freeze_global`] fully wrote the frozen
-/// segment contents, the table store happens-before the `globals_version`
-/// release-bump, and readers acquire-load the version before touching the
-/// table. After publication the words are never written again, and the
-/// [`FrozenArea`](crate::frozen::FrozenArea) it points into is `Arc`-held
-/// by the runtime's program (`Program::frozen`) for at least as long as
-/// the table holding it, so the pointer cannot dangle while the value is
-/// reachable.
+/// Publication order makes the word safe to share: it reaches
+/// `publish_global` only after [`freeze_global`] wrote the segment, the table
+/// store happens-before the `globals_version` release-bump, and readers
+/// acquire-load that version first. The words are never written again, and
+/// `Program::frozen` keeps the area alive at least as long as the table.
 #[derive(Clone, Copy)]
 pub(super) struct FrozenValue(u64);
 
-// SAFETY: see the type docs — the word either encodes an immediate or
-// points into immutable, fully-published, never-moved frozen segments that
-// outlive every table holding a `FrozenValue`.
+// SAFETY: the word is either an immediate or points into immutable,
+// fully-published frozen segments that outlive every table holding one.
 unsafe impl Send for FrozenValue {}
 unsafe impl Sync for FrozenValue {}
 
 impl FrozenValue {
-    /// Wrap an already-frozen root word. Private: only [`freeze_global`] may
-    /// mint a `FrozenValue`, so the `Send`/`Sync` contract (an immediate, or a
-    /// pointer into fully written frozen segments) holds by construction.
+    /// Wrap an already-frozen root word. Private so only [`freeze_global`]
+    /// can mint one and the `Send`/`Sync` contract holds by construction.
     fn new(v: Value) -> FrozenValue {
         FrozenValue(v.to_bits())
     }
 
-    /// The frozen root as a `Value`: a plain word copy — frozen objects
-    /// share the process-arena object layout, so the word is directly
-    /// loadable on any scheduler with no decode and no allocation.
+    /// The frozen root as a `Value`: a plain word copy, loadable on any
+    /// scheduler with no decode and no allocation.
     pub(super) fn value(self) -> Value {
-        // SAFETY: `self.0` was minted by `freeze_global` from a fully published
-        // frozen graph (see the type docs), so it is a live immediate/immortal
-        // encoding that reference counting never touches.
+        // SAFETY: minted by `freeze_global` from a published frozen graph, so
+        // it is an immediate or immortal encoding that rc never touches.
         unsafe { Value::from_bits(self.0) }
     }
 }
 
-/// Deep-copy `root`'s whole value graph into the frozen area through `builder`,
-/// preserving sharing, and return the frozen root word.
-///
-/// This is [`ProcHeap::publish_frozen`] (`rc_publish_graph`): the source graph
-/// is left exactly as it was, immediates and already-frozen pointers come back
-/// unchanged, and `Arc` backings of binaries are bumped, not copied.
+/// Deep-copy `root`'s value graph into the frozen area, preserving sharing.
+/// The source is left as it was, immediates and already-frozen pointers come
+/// back unchanged, and binary backings are bumped rather than copied.
 pub(super) fn freeze_global(builder: &mut FrozenBuilder, root: &Value) -> FrozenValue {
     FrozenValue::new(ProcHeap::publish_frozen(builder, root).into_value())
 }
@@ -124,15 +102,15 @@ mod tests {
         assert_eq!(elems.len(), 3);
         assert_eq!(elems[0].as_str(), Some("shared"));
         assert_eq!(elems[2].as_int(), Some(7));
-        // Sharing preserved, asserted via words allocated: one 6-byte string
-        // (2 + 1 words) + the 3-tuple (2 + 3 words) — not two strings.
+        // One 6-byte string (2 + 1 words) plus the 3-tuple (2 + 3), not two
+        // strings.
         assert_eq!(b.area().words_used() - before, 3 + 5);
         assert_eq!(
             elems[0].object_addr(),
             elems[1].object_addr(),
             "one frozen copy, two references"
         );
-        // Clone-mode copy: the source graph is restored and still readable.
+        // The source graph is still readable.
         let src = t.as_tuple().expect("source tuple intact");
         assert_eq!(src[0].as_str(), Some("shared"));
         assert_ne!(src[0].object_addr(), elems[0].object_addr());
@@ -156,8 +134,7 @@ mod tests {
 
         let mut b = builder();
         let count_before = Arc::strong_count(&backing);
-        // The source is only read: `bin` (and its box's Arc count) stays
-        // live through the assertion.
+        // The source is only read; `bin` stays live through the assertion.
         let fv = freeze_global(&mut b, &bin);
         let loaded = fv.value();
         let view = loaded.as_binary().expect("frozen binary");
@@ -166,9 +143,7 @@ mod tests {
             view.backing().as_ptr(),
             backing.as_ref().as_ptr()
         ));
-        // The frozen box holds its own strong count for the program
-        // lifetime (the area never runs destructors): exactly one bump,
-        // no byte copy.
+        // One bump, no byte copy; the frozen box holds that count forever.
         assert_eq!(Arc::strong_count(&backing), count_before + 1);
     }
 }

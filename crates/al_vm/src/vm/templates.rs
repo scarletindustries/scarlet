@@ -1,26 +1,26 @@
 //! The VM's resolved view of [`Program::abi`](crate::bytecode::Program::abi):
-//! one clone of each bound [`EnumTemplate`], indexed by slot, so construction
-//! is an array read. Reaching an unbound slot means the front end emitted an
-//! op whose outcomes it did not bind — [`VmError::Internal`].
+//! one clone of each bound [`EnumTemplate`], indexed by slot. Reaching an
+//! unbound slot means the front end emitted an op whose outcomes it did not
+//! bind, and gives [`VmError::Internal`].
 
 use std::borrow::Cow;
 
-use crate::abi::AbiSlot;
-use crate::bytecode::{Arena, Program, Value};
+use crate::abi::{AbiSlot, TemplateIdx};
+use crate::bytecode::{Arena, Value};
 use crate::frozen::FrozenBuilder;
-use crate::template::EnumTemplate;
+use crate::template::{AbiTable, EnumTemplate};
+use crate::tivec::TiVec;
 
 use super::{VmError, VmResult};
 
 pub(super) struct Templates {
     slots: [Option<EnumTemplate>; AbiSlot::COUNT],
-    /// The HTTP/1 scanners' working set, resolved whole so `vm::http` stays
-    /// infallible past the op boundary.
+    /// Resolved whole so `vm::http` stays infallible past the op boundary.
     h1: Option<H1>,
 }
 
-/// Everything `vm::http` constructs. Nullary outcomes are the pre-built
-/// frozen values themselves: pushing one is a word copy.
+/// Everything `vm::http` constructs. A nullary outcome is the pre-built frozen
+/// value itself, so pushing one is a word copy.
 pub(super) struct H1 {
     pub(super) some: EnumTemplate,
     pub(super) none: Value,
@@ -28,8 +28,8 @@ pub(super) struct H1 {
     pub(super) version_http10: Value,
     pub(super) version_http11: Value,
     pub(super) head_flags: EnumTemplate,
-    /// The all-false `HeadFlags`, pre-built: most heads carry neither
-    /// `Connection` nor `Expect`, so the common parse copies one word.
+    /// The all-false `HeadFlags`, pre-built so the common parse copies a word
+    /// instead of allocating.
     pub(super) head_flags_none: Value,
     pub(super) parsed_done: EnumTemplate,
     pub(super) parsed_need_more: Value,
@@ -44,12 +44,15 @@ pub(super) struct H1 {
 }
 
 impl Templates {
-    /// Clone the bound templates out of `program`. `fb` prebuilds the one
-    /// composite the scanners want ready-made (`head_flags_none`).
-    pub(super) fn resolve(program: &Program, fb: &mut FrozenBuilder) -> Self {
-        let get = |slot: AbiSlot| -> Option<EnumTemplate> {
-            program.abi.get(slot).map(|i| program.templates[i].clone())
-        };
+    /// Clone the bound templates out of the program's tables. `fb` prebuilds
+    /// `head_flags_none`.
+    pub(super) fn resolve(
+        abi: &AbiTable,
+        templates: &TiVec<TemplateIdx, EnumTemplate>,
+        fb: &mut FrozenBuilder,
+    ) -> Self {
+        let get =
+            |slot: AbiSlot| -> Option<EnumTemplate> { abi.get(slot).map(|i| templates[i].clone()) };
         let nullary = |slot: AbiSlot| -> Option<Value> { get(slot)?.nullary().cloned() };
 
         let h1 = (|| {

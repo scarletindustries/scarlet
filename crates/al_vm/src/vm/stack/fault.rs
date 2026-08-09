@@ -1,18 +1,14 @@
-//! Naming stack overflows: a SIGSEGV handler that recognizes guard-page
-//! hits in the pooled slabs and reports *which AL process* overflowed its
-//! native stack before aborting.
+//! A SIGSEGV handler that recognizes guard-page hits in the pooled stack
+//! slabs and reports which AL process overflowed before aborting.
 //!
-//! Why this exists: std's stack-overflow handler only knows the *current
-//! thread's* guard range, so a fault in a process stack's guard page is
-//! otherwise a bare `SIGSEGV` with no hint that it was a stack overflow at
-//! all, let alone whose. This module owns every slab base and guard address
-//! (registered by [`super::slab`]), so the classification is exact.
+//! std's stack-overflow handler only knows the current thread's guard range,
+//! so a fault in a process stack's guard page would otherwise be a bare
+//! SIGSEGV. This module holds every slab base and guard address, registered
+//! by [`super::slab`], so the classification is exact.
 //!
-//! Async-signal-safety: the handler reads only fixed statics and leaked
-//! arrays (no locks, no allocation), formats integers into a stack buffer,
-//! and uses only `write(2)` and `abort(2)` — both AS-safe. Faults that are
-//! not a guard hit re-raise into whatever handler was installed before ours
-//! (std's, for ordinary thread-stack overflows), preserved at install time.
+//! The handler must stay async-signal-safe: fixed statics and leaked arrays
+//! only, no locks, no allocation, and only `write(2)` and `abort(2)`. A fault
+//! that is not a guard hit re-raises into the handler saved at install time.
 
 #![allow(unsafe_code)]
 
@@ -20,16 +16,14 @@ use std::mem::MaybeUninit;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-/// Registered slab mappings, written once each by [`register_slab`] and
-/// scanned (never modified) by the signal handler. Fixed capacity: at
-/// 16.6 MB of VSZ per slab, 1024 entries is ~17 GB of stack reservations —
-/// far beyond the VMA budget; registration beyond it is refused (those
-/// stacks still work, their overflows just fall through unnamed).
+/// Cap on registered slab mappings. At 16.6 MB of VSZ per slab this is ~17 GB
+/// of reservations, far past the VMA budget. Registrations beyond it are
+/// refused; those stacks still work, their overflows just go unnamed.
 const MAX_SLABS: usize = 1024;
 
 struct SlabEntry {
-    /// Base address of the mapping; 0 = empty. Written LAST with `Release`
-    /// so a handler that sees it nonzero sees the whole entry.
+    /// Base address of the mapping; 0 = empty. Written last with `Release`
+    /// so a handler seeing it nonzero sees the whole entry.
     base: AtomicUsize,
     total: AtomicUsize,
     slot: AtomicUsize,
@@ -58,9 +52,8 @@ static mut OLD_SEGV: MaybeUninit<libc::sigaction> = MaybeUninit::uninit();
 #[cfg(target_os = "macos")]
 static mut OLD_BUS: MaybeUninit<libc::sigaction> = MaybeUninit::uninit();
 
-/// Register one slab with the handler (called by [`super::slab::map_slab`]
-/// under its own serialization; entries are append-only). Installs the
-/// signal handler on first use — before that, no guard page exists to hit.
+/// Register one slab with the handler. Entries are append-only and the
+/// caller serializes. Installs the signal handler on first use.
 pub(super) fn register_slab(base: usize, total: usize, slot: usize, guard: usize) {
     install();
     let idx = SLAB_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -102,10 +95,9 @@ pub(super) fn set_slot_owner(guard_base: usize, pid: u64) {
 
 fn install() {
     INSTALL.call_once(|| {
-        // SAFETY: constructing a sigaction for our extern "C" handler and
-        // saving the previous one; SA_ONSTACK rides the sigaltstack std
-        // installs per thread (mandatory: the faulting stack has no room
-        // below its own guard for a signal frame).
+        // SAFETY: installs our extern "C" handler and saves the previous
+        // one. SA_ONSTACK is mandatory: the faulting stack has no room below
+        // its own guard for a signal frame.
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             let h: extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void) = handler;
@@ -120,8 +112,7 @@ fn install() {
     });
 }
 
-/// Format `n` into `buf`'s tail, returning the written slice. AS-safe by
-/// construction (no allocation, no locks).
+/// Format `n` into `buf`'s tail, returning the written slice.
 fn format_u64(n: u64, buf: &mut [u8; 20]) -> &[u8] {
     let mut i = buf.len();
     let mut n = n;
@@ -157,8 +148,8 @@ extern "C" fn handler(sig: i32, info: *mut libc::siginfo_t, _ctx: *mut libc::c_v
         let guard = e.guard.load(Ordering::Relaxed);
         let off = addr - base;
         if off % slot >= guard {
-            // Inside a slab but not in a guard page: a wild pointer, not an
-            // overflow. Fall through to the previous handler.
+            // Inside a slab but not a guard page: a wild pointer, not an
+            // overflow.
             break;
         }
         let owners = e.owners.load(Ordering::Relaxed) as *const AtomicU64;
@@ -185,9 +176,8 @@ extern "C" fn handler(sig: i32, info: *mut libc::siginfo_t, _ctx: *mut libc::c_v
         unsafe { libc::abort() };
     }
 
-    // Not ours: reinstall the saved handler and return. The faulting
-    // instruction re-executes and re-faults into the original disposition
-    // (std's overflow report for thread stacks, or the default core dump).
+    // Not ours: reinstall the saved handler and return, so the faulting
+    // instruction re-executes and re-faults into the original disposition.
     // SAFETY: OLD_* was written by `install` before this handler could run.
     unsafe {
         #[cfg(target_os = "macos")]
@@ -214,7 +204,7 @@ mod tests {
     const CHILD_ENV: &str = "AL_TEST_STACK_OVERFLOW_CHILD";
 
     /// Walk down from a stack local in 1K steps until the guard page stops
-    /// us. Volatile so the loop cannot be optimized into thin air.
+    /// us. Volatile so the loop cannot be optimized away.
     unsafe extern "C" fn overflower(_arg: *mut c_void) -> u64 {
         let probe = 0u8;
         let mut p = (&raw const probe) as *mut u8;
@@ -225,9 +215,8 @@ mod tests {
         }
     }
 
-    // The crashing half, run in a subprocess: inert (instant pass) unless
-    // the parent set CHILD_ENV. It acquires a stack owned by pid 4242 and
-    // overflows it; the fault handler must name the pid and abort.
+    // The crashing half, run as a subprocess by the test below. Inert unless
+    // the parent set CHILD_ENV.
     #[test]
     fn guard_page_overflow_child() {
         if std::env::var(CHILD_ENV).is_err() {
@@ -246,8 +235,7 @@ mod tests {
         unreachable!("the overflow must fault before the entry returns");
     }
 
-    // §5.4/5 — a guard-page overflow is caught and NAMED: the handler
-    // reports the owning AL pid on stderr instead of a bare SIGSEGV.
+    // The handler reports the owning AL pid on stderr, not a bare SIGSEGV.
     #[test]
     fn guard_page_faults_and_is_named() {
         let exe = std::env::current_exe().expect("test binary path");

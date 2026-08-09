@@ -1001,13 +1001,11 @@ fn export_type(
     }
 }
 
-/// Records a top-level name, emitting a diagnostic if it was already defined.
-/// Returns `true` when the name is a duplicate so the caller can drop the
-/// redundant declaration. Dropping it is load-bearing, not just diagnostic
-/// hygiene: the per-decl state the later passes carry is positional, but the
-/// call graph (`build_call_graph_sccs`) and the alias toposort
-/// (`register_aliases`) key their graph nodes by name — a second decl with
-/// the same name would alias the first's node and desync SCC scheduling.
+/// Records a top-level name, erroring if it was already defined. Returns
+/// `true` for a duplicate so the caller drops the redundant declaration.
+/// Dropping is load-bearing: the call graph and the alias toposort key their
+/// nodes by name, so a second decl would alias the first's node and desync
+/// SCC scheduling.
 fn check_duplicate<'a>(
     c: &mut Compiler,
     seen: &mut HashMap<&'a str, Span>,
@@ -1060,10 +1058,6 @@ fn collect_type_ast_deps<'a>(t: &'a ast::TypeIdentifier, out: &mut Vec<&'a str>)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pass 4 — call graph.
-// ---------------------------------------------------------------------------
-
 /// Returns SCCs in dependency order (leaves first). Each inner Vec holds
 /// indices into `decls`.
 fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
@@ -1072,8 +1066,8 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
 
     for d in decls {
         let n = graph.add_node(());
-        // Pass 0's `check_duplicate` dropped same-named decls, so names are
-        // unique here; a collision would alias two decls onto one node.
+        // Pass 0 dropped same-named decls, so names are unique here; a
+        // collision would alias two decls onto one node.
         let prev = node_of.insert(d.name(), n);
         debug_assert!(
             prev.is_none(),
@@ -1093,7 +1087,6 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
         };
         match d {
             Decl::Fn { fd, body, .. } => {
-                // Parameters shadow module names inside the body.
                 for p in &fd.params {
                     walker.define(&p.identifier.name);
                 }
@@ -1105,9 +1098,8 @@ fn build_call_graph_sccs(decls: &[Decl<'_>]) -> Vec<Vec<usize>> {
         }
     }
 
-    // tarjan_scc returns components in reverse topological order: a component
-    // appears after every component it has an edge to — i.e. callees come
-    // first, which is exactly the order we want for inference.
+    // Reverse topological order: callees come first, which is the order
+    // inference needs.
     tarjan_scc(&graph)
         .into_iter()
         .map(|component| component.into_iter().map(|n| n.index()).collect::<Vec<_>>())
@@ -1121,10 +1113,8 @@ struct RefWalker<'a, 'g> {
     graph: &'g mut StableGraph<(), (), Directed>,
     from: NodeIndex,
     shadowed: HashSet<&'a str>,
-    /// Undo log of names newly inserted into `shadowed`, in insertion order.
-    /// `scoped` records the log length on entry and removes exactly the names
-    /// pushed during the scope on exit, instead of deep-cloning the whole set
-    /// per block / match-arm / lambda.
+    /// Undo log of names newly inserted into `shadowed`. `scoped` truncates it
+    /// on exit instead of deep-cloning the whole set per block/arm/lambda.
     undo: Vec<&'a str>,
 }
 
@@ -1147,9 +1137,8 @@ impl<'a, 'g> RefWalker<'a, 'g> {
     fn scoped<F: FnOnce(&mut Self)>(&mut self, f: F) {
         let mark = self.undo.len();
         f(self);
-        // Names pushed by nested `scoped` calls are already drained and
-        // removed by the time control returns here, so `drain(mark..)` holds
-        // exactly the names newly shadowed at this scope level.
+        // Nested `scoped` calls already drained their own names, so this holds
+        // exactly what was shadowed at this level.
         for name in self.undo.drain(mark..) {
             self.shadowed.remove(name);
         }
@@ -1212,8 +1201,7 @@ impl<'a, 'g> RefWalker<'a, 'g> {
             E::UnaryExpression(u) => self.expr(&u.expression),
 
             E::PropertyAccessExpression(p) => {
-                // The RHS of `.` is a member, not a free identifier; only the
-                // left side can reference a top-level name.
+                // The RHS of `.` is a member, not a free identifier.
                 self.expr(&p.left);
             }
 

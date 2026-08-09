@@ -640,17 +640,7 @@ mod tests {
         let frozen = Arc::new(FrozenArea::new());
         let mut fb = frozen.builder();
         let (templates, abi) = crate::template::test_fixture::build(&mut fb);
-        let program = crate::bytecode::Program {
-            constants: Vec::new(),
-            functions: Vec::new(),
-            code: Vec::new(),
-            entry: 0,
-            frozen: Arc::clone(&frozen),
-            native: Default::default(),
-            templates,
-            abi,
-        };
-        let t = super::super::templates::Templates::resolve(&program, &mut fb)
+        let t = super::super::templates::Templates::resolve(&abi, &templates, &mut fb)
             .h1_owned()
             .expect("fixture binds every H1 slot");
         drop(fb);

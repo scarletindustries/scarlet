@@ -235,10 +235,9 @@ reject_case! {
 
 #[test]
 fn non_uniform_recursive_type_resolution_terminates() {
-    // `Nest`'s argument grows at every level, so the instance key never repeats
-    // and the recurrence bound is what stops resolution from looping forever.
-    // A match on it still type-checks: the recursive position is cut off to an
-    // infinite-constructor type, so the wildcard arm is required and accepted.
+    // `Nest`'s argument grows at every level, so the instance key never
+    // repeats and only the recurrence bound stops resolution looping. The
+    // recursive position is cut off, so the wildcard arm is required.
     check_ok(
         "type Nest(t) {\n\tMore(inner Nest((t, t)))\n\tDone\n}\n\
          fn f(n Nest(Int)) Int {\n\

@@ -1,11 +1,7 @@
 //! End-to-end coverage for the workspace reference graph exposed through
-//! `IncrementalSession`: cross-module goto-definition, workspace
-//! find-references, rename via reverse edges, document/workspace symbols,
-//! the `al/*` stdlib import path (alias tracking, cross-module goto-def into
-//! a precompiled stdlib declaration, and the unused-import hint),
-//! unused-import / dead private-definition hints, and incremental stability
-//! of the reverse-edge index (edit B → refs from A still resolve; invalidate
-//! → stale reverse edges are dropped).
+//! `IncrementalSession`: goto-definition, find-references, rename, symbols,
+//! the `al/*` stdlib import path, unused-import / dead-code hints, and
+//! incremental stability of the reverse-edge index.
 
 use al::bytecode::IncrementalSession;
 use al::module;
@@ -61,7 +57,6 @@ fn cross_module_goto_def_use_in_a_def_in_b() {
     let p = project();
     let s = checked(&p);
 
-    // use in entry (A) -> definition in B.
     let (l, c) = cursor(ENTRY, "bridge", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
@@ -69,8 +64,8 @@ fn cross_module_goto_def_use_in_a_def_in_b() {
     assert_eq!(m.last().map(String::as_str), Some("b"));
     assert!(span.start_line >= 0 && span.start_column >= 0);
 
-    // use in entry (A) -> definition in C (C is two hops: A imports C, B
-    // imports C; the occurrence in A still resolves to C's declaration).
+    // C is reached two ways (A imports C, B imports C); A's occurrence still
+    // resolves to C's declaration.
     let (l, c) = cursor(ENTRY, "shared", 1, 1);
     let (m, _) = s
         .definition("main", l, c)
@@ -128,8 +123,6 @@ fn workspace_rename_uses_reverse_edges() {
     let (l, c) = cursor(ENTRY, "shared", 1, 1);
     let (defid, _) = s.prepare_rename("main", l, c).expect("DefId for shared");
 
-    // rename is the reverse-edge closure: identical to find-references and
-    // spanning every module that mentions the symbol.
     let edits = s.rename(defid);
     assert_eq!(edits, s.references(defid), "rename == references closure");
 
@@ -139,7 +132,6 @@ fn workspace_rename_uses_reverse_edges() {
         distinct.len() >= 2,
         "rename must rewrite across modules, touched {distinct:?}"
     );
-    // Every edit span must be non-degenerate (a real identifier range).
     for (m, sp) in &edits {
         assert!(
             sp.end_line > sp.start_line || sp.end_column > sp.start_column,
@@ -153,18 +145,14 @@ fn document_and_workspace_symbols() {
     let p = project();
     let s = checked(&p);
 
-    // documentSymbol for module C lists its declaration.
     assert_has_sym(&s.document_symbols("./c"), "shared", EntityKind::Function);
 
-    // documentSymbol for the entry surfaces the import module-aliases,
-    // including the `al/array` stdlib import alias.
+    // The entry surfaces its import aliases, stdlib ones included.
     let main = s.document_symbols("main");
     assert_has_sym(&main, "array", EntityKind::ModuleAlias);
 
-    // workspace/symbol substring search finds the user symbol and is
-    // case-insensitive.
+    // Substring search, case-insensitive.
     assert_has_sym(&s.workspace_symbols("SHAR"), "shared", EntityKind::Function);
-    // Precision: an unrelated query returns nothing.
     assert!(
         s.workspace_symbols("definitely_no_such_symbol").is_empty(),
         "workspace_symbols matched a non-existent name"
@@ -194,9 +182,8 @@ fn stdlib_import_path_is_tracked() {
         "the alias binding is owned by the importing (entry) module"
     );
 
-    // Cross-module goto-def into the stdlib: the cursor on `array.length`
-    // resolves to the real `length` declaration in `al/array` (`src/std/al/
-    // array.al`, `pub fn length` — 0-based line 49, the identifier span).
+    // Goto-def must land on the real `pub fn length` in src/std/al/array.al
+    // (0-based line 49).
     let (l, c) = cursor(entry, "length", 1, 1);
     let (m, span) = s
         .definition("main", l, c)
@@ -211,8 +198,8 @@ fn stdlib_import_path_is_tracked() {
         (49, 7, 13),
         "must land on the real `length` declaration span, got {span:?}"
     );
-    // The synthesised stdlib definition and the entry's qualified occurrence
-    // share one canonical DefId, so find-references closes over both.
+    // One canonical DefId spans the synthesised stdlib definition and the
+    // entry's occurrence.
     let (defid, _) = s
         .prepare_rename("main", l, c)
         .expect("a DefId for the stdlib `length`");
@@ -231,11 +218,9 @@ fn stdlib_import_path_is_tracked() {
         "references missing the entry use site: {ref_mods:?}"
     );
 
-    // A *used* stdlib import is not reported unused.
     assert_no_msg(&unused_msgs(&s), "unused import `array`");
 
-    // The unused-import reachability rule reaches stdlib imports: an import
-    // whose alias has no recorded qualified/unqualified use is a Hint.
+    // The unused-import rule reaches stdlib imports too.
     let p2 = Project::new("stdlib_unused");
     let unused = "import al/array\nprintln(1)\n";
     p2.write("a.al", unused);
@@ -264,7 +249,6 @@ fn unused_import_and_dead_private_def_hints() {
 fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     let p = project();
 
-    // --- initial: b.bridge resolves from the entry and B declares it.
     let mut s = checked(&p);
     let (bl, bc) = cursor(ENTRY, "bridge", 1, 1);
     let (m0, _) = s.definition("main", bl, bc).expect("bridge resolves");
@@ -276,7 +260,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
     );
     let n0 = s.compile_count();
 
-    // --- edit B's body only (bridge kept): refs into B from A still resolve.
+    // Edit B's body only, keeping `bridge`.
     p.write(
         "b.al",
         "import ./c\npub fn bridge() Int { c.shared() + 100 }\n",
@@ -305,9 +289,7 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
         "entry use lost after B edit: {refs1:?}"
     );
 
-    // --- invalidate: B drops `bridge` and the entry stops referencing it.
-    // The wholesale graph rebuild must not leave a dangling reverse edge for
-    // the now-gone definition.
+    // B drops `bridge`: the graph rebuild must leave no dangling reverse edge.
     p.write("b.al", "pub fn other() Int { 7 }\n");
     let entry2 = "import ./b\nprintln(b.other())\n";
     p.write("a.al", entry2);
@@ -325,22 +307,16 @@ fn incremental_edit_b_keeps_refs_then_invalidate_drops_reverse_edges() {
 
 #[test]
 fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
-    // Local binders (`let`, params, match/destructure) are recorded in the
-    // graph as `EntityKind::Value` so goto-def / find-refs / rename resolve on
-    // them — but they must NOT flood the documentSymbol outline or the
-    // workspace/symbol picker, which list a module's structural declarations
-    // only. The filter touches only the symbol projection: resolution on the
-    // locals themselves is unaffected.
+    // Local binders are `EntityKind::Value` so navigation resolves on them,
+    // but the symbol surfaces list structural declarations only.
     let p = Project::new("symsurface");
     let entry =
         "fn calc(base Int) Int {\n\tscaled = base * 2\n\tscaled + 1\n}\nx = calc(10)\nprintln(x)\n";
     p.write("a.al", entry);
     let s = checked_with(&p, entry);
 
-    // documentSymbol lists the top-level fn …
     let doc = s.document_symbols("main");
     assert_has_sym(&doc, "calc", EntityKind::Function);
-    // … but NOT the local binder, the param, or any other `Value`.
     assert!(
         !doc.iter().any(|sym| sym.kind == EntityKind::Value),
         "documentSymbol must not surface local `Value` binders: {:?}",
@@ -352,7 +328,6 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
         sym_names(&doc)
     );
 
-    // workspace/symbol over a local binder's name returns nothing.
     let ws = s.workspace_symbols("scaled");
     assert!(
         ws.is_empty(),
@@ -360,10 +335,8 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
         sym_names(&ws)
     );
 
-    // Resolution on the local is UNAFFECTED — the filter never touches the
-    // forward index / `definitions()` scan. goto-def on the use of `scaled`
-    // (its 2nd occurrence) lands on the binder, prepare_rename yields its
-    // `Value` DefId, and find-refs closes over the binder and the use.
+    // Resolution on the local is unaffected: the filter never touches the
+    // forward index.
     let (l, c) = cursor(entry, "scaled", 2, 1);
     let (m, _) = s
         .definition("main", l, c)
@@ -378,11 +351,6 @@ fn local_bindings_excluded_from_symbol_surfaces_but_stay_resolvable() {
         "find-refs over a local must include its binder and its use"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Aliased selective import `{X as Y}` — rename must keep X's and Y's rename
-// classes separate.
-// ---------------------------------------------------------------------------
 
 const ALIAS_LIB: &str = "pub fn original() Int { 42 }\n";
 const ALIAS_MAIN: &str = "import ./lib.{original as alias}\n\
@@ -408,11 +376,9 @@ fn span_text(src: &str, sp: &Span) -> String {
 
 #[test]
 fn rename_imported_symbol_does_not_capture_local_alias() {
-    // `import ./lib.{original as alias}` then uses of `alias`. Renaming the
-    // imported `original` must rewrite only spans that spell `original` (its
-    // declaration in lib + the `original` part of the import). Rewriting the
-    // `alias` binder or any `alias` use would yield `{renamed as renamed}` and
-    // `renamed()` — name capture that no longer compiles.
+    // Renaming the imported `original` must rewrite only spans that spell
+    // `original`. Touching the `alias` binder or its uses would produce
+    // `{renamed as renamed}` — name capture that no longer compiles.
     let p = alias_project();
     let s = checked_with(&p, ALIAS_MAIN);
 
@@ -436,8 +402,6 @@ fn rename_imported_symbol_does_not_capture_local_alias() {
              touching the alias binder or its uses captures the name"
         );
     }
-    // It must still rewrite the real declaration and the `original` half of the
-    // import (two distinct `original` sites).
     assert_eq!(
         spans.len(),
         2,
@@ -448,18 +412,16 @@ fn rename_imported_symbol_does_not_capture_local_alias() {
 
 #[test]
 fn rename_local_alias_does_not_touch_imported_symbol() {
-    // The reverse direction: renaming the local alias `alias` (clicking a use
-    // of it) must rewrite only `alias` occurrences, all in the entry module —
-    // never the imported `original` or its declaration in lib.
+    // Renaming the local alias must rewrite only `alias` occurrences, all in
+    // the entry module.
     let p = alias_project();
     let s = checked_with(&p, ALIAS_MAIN);
 
     // 2nd occurrence of `alias` is the first use (`x = alias()`).
     let (l, c) = cursor(ALIAS_MAIN, "alias", 2, 1);
 
-    // goto-def on the alias use still chains through to the imported symbol's
-    // real declaration in lib (the rename class is separate, but navigation is
-    // not), so the alias remains a useful local handle on `original`.
+    // Navigation is not split the way the rename class is: goto-def still
+    // chains through to `original` in lib.
     let (gm, _) = s
         .definition("main", l, c)
         .expect("goto-def on the alias use resolves");
@@ -486,7 +448,6 @@ fn rename_local_alias_does_not_touch_imported_symbol() {
             "rename of the alias must only rewrite `alias`, got `{text}` at {sp:?}"
         );
     }
-    // The alias binder plus its two uses.
     assert_eq!(
         spans.len(),
         3,
@@ -494,11 +455,8 @@ fn rename_local_alias_does_not_touch_imported_symbol() {
     );
 }
 
-// Two plain qualified imports where only the second is used: the unused first
-// import must still be flagged. The `d.helper()` qualified use resolves into
-// module `d` only, so it must not keep the genuinely-unused `import ./c` alive
-// (the regression: `has_real_use` formerly kept any qualified import alive on
-// any cross-module qualified use, suppressing the `c` hint).
+// `d.helper()` resolves into module `d` only, so it must not keep the unused
+// `import ./c` alive.
 #[test]
 fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     let p = Project::new("twoimp");
@@ -514,17 +472,8 @@ fn unused_one_of_two_plain_qualified_imports_is_flagged() {
     assert_no_msg(&msgs, "unused import `d`");
 }
 
-// ---------------------------------------------------------------------------
-// Session navigation (goto-def / prepare_rename / find-refs / rename) on the
-// Constructor / Type / Constant / Field entity kinds. The query layer was
-// previously exercised only for Function / Value / ModuleAlias; these are the
-// remaining four `EntityKind`s. Each is driven from a real *use* site:
-//   - a constructor at a VALUE position (`chosen = Red`) — the match-pattern
-//     position is covered by `constructor_in_match_pattern_is_a_graph_reference`;
-//   - a type at an annotation use (`c Color`);
-//   - a constant inside an expression (`LIMIT + 1`);
-//   - a record field projection (`bx.label`).
-// ---------------------------------------------------------------------------
+// Session navigation over the Constructor / Type / Constant / Field entity
+// kinds, each driven from a real use site.
 
 const NAV_SRC: &str = "type Color {\n\tRed\n\tGreen\n\tBlue\n}\n\
 type Box { label String }\n\
@@ -540,11 +489,7 @@ println(total)\n";
 
 /// Drive goto-def + prepare_rename + find-references + rename for one entity
 /// through the session query API. The 1st occurrence of `needle` in `src` is
-/// always the declaration; `use_nth` (1-based) selects the *use* site to click.
-/// Asserts goto-def lands exactly on the declaring identifier, prepare_rename
-/// reports `expected` as the entity kind, and find-references (== rename)
-/// closes over the declaration and the use with every span pinned to the
-/// identifier and confined to the entry module.
+/// always the declaration; `use_nth` (1-based) selects the use site to click.
 fn assert_nav(
     s: &IncrementalSession,
     src: &str,
@@ -555,7 +500,6 @@ fn assert_nav(
     let (decl_l, decl_c) = cursor(src, needle, 1, 0);
     let (ul, uc) = cursor(src, needle, use_nth, 1);
 
-    // goto-def from the use site resolves to the declaring identifier.
     let (decl_mod, def_span) = s
         .definition("main", ul, uc)
         .unwrap_or_else(|| panic!("goto-def on `{needle}` use returned nothing"));
@@ -570,8 +514,6 @@ fn assert_nav(
         "goto-def landed off the `{needle}` identifier: {def_span:?}"
     );
 
-    // prepare_rename yields the DefId tagged with the entity kind and the span
-    // of the clicked identifier.
     let (defid, range) = s
         .prepare_rename("main", ul, uc)
         .unwrap_or_else(|| panic!("prepare_rename on `{needle}` use returned nothing"));
@@ -585,8 +527,6 @@ fn assert_nav(
         "prepare_rename range must cover the `{needle}` identifier: {range:?}"
     );
 
-    // find-references closes over the declaration plus the use; every span is
-    // an identifier-precise range inside the entry module.
     let refs = s.references(defid);
     assert!(
         refs.len() >= 2,
@@ -615,7 +555,6 @@ fn assert_nav(
         "find-refs on `{needle}` is missing the use site: {refs:?}"
     );
 
-    // rename is exactly the find-references closure.
     assert_eq!(
         s.rename(defid),
         refs,
@@ -629,28 +568,21 @@ fn navigation_on_constructor_type_constant_and_field() {
     p.write("a.al", NAV_SRC);
     let s = checked_with(&p, NAV_SRC);
 
-    // Constructor at a value position (`chosen = Red`, the 2nd `Red`): decl is
-    // the variant in `type Color { Red ... }`.
+    // Value position `chosen = Red`.
     assert_nav(&s, NAV_SRC, "Red", 2, EntityKind::Constructor);
-
-    // Type at an annotation use (`c Color`, the 2nd `Color`).
+    // Annotation use `c Color`.
     assert_nav(&s, NAV_SRC, "Color", 2, EntityKind::Type);
-
-    // Constant in an expression (`LIMIT + 1`, the 2nd `LIMIT`).
+    // Expression use `LIMIT + 1`.
     assert_nav(&s, NAV_SRC, "LIMIT", 2, EntityKind::Constant);
-
-    // Record field projection (`bx.label`, the 3rd `label`): the 1st is the
-    // field declaration, the 2nd is the construction label `Box(label: ...)`
-    // (not recorded as a graph reference), the 3rd is the access.
+    // 3rd `label` is `bx.label`; the 2nd is the construction label
+    // `Box(label: ...)`, which is not a graph reference.
     assert_nav(&s, NAV_SRC, "label", 3, EntityKind::Field);
 }
 
 #[test]
 fn constructor_in_match_pattern_is_a_graph_reference() {
-    // A constructor used in a match arm pattern must be recorded as a graph
-    // reference so find-references / rename reach it. `Left` here appears ONLY
-    // in the type declaration and the match arm — never at a value position —
-    // so this pins `type_ctor_pattern`'s `record_value_use` call directly.
+    // `Left` appears only in the type declaration and the match arm, never at
+    // a value position, so this pins `type_ctor_pattern`'s `record_value_use`.
     let p = Project::new("ctor_pattern_ref");
     let src = "type Side {\n\tLeft\n\tRight\n}\n\
                fn f(x Side) Int { match x { Left -> 1 Right -> 2 } }\n\
@@ -662,13 +594,9 @@ fn constructor_in_match_pattern_is_a_graph_reference() {
     assert_nav(&s, src, "Left", 2, EntityKind::Constructor);
 }
 
-// --- Embedded-stdlib type fidelity through the session -------------------------
-
-// A program that imports al/http/h1 and matches its `Parsed` enum exhaustively
-// must check clean through `IncrementalSession` (the LSP's check path for
-// non-stdlib files) exactly like it does through `al check`: both resolve the
-// import against the same precompiled stdlib. A mismatch here means the
-// session's hydration of the embedded blob lost or mangled a declaration.
+// A program matching al/http/h1's `Parsed` enum exhaustively must check clean
+// through `IncrementalSession` exactly as through `al check`. A failure means
+// session hydration of the embedded stdlib blob mangled a declaration.
 const HTTP_ENTRY: &str = "import al/binary\n\
 import al/http/h1.{Done, NeedMore, Bad}\n\
 r = match h1.parse_request(binary.from_string('GET / HTTP/1.1\\r\\n\\r\\n'), 0) {\n\
@@ -682,13 +610,11 @@ println(r)\n";
 fn session_checks_http_h1_program_clean() {
     let p = Project::new("http_session");
     p.write("a.al", HTTP_ENTRY);
-    // parse_request : fn(Binary, Int) Parsed comes from the embedded stdlib.
     checked_with(&p, HTTP_ENTRY);
 }
 
-// Same session, two checks: a trivial entry first, then the al/http/h1
-// program. The stdlib types hydrated for the second entry must not be
-// corrupted by arena truncation between checks.
+// Two checks in one session: arena truncation between them must not corrupt
+// the stdlib types hydrated for the second.
 #[test]
 fn session_recheck_keeps_stdlib_types_intact() {
     let p = Project::new("http_session_recheck");
