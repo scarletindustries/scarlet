@@ -12,7 +12,6 @@ pub use prim::PrimOp;
 
 use std::fmt;
 
-use crate::bytecode::HeapTag;
 use crate::newtype_index;
 use crate::type_def::TypeId;
 use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy};
@@ -134,20 +133,19 @@ pub struct VariantRef {
     pub(crate) type_name: StrId,
 }
 
-/// Heap-cell shape for Perceus reuse pairing. A `Drop` may only hand its cell
-/// to a `Ctor` of the same shape, so the overwrite needs no resize.
+/// Heap-cell shape for Perceus reuse pairing: a constructor cell with this
+/// many fields. A `Drop` may only hand its cell to a `Ctor` of the same shape,
+/// so the overwrite needs no resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReuseShape {
-    tag: HeapTag,
-    words: u16,
+    fields: u16,
 }
 
 impl ReuseShape {
     #[allow(clippy::expect_used)] // ctor arity is bounded far below u16::MAX upstream
-    fn enum_(arity: usize) -> Self {
+    fn ctor(arity: usize) -> Self {
         ReuseShape {
-            tag: HeapTag::Enum,
-            words: u16::try_from(arity).expect("constructor arity exceeds u16"),
+            fields: u16::try_from(arity).expect("constructor arity exceeds u16"),
         }
     }
 }
@@ -764,7 +762,7 @@ mod tests {
             rhs: Atom::prim(PrimOp::IntAdd, vec![LocalId(0), LocalId(1)]),
             body: Box::new(CoreExpr::Drop {
                 local: LocalId(0),
-                shape: Some(ReuseShape::enum_(3)),
+                shape: Some(ReuseShape::ctor(3)),
                 body: Box::new(CoreExpr::Let {
                     bind: bind(3, RTy(11)),
                     rhs: Atom::Ctor {

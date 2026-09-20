@@ -372,7 +372,7 @@ impl<'p> Perceus<'p> {
                 }
                 (
                     fields.iter().map(|b| b.id).collect(),
-                    Some(ReuseShape::enum_(fields.len())),
+                    Some(ReuseShape::ctor(fields.len())),
                 )
             }
         }
@@ -470,7 +470,7 @@ impl ReuseWalk {
                     // callee. Frame-limited (ICFP'22 §4) constrains reuse to
                     // this frame; it does not fence intra-frame call sites.
                     if let Atom::Ctor { fields, reuse, .. } = rhs {
-                        let want = ReuseShape::enum_(fields.len());
+                        let want = ReuseShape::ctor(fields.len());
                         // Prefer this bind's own slot: `StoreLocal` is about to
                         // overwrite it, so a same-slot token must be consumed
                         // here or discarded by the retain below.
@@ -516,7 +516,7 @@ impl ReuseWalk {
                 CoreExpr::Tail(a) => {
                     match a {
                         Atom::Ctor { fields, reuse, .. } => {
-                            let want = ReuseShape::enum_(fields.len());
+                            let want = ReuseShape::ctor(fields.len());
                             if let Some(i) =
                                 avail.iter().rposition(|t| !t.carried && t.shape == want)
                             {
@@ -657,7 +657,7 @@ fn unscoped_goto(id: JoinId) -> ! {
 /// `Call`/`PrimOp` results have no statically-known arity.
 fn ctor_shape(a: &Atom) -> Option<ReuseShape> {
     match a {
-        Atom::Ctor { fields, .. } => Some(ReuseShape::enum_(fields.len())),
+        Atom::Ctor { fields, .. } => Some(ReuseShape::ctor(fields.len())),
         _ => None,
     }
 }
