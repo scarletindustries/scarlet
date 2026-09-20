@@ -138,7 +138,7 @@ pub mod pool {
 /// [`pool`]). `len` is `u16` to keep `TypeNode` at 12 bytes; no Scarlet type has
 /// more than 65535 type arguments, parameters, or tuple elements.
 pub struct ArenaSlice<P> {
-    pub start: u32,
+    start: u32,
     pub len: u16,
     _pool: PhantomData<P>,
 }
@@ -182,7 +182,7 @@ impl<P> ArenaSlice<P> {
         }
     }
     #[inline]
-    pub fn range(self) -> std::ops::Range<usize> {
+    fn range(self) -> std::ops::Range<usize> {
         self.start as usize..(self.start as usize + self.len as usize)
     }
 }
@@ -304,15 +304,15 @@ pub enum ValueKind {
 /// It is engine-local, so `None` once a scheme crosses engines.
 #[derive(Debug, Clone, Copy)]
 pub struct QuantVar {
-    pub constraint: Option<Constraint>,
+    constraint: Option<Constraint>,
     /// Display name; `StrId::NONE` when unset.
-    pub name: StrId,
-    pub origin_id: Option<i32>,
+    name: StrId,
+    origin_id: Option<i32>,
     /// The engine's `var_epoch` when `origin_id` was minted. `instantiate`
     /// honours `origin_id` (the rigid self-reference case) only within the
     /// same epoch: `truncate_to` restarts var numbering, so a later compile's
     /// rigid var can share the number without being the same variable.
-    pub epoch: u32,
+    epoch: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -427,26 +427,26 @@ pub enum MatchFunTypeError {
 #[derive(Debug, Default)]
 pub struct InferEngine {
     /// The type arena. `Ty` indexes into this.
-    pub nodes: Vec<TypeNode>,
+    nodes: Vec<TypeNode>,
     /// Shared pool for `Con.args`/`Fun.params`/`Tuple.elems`. `ArenaSlice`
     /// indexes into this.
-    pub children: Vec<Ty>,
+    children: Vec<Ty>,
     /// Interned strings. `StrId` indexes into this.
-    pub strings: IndexSet<String>,
+    strings: IndexSet<String>,
 
     // Pools backing the variable-length data `Scheme`/`TypeInfo` carry while
     // staying `Copy` and const-constructible. Append-only; indices are stable.
     /// `Scheme.quantified` slices into this.
-    pub quants: Vec<QuantVar>,
+    quants: Vec<QuantVar>,
     /// `ValueKind::Constructor.field_labels` and `TypeInfo.module` slice into
     /// this. Each entry is itself a `StrId` into `strings`.
-    pub str_slices: Vec<StrId>,
+    str_slices: Vec<StrId>,
     /// `TypeInfo.type_params` slices into this.
-    pub type_params: Vec<TypeParam>,
+    type_params: Vec<TypeParam>,
     /// `Variant.fields` slices into this.
-    pub variant_fields: Vec<VariantField>,
+    variant_fields: Vec<VariantField>,
     /// `TypeBody::Custom.variants` slices into this.
-    pub variants: Vec<Variant>,
+    variants: Vec<Variant>,
 
     vars: Vec<TyVarState>,
     next_var_id: i32,
@@ -524,14 +524,14 @@ pub struct EnginePoolWatermark {
     // Field order is significant: derived `Ord` compares lexicographically, so
     // `nodes` decides. `ModuleTable::invalidate` relies on `min` over
     // watermarks picking the earliest-compiled module.
-    pub nodes: usize,
-    pub children: usize,
+    nodes: usize,
+    children: usize,
     pub strings: usize,
-    pub quants: usize,
-    pub str_slices: usize,
-    pub type_params: usize,
-    pub variant_fields: usize,
-    pub variants: usize,
+    quants: usize,
+    str_slices: usize,
+    type_params: usize,
+    variant_fields: usize,
+    variants: usize,
 }
 
 fn next_letter(uid: &mut u64) -> String {

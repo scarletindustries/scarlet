@@ -4462,11 +4462,6 @@ impl Compiler {
             program: TypedProgram {
                 fns: fns.into_vec(),
                 toplevel,
-                // `lower` copies this verbatim into `CoreProgram::consts` and
-                // nothing downstream of here reads it: the elaborator pooled
-                // every constant straight into the compiler's `consts`, and
-                // that is the pool every `ConstId` indexes.
-                consts: Vec::new(),
                 pool,
                 temps,
             },

@@ -53,11 +53,6 @@ impl ModuleKey {
         Self::of(path)
     }
 
-    /// Key of the prelude module ([`scarlet_prelude`]).
-    pub fn prelude() -> Self {
-        Self::of(&scarlet_prelude())
-    }
-
     /// Key of the entry module ([`main_module`]).
     pub fn main() -> Self {
         Self::of(&main_module())

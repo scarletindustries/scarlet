@@ -32,7 +32,7 @@ newtype_index!(
 );
 
 newtype_index!(
-    /// Index into `CoreProgram.consts`.
+    /// Index into [`Program::consts`].
     pub struct ConstId("c")
 );
 
@@ -104,7 +104,7 @@ newtype_index!(
 #[derive(Debug, Clone)]
 pub struct CoreBind {
     id: LocalId,
-    pub ty: RTy,
+    ty: RTy,
     /// `Some(slot)` when this bind is a module-toplevel decl that must land in
     /// that entry-frame slot: already-emitted fn bodies address it as
     /// `PushGlobal <slot>`, so the entry frame's `StoreLocal` has to agree.
@@ -361,26 +361,24 @@ impl CoreExpr {
 #[derive(Debug, Clone)]
 pub struct CoreFn {
     pub(crate) name: StrId,
-    pub params: Vec<CoreBind>,
+    pub(crate) params: Vec<CoreBind>,
     pub(crate) body: CoreExpr,
-    pub ret_ty: RTy,
+    pub(crate) ret_ty: RTy,
 }
 
 /// Whole-module lowering: every function plus the module toplevel as its own
-/// expression (module init). `consts` is shared across all `ConstId`s.
+/// expression (module init).
 #[derive(Debug, Clone)]
 pub struct CoreProgram {
-    pub fns: Vec<CoreFn>,
-    pub consts: Vec<Const>,
+    pub(crate) fns: Vec<CoreFn>,
     pub(crate) toplevel: CoreExpr,
 }
 
 impl Default for CoreProgram {
-    /// No functions and no constants, with a toplevel returning nil.
+    /// No functions, with a toplevel returning nil.
     fn default() -> Self {
         CoreProgram {
             fns: Vec::new(),
-            consts: Vec::new(),
             toplevel: CoreExpr::Tail(Atom::Nil),
         }
     }
@@ -399,7 +397,14 @@ pub struct LoweredFn {
     /// and `scarlet/option` both have a `map`.
     pub name: String,
     pub core: CoreFn,
-    pub pool: Rc<ResolvedPool>,
+    /// What every `RTy` in `core` indexes. Nothing reads a body's types until
+    /// a backend does, but dropping the pool would leave those indices
+    /// pointing into an arena that no longer exists.
+    #[expect(
+        dead_code,
+        reason = "the RTys in `core` index it; the backend that reads them is not written yet"
+    )]
+    pub(crate) pool: Rc<ResolvedPool>,
 }
 
 /// A whole compiled program in core IR: what a backend runs.

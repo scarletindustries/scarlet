@@ -54,9 +54,9 @@ impl EntityKind {
 /// a `Vec<String>`, so this struct and the `Scheme` embedding it stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefinitionLocation {
-    pub line: i32,
-    pub column: i32,
-    pub end_col: i32,
+    line: i32,
+    column: i32,
+    end_col: i32,
     /// → `InferEngine.str_slices`: the owning module's path segments.
     pub module: ArenaSlice<pool::StrSlices>,
     pub entity: EntityKind,
@@ -154,10 +154,10 @@ pub struct TypeInfo {
     pub id: TypeId,
     pub name: StrId,
     /// → `InferEngine.str_slices`
-    pub module: ArenaSlice<pool::StrSlices>,
+    pub(crate) module: ArenaSlice<pool::StrSlices>,
     /// → `InferEngine.type_params`
     pub type_params: ArenaSlice<pool::TypeParams>,
-    pub body: TypeBody,
+    pub(crate) body: TypeBody,
 }
 
 impl TypeInfo {
@@ -710,25 +710,6 @@ impl TypeEnv {
     /// shadowed by whatever same-named type was analysed most recently.
     pub fn lookup_type_info_by_id(&self, id: TypeId) -> Option<TypeInfo> {
         self.type_info_by_id.get(&id).copied()
-    }
-
-    /// The declaration `id` was minted for. Total for every id a type node
-    /// carries: [`register_type_head`](Self::register_type_head) mints an id
-    /// and stores its `TypeInfo` in the same step; a declaration from another
-    /// module is stored by the import, or seeded from the precompiled stdlib
-    /// below the session watermark, before a scheme naming it is bound; and
-    /// the by-id registry shrinks only through
-    /// [`truncate_to`](Self::truncate_to), which the session runs only after
-    /// evicting every module compiled past that watermark. An id that misses
-    /// was never registered — the pass-ordering bug
-    /// [`set_type_body`](Self::set_type_body) refuses, not a state a compile
-    /// reaches.
-    #[allow(clippy::panic)]
-    pub fn declaration(&self, id: TypeId) -> TypeInfo {
-        *self
-            .type_info_by_id
-            .get(&id)
-            .unwrap_or_else(|| panic!("declaration: type id {id} was never registered"))
     }
 
     pub fn suggest_name(&self, name: &str) -> Option<String> {

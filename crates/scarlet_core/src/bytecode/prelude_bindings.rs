@@ -29,8 +29,8 @@ pub mod names {
 pub struct TypeRef {
     /// Compare via [`TypeRef::is`], never `==`: a pre-capture binding holds
     /// `TypeId::NONE`, which `==` would match.
-    pub id: TypeId,
-    pub name: &'static str,
+    pub(crate) id: TypeId,
+    pub(crate) name: &'static str,
 }
 
 impl TypeRef {
@@ -60,16 +60,14 @@ impl TypeRef {
 // Identity goes through `CtorRef::is`.
 #[derive(Debug, Clone, Copy)]
 pub struct CtorRef {
-    pub type_id: TypeId,
-    pub variant_idx: u16,
-    pub arity: u16,
+    pub(crate) type_id: TypeId,
+    pub(crate) variant_idx: u16,
 }
 
 impl CtorRef {
     const ZERO: Self = CtorRef {
         type_id: TypeId::NONE,
         variant_idx: 0,
-        arity: 0,
     };
 }
 
@@ -201,7 +199,6 @@ macro_rules! prelude_bindings {
                                 Ok(CtorRef {
                                     type_id: *type_id,
                                     variant_idx: *variant_idx,
-                                    arity: *a,
                                 })
                             } else {
                                 Err(PreludeCaptureError::CtorShape {

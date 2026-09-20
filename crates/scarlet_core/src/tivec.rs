@@ -27,41 +27,28 @@ pub struct TiVec<I: Idx, T> {
 // world), and clippy would otherwise insist it accompany `len`.
 #[allow(clippy::len_without_is_empty)]
 impl<I: Idx, T> TiVec<I, T> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TiVec {
             raw: Vec::new(),
             _idx: PhantomData,
         }
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.raw.len()
     }
 
     /// The index [`Self::push`] would return. Mint indices here, not from
     /// `len() as u32` at a call site that may not own the whole table.
-    pub fn next_idx(&self) -> I {
+    fn next_idx(&self) -> I {
         I::from_usize(self.raw.len())
     }
 
     /// Append `v` and return the index it landed at.
-    pub fn push(&mut self, v: T) -> I {
+    pub(crate) fn push(&mut self, v: T) -> I {
         let i = self.next_idx();
         self.raw.push(v);
         i
-    }
-
-    pub fn get(&self, i: I) -> Option<&T> {
-        self.raw.get(i.index())
-    }
-
-    pub fn get_mut(&mut self, i: I) -> Option<&mut T> {
-        self.raw.get_mut(i.index())
-    }
-
-    /// True when `i` names an element of this vector.
-    fn contains_idx(&self, i: I) -> bool {
-        i.index() < self.raw.len()
     }
 
     #[cfg(test)]
@@ -70,28 +57,18 @@ impl<I: Idx, T> TiVec<I, T> {
     }
 
     /// Drop every element at `len` and after. No-op when `len >= self.len()`.
-    pub fn truncate(&mut self, len: usize) {
+    pub(crate) fn truncate(&mut self, len: usize) {
         self.raw.truncate(len);
     }
 
     /// The elements at `start..`, for consumers that walk a suffix.
-    pub fn tail_from(&self, start: I) -> &[T] {
+    pub(crate) fn tail_from(&self, start: I) -> &[T] {
         &self.raw[start.index()..]
     }
 
     /// Drop the typed-index wrapper, for consumers that want a plain `Vec`.
-    pub fn into_vec(self) -> Vec<T> {
+    pub(crate) fn into_vec(self) -> Vec<T> {
         self.raw
-    }
-
-    /// Grow with `fill` until `i` is a valid index. No-op when it already is.
-    pub fn resize_at_least(&mut self, i: I, fill: T)
-    where
-        T: Clone,
-    {
-        if !self.contains_idx(i) {
-            self.raw.resize(i.index() + 1, fill);
-        }
     }
 }
 
@@ -191,18 +168,6 @@ mod tests {
         assert_eq!(v[a], "zero");
         assert_eq!(v[b], "one");
         assert_eq!(v.next_idx(), A(2));
-    }
-
-    #[test]
-    fn resize_at_least_grows_only_when_the_index_is_out_of_range() {
-        let mut v: TiVec<A, u8> = TiVec::new();
-        assert!(!v.contains_idx(A(2)));
-        v.resize_at_least(A(2), 9);
-        assert!(v.contains_idx(A(2)));
-        assert_eq!(v.as_slice(), &[9, 9, 9]);
-        v[A(0)] = 1;
-        v.resize_at_least(A(1), 9);
-        assert_eq!(v.as_slice(), &[1, 9, 9]);
     }
 
     #[test]

@@ -201,7 +201,7 @@ impl ResolvedPool {
     }
 
     /// The primitive `t` denotes, if any.
-    pub fn prim_of(&self, t: RTy) -> Option<Prim> {
+    pub(crate) fn prim_of(&self, t: RTy) -> Option<Prim> {
         match self.node(t) {
             ResolvedNode::Con { id, .. } => self.as_prim(id),
             ResolvedNode::Bound(_) | ResolvedNode::Fun { .. } | ResolvedNode::Tuple { .. } => None,

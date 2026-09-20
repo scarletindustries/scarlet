@@ -11,7 +11,7 @@ use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
 use crate::types::{Scheme, TypeInfo};
 
-pub(crate) mod stdlib;
+mod stdlib;
 
 // Module identity lives in `scarlet_syntax::module_path` because a `Diagnostic`
 // carries the key of the module it points into. Re-exported here, where

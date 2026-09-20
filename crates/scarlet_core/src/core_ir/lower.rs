@@ -102,7 +102,6 @@ pub(crate) fn lower(p: &TypedProgram) -> CoreProgram {
     CoreProgram {
         toplevel: lower_fn(p.temps, &p.toplevel).body,
         fns,
-        consts: p.consts.clone(),
     }
 }
 

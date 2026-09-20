@@ -30,7 +30,7 @@ pub(crate) use resolve::Denotation;
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub(crate) use zonk::{Zonker, pool_for};
 
-use crate::core_ir::{Const, ConstId, FuncIdx, PrimOp, VariantRef};
+use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
 use crate::types::StrId;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -51,7 +51,7 @@ impl std::fmt::Display for BindingId {
 /// module-scope name may be bound more than once (an import shadowed by a later
 /// `let`), so each [`TypedBind`] carries the slot its own binding lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GlobalSlot(pub i32);
+pub struct GlobalSlot(pub(crate) i32);
 
 /// A slot in the *current* frame. A different index
 /// space from [`GlobalSlot`] and [`CaptureIdx`], kept distinct so the three
@@ -462,17 +462,6 @@ pub struct TypedProgram {
     /// The module's initialiser — top-level declarations in dependency order
     /// followed by its statements. `params` is empty.
     pub(crate) toplevel: TypedFn,
-    /// The compiler's own constant pool, moved in — not a copy, and not a
-    /// second pool merged at emit.
-    ///
-    /// `lower` copies it verbatim and the compiler adopts it back wholesale, so
-    /// a [`ConstId`] means the same thing from elaboration to the VM. That is
-    /// what keeps `lower` `&mut`-free: every constant a lowered body pushes
-    /// must already be pooled and carried on the node, including the ones with
-    /// no source literal behind them (`TypedPat::Array`'s `len`,
-    /// `TypedPat::Bin`'s `zero`, `TypedBinPatSeg::Utf8Literal`'s `bits`).
-    /// Pinned by `typed_program_consts_are_stable_ids`.
-    pub(crate) consts: Vec<Const>,
     /// The arena every [`RTy`] in the program indexes. Append-only during
     /// elaboration, immutable afterwards. `lower` never reads it; `perceus`
     /// reads it for `is_heap`, and `emit` erases types entirely.
@@ -641,7 +630,6 @@ mod tests {
     fn typed_program_consts_are_stable_ids() {
         let (pool, temps) = pool_and_temps();
         let int = temps.int;
-        let consts = vec![Const::Int(7), Const::Int(9)];
         let p = TypedProgram {
             fns: vec![nullary(
                 StrId::NONE,
@@ -659,24 +647,19 @@ mod tests {
                     value: ConstId(0),
                 },
             ),
-            consts: consts.clone(),
             pool,
             temps,
         };
 
-        let out = lower::lower(&p);
-        assert_eq!(
-            out.consts.len(),
-            consts.len(),
-            "lower has no pool to intern into: it hands back what it was given"
+        // Every constant lives in the compiler's one pool, and `lower` has
+        // none of its own: an id the elaborator minted names the same constant
+        // after lowering.
+        let out = format!("{}", lower::lower(&p));
+        assert!(out.contains("ret c1\n"), "the fn's constant:\n{out}");
+        assert!(
+            out.ends_with("toplevel:\n  ret c0\n"),
+            "the toplevel's constant:\n{out}"
         );
-        assert_eq!(
-            out.consts, consts,
-            "every ConstId the elaborator minted must name the same constant \
-             after lowering, or the ConstIds baked into TypedExpr::Const would \
-             have to be renumbered"
-        );
-        assert_eq!(p.consts.get(ConstId(1).0 as usize), Some(&out.consts[1]));
     }
 
     /// A builtin call reaches the core IR as a call to that same intrinsic.
@@ -700,7 +683,6 @@ mod tests {
                     }],
                 },
             ),
-            consts: vec![Const::Int(7), Const::Int(42)],
             pool,
             temps,
         };
@@ -757,7 +739,6 @@ mod tests {
                 },
             },
         ];
-        let consts = vec![Const::Int(2), Const::Int(1), Const::Int(0)];
         let p = TypedProgram {
             fns: Vec::new(),
             toplevel: nullary(
@@ -769,16 +750,15 @@ mod tests {
                     arms,
                 },
             ),
-            consts: consts.clone(),
             pool,
             temps,
         };
 
-        let out = lower::lower(&p);
-        assert_eq!(
-            out.consts, consts,
-            "the array arm's length check reads TypedPat::Array's pooled `len`; \
-             lower neither appends to nor reorders the pool it was handed"
-        );
+        // The array arm's length check compares against `TypedPat::Array`'s
+        // pooled `len`, `c0`: `lower` has no pool to mint a constant into, so
+        // every constant it emits is one the elaborator already pooled.
+        let out = format!("{}", lower::lower(&p));
+        assert!(out.contains("c0"), "the length check:\n{out}");
+        assert!(!out.contains("c3"), "a constant nobody pooled:\n{out}");
     }
 }

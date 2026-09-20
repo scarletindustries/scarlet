@@ -56,11 +56,11 @@ impl FnRTy {
         self.ty
     }
 
-    pub(super) fn params(&self) -> &[RTy] {
+    fn params(&self) -> &[RTy] {
         &self.params
     }
 
-    pub(super) fn ret(&self) -> RTy {
+    fn ret(&self) -> RTy {
         self.ret
     }
 
