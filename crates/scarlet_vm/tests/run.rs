@@ -71,6 +71,51 @@ fn nil_prints_as_nil() {
     prints("pub fn main() {\n\tprintln(println(1))\n}\n", "1\nNil\n");
 }
 
+#[test]
+fn if_picks_a_branch_in_both_positions() {
+    prints(
+        "fn max(a Int, b Int) Int {\n\
+         \tif a > b { a } else { b }\n\
+         }\n\
+         pub fn main() {\n\
+         \tx = if 1 < 2 { 10 } else { 20 }\n\
+         \tprintln(x + max(3, 4))\n\
+         \tprintln(if max(1, 2) == 2 { 7 } else { 8 })\n\
+         }\n",
+        "14\n7\n",
+    );
+}
+
+/// A loop written as tail recursion: each step's call is a tail call, which
+/// reuses the frame, so a million steps finish in the room of one.
+#[test]
+fn a_tail_recursive_loop_of_a_million_steps_finishes() {
+    prints(
+        "fn count(n Int, acc Int) Int {\n\
+         \tif n == 0 { acc } else { count(n - 1, acc + 1) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(count(1000000, 0))\n\
+         }\n",
+        "1000000\n",
+    );
+}
+
+/// Frames live on the VM's own stack, not Rust's, so a deep recursion that is
+/// not a tail call just uses memory: nothing overflows.
+#[test]
+fn a_deep_recursion_uses_memory_not_the_rust_stack() {
+    prints(
+        "fn depth(n Int) Int {\n\
+         \tif n == 0 { 0 } else { 1 + depth(n - 1) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(depth(200000))\n\
+         }\n",
+        "200000\n",
+    );
+}
+
 /// A function that uses something not built yet still loads; only calling
 /// it stops the run, and the stop says what it needs.
 #[test]

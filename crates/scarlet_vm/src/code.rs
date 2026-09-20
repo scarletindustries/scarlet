@@ -73,7 +73,30 @@ pub(crate) enum Instr {
     Ret {
         src: Reg,
     },
+    /// Continue at instruction `to` of this function.
+    Jump {
+        to: u32,
+    },
+    /// Continue at `to` when `cond` is `False`, else at the next instruction.
+    JumpIfFalse {
+        cond: Reg,
+        to: u32,
+    },
 }
+
+/// Where a Core IR expression's value goes.
+#[derive(Clone, Copy)]
+enum Dest {
+    /// Returned from the function: a `Tail` is a return or a tail call.
+    Return,
+    /// Written to `reg`, then on to the code after a `LetJoin`: a `Tail` is
+    /// a value, and a call in it is an ordinary call.
+    Join { reg: Reg, after: Label },
+}
+
+/// A jump target not placed yet. Every jump to it is patched when it is.
+#[derive(Clone, Copy)]
+struct Label(usize);
 
 /// A two-operand Int operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,13 +145,14 @@ pub(crate) fn load(program: &Program) -> Code {
     let consts = &program.consts;
     let mut fns = TiVec::new();
     for f in &program.fns {
-        fns.push(load_fn(f, consts));
+        let this = fns.next_idx();
+        fns.push(load_fn(f, consts, Some(this)));
     }
     let toplevels = program
         .inits
         .iter()
         .chain([&program.toplevel])
-        .map(|f| load_fn(f, consts))
+        .map(|f| load_fn(f, consts, None))
         .collect();
     Code {
         fns,
@@ -138,8 +162,10 @@ pub(crate) fn load(program: &Program) -> Code {
     }
 }
 
-fn load_fn(f: &LoweredFn, consts: &[Const]) -> Func {
-    match Loader::new(consts, &f.core).body(&f.core) {
+/// `this` is the function's own index, which a call to `self` means. A
+/// toplevel has none, and cannot call itself.
+fn load_fn(f: &LoweredFn, consts: &[Const], this: Option<FuncIdx>) -> Func {
+    match Loader::new(consts, &f.core, this).body(&f.core) {
         Ok((regs, instrs)) => Func::Ready(Body {
             name: format!("{}.{}", f.module, f.name),
             regs,
@@ -152,14 +178,18 @@ fn load_fn(f: &LoweredFn, consts: &[Const]) -> Func {
 
 struct Loader<'c> {
     consts: &'c [Const],
+    this: Option<FuncIdx>,
     instrs: Vec<Instr>,
+    /// Each label's instruction index once placed, and the jumps still
+    /// waiting for it.
+    labels: Vec<(Option<u32>, Vec<usize>)>,
     /// One past the highest register the function names. A value that no
     /// local holds, like a tail expression's, gets a register from here.
     next: u32,
 }
 
 impl<'c> Loader<'c> {
-    fn new(consts: &'c [Const], f: &CoreFn) -> Self {
+    fn new(consts: &'c [Const], f: &CoreFn, this: Option<FuncIdx>) -> Self {
         let mut top = 0;
         for p in &f.params {
             top = top.max(p.id.0 + 1);
@@ -167,14 +197,60 @@ impl<'c> Loader<'c> {
         top = top.max(highest_local(&f.body));
         Loader {
             consts,
+            this,
             instrs: Vec::new(),
+            labels: Vec::new(),
             next: top,
         }
     }
 
     fn body(mut self, f: &CoreFn) -> Result<(u32, Vec<Instr>), String> {
-        self.expr(&f.body)?;
+        self.expr(&f.body, Dest::Return)?;
         Ok((self.next, self.instrs))
+    }
+
+    fn label(&mut self) -> Label {
+        self.labels.push((None, Vec::new()));
+        Label(self.labels.len() - 1)
+    }
+
+    /// Put `l` at the next instruction, and point every jump to it there.
+    fn place(&mut self, l: Label) {
+        let here = self.instrs.len() as u32;
+        let waiting = match self.labels.get_mut(l.0) {
+            Some((at, waiting)) => {
+                *at = Some(here);
+                std::mem::take(waiting)
+            }
+            None => Vec::new(),
+        };
+        for i in waiting {
+            if let Some(Instr::Jump { to } | Instr::JumpIfFalse { to, .. }) = self.instrs.get_mut(i)
+            {
+                *to = here;
+            }
+        }
+    }
+
+    /// Push a jump to `l`, patched when `l` is placed if it is not yet.
+    fn jump(&mut self, l: Label, make: impl FnOnce(u32) -> Instr) {
+        let at = self.labels.get(l.0).and_then(|(at, _)| *at);
+        let i = self.instrs.len();
+        self.instrs.push(make(at.unwrap_or(0)));
+        if at.is_none()
+            && let Some((_, waiting)) = self.labels.get_mut(l.0)
+        {
+            waiting.push(i);
+        }
+    }
+
+    /// A known callee, with `self` resolved to this function.
+    fn known(&self, callee: &Callee) -> Option<FuncIdx> {
+        match callee {
+            Callee::Known(f) => Some(*f),
+            Callee::Self_ => self.this,
+            Callee::Local(_) => None,
+        }
     }
 
     fn scratch(&mut self) -> Reg {
@@ -183,7 +259,7 @@ impl<'c> Loader<'c> {
         r
     }
 
-    fn expr(&mut self, e: &CoreExpr) -> Result<(), String> {
+    fn expr(&mut self, e: &CoreExpr, dest: Dest) -> Result<(), String> {
         let mut e = e;
         loop {
             match e {
@@ -198,26 +274,54 @@ impl<'c> Loader<'c> {
                 // Every value so far is a word with nothing to count, so a
                 // drop has nothing to release yet.
                 CoreExpr::Drop { body, .. } => e = body,
-                CoreExpr::Tail(Atom::Call {
-                    callee: Callee::Known(func),
-                    args,
-                }) => {
-                    let args = args.iter().copied().map(Reg::of).collect();
-                    self.instrs.push(Instr::TailCall { func: *func, args });
-                    return Ok(());
-                }
                 CoreExpr::Tail(atom) => {
-                    let src = self.scratch();
-                    self.atom(src, atom)?;
-                    self.instrs.push(Instr::Ret { src });
+                    match (dest, atom) {
+                        (Dest::Return, Atom::Call { callee, args })
+                            if self.known(callee).is_some() =>
+                        {
+                            let args = args.iter().copied().map(Reg::of).collect();
+                            if let Some(func) = self.known(callee) {
+                                self.instrs.push(Instr::TailCall { func, args });
+                            }
+                        }
+                        (Dest::Return, atom) => {
+                            let src = self.scratch();
+                            self.atom(src, atom)?;
+                            self.instrs.push(Instr::Ret { src });
+                        }
+                        (Dest::Join { reg, after }, atom) => {
+                            self.atom(reg, atom)?;
+                            self.jump(after, |to| Instr::Jump { to });
+                        }
+                    }
                     return Ok(());
                 }
-                CoreExpr::LetJoin { .. } => return Err("a branch whose value is used".into()),
+                // The branch's value lands in `bind`, and every path through
+                // it jumps to the code after it.
+                CoreExpr::LetJoin { bind, join, body } => {
+                    let after = self.label();
+                    let reg = Reg::of(bind.id);
+                    self.expr(join, Dest::Join { reg, after })?;
+                    self.place(after);
+                    if let Some(slot) = bind.global {
+                        self.instrs.push(Instr::SetGlobal { slot, src: reg });
+                    }
+                    e = body;
+                }
+                CoreExpr::If {
+                    cond, then, els, ..
+                } => {
+                    let otherwise = self.label();
+                    let cond = Reg::of(*cond);
+                    self.jump(otherwise, |to| Instr::JumpIfFalse { cond, to });
+                    self.expr(then, dest)?;
+                    self.place(otherwise);
+                    e = els;
+                }
                 CoreExpr::LetCont { .. } | CoreExpr::Goto(_) => {
                     return Err("pattern matching".into());
                 }
                 CoreExpr::Match { .. } => return Err("match".into()),
-                CoreExpr::If { .. } => return Err("if".into()),
             }
         }
     }
@@ -247,15 +351,14 @@ impl<'c> Loader<'c> {
                 value: Value::func(*func_idx),
             },
             Atom::Closure { .. } => return Err("closures that capture".into()),
-            Atom::Call {
-                callee: Callee::Known(func),
-                args,
-            } => Instr::Call {
-                dst,
-                func: *func,
-                args: args.iter().copied().map(Reg::of).collect(),
+            Atom::Call { callee, args } => match self.known(callee) {
+                Some(func) => Instr::Call {
+                    dst,
+                    func,
+                    args: args.iter().copied().map(Reg::of).collect(),
+                },
+                None => return Err("calling a function value".into()),
             },
-            Atom::Call { .. } => return Err("calling a function value".into()),
             Atom::PrimOp { op, args } => self.prim(dst, *op, args)?,
             Atom::Intrinsic {
                 intrinsic: Intrinsic::Println,

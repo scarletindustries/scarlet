@@ -141,6 +141,14 @@ impl<'c, 'o> Machine<'c, 'o> {
                     frame.body = callee;
                     frame.pc = 0;
                 }
+                Instr::Jump { to } => frame.pc = *to as usize,
+                Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
+                    View::Bool(true) => {}
+                    View::Bool(false) => frame.pc = *to as usize,
+                    v @ (View::Float(_) | View::Int(_) | View::Nil | View::Func(_)) => {
+                        return Err(Stop::NotBuiltYet(format!("a branch on {v:?}")));
+                    }
+                },
                 Instr::Ret { src } => {
                     let v = self.get(base, *src);
                     let ret_to = frame.ret_to;

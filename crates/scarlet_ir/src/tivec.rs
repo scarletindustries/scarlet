@@ -40,7 +40,7 @@ impl<I: Idx, T> TiVec<I, T> {
 
     /// The index [`Self::push`] would return. Mint indices here, not from
     /// `len() as u32` at a call site that may not own the whole table.
-    fn next_idx(&self) -> I {
+    pub fn next_idx(&self) -> I {
         I::from_usize(self.raw.len())
     }
 

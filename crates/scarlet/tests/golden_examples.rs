@@ -107,14 +107,14 @@ fn assert_dir_wired(src_dir: &Path, golden_dir: &Path, wired: &[String], goldens
 // no entry here fails, and so does a golden left behind by a deleted program.
 macro_rules! suite {
     (
-        examples: [ $($example:ident),* $(,)? ],
-        programs: [ $($program:ident),* $(,)? ],
+        examples: [ $( $(#[$em:meta])* $example:ident ),* $(,)? ],
+        programs: [ $( $(#[$pm:meta])* $program:ident ),* $(,)? ],
         checks: [ $($check:ident),* $(,)? ],
         untested: [ $($untested:literal),* $(,)? ],
     ) => {
         $(
             #[test]
-            #[ignore = "needs the VM"]
+            $(#[$em])*
             fn $example() {
                 assert_golden_in(&examples_dir(), &golden_dir(), stringify!($example));
             }
@@ -122,7 +122,7 @@ macro_rules! suite {
 
         $(
             #[test]
-            #[ignore = "needs the VM"]
+            $(#[$pm])*
             fn $program() {
                 assert_golden_in(&programs_dir(), &programs_golden_dir(), stringify!($program));
             }
@@ -179,20 +179,33 @@ suite! {
     // asserts the child wrote zero bytes to stderr.
     examples: [
         // Language core.
+        #[ignore = "needs the VM"]
         hello,
+        #[ignore = "needs the VM"]
         control_flow,
+        #[ignore = "needs the VM"]
         pattern_matching,
+        #[ignore = "needs the VM"]
         data_types,
+        #[ignore = "needs the VM"]
         generics,
+        #[ignore = "needs the VM"]
         closures,
         // Named tco.scrl: scarlet/internal.scrl's `stack_depth` doc points at it.
+        #[ignore = "needs the VM"]
         tco,
+        #[ignore = "needs the VM"]
         errors,
         // Stdlib surface.
+        #[ignore = "needs the VM"]
         collections,
+        #[ignore = "needs the VM"]
         strings,
+        #[ignore = "needs the VM"]
         numbers,
+        #[ignore = "needs the VM"]
         money,
+        #[ignore = "needs the VM"]
         wire_format,
         // Effects. Both bind a loopback listener on port 0, serve it
         // in-process, then close it, which wakes the parked acceptors with
@@ -204,18 +217,24 @@ suite! {
         // `http_client` does that twice, the second time against a hand-rolled
         // connection driver, which is the only coverage of scarlet/http/body's
         // socket-bound half — sans-IO http_parse.scrl cannot reach it.
+        #[ignore = "needs the VM"]
         sockets,
+        #[ignore = "needs the VM"]
         http_client,
         // Multi-file: imports examples/lib/units.scrl and lib/report/table.scrl,
         // which imports `../units` relative to its own directory.
+        #[ignore = "needs the VM"]
         modules,
         // Algorithms, then the capstone: a lexer, parser and evaluator built
         // only from what the examples above teach. Read last.
+        #[ignore = "needs the VM"]
         life,
+        #[ignore = "needs the VM"]
         interpreter,
         // Benchmarks scripts/bench*.sh also drives. Deterministic, so goldened
         // like any other example.
         bench,
+        #[ignore = "needs the VM"]
         bench_list,
     ],
 
@@ -225,73 +244,97 @@ suite! {
     // answer was.
     programs: [
         // Type system: HM inference, generalization, and monomorphisation.
+        #[ignore = "needs the VM"]
         inference,
+        #[ignore = "needs the VM"]
         generics_adversarial,
         // Pattern matching, equality, and the shapes values come in.
+        #[ignore = "needs the VM"]
         exhaustive_match,
+        #[ignore = "needs the VM"]
         tuples_and_records,
+        #[ignore = "needs the VM"]
         enum_equality,
         // Field punning on constructor calls: `f(now:, self:)` desugars to
         // `f(now: now, self: self)` at parse time.
+        #[ignore = "needs the VM"]
         field_punning,
         // Evaluation: tail calls in constant stack, closure capture, and core
         // semantics.
+        #[ignore = "needs the VM"]
         tco_and_closures,
+        #[ignore = "needs the VM"]
         semantics,
         // Numeric edges: i64 wrapping, boxed ints, float canonicalization,
         // exact decimals.
+        #[ignore = "needs the VM"]
         numerics,
         // Bitwise edges: the sign bit, shift counts at and past the 64-bit
         // width, negative counts, and arithmetic (not logical) right shift.
+        #[ignore = "needs the VM"]
         bitwise,
         // Hex (`0x`) and binary (`0b`) integer literals: magnitude parse,
         // i64 range, separators, match-pattern identity with decimal.
+        #[ignore = "needs the VM"]
         hex_literals,
         // The deterministic slice of the effectful stdlib. Everything is pinned
         // as a derived fact, never a clock reading or an env value.
+        #[ignore = "needs the VM"]
         effects,
         // Subjects: a worker pool stopped and restarted; pins the native
         // park/resume + frame-slot contract (each local owns its slot).
+        #[ignore = "needs the VM"]
         subject_pool_restart,
         // Subjects: rounds of spawned callers through the pool; pins the
         // native bridge-shim contract (the frame base survives a value-stack
         // growth mid-body: the shim returns the moved base with its result).
+        #[ignore = "needs the VM"]
         subject_pool_rounds,
         // Subjects: send/receive ordering, park/wake, timeouts, owner death.
         // Cross-sender interleavings are asserted as aggregates only.
+        #[ignore = "needs the VM"]
         messages,
         // Monitors: notices after and before the end, wrapping into the
         // receiver's type, demonitor, and request/reply against a dead server.
+        #[ignore = "needs the VM"]
         monitors,
         // Ports: stdio round trip through cat, exit codes, env, the
         // terminate-on-close schedule, spawn failure, owner-death cleanup.
+        #[ignore = "needs the VM"]
         ports,
         // Kill and links: Killed notices, cascades over links in both
         // directions stopping at an unlinked boundary, normal exits not
         // spreading, self-kill. (Crashes write to stderr: tests/vm_exits.rs.)
+        #[ignore = "needs the VM"]
         exits,
         // Supervision: restart at a stable address, policies, one-for-all /
         // rest-for-one stop order and restart sets, Ask shutdown, nested
         // supervisors, keyed and unkeyed factories, introspection, and the
         // tree dying with the process that declared it. (Crashes and budget
         // exhaustion write to stderr: tests/vm_supervision.rs.)
+        #[ignore = "needs the VM"]
         supervisors,
         // HTTP/1.1 surface. Locks the native scanners behind scarlet/http/h1 to the
         // sans-IO contract the Scarlet reference parser defined.
+        #[ignore = "needs the VM"]
         http_parse,
         // The HTTP CLIENT: response-head parsing, response body framing, URL
         // parsing, and the whole request/response path driven over an
         // in-memory transport — the reach the `Io` shape was chosen for.
+        #[ignore = "needs the VM"]
         http_response,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
+        #[ignore = "needs the VM"]
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.
+        #[ignore = "needs the VM"]
         pipe,
         // JSON: the SIMD parse, on-demand reads off the tape, typed decoding
         // with accumulated paths, and the three presence states — absent, null
         // and present — that a partial update turns on. Also pins the
         // adversarial answers: 1e400, a lone surrogate, invalid UTF-8, the
         // 64-bit boundary, duplicate keys and deep nesting.
+        #[ignore = "needs the VM"]
         json,
         // scarlet/json/decode's own shape: a forty-member record written one
         // flat line per member, independent members accumulating their failures
@@ -299,6 +342,7 @@ suite! {
         // accumulation, one_of over 2 vs 2.0, and the two places where
         // accumulation is deliberately given up — `fail`, and `then`'s
         // dependent continuation.
+        #[ignore = "needs the VM"]
         decoders,
         // base64, SHA-1, and the OS CSPRNG: the RFC 4648 and FIPS 180-1
         // vectors, the SHA-1 block/length padding edges, base64's rejection
@@ -306,6 +350,7 @@ suite! {
         // example the two combine to produce, and the single-run CSPRNG
         // checks (length, two draws differ, not a uniform fill). Not a
         // quality test, and not the JIT — see native_backend.rs.
+        #[ignore = "needs the VM"]
         crypto,
     ],
 
@@ -340,7 +385,6 @@ suite! {
 
 // The timing-free "it still runs" check the bench scripts depend on.
 #[test]
-#[ignore = "needs the VM"]
 fn bench_runs() {
     run_file(&examples_dir().join("bench.scrl"), "bench");
 }
