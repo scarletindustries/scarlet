@@ -15,5 +15,6 @@
 pub use scarlet_core::*;
 
 pub mod cli;
+pub mod dis;
 pub mod lsp;
 pub mod repl;

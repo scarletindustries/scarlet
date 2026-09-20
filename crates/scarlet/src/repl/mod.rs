@@ -292,9 +292,27 @@ impl Session {
         }
     }
 
-    /// There is no bytecode to show while the VM is rebuilt.
-    fn disassemble(&mut self, _needle: &str) {
-        eprintln!("no bytecode to show: the VM is being rebuilt");
+    /// The Core IR of the session's functions whose name contains `needle`.
+    /// Filtered, never whole: the program carries the entire stdlib.
+    fn disassemble(&mut self, needle: &str) {
+        let replay = self.replay();
+        let mut scanner = crate::scanner::new_scanner(replay.clone());
+        let parsed = crate::parser::new_parser(&mut scanner).parse_program();
+        let result = bytecode::compile_with(
+            &ast::Expression::BlockExpression(parsed.ast),
+            self.compile_options(),
+        );
+        if !result.success() {
+            self.report(&result.diagnostics, &replay);
+            return;
+        }
+        let Some(program) = result.into_runnable() else {
+            return;
+        };
+        match crate::dis::listing(&program, crate::dis::Filter::Named(needle)) {
+            Some(text) => print!("{text}"),
+            None => eprintln!("no function matching '{needle}'"),
+        }
     }
 
     /// Evaluate a file as one entry, so its definitions join the session.

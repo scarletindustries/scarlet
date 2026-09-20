@@ -20,7 +20,7 @@ use std::process;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use scarlet::cli::{help, man};
-use scarlet::{ast, bytecode, diagnostic, formatter, lint, lsp, parser, repl, scanner};
+use scarlet::{ast, bytecode, diagnostic, dis, formatter, lint, lsp, parser, repl, scanner};
 
 const VERSION: &str = env!("SCARLET_VERSION");
 
@@ -55,7 +55,7 @@ enum Commands {
     Lint(LintArgs),
     /// Upgrade to a specific version (default: canary)
     Upgrade { version: Option<String> },
-    /// Print the compiled bytecode
+    /// Print the compiled Core IR
     Dis(DisArgs),
     /// Run a program
     Run(RunArgs),
@@ -64,8 +64,8 @@ enum Commands {
 #[derive(Args)]
 struct DisArgs {
     entrypoint: String,
-    /// Only functions whose name contains this. Without it every stdlib
-    /// function is printed too — they are compiled into the same program.
+    /// Every function, from any module, whose name contains this. Without it
+    /// only this file's functions and toplevel are printed.
     #[arg(long = "fn", value_name = "NAME")]
     only: Option<String>,
 }
@@ -376,8 +376,21 @@ fn main() -> process::ExitCode {
         Some(Commands::Dis(args)) => {
             let file = read_file_or_die(&args.entrypoint);
             let expr = parse_source(&file, &args.entrypoint);
-            compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
-            die("no bytecode to show: the VM is being rebuilt");
+            let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+            let Some(program) = result.into_runnable() else {
+                die("nothing to list: the compile produced no program");
+            };
+            let filter = match &args.only {
+                Some(name) => dis::Filter::Named(name),
+                None => dis::Filter::Entry,
+            };
+            match dis::listing(&program, filter) {
+                Some(text) => print!("{text}"),
+                None => die(format!(
+                    "no function matching '{}'",
+                    args.only.as_deref().unwrap_or_default()
+                )),
+            }
         }
         Some(Commands::Check { entrypoint }) => {
             let file = read_file_or_die(&entrypoint);

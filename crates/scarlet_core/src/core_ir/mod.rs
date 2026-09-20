@@ -606,17 +606,30 @@ impl fmt::Display for CoreExpr {
     }
 }
 
+/// A function headed with `name`: its parameters, return type and body.
+fn write_fn(f: &mut fmt::Formatter<'_>, name: fmt::Arguments<'_>, core: &CoreFn) -> fmt::Result {
+    write!(f, "fn {name}(")?;
+    for (i, p) in core.params.iter().enumerate() {
+        if i > 0 {
+            f.write_str(", ")?;
+        }
+        write!(f, "{p}")?;
+    }
+    writeln!(f, ") -> :{}", core.ret_ty)?;
+    write!(f, "{}", Indented(&core.body, 1))
+}
+
 impl fmt::Display for CoreFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn s{}(", self.name.0)?;
-        for (i, p) in self.params.iter().enumerate() {
-            if i > 0 {
-                f.write_str(", ")?;
-            }
-            write!(f, "{p}")?;
-        }
-        writeln!(f, ") -> :{}", self.ret_ty)?;
-        Indented(&self.body, 1).fmt(f)
+        write_fn(f, format_args!("s{}", self.name.0), self)
+    }
+}
+
+/// Headed with the module and source name rather than the interned id, which
+/// is what a person reading a listing can use: `fn scarlet/array.map(...)`.
+impl fmt::Display for LoweredFn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_fn(f, format_args!("{}.{}", self.module, self.name), &self.core)
     }
 }
 

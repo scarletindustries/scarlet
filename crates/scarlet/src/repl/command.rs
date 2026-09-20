@@ -39,7 +39,7 @@ const COMMANDS: &[Spec] = &[
         name: "dis",
         aliases: &[],
         arg: Arg::Text("name"),
-        help: "disassemble the functions whose name contains <name>",
+        help: "print the Core IR of the functions whose name contains <name>",
     },
     Spec {
         name: "load",

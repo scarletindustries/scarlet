@@ -166,7 +166,6 @@ fn a_session_round_trips_through_save_and_load() {
 
 /// `:dis` filters: the emitted program carries the whole stdlib.
 #[test]
-#[ignore = "waits for `:dis` to print Core IR"]
 fn dis_lists_only_the_matching_function() {
     let (out, err) = session("fn only_mine() Int { 7 }\n:dis only_mine\n:dis nope\n");
     assert!(out.contains("only_mine"), "{out}");
