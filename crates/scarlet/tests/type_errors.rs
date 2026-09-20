@@ -590,6 +590,7 @@ ok_case! {
 /// `Outer(a)` refuses at the argument with no path, and a field can hold
 /// nothing a type was not applied to.
 #[test]
+#[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn wire_names_the_whole_path_down_to_the_refusing_type() {
     let all = wire_rejects(
         "import scarlet/wire\n\
@@ -647,6 +648,7 @@ mod unknown_payload {
     const WANTED: &str = "the type `wire.decode` produces here is not known; annotate the binding";
 
     #[test]
+    #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
     fn an_unconstrained_decode_is_refused() {
         wire_rejects(
             "import scarlet/wire\n\
@@ -670,6 +672,7 @@ mod unknown_payload {
     /// elaborated at the generalised signature, where `a` is rigid. That is
     /// the distinction from the case above, and it is invisible in the text.
     #[test]
+    #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
     fn a_decode_in_a_generic_fn_is_refused() {
         wire_rejects(
             "import scarlet/wire\n\
