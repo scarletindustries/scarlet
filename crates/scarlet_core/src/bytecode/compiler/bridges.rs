@@ -67,11 +67,9 @@ impl Compiler {
     }
 
     /// The variant count a `SwitchTag` over `tid` dispatches on, or `None`
-    /// when the type never switches: the bytecode emitter's rule, and — via
-    /// [`crate::core_ir::SwitchCounts`] — the native planner's, so the two
-    /// backends ladder and switch the same matches. `Bool` is unboxed, so
-    /// its scrutinee has no tag word; past 255 variants the `SwitchTag.a`
-    /// byte overflows.
+    /// when the type never switches: the bytecode emitter's rule. `Bool` is
+    /// unboxed, so its scrutinee has no tag word; past 255 variants the
+    /// `SwitchTag.a` byte overflows.
     pub(super) fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
         let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
         if self.prelude.bool().is(tid) || n > 255 {

@@ -96,19 +96,6 @@ newtype_index!(
     pub struct FuncIdx("fn#")
 );
 
-/// The one fact about the type table a backend needs while planning a body:
-/// the variant count a `SwitchTag` over a type dispatches on, answered
-/// exactly as [`emit::EmitCtx::switch_variant_count`] answers it for the
-/// bytecode (`None` for `Bool`, for anything past 255 variants, and for
-/// non-enums), so the two backends make the same switch-or-ladder decision
-/// for every match. Handed to the native hook alongside the body, because
-/// the type table — like the body's `ResolvedPool` — is gone by the time
-/// the plan is compiled. It cannot be recovered from the match itself: the
-/// pattern compiler emits matches over the variants still possible at that
-/// point, so one body may legitimately hold a two-arm and a one-arm match
-/// over the same type.
-pub type SwitchCounts<'a> = &'a dyn Fn(crate::type_def::TypeId) -> Option<u8>;
-
 /// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
 /// where an unsolved inference variable is unrepresentable, so Perceus cannot
 /// be handed a type that answers `is_heap` `false` because inference lost it.

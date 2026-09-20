@@ -185,15 +185,6 @@ enum FieldMismatch {
 #[derive(Debug)]
 pub struct Emitted {
     pub program: Program,
-    /// The frame layout `emit` fixed for each body, keyed by `FuncIdx`.
-    ///
-    /// The native backend needs the same slot assignment and the same
-    /// constructor-header constants the bytecode emission chose. Handing over
-    /// what emit actually produced is the only way to be sure they agree —
-    /// re-running emit against a stand-in context recovers the slots but not
-    /// the interned constants.
-    pub frame_layouts:
-        std::collections::HashMap<crate::core_ir::FuncIdx, crate::core_ir::emit::FrameLayout>,
     /// Lowered Core IR (typed ANF) for the whole program.
     /// Golden-snapshotted by `crates/scarlet/tests/core_ir.rs`.
     pub core: crate::core_ir::CoreProgram,
@@ -447,8 +438,7 @@ pub struct Compiler {
     /// `(locals_frame_undo.len(), undo_log.len())` captured by each *scoped*
     /// `enter_module_frame` (see [`ModuleFrame::scoped`]).
     locals_frame_marks: Vec<(usize, usize)>,
-    /// Stdlib bootstrap (prelude registration, the native-hook relower)
-    /// compiles at root on purpose: the flat by-name residue it leaves *is*
+    /// Stdlib bootstrap (prelude registration) compiles at root on purpose: the flat by-name residue it leaves *is*
     /// the ambient stdlib namespace. While set, `enter_module_frame` skips
     /// namespace scoping. User modules always compile with it unset.
     retain_namespaces: bool,
@@ -544,14 +534,6 @@ pub struct Compiler {
     /// the module's `CachedModule`. Reset by `reset_to` like `recorded`.
     pub(super) module_refs: ModuleReferences,
     check_only: bool,
-    /// Whole-unit accounting for the native compile-at-load pass: how many
-    /// bodies the native hook saw and how long it
-    /// spent on them. Summarised against the 100ms unit budget (under
-    /// `SCARLET_NATIVE_DEBUG`) when the compile hands back its `Emitted`.
-    native_stats: super::native::UnitStats,
-    /// Per-body frame layouts, drained into [`Emitted`].
-    frame_layouts:
-        std::collections::HashMap<crate::core_ir::FuncIdx, crate::core_ir::emit::FrameLayout>,
     /// Whether to buffer per-occurrence `RawRef`s and resolve them into the
     /// `HoverFact` table in `finalize_references`. Only `IncrementalSession`
     /// (the LSP) consumes `HoverFact`s; the free `compile`/`check` entry points
@@ -725,11 +707,6 @@ pub struct Compiler {
     /// case, and it is the only one of the layout tests an entry file cannot
     /// express — `pub fn main` always claims the mark first.
     region_jump_overs: Option<Vec<i32>>,
-    /// Native-backend hook, installed by [`compile_with_native`] and fired by
-    /// `elaborate_body` / `materialize_eta_wrappers` once per lowered body —
-    /// see [`NativeHook`]. `None` on every other path (plain compile/check,
-    /// the LSP session).
-    native_hook: Option<NativeHook>,
 }
 
 /// One body, elaborated into a whole-module [`TypedProgram`] that the Core
@@ -762,49 +739,6 @@ struct LoweredBody {
     core: CoreFn,
     pool: ResolvedPool,
 }
-
-/// Per-body hook into the native (Cranelift) backend: called once for every
-/// lowered function body, at the only point in the pipeline where the body's
-/// post-perceus [`CoreFn`] and the [`ResolvedPool`] its `RTy`s index are both
-/// alive. An `RTy` is an index into a *per-body* pool that dies when the
-/// [`LoweredBody`] carrying it is consumed, so a post-pass over
-/// [`Emitted::core`] would resolve every type through the wrong (or a dropped)
-/// arena — native codegen must hang off this seam or not run at all.
-///
-/// The body's [`FuncIdx`](crate::core_ir::FuncIdx) is passed explicitly: it is
-/// the slot the body owns in `program.functions`/`CoreProgram::fns`, and the
-/// key the native entry table, closure dispatch and the perf map all share.
-/// The hook only observes — it receives shared references and no compiler
-/// handle, so it cannot reserve or reorder `Function` entries, and the
-/// numbering `tests/check_parity.rs` pins is untouched by installing one.
-///
-/// Fires for declared function bodies and for the eta wrappers elaboration
-/// mints; never for module toplevels or `__main__` (always-interpreted glue,
-/// no `FuncIdx` of their own), and never under `check_only`. Every fire is
-/// fired for every lowered body
-/// ([`native::config`](super::native::config)): `off` suppresses the hook
-/// entirely, `native` (the default) fires for every body, and `mix` fires for
-/// a seeded per-function subset — so a backend never sees a body the mode
-/// excluded and need not re-implement the env contract. Stdlib bodies fire
-/// it too: installing a hook makes `compile_impl` re-lower the whole stdlib
-/// from source instead of seeding the precompiled blob (which ships
-/// post-emit bytecode — no `CoreFn`/`ResolvedPool` exists to hand a hook),
-/// so the hook sees every function body in the program, stdlib and user
-/// alike. Only the hook-free paths (plain compile/check, the LSP, `off`
-/// mode) take the seeded shortcut.
-///
-/// A caller-installed callback, even though CLIF construction itself lives in
-/// this crate beside `emit` (`core_ir::clif`): the driver — `crates/al`, which
-/// owns the VM, the runtime shims generated code calls by symbol name, and the
-/// JIT finalize step that resolves them (`vm/jit.rs`) — decides what each fire
-/// does and captures the `JITModule` it accumulates into, then finalizes and
-/// publishes entries into the emitted program's
-/// [`NativeTable`](super::NativeTable) after [`compile_with_native`] returns.
-/// This compiler stays backend-agnostic: it hands over `(FuncIdx, CoreFn,
-/// pool)` and never learns what a backend is.
-pub type NativeHook = Box<
-    dyn FnMut(crate::core_ir::FuncIdx, &CoreFn, &ResolvedPool, crate::core_ir::SwitchCounts<'_>),
->;
 
 /// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
 /// entering an expression) and its fill (on leaving it). No `Ty` ever takes this
@@ -1132,8 +1066,6 @@ pub struct CompileOptions<'a> {
     pub check_only: bool,
     /// Analyse the buffer *as* this module rather than as `main`.
     pub as_module: Option<ModulePath>,
-    /// Called once per lowered function body; see [`NativeHook`].
-    pub native_hook: Option<NativeHook>,
     /// Whether bindings nothing reads are reported. See [`UnusedBindings`].
     pub unused_bindings: UnusedBindings,
     /// Whether the entry may contain module-scope statements. See
@@ -1154,26 +1086,6 @@ impl<'a> CompileOptions<'a> {
 
 pub fn compile(expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
     compile_with(expr, CompileOptions::new(base_dir))
-}
-
-/// [`compile`], with a [`NativeHook`] installed for the duration: the hook is
-/// called once per lowered function body, paired with the live `ResolvedPool`
-/// its `RTy`s index and keyed by the body's `FuncIdx`. See [`NativeHook`] for
-/// the full contract. The caller publishes whatever the hook compiled into
-/// the emitted program's [`NativeTable`](super::NativeTable) after this
-/// returns — the table is sized once the function list is final.
-pub fn compile_with_native(
-    expr: &ast::Expression,
-    base_dir: Option<&Path>,
-    native_hook: NativeHook,
-) -> CompileResult {
-    compile_with(
-        expr,
-        CompileOptions {
-            native_hook: Some(native_hook),
-            ..CompileOptions::new(base_dir)
-        },
-    )
 }
 
 pub fn check(expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
@@ -1267,9 +1179,6 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         defer_depth: 0,
         deferred_env_pin: None,
         region_jump_overs: None,
-        native_hook: None,
-        native_stats: super::native::UnitStats::default(),
-        frame_layouts: std::collections::HashMap::new(),
     }
 }
 
@@ -1319,7 +1228,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         base_dir,
         check_only,
         as_module,
-        native_hook,
         unused_bindings,
         module_scope,
     } = options;
@@ -1331,7 +1239,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     let expr = &expr;
 
     let mut c = new_compiler(base_dir, check_only);
-    c.native_hook = native_hook;
     c.unused_bindings = unused_bindings;
     c.module_scope = module_scope;
     if let Some(m) = as_module.clone() {
@@ -1485,10 +1392,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         code_len: c.program.code.len() as i32 - main_start,
     });
     c.program.entry = c.program.functions.len() as i32 - 1;
-    // The function list is final: size the native-entry table against it so
-    // the backend can publish compiled bodies keyed by the same `FuncIdx`
-    // numbering. Slots start empty (= interpret).
-    c.program.native = super::NativeTable::new(c.program.functions.len());
 
     if !check_only {
         // Bind the runtime-constructed stdlib values (`Program.templates` /
@@ -1498,9 +1401,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // owns each instruction: `functions` is that map, and the entry frame
         // owns everything the bodies do not.
         fuse(&mut c.program.code, &c.program.functions);
-        // Whole-unit native compile accounting, printed under
-        // `SCARLET_NATIVE_DEBUG` and checked against the <100ms budget.
-        c.native_stats.log_summary(c.program.code.len());
     }
 
     let (references, _facts) = c.finalize_references();
@@ -1508,7 +1408,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         emitted: Some(Emitted {
             program: c.program,
             core: c.core,
-            frame_layouts: c.frame_layouts,
         }),
         entry,
         diagnostics: c.engine.diagnostics,
@@ -4785,27 +4684,10 @@ impl Compiler {
         use crate::core_ir::{emit, perceus};
         for (i, w) in wrappers.into_iter().enumerate() {
             let w = perceus::perceus(pool, w);
-            // Wrappers own real `Function` slots and are `CallKnown` targets,
-            // so they are native candidates like any declared body; `base + i`
-            // is the `FuncIdx` their reservation in `Self::elaborate` fixed.
-            // Guarded on `check_only` here (unlike `elaborate_body`, which
-            // returned before its hook) because a check still materializes
-            // wrappers.
-            let wrapper_idx = crate::core_ir::FuncIdx::from_usize(base + i);
-            if !self.check_only
-                && let Some(mut hook) = self.native_hook.take()
-            {
-                let native_t0 = std::time::Instant::now();
-                hook(wrapper_idx, &w, pool, &|tid| self.switch_variant_count(tid));
-                self.native_hook = Some(hook);
-                self.native_stats.record(native_t0.elapsed());
-                super::native::log_selected(wrapper_idx, self.engine.str(w.name));
-            }
             let jump_over = self.current_addr();
             self.program.code.push(op_arg(Op::Jump, 0));
             let body_start = self.current_addr();
             let out = emit::emit(&w, self);
-            self.frame_layouts.insert(wrapper_idx, out.layout);
             self.program.code.extend(out.code);
             self.emit(Op::Ret);
             let end = self.current_addr();
@@ -4866,21 +4748,6 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{core}", self.engine.str(name));
         }
-        // The native-backend seam: this body's `RTy`s index `pool`, which dies
-        // with this call — see [`NativeHook`]. Post-perceus, so the hook sees
-        // the same Core IR (Drops, reuse tokens and all) that `emit` consumes.
-        // The hook time feeds
-        // the whole-unit budget summary.
-        // Taken out for the call so the oracle can borrow the type table.
-        if let Some(mut hook) = self.native_hook.take() {
-            let native_t0 = std::time::Instant::now();
-            hook(func_idx, &core, &pool, &|tid| {
-                self.switch_variant_count(tid)
-            });
-            self.native_hook = Some(hook);
-            self.native_stats.record(native_t0.elapsed());
-            super::native::log_selected(func_idx, self.engine.str(name));
-        }
         self.core.fns.push(core.clone());
         // Linking a body is a plain append: `emit`'s jump operands are relative
         // to `code[0]` of the block, and `code[0]` lands at `base`, which is
@@ -4892,7 +4759,6 @@ impl Compiler {
         // body, `materialize_eta_wrappers`, has already run.
         let base = self.current_addr();
         let out = emit::emit(&core, self);
-        self.frame_layouts.insert(func_idx, out.layout);
         self.program.code.extend(out.code);
         // No `Ret` appended here: `emit` runs the whole body at `tail = true`,
         // so its own code already ends in a terminator (its doc comment and
