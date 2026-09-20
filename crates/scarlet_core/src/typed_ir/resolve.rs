@@ -147,14 +147,12 @@ impl Denotation {
             ValueKind::Constructor {
                 type_id,
                 variant_idx,
-                type_name,
                 arity,
                 ..
             } => Some(Denotation::ctor(
                 VariantRef {
                     type_id,
                     variant_idx,
-                    type_name,
                 },
                 Arity(arity),
             )),
@@ -218,7 +216,6 @@ mod tests {
         VariantRef {
             type_id: TypeId(3),
             variant_idx: 1,
-            type_name: StrId(10),
         }
     }
 

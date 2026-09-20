@@ -198,34 +198,21 @@ impl ElabCtx for Compiler {
         let TypeNode::Con { id, .. } = self.engine.node(resolved) else {
             return None;
         };
-        let (tref, ok, fail, err_has_payload) = if self.prelude.option().is(id) {
-            (
-                self.prelude.option(),
-                self.prelude.some(),
-                self.prelude.none(),
-                false,
-            )
+        let (ok, fail, err_has_payload) = if self.prelude.option().is(id) {
+            (self.prelude.some(), self.prelude.none(), false)
         } else if self.prelude.result().is(id) {
-            (
-                self.prelude.result(),
-                self.prelude.ok(),
-                self.prelude.err(),
-                true,
-            )
+            (self.prelude.ok(), self.prelude.err(), true)
         } else {
             return None;
         };
-        let tn = self.engine.intern(tref.name);
         Some(OrShape {
             fail: VariantRef {
                 type_id: fail.type_id,
                 variant_idx: fail.variant_idx,
-                type_name: tn,
             },
             ok: VariantRef {
                 type_id: ok.type_id,
                 variant_idx: ok.variant_idx,
-                type_name: tn,
             },
             err_has_payload,
         })

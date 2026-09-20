@@ -1,4 +1,4 @@
-fn s0(%0:t0) -> :t1
+fn main.g(%0:t0) -> :t1
   match %0 :t1
     | 512.0(%1, %2) ->
       drop %0 [ctor:2]
@@ -8,7 +8,7 @@ fn s0(%0:t0) -> :t1
       drop %0 [ctor:0]
       ret c0
 
-fn s1(%0:t1) -> :t2
+fn main.f(%0:t1) -> :t2
   letj %6:t0 =
     if %0 :t0
       let %1:t2 = c1
@@ -24,12 +24,12 @@ fn s1(%0:t1) -> :t2
   let %8:t2 = c1
   ret IntAdd(%8, %7)
 
-fn s2() -> :t1
+fn main.main() -> :t1
   let %0:t5 = ctor 261.0()
   ret call fn#1(%0)
 
 toplevel:
-fn s3() -> :t6
+fn main.__main__() -> :t6
   let %0:t4@g0 = closure fn#0()
   let %1:t7@g1 = closure fn#1()
   let %2:t3@g2 = closure fn#2()

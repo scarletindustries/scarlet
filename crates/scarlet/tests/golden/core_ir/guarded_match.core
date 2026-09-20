@@ -1,4 +1,4 @@
-fn s0(%0:t0, %1:t1, %2:t2) -> :t1
+fn main.clamp(%0:t0, %1:t1, %2:t2) -> :t1
   letc j0 =
     letc j1 =
       match %0 :t1
@@ -19,14 +19,14 @@ fn s0(%0:t0, %1:t1, %2:t2) -> :t1
       else
         goto j0
 
-fn s1() -> :t1
+fn main.main() -> :t1
   let %0:t4 = c0
   let %1:t4 = c1
   let %2:t4 = c2
   ret call fn#0(%0, %1, %2)
 
 toplevel:
-fn s2() -> :t5
+fn main.__main__() -> :t5
   let %0:t6@g0 = closure fn#0()
   let %1:t7@g1 = closure fn#1()
   ret nil

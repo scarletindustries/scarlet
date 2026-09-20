@@ -88,14 +88,13 @@ fn binding_bug(b: BindingId, why: &str) -> ! {
 /// `PushGlobal slot` already-emitted fn bodies use.
 pub(crate) fn lower(p: &TypedProgram) -> CoreProgram {
     let mut fns = Vec::with_capacity(p.fns.len());
-    for f in &p.fns {
+    for (i, f) in p.fns.iter().enumerate() {
         let f = lower_fn(p.temps, f);
-        // Only `emit_toplevel` reads the pinning, so a pinned bind inside an
-        // ordinary fn would be silently ignored.
+        // Only a toplevel's lowering reads the pinning, so a pinned bind inside
+        // an ordinary fn would be silently ignored.
         debug_assert!(
             f.body.toplevel_globals().is_empty(),
-            "ordinary fn s{} carries slot-pinned binds",
-            f.name.0
+            "ordinary fn#{i} carries slot-pinned binds"
         );
         fns.push(f);
     }
@@ -120,7 +119,6 @@ fn lower_fn(temps: TempTys, f: &TypedFn) -> CoreFn {
         .collect();
     let body = lo.sealed(|lo| lo.expr_tail(&f.body, f.ret, SpinePos::Outer));
     CoreFn {
-        name: f.name,
         params,
         body,
         ret_ty: f.ret,

@@ -1,4 +1,4 @@
-fn s0() -> :t0
+fn main.f() -> :t0
   let %0:t0 = c0
   let %1:t1 = ctor 512.0(%0)
   let %2:t2 = ctor 263.0(%1)
@@ -14,11 +14,11 @@ fn s0() -> :t0
       let %5:t0 = c2
       ret IntAdd(%4, %5)
 
-fn s1() -> :t4
+fn main.main() -> :t4
   ret call fn#0()
 
 toplevel:
-fn s2() -> :t5
+fn main.__main__() -> :t5
   let %0:t2@g0 = closure fn#0()
   let %1:t6@g1 = closure fn#1()
   ret nil

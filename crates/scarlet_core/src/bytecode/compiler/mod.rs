@@ -662,6 +662,8 @@ struct Elaborated {
 /// the `Load::Global` every function body reads is unspellable: there is no
 /// side table to desync from the binds it describes.
 struct LoweredBody {
+    /// The function's name, from the `TypedFn` it was lowered from.
+    name: StrId,
     core: CoreFn,
     pool: Rc<ResolvedPool>,
 }
@@ -2873,16 +2875,20 @@ impl Compiler {
         if !self.toplevel_binds.is_empty() {
             unclaimed_toplevel_slots(self.toplevel_binds.len());
         }
-        let LoweredBody { core: top, pool } = lowered;
+        let LoweredBody {
+            name,
+            core: top,
+            pool,
+        } = lowered;
         // Perceus runs so *temporaries* passed into calls are moved (rc==1 in
         // the callee → its own reuse fires). `keep_globals` then takes the
         // pinned globals back out: their last use in the toplevel is not their
         // last use in the program.
         let top = perceus::keep_globals(perceus::perceus(&pool, top));
         if std::env::var("CORE_DBG").is_ok() {
-            eprintln!("=== {}\n{top}", self.engine.str(top.name));
+            eprintln!("=== {}\n{top}", self.engine.str(name));
         }
-        let lowered = self.lowered_fn(top, pool);
+        let lowered = self.lowered_fn(name, top, pool);
         match kind {
             TopKind::Module => {
                 self.inits.push(lowered);
@@ -4392,19 +4398,25 @@ impl Compiler {
         let crate::core_ir::CoreProgram {
             mut fns, toplevel, ..
         } = crate::core_ir::lower::lower(&program);
+        // Names come from the typed program, index for index: `lower` keeps
+        // `fns` in `TypedProgram::fns` order.
+        let names: Vec<StrId> = program.fns.iter().map(|f| f.name).collect();
         let pool = Rc::new(program.pool);
         let wrappers = fns.split_off(eta_base);
+        let wrappers = names[eta_base..].iter().copied().zip(wrappers).collect();
         self.materialize_eta_wrappers(&pool, eta_base, wrappers);
-        let core = match at {
-            Some(func_idx) => fns.swap_remove(func_idx.index()),
-            None => CoreFn {
-                name: program.toplevel.name,
-                params: Vec::new(),
-                body: toplevel,
-                ret_ty: program.toplevel.ret,
-            },
+        let (name, core) = match at {
+            Some(func_idx) => (names[func_idx.index()], fns.swap_remove(func_idx.index())),
+            None => (
+                program.toplevel.name,
+                CoreFn {
+                    params: Vec::new(),
+                    body: toplevel,
+                    ret_ty: program.toplevel.ret,
+                },
+            ),
         };
-        LoweredBody { core, pool }
+        LoweredBody { name, core, pool }
     }
 
     /// Elaborate one body into a whole-module [`TypedProgram`], reserving a
@@ -4476,22 +4488,23 @@ impl Compiler {
         &mut self,
         pool: &Rc<ResolvedPool>,
         base: usize,
-        wrappers: Vec<CoreFn>,
+        wrappers: Vec<(StrId, CoreFn)>,
     ) {
         use crate::core_ir::perceus;
-        for (i, w) in wrappers.into_iter().enumerate() {
+        for (i, (name, w)) in wrappers.into_iter().enumerate() {
             let core = perceus::perceus(pool, w);
-            self.fns[FuncIdx::from_usize(base + i)] = Some(self.lowered_fn(core, Rc::clone(pool)));
+            self.fns[FuncIdx::from_usize(base + i)] =
+                Some(self.lowered_fn(name, core, Rc::clone(pool)));
         }
     }
 
     /// Package a finished body for the [`Program`]. Called while the module
     /// that owns the body is the one being compiled, which is what makes
     /// `current_module_key` its module.
-    fn lowered_fn(&self, core: CoreFn, pool: Rc<ResolvedPool>) -> LoweredFn {
+    fn lowered_fn(&self, name: StrId, core: CoreFn, pool: Rc<ResolvedPool>) -> LoweredFn {
         LoweredFn {
-            module: self.current_module_key.clone(),
-            name: self.engine.str(core.name).to_string(),
+            module: self.current_module_key.to_string(),
+            name: self.engine.str(name).to_string(),
             core,
             pool,
         }
@@ -4520,7 +4533,7 @@ impl Compiler {
         func_idx: FuncIdx,
     ) {
         use crate::core_ir::perceus;
-        let LoweredBody { core, pool } =
+        let LoweredBody { core, pool, .. } =
             self.elaborate_then_materialize(clean, Some(func_idx), |c, pool, fns| {
                 typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, walk_tys)
             });
@@ -4531,7 +4544,7 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{core}", self.engine.str(name));
         }
-        self.fns[func_idx] = Some(self.lowered_fn(core, pool));
+        self.fns[func_idx] = Some(self.lowered_fn(name, core, pool));
     }
 
     /// Open the elaboration phase boundary: every function body walked until

@@ -22,7 +22,6 @@ use crate::typed_ir::{RTy, ResolvedPool};
 /// make `is_heap` answer `false` by accident.
 pub(crate) fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
     let CoreFn {
-        name,
         params,
         body,
         ret_ty,
@@ -41,7 +40,6 @@ pub(crate) fn perceus(pool: &ResolvedPool, f: CoreFn) -> CoreFn {
         .collect();
     let body = cx.wrap_drops(&dead_params, None, body);
     CoreFn {
-        name,
         params,
         body: reuse_pass(body),
         ret_ty,

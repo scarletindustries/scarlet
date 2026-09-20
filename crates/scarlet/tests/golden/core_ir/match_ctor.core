@@ -1,4 +1,4 @@
-fn s0(%0:t0) -> :t1
+fn main.area(%0:t0) -> :t1
   match %0 :t1
     | 512.0(%1) ->
       drop %0 [ctor:1]
@@ -9,14 +9,14 @@ fn s0(%0:t0) -> :t1
       drop %0 [ctor:2]
       ret IntMul(%4, %5)
 
-fn s1() -> :t1
+fn main.main() -> :t1
   let %0:t2 = c1
   let %1:t2 = c2
   let %2:t3 = ctor 512.1(%0, %1)
   ret call fn#0(%2)
 
 toplevel:
-fn s2() -> :t4
+fn main.__main__() -> :t4
   let %0:t5@g0 = closure fn#0()
   let %1:t3@g1 = closure fn#1()
   ret nil

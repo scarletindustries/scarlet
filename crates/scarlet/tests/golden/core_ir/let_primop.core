@@ -1,4 +1,4 @@
-fn s0() -> :t0
+fn main.main() -> :t0
   let %0:t0 = c0
   let %1:t0 = c1
   let %2:t0 = IntAdd(%0, %1)
@@ -7,7 +7,7 @@ fn s0() -> :t0
   ret IntSub(%4, %2)
 
 toplevel:
-fn s1() -> :t1
+fn main.__main__() -> :t1
   let %0:t2@g0 = closure fn#0()
   ret nil
 where

@@ -28,7 +28,7 @@ pub fn listing(program: &Program, filter: Filter<'_>) -> Option<String> {
     let mut shown = 0;
     for (i, f) in (&program.fns).into_iter().enumerate() {
         let keep = match filter {
-            Filter::Entry => f.module == entry,
+            Filter::Entry => f.module == entry.as_str(),
             Filter::Named(needle) => f.name.contains(needle),
         };
         if keep {
@@ -49,7 +49,7 @@ fn summary(program: &Program, entry: &ModuleKey) -> String {
     let total = (&program.fns).into_iter().count();
     let own = (&program.fns)
         .into_iter()
-        .filter(|f| &f.module == entry)
+        .filter(|f| f.module == entry.as_str())
         .count();
     let start = match program.main {
         Some(main) => format!("starts at {main} ({})", program.fns[main].name),

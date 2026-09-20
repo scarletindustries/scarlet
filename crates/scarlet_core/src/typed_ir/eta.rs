@@ -174,7 +174,6 @@ mod tests {
         VariantRef {
             type_id: TypeId(9),
             variant_idx: 0,
-            type_name: StrId(10),
         }
     }
 

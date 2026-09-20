@@ -675,14 +675,12 @@ mod tests {
             let Some((idx, labels, tys)) = self.ctors.get(name).cloned() else {
                 elaborator_bug("unresolved constructor pattern", Span::DUMMY)
             };
-            let type_name = self.intern("T");
             let arity = Arity::of(&labels);
             let labels = labels.iter().map(|l| self.intern(l)).collect();
             CtorPat::from_parts(
                 VariantRef {
                     type_id: USER,
                     variant_idx: idx,
-                    type_name,
                 },
                 arity,
                 labels,
@@ -806,7 +804,6 @@ mod tests {
                 variant: VariantRef {
                     type_id: USER,
                     variant_idx: 1,
-                    type_name: StrId(0),
                 },
                 fields: vec![],
             }
@@ -905,7 +902,6 @@ mod tests {
         let v = VariantRef {
             type_id: USER,
             variant_idx: 0,
-            type_name: cx.intern("T"),
         };
         let a = cx.intern("a");
         let b = cx.intern("b");
@@ -926,7 +922,6 @@ mod tests {
         let v = VariantRef {
             type_id: USER,
             variant_idx: 0,
-            type_name: cx.intern("T"),
         };
         let a = cx.intern("a");
         let b = cx.intern("b");
@@ -941,7 +936,6 @@ mod tests {
         let v = VariantRef {
             type_id: USER,
             variant_idx: 0,
-            type_name: cx.intern("T"),
         };
         let a = cx.intern("a");
         let b = cx.intern("b");

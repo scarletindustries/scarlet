@@ -891,12 +891,17 @@ mod function_modules {
         let mut maps: Vec<String> = (&program.fns)
             .into_iter()
             .filter(|f| f.name == "map")
-            .map(|f| f.module.to_string())
+            .map(|f| f.module.clone())
             .collect();
         maps.sort();
         assert_eq!(maps, ["main", "scarlet/array"]);
-        assert_eq!(program.toplevel.module, ModuleKey::main());
+        assert_eq!(program.toplevel.module, ModuleKey::main().as_str());
         let array = ModuleKey::of(&vec!["scarlet".to_string(), "array".to_string()]);
-        assert!(program.inits.iter().any(|init| init.module == array));
+        assert!(
+            program
+                .inits
+                .iter()
+                .any(|init| init.module == array.as_str())
+        );
     }
 }

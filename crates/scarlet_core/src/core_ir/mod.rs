@@ -13,11 +13,9 @@ pub use prim::PrimOp;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::module::ModuleKey;
 use crate::tivec::TiVec;
 use crate::type_def::TypeId;
 use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy, ResolvedPool};
-use crate::types::StrId;
 use scarlet_ir::newtype_index;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -130,15 +128,13 @@ impl CoreBind {
     }
 }
 
-/// Resolved constructor identity, captured at lowering so `emit` need not
-/// re-consult the `TypeEnv` for dispatch. Perceus pairs drops on shape
-/// equality: `type_id`, `variant_idx`, arity. Display name is
-/// `variants[variant_idx].name`, looked up at emit.
+/// Resolved constructor identity, captured at lowering so a backend need not
+/// consult the type environment for dispatch. Perceus pairs drops on shape
+/// equality: `type_id`, `variant_idx`, arity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantRef {
     pub(crate) type_id: TypeId,
     pub(crate) variant_idx: u16,
-    pub(crate) type_name: StrId,
 }
 
 /// Heap-cell shape for Perceus reuse pairing: a constructor cell with this
@@ -357,10 +353,9 @@ impl CoreExpr {
     }
 }
 
-/// One lowered function.
+/// One lowered function. Its name travels beside it, on [`LoweredFn`].
 #[derive(Debug, Clone)]
 pub struct CoreFn {
-    pub(crate) name: StrId,
     pub(crate) params: Vec<CoreBind>,
     pub(crate) body: CoreExpr,
     pub(crate) ret_ty: RTy,
@@ -389,14 +384,17 @@ impl Default for CoreProgram {
 /// together with the eta wrappers it minted.
 #[derive(Debug, Clone)]
 pub struct LoweredFn {
-    /// The module whose source this body was lowered from.
-    pub module: ModuleKey,
+    /// The key of the module whose source this body was lowered from, as
+    /// text: `main` for the entry file, `scarlet/array` for a stdlib module,
+    /// a canonical path for any other file. For people to read, and for
+    /// picking out one module's functions.
+    pub module: String,
     /// The source name, for anything a person reads: a crash report, a stack
     /// trace, a profile. `core.name` is an interned id that means nothing
     /// once the compile is over. Unique only within `module`: `scarlet/array`
     /// and `scarlet/option` both have a `map`.
     pub name: String,
-    pub core: CoreFn,
+    pub(crate) core: CoreFn,
     /// What every `RTy` in `core` indexes. Nothing reads a body's types until
     /// a backend does, but dropping the pool would leave those indices
     /// pointing into an arena that no longer exists.
@@ -611,9 +609,9 @@ impl fmt::Display for CoreExpr {
     }
 }
 
-/// A function headed with `name`: its parameters, return type and body.
-fn write_fn(f: &mut fmt::Formatter<'_>, name: fmt::Arguments<'_>, core: &CoreFn) -> fmt::Result {
-    write!(f, "fn {name}(")?;
+/// A function under `head`, then its parameters, return type and body.
+fn write_fn(f: &mut fmt::Formatter<'_>, head: fmt::Arguments<'_>, core: &CoreFn) -> fmt::Result {
+    write!(f, "{head}(")?;
     for (i, p) in core.params.iter().enumerate() {
         if i > 0 {
             f.write_str(", ")?;
@@ -626,7 +624,7 @@ fn write_fn(f: &mut fmt::Formatter<'_>, name: fmt::Arguments<'_>, core: &CoreFn)
 
 impl fmt::Display for CoreFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_fn(f, format_args!("s{}", self.name.0), self)
+        write_fn(f, format_args!("fn"), self)
     }
 }
 
@@ -634,7 +632,11 @@ impl fmt::Display for CoreFn {
 /// is what a person reading a listing can use: `fn scarlet/array.map(...)`.
 impl fmt::Display for LoweredFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_fn(f, format_args!("{}.{}", self.module, self.name), &self.core)
+        write_fn(
+            f,
+            format_args!("fn {}.{}", self.module, self.name),
+            &self.core,
+        )
     }
 }
 
@@ -683,7 +685,6 @@ pub(crate) mod testkit {
         VariantRef {
             type_id: TypeId(tid),
             variant_idx: idx,
-            type_name: StrId::NONE,
         }
     }
 
@@ -702,7 +703,6 @@ pub(crate) mod testkit {
 
     pub(crate) fn func(params: Vec<CoreBind>, body: CoreExpr, ret_ty: RTy) -> CoreFn {
         CoreFn {
-            name: StrId::NONE,
             params,
             body,
             ret_ty,
@@ -871,7 +871,6 @@ else
     #[test]
     fn core_fn_header_and_body() {
         let f = CoreFn {
-            name: StrId(42),
             params: vec![bind(0, RTy(1)), bind(1, RTy(1))],
             body: CoreExpr::Tail(Atom::prim(PrimOp::IntLt, vec![LocalId(0), LocalId(1)])),
             ret_ty: RTy(3),
@@ -879,7 +878,7 @@ else
         assert_eq!(
             f.to_string(),
             "\
-fn s42(%0:1, %1:1) -> :3
+fn(%0:1, %1:1) -> :3
   ret IntLt(%0, %1)
 "
         );

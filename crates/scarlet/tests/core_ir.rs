@@ -33,11 +33,11 @@ fn lower(source: &str) -> String {
     let entry = scarlet::module::ModuleKey::main();
     let mut raw = String::new();
     for f in &program.fns {
-        if f.module == entry {
-            raw.push_str(&format!("{}\n", f.core));
+        if f.module == entry.as_str() {
+            raw.push_str(&format!("{f}\n"));
         }
     }
-    raw.push_str(&format!("toplevel:\n{}", program.toplevel.core));
+    raw.push_str(&format!("toplevel:\n{}", program.toplevel));
     // Consts first: the `where` block needs both the original index and the
     // new name.
     let const_map = renumber(&raw, b'c');
@@ -45,7 +45,6 @@ fn lower(source: &str) -> String {
     // type — rather than an interner offset.
     let mut out = apply_renumber(&raw, b':', ":t", &renumber(&raw, b':'));
     out = apply_renumber(&out, b'c', "c", &const_map);
-    out = apply_renumber(&out, b's', "s", &renumber(&raw, b's'));
     // `fn#N`/`@gN` are absolute program offsets shared with the stdlib, so
     // dense-renumber them like the rest.
     out = renumber_prefixed(&out, "fn#");

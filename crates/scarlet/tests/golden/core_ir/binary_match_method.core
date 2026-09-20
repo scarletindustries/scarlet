@@ -1,4 +1,4 @@
-fn s0(%0:t0) -> :t1
+fn main.to_method(%0:t0) -> :t1
   letc j0 =
     letc j1 =
       letc j2 =
@@ -79,13 +79,13 @@ fn s0(%0:t0) -> :t1
       else
         goto j0
 
-fn s1() -> :t1
+fn main.main() -> :t1
   let %0:t4 = c8
   let %1:t5 = BinaryFromString(%0)
   ret call fn#0(%1)
 
 toplevel:
-fn s2() -> :t6
+fn main.__main__() -> :t6
   let %0:t7@g0 = closure fn#0()
   let %1:t8@g1 = closure fn#1()
   ret nil
