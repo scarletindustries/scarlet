@@ -48,7 +48,7 @@ use std::rc::Rc;
 use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
-use crate::core_ir::{Const, ConstId, CoreExpr, CoreFn, FuncIdx, LoweredFn, Program};
+use crate::core_ir::{Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program};
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
@@ -56,7 +56,6 @@ use crate::typed_ir::{
     self, CaptureIdx, Denotation, ElabCtx, FnTable, FrameSlot, GlobalSlot, OrShape, PreludeTys,
     RTy, ResolvedPool, TempTys, TypedExpr, TypedFn, TypedProgram, WalkStep, Zonker, pool_for,
 };
-use indexmap::IndexMap;
 use smallvec::SmallVec;
 
 use crate::module::{
@@ -72,8 +71,8 @@ use crate::type_def::TypeId;
 use crate::types::{
     AnnotationContext, ArenaSlice, Constraint, CtorResolver, DefinitionLocation, EntityKind,
     Hydrator, InferEngine, MatchFunTypeError, NullaryPrim, Pat, PatternBindings, PatternSink,
-    Scheme, StrId, Ty, TypeBody, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono,
-    new_engine, new_env, pool,
+    Scheme, StrId, Ty, TypeEnv, TypeInfo, TypeNode, UsefulnessMatrix, ValueKind, mono, new_engine,
+    new_env, pool,
 };
 
 mod bridges;
@@ -1270,11 +1269,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
 }
 
 impl Compiler {
-    pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
-        &self.engine.diagnostics
-    }
-
     /// The prelude bindings `register_prelude` established.
+    #[cfg(test)]
     pub(crate) fn prelude_bindings(&self) -> PreludeBindings {
         self.prelude.clone()
     }

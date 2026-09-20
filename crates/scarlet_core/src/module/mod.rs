@@ -9,7 +9,7 @@ use crate::bytecode::Watermark;
 use crate::reference::ModuleReferences;
 use crate::type_def::TypeId;
 use crate::typed_ir::GlobalSlot;
-use crate::types::{DefinitionLocation, Scheme, TypeInfo};
+use crate::types::{Scheme, TypeInfo};
 
 pub(crate) mod stdlib;
 
@@ -99,28 +99,12 @@ pub fn collect_scrl_files(dir: &Path, out: &mut Vec<PathBuf>) {
 pub struct ExportedValue {
     pub(crate) scheme: Scheme,
     pub(crate) local_slot: Option<GlobalSlot>,
-    /// A function's parameter names, in order. Empty for anything else.
-    ///
-    /// Documentation, not semantics: Scarlet rejects labelled arguments outside a
-    /// constructor call, so a parameter name never reaches a call site and must
-    /// stay out of `TypeNode::Fun` — otherwise unification would have to decide
-    /// whether `fn(path String)` equals `fn(p String)`. Constructor field
-    /// labels *are* semantic and live in the type instead.
-    pub(crate) param_names: Vec<String>,
-    /// The declaration's own doc comment, carried across module boundaries.
-    pub(crate) doc: Option<String>,
 }
 
-/// A module's exported type: its `TypeInfo` plus the declaration site and doc,
-/// so the reference graph and hover work for it.
+/// A module's exported type.
 #[derive(Debug, Clone)]
 pub struct ExportedType {
     pub(crate) info: TypeInfo,
-    /// The `type` declaration's own location. `None` only for types with no
-    /// source declaration to point at.
-    pub(crate) def: Option<DefinitionLocation>,
-    /// The declaration's own doc comment, carried across module boundaries.
-    pub(crate) doc: Option<String>,
 }
 
 /// What an importer sees of a compiled module: its `pub` types and values, plus

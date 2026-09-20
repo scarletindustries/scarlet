@@ -114,6 +114,7 @@ pub struct CoreBind {
 }
 
 impl CoreBind {
+    #[cfg(test)]
     pub(crate) fn id(&self) -> LocalId {
         self.id
     }
@@ -798,7 +799,7 @@ mod tests {
             e.to_string(),
             "\
 let %2:10 = IntAdd(%0, %1)
-drop %0 [Enum:3]
+drop %0 [ctor:3]
 let %3:11 = ctor 7.1(%2) reuse %0
 ret %3
 "

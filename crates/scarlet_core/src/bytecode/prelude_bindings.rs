@@ -71,13 +71,6 @@ impl CtorRef {
         variant_idx: 0,
         arity: 0,
     };
-
-    /// Whether `(type_id, variant_idx)` is this prelude constructor. Guards on
-    /// `type_id != NONE` so a pre-capture binding never falsely matches.
-    #[inline]
-    pub(crate) fn is(&self, type_id: TypeId, variant_idx: u16) -> bool {
-        type_id != TypeId::NONE && type_id == self.type_id && variant_idx == self.variant_idx
-    }
 }
 
 /// Why [`PreludeBindings::capture`] rejected the loaded prelude.
@@ -317,35 +310,7 @@ macro_rules! prelude_bindings {
     };
 }
 
-impl PreludeBindings {
-    /// Test-only stand-in: `bool`/`binary` bound to the given nominal ids,
-    /// `True` at variant 0 and `False` at 1 (the real prelude's order), and
-    /// every other binding left pending so nothing else falsely matches.
-    #[cfg(test)]
-    pub(crate) fn test_bool_binary(bool_id: TypeId, bin_id: TypeId) -> Self {
-        PreludeBindings {
-            bool: TypeRef {
-                id: bool_id,
-                name: "Bool",
-            },
-            binary: TypeRef {
-                id: bin_id,
-                name: "Binary",
-            },
-            true_: CtorRef {
-                type_id: bool_id,
-                variant_idx: 0,
-                arity: 0,
-            },
-            false_: CtorRef {
-                type_id: bool_id,
-                variant_idx: 1,
-                arity: 0,
-            },
-            ..PreludeBindings::default()
-        }
-    }
-}
+impl PreludeBindings {}
 
 prelude_bindings! {
     types: [

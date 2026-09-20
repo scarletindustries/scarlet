@@ -102,6 +102,7 @@ impl ResolvedPool {
         self.nodes.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn prims(&self) -> PrimIds {
         self.prims
     }

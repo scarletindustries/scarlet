@@ -127,13 +127,6 @@ impl<'a> Prepared<'a> {
         }
     }
 
-    fn doc(&self) -> Option<String> {
-        match self {
-            Prepared::Fn { fd, .. } => fd.doc.clone(),
-            Prepared::Const { cb, .. } => cb.doc.clone(),
-        }
-    }
-
     fn name(&self) -> &'a str {
         match self {
             Prepared::Fn { fd, .. } => &fd.identifier.name,
@@ -387,15 +380,7 @@ impl Compiler {
                 },
             );
             self.record(name, scheme.ty, fd.identifier.span, fd.doc.clone());
-            export_value(
-                iface.as_deref_mut(),
-                name,
-                is_pub,
-                scheme,
-                None,
-                params,
-                fd.doc.clone(),
-            );
+            export_value(iface.as_deref_mut(), name, is_pub, scheme, None);
         }
 
         // Not `get_or_create_local`: a decl's slot reaches the toplevel
@@ -620,8 +605,6 @@ impl Compiler {
                 p.is_pub(),
                 s,
                 Some(p.slot()),
-                p.param_names(),
-                p.doc(),
             );
         }
 
@@ -857,19 +840,7 @@ impl Compiler {
             }
             // Aliases and externals have no constructors; just export the type info.
             let ti = export_id.and_then(|id| self.env.lookup_type_info_by_id(id));
-            let def = DefinitionLocation::new(
-                td.identifier.span,
-                self.current_module_slice(),
-                EntityKind::Type,
-            );
-            export_type(
-                iface.as_deref_mut(),
-                &td.identifier.name,
-                is_public,
-                ti,
-                Some(def),
-                &td.doc,
-            );
+            export_type(iface.as_deref_mut(), &td.identifier.name, is_public, ti);
             return;
         };
         let ctors_public = is_public && !*opaque;
@@ -976,15 +947,7 @@ impl Compiler {
                 // Unconditional: `export_value` routes a non-`pub` name into
                 // `iface.private_names`, so a private ctor gives importers
                 // "'X' is private" rather than "no member 'X'".
-                export_value(
-                    iface.as_deref_mut(),
-                    name,
-                    ctors_public,
-                    scheme,
-                    None,
-                    labels,
-                    ctor.doc.clone(),
-                );
+                export_value(iface.as_deref_mut(), name, ctors_public, scheme, None);
             }
         });
 
@@ -999,19 +962,7 @@ impl Compiler {
         );
 
         let ti = self.env.lookup_type_info_by_id(type_id);
-        let def = DefinitionLocation::new(
-            td.identifier.span,
-            self.current_module_slice(),
-            EntityKind::Type,
-        );
-        export_type(
-            iface.as_deref_mut(),
-            type_name,
-            is_public,
-            ti,
-            Some(def),
-            &td.doc,
-        );
+        export_type(iface.as_deref_mut(), type_name, is_public, ti);
     }
 }
 
@@ -1078,16 +1029,12 @@ fn export_value(
     is_pub: bool,
     scheme: Scheme,
     slot: Option<GlobalSlot>,
-    param_names: Vec<String>,
-    doc: Option<String>,
 ) {
     let Some(iface) = iface else { return };
     if is_pub {
         let ev = ExportedValue {
             scheme,
             local_slot: slot,
-            param_names,
-            doc,
         };
         iface.values.insert(name.to_string(), ev);
     } else {
@@ -1100,20 +1047,13 @@ fn export_type(
     name: &str,
     is_pub: bool,
     ti: Option<TypeInfo>,
-    def: Option<DefinitionLocation>,
-    doc: &Option<String>,
 ) {
     let Some(iface) = iface else { return };
     if is_pub {
         if let Some(ti) = ti {
-            iface.types.insert(
-                name.to_string(),
-                ExportedType {
-                    info: ti,
-                    def,
-                    doc: doc.clone(),
-                },
-            );
+            iface
+                .types
+                .insert(name.to_string(), ExportedType { info: ti });
         }
     } else {
         iface.private_names.insert(name.to_string());
