@@ -1,7 +1,24 @@
 use indexmap::IndexMap;
 use std::fmt;
 
-pub use scarlet_vm::TypeId;
+/// Nominal identity of a user-declared type, allocated once per declaration by
+/// `TypeEnv::register_type_head`. The front end mints it and the runtime only
+/// carries it, so it lives here rather than in the VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct TypeId(pub i32);
+
+impl TypeId {
+    /// Sentinel meaning "no nominal type"; real ids start at 1. Deliberately
+    /// not `Default`, so a derived `Default` cannot manufacture it.
+    pub const NONE: TypeId = TypeId(0);
+}
+
+impl fmt::Display for TypeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Names of the prelude types that are not `Type::Named`. The only prelude
 /// name strings outside `bytecode::prelude_bindings`.
