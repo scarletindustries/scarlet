@@ -1,7 +1,6 @@
-//! The compiler side of the bytecode boundary: everything that produces a
-//! runnable [`Program`] from Scarlet source. The ISA, [`Program`], the NaN-boxed
-//! `value` and the heap live in `scarlet_vm` and are re-exported here, so
-//! `scarlet_core::bytecode::*` is the one import for both halves of the contract.
+//! The compiler: Scarlet source in, a [`Program`](crate::core_ir::Program) in
+//! core IR out. The module is still called `bytecode` for historical reasons;
+//! it no longer produces any.
 
 mod analysis;
 pub mod compiler;
@@ -11,5 +10,4 @@ mod session;
 
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
-pub use scarlet_vm::bytecode::*;
 pub use session::{HoverFact, IncrementalSession, Watermark};
