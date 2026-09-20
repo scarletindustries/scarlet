@@ -45,7 +45,8 @@
 use std::collections::VecDeque;
 
 use super::{
-    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, Imm, JoinId, LocalId,
+    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, Imm, JoinId, Load,
+    LocalId,
 };
 use crate::bytecode::Op;
 use crate::tivec::TiVec;
@@ -582,7 +583,7 @@ impl Lower {
         let ty = e.ty();
         let a = match e {
             TypedExpr::Const { value, .. } => Atom::Const(*value),
-            TypedExpr::Nil { .. } => Atom::prim(Op::PushNil, vec![]),
+            TypedExpr::Nil { .. } => Atom::Nil,
             TypedExpr::Var { place, .. } => match *place {
                 // A bound local's type was fixed when the bind was minted.
                 ValueRef::Local(b) => {
@@ -591,22 +592,10 @@ impl Lower {
                 }
                 // A raw frame slot the module walk allocated for a selective
                 // import. Outside lower's `LocalId` space.
-                ValueRef::Slot(slot) => Atom::PrimOp {
-                    op: Op::PushLocal,
-                    args: vec![],
-                    imm: Imm::Index(idx16(slot.0)),
-                },
-                ValueRef::Global(slot) => Atom::PrimOp {
-                    op: Op::PushGlobal,
-                    args: vec![],
-                    imm: Imm::Index(idx16(slot.0)),
-                },
-                ValueRef::Capture(idx) => Atom::PrimOp {
-                    op: Op::PushCapture,
-                    args: vec![],
-                    imm: Imm::Index(idx16(idx.0)),
-                },
-                ValueRef::SelfClosure => Atom::prim(Op::PushSelf, vec![]),
+                ValueRef::Slot(slot) => Atom::Load(Load::Slot(slot)),
+                ValueRef::Global(slot) => Atom::Load(Load::Global(slot)),
+                ValueRef::Capture(idx) => Atom::Load(Load::Capture(idx)),
+                ValueRef::SelfClosure => Atom::Load(Load::SelfClosure),
             },
             // Only `b` is conditional, so `a` lowers onto the enclosing spine
             // and only the `If` is sealed as the join. Sealing `a` inside would
@@ -760,9 +749,9 @@ impl Lower {
         let cond = self.operand(lhs);
         let other = self.expr_as(rhs, result_ty);
         let (then, els) = if and {
-            (other, CoreExpr::Tail(Atom::prim(Op::PushFalse, vec![])))
+            (other, CoreExpr::Tail(Atom::Bool(false)))
         } else {
-            (CoreExpr::Tail(Atom::prim(Op::PushTrue, vec![])), other)
+            (CoreExpr::Tail(Atom::Bool(true)), other)
         };
         CoreExpr::If {
             cond,

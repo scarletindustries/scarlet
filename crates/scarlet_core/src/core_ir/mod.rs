@@ -12,7 +12,7 @@ use std::fmt;
 use crate::bytecode::{HeapTag, Op, Value};
 use crate::newtype_index;
 use crate::type_def::TypeId;
-use crate::typed_ir::{GlobalSlot, RTy};
+use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy};
 use crate::types::StrId;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -150,6 +150,19 @@ impl fmt::Display for Imm {
     }
 }
 
+/// A value read from somewhere other than a core-IR local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Load {
+    /// A raw frame slot the module walk assigned (a selective import).
+    Slot(FrameSlot),
+    /// An entry-frame slot: a module-scope binding.
+    Global(GlobalSlot),
+    /// A value the current closure captured.
+    Capture(CaptureIdx),
+    /// The current closure itself.
+    SelfClosure,
+}
+
 /// Right-hand side of a `Let`, or the payload of a `Tail`. Every compound
 /// operand is a `LocalId` — nested evaluation has already been linearised into
 /// the enclosing `Let` spine.
@@ -157,6 +170,9 @@ impl fmt::Display for Imm {
 pub enum Atom {
     Local(LocalId),
     Const(ConstId),
+    Load(Load),
+    Nil,
+    Bool(bool),
     Ctor {
         variant: VariantRef,
         fields: Vec<LocalId>,
@@ -204,7 +220,7 @@ impl Atom {
     fn operands(&self) -> impl Iterator<Item = LocalId> + '_ {
         let (pushed, trailing): (&[LocalId], Option<LocalId>) = match self {
             Atom::Local(x) => (&[], Some(*x)),
-            Atom::Const(_) => (&[], None),
+            Atom::Const(_) | Atom::Load(_) | Atom::Nil | Atom::Bool(_) => (&[], None),
             Atom::Ctor { fields, .. } => (fields, None),
             Atom::PrimOp { args, .. } | Atom::Intrinsic { args, .. } => (args, None),
             Atom::Closure { captures, .. } => (captures, None),
@@ -404,6 +420,12 @@ impl fmt::Display for Atom {
         match self {
             Atom::Local(l) => write!(f, "{l}"),
             Atom::Const(c) => write!(f, "{c}"),
+            Atom::Load(Load::Slot(s)) => write!(f, "slot{}", s.0),
+            Atom::Load(Load::Global(g)) => write!(f, "global{}", g.0),
+            Atom::Load(Load::Capture(c)) => write!(f, "capture{}", c.0),
+            Atom::Load(Load::SelfClosure) => f.write_str("self"),
+            Atom::Nil => f.write_str("nil"),
+            Atom::Bool(b) => write!(f, "{b}"),
             Atom::Ctor {
                 variant,
                 fields,

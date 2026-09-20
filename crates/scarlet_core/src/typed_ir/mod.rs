@@ -47,20 +47,19 @@ impl std::fmt::Display for BindingId {
     }
 }
 
-/// A slot in the entry (module) frame: what `PushGlobal` addresses. A
+/// A slot in the entry (module) frame: where a module-scope binding lives. A
 /// module-scope name may be bound more than once (an import shadowed by a later
 /// `let`), so each [`TypedBind`] carries the slot its own binding lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GlobalSlot(pub i32);
 
-/// A slot in the *current* frame: what `PushLocal` addresses. A different index
+/// A slot in the *current* frame. A different index
 /// space from [`GlobalSlot`] and [`CaptureIdx`], kept distinct so the three
 /// cannot be swapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FrameSlot(pub(crate) i32);
 
-/// An index into the current closure's capture array: what `PushCapture`
-/// addresses.
+/// An index into the current closure's capture array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CaptureIdx(pub(crate) i32);
 
@@ -71,7 +70,7 @@ pub struct TypedBind {
     pub(crate) name: StrId,
     pub(crate) ty: RTy,
     /// `Some(slot)` when this binding is module-level and must land in that
-    /// entry-frame slot, because fn bodies address it by `PushGlobal slot`.
+    /// entry-frame slot, because fn bodies read it from there.
     pub(crate) global: Option<GlobalSlot>,
 }
 
@@ -81,17 +80,17 @@ pub struct TypedBind {
 pub enum ValueRef {
     /// A [`TypedBind`] in the current function.
     Local(BindingId),
-    /// ESCAPE HATCH: `PushLocal slot` for a raw frame slot the module walk
-    /// assigned (a selective `import mod.{x}` binding). Anchored to no
-    /// [`BindingId`], because import bindings are materialised by the module
-    /// walk rather than by the elaborator.
+    /// ESCAPE HATCH: a raw frame slot the module walk assigned (a selective
+    /// `import mod.{x}` binding). Anchored to no [`BindingId`], because import
+    /// bindings are materialised by the module walk rather than by the
+    /// elaborator.
     Slot(FrameSlot),
-    /// `PushGlobal slot`. A top-level `fn` referenced as a *value* loads this
+    /// An entry-frame slot. A top-level `fn` referenced as a *value* loads this
     /// way even inside itself; self-*calls* are [`TypedCallee::SelfRec`].
     Global(GlobalSlot),
-    /// `PushCapture idx` — a value captured from the enclosing frame.
+    /// A value captured from the enclosing frame.
     Capture(CaptureIdx),
-    /// `PushSelf` — the current closure itself.
+    /// The current closure itself.
     SelfClosure,
 }
 
@@ -256,7 +255,7 @@ pub enum TypedExpr {
         ty: RTy,
         value: ConstId,
     },
-    /// `PushNil` — a block that ended in a statement, or an empty one.
+    /// `Nil` — a block that ended in a statement, or an empty one.
     Nil {
         ty: RTy,
     },
