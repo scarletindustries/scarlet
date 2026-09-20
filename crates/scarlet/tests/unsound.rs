@@ -340,7 +340,6 @@ run_case! {
 // semantics, which both accepts non-exhaustive matches and rejects exhaustive
 // ones.
 #[test]
-#[ignore = "needs the VM"]
 fn u21_exhaustiveness_respects_field_labels() {
     // Unsound direction: the two arms together miss (a=True, b=False), so the
     // match is genuinely non-exhaustive.
@@ -357,7 +356,11 @@ fn u21_exhaustiveness_respects_field_labels() {
          }\n",
         "not exhaustive",
     );
+}
 
+#[test]
+#[ignore = "needs the VM"]
+fn u21_exhaustiveness_respects_field_labels_runs() {
     // False-positive direction: an exhaustive match whose third arm names
     // fields in reverse order covers (a=False, b=True), so f returns 3.
     run_outputs(

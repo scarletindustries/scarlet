@@ -383,8 +383,17 @@ fn stdlib_decimal() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary() {
+    check_rejects(
+        "import scarlet/net/socket.{Socket}\n\
+         fn f(c Socket) Nil { socket.write(c, 'nope') or Nil }\n",
+        "Type mismatch",
+    );
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn stdlib_binary_runs() {
     run_outputs(
         "import scarlet/binary\n\
          pub fn main() {\n\
@@ -457,11 +466,6 @@ fn stdlib_binary() {
          }\n",
         "Err(Nil)\n",
     );
-    check_rejects(
-        "import scarlet/net/socket.{Socket}\n\
-         fn f(c Socket) Nil { socket.write(c, 'nope') or Nil }\n",
-        "Type mismatch",
-    );
 }
 
 /// The unit a window is measured in lives in the function's name, and the two
@@ -472,7 +476,6 @@ fn stdlib_binary() {
 /// bytes. The old spelling no longer exists, so that call is now a compile
 /// error rather than a wrong answer.
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_binary_slice_units() {
     // The name `slice` is gone. This is the guard on reintroducing it: a
     // function of that name could only pick one of the two units, and the
@@ -484,6 +487,11 @@ fn stdlib_binary_slice_units() {
         // loose form would pass on a diagnostic about a different name.
         "has no member 'slice'",
     );
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn stdlib_binary_slice_units_runs() {
     // Both units, over the same measured windows from T-208, side by side.
     run_outputs(
         "import scarlet/binary\n\

@@ -810,8 +810,23 @@ fn vm_attribute_may_not_be_used_on_a_type() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn bool_is_a_normal_two_ctor_type() {
+    check_rejects(
+        "fn f(b Bool) Int { match b { True -> 1 } }\n\
+         pub fn main() {\n\
+         \tprintln(f(True))\n\
+         }\n",
+        "not exhaustive",
+    );
+    check_rejects(
+        "type My { True }\n",
+        "is defined in the prelude and cannot be redefined",
+    );
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn bool_is_a_normal_two_ctor_type_runs() {
     run_outputs(
         "pub fn main() {\n\
          \tprintln(True)\n\
@@ -828,17 +843,6 @@ fn bool_is_a_normal_two_ctor_type() {
          }\n",
         "yes\nno\n",
     );
-    check_rejects(
-        "fn f(b Bool) Int { match b { True -> 1 } }\n\
-         pub fn main() {\n\
-         \tprintln(f(True))\n\
-         }\n",
-        "not exhaustive",
-    );
-    check_rejects(
-        "type My { True }\n",
-        "is defined in the prelude and cannot be redefined",
-    );
 }
 
 reject_case! {
@@ -852,13 +856,17 @@ reject_case! {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn reserved_set_derived_from_prelude_iface() {
     // Prelude types/ctors are reserved...
     check_rejects(
         "type Option(a) {\n\tJust(value a)\n\tNothing\n}\n",
         "is defined in the prelude and cannot be redefined",
     );
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn reserved_set_derived_from_prelude_iface_runs() {
     // ...but `@vm` functions are not.
     run_outputs(
         "fn println(x Int) Int { x + 1 }\n\
@@ -870,8 +878,24 @@ fn reserved_set_derived_from_prelude_iface() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn binary_string_literal_patterns() {
+    // The Utf8 default applies only to bare string segments.
+    check_rejects(
+        "import scarlet/binary\n\
+         pub fn main() {\n\
+         \tr = match binary.from_string('AB') {\n\
+         \t\t<<'AB':16>> -> 1\n\
+         \t\t_ -> 0\n\
+         \t}\n\
+         \tprintln(r)\n\
+         }\n",
+        "Type mismatch",
+    );
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn binary_string_literal_patterns_runs() {
     // A bare string-literal segment matches its UTF-8 bytes as a prefix
     // (Op::BinMatchPrefix); the rest binding is a zero-copy view.
     run_outputs(
@@ -986,18 +1010,6 @@ fn binary_string_literal_patterns() {
          \tprintln(binary.bit_size(<<''>>))\n\
          }\n",
         "True\nTrue\n0\n",
-    );
-    // The Utf8 default applies only to bare string segments.
-    check_rejects(
-        "import scarlet/binary\n\
-         pub fn main() {\n\
-         \tr = match binary.from_string('AB') {\n\
-         \t\t<<'AB':16>> -> 1\n\
-         \t\t_ -> 0\n\
-         \t}\n\
-         \tprintln(r)\n\
-         }\n",
-        "Type mismatch",
     );
 }
 
@@ -1134,10 +1146,7 @@ fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
     run_outputs(src, "222\n111\n");
 }
 
-#[test]
-#[ignore = "needs the VM"]
-fn field_access_through_a_constructor_inferred_scrutinee() {
-    let src = "type User { User(id Int, name String) }\n\
+const FIELD_ACCESS_THROUGH_A_CONSTRUCTOR_INFERRED_SCRUTINEE_SRC: &str = "type User { User(id Int, name String) }\n\
                fn f() Int {\n\
                \tmatch Some(User(7, 'al')) {\n\
                \t\tNone -> 0\n\
@@ -1147,14 +1156,22 @@ fn field_access_through_a_constructor_inferred_scrutinee() {
                pub fn main() {\n\
                \tprintln(f())\n\
                }\n";
-    check_ok(src);
-    run_outputs(src, "7\n");
+
+#[test]
+fn field_access_through_a_constructor_inferred_scrutinee() {
+    check_ok(FIELD_ACCESS_THROUGH_A_CONSTRUCTOR_INFERRED_SCRUTINEE_SRC);
 }
 
 #[test]
 #[ignore = "needs the VM"]
-fn field_access_through_a_module_fn_inferred_scrutinee() {
-    let src = "import scarlet/map\n\
+fn field_access_through_a_constructor_inferred_scrutinee_runs() {
+    run_outputs(
+        FIELD_ACCESS_THROUGH_A_CONSTRUCTOR_INFERRED_SCRUTINEE_SRC,
+        "7\n",
+    );
+}
+
+const FIELD_ACCESS_THROUGH_A_MODULE_FN_INFERRED_SCRUTINEE_SRC: &str = "import scarlet/map\n\
                type User { User(id Int, name String) }\n\
                fn f(m map.Map(Binary, User)) Int {\n\
                \tmatch map.get(m, <<'a'>>) {\n\
@@ -1165,8 +1182,19 @@ fn field_access_through_a_module_fn_inferred_scrutinee() {
                pub fn main() {\n\
                \tprintln(f(map.set(map.new(), <<'a'>>, User(7, 'al'))))\n\
                }\n";
-    check_ok(src);
-    run_outputs(src, "7\n");
+
+#[test]
+fn field_access_through_a_module_fn_inferred_scrutinee() {
+    check_ok(FIELD_ACCESS_THROUGH_A_MODULE_FN_INFERRED_SCRUTINEE_SRC);
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn field_access_through_a_module_fn_inferred_scrutinee_runs() {
+    run_outputs(
+        FIELD_ACCESS_THROUGH_A_MODULE_FN_INFERRED_SCRUTINEE_SRC,
+        "7\n",
+    );
 }
 
 /// Binding an inferred scrutinee's heap payload makes the arm responsible for
@@ -1192,19 +1220,24 @@ fn inferred_scrutinee_with_a_heap_payload_runs() {
     run_outputs(src, "4\n");
 }
 
-/// The `Err` payload bound by `expr or e -> body` is the LHS type's second
-/// argument, not a fresh variable, so a heap error stays droppable.
-#[test]
-#[ignore = "needs the VM"]
-fn or_receiver_binds_a_heap_error_payload() {
-    let src = "type Boxed { Boxed(n Int) }\n\
+const OR_RECEIVER_BINDS_A_HEAP_ERROR_PAYLOAD_SRC: &str = "type Boxed { Boxed(n Int) }\n\
                fn bad() Result(Int, Boxed) { Err(Boxed(9)) }\n\
                fn f() Int { bad() or e -> e.n }\n\
                pub fn main() {\n\
                \tprintln(f())\n\
                }\n";
-    check_ok(src);
-    run_outputs(src, "9\n");
+
+/// The `Err` payload bound by `expr or e -> body` is the LHS type's second
+/// argument, not a fresh variable, so a heap error stays droppable.
+#[test]
+fn or_receiver_binds_a_heap_error_payload() {
+    check_ok(OR_RECEIVER_BINDS_A_HEAP_ERROR_PAYLOAD_SRC);
+}
+
+#[test]
+#[ignore = "needs the VM"]
+fn or_receiver_binds_a_heap_error_payload_runs() {
+    run_outputs(OR_RECEIVER_BINDS_A_HEAP_ERROR_PAYLOAD_SRC, "9\n");
 }
 
 // T-148: `@exhaustive` is opt-in and only forbids a wildcard/bare-binder arm
