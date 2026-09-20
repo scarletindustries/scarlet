@@ -352,24 +352,27 @@ impl Compiler {
         // Pass 3 — pre-allocate one slot per decl, then register fn
         // signatures, positionally in `prepared`.
         //
-        // `@vm` fns get a `Builtin{intrinsic}` scheme, no slot, no body codegen, and
+        // `@vm` fns get a `Builtin` scheme, no slot, no body codegen, and
         // export here rather than after generalisation: their type is the
         // annotated signature verbatim, there is no body to infer from.
         for &(fd, is_pub, intrinsic) in &vm_fns {
             let name = &fd.identifier.name;
             let fn_ty = self.hydrate_fn_signature(fd).fn_ty;
-            let mut scheme = self.engine.generalize_top(fn_ty);
-            scheme.kind = ValueKind::Builtin { intrinsic };
-            let m = self.current_module_slice();
-            let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
-            scheme.def = Some(dl);
-            self.env.define_at(name, scheme, dl);
-            self.env.store_doc_opt(name, &fd.doc);
             let params: Vec<String> = fd
                 .params
                 .iter()
                 .map(|p| p.identifier.name.clone())
                 .collect();
+            let mut scheme = self.engine.generalize_top(fn_ty);
+            scheme.kind = ValueKind::Builtin {
+                intrinsic,
+                param_labels: self.engine.intern_slice(&params),
+            };
+            let m = self.current_module_slice();
+            let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
+            scheme.def = Some(dl);
+            self.env.define_at(name, scheme, dl);
+            self.env.store_doc_opt(name, &fd.doc);
             self.emit_def(
                 dl,
                 name,

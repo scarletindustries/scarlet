@@ -5,7 +5,7 @@
 //! arena that minted it. [`Compiler::reset_to`] destructures [`Watermark`]
 //! exhaustively so a new arena cannot join the snapshot without its rewind
 //! being written.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -16,7 +16,7 @@ use crate::reference::{ModuleId, ModuleReferences, ReferenceGraph, ReferenceGrap
 use crate::span::Span;
 use crate::tivec::Idx;
 use crate::type_def::{Type, TypeId};
-use crate::types::{EnginePoolWatermark, EnvWatermark, Ty};
+use crate::types::{EnginePoolWatermark, EnvWatermark, Ty, ValueKind};
 
 /// One buffered name occurrence, holding the *live* `Ty`: resolution is
 /// deferred until all unifications have settled.
@@ -29,6 +29,16 @@ pub(super) struct RawRef {
     /// Interned at `record` time so `finalize_references` need not re-intern
     /// the path per occurrence.
     pub(super) module: ModuleId,
+}
+
+/// One name a module offers its importers, as a name list (REPL completion)
+/// wants it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub name: String,
+    /// A function's parameter names, or a constructor's field labels, in
+    /// order. Empty for anything else.
+    pub params: Vec<String>,
 }
 
 /// Resolved type at one occurrence span. The reference graph is identity-only,
@@ -658,13 +668,57 @@ impl IncrementalSession {
             .min_by_key(|f| f.span.width())?;
         Some((f.name.clone(), f.ty.clone(), f.doc.clone()))
     }
+
+    /// What the module at `path` exports, types first. A module no check has
+    /// imported yet is compiled first, by checking an entry that imports it,
+    /// so it lands in the cache through the same door as any other import.
+    /// One that does not resolve or does not compile exports nothing.
+    pub fn exports(&mut self, path: &ModulePath) -> Vec<Export> {
+        let key = module::ModuleKey::of(path);
+        if self.c.module_table.get(&key).is_none() {
+            let mut scanner = crate::scanner::new_scanner(format!("import {key}\n"));
+            let parsed = crate::parser::new_parser(&mut scanner).parse_program();
+            if crate::diagnostic::has_errors(&parsed.diagnostics) {
+                return Vec::new();
+            }
+            self.check(&ast::Expression::BlockExpression(parsed.ast), None);
+        }
+        let Some(iface) = self.c.module_table.get(&key) else {
+            return Vec::new();
+        };
+        let engine = &self.c.engine;
+        let types = iface.types.keys().map(|name| Export {
+            name: name.clone(),
+            params: Vec::new(),
+        });
+        let values = iface.values.iter().map(|(name, ev)| {
+            let params = match ev.scheme.kind {
+                ValueKind::ModuleFn { param_labels } | ValueKind::Builtin { param_labels, .. } => {
+                    engine.strs_of(param_labels)
+                }
+                ValueKind::Constructor { field_labels, .. } => engine.strs_of(field_labels),
+                ValueKind::Local => Vec::new(),
+            };
+            Export {
+                name: name.clone(),
+                params,
+            }
+        });
+        // One name, one entry: a record type names its single constructor
+        // after itself.
+        let mut seen = HashSet::new();
+        types
+            .chain(values)
+            .filter(|e| seen.insert(e.name.clone()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
 
-    use super::Watermark;
+    use super::{Export, IncrementalSession, Watermark};
     use crate::bytecode::compiler::new_compiler;
     use crate::core_ir::{Atom, Const, CoreExpr, CoreFn, LoweredFn};
     use crate::type_def::TypeId;
@@ -783,5 +837,64 @@ mod tests {
         );
         assert_eq!(c.consts.len(), consts + 1, "consts rewind to the watermark");
         assert!(c.inits.is_empty(), "a rewound compile's inits are dropped");
+    }
+
+    fn path(s: &str) -> crate::module::ModulePath {
+        s.split('/').map(str::to_string).collect()
+    }
+
+    fn export<'a>(exports: &'a [Export], name: &str) -> &'a Export {
+        exports
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} is not exported"))
+    }
+
+    #[test]
+    fn a_modules_functions_export_with_their_parameter_names() {
+        let mut session = IncrementalSession::new();
+        let exports = session.exports(&path("scarlet/string"));
+        assert_eq!(
+            export(&exports, "replace").params,
+            ["s", "pattern", "replacement"]
+        );
+        // `@vm` functions carry their names the same way.
+        assert_eq!(export(&exports, "length").params, ["s"]);
+    }
+
+    /// The prelude is compiled when the session starts, so it is listed
+    /// without another check running.
+    #[test]
+    fn the_prelude_exports_without_a_check() {
+        let mut session = IncrementalSession::new();
+        let before = session.compile_count();
+        let exports = session.exports(&path("scarlet"));
+        assert_eq!(export(&exports, "println").params, ["x"]);
+        assert_eq!(session.compile_count(), before);
+    }
+
+    #[test]
+    fn a_constructor_exports_with_its_field_labels() {
+        let mut session = IncrementalSession::new();
+        let exports = session.exports(&path("scarlet/http"));
+        assert_eq!(export(&exports, "Fixed").params, ["len", "b"]);
+        assert!(export(&exports, "Post").params.is_empty());
+        // A record's constructor shares its type's name and is listed once.
+        let responses = exports.iter().filter(|e| e.name == "Response").count();
+        assert_eq!(responses, 1);
+    }
+
+    #[test]
+    fn an_unknown_module_exports_nothing() {
+        let mut session = IncrementalSession::new();
+        assert!(session.exports(&path("scarlet/nope")).is_empty());
+    }
+
+    #[test]
+    fn the_stdlib_lists_nested_modules_and_the_prelude() {
+        let modules = crate::module::stdlib_modules();
+        assert!(modules.contains(&path("scarlet")));
+        assert!(modules.contains(&path("scarlet/net/tls")));
+        assert!(modules.is_sorted());
     }
 }

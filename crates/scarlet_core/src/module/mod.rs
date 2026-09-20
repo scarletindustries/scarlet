@@ -21,6 +21,12 @@ pub use scarlet_syntax::module_path::{
     main_module, scarlet_prelude,
 };
 
+/// Every module the embedded stdlib holds, sorted by the path an import names
+/// it with.
+pub fn stdlib_modules() -> Vec<ModulePath> {
+    stdlib::module_paths()
+}
+
 const STDLIB_MARKER: &str = include_str!("../std/.scarlet-stdlib-root");
 
 /// Walk up from `near` for a `src/std/.scarlet-stdlib-root` marker matching the one

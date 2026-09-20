@@ -158,7 +158,7 @@ impl Denotation {
                 },
                 Arity(arity),
             )),
-            ValueKind::Builtin { intrinsic } => Some(Denotation::builtin(intrinsic)),
+            ValueKind::Builtin { intrinsic, .. } => Some(Denotation::builtin(intrinsic)),
             ValueKind::Local | ValueKind::ModuleFn { .. } => None,
         }
     }
@@ -366,6 +366,7 @@ mod tests {
     fn a_builtins_kind_fixes_its_denotation() {
         let d = Denotation::from_kind(ValueKind::Builtin {
             intrinsic: Intrinsic::StringLength,
+            param_labels: crate::types::ArenaSlice::EMPTY,
         })
         .expect("a builtin's kind fixes its denotation");
         assert_eq!(d, Denotation::builtin(Intrinsic::StringLength));

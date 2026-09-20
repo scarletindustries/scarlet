@@ -273,7 +273,13 @@ pub enum ValueKind {
     /// A built-in function, from a `@vm(key)` declaration. Analysis resolves
     /// the key to its [`Intrinsic`] at the annotation, so an unknown key is a
     /// compile error there rather than a codegen fallthrough.
-    Builtin { intrinsic: Intrinsic },
+    Builtin {
+        intrinsic: Intrinsic,
+        /// The declaration's parameter names, as for `ModuleFn`.
+        ///
+        /// → `InferEngine.str_slices`
+        param_labels: ArenaSlice<pool::StrSlices>,
+    },
     /// A data constructor. Carries enough to compile pattern-match and
     /// constructor-call without re-consulting the type env.
     Constructor {

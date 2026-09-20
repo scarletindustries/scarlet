@@ -10,4 +10,4 @@ mod session;
 
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
-pub use session::{HoverFact, IncrementalSession, Watermark};
+pub use session::{Export, HoverFact, IncrementalSession, Watermark};
