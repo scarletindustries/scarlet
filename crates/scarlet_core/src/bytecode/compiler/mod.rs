@@ -2562,26 +2562,25 @@ impl Compiler {
             child_base,
         );
         let refs = Rc::new(body.refs);
-        // The watermark is captured *after* this module's own dependencies have
-        // loaded (compile_module_body does that first) but reflects the arena
-        // state immediately *before* this module's body added anything. Only
-        // on-disk modules are ever invalidated, so only they carry it.
         let origin = match source_path {
             Some(path) => ModuleOrigin::File {
                 source_hash: hash,
                 stat: None,
-                watermark: body.watermark,
                 path,
                 refs,
             },
             None => ModuleOrigin::Embedded { refs },
         };
         self.module_table.bump_compile_count();
+        // The watermark is captured *after* this module's own dependencies have
+        // loaded (compile_module_body does that first) but reflects the arena
+        // state immediately *before* this module's body added anything.
         self.module_table.insert_cached(
             key.clone(),
             CachedModule {
                 iface: body.iface,
                 origin,
+                watermark: body.watermark,
                 dependents: HashSet::new(),
             },
         );

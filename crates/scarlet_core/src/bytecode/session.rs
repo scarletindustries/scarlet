@@ -69,6 +69,15 @@ pub struct Watermark {
 }
 
 impl Watermark {
+    /// A watermark `n` functions in, for ordering tests.
+    #[cfg(test)]
+    pub(crate) fn at(functions: usize) -> Self {
+        Watermark {
+            functions,
+            ..Watermark::default()
+        }
+    }
+
     /// Comparison key. Every field is an append-only pool length or a monotone
     /// counter, so an earlier watermark compares `<=` a later one. `env` is
     /// excluded: it is a rollback payload, not a position, so its field set can
@@ -546,7 +555,7 @@ impl IncrementalSession {
             .c
             .module_table
             .user_modules()
-            .filter(|(_, cm)| cm.watermark().is_none_or(|w| w >= seed))
+            .filter(|(_, cm)| cm.watermark >= seed)
             .map(|(k, _)| k.clone())
             .collect();
         let dirty: Vec<module::ModuleKey> = candidates
