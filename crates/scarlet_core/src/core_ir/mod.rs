@@ -13,6 +13,7 @@ pub use prim::PrimOp;
 use std::fmt;
 use std::rc::Rc;
 
+use crate::module::ModuleKey;
 use crate::newtype_index;
 use crate::tivec::TiVec;
 use crate::type_def::TypeId;
@@ -390,9 +391,12 @@ impl Default for CoreProgram {
 /// together with the eta wrappers it minted.
 #[derive(Debug, Clone)]
 pub struct LoweredFn {
+    /// The module whose source this body was lowered from.
+    pub module: ModuleKey,
     /// The source name, for anything a person reads: a crash report, a stack
     /// trace, a profile. `core.name` is an interned id that means nothing
-    /// once the compile is over.
+    /// once the compile is over. Unique only within `module`: `scarlet/array`
+    /// and `scarlet/option` both have a `map`.
     pub name: String,
     pub core: CoreFn,
     pub pool: Rc<ResolvedPool>,

@@ -868,3 +868,35 @@ mod typed_prim_ops {
         assert!(!ops.contains(&PrimOp::Add), "Add leaked: {ops:?}");
     }
 }
+
+mod function_modules {
+    //! Every lowered function names the module it came from. A name alone is
+    //! ambiguous once the stdlib compiles into the same program as the user's
+    //! code.
+
+    use super::parse_ok;
+    use crate::ast;
+    use crate::bytecode::compile;
+    use crate::module::ModuleKey;
+
+    #[test]
+    fn two_maps_are_told_apart_by_their_module() {
+        let src = "import scarlet/array\n\
+                   fn map(x Int) Int { x + 1 }\n\
+                   pub fn main() {\n\
+                   \tprintln(array.map([map(1)], map))\n\
+                   }\n";
+        let result = compile(&ast::Expression::BlockExpression(parse_ok(src)), None);
+        let program = result.into_runnable().expect("the snippet compiles");
+        let mut maps: Vec<String> = (&program.fns)
+            .into_iter()
+            .filter(|f| f.name == "map")
+            .map(|f| f.module.to_string())
+            .collect();
+        maps.sort();
+        assert_eq!(maps, ["main", "scarlet/array"]);
+        assert_eq!(program.toplevel.module, ModuleKey::main());
+        let array = ModuleKey::of(&vec!["scarlet".to_string(), "array".to_string()]);
+        assert!(program.inits.iter().any(|init| init.module == array));
+    }
+}

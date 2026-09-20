@@ -2883,11 +2883,7 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{top}", self.engine.str(top.name));
         }
-        let lowered = LoweredFn {
-            name: self.engine.str(top.name).to_string(),
-            core: top,
-            pool,
-        };
+        let lowered = self.lowered_fn(top, pool);
         match kind {
             TopKind::Module => {
                 self.inits.push(lowered);
@@ -4491,11 +4487,19 @@ impl Compiler {
         use crate::core_ir::perceus;
         for (i, w) in wrappers.into_iter().enumerate() {
             let core = perceus::perceus(pool, w);
-            self.fns[FuncIdx::from_usize(base + i)] = Some(LoweredFn {
-                name: self.engine.str(core.name).to_string(),
-                core,
-                pool: Rc::clone(pool),
-            });
+            self.fns[FuncIdx::from_usize(base + i)] = Some(self.lowered_fn(core, Rc::clone(pool)));
+        }
+    }
+
+    /// Package a finished body for the [`Program`]. Called while the module
+    /// that owns the body is the one being compiled, which is what makes
+    /// `current_module_key` its module.
+    fn lowered_fn(&self, core: CoreFn, pool: Rc<ResolvedPool>) -> LoweredFn {
+        LoweredFn {
+            module: self.current_module_key.clone(),
+            name: self.engine.str(core.name).to_string(),
+            core,
+            pool,
         }
     }
 
@@ -4533,11 +4537,7 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{core}", self.engine.str(name));
         }
-        self.fns[func_idx] = Some(LoweredFn {
-            name: self.engine.str(name).to_string(),
-            core,
-            pool,
-        });
+        self.fns[func_idx] = Some(self.lowered_fn(core, pool));
     }
 
     /// Open the elaboration phase boundary: every function body walked until

@@ -808,6 +808,7 @@ mod tests {
         let mut c = new_compiler(None, false);
         let pool = Rc::new(crate::typed_ir::ResolvedPool::new(PrimIds::default()));
         let top = LoweredFn {
+            module: crate::module::ModuleKey::main(),
             name: "m".to_string(),
             core: CoreFn {
                 name: c.engine.intern("m"),
