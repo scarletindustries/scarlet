@@ -12,18 +12,15 @@
 )]
 #![deny(unsafe_code)]
 
-use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::rc::Rc;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use scarlet::cli::{help, man};
-use scarlet::core_ir::clif;
-use scarlet::{STDLIB, ast, bytecode, diagnostic, formatter, lint, lsp, parser, repl, scanner, vm};
+use scarlet::{ast, bytecode, diagnostic, formatter, lint, lsp, parser, repl, scanner};
 
 const VERSION: &str = env!("SCARLET_VERSION");
 
@@ -71,10 +68,6 @@ struct DisArgs {
     /// function is printed too — they are compiled into the same program.
     #[arg(long = "fn", value_name = "NAME")]
     only: Option<String>,
-    /// Print the CLIF and finalized code size of natively compiled functions
-    /// whose name contains this, beside their bytecode listing.
-    #[arg(long = "native", value_name = "NAME", conflicts_with = "only")]
-    native: Option<String>,
 }
 
 #[derive(Args)]
@@ -255,11 +248,7 @@ fn compile_source(
     expr: &ast::Expression,
     file: &str,
     entrypoint: &str,
-    f: impl FnOnce(
-        &ast::Expression,
-        Option<&Path>,
-        Option<&'static scarlet::StaticStdlib>,
-    ) -> bytecode::CompileResult,
+    f: impl FnOnce(&ast::Expression, Option<&Path>) -> bytecode::CompileResult,
 ) -> bytecode::CompileResult {
     let path = Path::new(entrypoint);
     let base_dir = path.parent();
@@ -267,7 +256,7 @@ fn compile_source(
     // external are permitted and prelude self-redefinition is suppressed.
     let result = match scarlet::module::detect_stdlib_module(path) {
         Some(m) => bytecode::check_as_module(expr, base_dir, m),
-        None => f(expr, base_dir, Some(&STDLIB)),
+        None => f(expr, base_dir),
     };
 
     report(&result.diagnostics, !result.success(), file, entrypoint);
@@ -387,51 +376,8 @@ fn main() -> process::ExitCode {
         Some(Commands::Dis(args)) => {
             let file = read_file_or_die(&args.entrypoint);
             let expr = parse_source(&file, &args.entrypoint);
-            if let Some(needle) = &args.native {
-                // Names are matched after compile: the hook sees interned ids,
-                // the emitted program has the names.
-                let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
-                let sink = Rc::clone(&plans);
-                let result = compile_source(&expr, &file, &args.entrypoint, move |e, base, pre| {
-                    bytecode::compile_with_native(
-                        e,
-                        base,
-                        pre,
-                        Box::new(move |idx, f, pool, counts| {
-                            sink.borrow_mut().push(clif::plan(
-                                idx,
-                                f,
-                                pool,
-                                STDLIB.prelude,
-                                counts,
-                            ));
-                        }),
-                    )
-                });
-                let Some(emitted) = result.into_runnable() else {
-                    die("nothing to disassemble: the compile produced no program");
-                };
-                let plans = plans.take();
-                match scarlet::dis::disassemble_native(
-                    &emitted.program,
-                    needle,
-                    plans,
-                    &emitted.frame_layouts,
-                ) {
-                    Ok(text) => print!("{text}"),
-                    Err(e) => die(e),
-                }
-            } else {
-                let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
-                let Some(emitted) = result.into_runnable() else {
-                    die("nothing to disassemble: the compile produced no program");
-                };
-                let text = match &args.only {
-                    Some(n) => scarlet::dis::disassemble_fn(&emitted.program, n),
-                    None => scarlet::dis::disassemble(&emitted.program),
-                };
-                print!("{text}");
-            }
+            compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+            die("no bytecode to show: the VM is being rebuilt");
         }
         Some(Commands::Check { entrypoint }) => {
             let file = read_file_or_die(&entrypoint);
@@ -494,175 +440,9 @@ fn cmd_run(args: RunArgs) {
         println!();
     }
 
-    // The hook only captures plans; `publish_native` turns them into machine
-    // code afterwards, because the plans' ConstIds index the constant pool and
-    // that is not final until the compile finishes.
-    let plans: Rc<RefCell<Vec<clif::NativePlan>>> = Rc::default();
-    let sink = Rc::clone(&plans);
-    let result = compile_source(&expr, &file, &args.entrypoint, move |e, base, pre| {
-        bytecode::compile_with_native(
-            e,
-            base,
-            pre,
-            Box::new(move |idx, f, pool, counts| {
-                sink.borrow_mut()
-                    .push(clif::plan(idx, f, pool, STDLIB.prelude, counts));
-            }),
-        )
-    });
-    let Some(emitted) = result.into_runnable() else {
-        die("nothing to run: the compile produced no program");
-    };
-    publish_native(
-        plans.take(),
-        &emitted.program,
-        emitted.frame_layouts.clone(),
-    );
-
-    let mut argv = Vec::with_capacity(args.args.len() + 1);
-    argv.push(args.entrypoint.clone());
-    argv.extend(args.args.iter().cloned());
-
-    let mut v = vm::new_vm_with_argv(emitted.program, argv).unwrap_or_else(|e| die(e));
-    // `main`'s return value is discarded: a program says what it has to say
-    // through its effects, and its exit status is the run's outcome.
-    drop(v.run().unwrap_or_else(|e| die(e)));
-}
-
-/// Park the hook-captured plans behind the program's
-/// [`NativeTable`](bytecode::NativeTable), so a body is compiled the first time
-/// it has been interpreted `WARM_CALLS` times.
-///
-/// Nothing is compiled here. Compiling every body costs ~0.7ms each, which a
-/// short-lived program should not pay for code it never runs; a hot body
-/// crosses the threshold within its first few calls.
-fn publish_native(
-    plans: Vec<clif::NativePlan>,
-    program: &bytecode::Program,
-    layouts: std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
-) {
-    // Even with no live plans (a program whose bodies all come from the
-    // seeded stdlib), the static bundles still need a compiler installed.
-    if plans.is_empty() && scarlet::STDLIB_CORE_INDEX.is_empty() {
-        return;
-    }
-    let module = match vm::jit::jit_module() {
-        Ok(m) => m,
-        Err(e) => die(format!("native backend unavailable: {e}")),
-    };
-    install_lazy_compiler(module, plans, program, layouts);
-}
-
-/// Park the plans and hand the table a compiler, so a body is compiled the
-/// first time it proves hot.
-///
-/// The state is behind a `Mutex` because schedulers run on their own threads
-/// and any of them can be the one to warm a body. Contention is not a concern:
-/// a body is compiled at most once, and the lock is held only for that.
-fn install_lazy_compiler(
-    module: vm::jit::JitModule,
-    plans: Vec<clif::NativePlan>,
-    program: &bytecode::Program,
-    layouts: std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
-) {
-    use scarlet::tivec::Idx as _;
-    use std::sync::{Arc, Mutex};
-
-    struct Pending {
-        module: vm::jit::JitModule,
-        plans: std::collections::HashMap<scarlet_vm::FuncIdx, clif::NativePlan>,
-        layouts:
-            std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
-    }
-
-    let by_idx = plans.into_iter().map(|p| (p.func_idx, p)).collect();
-    let pending = Arc::new(Mutex::new(Pending {
-        module,
-        plans: by_idx,
-        layouts,
-    }));
-    // The program the compiled code is compiled against. Its `native` table is
-    // shared with every scheduler's clone, so publishing here is visible to
-    // all of them.
-    let prog = program.clone();
-    let table = program.native.clone();
-    let compile = move |idx: scarlet_vm::FuncIdx| {
-        let Ok(mut st) = pending.lock() else {
-            return;
-        };
-        // Another scheduler may have won the race and already published it.
-        if prog.native.get(idx).is_some() {
-            return;
-        }
-        let t0 = std::time::Instant::now();
-        let st = &mut *st;
-        // A live plan (the user's own file) or a static bundle (a stdlib
-        // body, hydrated from the blob only now that it proved hot).
-        let (plan, static_layout) = match st.plans.remove(&idx) {
-            Some(plan) => (plan, None),
-            None => {
-                let Ok(at) = scarlet::STDLIB_CORE_INDEX
-                    .binary_search_by_key(&(idx.index() as u32), |(i, _, _)| *i)
-                else {
-                    return;
-                };
-                let (_, start, len) = scarlet::STDLIB_CORE_INDEX[at];
-                let bytes = &scarlet::STDLIB_CORE_BYTES[start as usize..(start + len) as usize];
-                match clif::decode_plan_bundle(idx, bytes, STDLIB.prelude) {
-                    Ok((plan, layout)) => (plan, Some(layout)),
-                    Err(e) => die(format!("stdlib core bundle for fn#{}: {e}", idx.index())),
-                }
-            }
-        };
-        if let Some(layout) = static_layout {
-            st.layouts.insert(idx, layout);
-        }
-        let def = compile_one(&mut st.module, &plan, &prog, &st.layouts);
-        if let Err(e) = vm::jit::finalize_into(&mut st.module, &[def], &table) {
-            die(format!("native finalize failed: {e}"));
-        }
-        if bytecode::native::debug() {
-            eprintln!(
-                "al-native: warmed fn#{} in {:.2}ms",
-                idx.index(),
-                t0.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-    };
-    // SAFETY-adjacent: the table is shared by `Arc`, so the compiler must be
-    // installed before any process runs.
-    program.native.set_compiler(Arc::new(compile));
-}
-
-/// Compile one planned body into `module`, or stop the run.
-fn compile_one(
-    module: &mut vm::jit::JitModule,
-    plan: &clif::NativePlan,
-    program: &bytecode::Program,
-    layouts: &std::collections::HashMap<scarlet_vm::FuncIdx, scarlet::core_ir::emit::FrameLayout>,
-) -> vm::jit::JitDef {
-    use scarlet::tivec::Idx as _;
-    let Some(layout) = layouts.get(&plan.func_idx) else {
-        die(format!(
-            "no frame layout recorded for fn#{}",
-            plan.func_idx.index()
-        ));
-    };
-    let body = match clif::compile(module, plan, program, layout) {
-        Ok(body) => body,
-        Err(e) => die(format!("native compile failed: {e}")),
-    };
-    let name = program
-        .functions
-        .get(body.func_idx.index())
-        .map(|f| f.name.to_string())
-        .unwrap_or_default();
-    vm::jit::JitDef {
-        fn_idx: body.func_idx,
-        func_id: body.func_id,
-        name,
-        code_size: body.code_size,
-    }
+    // Compiled all the same, so `run` still reports what `check` would.
+    compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+    die("cannot run: the VM is being rebuilt");
 }
 
 /// `al fmt --stdin`: format stdin and print the result. Separate from the file

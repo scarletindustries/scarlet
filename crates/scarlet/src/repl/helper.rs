@@ -101,7 +101,7 @@ impl ScarletHelper {
             // filesystem on every keystroke.
             Some(after_marker) if after_marker.contains(char::is_whitespace) => return None,
             Some(_) => complete_command(typed_command(line, pos)),
-            None => complete_source(line, pos, &self.names.borrow()),
+            None => complete_source(line, pos, &mut self.names.borrow_mut()),
         };
         let typed = line.get(start..pos).filter(|t| !t.is_empty())?;
         let shared = common_prefix(candidates.iter().map(|c| c.replacement.as_str()))?;
@@ -156,7 +156,7 @@ impl Completer for ScarletHelper {
         ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let Some(after_marker) = command::body(line) else {
-            return Ok(complete_source(line, pos, &self.names.borrow()));
+            return Ok(complete_source(line, pos, &mut self.names.borrow_mut()));
         };
         match after_marker.split_once(char::is_whitespace) {
             // Still typing the command itself.
@@ -191,7 +191,7 @@ fn complete_command((marker, typed): (&str, &str)) -> (usize, Vec<Pair>) {
 }
 
 /// Candidates for source text, and the byte offset they replace from.
-fn complete_source(line: &str, pos: usize, names: &Names) -> (usize, Vec<Pair>) {
+fn complete_source(line: &str, pos: usize, names: &mut Names) -> (usize, Vec<Pair>) {
     // `import scarlet/…` completes module paths, which are not identifiers:
     // their `/` separators fall outside the word grammar.
     if let Some(path) = import_path_before(line, pos) {
@@ -264,7 +264,7 @@ mod tests {
         names
     }
 
-    fn candidates(line: &str, names: &Names) -> (usize, Vec<String>) {
+    fn candidates(line: &str, names: &mut Names) -> (usize, Vec<String>) {
         let (start, pairs) = complete_source(line, line.len(), names);
         (start, pairs.into_iter().map(|p| p.replacement).collect())
     }
@@ -327,16 +327,16 @@ mod tests {
 
     #[test]
     fn a_bare_prefix_completes_prelude_names() {
-        let (start, items) = candidates("printl", &Names::default());
+        let (start, items) = candidates("printl", &mut Names::default());
         assert_eq!(start, 0);
         assert!(items.contains(&"println".to_string()), "{items:?}");
     }
 
     #[test]
     fn completion_replaces_only_the_member_after_a_dot() {
-        let names = observed("import scarlet/string");
+        let mut names = observed("import scarlet/string");
         let line = "const x = string.";
-        let (start, items) = candidates(line, &names);
+        let (start, items) = candidates(line, &mut names);
         assert_eq!(start, line.len());
         assert!(!items.is_empty(), "no exports offered");
     }
@@ -353,14 +353,14 @@ mod tests {
 
     #[test]
     fn an_import_line_completes_module_paths() {
-        let (start, items) = candidates("import scarlet/str", &Names::default());
+        let (start, items) = candidates("import scarlet/str", &mut Names::default());
         assert_eq!(start, "import ".len());
         assert!(items.iter().any(|i| i == "scarlet/string"), "{items:?}");
     }
 
     #[test]
     fn a_number_is_not_a_name_to_complete() {
-        let (start, items) = candidates("1 + 2", &Names::default());
+        let (start, items) = candidates("1 + 2", &mut Names::default());
         assert_eq!(start, "1 + 2".len());
         assert!(items.is_empty(), "{items:?}");
     }

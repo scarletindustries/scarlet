@@ -21,10 +21,9 @@ use rustyline::{Cmd, Config, Editor, EventHandler, KeyCode, KeyEvent, Modifiers}
 
 use crate::ast;
 use crate::bytecode;
-use crate::bytecode::{CompileOptions, IncrementalSession, ModuleScope, UnusedBindings, ValueView};
+use crate::bytecode::{CompileOptions, IncrementalSession, ModuleScope, UnusedBindings};
 use crate::diagnostic;
 use crate::term::Palette;
-use crate::vm;
 use command::Flow;
 use entry::Entry;
 use names::Names;
@@ -156,17 +155,6 @@ fn history_path() -> Option<PathBuf> {
     )
 }
 
-/// Whether the entry evaluated to nothing worth showing: a declaration, or a
-/// call that ran for its output alone. `Nil` is a prelude type the compiler
-/// refuses to let a program redefine, so its name identifies it.
-fn is_unit(value: &crate::bytecode::Value) -> bool {
-    match value.kind() {
-        ValueView::Nil => true,
-        ValueView::Enum(e) => e.enum_name() == "Nil",
-        _ => false,
-    }
-}
-
 /// The live session: the source it replays, and the names that source bound.
 pub(crate) struct Session {
     /// Every import the session has seen, and every declaration it has
@@ -208,7 +196,7 @@ impl Session {
         CompileOptions {
             unused_bindings: UnusedBindings::Ignore,
             module_scope: ModuleScope::Script,
-            ..CompileOptions::new(self.base_dir.as_deref(), Some(&crate::STDLIB))
+            ..CompileOptions::new(self.base_dir.as_deref())
         }
     }
 
@@ -217,9 +205,10 @@ impl Session {
         format!("{}{}", self.imports, self.definitions)
     }
 
-    /// Compile the session's source plus `input` as one program and run it,
-    /// printing the value unless it is `Nil` (a definition, or a call that ran
-    /// only for its output).
+    /// Compile the session's source plus `input` as one program. There is no
+    /// VM to run it on while the VM is rebuilt, so an entry that ends in an
+    /// expression says it was not evaluated; one that compiles still joins
+    /// the session, so its definitions stay usable.
     fn eval(&mut self, input: &str) {
         let program = match entry::parse(input) {
             Entry::Accepted(program) => program,
@@ -251,30 +240,16 @@ impl Session {
                 return;
             }
         }
-        let Some(emitted) = result.into_runnable() else {
-            // A successful non-check compile always emits, so reaching here
-            // means the stdlib seed failed and was already reported.
+        if result.into_runnable().is_none() {
+            // A successful non-check compile always produces a program, so
+            // reaching here means the stdlib seed failed and was already
+            // reported.
             return;
-        };
-
-        let mut vm = match vm::new_vm(emitted.program) {
-            Ok(vm) => vm,
-            Err(err) => return eprintln!("Runtime error: {err}"),
-        };
-        let value = match vm.run() {
-            Ok(value) => value,
-            Err(err) => {
-                // Per `VM::run`'s contract an errored run leaks its scheduler
-                // threads. The REPL accepts one leak per errored evaluation to
-                // keep the session alive.
-                return eprintln!("Runtime error: {err}");
-            }
-        };
+        }
         // Only an entry that ends in an expression has a value the user wrote.
-        // What a definition leaves on the stack is a compiler artifact, and
-        // printing it says nothing about the entry.
-        if !parts.expressions.trim().is_empty() && !is_unit(&value) {
-            println!("{}", vm::inspect(&value, vm.program()));
+        if !parts.expressions.trim().is_empty() {
+            let p = &self.palette;
+            eprintln!("{}not evaluated: the VM is being rebuilt{}", p.dim, p.reset);
         }
 
         self.names.borrow_mut().observe(&program);
@@ -297,7 +272,7 @@ impl Session {
             return;
         }
 
-        let mut session = IncrementalSession::new(&crate::STDLIB);
+        let mut session = IncrementalSession::new();
         session.as_repl();
         let result = session.check(
             &ast::Expression::BlockExpression(probe.ast),
@@ -317,35 +292,9 @@ impl Session {
         }
     }
 
-    /// The bytecode of the session's functions whose name contains `needle`.
-    /// Filtered, never whole: the emitted program carries the entire stdlib.
-    fn disassemble(&mut self, needle: &str) {
-        let replay = self.replay();
-        let mut scanner = crate::scanner::new_scanner(replay.clone());
-        let parsed = crate::parser::new_parser(&mut scanner).parse_program();
-        let result = bytecode::compile_with(
-            &ast::Expression::BlockExpression(parsed.ast),
-            self.compile_options(),
-        );
-        if !result.success() {
-            self.report(&result.diagnostics, &replay);
-            return;
-        }
-        let Some(emitted) = result.into_runnable() else {
-            return;
-        };
-        // Asked here rather than by looking at the listing, which carries a
-        // program header whether or not anything matched.
-        if !emitted
-            .program
-            .functions
-            .iter()
-            .any(|f| f.name.contains(needle))
-        {
-            eprintln!("no function matching '{needle}'");
-            return;
-        }
-        print!("{}", crate::dis::disassemble_fn(&emitted.program, needle));
+    /// There is no bytecode to show while the VM is rebuilt.
+    fn disassemble(&mut self, _needle: &str) {
+        eprintln!("no bytecode to show: the VM is being rebuilt");
     }
 
     /// Evaluate a file as one entry, so its definitions join the session.

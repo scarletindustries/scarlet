@@ -107,15 +107,16 @@ pub(super) struct RootState {
 impl RootState {
     pub(super) fn new() -> Self {
         Self {
-            session: bytecode::IncrementalSession::new(&crate::STDLIB),
+            session: bytecode::IncrementalSession::new(),
             xrefs: WorkspaceXrefs::default(),
         }
     }
 
     /// A root for the in-repo stdlib source tree itself: the session compiles
     /// `scarlet/...` modules from the `.scrl` files under `stdlib_root` rather than
-    /// seeding the (stale, span-less) precompiled blob, so stdlib sources get
-    /// the same hover / goto-def / references fidelity as user code.
+    /// the copy embedded in the binary, which may be stale against the files
+    /// being edited, so stdlib sources get the same hover / goto-def /
+    /// references fidelity as user code.
     pub(super) fn new_stdlib(stdlib_root: std::path::PathBuf) -> Self {
         Self {
             session: bytecode::IncrementalSession::new_from_source(stdlib_root),

@@ -7,10 +7,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::STDLIB;
 use crate::ast;
-use crate::module::ModuleKey;
-use crate::static_ir::StaticExport;
+use crate::bytecode::{Export, IncrementalSession};
+use crate::module::{self, ModuleKey, ModulePath};
 use crate::token::Keyword;
 
 /// A completion candidate and how to describe it in the completion list.
@@ -28,10 +27,10 @@ impl Candidate {
         }
     }
 
-    fn from_export(e: &StaticExport) -> Self {
+    fn from_export(e: Export) -> Self {
         Candidate {
-            name: e.name.to_string(),
-            params: e.params.iter().map(|p| (*p).to_string()).collect(),
+            name: e.name,
+            params: e.params,
         }
     }
 
@@ -51,10 +50,14 @@ impl Candidate {
 #[derive(Default)]
 pub struct Names {
     defined: Vec<String>,
-    /// Import alias to module key, for `alias.` completion. Only stdlib
+    /// Import alias to module path, for `alias.` completion. Only stdlib
     /// modules resolve: a relative import's exports live in a file this index
     /// never reads.
-    aliases: BTreeMap<String, String>,
+    aliases: BTreeMap<String, ModulePath>,
+    /// Where stdlib exports are read from. Built on the first completion that
+    /// needs one, since it compiles the prelude; it caches every module it
+    /// compiles after that, so each module compiles once per REPL.
+    stdlib: Option<IncrementalSession>,
 }
 
 impl Names {
@@ -104,11 +107,10 @@ impl Names {
             Some(a) => a.name.clone(),
             None => last.clone(),
         };
-        // Only a canonical (non-relative) path names a module the static
-        // stdlib can be keyed by; anything else completes to nothing.
+        // Only a canonical (non-relative) path names a stdlib module;
+        // anything else completes to nothing.
         if import.path.leading.is_empty() {
-            let key = ModuleKey::of(&import.path.names);
-            self.aliases.insert(alias, key.to_string());
+            self.aliases.insert(alias, import.path.names.clone());
         } else {
             self.aliases.remove(&alias);
         }
@@ -122,7 +124,7 @@ impl Names {
 
     /// Candidates for a bare word: keywords, the implicitly imported prelude,
     /// module aliases, and the session's own definitions.
-    pub fn bare(&self, prefix: &str) -> Vec<Candidate> {
+    pub fn bare(&mut self, prefix: &str) -> Vec<Candidate> {
         let mut out: Vec<Candidate> = Vec::new();
         out.extend(
             Keyword::ALL
@@ -131,8 +133,8 @@ impl Names {
                 .filter(|c| c.name.starts_with(prefix)),
         );
         out.extend(
-            prelude_exports()
-                .iter()
+            self.exports(&module::scarlet_prelude())
+                .into_iter()
                 .filter(|e| e.name.starts_with(prefix))
                 .map(Candidate::from_export),
         );
@@ -149,13 +151,13 @@ impl Names {
     }
 
     /// Candidates after `qualifier.`: that module's public exports.
-    pub fn qualified(&self, qualifier: &str, prefix: &str) -> Vec<Candidate> {
-        let Some(key) = self.aliases.get(qualifier) else {
+    pub fn qualified(&mut self, qualifier: &str, prefix: &str) -> Vec<Candidate> {
+        let Some(path) = self.aliases.get(qualifier).cloned() else {
             return Vec::new();
         };
-        let mut out: Vec<Candidate> = STDLIB
-            .exports(key)
-            .iter()
+        let mut out: Vec<Candidate> = self
+            .exports(&path)
+            .into_iter()
             .filter(|e| e.name.starts_with(prefix))
             .map(Candidate::from_export)
             .collect();
@@ -165,19 +167,19 @@ impl Names {
 
     /// Every importable stdlib module path, for completing `import scarlet/…`.
     pub fn module_paths(prefix: &str) -> Vec<Candidate> {
-        STDLIB
-            .module_keys()
+        module::stdlib_modules()
+            .iter()
+            .map(|path| ModuleKey::of(path).to_string())
             .filter(|k| k.starts_with(prefix))
             .map(Candidate::plain)
             .collect()
     }
-}
 
-/// The prelude module's exports — the names usable without an import.
-fn prelude_exports() -> &'static [StaticExport] {
-    use std::sync::OnceLock;
-    static EXPORTS: OnceLock<Vec<StaticExport>> = OnceLock::new();
-    EXPORTS.get_or_init(|| STDLIB.exports(ModuleKey::prelude().as_str()))
+    fn exports(&mut self, path: &ModulePath) -> Vec<Export> {
+        self.stdlib
+            .get_or_insert_with(IncrementalSession::new)
+            .exports(path)
+    }
 }
 
 #[cfg(test)]
@@ -199,7 +201,7 @@ mod tests {
 
     #[test]
     fn the_prelude_is_completable_with_no_session_at_all() {
-        let names = Names::default();
+        let mut names = Names::default();
         assert!(labels(&names.bare("printl")).contains(&"println".to_string()));
         assert!(
             labels(&names.bare("f")).contains(&"fn".to_string()),
@@ -209,21 +211,21 @@ mod tests {
 
     #[test]
     fn a_definition_becomes_completable() {
-        let names = observed("fn triple(n Int) Int { n * 3 }\nconst k = 1\n");
+        let mut names = observed("fn triple(n Int) Int { n * 3 }\nconst k = 1\n");
         assert_eq!(labels(&names.bare("tri")), vec!["triple"]);
         assert_eq!(labels(&names.bare("k")), vec!["k"]);
     }
 
     #[test]
     fn a_type_declaration_offers_its_constructors() {
-        let names = observed("type Shape {\n\tCircle(r Int)\n\tSquare(s Int)\n}\n");
+        let mut names = observed("type Shape {\n\tCircle(r Int)\n\tSquare(s Int)\n}\n");
         assert_eq!(labels(&names.bare("Circ")), vec!["Circle"]);
         assert_eq!(labels(&names.bare("Shape")), vec!["Shape"]);
     }
 
     #[test]
     fn an_import_completes_the_modules_exports_behind_its_alias() {
-        let names = observed("import scarlet/string\n");
+        let mut names = observed("import scarlet/string\n");
         let items = labels(&names.qualified("string", ""));
         assert!(!items.is_empty(), "no exports for scarlet/string");
         assert!(names.qualified("nope", "").is_empty(), "unknown qualifier");
@@ -233,7 +235,7 @@ mod tests {
     /// the name list has to reach into the type to find it.
     #[test]
     fn a_constructor_completes_behind_its_modules_alias() {
-        let names = observed("import scarlet/http\n");
+        let mut names = observed("import scarlet/http\n");
         assert_eq!(labels(&names.qualified("http", "Po")), vec!["Post"]);
         assert_eq!(labels(&names.qualified("http", "Del")), vec!["Delete"]);
         assert!(labels(&names.qualified("http", "Met")).contains(&"Method".to_string()));
@@ -241,7 +243,7 @@ mod tests {
 
     #[test]
     fn an_aliased_import_completes_under_the_alias_only() {
-        let names = observed("import scarlet/string as str\n");
+        let mut names = observed("import scarlet/string as str\n");
         assert!(!names.qualified("str", "").is_empty());
         assert!(names.qualified("string", "").is_empty());
         assert!(labels(&names.bare("st")).contains(&"str".to_string()));
@@ -254,7 +256,7 @@ mod tests {
     }
 
     fn names_candidate(name: &str) -> Candidate {
-        let names = Names::default();
+        let mut names = Names::default();
         names
             .bare(name)
             .into_iter()
