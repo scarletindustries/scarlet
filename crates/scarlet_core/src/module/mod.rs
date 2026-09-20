@@ -132,12 +132,11 @@ pub struct ModuleInterface {
     pub(crate) path: ModulePath,
     pub(crate) types: IndexMap<String, ExportedType>,
     pub(crate) values: IndexMap<String, ExportedValue>,
-    /// `BTreeSet` so iteration is sorted: `static_ir::flatten` interns these
-    /// in iteration order into the reproducible stdlib blob.
+    /// `BTreeSet` so iteration is sorted.
     pub(crate) private_names: BTreeSet<String>,
     /// The module's own doc comment: the `/** */` block at line 0 of its
-    /// source. Unlike every other doc, this one is carried through the
-    /// precompiled stdlib blob so hovering `scarlet/process` shows its prose.
+    /// source. Kept on the interface so hovering `scarlet/process` shows its
+    /// prose.
     pub(crate) doc: Option<String>,
 }
 
@@ -283,13 +282,9 @@ impl CachedModule {
 
 #[derive(Debug)]
 pub struct ModuleTable {
-    /// Insertion order is compilation order; `into_loaded` preserves it so the
-    /// precompiled-stdlib emit is deterministic.
+    /// Insertion order is compilation order.
     loaded: IndexMap<ModuleKey, CachedModule>,
     loading: HashSet<ModuleKey>,
-    /// When the binary carries a static stdlib, `get_or_hydrate` falls through
-    /// to it on a `loaded` miss and caches the result.
-    static_fallback: Option<&'static crate::static_ir::StaticStdlib>,
     /// In-memory document overrides (LSP unsaved buffers), preferred over
     /// `fs::read_to_string`.
     overlays: HashMap<PathBuf, String>,
@@ -314,7 +309,6 @@ impl Default for ModuleTable {
         ModuleTable {
             loaded: IndexMap::new(),
             loading: HashSet::new(),
-            static_fallback: None,
             overlays: HashMap::new(),
             compile_count: 0,
             id_bases: HashMap::new(),
@@ -363,18 +357,6 @@ impl ModuleTable {
         self.loaded.get(key).map(|c| &c.iface)
     }
 
-    /// `get`, falling through to `static_fallback` and caching the hydrate.
-    pub(crate) fn get_or_hydrate(&mut self, key: &ModuleKey) -> Option<&ModuleInterface> {
-        if !self.loaded.contains_key(key)
-            && let Some(s) = self.static_fallback
-            && let Some(iface) = s.lookup_module(key.as_str())
-        {
-            self.loaded
-                .insert(key.clone(), CachedModule::hydrated(iface));
-        }
-        self.loaded.get(key).map(|c| &c.iface)
-    }
-
     /// Record that `importer` directly depends on `importee` so a change to
     /// `importee` cascades to `importer` on invalidate.
     pub(crate) fn record_dependent(&mut self, importee: &ModuleKey, importer: &ModuleKey) {
@@ -397,10 +379,6 @@ impl ModuleTable {
 
     pub(crate) fn clear_overlay(&mut self, path: &Path) {
         self.overlays.remove(path);
-    }
-
-    pub(crate) fn set_static_fallback(&mut self, s: &'static crate::static_ir::StaticStdlib) {
-        self.static_fallback = Some(s);
     }
 
     /// Iterate cached user modules (those compiled from a file on disk).

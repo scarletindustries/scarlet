@@ -480,7 +480,7 @@ impl Compiler {
             let key = ModuleKey::of(&module.iter().map(|s| s.to_string()).collect());
             // A module this compile cannot resolve declares no type a value
             // of `id` could have, so a miss here is not a miss on `id`.
-            let Some(iface) = self.module_table.get_or_hydrate(&key) else {
+            let Some(iface) = self.module_table.get(&key) else {
                 continue;
             };
             if iface.types.get(name).is_some_and(|et| et.info.id == id) {

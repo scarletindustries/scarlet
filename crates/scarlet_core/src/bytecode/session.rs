@@ -189,9 +189,9 @@ impl Compiler {
     /// exhaustive destructure below makes a new snapshot field fail to compile
     /// until its rewind is written.
     ///
-    /// `w` must not be below the watermark captured right after `seed_static`:
-    /// that prefix is memcpy'd out of the stdlib blob and every `Ty`/`StrId`/
-    /// `ArenaSlice` frozen into `.rodata` indexes into it.
+    /// `w` must not be below the session's `seed`, because everything below it
+    /// is the stdlib itself. The prelude-as-entry teardown to `bare` is the one
+    /// deliberate exception, and it rebuilds the session afterwards.
     /// `IncrementalSession::rewind_to` is the clamp.
     fn reset_to(&mut self, w: &Watermark) {
         let Watermark {
@@ -479,12 +479,10 @@ pub struct IncrementalSession {
     seed: Watermark,
     /// Watermark before anything at all was seeded — the floor a
     /// prelude-as-entry check rewinds to, since the prelude cannot be checked
-    /// on top of itself. Equals `seed` for blob-seeded sessions, which never
-    /// check the prelude as an entry.
+    /// on top of itself.
     bare: Watermark,
     /// Whether the prelude seed is currently in place. A prelude-as-entry
     /// check tears it down (`bare` rewind); the next ordinary check re-seeds.
-    /// Always true for blob-seeded sessions.
     seeded: bool,
     /// Watermark immediately before the previous entry-body analysis, i.e.
     /// after every imported module had been compiled.
@@ -497,33 +495,32 @@ pub struct IncrementalSession {
     type_facts: Vec<HoverFact>,
 }
 
+impl Default for IncrementalSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IncrementalSession {
-    pub fn new(stdlib: &'static crate::static_ir::StaticStdlib) -> Self {
-        let mut c = new_compiler(None, true);
-        c.collect_hover_facts = true;
-        c.seed_static(stdlib);
-        let seed = c.watermark();
-        IncrementalSession {
-            c,
-            seed,
-            bare: seed,
-            seeded: true,
-            last_entry: None,
-            graph: Rc::new(ReferenceGraph::new()),
-            type_facts: Vec::new(),
-        }
+    /// A session over the stdlib embedded in the binary.
+    pub fn new() -> Self {
+        Self::with_stdlib_root(None)
     }
 
     /// A session that compiles the stdlib from the `.scrl` sources under
-    /// `stdlib_root` (the in-repo `src/std`) instead of seeding the
-    /// precompiled blob. Used when editing the stdlib itself: every `scarlet/...`
-    /// module is then an ordinary on-disk `File` module — compiled, cached,
-    /// hashed and invalidated exactly like user code — so the reference graph
-    /// and hover facts carry full fidelity for stdlib sources.
+    /// `stdlib_root` (the in-repo `src/std`) instead of the embedded copy.
+    /// Used when editing the stdlib itself: every `scarlet/...` module is then
+    /// an ordinary on-disk `File` module — compiled, cached, hashed and
+    /// invalidated exactly like user code — so the reference graph and hover
+    /// facts carry full fidelity for stdlib sources.
     pub fn new_from_source(stdlib_root: std::path::PathBuf) -> Self {
+        Self::with_stdlib_root(Some(stdlib_root))
+    }
+
+    fn with_stdlib_root(stdlib_root: Option<std::path::PathBuf>) -> Self {
         let mut c = new_compiler(None, true);
         c.collect_hover_facts = true;
-        c.stdlib_source_root = Some(stdlib_root);
+        c.stdlib_source_root = stdlib_root;
         let bare = c.watermark();
         c.register_prelude();
         let seed = c.watermark();
@@ -553,9 +550,9 @@ impl IncrementalSession {
     }
 
     /// The one rewind path. `seed` is a hard floor: everything below it is the
-    /// stdlib blob memcpy'd out of `.rodata`, and the `Ty`/`StrId`/`ArenaSlice`
-    /// indices frozen into the binary cannot be re-minted. Clamping here rather
-    /// than at each caller means a new rewind site cannot forget.
+    /// stdlib, compiled when the session started, and rewinding past it would
+    /// drop the stdlib too. Clamping here rather than at each caller means a
+    /// new rewind site cannot forget.
     fn rewind_to(&mut self, w: Watermark) {
         self.c.reset_to(&w.later(self.seed));
     }
@@ -647,13 +644,7 @@ impl IncrementalSession {
             // with none of the partially-rewound world to reason about. Rare
             // (only after editing `scrl.scrl` and switching file), so the full
             // stdlib recompile it implies is acceptable.
-            #[allow(clippy::expect_used)]
-            let root = self
-                .c
-                .stdlib_source_root
-                .clone()
-                .expect("only a from-source session tears down its seed");
-            *self = Self::new_from_source(root);
+            *self = Self::with_stdlib_root(self.c.stdlib_source_root.clone());
         }
 
         // The previous entry's contributions are dropped; cached modules' arena

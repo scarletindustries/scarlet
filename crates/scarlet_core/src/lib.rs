@@ -30,6 +30,4 @@ pub use scarlet_types::{type_def, types};
 pub use scarlet_vm::{assert_send, assert_send_sync, frozen, heap};
 
 pub use bytecode::{CtorRef, PreludeBindings, TypeRef};
-pub use precompile::{PrecompileError, PrecompileOutput, precompile_stdlib};
-pub use static_ir::StaticStdlib;
 pub use type_def::TypeId;

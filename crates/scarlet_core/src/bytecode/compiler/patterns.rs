@@ -180,7 +180,7 @@ impl Compiler {
             );
             return None;
         };
-        let Some(iface) = self.module_table.get_or_hydrate(&key) else {
+        let Some(iface) = self.module_table.get(&key) else {
             let module = self.module_name(&key);
             self.error(format!("Module '{module}' is not loaded"), span);
             return None;

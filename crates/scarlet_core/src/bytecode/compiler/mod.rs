@@ -444,10 +444,9 @@ pub struct Compiler {
     /// `(locals_frame_undo.len(), undo_log.len())` captured by each *scoped*
     /// `enter_module_frame` (see [`ModuleFrame::scoped`]).
     locals_frame_marks: Vec<(usize, usize)>,
-    /// Stdlib bootstrap (prelude registration, `precompile_stdlib`, the
-    /// native-hook relower) compiles at root on purpose: the flat by-name
-    /// residue it leaves *is* the ambient stdlib namespace the blob snapshots
-    /// and `seed_static` reinjects. While set, `enter_module_frame` skips
+    /// Stdlib bootstrap (prelude registration, the native-hook relower)
+    /// compiles at root on purpose: the flat by-name residue it leaves *is*
+    /// the ambient stdlib namespace. While set, `enter_module_frame` skips
     /// namespace scoping. User modules always compile with it unset.
     retain_namespaces: bool,
     /// Per-scope unused-binding tracking. Each frame maps a let/param/match
@@ -621,14 +620,7 @@ pub struct Compiler {
     /// interface (every exported type and constructor) so the set is derived
     /// from `scrl.scrl` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
-    /// `BTreeSet` so `precompile_stdlib`'s snapshot iterates sorted — the
-    /// blob's `RESERVED` slice must be reproducible (and binary-searchable).
     pub(super) reserved: BTreeSet<String>,
-    /// When the binary is built with the static stdlib, this is the
-    /// `&'static StaticStdlib` handle; lazy-hydrate fallthrough lookups consult
-    /// it on a runtime-map miss. `None` for the from-source path
-    /// (`register_prelude`, `precompile_stdlib`, LSP-editing-stdlib).
-    static_stdlib: Option<&'static crate::static_ir::StaticStdlib>,
     /// Lowered Core IR accumulated during this compile. Each function body
     /// [`Self::compile_fn_body`] routes through the `lower→perceus→emit`
     /// pipeline pushes its post-perceus [`crate::core_ir::CoreFn`] into
@@ -741,7 +733,7 @@ pub struct Compiler {
     /// Native-backend hook, installed by [`compile_with_native`] and fired by
     /// `elaborate_body` / `materialize_eta_wrappers` once per lowered body —
     /// see [`NativeHook`]. `None` on every other path (plain compile/check,
-    /// the LSP session, `precompile_stdlib`).
+    /// the LSP session).
     native_hook: Option<NativeHook>,
 }
 
@@ -1141,8 +1133,6 @@ struct CompiledBody {
 pub struct CompileOptions<'a> {
     /// Directory relative imports resolve against. `None` rejects them.
     pub base_dir: Option<&'a Path>,
-    /// The precompiled stdlib to seed from, if any.
-    pub stdlib: Option<&'static crate::static_ir::StaticStdlib>,
     /// Analyse without emitting a program.
     pub check_only: bool,
     /// Analyse the buffer *as* this module rather than as `main`.
@@ -1157,27 +1147,18 @@ pub struct CompileOptions<'a> {
 }
 
 impl<'a> CompileOptions<'a> {
-    /// Emit a program from `base_dir`, seeded from `stdlib`: what a file
-    /// compile is. Every other entry point below is this with one field
-    /// changed.
-    pub fn new(
-        base_dir: Option<&'a Path>,
-        stdlib: Option<&'static crate::static_ir::StaticStdlib>,
-    ) -> Self {
+    /// Emit a program from `base_dir`: what a file compile is. Every other
+    /// entry point below is this with one field changed.
+    pub fn new(base_dir: Option<&'a Path>) -> Self {
         CompileOptions {
             base_dir,
-            stdlib,
             ..Self::default()
         }
     }
 }
 
-pub fn compile(
-    expr: &ast::Expression,
-    base_dir: Option<&Path>,
-    pre: Option<&'static crate::static_ir::StaticStdlib>,
-) -> CompileResult {
-    compile_with(expr, CompileOptions::new(base_dir, pre))
+pub fn compile(expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
+    compile_with(expr, CompileOptions::new(base_dir))
 }
 
 /// [`compile`], with a [`NativeHook`] installed for the duration: the hook is
@@ -1189,36 +1170,30 @@ pub fn compile(
 pub fn compile_with_native(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
-    pre: Option<&'static crate::static_ir::StaticStdlib>,
     native_hook: NativeHook,
 ) -> CompileResult {
     compile_with(
         expr,
         CompileOptions {
             native_hook: Some(native_hook),
-            ..CompileOptions::new(base_dir, pre)
+            ..CompileOptions::new(base_dir)
         },
     )
 }
 
-pub fn check(
-    expr: &ast::Expression,
-    base_dir: Option<&Path>,
-    pre: Option<&'static crate::static_ir::StaticStdlib>,
-) -> CompileResult {
+pub fn check(expr: &ast::Expression, base_dir: Option<&Path>) -> CompileResult {
     compile_with(
         expr,
         CompileOptions {
             check_only: true,
-            ..CompileOptions::new(base_dir, pre)
+            ..CompileOptions::new(base_dir)
         },
     )
 }
 
 /// Analyse a file *as* a specific stdlib module (used when editing
 /// `src/std/**/*.scrl` inside the Scarlet repo so the LSP/CLI doesn't report
-/// `@vm is stdlib-only` / `Result is reserved`). Always check-only and always
-/// from source (the user is editing it; the precompiled blob is stale).
+/// `@vm is stdlib-only` / `Result is reserved`). Always check-only.
 pub fn check_as_module(
     expr: &ast::Expression,
     base_dir: Option<&Path>,
@@ -1229,7 +1204,7 @@ pub fn check_as_module(
         CompileOptions {
             check_only: true,
             as_module: Some(module),
-            ..CompileOptions::new(base_dir, None)
+            ..CompileOptions::new(base_dir)
         },
     )
 }
@@ -1289,7 +1264,6 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
-        static_stdlib: None,
         core: crate::core_ir::CoreProgram::default(),
         frame_closures: Vec::new(),
         walk_tys: Vec::new(),
@@ -1348,7 +1322,6 @@ struct CtorHead<'a> {
 pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> CompileResult {
     let CompileOptions {
         base_dir,
-        stdlib: pre,
         check_only,
         as_module,
         native_hook,
@@ -1382,17 +1355,9 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     // modules still need the prelude for `Result`/`Nil`/etc.
     let is_prelude_self = as_module.as_deref() == Some(module::scarlet_prelude().as_slice());
     if !is_prelude_self {
-        match pre {
-            // Seeding is unconditional: the static blob now ships each
-            // stdlib body's Core IR bundle (`STDLIB_CORE_*`), so the backend
-            // no longer needs the hook to see stdlib bodies — a warm stdlib
-            // body hydrates its plan from the blob instead. Re-lowering the
-            // whole stdlib here once cost ~9ms of every startup.
-            Some(s) => c.seed_static(s),
-            None => c.register_prelude(),
-        }
+        c.register_prelude();
         if has_errors(&c.engine.diagnostics) {
-            // The seed itself failed: the user's program was never compiled,
+            // The prelude itself failed: the user's program was never compiled,
             // so there is nothing to hand back — not even a partial one.
             return CompileResult::analysis_only(
                 c.engine.diagnostics,
@@ -1400,11 +1365,8 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
             );
         }
     }
-    // `__main__` must include any module-init code already emitted (the
-    // `MakeClosure`/`StoreLocal` sequences for pure-Scarlet stdlib functions seeded
-    // by `seed_precompiled`), so it starts at 0. With the from-source path
-    // `register_prelude` emits no init code (scrl.scrl has only types and @vm fns)
-    // so 0 == code.len() there too.
+    // `__main__` starts at 0: `register_prelude` emits no init code (scrl.scrl
+    // has only types and @vm fns), so 0 == code.len() here.
     let main_start = 0i32;
     // Marks for the Core re-emit below. They must sit AFTER `process_imports`
     // (which recursively compiles imported modules into the same `program` /
@@ -1569,30 +1531,9 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     }
 }
 
-/// The compiler state `precompile_stdlib` freezes into the static blob:
-/// the compiled program plus the scalars a fresh compiler needs to resume
-/// from it.
-pub(crate) struct CompilerParts {
-    pub(crate) program: Program,
-    pub(crate) prelude: PreludeBindings,
-    pub(crate) reserved: BTreeSet<String>,
-    pub(crate) next_type_id: TypeId,
-    pub(crate) local_count: i32,
-}
-
 impl Compiler {
-    // ========================================================================
-    // Precompile accessors (used by `precompile.rs` only)
-    // ========================================================================
-
     pub(crate) fn diagnostics(&self) -> &[Diagnostic] {
         &self.engine.diagnostics
-    }
-    /// Install the native-backend hook. `precompile_stdlib` uses this to
-    /// capture every lowered stdlib body for the static blob; the runtime
-    /// installs its hook through [`compile_with_native`] instead.
-    pub(crate) fn set_native_hook(&mut self, hook: NativeHook) {
-        self.native_hook = Some(hook);
     }
 
     /// The prelude bindings `register_prelude` established.
@@ -1600,108 +1541,8 @@ impl Compiler {
         self.prelude.clone()
     }
 
-    /// Drain the per-body frame layouts this compile recorded.
-    pub(crate) fn take_frame_layouts(
-        &mut self,
-    ) -> std::collections::HashMap<crate::core_ir::FuncIdx, crate::core_ir::emit::FrameLayout> {
-        std::mem::take(&mut self.frame_layouts)
-    }
-
-    pub(crate) fn take_module_table(&mut self) -> IndexMap<String, ModuleInterface> {
-        std::mem::take(&mut self.module_table).into_loaded()
-    }
-    pub(crate) fn take_type_info(&mut self) -> IndexMap<String, crate::types::TypeInfo> {
-        self.env.take_type_info()
-    }
-    /// Tear down for `precompile_stdlib`: program + scalars, plus the engine
-    /// (whose arena `flatten` snapshots).
-    pub(crate) fn into_parts(self) -> (CompilerParts, InferEngine) {
-        (
-            CompilerParts {
-                program: self.program,
-                prelude: self.prelude,
-                reserved: self.reserved,
-                next_type_id: self.env.next_type_id(),
-                local_count: self.local_count,
-            },
-            self.engine,
-        )
-    }
-
-    /// Seed from the build-time static stdlib. Per-compile work here is
-    /// deliberately minimal: copy code/functions/constants (the VM mutates
-    /// around them so they must be owned), hydrate the dozen prelude
-    /// `TypeInfo`s and constructor `Scheme`s into root scope, and remember the
-    /// `&'static StaticStdlib` so `module_table.get_or_hydrate` can lazily
-    /// pull non-prelude stdlib modules on first import. Nothing is parsed or
-    /// deserialized.
-    pub(crate) fn seed_static(&mut self, s: &'static crate::static_ir::StaticStdlib) {
-        debug_assert!(self.program.code.is_empty());
-        self.static_stdlib = Some(s);
-        self.module_table.set_static_fallback(s);
-        self.prelude = s.prelude.clone();
-        self.engine.set_prim_ids(self.prelude.prim_ids());
-        self.env.set_next_type_id(s.next_type_id);
-        // The static type arena IS the live arena's prefix — every `Ty`/
-        // `ArenaSlice` in stdlib schemes/typeinfos indexes into it. memcpy
-        // every pool + intern strings.
-        self.engine.seed_arena(crate::types::ArenaSeed {
-            nodes: s.nodes,
-            children: s.children,
-            strings: s.str_pool,
-            quants: s.quants,
-            str_slices: s.str_slices,
-            type_params: s.type_params,
-            variant_fields: s.variant_fields,
-            variants: s.variants,
-        });
-
-        let (code, functions, constants) = s.hydrate_program(&mut self.frozen);
-        self.program.code = code;
-        self.program.functions = functions;
-        self.program.constants = constants;
-        self.local_count = s.local_count;
-        for slot in 0..s.local_count {
-            let id = self.engine.intern(&format!("__pre{}", slot));
-            self.bind_local(id, slot);
-        }
-
-        // Stdlib type-infos: copy eagerly so both the by-name map (annotation
-        // resolution) and the by-id registry (nominal lookups: exhaustiveness,
-        // field access, hover) hit without hydration. Seeded below the session
-        // watermark, so they are never truncated and never overwritten in
-        // place (a colliding user type gets its own id and its own entry).
-        for (name, idx) in s.typeinfo_by_name {
-            let ti = s.typeinfos[idx.0 as usize];
-            // The env is fresh here, so nothing is overwritten or journaled.
-            self.env.store_type_info(name, ti);
-        }
-
-        // Re-export prelude constructor/@vm schemes (Some/None/Ok/Err/True/...)
-        // into root scope.
-        let key = ModuleKey::prelude();
-        if let Some(iface) = self.module_table.get_or_hydrate(&key) {
-            let pairs: Vec<_> = iface
-                .values
-                .iter()
-                .map(|(n, ev)| (n.clone(), ev.scheme))
-                .collect();
-            for (name, scheme) in pairs {
-                self.env.define(&name, scheme);
-            }
-        }
-    }
-
-    /// Reserved-name check covering both the runtime set (from-source path)
-    /// and the static sorted slice (`seed_static` path).
     pub(super) fn is_reserved(&self, name: &str) -> bool {
-        if self.reserved.contains(name) {
-            return true;
-        }
-        if let Some(s) = self.static_stdlib {
-            return s.reserved.binary_search(&name).is_ok();
-        }
-        false
+        self.reserved.contains(name)
     }
 
     // ========================================================================
@@ -2912,7 +2753,7 @@ impl Compiler {
         // `resolve` already minted the canonical path + key from it.
         let module::ResolvedModule { source, canon, key } = resolved;
         let importer = self.current_module_key.clone();
-        if self.module_table.get_or_hydrate(&key).is_some() {
+        if self.module_table.get(&key).is_some() {
             self.module_table.record_dependent(&key, &importer);
             return Some((canon, key));
         }
@@ -2994,11 +2835,8 @@ impl Compiler {
     /// `late_types`), which `PreludeBindings::capture` could not: it runs
     /// before any stdlib module loads.
     ///
-    /// Only the from-source path needs this. A statically seeded compiler gets
-    /// the binding already filled, because `seed_static` clones the baked
-    /// `PRELUDE` — so the `get_or_hydrate` exit above deliberately does *not*
-    /// call this. Repairing the binding there would hide a static stdlib built
-    /// without it; `precompile`'s tests are what hold that end.
+    /// Runs once, when `key` is first compiled. The cache-hit exit above skips
+    /// it, because the binding was made on that first compile.
     fn bind_late_prelude(&mut self, key: &ModuleKey) {
         let Compiler {
             prelude,
@@ -3386,7 +3224,7 @@ impl Compiler {
         member: &str,
         member_span: Span,
     ) -> Option<(Scheme, Option<GlobalSlot>)> {
-        let Some(iface) = self.module_table.get_or_hydrate(module_key) else {
+        let Some(iface) = self.module_table.get(module_key) else {
             self.module_error(format!("Module '{module_key}' is not loaded"), member_span);
             return None;
         };
