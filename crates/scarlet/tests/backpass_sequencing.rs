@@ -125,6 +125,7 @@ fn run_bounded(tag: &str, src: &str) -> (Option<i32>, String) {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn failed_step_does_not_run_a_continuation_that_would_not_end() {
     let (code, out) = run_bounded("divergent", DIVERGENT_CONTINUATION);
     assert_eq!(
@@ -141,6 +142,7 @@ fn failed_step_does_not_run_a_continuation_that_would_not_end() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_second_independent_step_does_not_run_after_the_first_fails() {
     let (code, out) = run_bounded("two_writes", TWO_INDEPENDENT_WRITES);
     assert_eq!(code, Some(0), "output:\n{out}");

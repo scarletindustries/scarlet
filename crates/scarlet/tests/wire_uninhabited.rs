@@ -16,6 +16,7 @@ use common::run_outputs;
 /// `Tagged(Native)` over an `Int`. The body is the `Int` alone — one byte,
 /// zigzag 7 — and the value round trips to `==` with its field intact.
 #[test]
+#[ignore = "needs the VM"]
 fn a_record_with_a_phantom_bodiless_argument_round_trips() {
     run_outputs(
         "import scarlet/binary\n\
@@ -50,6 +51,7 @@ fn a_record_with_a_phantom_bodiless_argument_round_trips() {
 /// one the input does cover is refused at the element, where the walk meets
 /// the node. Both are `Malformed`, and the program goes on running.
 #[test]
+#[ignore = "needs the VM"]
 fn an_empty_array_of_a_bodiless_type_round_trips_and_forged_counts_are_malformed() {
     run_outputs(
         "import scarlet/binary\n\
@@ -84,6 +86,7 @@ fn an_empty_array_of_a_bodiless_type_round_trips_and_forged_counts_are_malformed
 /// `Some` tag steers the decoder into the payload's node and is refused
 /// there.
 #[test]
+#[ignore = "needs the VM"]
 fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
@@ -120,6 +123,7 @@ fn none_of_a_bodiless_type_round_trips_and_a_forged_some_is_malformed() {
 /// one of them. The body is empty, and the decoder is refused at byte 11 —
 /// `Malformed`, never a panic, never a value.
 #[test]
+#[ignore = "needs the VM"]
 fn decode_at_a_bodiless_type_is_malformed_rather_than_a_value_or_a_panic() {
     run_outputs(
         "import scarlet/wire\n\

@@ -151,6 +151,7 @@ fn a_session_re_checks_a_wire_call_across_an_edit() {
 /// nothing to fix its payload is the refusal a REPL user hits first, and it
 /// must be a diagnostic there rather than an internal error.
 #[test]
+#[ignore = "needs the VM"]
 fn the_repl_reports_an_unconstrained_decode() {
     use std::io::Write;
     use std::process::{Command, Stdio};

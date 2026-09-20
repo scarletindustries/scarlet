@@ -420,6 +420,7 @@ pub fn main() {{
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "needs the VM"]
 fn an_untrusted_issuer_is_rejected() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -440,6 +441,7 @@ fn an_untrusted_issuer_is_rejected() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn an_expired_certificate_is_rejected() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Expired);
@@ -464,6 +466,7 @@ fn an_expired_certificate_is_rejected() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_hostname_mismatch_is_rejected() {
     let ca = make_ca();
     // Valid, current, and signed by a CA the client trusts — issued for the
@@ -503,6 +506,7 @@ fn a_hostname_mismatch_is_rejected() {
 // issuer, and only the certificate's SAN differs.
 
 #[test]
+#[ignore = "needs the VM"]
 fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
     let ca = make_ca();
     // `DNS:localhost` and no IP SAN, so 127.0.0.1 is simply not on this
@@ -534,6 +538,7 @@ fn an_ip_literal_against_a_certificate_without_it_is_a_hostname_mismatch() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
     let ca = make_ca();
     // `CertificateParams::new` sorts a SAN that parses as an address into
@@ -562,6 +567,7 @@ fn an_ip_literal_against_a_matching_ip_san_completes_the_handshake() {
 /// `tls.connect` resolves the host first and fails as `Transport(NetError)`
 /// before the name is ever handed to rustls.
 #[test]
+#[ignore = "needs the VM"]
 fn a_name_that_is_neither_dns_nor_address_is_an_invalid_server_name() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -589,6 +595,7 @@ fn a_name_that_is_neither_dns_nor_address_is_an_invalid_server_name() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_trusted_certificate_completes_the_handshake_and_moves_bytes() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -640,6 +647,7 @@ pub fn main() {{
 /// clock would still look like a timeout here (one park, then the timer),
 /// so this test witnesses the typed timeout, not the re-run discipline.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_read_within_times_out_as_transport_timed_out() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -707,6 +715,7 @@ pub fn main() {{
 /// the timer produces this output, and a re-run that reset the clock would look
 /// identical.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_handshake_within_times_out_against_a_silent_peer() {
     let port = spawn_silent_peer();
 
@@ -754,6 +763,7 @@ pub fn main() {{
 /// arm is about the deadline NOT firing, so it must not become a timing test of
 /// a host that may be busy.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_handshake_within_completes_against_a_live_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -878,6 +888,7 @@ pub fn main() {{
 /// No trust root is installed and none is needed: the deadline must fire before
 /// a certificate is ever offered.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_connect_within_times_out_against_a_peer_that_never_speaks_tls() {
     let port = spawn_silent_peer();
 
@@ -934,6 +945,7 @@ pub fn main() {{
 /// against the same string it connects to. `localhost` cannot be used here: it
 /// resolves to `::1` on this host, where nothing is bound.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_connect_until_completes_against_a_live_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "127.0.0.1", Validity::Current);
@@ -978,6 +990,7 @@ pub fn main() {{
 /// The hang is after the handshake: `tls.connect`/`handshake` still have no
 /// deadline of their own, so this test speaks TLS first and then waits.
 #[test]
+#[ignore = "needs the VM"]
 fn https_send_until_times_out_against_a_silent_peer() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1038,6 +1051,7 @@ pub fn main() {{
 /// the peer does send. A red hang test next to this is a deadline, not a
 /// broken HTTPS client.
 #[test]
+#[ignore = "needs the VM"]
 fn https_send_until_returns_a_response() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1090,6 +1104,7 @@ pub fn main() {{
 
 /// `tls.read_within` returns the plaintext that arrives before the deadline.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_read_within_returns_data() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1137,6 +1152,7 @@ pub fn main() {{
 /// connection, so a caller holding the `Socket` it passed in cannot go around
 /// the encryption with it.
 #[test]
+#[ignore = "needs the VM"]
 fn the_cleartext_handle_is_dead_after_an_upgrade() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1203,6 +1219,7 @@ pub fn main() {{
 /// the dispatch rather than of TLS: three past the threshold, and the outcome
 /// asserted is only that the program finished and reported typed results.
 #[test]
+#[ignore = "needs the VM"]
 fn a_tls_op_survives_the_function_around_it_being_compiled() {
     const REPS: usize = 12;
     let ca = make_ca();
@@ -1365,6 +1382,7 @@ pub fn main() {{
 /// before it refuses a byte, which no single write under the 64 KiB limit could
 /// ever reach.
 #[test]
+#[ignore = "needs the VM"]
 fn a_large_tls_write_parks_and_resumes_without_duplicating_a_byte() {
     // 16 << 11 = 32 KiB per write, under rustls's 64 KiB limit; 96 of them is
     // 3 MiB, comfortably past a loopback socket's capacity with the peer's
@@ -1475,6 +1493,7 @@ pub fn main() {{
 /// happens whether the handshake succeeds or fails — the failure path evicts
 /// the NEW id, which is not the one the sibling is on.
 #[test]
+#[ignore = "needs the VM"]
 fn an_upgrade_wakes_a_sibling_parked_on_the_cleartext_id() {
     let ca = make_ca();
     let leaf = make_leaf(&ca, "localhost", Validity::Current);
@@ -1538,6 +1557,7 @@ pub fn main() {{
 /// Connecting with TLS to a plaintext port is a protocol error, not a hang and
 /// not a silent success.
 #[test]
+#[ignore = "needs the VM"]
 fn a_plaintext_peer_is_a_protocol_error() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();

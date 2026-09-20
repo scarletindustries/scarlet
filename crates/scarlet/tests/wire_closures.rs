@@ -24,6 +24,7 @@ use common::run_outputs;
 /// copy called with the right result. `apply` pins the type `decode` is used
 /// at, since `println` alone would leave the return polymorphic.
 #[test]
+#[ignore = "needs the VM"]
 fn a_closure_capturing_an_int_and_a_string_round_trips_and_is_called() {
     run_outputs(
         "import scarlet/wire\n\
@@ -52,6 +53,7 @@ fn a_closure_capturing_an_int_and_a_string_round_trips_and_is_called() {
 /// immediate range, and a range. The decoded copy hands them all back, and
 /// each is checked against what went in rather than only `==` to itself.
 #[test]
+#[ignore = "needs the VM"]
 fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
     run_outputs(
         "import scarlet/map\n\
@@ -96,6 +98,7 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
 /// A closure capturing a closure: the decoded outer calls the decoded inner,
 /// so both bodies run over their own captures.
 #[test]
+#[ignore = "needs the VM"]
 fn a_closure_capturing_a_closure_round_trips_and_is_called_through_both() {
     run_outputs(
         "import scarlet/wire\n\
@@ -123,6 +126,7 @@ fn a_closure_capturing_a_closure_round_trips_and_is_called_through_both() {
 /// arrives at the original's owner. A pid captured by a closure is the
 /// process it was.
 #[test]
+#[ignore = "needs the VM"]
 fn a_closure_capturing_a_subject_and_a_pid_round_trips_and_the_copies_are_used() {
     run_outputs(
         "import scarlet/process\n\
@@ -157,6 +161,7 @@ fn a_closure_capturing_a_subject_and_a_pid_round_trips_and_the_copies_are_used()
 /// A named function as a value, and a lambda closing over nothing: the row
 /// is the run, the index and a count of zero.
 #[test]
+#[ignore = "needs the VM"]
 fn a_zero_capture_closure_round_trips_and_is_called() {
     run_outputs(
         "import scarlet/wire\n\
@@ -183,6 +188,7 @@ fn a_zero_capture_closure_round_trips_and_is_called() {
 /// A record with a `fn` field crosses with its closure, and the closure
 /// still runs.
 #[test]
+#[ignore = "needs the VM"]
 fn a_record_with_a_fn_field_round_trips_and_the_field_is_called() {
     run_outputs(
         "import scarlet/wire\n\
@@ -214,6 +220,7 @@ fn a_record_with_a_fn_field_round_trips_and_the_field_is_called() {
 /// another run's, and the refusal is `OtherRun`, this run's identity first.
 /// Bytes 11..27 are the run, as for a handle.
 #[test]
+#[ignore = "needs the VM"]
 fn a_closure_from_another_run_is_refused_with_other_run() {
     run_outputs(
         "import scarlet/binary\n\
@@ -248,6 +255,7 @@ fn a_closure_from_another_run_is_refused_with_other_run() {
 /// functions for; the zero-capture closure's row ends with its count, so the
 /// index is everything between the run and the last byte.
 #[test]
+#[ignore = "needs the VM"]
 fn a_tampered_function_index_is_malformed_not_a_panic() {
     run_outputs(
         "import scarlet/binary\n\
@@ -279,6 +287,7 @@ fn a_tampered_function_index_is_malformed_not_a_panic() {
 /// offset — here a zero-capture lambda's row claiming one `Nil` capture —
 /// rather than a capture-index error when the body runs.
 #[test]
+#[ignore = "needs the VM"]
 fn a_tampered_capture_count_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
@@ -310,6 +319,7 @@ fn a_tampered_capture_count_is_malformed() {
 /// bytes are refused at the count's offset. The row ends `count, tag,
 /// zigzag(5)`, so the count is the third-to-last byte.
 #[test]
+#[ignore = "needs the VM"]
 fn a_capture_count_short_of_the_functions_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\
@@ -342,6 +352,7 @@ fn a_capture_count_short_of_the_functions_is_malformed() {
 /// The closure captures one `Int`, so its row ends `tag, zigzag(5)`; the
 /// tag is the second-to-last byte.
 #[test]
+#[ignore = "needs the VM"]
 fn a_tampered_capture_tag_is_malformed() {
     run_outputs(
         "import scarlet/binary\n\

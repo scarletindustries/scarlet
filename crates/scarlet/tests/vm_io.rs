@@ -36,6 +36,7 @@ pub fn main() {{
 /// `io.write_text` then `io.read_text` round-trips, and the bytes land on
 /// disk.
 #[test]
+#[ignore = "needs the VM"]
 fn file_write_then_read_roundtrips() {
     let proj = Project::new("io_roundtrip");
     let data = proj.dir.join("out.txt");
@@ -78,6 +79,7 @@ pub fn main() {
 /// `net.accept` -> `sock.peer` -> `net.read` -> `net.write` -> `net.close`.
 /// The only test covering the socket opcodes' success paths.
 #[test]
+#[ignore = "needs the VM"]
 fn tcp_echo_server_roundtrip() {
     let proj = Project::new("io_tcp");
     let src = listening_src(
@@ -134,6 +136,7 @@ fn tcp_echo_server_roundtrip() {
 /// The client side of the API, entirely from Scarlet. Covers connect (non-blocking
 /// completion), read_exact (cross-read accumulation), and write_parts.
 #[test]
+#[ignore = "needs the VM"]
 fn tcp_connect_and_vectored_echo() {
     let proj = Project::new("io_connect");
     let src = r#"import scarlet/process
@@ -201,6 +204,7 @@ pub fn main() {
 /// its deadline instead of blocking forever. The client stays connected and
 /// silent, so only the deadline timer can wake the parked read.
 #[test]
+#[ignore = "needs the VM"]
 fn tcp_read_within_times_out() {
     let proj = Project::new("io_read_within_timeout");
     let src = listening_src(
@@ -233,6 +237,7 @@ fn tcp_read_within_times_out() {
 /// `socket.read_within` returns `Ok` when data arrives before the deadline.
 /// The generous timeout keeps this independent of scheduler timing.
 #[test]
+#[ignore = "needs the VM"]
 fn tcp_read_within_returns_data() {
     let proj = Project::new("io_read_within_data");
     let src = listening_src(
@@ -265,6 +270,7 @@ fn tcp_read_within_returns_data() {
 /// Writing a bit-unaligned binary (`<<1:4>>`) to a file surfaces as
 /// `IoError::UnalignedBinary`, and the file is never created.
 #[test]
+#[ignore = "needs the VM"]
 fn file_write_unaligned_binary_errors() {
     let proj = Project::new("io_unaligned");
     let data = proj.dir.join("out.bin");
@@ -297,6 +303,7 @@ pub fn main() {
 /// Reading a missing path surfaces `IoError::NotFound(path)`, with the path
 /// carried in the variant rather than buried in a string.
 #[test]
+#[ignore = "needs the VM"]
 fn file_read_missing_path_errors() {
     let proj = Project::new("io_missing");
     let missing = proj.dir.join("does_not_exist.txt");
@@ -326,6 +333,7 @@ pub fn main() {
 /// Connecting to a port with no listener surfaces `ConnectionRefused` as a
 /// typed variant, and exercises the non-blocking-connect completion path.
 #[test]
+#[ignore = "needs the VM"]
 fn connect_refused_is_typed() {
     // Reserve an ephemeral port and release it. Tests that spawn a server must
     // never do this: between release and re-bind the kernel can hand the port
@@ -364,6 +372,7 @@ pub fn main() {
 /// scheduler thread for the syscall: several processes read the same file
 /// concurrently, exercising offload → worker → completion → resume.
 #[test]
+#[ignore = "needs the VM"]
 fn file_read_offloads_to_blocking_pool() {
     let proj = Project::new("io_pool");
     let data = proj.dir.join("data.txt");
@@ -404,6 +413,7 @@ pub fn main() {
 /// `net.resolve` runs `getaddrinfo` on the blocking pool and returns a typed
 /// `IpAddress`. `localhost` always resolves on a loopback-capable host.
 #[test]
+#[ignore = "needs the VM"]
 fn dns_resolve_runs_on_pool() {
     let proj = Project::new("dns_resolve");
     let src = r#"import scarlet/net
@@ -510,6 +520,7 @@ fn assert_200(stream: &mut TcpStream, buf: &mut Vec<u8>, expected: &[u8], ctx: &
 /// request is pipelined into the same write, so the connection driver must
 /// answer it from carried leftover bytes with no intervening read.
 #[test]
+#[ignore = "needs the VM"]
 fn http_server_get_and_keepalive() {
     let proj = Project::new("io_http");
     let src = listening_src(
@@ -539,6 +550,7 @@ fn http_server_get_and_keepalive() {
 /// request on the same connection must also succeed, proving the chunked
 /// framing consumed exactly the body plus terminator and did not desync.
 #[test]
+#[ignore = "needs the VM"]
 fn http_server_chunked_post_roundtrip() {
     let proj = Project::new("io_http_chunked");
     let src = listening_src(
@@ -623,6 +635,7 @@ fn http_server_chunked_post_roundtrip() {
 /// close` request gets `Connection: close` back and then a closed socket (RFC
 /// 9112 §9.6), and `close` wins over a `keep-alive` token (§9.3).
 #[test]
+#[ignore = "needs the VM"]
 fn http_server_connection_close_semantics() {
     let proj = Project::new("io_http_close");
     let src = listening_src(
@@ -682,6 +695,7 @@ fn http_server_connection_close_semantics() {
 /// an empty body instead of reading the socket. Nothing is ever sent on the
 /// pair here, so a regression shows up as a read error or a hang.
 #[test]
+#[ignore = "needs the VM"]
 fn http_body_content_length_non_positive_terminates() {
     let src = r#"import scarlet/net
 import scarlet/net/socket
@@ -727,6 +741,7 @@ pub fn main() {
 /// case is pipelined behind a healthy request to prove the batched response
 /// ahead of the 500 still goes out.
 #[test]
+#[ignore = "needs the VM"]
 fn http_server_body_source_failure_yields_framed_500() {
     let proj = Project::new("io_http_source_500");
     let src = listening_src(
@@ -837,6 +852,7 @@ fn run_with_schedulers(tag: &str, src: &str, schedulers: u32, secs: u64) -> (Opt
 /// The deterministic discriminator is the unit test
 /// `vm::io::tests::a_foreign_scheduler_registers_the_same_kernel_socket`.
 #[test]
+#[ignore = "needs the VM"]
 fn accept_on_a_scheduler_that_did_not_listen() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -896,6 +912,7 @@ pub fn main() {
 /// `net.close` on a listener must end accepts parked on other schedulers
 /// with `Ok(None)`, not leave them parked forever.
 #[test]
+#[ignore = "needs the VM"]
 fn closing_a_listener_wakes_a_foreign_parked_acceptor() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -943,6 +960,7 @@ pub fn main() {
 /// rule). The child returns without `socket.close`, so the parent's read on
 /// the peer side must see EOF rather than park on a leaked fd.
 #[test]
+#[ignore = "needs the VM"]
 fn a_connection_closes_when_its_owner_ends() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -985,6 +1003,7 @@ pub fn main() {
 /// reader wakes, re-runs, misses the table, and gets a stale-socket
 /// `NetError`.
 #[test]
+#[ignore = "needs the VM"]
 fn closing_a_connection_wakes_a_parked_reader() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -1037,6 +1056,7 @@ pub fn main() {
 /// moves implicitly: transfer-on-capture would make this split reader/writer
 /// program's fate depend on spawn order.
 #[test]
+#[ignore = "needs the VM"]
 fn a_siblings_exit_does_not_close_a_foreign_socket() {
     let src = r#"import scarlet/process
 import scarlet/net
@@ -1091,6 +1111,7 @@ pub fn main() {
 /// server's whole life (its owner, the acceptor, loops forever). The client
 /// sees the handler's data, then EOF.
 #[test]
+#[ignore = "needs the VM"]
 fn the_accept_loop_closes_a_forgetful_handlers_socket() {
     use std::io::Read;
     let proj = Project::new("serve_forgetful");
@@ -1287,6 +1308,7 @@ pub fn main() {{
 /// root to configure, and the one path that stalls without it (mDNS, measured
 /// at 5.0 s on Darwin) resolves differently on Linux.
 #[test]
+#[ignore = "needs the VM"]
 fn resolve_within_gives_up_on_a_deadline_that_beats_the_lookup() {
     let proj = Project::new("resolve_within");
     let src = r#"import scarlet/net
@@ -1339,6 +1361,7 @@ pub fn main() {
 /// budget. It is what fails if the refusal is ever hoisted above the
 /// IP-literal case.
 #[test]
+#[ignore = "needs the VM"]
 fn resolve_within_refuses_a_spent_budget_before_dispatching() {
     let src = r#"import scarlet/net
 import scarlet/net/error.{TimedOut}

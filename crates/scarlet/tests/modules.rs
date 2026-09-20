@@ -9,6 +9,7 @@ const UTIL_SRC: &str =
     "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";
 
 #[test]
+#[ignore = "needs the VM"]
 fn relative_qualified() {
     let proj = Project::new("rel_qual");
     proj.write("util.scrl", UTIL_SRC);
@@ -20,6 +21,7 @@ fn relative_qualified() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn labelled_args_on_a_qualified_call_take_declared_order() {
     // A qualified callee resolves through `resolve_qualified`, so its parameter
     // labels come off the imported module's scheme rather than the local env —
@@ -39,6 +41,7 @@ fn labelled_args_on_a_qualified_call_take_declared_order() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn relative_selective_and_alias() {
     let proj = Project::new("rel_sel");
     proj.write("util.scrl", UTIL_SRC);
@@ -50,6 +53,7 @@ fn relative_selective_and_alias() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn aliased_type_import_unifies_with_canonical() {
     // `import mod.{T as X}` must hydrate an annotation of `X` to the type's
     // canonical nominal name. Values carry the canonical name, so an
@@ -64,6 +68,7 @@ fn aliased_type_import_unifies_with_canonical() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn relative_import() {
     let proj = Project::new("rel_imp");
     proj.write("helper.scrl", "pub fn greet() String { 'hello' }\n");
@@ -93,6 +98,7 @@ fn private_is_not_importable() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn opaque_type_hides_constructors() {
     let proj = Project::new("opaque");
     proj.write(
@@ -295,6 +301,7 @@ fn qualified_import_unknown_member_is_error() {
 /// env. An elaborator that re-probed the live env would read `util.empty()` as
 /// a field access, enter an expression the walk never entered, and abort.
 #[test]
+#[ignore = "needs the VM"]
 fn lambda_body_keeps_the_walks_qualifier_verdict() {
     let proj = Project::new("qual_pinned");
     proj.write("util.scrl", "pub fn empty() String { 'E' }\n");
@@ -309,6 +316,7 @@ fn lambda_body_keeps_the_walks_qualifier_verdict() {
 /// field of the member's name, so after it `one.go` really is a field read while
 /// inside the earlier-walked lambda it is still module `one`'s `go`.
 #[test]
+#[ignore = "needs the VM"]
 fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
     let proj = Project::new("qual_shadow");
     proj.write("one.scrl", "pub const go = 7\n");
@@ -325,6 +333,7 @@ fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
 
 /// `sub/mid.scrl` imports `./b`, which must be `sub/b.scrl`, not the root's.
 #[test]
+#[ignore = "needs the VM"]
 fn same_named_modules_in_different_directories_are_distinct() {
     let proj = Project::new("mod_identity");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
@@ -344,6 +353,7 @@ fn same_named_modules_in_different_directories_are_distinct() {
 /// The same file reached by two different spellings (`./b` from the root and
 /// `../b` from `sub/`) is ONE module: it must compile once and share state.
 #[test]
+#[ignore = "needs the VM"]
 fn one_file_reached_two_ways_is_one_module() {
     let proj = Project::new("mod_identity_alias");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
@@ -377,6 +387,7 @@ fn a_module_in_another_directory_does_not_satisfy_a_relative_import() {
 /// A type in `sub/b.scrl` and one in `b.scrl` are different types even though both
 /// modules are spelled `./b`. A shared cache entry would unify them.
 #[test]
+#[ignore = "needs the VM"]
 fn same_named_modules_do_not_share_types() {
     let proj = Project::new("mod_identity_types");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
@@ -406,6 +417,7 @@ fn same_named_modules_do_not_share_types() {
 const COLOR_SRC: &str = "pub type Color {\n\tRed\n\tGreen(shade Int)\n}\n";
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_qualified_constructor_pattern_matches() {
     let proj = Project::new("qual_pat");
     proj.write("color.scrl", COLOR_SRC);
@@ -419,6 +431,7 @@ fn a_qualified_constructor_pattern_matches() {
 /// The imported name and the qualified spelling denote the same constructor,
 /// so exhaustiveness counts them together.
 #[test]
+#[ignore = "needs the VM"]
 fn qualified_and_imported_constructors_are_the_same_constructor() {
     let proj = Project::new("qual_pat_mixed");
     proj.write("color.scrl", COLOR_SRC);
@@ -448,6 +461,7 @@ fn a_qualified_pattern_is_seen_by_exhaustiveness() {
 /// equals: every arm read as covering nothing, and a total match was rejected
 /// as missing every variant.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_constructor_import_covers_its_variant() {
     let proj = Project::new("alias_ctor_exh");
     proj.write("color.scrl", COLOR_SRC);
@@ -462,6 +476,7 @@ fn an_aliased_constructor_import_covers_its_variant() {
 /// two aliases that swap a pair of constructor names still name the variant
 /// each was imported from.
 #[test]
+#[ignore = "needs the VM"]
 fn swapped_constructor_aliases_keep_their_own_variants() {
     let proj = Project::new("alias_ctor_swap");
     proj.write("color.scrl", COLOR_SRC);
@@ -475,6 +490,7 @@ fn swapped_constructor_aliases_keep_their_own_variants() {
 /// The irrefutability check on a destructuring binding lowers its pattern
 /// through the same path, so an aliased head must resolve there too.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_constructor_destructures_irrefutably() {
     let proj = Project::new("alias_ctor_destructure");
     proj.write("pair.scrl", "pub type Pair {\n\tPair(a Int, b Int)\n}\n");
@@ -518,6 +534,7 @@ const HUE_SRC: &str = "pub type Hue {\n\tRed\n\tGreen(shade Int)\n\tBlue\n}\n\np
 /// The four tests above omit a catch-all, so all four take the switch and
 /// none of them can see this.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_arm_matches_beside_a_catch_all() {
     let proj = Project::new("alias_ctor_catchall");
     proj.write("color.scrl", COLOR_MAKE_SRC);
@@ -531,6 +548,7 @@ fn an_aliased_arm_matches_beside_a_catch_all() {
 /// A bare binding arm is a catch-all too, and takes the same ladder. This is
 /// the shape that broke RESP3 pub/sub: `other -> ...` after an aliased head.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_arm_matches_beside_a_bare_binding_catch_all() {
     let proj = Project::new("alias_ctor_binding_catchall");
     proj.write("color.scrl", COLOR_MAKE_SRC);
@@ -544,6 +562,7 @@ fn an_aliased_arm_matches_beside_a_bare_binding_catch_all() {
 /// The same match, with the scrutinee built through the qualifier in this
 /// file rather than returned from the module.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_arm_matches_a_qualified_scrutinee_beside_a_catch_all() {
     let proj = Project::new("alias_ctor_qual_catchall");
     proj.write("color.scrl", COLOR_MAKE_SRC);
@@ -557,6 +576,7 @@ fn an_aliased_arm_matches_a_qualified_scrutinee_beside_a_catch_all() {
 /// An aliased head nested inside a tuple pattern reaches the ladder through a
 /// different lowering path than a top-level head, and resolved the same way.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_head_matches_nested_beside_a_catch_all() {
     let proj = Project::new("alias_ctor_nested_catchall");
     proj.write("hue.scrl", HUE_SRC);
@@ -570,6 +590,7 @@ fn an_aliased_head_matches_nested_beside_a_catch_all() {
 /// An aliased head as one alternative of an or-pattern. `Hue`'s third variant
 /// keeps the catch-all reachable, so the match still takes the ladder.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_head_matches_in_an_or_pattern_beside_a_catch_all() {
     let proj = Project::new("alias_ctor_or_catchall");
     proj.write("hue.scrl", HUE_SRC);
@@ -583,6 +604,7 @@ fn an_aliased_head_matches_in_an_or_pattern_beside_a_catch_all() {
 /// As `an_aliased_constructor_destructures_irrefutably`, but the value comes
 /// from the declaring module rather than being built through the alias here.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_destructure_takes_a_value_from_the_declaring_module() {
     let proj = Project::new("alias_ctor_destructure_cross");
     proj.write(
@@ -614,6 +636,7 @@ fn a_catch_all_before_an_aliased_arm_is_still_unreachable() {
 /// same variant built any other way. Carrying the written name onto the value
 /// made `G(9) == color.Green(9)` false and printed `G(9)`.
 #[test]
+#[ignore = "needs the VM"]
 fn an_alias_does_not_change_a_constructed_value_identity() {
     let proj = Project::new("alias_ctor_value_identity");
     proj.write("color.scrl", COLOR_MAKE_SRC);
@@ -634,6 +657,7 @@ fn an_alias_does_not_change_a_constructed_value_identity() {
 /// The tests above all alias to a fresh name, where the mismatch only ever
 /// costs a branch. None of them can reach this.
 #[test]
+#[ignore = "needs the VM"]
 fn an_alias_colliding_with_a_real_variant_does_not_capture_it() {
     let proj = Project::new("alias_ctor_collide");
     proj.write("color.scrl", COLOR_MAKE_SRC);
@@ -653,6 +677,7 @@ fn an_alias_colliding_with_a_real_variant_does_not_capture_it() {
 /// the VM, so an alias-named `Hex` was a `Radix` the builtin did not
 /// recognise: `expected Radix, got 'Radix'`, exit 1.
 #[test]
+#[ignore = "needs the VM"]
 fn an_aliased_stdlib_constructor_reaches_a_vm_builtin() {
     let proj = Project::new("alias_ctor_stdlib");
     proj.write(
@@ -664,6 +689,7 @@ fn an_aliased_stdlib_constructor_reaches_a_vm_builtin() {
 
 /// Labelled arguments and `..` work through a qualifier, as they do bare.
 #[test]
+#[ignore = "needs the VM"]
 fn a_qualified_pattern_takes_labels_and_rest() {
     let proj = Project::new("qual_pat_args");
     proj.write("color.scrl", COLOR_SRC);

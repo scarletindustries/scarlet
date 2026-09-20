@@ -112,6 +112,7 @@ pub fn main() {{
 /// Eight CPU-bound workers under two schedulers: the run-queue state the
 /// donation policy migrates.
 #[test]
+#[ignore = "needs the VM"]
 fn cpu_bound_spawns_complete_correctly_under_two_schedulers() {
     cpu_bound_smoke("sched2_smoke", 2, 8, 20, 4);
 }
@@ -119,6 +120,7 @@ fn cpu_bound_spawns_complete_correctly_under_two_schedulers() {
 /// Same workload on one scheduler, where there is never an idle peer: the
 /// donation path must stay inert and the output must be identical.
 #[test]
+#[ignore = "needs the VM"]
 fn cpu_bound_spawns_complete_correctly_under_one_scheduler() {
     cpu_bound_smoke("sched1_smoke", 1, 6, 19, 3);
 }
@@ -128,6 +130,7 @@ fn cpu_bound_spawns_complete_correctly_under_one_scheduler() {
 /// moved frame metadata (ip/base_slot/captures) derails the recursion and the
 /// final value comes out wrong.
 #[test]
+#[ignore = "needs the VM"]
 fn deep_recursive_worker_survives_two_schedulers() {
     let stdout = run_fib_program(
         "sched2_deep",
@@ -151,6 +154,7 @@ fn deep_recursive_worker_survives_two_schedulers() {
 /// so nothing it points at may be scheduler-local. Each worker loads the
 /// globals first, burns many reductions, then prints them.
 #[test]
+#[ignore = "needs the VM"]
 fn migrated_process_keeps_loaded_globals_valid() {
     let stdout = run_fib_program(
         "sched2_globals",

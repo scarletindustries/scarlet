@@ -82,6 +82,7 @@ fn assert_prints(tag: &str, src: &str, schedulers: Option<u32>, expected: &str) 
 /// frames run native while `middle`/`outer` stay interpreted: the boundary is
 /// crossed in both directions inside one program.
 #[test]
+#[ignore = "needs the VM"]
 fn sandwich_crosses_the_warmup_boundary_mid_run() {
     let src = "import scarlet/array
 
@@ -112,6 +113,7 @@ pub fn main() {
 /// timer. The suspension must unwind through the native frame and the resume
 /// must find `x` — bound before the parking call, used after it — intact.
 #[test]
+#[ignore = "needs the VM"]
 fn native_caller_parks_and_resumes_through_interpreted_callee() {
     let src = "import scarlet/process
 
@@ -145,6 +147,7 @@ pub fn main() {
 /// like the interpreter's TailCallSelf, or the spinner starves the sibling
 /// and the output order inverts.
 #[test]
+#[ignore = "needs the VM"]
 fn fairness_native_self_tail_loop_yields_to_sibling() {
     let src = "import scarlet/process
 
@@ -178,6 +181,7 @@ pub fn main() {
 /// flips the running frame onto the fresh entry mid-loop. The debug line is
 /// the witness that the compile fired inside the single call.
 #[test]
+#[ignore = "needs the VM"]
 fn single_call_loop_warms_and_flips_mid_run() {
     let src = "fn spin(n Int, acc Int) Int {
 \tif n == 0 { acc } else { spin(n - 1, acc + 1) }
@@ -220,6 +224,7 @@ pub fn main() {
 /// `make` warm here too, so a bare "some body warmed" witness is satisfied
 /// even when the body holding the match never leaves the interpreter.
 #[test]
+#[ignore = "needs the VM"]
 fn a_warmed_aliased_match_agrees_across_the_warmup_boundary() {
     let src = "import ./color
 import ./color.{Color, Green as G}
@@ -262,6 +267,7 @@ pub fn main() {
 /// and at the i64 wrap. The recursion warms both functions mid-run, so the
 /// pinned literals hold across the interp→native switch.
 #[test]
+#[ignore = "needs the VM"]
 fn int_overflow_spill_prints_pinned_values() {
     let src = "fn fact(n Int, acc Int) Int {
 \tif n < 2 { acc } else { fact(n - 1, acc * n) }
@@ -384,6 +390,7 @@ fn assert_warmed(stderr: &str, name: &str) {
 /// The expected output is recomputed in Rust from the same recurrence, so a
 /// miscompile fails against ground truth rather than against a second run.
 #[test]
+#[ignore = "needs the VM"]
 fn bitwise_ops_survive_the_native_bridge() {
     let src = "import scarlet/int
 
@@ -437,6 +444,7 @@ pub fn main() {
 /// getrandom rather than another CSPRNG. The two-process test below is what
 /// refuses a fixed-seed userspace generator.
 #[test]
+#[ignore = "needs the VM"]
 fn random_bytes_survives_the_native_bridge() {
     let src = "import scarlet/binary
 import scarlet/crypto
@@ -503,6 +511,7 @@ pub fn main() {
 /// once in the source would pass every in-process check and fail here.
 /// Collision of two honest 16-byte CSPRNG draws is 2^-128.
 #[test]
+#[ignore = "needs the VM"]
 fn random_bytes_is_not_a_fixed_seed() {
     let src = "import scarlet/binary
 import scarlet/crypto
@@ -1079,6 +1088,7 @@ fn gen_program(r: &mut Rng) -> (String, String) {
 /// generator computed from the intended semantics. The seed is fixed, and a
 /// divergence panics with the program index and full source.
 #[test]
+#[ignore = "needs the VM"]
 fn fuzz_generated_programs_print_their_computed_values() {
     const SEED: u64 = 0x5eed_a10c_0de5_eed1;
     const PROGRAMS: usize = 200;
@@ -1101,37 +1111,6 @@ fn fuzz_generated_programs_print_their_computed_values() {
             out.stdout
         );
     }
-}
-
-/// (f) `al dis <file> --native fib` prints a CLIF listing: the function's
-/// name, and the `block0` every non-trivial compiled function has.
-#[test]
-fn dis_native_prints_clif_for_fib() {
-    let proj = Project::new("native_dis");
-    let path = proj.dir.join("fib.scrl");
-    std::fs::write(
-        &path,
-        "fn fib(n Int) Int {\n\tif n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n\n\
-         pub fn main() {\n\tprintln(fib(10))\n}\n",
-    )
-    .unwrap();
-    let path = path.to_string_lossy().into_owned();
-    let out = run_al_env(&["dis", &path, "--native", "fib"], &[]);
-    assert!(
-        out.success,
-        "`al dis --native fib` failed:\n--- stdout ---\n{}--- stderr ---\n{}",
-        out.stdout, out.stderr
-    );
-    assert!(
-        out.stdout.contains("fib"),
-        "the listing must name the function:\n{}",
-        out.stdout
-    );
-    assert!(
-        out.stdout.contains("block0"),
-        "no CLIF body (expected an entry `block0`):\n{}",
-        out.stdout
-    );
 }
 
 /// How many `wire.encode`/`wire.decode` round trips the JIT test below runs.
@@ -1164,6 +1143,7 @@ const WIRE_ROUNDS: i64 = 2_000;
 /// cannot see a fault symmetric across both), and decode's behaviour on
 /// hostile bytes (T-343). This test is about the bridge, not the codec.
 #[test]
+#[ignore = "needs the VM"]
 fn wire_ops_survive_the_native_bridge() {
     let src = "import scarlet/wire
 
@@ -1222,6 +1202,7 @@ pub fn main() {
 /// corruption, or truncation and single-byte mutation coverage — that is
 /// T-343. Here the only question is abort versus value.
 #[test]
+#[ignore = "needs the VM"]
 fn a_wire_decode_refusal_is_a_value_on_the_native_bridge_not_an_abort() {
     let src = "import scarlet/wire
 

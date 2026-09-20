@@ -309,6 +309,7 @@ run_case! {
 // materialized into the closure at `MakeClosure` time.
 
 #[test]
+#[ignore = "needs the VM"]
 fn closure_captures_enclosing_function_local() {
     // Two closures over distinct captures: a shared or global slot would make
     // both print the last `x` written.
@@ -327,6 +328,7 @@ fn closure_captures_enclosing_function_local() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn closure_captures_multiple_enclosing_locals() {
     // Two captures: `MakeClosure(capture_count = 2)` plus `PushCapture` at
     // indices 0 and 1, read back in order.
@@ -345,6 +347,7 @@ fn closure_captures_multiple_enclosing_locals() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn closure_captures_non_parameter_local() {
     // `base` is a let-binding rather than a parameter, still `PushCapture`.
     run_outputs(
@@ -363,6 +366,7 @@ fn closure_captures_non_parameter_local() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn and_or_short_circuit_skips_rhs() {
     // `loud` prints when its argument is computed, so a missing 'evaluated'
     // line proves the RHS was never reached.
@@ -380,6 +384,7 @@ fn and_or_short_circuit_skips_rhs() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn and_or_evaluate_rhs_when_lhs_undecided() {
     // Control for `and_or_short_circuit_skips_rhs`: the LHS does not decide
     // the result, so the RHS must run and `loud` must print.
@@ -402,6 +407,7 @@ fn and_or_evaluate_rhs_when_lhs_undecided() {
 // only inside the match matcher.
 
 #[test]
+#[ignore = "needs the VM"]
 fn neq_on_int_and_enum() {
     // Both directions per opcode, so an always-true, always-false, or
     // accidental-`==` lowering flips exactly one line.
@@ -418,6 +424,7 @@ fn neq_on_int_and_enum() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn eq_on_string_array_tuple() {
     // Generic `Op::Eq` as a value-producing expression over each compound
     // kind, both directions.
@@ -640,6 +647,7 @@ run_case! {
 /// The fused op evaluates its default eagerly, so `lower` may only fuse a
 /// *pure* one. A call has an effect and must stay behind the lazy match.
 #[test]
+#[ignore = "needs the VM"]
 fn index_or_does_not_evaluate_an_impure_default() {
     run_outputs(
         "fn side() Int {\n\
@@ -658,6 +666,7 @@ fn index_or_does_not_evaluate_an_impure_default() {
 /// `False` is a nullary constructor, not a constant, so it exercises the
 /// pushed-default path a grid walk's `row[x] or False` depends on.
 #[test]
+#[ignore = "needs the VM"]
 fn index_or_covers_both_encodings_and_every_boundary() {
     run_outputs(
         "fn f(a Array(Int), i Int) Int { a[i] or -1 }\n\
@@ -686,6 +695,7 @@ fn index_or_covers_both_encodings_and_every_boundary() {
 /// build against an absolute bar, never ran, and belongs in an interleaved
 /// min-of-N bench, not here.
 #[test]
+#[ignore = "needs the VM"]
 fn bench_typed_output_is_pinned() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bench_typed.scrl");

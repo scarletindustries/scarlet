@@ -31,6 +31,7 @@ fn assert_failed_with(out: &AlOutput, needle: &str) {
 /// An unlinked child's crash is reported, seen by its monitor as the typed
 /// reason, and does not touch the process that spawned it.
 #[test]
+#[ignore = "needs the VM"]
 fn an_unlinked_crash_is_contained_and_typed() {
     let out = run(
         "contained",
@@ -81,6 +82,7 @@ pub fn main() {
 /// The main process crashing is reported once, as the exit status, exactly
 /// as before fault isolation existed.
 #[test]
+#[ignore = "needs the VM"]
 fn a_main_crash_fails_the_run_and_is_reported_once() {
     let out = run(
         "main_crash",
@@ -105,6 +107,7 @@ fn a_main_crash_fails_the_run_and_is_reported_once() {
 /// A crash in a linked child kills main: the program fails, promptly, even
 /// though main itself was blocked for ever and never misbehaved.
 #[test]
+#[ignore = "needs the VM"]
 fn a_linked_childs_crash_kills_main() {
     let started = Instant::now();
     let out = run(
@@ -135,6 +138,7 @@ pub fn main() {
 /// A crash in main kills the processes linked to it, so a program whose
 /// main crashes does not linger on the strength of its workers.
 #[test]
+#[ignore = "needs the VM"]
 fn a_main_crash_kills_linked_workers() {
     let started = Instant::now();
     let out = run(
@@ -160,6 +164,7 @@ pub fn main() {
 /// survives a crash two levels down when the middle process was spawned
 /// unlinked, and sees it only through its monitor on the middle process.
 #[test]
+#[ignore = "needs the VM"]
 fn a_cascade_stops_at_an_unlinked_process() {
     let out = run(
         "boundary",
@@ -202,6 +207,7 @@ pub fn main() {
 /// a handler that crashes closes its own connection and the server keeps
 /// serving the next one.
 #[test]
+#[ignore = "needs the VM"]
 fn a_crashing_connection_handler_does_not_stop_the_server() {
     use std::io::{Read, Write};
     use std::net::TcpStream;

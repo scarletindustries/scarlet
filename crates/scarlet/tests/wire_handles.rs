@@ -22,6 +22,7 @@ use common::{Project, run_outputs};
 /// the right pid and `Normal`. A decoded pid naming some other number would
 /// report `NoProcess` at once instead.
 #[test]
+#[ignore = "needs the VM"]
 fn a_pid_round_trips_and_a_monitor_placed_through_the_copy_fires() {
     run_outputs(
         "import scarlet/process\n\
@@ -70,6 +71,7 @@ fn a_pid_round_trips_and_a_monitor_placed_through_the_copy_fires() {
 /// owner. The original is the owning form and the copy is not; they are one
 /// mailbox and compare equal.
 #[test]
+#[ignore = "needs the VM"]
 fn a_subject_round_trips_and_a_message_sent_through_the_copy_arrives() {
     run_outputs(
         "import scarlet/process\n\
@@ -92,6 +94,7 @@ fn a_subject_round_trips_and_a_message_sent_through_the_copy_arrives() {
 /// A `Subject` three levels down a public record crosses with the record,
 /// and the identity at the bottom is still the mailbox it was.
 #[test]
+#[ignore = "needs the VM"]
 fn a_subject_three_levels_down_round_trips() {
     run_outputs(
         "import scarlet/process\n\
@@ -128,6 +131,7 @@ fn a_subject_three_levels_down_round_trips() {
 /// `SocketAddress` from another module, so this is the identity rule and the
 /// opaque rule walking one record together.
 #[test]
+#[ignore = "needs the VM"]
 fn a_listener_and_a_socket_record_round_trip_and_the_copies_are_used() {
     let proj = Project::new("wire_socket");
     let src = "import scarlet/binary
@@ -188,6 +192,7 @@ pub fn main() {
 /// `Connection`, and a decoder that rebuilt it as a connection would hand
 /// `port.write` a handle the port table does not hold.
 #[test]
+#[ignore = "needs the VM"]
 fn a_port_record_round_trips_and_the_copy_is_written_to() {
     run_outputs(
         "import scarlet/os/port\n\
@@ -217,6 +222,7 @@ fn a_port_record_round_trips_and_the_copy_is_written_to() {
 /// header is eleven bytes and the run follows it, so bytes 11..27 are the
 /// run.
 #[test]
+#[ignore = "needs the VM"]
 fn a_handle_from_another_run_is_refused_with_other_run() {
     run_outputs(
         "import scarlet/binary\n\

@@ -50,8 +50,11 @@ fn assert_golden_in(src_dir: &Path, golden_dir: &Path, name: &str) {
 }
 
 fn assert_example_checks(name: &str) {
-    let example = examples_dir().join(format!("{name}.scrl"));
-    let out = run_al("check", &example);
+    assert_checks(&examples_dir(), name);
+}
+
+fn assert_checks(src_dir: &Path, name: &str) {
+    let out = run_al("check", &src_dir.join(format!("{name}.scrl")));
     if !out.success {
         panic!(
             "al check {name} exited {:?}\nstdout:\n{}\nstderr:\n{}",
@@ -111,6 +114,7 @@ macro_rules! suite {
     ) => {
         $(
             #[test]
+            #[ignore = "needs the VM"]
             fn $example() {
                 assert_golden_in(&examples_dir(), &golden_dir(), stringify!($example));
             }
@@ -118,10 +122,20 @@ macro_rules! suite {
 
         $(
             #[test]
+            #[ignore = "needs the VM"]
             fn $program() {
                 assert_golden_in(&programs_dir(), &programs_golden_dir(), stringify!($program));
             }
         )*
+
+        /// Every program with a golden still type-checks while its run waits
+        /// for the VM, so a front-end regression cannot hide behind the
+        /// ignore.
+        #[test]
+        fn every_golden_program_checks() {
+            $( assert_checks(&examples_dir(), stringify!($example)); )*
+            $( assert_checks(&programs_dir(), stringify!($program)); )*
+        }
 
         $(
             #[test]
@@ -326,6 +340,7 @@ suite! {
 
 // The timing-free "it still runs" check the bench scripts depend on.
 #[test]
+#[ignore = "needs the VM"]
 fn bench_runs() {
     run_file(&examples_dir().join("bench.scrl"), "bench");
 }

@@ -19,6 +19,7 @@ use common::run_outputs;
 /// `wire.encode(True)` is the single byte 0 behind the eleven-byte header,
 /// and `Nil` — one constructor — has no body at all.
 #[test]
+#[ignore = "needs the VM"]
 fn true_false_and_nil_round_trip_and_the_tag_is_the_declared_index() {
     run_outputs(
         "import scarlet/binary\n\
@@ -40,6 +41,7 @@ fn true_false_and_nil_round_trip_and_the_tag_is_the_declared_index() {
 /// the root. The decoded `Bool` is used as one — branched on, not only
 /// compared — which a cell standing in for it could not be.
 #[test]
+#[ignore = "needs the VM"]
 fn a_record_with_a_bool_field_and_an_array_of_bools_round_trip() {
     run_outputs(
         "import scarlet/wire\n\

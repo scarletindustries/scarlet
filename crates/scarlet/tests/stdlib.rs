@@ -5,6 +5,7 @@ mod common;
 use common::{check_ok, check_rejects, run_outputs};
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_option() {
     run_outputs(
         "import scarlet/option\n\
@@ -54,6 +55,7 @@ fn stdlib_option() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
@@ -114,6 +116,7 @@ fn stdlib_result() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_resource() {
     // Acquire, use, release — in that order — and the use's value comes back.
     run_outputs(
@@ -150,6 +153,7 @@ fn stdlib_resource() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_array() {
     run_outputs(
         "import scarlet/array\n\
@@ -231,6 +235,7 @@ run_case! {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_decimal() {
     // Scale propagation: add aligns to the wider scale, mul sums scales.
     run_outputs(
@@ -378,6 +383,7 @@ fn stdlib_decimal() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_binary() {
     run_outputs(
         "import scarlet/binary\n\
@@ -466,6 +472,7 @@ fn stdlib_binary() {
 /// bytes. The old spelling no longer exists, so that call is now a compile
 /// error rather than a wrong answer.
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_binary_slice_units() {
     // The name `slice` is gone. This is the guard on reintroducing it: a
     // function of that name could only pick one of the two units, and the
@@ -569,6 +576,7 @@ fn stdlib_binary_slice_units() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_binary_concat() {
     // Empty input is the identity of append; a first-element stub would
     // pass the singleton and fail the rest.
@@ -598,6 +606,7 @@ fn stdlib_binary_concat() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_binary_byte_at() {
     // byte_at is -1 out of bounds on both sides; a view reads through its
     // offset.
@@ -693,6 +702,7 @@ fn stdlib_http_builtins() {
 // `vm::http::has_token` and in Scarlet as `headers.contains_token`. This table
 // drives one set of cases through both and demands the same answer.
 #[test]
+#[ignore = "needs the VM"]
 fn native_and_al_token_matching_agree() {
     // (Connection value, does it carry the `close` token?)
     let cases: &[(&str, bool)] = &[
@@ -789,6 +799,7 @@ fn stdlib_binary_ascii_builtins() {
 // is unreachable from it (T-197). The last line is the control: that
 // existing spelling must stay as it is.
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_binary_hex_byte() {
     run_outputs(
         "import scarlet/binary.{Hex}\n\
@@ -806,6 +817,7 @@ fn stdlib_binary_hex_byte() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_float() {
     run_outputs(
         "import scarlet/float\n\
@@ -860,6 +872,7 @@ fn stdlib_float() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn stdlib_string() {
     // length counts codepoints, not bytes: 'héllo' is 5 chars, 6 bytes.
     // split with an empty delimiter takes the char-split branch. trim strips

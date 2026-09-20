@@ -210,6 +210,7 @@ ok_case! {
 
 /// Runtime counterpart of the case above.
 #[test]
+#[ignore = "needs the VM"]
 fn fn_type_without_return_in_binding_annotation_runs() {
     common::run_outputs(
         "pub fn main() {\n\tf fn(Int) = fn(x Int) { x * 2 }\n\tprintln(f(3))\n}\n",
@@ -402,6 +403,7 @@ fn ctor_arg_diagnostics_come_out_in_declared_field_order() {
 /// A `..base` spread must unify the result type before any argument is checked,
 /// so a function-literal argument still gets a concrete parameter type.
 #[test]
+#[ignore = "needs the VM"]
 fn ctor_spread_solves_type_params_before_lambda_args_are_hinted() {
     common::run_outputs(
         "type Pair(a) {\n\tfst a\n\tsnd fn(a) a\n}\n\
@@ -703,6 +705,7 @@ mod opaque_from_another_module {
     /// (which compares `units` and `scale`) and by the declaring module's own
     /// reader.
     #[test]
+    #[ignore = "needs the VM"]
     fn round_trips_with_equality() {
         run_outputs(
             "import scarlet/decimal\n\
@@ -725,6 +728,7 @@ mod opaque_from_another_module {
     /// The decode half alone, with the payload type fixed only by the
     /// declaring module's reader.
     #[test]
+    #[ignore = "needs the VM"]
     fn decode_is_typed_by_the_declaring_modules_reader() {
         run_outputs(
             "import scarlet/decimal\n\

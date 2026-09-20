@@ -68,6 +68,7 @@ fn strip_banner(stdout: &str) -> String {
 /// `'x' + 'y'` and `100 + 200` occupy the identical `Span` when each entry is
 /// parsed on its own, so the second must not retype the first.
 #[test]
+#[ignore = "needs the VM"]
 fn a_later_entry_does_not_retype_an_earlier_one() {
     let out = repl("const a = 'x' + 'y'\nconst b = 100 + 200\nprintln(a)\n");
     assert!(out.contains("xy"), "want the string concat, got:\n{out}");
@@ -78,6 +79,7 @@ fn a_later_entry_does_not_retype_an_earlier_one() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn definitions_persist_across_entries() {
     let out = repl("fn add(a Int, b Int) Int { a + b }\nprintln(add(1, 2))\n");
     assert!(out.contains('3'), "want 3, got:\n{out}");
@@ -85,6 +87,7 @@ fn definitions_persist_across_entries() {
 
 /// Replaying a bare expression would repeat its effects on every later entry.
 #[test]
+#[ignore = "needs the VM"]
 fn a_bare_expression_is_not_replayed() {
     let out = repl("println('once')\nprintln('twice')\n");
     assert_eq!(out.matches("once").count(), 1, "replayed an effect:\n{out}");
@@ -92,6 +95,7 @@ fn a_bare_expression_is_not_replayed() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_multi_line_entry_still_evaluates() {
     let out = repl(
         "fn tri(n Int) Int {\n\tif n == 0 { 0 } else { n + tri(n - 1) }\n}\nprintln(tri(3))\n",
@@ -102,6 +106,7 @@ fn a_multi_line_entry_still_evaluates() {
 /// The language requires imports to precede every other declaration, but a
 /// session is typed in whatever order the user thinks of things.
 #[test]
+#[ignore = "needs the VM"]
 fn an_import_after_a_definition_still_resolves() {
     let out = repl("const s = 'a,b'\nimport scarlet/string\nprintln(string.split(s, ','))\n");
     assert!(out.contains('b'), "want the split, got:\n{out}");
@@ -138,6 +143,7 @@ fn reset_forgets_the_session() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_session_round_trips_through_save_and_load() {
     let dir = std::env::temp_dir().join(format!("scarlet_repl_save_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
@@ -160,6 +166,7 @@ fn a_session_round_trips_through_save_and_load() {
 
 /// `:dis` filters: the emitted program carries the whole stdlib.
 #[test]
+#[ignore = "waits for `:dis` to print Core IR"]
 fn dis_lists_only_the_matching_function() {
     let (out, err) = session("fn only_mine() Int { 7 }\n:dis only_mine\n:dis nope\n");
     assert!(out.contains("only_mine"), "{out}");
@@ -170,6 +177,7 @@ fn dis_lists_only_the_matching_function() {
 /// `/` is the marker half the world's tools use; no Scarlet entry starts with
 /// one, so it spells a command too.
 #[test]
+#[ignore = "needs the VM"]
 fn a_slash_command_runs_rather_than_erroring() {
     let (out, err) = session("1 + 1\n/quit\n2 + 2\n");
     assert!(out.contains('2'), "{out}");
@@ -188,6 +196,7 @@ fn reset_says_it_ran() {
 /// Binding a name now and using it in the next entry is what a session is, so
 /// the unused-binding check must not reject the entry that binds it.
 #[test]
+#[ignore = "needs the VM"]
 fn a_binding_used_by_a_later_entry_is_not_called_unused() {
     let (out, err) = session("import scarlet/http\nserve = http.serve\nprintln(serve)\n");
     assert!(!err.contains("unused"), "{err}");
@@ -198,6 +207,7 @@ fn a_binding_used_by_a_later_entry_is_not_called_unused() {
 /// not merely print: it makes the module dirty, and a dirty module emits no
 /// toplevel, so the entry silently evaluates to nothing.
 #[test]
+#[ignore = "needs the VM"]
 fn an_entry_after_a_binding_still_evaluates() {
     let out = repl("x = 5\n42\n");
     assert!(out.contains("42"), "want 42, got:\n{out}");

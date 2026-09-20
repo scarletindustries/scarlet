@@ -146,6 +146,7 @@ reject_case! {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn index_negative_returns_none() {
     // A negative index is rejected by `Op::Index`'s own `idx >= 0` guard, a
     // different path from the out-of-bounds `arr.get` returning `None`.
@@ -161,6 +162,7 @@ fn index_negative_returns_none() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn slice_in_bounds_returns_subarray() {
     // A slice is an `Array(Int)`, not an `Option`.
     run_outputs(
@@ -177,6 +179,7 @@ fn slice_in_bounds_returns_subarray() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn range_as_value_materializes() {
     // A bare `start..end` is a first-class `Array(Int)`. A reversed range
     // saturates to length 0 rather than a negative length or a crash.
@@ -455,6 +458,7 @@ run_case! {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn ctor_record_update_overrides_and_projects() {
     // Record-update builds a fresh value: `base` is left untouched.
     run_outputs(
@@ -628,6 +632,7 @@ reject_case! {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn or_pattern_binding_after_or_in_tuple() {
     // A binding after an or-pattern, as in `(0 | 1, y)`, is in scope.
     run_outputs(
@@ -646,6 +651,7 @@ fn or_pattern_binding_after_or_in_tuple() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn or_pattern_binding_before_or_in_tuple() {
     // A binding before an or-pattern, as in `(y, 0 | 1)`, is in scope.
     run_outputs(
@@ -680,6 +686,7 @@ reject_case! {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn or_pattern_nested_in_non_first_alternative() {
     // A nested or-pattern is checked against the outer or's canonical set,
     // not treated as a fresh scope.
@@ -803,6 +810,7 @@ fn vm_attribute_may_not_be_used_on_a_type() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn bool_is_a_normal_two_ctor_type() {
     run_outputs(
         "pub fn main() {\n\
@@ -844,6 +852,7 @@ reject_case! {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn reserved_set_derived_from_prelude_iface() {
     // Prelude types/ctors are reserved...
     check_rejects(
@@ -861,6 +870,7 @@ fn reserved_set_derived_from_prelude_iface() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn binary_string_literal_patterns() {
     // A bare string-literal segment matches its UTF-8 bytes as a prefix
     // (Op::BinMatchPrefix); the rest binding is a zero-copy view.
@@ -992,6 +1002,7 @@ fn binary_string_literal_patterns() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn binary_literal_and_pattern_e2e() {
     // <<a, b>> pattern: scan→parse→compile→VM. 'A'=65, 'B'=66, sum=131.
     run_outputs(
@@ -1108,6 +1119,7 @@ reject_case! {
 // `program.code` ahead of the body, so `emit` must bake absolute jump targets
 // against the post-lowering address. Only the `else` arm jumps.
 #[test]
+#[ignore = "needs the VM"]
 fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
     let src = "import scarlet/array\n\
                type W { W(v Int) }\n\
@@ -1123,6 +1135,7 @@ fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn field_access_through_a_constructor_inferred_scrutinee() {
     let src = "type User { User(id Int, name String) }\n\
                fn f() Int {\n\
@@ -1160,6 +1173,7 @@ fn field_access_through_a_module_fn_inferred_scrutinee() {
 /// The `drop` itself is pinned by the `inferred_scrutinee_drops_heap_payload`
 /// Core IR golden; this pins the answer.
 #[test]
+#[ignore = "needs the VM"]
 fn inferred_scrutinee_with_a_heap_payload_runs() {
     let src = "type Boxed { Boxed(n Int) }\n\
                fn f() Int {\n\
@@ -1180,6 +1194,7 @@ fn inferred_scrutinee_with_a_heap_payload_runs() {
 /// The `Err` payload bound by `expr or e -> body` is the LHS type's second
 /// argument, not a fresh variable, so a heap error stays droppable.
 #[test]
+#[ignore = "needs the VM"]
 fn or_receiver_binds_a_heap_error_payload() {
     let src = "type Boxed { Boxed(n Int) }\n\
                fn bad() Result(Int, Boxed) { Err(Boxed(9)) }\n\

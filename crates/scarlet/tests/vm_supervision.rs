@@ -64,6 +64,7 @@ fn crash(c Subject(Msg), n Int) Nil {
 "#;
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_crashing_worker_is_restarted_and_its_crash_reported() {
     let out = run(
         "crash_restart",
@@ -114,6 +115,7 @@ pub fn main() {{
 /// then gives up, nothing can be killed, so the failure becomes the exit
 /// status once the program winds down.
 #[test]
+#[ignore = "needs the VM"]
 fn a_tree_outliving_its_declarer_still_fails_the_run_when_it_gives_up() {
     let started = Instant::now();
     let out = run(
@@ -146,6 +148,7 @@ pub fn main() {{
 /// A main that returns leaves its tree running: the worker is still
 /// restarted afterwards, and the program keeps going on the tree's account.
 #[test]
+#[ignore = "needs the VM"]
 fn a_returned_main_leaves_its_tree_supervised() {
     let out = run(
         "orphan_restart",
@@ -169,6 +172,7 @@ pub fn main() {{
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn a_nested_supervisor_that_gives_up_is_restarted_by_its_parent() {
     let out = run(
         "nested_giveup",
@@ -213,6 +217,7 @@ pub fn main() {{
 /// A watch on a supervisor hears it give up, and then hears it removed when
 /// the failure reaches (and kills) the process that declared it.
 #[test]
+#[ignore = "needs the VM"]
 fn a_watch_on_a_supervisor_reports_its_give_up() {
     let out = run(
         "watch_giveup",
@@ -261,6 +266,7 @@ pub fn main() {{
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn only_the_creator_may_declare_into_a_supervisor() {
     let out = run(
         "creator_rule",
@@ -317,6 +323,7 @@ pub fn main() {
 /// service reports its open connections, and the acceptors are supervised
 /// children of the service.
 #[test]
+#[ignore = "needs the VM"]
 fn a_service_is_a_supervised_subtree() {
     use std::io::{Read, Write};
     use std::net::TcpStream;

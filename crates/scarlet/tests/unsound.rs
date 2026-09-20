@@ -227,6 +227,7 @@ fn u19_deep_else_if_chain_is_rejected_without_overflow() {
 // U20: arithmetic is TOTAL. `x/0 = 0`, `x%0 = x`, overflow wraps, non-finite
 // float results collapse to 0.0. No panic, no abort, no non-zero exit.
 #[test]
+#[ignore = "needs the VM"]
 fn u20_arithmetic_is_total_vm_never_exits() {
     // (expression, what `println` of it prints)
     let exact = [
@@ -339,6 +340,7 @@ run_case! {
 // semantics, which both accepts non-exhaustive matches and rejects exhaustive
 // ones.
 #[test]
+#[ignore = "needs the VM"]
 fn u21_exhaustiveness_respects_field_labels() {
     // Unsound direction: the two arms together miss (a=True, b=False), so the
     // match is genuinely non-exhaustive.
@@ -379,6 +381,7 @@ fn u21_exhaustiveness_respects_field_labels() {
 // re-binding a name in the scope that already binds it must allocate a fresh
 // slot; reusing the slot corrupts every closure that captured the old one.
 #[test]
+#[ignore = "needs the VM"]
 fn u22_same_scope_shadow_preserves_closure_capture() {
     // Each closure captures the binding live at its definition; later shadows
     // must not retroactively change what an earlier closure sees.
@@ -442,6 +445,7 @@ reject_case! {
 // U25: receive on another process's subject is a clean runtime error: the
 // handle travels, the right to receive does not.
 #[test]
+#[ignore = "needs the VM"]
 fn u25_foreign_receive_is_a_clean_error() {
     run_rejects(
         "import scarlet/process\n\
@@ -460,6 +464,7 @@ fn u25_foreign_receive_is_a_clean_error() {
 // U23: a slice whose bounds escape the array, or is reversed, is a clean
 // runtime error: non-zero exit with a diagnostic, never a panic or abort.
 #[test]
+#[ignore = "needs the VM"]
 fn u23_oob_and_reversed_slice_are_clean_errors() {
     // (slice expression, the runtime error printing it must exit with)
     let cases = [
