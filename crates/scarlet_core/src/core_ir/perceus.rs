@@ -653,6 +653,78 @@ fn unscoped_goto(id: JoinId) -> ! {
     )
 }
 
+/// Take a module toplevel's pinned globals back out of Perceus's hands: no
+/// `Drop` releases one, and no `Ctor` reuses one's cell.
+///
+/// Perceus sees only the toplevel, where a global's last read is not its last
+/// use: function bodies read it through `Load::Global` for as long as the
+/// program runs. Releasing or overwriting it at the toplevel's last read would
+/// free a value the program still holds.
+pub(crate) fn keep_globals(mut f: CoreFn) -> CoreFn {
+    let pinned: BTreeSet<LocalId> = f
+        .body
+        .toplevel_globals()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    if !pinned.is_empty() {
+        spare(&mut f.body, &pinned);
+    }
+    f
+}
+
+/// [`keep_globals`]'s walk. Iterative along each spine and recursive only into
+/// branches, so a long toplevel costs no stack depth.
+fn spare(mut e: &mut CoreExpr, pinned: &BTreeSet<LocalId>) {
+    loop {
+        if let CoreExpr::Drop { local, body, .. } = &mut *e
+            && pinned.contains(local)
+        {
+            let rest = std::mem::replace(&mut **body, CoreExpr::Tail(Atom::Nil));
+            *e = rest;
+            continue;
+        }
+        match e {
+            CoreExpr::Let { rhs, body, .. } => {
+                spare_atom(rhs, pinned);
+                e = body;
+            }
+            CoreExpr::LetJoin { join, body, .. } => {
+                spare(join, pinned);
+                e = body;
+            }
+            CoreExpr::LetCont { cont, body, .. } => {
+                spare(cont, pinned);
+                e = body;
+            }
+            CoreExpr::Drop { body, .. } => e = body,
+            CoreExpr::If { then, els, .. } => {
+                spare(then, pinned);
+                e = els;
+            }
+            CoreExpr::Match { arms, .. } => {
+                for (_, body) in arms {
+                    spare(body, pinned);
+                }
+                return;
+            }
+            CoreExpr::Tail(a) => {
+                spare_atom(a, pinned);
+                return;
+            }
+            CoreExpr::Goto(_) => return,
+        }
+    }
+}
+
+fn spare_atom(a: &mut Atom, pinned: &BTreeSet<LocalId>) {
+    if let Atom::Ctor { reuse, .. } = a
+        && reuse.is_some_and(|r| pinned.contains(&r))
+    {
+        *reuse = None;
+    }
+}
+
 /// Known allocation shape of a `Let`'s rhs. Only a `Ctor` rhs proves a shape;
 /// `Call`/`PrimOp` results have no statically-known arity.
 fn ctor_shape(a: &Atom) -> Option<ReuseShape> {
@@ -759,6 +831,59 @@ mod tests {
     /// `map` shape: match xs { Cons(h,t) -> Cons(h+h, self t) | Nil -> Nil }.
     /// The Cons arm's tail Cons reuses `%0` across the recursive call; the Nil
     /// arm's arity-0 ctor does not pair.
+    /// A toplevel keeps every value it pins to a global: Perceus's drop of
+    /// one and a constructor's reuse of its cell both go, while a plain
+    /// temporary's drop stays.
+    #[test]
+    fn keep_globals_spares_pinned_globals_only() {
+        let mut pool = pool();
+        let obj = con(&mut pool, 7);
+        let mut global = bind(0, obj);
+        global.global = Some(crate::typed_ir::GlobalSlot(0));
+        let reuse_global = Atom::Ctor {
+            variant: variant(),
+            fields: Vec::new(),
+            reuse: Some(local(0)),
+        };
+        let top = func(
+            Vec::new(),
+            CoreExpr::Let {
+                bind: global,
+                rhs: ctor(&[]),
+                body: Box::new(CoreExpr::Let {
+                    bind: bind(1, obj),
+                    rhs: ctor(&[]),
+                    body: Box::new(CoreExpr::Drop {
+                        local: local(0),
+                        shape: Some(ReuseShape::ctor(0)),
+                        body: Box::new(CoreExpr::Drop {
+                            local: local(1),
+                            shape: Some(ReuseShape::ctor(0)),
+                            body: Box::new(CoreExpr::Tail(reuse_global)),
+                        }),
+                    }),
+                }),
+            },
+            obj,
+        );
+        let kept = keep_globals(top);
+        assert_eq!(count_drops(&kept.body), 1, "only the temporary is dropped");
+        assert!(
+            matches!(
+                kept.body,
+                CoreExpr::Let { ref body, .. }
+                    if matches!(**body, CoreExpr::Let { ref body, .. }
+                        if matches!(**body, CoreExpr::Drop { local, .. } if local == LocalId(1)))
+            ),
+            "the global's drop is the one removed"
+        );
+        assert_eq!(
+            ctor_reuses(&kept.body),
+            vec![None, None, None],
+            "no constructor reuses the global's cell"
+        );
+    }
+
     #[test]
     fn map_reuse_across_call_and_arm_shape() {
         let mut pool = pool();

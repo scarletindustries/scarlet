@@ -53,7 +53,6 @@ pub struct HoverFact {
 pub struct Watermark {
     engine: EnginePoolWatermark,
     env: EnvWatermark,
-    code: usize,
     functions: usize,
     constants: usize,
     local_count: i32,
@@ -65,18 +64,17 @@ impl Watermark {
     /// excluded: it is a rollback payload, not a position, so its field set can
     /// change without perturbing this ordering. Equal keys can therefore hide
     /// different env payloads, which is why `earlier`/`later` merge on ties.
-    fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, usize, i32) {
+    fn ord_key(&self) -> (EnginePoolWatermark, usize, usize, i32) {
         // Exhaustive destructure: a new field must be consciously placed in or
         // out of the ordering.
         let Watermark {
             engine,
             env: _,
-            code,
             functions,
             constants,
             local_count,
         } = *self;
-        (engine, code, functions, constants, local_count)
+        (engine, functions, constants, local_count)
     }
 
     /// The earlier-compiled of two watermarks, order-independently. Use this,
@@ -160,8 +158,7 @@ impl Compiler {
         Watermark {
             engine: self.engine.pool_watermark(),
             env: self.env.watermark(),
-            code: self.program.code.len(),
-            functions: self.program.functions.len(),
+            functions: self.fns.len(),
             constants: self.consts.len(),
             local_count: self.local_count,
         }
@@ -184,7 +181,6 @@ impl Compiler {
         let Watermark {
             engine,
             env,
-            code,
             functions,
             constants,
             local_count,
@@ -196,8 +192,7 @@ impl Compiler {
         // by length, which cannot undo an in-place `define` overwrite, so an
         // import that shadows a prelude name must never touch the root scope.
         self.env.push_scope();
-        self.program.code.truncate(code);
-        self.program.functions.truncate(functions);
+        self.fns.truncate(functions);
         self.consts.truncate(constants);
         self.local_count = local_count;
         self.global_to_func.retain(|_, fi| fi.index() < functions);
@@ -215,19 +210,12 @@ impl Compiler {
             }
         });
 
-        // Lowered Core IR is cleared, never truncated. A `CoreFn`'s `ConstId`s
-        // index `core.consts`, which is assigned wholesale rather than appended
-        // to, and its types index a `ResolvedPool` the elaborator builds fresh
-        // per compile and drops after emit. Neither has a length to rewind to,
-        // so no `core_fns` watermark would mean anything.
-        let crate::core_ir::CoreProgram {
-            fns,
-            consts,
-            toplevel,
-        } = &mut self.core;
-        fns.clear();
-        consts.clear();
-        *toplevel = crate::core_ir::CoreProgram::default().toplevel;
+        // Lowered toplevels are dropped, never truncated: they are recorded
+        // at the end of a module's compile, and a rewound compile's init code
+        // must not run as part of the next one.
+        self.inits.clear();
+        self.entry_toplevel = None;
+        self.main = None;
 
         // Recorded expression types hold `Ty` indices into the arena just
         // rewound; the next compile's typecheck walk re-records them all.
@@ -674,12 +662,14 @@ impl IncrementalSession {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::Watermark;
     use crate::bytecode::compiler::new_compiler;
-    use crate::core_ir::{Atom, Const, ConstId, CoreExpr, CoreFn};
+    use crate::core_ir::{Atom, Const, CoreExpr, CoreFn, LoweredFn};
     use crate::type_def::TypeId;
     use crate::typed_ir::RTy;
-    use crate::types::EnvWatermark;
+    use crate::types::{EnvWatermark, PrimIds};
 
     /// Watermarks with equal `ord_key` can carry different env payloads.
     /// `earlier` must be symmetric and merge them toward the deeper rollback.
@@ -743,7 +733,7 @@ mod tests {
     fn earlier_and_later_follow_ord_when_keys_differ() {
         let older = Watermark::default();
         let newer = Watermark {
-            code: 10,
+            functions: 10,
             env: EnvWatermark {
                 root_scope: 4,
                 ..EnvWatermark::default()
@@ -756,66 +746,42 @@ mod tests {
         assert_eq!(newer.later(older).env, newer.env);
     }
 
-    /// The resolved-type pool is compile-local, so a `CoreFn` cannot outlive
-    /// the compile that lowered it: `reset_to` must clear `core.fns` outright
-    /// rather than truncate it, and `Watermark` carries no field for it.
+    /// `reset_to` rewinds the function table and the constant pool to the
+    /// watermark, and drops every lowered toplevel: a rewound compile's init
+    /// code must not run as part of the next one.
     #[test]
-    fn reset_to_clears_lowered_core_fns_because_the_pool_is_compile_local() {
+    fn reset_to_rewinds_functions_and_consts_and_drops_toplevels() {
         let mut c = new_compiler(None, false);
-        let name = c.engine.intern("f");
-        let lowered = |name| CoreFn {
-            name,
-            params: Vec::new(),
-            body: CoreExpr::Tail(Atom::Const(ConstId(0))),
-            ret_ty: RTy(0),
+        let pool = Rc::new(crate::typed_ir::ResolvedPool::new(PrimIds::default()));
+        let top = LoweredFn {
+            name: "m".to_string(),
+            core: CoreFn {
+                name: c.engine.intern("m"),
+                params: Vec::new(),
+                body: CoreExpr::Tail(Atom::Nil),
+                ret_ty: RTy(0),
+            },
+            pool,
         };
-
-        // Lowered below the watermark: a length-based rewind would preserve it.
-        c.core.fns.push(lowered(name));
-        let w = c.watermark();
-        c.core.fns.push(lowered(name));
-
-        c.reset_to(&w);
-
-        assert!(
-            c.core.fns.is_empty(),
-            "core.fns must be cleared, not truncated: {} lowered bodies survived \
-             the rewind holding RTys into a pool that no longer exists",
-            c.core.fns.len()
-        );
-    }
-
-    /// `core.consts` is assigned wholesale, not appended to, so it has no
-    /// watermark. Rewinding it to another pool's length would leave a stale
-    /// prefix no surviving `ConstId` was minted against.
-    #[test]
-    fn reset_to_clears_core_consts_rather_than_truncating_to_another_pool() {
-        let mut c = new_compiler(None, false);
 
         // Anchored to whatever `new_compiler` seeded, not a literal, so the
         // test survives that seed growing.
-        let base = c.consts.len();
+        let (fns, consts) = (c.fns.len(), c.consts.len());
+        c.fns.push(None);
         c.consts.push(Const::Int(1));
         let w = c.watermark();
-        assert_eq!(w.constants, base + 1);
-
-        // A compile then grows `consts` and clones it wholesale.
+        c.fns.push(None);
         c.consts.push(Const::Int(2));
-        c.consts.push(Const::Int(3));
-        c.core.consts = c.consts.clone();
+        c.inits.push(top);
 
         c.reset_to(&w);
 
         assert_eq!(
-            c.consts.len(),
-            base + 1,
-            "consts rewinds to its own watermark"
+            c.fns.len(),
+            fns + 1,
+            "function slots rewind to the watermark"
         );
-        assert!(
-            c.core.consts.is_empty(),
-            "core.consts must be cleared, not truncated to consts.len() \
-             ({} entries survived) — a stale prefix is indexed by no live ConstId",
-            c.core.consts.len()
-        );
+        assert_eq!(c.consts.len(), consts + 1, "consts rewind to the watermark");
+        assert!(c.inits.is_empty(), "a rewound compile's inits are dropped");
     }
 }

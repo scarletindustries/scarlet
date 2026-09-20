@@ -1,15 +1,15 @@
-//! AST → [`Program`]: orchestrates Hindley–Milner type inference and bytecode
-//! emission.
+//! AST → core IR: orchestrates Hindley–Milner type inference, elaboration to
+//! the typed IR, lowering to core IR and Perceus. The output is a
+//! [`Program`]: every function body, every module's top level, and `main`.
 //!
 //! Function bodies go through the Core IR pipeline: the fused
 //! [`Compiler::compile_expr`] walk runs first for type inference (a type that
-//! unification just resolved is immediately available so `lower` can pick
-//! typed opcodes — `AddInt` over `Add` — and pattern codegen can consult
-//! variant layouts), then the typechecked body is lowered to
-//! [`crate::core_ir`] ANF, run through Core→Core passes (Perceus reuse, later
-//! mode inference), and finally emitted by `core_ir::emit`. Type erasure
-//! happens exactly once at Core→bytecode. See [`Compiler::compile_fn_body`]
-//! and `docs/core-ir-spec.md`.
+//! unification just resolved is immediately available so elaboration can pick
+//! typed operations — `IntAdd` over `Add` — and pattern lowering can consult
+//! variant layouts), then the typechecked body is elaborated, lowered to
+//! [`crate::core_ir`] ANF and run through Core→Core passes (Perceus reuse,
+//! later mode inference). See [`Compiler::compile_fn_body`] and
+//! `docs/core-ir-spec.md`.
 //!
 //! Module top level is the exception: declarations are mutually
 //! recursive and order-free, so `analysis.rs` runs its multi-pass declaration
@@ -18,32 +18,25 @@
 //! # Map of the module
 //!
 //! - **This file** — [`Compiler`] + entry points ([`compile`] / [`check`] /
-//!   [`check_as_module`]): all codegen, scoping, and inference state in one
-//!   struct, documented field by field; the pass itself (`compile_node` /
+//!   [`check_as_module`]): scoping and inference state in one struct,
+//!   documented field by field; the pass itself (`compile_node` /
 //!   `compile_expr` and friends, one method per AST form); and the Core IR
-//!   orchestration ([`Compiler::compile_fn_body`]), the `lower → perceus →
-//!   emit` pipeline hook for function bodies.
-//! - **`patterns.rs`** — pattern type-checking (no codegen):
-//!   [`Compiler::type_pattern`] plus constructor lookup and argument
-//!   slotting.
-//! - **`bridges.rs`** — the `EmitCtx`/[`ElabCtx`] impls through which the
-//!   compiler-agnostic Core IR passes speak to this compilation.
+//!   orchestration ([`Compiler::compile_fn_body`]).
+//! - **`patterns.rs`** — pattern type-checking: [`Compiler::type_pattern`]
+//!   plus constructor lookup and argument slotting.
+//! - **`bridges.rs`** — the [`ElabCtx`] impl through which the elaborator
+//!   speaks to this compilation.
 //! - **`tests.rs`** — the unit-test modules.
 //!
 //! The LSP/workspace layer that owns a `Compiler` across edits —
 //! [`IncrementalSession`], [`Watermark`]/`reset_to`, and the reference-graph
-//! finalization — lives in [`super::session`]; the peephole superinstruction
-//! pass lives in [`super::peephole`].
+//! finalization — lives in [`super::session`].
 //!
 //! # Invariants
 //!
-//! - Every constant `Value` is built through the compiler's
-//!   `FrozenBuilder` handle (the `const_*` helpers), never a bare `Value`
-//!   constructor, so all constants live in the program's frozen area and
-//!   stay valid for the program's life on any thread.
-//! - Everything a compile appends to (inference pool, type env, code,
-//!   functions, constants) stays append-only between module boundaries;
-//!   that is what makes `Watermark` rollback pure truncation.
+//! - Everything a compile appends to (inference pool, type env, function
+//!   table, constants) stays append-only between module boundaries; that is
+//!   what makes `Watermark` rollback pure truncation.
 //! - Local scoping is undo-log based (`undo_log` / `scope_marks`): popping
 //!   a scope replays only the bindings it actually shadowed, never a map
 //!   snapshot.
@@ -51,16 +44,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use super::peephole::fuse;
 use super::session::{RawRef, Watermark};
-use super::{Function, Op, PreludeBindings, Program, TypeRef, Value, op, op_ab, op_arg};
+use super::{PreludeBindings, TypeRef};
 use crate::ast;
-use crate::core_ir::{Const, ConstId, CoreFn};
+use crate::core_ir::{Const, ConstId, CoreExpr, CoreFn, FuncIdx, LoweredFn, Program};
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
-use crate::frozen::FrozenBuilder;
-use crate::tivec::Idx;
+use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
     self, CaptureIdx, Denotation, ElabCtx, FnTable, FrameSlot, GlobalSlot, OrShape, PreludeTys,
@@ -147,12 +137,12 @@ use clean::CleanModule;
 /// user's program is actually in the `Program`, not just the stdlib init that
 /// precedes it.
 ///
-/// Minted only by [`Compiler::append_toplevel_init`] on its `Entry` path, and
-/// the only way to reach [`CompileResult::into_runnable`]. Without it, a
-/// compile that rejected the module still hands back a `Program` whose entry
-/// frame runs the stdlib and halts — which does not fail, it silently
-/// evaluates to whatever the entry frame's locals were pre-filled with. A
-/// caller cannot tell that apart from a real result, and one did not.
+/// Minted only by [`Compiler::record_toplevel`] on its `Entry` path, and the
+/// only way to reach [`CompileResult::into_runnable`]. Without it, a compile
+/// that rejected the module could still hand back a program that runs the
+/// stdlib and nothing else — which does not fail, it silently evaluates to
+/// whatever the globals were pre-filled with. A caller cannot tell that apart
+/// from a real result, and one did not.
 #[must_use]
 struct EntryToplevel {
     _priv: (),
@@ -177,18 +167,6 @@ enum FieldMismatch {
 // ============================================================================
 // CompileResult
 // ============================================================================
-
-/// The artifacts one compile materialises together: the bytecode `Program`
-/// and the Core IR it was derived from. A `check` still carries one — the
-/// function table it registers is mode-independent and pinned by
-/// `crates/scarlet/tests/check_parity.rs` — its bodies are simply never emitted.
-#[derive(Debug)]
-pub struct Emitted {
-    pub program: Program,
-    /// Lowered Core IR (typed ANF) for the whole program.
-    /// Golden-snapshotted by `crates/scarlet/tests/core_ir.rs`.
-    pub core: crate::core_ir::CoreProgram,
-}
 
 #[derive(Debug)]
 /// Whether a compilation unit reports the bindings it never uses.
@@ -220,15 +198,12 @@ pub enum ModuleScope {
 }
 
 pub struct CompileResult {
-    /// What the compile built, when it built anything. `None` means nothing
-    /// was materialised at all: the incremental (LSP) session's check path,
-    /// and a compile whose stdlib seed failed before the program was touched.
+    /// The program, when the compile built one. `None` for a check, for a
+    /// module that failed, and for the incremental (LSP) session.
     ///
-    /// Private, and reachable only through [`into_runnable`](Self::into_runnable)
-    /// or [`into_artifacts`](Self::into_artifacts): "there is an `Emitted`"
-    /// and "there is a program worth running" are different facts, and the
-    /// field alone cannot tell them apart.
-    emitted: Option<Emitted>,
+    /// Private, and reachable only through [`into_runnable`](Self::into_runnable),
+    /// which also demands the [`EntryToplevel`] witness.
+    program: Option<Program>,
     /// Set iff the entry toplevel was spliced. See [`EntryToplevel`].
     entry: Option<EntryToplevel>,
     pub diagnostics: Vec<Diagnostic>,
@@ -249,15 +224,14 @@ impl CompileResult {
 
     /// The program to run, and the only way to reach one.
     ///
-    /// `None` unless the compiler spliced the user's toplevel into the entry
-    /// frame — which a check-only compile and a rejected module both skip,
-    /// while still leaving an `Emitted` behind for analysis. The answer comes
-    /// from the splice itself ([`EntryToplevel`]), not from re-reading
+    /// `None` unless the compiler recorded the user's toplevel — which a
+    /// check-only compile and a rejected module both skip. The answer comes
+    /// from that recording itself ([`EntryToplevel`]), not from re-reading
     /// `diagnostics`, so a caller that filters a diagnostic away cannot turn
-    /// a compile that never emitted into a run.
-    pub fn into_runnable(self) -> Option<Emitted> {
-        let _spliced = self.entry?;
-        self.emitted
+    /// a compile that never lowered into a run.
+    pub fn into_runnable(self) -> Option<Program> {
+        let _recorded = self.entry?;
+        self.program
     }
 
     /// A compile that materialised no program: a check-only session, or a
@@ -267,23 +241,16 @@ impl CompileResult {
         references: Rc<ReferenceGraph>,
     ) -> Self {
         CompileResult {
-            emitted: None,
+            program: None,
             entry: None,
             diagnostics,
             references,
         }
     }
-
-    /// What analysis built, runnable or not: the function table, the Core IR,
-    /// the frame layouts. For inspecting a compile rather than running it —
-    /// `check` populates this and nothing else.
-    pub fn into_artifacts(self) -> Option<Emitted> {
-        self.emitted
-    }
 }
 
 // ============================================================================
-// Compiler — single-pass: HM type inference + bytecode emission
+// Compiler — single-pass: HM type inference + elaboration
 // ============================================================================
 
 /// An enclosing function frame's locals, moved here wholesale by
@@ -332,7 +299,7 @@ pub(super) struct ToplevelDecl {
 }
 
 /// Compiler state snapshotted on entry to a nested function body and restored
-/// by `finish_fn_frame` once its bytecode and closure have been emitted.
+/// by `finish_fn_frame` once the body has been walked and parked.
 struct FnFrame {
     /// `undo_log`/`scope_marks` lengths at frame entry. A nested body's
     /// param/local bindings live in the *enclosing* scope's mark range (no
@@ -347,7 +314,6 @@ struct FnFrame {
     capture_names: Vec<StrId>,
     rigid_ids: HashSet<i32>,
     binding: Option<StrId>,
-    jump_over: i32,
     /// The enclosing frame's [`Compiler::frame_closures`], parked for the
     /// duration of the inner walk so the inner frame accumulates only its own.
     closures: Vec<ClosureSite>,
@@ -400,15 +366,19 @@ struct ElabFrame {
 // [`UnusedBindings`] and [`ModuleScope`]; these four carry none between them.
 #[cfg_attr(dylint_lib = "mordant", allow(flag_cluster))]
 pub struct Compiler {
-    // --- Codegen state ---
-    pub(super) program: Program,
-    /// Append handle to `program`'s frozen area.
-    /// Every constant `Value` the compiler builds — literals, enum
-    /// construction/match headers, folded binaries — is constructed through
-    /// this builder (the `const_*` helpers below), never via bare `Value`
-    /// constructors, so enum names and field labels from compile-time
-    /// constants all point at the area's canonical interned allocations.
-    frozen: FrozenBuilder,
+    // --- Lowered program ---
+    /// Every function this compile reserved, indexed by [`FuncIdx`], and filled
+    /// once its body is lowered. A slot stays `None` under `check_only` and
+    /// in a module that failed; [`Self::finish_program`] only builds a
+    /// [`Program`] when every one is filled.
+    pub(super) fns: TiVec<FuncIdx, Option<LoweredFn>>,
+    /// Each imported module's lowered top level, in the order they finished
+    /// compiling: a module after everything it imports.
+    pub(super) inits: Vec<LoweredFn>,
+    /// The entry file's lowered top level, once recorded.
+    pub(super) entry_toplevel: Option<LoweredFn>,
+    /// `pub fn main`, when the entry file has a usable one.
+    pub(super) main: Option<FuncIdx>,
     /// Every constant this compile pooled, indexed by [`ConstId`]. Handed to
     /// [`CoreProgram::consts`](crate::core_ir::CoreProgram) wholesale once the
     /// program is lowered.
@@ -457,18 +427,18 @@ pub struct Compiler {
     pub(super) nil_discards: Vec<(String, Ty, Span)>,
     pub(super) outer_scopes: Vec<Scope>,
     pub(super) local_count: i32,
-    /// Entry-frame slot → `program.functions` index for every top-level `fn`
+    /// Global slot → [`FuncIdx`] for every top-level `fn`
     /// that has already been compiled. Populated by `compile_declared_function`
     /// after `finish_fn_frame` assigns the `func_idx`; consulted by
     /// `resolve_variable` to choose between [`Denotation::known_fn`] and
-    /// [`Denotation::global`], which lets the Core emit call a known top-level
-    /// fn with `CallKnown` (immediate `func_idx`, no callee value pushed)
-    /// instead of the `PushGlobal; Call` dynamic path. A miss (forward ref
-    /// within an SCC, or a non-fn global) falls back to `Call`.
+    /// [`Denotation::global`], which lets Core call a known top-level fn
+    /// directly (`Callee::Known`) instead of loading it and calling the value.
+    /// A miss (forward ref within an SCC, or a non-fn global) falls back to the
+    /// value call.
     pub(super) global_to_func: HashMap<GlobalSlot, crate::core_ir::FuncIdx>,
     /// This module's own top-level `fn`/`const` declarations, in Pass 5
-    /// SCC-visit order (leaves first). Cleared to entry-file scope at
-    /// `code_mark`.
+    /// SCC-visit order (leaves first). Cleared to entry-file scope once the
+    /// imports are compiled.
     ///
     /// One record serves both halves of the toplevel elaboration. The
     /// [`ToplevelDecl::node`] index *schedules* the spine: the elaborator walks
@@ -487,9 +457,9 @@ pub struct Compiler {
     /// visit the module's statements in source order. A queue rather than a
     /// map because a name may be rebound (`x = 10; f = fn() x; x = 20`) and
     /// each binding needs its own slot — the closures compiled in between
-    /// address distinct slots via `PushGlobal` — so a name is not an identity
-    /// here, and nothing downstream ever maps one back to a slot. Cleared to
-    /// entry-file scope at `code_mark`.
+    /// load distinct slots — so a name is not an identity here, and nothing
+    /// downstream ever maps one back to a slot. Cleared to entry-file scope
+    /// once the imports are compiled.
     pub(super) toplevel_binds: VecDeque<GlobalSlot>,
     /// True only while `analyse_module` walks a module's own statement list,
     /// the single walk whose bindings the toplevel elaboration mirrors. The
@@ -594,13 +564,6 @@ pub struct Compiler {
     /// from `scrl.scrl` rather than mirrored in Rust. `@vm` functions are
     /// deliberately excluded — `println` is shadowable.
     pub(super) reserved: BTreeSet<String>,
-    /// Lowered Core IR accumulated during this compile. Each function body
-    /// [`Self::compile_fn_body`] routes through the `lower→perceus→emit`
-    /// pipeline pushes its post-perceus [`crate::core_ir::CoreFn`] into
-    /// `core.fns`, and [`compile_impl`] lowers the module toplevel into
-    /// `core.toplevel`. Moved into [`Emitted::core`] at the end of
-    /// [`compile_impl`].
-    pub(super) core: crate::core_ir::CoreProgram,
     /// The `fn(...) {...}` expressions written *directly inside the frame being
     /// walked* — one [`ClosureSite`] each, in the order the walk closed them.
     ///
@@ -654,7 +617,7 @@ pub struct Compiler {
     /// Parked, not indexed: only [`Compiler::walk_tys`] is ever written to.
     pub(super) walk_tys_stack: Vec<Vec<WalkStep>>,
     /// Function bodies whose typecheck walk has finished but whose Core
-    /// pipeline (`lower`→`perceus`→`emit`) is deferred until the enclosing
+    /// pipeline (`lower`→`perceus`) is deferred until the enclosing
     /// declaration group has been generalized. See
     /// [`Self::begin_deferred_elaboration`].
     deferred_bodies: Vec<DeferredBody>,
@@ -674,35 +637,6 @@ pub struct Compiler {
     /// constructor or sibling decl (`println = 5` after `fn g() { println(x) }`
     /// turned the callee into a self-call).
     deferred_env_pin: Option<(usize, TypeEnv)>,
-    /// Jump-overs emitted by [`Self::materialize_eta_wrappers`] *while a
-    /// deferral region is draining*, collected for the region-wide patch at
-    /// the end of [`Self::end_deferred_elaboration`].
-    ///
-    /// `Some` for exactly the span of that drain, and that is the whole point:
-    /// what a wrapper's jump-over may target is decided by what was emitted
-    /// after it, and only the drain knows. Outside a drain the wrappers are the
-    /// last thing before the toplevel init, so "just past my own `Ret`" names
-    /// the next wrapper's jump-over or the init itself — neither inside a
-    /// function body. Inside a drain it names the next *body*'s `code_start`,
-    /// which is a jump into a foreign frame's code.
-    ///
-    /// The invariant is a layout one, not a control-flow one: no jump-over in
-    /// either splice is ever executed, because `append_toplevel_init` overwrites
-    /// the head of the region with a `Jump` to the init and control reaches a
-    /// body only by `CallKnown`.
-    ///
-    /// Never executed is not the same as removable, which T-192 asked and
-    /// measured. That overwrite writes *in place*, so whatever holds the
-    /// region's first address is destroyed by it, and a module that declares no
-    /// function and no module-scope lambda parks no body — leaving the leading
-    /// eta wrapper's own jump-over as the only expendable instruction there.
-    /// Drop it and the overwrite truncates the wrapper's first real
-    /// instruction; the wrapper then builds nothing and the program exits 0
-    /// having printed nothing. `tests/check_parity.rs`'s
-    /// `a_module_that_declares_no_body_keeps_its_leading_jump_over` is that
-    /// case, and it is the only one of the layout tests an entry file cannot
-    /// express — `pub fn main` always claims the mark first.
-    region_jump_overs: Option<Vec<i32>>,
 }
 
 /// One body, elaborated into a whole-module [`TypedProgram`] that the Core
@@ -710,30 +644,27 @@ pub struct Compiler {
 ///
 /// The elaborator mints a `FuncIdx` for every eta wrapper it needs by pushing
 /// onto its `FnTable`, and `FuncIdx` is also this compiler's index into
-/// `program.functions` (it is what `Atom::Closure` and `CallKnown` carry). So
-/// `fns` is padded up to `program.functions.len()` before the walk starts, and
-/// each wrapper the walk appends past that point gets its `Function` reserved
-/// here in the same order. `eta_base` is the padding length: `fns[eta_base..]`
-/// are exactly the wrappers, and `program.functions[eta_base..]` their reserved
-/// entries.
+/// [`Compiler::fns`] (it is what `Atom::Closure` and `Callee::Known` carry).
+/// So `fns` is padded up to `Compiler::fns.len()` before the walk starts, and
+/// each wrapper the walk appends past that point gets its slot reserved here
+/// in the same order. `eta_base` is the padding length: `fns[eta_base..]` are
+/// exactly the wrappers.
 struct Elaborated {
     program: TypedProgram,
     eta_base: usize,
 }
 
 /// One body, all the way through `lower`: the `CoreFn` itself and the arena
-/// its `RTy`s index (`perceus` reads it, `emit` does not).
+/// its `RTy`s index.
 ///
-/// A module toplevel's entry-frame slot pinnings ride the IR itself: `lower`
-/// copied `TypedBind::global` — stamped by `ElabCtx::global_slot` during
-/// elaboration — onto each module-scope `Let`'s `CoreBind`, and
-/// `emit_toplevel` reads them back off the body it emits via
-/// `CoreExpr::toplevel_globals`. So a def/use mismatch against the
-/// `PushGlobal <slot>` already baked into every emitted fn body is
-/// unspellable: there is no side table to desync from the binds it describes.
+/// A module toplevel's global-slot pinnings ride the IR itself: `lower` copied
+/// `TypedBind::global` — stamped by `ElabCtx::global_slot` during elaboration
+/// — onto each module-scope `Let`'s `CoreBind`. So a def/use mismatch against
+/// the `Load::Global` every function body reads is unspellable: there is no
+/// side table to desync from the binds it describes.
 struct LoweredBody {
     core: CoreFn,
-    pool: ResolvedPool,
+    pool: Rc<ResolvedPool>,
 }
 
 /// The value a [`Compiler::walk_tys`] slot holds between its reservation (on
@@ -813,7 +744,20 @@ fn unclaimed_toplevel_slots(n: usize) -> ! {
     )
 }
 
-/// Something pushed a `Function` while the elaborator walked — the `FuncIdx`
+/// A function slot was reserved but no body ever filled it, so the program
+/// would call a function that does not exist. Aborts: only a compiler bug can
+/// leave one behind.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn function_never_lowered(idx: usize) -> ! {
+    panic!(
+        "internal compiler error: function fn#{idx} was reserved but never lowered. \
+         Report this as a compiler bug."
+    )
+}
+
+/// Something reserved a function while the elaborator walked — the `FuncIdx`
 /// the next `FnTable::push` mints would stop naming it. Aborts, in release as
 /// well as debug: every eta wrapper reserved after the stray push would
 /// silently call the wrong function.
@@ -822,39 +766,14 @@ fn unclaimed_toplevel_slots(n: usize) -> ! {
 #[inline(never)]
 fn function_reserved_during_elaboration() -> ! {
     panic!(
-        "internal compiler error: a `Function` was reserved while the elaborator walked. \
+        "internal compiler error: a function was reserved while the elaborator walked. \
          Report this as a compiler bug."
     )
 }
 
-/// The deferral drain opened a jump-over collector and it was gone by the end
-/// of the same call, so something re-entered `end_deferred_elaboration`.
-///
-/// A detector, not a preventer, and the difference is worth knowing before
-/// trusting it: a re-entrant drain replaces the outer collector on the way in,
-/// dropping the jump-overs already in it, and its own `take()` leaves `None`
-/// behind — so every wrapper materialized between that point and here takes the
-/// `None` arm, with the mispatch [`Compiler::region_jump_overs`] exists to stop.
-/// By the time this fires the region is already laid down. Aborting is what is
-/// left, and it happens in release too; in debug the `debug_assert` in
-/// `end_deferred_elaboration` fires first.
-///
-/// Nothing nests today: `begin_deferred_elaboration` has three callers
-/// (`analyse_module` and the two bare-expression entries) and none of them runs
-/// from inside a drained body.
-#[allow(clippy::panic)]
-#[cold]
-#[inline(never)]
-fn region_collector_lost() -> ! {
-    panic!(
-        "internal compiler error: the deferral drain's jump-over collector went missing. \
-         Report this as a compiler bug."
-    )
-}
-
-/// A `fn(...) {...}` expression the walk closed over: the `Function` its body
-/// was reserved at, and the names its frame captured — in the order
-/// `Function::capture_count` counts them and `PushCapture` indexes them.
+/// A `fn(...) {...}` expression the walk closed over: the function slot its
+/// body was reserved at, and the names its frame captured — in the order a
+/// `Load::Capture` indexes them.
 ///
 /// Lives in the enclosing frame's [`Compiler::frame_closures`], because that is
 /// the frame whose elaboration has to build the `Atom::Closure`: the capture
@@ -871,8 +790,8 @@ pub(super) struct ClosureSite {
 /// A function body parked between its typecheck walk and its elaboration.
 ///
 /// The walk fixes everything about the body except its *types*: which
-/// `Function` slot it owns, which names it captured and at which indices, and
-/// where its jump-over placeholder sits. Types keep moving until the whole SCC
+/// function slot it owns, and which names it captured and at which indices.
+/// Types keep moving until the whole SCC
 /// has been inferred and generalized, so `lower` — the pass that reads them —
 /// runs last, off this record.
 ///
@@ -897,18 +816,11 @@ struct DeferredBody {
     /// [`Compiler::frame_closures`] the moment the walk of this body finished.
     /// Swapped back in for its elaboration and dropped with it.
     closures: Vec<ClosureSite>,
-    /// `local_count` watermark after the params were bound; `Function.locals`
-    /// is this maxed with Core's own slot allocation.
-    param_slots: i32,
-    /// Index of the placeholder `Function` this body fills in. Reserved by
-    /// `finish_fn_frame` in *both* modes: a [`ClosureSite`] and `global_to_func`
-    /// record it, and `lower` bakes it into `Atom::Closure`/`CallKnown`, all
-    /// of which happen under `check_only` too.
-    func_idx: crate::core_ir::FuncIdx,
-    /// Address of `enter_fn_frame`'s jump-over. Patched by
-    /// `end_deferred_elaboration` once *every* body parked in the region has
-    /// been emitted, so the enclosing stream skips the whole run.
-    jump_over: i32,
+    /// The function slot this body fills in. Reserved by `finish_fn_frame` in
+    /// *both* modes: a [`ClosureSite`] and `global_to_func` record it, and
+    /// `lower` bakes it into `Atom::Closure`/`Callee::Known`, all of which
+    /// happen under `check_only` too.
+    func_idx: FuncIdx,
     /// The frame state `resolve_name` needs: a captured name must resolve to
     /// the same `Denotation::capture` index the walk assigned it, and a
     /// self-reference to the same self-closure/self-toplevel-fn denotation.
@@ -925,7 +837,8 @@ struct DeferredBody {
     /// `current_binding == Some(name)` short-circuits before the capture is
     /// recorded, so a recursive local lambda whose self-name shadows a
     /// module-scope decl would re-resolve to `SelfGlobal(module_slot)` — a
-    /// `PushGlobal` of the wrong value where the walk emitted `PushSelf`.
+    /// global load of the wrong value where the walk resolved the closure
+    /// itself.
     outer_scopes: Vec<Scope>,
     /// Type-env entries `lower`'s `resolve_name` would otherwise miss: the
     /// enclosing frames' scopes are long popped by elaboration time. Only two
@@ -941,14 +854,13 @@ struct DeferredBody {
 /// The walk half of a [`DeferredBody`]: everything [`Compiler::compile_fn_body`]
 /// knows about the body it just typechecked, carried by value to the matching
 /// [`Compiler::finish_fn_frame`], which adds the frame half (captures,
-/// `func_idx`, jump-over) and pushes the complete `DeferredBody`.
+/// `func_idx`) and pushes the complete `DeferredBody`.
 ///
 /// There is exactly one outcome, and that is the point: the typecheck walk
-/// cannot emit a function body, because `compile_fn_body` has nothing to hand
+/// cannot lower a function body, because `compile_fn_body` has nothing to hand
 /// `finish_fn_frame` but this record. The phase boundary is a type, not a
-/// convention — no `code_start` exists yet for anyone to spell. The deferred
-/// body appends its code, fills the `Function` entry and patches the
-/// jump-over, in `analyse_module`'s pass 6.
+/// convention. The deferred body is lowered and fills its function slot in
+/// `analyse_module`'s pass 6.
 struct ParkedBody {
     name: StrId,
     param_binds: Vec<(StrId, Ty)>,
@@ -956,7 +868,6 @@ struct ParkedBody {
     body_ty: Ty,
     walk_tys: Vec<WalkStep>,
     closures: Vec<ClosureSite>,
-    param_slots: i32,
 }
 
 /// A name resolved to a constructor, as `type_ctor_pattern` needs it: the
@@ -989,20 +900,14 @@ impl CtorLookup {
     }
 }
 
-/// Which toplevel `append_toplevel_init` is emitting: the entry file's or an
-/// imported module's. They differ only in what happens to the toplevel's tail
-/// value and Core body.
+/// Which toplevel [`Compiler::record_toplevel`] is recording: the entry file's
+/// or an imported module's.
 enum TopKind {
-    /// `__main__`: the Core body is kept on `self.core` for consumers of the
-    /// entry program's IR, and then the program starts. For a program that
-    /// is `entered` at a `main` function, the toplevel's own tail (the Nil of
-    /// a declarations-only module) is popped and `main` is called, leaving
-    /// its result — which the program discards — for `Halt`; a script (the
-    /// REPL) leaves its tail value there instead, which is what it prints.
-    Entry {
-        entered: Option<crate::core_ir::FuncIdx>,
-    },
-    /// An imported module: its toplevel runs for effect, so the tail is popped.
+    /// `__main__`: the program's own toplevel, and the `main` it starts at when
+    /// it has one. A script (the REPL) has no `main`, and its toplevel's tail
+    /// value is what it prints.
+    Entry { entered: Option<FuncIdx> },
+    /// An imported module: its toplevel runs for effect.
     Module,
 }
 
@@ -1115,13 +1020,11 @@ pub fn check_as_module(
 pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compiler {
     let mut ref_interner = ModuleInterner::new();
     let main_refs = ModuleReferences::new(ref_interner.intern(&module::main_module()));
-    let program = Program::default();
-    // The builder appends to the area the emitted `Program` anchors, so the
-    // constants built during this compile stay frozen for the program's life.
-    let frozen = program.frozen.builder();
     Compiler {
-        program,
-        frozen,
+        fns: TiVec::new(),
+        inits: Vec::new(),
+        entry_toplevel: None,
+        main: None,
         consts: Vec::new(),
         const_dedup: HashMap::new(),
         locals: HashMap::new(),
@@ -1166,14 +1069,12 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
         stdlib_source_root: None,
         prelude: PreludeBindings::default(),
         reserved: BTreeSet::new(),
-        core: crate::core_ir::CoreProgram::default(),
         frame_closures: Vec::new(),
         walk_tys: Vec::new(),
         walk_tys_stack: Vec::new(),
         deferred_bodies: Vec::new(),
         defer_depth: 0,
         deferred_env_pin: None,
-        region_jump_overs: None,
     }
 }
 
@@ -1262,16 +1163,6 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
             );
         }
     }
-    // `__main__` starts at 0: `register_prelude` emits no init code (scrl.scrl
-    // has only types and @vm fns), so 0 == code.len() here.
-    let main_start = 0i32;
-    // Marks for the Core re-emit below. They must sit AFTER `process_imports`
-    // (which recursively compiles imported modules into the same `program` /
-    // entry frame) and BEFORE this file's own `analyse_module`, so the range
-    // `[code_mark, ..)` and slots `[slot_base, ..)` cover exactly the entry
-    // file's fused-walk output — never an imported module's init.
-    let code_mark;
-    let slot_base;
     let top_ty;
     // The `main` a program starts at; `None` for a check, a script, a
     // module, or a program with no usable `main` (which is then not clean).
@@ -1279,12 +1170,10 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
     if let ast::Expression::BlockExpression(block) = expr {
         c.process_imports(block);
         c.bump_type_ids_past_reserved();
-        code_mark = c.program.code.len();
-        slot_base = c.local_count;
         // `toplevel_binds` accumulated every imported module's bindings during
-        // `process_imports`; those slots are already live in `[0, code_mark)`
-        // and are not re-emitted by the toplevel Core, so drop them so a
-        // shadowing entry-file bind doesn't dequeue an import's slot.
+        // `process_imports`; those modules' toplevels are already recorded, so
+        // drop them so a shadowing entry-file bind doesn't dequeue an import's
+        // slot.
         c.toplevel_binds.clear();
         c.toplevel_decls.clear();
         // Entry-file env scope: opened here (not inside `analyse_module`) so
@@ -1299,20 +1188,18 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
             entered = c.program_entry(block, check_only, expr.span());
         }
     } else {
-        code_mark = c.program.code.len();
-        slot_base = c.local_count;
         c.env.push_scope();
         // `analyse_module` opens a local scope around a module's statements, so
         // its nested blocks bind at depth 2 and are frame temps, not globals.
         // A bare expression has no statement walk, so open the same scope here:
         // without it a `let` in the expression's first nested block (an `if`
         // arm) would sit at the module's own depth, `resolve_variable` would
-        // call it a global, and a lambda would read a `PushGlobal` slot that
+        // call it a global, and a lambda would load a global slot that
         // `bind_local` never queued and the elaborator therefore never pins.
         c.push_local_scope();
         // The same phase boundary `analyse_module` puts around its walk: a bare
         // expression program can still contain lambdas, and none of them may
-        // lower or emit while the expression is being typechecked.
+        // lower while the expression is being typechecked.
         c.begin_deferred_elaboration();
         top_ty = c.compile_expr(expr);
         c.end_deferred_elaboration();
@@ -1328,32 +1215,27 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         c.toplevel_decls.clear();
     }
 
-    // Elaborate the module toplevel, lower it into Core and re-emit the entry
-    // frame from it, so `__main__`'s bytecode is Core-derived like every other
+    // Elaborate the module toplevel and lower it into Core, like every other
     // function body (docs/core-ir-spec.md §Pipeline step 3). The elaborator
     // handles top-level `fn`/`const`/`type`/`import` decls, so it covers real
-    // modules. Fn bodies were already emitted during `analyse_module` and
-    // reference sibling decls via `PushGlobal <slot>` where `<slot>` is Pass 3's
-    // decl-first allocation; `ElabCtx::global_slot` stamped the corresponding
-    // slot onto each `TypedBind`, `lower` copied it onto each toplevel `Let`'s
-    // `CoreBind`, and `emit_toplevel` pins those `Let`s to the same slots (read
-    // back via `CoreExpr::toplevel_globals`) so the entry-frame `StoreLocal`s
-    // line up.
+    // modules. Fn bodies were already lowered during `analyse_module` and read
+    // sibling decls with `Load::Global(slot)`, where `slot` is Pass 3's
+    // decl-first allocation; `ElabCtx::global_slot` stamped the same slot onto
+    // each `TypedBind`, and `lower` copied it onto each toplevel `Let`'s
+    // `CoreBind`, so definition and use agree.
     //
-    // Elaboration and lowering run under `check_only` too — only the emit half
-    // is skipped. A well-typed program the front half cannot handle has to be
-    // reported by `al check`, not left to blow up at `al run`.
+    // Elaboration and lowering run under `check_only` too. A well-typed
+    // program the front half cannot handle has to be reported by
+    // `scarlet check`, not left to blow up at `scarlet run`.
     // Drained whether or not the entry elaborates, so a `check` that bailed
     // leaves nothing behind for the next compile on this `Compiler`.
     let walk_tys = c.take_toplevel_walk_tys();
-    // Stays `None` unless the splice below actually happens, which is what
+    // Stays `None` unless the recording below actually happens, which is what
     // keeps a rejected or check-only compile from handing back a `Program`
     // that runs the stdlib init and nothing else.
     let mut entry = None;
     if let Some(clean) = c.clean_module() {
         let name = c.engine.intern("__main__");
-        // The wrappers land ahead of `append_toplevel_init`'s `base`, inside
-        // `[code_mark, base)` — the region the entry frame's first `Jump` hops over.
         let lowered = c.elaborate_then_materialize(clean, None, |c, pool, fns| {
             // A module block was walked statement-by-statement, so nothing
             // recorded a type for the block itself; a bare expression *was*
@@ -1369,38 +1251,18 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         // `frame_closures` in this compile is done with it.
         c.frame_closures.clear();
         if !check_only {
-            entry =
-                c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry { entered });
-            c.core.consts = c.consts.clone();
+            entry = c.record_toplevel(lowered, TopKind::Entry { entered });
         }
     }
     c.env.pop_scope();
 
-    c.emit(Op::Halt);
-
-    c.program.functions.push(Function {
-        name: "__main__".into(),
-        arity: 0,
-        locals: c.local_count,
-        capture_count: 0,
-        code_start: main_start,
-        code_len: c.program.code.len() as i32 - main_start,
-    });
-    c.program.entry = c.program.functions.len() as i32 - 1;
-
-    if !check_only {
-        // Jump operands are frame-relative, so fusion has to know which frame
-        // owns each instruction: `functions` is that map, and the entry frame
-        // owns everything the bodies do not.
-        fuse(&mut c.program.code, &c.program.functions);
-    }
-
+    let program = match entry {
+        Some(_) => c.finish_program(),
+        None => None,
+    };
     let (references, _facts) = c.finalize_references();
     CompileResult {
-        emitted: Some(Emitted {
-            program: c.program,
-            core: c.core,
-        }),
+        program,
         entry,
         diagnostics: c.engine.diagnostics,
         references,
@@ -1421,23 +1283,32 @@ impl Compiler {
         self.reserved.contains(name)
     }
 
-    // ========================================================================
-    // Codegen primitives. None of them consult `check_only`. The frame
-    // scaffolding — the jump-over, the trailing `Ret`, the `Function` entry —
-    // is laid down in every mode, so a `func_idx` denotes the same function
-    // under `al check` as under `al build`. `check_only` truncates the
-    // pipeline at exactly one place (`elaborate_body` returns before
-    // `perceus`/`emit`) and skips the toplevel init and the peephole pass. It
-    // is a suffix of the compile, not a second compilation mode.
-    // ========================================================================
-
-    #[inline]
-    fn emit(&mut self, o: Op) {
-        self.program.code.push(op(o));
-    }
-
-    fn current_addr(&self) -> i32 {
-        self.program.code.len() as i32
+    /// Assemble the [`Program`] once the entry toplevel is recorded. Every
+    /// reserved function slot is filled by then; an empty one is a function
+    /// nothing lowered, which only a compiler bug leaves behind.
+    fn finish_program(&mut self) -> Option<Program> {
+        let toplevel = self.entry_toplevel.take()?;
+        let mut fns = TiVec::new();
+        for (i, slot) in std::mem::take(&mut self.fns)
+            .into_vec()
+            .into_iter()
+            .enumerate()
+        {
+            match slot {
+                Some(f) => {
+                    fns.push(f);
+                }
+                None => function_never_lowered(i),
+            }
+        }
+        Some(Program {
+            fns,
+            consts: self.consts.clone(),
+            inits: std::mem::take(&mut self.inits),
+            toplevel,
+            main: self.main,
+            globals: self.local_count as u32,
+        })
     }
 
     /// Pool `c`, deduplicating against the existing pool.
@@ -1692,18 +1563,17 @@ impl Compiler {
         }
         // Search enclosing scopes innermost-first so inner bindings shadow
         // outer ones. The bottom of the stack (index 0) is always the entry
-        // frame, and its *module-scope* locals are the program's globals:
-        // `StoreLocal` publishes them (see `Op::StoreLocal` in the VM), so a
-        // nested fn loads them with `PushGlobal` at call time instead of
+        // frame, and its *module-scope* locals are the program's globals, so a
+        // nested fn loads them (`Load::Global`) at call time instead of
         // capturing by value. This is what makes mutually-recursive top-level
-        // fns work — the sibling's slot is read at call time, not at
-        // `MakeClosure` time.
+        // fns work — the sibling's slot is read at call time, not when the
+        // closure is made.
         //
         // A local bound in a nested block/if/match scope at module level is
-        // *not* a global: it is an ordinary entry-frame temp whose slot the
-        // toplevel Core emit assigns for itself (only module-scope-depth binds
-        // are queued on `toplevel_binds`, see `bind_local`), and nothing
-        // guarantees it is stored before a `PushGlobal` of it runs. Such a
+        // *not* a global: it is an ordinary toplevel temp (only
+        // module-scope-depth binds are queued on `toplevel_binds`, see
+        // `bind_local`), and nothing guarantees it is stored before a global
+        // load of it runs. Such a
         // name is captured by value like any other enclosing local — exactly
         // as it would be inside a fn body. Which of the two a name is was
         // decided once, by [`Self::binds_a_global`], and recorded on the
@@ -2870,11 +2740,9 @@ impl Compiler {
         // those of the dependencies `process_imports` just compiled.
         self.toplevel_binds.clear();
         self.toplevel_decls.clear();
-        let code_mark = self.program.code.len();
-        let slot_base = self.local_count;
         self.env.push_scope();
         self.analyse_module(block, Some(&mut iface));
-        self.emit_module_init(&key, block, code_mark, slot_base);
+        self.lower_module_init(&key, block);
         self.env.pop_scope();
         // Record actual type-id consumption so `id_high_water` tracks real
         // usage and a reused-range spill past `MODULE_TYPE_ID_RANGE` raises
@@ -2901,19 +2769,6 @@ impl Compiler {
         )
     }
 
-    /// Perceus-optimise a just-lowered toplevel and append its Core-derived
-    /// entry-frame init. Shared by `__main__` and every imported module.
-    ///
-    /// The analysis pass laid the toplevel's function bodies down in
-    /// `[code_mark, base)`; each is preceded by a jump-over so the enclosing
-    /// stream skips it. Overwriting the first of those with `Jump base` skips
-    /// the whole run in one hop and lands on the Core-derived init, which then
-    /// falls through to the next region. Bodies keep the addresses their
-    /// `Function.code_start` recorded and stay reachable via `CallKnown`;
-    /// truncating instead would orphan every one of them.
-    ///
-    /// See [`TopKind`] for how the two callers differ in their handling of the
-    /// toplevel's tail value.
     /// The function a program starts at. Validates the entry file's `main`
     /// — `pub`, no parameters — whenever there is one, so `check` reports a
     /// malformed entry point too, and requires one when the program is going
@@ -2977,17 +2832,12 @@ impl Compiler {
         self.global_to_func.get(&slot).copied()
     }
 
-    /// Splice a lowered toplevel into the code. Returns the [`EntryToplevel`]
-    /// witness for `TopKind::Entry` — the one place it is minted, so it
-    /// cannot outrun the splice it stands for.
-    fn append_toplevel_init(
-        &mut self,
-        lowered: LoweredBody,
-        code_mark: usize,
-        slot_base: i32,
-        kind: TopKind,
-    ) -> Option<EntryToplevel> {
-        use crate::core_ir::{emit, perceus};
+    /// Perceus a just-lowered toplevel and record it: an imported module's
+    /// joins [`Self::inits`], and the entry file's becomes the program's own.
+    /// Returns the [`EntryToplevel`] witness for `TopKind::Entry` — the one
+    /// place it is minted, so it cannot outrun the recording it stands for.
+    fn record_toplevel(&mut self, lowered: LoweredBody, kind: TopKind) -> Option<EntryToplevel> {
+        use crate::core_ir::perceus;
         // The elaboration that produced `lowered` drained the queue the check
         // walk filled. A leftover means the two walks disagreed about which
         // statements bind at module scope — the failure the old name-keyed map
@@ -2998,59 +2848,34 @@ impl Compiler {
         }
         let LoweredBody { core: top, pool } = lowered;
         // Perceus runs so *temporaries* passed into calls are moved (rc==1 in
-        // the callee → its own reuse fires); `emit_toplevel` suppresses the
-        // resulting `Drop`/`Reuse` for the pinned globals, whose last use in
-        // the toplevel is not their last use in the program.
-        let top = perceus::perceus(&pool, top);
+        // the callee → its own reuse fires). `keep_globals` then takes the
+        // pinned globals back out: their last use in the toplevel is not their
+        // last use in the program.
+        let top = perceus::keep_globals(perceus::perceus(&pool, top));
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{top}", self.engine.str(top.name));
         }
-        let base = self.program.code.len() as i32;
-        let mut out = emit::emit_toplevel(&top.body, slot_base, self);
-        // A function body links by plain append because its block starts at its
-        // own `Function.code_start`. This block does not: it is spliced into the
-        // *entry* frame, whose `code_start` is 0 (it must run the module-init
-        // code that precedes every body), and it starts at `base`. The VM
-        // resolves its jumps as `0 + operand`, so rebase them by `base` here.
-        // This is the one place an operand is ever rewritten.
-        emit::relocate(&mut out.code, base);
-        self.local_count = self.local_count.max(out.locals);
-        // In place, not an insert: the instruction at `code_mark` is destroyed.
-        // The analysis pass guarantees an expendable one is there — a declared
-        // body's jump-over, or the leading eta wrapper's when the module
-        // declares no body — so nothing may stop emitting one without moving
-        // this write. See [`Compiler::region_jump_overs`] (T-192).
-        if code_mark < base as usize {
-            self.program.code[code_mark] = op_arg(Op::Jump, base);
-        }
-        self.program.code.extend(out.code);
+        let lowered = LoweredFn {
+            name: self.engine.str(top.name).to_string(),
+            core: top,
+            pool,
+        };
         match kind {
             TopKind::Module => {
-                self.program.code.push(op(Op::Pop));
+                self.inits.push(lowered);
                 None
             }
             TopKind::Entry { entered } => {
-                self.core.toplevel = top.body;
-                if let Some(main) = entered {
-                    self.program.code.push(op(Op::Pop));
-                    self.program
-                        .code
-                        .push(op_ab(Op::CallKnown, 0, 0, main.to_operand()));
-                }
+                self.entry_toplevel = Some(lowered);
+                self.main = entered;
                 Some(EntryToplevel { _priv: () })
             }
         }
     }
 
-    /// Elaborate and lower a just-analysed module toplevel to Core and append
-    /// its entry-frame init, exactly as `compile_impl` does for `__main__`.
-    fn emit_module_init(
-        &mut self,
-        key: &ModuleKey,
-        block: &ast::BlockExpression,
-        code_mark: usize,
-        slot_base: i32,
-    ) {
+    /// Elaborate and lower a just-analysed module toplevel to Core and record
+    /// it, exactly as `compile_with` does for `__main__`.
+    fn lower_module_init(&mut self, key: &ModuleKey, block: &ast::BlockExpression) {
         // This module's toplevel lambdas, and nobody else's. Taken (not merely
         // read) so the next module's toplevel — whose `Span`s are numbered from
         // its own file — cannot find one of ours at the same offset. Dropped on
@@ -3065,17 +2890,15 @@ impl Compiler {
         self.frame_closures = sites;
         let name = self.engine.intern(key.as_str());
         let nil = self.ty_nil();
-        // Elaborated and lowered even under `check_only` (emit is not) so a
-        // module toplevel the front half cannot handle is a diagnostic rather
-        // than a crash at `al run`. Same rule as `elaborate_body`: the wrappers
-        // go down before anyone reads an address, here
-        // `append_toplevel_init`'s `base`.
+        // Elaborated and lowered even under `check_only` so a module toplevel
+        // the front half cannot handle is a diagnostic rather than a crash at
+        // `scarlet run`.
         let lowered = self.elaborate_then_materialize(clean, None, |c, pool, fns| {
             typed_ir::elaborate_toplevel(c, pool, fns, name, block, nil, &walk_tys)
         });
         self.frame_closures.clear();
         if !self.check_only {
-            self.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Module);
+            self.record_toplevel(lowered, TopKind::Module);
         }
     }
 
@@ -4448,17 +4271,17 @@ impl Compiler {
     /// the single seam between the typecheck [`Self::compile_expr`] walk and
     /// the Core IR pipeline, and it is a *hand-off*, not a call: the walk is
     /// where inference, diagnostics, hover facts and reference-graph collection
-    /// happen, and it produces no bytecode at all.
+    /// happen, and it lowers nothing at all.
     ///
     /// The parked body is handed to `typed_ir::elaborate_body`→
-    /// [`core_ir::lower`](crate::core_ir::lower)→`perceus`→`emit` in pass 6,
+    /// [`core_ir::lower`](crate::core_ir::lower)→`perceus` in pass 6,
     /// once the whole module has been walked. There is no fallback path and no
     /// error path: the elaborator covers every form a [`CleanModule`] can
     /// contain, so it returns a [`TypedFn`] rather than a `Result`.
     ///
-    /// Elaboration and lowering run under `check_only` too (they just stop
-    /// before `emit`): they are the only passes that can prove a well-typed
-    /// program is actually compilable, so `al check` must not skip them.
+    /// Elaboration and lowering run under `check_only` too: they are the only
+    /// passes that can prove a well-typed program is actually compilable, so
+    /// `scarlet check` must not skip them.
     ///
     /// The Core pipeline does not run here at all: the body is parked in
     /// `deferred_bodies` and elaborated once the whole module has been walked
@@ -4475,8 +4298,8 @@ impl Compiler {
     ) -> (Ty, ParkedBody) {
         // Typecheck walk. Nested closures encountered here re-enter this fn
         // (via `compile_function_common`) and park their own bodies + reserve
-        // their `Function` entries before we reserve ours.
-        let param_slots = self.local_count;
+        // their slots before we reserve ours.
+        let params_end = self.local_count;
         // This body's own walk region: its expressions, and none of the
         // enclosing frame's. A nested lambda opens another one here, so its
         // types never land in ours.
@@ -4484,9 +4307,8 @@ impl Compiler {
         let body_ty = self.compile_expr(body);
         let walk_tys = self.close_walk_region();
         // The walk still bumped `local_count` for the pattern binds it
-        // reserved; those slots are dead. Rewind to the param watermark so
-        // `Function.locals` reflects only Core's own slot allocation.
-        self.local_count = param_slots;
+        // reserved; those slots are dead, so rewind to the param watermark.
+        self.local_count = params_end;
         debug_assert!(
             self.defer_depth > 0,
             "every function body must be walked inside a deferral region: \
@@ -4514,7 +4336,6 @@ impl Compiler {
             // `finish_fn_frame`, which has already handed the enclosing frame
             // its own list back.
             closures: std::mem::take(&mut self.frame_closures),
-            param_slots,
         };
         (body_ty, parked)
     }
@@ -4526,27 +4347,18 @@ impl Compiler {
     /// **The one door into the Core pipeline.** It is the only place in this
     /// compiler that calls `typed_ir::elaborate_body`/`elaborate_toplevel`, and
     /// those two are the only constructors of a [`TypedFn`] — so they are the
-    /// only constructors of the [`TypedProgram`] that `lower`, `perceus` and
-    /// `emit` consume. Consuming a [`CleanModule`] here therefore closes the
+    /// only constructors of the [`TypedProgram`] that `lower` and `perceus`
+    /// consume. Consuming a [`CleanModule`] here therefore closes the
     /// whole pipeline to a module that reported an error: not by convention,
     /// but because a poisoned module cannot produce the value the passes take.
     /// (`lower` needs no proof of its own for exactly that reason.)
     ///
     /// `at` says where the elaborated function belongs in the program it is
     /// lowered as part of: `Some(func_idx)` for a function body, whose reserved
-    /// `Function` slot fixes its [`FuncIdx`](crate::core_ir::FuncIdx); `None`
-    /// for a module toplevel, which is `TypedProgram::toplevel` and has no
-    /// index. Either way the returned [`LoweredBody`] carries its `CoreFn`.
-    ///
-    /// The wrappers are written *before* the caller reads `current_addr()` as
-    /// `base`: they are the only instructions an elaboration can add ahead of
-    /// its own body, and `base` becomes the body's `Function.code_start`, which
-    /// the VM adds to every frame-relative jump operand `emit` produced. So
-    /// `base` must name the body's first instruction. Each wrapper is
-    /// self-contained — a `Jump` over its own body, then the body — so it can be
-    /// spliced into a stream without disturbing it. Where that `Jump` points is
-    /// [`Self::materialize_eta_wrappers`]'s call, not this one's. The elaborator
-    /// itself cannot touch `program.code`; the debug assertion below pins that.
+    /// slot fixes its [`FuncIdx`]; `None` for a module toplevel, which is
+    /// `TypedProgram::toplevel` and has no index. Either way the returned
+    /// [`LoweredBody`] carries its `CoreFn`, and the eta wrappers the
+    /// elaborator minted are already in their own slots.
     fn elaborate_then_materialize(
         &mut self,
         _clean: CleanModule,
@@ -4557,8 +4369,9 @@ impl Compiler {
         let crate::core_ir::CoreProgram {
             mut fns, toplevel, ..
         } = crate::core_ir::lower::lower(&program);
+        let pool = Rc::new(program.pool);
         let wrappers = fns.split_off(eta_base);
-        self.materialize_eta_wrappers(&program.pool, eta_base, wrappers);
+        self.materialize_eta_wrappers(&pool, eta_base, wrappers);
         let core = match at {
             Some(func_idx) => fns.swap_remove(func_idx.index()),
             None => CoreFn {
@@ -4568,26 +4381,23 @@ impl Compiler {
                 ret_ty: program.toplevel.ret,
             },
         };
-        LoweredBody {
-            core,
-            pool: program.pool,
-        }
+        LoweredBody { core, pool }
     }
 
     /// Elaborate one body into a whole-module [`TypedProgram`], reserving a
-    /// `Function` entry for every eta wrapper the walk minted.
+    /// function slot for every eta wrapper the walk minted.
     ///
-    /// `TypedProgram::fns` is `FuncIdx`-indexed and so is `program.functions`,
-    /// so the two must agree: `fns` is padded up to `program.functions.len()`
-    /// before the walk (`FnTable::push` mints each `FuncIdx` in append order),
-    /// and each wrapper appended past that point gets its `Function` reserved
-    /// here, in order. Nothing else may push a `Function` while the walk runs.
+    /// `TypedProgram::fns` is `FuncIdx`-indexed and so is [`Self::fns`], so the
+    /// two must agree: `fns` is padded up to `Self::fns.len()` before the walk
+    /// (`FnTable::push` mints each `FuncIdx` in append order), and each wrapper
+    /// appended past that point gets its slot reserved here, in order. Nothing
+    /// else may reserve a slot while the walk runs.
     fn elaborate(
         &mut self,
         at: Option<crate::core_ir::FuncIdx>,
         build: impl FnOnce(&mut Self, &mut ResolvedPool, &mut FnTable) -> TypedFn,
     ) -> Elaborated {
-        let eta_base = self.program.functions.len();
+        let eta_base = self.fns.len();
         let mut pool = pool_for(&self.engine);
         // `RTy`s name nodes of `pool`, so the memo dies with the previous one.
         self.rty_cache.clear();
@@ -4596,7 +4406,7 @@ impl Compiler {
         let nil = PreludeTys::resolve_rty(self, &mut pool, nil_ty);
         // The `fns` entries an earlier body already owns. Never lowered into
         // anything the caller reads — they exist so the next `FnTable::push`
-        // lands on the `Function` reserved for it below.
+        // lands on the slot reserved for it below.
         let filler = || TypedFn {
             name: crate::types::StrId::NONE,
             params: Vec::new(),
@@ -4609,27 +4419,13 @@ impl Compiler {
             fns.push(filler());
         }
 
-        let code_before = self.program.code.len();
         let built = build(self, &mut pool, &mut fns);
-        debug_assert_eq!(
-            self.program.code.len(),
-            code_before,
-            "the elaborator must not append to `program.code`"
-        );
 
-        if self.program.functions.len() != eta_base {
+        if self.fns.len() != eta_base {
             function_reserved_during_elaboration();
         }
-        for w in fns.tail_from(crate::core_ir::FuncIdx::from_usize(eta_base)) {
-            let arity = w.params.len() as i32;
-            self.program.functions.push(Function {
-                name: self.engine.str(w.name).into(),
-                arity,
-                locals: arity,
-                capture_count: 0,
-                code_start: 0,
-                code_len: 0,
-            });
+        for _ in fns.tail_from(FuncIdx::from_usize(eta_base)) {
+            self.fns.push(None);
         }
 
         let toplevel = match at {
@@ -4655,61 +4451,33 @@ impl Compiler {
         }
     }
 
-    /// Perceus and emit the eta wrappers `fns[base..]`, back-filling the
-    /// `Function` entries [`Self::elaborate`] reserved for them.
-    ///
-    /// They go down ahead of the body that named them, each behind a `Jump`
-    /// over itself, exactly where the old request-and-synthesise path put them.
-    ///
-    /// Where that `Jump` may point is not a local question. Ahead of a toplevel
-    /// init the wrappers are the last thing emitted, so clearing its own body
-    /// lands it outside every body; emitted inside a deferral drain the code
-    /// after it is the next *body*, so it must clear the whole region and only
-    /// the drain knows where that ends — [`Self::region_jump_overs`] is how it
-    /// says so, and patches them.
+    /// Perceus the eta wrappers `fns[base..]` and fill the slots
+    /// [`Self::elaborate`] reserved for them. They share the pool of the body
+    /// that minted them.
     fn materialize_eta_wrappers(
         &mut self,
-        pool: &ResolvedPool,
+        pool: &Rc<ResolvedPool>,
         base: usize,
         wrappers: Vec<CoreFn>,
     ) {
-        use crate::core_ir::{emit, perceus};
+        use crate::core_ir::perceus;
         for (i, w) in wrappers.into_iter().enumerate() {
-            let w = perceus::perceus(pool, w);
-            let jump_over = self.current_addr();
-            self.program.code.push(op_arg(Op::Jump, 0));
-            let body_start = self.current_addr();
-            let out = emit::emit(&w, self);
-            self.program.code.extend(out.code);
-            self.emit(Op::Ret);
-            let end = self.current_addr();
-            match self.region_jump_overs.as_mut() {
-                // A drain is running, so `end` is the next body's `code_start`,
-                // not the tail of the splice: patching here would aim this jump
-                // at a foreign frame's first instruction. The drain patches it
-                // past the whole region instead.
-                Some(region) => region.push(jump_over),
-                // Dead as a jump and still load-bearing as an instruction: no
-                // body was parked ahead of this wrapper when the module
-                // declares none, so it is what `append_toplevel_init`
-                // overwrites. See [`Self::region_jump_overs`].
-                None => self.program.code[jump_over as usize].operand = end,
-            }
-            let f = &mut self.program.functions[base + i];
-            f.locals = f.arity.max(out.locals);
-            f.code_start = body_start;
-            f.code_len = end - body_start;
+            let core = perceus::perceus(pool, w);
+            self.fns[FuncIdx::from_usize(base + i)] = Some(LoweredFn {
+                name: self.engine.str(core.name).to_string(),
+                core,
+                pool: Rc::clone(pool),
+            });
         }
     }
 
-    /// Run the Core pipeline (elaborate→`lower`→`perceus`→`emit`) over one
-    /// already typechecked body and append its bytecode.
+    /// Run the Core pipeline (elaborate→`lower`→`perceus`) over one already
+    /// typechecked body and fill its function slot.
     ///
     /// Runs in pass 6, after the whole module has been walked; the only caller
-    /// is [`Self::elaborate_deferred`]. `func_idx` is the placeholder
-    /// `Function` the walk reserved and this fills in. Under `check_only` the
-    /// pipeline stops after `lower` — nothing is emitted and the `Function`
-    /// stays unfilled; the caller closes it out.
+    /// is [`Self::elaborate_deferred`]. `func_idx` is the slot the walk
+    /// reserved. Under `check_only` the pipeline stops after `lower` and the
+    /// slot stays empty.
     ///
     /// The `CleanModule` is the caller's proof that this body typechecked (that
     /// nothing in the module failed to): a poisoned body has no types to
@@ -4723,13 +4491,10 @@ impl Compiler {
         body: &ast::Expression,
         body_ty: Ty,
         walk_tys: &[WalkStep],
-        param_slots: i32,
-        func_idx: crate::core_ir::FuncIdx,
+        func_idx: FuncIdx,
     ) {
-        use crate::core_ir::{emit, perceus};
-        // The eta-wrappers the elaborator minted are written by the helper,
-        // ahead of this body.
-        let LoweredBody { core, pool, .. } =
+        use crate::core_ir::perceus;
+        let LoweredBody { core, pool } =
             self.elaborate_then_materialize(clean, Some(func_idx), |c, pool, fns| {
                 typed_ir::elaborate_body(c, pool, fns, name, param_binds, body, body_ty, walk_tys)
             });
@@ -4740,28 +4505,11 @@ impl Compiler {
         if std::env::var("CORE_DBG").is_ok() {
             eprintln!("=== {}\n{core}", self.engine.str(name));
         }
-        self.core.fns.push(core.clone());
-        // Linking a body is a plain append: `emit`'s jump operands are relative
-        // to `code[0]` of the block, and `code[0]` lands at `base`, which is
-        // exactly the `Function.code_start` the VM adds back. Nothing may push
-        // an instruction between here and the `extend` below, or `code_start`
-        // would no longer name the block's first instruction. The elaborator
-        // cannot — it appends eta-wrappers to `TypedProgram::fns` rather than
-        // synthesising them — and the one caller that still writes ahead of the
-        // body, `materialize_eta_wrappers`, has already run.
-        let base = self.current_addr();
-        let out = emit::emit(&core, self);
-        self.program.code.extend(out.code);
-        // No `Ret` appended here: `emit` runs the whole body at `tail = true`,
-        // so its own code already ends in a terminator (its doc comment and
-        // `debug_assert` are the proof). Appending another used to leave a
-        // second, unreachable one after it (T-576) — this body owns only the
-        // `Function` entry's remaining fields, not any more code.
-        let end = self.current_addr();
-        let f = &mut self.program.functions[func_idx.index()];
-        f.locals = param_slots.max(out.locals);
-        f.code_start = base;
-        f.code_len = end - base;
+        self.fns[func_idx] = Some(LoweredFn {
+            name: self.engine.str(name).to_string(),
+            core,
+            pool,
+        });
     }
 
     /// Open the elaboration phase boundary: every function body walked until
@@ -4776,8 +4524,8 @@ impl Compiler {
     /// leaves it nothing else to return.
     ///
     /// It is a whole-module boundary and not a per-SCC one because that is what
-    /// `lower(p: &TypedProgram) -> CoreProgram` needs to exist: emit cannot be
-    /// a step of the typecheck walk if the walk's product is the module.
+    /// `lower(p: &TypedProgram) -> CoreProgram` needs to exist: lowering cannot
+    /// be a step of the typecheck walk if the walk's product is the module.
     ///
     /// A body's types are also only final once its SCC has been inferred,
     /// `leave_level` has run and `generalize_top` has quantified what stayed
@@ -4794,16 +4542,9 @@ impl Compiler {
     /// newly resolves — a var pinned by a later SCC sibling, or by the
     /// post-body `unify_at(ret_ty, body_ty)` — exist but move no opcodes there.
     ///
-    /// Deferral *does* move code addresses and `program.functions` ordering
-    /// relative to the fused pipeline: the module's jump-overs now all precede
-    /// all of its bodies, and an eta-wrapper `Function` is pushed after its
-    /// owner's (reserved during the walk) rather than before it. Both are
-    /// self-consistent — every operand referring to them is computed after the
-    /// fact — but `al build`'s output is not byte-identical to the fused
-    /// compiler's, and an opcode histogram cannot see the difference. What does
-    /// *not* move is which `Function` slot a declared body owns: those are
-    /// reserved by `finish_fn_frame` during the walk, in walk order, in both
-    /// `check` and `build` — the property `tests/check_parity.rs` pins.
+    /// What deferral does *not* move is which slot a declared body owns: those
+    /// are reserved by `finish_fn_frame` during the walk, in walk order, in
+    /// both `check` and `build`.
     pub(super) fn begin_deferred_elaboration(&mut self) {
         self.defer_depth += 1;
     }
@@ -4834,30 +4575,15 @@ impl Compiler {
 
     /// Close the region opened by [`Self::begin_deferred_elaboration`] and, at
     /// depth zero, run the Core pipeline over every parked body in walk order
-    /// — innermost closure first, exactly the order the fused pipeline emitted
-    /// them in. This is the module's whole `lower`→`perceus`→`emit` phase: one
-    /// loop, after the typecheck walk, over every body the walk produced.
-    ///
-    /// Every jump-over is patched *after* the whole run, not per body: the
-    /// bodies are emitted contiguously here, long after the walk pushed the
-    /// `Jump` placeholders, so there is no `J_a, body_a, J_b, body_b` chain to
-    /// hop along any more. Each `J` skips the entire run.
+    /// — innermost closure first. This is the module's whole `lower`→`perceus`
+    /// phase: one loop, after the typecheck walk, over every body the walk
+    /// produced.
     pub(super) fn end_deferred_elaboration(&mut self) {
         self.defer_depth -= 1;
         if self.defer_depth > 0 {
             return;
         }
         let bodies = std::mem::take(&mut self.deferred_bodies);
-        let mut jumps: Vec<i32> = bodies.iter().map(|d| d.jump_over).collect();
-        // Open the collector for the eta-wrapper jump-overs the bodies below
-        // will emit. It is `Some` for exactly this drain, which is what tells
-        // `materialize_eta_wrappers` that what follows a wrapper is another
-        // body rather than the tail of the splice.
-        debug_assert!(
-            self.region_jump_overs.is_none(),
-            "a deferral drain is already collecting jump-overs"
-        );
-        self.region_jump_overs = Some(Vec::new());
         // Bodies parked before `pin_deferred_env` (the declaration walk's)
         // elaborate against the env that walk saw; the rest (lambdas the
         // toplevel `let` walk parked) against the live one. See the pin's docs.
@@ -4874,30 +4600,19 @@ impl Compiler {
             // Re-proved per body, not once for the run: `elaborate_deferred`
             // consumes the proof, and an internal error raised while lowering
             // one body poisons the module for the next.
-            match self.clean_module() {
-                // A decl in the module failed to typecheck: the parked bodies
-                // may reference names inference never resolved, and there is no
-                // typed IR to lower. Leave them empty, exactly as the fused
-                // pipeline left an ill-typed body empty.
-                None => self.close_empty_deferred(d.func_idx, d.param_slots),
-                Some(clean) => self.elaborate_deferred(d, clean),
+            //
+            // A decl in the module failed to typecheck when there is no proof:
+            // the parked bodies may reference names inference never resolved,
+            // and there is no typed IR to lower. Their slots stay empty, and a
+            // module with an error builds no program.
+            if let Some(clean) = self.clean_module() {
+                self.elaborate_deferred(d, clean);
             }
         }
         // Every parked body was pre-pin: hand the live env back. Lowering reads
         // the env, never writes it, so the pinned copy is dropped unexamined.
         if let Some(live) = live_env {
             self.env = live;
-        }
-        // The wrappers written between the bodies clear the region on the same
-        // terms as the bodies' own jump-overs: everything the drain emitted is
-        // behind `end`.
-        let Some(region) = self.region_jump_overs.take() else {
-            region_collector_lost()
-        };
-        jumps.extend(region);
-        let end = self.current_addr();
-        for j in jumps {
-            self.program.code[j as usize].operand = end;
         }
     }
 
@@ -4910,15 +4625,9 @@ impl Compiler {
             &d.body,
             d.body_ty,
             &d.walk_tys,
-            d.param_slots,
             d.func_idx,
         );
         self.leave_elab_frame(saved);
-        // `check_only` stops the pipeline before `emit`, so the reserved
-        // `Function` still has to be closed out.
-        if self.check_only {
-            self.close_empty_deferred(d.func_idx, d.param_slots);
-        }
     }
 
     /// Swap a [`DeferredBody`]'s frame snapshot into the compiler for its
@@ -4981,19 +4690,6 @@ impl Compiler {
         self.frame_closures = frame_closures;
     }
 
-    /// Give a parked body that never elaborated the same shape the inline path
-    /// gives an ill-typed one: a bare `Ret`, and a `Function` one instruction
-    /// long that spans it. The jump-over is patched with the rest of the
-    /// region's, in [`Self::end_deferred_elaboration`].
-    fn close_empty_deferred(&mut self, func_idx: crate::core_ir::FuncIdx, param_slots: i32) {
-        let base = self.current_addr();
-        self.program.code.push(op(Op::Ret));
-        let f = &mut self.program.functions[func_idx.index()];
-        f.locals = param_slots;
-        f.code_start = base;
-        f.code_len = 1;
-    }
-
     /// Compile a `fn(...) { ... }` expression. `param_hints` is `Some` when
     /// the lambda is being passed directly to a call site whose parameter
     /// types are known; in that case any unannotated parameter is given the
@@ -5042,7 +4738,7 @@ impl Compiler {
             None => body_ty,
         };
 
-        let (func_idx, captures) = self.finish_fn_frame(saved, "__anon__", params.len(), body_emit);
+        let (func_idx, captures) = self.finish_fn_frame(saved, body_emit);
         // `finish_fn_frame` restored the enclosing frame, so this lands in that
         // frame's site list — the one its elaboration will read.
         self.frame_closures.push(ClosureSite {
@@ -5089,17 +4785,15 @@ impl Compiler {
         // in every mode — so the index has to be a real one under `check_only`
         // too.
         // `finish_fn_frame` reserved it; take it from there rather than
-        // re-deriving it from `program.functions.len()`, which is only the
-        // same number by accident of nothing else having pushed since.
-        let (func_idx, _) = self.finish_fn_frame(saved, name, params.len(), body_emit);
+        // re-deriving it from `fns.len()`, which is only the same number by
+        // accident of nothing else having reserved since.
+        let (func_idx, _) = self.finish_fn_frame(saved, body_emit);
         self.global_to_func.insert(global_slot, func_idx);
         self.engine.mk_fun(&param_tys, ret_ty)
     }
 
-    /// Snapshot the enclosing frame's codegen state, push a fresh inner frame,
-    /// emit the jump-over placeholder that lets execution skip the embedded
-    /// body, and open a new type-env scope. Param binding emits no bytecode so
-    /// `func_start` here equals the address after params are bound.
+    /// Snapshot the enclosing frame's state, push a fresh inner frame, and
+    /// open a new type-env scope.
     fn enter_fn_frame(&mut self, binding: Option<&str>) -> FnFrame {
         let binding_id = binding.map(|n| self.engine.intern(n));
         // The enclosing frame's locals already map any preallocated
@@ -5110,13 +4804,6 @@ impl Compiler {
         self.outer_scopes.push(Scope {
             locals: std::mem::take(&mut self.locals),
         });
-        // The jump-over lets the enclosing code stream (the module's
-        // fn-body run, or an outer body chaining past a nested closure's
-        // body) skip the embedded `Function` body. Pushed in `check_only` too:
-        // it is what makes `jump_over` — and therefore every `Function` index
-        // downstream of it — mode-independent.
-        let jump_over = self.current_addr();
-        self.program.code.push(op_arg(Op::Jump, 0));
         self.env.push_scope();
         self.unused.push(HashMap::new());
         FnFrame {
@@ -5138,7 +4825,6 @@ impl Compiler {
                     std::mem::replace(&mut self.current_binding, self.next_fn_self_name.take())
                 }
             },
-            jump_over,
             closures: std::mem::take(&mut self.frame_closures),
         }
     }
@@ -5165,22 +4851,15 @@ impl Compiler {
         self.register_local_binding(&p.identifier.name, ty, p.identifier.span);
     }
 
-    /// Close out a function body: reserve its `Function` slot, combine the
+    /// Close out a function body: reserve its function slot, combine the
     /// walk half ([`ParkedBody`]) with the frame state that just became final
     /// into the complete [`DeferredBody`], and restore the enclosing frame
     /// and type-env. Returns the assigned `func_idx` and captured-name set so
     /// `compile_function_common` can record a [`ClosureSite`] in the enclosing
     /// frame.
     ///
-    /// No bytecode is written here. The body's `Ret`, its `code_start`/`locals`
-    /// and its jump-over patch all belong to pass 6, which runs after the walk.
-    fn finish_fn_frame(
-        &mut self,
-        saved: FnFrame,
-        name: &str,
-        arity: usize,
-        parked: ParkedBody,
-    ) -> (crate::core_ir::FuncIdx, Vec<StrId>) {
+    /// Nothing is lowered here: the body is lowered in pass 6, after the walk.
+    fn finish_fn_frame(&mut self, saved: FnFrame, parked: ParkedBody) -> (FuncIdx, Vec<StrId>) {
         // The frame's own name/rigids/captures, taken before the enclosing
         // frame's are moved back over them: a parked body needs them at
         // elaboration time to resolve its captures and self-reference exactly
@@ -5196,19 +4875,10 @@ impl Compiler {
         self.pop_unused_scope();
 
         let captured = std::mem::replace(&mut self.capture_names, saved.capture_names);
-        // Reserve the body's `Function` slot now, so the `func_idx` that
-        // the `ClosureSite` and `global_to_func` are about to record is the one
-        // the elaborated body fills in. `locals`, `code_start` and
-        // `code_len` are the only fields pass 6 can still move.
-        self.program.functions.push(Function {
-            name: name.into(),
-            arity: arity as i32,
-            locals: 0,
-            capture_count: captured.len() as i32,
-            code_start: 0,
-            code_len: 0,
-        });
-        let func_idx = crate::core_ir::FuncIdx::from_usize(self.program.functions.len() - 1);
+        // Reserve the body's slot now, so the `func_idx` that the
+        // `ClosureSite` and `global_to_func` are about to record is the one the
+        // elaborated body fills in.
+        let func_idx = self.fns.push(None);
         // Read after `env.pop_scope()`: a captured name is by
         // definition bound in an *enclosing* frame's scope, which is
         // still open here but gone by elaboration time.
@@ -5227,7 +4897,6 @@ impl Compiler {
             body_ty,
             walk_tys,
             closures,
-            param_slots,
         } = parked;
         self.deferred_bodies.push(DeferredBody {
             name: body_name,
@@ -5236,9 +4905,7 @@ impl Compiler {
             body_ty,
             walk_tys,
             closures,
-            param_slots,
             func_idx,
-            jump_over: saved.jump_over,
             captures: frame_captures,
             capture_names: captured.clone(),
             rigid_ids: frame_rigids,

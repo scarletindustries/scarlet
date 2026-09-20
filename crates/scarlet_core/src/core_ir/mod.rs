@@ -11,10 +11,12 @@ mod prim;
 pub use prim::PrimOp;
 
 use std::fmt;
+use std::rc::Rc;
 
 use crate::newtype_index;
+use crate::tivec::TiVec;
 use crate::type_def::TypeId;
-use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy};
+use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy, ResolvedPool};
 use crate::types::StrId;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -112,6 +114,10 @@ pub struct CoreBind {
 }
 
 impl CoreBind {
+    pub(crate) fn id(&self) -> LocalId {
+        self.id
+    }
+
     /// Fresh bind, pinned to no slot. `lower` pins [`Self::global`] afterwards.
     fn new(id: LocalId, ty: RTy) -> Self {
         CoreBind {
@@ -378,6 +384,42 @@ impl Default for CoreProgram {
     }
 }
 
+/// One body ready for a backend: its core IR after Perceus, and the pool its
+/// `RTy`s index. The pool is shared, because one elaboration lowers a body
+/// together with the eta wrappers it minted.
+#[derive(Debug, Clone)]
+pub struct LoweredFn {
+    /// The source name, for anything a person reads: a crash report, a stack
+    /// trace, a profile. `core.name` is an interned id that means nothing
+    /// once the compile is over.
+    pub name: String,
+    pub core: CoreFn,
+    pub pool: Rc<ResolvedPool>,
+}
+
+/// A whole compiled program in core IR: what a backend runs.
+///
+/// Running it means running every one of [`Self::inits`] in order, then
+/// [`Self::toplevel`], then calling [`Self::main`] when there is one. Every
+/// module-scope binding lives in one shared frame of [`Self::globals`] slots,
+/// which is what a `GlobalSlot` indexes.
+#[derive(Debug, Clone)]
+pub struct Program {
+    /// Every function, indexed by [`FuncIdx`]: declared ones, lambdas and the
+    /// eta wrappers elaboration minted.
+    pub fns: TiVec<FuncIdx, LoweredFn>,
+    pub consts: Vec<Const>,
+    /// Each imported module's top level, a module after everything it imports.
+    pub inits: Vec<LoweredFn>,
+    /// The entry file's own top level.
+    pub toplevel: LoweredFn,
+    /// `pub fn main`, when the program has one to start at.
+    pub main: Option<FuncIdx>,
+    /// How many global slots module-scope bindings occupy. Every `GlobalSlot`
+    /// is below this.
+    pub globals: u32,
+}
+
 // Printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids print as
 // `%n` and constants as `cN` so snapshots survive string-interner churn. An
 // `RTy` prints as `:N`, its raw pool index, which shifts whenever the
@@ -583,11 +625,28 @@ impl fmt::Display for CoreProgram {
     }
 }
 
+impl fmt::Display for Program {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for func in &self.fns {
+            writeln!(f, "{}", func.core)?;
+        }
+        for init in &self.inits {
+            writeln!(f, "init:")?;
+            Indented(&init.core.body, 1).fmt(f)?;
+        }
+        writeln!(f, "toplevel:")?;
+        Indented(&self.toplevel.core.body, 1).fmt(f)?;
+        if let Some(main) = self.main {
+            writeln!(f, "main: {main}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Fixture builders shared by the `core_ir` test modules.
 #[cfg(test)]
 pub(crate) mod testkit {
     use super::*;
-    use crate::core_ir::emit::EmitCtx;
 
     pub(crate) fn bind(id: u32, ty: RTy) -> CoreBind {
         CoreBind::new(LocalId(id), ty)
@@ -624,45 +683,6 @@ pub(crate) mod testkit {
             params,
             body,
             ret_ty,
-        }
-    }
-
-    /// Minimal [`EmitCtx`] double. `variant_count` decides `SwitchTag` vs the
-    /// `MatchEnum` ladder.
-    pub struct Ctx {
-        consts: Vec<i64>,
-        variant_count: Option<u8>,
-    }
-
-    pub(crate) fn ctx(variant_count: Option<u8>) -> Ctx {
-        Ctx {
-            consts: vec![],
-            variant_count,
-        }
-    }
-
-    impl EmitCtx for Ctx {
-        fn resolve_str(&self, _id: StrId) -> &str {
-            "T"
-        }
-        fn intern_int(&mut self, i: i64) -> i32 {
-            self.consts.push(i);
-            self.consts.len() as i32 - 1
-        }
-        fn intern_str(&mut self, _s: &str) -> i32 {
-            0
-        }
-        fn intern_labels(&mut self, _t: TypeId, _v: u16) -> i32 {
-            0
-        }
-        fn variant_name(&self, _t: TypeId, _v: u16) -> &str {
-            "T"
-        }
-        fn switch_variant_count(&self, _t: TypeId) -> Option<u8> {
-            self.variant_count
-        }
-        fn bool_variant(&self, _t: TypeId, _v: u16) -> Option<bool> {
-            None
         }
     }
 }

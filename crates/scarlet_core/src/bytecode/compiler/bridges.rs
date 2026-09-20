@@ -1,84 +1,9 @@
-//! `Compiler`'s impls of the traits `core_ir` speaks to the enclosing
-//! compilation through ([`crate::core_ir::emit::EmitCtx`], [`ElabCtx`]), kept
-//! here so `core_ir` never sees the compiler's fields.
+//! `Compiler`'s impls of the traits the elaborator speaks to the enclosing
+//! compilation through ([`PreludeTys`], [`ElabCtx`]), kept here so the
+//! elaborator never sees the compiler's fields.
 
 use super::*;
 use crate::typed_ir::PreludeTys;
-
-impl crate::core_ir::emit::EmitCtx for Compiler {
-    fn resolve_str(&self, id: StrId) -> &str {
-        self.engine.str(id)
-    }
-    fn intern_int(&mut self, i: i64) -> i32 {
-        self.const_int(i)
-    }
-    fn intern_str(&mut self, s: &str) -> i32 {
-        self.const_str(s)
-    }
-    fn intern_labels(&mut self, tid: TypeId, variant_idx: u16) -> i32 {
-        let variant = self.declared_variant(tid, variant_idx);
-        let labels: Vec<String> = self
-            .engine
-            .variant_fields_of(variant.fields)
-            .iter()
-            .map(|f| self.engine.str(f.label).to_string())
-            .collect();
-        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let v = self.frozen.str_array(&refs).into_value();
-        self.add_constant(v)
-    }
-    fn variant_name(&self, tid: TypeId, variant_idx: u16) -> &str {
-        self.engine
-            .str(self.declared_variant(tid, variant_idx).name)
-    }
-    fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
-        Compiler::switch_variant_count(self, tid)
-    }
-    fn bool_variant(&self, tid: TypeId, variant_idx: u16) -> Option<bool> {
-        if !self.prelude.bool().is(tid) {
-            return None;
-        }
-        Some(self.prelude.true_().is(tid, variant_idx))
-    }
-}
-
-/// `emit` asked for a constructor of a type with no variants. Aborts in
-/// release too: any name or labels invented here ship the wrong cell.
-#[allow(clippy::unreachable)]
-#[cold]
-#[inline(never)]
-fn no_variants(tid: TypeId) -> ! {
-    unreachable!(
-        "internal compiler error: emit asked for a variant of a type with no variants: {tid:?}. \
-         Report this as a compiler bug."
-    )
-}
-
-impl Compiler {
-    fn declared_variant(&self, tid: TypeId, variant_idx: u16) -> crate::types::Variant {
-        let Some(vs) = self
-            .env
-            .lookup_type_info_by_id(tid)
-            .and_then(|ti| ti.variants())
-        else {
-            no_variants(tid);
-        };
-        self.engine.variants_of(vs)[variant_idx as usize]
-    }
-
-    /// The variant count a `SwitchTag` over `tid` dispatches on, or `None`
-    /// when the type never switches: the bytecode emitter's rule. `Bool` is
-    /// unboxed, so its scrutinee has no tag word; past 255 variants the
-    /// `SwitchTag.a` byte overflows.
-    pub(super) fn switch_variant_count(&self, tid: TypeId) -> Option<u8> {
-        let n = self.env.lookup_type_info_by_id(tid)?.variants()?.len;
-        if self.prelude.bool().is(tid) || n > 255 {
-            None
-        } else {
-            Some(n as u8)
-        }
-    }
-}
 
 impl PreludeTys for Compiler {
     /// The one bridge from a live inference `Ty` into the program's `RTy`

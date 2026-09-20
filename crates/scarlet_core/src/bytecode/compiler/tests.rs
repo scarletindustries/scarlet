@@ -26,6 +26,86 @@ fn compile_script(src: &str) -> super::CompileResult {
     )
 }
 
+/// The lowered body of the function `name` in `p`.
+fn body_named<'p>(p: &'p crate::core_ir::Program, name: &str) -> &'p crate::core_ir::CoreFn {
+    for f in &p.fns {
+        if f.name == name {
+            return &f.core;
+        }
+    }
+    panic!("no function named `{name}` in the program")
+}
+
+/// Every atom in `e`, in no particular order.
+fn atoms(e: &crate::core_ir::CoreExpr) -> Vec<&crate::core_ir::Atom> {
+    use crate::core_ir::CoreExpr as E;
+    fn go<'e>(e: &'e E, out: &mut Vec<&'e crate::core_ir::Atom>) {
+        match e {
+            E::Let { rhs, body, .. } => {
+                out.push(rhs);
+                go(body, out);
+            }
+            E::LetJoin { join, body, .. } => {
+                go(join, out);
+                go(body, out);
+            }
+            E::LetCont { cont, body, .. } => {
+                go(cont, out);
+                go(body, out);
+            }
+            E::Drop { body, .. } => go(body, out),
+            E::If { then, els, .. } => {
+                go(then, out);
+                go(els, out);
+            }
+            E::Match { arms, .. } => {
+                for (_, b) in arms {
+                    go(b, out);
+                }
+            }
+            E::Tail(a) => out.push(a),
+            E::Goto(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(e, &mut out);
+    out
+}
+
+/// The locals `e` drops, in spine order.
+fn drops(e: &crate::core_ir::CoreExpr) -> Vec<crate::core_ir::LocalId> {
+    use crate::core_ir::CoreExpr as E;
+    fn go(e: &E, out: &mut Vec<crate::core_ir::LocalId>) {
+        match e {
+            E::Drop { local, body, .. } => {
+                out.push(*local);
+                go(body, out);
+            }
+            E::Let { body, .. } => go(body, out),
+            E::LetJoin { join, body, .. }
+            | E::LetCont {
+                cont: join, body, ..
+            } => {
+                go(join, out);
+                go(body, out);
+            }
+            E::If { then, els, .. } => {
+                go(then, out);
+                go(els, out);
+            }
+            E::Match { arms, .. } => {
+                for (_, b) in arms {
+                    go(b, out);
+                }
+            }
+            E::Tail(_) | E::Goto(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(e, &mut out);
+    out
+}
+
 /// Compile `src` as the entry module on the LSP path, with
 /// `collect_hover_facts` on so occurrence collection fires. A script, for
 /// the reason `compile_script` is.
@@ -151,29 +231,35 @@ mod local_binders_as_definitions {
     }
 }
 
-/// Perceus drop/reuse assertions on the `lower → perceus → emit` output.
+/// Perceus drop/reuse assertions on the lowered program.
 mod perceus_drop {
-    use super::super::*;
+    use super::{atoms, body_named, drops};
+    use crate::core_ir::{Atom, CoreExpr, Program};
 
-    /// Compile `src` with codegen on and return the emitted instructions.
-    fn emitted(src: &str) -> Vec<crate::bytecode::Instruction> {
+    /// Compile `src` and return the lowered program.
+    fn lowered(src: &str) -> Program {
         let r = super::compile_script(src);
         assert!(
             !crate::diagnostic::has_errors(&r.diagnostics),
             "snippet failed to compile: {:?}",
             r.diagnostics,
         );
-        r.into_runnable()
-            .expect("a non-check compile emits")
-            .program
-            .code
+        r.into_runnable().expect("a clean compile is runnable")
+    }
+
+    /// The constructors in `e` that reuse a dropped cell.
+    fn reusing_ctors(e: &CoreExpr) -> Vec<&Atom> {
+        atoms(e)
+            .into_iter()
+            .filter(|a| matches!(a, Atom::Ctor { reuse: Some(_), .. }))
+            .collect()
     }
 
     #[test]
-    fn drop_slot_emitted_at_heap_local_last_use() {
-        // `p` is heap-shaped and read twice, so `Drop 0` belongs right after
-        // the second read's `Let`. Int local `n` gets no Drop.
-        let code = emitted(
+    fn a_heap_local_is_dropped_once_and_an_int_never() {
+        // `p` is heap-shaped and read twice, so it is dropped once, after the
+        // second read. `n` is an Int and gets no drop at all.
+        let p = lowered(
             "fn f(p (Int, Int), n Int) Int {\n\
             \x20 a = p.0\n\
             \x20 b = p.1\n\
@@ -181,44 +267,29 @@ mod perceus_drop {
             }\n\
             f((1, 2), 3)\n",
         );
-        let drops: Vec<_> = code.iter().filter(|i| i.op == Op::Drop).collect();
-        assert_eq!(drops.len(), 1, "expected one DropSlot, got {drops:?}");
-        assert_eq!(drops[0].operand, 0, "DropSlot targets param slot 0 (`p`)");
-        let pos = code.iter().position(|i| i.op == Op::Drop).unwrap();
-        let last_read = code[..pos]
-            .iter()
-            .rposition(|i| i.op == Op::PushLocal && i.operand == 0)
-            .unwrap();
-        assert!(
-            code[last_read + 1..pos]
-                .iter()
-                .all(|i| matches!(i.op, Op::TupleIndex | Op::StoreLocal)),
-            "Drop is placed on the spine right after `p.1`'s let",
-        );
-        assert!(
-            !code[pos..]
-                .iter()
-                .take_while(|i| i.op != Op::Ret)
-                .any(|i| i.op == Op::PushLocal && i.operand == 0),
-            "no read of `p` after its Drop",
-        );
-        assert!(!code.iter().any(|i| i.op == Op::Drop && i.operand == 1));
-    }
-
-    #[test]
-    fn drop_slot_not_emitted_for_unboxed_prim() {
-        let code = emitted("fn g(x Int) Int { x + x }\ng(1)\n");
-        assert!(
-            !code.iter().any(|i| i.op == Op::Drop),
-            "Int local must not receive a DropSlot",
+        let f = body_named(&p, "f");
+        assert_eq!(
+            drops(&f.body),
+            vec![f.params[0].id()],
+            "exactly `p` is dropped:\n{f}"
         );
     }
 
     #[test]
-    fn reuse_paired_for_match_destructure_then_construct() {
+    fn an_unboxed_prim_is_never_dropped() {
+        let p = lowered("fn g(x Int) Int { x + x }\ng(1)\n");
+        let g = body_named(&p, "g");
+        assert!(
+            drops(&g.body).is_empty(),
+            "an Int local is never dropped:\n{g}"
+        );
+    }
+
+    #[test]
+    fn a_destructured_cell_is_reused_by_a_same_shaped_constructor() {
         // Canonical Perceus shape: destructure a Cons, construct a same-arity
         // Cons in the arm body, pairing the dropped cell with the constructor.
-        let code = emitted(
+        let p = lowered(
             "type List {\n\tLNil\n\tLCons(head Int, tail List)\n}\n\
              fn lmap(xs List, f fn(Int) Int) List {\n\
              \x20 match xs {\n\
@@ -228,30 +299,20 @@ mod perceus_drop {
              }\n\
              lmap(LNil, fn(x) { x })\n",
         );
-        let reuse_at = code
-            .iter()
-            .position(|i| i.op == Op::Reuse)
-            .expect("Op::Reuse emitted for LCons arm");
-        let ctor = code[reuse_at + 1];
-        assert_eq!(ctor.op, Op::MakeEnumPayload);
-        assert_eq!(ctor.a, 1, "constructor's a-byte set for in-place reuse");
-        assert_eq!(ctor.b, 2, "reuse paired with the 2-arity Cons, not LNil");
-        let nil_ctors: Vec<_> = code
-            .iter()
-            .filter(|i| i.op == Op::MakeEnumPayload && i.b == 0)
-            .collect();
+        let lmap = body_named(&p, "lmap");
+        let reusing = reusing_ctors(&lmap.body);
+        assert_eq!(reusing.len(), 1, "one constructor reuses a cell:\n{lmap}");
         assert!(
-            nil_ctors.iter().all(|i| i.a == 0),
-            "0-arity constructor must allocate fresh (a=0)",
+            matches!(reusing[0], Atom::Ctor { fields, .. } if fields.len() == 2),
+            "the reuse pairs with the two-field LCons, not LNil:\n{lmap}"
         );
     }
 
     #[test]
-    fn reuse_candidate_scoped_per_match_arm() {
-        // Reuse pairing is arm-scoped: arm 1's dropped 2-field cell must not
-        // be consumed by arm 2's constructor. At runtime the slot holds a
-        // 0-field cell in arm 2 and `reuse_or_alloc`'s shape assert fires.
-        let code = emitted(
+    fn a_reuse_candidate_stays_in_its_own_arm() {
+        // Reuse pairing is arm-scoped: arm 1's dropped two-field cell must not
+        // be consumed by arm 2's constructor, which runs when the cell is a B.
+        let p = lowered(
             "type T {\n\tA(x Int, y Int)\n\tB\n}\n\
              fn f(v T) T {\n\
              \x20 match v {\n\
@@ -261,16 +322,17 @@ mod perceus_drop {
              }\n\
              f(B)\n",
         );
+        let f = body_named(&p, "f");
         assert!(
-            !code.iter().any(|i| i.op == Op::Reuse),
-            "arm 1's Enum/2 candidate must not leak to arm 2's Enum/2 constructor",
+            reusing_ctors(&f.body).is_empty(),
+            "arm 1's candidate must not leak to arm 2's constructor:\n{f}"
         );
     }
 }
 
 /// A module the typechecker rejected must never reach the elaborator.
 ///
-/// `CleanModule` is why `lower`, `perceus` and `emit` need no poison arm: they
+/// `CleanModule` is why `lower` and `perceus` need no poison arm: they
 /// take a `TypedProgram`, which only `elaborate_body`/`elaborate_toplevel` can
 /// build. `Elab` aborts when `resolve_name` returns `None`, so without the
 /// gate an ordinary type error would abort the compiler.
@@ -338,7 +400,7 @@ mod clean_module_gate {
             crate::diagnostic::has_errors(&pr.diagnostics),
             "snippet must fail to parse"
         );
-        let r = compile(&ast::Expression::BlockExpression(pr.ast), None, None);
+        let r = compile(&ast::Expression::BlockExpression(pr.ast), None);
         assert!(!r.success(), "an unparseable program must not compile");
         assert!(
             codes(&r.diagnostics).contains(&DiagnosticCode::ParseError),
@@ -351,13 +413,10 @@ mod clean_module_gate {
     #[test]
     fn a_clean_module_reaches_the_core_pipeline() {
         let block = parse_ok("fn f(x Int) Int { x + 1 }\npub fn main() { f(1) }\n");
-        let r = compile(&ast::Expression::BlockExpression(block), None, None);
+        let r = compile(&ast::Expression::BlockExpression(block), None);
         assert!(r.success(), "{:#?}", r.diagnostics);
-        let emitted = r.into_runnable().expect("a non-check compile emits");
-        assert!(
-            !emitted.core.fns.is_empty(),
-            "a diagnostics-clean module must produce Core"
-        );
+        let program = r.into_runnable().expect("a clean compile is runnable");
+        let _ = super::body_named(&program, "f");
     }
 }
 
@@ -396,7 +455,7 @@ mod toplevel_slot_queue {
         let [ast::Node::Expression(expr)] = &block.body[..] else {
             panic!("expected a single bare expression");
         };
-        let r = compile(expr, None, None);
+        let r = compile(expr, None);
         assert!(
             !crate::diagnostic::has_errors(&r.diagnostics),
             "{:?}",
@@ -486,22 +545,23 @@ mod qualified_ctor_pattern_occurrences {
 }
 
 mod runnable_programs {
-    //! Two facts a `CompileResult` must never confuse: what analysis built,
-    //! and whether there is a program worth running. A rejected module emits
-    //! no toplevel, so its `Program` runs the stdlib init and halts — and the
-    //! entry frame's pre-filled locals make that look like a computed `0`
+    //! Two facts a `CompileResult` must never confuse: what analysis saw, and
+    //! whether there is a program worth running. A rejected module records no
+    //! toplevel, so running what it built would run the stdlib init and stop
+    //! — and the pre-filled globals would make that look like a computed `0`
     //! rather than a failure.
     //!
     //! Also: a REPL entry is a fragment of a session, not a whole program, so
     //! the line that uses a binding is typed next. That is why the prompt
     //! turns the unused-binding check off — and why turning it off must mean
-    //! "do not report", never "report and skip the emit".
+    //! "do not report", never "report and skip the lowering".
 
     use super::parse_ok;
     use crate::ast;
     use crate::bytecode::{
-        CompileOptions, ModuleScope, Op, UnusedBindings, check, compile, compile_with,
+        CompileOptions, ModuleScope, UnusedBindings, check, compile, compile_with,
     };
+    use crate::core_ir::{Atom, Const, CoreExpr};
 
     fn entry(src: &str) -> ast::Expression {
         ast::Expression::BlockExpression(parse_ok(src))
@@ -509,7 +569,7 @@ mod runnable_programs {
 
     #[test]
     fn an_unused_binding_is_reported_in_a_file() {
-        let result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None, None);
+        let result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None);
         assert!(
             !result.success(),
             "a file's unused binding must be an error"
@@ -519,61 +579,60 @@ mod runnable_programs {
     /// The shape of a real bug: the REPL filtered a diagnostic it did not want
     /// to show, `success()` then said yes, and the `Program` it ran had no
     /// toplevel — so the entry "evaluated" to one of the entry frame's
-    /// pre-filled locals. Whether a program is runnable is now the splice's
-    /// answer, not the diagnostics'.
+    /// pre-filled globals. Whether a program is runnable is now the recorded
+    /// toplevel's answer, not the diagnostics'.
     #[test]
     fn a_rejected_compile_stays_unrunnable_even_with_its_diagnostics_removed() {
-        let mut result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None, None);
+        let mut result = compile(&entry("pub fn main() {\n  x = 5\n  42\n}\n"), None);
         assert!(!result.success(), "an unused binding rejects a file");
         result.diagnostics.clear();
         assert!(result.success(), "the filtered result looks clean");
         assert!(
             result.into_runnable().is_none(),
-            "a program whose toplevel was never emitted must not be runnable"
+            "a program whose toplevel was never recorded must not be runnable"
         );
     }
 
-    /// A check builds the function table but splices no toplevel: analysis,
-    /// never a run. It also does not need a `main`: a library file checks.
+    /// A check records no toplevel: analysis, never a run. It also does not
+    /// need a `main`: a library file checks.
     #[test]
-    fn a_check_has_artifacts_but_nothing_to_run() {
+    fn a_check_has_nothing_to_run() {
         let src = entry("pub const x = 1\n");
-        let checked = check(&src, None, None);
+        let checked = check(&src, None);
         assert!(checked.success(), "{:?}", checked.diagnostics);
-        assert!(check(&src, None, None).into_runnable().is_none());
-        assert!(check(&src, None, None).into_artifacts().is_some());
+        assert!(check(&src, None).into_runnable().is_none());
     }
 
-    /// The last three instructions of a program's entry frame after the
-    /// declarations have been initialised.
-    fn entry_tail(src: &str) -> Vec<Op> {
-        let result = compile(&entry(src), None, None);
-        assert!(result.success(), "{:?}", result.diagnostics);
-        let emitted = result.into_runnable().expect("a successful compile emits");
-        let mut ops: Vec<Op> = emitted
-            .program
-            .code
-            .iter()
-            .rev()
-            .take(3)
-            .map(|i| i.op)
-            .collect();
-        ops.reverse();
-        ops
+    /// The atom a toplevel ends in, past its `Let`/`Drop` spine.
+    fn tail(mut e: &CoreExpr) -> &Atom {
+        loop {
+            match e {
+                CoreExpr::Let { body, .. }
+                | CoreExpr::LetJoin { body, .. }
+                | CoreExpr::LetCont { body, .. }
+                | CoreExpr::Drop { body, .. } => e = body,
+                CoreExpr::Tail(a) => return a,
+                CoreExpr::If { .. } | CoreExpr::Match { .. } | CoreExpr::Goto(_) => {
+                    panic!("toplevel ends in a branch")
+                }
+            }
+        }
     }
 
-    /// A program is entered at `main`: the toplevel's own Nil is popped and
-    /// `main` is called by index, so its result is what `Halt` sees.
+    /// A program is entered at `main`, which the program names by index.
     #[test]
     fn a_program_starts_at_main() {
-        assert_eq!(
-            entry_tail("pub fn main() {\n  42\n}\n"),
-            vec![Op::Pop, Op::CallKnown, Op::Halt]
-        );
+        let result = compile(&entry("pub fn main() {\n  42\n}\n"), None);
+        assert!(result.success(), "{:?}", result.diagnostics);
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        let main = program
+            .main
+            .expect("a program with `pub fn main` starts there");
+        assert_eq!(program.fns[main].name, "main");
     }
 
     fn messages(src: &str) -> Vec<String> {
-        compile(&entry(src), None, None)
+        compile(&entry(src), None)
             .diagnostics
             .into_iter()
             .map(|d| d.message)
@@ -590,7 +649,7 @@ mod runnable_programs {
             "{:?}",
             messages(src)
         );
-        assert!(check(&entry(src), None, None).success());
+        assert!(check(&entry(src), None).success());
     }
 
     #[test]
@@ -607,7 +666,7 @@ mod runnable_programs {
         );
         // Both are reported by `check` too: a malformed entry point is a
         // fact about the file, not about running it.
-        let checked = check(&entry("fn main() {\n  1\n}\n"), None, None);
+        let checked = check(&entry("fn main() {\n  1\n}\n"), None);
         assert!(!checked.success());
     }
 
@@ -622,8 +681,8 @@ mod runnable_programs {
     }
 
     /// The REPL's mode: statements are the input, bindings persist as
-    /// module-scope binds, and the entry's value is its tail expression,
-    /// left on the stack for the `Halt` the REPL reads — no `main` involved.
+    /// module-scope binds, and the entry's value is its tail expression — no
+    /// `main` involved.
     #[test]
     fn a_script_entry_runs_its_statements_and_leaves_the_tail() {
         let result = compile_with(
@@ -635,20 +694,15 @@ mod runnable_programs {
             },
         );
         assert!(result.success(), "{:?}", result.diagnostics);
-        let emitted = result.into_runnable().expect("a successful compile emits");
-        let ops: Vec<Op> = emitted
-            .program
-            .code
-            .iter()
-            .rev()
-            .take(3)
-            .map(|i| i.op)
-            .collect();
-        assert_eq!(
-            ops,
-            vec![Op::Halt, Op::PushConst, Op::StoreLocal],
-            "the toplevel was not emitted: {ops:?}"
-        );
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        assert!(program.main.is_none(), "a script has no `main`");
+        let Atom::Const(c) = tail(&program.toplevel.core.body) else {
+            panic!(
+                "the script's tail is not a constant:\n{}",
+                program.toplevel.core
+            );
+        };
+        assert_eq!(program.consts[c.0 as usize], Const::Int(42));
     }
 }
 
@@ -704,21 +758,14 @@ mod ctor_visibility_survives_on_the_type {
     }
 }
 
-/// `scarlet/wire`'s declaration surface: the two `@vm` keys reach the two new
-/// opcodes, and a program that calls them binds `DecodeError`'s ABI slots.
+/// `scarlet/wire`'s declaration surface: the two `@vm` keys reach the core IR
+/// as their intrinsics.
 mod wire_surface {
-    use super::super::*;
+    use crate::core_ir::Atom;
+    use scarlet_types::intrinsic::Intrinsic;
 
-    /// A clean compile is half the assertion here. `bind_abi` refuses a
-    /// program whose emitted ops construct unbound slots, and `slots_for`
-    /// declares all five `DecodeError` slots against `WireDecode` — so a
-    /// constructor renamed out from under `BINDINGS`, or one whose arity no
-    /// longer matches its slot, is an error in `r.diagnostics`, not a
-    /// mis-built value at runtime.
-    ///
-    /// The ops themselves have no bodies yet; nothing here runs them.
     #[test]
-    fn a_wire_call_emits_its_op_and_binds_the_decode_error_slots() {
+    fn a_wire_call_reaches_the_core_ir_as_its_intrinsic() {
         let r = super::compile_script(
             "import scarlet/wire\n\
              b = wire.encode(1)\n\
@@ -732,18 +779,18 @@ mod wire_surface {
             "snippet failed to compile: {:?}",
             r.diagnostics,
         );
-        let code = r
-            .into_runnable()
-            .expect("a non-check compile emits")
-            .program
-            .code;
-        assert!(
-            code.iter().any(|i| i.op == Op::WireEncode),
-            "wire.encode must reach Op::WireEncode",
-        );
-        assert!(
-            code.iter().any(|i| i.op == Op::WireDecode),
-            "wire.decode must reach Op::WireDecode",
-        );
+        let program = r.into_runnable().expect("a clean compile is runnable");
+        let calls: Vec<Intrinsic> = super::atoms(&program.toplevel.core.body)
+            .into_iter()
+            .filter_map(|a| {
+                if let Atom::Intrinsic { intrinsic, .. } = a {
+                    Some(*intrinsic)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(calls.contains(&Intrinsic::WireEncode), "{calls:?}");
+        assert!(calls.contains(&Intrinsic::WireDecode), "{calls:?}");
     }
 }
