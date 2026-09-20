@@ -6,10 +6,13 @@
 
 pub(crate) mod lower;
 pub(crate) mod perceus;
+mod prim;
+
+pub use prim::PrimOp;
 
 use std::fmt;
 
-use crate::bytecode::{HeapTag, Op, Value};
+use crate::bytecode::{HeapTag, Value};
 use crate::newtype_index;
 use crate::type_def::TypeId;
 use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy};
@@ -121,35 +124,6 @@ pub enum Callee {
     Local(LocalId),
 }
 
-/// A [`Atom::PrimOp`]'s immediate operand, tagged with its meaning. `emit` is
-/// the single point that flattens it to the instruction's `i32`, so a `ConstId`
-/// can never be read as an argc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Imm {
-    /// No immediate; encoded as 0.
-    None,
-    /// A field or slot index.
-    Index(u16),
-    /// An argument count.
-    Argc(u32),
-    /// `Op::IndexOr` with a constant default riding in the operand.
-    Const(ConstId),
-    /// `Op::IndexOr` with the default pushed on the stack (encoded as -1).
-    PushedDefault,
-}
-
-impl fmt::Display for Imm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Imm::None => Ok(()),
-            Imm::Index(i) => write!(f, "#{i}"),
-            Imm::Argc(n) => write!(f, "#{n}"),
-            Imm::Const(c) => write!(f, "#{c}"),
-            Imm::PushedDefault => f.write_str("#pushed"),
-        }
-    }
-}
-
 /// A value read from somewhere other than a core-IR local.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Load {
@@ -181,12 +155,10 @@ pub enum Atom {
         /// followed by `MakeEnumPayload a=1`; `None` allocates fresh.
         reuse: Option<LocalId>,
     },
-    /// A primitive VM operation. `op` is the bytecode `Op` directly, so this
-    /// emits as `PushLocal args; op{operand=imm}; StoreLocal`.
+    /// A primitive operation on `args`. See [`PrimOp`] for each one's operands.
     PrimOp {
-        op: Op,
+        op: PrimOp,
         args: Vec<LocalId>,
-        imm: Imm,
     },
     /// A call to a `@vm` built-in.
     Intrinsic {
@@ -206,13 +178,8 @@ pub enum Atom {
 }
 
 impl Atom {
-    /// A `PrimOp` with no immediate.
-    fn prim(op: Op, args: Vec<LocalId>) -> Self {
-        Atom::PrimOp {
-            op,
-            args,
-            imm: Imm::None,
-        }
+    fn prim(op: PrimOp, args: Vec<LocalId>) -> Self {
+        Atom::PrimOp { op, args }
     }
 
     /// The locals this atom reads, in push order. `Ctor`'s `reuse` is not one:
@@ -439,9 +406,8 @@ impl fmt::Display for Atom {
                 }
                 Ok(())
             }
-            Atom::PrimOp { op, args, imm } => {
-                write!(f, "{op:?}{imm}")?;
-                f.write_str("(")?;
+            Atom::PrimOp { op, args } => {
+                write!(f, "{op:?}(")?;
                 write_locals(f, args)?;
                 f.write_str(")")
             }
@@ -678,17 +644,16 @@ mod tests {
         assert_eq!(Atom::Local(LocalId(3)).to_string(), "%3");
         assert_eq!(Atom::Const(ConstId(7)).to_string(), "c7");
         assert_eq!(
-            Atom::prim(Op::AddInt, vec![LocalId(0), LocalId(1)]).to_string(),
-            "AddInt(%0, %1)"
+            Atom::prim(PrimOp::IntAdd, vec![LocalId(0), LocalId(1)]).to_string(),
+            "IntAdd(%0, %1)"
         );
         assert_eq!(
             Atom::PrimOp {
-                op: Op::TupleIndex,
+                op: PrimOp::TupleField(2),
                 args: vec![LocalId(0)],
-                imm: Imm::Index(2),
             }
             .to_string(),
-            "TupleIndex#2(%0)"
+            "TupleField(2)(%0)"
         );
         assert_eq!(
             Atom::Closure {
@@ -761,7 +726,7 @@ mod tests {
     fn let_drop_spine_is_flat() {
         let e = CoreExpr::Let {
             bind: bind(2, RTy(10)),
-            rhs: Atom::prim(Op::AddInt, vec![LocalId(0), LocalId(1)]),
+            rhs: Atom::prim(PrimOp::IntAdd, vec![LocalId(0), LocalId(1)]),
             body: Box::new(CoreExpr::Drop {
                 local: LocalId(0),
                 shape: Some(ReuseShape::enum_(3)),
@@ -779,7 +744,7 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "\
-let %2:10 = AddInt(%0, %1)
+let %2:10 = IntAdd(%0, %1)
 drop %0 [Enum:3]
 let %3:11 = ctor 7.1(%2) reuse %0
 ret %3
@@ -832,14 +797,14 @@ else
         let f = CoreFn {
             name: StrId(42),
             params: vec![bind(0, RTy(1)), bind(1, RTy(1))],
-            body: CoreExpr::Tail(Atom::prim(Op::LtInt, vec![LocalId(0), LocalId(1)])),
+            body: CoreExpr::Tail(Atom::prim(PrimOp::IntLt, vec![LocalId(0), LocalId(1)])),
             ret_ty: RTy(3),
         };
         assert_eq!(
             f.to_string(),
             "\
 fn s42(%0:1, %1:1) -> :3
-  ret LtInt(%0, %1)
+  ret IntLt(%0, %1)
 "
         );
     }

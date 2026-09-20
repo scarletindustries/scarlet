@@ -9,7 +9,6 @@ mod prelude;
 pub mod prelude_bindings;
 mod session;
 
-pub(crate) use binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 pub use compiler::*;
 pub use prelude_bindings::{CtorRef, PreludeBindings, TypeRef};
 pub use scarlet_vm::bytecode::*;

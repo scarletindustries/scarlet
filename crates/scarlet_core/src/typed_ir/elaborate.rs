@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
+use super::binop::{BinopKind, ShortCircuitOp, ValueBinop, specialize_binop};
 use super::elaborate_pat::{
     CtorPat, PatCtx, SpecWidth, elaborate_arms, seg_bits, slot_pattern_args,
 };
@@ -28,8 +29,8 @@ use super::{
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::ast;
-use crate::bytecode::{BinopKind, Op, ShortCircuitOp, Value, ValueBinop, specialize_binop};
-use crate::core_ir::{ConstId, FuncIdx, VariantRef};
+use crate::bytecode::Value;
+use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
 use crate::span::Span;
 use crate::types::{Prim, StrId, Ty};
 
@@ -653,10 +654,10 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         eta_wrapper(self.fns, name, self.eta_param, target, &f)
     }
 
-    /// An operator that denotes an opcode. `op` is a [`ValueBinop`], so `&&`/`||`
-    /// cannot arrive here — [`BinopKind::of`] routes them to
-    /// [`Self::short_circuit`]. That is what lets `specialize_binop` return an
-    /// `Op` and not an option.
+    /// An operator that denotes a [`PrimOp`]. `op` is a [`ValueBinop`], so
+    /// `&&`/`||` cannot arrive here — [`BinopKind::of`] routes them to
+    /// [`Self::short_circuit`]. That is what lets `specialize_binop` return a
+    /// `PrimOp` and not an option.
     fn binary(&mut self, be: &ast::BinaryExpression, op: ValueBinop, own: Ty) -> TypedExpr {
         let ty = self.resolve(own);
         let lhs = self.expr(&be.left);
@@ -693,11 +694,11 @@ impl<'a, C: ElabCtx> Elab<'a, C> {
         let ty = self.resolve(own);
         let operand = self.expr(&ue.expression);
         let op = match ue.op {
-            ast::UnaryOp::Not => Op::Not,
+            ast::UnaryOp::Not => PrimOp::Not,
             ast::UnaryOp::Neg => match self.pool.prim_of(operand.ty()) {
-                Some(Prim::Int) => Op::NegInt,
-                Some(Prim::Float) => Op::NegFloat,
-                _ => Op::Neg,
+                Some(Prim::Int) => PrimOp::IntNeg,
+                Some(Prim::Float) => PrimOp::FloatNeg,
+                _ => PrimOp::Neg,
             },
         };
         TypedExpr::Unary {

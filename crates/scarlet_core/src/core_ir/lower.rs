@@ -45,10 +45,9 @@
 use std::collections::VecDeque;
 
 use super::{
-    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, Imm, JoinId, Load,
-    LocalId,
+    Atom, Callee, ConstId, CoreBind, CoreExpr, CoreFn, CorePat, CoreProgram, JoinId, Load, LocalId,
+    PrimOp,
 };
-use crate::bytecode::Op;
 use crate::tivec::TiVec;
 use crate::typed_ir::{
     BindingId, PatRest, RTy, TempTys, TypedArm, TypedArrayElem, TypedBinPatSeg, TypedBinSeg,
@@ -56,8 +55,8 @@ use crate::typed_ir::{
 };
 use crate::types::StrId;
 
-/// Checked narrowing for an [`Imm::Index`] payload. Overflow aborts: silently
-/// truncating would emit an instruction addressing the wrong slot.
+/// Checked narrowing for a [`PrimOp`] field or element index. Overflow aborts:
+/// silently truncating would address the wrong field.
 #[allow(clippy::panic)]
 fn idx16<T: TryInto<u16> + Copy + std::fmt::Debug>(i: T) -> u16 {
     match i.try_into() {
@@ -392,13 +391,6 @@ impl Lower {
         self.let_(int_t, Atom::Const(c))
     }
 
-    /// A `PrimOp` atom with `imm = Argc(args.len())`, for the variadic opcodes
-    /// whose operand is an argc.
-    fn primn(&self, op: Op, args: Vec<LocalId>) -> Atom {
-        let imm = Imm::Argc(args.len() as u32);
-        Atom::PrimOp { op, args, imm }
-    }
-
     /// Fold every pending let (from `mark` onward) around `tail`, innermost
     /// first, producing the sealed `CoreExpr` for this segment.
     fn seal(&mut self, mark: usize, tail: CoreExpr) -> CoreExpr {
@@ -628,29 +620,23 @@ impl Lower {
             }
             TypedExpr::Tuple { elems, .. } => {
                 let args = self.operands(elems);
-                self.primn(Op::MakeTuple, args)
+                Atom::prim(PrimOp::MakeTuple, args)
             }
             TypedExpr::TupleIndex { recv, idx, .. } => {
                 let r = self.operand(recv);
-                Atom::PrimOp {
-                    op: Op::TupleIndex,
-                    args: vec![r],
-                    imm: Imm::Index(idx16(*idx)),
-                }
+                Atom::prim(PrimOp::TupleField(idx16(*idx)), vec![r])
             }
             TypedExpr::Field {
                 recv, idx, checked, ..
             } => {
                 let r = self.operand(recv);
-                Atom::PrimOp {
-                    op: if *checked {
-                        Op::GetField
-                    } else {
-                        Op::GetFieldUnchecked
-                    },
-                    args: vec![r],
-                    imm: Imm::Index(idx16(*idx)),
-                }
+                let i = idx16(*idx);
+                let op = if *checked {
+                    PrimOp::Field(i)
+                } else {
+                    PrimOp::FieldUnchecked(i)
+                };
+                Atom::prim(op, vec![r])
             }
             TypedExpr::Ctor { variant, args, .. } => {
                 let fields = self.operands(args);
@@ -664,7 +650,7 @@ impl Lower {
             TypedExpr::Index { recv, index, .. } => {
                 let r = self.operand(recv);
                 let i = self.operand(index);
-                Atom::prim(Op::Index, vec![r, i])
+                Atom::prim(PrimOp::ArrayIndex, vec![r, i])
             }
             TypedExpr::Slice {
                 recv, start, end, ..
@@ -672,12 +658,12 @@ impl Lower {
                 let r = self.operand(recv);
                 let s = self.operand(start);
                 let e = self.operand(end);
-                Atom::prim(Op::ArraySlice, vec![r, s, e])
+                Atom::prim(PrimOp::ArraySlice, vec![r, s, e])
             }
             TypedExpr::Range { start, end, .. } => {
                 let s = self.operand(start);
                 let e = self.operand(end);
-                Atom::prim(Op::MakeRange, vec![s, e])
+                Atom::prim(PrimOp::MakeRange, vec![s, e])
             }
             TypedExpr::Interp { parts, .. } => self.interp(parts),
             TypedExpr::BinLit { segs, .. } => self.bin_lit(segs),
@@ -774,7 +760,7 @@ impl Lower {
                     args.push(self.operand(ex));
                 }
             }
-            return self.primn(Op::MakeArray, args);
+            return Atom::prim(PrimOp::MakeArray, args);
         }
 
         let mut acc: Option<LocalId> = None;
@@ -783,7 +769,7 @@ impl Lower {
             if let Some(TypedArrayElem::Spread(sp)) = elems.get(i) {
                 let s = self.operand(sp);
                 acc = Some(match acc {
-                    Some(a) => self.let_(ty, Atom::prim(Op::ArrayConcat, vec![a, s])),
+                    Some(a) => self.let_(ty, Atom::prim(PrimOp::ArrayConcat, vec![a, s])),
                     None => s,
                 });
                 i += 1;
@@ -804,35 +790,19 @@ impl Lower {
                 && let Some(TypedArrayElem::Spread(sp)) = elems.get(j)
             {
                 let s = self.operand(sp);
-                let k = Imm::Argc(run.len() as u32);
                 run.push(s);
-                acc = Some(self.let_(
-                    ty,
-                    Atom::PrimOp {
-                        op: Op::Prepend,
-                        args: run,
-                        imm: k,
-                    },
-                ));
+                acc = Some(self.let_(ty, Atom::prim(PrimOp::ArrayPrepend, run)));
                 i = j + 1;
                 continue;
             }
             let a = match acc {
                 Some(a) => {
-                    let k = Imm::Argc(run.len() as u32);
                     let mut args = vec![a];
                     args.extend(run);
-                    self.let_(
-                        ty,
-                        Atom::PrimOp {
-                            op: Op::Append,
-                            args,
-                            imm: k,
-                        },
-                    )
+                    self.let_(ty, Atom::prim(PrimOp::ArrayAppend, args))
                 }
                 None => {
-                    let a = self.primn(Op::MakeArray, run);
+                    let a = Atom::prim(PrimOp::MakeArray, run);
                     self.let_(ty, a)
                 }
             };
@@ -841,7 +811,7 @@ impl Lower {
         }
         match acc {
             Some(id) => Atom::Local(id),
-            None => self.primn(Op::MakeArray, vec![]),
+            None => Atom::prim(PrimOp::MakeArray, vec![]),
         }
     }
 
@@ -855,14 +825,14 @@ impl Lower {
                 TypedInterpPart::Str(c) => self.let_(str_t, Atom::Const(*c)),
                 TypedInterpPart::Expr(ex) => {
                     let v = self.operand(ex);
-                    self.let_(str_t, Atom::prim(Op::ToString, vec![v]))
+                    self.let_(str_t, Atom::prim(PrimOp::ToString, vec![v]))
                 }
             };
             args.push(a);
         }
         match args.len() {
             1 => Atom::Local(args[0]),
-            _ => self.primn(Op::StrConcatN, args),
+            _ => Atom::prim(PrimOp::StringConcatMany, args),
         }
     }
 
@@ -875,34 +845,34 @@ impl Lower {
                 TypedBinSeg::Int { value, bits } => {
                     let v = self.operand(value);
                     let b = self.operand(bits);
-                    self.let_(bin_t, Atom::prim(Op::BinFromInt, vec![v, b]))
+                    self.let_(bin_t, Atom::prim(PrimOp::BinaryFromInt, vec![v, b]))
                 }
                 TypedBinSeg::Binary { value, bits } => {
                     let v = self.operand(value);
                     match bits {
                         Some(b) => {
                             let b = self.operand(b);
-                            self.let_(bin_t, Atom::prim(Op::BinTake, vec![v, b]))
+                            self.let_(bin_t, Atom::prim(PrimOp::BinaryTake, vec![v, b]))
                         }
                         None => v,
                     }
                 }
                 TypedBinSeg::Utf8 { value } => {
                     let v = self.operand(value);
-                    self.let_(bin_t, Atom::prim(Op::BinFromString, vec![v]))
+                    self.let_(bin_t, Atom::prim(PrimOp::BinaryFromString, vec![v]))
                 }
             };
             out.push(id);
         }
         match out.len() {
             1 => Atom::Local(out[0]),
-            _ => self.primn(Op::BinConcatN, out),
+            _ => Atom::prim(PrimOp::BinaryConcatMany, out),
         }
     }
 
-    /// `arr[i] or <pure atom>` → one [`Op::IndexOr`], no `Option` cell. The
-    /// ordinary lowering boxes a `Some` that the next instruction destructures
-    /// and drops, one heap allocation per index.
+    /// `arr[i] or <pure atom>` → one [`PrimOp::ArrayIndexOr`], no `Option`
+    /// cell. The ordinary lowering boxes a `Some` that the next step
+    /// destructures and drops, one heap allocation per index.
     ///
     /// Only fuses when the failure arm is a pure atom: the fused op cannot skip
     /// evaluating it, so anything with an effect or control flow must keep the
@@ -941,21 +911,11 @@ impl Lower {
 
         let r = self.operand(recv);
         let i = self.operand(index);
-        // A constant default rides in the operand and never touches the stack.
-        // Any other pure atom is pushed, and `Imm::PushedDefault` tells the VM
-        // to pop it.
-        Some(CoreExpr::Tail(match dflt {
-            TypedExpr::Const { value, .. } => Atom::PrimOp {
-                op: Op::IndexOr,
-                args: vec![r, i],
-                imm: Imm::Const(*value),
-            },
-            _ => Atom::PrimOp {
-                op: Op::IndexOr,
-                args: vec![r, i, self.operand(dflt)],
-                imm: Imm::PushedDefault,
-            },
-        }))
+        let d = self.operand(dflt);
+        Some(CoreExpr::Tail(Atom::prim(
+            PrimOp::ArrayIndexOr,
+            vec![r, i, d],
+        )))
     }
 
     /// Lower `arms` against an already-bound `scrut`.
@@ -1241,14 +1201,8 @@ impl Lower {
                 TypedPat::Tuple { elems, .. } => {
                     let mut tmp = Vec::with_capacity(elems.len());
                     for (j, elem) in elems.iter().enumerate() {
-                        let ej = self.let_(
-                            elem.ty(),
-                            Atom::PrimOp {
-                                op: Op::TupleIndex,
-                                args: vec![v],
-                                imm: Imm::Index(idx16(j)),
-                            },
-                        );
+                        let ej =
+                            self.let_(elem.ty(), Atom::prim(PrimOp::TupleField(idx16(j)), vec![v]));
                         tmp.push((ej, elem));
                     }
                     for r in tmp.into_iter().rev() {
@@ -1281,30 +1235,24 @@ impl Lower {
                     let int_t = self.temps.int;
                     let bool_t = self.temps.bool;
                     let pre = prefix.len();
-                    let len = self.let_(int_t, Atom::prim(Op::ArrayLen, vec![v]));
+                    let len = self.let_(int_t, Atom::prim(PrimOp::ArrayLen, vec![v]));
                     let n = self.int_const(*len_c);
                     let cmp = match rest {
-                        PatRest::None => Op::Eq,
-                        PatRest::Discard | PatRest::Bind(_) => Op::Gte,
+                        PatRest::None => PrimOp::IntEq,
+                        PatRest::Discard | PatRest::Bind(_) => PrimOp::IntGe,
                     };
                     let ok = self.let_(bool_t, Atom::prim(cmp, vec![len, n]));
                     let then = {
                         let then_mark = self.spine.len();
                         let mut tmp = Vec::with_capacity(pre);
                         for (j, ep) in prefix.iter().enumerate() {
-                            let ej = self.let_(
-                                *elem_ty,
-                                Atom::PrimOp {
-                                    op: Op::ElemAt,
-                                    args: vec![v],
-                                    imm: Imm::Index(idx16(j)),
-                                },
-                            );
+                            let ej = self
+                                .let_(*elem_ty, Atom::prim(PrimOp::ArrayElem(idx16(j)), vec![v]));
                             tmp.push((ej, ep));
                         }
                         if let PatRest::Bind(b) = rest {
                             let n2 = self.int_const(*len_c);
-                            let tail = self.let_(vty, Atom::prim(Op::SeqDrop, vec![v, n2]));
+                            let tail = self.let_(vty, Atom::prim(PrimOp::ArrayDrop, vec![v, n2]));
                             self.bind(b.id, tail);
                         }
                         for r in tmp.into_iter().rev() {
@@ -1319,11 +1267,11 @@ impl Lower {
                     let int_t = self.temps.int;
                     let bool_t = self.temps.bool;
                     let lo = self.let_(int_t, Atom::Const(*lo));
-                    let ge = self.let_(bool_t, Atom::prim(Op::Gte, vec![v, lo]));
+                    let ge = self.let_(bool_t, Atom::prim(PrimOp::IntGe, vec![v, lo]));
                     let then = {
                         let then_mark = self.spine.len();
                         let hi = self.let_(int_t, Atom::Const(*hi));
-                        let lt = self.let_(bool_t, Atom::prim(Op::Lt, vec![v, hi]));
+                        let lt = self.let_(bool_t, Atom::prim(PrimOp::IntLt, vec![v, hi]));
                         let inner = self.nested_arm_body(nested, leaf, fall, result_ty);
                         self.guard_if(then_mark, lt, inner, fall, result_ty)
                     };
@@ -1338,7 +1286,7 @@ impl Lower {
                     zero, segs, rest, ..
                 } => {
                     let int_t = self.temps.int;
-                    let total = self.let_(int_t, Atom::prim(Op::BinBitSize, vec![v]));
+                    let total = self.let_(int_t, Atom::prim(PrimOp::BinaryBitSize, vec![v]));
                     let cursor = self.int_const(*zero);
                     let after: Vec<_> = nested.into_iter().collect();
                     let body = self.bin_segments(
@@ -1384,8 +1332,11 @@ impl Lower {
         let Some((seg, tail_segs)) = segs.split_first() else {
             match rest {
                 PatRest::Bind(b) => {
-                    let rem = self.let_(int_t, Atom::prim(Op::Sub, vec![total, cursor]));
-                    let rv = self.let_(bin_ty, Atom::prim(Op::BinView, vec![bin, cursor, rem]));
+                    let rem = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]));
+                    let rv = self.let_(
+                        bin_ty,
+                        Atom::prim(PrimOp::BinaryView, vec![bin, cursor, rem]),
+                    );
                     self.bind(b.id, rv);
                     let body = self.nested_arm_body(after.into(), then, fall, result_ty);
                     return self.seal(mark, body);
@@ -1395,7 +1346,7 @@ impl Lower {
                     return self.seal(mark, body);
                 }
                 PatRest::None => {
-                    let ok = self.let_(bool_t, Atom::prim(Op::Eq, vec![cursor, total]));
+                    let ok = self.let_(bool_t, Atom::prim(PrimOp::IntEq, vec![cursor, total]));
                     let body = self.nested_arm_body(after.into(), then, fall, result_ty);
                     return self.guard_if(mark, ok, body, fall, result_ty);
                 }
@@ -1419,12 +1370,12 @@ impl Lower {
                 let pfx = self.let_(bin_ty, Atom::Const(*bytes));
                 let ok = self.let_(
                     bool_t,
-                    Atom::prim(Op::BinMatchPrefix, vec![bin, cursor, pfx]),
+                    Atom::prim(PrimOp::BinaryMatchPrefix, vec![bin, cursor, pfx]),
                 );
                 let then_e = {
                     let tm = self.spine.len();
                     let w = self.int_const(*bits);
-                    let cur2 = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, w]));
+                    let cur2 = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, w]));
                     let inner = self.bin_segments(cont(cur2), fall, result_ty);
                     self.seal(tm, inner)
                 };
@@ -1434,28 +1385,17 @@ impl Lower {
             // `(codepoint, nbits)`, with `nbits == 0` meaning decode failure.
             TypedBinPatSeg::Utf8 { value } => {
                 let pair_ty = self.temps.int_pair;
-                let pair = self.let_(pair_ty, Atom::prim(Op::BinReadUtf8, vec![bin, cursor]));
-                let cp = self.let_(
-                    int_t,
-                    Atom::PrimOp {
-                        op: Op::TupleIndex,
-                        args: vec![pair],
-                        imm: Imm::Index(0),
-                    },
+                let pair = self.let_(
+                    pair_ty,
+                    Atom::prim(PrimOp::BinaryReadUtf8, vec![bin, cursor]),
                 );
-                let nbits = self.let_(
-                    int_t,
-                    Atom::PrimOp {
-                        op: Op::TupleIndex,
-                        args: vec![pair],
-                        imm: Imm::Index(1),
-                    },
-                );
+                let cp = self.let_(int_t, Atom::prim(PrimOp::TupleField(0), vec![pair]));
+                let nbits = self.let_(int_t, Atom::prim(PrimOp::TupleField(1), vec![pair]));
                 let z = self.int_const(zero);
-                let ok = self.let_(bool_t, Atom::prim(Op::Gt, vec![nbits, z]));
+                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntGt, vec![nbits, z]));
                 let then_e = {
                     let tm = self.spine.len();
-                    let cur2 = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, nbits]));
+                    let cur2 = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, nbits]));
                     let leaf2 = ArmLeaf::BinCont(Box::new(cont(cur2)));
                     let inner =
                         self.nested_arm_body(VecDeque::from([(cp, value)]), leaf2, fall, result_ty);
@@ -1469,7 +1409,7 @@ impl Lower {
                 mark,
                 BinWalk { bin, total, cursor },
                 SegWidth::Sized(bits),
-                Op::BinReadInt,
+                PrimOp::BinaryReadInt,
                 int_t,
                 value,
                 cont,
@@ -1485,7 +1425,7 @@ impl Lower {
                     mark,
                     BinWalk { bin, total, cursor },
                     width,
-                    Op::BinView,
+                    PrimOp::BinaryView,
                     bin_ty,
                     value,
                     cont,
@@ -1505,7 +1445,7 @@ impl Lower {
         mark: usize,
         walk: BinWalk,
         width: SegWidth<'p>,
-        read_op: Op,
+        read_op: PrimOp,
         val_ty: RTy,
         value: &'p TypedPat,
         cont: impl Fn(LocalId) -> BinCont<'p>,
@@ -1525,14 +1465,14 @@ impl Lower {
         match width {
             SegWidth::Sized(bits) => {
                 let width = self.operand(bits);
-                let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
-                let ok = self.let_(bool_t, Atom::prim(Op::Lte, vec![end, total]));
+                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]));
+                let ok = self.let_(bool_t, Atom::prim(PrimOp::IntLe, vec![end, total]));
                 let then_e = read(self, width, end, fall);
                 self.guard_if(mark, ok, then_e, fall, result_ty)
             }
             SegWidth::Remainder => {
-                let width = self.let_(int_t, Atom::prim(Op::Sub, vec![total, cursor]));
-                let end = self.let_(int_t, Atom::prim(Op::Add, vec![cursor, width]));
+                let width = self.let_(int_t, Atom::prim(PrimOp::IntSub, vec![total, cursor]));
+                let end = self.let_(int_t, Atom::prim(PrimOp::IntAdd, vec![cursor, width]));
                 let then_e = read(self, width, end, fall);
                 self.seal(mark, then_e)
             }

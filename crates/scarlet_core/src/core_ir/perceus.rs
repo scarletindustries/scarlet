@@ -665,7 +665,7 @@ fn ctor_shape(a: &Atom) -> Option<ReuseShape> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::Op;
+    use crate::core_ir::PrimOp;
     use crate::core_ir::testkit::{bind, ctor, func, local, variant};
     use crate::core_ir::{ConstId, FuncIdx};
     use crate::type_def::TypeId;
@@ -766,7 +766,7 @@ mod tests {
         let int = int_ty(&mut pool);
         let cons_body = CoreExpr::Let {
             bind: bind(3, int),
-            rhs: Atom::prim(Op::AddInt, vec![local(1), local(1)]),
+            rhs: Atom::prim(PrimOp::IntAdd, vec![local(1), local(1)]),
             body: Box::new(CoreExpr::Let {
                 bind: bind(4, list),
                 rhs: Atom::Call {
@@ -902,7 +902,7 @@ mod tests {
             rhs: ctor(&[0, 0]),
             body: Box::new(CoreExpr::Let {
                 bind: bind(2, int),
-                rhs: Atom::prim(Op::AddInt, vec![local(1)]),
+                rhs: Atom::prim(PrimOp::IntAdd, vec![local(1)]),
                 body: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
             }),
         };
@@ -1035,7 +1035,7 @@ mod tests {
                     rhs: ctor(&[0, 0]),
                     body: Box::new(CoreExpr::Let {
                         bind: bind(2, t),
-                        rhs: Atom::prim(Op::AddInt, vec![local(1)]),
+                        rhs: Atom::prim(PrimOp::IntAdd, vec![local(1)]),
                         body: Box::new(CoreExpr::Tail(ctor(&[2, 2, 2]))),
                     }),
                 },
@@ -1109,7 +1109,7 @@ mod tests {
         let int = int_ty(&mut pool);
         let cont = CoreExpr::Let {
             bind: bind(2, int),
-            rhs: Atom::prim(Op::AddInt, vec![local(0)]),
+            rhs: Atom::prim(PrimOp::IntAdd, vec![local(0)]),
             body: Box::new(CoreExpr::Tail(Atom::Local(local(2)))),
         };
         let f = perceus(
@@ -1161,7 +1161,7 @@ mod tests {
                     rhs: ctor(&[0, 0]),
                     body: Box::new(CoreExpr::Let {
                         bind: bind(2, int),
-                        rhs: Atom::prim(Op::AddInt, vec![local(1)]),
+                        rhs: Atom::prim(PrimOp::IntAdd, vec![local(1)]),
                         // Drop %1 [Enum:2] lands here, ahead of the LetCont.
                         body: Box::new(CoreExpr::LetCont {
                             id: JoinId(0),

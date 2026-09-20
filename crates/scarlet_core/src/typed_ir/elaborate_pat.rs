@@ -27,8 +27,8 @@ use std::collections::{HashMap, HashSet};
 use smallvec::SmallVec;
 
 use crate::ast;
-use crate::bytecode::Op;
 use crate::core_ir::ConstId;
+use crate::core_ir::PrimOp;
 use crate::core_ir::VariantRef;
 use crate::span::Span;
 use crate::types::StrId;
@@ -533,7 +533,7 @@ pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth 
             let eight = cx.int_const(8);
             SpecWidth::Bytes(Some(TypedExpr::Binary {
                 ty,
-                op: Op::MulInt,
+                op: PrimOp::IntMul,
                 lhs: Box::new(v),
                 rhs: Box::new(TypedExpr::Const { ty, value: eight }),
             }))
@@ -1311,7 +1311,7 @@ mod tests {
                 bits: Some(bits), ..
             } => match bits {
                 TypedExpr::Binary { op, rhs, .. } => {
-                    assert_eq!(*op, Op::MulInt);
+                    assert_eq!(*op, PrimOp::IntMul);
                     let TypedExpr::Const { value, .. } = rhs.as_ref() else {
                         panic!("{rhs:?}")
                     };

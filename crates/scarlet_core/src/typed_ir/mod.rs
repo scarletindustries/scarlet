@@ -12,6 +12,7 @@
 //! patterns keep their nesting for `lower` to flatten into `CorePat` heads
 //! (docs/core-ir-spec.md §IR).
 
+pub(crate) mod binop;
 pub mod elaborate;
 pub mod elaborate_pat;
 pub mod eta;
@@ -29,8 +30,8 @@ pub(crate) use resolve::Denotation;
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub(crate) use zonk::{Zonker, pool_for};
 
-use crate::bytecode::{Op, Value};
-use crate::core_ir::{ConstId, FuncIdx, VariantRef};
+use crate::bytecode::Value;
+use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
 use crate::types::StrId;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -279,17 +280,17 @@ pub enum TypedExpr {
         body: Box<TypedExpr>,
     },
     /// A binary operator, already specialised against the operand's resolved
-    /// primitive (`AddInt` rather than `Add`). Never `&&`/`||`.
+    /// primitive (`IntAdd` rather than `Add`). Never `&&`/`||`.
     Binary {
         ty: RTy,
-        op: Op,
+        op: PrimOp,
         lhs: Box<TypedExpr>,
         rhs: Box<TypedExpr>,
     },
-    /// `!x`, `-x` — specialised the same way (`NegInt`/`NegFloat`/`Neg`).
+    /// `!x`, `-x` — specialised the same way (`IntNeg`/`FloatNeg`/`Neg`).
     Unary {
         ty: RTy,
-        op: Op,
+        op: PrimOp,
         operand: Box<TypedExpr>,
     },
     /// `a && b`. Control flow, not an operator: `b` is not evaluated when `a`
