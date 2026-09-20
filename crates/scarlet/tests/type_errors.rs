@@ -593,8 +593,9 @@ ok_case! {
 #[ignore = "waits for the wire redesign: check stopped refusing wire types in #50"]
 fn wire_names_the_whole_path_down_to_the_refusing_type() {
     let all = wire_rejects(
-        "import scarlet/wire\n\
-         fn send(o (Int, Map(String, Array(a)))) Binary {\n\
+        "import scarlet/map\n\
+         import scarlet/wire\n\
+         fn send(o (Int, map.Map(String, Array(a)))) Binary {\n\
          \twire.encode(o)\n\
          }\n\
          pub fn main() {\n\
@@ -754,4 +755,44 @@ ok_case! {
     a_module_may_encode_its_own_opaque_type: (
         "import scarlet/binary\nimport scarlet/wire\npub opaque type Token {\n\tToken(id Int)\n}\npub fn main() {\n\tprintln(binary.byte_size(wire.encode(Token(1))))\n}\n"
     ),
+}
+
+/// `Map` lives in `scarlet/map`, and the import names it `map.Map`: the bare
+/// name resolves to nothing, and the error says which spelling does.
+#[test]
+fn a_bare_type_from_an_imported_module_points_at_its_qualified_name() {
+    check_rejects(
+        "import scarlet/map\n\
+         fn f(_m Map(String, Int)) Int { 0 }\n\
+         pub fn main() {\n\
+         \tprintln(f(map.new()))\n\
+         }\n",
+        "Unknown type 'Map'. Did you mean 'map.Map'?",
+    );
+    check_rejects(
+        "import scarlet/map as m\n\
+         fn f(_m Map(String, Int)) Int { 0 }\n\
+         pub fn main() {\n\
+         \tprintln(f(m.new()))\n\
+         }\n",
+        "Did you mean 'm.Map'?",
+    );
+}
+
+/// A stdlib type is not in scope until its module is imported. The old
+/// pre-built stdlib put every stdlib type name in every program.
+#[test]
+fn a_stdlib_type_is_unknown_without_its_import() {
+    let out = check_rejects(
+        "fn f(_m Map(String, Int)) Int { 0 }\n\
+         pub fn main() {\n\
+         \tprintln(f)\n\
+         }\n",
+        "Unknown type 'Map'",
+    );
+    assert!(
+        !out.combined().contains("Did you mean"),
+        "nothing imported exports a `Map`:\n{}",
+        out.combined()
+    );
 }

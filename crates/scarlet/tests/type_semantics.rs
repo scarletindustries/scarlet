@@ -1152,10 +1152,11 @@ fn field_access_through_a_constructor_inferred_scrutinee() {
 }
 
 #[test]
+#[ignore = "needs the VM"]
 fn field_access_through_a_module_fn_inferred_scrutinee() {
     let src = "import scarlet/map\n\
                type User { User(id Int, name String) }\n\
-               fn f(m Map(Binary, User)) Int {\n\
+               fn f(m map.Map(Binary, User)) Int {\n\
                \tmatch map.get(m, <<'a'>>) {\n\
                \t\tNone -> 0\n\
                \t\tSome(u) -> u.id\n\

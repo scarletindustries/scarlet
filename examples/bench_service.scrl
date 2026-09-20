@@ -100,8 +100,8 @@ fn make_user(i Int) User {
 // Two indexes over the same records: by name for /login and /me, by id for
 // /users/<id>.
 type Tables {
-	by_name Map(Binary, User)
-	by_id Map(Int, User)
+	by_name map.Map(Binary, User)
+	by_id map.Map(Int, User)
 }
 
 // Both lookups go through a helper whose return type is written out. Reading

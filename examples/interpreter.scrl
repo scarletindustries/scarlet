@@ -161,7 +161,7 @@ fn parse(tokens Array(Token)) Result(Expr, String) {
 
 // Evaluate against the environment. A `Var` is a map lookup, so an unbound
 // name fails the same way dividing by zero does: as an Err the caller reports.
-fn evaluate(e Expr, env Map(String, Int)) Result(Int, String) {
+fn evaluate(e Expr, env map.Map(String, Int)) Result(Int, String) {
 	match e {
 		Lit(n) -> Ok(n)
 		Var(name) -> match map.get(env, name) {
@@ -179,7 +179,7 @@ fn evaluate(e Expr, env Map(String, Int)) Result(Int, String) {
 fn combine(
 	l Expr,
 	r Expr,
-	env Map(String, Int),
+	env map.Map(String, Int),
 	op fn(Int, Int) Result(Int, String),
 ) Result(Int, String) {
 	result.then(evaluate(l, env), fn(a) result.then(evaluate(r, env), fn(b) op(a, b)))
@@ -209,7 +209,7 @@ fn show(e Expr) String {
 // A line is either `name = expression`, which binds a variable, or a bare
 // expression, which is evaluated and printed. Binding returns a *new* map;
 // the fold below threads it into the next line, so nothing is ever mutated.
-fn run_line(env Map(String, Int), line String) Map(String, Int) {
+fn run_line(env map.Map(String, Int), line String) map.Map(String, Int) {
 	match lex(line) {
 		Err(m) -> {
 			report(line, Err(m))
@@ -229,7 +229,12 @@ fn run_line(env Map(String, Int), line String) Map(String, Int) {
 	}
 }
 
-fn bind(env Map(String, Int), line String, name String, rest Array(Token)) Map(String, Int) {
+fn bind(
+	env map.Map(String, Int),
+	line String,
+	name String,
+	rest Array(Token),
+) map.Map(String, Int) {
 	match result.then(parse(rest), fn(e) evaluate(e, env)) {
 		Ok(v) -> {
 			report(line, Ok('${name} = ${v}'))

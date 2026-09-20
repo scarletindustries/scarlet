@@ -3,7 +3,7 @@
 
 import scarlet/map
 
-fn fill(m Map(Int, Int), i Int) Map(Int, Int) {
+fn fill(m map.Map(Int, Int), i Int) map.Map(Int, Int) {
 	if i == 0 {
 		m
 	} else {
@@ -11,7 +11,7 @@ fn fill(m Map(Int, Int), i Int) Map(Int, Int) {
 	}
 }
 
-fn sum_lookups(m Map(Int, Int), i Int, acc Int) Int {
+fn sum_lookups(m map.Map(Int, Int), i Int, acc Int) Int {
 	if i == 0 {
 		acc
 	} else {
@@ -23,7 +23,7 @@ fn sum_lookups(m Map(Int, Int), i Int, acc Int) Int {
 	}
 }
 
-fn churn(m Map(Int, Int), i Int) Int {
+fn churn(m map.Map(Int, Int), i Int) Int {
 	if i == 0 {
 		map.size(m)
 	} else {
@@ -33,7 +33,7 @@ fn churn(m Map(Int, Int), i Int) Int {
 
 // Sized so the run is ~1s: below that the 10ms timer granularity dominates
 // and the benchmark cannot resolve the regressions it exists to catch.
-fn repeat_lookups(m Map(Int, Int), rounds Int, acc Int) Int {
+fn repeat_lookups(m map.Map(Int, Int), rounds Int, acc Int) Int {
 	if rounds == 0 {
 		acc
 	} else {

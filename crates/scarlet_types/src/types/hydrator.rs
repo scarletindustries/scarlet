@@ -266,10 +266,29 @@ impl Hydrator {
                         "Unknown type '{display}'. Import '{}' and verify it exports a type '{}'.",
                         q.name, name
                     ),
-                    None => format!("Unknown type '{}'", name),
+                    None => unknown_bare_type(env, name),
                 },
             )),
         }
+    }
+}
+
+/// "Unknown type" for a bare name, pointing at the qualified spelling when an
+/// import does export a type by that name: `Map` after `import scarlet/map`
+/// is `map.Map`.
+fn unknown_bare_type(env: &TypeEnv, name: &str) -> String {
+    let quoted: Vec<String> = env
+        .qualified_spellings(name)
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect();
+    match quoted.as_slice() {
+        [] => format!("Unknown type '{name}'"),
+        [one] => format!("Unknown type '{name}'. Did you mean {one}?"),
+        many => format!(
+            "Unknown type '{name}'. Did you mean one of {}?",
+            many.join(", ")
+        ),
     }
 }
 

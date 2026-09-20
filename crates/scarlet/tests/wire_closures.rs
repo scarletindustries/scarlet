@@ -61,7 +61,7 @@ fn a_closure_capturing_every_value_form_round_trips_and_is_called() {
          type P {\n\
          \tP(x Int, name String)\n\
          }\n\
-         fn call(f fn() (P, Array(Int), Map(String, Int), Bool, Nil, Float, Int, Array(Int))) (P, Array(Int), Map(String, Int), Bool, Nil, Float, Int, Array(Int)) {\n\
+         fn call(f fn() (P, Array(Int), map.Map(String, Int), Bool, Nil, Float, Int, Array(Int))) (P, Array(Int), map.Map(String, Int), Bool, Nil, Float, Int, Array(Int)) {\n\
          \tf()\n\
          }\n\
          pub fn main() {\n\

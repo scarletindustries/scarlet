@@ -225,8 +225,9 @@ fn the_refusal_path_survives_to_the_session_check_path() {
     let mut s = IncrementalSession::new();
     let r = s.check(
         &parse(
-            "import scarlet/wire\n\
-             fn send(o (Int, Map(String, Array(a)))) Binary {\n\
+            "import scarlet/map\n\
+             import scarlet/wire\n\
+             fn send(o (Int, map.Map(String, Array(a)))) Binary {\n\
              \twire.encode(o)\n\
              }\n\
              pub fn main() {\n\

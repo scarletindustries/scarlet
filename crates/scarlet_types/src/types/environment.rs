@@ -689,6 +689,22 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
+    /// Every qualified spelling (`map.Map`) under which a type named `name`
+    /// is in scope, sorted. An import registers each of its module's types
+    /// under `qualifier.Name`, so these are exactly the spellings that would
+    /// resolve where the bare `name` did not.
+    pub(crate) fn qualified_spellings(&self, name: &str) -> Vec<String> {
+        let suffix = format!(".{name}");
+        let mut out: Vec<String> = self
+            .type_info
+            .keys()
+            .filter(|k| k.ends_with(&suffix))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Nominal lookup by the id carried in `TypeNode::Con`. The only correct
     /// way to ask for a type's variants or fields: the by-name map can be
     /// shadowed by whatever same-named type was analysed most recently.
