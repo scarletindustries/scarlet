@@ -41,7 +41,6 @@ use petgraph::Directed;
 use petgraph::algo::tarjan_scc;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
-use super::Op;
 use super::compiler::{Compiler, ToplevelDecl};
 use crate::ast;
 use crate::module::{self, ExportedType, ExportedValue, ModuleInterface};
@@ -53,6 +52,7 @@ use crate::types::{
     AddedTypeVar, AnnotationContext, ArenaSlice, DefinitionLocation, EntityKind, Hydrator, Scheme,
     StrId, Ty, TypeBody, TypeInfo, TypeParam, ValueKind, Variant, VariantField, pool,
 };
+use scarlet_types::intrinsic::Intrinsic;
 
 #[derive(Clone, Copy)]
 enum Decl<'a> {
@@ -236,7 +236,7 @@ impl Compiler {
         // which Pass 3.5 drops as duplicate fns/consts are dropped here.
         let mut dup_ctors: Vec<Vec<bool>> = Vec::new();
         let mut decls: Vec<Decl<'_>> = Vec::new();
-        let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, Op)> = Vec::new();
+        let mut vm_fns: Vec<(&ast::FunctionDeclaration, bool, Intrinsic)> = Vec::new();
         let mut other_nodes: Vec<&ast::Node> = Vec::new();
 
         let in_prelude = self.current_module == module::scarlet_prelude();
@@ -284,8 +284,10 @@ impl Compiler {
                                     // a real expression body.
                                     match &fd.body {
                                         ast::FnBody::Vm(key) => {
-                                            match super::builtin_op(&key.name) {
-                                                Some(op) => vm_fns.push((fd, is_public, op)),
+                                            match Intrinsic::from_key(&key.name) {
+                                                Some(intrinsic) => {
+                                                    vm_fns.push((fd, is_public, intrinsic))
+                                                }
                                                 None => self.error(
                                                     format!("unknown @vm builtin '{}'", key.name),
                                                     key.span,
@@ -357,14 +359,14 @@ impl Compiler {
         // Pass 3 — pre-allocate one slot per decl, then register fn
         // signatures, positionally in `prepared`.
         //
-        // `@vm` fns get a `Builtin{op}` scheme, no slot, no body codegen, and
+        // `@vm` fns get a `Builtin{intrinsic}` scheme, no slot, no body codegen, and
         // export here rather than after generalisation: their type is the
         // annotated signature verbatim, there is no body to infer from.
-        for &(fd, is_pub, op) in &vm_fns {
+        for &(fd, is_pub, intrinsic) in &vm_fns {
             let name = &fd.identifier.name;
             let fn_ty = self.hydrate_fn_signature(fd).fn_ty;
             let mut scheme = self.engine.generalize_top(fn_ty);
-            scheme.kind = ValueKind::Builtin { op };
+            scheme.kind = ValueKind::Builtin { intrinsic };
             let m = self.current_module_slice();
             let dl = DefinitionLocation::new(fd.identifier.span, m, EntityKind::Function);
             scheme.def = Some(dl);
