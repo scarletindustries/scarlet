@@ -30,8 +30,7 @@ pub(crate) use resolve::Denotation;
 pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub(crate) use zonk::{Zonker, pool_for};
 
-use crate::bytecode::Value;
-use crate::core_ir::{ConstId, FuncIdx, PrimOp, VariantRef};
+use crate::core_ir::{Const, ConstId, FuncIdx, PrimOp, VariantRef};
 use crate::types::StrId;
 use scarlet_types::intrinsic::Intrinsic;
 
@@ -473,7 +472,7 @@ pub struct TypedProgram {
     /// no source literal behind them (`TypedPat::Array`'s `len`,
     /// `TypedPat::Bin`'s `zero`, `TypedBinPatSeg::Utf8Literal`'s `bits`).
     /// Pinned by `typed_program_consts_are_stable_ids`.
-    pub(crate) consts: Vec<Value>,
+    pub(crate) consts: Vec<Const>,
     /// The arena every [`RTy`] in the program indexes. Append-only during
     /// elaboration, immutable afterwards. `lower` never reads it; `perceus`
     /// reads it for `is_heap`, and `emit` erases types entirely.
@@ -636,17 +635,13 @@ mod tests {
         }
     }
 
-    fn bits(vs: &[Value]) -> Vec<u64> {
-        vs.iter().map(|v| v.to_bits()).collect()
-    }
-
     /// `TypedProgram::consts` is not a second pool that emit merges: lowering
     /// preserves every `ConstId` in it.
     #[test]
     fn typed_program_consts_are_stable_ids() {
         let (pool, temps) = pool_and_temps();
         let int = temps.int;
-        let consts = vec![Value::small_int(7), Value::small_int(9)];
+        let consts = vec![Const::Int(7), Const::Int(9)];
         let p = TypedProgram {
             fns: vec![nullary(
                 StrId::NONE,
@@ -676,16 +671,12 @@ mod tests {
             "lower has no pool to intern into: it hands back what it was given"
         );
         assert_eq!(
-            bits(&out.consts),
-            bits(&consts),
-            "every ConstId the elaborator minted must name the same Value after \
-             lowering, or PushConst operands baked into TypedExpr::Const would \
+            out.consts, consts,
+            "every ConstId the elaborator minted must name the same constant \
+             after lowering, or the ConstIds baked into TypedExpr::Const would \
              have to be renumbered"
         );
-        assert_eq!(
-            p.consts.get(ConstId(1).0 as usize).map(Value::to_bits),
-            Some(out.consts[1].to_bits())
-        );
+        assert_eq!(p.consts.get(ConstId(1).0 as usize), Some(&out.consts[1]));
     }
 
     /// A builtin call reaches the core IR as a call to that same intrinsic.
@@ -709,7 +700,7 @@ mod tests {
                     }],
                 },
             ),
-            consts: vec![Value::small_int(7), Value::small_int(42)],
+            consts: vec![Const::Int(7), Const::Int(42)],
             pool,
             temps,
         };
@@ -766,11 +757,7 @@ mod tests {
                 },
             },
         ];
-        let consts = vec![
-            Value::small_int(2),
-            Value::small_int(1),
-            Value::small_int(0),
-        ];
+        let consts = vec![Const::Int(2), Const::Int(1), Const::Int(0)];
         let p = TypedProgram {
             fns: Vec::new(),
             toplevel: nullary(
@@ -789,8 +776,7 @@ mod tests {
 
         let out = lower::lower(&p);
         assert_eq!(
-            bits(&out.consts),
-            bits(&consts),
+            out.consts, consts,
             "the array arm's length check reads TypedPat::Array's pooled `len`; \
              lower neither appends to nor reorders the pool it was handed"
         );

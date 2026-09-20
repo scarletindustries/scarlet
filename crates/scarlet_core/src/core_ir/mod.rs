@@ -12,7 +12,7 @@ pub use prim::PrimOp;
 
 use std::fmt;
 
-use crate::bytecode::{HeapTag, Value};
+use crate::bytecode::HeapTag;
 use crate::newtype_index;
 use crate::type_def::TypeId;
 use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy};
@@ -33,6 +33,56 @@ newtype_index!(
     /// Index into `CoreProgram.consts`.
     pub struct ConstId("c")
 );
+
+/// A constant the IR names by [`ConstId`]: a literal's value, or one the
+/// elaborator needs with no literal behind it (a pattern's length, a segment's
+/// width).
+#[derive(Debug, Clone)]
+pub enum Const {
+    Int(i64),
+    Float(f64),
+    String(String),
+    /// `bit_len` bits, packed into `bytes` from the most significant bit.
+    Binary {
+        bytes: Vec<u8>,
+        bit_len: u64,
+    },
+}
+
+/// A [`Const`]'s identity. A float is compared by its bits, so `0.0` and
+/// `-0.0` stay two constants, and a constant is always equal to itself.
+#[derive(PartialEq, Eq, Hash)]
+enum ConstKey<'a> {
+    Int(i64),
+    Float(u64),
+    String(&'a str),
+    Binary(&'a [u8], u64),
+}
+
+impl Const {
+    fn key(&self) -> ConstKey<'_> {
+        match self {
+            Const::Int(i) => ConstKey::Int(*i),
+            Const::Float(f) => ConstKey::Float(f.to_bits()),
+            Const::String(s) => ConstKey::String(s),
+            Const::Binary { bytes, bit_len } => ConstKey::Binary(bytes, *bit_len),
+        }
+    }
+}
+
+impl PartialEq for Const {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for Const {}
+
+impl std::hash::Hash for Const {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state);
+    }
+}
 
 newtype_index!(
     /// Labelled-continuation index, scoped to one lowered body. Declared by
@@ -328,19 +378,17 @@ pub struct CoreFn {
 #[derive(Debug, Clone)]
 pub struct CoreProgram {
     pub fns: Vec<CoreFn>,
-    pub consts: Vec<Value>,
+    pub consts: Vec<Const>,
     pub(crate) toplevel: CoreExpr,
 }
 
 impl Default for CoreProgram {
-    /// No functions, a toplevel returning nil. The nil lives in `consts` so the
-    /// default keeps the invariant every consumer leans on: every referenced
-    /// `ConstId` is below `consts.len()`.
+    /// No functions and no constants, with a toplevel returning nil.
     fn default() -> Self {
         CoreProgram {
             fns: Vec::new(),
-            consts: vec![Value::nil()],
-            toplevel: CoreExpr::Tail(Atom::Const(ConstId(0))),
+            consts: Vec::new(),
+            toplevel: CoreExpr::Tail(Atom::Nil),
         }
     }
 }

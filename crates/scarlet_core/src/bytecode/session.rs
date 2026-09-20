@@ -162,7 +162,7 @@ impl Compiler {
             env: self.env.watermark(),
             code: self.program.code.len(),
             functions: self.program.functions.len(),
-            constants: self.program.constants.len(),
+            constants: self.consts.len(),
             local_count: self.local_count,
         }
     }
@@ -198,7 +198,7 @@ impl Compiler {
         self.env.push_scope();
         self.program.code.truncate(code);
         self.program.functions.truncate(functions);
-        self.program.constants.truncate(constants);
+        self.consts.truncate(constants);
         // ABI templates are a prefix whose length `bind_abi` recorded.
         // Descriptor templates live only in the suffix and must not survive,
         // and neither must the index naming where they were: every
@@ -683,9 +683,8 @@ impl IncrementalSession {
 #[cfg(test)]
 mod tests {
     use super::Watermark;
-    use crate::bytecode::Value;
     use crate::bytecode::compiler::new_compiler;
-    use crate::core_ir::{Atom, ConstId, CoreExpr, CoreFn};
+    use crate::core_ir::{Atom, Const, ConstId, CoreExpr, CoreFn};
     use crate::type_def::TypeId;
     use crate::typed_ir::RTy;
     use crate::types::EnvWatermark;
@@ -803,26 +802,26 @@ mod tests {
 
         // Anchored to whatever `new_compiler` seeded, not a literal, so the
         // test survives that seed growing.
-        let base = c.program.constants.len();
-        c.program.constants.push(Value::bool(true));
+        let base = c.consts.len();
+        c.consts.push(Const::Int(1));
         let w = c.watermark();
         assert_eq!(w.constants, base + 1);
 
-        // A compile then grows `program.constants` and clones it wholesale.
-        c.program.constants.push(Value::bool(false));
-        c.program.constants.push(Value::nil());
-        c.core.consts = c.program.constants.clone();
+        // A compile then grows `consts` and clones it wholesale.
+        c.consts.push(Const::Int(2));
+        c.consts.push(Const::Int(3));
+        c.core.consts = c.consts.clone();
 
         c.reset_to(&w);
 
         assert_eq!(
-            c.program.constants.len(),
+            c.consts.len(),
             base + 1,
-            "program.constants rewinds to its own watermark"
+            "consts rewinds to its own watermark"
         );
         assert!(
             c.core.consts.is_empty(),
-            "core.consts must be cleared, not truncated to program.constants.len() \
+            "core.consts must be cleared, not truncated to consts.len() \
              ({} entries survived) — a stale prefix is indexed by no live ConstId",
             c.core.consts.len()
         );

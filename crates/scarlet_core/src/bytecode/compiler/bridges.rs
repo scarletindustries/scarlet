@@ -122,23 +122,20 @@ impl ElabCtx for Compiler {
     fn str(&self, id: StrId) -> &str {
         self.engine.str(id)
     }
-    // Safe mid-elaboration: `program.constants` is `ConstId`-addressed, so
-    // pooling moves no address.
-    fn add_const(&mut self, v: Value) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.add_constant(v) as u32)
-    }
+    // Safe mid-elaboration: the pool is `ConstId`-addressed, so pooling moves
+    // no address.
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> crate::core_ir::ConstId {
-        let v = self.const_number(lit);
-        crate::core_ir::ConstId(self.add_constant(v) as u32)
+        let c = self.const_number(lit);
+        self.add_constant(c)
     }
     fn string_const(&mut self, s: &str) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.const_str(s) as u32)
+        self.const_str(s)
     }
     fn int_const(&mut self, i: i64) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.const_int(i) as u32)
+        self.const_int(i)
     }
     fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.const_binary(bytes, bit_len) as u32)
+        self.const_binary(bytes, bit_len)
     }
     fn resolve_name(&mut self, name: &str) -> Option<(Ty, Denotation)> {
         let scheme = self.env.lookup(name)?;

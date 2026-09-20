@@ -57,9 +57,9 @@ use super::peephole::fuse;
 use super::session::{RawRef, Watermark};
 use super::{Function, Op, PreludeBindings, Program, TypeRef, Value, op, op_ab, op_arg};
 use crate::ast;
-use crate::core_ir::CoreFn;
+use crate::core_ir::{Const, ConstId, CoreFn};
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
-use crate::frozen::{FrozenBuilder, FrozenConst};
+use crate::frozen::FrozenBuilder;
 use crate::tivec::Idx;
 use crate::typed_ir::slots::{SlotError, slot_labeled};
 use crate::typed_ir::{
@@ -418,13 +418,16 @@ pub struct Compiler {
     /// constructors, so enum names and field labels from compile-time
     /// constants all point at the area's canonical interned allocations.
     frozen: FrozenBuilder,
-    /// `Value::to_bits` → constant-pool index, so `add_constant` returns the
-    /// existing slot for a repeated literal instead of pushing a duplicate.
-    /// `frozen` interns heap constants and immediates encode by value, so
-    /// identical constants have identical bits. Self-validating on lookup
-    /// (index in-bounds and slot bits still match) so `reset_to`'s pool
-    /// truncate needs no paired invalidation — a stale entry just misses.
-    const_dedup: HashMap<u64, i32>,
+    /// Every constant this compile pooled, indexed by [`ConstId`]. Handed to
+    /// [`CoreProgram::consts`](crate::core_ir::CoreProgram) wholesale once the
+    /// program is lowered.
+    pub(super) consts: Vec<Const>,
+    /// Each pooled constant → its `ConstId`, so `add_constant` returns the
+    /// existing id for a repeated literal instead of pushing a duplicate.
+    /// Self-validating on lookup (the id is in bounds and still names that
+    /// constant) so `reset_to`'s pool truncate needs no paired invalidation —
+    /// a stale entry just misses.
+    const_dedup: HashMap<Const, ConstId>,
     pub(super) locals: HashMap<StrId, LocalSlot>,
     /// Scoped-symbol-table undo log. Every mutation of `locals` made inside an
     /// open block scope appends `(name, previous entry)`; `pop_local_scope`
@@ -1211,6 +1214,7 @@ pub(crate) fn new_compiler(base_dir: Option<&Path>, check_only: bool) -> Compile
     Compiler {
         program,
         frozen,
+        consts: Vec::new(),
         const_dedup: HashMap::new(),
         locals: HashMap::new(),
         undo_log: vec![],
@@ -1465,7 +1469,7 @@ pub fn compile_with(expr: &ast::Expression, options: CompileOptions<'_>) -> Comp
         if !check_only {
             entry =
                 c.append_toplevel_init(lowered, code_mark, slot_base, TopKind::Entry { entered });
-            c.core.consts = c.program.constants.clone();
+            c.core.consts = c.consts.clone();
         }
     }
     c.env.pop_scope();
@@ -1545,47 +1549,35 @@ impl Compiler {
         self.program.code.len() as i32
     }
 
-    /// Pool `v`, deduplicating against the existing pool.
+    /// Pool `c`, deduplicating against the existing pool.
     ///
     /// The `const_dedup` memo survives `IncrementalSession::reset_to`, which
-    /// truncates `program.constants` without clearing it. Every hit is therefore
-    /// re-validated against the live pool (`constants.get(idx)` plus a
-    /// `to_bits()` compare): a stale entry either falls out of range or fails
-    /// the compare, and the constant is re-pooled.
-    fn add_constant(&mut self, v: Value) -> i32 {
-        let bits = v.to_bits();
-        if let Some(&idx) = self.const_dedup.get(&bits)
-            && let Some(slot) = self.program.constants.get(idx as usize)
-            && slot.to_bits() == bits
+    /// truncates `consts` without clearing it. Every hit is therefore
+    /// re-validated against the live pool: a stale entry either falls out of
+    /// range or names a different constant, and `c` is re-pooled.
+    fn add_constant(&mut self, c: Const) -> ConstId {
+        if let Some(&id) = self.const_dedup.get(&c)
+            && self.consts.get(id.0 as usize) == Some(&c)
         {
-            return idx;
+            return id;
         }
-        self.program.constants.push(v);
-        let idx = self.program.constants.len() as i32 - 1;
-        self.const_dedup.insert(bits, idx);
-        idx
+        let id = ConstId(self.consts.len() as u32);
+        self.consts.push(c.clone());
+        self.const_dedup.insert(c, id);
+        id
     }
 
-    // Frozen constant-pool helpers: every constant `Value` is built through
-    // `self.frozen` and then pooled.
-
-    /// Pool a frozen Int constant.
-    fn const_int(&mut self, i: i64) -> i32 {
-        let v = self.frozen.int(i).into_value();
-        self.add_constant(v)
+    fn const_int(&mut self, i: i64) -> ConstId {
+        self.add_constant(Const::Int(i))
     }
 
-    /// Pool a frozen string constant (interned: every pool entry with the
-    /// same contents shares one frozen allocation).
-    fn const_str(&mut self, s: &str) -> i32 {
-        let v = self.frozen.str(s).into_value();
-        self.add_constant(v)
+    fn const_str(&mut self, s: &str) -> ConstId {
+        self.add_constant(Const::String(s.to_string()))
     }
 
-    /// Pool a frozen binary constant of `bit_len` bits.
-    fn const_binary(&mut self, bytes: Vec<u8>, bit_len: u64) -> i32 {
-        let v = self.frozen.binary_bits(bytes, bit_len).into_value();
-        self.add_constant(v)
+    /// Pool a binary constant of `bit_len` bits.
+    fn const_binary(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId {
+        self.add_constant(Const::Binary { bytes, bit_len })
     }
 
     fn get_or_create_local(&mut self, name: &str) -> i32 {
@@ -3346,10 +3338,10 @@ impl Compiler {
             }
             ast::Expression::NumberLiteral(nl) => {
                 // `const_number` is the single source of the int/float split
-                // (and of the overflow diagnostic); the pooled `Value` itself
-                // is re-interned by the Core emit.
-                let v = self.const_number(nl);
-                if v.is_float() {
+                // (and of the overflow diagnostic); the elaborator pools the
+                // constant itself.
+                let c = self.const_number(nl);
+                if matches!(c, Const::Float(_)) {
                     self.engine.icon_float()
                 } else {
                     self.ty_int()
@@ -4762,9 +4754,8 @@ impl Compiler {
                 toplevel,
                 // `lower` copies this verbatim into `CoreProgram::consts` and
                 // nothing downstream of here reads it: the elaborator pooled
-                // every constant straight into `program.constants` through
-                // `ElabCtx::add_const`, and that is the pool `emit`'s operands
-                // and the VM both address.
+                // every constant straight into the compiler's `consts`, and
+                // that is the pool every `ConstId` indexes.
                 consts: Vec::new(),
                 pool,
                 temps,
@@ -5645,17 +5636,17 @@ impl Compiler {
     }
 
     /// Single source of truth turning a numeric literal's source text into a
-    /// constant `Value`. On i64 overflow / malformed input it emits a real
-    /// diagnostic via [`Compiler::error`] and then returns a kind-preserving
-    /// recovery zero. The recovery value is reachable ONLY on the
-    /// post-diagnostic error branch, so it can never masquerade as a valid
-    /// literal `0`: the compile has already failed.
-    fn const_number(&mut self, n: &ast::NumberLiteral) -> Value {
-        match number_literal_value(n, &mut self.frozen) {
-            Ok(v) => v.into_value(),
+    /// [`Const`]. On i64 overflow / malformed input it emits a real diagnostic
+    /// via [`Compiler::error`] and then returns a kind-preserving recovery
+    /// zero. The recovery value is reachable ONLY on the post-diagnostic error
+    /// branch, so it can never masquerade as a valid literal `0`: the compile
+    /// has already failed.
+    fn const_number(&mut self, n: &ast::NumberLiteral) -> Const {
+        match number_literal_value(n) {
+            Ok(c) => c,
             Err(e) => {
                 self.error(e.message(&n.value), n.span);
-                e.recovery(&mut self.frozen).into_value()
+                e.recovery()
             }
         }
     }
@@ -5694,7 +5685,7 @@ fn type_defining_span(expr: &ast::Expression) -> Span {
     }
 }
 
-/// Why a numeric literal's source text could not be turned into a `Value`.
+/// Why a numeric literal's source text could not be turned into a [`Const`].
 ///
 /// The scanner produces decimal (`[0-9]+(\.[0-9]+)?`), hex (`0[xX][0-9A-Fa-f]+`),
 /// or binary (`0[bB][01]+`), and the parser only prepends a leading `-` for
@@ -5720,36 +5711,30 @@ impl NumLitError {
         }
     }
 
-    /// Value to substitute so codegen can continue after the diagnostic has
-    /// been emitted. Kind-preserving so the inferred type still matches user
-    /// intent and the compile doesn't cascade into spurious type errors.
-    fn recovery(&self, frozen: &mut FrozenBuilder) -> FrozenConst {
+    /// Constant to substitute so compilation can continue after the
+    /// diagnostic has been emitted. Kind-preserving so the inferred type still
+    /// matches user intent and the compile doesn't cascade into spurious type
+    /// errors.
+    fn recovery(&self) -> Const {
         match self {
-            NumLitError::IntOutOfRange => frozen.int(0),
-            NumLitError::InvalidFloat => frozen.float(0.0),
+            NumLitError::IntOutOfRange => Const::Int(0),
+            NumLitError::InvalidFloat => Const::Float(0.0),
         }
     }
 }
 
-/// Parse a numeric literal's source text into a constant `Value`, built
-/// through the frozen builder like every other program constant.
+/// Parse a numeric literal's source text into a [`Const`].
 ///
 /// Total: the partiality is lifted into the return type so no caller can
-/// obtain a fabricated `Value` for out-of-domain input. The only
-/// `Value`-producing path for callers is [`Compiler::const_number`], which
-/// emits a diagnostic before recovering.
-fn number_literal_value(
-    n: &ast::NumberLiteral,
-    frozen: &mut FrozenBuilder,
-) -> Result<FrozenConst, NumLitError> {
+/// obtain a fabricated constant for out-of-domain input. The only caller is
+/// [`Compiler::const_number`], which emits a diagnostic before recovering.
+fn number_literal_value(n: &ast::NumberLiteral) -> Result<Const, NumLitError> {
     let s = n.digits();
     if s.contains('.') {
         s.parse()
-            .map(|f| frozen.float(f))
+            .map(Const::Float)
             .map_err(|_| NumLitError::InvalidFloat)
     } else {
-        n.as_int()
-            .map(|i| frozen.int(i))
-            .ok_or(NumLitError::IntOutOfRange)
+        n.as_int().map(Const::Int).ok_or(NumLitError::IntOutOfRange)
     }
 }

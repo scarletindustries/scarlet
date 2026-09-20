@@ -546,7 +546,7 @@ pub(crate) fn seg_bits<C: PatCtx>(cx: &mut C, spec: &ast::BinSpec) -> SpecWidth 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::Value;
+    use crate::core_ir::Const;
     use crate::span::Span;
     use crate::type_def::TypeId;
     use crate::typed_ir::BindingId;
@@ -565,7 +565,7 @@ mod tests {
     struct Ctx {
         pool: ResolvedPool,
         names: Vec<String>,
-        consts: Vec<Value>,
+        consts: Vec<Const>,
         binds: Vec<TypedBind>,
         scope: Vec<StrId>,
         ctors: HashMap<String, (u16, Vec<&'static str>, Vec<RTy>)>,
@@ -647,19 +647,17 @@ mod tests {
         }
 
         fn string_const(&mut self, s: &str) -> ConstId {
-            self.consts.push(Value::nil());
-            let _ = s;
+            self.consts.push(Const::String(s.to_string()));
             ConstId((self.consts.len() - 1) as u32)
         }
 
         fn int_const(&mut self, i: i64) -> ConstId {
-            self.consts.push(Value::small_int(i));
+            self.consts.push(Const::Int(i));
             ConstId((self.consts.len() - 1) as u32)
         }
 
         fn binary_const(&mut self, bytes: Vec<u8>, bit_len: u64) -> ConstId {
-            let _ = (bytes, bit_len);
-            self.consts.push(Value::nil());
+            self.consts.push(Const::Binary { bytes, bit_len });
             ConstId((self.consts.len() - 1) as u32)
         }
 
@@ -982,7 +980,7 @@ mod tests {
         assert_eq!(elem_ty, user);
         assert_ne!(elem_ty, int);
         assert_eq!(prefix.len(), 1);
-        assert_eq!(cx.consts[len.0 as usize].as_int(), Some(1));
+        assert_eq!(cx.consts[len.0 as usize], Const::Int(1));
         assert_eq!(prefix[0].ty(), user);
         match rest {
             // The suffix is an array, not an element.
@@ -1283,11 +1281,11 @@ mod tests {
         };
         assert_eq!(ty, bin_t);
         assert_eq!(segs.len(), 4);
-        assert_eq!(cx.consts[zero.0 as usize].as_int(), Some(0));
+        assert_eq!(cx.consts[zero.0 as usize], Const::Int(0));
 
         match &segs[0] {
             TypedBinPatSeg::Utf8Literal { bits, .. } => {
-                assert_eq!(cx.consts[bits.0 as usize].as_int(), Some(16));
+                assert_eq!(cx.consts[bits.0 as usize], Const::Int(16));
             }
             other => panic!("{other:?}"),
         }
@@ -1301,7 +1299,7 @@ mod tests {
                     panic!("{bits:?}")
                 };
                 assert_eq!(*bits_ty, int);
-                assert_eq!(cx.consts[c.0 as usize].as_int(), Some(8));
+                assert_eq!(cx.consts[c.0 as usize], Const::Int(8));
                 assert!(matches!(value, TypedPat::Bind(_)));
             }
             other => panic!("{other:?}"),
@@ -1315,7 +1313,7 @@ mod tests {
                     let TypedExpr::Const { value, .. } = rhs.as_ref() else {
                         panic!("{rhs:?}")
                     };
-                    assert_eq!(cx.consts[value.0 as usize].as_int(), Some(8));
+                    assert_eq!(cx.consts[value.0 as usize], Const::Int(8));
                 }
                 other => panic!("{other:?}"),
             },
