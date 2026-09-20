@@ -1,60 +1,22 @@
 //! The two boundaries where an index can outlive the arena that minted it.
 //!
 //! 1. `IncrementalSession` rewinds. `Compiler::reset_to` truncates the
-//!    inference arena, the code/function/constant pools and the lowered Core
+//!    inference arena, the function and constant pools and the lowered Core
 //!    IR back to a `Watermark`. Anything surviving that still holds an index
 //!    into one of them must be truncated, filtered, or cleared.
 //!
-//! 2. The precompiled stdlib blob. `seed_static` memcpys the `.rodata` arenas
-//!    in as the live engine's prefix, and every `Ty` frozen into a static
-//!    `Scheme` indexes there, so no rewind may cross it.
+//! 2. The seed. A session compiles the prelude when it starts, and every
+//!    prelude `Ty` indexes the arena below the seed watermark, so no rewind
+//!    may cross it.
 
 use scarlet::bytecode::IncrementalSession;
 
 mod common;
 use common::{Project, module_key, parse};
 
-/// No stdlib body is lowered at runtime on the seeded path: the stdlib
-/// contributes hundreds of entries to `program.functions` and zero to
-/// `core.fns`. That is what keeps the resolved-type pool compile-local and out
-/// of the blob. If this fails the blob must start carrying that pool.
-#[test]
-fn stdlib_bodies_are_never_relowered() {
-    // `array.map` makes the stdlib genuinely reachable, not merely seeded.
-    let src = "\
-import scarlet/array
-
-fn double(x Int) Int { x * 2 }
-
-fn apply_all(xs Array(Int)) Array(Int) { array.map(xs, double) }
-
-pub fn main() {
-\tprintln(apply_all([1, 2, 3]))
-}
-";
-    let r = scarlet::bytecode::compile(&parse(src), None, Some(&scarlet::STDLIB));
-    assert!(r.success(), "compile failed: {:?}", r.diagnostics);
-    let r = r.into_runnable().expect("a successful compile emits");
-
-    assert!(
-        r.program.functions.len() > 50,
-        "expected the hydrated stdlib in program.functions, got {}",
-        r.program.functions.len()
-    );
-    // Loose enough to survive a phase synthesising a few extra fns, tight
-    // enough that one lowered stdlib module would blow through it.
-    let lowered = r.core.fns.len();
-    assert!(
-        (2..10).contains(&lowered),
-        "expected only the 3 user fn bodies to reach `lower`, saw {lowered}; if a \
-         stdlib body is being lowered at runtime the resolved-type pool is no \
-         longer compile-local and the blob must serialise it"
-    );
-}
-
-/// The frozen prefix survives every kind of rewind. `array.map`'s `Ty`s index
-/// into the `.rodata` node arena, so a `reset_to` below the seed watermark
-/// would dangle them and this program would stop type-checking.
+/// The seed survives every kind of rewind. The prelude's `Ty`s index the
+/// arena below the seed watermark, so a `reset_to` below it would dangle them
+/// and this program would stop type-checking.
 #[test]
 fn stdlib_prefix_survives_repeated_rewinds() {
     let p = Project::new("arena_rewind_prefix");
@@ -69,7 +31,7 @@ pub fn main() {
 }
 ";
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     for i in 0..10 {
         // Vary the imported module so `check` rewinds to its watermark, not
         // just the entry's.
@@ -93,7 +55,7 @@ fn hover_is_stable_across_many_rewinds() {
     p.write("lib.scrl", "pub fn one() Int { 1 }\n");
     let entry = "import ./lib\nconst v = lib.one()\npub fn main() {\n\tprintln(v)\n}\n";
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let mut seen: Option<String> = None;
     for i in 0..8 {
         let r = s.check(&parse(entry), Some(&p.dir));
@@ -131,7 +93,7 @@ pub fn main() {
 }
 ";
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let first = s.check(&parse(entry), Some(&p.dir));
     assert!(first.success(), "initial: {:?}", first.diagnostics);
 
@@ -163,7 +125,7 @@ fn edit_and_revert_returns_to_the_same_arena_state() {
     );
     let entry = "import ./lib\npub fn main() {\n\tprintln(lib.mk())\n}\n";
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     assert!(s.check(&parse(entry), Some(&p.dir)).success());
     // Keyed by canonical identity, never the `./lib` spelling: a written-path
     // lookup would always be `None` and the assertion below vacuous.

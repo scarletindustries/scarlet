@@ -1,10 +1,10 @@
 fn s0(%0:t0) -> :t0
-  ret MulInt(%0, %0)
+  ret IntMul(%0, %0)
 
 fn s1(%0:t1, %1:t2) -> :t0
   let %2:t0 = call fn#0(%0)
   let %3:t0 = call fn#0(%1)
-  ret AddInt(%2, %3)
+  ret IntAdd(%2, %3)
 
 fn s2() -> :t0
   let %0:t3 = c0
@@ -12,13 +12,11 @@ fn s2() -> :t0
   ret call fn#1(%0, %1)
 
 toplevel:
+fn s3() -> :t4
   let %0:t2@g0 = closure fn#0()
-  drop %0
-  let %1:t4@g1 = closure fn#1()
-  drop %1
-  let %2:t5@g2 = closure fn#2()
-  drop %2
-  ret PushNil()
+  let %1:t5@g1 = closure fn#1()
+  let %2:t6@g2 = closure fn#2()
+  ret nil
 where
   c0 = Int(3)
   c1 = Int(4)

@@ -46,11 +46,10 @@ fn s1() -> :t0
   ret call fn#0(%0)
 
 toplevel:
-  let %0:t2@g0 = closure fn#0()
-  drop %0
-  let %1:t3@g1 = closure fn#1()
-  drop %1
-  ret PushNil()
+fn s2() -> :t2
+  let %0:t3@g0 = closure fn#0()
+  let %1:t4@g1 = closure fn#1()
+  ret nil
 where
   c0 = Int(0)
   c1 = Int(2)

@@ -27,7 +27,7 @@ fn cached_module_type_bodies_survive_rewinds() {
         )
     };
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     for i in 0..4 {
         // Only the entry changes, so `lib` stays cached below the rewind
         // watermark while the rewind clears the engine's `vars` table.

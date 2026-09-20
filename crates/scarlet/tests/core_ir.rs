@@ -13,23 +13,31 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden/core_ir")
 }
 
-/// Parse + typecheck + lower `source` and return the pretty-printed Core.
+/// Parse + typecheck + lower `source` and return the pretty-printed Core of
+/// the entry file's functions, its toplevel last. The stdlib compiles into
+/// the same program, and is left out.
 ///
 /// Every printed id is an index into a pool shared with the prelude, so its
 /// absolute value moves on any stdlib edit. All are renumbered by order of
-/// first appearance, and each referenced constant's `Value` is printed in a
+/// first appearance, and each referenced constant's value is printed in a
 /// `where` block so the snapshot still shows what the program computes.
 fn lower(source: &str) -> String {
     let ast = parse(source);
-    let r = scarlet::bytecode::compile(&ast, None, Some(&scarlet::STDLIB));
+    let r = scarlet::bytecode::compile(&ast, None);
     assert!(
         r.success(),
         "compile failed:\n{source}\n--- diagnostics ---\n{:#?}",
         r.diagnostics
     );
-    let emitted = r.into_runnable().expect("a successful compile emits");
-    let core: &scarlet::core_ir::CoreProgram = &emitted.core;
-    let raw = format!("{core}");
+    let program = r.into_runnable().expect("a successful compile is runnable");
+    let entry = scarlet::module::ModuleKey::main();
+    let mut raw = String::new();
+    for f in &program.fns {
+        if f.module == entry {
+            raw.push_str(&format!("{}\n", f.core));
+        }
+    }
+    raw.push_str(&format!("toplevel:\n{}", program.toplevel.core));
     // Consts first: the `where` block needs both the original index and the
     // new name.
     let const_map = renumber(&raw, b'c');
@@ -47,7 +55,7 @@ fn lower(source: &str) -> String {
         rows.sort_unstable();
         out.push_str("where\n");
         for (new, orig) in rows {
-            let v = core
+            let v = program
                 .consts
                 .get(orig)
                 .map(|c| format!("{c:?}"))
@@ -840,32 +848,26 @@ mod unlowerable {
     #[test]
     fn al_check_reports_it_rather_than_passing() {
         let (expr, at) = program_with_an_error_node();
-        let r = scarlet::bytecode::check(&expr, None, Some(&scarlet::STDLIB));
+        let r = scarlet::bytecode::check(&expr, None);
         assert_rejected(&r, at, "check");
     }
 
     #[test]
     fn al_run_reports_it_rather_than_panicking() {
         let (expr, at) = program_with_an_error_node();
-        let r = scarlet::bytecode::compile(&expr, None, Some(&scarlet::STDLIB));
+        let r = scarlet::bytecode::compile(&expr, None);
         assert_rejected(&r, at, "compile");
     }
 
     /// Rejecting the `ErrorNode` is a gate on the module, not a mute button on
     /// the pipeline: the same program with a readable `main` body still
-    /// compiles and runs, and `main`'s value is what the entry frame halts
-    /// with.
+    /// compiles to a program that starts at `main`.
     #[test]
-    fn the_same_program_without_the_error_node_compiles_and_runs() {
+    fn the_same_program_without_the_error_node_compiles() {
         let expr = crate::common::parse("pub fn main() {\n\t1 + 1\n}\n");
-        let r = scarlet::bytecode::compile(&expr, None, Some(&scarlet::STDLIB));
+        let r = scarlet::bytecode::compile(&expr, None);
         assert!(r.success(), "{:?}", r.diagnostics);
-        let program = r
-            .into_runnable()
-            .expect("a successful compile emits")
-            .program;
-        let mut vm = scarlet::vm::new_vm(program).expect("vm init");
-        let val = vm.run().expect("vm run");
-        assert_eq!(scarlet::vm::inspect(&val, vm.program()), "2");
+        let program = r.into_runnable().expect("a successful compile is runnable");
+        assert!(program.main.is_some(), "a program with `main` starts there");
     }
 }

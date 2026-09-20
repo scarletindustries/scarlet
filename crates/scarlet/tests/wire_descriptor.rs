@@ -84,7 +84,7 @@ fn messages(r: &scarlet::bytecode::CompileResult) -> String {
 /// has to arrive here or an editor shows a clean file that `al run` rejects.
 #[test]
 fn a_refusal_is_reported_on_the_session_check_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(GENERIC), None);
     assert!(!r.success(), "an unknown element type must be refused");
     assert!(
@@ -98,7 +98,7 @@ fn a_refusal_is_reported_on_the_session_check_path() {
 /// around it checks clean.
 #[test]
 fn a_bodiless_field_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(NATIVE), None);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
@@ -107,7 +107,7 @@ fn a_bodiless_field_checks_clean_on_the_session_path() {
 /// everything: an encodable type must still check clean on the same path.
 #[test]
 fn an_encodable_type_still_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(EVENT), None);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
@@ -116,7 +116,7 @@ fn an_encodable_type_still_checks_clean_on_the_session_path() {
 /// path.
 #[test]
 fn a_fn_field_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(HANDLER), None);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
@@ -125,7 +125,7 @@ fn a_fn_field_checks_clean_on_the_session_path() {
 /// described from the seeded registry, and the record checks clean.
 #[test]
 fn a_stdlib_type_reached_only_through_a_field_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(PORT), None);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
@@ -138,7 +138,7 @@ fn a_stdlib_type_reached_only_through_a_field_checks_clean_on_the_session_path()
 /// the call site.
 #[test]
 fn a_session_re_checks_a_wire_call_across_an_edit() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     for _ in 0..2 {
         let bad = s.check(&parse(GENERIC), None);
         assert!(!bad.success());
@@ -201,7 +201,7 @@ const SUBJECT_DEEP: &str = "import scarlet/process\n\
 
 #[test]
 fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(SUBJECT_DEEP), None);
     assert!(r.success(), "{:?}", r.diagnostics);
 }
@@ -218,7 +218,7 @@ fn a_handle_three_levels_down_checks_clean_on_the_session_path() {
 /// `Outer(a)` refuses at the argument with no path.
 #[test]
 fn the_refusal_path_survives_to_the_session_check_path() {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(
         &parse(
             "import scarlet/wire\n\

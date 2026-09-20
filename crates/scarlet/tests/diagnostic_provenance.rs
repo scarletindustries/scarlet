@@ -37,7 +37,7 @@ fn check_project(p: &Project, entry_src: &str) -> bytecode::CompileResult {
         parsed.diagnostics
     );
     let expr = ast::Expression::BlockExpression(parsed.ast);
-    bytecode::check(&expr, Some(&p.dir), Some(&scarlet::STDLIB))
+    bytecode::check(&expr, Some(&p.dir))
 }
 
 #[test]

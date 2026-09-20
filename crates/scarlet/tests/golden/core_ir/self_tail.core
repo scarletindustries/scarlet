@@ -4,9 +4,9 @@ fn s0(%0:t0, %1:t1) -> :t1
       ret %1
     | _ ->
       let %2:t2 = c1
-      let %3:t0 = SubInt(%0, %2)
+      let %3:t0 = IntSub(%0, %2)
       let %4:t2 = c1
-      let %5:t1 = AddInt(%1, %4)
+      let %5:t1 = IntAdd(%1, %4)
       ret call self(%3, %5)
 
 fn s1() -> :t1
@@ -15,11 +15,10 @@ fn s1() -> :t1
   ret call fn#0(%0, %1)
 
 toplevel:
-  let %0:t3@g0 = closure fn#0()
-  drop %0
-  let %1:t4@g1 = closure fn#1()
-  drop %1
-  ret PushNil()
+fn s2() -> :t3
+  let %0:t4@g0 = closure fn#0()
+  let %1:t5@g1 = closure fn#1()
+  ret nil
 where
   c0 = Int(0)
   c1 = Int(1)

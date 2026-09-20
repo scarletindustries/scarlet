@@ -426,7 +426,7 @@ use scarlet::span::Span;
 
 /// Fresh session checking `entry` against project `p`, asserting success.
 pub fn checked_with(p: &Project, entry: &str) -> IncrementalSession {
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success(), "compile failed: {:?}", r.diagnostics);
     s

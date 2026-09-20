@@ -20,7 +20,7 @@ fn fresh_three_module_session(tag: &str) -> (Project, IncrementalSession) {
     p.write("b.scrl", B_SRC);
     p.write("a.scrl", A_SRC);
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(A_SRC), Some(&p.dir));
     assert!(r.success(), "initial: {:?}", r.diagnostics);
     assert_eq!(s.compile_count(), 2, "b + c compile on first check");
@@ -141,7 +141,7 @@ fn unrelated_module_keeps_type_id_base() {
     p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
     let entry = "import ./x\nimport ./y\npub fn main() {\n\t_ = x.f()\n\t_ = y.g()\n}\n";
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
     let r = s.check(&parse(entry), Some(&p.dir));
     assert!(r.success(), "initial: {:?}", r.diagnostics);
 
@@ -290,7 +290,7 @@ fn recompile_id_overflow_recovers_with_stable_ranges() {
     p.write("y.scrl", "pub type Y { Y }\npub fn g() Y { Y }\n");
     let entry = "import ./big\nimport ./y\npub fn main() {\n\t_ = big.f()\n\t_ = y.g()\n}\n";
 
-    let mut s = IncrementalSession::new(&scarlet::STDLIB);
+    let mut s = IncrementalSession::new();
 
     // big fits its reservation, so y is assigned the very next block — where
     // big's later spill will land.

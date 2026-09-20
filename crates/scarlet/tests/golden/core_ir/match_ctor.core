@@ -1,26 +1,25 @@
 fn s0(%0:t0) -> :t1
   match %0 :t1
-    | 10241.0(%1) ->
-      drop %0 [Enum:1]
-      let %2:t1 = MulInt(%1, %1)
+    | 512.0(%1) ->
+      drop %0 [ctor:1]
+      let %2:t1 = IntMul(%1, %1)
       let %3:t2 = c0
-      ret MulInt(%2, %3)
-    | 10241.1(%4, %5) ->
-      drop %0 [Enum:2]
-      ret MulInt(%4, %5)
+      ret IntMul(%2, %3)
+    | 512.1(%4, %5) ->
+      drop %0 [ctor:2]
+      ret IntMul(%4, %5)
 
 fn s1() -> :t1
   let %0:t2 = c1
   let %1:t2 = c2
-  let %2:t3 = ctor 10241.1(%0, %1)
+  let %2:t3 = ctor 512.1(%0, %1)
   ret call fn#0(%2)
 
 toplevel:
-  let %0:t4@g0 = closure fn#0()
-  drop %0
+fn s2() -> :t4
+  let %0:t5@g0 = closure fn#0()
   let %1:t3@g1 = closure fn#1()
-  drop %1
-  ret PushNil()
+  ret nil
 where
   c0 = Int(3)
   c1 = Int(4)

@@ -1,15 +1,15 @@
 fn s0() -> :t0
   let %0:t0 = c0
   let %1:t0 = c1
-  let %2:t0 = AddInt(%0, %1)
+  let %2:t0 = IntAdd(%0, %1)
   let %3:t0 = c2
-  let %4:t0 = MulInt(%2, %3)
-  ret SubInt(%4, %2)
+  let %4:t0 = IntMul(%2, %3)
+  ret IntSub(%4, %2)
 
 toplevel:
-  let %0:t1@g0 = closure fn#0()
-  drop %0
-  ret PushNil()
+fn s1() -> :t1
+  let %0:t2@g0 = closure fn#0()
+  ret nil
 where
   c0 = Int(1)
   c1 = Int(2)
