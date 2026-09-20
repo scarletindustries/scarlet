@@ -823,16 +823,16 @@ mod tests {
     fn reset_to_rewinds_functions_and_consts_and_drops_toplevels() {
         let mut c = new_compiler(None, false);
         let pool = Rc::new(crate::typed_ir::ResolvedPool::new(PrimIds::default()));
-        let top = LoweredFn {
-            module: crate::module::ModuleKey::main().to_string(),
-            name: "m".to_string(),
-            core: CoreFn {
+        let top = LoweredFn::new(
+            crate::module::ModuleKey::main().to_string(),
+            "m".to_string(),
+            CoreFn {
                 params: Vec::new(),
                 body: CoreExpr::Tail(Atom::Nil),
                 ret_ty: RTy(0),
             },
             pool,
-        };
+        );
 
         // Anchored to whatever `new_compiler` seeded, not a literal, so the
         // test survives that seed growing.

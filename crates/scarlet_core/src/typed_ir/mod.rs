@@ -47,21 +47,7 @@ impl std::fmt::Display for BindingId {
     }
 }
 
-/// A slot in the entry (module) frame: where a module-scope binding lives. A
-/// module-scope name may be bound more than once (an import shadowed by a later
-/// `let`), so each [`TypedBind`] carries the slot its own binding lands in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GlobalSlot(pub(crate) i32);
-
-/// A slot in the *current* frame. A different index
-/// space from [`GlobalSlot`] and [`CaptureIdx`], kept distinct so the three
-/// cannot be swapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct FrameSlot(pub(crate) i32);
-
-/// An index into the current closure's capture array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CaptureIdx(pub(crate) i32);
+pub use scarlet_ir::core_ir::{CaptureIdx, FrameSlot, GlobalSlot};
 
 /// A name bound to a value, with the type the checker gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

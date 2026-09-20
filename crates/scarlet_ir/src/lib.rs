@@ -19,6 +19,7 @@
 
 use std::fmt;
 
+pub mod core_ir;
 pub mod intrinsic;
 pub mod rty;
 pub mod tivec;

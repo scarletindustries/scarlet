@@ -270,7 +270,7 @@ mod perceus_drop {
         let f = body_named(&p, "f");
         assert_eq!(
             drops(&f.body),
-            vec![f.params[0].id()],
+            vec![f.params[0].id],
             "exactly `p` is dropped:\n{f}"
         );
     }

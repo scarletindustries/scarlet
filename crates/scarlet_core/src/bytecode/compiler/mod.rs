@@ -4502,12 +4502,12 @@ impl Compiler {
     /// that owns the body is the one being compiled, which is what makes
     /// `current_module_key` its module.
     fn lowered_fn(&self, name: StrId, core: CoreFn, pool: Rc<ResolvedPool>) -> LoweredFn {
-        LoweredFn {
-            module: self.current_module_key.to_string(),
-            name: self.engine.str(name).to_string(),
+        LoweredFn::new(
+            self.current_module_key.to_string(),
+            self.engine.str(name).to_string(),
             core,
             pool,
-        }
+        )
     }
 
     /// Run the Core pipeline (elaborate→`lower`→`perceus`) over one already
