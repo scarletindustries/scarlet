@@ -6,6 +6,7 @@ use indexmap::{IndexMap, IndexSet};
 use smallvec::SmallVec;
 
 use super::environment::{DefinitionLocation, TypeBody, TypeEnv, TypeParam, Variant, VariantField};
+use crate::intrinsic::Intrinsic;
 use crate::type_def::{
     FieldDef, PrimitiveKind, Type, TypeId, prim_names as pn, t_array, t_float, t_int, t_string,
     t_tuple, t_var,
@@ -269,10 +270,10 @@ pub enum ValueKind {
         /// → `InferEngine.str_slices`
         param_labels: ArenaSlice<pool::StrSlices>,
     },
-    /// VM intrinsic registered from Rust. The `@vm(name)` string is resolved
-    /// to an opcode at analysis time, so an unknown name is a compile error at
-    /// the annotation rather than a codegen fallthrough.
-    Builtin { op: scarlet_vm::bytecode::Op },
+    /// A built-in function, from a `@vm(key)` declaration. Analysis resolves
+    /// the key to its [`Intrinsic`] at the annotation, so an unknown key is a
+    /// compile error there rather than a codegen fallthrough.
+    Builtin { intrinsic: Intrinsic },
     /// A data constructor. Carries enough to compile pattern-match and
     /// constructor-call without re-consulting the type env.
     Constructor {
