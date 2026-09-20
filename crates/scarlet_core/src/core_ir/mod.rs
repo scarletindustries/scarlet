@@ -558,7 +558,7 @@ impl fmt::Display for Indented<'_> {
                 }
                 CoreExpr::Drop { local, shape, body } => {
                     match shape {
-                        Some(s) => writeln!(f, "drop {local} [{:?}:{}]", s.tag, s.words)?,
+                        Some(s) => writeln!(f, "drop {local} [ctor:{}]", s.fields)?,
                         None => writeln!(f, "drop {local}")?,
                     }
                     cur = body;

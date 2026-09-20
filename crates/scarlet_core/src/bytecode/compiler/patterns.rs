@@ -50,7 +50,7 @@ impl Compiler {
                     // `const_number` raises the out-of-range/malformed error.
                     ast::PatternLiteral::Number(n) => {
                         let v = self.const_number(n);
-                        let ty = if v.is_float() {
+                        let ty = if matches!(v, crate::core_ir::Const::Float(_)) {
                             self.engine.icon_float()
                         } else {
                             self.ty_int()
@@ -67,7 +67,7 @@ impl Compiler {
                 for bound in [start, end] {
                     // `const_number` raises the out-of-range/malformed error.
                     let v = self.const_number(bound);
-                    if v.is_float() {
+                    if matches!(v, crate::core_ir::Const::Float(_)) {
                         self.error(
                             format!(
                                 "Range pattern bound must be an integer, got '{}'",

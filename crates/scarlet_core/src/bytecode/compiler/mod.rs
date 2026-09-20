@@ -1283,6 +1283,38 @@ impl Compiler {
         self.reserved.contains(name)
     }
 
+    /// The type constructors whose parameters must stay monomorphic when a
+    /// binding's type is generalized — the relaxed value restriction. A
+    /// `Subject`'s argument names what a live mailbox carries, so
+    /// quantifying it would let one queue be sent one type and received as
+    /// another. Resolved by module identity, never by name alone, so a user
+    /// type called `Subject` is unaffected. An unresolvable module yields an
+    /// empty set, which is sound: no value of the type can occur in a
+    /// program that never loaded it.
+    pub(crate) fn restricted_generalization_cons(&mut self) -> HashSet<TypeId> {
+        if let Some(memo) = &self.restricted_gen_cons {
+            return memo.clone();
+        }
+        let process: ModulePath = ["scarlet", "process"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let found = self
+            .module_table
+            .get(&ModuleKey::of(&process))
+            .and_then(|iface| iface.types.get("Subject").map(|et| et.info.id));
+        match found {
+            Some(id) => {
+                let set = HashSet::from([id]);
+                // Memoize only a hit: a module unresolvable now (one this
+                // compile has not loaded yet) may load later in this session.
+                self.restricted_gen_cons = Some(set.clone());
+                set
+            }
+            None => HashSet::new(),
+        }
+    }
+
     /// Assemble the [`Program`] once the entry toplevel is recorded. Every
     /// reserved function slot is filled by then; an empty one is a function
     /// nothing lowered, which only a compiler bug leaves behind.

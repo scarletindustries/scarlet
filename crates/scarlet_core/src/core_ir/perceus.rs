@@ -454,7 +454,7 @@ impl ReuseWalk {
                     // A 0-payload cell has nothing to reuse: the header is the
                     // whole allocation.
                     if let Some(s) = *shape
-                        && s.words > 0
+                        && s.fields > 0
                     {
                         avail.push(Token {
                             slot: *local,
