@@ -378,6 +378,9 @@ pub struct IncrementalSession {
     /// Whether the prelude seed is currently in place. A prelude-as-entry
     /// check tears it down (`bare` rewind); the next ordinary check re-seeds.
     seeded: bool,
+    /// Module bodies compiled while seeding, which [`Self::compile_count`]
+    /// leaves out.
+    seed_compiles: u32,
     /// Watermark immediately before the previous entry-body analysis, i.e.
     /// after every imported module had been compiled.
     last_entry: Option<Watermark>,
@@ -418,11 +421,13 @@ impl IncrementalSession {
         let bare = c.watermark();
         c.register_prelude();
         let seed = c.watermark();
+        let seed_compiles = c.module_table.compile_count();
         IncrementalSession {
             c,
             seed,
             bare,
             seeded: true,
+            seed_compiles,
             last_entry: None,
             graph: Rc::new(ReferenceGraph::new()),
             type_facts: Vec::new(),
@@ -439,8 +444,10 @@ impl IncrementalSession {
         self.c.module_scope = crate::bytecode::ModuleScope::Script;
     }
 
+    /// Module bodies the session's checks have compiled, not counting cache
+    /// hits or the prelude it compiled when it started. Telemetry only.
     pub fn compile_count(&self) -> u32 {
-        self.c.module_table.compile_count()
+        self.c.module_table.compile_count() - self.seed_compiles
     }
 
     /// The one rewind path. `seed` is a hard floor: everything below it is the
@@ -892,6 +899,12 @@ mod tests {
         // A record's constructor shares its type's name and is listed once.
         let responses = exports.iter().filter(|e| e.name == "Response").count();
         assert_eq!(responses, 1);
+    }
+
+    /// The prelude compiles when the session starts, not in a check.
+    #[test]
+    fn a_new_session_counts_no_compiles() {
+        assert_eq!(IncrementalSession::new().compile_count(), 0);
     }
 
     #[test]
