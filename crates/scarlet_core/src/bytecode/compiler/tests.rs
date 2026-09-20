@@ -794,3 +794,77 @@ mod wire_surface {
         assert!(calls.contains(&Intrinsic::WireDecode), "{calls:?}");
     }
 }
+
+mod typed_prim_ops {
+    //! An operator on a type inference has fixed lowers to its typed
+    //! [`PrimOp`] (`IntAdd`), never the unresolved one (`Add`) a backend
+    //! would have to dispatch on at run time.
+
+    use super::{atoms, body_named, parse_ok};
+    use crate::ast;
+    use crate::bytecode::compile;
+    use crate::core_ir::{Atom, PrimOp};
+
+    /// The prim ops in the body of `name`.
+    fn prim_ops(src: &str, name: &str) -> Vec<PrimOp> {
+        let result = compile(&ast::Expression::BlockExpression(parse_ok(src)), None);
+        assert!(result.success(), "compile failed: {:?}", result.diagnostics);
+        let program = result.into_runnable().expect("a clean compile is runnable");
+        atoms(&body_named(&program, name).body)
+            .into_iter()
+            .filter_map(|a| match a {
+                Atom::PrimOp { op, .. } => Some(*op),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `sq(n)` adds a known call's return type to the operands' sources.
+    #[test]
+    fn int_operators_select_the_int_ops() {
+        let ops = prim_ops(
+            "fn sq(x Int) Int { x * x }\n\
+             fn f(n Int) Int {\n\
+             \tif n == 0 { 0 } else { sq(n) + n - 1 }\n\
+             }\n\
+             pub fn main() {\n\
+             \tprintln(f(3))\n\
+             }\n",
+            "f",
+        );
+        for typed in [PrimOp::IntEq, PrimOp::IntAdd, PrimOp::IntSub] {
+            assert!(ops.contains(&typed), "{typed:?} not selected: {ops:?}");
+        }
+        for unresolved in [PrimOp::Eq, PrimOp::Add, PrimOp::Sub] {
+            assert!(!ops.contains(&unresolved), "{unresolved:?} leaked: {ops:?}");
+        }
+    }
+
+    /// `v` is `Int` only because inference unified `Some`'s payload with the
+    /// literal `3`, so lowering must read the solved type back rather than
+    /// re-instantiate `Some`'s scheme.
+    ///
+    /// `fn g(a, b) { a + b }` would not test this: it really is
+    /// `Addable a => (a, a) -> a`, one body for every instantiation, and the
+    /// unresolved `Add` is correct there.
+    #[test]
+    fn an_operand_typed_only_by_inference_selects_the_int_op() {
+        let ops = prim_ops(
+            "fn f() Int {\n\
+             \tmatch Some(3) {\n\
+             \t\tNone -> 0\n\
+             \t\tSome(v) -> v + 1\n\
+             \t}\n\
+             }\n\
+             pub fn main() {\n\
+             \tprintln(f())\n\
+             }\n",
+            "f",
+        );
+        assert!(
+            ops.contains(&PrimOp::IntAdd),
+            "IntAdd not selected: {ops:?}"
+        );
+        assert!(!ops.contains(&PrimOp::Add), "Add leaked: {ops:?}");
+    }
+}
