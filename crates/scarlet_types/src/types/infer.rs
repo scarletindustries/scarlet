@@ -473,47 +473,7 @@ pub struct InferEngine {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Nominal ids for the primitives the inference engine recognises directly:
-/// int/float/string literals, plus `Array` for structural resolution.
-#[derive(Debug, Clone, Copy)]
-pub struct PrimIds {
-    pub int: TypeId,
-    pub float: TypeId,
-    pub string: TypeId,
-    pub array: TypeId,
-}
-
-impl PrimIds {
-    /// Map a nominal type id to the corresponding primitive, if it is one.
-    /// Identity is by id, never name: a user's `type Int { }` is not `Int`.
-    /// `InferEngine::as_prim` and `ResolvedPool::as_prim` both delegate here so
-    /// the two sides of the `Ty`/`RTy` divide cannot disagree.
-    pub fn prim_of(self, id: TypeId) -> Option<Prim> {
-        if id == self.int {
-            Some(Prim::Int)
-        } else if id == self.float {
-            Some(Prim::Float)
-        } else if id == self.string {
-            Some(Prim::String)
-        } else {
-            None
-        }
-    }
-}
-
-impl Default for PrimIds {
-    fn default() -> Self {
-        // Placeholders for engine-only tests, distinct from each other and from
-        // the 1-based ids `register_type_head` allocates. `set_prim_ids`
-        // overwrites them as soon as a compiler owns the engine.
-        PrimIds {
-            int: TypeId(-1),
-            float: TypeId(-2),
-            string: TypeId(-3),
-            array: TypeId(-4),
-        }
-    }
-}
+pub use scarlet_ir::rty::PrimIds;
 
 pub fn new_engine() -> InferEngine {
     InferEngine::default()

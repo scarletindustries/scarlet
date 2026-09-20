@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn only_a_function_type_makes_an_fn_rty() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
         let tup = p.mk_tuple(&[int, int]);
         let f = p.mk_fun(&[int, int], tup);
         assert!(FnRTy::of(&p, int).is_none());
@@ -196,8 +196,8 @@ mod tests {
     #[test]
     fn a_constructor_wrapper_constructs_from_its_parameters() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
-        let w = p.mk_con(TypeId(9), StrId(10), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
+        let w = p.mk_con(TypeId(9), &[]);
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn a_builtin_wrapper_calls_the_opcode_with_its_parameters_in_order() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
         let ty = p.mk_fun(&[int, int], int);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
@@ -299,8 +299,8 @@ mod tests {
     #[test]
     fn each_wrapper_is_named_by_its_index_in_fns() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
-        let w = p.mk_con(TypeId(9), StrId(10), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
+        let w = p.mk_con(TypeId(9), &[]);
         let cty = p.mk_fun(&[int], w);
         let aty = p.mk_fun(&[int, int], int);
         let ctor_ty = FnRTy::of(&p, cty).expect("a Fun node");
@@ -340,8 +340,8 @@ mod tests {
     #[test]
     fn a_wrapper_names_its_slot_in_the_table_it_was_appended_to() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
-        let w = p.mk_con(TypeId(9), StrId(10), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
+        let w = p.mk_con(TypeId(9), &[]);
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 
@@ -382,8 +382,8 @@ mod tests {
     #[should_panic(expected = "one parameter per declared field")]
     fn a_constructor_whose_type_disagrees_with_its_declaration_is_rejected() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
-        let w = p.mk_con(TypeId(9), StrId(10), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
+        let w = p.mk_con(TypeId(9), &[]);
         let ty = p.mk_fun(&[int], w);
         let fn_ty = FnRTy::of(&p, ty).expect("a Fun node");
 

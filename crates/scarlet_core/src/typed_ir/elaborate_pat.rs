@@ -581,8 +581,8 @@ mod tests {
                 string: STRING,
                 array: ARRAY,
             });
-            let int = pool.mk_con(INT, StrId(0), &[]);
-            let binary = pool.mk_con(BINARY, StrId(0), &[]);
+            let int = pool.mk_con(INT, &[]);
+            let binary = pool.mk_con(BINARY, &[]);
             Ctx {
                 pool,
                 names: Vec::new(),
@@ -596,11 +596,11 @@ mod tests {
         }
 
         fn arr(&mut self, elem: RTy) -> RTy {
-            self.pool.mk_con(ARRAY, StrId(0), &[elem])
+            self.pool.mk_con(ARRAY, &[elem])
         }
 
         fn user(&mut self) -> RTy {
-            self.pool.mk_con(USER, StrId(0), &[])
+            self.pool.mk_con(USER, &[])
         }
 
         /// Declare `name` as variant `idx`.

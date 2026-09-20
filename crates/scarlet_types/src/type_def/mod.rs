@@ -12,20 +12,13 @@ pub mod prim_names {
     pub const ARRAY: &str = "Array";
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrimitiveKind {
-    Int,
-    Float,
-    String,
-}
+pub use scarlet_ir::rty::Prim as PrimitiveKind;
 
-impl PrimitiveKind {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Int => prim_names::INT,
-            Self::Float => prim_names::FLOAT,
-            Self::String => prim_names::STRING,
-        }
+const fn prim_name(kind: PrimitiveKind) -> &'static str {
+    match kind {
+        PrimitiveKind::Int => prim_names::INT,
+        PrimitiveKind::Float => prim_names::FLOAT,
+        PrimitiveKind::String => prim_names::STRING,
     }
 }
 
@@ -116,7 +109,7 @@ pub(crate) fn t_named(
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Primitive { kind } => f.write_str(kind.name()),
+            Type::Primitive { kind } => f.write_str(prim_name(*kind)),
             Type::Array { element } => write!(f, "Array({})", element),
             Type::Function { params, ret } => {
                 let params: Vec<String> = params.iter().map(|p| p.to_string()).collect();

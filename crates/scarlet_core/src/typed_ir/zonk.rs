@@ -104,9 +104,9 @@ impl<'e> Zonker<'e> {
             // A `Scheme.ty`'s `Bound` indices are already closed and this
             // scheme's, so they pass through unchanged.
             TypeNode::Bound(i) => (pool.mk_bound(i), false),
-            TypeNode::Con { id, name, args } => {
+            TypeNode::Con { id, args, .. } => {
                 let (kids, inv) = self.zonk_children(pool, args);
-                (pool.mk_con(id, name, &kids), inv)
+                (pool.mk_con(id, &kids), inv)
             }
             TypeNode::Fun { params, ret } => {
                 let (ps, inv) = self.zonk_children(pool, params);
@@ -211,11 +211,11 @@ mod tests {
         let elems = pool.tuple_elems(r);
         assert_eq!(elems[0], elems[1], "shared spine must be memoised");
         // Int, Array(Int), (Array,Array) — three nodes, not five.
-        assert_eq!(pool.len(), 3);
+        assert_eq!(pool.node_count(), 3);
         // Re-zonking the same type is free.
         let (again, _) = z.zonk_or_opaque(&mut pool, tup);
         assert_eq!(again, r);
-        assert_eq!(pool.len(), 3);
+        assert_eq!(pool.node_count(), 3);
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod tests {
         let (a, _) = z.zonk_or_opaque(&mut pool, v);
         let (b, _) = z.zonk_or_opaque(&mut pool, int);
         assert_eq!(a, b);
-        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.node_count(), 1);
     }
 
     /// One variable is one `Bound` however often it appears; two are two.

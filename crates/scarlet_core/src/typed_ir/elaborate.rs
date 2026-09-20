@@ -1596,13 +1596,13 @@ fn subst_rty(pool: &mut ResolvedPool, t: RTy, m: &HashMap<u32, RTy>) -> RTy {
     }
     match pool.node(t) {
         ResolvedNode::Bound(i) => m.get(&i).copied().unwrap_or(t),
-        ResolvedNode::Con { id, name, args } => {
+        ResolvedNode::Con { id, args } => {
             let kids: SmallVec<[RTy; 4]> = pool.children(args).into();
             let new: SmallVec<[RTy; 4]> = kids.iter().map(|&k| subst_rty(pool, k, m)).collect();
             if new == kids {
                 t
             } else {
-                pool.mk_con(id, name, &new)
+                pool.mk_con(id, &new)
             }
         }
         ResolvedNode::Fun { params, ret } => {
@@ -1644,10 +1644,10 @@ mod tests {
     #[test]
     fn a_ctors_fields_specialise_to_the_type_it_is_used_at() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
         let a = p.mk_bound(0);
-        let list_a = p.mk_con(TypeId(9), StrId(1), &[a]);
-        let list_int = p.mk_con(TypeId(9), StrId(1), &[int]);
+        let list_a = p.mk_con(TypeId(9), &[a]);
+        let list_int = p.mk_con(TypeId(9), &[int]);
 
         let m = bound_subst(&p, list_a, list_int);
         assert_eq!(m.get(&0), Some(&int));
@@ -1665,7 +1665,7 @@ mod tests {
     fn an_opaque_use_site_leaves_the_fields_bound() {
         let mut p = pool();
         let a = p.mk_bound(0);
-        let list_a = p.mk_con(TypeId(9), StrId(1), &[a]);
+        let list_a = p.mk_con(TypeId(9), &[a]);
         let opaque = p.mk_bound(7);
         let m = bound_subst(&p, list_a, opaque);
         assert!(m.is_empty());
@@ -1678,23 +1678,23 @@ mod tests {
     #[test]
     fn substitution_over_a_concrete_type_allocates_nothing() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
         let tup = p.mk_tuple(&[int, int]);
-        let before = p.len();
+        let before = p.node_count();
         let mut m = HashMap::new();
         m.insert(3u32, int);
         assert_eq!(subst_rty(&mut p, tup, &m), tup);
-        assert_eq!(p.len(), before);
+        assert_eq!(p.node_count(), before);
     }
 
     /// Nested spines are rebuilt, not shallowly copied.
     #[test]
     fn substitution_rewrites_a_nested_spine() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
         let a = p.mk_bound(0);
         let inner = p.mk_tuple(&[a, int]);
-        let outer = p.mk_con(TypeId(4), StrId(2), &[inner]);
+        let outer = p.mk_con(TypeId(4), &[inner]);
         let mut m = HashMap::new();
         m.insert(0u32, int);
         let out = subst_rty(&mut p, outer, &m);
@@ -1708,7 +1708,7 @@ mod tests {
     #[test]
     fn spilled_lets_preserve_source_order() {
         let mut p = pool();
-        let int = p.mk_con(TypeId(1), StrId(0), &[]);
+        let int = p.mk_con(TypeId(1), &[]);
         let mk = |i: u32| TypedBind {
             id: BindingId(i),
             name: StrId(0),

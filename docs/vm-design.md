@@ -81,7 +81,7 @@ The old VM broke this in these ways. The new one must not:
 - That alone is always correct, whatever Perceus did or didn't insert.
 - Perceus's `Drop x` gives the reference up at `x`'s last use instead of at frame exit. If it was the only reference, the cell is kept empty for a following `Ctor { reuse: Some(x) }` to fill in place.
 
-This matters because Perceus decides what to drop by type, and it leaves some types alone on purpose: `Int`, `Float`, `String`, `Array`, and generic type variables (`ResolvedPool::is_heap`). Under this split those are still freed, just at frame exit. A big `Int` is a heap object Perceus never drops, and it's still correct.
+This matters because Perceus decides what to drop by type, and it leaves some types alone on purpose: `Int`, `Float`, `String`, and generic type variables (`ResolvedPool::is_heap`). Under this split those are still freed, just at frame exit. A big `Int` is a heap object Perceus never drops, and it's still correct.
 
 **Open:** when a read may *move* a reference instead of copying it, for example a local's last use as a call argument. That's an optimisation, but it's also what lets reuse fire in the callee. It has to be written down against `perceus.rs` before the VM does it.
 

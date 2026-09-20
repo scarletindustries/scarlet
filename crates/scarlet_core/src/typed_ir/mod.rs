@@ -597,10 +597,10 @@ mod tests {
     fn pool_and_temps() -> (ResolvedPool, TempTys) {
         let mut p = ResolvedPool::new(PrimIds::default());
         let prims = p.prims();
-        let int = p.mk_con(prims.int, StrId::NONE, &[]);
-        let boolean = p.mk_con(TypeId(100), StrId::NONE, &[]);
-        let string = p.mk_con(prims.string, StrId::NONE, &[]);
-        let binary = p.mk_con(TypeId(101), StrId::NONE, &[]);
+        let int = p.mk_con(prims.int, &[]);
+        let boolean = p.mk_con(TypeId(100), &[]);
+        let string = p.mk_con(prims.string, &[]);
+        let binary = p.mk_con(TypeId(101), &[]);
         let int_pair = p.mk_tuple(&[int, int]);
         (
             p,
@@ -705,7 +705,7 @@ mod tests {
         let array = {
             let mut pool = pool;
             let prims = pool.prims();
-            let a = pool.mk_con(prims.array, StrId::NONE, &[int]);
+            let a = pool.mk_con(prims.array, &[int]);
             (pool, a)
         };
         let (pool, arr_ty) = array;

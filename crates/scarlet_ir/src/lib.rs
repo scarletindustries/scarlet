@@ -20,6 +20,7 @@
 use std::fmt;
 
 pub mod intrinsic;
+pub mod rty;
 pub mod tivec;
 
 /// A nominal type's identity: which `type` declaration a value or pattern
