@@ -4,11 +4,7 @@
 //! frame-limited). Optimisation passes are Core→Core; type erasure happens once
 //! at Core→bytecode. See `docs/core-ir-spec.md`.
 
-pub mod clif;
-pub(crate) mod codec;
-pub mod emit;
 pub(crate) mod lower;
-pub mod native_frame;
 pub use scarlet_vm::native_rc;
 pub(crate) mod perceus;
 

@@ -86,7 +86,6 @@ use crate::types::{
     new_engine, new_env, pool,
 };
 
-mod abi;
 mod bridges;
 mod patterns;
 #[cfg(test)]

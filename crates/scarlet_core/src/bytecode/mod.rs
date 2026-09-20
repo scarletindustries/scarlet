@@ -4,9 +4,7 @@
 //! `scarlet_core::bytecode::*` is the one import for both halves of the contract.
 
 mod analysis;
-pub mod binop;
 pub mod compiler;
-mod peephole;
 mod prelude;
 pub mod prelude_bindings;
 mod session;

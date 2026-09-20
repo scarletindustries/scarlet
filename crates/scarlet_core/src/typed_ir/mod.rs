@@ -17,7 +17,6 @@ pub mod elaborate_pat;
 pub mod eta;
 pub mod resolve;
 pub mod rty;
-pub mod wire;
 pub(crate) use scarlet_types::slots;
 pub(crate) mod zonk;
 

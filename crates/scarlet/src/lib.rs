@@ -15,10 +15,8 @@
 pub use scarlet_core::*;
 
 pub mod cli;
-pub mod dis;
 pub mod lsp;
 pub mod repl;
-pub mod vm;
 
 #[allow(clippy::approx_constant, clippy::unreadable_literal, unused_imports)]
 mod generated {
