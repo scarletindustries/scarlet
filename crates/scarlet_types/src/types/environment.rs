@@ -689,13 +689,6 @@ impl TypeEnv {
         self.type_info.get(name).copied()
     }
 
-    /// Unjournaled escape hatch for `precompile_stdlib`'s teardown: moves the
-    /// by-name type registry out so `flatten` can snapshot it. Safe only
-    /// because the env is being consumed and no `truncate_to` can follow.
-    pub fn take_type_info(&mut self) -> IndexMap<String, TypeInfo> {
-        std::mem::take(&mut self.type_info)
-    }
-
     /// Nominal lookup by the id carried in `TypeNode::Con`. The only correct
     /// way to ask for a type's variants or fields: the by-name map can be
     /// shadowed by whatever same-named type was analysed most recently.

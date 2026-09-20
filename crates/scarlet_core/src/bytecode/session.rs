@@ -12,14 +12,11 @@ use std::rc::Rc;
 use super::compiler::{CompileResult, Compiler, new_compiler};
 use crate::ast;
 use crate::module::{self, ModulePath};
-use crate::reference::{
-    Definition, DefinitionKind, EntityKind, ModuleId, ModuleReferences, ReferenceGraph,
-    ReferenceGraphBuilder,
-};
+use crate::reference::{ModuleId, ModuleReferences, ReferenceGraph, ReferenceGraphBuilder};
 use crate::span::Span;
 use crate::tivec::Idx;
 use crate::type_def::{Type, TypeId};
-use crate::types::{DefinitionLocation, EnginePoolWatermark, EnvWatermark, Ty};
+use crate::types::{EnginePoolWatermark, EnvWatermark, Ty};
 
 /// One buffered name occurrence, holding the *live* `Ty`: resolution is
 /// deferred until all unifications have settled.
@@ -158,16 +155,6 @@ impl PartialOrd for Watermark {
     }
 }
 
-/// One definition synthesised for a static/hydrated stdlib module from its
-/// interface's exported values.
-struct SynthDef {
-    name: String,
-    location: DefinitionLocation,
-    doc: Option<String>,
-    /// Function parameter names / constructor field labels, for hover.
-    param_names: Vec<String>,
-}
-
 impl Compiler {
     pub(crate) fn watermark(&self) -> Watermark {
         Watermark {
@@ -302,72 +289,18 @@ impl Compiler {
         let (references, facts) = self.finalize_references();
         (
             // A check-only session emits no program: the LSP reads only
-            // diagnostics and the graph, and cloning the hydrated stdlib
-            // `Program` per keystroke would be pure waste.
+            // diagnostics and the graph.
             CompileResult::analysis_only(self.engine.diagnostics.clone(), references),
             facts,
         )
     }
 
-    /// Synthesise reference-graph [`Definition`]s for a static/hydrated stdlib
-    /// module from its exported values' `Scheme.def` and its exported types'
-    /// `ExportedType.def`, both of which carry the real declaration span.
-    /// `None` for an interface exporting nothing.
-    ///
-    /// Every `DefId` and the owning container go through
-    /// [`Compiler::defid_of`], the same computation a populated use of the name
-    /// bakes into its occurrence target, so both share one canonical `DefId`
-    /// even when the precompiled `Scheme.def.module` spelling differs from the
-    /// `ModuleTable` key.
-    fn synth_refs_from_interface(
-        &mut self,
-        defs: &[SynthDef],
-        doc: Option<&str>,
-    ) -> Option<ModuleReferences> {
-        let mid = self.defid_of(defs.first()?.location).module;
-        let mut mr = ModuleReferences::new(mid);
-        mr.set_doc(doc.map(str::to_string));
-        for sd in defs {
-            let defid = self.defid_of(sd.location);
-            // A constructor's declaring-type `DefId` is not serialised, so its
-            // `ctor_of` edge is absent. Harmless: the dead-code pass that walks
-            // it only reports the entry module.
-            let kind = match defid.entity {
-                EntityKind::Function => DefinitionKind::Function {
-                    param_names: sd.param_names.clone(),
-                },
-                EntityKind::Constructor => DefinitionKind::Constructor {
-                    ctor_of: None,
-                    param_names: sd.param_names.clone(),
-                },
-                EntityKind::Constant => DefinitionKind::Constant,
-                EntityKind::Value => DefinitionKind::Value { alias_of: None },
-                EntityKind::Type => DefinitionKind::Type,
-                EntityKind::Field => DefinitionKind::Field,
-                EntityKind::ModuleAlias => DefinitionKind::ModuleAlias {
-                    decl_span: defid.span,
-                    imports_module: None,
-                },
-            };
-            mr.add_definition(Definition::new(
-                defid.module,
-                defid.span,
-                sd.name.clone(),
-                sd.doc.clone(),
-                true,
-                kind,
-            ));
-        }
-        Some(mr)
-    }
-
-    /// Build the workspace [`ReferenceGraph`] from the entry file's collector,
-    /// every from-source `CachedModule`'s persisted `module_refs`, and
-    /// definitions synthesised from hydrated stdlib interfaces. Built wholesale
-    /// each `check` so an evicted module's reverse edges vanish coherently.
+    /// Build the workspace [`ReferenceGraph`] from the entry file's collector
+    /// and every `CachedModule`'s persisted `module_refs`. Built wholesale each
+    /// `check` so an evicted module's reverse edges vanish coherently.
     fn build_reference_graph(&mut self) -> ReferenceGraph {
-        // Intern every loaded module path plus main, so a synthesised stdlib
-        // def gets a stable `ModuleId`.
+        // Intern every loaded module path plus main, so every module gets a
+        // stable `ModuleId`.
         let loaded_paths: Vec<ModulePath> = self
             .module_table
             .loaded_modules()
@@ -387,43 +320,10 @@ impl Compiler {
             graph.intern_module(p);
         }
 
-        // Every cached module's references; hydrated stdlib modules carry none,
-        // so their definitions are synthesised from the interface below. The
-        // reverse index is built once by `finish()`, not per insert.
-        let mut synth_inputs: Vec<(Vec<SynthDef>, Option<String>)> = Vec::new();
+        // Every cached module's references. The reverse index is built once by
+        // `finish()`, not per insert.
         for (_key, cm) in self.module_table.loaded_modules() {
-            match cm.module_refs() {
-                Some(mr) => graph.insert(Rc::clone(mr)),
-                None => {
-                    let values = cm.iface.values.iter().filter_map(|(name, ev)| {
-                        ev.scheme.def.map(|dl| SynthDef {
-                            name: name.clone(),
-                            location: dl,
-                            doc: ev.doc.clone(),
-                            param_names: ev.param_names.clone(),
-                        })
-                    });
-                    let types = cm.iface.types.iter().filter_map(|(name, et)| {
-                        et.def.map(|dl| SynthDef {
-                            name: name.clone(),
-                            location: dl,
-                            doc: et.doc.clone(),
-                            param_names: Vec::new(),
-                        })
-                    });
-                    let defs: Vec<SynthDef> = values.chain(types).collect();
-                    if !defs.is_empty() {
-                        synth_inputs.push((defs, cm.iface.doc.clone()));
-                    }
-                }
-            }
-        }
-        // Deferred out of the loop above: `defid_of` takes `&mut self`, which
-        // cannot overlap the `module_table` iteration.
-        for (defs, doc) in &synth_inputs {
-            if let Some(synth) = self.synth_refs_from_interface(defs, doc.as_deref()) {
-                graph.insert(Rc::new(synth));
-            }
+            graph.insert(Rc::clone(cm.module_refs()));
         }
 
         // The entry file's own refs must be copied: the collector is reused for

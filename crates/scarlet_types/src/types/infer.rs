@@ -528,21 +528,6 @@ pub struct EnginePoolWatermark {
     pub variants: usize,
 }
 
-/// Every static pool slice handed to [`InferEngine::seed_arena`]. Named fields
-/// rather than eight positional slices, so transposing two same-typed pools is
-/// a compile error and not a corrupted arena prefix.
-#[derive(Clone, Copy)]
-pub struct ArenaSeed<'a> {
-    pub nodes: &'a [TypeNode],
-    pub children: &'a [Ty],
-    pub strings: &'a [&'a str],
-    pub quants: &'a [QuantVar],
-    pub str_slices: &'a [StrId],
-    pub type_params: &'a [TypeParam],
-    pub variant_fields: &'a [VariantField],
-    pub variants: &'a [Variant],
-}
-
 fn next_letter(uid: &mut u64) -> String {
     let alphabet_len: u64 = 26;
     let offset = b'a';
@@ -703,25 +688,8 @@ impl InferEngine {
         self.diagnostics.clear();
     }
 
-    /// Seed every arena/pool from static slices (the precompiled stdlib). Must
-    /// be called before anything is minted so static indices stay valid.
-    pub fn seed_arena(&mut self, seed: ArenaSeed<'_>) {
-        debug_assert_eq!(self.pool_watermark(), EnginePoolWatermark::default());
-        debug_assert!(self.vars.is_empty());
-        self.nodes.extend_from_slice(seed.nodes);
-        self.children.extend_from_slice(seed.children);
-        for s in seed.strings {
-            self.intern(s);
-        }
-        self.quants.extend_from_slice(seed.quants);
-        self.str_slices.extend_from_slice(seed.str_slices);
-        self.type_params.extend_from_slice(seed.type_params);
-        self.variant_fields.extend_from_slice(seed.variant_fields);
-        self.variants.extend_from_slice(seed.variants);
-    }
-
     /// Wire the nominal ids of Int/Float/String. Called once by the compiler
-    /// right after the prelude is registered or seeded.
+    /// right after the prelude is registered.
     pub fn set_prim_ids(&mut self, ids: PrimIds) {
         self.prim_ids = ids;
         self.nullary_cache = NullaryCache::default();
