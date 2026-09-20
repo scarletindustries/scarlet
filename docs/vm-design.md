@@ -89,21 +89,32 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 
 **Proposed: freeing a big value is a loop, and can be paused.** Dropping a million-item list must not freeze a scheduler thread. The audit measured a 3.4 s freeze on a large `==`.
 
-**Your decision: how one process's memory is limited.**
+**Decided: a heap per process.** Each process allocates from its own heap, and reference counting runs inside it. This is BEAM's shape, with counting where BEAM has a GC.
 
-- **A. One shared allocator, and a byte count per process.** Messages are copied when sent, so every heap object belongs to exactly one process, and the count is exact. When a process passes its limit, it stops. When a process dies, its objects are freed one by one.
-- **B. A heap per process.** A dead process's memory goes all at once. But a process moves between scheduler threads, and fast allocators like mimalloc tie a heap to one thread, so the heap would have to move with it.
+- **Why it works:** messages are copied when sent, so every object in a process's heap is reachable only from that process. Only the owner ever allocates or frees in it, so it needs no locks and no atomic counts.
+- **A limit is just the heap's size.** A process that passes its limit stops, and that's a resource death, not a bug.
+- **Death frees everything at once:** the heap's memory is returned in whole chunks, with no walk over the objects in it.
 
-**My pick: A.** It's the simplest one to reason about, and it's what you'd reach for first to stop runaway memory. B's one advantage, fast freeing on death, can be added later if a benchmark asks for it.
+**Proposed: how.**
+
+- The heap is plain data owned by the process: chunks of memory, carved into cells by size, with a free list per size. So it moves with the process when the process moves to another scheduler thread. The old concern, that allocators like mimalloc tie a heap to one thread, doesn't apply to a heap we own.
+- A few things must live outside any one process's heap, because more than one process can hold them:
+  - constants, in the frozen area;
+  - big binaries, which are shared on send rather than copied, as in the old VM, and counted with atomic counts;
+  - handles to OS resources, like sockets and files.
+- A process keeps a list of the outside things its heap points to. When it dies, it releases each of them before returning its chunks. This is BEAM's "off-heap" list.
+
+**Open:** how big a heap's first chunk is, and how a heap grows. A million tiny processes each with a large first chunk would waste a lot of memory.
 
 ## Running code
 
-**Your decision: what the VM executes.**
+**Decided: a flat list of register instructions per function, made once when the program loads.** Each Core construct becomes one instruction, or a few. A local is a register: `Let x = IntAdd(a, b)` becomes `x = add a, b`. `If` and `Match` become branches, `LetCont`/`Goto` become labels and jumps, and a `Tail` call reuses the frame.
 
-- **A. The Core IR tree itself.** One less layer. But `LetJoin`, `LetCont` and calls inside a tree need an explicit stack of "what to do next" entries, which is the hardest part of an interpreter to get right.
-- **B. A flat list of register instructions per function, made once when the program loads.** Each Core construct becomes one instruction, or a few. A local is a register: `Let x = IntAdd(a, b)` becomes `x = add a, b`. `If` and `Match` become branches, `LetCont`/`Goto` become labels and jumps, and a `Tail` call reuses the frame.
+A frame is then just "which function, which instruction, where its registers start". That keeps tail calls, the preemption check, and "no Rust recursion" simple. `dis` can print the instructions next to the Core IR, so nothing is hidden.
 
-**My pick: B.** A frame is then just "which function, which instruction, where its registers start". That makes tail calls, the preemption check, and "no Rust recursion" simple. `dis` can print the instructions next to the Core IR, so nothing is hidden. It is not the old bytecode: there's no stack machine, no fused super-instructions, no peephole pass, and no JIT. Speed work comes later, and only against a benchmark.
+It is not the old bytecode: there's no stack machine, no fused super-instructions and no peephole pass.
+
+**Decided: a JIT comes later.** It compiles the same instructions to machine code, so the interpreter and the JIT agree by construction on what each instruction means. Speed work, JIT included, waits for a benchmark to point at.
 
 **Proposed: every call is a proper tail call when it's in tail position.** Scarlet programs rely on it (`examples/tco.scrl`).
 
@@ -111,12 +122,9 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 
 ## Where the VM lives
 
-**Your decision.**
+**Decided: a new `scarlet_ir` crate holds the Program types, and `scarlet_vm` depends only on it.** That's the Core IR, `PrimOp`, `Const`, `Intrinsic`, `TypeId` and the type pool. The passes (`lower`, `perceus`) stay in `scarlet_core`, which depends on `scarlet_ir` too.
 
-- **A. `scarlet_vm` depends on `scarlet_core` and reads `core_ir::Program` directly.** No moving code. But the VM crate can see the whole compiler, and building the VM builds the type checker.
-- **B. Move the Program types into a small new crate, `scarlet_ir`, that both depend on.** That's the Core IR, `PrimOp`, `Const`, `Intrinsic`, `TypeId` and the type pool. `scarlet_vm` depends only on `scarlet_ir`, and the passes (`lower`, `perceus`) stay in `scarlet_core`.
-
-**My pick: B.** Then everything the VM can see is in one crate, which is the whole contract between compiler and VM. It costs a few PRs that only move types, with no behaviour change.
+Everything the VM can see is then in one crate, which is the whole contract between the compiler and the VM. Moving the types is a few PRs with no behaviour change.
 
 Either way, `CLAUDE.md`'s crate-layout paragraph is out of date. It still describes the old VM, with bytecode, a JIT, and a "language-agnostic" runtime. The new VM runs Scarlet's own Core IR, so it isn't language-agnostic any more. The paragraph gets rewritten in the first VM PR.
 
@@ -136,11 +144,11 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left. It's 321 today.
 
-1. The `scarlet_ir` crate (if B above).
+1. The `scarlet_ir` crate.
 2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, `IntAdd`, calls, `Println`. `scarlet run` uses it. The `hello` golden passes.
 3. Control flow and data: `If`, `Match`, `LetJoin`, `LetCont`/`Goto`, constructors, tuples and fields.
 4. Closures, captures, globals, and module inits.
-5. Reference counting, then Perceus's `Drop` and reuse. The allocation-count tests come back here.
+5. The per-process heap and reference counting, then Perceus's `Drop` and reuse. The allocation-count tests come back here.
 6. Big ints.
 7. Floats with the no-NaN rule.
 8. Strings, binaries (with binary patterns), arrays and maps.
@@ -151,6 +159,7 @@ Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the t
 ## Open, all in one place
 
 - How many bits a small int gets.
+- How big a process heap starts, and how it grows.
 - When a read moves a reference instead of copying it.
 - When a program ends, and the exit code when `main` returns `Err`.
 - From `docs/semantics.md`: `x % 0`, `sqrt(-1.0)`, and float literals too large to represent.
