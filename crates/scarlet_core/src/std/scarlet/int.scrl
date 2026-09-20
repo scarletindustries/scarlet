@@ -55,6 +55,18 @@ pub fn clamp(n Int, lo Int, hi Int) Int {
 	min(max(n, lo), hi)
 }
 
+// `a / b`, except that a zero divisor is `Err(Nil)` rather than the operator's
+// 0. Truncates toward zero, like `/`.
+pub fn divide(a Int, b Int) Result(Int, Nil) {
+	if b == 0 { Err(Nil) } else { Ok(a / b) }
+}
+
+// `a % b`, except that a zero divisor is `Err(Nil)` rather than the operator's
+// `a`. The remainder takes the sign of `a`, like `%`.
+pub fn remainder(a Int, b Int) Result(Int, Nil) {
+	if b == 0 { Err(Nil) } else { Ok(a % b) }
+}
+
 // --- Bitwise ---------------------------------------------------------------
 //
 // Int is a 64-bit signed two's-complement integer — `min_value` and

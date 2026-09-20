@@ -14,6 +14,8 @@ mod by zero: 7 -7
 trunc div: 3 -3 -3 3
 rem sign: 1 -1 1 -1
 exact div: 2 0 0
+checked div: Ok(3) Ok(-3) Err(Nil)
+checked rem: Ok(1) Ok(-1) Err(Nil)
 float fmt: 2.0 0.5 -0.0
 float repr: 0.30000000000000004 0.3333333333333333
 float big: 9223372036854776000.0

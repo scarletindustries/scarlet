@@ -74,6 +74,11 @@ pub fn main() {
 	println('rem sign: ${p7 % p2} ${n7 % p2} ${p7 % n2} ${n7 % n2}')
 	println('exact div: ${6 / 3} ${6 % 3} ${1 / 2}')
 
+	// The checked forms answer `Err(Nil)` for a zero divisor and otherwise
+	// agree with the operators, sign rules included.
+	println('checked div: ${string.inspect(int.divide(p7, p2))} ${string.inspect(int.divide(n7, p2))} ${string.inspect(int.divide(p7, 0))}')
+	println('checked rem: ${string.inspect(int.remainder(p7, p2))} ${string.inspect(int.remainder(n7, p2))} ${string.inspect(int.remainder(p7, 0))}')
+
 	// --- Float: formatting and non-finite collapse ----------------------------
 
 	// Printing matches Rust's f64 Display with a forced `.0` when the shortest
