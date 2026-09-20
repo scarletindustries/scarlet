@@ -1170,6 +1170,7 @@ pub fn main() {
 /// unmeasurable: the kernel answered, so the deadline-vs-kernel-floor gap
 /// does not exist.
 #[test]
+#[ignore = "needs the VM"]
 fn connect_addr_within_times_out_against_a_full_accept_queue() {
     let Some((_listener, _fillers, port)) = full_accept_queue() else {
         return;
@@ -1239,6 +1240,7 @@ pub fn main() {{
 /// connect step — this does not witness the deadline surviving a real
 /// hostname resolve, which is `resolve_within`'s own coverage above.
 #[test]
+#[ignore = "needs the VM"]
 fn connect_within_times_out_against_a_full_accept_queue() {
     let Some((_listener, _fillers, port)) = full_accept_queue() else {
         return;
