@@ -5,21 +5,19 @@
 //! at Core→bytecode. See `docs/core-ir-spec.md`.
 
 pub(crate) mod lower;
-pub use scarlet_vm::native_rc;
 pub(crate) mod perceus;
 
 use std::fmt;
 
 use crate::bytecode::{HeapTag, Op, Value};
+use crate::newtype_index;
 use crate::type_def::TypeId;
 use crate::typed_ir::{GlobalSlot, RTy};
 use crate::types::StrId;
-use scarlet_vm::newtype_index;
 
-// The index spaces a bytecode operand can hold. Each is a `crate::tivec::Idx`,
-// so the `TiVec` it indexes rejects the others at compile time. `GlobalSlot`
-// (entry-frame stack space) is minted in `typed_ir`; frame-local slots belong
-// to `bytecode::compiler`.
+// The core IR's index spaces. Each is a `crate::tivec::Idx`, so the `TiVec` it
+// indexes rejects the others at compile time. `GlobalSlot` (entry-frame stack
+// space) is minted in `typed_ir`.
 
 newtype_index!(
     /// Dense per-function local index. Minted by `lower` in evaluation order so
@@ -39,10 +37,10 @@ newtype_index!(
     pub struct JoinId("j")
 );
 
-// `FuncIdx` numbers `CoreProgram.fns`, `Program.functions` and
-// `TypedProgram::fns` alike. It lives in `scarlet_vm` because the runtime stores it
-// in closures and the native-entry table.
-pub use scarlet_vm::FuncIdx;
+newtype_index!(
+    /// Index into `CoreProgram.fns`, numbered the same as `TypedProgram::fns`.
+    pub struct FuncIdx("fn#")
+);
 
 /// The one fact about the type table a backend needs while planning a body:
 /// the variant count a `SwitchTag` over a type dispatches on, answered
@@ -56,30 +54,6 @@ pub use scarlet_vm::FuncIdx;
 /// point, so one body may legitimately hold a two-arm and a one-arm match
 /// over the same type.
 pub type SwitchCounts<'a> = &'a dyn Fn(crate::type_def::TypeId) -> Option<u8>;
-
-newtype_index!(
-    /// A function-relative instruction offset. Jump operands are exactly this;
-    /// the VM adds `Function.code_start` back, so the emitter never spells an
-    /// absolute `program.code` address. `emit::relocate` is the only place a
-    /// block's offsets move onto the absolute stream.
-    pub struct CodeAddr("@")
-);
-
-impl CodeAddr {
-    /// The jump-operand encoding, read back by the VM relative to
-    /// `Function.code_start`.
-    #[inline]
-    fn to_operand(self) -> i32 {
-        self.0 as i32
-    }
-
-    /// The address of the following instruction. A `SwitchTag` jump table sits
-    /// at `switch.next()`.
-    #[inline]
-    fn next(self) -> CodeAddr {
-        CodeAddr(self.0 + 1)
-    }
-}
 
 /// A typed local binding. Its [`RTy`] indexes the elaborator's `ResolvedPool`,
 /// where an unsolved inference variable is unrepresentable, so Perceus cannot

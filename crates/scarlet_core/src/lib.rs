@@ -18,6 +18,7 @@ pub mod core_ir;
 pub mod lint;
 pub mod module;
 pub mod reference;
+pub mod tivec;
 pub mod typed_ir;
 
 // Re-exported at their historical paths so `scarlet_core::parser`,
@@ -26,7 +27,7 @@ pub use scarlet_syntax::{
     ast, desugar, diagnostic, formatter, highlight, parser, scanner, span, term, token,
 };
 pub use scarlet_types::{type_def, types};
-pub use scarlet_vm::{assert_send, assert_send_sync, frozen, heap, tivec};
+pub use scarlet_vm::{assert_send, assert_send_sync, frozen, heap};
 
 pub use bytecode::{CtorRef, PreludeBindings, TypeRef};
 pub use precompile::{PrecompileError, PrecompileOutput, precompile_stdlib};
