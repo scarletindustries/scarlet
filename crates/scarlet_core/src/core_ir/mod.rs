@@ -14,11 +14,11 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::module::ModuleKey;
-use crate::newtype_index;
 use crate::tivec::TiVec;
 use crate::type_def::TypeId;
 use crate::typed_ir::{CaptureIdx, FrameSlot, GlobalSlot, RTy, ResolvedPool};
 use crate::types::StrId;
+use scarlet_ir::newtype_index;
 use scarlet_types::intrinsic::Intrinsic;
 
 // The core IR's index spaces. Each is a `crate::tivec::Idx`, so the `TiVec` it

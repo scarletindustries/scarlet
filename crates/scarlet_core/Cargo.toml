@@ -12,6 +12,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dylint_lib, values("mordan
 
 [dependencies]
 scarlet_syntax = { path = "../scarlet_syntax" }
+scarlet_ir = { path = "../scarlet_ir" }
 scarlet_types = { path = "../scarlet_types" }
 indexmap = { workspace = true }
 smallvec = "1.15"

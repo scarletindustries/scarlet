@@ -27,14 +27,14 @@ pub struct TiVec<I: Idx, T> {
 // world), and clippy would otherwise insist it accompany `len`.
 #[allow(clippy::len_without_is_empty)]
 impl<I: Idx, T> TiVec<I, T> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         TiVec {
             raw: Vec::new(),
             _idx: PhantomData,
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.raw.len()
     }
 
@@ -45,7 +45,7 @@ impl<I: Idx, T> TiVec<I, T> {
     }
 
     /// Append `v` and return the index it landed at.
-    pub(crate) fn push(&mut self, v: T) -> I {
+    pub fn push(&mut self, v: T) -> I {
         let i = self.next_idx();
         self.raw.push(v);
         i
@@ -57,17 +57,17 @@ impl<I: Idx, T> TiVec<I, T> {
     }
 
     /// Drop every element at `len` and after. No-op when `len >= self.len()`.
-    pub(crate) fn truncate(&mut self, len: usize) {
+    pub fn truncate(&mut self, len: usize) {
         self.raw.truncate(len);
     }
 
     /// The elements at `start..`, for consumers that walk a suffix.
-    pub(crate) fn tail_from(&self, start: I) -> &[T] {
+    pub fn tail_from(&self, start: I) -> &[T] {
         &self.raw[start.index()..]
     }
 
     /// Drop the typed-index wrapper, for consumers that want a plain `Vec`.
-    pub(crate) fn into_vec(self) -> Vec<T> {
+    pub fn into_vec(self) -> Vec<T> {
         self.raw
     }
 }

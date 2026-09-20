@@ -810,10 +810,15 @@ dependencies = [
  "indexmap",
  "percent-encoding",
  "petgraph",
+ "scarlet_ir",
  "scarlet_syntax",
  "scarlet_types",
  "smallvec",
 ]
+
+[[package]]
+name = "scarlet_ir"
+version = "0.1.0"
 
 [[package]]
 name = "scarlet_syntax"
@@ -828,6 +833,7 @@ name = "scarlet_types"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "scarlet_ir",
  "scarlet_syntax",
  "smallvec",
 ]
