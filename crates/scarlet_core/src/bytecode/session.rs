@@ -207,11 +207,6 @@ impl Compiler {
         self.program.templates.truncate(self.abi_template_count);
         self.program.wire_templates.clear();
         self.program.wire_descs.clear();
-        // Descriptors elaboration built for the compile being rewound. A
-        // check-only compile never drains them, so without this a later emit
-        // in the same session would mint templates for a call site that no
-        // longer exists.
-        self.wire_descs.clear();
         self.local_count = local_count;
         self.global_to_func.retain(|_, fi| fi.index() < functions);
         // Survivors are watermark-preserved entry-frame slots. Depth normalises
@@ -869,37 +864,5 @@ mod tests {
         );
         assert!(c.program.templates.get(TemplateIdx(0)).is_some());
         assert!(c.program.templates.get(TemplateIdx(1)).is_some());
-    }
-
-    /// Descriptors elaboration built for a compile that is being rewound must
-    /// go with it. A check-only compile never reaches the drain in
-    /// `compile_impl`, so without the clear a later emit in the same session
-    /// would mint templates for a `wire` call site the edit deleted.
-    #[test]
-    fn reset_to_clears_the_descriptors_the_rewound_compile_built() {
-        use crate::core_ir::VariantRef;
-        use crate::type_def::TypeId;
-        use crate::typed_ir::wire::{Desc, Node, WireVariant};
-
-        let mut c = new_compiler(None, false);
-        let name = c.engine.intern("Colour");
-        let w = c.watermark();
-        c.wire_descs
-            .push(Desc::from_parts(vec![Node::Data(vec![WireVariant {
-                variant: VariantRef {
-                    type_id: TypeId(500),
-                    variant_idx: 0,
-                    type_name: name,
-                },
-                name,
-                fields: Vec::new(),
-            }])]));
-
-        c.reset_to(&w);
-
-        assert!(
-            c.wire_descs.is_empty(),
-            "a rewound compile's descriptors must not reach the next one"
-        );
     }
 }

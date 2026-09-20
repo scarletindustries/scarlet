@@ -14,6 +14,7 @@ use crate::newtype_index;
 use crate::type_def::TypeId;
 use crate::typed_ir::{GlobalSlot, RTy};
 use crate::types::StrId;
+use scarlet_types::intrinsic::Intrinsic;
 
 // The core IR's index spaces. Each is a `crate::tivec::Idx`, so the `TiVec` it
 // indexes rejects the others at compile time. `GlobalSlot` (entry-frame stack
@@ -135,13 +136,6 @@ pub enum Imm {
     Const(ConstId),
     /// `Op::IndexOr` with the default pushed on the stack (encoded as -1).
     PushedDefault,
-    /// A wire op's descriptor, as an index into `Program.wire_descs`.
-    ///
-    /// **Not `Const`**, though it was until T-732: a descriptor is not a
-    /// constant-pool `Value` and reusing `Const` would mean two index spaces
-    /// silently made to coincide. Its own variant is what makes
-    /// `imm_operand`'s abort able to tell them apart.
-    WireDesc(u32),
 }
 
 impl fmt::Display for Imm {
@@ -152,7 +146,6 @@ impl fmt::Display for Imm {
             Imm::Argc(n) => write!(f, "#{n}"),
             Imm::Const(c) => write!(f, "#{c}"),
             Imm::PushedDefault => f.write_str("#pushed"),
-            Imm::WireDesc(i) => write!(f, "#w{i}"),
         }
     }
 }
@@ -178,6 +171,11 @@ pub enum Atom {
         op: Op,
         args: Vec<LocalId>,
         imm: Imm,
+    },
+    /// A call to a `@vm` built-in.
+    Intrinsic {
+        intrinsic: Intrinsic,
+        args: Vec<LocalId>,
     },
     /// `PushLocal captures; MakeClosure func_idx`. The nested body was already
     /// lowered and emitted by `compile_fn_body`, so `emit` only references it.
@@ -208,7 +206,7 @@ impl Atom {
             Atom::Local(x) => (&[], Some(*x)),
             Atom::Const(_) => (&[], None),
             Atom::Ctor { fields, .. } => (fields, None),
-            Atom::PrimOp { args, .. } => (args, None),
+            Atom::PrimOp { args, .. } | Atom::Intrinsic { args, .. } => (args, None),
             Atom::Closure { captures, .. } => (captures, None),
             Atom::Call { callee, args } => match callee {
                 Callee::Local(id) => (args, Some(*id)),
@@ -422,6 +420,11 @@ impl fmt::Display for Atom {
             Atom::PrimOp { op, args, imm } => {
                 write!(f, "{op:?}{imm}")?;
                 f.write_str("(")?;
+                write_locals(f, args)?;
+                f.write_str(")")
+            }
+            Atom::Intrinsic { intrinsic, args } => {
+                write!(f, "{intrinsic:?}(")?;
                 write_locals(f, args)?;
                 f.write_str(")")
             }

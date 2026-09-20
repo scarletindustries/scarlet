@@ -30,8 +30,9 @@ pub use rty::{Arity, RSlice, RTy, ResolvedNode, ResolvedPool};
 pub(crate) use zonk::{Zonker, pool_for};
 
 use crate::bytecode::{Op, Value};
-use crate::core_ir::{ConstId, FuncIdx, Imm, VariantRef};
+use crate::core_ir::{ConstId, FuncIdx, VariantRef};
 use crate::types::StrId;
+use scarlet_types::intrinsic::Intrinsic;
 
 /// A binding introduced by a `TypedFn`'s parameter list, a `let`, or a
 /// pattern. Dense within its function: `BindingId(i)` for `i < TypedFn::binds`.
@@ -101,11 +102,8 @@ pub enum TypedCallee {
     Known(FuncIdx),
     /// The function currently being lowered.
     SelfRec,
-    /// A `@vm` builtin: the call *is* the opcode. `imm` is the operand the
-    /// instruction carries; every builtin resolved from a name takes
-    /// [`Imm::None`], and only a site that has a constant to attach — a wire
-    /// op's descriptor — sets anything else.
-    Builtin { op: Op, imm: Imm },
+    /// A `@vm` builtin: the call *is* the intrinsic.
+    Builtin { intrinsic: Intrinsic },
     /// A closure value computed at runtime.
     Dynamic(Box<TypedExpr>),
 }
@@ -690,11 +688,9 @@ mod tests {
         );
     }
 
-    /// `lower` copies the callee's immediate onto the atom. Dropping it would
-    /// be silent — the op still emits, with operand 0, and decodes against
-    /// whatever schema that names.
+    /// A builtin call reaches the core IR as a call to that same intrinsic.
     #[test]
-    fn a_builtin_immediate_reaches_the_core_atom() {
+    fn a_builtin_call_reaches_the_core_ir_as_its_intrinsic() {
         let (pool, temps) = pool_and_temps();
         let binary = temps.binary;
         let p = TypedProgram {
@@ -705,8 +701,7 @@ mod tests {
                 TypedExpr::Call {
                     ty: binary,
                     callee: TypedCallee::Builtin {
-                        op: Op::WireEncode,
-                        imm: Imm::Const(ConstId(1)),
+                        intrinsic: Intrinsic::StringLength,
                     },
                     args: vec![TypedExpr::Const {
                         ty: binary,
@@ -722,8 +717,8 @@ mod tests {
         let out = lower::lower(&p);
         let rendered = out.toplevel.to_string();
         assert!(
-            rendered.contains("WireEncode#c1"),
-            "the descriptor must survive lowering, got: {rendered}"
+            rendered.contains("StringLength"),
+            "the intrinsic must survive lowering, got: {rendered}"
         );
     }
 

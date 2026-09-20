@@ -14,9 +14,9 @@
 //! [`Denotation::self_closure`] is the *nested lambda* case, where the frame is
 //! a real closure frame and `PushSelf` is correct.
 
-use crate::bytecode::Op;
-use crate::core_ir::{FuncIdx, Imm, VariantRef};
+use crate::core_ir::{FuncIdx, VariantRef};
 use crate::types::ValueKind;
+use scarlet_types::intrinsic::Intrinsic;
 
 use super::{Arity, CaptureIdx, FrameSlot, GlobalSlot, RTy, TypedCallee, TypedExpr, ValueRef};
 
@@ -43,8 +43,8 @@ enum Den {
     Fn { place: ValueRef, target: FnTarget },
     /// A data constructor.
     Ctor { variant: VariantRef, arity: Arity },
-    /// A `@vm` builtin: the call *is* the opcode.
-    Builtin { op: Op },
+    /// A `@vm` builtin: the call *is* the intrinsic.
+    Builtin { intrinsic: Intrinsic },
 }
 
 /// A name in value position. Not every name is a load: a constructor is a
@@ -66,7 +66,7 @@ pub enum EtaTarget {
     /// Arity comes from the declaration, not from the (instantiated) type.
     Ctor { variant: VariantRef, arity: Arity },
     /// Arity comes from the instantiated function type via `FnRTy`.
-    Builtin { op: Op },
+    Builtin { intrinsic: Intrinsic },
 }
 
 /// A name in callee position.
@@ -126,8 +126,8 @@ impl Denotation {
         Denotation(Den::Ctor { variant, arity })
     }
 
-    fn builtin(op: Op) -> Self {
-        Denotation(Den::Builtin { op })
+    fn builtin(intrinsic: Intrinsic) -> Self {
+        Denotation(Den::Builtin { intrinsic })
     }
 
     /// The denotation a name's [`ValueKind`] fixes on its own: a data
@@ -158,7 +158,7 @@ impl Denotation {
                 },
                 Arity(arity),
             )),
-            ValueKind::Builtin { op } => Some(Denotation::builtin(op)),
+            ValueKind::Builtin { intrinsic } => Some(Denotation::builtin(intrinsic)),
             ValueKind::Local | ValueKind::ModuleFn { .. } => None,
         }
     }
@@ -172,7 +172,7 @@ impl Denotation {
                 arity: Arity(0),
             } => ValueForm::Ctor(variant),
             Den::Ctor { variant, arity } => ValueForm::Eta(EtaTarget::Ctor { variant, arity }),
-            Den::Builtin { op } => ValueForm::Eta(EtaTarget::Builtin { op }),
+            Den::Builtin { intrinsic } => ValueForm::Eta(EtaTarget::Builtin { intrinsic }),
         }
     }
 
@@ -193,7 +193,7 @@ impl Denotation {
                 place,
             }))),
             Den::Ctor { .. } => CallForm::Ctor,
-            Den::Builtin { op } => CallForm::Callee(TypedCallee::Builtin { op, imm: Imm::None }),
+            Den::Builtin { intrinsic } => CallForm::Callee(TypedCallee::Builtin { intrinsic }),
         }
     }
 
@@ -322,18 +322,19 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_is_an_opcode_when_called_and_a_wrapper_when_loaded() {
-        let d = Denotation::builtin(Op::Add);
+    fn a_builtin_is_a_direct_call_when_called_and_a_wrapper_when_loaded() {
+        let d = Denotation::builtin(Intrinsic::StringLength);
         assert_eq!(
             d.as_callee(TY),
             CallForm::Callee(TypedCallee::Builtin {
-                op: Op::Add,
-                imm: Imm::None,
+                intrinsic: Intrinsic::StringLength,
             })
         );
         assert_eq!(
             d.as_value(),
-            ValueForm::Eta(EtaTarget::Builtin { op: Op::Add })
+            ValueForm::Eta(EtaTarget::Builtin {
+                intrinsic: Intrinsic::StringLength,
+            })
         );
         assert_eq!(d.as_ctor().map(|(_, a)| a), None);
     }
@@ -363,9 +364,11 @@ mod tests {
     /// A builtin's kind fixes it too, and it is not a constructor.
     #[test]
     fn a_builtins_kind_fixes_its_denotation() {
-        let d = Denotation::from_kind(ValueKind::Builtin { op: Op::Add })
-            .expect("a builtin's kind fixes its denotation");
-        assert_eq!(d, Denotation::builtin(Op::Add));
+        let d = Denotation::from_kind(ValueKind::Builtin {
+            intrinsic: Intrinsic::StringLength,
+        })
+        .expect("a builtin's kind fixes its denotation");
+        assert_eq!(d, Denotation::builtin(Intrinsic::StringLength));
         assert_eq!(d.as_ctor(), None);
     }
 }

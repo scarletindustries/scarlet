@@ -731,14 +731,11 @@ impl Lower {
                     args,
                 }
             }
-            // A `@vm` builtin: the call is the opcode, and its immediate rides
-            // to the instruction's operand.
-            TypedCallee::Builtin { op, imm } => {
+            TypedCallee::Builtin { intrinsic } => {
                 let args = self.operands(args);
-                Atom::PrimOp {
-                    op: *op,
+                Atom::Intrinsic {
+                    intrinsic: *intrinsic,
                     args,
-                    imm: *imm,
                 }
             }
             TypedCallee::Dynamic(f) => {

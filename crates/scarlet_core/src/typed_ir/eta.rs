@@ -12,7 +12,7 @@
 //! only `&mut FnTable` and returns a [`FuncIdx`], never an address; the wrapper
 //! is an ordinary [`TypedFn`] emitted by the same loop as every other function.
 
-use crate::core_ir::{FuncIdx, Imm};
+use crate::core_ir::FuncIdx;
 use crate::tivec::TiVec;
 use crate::types::StrId;
 
@@ -89,11 +89,6 @@ pub(crate) fn eta_wrapper(
     param_name: StrId,
     target: EtaTarget,
     fn_ty: &FnRTy,
-    // The immediate the wrapped builtin carries. `Imm::None` for every
-    // target that does not read one; a wire op MUST be given its
-    // descriptor here, because nothing downstream can recover it — see
-    // `Elaborator::eta_wire_imm`.
-    imm: Imm,
 ) -> TypedExpr {
     // A fresh function, so its `BindingId` space starts at zero.
     let params: Vec<TypedBind> = fn_ty
@@ -132,9 +127,9 @@ pub(crate) fn eta_wrapper(
                 args,
             }
         }
-        EtaTarget::Builtin { op } => TypedExpr::Call {
+        EtaTarget::Builtin { intrinsic } => TypedExpr::Call {
             ty: ret,
-            callee: TypedCallee::Builtin { op, imm },
+            callee: TypedCallee::Builtin { intrinsic },
             args,
         },
     };
@@ -158,10 +153,10 @@ pub(crate) fn eta_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::Op;
     use crate::core_ir::VariantRef;
     use crate::type_def::TypeId;
     use crate::types::PrimIds;
+    use scarlet_types::intrinsic::Intrinsic;
 
     const NAME: StrId = StrId(1);
     const PARAM: StrId = StrId(2);
@@ -216,7 +211,6 @@ mod tests {
                 arity: Arity(1),
             },
             &fn_ty,
-            Imm::None,
         );
 
         assert_eq!(
@@ -266,9 +260,10 @@ mod tests {
             &mut fns,
             NAME,
             PARAM,
-            EtaTarget::Builtin { op: Op::Add },
+            EtaTarget::Builtin {
+                intrinsic: Intrinsic::StringLength,
+            },
             &fn_ty,
-            Imm::None,
         );
 
         assert_eq!(
@@ -285,8 +280,7 @@ mod tests {
             TypedExpr::Call {
                 ty: int,
                 callee: TypedCallee::Builtin {
-                    op: Op::Add,
-                    imm: Imm::None,
+                    intrinsic: Intrinsic::StringLength,
                 },
                 args: vec![
                     TypedExpr::Var {
@@ -322,15 +316,15 @@ mod tests {
                 arity: Arity(1),
             },
             &ctor_ty,
-            Imm::None,
         );
         let second = eta_wrapper(
             &mut fns,
             NAME,
             PARAM,
-            EtaTarget::Builtin { op: Op::Add },
+            EtaTarget::Builtin {
+                intrinsic: Intrinsic::StringLength,
+            },
             &add_ty,
-            Imm::None,
         );
 
         let idx = |e: &TypedExpr| match e {
@@ -374,7 +368,6 @@ mod tests {
                 arity: Arity(1),
             },
             &fn_ty,
-            Imm::None,
         );
 
         let TypedExpr::Closure { func_idx, .. } = value else {
@@ -404,7 +397,6 @@ mod tests {
                 arity: Arity(2),
             },
             &fn_ty,
-            Imm::None,
         );
     }
 }
