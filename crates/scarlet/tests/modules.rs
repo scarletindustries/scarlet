@@ -21,7 +21,6 @@ fn relative_qualified() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn labelled_args_on_a_qualified_call_take_declared_order() {
     // A qualified callee resolves through `resolve_qualified`, so its parameter
     // labels come off the imported module's scheme rather than the local env —
@@ -156,6 +155,7 @@ fn unknown_module() {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     stdlib_net_socket_type: (
         "import scarlet/net/socket.{Socket}\n\nfn id(s Socket) Socket { s }\n\npub fn main() {\n\tprintln('ok')\n}\n",
         "ok\n",

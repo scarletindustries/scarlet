@@ -101,7 +101,6 @@ fn closure_inside_a_mutual_scc_is_skipped_by_the_enclosing_stream() {
 /// gone again by the time `g` is walked and lowered; if it leaked, `println`
 /// would stop routing as a builtin inside `g`.
 #[test]
-#[ignore = "needs the VM"]
 fn a_bind_shadowing_a_builtin_in_one_body_does_not_repoint_a_sibling_body() {
     run_outputs(
         "fn shadow() Int {\n\
@@ -120,7 +119,6 @@ fn a_bind_shadowing_a_builtin_in_one_body_does_not_repoint_a_sibling_body() {
 /// The same leak one step milder: the bind flips the declared `fn` `h` to an
 /// Int local. `k`, walked afterwards, must still call the function.
 #[test]
-#[ignore = "needs the VM"]
 fn a_bind_shadowing_a_decl_fn_in_one_body_does_not_repoint_a_sibling_body() {
     run_outputs(
         "fn h(x Int) Int { x + 1 }\n\

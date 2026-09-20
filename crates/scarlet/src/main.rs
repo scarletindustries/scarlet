@@ -453,9 +453,22 @@ fn cmd_run(args: RunArgs) {
         println!();
     }
 
-    // Compiled all the same, so `run` still reports what `check` would.
-    compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
-    die("cannot run: the VM is being rebuilt");
+    let result = compile_source(&expr, &file, &args.entrypoint, bytecode::compile);
+    let Some(program) = result.into_runnable() else {
+        die("nothing to run: the compile produced no program");
+    };
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    let outcome = scarlet_vm::run(&program, &mut out);
+    // Flushed before any message, so the program's own output comes first.
+    let flushed = out.flush();
+    match outcome {
+        Ok(()) if flushed.is_ok() => {}
+        // A closed pipe, like `| head`, is the reader leaving, not a failure.
+        Ok(()) | Err(scarlet_vm::Stop::OutputClosed) => {}
+        Err(scarlet_vm::Stop::NotBuiltYet(what)) => {
+            die(format!("cannot run: the new VM does not run {what} yet"))
+        }
+    }
 }
 
 /// `al fmt --stdin`: format stdin and print the result. Separate from the file

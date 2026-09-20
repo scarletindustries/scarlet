@@ -142,19 +142,20 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 ## Order of work
 
-Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left. It's 321 today.
+Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 310 after step 2.
 
-1. The `scarlet_ir` crate.
-2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, `IntAdd`, calls, `Println`. `scarlet run` uses it. The `hello` golden passes.
-3. Control flow and data: `If`, `Match`, `LetJoin`, `LetCont`/`Goto`, constructors, tuples and fields.
-4. Closures, captures, globals, and module inits.
-5. The per-process heap and reference counting, then Perceus's `Drop` and reuse. The allocation-count tests come back here.
-6. Big ints.
-7. Floats with the no-NaN rule.
-8. Strings, binaries (with binary patterns), arrays and maps.
-9. The rest of the intrinsics, one stdlib module at a time.
-10. Processes: mailboxes, the scheduler, preemption, then links, monitors and supervisors.
-11. IO (files, sockets, TLS, HTTP), `os`, and `wire` after its redesign.
+1. The `scarlet_ir` crate. **Done.**
+2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, Int operations, calls, `Println`. `scarlet run` uses it. **Done.**
+3. Control flow: `If`, `Match`, `LetJoin`, `LetCont`/`Goto`.
+4. The per-process heap and reference counting, so there is somewhere to put a heap value.
+5. Big ints. Moved up: when step 2 landed, 119 of the parked tests stopped at a 64-bit constant, most of them in a stdlib module's toplevel (`int.max_value` and the like), before the test's own code ran.
+6. Constructors, tuples, fields, then Perceus's `Drop` and reuse. The allocation-count tests come back here.
+7. Closures that capture, and calling a function value.
+8. Floats with the no-NaN rule.
+9. Strings, binaries (with binary patterns), arrays and maps.
+10. The rest of the intrinsics, one stdlib module at a time.
+11. Processes: mailboxes, the scheduler, preemption, then links, monitors and supervisors.
+12. IO (files, sockets, TLS, HTTP), `os`, and `wire` after its redesign.
 
 ## Open, all in one place
 

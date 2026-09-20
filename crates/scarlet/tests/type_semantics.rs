@@ -8,6 +8,7 @@ mod common;
 use common::{check_ok, check_rejects, run_outputs};
 
 run_case! {
+    #[ignore = "needs the VM"]
     type_keyword_single_variant: (
         "type User { User(name String, age Int) }\n\
          pub fn main() {\n\
@@ -18,6 +19,7 @@ run_case! {
         "al\n18\n",
     ),
 
+    #[ignore = "needs the VM"]
     type_keyword_multi_variant: (
         "type Shape {\n\tCircle(r Int)\n\tRect(w Int, h Int)\n}\n\
          fn area(s Shape) Int {\n\
@@ -55,6 +57,7 @@ reject_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     some_call_is_ordinary_call: (
         "pub fn main() {\n\
          \tx = Some(5)\n\
@@ -63,6 +66,7 @@ run_case! {
         "5\n",
     ),
 
+    #[ignore = "needs the VM"]
     constructor_is_first_class: (
         "fn map(f fn(a) b, xs Array(a)) Array(b) {\n\
          \tmatch xs {\n\
@@ -78,6 +82,7 @@ run_case! {
         "Some(1)\nSome(3)\n",
     ),
 
+    #[ignore = "needs the VM"]
     nullary_constructor_is_value: (
         "pub fn main() {\n\
          \tx = None\n\
@@ -123,6 +128,7 @@ run_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     index_returns_option: (
         "pub fn main() {\n\
          \txs = [10, 20, 30]\n\
@@ -194,6 +200,7 @@ fn range_as_value_materializes() {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     field_access_total_across_variants: (
         "type Named {\n\tPerson(name String, age Int)\n\tOrg(name String, size Int)\n}\n\
          fn name_of(n Named) String { n.name }\n\
@@ -216,6 +223,7 @@ ok_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     recursive_type_runs: (
         "type Tree(a) {\n\tLeaf\n\tNode(l Tree(a), v a, r Tree(a))\n}\n\
          fn size(t Tree(a)) Int {\n\
@@ -247,6 +255,7 @@ ok_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     nested_option_match_runs: (
         "pub fn main() {\n\
          \tx = Some(Some(5))\n\
@@ -326,6 +335,7 @@ fn non_uniform_recursive_type_resolution_terminates() {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     mutual_recursion_functions: (
         "fn is_even(n Int) Bool {\n\
          \tif n == 0 { True } else { is_odd(n - 1) }\n\
@@ -370,6 +380,7 @@ reject_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     ctor_pattern_with_spread_is_ok: (
         "type User { User(name String, age Int, email String) }\n\
          fn f(u User) String {\n\
@@ -395,6 +406,7 @@ reject_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     or_on_result_unwraps_ok: (
         "fn f(b Bool) Result(Int, String) {\n\
          \tif b { Ok(42) } else { Err('nope') }\n\
@@ -437,6 +449,7 @@ run_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     positional_construction: (
         "type Pair { Pair(fst Int, snd Int) }\n\
          pub fn main() {\n\
@@ -446,6 +459,7 @@ run_case! {
         "3\n",
     ),
 
+    #[ignore = "needs the VM"]
     labeled_construction_reordered: (
         "type Pair { Pair(fst Int, snd Int) }\n\
          pub fn main() {\n\
@@ -576,6 +590,7 @@ run_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     match_guard_basic: (
         "fn classify(n Int) String {\n\
          \tmatch n {\n\
@@ -594,6 +609,7 @@ run_case! {
         "neg\nzero\nsmall\nbig\n",
     ),
 
+    #[ignore = "needs the VM"]
     match_guard_with_constructor: (
         "fn pos(o Option(Int)) Int {\n\
          \tmatch o {\n\
@@ -708,6 +724,7 @@ fn or_pattern_nested_in_non_first_alternative() {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     array_spread_literal: (
         "pub fn main() {\n\
          \txs = [1, 2]\n\
@@ -865,7 +882,6 @@ fn reserved_set_derived_from_prelude_iface() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn reserved_set_derived_from_prelude_iface_runs() {
     // ...but `@vm` functions are not.
     run_outputs(
@@ -1039,6 +1055,7 @@ fn binary_literal_and_pattern_e2e() {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     ctor_destructure_single_variant_ok: (
         "type Box { Box(value Int) }\n\
          pub fn main() {\n\
@@ -1048,6 +1065,7 @@ run_case! {
         "42\n",
     ),
 
+    #[ignore = "needs the VM"]
     ctor_destructure_multi_field_ok: (
         "type Pair { Pair(a Int, b String) }\n\
          pub fn main() {\n\
@@ -1059,6 +1077,7 @@ run_case! {
     ),
 
     // Labels bind by declared field order, not by argument position.
+    #[ignore = "needs the VM"]
     ctor_destructure_labeled_out_of_order: (
         "type Point { Point(x Int, y Int) }\n\
          pub fn main() {\n\
@@ -1069,6 +1088,7 @@ run_case! {
         "1\n2\n",
     ),
 
+    #[ignore = "needs the VM"]
     ctor_destructure_labeled_with_rest: (
         "type T { T(a Int, b Int, c Int) }\n\
          pub fn main() {\n\
@@ -1098,6 +1118,7 @@ reject_case! {
 }
 
 run_case! {
+    #[ignore = "needs the VM"]
     typed_discard_nil_println_ok: (
         "pub fn main() {\n\
          \tNil = println('x')\n\
@@ -1245,6 +1266,7 @@ fn or_receiver_binds_a_heap_error_payload_runs() {
 // works exactly as it does without the attribute.
 run_case! {
     /// Every variant named explicitly: `@exhaustive` has nothing to refuse.
+    #[ignore = "needs the VM"]
     exhaustive_type_with_every_variant_named_runs: (
         "@exhaustive\ntype Color {\n\tRed\n\tGreen\n\tBlue\n}\n\
          pub fn main() {\n\

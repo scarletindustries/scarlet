@@ -797,6 +797,7 @@ dependencies = [
  "rustls-pki-types",
  "rustyline",
  "scarlet_core",
+ "scarlet_vm",
  "serde_json",
  "socket2",
  "ureq",
@@ -836,6 +837,14 @@ dependencies = [
  "scarlet_ir",
  "scarlet_syntax",
  "smallvec",
+]
+
+[[package]]
+name = "scarlet_vm"
+version = "0.1.0"
+dependencies = [
+ "scarlet_core",
+ "scarlet_ir",
 ]
 
 [[package]]

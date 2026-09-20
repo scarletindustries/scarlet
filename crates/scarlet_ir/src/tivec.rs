@@ -51,6 +51,11 @@ impl<I: Idx, T> TiVec<I, T> {
         i
     }
 
+    /// The element at `i`, or `None` past the end.
+    pub fn get(&self, i: I) -> Option<&T> {
+        self.raw.get(i.index())
+    }
+
     #[cfg(test)]
     fn as_slice(&self) -> &[T] {
         &self.raw

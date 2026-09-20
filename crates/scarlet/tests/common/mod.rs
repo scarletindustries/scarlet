@@ -309,7 +309,6 @@ macro_rules! run_case {
         $(
             $(#[$m])*
             #[test]
-            #[ignore = "needs the VM"]
             fn $name() { $crate::common::run_outputs($src, $expected); }
         )*
     };

@@ -1,0 +1,44 @@
+//! The Scarlet VM: runs a compiled `Program`.
+//!
+//! It reads nothing but `scarlet_ir`, the contract with the compiler. The plan
+//! it follows, and why, is `docs/vm-design.md`. It is being built one feature
+//! at a time, so a program that needs something not built yet stops with
+//! [`Stop::NotBuiltYet`], saying what.
+
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+    )
+)]
+#![forbid(unsafe_code)]
+
+mod code;
+mod exec;
+mod value;
+
+use std::io::Write;
+
+use scarlet_ir::core_ir::Program;
+
+/// Why a run ended before the program did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// The program reached something the VM does not run yet.
+    NotBuiltYet(String),
+    /// Where the program's output goes was closed, like a pipe into `head`.
+    /// Nothing is wrong with the program, so this stops it quietly.
+    OutputClosed,
+}
+
+/// Run `program`, writing what it prints to `out`.
+pub fn run(program: &Program, out: &mut dyn Write) -> Result<(), Stop> {
+    let code = code::load(program);
+    exec::Machine::new(&code, out).run()?;
+    Ok(())
+}

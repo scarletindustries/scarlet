@@ -7,6 +7,7 @@ build = "build.rs"
 
 [dependencies]
 scarlet_core = { path = "../scarlet_core" }
+scarlet_vm = { path = "../scarlet_vm" }
 clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.3"
 percent-encoding = "2"

@@ -137,6 +137,7 @@ reject_case! {
 run_case! {
     // U3: `Err(x)` is an ordinary constructor, so a fn returning
     // `Result(Int, E)` may return it and `or` observes the error.
+    #[ignore = "needs the VM"]
     u3_err_constructor_typechecks: (
         "type E { E(msg String) }\n\
          fn f() Result(Int, E) {\n\
@@ -151,6 +152,7 @@ run_case! {
 
     // U4: a block-scoped type env with a function-scoped slot map lets an inner
     // `x = 'hi'` overwrite the outer slot while the outer type stays Int.
+    #[ignore = "needs the VM"]
     u4_block_scope_preserves_outer_slot: (
         "pub fn main() {\n\
          \tx = 1\n\
@@ -166,6 +168,7 @@ run_case! {
 
     // U6: a bare variant name over an unannotated subject must not compile to a
     // wildcard binding, which would send every value into the first arm.
+    #[ignore = "needs the VM"]
     u6_bare_variant_on_inferred_subject_dispatches: (
         "type E {\n\tA\n\tB\n}\n\
          fn f(e) {\n\
@@ -182,6 +185,7 @@ run_case! {
 
     // U14: payload types must be substituted before exhaustiveness, or a fully
     // exhaustive match over `Maybe(Bool)` is wrongly rejected.
+    #[ignore = "needs the VM"]
     u14_generic_enum_exhaustiveness_substitutes_payload: (
         "type Maybe(t) {\n\tJust(value t)\n\tNothing\n}\n\
          fn f(m Maybe(Bool)) Int {\n\
@@ -201,6 +205,7 @@ run_case! {
 
     // U15: `.` after a digit is only part of the number when a digit follows,
     // or `t.0.name` lexes as `t` `.` `0.` `name`.
+    #[ignore = "needs the VM"]
     u15_tuple_index_then_field_access: (
         "type P { P(name String) }\n\
          pub fn main() {\n\
@@ -296,6 +301,7 @@ run_case! {
     // `fn op(a, b)` generalizes to one body emitting `Op::Add`/`Lt`/... which
     // tag-dispatches at runtime. Calling each fn at BOTH Int and Float is what
     // proves the generic op is live; a specialized body could not serve both.
+    #[ignore = "needs the VM"]
     u20b_generic_polymorphic_numeric_ops_are_total: (
         "fn subtract(a, b) { a - b }\n\
          fn multiply(a, b) { a * b }\n\

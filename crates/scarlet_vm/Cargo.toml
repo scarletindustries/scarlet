@@ -1,0 +1,12 @@
+[package]
+name = "scarlet_vm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet_ir = { path = "../scarlet_ir" }
+
+[dev-dependencies]
+# Tests write their programs in Scarlet and compile them. Only the tests see
+# the compiler; the VM itself reads nothing but `scarlet_ir`.
+scarlet_core = { path = "../scarlet_core" }
