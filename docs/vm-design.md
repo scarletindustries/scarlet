@@ -10,7 +10,7 @@ Each point is marked:
 
 ## What the VM is given
 
-The compiler hands over one `core_ir::Program` (`crates/scarlet_core/src/core_ir/mod.rs`):
+The compiler hands over one `core_ir::Program` (`crates/scarlet_ir/src/core_ir/mod.rs`):
 
 | Field | What it is |
 |---|---|
@@ -20,6 +20,7 @@ The compiler hands over one `core_ir::Program` (`crates/scarlet_core/src/core_ir
 | `toplevel` | The entry file's own toplevel. |
 | `main` | The function the program starts at. It's `None` for a REPL entry, which runs its toplevel and prints the value. |
 | `globals` | How many module-level slots the program needs. Toplevels write them, and functions read them with `Load::Global`. |
+| `types` | The names of every type the program builds or matches a constructor of, by `TypeId`: the type's name, and each variant's name and field labels. Only for showing a value to a person (`Some(1)`, `Point{ x: 1, y: 2 }`); nothing the program *does* depends on a name. |
 
 Each function is a `LoweredFn`: its `module`, its source `name`, its `core` body, and the `pool` that the types in the body are numbered in.
 

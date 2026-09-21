@@ -41,14 +41,16 @@
 //!   a scope replays only the bindings it actually shadowed, never a map
 //!   snapshot.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use super::session::{RawRef, Watermark};
 use super::{PreludeBindings, TypeRef};
 use crate::ast;
-use crate::core_ir::{Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program};
+use crate::core_ir::{
+    Const, ConstId, CoreFn, FuncIdx, LoweredFn, Program, TypeNames, VariantNames,
+};
 use crate::diagnostic::{Diagnostic, DiagnosticCode, has_errors};
 use crate::tivec::{Idx, TiVec};
 use crate::typed_ir::slots::{SlotError, slot_labeled};
@@ -758,6 +760,20 @@ fn function_never_lowered(idx: usize) -> ! {
     )
 }
 
+/// A lowered body names a constructor of a type the compile never registered
+/// with constructors. Lowering only names constructors the checker resolved,
+/// so only a compiler bug gets here.
+#[allow(clippy::panic)]
+#[cold]
+#[inline(never)]
+fn constructor_of_no_type(id: TypeId) -> ! {
+    panic!(
+        "internal compiler error: a constructor of type {} has no declared variants. \
+         Report this as a compiler bug.",
+        id.0
+    )
+}
+
 /// Something reserved a function while the elaborator walked — the `FuncIdx`
 /// the next `FnTable::push` mints would stop naming it. Aborts, in release as
 /// well as debug: every eta wrapper reserved after the stray push would
@@ -1331,14 +1347,61 @@ impl Compiler {
                 None => function_never_lowered(i),
             }
         }
+        let inits = std::mem::take(&mut self.inits);
+        let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]));
         Some(Program {
             fns,
             consts: self.consts.clone(),
-            inits: std::mem::take(&mut self.inits),
+            inits,
             toplevel,
             main: self.main,
             globals: self.local_count as u32,
+            types,
         })
+    }
+
+    /// The names of every type a constructor in `bodies` belongs to.
+    fn type_names<'a>(
+        &self,
+        bodies: impl Iterator<Item = &'a LoweredFn>,
+    ) -> BTreeMap<TypeId, TypeNames> {
+        let mut ids = BTreeSet::new();
+        for f in bodies {
+            f.core.body.for_each_variant(|v| {
+                ids.insert(v.type_id);
+            });
+        }
+        ids.into_iter()
+            .map(|id| (id, self.names_of_type(id)))
+            .collect()
+    }
+
+    fn names_of_type(&self, id: TypeId) -> TypeNames {
+        let Some((info, variants)) = self
+            .env
+            .lookup_type_info_by_id(id)
+            .and_then(|info| Some((info, info.variants()?)))
+        else {
+            constructor_of_no_type(id)
+        };
+        let str = |s| self.engine.str(s).to_string();
+        TypeNames {
+            name: str(info.name),
+            variants: self
+                .engine
+                .variants_of(variants)
+                .iter()
+                .map(|v| VariantNames {
+                    name: str(v.name),
+                    fields: self
+                        .engine
+                        .variant_fields_of(v.fields)
+                        .iter()
+                        .map(|f| str(f.label))
+                        .collect(),
+                })
+                .collect(),
+        }
     }
 
     /// Pool `c`, deduplicating against the existing pool.

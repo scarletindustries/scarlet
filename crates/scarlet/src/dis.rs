@@ -4,9 +4,10 @@
 //! listing always picks: the entry file's own functions, or every function
 //! whose name matches, from any module.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use crate::core_ir::Program;
+use crate::core_ir::{CoreExpr, Program};
 use crate::module::ModuleKey;
 
 /// Which functions a listing shows.
@@ -21,11 +22,12 @@ pub enum Filter<'a> {
 /// The listing, or `None` when `filter` matches no function.
 ///
 /// Each function is preceded by its `fn#N`, the number a `call fn#N` or
-/// `closure fn#N` elsewhere in the listing refers to.
+/// `closure fn#N` elsewhere in the listing refers to. The listing ends with
+/// the names of the constructors it shows, so `ctor 512.0(%1)` can be read.
 pub fn listing(program: &Program, filter: Filter<'_>) -> Option<String> {
     let entry = ModuleKey::main();
     let mut out = summary(program, &entry);
-    let mut shown = 0;
+    let mut shown: Vec<&CoreExpr> = Vec::new();
     for (i, f) in (&program.fns).into_iter().enumerate() {
         let keep = match filter {
             Filter::Entry => f.module == entry.as_str(),
@@ -33,14 +35,48 @@ pub fn listing(program: &Program, filter: Filter<'_>) -> Option<String> {
         };
         if keep {
             let _ = write!(out, "\n; fn#{i}\n{f}");
-            shown += 1;
+            shown.push(&f.core.body);
         }
     }
     if let Filter::Entry = filter {
         let _ = write!(out, "\n; toplevel\n{}", program.toplevel);
-        shown += 1;
+        shown.push(&program.toplevel.core.body);
     }
-    (shown > 0).then_some(out)
+    if shown.is_empty() {
+        return None;
+    }
+    types(program, &shown, &mut out);
+    Some(out)
+}
+
+/// One comment line per type a constructor in `bodies` belongs to:
+/// `; 512 Option: .0 Some(value), .1 None`.
+fn types(program: &Program, bodies: &[&CoreExpr], out: &mut String) {
+    let mut ids = BTreeSet::new();
+    for body in bodies {
+        body.for_each_variant(|v| {
+            ids.insert(v.type_id);
+        });
+    }
+    if ids.is_empty() {
+        return;
+    }
+    out.push_str("\n; types\n");
+    for id in ids {
+        let Some(t) = program.types.get(&id) else {
+            let _ = writeln!(out, "; {} has no names", id.0);
+            continue;
+        };
+        let _ = write!(out, "; {} {}:", id.0, t.name);
+        for (i, v) in t.variants.iter().enumerate() {
+            let sep = if i == 0 { " " } else { ", " };
+            let _ = write!(out, "{sep}.{i} {}", v.name);
+            if !v.fields.is_empty() {
+                let _ = write!(out, "({})", v.fields.join(", "));
+            }
+        }
+        out.push('\n');
+    }
 }
 
 /// One comment line on the program's shape, so a filtered listing still says
@@ -101,6 +137,33 @@ mod tests {
         let text = listing(&program(src), Filter::Named("replace")).expect("replace exists");
         assert!(text.contains("fn scarlet/string.replace("), "{text}");
         assert!(!text.contains("; toplevel"), "{text}");
+    }
+
+    /// A listing ends with the names of the constructors it shows, and only
+    /// those.
+    #[test]
+    fn the_listing_names_its_constructors() {
+        let src = "type Shape {\n\
+                   \tCircle(radius Int)\n\
+                   \tDot\n\
+                   }\n\
+                   fn area(s Shape) Int {\n\
+                   \tmatch s {\n\
+                   \t\tCircle(r) -> r * r\n\
+                   \t\tDot -> 0\n\
+                   \t}\n\
+                   }\n\
+                   pub fn main() {\n\
+                   \tprintln(area(Circle(radius: 2)))\n\
+                   }\n";
+        let text = listing(&program(src), Filter::Entry).expect("main has functions");
+        let (_, types) = text.split_once("\n; types\n").expect("a types section");
+        let lines: Vec<&str> = types.lines().collect();
+        assert_eq!(lines.len(), 1, "{types}");
+        assert!(
+            lines[0].ends_with(" Shape: .0 Circle(radius), .1 Dot"),
+            "{types}"
+        );
     }
 
     #[test]

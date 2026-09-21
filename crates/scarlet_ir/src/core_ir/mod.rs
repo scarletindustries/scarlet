@@ -8,6 +8,7 @@ mod prim;
 
 pub use prim::PrimOp;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -128,6 +129,23 @@ impl CoreBind {
 pub struct VariantRef {
     pub type_id: TypeId,
     pub variant_idx: u16,
+}
+
+/// What a type and its constructors are called, for anything that shows a
+/// value of it to a person: `Some(1)`, `Point{ x: 1, y: 2 }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeNames {
+    /// As declared, which is not always how an importer spells it.
+    pub name: String,
+    /// Indexed by [`VariantRef::variant_idx`].
+    pub variants: Vec<VariantNames>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantNames {
+    pub name: String,
+    /// Each field's label, in the order the constructor holds its fields.
+    pub fields: Vec<String>,
 }
 
 /// Heap-cell shape for Perceus reuse pairing: a constructor cell with this
@@ -334,6 +352,44 @@ pub enum CoreExpr {
 }
 
 impl CoreExpr {
+    /// Calls `f` for each constructor this expression builds or matches on,
+    /// once per mention, in no set order.
+    pub fn for_each_variant(&self, mut f: impl FnMut(VariantRef)) {
+        let mut work = vec![self];
+        while let Some(e) = work.pop() {
+            match e {
+                CoreExpr::Let { rhs, body, .. } => {
+                    if let Atom::Ctor { variant, .. } = rhs {
+                        f(*variant);
+                    }
+                    work.push(body);
+                }
+                CoreExpr::Tail(Atom::Ctor { variant, .. }) => f(*variant),
+                CoreExpr::Tail(_) | CoreExpr::Goto(_) => {}
+                CoreExpr::LetJoin { join, body, .. }
+                | CoreExpr::LetCont {
+                    cont: join, body, ..
+                } => {
+                    work.push(join);
+                    work.push(body);
+                }
+                CoreExpr::Drop { body, .. } => work.push(body),
+                CoreExpr::Match { arms, .. } => {
+                    for (pat, arm) in arms {
+                        if let CorePat::Ctor { variant, .. } = pat {
+                            f(*variant);
+                        }
+                        work.push(arm);
+                    }
+                }
+                CoreExpr::If { then, els, .. } => {
+                    work.push(then);
+                    work.push(els);
+                }
+            }
+        }
+    }
+
     /// The `(bind, entry-frame slot)` pairs pinned on this expression's
     /// outermost `Let`/`LetJoin` spine, in binding order.
     ///
@@ -427,6 +483,9 @@ pub struct Program {
     /// How many global slots module-scope bindings occupy. Every `GlobalSlot`
     /// is below this.
     pub globals: u32,
+    /// The names of every type the program builds or matches a constructor
+    /// of. Every [`VariantRef`] in the program has its type here.
+    pub types: BTreeMap<TypeId, TypeNames>,
 }
 
 // Printer for the golden tests in `crates/scarlet/tests/core_ir.rs`. Ids print as

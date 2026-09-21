@@ -904,3 +904,59 @@ mod unlowerable {
         assert!(program.main.is_some(), "a program with `main` starts there");
     }
 }
+
+/// Every constructor a program builds or matches on has its type's names in
+/// `Program::types`, down to the variant: the prelude's, the imported
+/// modules', and the entry file's own.
+#[test]
+fn every_constructor_has_names() {
+    let src = "import scarlet/http\n\
+               import scarlet/json\n\
+               import scarlet/map\n\
+               import scarlet/string\n\
+               type Shape {\n\
+               \tCircle(radius Int)\n\
+               \tDot\n\
+               }\n\
+               pub fn main() {\n\
+               \tprintln(string.inspect(Circle(radius: 1)))\n\
+               }\n";
+    let r = scarlet::bytecode::compile(&parse(src), None);
+    assert!(r.success(), "{:?}", r.diagnostics);
+    let program = r.into_runnable().expect("a successful compile is runnable");
+    let bodies = (&program.fns)
+        .into_iter()
+        .chain(&program.inits)
+        .chain([&program.toplevel]);
+    let mut seen = 0;
+    for f in bodies {
+        f.core.body.for_each_variant(|v| {
+            seen += 1;
+            let names = program.types.get(&v.type_id).unwrap_or_else(|| {
+                panic!("{}.{}: type {} has no names", f.module, f.name, v.type_id.0)
+            });
+            assert!(
+                names.variants.get(usize::from(v.variant_idx)).is_some(),
+                "{}.{}: {} has no variant {}",
+                f.module,
+                f.name,
+                names.name,
+                v.variant_idx
+            );
+        });
+    }
+    assert!(
+        seen > 100,
+        "only {seen} constructors: the stdlib did not compile in"
+    );
+    let shape = program
+        .types
+        .values()
+        .find(|t| t.name == "Shape")
+        .expect("the entry file's own type");
+    let circle = shape.variants.first().expect("Circle");
+    assert_eq!(
+        (circle.name.as_str(), circle.fields.as_slice()),
+        ("Circle", &["radius".to_string()][..])
+    );
+}
