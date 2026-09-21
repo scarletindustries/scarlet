@@ -14,6 +14,7 @@
 use std::io::Write;
 
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
+use scarlet_ir::intrinsic::Intrinsic;
 
 use crate::Stop;
 use crate::array::{self, End, Seq};
@@ -363,6 +364,15 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let cell = array::from_values(&mut self.heap, &values).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::Builtin {
+                    dst,
+                    intrinsic,
+                    args,
+                } => {
+                    let args: Vec<Value> = args.iter().map(|r| self.get(base, *r)).collect();
+                    let v = self.builtin(*intrinsic, &args)?;
+                    self.set(base, *dst, v);
+                }
                 Instr::Equal { dst, a, b } => {
                     let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
                     self.set(base, *dst, Value::bool(same));
@@ -537,6 +547,52 @@ impl<'c, 'o> Machine<'c, 'o> {
                     }
                 }
             }
+        }
+    }
+
+    /// What built-in `i` gives for `args`, which it only reads. The result
+    /// holds its own reference.
+    fn builtin(&mut self, i: Intrinsic, args: &[Value]) -> Result<Value, Stop> {
+        let &[v] = args else {
+            return Err(Stop::BadProgram(format!(
+                "the built-in {i:?} called with {} arguments",
+                args.len()
+            )));
+        };
+        match i {
+            Intrinsic::StringInspect => {
+                let mut text = Vec::new();
+                self.show(v, &mut text)?;
+                Ok(Value::cell(self.heap.string(&text).map_err(full)?))
+            }
+            Intrinsic::StringLength => {
+                let Some(cell) = v.as_cell().filter(|_| self.is_string(v)) else {
+                    return Err(Stop::BadProgram(format!("`string.length` of {v:?}")));
+                };
+                let mut bytes = Vec::with_capacity(self.heap.string_len(cell));
+                self.heap.read_string(cell, &mut bytes);
+                let n = match std::str::from_utf8(&bytes) {
+                    Ok(s) => s.chars().count(),
+                    Err(_) => {
+                        return Err(Stop::BadProgram("a string that is not UTF-8".into()));
+                    }
+                };
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            Intrinsic::ArrayLength => {
+                let n = self.seq(v)?.len(&self.heap);
+                bigint::value(&mut self.heap, n.into()).map_err(full)
+            }
+            Intrinsic::IntToString => {
+                let text = match self.int_of(v)? {
+                    Int::Small(n) => n.to_string(),
+                    Int::Big(n) => n.to_string(),
+                };
+                Ok(Value::cell(
+                    self.heap.string(text.as_bytes()).map_err(full)?,
+                ))
+            }
+            other => Err(Stop::NotBuiltYet(format!("the built-in {other:?}"))),
         }
     }
 
@@ -764,7 +820,11 @@ impl<'c, 'o> Machine<'c, 'o> {
     }
 
     fn int(&self, base: usize, r: Reg) -> Result<Int, Stop> {
-        match self.get(base, r).view() {
+        self.int_of(self.get(base, r))
+    }
+
+    fn int_of(&self, v: Value) -> Result<Int, Stop> {
+        match v.view() {
             View::Int(n) => Ok(Int::Small(n)),
             View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
                 Ok(Int::Big(self.heap.read_big_int(cell)))

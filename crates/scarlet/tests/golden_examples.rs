@@ -180,15 +180,11 @@ suite! {
     examples: [
         // Language core.
         hello,
-        #[ignore = "needs the VM"]
         control_flow,
-        #[ignore = "needs the VM"]
         pattern_matching,
         #[ignore = "needs the VM"]
         data_types,
-        #[ignore = "needs the VM"]
         generics,
-        #[ignore = "needs the VM"]
         closures,
         // Named tco.scrl: scarlet/internal.scrl's `stack_depth` doc points at it.
         #[ignore = "needs the VM"]
@@ -226,14 +222,12 @@ suite! {
         modules,
         // Algorithms, then the capstone: a lexer, parser and evaluator built
         // only from what the examples above teach. Read last.
-        #[ignore = "needs the VM"]
         life,
         #[ignore = "needs the VM"]
         interpreter,
         // Benchmarks scripts/bench*.sh also drives. Deterministic, so goldened
         // like any other example.
         bench,
-        #[ignore = "needs the VM"]
         bench_list,
     ],
 

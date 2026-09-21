@@ -1124,7 +1124,6 @@ reject_case! {
 // `program.code` ahead of the body, so `emit` must bake absolute jump targets
 // against the post-lowering address. Only the `else` arm jumps.
 #[test]
-#[ignore = "needs the VM"]
 fn a_branch_after_an_eta_wrapper_jumps_to_the_right_place() {
     let src = "import scarlet/array\n\
                type W { W(v Int) }\n\

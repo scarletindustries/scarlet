@@ -150,7 +150,6 @@ fn stdlib_resource() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_array() {
     run_outputs(
         "import scarlet/array\n\
@@ -207,7 +206,6 @@ fn stdlib_array() {
 }
 
 run_case! {
-    #[ignore = "needs the VM"]
     stdlib_int: (
         "import scarlet/int\n\
          pub fn main() {\n\

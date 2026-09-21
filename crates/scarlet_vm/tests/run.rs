@@ -745,3 +745,25 @@ fn equality_walks_deep_values_in_constant_stack() {
         "True\nFalse\n",
     );
 }
+
+#[test]
+fn the_first_built_ins_run() {
+    prints(
+        "import scarlet/array\n\
+         import scarlet/int\n\
+         import scarlet/string\n\
+         pub fn main() {\n\
+         \tprintln(string.inspect(Some([1, 2])))\n\
+         \tprintln(string.inspect('as is'))\n\
+         \tprintln(string.length('héllo'))\n\
+         \tprintln(string.length(''))\n\
+         \tprintln(array.length([1, 2, 3]))\n\
+         \tprintln(array.length(0..1000000000000))\n\
+         \tprintln(int.to_string(-42))\n\
+         \tprintln(int.to_string(9223372036854775807 + 1))\n\
+         \tprintln(array.map([1, 2, 3], fn(x) { x * 10 }))\n\
+         \tprintln(array.reverse([1, 2, 3]))\n\
+         }\n",
+        "Some(\n  [1, 2]\n)\nas is\n5\n0\n3\n1000000000000\n-42\n9223372036854775808\n[10, 20, 30]\n[3, 2, 1]\n",
+    );
+}

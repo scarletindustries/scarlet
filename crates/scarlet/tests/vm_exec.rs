@@ -742,7 +742,6 @@ run_case! {
     // A `@vm` builtin named without being called is a first-class value: the
     // elaborator synthesises an eta wrapper over the opcode, as for a ctor
     // used as a value. Driven through the VM, not just the typechecker.
-    #[ignore = "needs the VM"]
     builtin_bound_to_a_local_is_callable: (
         "import scarlet/string\n\
          pub fn main() {\n\
@@ -751,7 +750,6 @@ run_case! {
          }\n",
         "3\n",
     ),
-    #[ignore = "needs the VM"]
     builtin_passed_as_a_function_argument: (
         "import scarlet/array\n\
          import scarlet/string\n\
@@ -778,7 +776,6 @@ run_case! {
     // It is not a witness for the jump-over mispatch `tests/check_parity.rs`
     // pins: both cases pass against the unfixed compiler, because the mispatched
     // jump is never executed. Only the layout assertion catches that.
-    #[ignore = "needs the VM"]
     builtin_as_a_value_inside_a_function_body: (
         "import scarlet/array\n\
          import scarlet/string\n\
@@ -790,7 +787,6 @@ run_case! {
          }\n",
         "[1, 2, 3]\n",
     ),
-    #[ignore = "needs the VM"]
     ctor_as_a_value_inside_a_function_body: (
         "import scarlet/array\n\
          type W { W(v Int) }\n\

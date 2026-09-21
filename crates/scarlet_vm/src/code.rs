@@ -195,6 +195,12 @@ pub(crate) enum Instr {
         src: Reg,
         index: u16,
     },
+    /// A call to a `@vm` built-in the VM runs ([`built`]).
+    Builtin {
+        dst: Reg,
+        intrinsic: Intrinsic,
+        args: Box<[Reg]>,
+    },
     /// `a == b`, structurally ([`crate::eq`]).
     Equal {
         dst: Reg,
@@ -331,6 +337,7 @@ impl Instr {
             | Instr::Field { .. }
             | Instr::Tuple { .. }
             | Instr::Element { .. }
+            | Instr::Builtin { .. }
             | Instr::Equal { .. }
             | Instr::NotEqual { .. }
             | Instr::Not { .. }
@@ -752,6 +759,13 @@ impl<'c> Loader<'c> {
                 },
                 _ => return Err("println with other than one argument".into()),
             },
+            Atom::Intrinsic { intrinsic, args } if built(*intrinsic, args.len()) => {
+                Instr::Builtin {
+                    dst,
+                    intrinsic: *intrinsic,
+                    args: args.iter().copied().map(Reg::of).collect(),
+                }
+            }
             Atom::Intrinsic { intrinsic, .. } => return Err(format!("the built-in {intrinsic:?}")),
             // Perceus's `reuse` is a hint that `fields` may overwrite a cell
             // just dropped. A fresh cell is always right, so it waits.
@@ -952,6 +966,18 @@ impl<'c> Loader<'c> {
             Some(Const::Binary { .. }) => Err("Binary".into()),
             None => Err(format!("constant c{i}, which the program does not have")),
         }
+    }
+}
+
+/// Whether the VM runs built-in `i` when called with `argc` arguments. A
+/// function calling any other still loads, and stops only when it runs.
+fn built(i: Intrinsic, argc: usize) -> bool {
+    match i {
+        Intrinsic::StringInspect
+        | Intrinsic::StringLength
+        | Intrinsic::ArrayLength
+        | Intrinsic::IntToString => argc == 1,
+        _ => false,
     }
 }
 

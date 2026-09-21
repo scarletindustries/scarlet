@@ -82,7 +82,6 @@ fn assert_prints(tag: &str, src: &str, schedulers: Option<u32>, expected: &str) 
 /// frames run native while `middle`/`outer` stay interpreted: the boundary is
 /// crossed in both directions inside one program.
 #[test]
-#[ignore = "needs the VM"]
 fn sandwich_crosses_the_warmup_boundary_mid_run() {
     let src = "import scarlet/array
 
