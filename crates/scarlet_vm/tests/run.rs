@@ -120,19 +120,16 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
 /// it stops the run, and the stop says what it needs.
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
-    let src = "fn pair() Array(Int) { [1, 2] }\n\
+    let src = "fn half() Float { 0.5 }\n\
                pub fn main() {\n\
                \tprintln(1)\n\
                }\n";
     prints(src, "1\n");
-    let calls = "fn pair() Array(Int) { [1, 2] }\n\
+    let calls = "fn half() Float { 0.5 }\n\
                  pub fn main() {\n\
-                 \t_ = pair()\n\
+                 \t_ = half()\n\
                  }\n";
-    assert_eq!(
-        run(calls),
-        Err(Stop::NotBuiltYet("the operation MakeArray".into()))
-    );
+    assert_eq!(run(calls), Err(Stop::NotBuiltYet("Float".into())));
 }
 
 #[test]
@@ -521,5 +518,85 @@ fn a_wide_tuple_takes_a_line_per_element() {
     prints(
         &format!("pub fn main() {{\n\tprintln({past_80})\n}}\n"),
         "(\n  aaaaaaaaaaaaaaaaaa,\n  bbbbbbbbbbbbbbbbbb,\n  cccccccccccccccccc,\n  ddddddddddddddddddd\n)\n",
+    );
+}
+
+#[test]
+fn an_array_is_built_and_shown() {
+    prints(
+        "pub fn main() {\n\
+         \tprintln([1, 2, 3])\n\
+         \tprintln([])\n\
+         \tprintln(['a', 'b'])\n\
+         \tprintln([[1, 2], [3, 4]])\n\
+         \tprintln(Some([1]))\n\
+         \tprintln('${[True, False]}')\n\
+         }\n",
+        "[1, 2, 3]\n[]\n[a, b]\n[\n  [1, 2],\n  [3, 4]\n]\nSome(\n  [1]\n)\n[True, False]\n",
+    );
+}
+
+/// A long array of small values goes six to a line.
+#[test]
+fn a_long_array_goes_six_to_a_line() {
+    prints(
+        "fn upto(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { upto(n - 1, [n, ..acc]) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(upto(40, []))\n\
+         }\n",
+        "[\n  1, 2, 3, 4, 5, 6, \n  7, 8, 9, 10, 11, 12, \n  13, 14, 15, 16, 17, 18, \n  \
+         19, 20, 21, 22, 23, 24, \n  25, 26, 27, 28, 29, 30, \n  31, 32, 33, 34, 35, 36, \n  \
+         37, 38, 39, 40\n]\n",
+    );
+}
+
+/// Arrays walked the way Scarlet code walks them: head and rest, built by
+/// appending in a loop and by prepending in one, joined and indexed.
+#[test]
+fn an_array_is_walked_built_and_joined() {
+    prints(
+        "fn sum(xs Array(Int)) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> 0\n\
+         \t\t[h, ..t] -> h + sum(t)\n\
+         \t}\n\
+         }\n\
+         fn total(xs Array(Int), acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> acc\n\
+         \t\t[h, ..t] -> total(t, acc + h)\n\
+         \t}\n\
+         }\n\
+         fn build(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { build(n - 1, [..acc, n]) }\n\
+         }\n\
+         fn describe(xs Array(Int)) String {\n\
+         \tmatch xs {\n\
+         \t\t[] -> 'empty'\n\
+         \t\t[a] -> 'one ${a}'\n\
+         \t\t[a, b] -> 'two ${a} ${b}'\n\
+         \t\t[a, _, ..rest] -> 'from ${a}, then ${rest}'\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(sum([1, 2, 3, 4]))\n\
+         \tbig = build(10000, [])\n\
+         \tprintln(total(big, 0))\n\
+         \tprintln(describe([]))\n\
+         \tprintln(describe([7]))\n\
+         \tprintln(describe([7, 8]))\n\
+         \tprintln(describe([7, 8, 9, 10]))\n\
+         \tprintln([0, ..[1, 2], 3])\n\
+         \tprintln([..[1, 2], ..[3, 4]])\n\
+         \tprintln([10, 20, 30][1] or 99)\n\
+         \tprintln([10, 20, 30][3] or 99)\n\
+         \tprintln([10, 20, 30][-1] or 99)\n\
+         \tprintln(big[9999] or 99)\n\
+         \tprintln(big[9223372036854775807] or 99)\n\
+         }\n",
+        "10\n50005000\nempty\none 7\ntwo 7 8\nfrom 7, then [9, 10]\n[0, 1, 2, 3]\n[1, 2, 3, 4]\n\
+         20\n99\n99\n1\n99\n",
     );
 }

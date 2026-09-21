@@ -707,7 +707,6 @@ fn or_pattern_nested_in_non_first_alternative() {
 }
 
 run_case! {
-    #[ignore = "needs the VM"]
     array_spread_literal: (
         "pub fn main() {\n\
          \txs = [1, 2]\n\

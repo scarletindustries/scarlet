@@ -16,6 +16,7 @@ use std::io::Write;
 use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::Stop;
+use crate::array::{self, End};
 use crate::bigint::{self, Int};
 use crate::code::{Body, Code, Func, Instr, Reg};
 use crate::heap::{Full, Heap, Kind};
@@ -356,6 +357,90 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let element = self.share(element);
                     self.set(base, *dst, element);
                 }
+                Instr::Array { dst, elements } => {
+                    let values = self.args(base, elements);
+                    let cell = array::from_values(&mut self.heap, &values).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::ArrayLen { dst, src } => {
+                    let a = self.array(self.get(base, *src))?;
+                    let n = array::len(&self.heap, a);
+                    let v = bigint::value(&mut self.heap, n.into()).map_err(full)?;
+                    self.set(base, *dst, v);
+                }
+                Instr::ArrayElem { dst, src, index } => {
+                    let a = self.array(self.get(base, *src))?;
+                    let Some(v) = array::get(&self.heap, a, usize::from(*index)) else {
+                        return Err(Stop::BadProgram(format!(
+                            "element {index} read from an array with no such element"
+                        )));
+                    };
+                    let v = self.share(v);
+                    self.set(base, *dst, v);
+                }
+                Instr::ArrayDrop { dst, src, n } => {
+                    let a = self.array(self.get(base, *src))?;
+                    let n = match self.get(base, *n).view() {
+                        View::Int(n) if n >= 0 => n as usize,
+                        v @ (View::Int(_)
+                        | View::Float(_)
+                        | View::Nil
+                        | View::Bool(_)
+                        | View::Func(_)
+                        | View::Cell(_)
+                        | View::Nullary(_)) => {
+                            return Err(Stop::BadProgram(format!(
+                                "an array's first {v:?} elements dropped"
+                            )));
+                        }
+                    };
+                    let cell = array::skip(&mut self.heap, a, n).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::ArrayPrepend { dst, front, rest } => {
+                    let a = self.array(self.get(base, *rest))?;
+                    let items = self.args(base, front);
+                    let cell = self.push_all(a, items.into_iter().rev(), End::Front)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::ArrayAppend { dst, rest, back } => {
+                    let a = self.array(self.get(base, *rest))?;
+                    let items = self.args(base, back);
+                    let cell = self.push_all(a, items.into_iter(), End::Back)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::ArrayConcat { dst, a, b } => {
+                    let a = self.array(self.get(base, *a))?;
+                    let b = self.array(self.get(base, *b))?;
+                    let cell = array::concat(&mut self.heap, a, b).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::ArrayIndexOr {
+                    dst,
+                    src,
+                    index,
+                    default,
+                } => {
+                    let a = self.array(self.get(base, *src))?;
+                    let found = match self.get(base, *index).view() {
+                        View::Int(i) => usize::try_from(i)
+                            .ok()
+                            .and_then(|i| array::get(&self.heap, a, i)),
+                        // A big int is past the end of any array.
+                        View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => None,
+                        v @ (View::Float(_)
+                        | View::Nil
+                        | View::Bool(_)
+                        | View::Func(_)
+                        | View::Cell(_)
+                        | View::Nullary(_)) => {
+                            return Err(Stop::BadProgram(format!("an array indexed by {v:?}")));
+                        }
+                    };
+                    let v = found.unwrap_or(self.get(base, *default));
+                    let v = self.share(v);
+                    self.set(base, *dst, v);
+                }
                 Instr::Bad { why } => return Err(Stop::BadProgram((*why).into())),
                 Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
                     View::Bool(true) => {}
@@ -386,6 +471,34 @@ impl<'c, 'o> Machine<'c, 'o> {
                 }
             }
         }
+    }
+
+    /// The array `v` holds.
+    fn array(&self, v: Value) -> Result<crate::heap::Cell, Stop> {
+        match v.as_cell() {
+            Some(cell) if self.heap.kind(cell) == Some(Kind::ArrayRoot) => Ok(cell),
+            _ => Err(Stop::BadProgram(format!(
+                "an array operation on {v:?}, which is not an array"
+            ))),
+        }
+    }
+
+    /// `a` with each of `items` pushed at `end`, in turn. Each item's
+    /// reference passes to the result; `a` is borrowed.
+    fn push_all(
+        &mut self,
+        a: crate::heap::Cell,
+        items: impl Iterator<Item = Value>,
+        end: End,
+    ) -> Result<crate::heap::Cell, Stop> {
+        let mut cur = a;
+        self.heap.share(cur);
+        for x in items {
+            let next = array::push(&mut self.heap, cur, x, end).map_err(full)?;
+            self.heap.release(cur);
+            cur = next;
+        }
+        Ok(cur)
     }
 
     /// The values in `regs`, each with one more reference: for passing on.
@@ -738,6 +851,38 @@ mod tests {
             out,
             "1\n(1, 500500)\nSome(\n  (\n    (1, 500500),\n    x\n  )\n)\n"
         );
+        assert_eq!(left, 0);
+    }
+
+    /// An array shares its nodes with the arrays it was made from. Building
+    /// arrays of strings at both ends, walking them, joining them and keeping
+    /// old versions around leaves nothing once they are all dropped.
+    #[test]
+    fn arrays_and_what_they_share_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "fn build(n Int, acc Array(String)) Array(String) {\n\
+             \tif n == 0 { acc } else { build(n - 1, [..acc, '${n}']) }\n\
+             }\n\
+             fn front(n Int, acc Array(String)) Array(String) {\n\
+             \tif n == 0 { acc } else { front(n - 1, ['${n}', ..acc]) }\n\
+             }\n\
+             fn count(xs Array(String), n Int) Int {\n\
+             \tmatch xs {\n\
+             \t\t[] -> n\n\
+             \t\t[_, ..t] -> count(t, n + 1)\n\
+             \t}\n\
+             }\n\
+             pub fn main() {\n\
+             \ta = build(2000, [])\n\
+             \tb = front(2000, a)\n\
+             \tc = [..b, ..a]\n\
+             \tprintln(count(c, 0))\n\
+             \tprintln(c[0] or '?')\n\
+             \tprintln(a[0] or '?')\n\
+             \tprintln(count([..a, ..[]], 0))\n\
+             }\n",
+        );
+        assert_eq!(out, "6000\n1\n2000\n2000\n");
         assert_eq!(left, 0);
     }
 

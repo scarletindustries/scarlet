@@ -18,6 +18,7 @@
 )]
 #![forbid(unsafe_code)]
 
+mod array;
 mod bigint;
 mod code;
 mod exec;

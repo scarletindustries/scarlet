@@ -183,7 +183,6 @@ run_case! {
 
     // `vm::inspect`'s multiline layout through the real binary, not just the
     // unit tests.
-    #[ignore = "needs the VM"]
     inspect_multiline_structures_e2e: (
         "type Point {\n\tx Int\n\ty Int\n}\n\
          type Seg {\n\ta Point\n\tb Point\n}\n\
@@ -771,7 +770,6 @@ run_case! {
     ),
     // A bare builtin as a value takes the identifier path, not
     // `module.member`.
-    #[ignore = "needs the VM"]
     bare_builtin_as_value_is_callable: (
         "import scarlet/array\n\
          pub fn main() {\n\

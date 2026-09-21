@@ -22,6 +22,7 @@ use scarlet_ir::TypeId;
 use scarlet_ir::core_ir::{FuncIdx, TypeNames, VariantNames, VariantRef};
 
 use crate::Stop;
+use crate::array;
 use crate::code::Code;
 use crate::heap::{Cell, Heap, Kind};
 use crate::value::{Value, View};
@@ -57,12 +58,7 @@ pub(crate) fn show(heap: &Heap, code: &Code, v: Value, out: &mut Vec<u8>) -> Res
     while let Some(piece) = todo.pop() {
         match piece {
             Piece::Text(s) => out.extend_from_slice(s.as_bytes()),
-            Piece::Line(n) => {
-                out.push(b'\n');
-                for _ in 0..n {
-                    out.extend_from_slice(b"  ");
-                }
-            }
+            Piece::Line(n) => line(out, n),
             Piece::Value(v, layout) => value(heap, code, v, layout, out, &mut todo)?,
         }
     }
@@ -94,6 +90,12 @@ fn value<'t>(
             Some(Kind::Ctor) => ctor(heap, &code.types, cell, layout, out, todo),
             Some(Kind::Closure) => function(code, heap.closure_func(cell), out),
             Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
+            Some(Kind::ArrayRoot) => array(heap, code, cell, layout, out, todo)?,
+            Some(Kind::ArrayLeaf | Kind::ArrayBranch) => {
+                return Err(Stop::BadProgram(
+                    "a piece of an array's tree held as a value".into(),
+                ));
+            }
             None => return Err(Stop::NotBuiltYet("printing this value".into())),
         },
         View::Func(f) => function(code, f, out),
@@ -227,6 +229,102 @@ fn tuple<'t>(
     Ok(())
 }
 
+/// An array: `[1, 2, 3]` when it fits on a line, six to a line when it holds
+/// only small values and does not fit, and one element per line otherwise.
+fn array<'t>(
+    heap: &Heap,
+    code: &'t Code,
+    cell: Cell,
+    layout: Layout,
+    out: &mut Vec<u8>,
+    todo: &mut Vec<Piece<'t>>,
+) -> Result<(), Stop> {
+    let elements = array::elements(heap, cell);
+    match layout {
+        Layout::Open(_) if elements.is_empty() => out.extend_from_slice(b"[]"),
+        Layout::Open(n) if elements.iter().all(|e| small(heap, *e)) => {
+            six_to_a_line(heap, code, &elements, n, out)?;
+        }
+        Layout::Open(n) => {
+            out.push(b'[');
+            todo.push(Piece::Text("]"));
+            todo.push(Piece::Line(n));
+            for (i, e) in elements.iter().enumerate().rev() {
+                todo.push(Piece::Value(*e, Layout::Open(n + 1)));
+                todo.push(Piece::Line(n + 1));
+                if i > 0 {
+                    todo.push(Piece::Text(","));
+                }
+            }
+        }
+        Layout::Flat => {
+            out.push(b'[');
+            todo.push(Piece::Text("]"));
+            for (i, e) in elements.iter().enumerate().rev() {
+                todo.push(Piece::Value(*e, Layout::Flat));
+                if i > 0 {
+                    todo.push(Piece::Text(", "));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Small elements on one line when they fit in `LINE` columns, and six to a
+/// line, indented one past `n`, when they do not. The one-line try stops as
+/// soon as it is too wide, so no element is written more than twice.
+fn six_to_a_line(
+    heap: &Heap,
+    code: &Code,
+    elements: &[Value],
+    n: usize,
+    out: &mut Vec<u8>,
+) -> Result<(), Stop> {
+    let start = out.len();
+    out.push(b'[');
+    let mut fits = true;
+    for (i, e) in elements.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(b", ");
+        }
+        show(heap, code, *e, out)?;
+        if out.len() - start > LINE {
+            fits = false;
+            break;
+        }
+    }
+    if fits {
+        out.push(b']');
+        if out.len() - start <= LINE {
+            return Ok(());
+        }
+    }
+    out.truncate(start);
+    out.push(b'[');
+    line(out, n + 1);
+    for (i, e) in elements.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(b", ");
+            if i % 6 == 0 {
+                line(out, n + 1);
+            }
+        }
+        show(heap, code, *e, out)?;
+    }
+    line(out, n);
+    out.push(b']');
+    Ok(())
+}
+
+/// A line break, then `n` levels of indent.
+fn line(out: &mut Vec<u8>, n: usize) {
+    out.push(b'\n');
+    for _ in 0..n {
+        out.extend_from_slice(b"  ");
+    }
+}
+
 /// Whether `v` is small enough that a constructor holding only such values
 /// stays on one line.
 fn small(heap: &Heap, v: Value) -> bool {
@@ -240,7 +338,10 @@ fn small(heap: &Heap, v: Value) -> bool {
         View::Cell(cell) => match heap.kind(cell) {
             Some(Kind::String) => heap.string_len(cell) < SMALL_STRING,
             Some(Kind::BigInt | Kind::Closure) => true,
-            Some(Kind::Ctor | Kind::Tuple) | None => false,
+            Some(
+                Kind::Ctor | Kind::Tuple | Kind::ArrayRoot | Kind::ArrayLeaf | Kind::ArrayBranch,
+            )
+            | None => false,
         },
     }
 }

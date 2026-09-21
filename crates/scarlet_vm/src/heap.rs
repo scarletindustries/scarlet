@@ -12,8 +12,8 @@
 //! Every cell starts with one header word: its reference count, its kind, and
 //! its size in words. A cell is freed when its count reaches zero, and its
 //! space is kept on a free list for the next cell of the same size. Freeing a
-//! constructor, tuple or closure gives up the references it holds too, and so
-//! on down.
+//! constructor, tuple, closure or array node gives up the references it holds
+//! too, and so on down.
 //!
 //! Chunks are words, not bytes, and cells are named by chunk and word rather
 //! than by address, so the heap needs no `unsafe` and moves with its process
@@ -76,6 +76,12 @@ pub(crate) enum Kind {
     /// A tuple: each element's value word, in order, straight after the
     /// header. Each element holds one reference.
     Tuple = 5,
+    /// An array's root, one of its leaves, or one of its branches.
+    /// [`crate::array`] has their layout; the heap only knows which of their
+    /// words hold references.
+    ArrayRoot = 6,
+    ArrayLeaf = 7,
+    ArrayBranch = 8,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -195,11 +201,9 @@ impl Heap {
                 self.set_word(cell, 0, h - 1);
                 continue;
             }
-            if let Some(first) = first_held(kind_bits(h)) {
-                for i in first..size(h) {
-                    if let Some(held) = Value::from_bits(self.word(cell, i)).as_cell() {
-                        dying.push(held);
-                    }
+            for i in held(kind_bits(h), size(h)) {
+                if let Some(held) = Value::from_bits(self.word(cell, i)).as_cell() {
+                    dying.push(held);
                 }
             }
             self.free_cell(cell, h);
@@ -228,6 +232,9 @@ impl Heap {
             3 => Some(Kind::Ctor),
             4 => Some(Kind::Closure),
             5 => Some(Kind::Tuple),
+            6 => Some(Kind::ArrayRoot),
+            7 => Some(Kind::ArrayLeaf),
+            8 => Some(Kind::ArrayBranch),
             _ => None,
         }
     }
@@ -344,6 +351,28 @@ impl Heap {
         self.held(cell, i)
     }
 
+    /// A new cell of `kind` holding `data` after its header, with one
+    /// reference, the caller's. Any reference in `data` passes to the cell.
+    /// For a kind whose layout lives outside the heap, like an array's nodes.
+    pub(crate) fn make(&mut self, kind: Kind, data: &[u64]) -> Result<Cell, Full> {
+        let cell = self.alloc(kind, data.len())?;
+        for (i, w) in data.iter().enumerate() {
+            self.set_word(cell, 1 + i, *w);
+        }
+        Ok(cell)
+    }
+
+    /// The words of `cell` after its header. Empty for a cell the heap does
+    /// not have.
+    pub(crate) fn data(&self, cell: Cell) -> &[u64] {
+        let n = size(self.word(cell, 0)).saturating_sub(1);
+        let start = cell.word as usize + 1;
+        match self.chunks.get(cell.chunk as usize) {
+            Some(Some(c)) => c.words.get(start..start + n).unwrap_or(&[]),
+            _ => &[],
+        }
+    }
+
     /// A new tuple cell holding `elements`. Each element's reference passes
     /// to the cell.
     pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Full> {
@@ -416,16 +445,22 @@ fn kind_bits(h: u64) -> u64 {
     h >> 32 & 0xFF
 }
 
-/// The first word of a cell of this kind that holds a value, for the kinds
-/// that hold values: after a constructor's or closure's tag word, and straight
-/// after a tuple's header.
-fn first_held(kind: u64) -> Option<usize> {
-    if kind == Kind::Ctor as u64 || kind == Kind::Closure as u64 {
-        Some(2)
-    } else if kind == Kind::Tuple as u64 {
-        Some(1)
+/// The words of a cell of this kind and size that hold a value, and so a
+/// reference: after a constructor's or closure's tag word, all of a tuple or
+/// an array leaf, an array root's three parts (after its length and height),
+/// and an array branch's children (after its height and size table).
+fn held(kind: u64, size: usize) -> std::ops::Range<usize> {
+    let k = |want: Kind| kind == want as u64;
+    if k(Kind::Ctor) || k(Kind::Closure) {
+        2..size
+    } else if k(Kind::Tuple) || k(Kind::ArrayLeaf) {
+        1..size
+    } else if k(Kind::ArrayRoot) {
+        3..size
+    } else if k(Kind::ArrayBranch) {
+        2 + size.saturating_sub(2) / 2..size
     } else {
-        None
+        0..0
     }
 }
 

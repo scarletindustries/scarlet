@@ -195,6 +195,55 @@ pub(crate) enum Instr {
         src: Reg,
         index: u16,
     },
+    /// A new array of `elements`.
+    Array {
+        dst: Reg,
+        elements: Box<[Reg]>,
+    },
+    /// How many elements the array in `src` has.
+    ArrayLen {
+        dst: Reg,
+        src: Reg,
+    },
+    /// Element `index` of the array in `src`, which a pattern has already
+    /// proved it has.
+    ArrayElem {
+        dst: Reg,
+        src: Reg,
+        index: u16,
+    },
+    /// The array in `src` without its first `n` elements.
+    ArrayDrop {
+        dst: Reg,
+        src: Reg,
+        n: Reg,
+    },
+    /// `[x, y, ..xs]`: the array in `rest` with `front` before it, in order.
+    ArrayPrepend {
+        dst: Reg,
+        front: Box<[Reg]>,
+        rest: Reg,
+    },
+    /// `[..xs, x, y]`: the array in `rest` with `back` after it, in order.
+    ArrayAppend {
+        dst: Reg,
+        rest: Reg,
+        back: Box<[Reg]>,
+    },
+    /// `[..a, ..b]`.
+    ArrayConcat {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// `xs[i] or d`: element `index` of the array in `src`, or `default`
+    /// when it has none.
+    ArrayIndexOr {
+        dst: Reg,
+        src: Reg,
+        index: Reg,
+        default: Reg,
+    },
     /// Field `index` of the constructor in `src`.
     Field {
         dst: Reg,
@@ -244,6 +293,14 @@ impl Instr {
             | Instr::Field { .. }
             | Instr::Tuple { .. }
             | Instr::Element { .. }
+            | Instr::Array { .. }
+            | Instr::ArrayLen { .. }
+            | Instr::ArrayElem { .. }
+            | Instr::ArrayDrop { .. }
+            | Instr::ArrayPrepend { .. }
+            | Instr::ArrayAppend { .. }
+            | Instr::ArrayConcat { .. }
+            | Instr::ArrayIndexOr { .. }
             | Instr::Bad { .. } => None,
         }
     }
@@ -710,6 +767,66 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                 }),
                 _ => Err("IntNeg with other than one argument".into()),
+            },
+            PrimOp::MakeArray => Ok(Instr::Array {
+                dst,
+                elements: args.iter().copied().map(Reg::of).collect(),
+            }),
+            PrimOp::ArrayLen => match args {
+                [src] => Ok(Instr::ArrayLen {
+                    dst,
+                    src: Reg::of(*src),
+                }),
+                _ => Err("ArrayLen with other than one argument".into()),
+            },
+            PrimOp::ArrayElem(index) => match args {
+                [src] => Ok(Instr::ArrayElem {
+                    dst,
+                    src: Reg::of(*src),
+                    index,
+                }),
+                _ => Err("ArrayElem with other than one argument".into()),
+            },
+            PrimOp::ArrayDrop => match args {
+                [src, n] => Ok(Instr::ArrayDrop {
+                    dst,
+                    src: Reg::of(*src),
+                    n: Reg::of(*n),
+                }),
+                _ => Err("ArrayDrop with other than two arguments".into()),
+            },
+            PrimOp::ArrayPrepend => match args.split_last() {
+                Some((rest, front)) => Ok(Instr::ArrayPrepend {
+                    dst,
+                    front: front.iter().copied().map(Reg::of).collect(),
+                    rest: Reg::of(*rest),
+                }),
+                None => Err("ArrayPrepend with no arguments".into()),
+            },
+            PrimOp::ArrayAppend => match args.split_first() {
+                Some((rest, back)) => Ok(Instr::ArrayAppend {
+                    dst,
+                    rest: Reg::of(*rest),
+                    back: back.iter().copied().map(Reg::of).collect(),
+                }),
+                None => Err("ArrayAppend with no arguments".into()),
+            },
+            PrimOp::ArrayConcat => match args {
+                [a, b] => Ok(Instr::ArrayConcat {
+                    dst,
+                    a: Reg::of(*a),
+                    b: Reg::of(*b),
+                }),
+                _ => Err("ArrayConcat with other than two arguments".into()),
+            },
+            PrimOp::ArrayIndexOr => match args {
+                [src, index, default] => Ok(Instr::ArrayIndexOr {
+                    dst,
+                    src: Reg::of(*src),
+                    index: Reg::of(*index),
+                    default: Reg::of(*default),
+                }),
+                _ => Err("ArrayIndexOr with other than three arguments".into()),
             },
             PrimOp::MakeTuple => Ok(Instr::Tuple {
                 dst,
