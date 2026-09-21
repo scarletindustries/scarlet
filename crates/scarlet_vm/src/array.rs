@@ -35,6 +35,11 @@
 //!
 //! The walks here go one level per call at most, so they are as deep as the
 //! tree is tall: 13 levels at the very most, for 2^64 elements.
+//!
+//! An array can also be a range, `start..end`, which stores only its two
+//! ends, as the old VM's did: its length, its elements, its tail and its
+//! slices all come from those two numbers. [`Seq`] is either kind. Adding to a
+//! range, or joining one to another array, first builds it as a tree.
 
 use crate::heap::{Cell, Full, Heap, Kind};
 use crate::value::Value;
@@ -46,6 +51,55 @@ const BITS: usize = 5;
 /// How many more nodes than the tightest packing a level may keep after a
 /// join, which bounds the extra steps a lookup takes (the RRB paper's `e`).
 const E_MAX: usize = 2;
+
+/// An array as the VM holds it: a tree of its elements, or a range of Ints
+/// that stores only its two ends.
+#[derive(Clone, Copy)]
+pub(crate) enum Seq {
+    Tree(Cell),
+    Range { start: i64, end: i64 },
+}
+
+impl Seq {
+    pub(crate) fn len(self, heap: &Heap) -> u64 {
+        match self {
+            Seq::Tree(cell) => len(heap, cell) as u64,
+            Seq::Range { start, end } => range_len(start, end),
+        }
+    }
+}
+
+/// How many Ints `start..end` holds: none when `end` is not past `start`.
+pub(crate) fn range_len(start: i64, end: i64) -> u64 {
+    u64::try_from(i128::from(end) - i128::from(start)).unwrap_or(0)
+}
+
+/// A new range cell, `start..end`.
+pub(crate) fn range(heap: &mut Heap, start: i64, end: i64) -> Result<Cell, Full> {
+    heap.make(Kind::Range, &[start as u64, end as u64])
+}
+
+/// The array `cell` holds, or `None` when it holds something else.
+pub(crate) fn seq(heap: &Heap, cell: Cell) -> Option<Seq> {
+    match heap.kind(cell)? {
+        Kind::ArrayRoot => Some(Seq::Tree(cell)),
+        Kind::Range => {
+            let d = heap.data(cell);
+            let w = |i: usize| d.get(i).copied().unwrap_or(0) as i64;
+            Some(Seq::Range {
+                start: w(0),
+                end: w(1),
+            })
+        }
+        Kind::String
+        | Kind::BigInt
+        | Kind::Ctor
+        | Kind::Closure
+        | Kind::Tuple
+        | Kind::ArrayLeaf
+        | Kind::ArrayBranch => None,
+    }
+}
 
 /// Which end of an array.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,7 +163,8 @@ fn node(heap: &Heap, v: Value) -> Option<Node> {
         | Kind::Ctor
         | Kind::Closure
         | Kind::Tuple
-        | Kind::ArrayRoot => None,
+        | Kind::ArrayRoot
+        | Kind::Range => None,
     }
 }
 
@@ -246,7 +301,7 @@ pub(crate) fn from_values(heap: &mut Heap, items: &[Value]) -> Result<Cell, Full
     new_root(heap, n, shift, Value::NIL, tree, tail)
 }
 
-pub(crate) fn len(heap: &Heap, array: Cell) -> usize {
+fn len(heap: &Heap, array: Cell) -> usize {
     root(heap, array).len
 }
 

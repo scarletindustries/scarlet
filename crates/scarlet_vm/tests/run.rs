@@ -652,3 +652,39 @@ fn a_slice_is_a_result() {
          Err(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n[4991, 4992, 4993, 4994, 4995]\n[0]\n",
     );
 }
+
+/// A range stores only its two ends, and is an array of Ints in every way a
+/// program can see: shown, indexed, walked, sliced, spread and joined.
+#[test]
+fn a_range_is_an_array_of_its_ints() {
+    prints(
+        "fn total(xs Array(Int), acc Int) Int {\n\
+         \tmatch xs {\n\
+         \t\t[] -> acc\n\
+         \t\t[h, ..t] -> total(t, acc + h)\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(1..4)\n\
+         \tprintln(3..3)\n\
+         \tprintln(5..2)\n\
+         \tprintln({ 10..20 }[2])\n\
+         \tprintln({ 10..20 }[10])\n\
+         \tprintln(total(0..100001, 0))\n\
+         \tprintln({ 0..10 }[2..5])\n\
+         \tprintln({ 0..10 }[8..11])\n\
+         \tprintln([1, ..{ 5..8 }, 9])\n\
+         \tprintln([..{ 0..2 }, ..{ 7..9 }])\n\
+         \tprintln('${0..3}')\n\
+         \tprintln(0..40)\n\
+         \tprintln({ 9223372036854775800..9223372036854775807 }[6] or 0)\n\
+         \tbig = 0..1000000000000\n\
+         \tprintln(big[999999999999] or 0)\n\
+         }\n",
+        "[1, 2, 3]\n[]\n[]\nSome(12)\nNone\n5000050000\nOk(\n  [2, 3, 4]\n)\nErr(Nil)\n\
+         [1, 5, 6, 7, 9]\n[0, 1, 7, 8]\n[0, 1, 2]\n\
+         [\n  0, 1, 2, 3, 4, 5, \n  6, 7, 8, 9, 10, 11, \n  12, 13, 14, 15, 16, 17, \n  \
+         18, 19, 20, 21, 22, 23, \n  24, 25, 26, 27, 28, 29, \n  30, 31, 32, 33, 34, 35, \n  \
+         36, 37, 38, 39\n]\n9223372036854775806\n999999999999\n",
+    );
+}
