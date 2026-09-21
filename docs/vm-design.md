@@ -82,6 +82,7 @@ The old VM broke this in these ways. The new one must not:
 - Reading a local into an operand takes a new reference. Overwriting a slot, or leaving a frame, gives one up.
 - That alone is always correct, whatever Perceus did or didn't insert.
 - Perceus's `Drop x` gives the reference up at `x`'s last use instead of at frame exit. If it was the only reference, the cell is kept empty for a following `Ctor { reuse: Some(x) }` to fill in place.
+- A tail call reads its arguments, then gives up every reference its frame still holds, because the callee takes the frame's place. So Perceus puts no `Drop` of an argument before a tail call. The old VM's self tail call kept its frame and needed one, which its emitter moved past the argument reads; in the new VM that drop would free the argument before the call read it.
 
 This matters because Perceus decides what to drop by type, and it leaves some types alone on purpose: `Int`, `Float`, `String`, and generic type variables (`ResolvedPool::is_heap`). Under this split those are still freed, just at frame exit. A big `Int` is a heap object Perceus never drops, and it's still correct.
 

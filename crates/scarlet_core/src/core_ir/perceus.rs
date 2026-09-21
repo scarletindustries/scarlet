@@ -169,9 +169,12 @@ impl<'p> Perceus<'p> {
                     // Strip and re-derive, so the pass is safe to rerun.
                     e = *body;
                 }
+                // A tail call gives up every reference its frame still holds
+                // once it has read its arguments, so its arguments need no
+                // `Drop` here. One here would come before the read.
                 CoreExpr::Tail(a) => {
                     let live = atom_live(&a);
-                    break (self.release_self_tail_args(a), live);
+                    break (CoreExpr::Tail(a), live);
                 }
                 CoreExpr::Goto(id) => {
                     // The edge hands the cont ownership of exactly its live-in
@@ -256,43 +259,6 @@ impl<'p> Perceus<'p> {
             };
         }
         (body, live)
-    }
-
-    /// Release the argument slots of a self-tail-call.
-    ///
-    /// `TailCallSelf` keeps its frame and does not drain `[base, args_start)`
-    /// the way every other tail call does, because those slots *are* the
-    /// per-frame reuse table. Without this, a heap argument still sitting in a
-    /// local slot enters the next iteration at rc==2 and its `Drop` refuses to
-    /// hollow it, so a self-recursive `map` never reuses.
-    ///
-    /// `emit::split_self_tail_drops` sinks these drops past the operand pushes,
-    /// so the `PushLocal` dup keeps the value alive while the slot's own
-    /// reference goes. `shape: None` keeps the reuse walk from parking a live
-    /// cell as a token.
-    fn release_self_tail_args(&mut self, a: Atom) -> CoreExpr {
-        let Atom::Call {
-            callee: Callee::Self_,
-            args,
-        } = &a
-        else {
-            return CoreExpr::Tail(a);
-        };
-        let mut moved: Vec<LocalId> = Vec::new();
-        for &x in args {
-            if !moved.contains(&x) && self.is_heap_local(x) {
-                moved.push(x);
-            }
-        }
-        let mut body = CoreExpr::Tail(a);
-        for &x in moved.iter().rev() {
-            body = CoreExpr::Drop {
-                local: x,
-                shape: None,
-                body: Box::new(body),
-            };
-        }
-        body
     }
 
     fn drop_match(
@@ -1012,6 +978,28 @@ mod tests {
         );
         assert!(find_drop(&f.body, local(2)));
         assert!(find_drop(&f.body, local(3)));
+    }
+
+    /// A tail call reads its arguments before its frame's references go, so
+    /// no argument is dropped ahead of it: that drop would come before the
+    /// read. Other locals the frame holds still drop as usual.
+    #[test]
+    fn a_tail_call_argument_is_not_dropped_before_the_call() {
+        let mut pool = pool();
+        let list = con(&mut pool, 99);
+        for callee in [Callee::Self_, Callee::Known(FuncIdx(3))] {
+            let body = CoreExpr::Let {
+                bind: bind(1, list),
+                rhs: ctor(&[0]),
+                body: Box::new(CoreExpr::Tail(Atom::Call {
+                    callee,
+                    args: vec![local(1)],
+                })),
+            };
+            let f = perceus(&pool, func(vec![bind(0, list)], body, list));
+            assert!(!find_drop(&f.body, local(1)), "{}", f.body);
+            assert!(find_drop(&f.body, local(0)), "{}", f.body);
+        }
     }
 
     /// Without a self-tail edge nothing loop-carries.
