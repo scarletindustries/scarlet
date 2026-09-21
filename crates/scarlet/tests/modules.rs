@@ -557,7 +557,6 @@ fn an_aliased_arm_matches_a_qualified_scrutinee_beside_a_catch_all() {
 /// An aliased head nested inside a tuple pattern reaches the ladder through a
 /// different lowering path than a top-level head, and resolved the same way.
 #[test]
-#[ignore = "needs the VM"]
 fn an_aliased_head_matches_nested_beside_a_catch_all() {
     let proj = Project::new("alias_ctor_nested_catchall");
     proj.write("hue.scrl", HUE_SRC);

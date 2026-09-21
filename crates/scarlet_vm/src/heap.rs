@@ -12,8 +12,8 @@
 //! Every cell starts with one header word: its reference count, its kind, and
 //! its size in words. A cell is freed when its count reaches zero, and its
 //! space is kept on a free list for the next cell of the same size. Freeing a
-//! constructor or a closure gives up the references it holds too, and so on
-//! down.
+//! constructor, tuple or closure gives up the references it holds too, and so
+//! on down.
 //!
 //! Chunks are words, not bytes, and cells are named by chunk and word rather
 //! than by address, so the heap needs no `unsafe` and moves with its process
@@ -73,6 +73,9 @@ pub(crate) enum Kind {
     /// capture's value word, in order. Each capture holds one reference. A
     /// function with none is a value word of its own, and needs no cell.
     Closure = 4,
+    /// A tuple: each element's value word, in order, straight after the
+    /// header. Each element holds one reference.
+    Tuple = 5,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -192,10 +195,10 @@ impl Heap {
                 self.set_word(cell, 0, h - 1);
                 continue;
             }
-            if kind_bits(h) == Kind::Ctor as u64 || kind_bits(h) == Kind::Closure as u64 {
-                for i in 2..size(h) {
-                    if let Some(field) = Value::from_bits(self.word(cell, i)).as_cell() {
-                        dying.push(field);
+            if let Some(first) = first_held(kind_bits(h)) {
+                for i in first..size(h) {
+                    if let Some(held) = Value::from_bits(self.word(cell, i)).as_cell() {
+                        dying.push(held);
                     }
                 }
             }
@@ -224,6 +227,7 @@ impl Heap {
             2 => Some(Kind::BigInt),
             3 => Some(Kind::Ctor),
             4 => Some(Kind::Closure),
+            5 => Some(Kind::Tuple),
             _ => None,
         }
     }
@@ -340,6 +344,29 @@ impl Heap {
         self.held(cell, i)
     }
 
+    /// A new tuple cell holding `elements`. Each element's reference passes
+    /// to the cell.
+    pub(crate) fn tuple(&mut self, elements: &[Value]) -> Result<Cell, Full> {
+        let cell = self.alloc(Kind::Tuple, elements.len())?;
+        for (i, e) in elements.iter().enumerate() {
+            self.set_word(cell, 1 + i, e.bits());
+        }
+        Ok(cell)
+    }
+
+    /// Element `i` of a tuple cell, or `None` past its last. Reading it adds
+    /// no reference.
+    pub(crate) fn element(&self, cell: Cell, i: usize) -> Option<Value> {
+        let n = size(self.word(cell, 0)).saturating_sub(1);
+        (i < n).then(|| Value::from_bits(self.word(cell, 1 + i)))
+    }
+
+    /// A tuple cell's elements, in order. Reading one adds no reference.
+    pub(crate) fn elements(&self, cell: Cell) -> impl Iterator<Item = Value> + '_ {
+        let n = size(self.word(cell, 0)).saturating_sub(1);
+        (0..n).map(move |i| Value::from_bits(self.word(cell, 1 + i)))
+    }
+
     /// Value `i` of the ones a constructor or closure cell holds after its
     /// tag word.
     fn held(&self, cell: Cell, i: usize) -> Option<Value> {
@@ -387,6 +414,19 @@ fn count(h: u64) -> u64 {
 
 fn kind_bits(h: u64) -> u64 {
     h >> 32 & 0xFF
+}
+
+/// The first word of a cell of this kind that holds a value, for the kinds
+/// that hold values: after a constructor's or closure's tag word, and straight
+/// after a tuple's header.
+fn first_held(kind: u64) -> Option<usize> {
+    if kind == Kind::Ctor as u64 || kind == Kind::Closure as u64 {
+        Some(2)
+    } else if kind == Kind::Tuple as u64 {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn size(h: u64) -> usize {
@@ -561,6 +601,23 @@ mod tests {
         );
         assert!(heap.capture(cell, 2).is_none());
         assert_eq!(heap.live(), 2);
+        heap.release(cell);
+        assert_eq!(heap.live(), 0);
+    }
+
+    #[test]
+    fn a_tuple_holds_its_elements() {
+        let mut heap = Heap::default();
+        let s = heap.string(b"second").expect("room");
+        let one = Value::int(1).expect("small");
+        let cell = heap.tuple(&[one, Value::cell(s)]).expect("room");
+        assert_eq!(heap.kind(cell), Some(Kind::Tuple));
+        assert_eq!(heap.element(cell, 0).map(Value::view), Some(one.view()));
+        assert!(heap.element(cell, 2).is_none());
+        assert_eq!(heap.elements(cell).count(), 2);
+        let empty = heap.tuple(&[]).expect("room");
+        assert_eq!(heap.elements(empty).count(), 0);
+        heap.release(empty);
         heap.release(cell);
         assert_eq!(heap.live(), 0);
     }

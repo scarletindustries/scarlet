@@ -201,7 +201,6 @@ run_case! {
 
     // U15: `.` after a digit is only part of the number when a digit follows,
     // or `t.0.name` lexes as `t` `.` `0.` `name`.
-    #[ignore = "needs the VM"]
     u15_tuple_index_then_field_access: (
         "type P { P(name String) }\n\
          pub fn main() {\n\

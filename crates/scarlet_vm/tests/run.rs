@@ -120,18 +120,18 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
 /// it stops the run, and the stop says what it needs.
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
-    let src = "fn pair() (Int, Int) { (1, 2) }\n\
+    let src = "fn pair() Array(Int) { [1, 2] }\n\
                pub fn main() {\n\
                \tprintln(1)\n\
                }\n";
     prints(src, "1\n");
-    let calls = "fn pair() (Int, Int) { (1, 2) }\n\
+    let calls = "fn pair() Array(Int) { [1, 2] }\n\
                  pub fn main() {\n\
                  \t_ = pair()\n\
                  }\n";
     assert_eq!(
         run(calls),
-        Err(Stop::NotBuiltYet("the operation MakeTuple".into()))
+        Err(Stop::NotBuiltYet("the operation MakeArray".into()))
     );
 }
 
@@ -483,5 +483,43 @@ fn a_named_function_is_a_value() {
          \tprintln(Some(double))\n\
          }\n",
         "42\n8\n<fn#double>\nSome(<fn#double>)\n",
+    );
+}
+
+#[test]
+fn a_tuple_is_built_read_and_shown() {
+    prints(
+        "fn swap(t (Int, String)) (String, Int) { (t.1, t.0) }\n\
+         fn sum(t (Int, (Int, Int))) Int {\n\
+         \tmatch t {\n\
+         \t\t(a, (b, c)) -> a + b + c\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(swap((1, 'one')))\n\
+         \tprintln(sum((1, (2, 3))))\n\
+         \tprintln((1, (2, 3)))\n\
+         \tprintln(Some((True, Nil)))\n\
+         \tprintln('${(1, 2)}')\n\
+         }\n",
+        "(one, 1)\n6\n(\n  1,\n  (2, 3)\n)\nSome(\n  (True, Nil)\n)\n(1, 2)\n",
+    );
+}
+
+/// A tuple of small values stays on one line up to 80 columns, and takes a
+/// line per element past that.
+#[test]
+fn a_wide_tuple_takes_a_line_per_element() {
+    let exactly_80 =
+        "('aaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbb', 'cccccccccccccccccc', 'dddddddddddddddddd')";
+    prints(
+        &format!("pub fn main() {{\n\tprintln({exactly_80})\n}}\n"),
+        "(aaaaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbbbb, cccccccccccccccccc, dddddddddddddddddd)\n",
+    );
+    let past_80 =
+        "('aaaaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbbbb', 'cccccccccccccccccc', 'ddddddddddddddddddd')";
+    prints(
+        &format!("pub fn main() {{\n\tprintln({past_80})\n}}\n"),
+        "(\n  aaaaaaaaaaaaaaaaaa,\n  bbbbbbbbbbbbbbbbbb,\n  cccccccccccccccccc,\n  ddddddddddddddddddd\n)\n",
     );
 }

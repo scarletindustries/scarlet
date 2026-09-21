@@ -634,7 +634,6 @@ reject_case! {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn or_pattern_binding_after_or_in_tuple() {
     // A binding after an or-pattern, as in `(0 | 1, y)`, is in scope.
     run_outputs(
@@ -653,7 +652,6 @@ fn or_pattern_binding_after_or_in_tuple() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn or_pattern_binding_before_or_in_tuple() {
     // A binding before an or-pattern, as in `(y, 0 | 1)`, is in scope.
     run_outputs(
@@ -688,7 +686,6 @@ reject_case! {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn or_pattern_nested_in_non_first_alternative() {
     // A nested or-pattern is checked against the outer or's canonical set,
     // not treated as a fresh scope.

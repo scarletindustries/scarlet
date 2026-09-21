@@ -336,6 +336,26 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let field = self.share(field);
                     self.set(base, *dst, field);
                 }
+                Instr::Tuple { dst, elements } => {
+                    let values = self.args(base, elements);
+                    let cell = self.heap.tuple(&values).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::Element { dst, src, index } => {
+                    let element = match self.get(base, *src).as_cell() {
+                        Some(cell) if self.heap.kind(cell) == Some(Kind::Tuple) => {
+                            self.heap.element(cell, usize::from(*index))
+                        }
+                        _ => None,
+                    };
+                    let Some(element) = element else {
+                        return Err(Stop::BadProgram(format!(
+                            "element {index} read from a value with no such element"
+                        )));
+                    };
+                    let element = self.share(element);
+                    self.set(base, *dst, element);
+                }
                 Instr::Bad { why } => return Err(Stop::BadProgram((*why).into())),
                 Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
                     View::Bool(true) => {}
@@ -696,6 +716,28 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "hi, you\nbye, 1\nkept\n");
+        assert_eq!(left, 0);
+    }
+
+    /// A tuple holds references to its elements, and reading one out takes
+    /// its own.
+    #[test]
+    fn tuples_and_what_they_hold_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "fn pairs(n Int, acc (String, Int)) (String, Int) {\n\
+             \tif n == 0 { acc } else { pairs(n - 1, ('${n}', acc.1 + n)) }\n\
+             }\n\
+             pub fn main() {\n\
+             \tp = pairs(1000, ('start', 0))\n\
+             \tprintln(p.0)\n\
+             \tprintln(p)\n\
+             \tprintln(Some((p, 'x')))\n\
+             }\n",
+        );
+        assert_eq!(
+            out,
+            "1\n(1, 500500)\nSome(\n  (\n    (1, 500500),\n    x\n  )\n)\n"
+        );
         assert_eq!(left, 0);
     }
 

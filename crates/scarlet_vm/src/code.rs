@@ -184,6 +184,17 @@ pub(crate) enum Instr {
         text: Box<[u8]>,
         to: u32,
     },
+    /// A new tuple holding `elements`.
+    Tuple {
+        dst: Reg,
+        elements: Box<[Reg]>,
+    },
+    /// Element `index` of the tuple in `src`.
+    Element {
+        dst: Reg,
+        src: Reg,
+        index: u16,
+    },
     /// Field `index` of the constructor in `src`.
     Field {
         dst: Reg,
@@ -231,6 +242,8 @@ impl Instr {
             | Instr::GetSelf { .. }
             | Instr::Ret { .. }
             | Instr::Field { .. }
+            | Instr::Tuple { .. }
+            | Instr::Element { .. }
             | Instr::Bad { .. } => None,
         }
     }
@@ -697,6 +710,18 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                 }),
                 _ => Err("IntNeg with other than one argument".into()),
+            },
+            PrimOp::MakeTuple => Ok(Instr::Tuple {
+                dst,
+                elements: args.iter().copied().map(Reg::of).collect(),
+            }),
+            PrimOp::TupleField(index) => match args {
+                [src] => Ok(Instr::Element {
+                    dst,
+                    src: Reg::of(*src),
+                    index,
+                }),
+                _ => Err("TupleField with other than one argument".into()),
             },
             PrimOp::FieldUnchecked(index) => match args {
                 [src] => Ok(Instr::Field {

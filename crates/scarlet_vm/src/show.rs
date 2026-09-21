@@ -33,6 +33,9 @@ pub(crate) type Types = BTreeMap<TypeId, TypeNames>;
 /// a line per field.
 const SMALL_STRING: usize = 20;
 
+/// The widest a tuple of small values may be and still stay on one line.
+const LINE: usize = 80;
+
 enum Piece<'t> {
     Value(Value, Layout),
     Text(&'t str),
@@ -90,6 +93,7 @@ fn value<'t>(
             }
             Some(Kind::Ctor) => ctor(heap, &code.types, cell, layout, out, todo),
             Some(Kind::Closure) => function(code, heap.closure_func(cell), out),
+            Some(Kind::Tuple) => tuple(heap, code, cell, layout, out, todo)?,
             None => return Err(Stop::NotBuiltYet("printing this value".into())),
         },
         View::Func(f) => function(code, f, out),
@@ -164,6 +168,65 @@ fn ctor<'t>(
     }
 }
 
+/// A tuple: `(1, 'a')` on one line when every element is small and the line
+/// fits, and one element per line otherwise.
+fn tuple<'t>(
+    heap: &Heap,
+    code: &'t Code,
+    cell: Cell,
+    layout: Layout,
+    out: &mut Vec<u8>,
+    todo: &mut Vec<Piece<'t>>,
+) -> Result<(), Stop> {
+    let elements: Vec<Value> = heap.elements(cell).collect();
+    let n = match layout {
+        Layout::Flat => None,
+        Layout::Open(_) if elements.is_empty() => None,
+        Layout::Open(n) if elements.iter().all(|e| small(heap, *e)) => {
+            // A small value holds no other value, so showing it here takes a
+            // bounded amount of work and no recursion.
+            let start = out.len();
+            out.push(b'(');
+            for (i, e) in elements.iter().enumerate() {
+                if i > 0 {
+                    out.extend_from_slice(b", ");
+                }
+                show(heap, code, *e, out)?;
+            }
+            out.push(b')');
+            if out.len() - start <= LINE {
+                return Ok(());
+            }
+            out.truncate(start);
+            Some(n)
+        }
+        Layout::Open(n) => Some(n),
+    };
+    out.push(b'(');
+    todo.push(Piece::Text(")"));
+    match n {
+        Some(n) => {
+            todo.push(Piece::Line(n));
+            for (i, e) in elements.iter().enumerate().rev() {
+                todo.push(Piece::Value(*e, Layout::Open(n + 1)));
+                todo.push(Piece::Line(n + 1));
+                if i > 0 {
+                    todo.push(Piece::Text(","));
+                }
+            }
+        }
+        None => {
+            for (i, e) in elements.iter().enumerate().rev() {
+                todo.push(Piece::Value(*e, Layout::Flat));
+                if i > 0 {
+                    todo.push(Piece::Text(", "));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether `v` is small enough that a constructor holding only such values
 /// stays on one line.
 fn small(heap: &Heap, v: Value) -> bool {
@@ -177,7 +240,7 @@ fn small(heap: &Heap, v: Value) -> bool {
         View::Cell(cell) => match heap.kind(cell) {
             Some(Kind::String) => heap.string_len(cell) < SMALL_STRING,
             Some(Kind::BigInt | Kind::Closure) => true,
-            Some(Kind::Ctor) | None => false,
+            Some(Kind::Ctor | Kind::Tuple) | None => false,
         },
     }
 }
