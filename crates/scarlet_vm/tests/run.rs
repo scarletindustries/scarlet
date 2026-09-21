@@ -688,3 +688,60 @@ fn a_range_is_an_array_of_its_ints() {
          36, 37, 38, 39\n]\n9223372036854775806\n999999999999\n",
     );
 }
+
+/// `==` compares what values hold, of every kind the VM builds.
+#[test]
+fn equality_is_structural() {
+    prints(
+        "type Shape {\n\
+         \tCircle(r Int)\n\
+         \tDot\n\
+         }\n\
+         fn add(n Int) fn(Int) Int { fn(x) { x + n } }\n\
+         pub fn main() {\n\
+         \tprintln(1 == 1)\n\
+         \tprintln(1 != 2)\n\
+         \tprintln(9223372036854775807 + 1 == 9223372036854775807 + 1)\n\
+         \tprintln('ab' == 'a${'b'}')\n\
+         \tprintln('ab' == 'abc')\n\
+         \tprintln(Circle(r: 2) == Circle(r: 2))\n\
+         \tprintln(Circle(r: 2) == Circle(r: 3))\n\
+         \tprintln(Circle(r: 2) == Dot)\n\
+         \tprintln(Dot == Dot)\n\
+         \tprintln(Some([1, 2]) == Some([1, 2]))\n\
+         \tprintln((1, 'a') == (1, 'a'))\n\
+         \tprintln((1, 'a') == (1, 'b'))\n\
+         \tprintln([1, 2, 3] == [1, 2])\n\
+         \tprintln(0..3 == [0, 1, 2])\n\
+         \tprintln([0, 1, 2] == 0..3)\n\
+         \tprintln(5..2 == 7..7)\n\
+         \tprintln(0..3 == 1..4)\n\
+         \tprintln(add(1) == add(1))\n\
+         \tprintln(add(1) == add(2))\n\
+         \tprintln(True == !False)\n\
+         \tprintln(Nil == Nil)\n\
+         }\n",
+        "True\nTrue\nTrue\nTrue\nFalse\nTrue\nFalse\nFalse\nTrue\nTrue\nTrue\nFalse\nFalse\n\
+         True\nTrue\nTrue\nFalse\nTrue\nFalse\nTrue\nTrue\n",
+    );
+}
+
+/// Two lists 200,000 long compare without overflowing the stack, and
+/// the first difference, however deep, decides.
+#[test]
+fn equality_walks_deep_values_in_constant_stack() {
+    prints(
+        "type L {\n\
+         \tCons(h Int, t L)\n\
+         \tEnd\n\
+         }\n\
+         fn build(n Int, last Int, acc L) L {\n\
+         \tif n == 0 { Cons(last, acc) } else { build(n - 1, last, Cons(n, acc)) }\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(build(200000, 0, End) == build(200000, 0, End))\n\
+         \tprintln(build(200000, 0, End) == build(200000, 1, End))\n\
+         }\n",
+        "True\nFalse\n",
+    );
+}

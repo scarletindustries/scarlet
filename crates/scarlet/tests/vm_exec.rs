@@ -414,7 +414,6 @@ fn and_or_evaluate_rhs_when_lhs_undecided() {
 // only inside the match matcher.
 
 #[test]
-#[ignore = "needs the VM"]
 fn neq_on_int_and_enum() {
     // Both directions per opcode, so an always-true, always-false, or
     // accidental-`==` lowering flips exactly one line.
@@ -431,7 +430,6 @@ fn neq_on_int_and_enum() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn eq_on_string_array_tuple() {
     // Generic `Op::Eq` as a value-producing expression over each compound
     // kind, both directions.

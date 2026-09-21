@@ -21,6 +21,7 @@
 mod array;
 mod bigint;
 mod code;
+mod eq;
 mod exec;
 mod heap;
 mod show;

@@ -195,6 +195,23 @@ pub(crate) enum Instr {
         src: Reg,
         index: u16,
     },
+    /// `a == b`, structurally ([`crate::eq`]).
+    Equal {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// `a != b`.
+    NotEqual {
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+    },
+    /// `!a`, on a Bool.
+    Not {
+        dst: Reg,
+        a: Reg,
+    },
     /// `start..end`: a range of Ints, which stores only its two ends.
     Range {
         dst: Reg,
@@ -314,6 +331,9 @@ impl Instr {
             | Instr::Field { .. }
             | Instr::Tuple { .. }
             | Instr::Element { .. }
+            | Instr::Equal { .. }
+            | Instr::NotEqual { .. }
+            | Instr::Not { .. }
             | Instr::Range { .. }
             | Instr::Array { .. }
             | Instr::ArrayLen { .. }
@@ -794,6 +814,24 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                 }),
                 _ => Err("IntNeg with other than one argument".into()),
+            },
+            PrimOp::Eq | PrimOp::Ne => match args {
+                [a, b] => {
+                    let (a, b) = (Reg::of(*a), Reg::of(*b));
+                    Ok(if op == PrimOp::Eq {
+                        Instr::Equal { dst, a, b }
+                    } else {
+                        Instr::NotEqual { dst, a, b }
+                    })
+                }
+                _ => Err(format!("{op:?} with other than two arguments")),
+            },
+            PrimOp::Not => match args {
+                [a] => Ok(Instr::Not {
+                    dst,
+                    a: Reg::of(*a),
+                }),
+                _ => Err("Not with other than one argument".into()),
             },
             PrimOp::MakeRange => match args {
                 [start, end] => Ok(Instr::Range {

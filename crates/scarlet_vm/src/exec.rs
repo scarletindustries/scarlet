@@ -19,6 +19,7 @@ use crate::Stop;
 use crate::array::{self, End, Seq};
 use crate::bigint::{self, Int};
 use crate::code::{Body, Code, Func, Instr, Reg};
+use crate::eq;
 use crate::heap::{Full, Heap, Kind};
 use crate::show;
 use crate::value::{Value, View};
@@ -361,6 +362,28 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let values = self.args(base, elements);
                     let cell = array::from_values(&mut self.heap, &values).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::Equal { dst, a, b } => {
+                    let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
+                    self.set(base, *dst, Value::bool(same));
+                }
+                Instr::NotEqual { dst, a, b } => {
+                    let same = eq::equal(&self.heap, self.get(base, *a), self.get(base, *b));
+                    self.set(base, *dst, Value::bool(!same));
+                }
+                Instr::Not { dst, a } => {
+                    let b = match self.get(base, *a).view() {
+                        View::Bool(b) => b,
+                        v @ (View::Float(_)
+                        | View::Int(_)
+                        | View::Nil
+                        | View::Func(_)
+                        | View::Cell(_)
+                        | View::Nullary(_)) => {
+                            return Err(Stop::BadProgram(format!("`!` on {v:?}, not a Bool")));
+                        }
+                    };
+                    self.set(base, *dst, Value::bool(!b));
                 }
                 Instr::Range { dst, start, end } => {
                     let start = self.range_end(self.get(base, *start))?;

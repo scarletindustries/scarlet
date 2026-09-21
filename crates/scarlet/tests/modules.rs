@@ -614,7 +614,6 @@ fn a_catch_all_before_an_aliased_arm_is_still_unreachable() {
 /// same variant built any other way. Carrying the written name onto the value
 /// made `G(9) == color.Green(9)` false and printed `G(9)`.
 #[test]
-#[ignore = "needs the VM"]
 fn an_alias_does_not_change_a_constructed_value_identity() {
     let proj = Project::new("alias_ctor_value_identity");
     proj.write("color.scrl", COLOR_MAKE_SRC);

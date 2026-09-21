@@ -820,7 +820,6 @@ fn bool_is_a_normal_two_ctor_type() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn bool_is_a_normal_two_ctor_type_runs() {
     run_outputs(
         "pub fn main() {\n\
