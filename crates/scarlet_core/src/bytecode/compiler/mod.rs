@@ -4398,6 +4398,10 @@ impl Compiler {
         let crate::core_ir::CoreProgram {
             mut fns, toplevel, ..
         } = crate::core_ir::lower::lower(&program);
+        let im = self.immediates();
+        for f in &mut fns {
+            crate::core_ir::immediates::rewrite(f, &im);
+        }
         // Names come from the typed program, index for index: `lower` keeps
         // `fns` in `TypedProgram::fns` order.
         let names: Vec<StrId> = program.fns.iter().map(|f| f.name).collect();
@@ -4407,14 +4411,15 @@ impl Compiler {
         self.materialize_eta_wrappers(&pool, eta_base, wrappers);
         let (name, core) = match at {
             Some(func_idx) => (names[func_idx.index()], fns.swap_remove(func_idx.index())),
-            None => (
-                program.toplevel.name,
-                CoreFn {
+            None => {
+                let mut top = CoreFn {
                     params: Vec::new(),
                     body: toplevel,
                     ret_ty: program.toplevel.ret,
-                },
-            ),
+                };
+                crate::core_ir::immediates::rewrite(&mut top, &im);
+                (program.toplevel.name, top)
+            }
         };
         LoweredBody { name, core, pool }
     }
@@ -4495,6 +4500,19 @@ impl Compiler {
             let core = perceus::perceus(pool, w);
             self.fns[FuncIdx::from_usize(base + i)] =
                 Some(self.lowered_fn(name, core, Rc::clone(pool)));
+        }
+    }
+
+    /// The prelude constructors Core IR spells as immediates.
+    fn immediates(&self) -> crate::core_ir::immediates::Immediates {
+        let v = |c: crate::bytecode::CtorRef| crate::core_ir::VariantRef {
+            type_id: c.type_id,
+            variant_idx: c.variant_idx,
+        };
+        crate::core_ir::immediates::Immediates {
+            true_: v(self.prelude.true_()),
+            false_: v(self.prelude.false_()),
+            nil: v(self.prelude.nil_ctor()),
         }
     }
 

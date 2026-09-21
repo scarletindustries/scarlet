@@ -4,6 +4,7 @@
 //! module re-exports it and holds the compiler's passes over it: `lower`
 //! (typed IR to Core) and `perceus` (reference counting and reuse).
 
+pub(crate) mod immediates;
 pub(crate) mod lower;
 pub(crate) mod perceus;
 
@@ -54,7 +55,7 @@ pub(crate) mod testkit {
         LocalId(id)
     }
 
-    fn vref(tid: i32, idx: u16) -> VariantRef {
+    pub(crate) fn vref(tid: i32, idx: u16) -> VariantRef {
         VariantRef {
             type_id: TypeId(tid),
             variant_idx: idx,

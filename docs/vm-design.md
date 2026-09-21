@@ -28,6 +28,7 @@ A body is already in A-normal form: every operand is a local, and nested express
 - **Values** (`Atom`): a local, a constant, a global or capture, `nil`, a bool, a constructor, a closure, a primitive op (`PrimOp`, like `IntAdd`), a built-in call (`Intrinsic`, one of 135), and a call. A call names its target as a known function, the function itself, or a closure held in a local.
 - **Control** (`CoreExpr`): `Let`, `If`, `Match`, `Tail` (return a value or tail-call), `LetJoin` (a branch whose value is used), `LetCont` and `Goto` (a shared "try the next case" point for pattern matching), and `Drop`.
 - **Memory hints from Perceus**: `Drop x` at the last use of `x`, and `Ctor { reuse: Some(x) }` when a new constructor may overwrite `x`'s cell in place.
+- **Bool and Nil are never constructors.** In the source, `True`, `False` and `Nil` are the prelude's constructors. A compiler pass (`core_ir/immediates.rs`) turns each one into the `bool` or `nil` value and turns a `match` on a Bool into an `If`, so the VM never needs to know which type is the prelude's `Bool`.
 
 `scarlet dis FILE` prints all of this for any program.
 
@@ -158,7 +159,7 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 ## Order of work
 
-Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 310 after step 2, 300 after step 4, and 299 after step 5.
+Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 310 after step 2, 300 after step 4, 299 after step 5, and 293 once Bool and Nil stopped being constructors.
 
 1. The `scarlet_ir` crate. **Done.**
 2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, Int operations, calls, `Println`. `scarlet run` uses it. **Done.**

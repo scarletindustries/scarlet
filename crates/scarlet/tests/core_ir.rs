@@ -346,6 +346,32 @@ core_golden!(
      }\n"
 );
 
+// `True`, `False` and `Nil` are immediates, never the prelude's
+// constructors, and a match on a Bool is an `if`. A match on Nil is its arm.
+core_golden!(
+    bool_match_is_if,
+    "fn pick(b Bool) Int {\n\
+     \tmatch b {\n\
+     \t\tFalse -> 0\n\
+     \t\tTrue -> 1\n\
+     \t}\n\
+     }\n\
+     fn yes(b Bool) Bool {\n\
+     \tmatch b {\n\
+     \t\tTrue -> False\n\
+     \t\t_ -> True\n\
+     \t}\n\
+     }\n\
+     fn unit(n Nil) Int {\n\
+     \tmatch n {\n\
+     \t\tNil -> 2\n\
+     \t}\n\
+     }\n\
+     pub fn main() {\n\
+     \tpick(yes(True)) + unit(Nil)\n\
+     }\n"
+);
+
 // Perceus inserts no drops inside a join body, so `t` is held to the end of
 // `f`'s frame. Sound, but it forfeits a `Reuse` token. This snapshot pins the
 // gap; sinking drops into joins should change it.

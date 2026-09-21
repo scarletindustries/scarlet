@@ -1,0 +1,38 @@
+fn main.pick(%0:t0) -> :t1
+  if %0 :t1
+    ret c0
+  else
+    ret c1
+
+fn main.yes(%0:t2) -> :t0
+  if %0 :t0
+    ret false
+  else
+    ret true
+
+fn main.unit(%0:t0) -> :t1
+  drop %0
+  ret c2
+
+fn main.main() -> :t0
+  let %0:t3 = true
+  let %1:t4 = call fn#0(%0)
+  drop %0
+  let %2:t0 = call fn#1(%1)
+  drop %1
+  let %3:t5 = nil
+  let %4:t6 = call fn#2(%3)
+  drop %3
+  ret IntAdd(%2, %4)
+
+toplevel:
+fn main.__main__() -> :t7
+  let %0:t8@g0 = closure fn#1()
+  let %1:t9@g1 = closure fn#0()
+  let %2:t3@g2 = closure fn#2()
+  let %3:t10@g3 = closure fn#3()
+  ret nil
+where
+  c0 = Int(1)
+  c1 = Int(0)
+  c2 = Int(2)

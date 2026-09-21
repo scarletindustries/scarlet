@@ -335,7 +335,6 @@ fn non_uniform_recursive_type_resolution_terminates() {
 }
 
 run_case! {
-    #[ignore = "needs the VM"]
     mutual_recursion_functions: (
         "fn is_even(n Int) Bool {\n\
          \tif n == 0 { True } else { is_odd(n - 1) }\n\

@@ -25,7 +25,7 @@ fn main.f(%0:t1) -> :t2
   ret IntAdd(%8, %7)
 
 fn main.main() -> :t1
-  let %0:t5 = ctor 261.0()
+  let %0:t5 = true
   ret call fn#1(%0)
 
 toplevel:

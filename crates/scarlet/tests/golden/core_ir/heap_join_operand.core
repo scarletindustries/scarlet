@@ -20,7 +20,7 @@ fn main.f(%0:t0) -> :t1
   ret call fn#0(%3)
 
 fn main.main() -> :t1
-  let %0:t5 = ctor 261.0()
+  let %0:t5 = true
   ret call fn#1(%0)
 
 toplevel:

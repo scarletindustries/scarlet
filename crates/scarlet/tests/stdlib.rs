@@ -225,7 +225,6 @@ run_case! {
         "7\n3\n5\n9223372036854775807\n10\n0\n42\n",
     ),
 
-    #[ignore = "needs the VM"]
     stdlib_bool: (
         "import scarlet/bool\n\
          pub fn main() {\n\

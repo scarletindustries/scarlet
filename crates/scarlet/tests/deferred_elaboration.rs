@@ -60,7 +60,6 @@ fn nested_recursive_lambda_shadowing_resolves_through_the_whole_chain() {
 /// bodies (`[J_a, J_b, body_a, Ret, body_b, Ret]`), so one patched to "just
 /// past my own `Ret`" lands inside the next body. Each must skip the whole run.
 #[test]
-#[ignore = "needs the VM"]
 fn mutually_recursive_scc_jumps_over_every_parked_body() {
     run_outputs(
         "fn is_even(n Int) Bool { if n == 0 { True } else { is_odd(n - 1) } }\n\

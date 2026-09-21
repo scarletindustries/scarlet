@@ -386,7 +386,6 @@ fn closure_captures_non_parameter_local() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn and_or_short_circuit_skips_rhs() {
     // `loud` prints when its argument is computed, so a missing 'evaluated'
     // line proves the RHS was never reached.
@@ -404,7 +403,6 @@ fn and_or_short_circuit_skips_rhs() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn and_or_evaluate_rhs_when_lhs_undecided() {
     // Control for `and_or_short_circuit_skips_rhs`: the LHS does not decide
     // the result, so the RHS must run and `loud` must print.
@@ -542,7 +540,6 @@ run_case! {
 
     // `Op::TailCallKnown`. At n = 200_000 a frame-pushing lowering overflows
     // the stack, so terminating at all is the assertion.
-    #[ignore = "needs the VM"]
     mutual_tail_recursion_between_known_fns: (
         "fn even(n Int) Bool { if n == 0 { True } else { odd(n - 1) } }\n\
          fn odd(n Int) Bool { if n == 0 { False } else { even(n - 1) } }\n\
