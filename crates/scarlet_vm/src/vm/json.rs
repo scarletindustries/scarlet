@@ -80,13 +80,18 @@ struct TapeNode {
     payload: u64,
 }
 
+/// Where a `K_STR` node's bytes are in the arena.
+struct ArenaSpan {
+    off: usize,
+    len: usize,
+}
+
 impl TapeNode {
-    /// Byte offset and length of a `K_STR` node's bytes in the arena.
-    fn str_span(self) -> (usize, usize) {
-        (
-            (self.payload >> 32) as usize,
-            (self.payload & 0xffff_ffff) as usize,
-        )
+    fn str_span(self) -> ArenaSpan {
+        ArenaSpan {
+            off: (self.payload >> 32) as usize,
+            len: (self.payload & 0xffff_ffff) as usize,
+        }
     }
 }
 
@@ -166,7 +171,7 @@ pub(super) fn inspect_doc(doc: &Value) -> String {
 
 /// The bytes of a `K_STR` node. `None` if the span escapes the arena.
 fn str_bytes(arena: &[u8], n: TapeNode) -> Option<&[u8]> {
-    let (off, len) = n.str_span();
+    let ArenaSpan { off, len } = n.str_span();
     arena.get(off..off.checked_add(len)?)
 }
 
@@ -286,7 +291,7 @@ fn build_tape(nodes: &[Node<'_>]) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
             Node::Array { len, count } => (K_ARRAY, *count as u64 + 1, *len as u64),
             Node::Static(StaticNode::Null) => (K_NULL, 1, 0),
             Node::Static(StaticNode::Bool(b)) => (K_BOOL, 1, u64::from(*b)),
-            Node::Static(StaticNode::I64(i)) => (K_INT, 1, *i as u64),
+            Node::Static(StaticNode::I64(i)) => (K_INT, 1, i.cast_unsigned()),
             Node::Static(StaticNode::U64(u)) => {
                 if *u <= i64::MAX as u64 {
                     (K_INT, 1, *u)
@@ -768,7 +773,7 @@ impl VM {
                 if key.kind != K_STR {
                     return None;
                 }
-                let (off, len) = key.str_span();
+                let ArenaSpan { off, len } = key.str_span();
                 // Reject a span that would panic later, while the arena is
                 // still in hand.
                 str_bytes(&arena, key)?;
@@ -869,7 +874,7 @@ impl VM {
         let n = (|| {
             let (_, tape_v, idx) = Self::doc_parts(&doc)?;
             let n = node_at(&bin_ref(&tape_v).full_bytes(), idx)?;
-            (n.kind == K_INT).then_some(n.payload as i64)
+            (n.kind == K_INT).then_some(n.payload.cast_signed())
         })();
         let v = match n {
             Some(i) => {
@@ -898,7 +903,7 @@ impl VM {
             let (_, tape_v, idx) = Self::doc_parts(&doc)?;
             let n = node_at(&bin_ref(&tape_v).full_bytes(), idx)?;
             match n.kind {
-                K_INT => Some((n.payload as i64).to_string()),
+                K_INT => Some(n.payload.cast_signed().to_string()),
                 K_UINT_BIG => Some(n.payload.to_string()),
                 _ => None,
             }
@@ -922,7 +927,7 @@ impl VM {
             let n = node_at(&bin_ref(&tape_v).full_bytes(), idx)?;
             match n.kind {
                 K_FLOAT => Some(f64::from_bits(n.payload)),
-                K_INT => Some(n.payload as i64 as f64),
+                K_INT => Some(n.payload.cast_signed() as f64),
                 K_UINT_BIG => Some(n.payload as f64),
                 _ => None,
             }
@@ -989,7 +994,7 @@ mod tests {
         let (tape, arena) = tape_of(r#"{"a":{"x":[1,2,{"y":3}]},"b":7}"#);
         let b = field_at(&tape, &arena, "b").expect("b is found past the nest");
         assert_eq!(node_at(&tape, b).unwrap().kind, K_INT);
-        assert_eq!(node_at(&tape, b).unwrap().payload as i64, 7);
+        assert_eq!(node_at(&tape, b).unwrap().payload.cast_signed(), 7);
     }
 
     #[test]
@@ -999,14 +1004,14 @@ mod tests {
         assert_eq!(node_at(&tape, 1).unwrap().skip, 1);
         assert_eq!(node_at(&tape, 2).unwrap().skip, 1);
         // The `1` is reachable only if both empty containers advanced by one.
-        assert_eq!(node_at(&tape, 3).unwrap().payload as i64, 1);
+        assert_eq!(node_at(&tape, 3).unwrap().payload.cast_signed(), 1);
     }
 
     #[test]
     fn duplicate_keys_both_survive_and_first_wins() {
         let (tape, arena) = tape_of(r#"{"a":1,"a":2}"#);
         let at = field_at(&tape, &arena, "a").unwrap();
-        assert_eq!(node_at(&tape, at).unwrap().payload as i64, 1);
+        assert_eq!(node_at(&tape, at).unwrap().payload.cast_signed(), 1);
         assert_eq!(
             node_at(&tape, 0).unwrap().payload,
             2,
@@ -1188,10 +1193,10 @@ mod tests {
             cursor += node_at(&tape, cursor).unwrap().skip;
         }
         assert_eq!(ats.len(), 4);
-        assert_eq!(node_at(&tape, ats[0]).unwrap().payload as i64, 1);
+        assert_eq!(node_at(&tape, ats[0]).unwrap().payload.cast_signed(), 1);
         assert_eq!(node_at(&tape, ats[1]).unwrap().kind, K_OBJECT);
         assert_eq!(node_at(&tape, ats[2]).unwrap().kind, K_ARRAY);
-        assert_eq!(node_at(&tape, ats[3]).unwrap().payload as i64, 5);
+        assert_eq!(node_at(&tape, ats[3]).unwrap().payload.cast_signed(), 5);
         // One walk covers the whole subtree: the cursor ends past the last node.
         assert_eq!(cursor, arr.skip);
     }
@@ -1249,7 +1254,7 @@ mod tests {
         let text = |i: usize| {
             let n = node_at(&tape, i).unwrap();
             match n.kind {
-                K_INT => Some((n.payload as i64).to_string()),
+                K_INT => Some(n.payload.cast_signed().to_string()),
                 K_UINT_BIG => Some(n.payload.to_string()),
                 _ => None,
             }

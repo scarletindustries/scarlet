@@ -1260,8 +1260,11 @@ impl<'a, 'g> RefWalker<'a, 'g> {
         let mark = self.undo.len();
         f(self);
         // Nested `scoped` calls already drained their own names, so this holds
-        // exactly what was shadowed at this level.
-        for name in self.undo.drain(mark..) {
+        // exactly what was shadowed at this level. Nothing else takes names
+        // out of the log, so it is at least as long as it was.
+        let len = self.undo.len();
+        debug_assert!(len >= mark, "the undo log shrank past this scope's mark");
+        for name in self.undo.drain(mark.min(len)..) {
             self.shadowed.remove(name);
         }
     }

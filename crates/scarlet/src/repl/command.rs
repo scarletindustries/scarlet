@@ -159,15 +159,15 @@ pub fn execute(cmd: Command<'_>, session: &mut Session) -> Flow {
 }
 
 /// The argument, or a usage line naming what was missing.
-fn require_arg<'a>(name: &str, arg: &'a str) -> Option<&'a str> {
+fn require_arg<'a>(command: &str, arg: &'a str) -> Option<&'a str> {
     if !arg.is_empty() {
         return Some(arg);
     }
-    let placeholder = match spec(name).map(|s| s.arg) {
+    let placeholder = match spec(command).map(|s| s.arg) {
         Some(Arg::Path(p) | Arg::Text(p)) => p,
         _ => return Some(arg),
     };
-    eprintln!("usage: :{name} <{placeholder}>");
+    eprintln!("usage: :{command} <{placeholder}>");
     None
 }
 

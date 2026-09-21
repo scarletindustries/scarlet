@@ -604,34 +604,44 @@ impl<'a> SeqNodeRef<'a> {
 // and new values are stored before old bits are released.
 // ---------------------------------------------------------------------------
 
+/// A Seq root's five fields, moved out by [`seq_root_take_parts`] and back
+/// in by [`seq_root_put_parts`].
+pub(crate) struct SeqRootParts {
+    pub(crate) len: usize,
+    pub(crate) shift: usize,
+    pub(crate) head: Value,
+    pub(crate) tree: Value,
+    pub(crate) tail: Value,
+}
+
 /// MOVE a uniquely-owned root's five fields out. The value slots become
 /// stale aliases; the caller must [`seq_root_put_parts`].
-pub(crate) fn seq_root_take_parts(root: &Value) -> (usize, usize, Value, Value, Value) {
+pub(crate) fn seq_root_take_parts(root: &Value) -> SeqRootParts {
     debug_assert!(root.is_unique());
     let obj = root.heap_obj();
     // SAFETY: unique live Seq root; layout [len, shift, head, tree, tail].
     unsafe {
         debug_assert_eq!(header_tag(*obj), HeapTag::Seq);
-        (
-            payload_word(obj, 0) as usize,
-            payload_word(obj, 1) as usize,
-            Value(payload_word(obj, 2)),
-            Value(payload_word(obj, 3)),
-            Value(payload_word(obj, 4)),
-        )
+        SeqRootParts {
+            len: payload_word(obj, 0) as usize,
+            shift: payload_word(obj, 1) as usize,
+            head: Value(payload_word(obj, 2)),
+            tree: Value(payload_word(obj, 3)),
+            tail: Value(payload_word(obj, 4)),
+        }
     }
 }
 
 /// MOVE five fields back into a uniquely-owned root whose value slots hold
 /// stale aliases from [`seq_root_take_parts`].
-pub(crate) fn seq_root_put_parts(
-    root: &Value,
-    len: usize,
-    shift: usize,
-    head: Value,
-    tree: Value,
-    tail: Value,
-) {
+pub(crate) fn seq_root_put_parts(root: &Value, parts: SeqRootParts) {
+    let SeqRootParts {
+        len,
+        shift,
+        head,
+        tree,
+        tail,
+    } = parts;
     debug_assert!(root.is_unique());
     let obj = root.heap_obj() as *mut u64;
     // SAFETY: unique live Seq root; slots hold stale aliases by contract.
@@ -1420,6 +1430,22 @@ impl Value {
     #[inline(always)]
     pub unsafe fn from_bits(bits: u64) -> Value {
         Value(bits)
+    }
+
+    /// `n` value words at `words`, viewed in place as values. A borrow: no
+    /// reference changes hands, as with `from_bits`.
+    ///
+    /// # Safety
+    /// `words` must point at `n` initialized value words that stay live and
+    /// unchanged for `'a`. It may be null when `n` is 0.
+    #[inline]
+    pub(crate) unsafe fn slice_from_words<'a>(words: *const u64, n: usize) -> &'a [Value] {
+        if n == 0 {
+            return &[];
+        }
+        // SAFETY: `Value` is `repr(transparent)` over its bits, and the
+        // caller vouches for the words.
+        unsafe { std::slice::from_raw_parts(words.cast::<Value>(), n) }
     }
 
     /// Box a pointer to an object header as a heap value. The only place

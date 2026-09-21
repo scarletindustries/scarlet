@@ -377,12 +377,8 @@ pub(crate) unsafe extern "C" fn al_rt_make_closure(
     // SAFETY: `vmx` is the running scheduler's live VM per the contract.
     let vm = unsafe { &mut *vmx };
     let n = count.max(0) as usize;
-    // SAFETY: `Value` is `repr(transparent)` over its u64 bits.
-    let borrowed: &[Value] = if n == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(caps.cast::<Value>(), n) }
-    };
+    // SAFETY: `caps` holds `n` value words per the contract.
+    let borrowed = unsafe { Value::slice_from_words(caps, n) };
     let v = Value::closure_in(&mut vm.heap, func_idx as i32, borrowed);
     for i in 0..n {
         // SAFETY: releases the one reference each word transferred in.

@@ -1,7 +1,7 @@
 //! `scarlet lint` — the `.scrl` half of the illegal-state sweep.
 //!
-//! Mordant's `flag_cluster` reads Rust and reports a struct whose `n` `bool`
-//! fields admit `2^n` states when fewer are legal. `wildcard_local_enum` flags
+//! Mordant's `bool_cluster` reads Rust and reports a struct whose `n` `bool`
+//! fields admit `2^n` states when fewer are legal. `wildcard_over_own_enum` flags
 //! a `_` arm over a crate-local enum, which is the only way to defeat
 //! exhaustiveness. Nothing read the Scarlet side, so a type declared in `.scrl`
 //! was invisible to both — the first sweep's one genuine hit was the then-
@@ -75,7 +75,7 @@
 //!   but it does not exclude the shape: an invariant held by a private
 //!   constructor is still held by a convention. Shape 2 similarly cannot tell
 //!   a deliberate extractor (`_ -> False`) from a silent collapse.
-//! - **Layout fixed from outside.** `flag_cluster` skips a `repr` struct because
+//! - **Layout fixed from outside.** `bool_cluster` skips a `repr` struct because
 //!   something outside Rust dictates its states. A Scarlet type crossing the VM
 //!   ABI is in that position and carries no syntactic mark, so it cannot be
 //!   filtered here and must be triaged by reading.
@@ -324,7 +324,7 @@ fn record_sum(path: &Path, root: usize, type_decl: &ast::TypeDeclaration, census
 
 fn record_catch_all(path: &Path, root: usize, m: &ast::MatchExpression, census: &mut Census) {
     // A single-arm match is a destructuring, not a dispatch — same cut as
-    // mordant's wildcard_local_enum.
+    // mordant's wildcard_over_own_enum.
     if m.arms.len() < 2 {
         return;
     }
@@ -731,7 +731,7 @@ fn is_prelude_bool(typ: &ast::TypeIdentifier) -> bool {
 }
 
 /// `2^n`, or the unevaluated power when it does not fit — the same contract as
-/// `flag_cluster`'s message, so the two sides print comparable numbers.
+/// `bool_cluster`'s message, so the two sides print comparable numbers.
 pub(crate) fn states(n: usize) -> String {
     match u32::try_from(n).ok().and_then(|n| 2u64.checked_pow(n)) {
         Some(n) => n.to_string(),
@@ -872,7 +872,7 @@ mod tests {
 
     /// Bools in two different constructors of one sum type are never
     /// simultaneously inhabited, so they are not a cluster. The Rust analogue
-    /// is that `flag_cluster` reads one struct, not an enum's whole variant set.
+    /// is that `bool_cluster` reads one struct, not an enum's whole variant set.
     #[test]
     fn bools_in_separate_constructors_do_not_combine() {
         let census = census_of("pub type Step {\n\tOpen(a Bool)\n\tShut(b Bool)\n}\n");
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(census.uninspected.len(), 0);
     }
 
-    /// The shape wildcard_local_enum exists to find, spelled as a local sum
+    /// The shape wildcard_over_own_enum exists to find, spelled as a local sum
     /// type with a `_` arm.
     #[test]
     fn catch_all_over_local_sum_is_found() {

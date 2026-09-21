@@ -93,18 +93,26 @@ fn branch_parts(branch: &Value) -> (&[u64], &[Value]) {
     }
 }
 
-/// Descend one level: the child slot holding element `idx`, and the cumulative
-/// count before it. The scan starts at the radix guess `idx >> shift`, which
-/// never overshoots because each child holds at most `1 << shift` elements.
-/// A strict subtree hits immediately; a relaxed one walks O(1) extra steps.
+/// Where an element sits one level down a branch.
+struct ChildSlot {
+    /// The child slot holding it.
+    child: usize,
+    /// The cumulative count of the children before that one.
+    before: usize,
+}
+
+/// Descend one level to element `idx`. The scan starts at the radix guess
+/// `idx >> shift`, which never overshoots because each child holds at most
+/// `1 << shift` elements. A strict subtree hits immediately; a relaxed one
+/// walks O(1) extra steps.
 #[inline]
-fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> (usize, usize) {
+fn size_slot(sizes: &[u64], idx: usize, shift: usize) -> ChildSlot {
     let mut k = (idx >> shift).min(sizes.len() - 1);
     while (sizes[k] as usize) <= idx {
         k += 1;
     }
     let before = if k > 0 { sizes[k - 1] as usize } else { 0 };
-    (k, before)
+    ChildSlot { child: k, before }
 }
 
 /// Total element count under a node (leaf count or last cumulative size).
@@ -185,7 +193,7 @@ pub(crate) fn get(root: &Value, i: usize) -> Option<Value> {
                 sizes,
                 children,
             } => {
-                let (k, before) = size_slot(sizes, idx, shift);
+                let ChildSlot { child: k, before } = size_slot(sizes, idx, shift);
                 idx -= before;
                 children[k].clone()
             }
@@ -328,7 +336,13 @@ fn push_end_unique<A: Arena + ?Sized, const FRONT: bool>(
     root: Value,
     x: Value,
 ) -> Value {
-    let (len, mut shift, head, mut tree, tail) = seq_root_take_parts(&root);
+    let SeqRootParts {
+        len,
+        mut shift,
+        head,
+        mut tree,
+        tail,
+    } = seq_root_take_parts(&root);
     let (this, other) = if FRONT { (head, tail) } else { (tail, head) };
     let new = if this.is_nil() {
         leaf_from(a, &[x])
@@ -355,7 +369,16 @@ fn push_end_unique<A: Arena + ?Sized, const FRONT: bool>(
         }
     };
     let (head, tail) = if FRONT { (new, other) } else { (other, new) };
-    seq_root_put_parts(&root, len + 1, shift, head, tree, tail);
+    seq_root_put_parts(
+        &root,
+        SeqRootParts {
+            len: len + 1,
+            shift,
+            head,
+            tree,
+            tail,
+        },
+    );
     root
 }
 
@@ -595,12 +618,27 @@ pub(crate) fn skip<A: Arena + ?Sized>(a: &mut A, root: Value, n: usize) -> Value
 /// The in-place [`skip`]: shrink the head buffer through the owned path,
 /// refilling it from the tree's left edge as it empties.
 fn skip_unique<A: Arena + ?Sized>(a: &mut A, root: Value, n: usize) -> Value {
-    let (len, mut shift, mut head, mut tree, mut tail) = seq_root_take_parts(&root);
+    let SeqRootParts {
+        len,
+        mut shift,
+        mut head,
+        mut tree,
+        mut tail,
+    } = seq_root_take_parts(&root);
     if n >= len {
         drop(head);
         drop(tree);
         drop(tail);
-        seq_root_put_parts(&root, 0, 0, Value::nil(), Value::nil(), Value::nil());
+        seq_root_put_parts(
+            &root,
+            SeqRootParts {
+                len: 0,
+                shift: 0,
+                head: Value::nil(),
+                tree: Value::nil(),
+                tail: Value::nil(),
+            },
+        );
         return root;
     }
     let mut left = n;
@@ -627,7 +665,16 @@ fn skip_unique<A: Arena + ?Sized>(a: &mut A, root: Value, n: usize) -> Value {
         tail = leaf_shrink_front(a, tail, left);
         left = 0;
     }
-    seq_root_put_parts(&root, len - n, shift, head, tree, tail);
+    seq_root_put_parts(
+        &root,
+        SeqRootParts {
+            len: len - n,
+            shift,
+            head,
+            tree,
+            tail,
+        },
+    );
     root
 }
 
@@ -764,7 +811,7 @@ fn tree_take<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
                 return node.clone();
             }
             // Keeping the first `m` means the last kept element is index `m - 1`.
-            let (k, before) = size_slot(sizes, m - 1, shift);
+            let ChildSlot { child: k, before } = size_slot(sizes, m - 1, shift);
             let child = tree_take(a, &children[k], m - before);
             let mut buf = Buf::new();
             buf.extend(&children[..k]);
@@ -786,7 +833,7 @@ fn tree_drop<A: Arena + ?Sized>(a: &mut A, node: &Value, m: usize) -> Value {
             sizes,
             children,
         } => {
-            let (k, before) = size_slot(sizes, m, shift);
+            let ChildSlot { child: k, before } = size_slot(sizes, m, shift);
             let child = tree_drop(a, &children[k], m - before);
             let mut buf = Buf::new();
             buf.push(child);

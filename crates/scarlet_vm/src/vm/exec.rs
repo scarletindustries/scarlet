@@ -67,7 +67,7 @@ impl VM {
     /// `Parked`, `Error`). One reduction budget spans the whole slice no
     /// matter which engine spends it.
     // Non-Done steps are forwarded to the caller unchanged, whatever they are.
-    #[allow(unknown_lints, wildcard_local_enum)]
+    #[allow(unknown_lints, wildcard_over_own_enum)]
     pub(super) fn run_slice(&mut self) -> VmResult<Step> {
         take_freed_objects();
         self.native_reds = REDUCTION_BUDGET;

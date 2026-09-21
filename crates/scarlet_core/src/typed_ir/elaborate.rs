@@ -29,7 +29,7 @@ use super::{
     TypedExpr, TypedFn, TypedInterpPart, TypedPat, ValueRef,
 };
 use crate::ast;
-use crate::bytecode::{BinopKind, Op, ShortCircuitOp, Value, ValueBinop, specialize_binop};
+use crate::bytecode::{BinopKind, Op, ShortCircuitOp, ValueBinop, specialize_binop};
 use crate::core_ir::{ConstId, FuncIdx, Imm, VariantRef};
 use crate::span::Span;
 use crate::types::{Prim, StrId, Ty};
@@ -88,9 +88,6 @@ pub trait ElabCtx: PreludeTys {
     fn intern(&mut self, s: &str) -> StrId;
     fn str(&self, id: StrId) -> &str;
 
-    /// Pool a constant value; the returned `ConstId` is the `PushConst` operand
-    /// `emit` will use verbatim.
-    fn add_const(&mut self, v: Value) -> ConstId;
     /// Parse-and-pool a numeric literal.
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> ConstId;
     /// Pool a string literal.

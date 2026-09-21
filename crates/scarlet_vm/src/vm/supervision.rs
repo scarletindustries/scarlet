@@ -847,7 +847,8 @@ impl Tree {
     fn begin(&mut self, owner: u64, mode: Mode, then: Then, actions: &mut Actions) {
         let Some(entry) = self.entries.get_mut(&owner) else {
             if let Then::Notify(parent) = then {
-                self.child_stopped(parent, owner, actions);
+                let child = owner;
+                self.child_stopped(parent, child, actions);
             }
             return;
         };
@@ -1042,7 +1043,8 @@ impl Tree {
                 if mode == Mode::Retire {
                     self.free_entry(owner, actions);
                 }
-                self.child_stopped(parent, owner, actions);
+                let child = owner;
+                self.child_stopped(parent, child, actions);
             }
             Then::Done => {
                 if mode == Mode::Retire {
@@ -1059,7 +1061,8 @@ impl Tree {
         match parent {
             Parent::Entry(p) => {
                 let now = Instant::now();
-                self.request_restart(p, owner, "a child supervisor gave up", now, actions);
+                let child = owner;
+                self.request_restart(p, child, "a child supervisor gave up", now, actions);
             }
             Parent::Process(pid) => {
                 // Nothing above can restart it: the failure has reached a
@@ -1384,6 +1387,12 @@ fn write<T>(l: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     l.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// What [`VM::mint_slot`] makes for a worker about to be declared.
+struct MintedSlot {
+    slot: u64,
+    address: u64,
+}
+
 impl VM {
     /// Carry out what the tree asked for. Starts happen here, before the
     /// caller counts the dead process as finished, so a program consisting
@@ -1582,10 +1591,10 @@ impl VM {
     }
 
     /// A slot id and a durable address for a worker about to be declared.
-    fn mint_slot(&self) -> (u64, u64) {
+    fn mint_slot(&self) -> MintedSlot {
         let slot = self.runtime.alloc_entry_id();
         let address = self.runtime.subject_create_durable(0, slot);
-        (slot, address)
+        MintedSlot { slot, address }
     }
 
     // ---- ops ---------------------------------------------------------------------
@@ -1640,7 +1649,7 @@ impl VM {
             None
         };
         let (_heap, recipe) = ProcHeap::spawn(&start);
-        let (slot, address) = self.mint_slot();
+        let MintedSlot { slot, address } = self.mint_slot();
         self.declare_worker(
             owner,
             false,
@@ -1665,7 +1674,7 @@ impl VM {
         for i in 0..self.runtime.scheduler_count() {
             *reds -= 2 * IO_REDUCTION_COST;
             let (_heap, recipe) = ProcHeap::spawn(&start);
-            let (slot, address) = self.mint_slot();
+            let MintedSlot { slot, address } = self.mint_slot();
             self.declare_worker(
                 owner,
                 false,
@@ -1733,7 +1742,7 @@ impl VM {
             match index.find(hash, &key) {
                 Some(address) => Err(address),
                 None => {
-                    let (slot, address) = self.mint_slot();
+                    let MintedSlot { slot, address } = self.mint_slot();
                     let (_heap, stored) = ProcHeap::spawn(&key);
                     index.insert(
                         hash,
@@ -1781,7 +1790,7 @@ impl VM {
         let factory = self.pop_int("process.start_in")? as u64;
         let policy = self.member_policy(factory)?;
         let (_heap, recipe) = ProcHeap::spawn(&arg);
-        let (slot, address) = self.mint_slot();
+        let MintedSlot { slot, address } = self.mint_slot();
         self.declare_worker(
             factory,
             true,

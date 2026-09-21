@@ -100,13 +100,9 @@ pub(crate) unsafe extern "C" fn al_shim_enum_alloc(
         )
     };
     debug_assert!(en.is_immortal() && vn.is_immortal() && lb.is_immortal());
-    // SAFETY: `payload` points at `n` initialized value words and `Value` is
-    // repr(transparent) over u64. Borrowed: the cell takes its own reference.
-    let fields: &[Value] = if n == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(payload.cast::<Value>(), n) }
-    };
+    // SAFETY: `payload` points at `n` initialized value words. Borrowed: the
+    // cell takes its own reference.
+    let fields = unsafe { Value::slice_from_words(payload, n) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     let v = Value::enum_reuse_in(
@@ -142,13 +138,9 @@ pub(crate) unsafe extern "C" fn al_shim_make_array(
     len: i64,
 ) -> u64 {
     let n = len as usize;
-    // SAFETY: `elems` points at `n` initialized value words and `Value` is
-    // repr(transparent) over u64. Borrowed: the array takes its own reference.
-    let vals: &[Value] = if n == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(elems.cast::<Value>(), n) }
-    };
+    // SAFETY: `elems` points at `n` initialized value words. Borrowed: the
+    // array takes its own reference.
+    let vals = unsafe { Value::slice_from_words(elems, n) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     let v = Value::array_in(&mut vm.heap, vals);
@@ -171,11 +163,7 @@ pub(crate) unsafe extern "C" fn al_shim_make_tuple(
 ) -> u64 {
     let n = len as usize;
     // SAFETY: see `al_shim_make_array`; identical contract.
-    let vals: &[Value] = if n == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(elems.cast::<Value>(), n) }
-    };
+    let vals = unsafe { Value::slice_from_words(elems, n) };
     // SAFETY: `vmx` is the running scheduler's VM per the contract above.
     let vm = unsafe { &mut *vmx };
     let v = Value::tuple_in(&mut vm.heap, vals);

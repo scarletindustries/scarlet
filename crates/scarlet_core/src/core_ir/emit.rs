@@ -681,14 +681,29 @@ fn split_self_tail_drops(mut e: &CoreExpr) -> Option<(Vec<LocalId>, Vec<LocalId>
 /// local failing any of them keeps the plain `StoreLocal`/`PushLocal` shape.
 #[derive(Default)]
 struct Scan {
-    /// `Ctor{reuse: Some(x)}` targets. The cell is this frame's reuse token,
-    /// not ownership to hand off, so [`peel_call_arg_drops`] must leave it.
-    reuse_claimed: TiVec<LocalId, bool>,
-    /// Locals the emitter addresses by slot rather than by pushing them:
-    /// `Match` scrutinees, `Drop` targets, reuse targets. Never const-aliased.
-    needs_slot: TiVec<LocalId, bool>,
-    /// Occurrence count per local, over every operand position in the body.
-    uses: TiVec<LocalId, u32>,
+    locals: TiVec<LocalId, LocalScan>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LocalScan {
+    slot: Slot,
+    /// Occurrences over every operand position in the body.
+    uses: u32,
+}
+
+/// How the emitter addresses a local.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Slot {
+    /// Only pushed.
+    #[default]
+    Free,
+    /// Addressed by slot rather than pushed: a `Match` scrutinee or a `Drop`
+    /// target. Never const-aliased.
+    Pinned,
+    /// A `Ctor{reuse: Some(x)}` target, so pinned too. The cell is this
+    /// frame's reuse token, not ownership to hand off, so
+    /// [`peel_call_arg_drops`] must leave it.
+    ReuseToken,
 }
 
 impl Scan {
@@ -701,37 +716,37 @@ impl Scan {
     /// Whether `id` must own a real slot. Out of range means the pre-pass
     /// never saw it, and the conservative answer keeps the slot.
     fn needs_slot(&self, id: LocalId) -> bool {
-        self.needs_slot.get(id).copied().unwrap_or(true)
+        self.locals.get(id).is_none_or(|l| l.slot != Slot::Free)
     }
 
     fn uses(&self, id: LocalId) -> u32 {
-        self.uses.get(id).copied().unwrap_or(0)
+        self.locals.get(id).map_or(0, |l| l.uses)
     }
 
     fn reuse_claimed(&self, id: LocalId) -> bool {
-        self.reuse_claimed.get(id).copied().unwrap_or(false)
+        self.locals
+            .get(id)
+            .is_some_and(|l| l.slot == Slot::ReuseToken)
     }
 
-    fn grow(&mut self, id: LocalId) {
-        self.uses.resize_at_least(id, 0);
-        self.needs_slot.resize_at_least(id, false);
-        self.reuse_claimed.resize_at_least(id, false);
+    fn local(&mut self, id: LocalId) -> &mut LocalScan {
+        self.locals.resize_at_least(id, LocalScan::default());
+        &mut self.locals[id]
     }
 
     fn use_(&mut self, id: LocalId) {
-        self.grow(id);
-        self.uses[id] += 1;
+        self.local(id).uses += 1;
     }
 
     fn pin(&mut self, id: LocalId) {
-        self.grow(id);
-        self.needs_slot[id] = true;
+        let local = self.local(id);
+        if local.slot == Slot::Free {
+            local.slot = Slot::Pinned;
+        }
     }
 
     fn claim(&mut self, id: LocalId) {
-        self.grow(id);
-        self.reuse_claimed[id] = true;
-        self.needs_slot[id] = true;
+        self.local(id).slot = Slot::ReuseToken;
     }
 
     fn atom(&mut self, a: &Atom) {

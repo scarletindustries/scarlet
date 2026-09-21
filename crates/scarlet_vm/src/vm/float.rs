@@ -21,29 +21,36 @@ use crate::bytecode::Value;
 use super::inspect::f64_str;
 use super::{VM, VmResult};
 
+/// The two operands of a binary op: `lhs` was pushed first, so it is the
+/// deeper of the two.
+struct Operands {
+    lhs: f64,
+    rhs: f64,
+}
+
 impl VM {
-    /// Pop two proven-Float operands, deepest first.
+    /// Pop two proven-Float operands.
     #[inline]
-    fn pop_float_pair(&mut self) -> VmResult<(f64, f64)> {
-        let b = self.pop()?.as_float_typed();
-        let a = self.pop()?.as_float_typed();
-        Ok((a, b))
+    fn pop_float_pair(&mut self) -> VmResult<Operands> {
+        let rhs = self.pop()?.as_float_typed();
+        let lhs = self.pop()?.as_float_typed();
+        Ok(Operands { lhs, rhs })
     }
 
     pub(super) fn add_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::float(a + b));
         Ok(())
     }
 
     pub(super) fn sub_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::float(a - b));
         Ok(())
     }
 
     pub(super) fn mul_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::float(a * b));
         Ok(())
     }
@@ -51,7 +58,7 @@ impl VM {
     /// Total like `Op::DivInt`: a zero divisor yields `0.0` rather than an
     /// infinity the value encoding cannot hold.
     pub(super) fn div_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         let r = if b == 0.0 { 0.0 } else { a / b };
         self.stack.push(Value::float(r));
         Ok(())
@@ -64,25 +71,25 @@ impl VM {
     }
 
     pub(super) fn lt_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::bool(a < b));
         Ok(())
     }
 
     pub(super) fn gt_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::bool(a > b));
         Ok(())
     }
 
     pub(super) fn lte_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::bool(a <= b));
         Ok(())
     }
 
     pub(super) fn gte_float(&mut self) -> VmResult<()> {
-        let (a, b) = self.pop_float_pair()?;
+        let Operands { lhs: a, rhs: b } = self.pop_float_pair()?;
         self.stack.push(Value::bool(a >= b));
         Ok(())
     }

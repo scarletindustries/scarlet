@@ -42,7 +42,7 @@ fn is_backpass(node: &Node) -> bool {
 }
 
 // The Statement catch-all below moves the non-backpass node back; a new statement kind belongs there.
-#[allow(unknown_lints, wildcard_local_enum)]
+#[allow(unknown_lints, wildcard_over_own_enum)]
 fn desugar_body(body: &mut Vec<Node>) {
     // Rewrite the first backpass; everything after it moves into the lambda,
     // so the generic walk below reaches any later ones inside that new node.

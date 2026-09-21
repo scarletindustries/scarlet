@@ -17,7 +17,8 @@ use crate::reference;
 use crate::scanner;
 
 use super::wire::{
-    WatchedChange, diagnostic_to_json, extract_position_params, query_module, root_for, uri_to_path,
+    DocPosition, WatchedChange, diagnostic_to_json, extract_position_params, query_module,
+    root_for, uri_to_path,
 };
 use super::xrefs::{RootState, Xref};
 
@@ -213,9 +214,9 @@ impl Workspace {
     /// Shared preamble for the position-based query responders: re-analyses the
     /// document as the entry. `Some` guarantees `graph_for(&uri)` is `Some`,
     /// which the caller re-fetches to avoid a `&mut self` / `&graph` overlap.
-    pub(super) fn resolve_pos(&mut self, params: &Json) -> Option<(String, i32, i32)> {
-        let (uri, line, col) = extract_position_params(params)?;
-        self.ensure_entry(&uri).then_some((uri, line, col))
+    pub(super) fn resolve_pos(&mut self, params: &Json) -> Option<DocPosition> {
+        let pos = extract_position_params(params)?;
+        self.ensure_entry(&pos.uri).then_some(pos)
     }
 
     /// Dependent-file callers of `def`, persisted across re-rooting because an

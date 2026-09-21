@@ -1486,7 +1486,7 @@ impl InferEngine {
                 }
                 // Guard fall-through: weak or level-bound variables of either
                 // state stay unquantified.
-                #[allow(unknown_lints, wildcard_local_enum)]
+                #[allow(unknown_lints, wildcard_over_own_enum)]
                 _ => {}
             },
             TypeNode::Con { args, .. } => self.collect_slice(args, ignore_level, weak, quantified),

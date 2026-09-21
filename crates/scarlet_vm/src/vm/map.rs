@@ -152,10 +152,7 @@ impl VM {
         let value = self.pop()?;
         let key = self.pop()?;
         let map = self.pop()?;
-        let base = match backing {
-            MapBacking::Hamt => map,
-            MapBacking::Env => self.build_env_hamt(&env_entries()),
-        };
+        let base = self.edit_base(backing, map);
         let next = hamt::insert(&mut self.heap, base, key, value, hash);
         self.stack.push(next);
         Ok(())
@@ -168,13 +165,19 @@ impl VM {
         let hash = hash_value(self.peek_at_or(0)?);
         let key = self.pop()?;
         let map = self.pop()?;
-        let base = match backing {
-            MapBacking::Hamt => map,
-            MapBacking::Env => self.build_env_hamt(&env_entries()),
-        };
+        let base = self.edit_base(backing, map);
         let next = hamt::remove(&mut self.heap, base, &key, hash);
         self.stack.push(next);
         Ok(())
+    }
+
+    /// The HAMT an edit of `map` starts from: `map` itself, or for a view of
+    /// the environment, a HAMT of its entries as they are now.
+    fn edit_base(&mut self, backing: MapBacking, map: Value) -> Value {
+        match backing {
+            MapBacking::Hamt => map,
+            MapBacking::Env => self.build_env_hamt(&env_entries()),
+        }
     }
 
     /// Build a HAMT holding `entries`, an environment snapshot.

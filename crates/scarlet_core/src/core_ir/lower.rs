@@ -542,7 +542,7 @@ impl Lower {
         let (a, ty) = self.atom(e);
         // Forwarding by design: any non-Local atom, current or future, gets
         // let-bound; only an existing local skips the binding.
-        #[allow(unknown_lints, wildcard_local_enum)]
+        #[allow(unknown_lints, wildcard_over_own_enum)]
         match a {
             Atom::Local(id) => id,
             other => self.let_(ty, other),
@@ -1074,7 +1074,7 @@ impl Lower {
                     let id = self.fresh(fp.ty());
                     // Forwarding by design: every compound pattern kind,
                     // current or future, goes to the nested queue.
-                    #[allow(unknown_lints, wildcard_local_enum)]
+                    #[allow(unknown_lints, wildcard_over_own_enum)]
                     match fp {
                         TypedPat::Wild { .. } => {}
                         TypedPat::Bind(b) => self.bind(b.id, id),
@@ -1571,7 +1571,7 @@ fn arm_fallible(arm: &TypedArm) -> bool {
 fn head_fallible(p: &TypedPat) -> bool {
     // Forwarding by design: anything that is not a bare head defers to the
     // general nested check, new pattern kinds included.
-    #[allow(unknown_lints, wildcard_local_enum)]
+    #[allow(unknown_lints, wildcard_over_own_enum)]
     match p {
         TypedPat::Wild { .. } | TypedPat::Bind(_) | TypedPat::Lit { .. } => false,
         TypedPat::Ctor { fields, .. } => fields.iter().any(nested_fallible),

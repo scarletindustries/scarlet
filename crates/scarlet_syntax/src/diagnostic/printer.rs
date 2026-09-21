@@ -30,6 +30,13 @@ fn severity_label(severity: Severity) -> &'static str {
     }
 }
 
+fn severity_color(severity: Severity, p: &Palette) -> &'static str {
+    match severity {
+        Severity::Error => p.red,
+        Severity::Hint => p.cyan,
+    }
+}
+
 fn get_source_line<'a>(lines: &'a [&'a str], line_number: i32) -> &'a str {
     if line_number < 1 || line_number as usize > lines.len() {
         return "";
@@ -74,10 +81,7 @@ impl EditorProbe {
 fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palette) -> String {
     let mut result = String::new();
 
-    let color = match d.severity {
-        Severity::Error => p.red,
-        Severity::Hint => p.cyan,
-    };
+    let color = severity_color(d.severity, p);
     let label = severity_label(d.severity);
 
     let file_path = view.file_path;
@@ -149,10 +153,7 @@ fn format_diagnostic_with_lines(d: &Diagnostic, view: &SourceView<'_>, p: &Palet
 /// Header and location only, for a diagnostic whose source module resolved to
 /// no text. A caret into some other file's text would be worse than none.
 fn format_diagnostic_header(d: &Diagnostic, file_path: &str, p: &Palette) -> String {
-    let color = match d.severity {
-        Severity::Error => p.red,
-        Severity::Hint => p.cyan,
-    };
+    let color = severity_color(d.severity, p);
     let label = severity_label(d.severity);
     let display_line = d.span.start_line + 1;
     let display_col = d.span.start_column + 1;

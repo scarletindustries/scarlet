@@ -394,6 +394,18 @@ enum RemovedOwned {
     Node(Value),
 }
 
+impl Removed {
+    /// The owned outcome, for a caller that held `node`, the reference this
+    /// removal read from.
+    fn owning(self, node: Value) -> RemovedOwned {
+        match self {
+            Removed::Absent => RemovedOwned::Absent(node),
+            Removed::Empty => RemovedOwned::Empty,
+            Removed::Node(n) => RemovedOwned::Node(n),
+        }
+    }
+}
+
 /// [`node_remove`] for a subtree reference the caller OWNS; the in-place
 /// mirror of [`node_insert_owned`].
 fn node_remove_owned<A: Arena + ?Sized>(
@@ -404,11 +416,7 @@ fn node_remove_owned<A: Arena + ?Sized>(
     shift: u32,
 ) -> RemovedOwned {
     if !node.is_unique() {
-        return match node_remove(a, &node, key, hash, shift) {
-            Removed::Absent => RemovedOwned::Absent(node),
-            Removed::Empty => RemovedOwned::Empty,
-            Removed::Node(n) => RemovedOwned::Node(n),
-        };
+        return node_remove(a, &node, key, hash, shift).owning(node);
     }
     match HamtNodeRef::of(&node) {
         HamtNodeRef::Entry { key: k, .. } => {
@@ -422,11 +430,7 @@ fn node_remove_owned<A: Arena + ?Sized>(
             }
         }
         // Rare; the copy path handles bucket surgery.
-        HamtNodeRef::Collision { .. } => match node_remove(a, &node, key, hash, shift) {
-            Removed::Absent => RemovedOwned::Absent(node),
-            Removed::Empty => RemovedOwned::Empty,
-            Removed::Node(n) => RemovedOwned::Node(n),
-        },
+        HamtNodeRef::Collision { .. } => node_remove(a, &node, key, hash, shift).owning(node),
         HamtNodeRef::Branch { bitmap, children } => {
             let n = children.len();
             let b = bit(hash, shift);

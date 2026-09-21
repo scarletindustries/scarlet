@@ -137,11 +137,9 @@ pub struct NativePlan {
     pub func_idx: FuncIdx,
     fun: CoreFn,
     bools: BoolCtors,
-    /// Per-local representation class, captured from each binding's `RTy`
-    /// while the pool is alive.
-    reprs: TiVec<LocalId, Repr>,
-    /// Nominal proofs the emitter uses to pick the unchecked lowering.
-    proofs: TiVec<LocalId, TyProof>,
+    /// Per-local facts, captured from each binding's `RTy` while the pool is
+    /// alive.
+    locals: TiVec<LocalId, LocalPlan>,
     /// `EmitCtx::switch_variant_count`'s answers for every type this body
     /// matches over by constructor, captured through the [`SwitchCounts`]
     /// oracle while the type table was alive. Both the layout re-emission
@@ -176,6 +174,15 @@ enum TyProof {
     Binary,
     /// A tuple of exactly this many elements.
     Tuple(u16),
+}
+
+/// What a [`NativePlan`] knows about one local.
+#[derive(Clone, Copy, Default)]
+struct LocalPlan {
+    /// Its representation class.
+    repr: Repr,
+    /// The nominal proof the emitter uses to pick the unchecked lowering.
+    proof: TyProof,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -298,8 +305,7 @@ pub fn plan(
         counts,
         bools,
         tys: ReprTys::of(prelude),
-        reprs: TiVec::new(),
-        proofs: TiVec::new(),
+        locals: TiVec::new(),
         switch_counts: HashMap::new(),
     };
     for p in &f.params {
@@ -310,19 +316,22 @@ pub fn plan(
         func_idx,
         fun: f.clone(),
         bools,
-        reprs: walk.reprs,
-        proofs: walk.proofs,
+        locals: walk.locals,
         switch_counts: walk.switch_counts,
     }
 }
 
 impl NativePlan {
+    fn local(&self, id: LocalId) -> LocalPlan {
+        self.locals.get(id).copied().unwrap_or_default()
+    }
+
     fn repr_of(&self, id: LocalId) -> Repr {
-        self.reprs.get(id).copied().unwrap_or_default()
+        self.local(id).repr
     }
 
     fn proof(&self, id: LocalId) -> TyProof {
-        self.proofs.get(id).copied().unwrap_or_default()
+        self.local(id).proof
     }
 
     fn is_int(&self, id: LocalId) -> bool {
@@ -406,18 +415,18 @@ struct PlanWalk<'a> {
     counts: SwitchCounts<'a>,
     bools: BoolCtors,
     tys: ReprTys,
-    reprs: TiVec<LocalId, Repr>,
-    /// Nominal proofs that outlive the pool; see [`TyProof`].
-    proofs: TiVec<LocalId, TyProof>,
+    /// Facts that outlive the pool; see [`TyProof`] for the proofs.
+    locals: TiVec<LocalId, LocalPlan>,
     switch_counts: HashMap<TypeId, u8>,
 }
 
 impl PlanWalk<'_> {
     fn record(&mut self, b: &CoreBind) {
-        self.reprs.resize_at_least(b.id, Repr::default());
-        self.reprs[b.id] = classify(self.pool, self.tys, b.ty);
-        self.proofs.resize_at_least(b.id, TyProof::default());
-        self.proofs[b.id] = prove(self.pool, self.tys, b.ty);
+        self.locals.resize_at_least(b.id, LocalPlan::default());
+        self.locals[b.id] = LocalPlan {
+            repr: classify(self.pool, self.tys, b.ty),
+            proof: prove(self.pool, self.tys, b.ty),
+        };
     }
 
     /// The plan-time half of emit's `switch_plan`: does this match compile to
@@ -1050,28 +1059,19 @@ pub(crate) fn encode_plan_bundle(plan: &NativePlan, layout: &FrameLayout) -> Vec
     let fn_bytes = super::codec::encode_fn(&plan.fun);
     e.usize(fn_bytes.len());
     e.buf.extend_from_slice(&fn_bytes);
-    e.usize(plan.reprs.len());
-    for i in 0..plan.reprs.len() {
-        let r = plan
-            .reprs
-            .get(LocalId::from_usize(i))
-            .copied()
-            .unwrap_or_default();
-        e.u8(match r {
+    // Every repr, then every proof: the layout the shipped bundles have.
+    e.usize(plan.locals.len());
+    for local in &plan.locals {
+        e.u8(match local.repr {
             Repr::Int => 0,
             Repr::Immediate => 1,
             Repr::Heap => 2,
             Repr::Dyn => 3,
         });
     }
-    e.usize(plan.proofs.len());
-    for i in 0..plan.proofs.len() {
-        match plan
-            .proofs
-            .get(LocalId::from_usize(i))
-            .copied()
-            .unwrap_or_default()
-        {
+    e.usize(plan.locals.len());
+    for local in &plan.locals {
+        match local.proof {
             TyProof::None => e.u8(0),
             TyProof::Array => e.u8(1),
             TyProof::Binary => e.u8(2),
@@ -1110,7 +1110,7 @@ pub fn decode_plan_bundle(
     let fun = super::codec::decode_fn(bytes.get(at..at + n).ok_or(DecodeError::Truncated)?)?;
     d.skip(n)?;
     let n = d.usize()?;
-    let mut reprs = TiVec::new();
+    let mut reprs = Vec::with_capacity(n);
     for _ in 0..n {
         reprs.push(match d.u8()? {
             0 => Repr::Int,
@@ -1121,7 +1121,7 @@ pub fn decode_plan_bundle(
         });
     }
     let n = d.usize()?;
-    let mut proofs = TiVec::new();
+    let mut proofs = Vec::with_capacity(n);
     for _ in 0..n {
         proofs.push(match d.u8()? {
             0 => TyProof::None,
@@ -1142,12 +1142,19 @@ pub fn decode_plan_bundle(
     let layout = super::codec::decode_layout(bytes.get(at..at + n).ok_or(DecodeError::Truncated)?)?;
     d.skip(n)?;
     d.finish()?;
+    // A local past the end of either list has that fact's default.
+    let mut locals = TiVec::new();
+    for i in 0..reprs.len().max(proofs.len()) {
+        locals.push(LocalPlan {
+            repr: reprs.get(i).copied().unwrap_or_default(),
+            proof: proofs.get(i).copied().unwrap_or_default(),
+        });
+    }
     let plan = NativePlan {
         func_idx,
         fun,
         bools: BoolCtors::of(prelude),
-        reprs,
-        proofs,
+        locals,
         switch_counts,
     };
     Ok((plan, layout))
@@ -1368,6 +1375,13 @@ enum Dest {
 struct AtomVal {
     word: Option<ir::Value>,
     int: Option<ir::Value>,
+}
+
+/// Which of an [`AtomVal`]'s views a caller of `eval_pure` needs.
+#[derive(Clone, Copy)]
+struct Want {
+    word: bool,
+    int: bool,
 }
 
 struct BodyGen<'a> {
@@ -1792,8 +1806,6 @@ impl<'a> BodyGen<'a> {
         }
     }
 
-    /// Evaluate a non-call atom. `want_word` asks for an owned boxed word,
-    /// `want_int` for the raw `i64` view.
     /// Structural equality of two already-materialised words, via the same
     /// `values_equal` the interpreter uses. Returns the Bool word.
     fn eq_words(&mut self, a: ir::Value, b: ir::Value) -> ir::Value {
@@ -1821,7 +1833,13 @@ impl<'a> BodyGen<'a> {
         self.shim_op_result(opc, opv, buf, n, want_int)
     }
 
-    fn eval_pure(&mut self, a: &Atom, want_word: bool, want_int: bool) -> AtomVal {
+    /// Evaluate a non-call atom. `want.word` asks for an owned boxed word,
+    /// `want.int` for the raw `i64` view.
+    fn eval_pure(&mut self, a: &Atom, want: Want) -> AtomVal {
+        let Want {
+            word: want_word,
+            int: want_int,
+        } = want;
         match a {
             Atom::Local(src) => {
                 let word = want_word.then(|| self.owned_word(*src));
@@ -2328,7 +2346,7 @@ impl<'a> BodyGen<'a> {
                             // A deliberate assertion: only arithmetic ops
                             // reach this table, and a new NOp that does is a
                             // routing bug this panic names.
-                            #[allow(unknown_lints, wildcard_local_enum)]
+                            #[allow(unknown_lints, wildcard_over_own_enum)]
                             _ => unsupported_node("arithmetic op"),
                         };
                         self.int_result(r, want_word)
@@ -2432,7 +2450,16 @@ impl<'a> BodyGen<'a> {
 
     /// An owned word for a tail/merge atom, whatever its shape.
     fn owned_atom_word(&mut self, a: &Atom) -> ir::Value {
-        match self.eval_pure(a, true, false).word {
+        match self
+            .eval_pure(
+                a,
+                Want {
+                    word: true,
+                    int: false,
+                },
+            )
+            .word
+        {
             Some(w) => w,
             None => unsupported_node("valueless atom"),
         }
@@ -3002,7 +3029,11 @@ impl<'a> BodyGen<'a> {
                                 }
                             }
                         }
-                        let v = self.eval_pure(rhs, want_word, want_int);
+                        let want = Want {
+                            word: want_word,
+                            int: want_int,
+                        };
+                        let v = self.eval_pure(rhs, want);
                         self.move_args.clear();
                         self.def_local(bind.id, v);
                     }

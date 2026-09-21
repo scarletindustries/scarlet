@@ -199,7 +199,7 @@ pub(crate) fn group_willing(d: Doc) -> Doc {
 }
 
 // Doc is a closed algebra: any non-group doc gets wrapped uniformly.
-#[allow(unknown_lints, wildcard_local_enum)]
+#[allow(unknown_lints, wildcard_over_own_enum)]
 fn group_as(breaks: Breaks, d: Doc) -> Doc {
     match d.0 {
         DocInner::Text { .. } | DocInner::Nil => d,
@@ -253,7 +253,7 @@ fn contains_hardline(d: &Doc) -> bool {
 }
 
 // Any non-Nil, non-Concat doc is pushed as-is; new doc kinds included.
-#[allow(unknown_lints, wildcard_local_enum)]
+#[allow(unknown_lints, wildcard_over_own_enum)]
 pub(crate) fn concat(ds: Vec<Doc>) -> Doc {
     let mut out: Vec<Doc> = Vec::with_capacity(ds.len());
     for d in ds {
@@ -279,7 +279,7 @@ macro_rules! d {
 }
 
 // Any other separator doc is a single part; new doc kinds included.
-#[allow(unknown_lints, wildcard_local_enum)]
+#[allow(unknown_lints, wildcard_over_own_enum)]
 pub(crate) fn join(items: Vec<Doc>, sep: Doc) -> Doc {
     if items.is_empty() {
         return nil();

@@ -557,7 +557,7 @@ fn pat_to_string(p: &Pat, t: &RcType, interner: &Interner) -> String {
                         }
                         // Guard fall-through: any non-list pattern renders
                         // as the open tail, whatever kind it is.
-                        #[allow(unknown_lints, wildcard_local_enum)]
+                        #[allow(unknown_lints, wildcard_over_own_enum)]
                         _ => {
                             heads.push("..".to_string());
                             return format!("[{}]", heads.join(", "));

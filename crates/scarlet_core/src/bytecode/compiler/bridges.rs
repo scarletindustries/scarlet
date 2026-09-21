@@ -124,9 +124,6 @@ impl ElabCtx for Compiler {
     }
     // Safe mid-elaboration: `program.constants` is `ConstId`-addressed, so
     // pooling moves no address.
-    fn add_const(&mut self, v: Value) -> crate::core_ir::ConstId {
-        crate::core_ir::ConstId(self.add_constant(v) as u32)
-    }
     fn number_const(&mut self, lit: &ast::NumberLiteral) -> crate::core_ir::ConstId {
         let v = self.const_number(lit);
         crate::core_ir::ConstId(self.add_constant(v) as u32)

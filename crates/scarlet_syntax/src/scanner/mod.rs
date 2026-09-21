@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::span::Span;
 use crate::token::{self, Kind, Token, Trivia};
@@ -245,7 +247,7 @@ impl Scanner {
         }
 
         if token::is_name_start(ch) {
-            let (start, end) = self.scan_name();
+            let Range { start, end } = self.scan_name();
 
             // Keyword lookup on a borrowed slice, so keywords allocate no
             // String. Names are ASCII, so `from_utf8` cannot fail here.
@@ -444,16 +446,16 @@ impl Scanner {
     // Advance past the rest of a name and return its `[start, end)` byte range.
     // The caller has already consumed the first byte, so the name starts at
     // `pos - 1`. Names are ASCII, so byte offsets are column offsets.
-    fn scan_name(&mut self) -> (i32, i32) {
+    fn scan_name(&mut self) -> Range<i32> {
         let start = self.pos - 1;
         while token::is_name_continue(self.peek_char()) {
             self.incr_pos();
         }
-        (start, self.pos)
+        start..self.pos
     }
 
     fn scan_identifier(&mut self) -> Token {
-        let (start, end) = self.scan_name();
+        let Range { start, end } = self.scan_name();
         let text = self.slice(start, end);
         self.new_token(Kind::Identifier(text.into()))
     }

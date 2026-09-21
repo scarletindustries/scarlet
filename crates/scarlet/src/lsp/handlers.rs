@@ -9,8 +9,8 @@ use crate::reference;
 use crate::span::Span;
 
 use super::wire::{
-    clean_doc_comment, completion_item, doc_uri, qualifier_before, query_module, range_json,
-    symbol_kind, uri_for, workspace_edit_json,
+    DocPosition, clean_doc_comment, completion_item, doc_uri, qualifier_before, query_module,
+    range_json, symbol_kind, uri_for, workspace_edit_json,
 };
 use super::workspace::Workspace;
 
@@ -18,7 +18,7 @@ impl Workspace {
     /// `textDocument/hover`: a markdown block for the symbol under the cursor,
     /// or `Json::Null`.
     pub fn hover_response(&mut self, params: &Json) -> Json {
-        let Some((uri, line, col)) = self.resolve_pos(params) else {
+        let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
         };
         // The reference graph carries no inference, so the type comes from the
@@ -77,7 +77,7 @@ impl Workspace {
     /// than an error.
     pub fn completion_response(&mut self, params: &Json) -> Json {
         let empty = Json::Array(Vec::new());
-        let Some((uri, line, col)) = self.resolve_pos(params) else {
+        let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return empty;
         };
         let Some((graph, mid)) = self.graph_module(&uri) else {
@@ -147,7 +147,7 @@ impl Workspace {
     /// `textDocument/definition`: the `{ uri, range }` of the definition under
     /// the cursor, or `Json::Null`.
     pub fn definition_response(&mut self, params: &Json) -> Json {
-        let Some((uri, line, col)) = self.resolve_pos(params) else {
+        let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
         };
         let Some((graph, mid)) = self.graph_module(&uri) else {
@@ -192,7 +192,7 @@ impl Workspace {
             .and_then(|c| c.get("includeDeclaration"))
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let Some((uri, line, col)) = self.resolve_pos(params) else {
+        let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
         };
         if let Some((graph, mid)) = self.graph_module(&uri) {
@@ -262,7 +262,7 @@ impl Workspace {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let Some((uri, line, col)) = self.resolve_pos(params) else {
+        let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Ok(Json::Null);
         };
         if let Some((graph, mid)) = self.graph_module(&uri)
@@ -304,7 +304,7 @@ impl Workspace {
     /// `textDocument/prepareRename`: `{ range, placeholder }`, or `Json::Null`
     /// when the position cannot be renamed.
     pub fn prepare_rename_response(&mut self, params: &Json) -> Json {
-        let Some((uri, line, col)) = self.resolve_pos(params) else {
+        let Some(DocPosition { uri, line, col }) = self.resolve_pos(params) else {
             return Json::Null;
         };
         let Some((graph, mid)) = self.graph_module(&uri) else {

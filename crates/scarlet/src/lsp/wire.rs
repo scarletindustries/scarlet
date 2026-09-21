@@ -65,12 +65,20 @@ pub(super) fn doc_uri(params: &Json) -> Option<String> {
     )
 }
 
-pub(super) fn extract_position_params(params: &Json) -> Option<(String, i32, i32)> {
+/// A document and a zero-based position in it, as a position request names
+/// them.
+pub(super) struct DocPosition {
+    pub(super) uri: String,
+    pub(super) line: i32,
+    pub(super) col: i32,
+}
+
+pub(super) fn extract_position_params(params: &Json) -> Option<DocPosition> {
     let uri = doc_uri(params)?;
     let pos = params.get("position")?;
     let line = pos.get("line")?.as_i64()? as i32;
     let col = pos.get("character")?.as_i64()? as i32;
-    Some((uri, line, col))
+    Some(DocPosition { uri, line, col })
 }
 
 /// LSP `SymbolKind` wire number for an [`EntityKind`]. Here, not on
