@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 scarlet_ir = { path = "../scarlet_ir" }
+# Big ints' arithmetic, behind `bigint.rs` (docs/vm-design.md, "Values").
+num-bigint = "0.5"
+num-traits = "0.2"
 
 [dev-dependencies]
 # Tests write their programs in Scarlet and compile them. Only the tests see

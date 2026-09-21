@@ -148,14 +148,54 @@ fn strings_print_join_and_interpolate() {
     );
 }
 
-/// Past 48 bits the exact answer needs a big int. Until those exist the run
-/// stops rather than print a wrapped, wrong number.
+/// An Int is exact however big it gets: past 48 bits it moves to the heap,
+/// and past 64 it keeps going.
 #[test]
-fn an_int_past_48_bits_stops_rather_than_wrapping() {
-    let src = "pub fn main() {\n\tprintln(140737488355327 + 1)\n}\n";
-    assert_eq!(
-        run(src),
-        Err(Stop::NotBuiltYet("Int beyond 48 bits (big ints)".into()))
+fn ints_are_exact_past_48_and_64_bits() {
+    prints(
+        "fn fact(n Int) Int { if n == 0 { 1 } else { n * fact(n - 1) } }\n\
+         pub fn main() {\n\
+         \tprintln(140737488355327 + 1)\n\
+         \tprintln(9223372036854775807 + 1)\n\
+         \tprintln(fact(25))\n\
+         \tprintln(0 - 9223372036854775807 - 1)\n\
+         }\n",
+        "140737488355328\n9223372036854775808\n15511210043330985984000000\n-9223372036854775808\n",
+    );
+}
+
+/// A result that fits comes back small, so a number has one form and `==`
+/// cannot see two.
+#[test]
+fn a_big_result_that_fits_is_small_again() {
+    prints(
+        "pub fn main() {\n\
+         \tbig = 9223372036854775807 * 4\n\
+         \tprintln(big / 4 == 9223372036854775807)\n\
+         \tprintln(big - big == 0)\n\
+         \tprintln({big - big} + 1)\n\
+         \tprintln(big > 1)\n\
+         \tprintln(0 - big < 0)\n\
+         }\n",
+        "True\nTrue\n1\nTrue\nTrue\n",
+    );
+}
+
+/// `docs/semantics.md`'s rules hold for big ints too, including the zero
+/// cases the library would otherwise panic on. The number is built by
+/// multiplying: a literal past 64 bits is still a compile error, because the
+/// compiler keeps Int constants as `i64`.
+#[test]
+fn big_division_follows_the_rules() {
+    prints(
+        "pub fn main() {\n\
+         \tbig = 1000000000000000 * 1000000000000000\n\
+         \tprintln({0 - big} / 7)\n\
+         \tprintln({0 - big} % 7)\n\
+         \tprintln(big / 0)\n\
+         \tprintln(big % 0 == big)\n\
+         }\n",
+        "-142857142857142857142857142857\n-1\n0\nTrue\n",
     );
 }
 

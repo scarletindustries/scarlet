@@ -152,7 +152,6 @@ fn unknown_module() {
 }
 
 run_case! {
-    #[ignore = "needs the VM"]
     stdlib_net_socket_type: (
         "import scarlet/net/socket.{Socket}\n\nfn id(s Socket) Socket { s }\n\npub fn main() {\n\tprintln('ok')\n}\n",
         "ok\n",

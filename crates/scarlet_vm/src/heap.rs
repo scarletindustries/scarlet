@@ -19,6 +19,8 @@
 
 use std::collections::HashMap;
 
+use num_bigint::{BigInt, Sign};
+
 /// Words in the first chunk: 2 KB.
 const FIRST_CHUNK_WORDS: usize = 256;
 
@@ -53,6 +55,10 @@ impl Cell {
 pub(crate) enum Kind {
     /// UTF-8 text: a word holding its length in bytes, then the bytes.
     String = 1,
+    /// An Int too big for a value word: a word holding its sign (bit 63) and
+    /// how many 64-bit digits follow, then the digits, least significant
+    /// first.
+    BigInt = 2,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -178,6 +184,7 @@ impl Heap {
     pub(crate) fn kind(&self, cell: Cell) -> Option<Kind> {
         match self.word(cell, 0) >> 32 & 0xFF {
             1 => Some(Kind::String),
+            2 => Some(Kind::BigInt),
             _ => None,
         }
     }
@@ -202,6 +209,32 @@ impl Heap {
             let n = (len - i * 8).min(8);
             out.extend_from_slice(&bytes[..n]);
         }
+    }
+
+    /// A new big-int cell holding `n`.
+    pub(crate) fn big_int(&mut self, n: &BigInt) -> Result<Cell, Full> {
+        let (sign, digits) = n.to_u64_digits();
+        let cell = self.alloc(Kind::BigInt, 1 + digits.len())?;
+        let negative = u64::from(sign == Sign::Minus) << 63;
+        self.set_word(cell, 1, negative | digits.len() as u64);
+        for (i, d) in digits.iter().enumerate() {
+            self.set_word(cell, 2 + i, *d);
+        }
+        Ok(cell)
+    }
+
+    pub(crate) fn read_big_int(&self, cell: Cell) -> BigInt {
+        let w = self.word(cell, 1);
+        let sign = if w >> 63 == 1 {
+            Sign::Minus
+        } else {
+            Sign::Plus
+        };
+        let len = (w & 0xFFFF_FFFF) as usize;
+        let bytes: Vec<u8> = (0..len)
+            .flat_map(|i| self.word(cell, 2 + i).to_le_bytes())
+            .collect();
+        BigInt::from_bytes_le(sign, &bytes)
     }
 
     /// Cells not yet freed.
@@ -322,6 +355,18 @@ mod tests {
         assert!(heap.chunks[cell.chunk as usize].is_none());
         let again = heap.string(&big).expect("room");
         assert_eq!(again.chunk, cell.chunk);
+    }
+
+    #[test]
+    fn a_big_int_reads_back_with_its_sign() {
+        let mut heap = Heap::default();
+        let big: BigInt = "-123456789012345678901234567890".parse().expect("a number");
+        let cell = heap.big_int(&big).expect("room");
+        assert_eq!(heap.kind(cell), Some(Kind::BigInt));
+        assert_eq!(heap.read_big_int(cell), big);
+        let positive = -big;
+        let cell = heap.big_int(&positive).expect("room");
+        assert_eq!(heap.read_big_int(cell), positive);
     }
 
     #[test]

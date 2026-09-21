@@ -41,6 +41,12 @@ pub(crate) enum Instr {
         dst: Reg,
         text: Box<[u8]>,
     },
+    /// A new big int holding `n`, for a constant past a small Int's range.
+    /// Made each time it runs, like [`Instr::Str`].
+    BigInt {
+        dst: Reg,
+        n: i64,
+    },
     Move {
         dst: Reg,
         src: Reg,
@@ -361,6 +367,7 @@ impl<'c> Loader<'c> {
                     dst,
                     text: text.as_bytes().into(),
                 },
+                Some(Const::Int(n)) if Value::int(*n).is_none() => Instr::BigInt { dst, n: *n },
                 _ => Instr::Const {
                     dst,
                     value: self.constant(c.index())?,
@@ -456,7 +463,7 @@ impl<'c> Loader<'c> {
     fn constant(&self, i: usize) -> Result<Value, String> {
         match self.consts.get(i) {
             Some(Const::Int(n)) => {
-                Value::int(*n).ok_or_else(|| "Int beyond 48 bits (big ints)".to_string())
+                Value::int(*n).ok_or_else(|| format!("the constant {n} as a small Int"))
             }
             Some(Const::Float(_)) => Err("Float".into()),
             Some(Const::String(_)) => Err("String".into()),

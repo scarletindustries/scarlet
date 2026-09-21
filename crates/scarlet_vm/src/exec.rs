@@ -16,7 +16,8 @@ use std::io::Write;
 use scarlet_ir::core_ir::FuncIdx;
 
 use crate::Stop;
-use crate::code::{Body, Code, Func, Instr, IntOp, Reg};
+use crate::bigint::{self, Int};
+use crate::code::{Body, Code, Func, Instr, Reg};
 use crate::heap::{Full, Heap, Kind};
 use crate::value::{Value, View};
 
@@ -104,6 +105,10 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let cell = self.heap.string(text).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::BigInt { dst, n } => {
+                    let v = bigint::value(&mut self.heap, (*n).into()).map_err(full)?;
+                    self.set(base, *dst, v);
+                }
                 Instr::Move { dst, src } => {
                     let v = self.share(self.get(base, *src));
                     self.set(base, *dst, v);
@@ -125,11 +130,13 @@ impl<'c, 'o> Machine<'c, 'o> {
                     }
                 }
                 Instr::Int { dst, op, a, b } => {
-                    let v = int_op(*op, self.int(base, *a)?, self.int(base, *b)?)?;
+                    let (a, b) = (self.int(base, *a)?, self.int(base, *b)?);
+                    let v = bigint::op(&mut self.heap, *op, a, b).map_err(full)?;
                     self.set(base, *dst, v);
                 }
                 Instr::IntNeg { dst, a } => {
-                    let v = small(self.int(base, *a)?.checked_neg())?;
+                    let a = self.int(base, *a)?;
+                    let v = bigint::neg(&mut self.heap, a).map_err(full)?;
                     self.set(base, *dst, v);
                 }
                 Instr::Println { dst, arg } => {
@@ -278,9 +285,12 @@ impl<'c, 'o> Machine<'c, 'o> {
             .is_some_and(|c| self.heap.kind(c) == Some(Kind::String))
     }
 
-    fn int(&self, base: usize, r: Reg) -> Result<i64, Stop> {
+    fn int(&self, base: usize, r: Reg) -> Result<Int, Stop> {
         match self.get(base, r).view() {
-            View::Int(n) => Ok(n),
+            View::Int(n) => Ok(Int::Small(n)),
+            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
+                Ok(Int::Big(self.heap.read_big_int(cell)))
+            }
             v @ (View::Float(_) | View::Nil | View::Bool(_) | View::Func(_) | View::Cell(_)) => {
                 Err(Stop::NotBuiltYet(format!("an Int operation on {v:?}")))
             }
@@ -295,6 +305,9 @@ impl<'c, 'o> Machine<'c, 'o> {
             View::Bool(true) => out.extend_from_slice(b"True"),
             View::Bool(false) => out.extend_from_slice(b"False"),
             View::Cell(cell) if self.is_string(v) => self.heap.read_string(cell, out),
+            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
+                out.extend_from_slice(self.heap.read_big_int(cell).to_string().as_bytes());
+            }
             View::Cell(_) => return Err(Stop::NotBuiltYet("printing this value".into())),
             View::Float(_) => return Err(Stop::NotBuiltYet("printing a Float".into())),
             View::Func(_) => return Err(Stop::NotBuiltYet("printing a function".into())),
@@ -326,32 +339,6 @@ fn ready(f: &Func) -> Result<&Body, Stop> {
 
 fn full(_: Full) -> Stop {
     Stop::HeapFull
-}
-
-/// `docs/semantics.md`'s Int rules: `/` truncates toward zero and `x / 0` is
-/// 0; `%` takes the dividend's sign and `x % 0` is `x`.
-fn int_op(op: IntOp, a: i64, b: i64) -> Result<Value, Stop> {
-    Ok(match op {
-        IntOp::Add => small(a.checked_add(b))?,
-        IntOp::Sub => small(a.checked_sub(b))?,
-        IntOp::Mul => small(a.checked_mul(b))?,
-        IntOp::Div => small(if b == 0 { Some(0) } else { a.checked_div(b) })?,
-        IntOp::Rem => small(if b == 0 { Some(a) } else { a.checked_rem(b) })?,
-        IntOp::Eq => Value::bool(a == b),
-        IntOp::Ne => Value::bool(a != b),
-        IntOp::Lt => Value::bool(a < b),
-        IntOp::Le => Value::bool(a <= b),
-        IntOp::Gt => Value::bool(a > b),
-        IntOp::Ge => Value::bool(a >= b),
-    })
-}
-
-/// An Int result as a value. Past a small Int's range, the exact answer needs
-/// a big int, which the VM does not have yet. Stopping says so; wrapping would
-/// print a wrong number.
-fn small(n: Option<i64>) -> Result<Value, Stop> {
-    n.and_then(Value::int)
-        .ok_or_else(|| Stop::NotBuiltYet("Int beyond 48 bits (big ints)".into()))
 }
 
 #[cfg(test)]
@@ -405,6 +392,24 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "1\n");
+        assert_eq!(left, 0);
+    }
+
+    /// Each step makes a bigger big int and drops the last, and printing one
+    /// makes and frees its text.
+    #[test]
+    fn big_ints_made_in_a_loop_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "fn grow(n Int, acc Int) Int {\n\
+             \tif n == 0 { acc } else { grow(n - 1, acc * 3) }\n\
+             }\n\
+             pub fn main() {\n\
+             \tbig = grow(200, 1)\n\
+             \tprintln(big > 1)\n\
+             \tprintln('${big / big}')\n\
+             }\n",
+        );
+        assert_eq!(out, "True\n1\n");
         assert_eq!(left, 0);
     }
 
