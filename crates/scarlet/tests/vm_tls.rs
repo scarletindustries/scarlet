@@ -828,6 +828,7 @@ pub fn main() {{
 /// that RSTs instead of dropping returns unmeasurable: the kernel answered,
 /// so the deadline-vs-kernel-floor gap does not exist.
 #[test]
+#[ignore = "needs the VM"]
 fn tls_connect_within_times_out_against_a_peer_that_never_accepts() {
     let Some((_listener, _fillers, port)) = full_accept_queue() else {
         return;
