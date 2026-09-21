@@ -26,21 +26,3 @@ codegen-units = 1
 inherits = "release"
 strip = false
 debug = true
-
-[workspace.metadata.dylint]
-# Pinned to a rev. Unpinned, `cargo dylint` resolves whatever the remote's HEAD
-# is at the moment each machine last fetched, so the mordant gate silently
-# changes underneath a tree that did not move: `flag_cluster` landing on mordant
-# master turned this repo's CI red with no commit here at all. It also
-# accumulates one `~/.cargo/git/checkouts` directory per rev, which is how the
-# same documented command comes to run two different lint sets in two worktrees
-# minutes apart.
-#
-# Bumping is now a deliberate act, and a fix on mordant master does not reach
-# this repo until someone moves this line.
-#
-# **Changing this line rebuilds nothing.** With a library already built, moving
-# the rev and re-running `cargo dylint` loads the dylib already in
-# `target/dylint`, so the bump leaves every run using the old pack.
-# `rm -rf target/dylint` is what makes it take, once per worktree.
-libraries = [{ git = "https://github.com/scarletindustries/mordant", rev = "eba57c339ebdfc7f2ce9a814507e028db0d21867" }]

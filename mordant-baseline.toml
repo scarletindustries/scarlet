@@ -1,3 +1,0 @@
-# Empty: the wildcard debt was burned down 2026-08-11. Regenerate with
-# MORDANT_BASELINE_WRITE=1 cargo dylint --all only when deliberately
-# accepting a finding.

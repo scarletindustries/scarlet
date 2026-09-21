@@ -8,7 +8,7 @@ edition = "2024"
 # the counter on through either crate.
 alloc-counter = ["scarlet_vm/alloc-counter"]
 
-# `cargo dylint` sets `--cfg dylint_lib="mordant"` and plain cargo does not, so
+# `cargo mordant` sets `--cfg dylint_lib="mordant"` and plain cargo does not, so
 # the `#[cfg_attr(dylint_lib = "mordant", ...)]` suppression on `Compiler` is an
 # unexpected cfg to every other build — and `clippy -- -D warnings` fails on it.
 [lints.rust]

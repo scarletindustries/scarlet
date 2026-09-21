@@ -1,15 +1,9 @@
 [mordant]
-# Spelled for the mordant rev pinned in `Cargo.toml` (`eba57c3`), whose fields are
-# `nonidentity_key_*`. Upstream renamed them to `key_not_identity_*` in `b9681bc`, which is
-# after this pin, and dropped the compatibility aliases in `28f9de0`. The pinned rev has no
-# `deny_unknown_fields`, so a key that does not match it is discarded in silence and the lint
-# runs with empty lists against a green gate — measured: a planted `HashMap<Span, _>` is not
-# reported under the post-rename spelling and is reported under this one. Move these three and
-# the pin in the same change, never separately.
-nonidentity-key-types = ["scarlet_syntax::span::Span"]
-nonidentity-key-forms = ["ptr-cast"]
-nonidentity-key-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
-baseline = "mordant-baseline.toml"
+# Spelled for the mordant rev pinned in `.github/workflows/ci.yml`. Mordant rejects a key it
+# does not know, so a rename upstream fails the gate instead of silently emptying a lint.
+key-not-identity-types = ["scarlet_syntax::span::Span"]
+key-not-identity-forms = ["ptr-cast"]
+key-not-identity-methods = ["scarlet_vm::bytecode::value::Value::to_bits"]
 
 # The language server must never kill its own process from a handler: a
 # malformed request or bad file state answers with an error response, not an

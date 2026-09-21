@@ -80,14 +80,17 @@ jobs:
       - name: Hawk
         run: cargo hawk check -D warnings
 
-  # Type-hardening gate: mordant's lints fire only on provable claims, and
-  # mordant-baseline.toml accepts the findings that predate the gate, so this
-  # fails only on new ones. To accept a finding deliberately, regenerate with
-  # MORDANT_BASELINE_WRITE=1 and commit the baseline. The lints build against
-  # their own pinned nightly, which dylint fetches; the workspace toolchain is
-  # untouched.
+  # Type-hardening gate: mordant's lints fire only on provable claims, and any
+  # finding fails the job; to keep one, `#[expect]` it where it is, with the
+  # reason. Tests are part of the run so that what they use counts for
+  # `unused_pub`; they are not linted. Mordant is pinned to a rev, so the gate
+  # only changes when this line does, and runs on the nightly it was built
+  # with; the workspace toolchain is untouched. Bump the two together.
   mordant:
     runs-on: ubuntu-latest
+    env:
+      MORDANT_REV: da558ae4118c8bd26ed64f6e4e83efbb19a79f4c
+      MORDANT_TOOLCHAIN: nightly-2026-09-01
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,19 +98,26 @@ jobs:
       - name: Install Rust (rust-toolchain.toml)
         run: rustup toolchain install
 
+      - name: Install mordant's nightly
+        run: rustup toolchain install "$MORDANT_TOOLCHAIN" --profile minimal --component rustc-dev --component llvm-tools-preview
+
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Cache dylint drivers
+      - name: Cache mordant
+        id: mordant-cache
         uses: actions/cache@v4
         with:
-          path: ~/.dylint_drivers
-          key: dylint-drivers-${{ runner.os }}
+          path: |
+            ~/.cargo/bin/cargo-mordant
+            ~/.cargo/bin/mordant-driver
+          key: mordant-${{ runner.os }}-${{ env.MORDANT_REV }}
 
-      - name: Install dylint
-        run: cargo install cargo-dylint dylint-link --locked
+      - name: Install mordant
+        if: steps.mordant-cache.outputs.cache-hit != 'true'
+        run: cargo +"$MORDANT_TOOLCHAIN" install --locked --git https://github.com/scarletindustries/mordant --rev "$MORDANT_REV"
 
       - name: Mordant
-        run: cargo dylint --all
+        run: cargo mordant --workspace --all-targets
         env:
-          DYLINT_RUSTFLAGS: -D warnings
+          MORDANT_RUSTFLAGS: -D warnings
