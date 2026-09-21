@@ -92,7 +92,7 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
 **Decided: a heap per process.** Each process allocates from its own heap, and reference counting runs inside it. This is BEAM's shape, with counting where BEAM has a GC.
 
 - **Why it works:** messages are copied when sent, so every object in a process's heap is reachable only from that process. Only the owner ever allocates or frees in it, so it needs no locks and no atomic counts.
-- **A limit is just the heap's size.** A process that passes its limit stops, and that's a resource death, not a bug.
+- **A limit is just the heap's size.** A process that passes its limit stops, and that's a resource death, not a bug. Its links hear about it like any other death, as with BEAM's `max_heap_size`.
 - **Death frees everything at once:** the heap's memory is returned in whole chunks, with no walk over the objects in it.
 
 **Proposed: how.**
@@ -104,7 +104,23 @@ This matters because Perceus decides what to drop by type, and it leaves some ty
   - handles to OS resources, like sockets and files.
 - A process keeps a list of the outside things its heap points to. When it dies, it releases each of them before returning its chunks. This is BEAM's "off-heap" list.
 
-**Open:** how big a heap's first chunk is, and how a heap grows. A million tiny processes each with a large first chunk would waste a lot of memory.
+**Proposed: how a heap grows.**
+
+- **No heap until it's needed.** A process gets no chunk until it makes its first heap value. One that only does Int maths or waits on messages costs nothing here.
+- **Small values fill chunks.** The first chunk is about 2 KB, and each new chunk is about 1.6 times the last. Growing in steps, rather than by exactly each value's size, keeps the number of chunks small: a 1 MB list of 24-byte cells fits in about 13 chunks instead of about 43,000. Allocation stays cheap, and a death returns a handful of chunks, not thousands.
+- **A value bigger than the current chunk size gets a chunk of exactly its size.**
+- **A chunk that empties goes back to the system.**
+
+**Where the numbers come from: BEAM.** Checked against Erlang/OTP `master` at `bf52b4d716` (2026-09-21):
+
+- A new process's heap starts at 233 words (`H_DEFAULT_SIZE`, `erts/emulator/beam/erl_vm.h`). A whole fresh process is 327 words, about 2.6 KB on a 64-bit machine (`system/doc/efficiency_guide/eff_guide_processes.md`).
+- Heap sizes follow Fibonacci plus one word: 12, 38, 51, 90, 142, 233, 376, 610, and so on. That's about 1.6 times per step, up to 833,026 words (about 6.4 MB). After that, each step adds 20% (`erts_init_gc` in `erts/emulator/beam/erl_gc.c`).
+- When a heap has no room, BEAM allocates a separate heap fragment of exactly the size needed (`erts_heap_alloc`, `erts/emulator/beam/utils.c`). A message that can't go straight into the receiver's heap goes into one too (`erts_try_alloc_message_on_heap`, `erl_message.c`).
+- The Fibonacci table only sizes the main heap at the next collection, which copies everything alive into one block. At that point a heap grows to the next size that fits, and shrinks when it's using under 25% (`erl_gc.c`).
+
+**Why we differ.** BEAM's copying GC moves values, so it can put a heap back into one block, and it rounds up then to keep copies rare. Reference counting never moves a value, so our heap stays a list of chunks. We need BEAM's first mechanism (exact-size space when short), but not its second (copying into a table-sized block).
+
+**Open: fragmentation.** Freed cells leave gaps that a copying GC would squeeze out, and we can't. BEAM hit its own version of this: shrinking hibernated heaps in place "caused serious fragmentation problems when large amounts of processes were hibernated", so `hibernate` now copies what's alive into a new heap of exact size (`garbage_collect_hibernate` in `erl_gc.c`). We should measure the gaps once processes exist.
 
 ## Running code
 
@@ -160,7 +176,7 @@ Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the t
 ## Open, all in one place
 
 - How many bits a small int gets.
-- How big a process heap starts, and how it grows.
+- How much memory a process heap loses to gaps between freed cells, once processes exist.
 - When a read moves a reference instead of copying it.
 - When a program ends, and the exit code when `main` returns `Err`.
 - From `docs/semantics.md`: `x % 0`, `sqrt(-1.0)`, and float literals too large to represent.
