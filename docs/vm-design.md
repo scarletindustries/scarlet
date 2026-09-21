@@ -159,7 +159,7 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 ## Order of work
 
-Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 310 after step 2, 300 after step 4, 299 after step 5, and 293 once Bool and Nil stopped being constructors.
+Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 311 after step 2, 301 after step 4, 300 after step 5, and 294 once Bool and Nil stopped being constructors. (Each count is one higher than first written: one Linux-only network test, which skips itself on a Mac, was parked late.)
 
 1. The `scarlet_ir` crate. **Done.**
 2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, Int operations, calls, `Println`. `scarlet run` uses it. **Done.**
