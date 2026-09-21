@@ -236,6 +236,14 @@ pub(crate) enum Instr {
         a: Reg,
         b: Reg,
     },
+    /// `xs[a..b]`: `Ok` of the elements of the array in `src` from `start` up
+    /// to `end`, or `Err(Nil)` when that range is not inside it.
+    ArraySlice {
+        dst: Reg,
+        src: Reg,
+        start: Reg,
+        end: Reg,
+    },
     /// `xs[i]`: `Some` of element `index` of the array in `src`, or `None`
     /// when it has none.
     ArrayIndex {
@@ -307,6 +315,7 @@ impl Instr {
             | Instr::ArrayPrepend { .. }
             | Instr::ArrayAppend { .. }
             | Instr::ArrayConcat { .. }
+            | Instr::ArraySlice { .. }
             | Instr::ArrayIndex { .. }
             | Instr::ArrayIndexOr { .. }
             | Instr::Bad { .. } => None,
@@ -829,6 +838,15 @@ impl<'c> Loader<'c> {
                     b: Reg::of(*b),
                 }),
                 _ => Err("ArrayConcat with other than two arguments".into()),
+            },
+            PrimOp::ArraySlice => match args {
+                [src, start, end] => Ok(Instr::ArraySlice {
+                    dst,
+                    src: Reg::of(*src),
+                    start: Reg::of(*start),
+                    end: Reg::of(*end),
+                }),
+                _ => Err("ArraySlice with other than three arguments".into()),
             },
             PrimOp::ArrayIndex => match args {
                 [src, index] => Ok(Instr::ArrayIndex {

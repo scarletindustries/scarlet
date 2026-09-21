@@ -463,23 +463,18 @@ fn u25_foreign_receive_is_a_clean_error() {
     );
 }
 
-// U23: a slice whose bounds escape the array, or is reversed, is a clean
-// runtime error: non-zero exit with a diagnostic, never a panic or abort.
+// U23: a slice whose bounds escape the array, or is reversed, is `Err(Nil)`:
+// the program runs on and sees the failure as a value, never a crash
+// (`docs/semantics.md`, "The rule").
 #[test]
-#[ignore = "needs the VM"]
-fn u23_oob_and_reversed_slice_are_clean_errors() {
-    // (slice expression, the runtime error printing it must exit with)
-    let cases = [
-        (
-            "[1, 2, 3][0..10]",
-            "Slice indices out of bounds: [0..10] (length 3)",
-        ),
-        (
-            "[1, 2, 3][2..1]",
-            "Slice indices out of bounds: [2..1] (length 3)",
-        ),
-    ];
-    for (expr, want) in cases {
-        run_rejects(&format!("pub fn main() {{\n\tprintln({expr})\n}}\n"), want);
-    }
+fn u23_oob_and_reversed_slice_are_err() {
+    run_outputs(
+        "pub fn main() {\n\
+         \tprintln([1, 2, 3][0..10])\n\
+         \tprintln([1, 2, 3][2..1])\n\
+         \tprintln([1, 2, 3][-1..2])\n\
+         \tprintln([1, 2, 3][1..3])\n\
+         }\n",
+        "Err(Nil)\nErr(Nil)\nErr(Nil)\nOk(\n  [2, 3]\n)\n",
+    );
 }

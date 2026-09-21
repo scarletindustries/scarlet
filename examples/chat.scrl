@@ -126,12 +126,9 @@ fn room_loop(r Room) Nil {
 			broadcast(said.members, stats_frame(said))
 			room_loop(said)
 		}
-		// An out-of-range slice is a crash: this process ends, the supervisor
-		// starts `room` again on the same inbox, and the tabs rejoin it.
-		Crash -> {
-			_ = r.history[0..1_000_000]
-			Nil
-		}
+		// Killing this process ends it: the supervisor starts `room` again on
+		// the same inbox, and the tabs rejoin it.
+		Crash -> process.kill(process.self())
 	}
 }
 
@@ -156,11 +153,9 @@ fn replay(feed Subject(Feed), history Array(Binary)) Nil {
 }
 
 fn remember(history Array(Binary), frame Binary) Array(Binary) {
-	n = array.length(history)
-	kept = if n < HISTORY {
-		history
-	} else {
-		history[1..n]
+	kept = match history {
+		[_, ..rest] if array.length(history) >= HISTORY -> rest
+		_ -> history
 	}
 	[..kept, frame]
 }

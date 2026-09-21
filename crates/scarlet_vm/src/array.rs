@@ -419,13 +419,6 @@ fn collapse(heap: &mut Heap, mut n: Value, mut shift: usize) -> (Value, usize) {
 }
 
 /// The first `n` elements.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "`xs[a..b]` uses it, once its rule for a range past the end is decided"
-    )
-)]
 fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full> {
     let r = root(heap, array);
     if n == 0 {
@@ -455,6 +448,23 @@ fn take(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full> {
     let head = own(heap, r.head);
     let tree = own(heap, r.tree);
     new_root(heap, n, r.shift, head, tree, tail)
+}
+
+/// The elements from `start` up to but not including `end`, or `None` when
+/// that range is not inside the array.
+pub(crate) fn slice(
+    heap: &mut Heap,
+    array: Cell,
+    start: usize,
+    end: usize,
+) -> Result<Option<Cell>, Full> {
+    if start > end || end > len(heap, array) {
+        return Ok(None);
+    }
+    let front = take(heap, array, end)?;
+    let cut = skip(heap, front, start)?;
+    heap.release(front);
+    Ok(Some(cut))
 }
 
 /// Every element but the first `n`.
@@ -495,7 +505,6 @@ pub(crate) fn skip(heap: &mut Heap, array: Cell, n: usize) -> Result<Cell, Full>
 }
 
 /// The first `m` elements of a tree node, `m` from 1 to its length.
-#[cfg_attr(not(test), expect(dead_code, reason = "only `take` calls it"))]
 fn tree_take(heap: &mut Heap, n: Value, m: usize) -> Result<Value, Full> {
     match node(heap, n) {
         None => Ok(Value::NIL),

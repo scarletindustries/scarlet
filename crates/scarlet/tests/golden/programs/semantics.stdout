@@ -36,10 +36,20 @@ empty interpolation of empty string: []
 index: Some(10) Some(30)
 out of bounds: None None
 index with fallback: 20 0
-slice: [2, 3]
-slice whole: [1, 2, 3, 4, 5]
-slice empty: []
-slice computed bounds: [2, 3, 4]
+slice: Ok(
+  [2, 3]
+)
+slice whole: Ok(
+  [1, 2, 3, 4, 5]
+)
+slice empty: Ok(
+  []
+)
+slice past the end: Err(Nil)
+slice backwards: Err(Nil)
+slice computed bounds: Ok(
+  [2, 3, 4]
+)
 range value: [1, 2, 3] True
 range with bounds that meet: []
 range indexed: Some(12)

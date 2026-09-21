@@ -70,10 +70,9 @@ fn room_loop(inbox Subject(RoomMsg), name String, history Array(String)) Nil {
 			room_loop(inbox, name, history)
 		}
 		Crash -> {
-			// An out-of-range slice ends this process; the factory starts a
-			// fresh one at the same address.
-			_ = history[0..1000000]
-			Nil
+			// Killing this process ends it; the factory starts a fresh one at
+			// the same address.
+			process.kill(process.self())
 		}
 	}
 }

@@ -1351,6 +1351,8 @@ impl Compiler {
         let abi = Abi {
             some: self.prelude.some().into(),
             none: self.prelude.none().into(),
+            ok: self.prelude.ok().into(),
+            err: self.prelude.err().into(),
         };
         let types = self.type_names((&fns).into_iter().chain(&inits).chain([&toplevel]), &abi);
         Some(Program {
@@ -3222,7 +3224,11 @@ impl Compiler {
                     let int_t = self.ty_int();
                     self.engine.unify_at(int_t, start_ty, r.start.span());
                     self.engine.unify_at(int_t, end_ty, r.end.span());
-                    self.ty_array(elem_var)
+                    // A slice can fail, when its range is not inside the
+                    // array, so it is a `Result`, as `binary.slice_bits` is.
+                    let slice = self.ty_array(elem_var);
+                    let nil = self.ty_nil();
+                    self.ty_result(slice, nil)
                 } else {
                     let idx_ty = self.compile_expr(&aie.index);
                     let int_t = self.ty_int();

@@ -415,6 +415,30 @@ impl<'c, 'o> Machine<'c, 'o> {
                     let cell = array::concat(&mut self.heap, a, b).map_err(full)?;
                     self.set(base, *dst, Value::cell(cell));
                 }
+                Instr::ArraySlice {
+                    dst,
+                    src,
+                    start,
+                    end,
+                } => {
+                    let a = self.array(self.get(base, *src))?;
+                    let bounds = (
+                        self.position(self.get(base, *start))?,
+                        self.position(self.get(base, *end))?,
+                    );
+                    let cut = match bounds {
+                        (Some(start), Some(end)) => {
+                            array::slice(&mut self.heap, a, start, end).map_err(full)?
+                        }
+                        _ => None,
+                    };
+                    let v = match cut {
+                        Some(cut) => self.heap.ctor(self.code.abi.ok, &[Value::cell(cut)]),
+                        None => self.heap.ctor(self.code.abi.err, &[Value::NIL]),
+                    };
+                    let v = Value::cell(v.map_err(full)?);
+                    self.set(base, *dst, v);
+                }
                 Instr::ArrayIndex { dst, src, index } => {
                     let found = self.index(self.get(base, *src), self.get(base, *index))?;
                     let v = match found {
@@ -481,21 +505,28 @@ impl<'c, 'o> Machine<'c, 'o> {
     }
 
     /// Element `index` of the array `a`, with no reference added, or `None`
-    /// when it has none: past the end, negative, or a big int, which is past
-    /// the end of any array.
+    /// when it has none.
     fn index(&self, a: Value, index: Value) -> Result<Option<Value>, Stop> {
         let a = self.array(a)?;
-        match index.view() {
-            View::Int(i) => Ok(usize::try_from(i)
-                .ok()
-                .and_then(|i| array::get(&self.heap, a, i))),
+        Ok(self
+            .position(index)?
+            .and_then(|i| array::get(&self.heap, a, i)))
+    }
+
+    /// The Int `v` as a position in an array, or `None` when it names none:
+    /// negative, or a big int, which is past the end of any array.
+    fn position(&self, v: Value) -> Result<Option<usize>, Stop> {
+        match v.view() {
+            View::Int(i) => Ok(usize::try_from(i).ok()),
             View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => Ok(None),
             v @ (View::Float(_)
             | View::Nil
             | View::Bool(_)
             | View::Func(_)
             | View::Cell(_)
-            | View::Nullary(_)) => Err(Stop::BadProgram(format!("an array indexed by {v:?}"))),
+            | View::Nullary(_)) => Err(Stop::BadProgram(format!(
+                "an array position that is {v:?}, not an Int"
+            ))),
         }
     }
 

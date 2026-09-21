@@ -16,9 +16,8 @@ Each rule is marked:
 - `Result` means an operation can fail. The error is `Nil` when it carries no data, and the stdlib never uses `Option` for failure.
 - Supervisors, links and monitors are for deaths that come from outside the code: a killed process, a process hitting a resource limit, a lost machine. They are not for bugs.
 
-Under this rule, every way code can still crash a process is a bug. Today there are three:
+Under this rule, every way code can still crash a process is a bug. Today there are two:
 
-- an out-of-range slice, `xs[a..b]` (`scarlet_vm/src/vm/collections.rs`)
 - a `receive` on a subject that another process created (`scarlet_vm/src/vm/mailbox.rs`)
 - a supervision declaration that the tree refuses (`Crash.Supervision` in `std/scarlet/process.scrl`)
 
@@ -58,6 +57,15 @@ Erlang crashes in these cases, and Scarlet gives a harmless value instead.
 
 - What `sqrt(-1.0)` returns, once maths functions exist.
 - A float literal too large to represent compiles to `0.0` today. It could become the largest float, or a compile error, as an oversized Int literal already is.
+
+## Arrays
+
+**Built: indexing and slicing never crash.**
+
+- `xs[i]` is `Option(a)`: `None` when `i` is negative or past the end.
+- `xs[a..b]` is `Result(Array(a), Nil)`: `Ok` of the elements from `a` up to but not including `b`, and `Err(Nil)` when that range is not inside the array, meaning `a` is negative, `b` is past the length, or `a` comes after `b`. `xs[a..a]` is `Ok([])`.
+
+A slice is a `Result` rather than a shorter array, because a range that misses the array is a failure the caller should see, not one to hide by clamping. `binary.slice_bits` follows the same rule. The old VM crashed on an out-of-range slice instead.
 
 ## Memory
 

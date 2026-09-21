@@ -124,7 +124,9 @@ pub enum PrimOp {
     /// `xs[i] or d`, with no `Option` built. Args: `xs`, `i`, `d`, where `d` is
     /// already evaluated, so it must be pure.
     ArrayIndexOr,
-    /// `xs[a..b]`. Args: `xs`, `a`, `b`.
+    /// `xs[a..b]`, as a `Result`: `Ok` of the elements from `a` up to but not
+    /// including `b`, or `Err(Nil)` when `a..b` is not inside the array.
+    /// Args: `xs`, `a`, `b`.
     ArraySlice,
     /// The length of an array.
     ArrayLen,

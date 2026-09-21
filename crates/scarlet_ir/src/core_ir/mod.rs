@@ -140,12 +140,16 @@ pub struct Abi {
     pub some: VariantRef,
     /// `None`.
     pub none: VariantRef,
+    /// `Ok(value)`.
+    pub ok: VariantRef,
+    /// `Err(error)`.
+    pub err: VariantRef,
 }
 
 impl Abi {
     /// Every constructor here, so their types' names can travel with them.
-    pub fn variants(&self) -> [VariantRef; 2] {
-        [self.some, self.none]
+    pub fn variants(&self) -> [VariantRef; 4] {
+        [self.some, self.none, self.ok, self.err]
     }
 }
 

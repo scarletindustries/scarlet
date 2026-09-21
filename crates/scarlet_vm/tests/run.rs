@@ -622,3 +622,33 @@ fn indexing_an_array_gives_an_option() {
         "Some(a)\nSome(c)\nNone\nNone\nNone\nfound b\ndefault\ncomputed\n",
     );
 }
+
+/// `xs[a..b]` is a `Result`: `Ok` of the elements when the range is inside
+/// the array, and `Err(Nil)` when it is not, never a crash.
+#[test]
+fn a_slice_is_a_result() {
+    prints(
+        "fn upto(n Int, acc Array(Int)) Array(Int) {\n\
+         \tif n == 0 { acc } else { upto(n - 1, [n, ..acc]) }\n\
+         }\n\
+         pub fn main() {\n\
+         \txs = [1, 2, 3, 4, 5]\n\
+         \tprintln(xs[1..3])\n\
+         \tprintln(xs[0..5])\n\
+         \tprintln(xs[2..2])\n\
+         \tprintln(xs[5..5])\n\
+         \tprintln(xs[3..9])\n\
+         \tprintln(xs[3..1])\n\
+         \tprintln(xs[-1..2])\n\
+         \tprintln(xs[0..9223372036854775807])\n\
+         \tbig = upto(5000, [])\n\
+         \tmatch big[4990..4995] {\n\
+         \t\tOk(part) -> println(part)\n\
+         \t\tErr(Nil) -> println('missed')\n\
+         \t}\n\
+         \tprintln(xs[9..10] or [0])\n\
+         }\n",
+        "Ok(\n  [2, 3]\n)\nOk(\n  [1, 2, 3, 4, 5]\n)\nOk(\n  []\n)\nOk(\n  []\n)\n\
+         Err(Nil)\nErr(Nil)\nErr(Nil)\nErr(Nil)\n[4991, 4992, 4993, 4994, 4995]\n[0]\n",
+    );
+}
