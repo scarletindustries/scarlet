@@ -20,6 +20,7 @@
 
 mod code;
 mod exec;
+mod heap;
 mod value;
 
 use std::io::Write;
@@ -34,6 +35,9 @@ pub enum Stop {
     /// Where the program's output goes was closed, like a pipe into `head`.
     /// Nothing is wrong with the program, so this stops it quietly.
     OutputClosed,
+    /// The program's heap grew past what the VM can address. A limit of the
+    /// machine, like running out of memory, not a bug in the program.
+    HeapFull,
 }
 
 /// Run `program`, writing what it prints to `out`.

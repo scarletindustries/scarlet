@@ -468,6 +468,7 @@ fn cmd_run(args: RunArgs) {
         Err(scarlet_vm::Stop::NotBuiltYet(what)) => {
             die(format!("cannot run: the new VM does not run {what} yet"))
         }
+        Err(scarlet_vm::Stop::HeapFull) => die("the program ran out of heap"),
     }
 }
 

@@ -35,6 +35,12 @@ pub(crate) enum Instr {
         dst: Reg,
         value: Value,
     },
+    /// A new string holding `text`. Made each time the instruction runs,
+    /// until constants get a shared area of their own.
+    Str {
+        dst: Reg,
+        text: Box<[u8]>,
+    },
     Move {
         dst: Reg,
         src: Reg,
@@ -60,6 +66,21 @@ pub(crate) enum Instr {
     Println {
         dst: Reg,
         arg: Reg,
+    },
+    /// The text `${a}` shows.
+    ToString {
+        dst: Reg,
+        a: Reg,
+    },
+    /// Every string in `parts`, joined in order.
+    Concat {
+        dst: Reg,
+        parts: Box<[Reg]>,
+    },
+    /// Perceus's last use of `reg`: give up its reference now rather than at
+    /// the frame's end.
+    Drop {
+        reg: Reg,
     },
     Call {
         dst: Reg,
@@ -271,9 +292,12 @@ impl<'c> Loader<'c> {
                     }
                     e = body;
                 }
-                // Every value so far is a word with nothing to count, so a
-                // drop has nothing to release yet.
-                CoreExpr::Drop { body, .. } => e = body,
+                CoreExpr::Drop { local, body, .. } => {
+                    self.instrs.push(Instr::Drop {
+                        reg: Reg::of(*local),
+                    });
+                    e = body;
+                }
                 CoreExpr::Tail(atom) => {
                     match (dest, atom) {
                         (Dest::Return, Atom::Call { callee, args })
@@ -332,9 +356,15 @@ impl<'c> Loader<'c> {
                 dst,
                 src: Reg::of(*src),
             },
-            Atom::Const(c) => Instr::Const {
-                dst,
-                value: self.constant(c.index())?,
+            Atom::Const(c) => match self.consts.get(c.index()) {
+                Some(Const::String(text)) => Instr::Str {
+                    dst,
+                    text: text.as_bytes().into(),
+                },
+                _ => Instr::Const {
+                    dst,
+                    value: self.constant(c.index())?,
+                },
             },
             Atom::Nil => Instr::Const {
                 dst,
@@ -401,6 +431,17 @@ impl<'c> Loader<'c> {
             PrimOp::IntLe => int(IntOp::Le),
             PrimOp::IntGt => int(IntOp::Gt),
             PrimOp::IntGe => int(IntOp::Ge),
+            PrimOp::ToString => match args {
+                [a] => Ok(Instr::ToString {
+                    dst,
+                    a: Reg::of(*a),
+                }),
+                _ => Err("ToString with other than one argument".into()),
+            },
+            PrimOp::StringConcat | PrimOp::StringConcatMany => Ok(Instr::Concat {
+                dst,
+                parts: args.iter().copied().map(Reg::of).collect(),
+            }),
             PrimOp::IntNeg => match args {
                 [a] => Ok(Instr::IntNeg {
                     dst,

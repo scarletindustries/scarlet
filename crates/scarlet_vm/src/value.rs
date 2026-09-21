@@ -11,12 +11,15 @@
 //! | `0xFFF9`    | a small Int, 48-bit two's complement          |
 //! | `0xFFFA`    | `Nil` (0), `False` (1) or `True` (2)          |
 //! | `0xFFFB`    | a function with no captures, by its `FuncIdx` |
+//! | `0xFFFC`    | a cell in the process's heap                  |
 //!
 //! Every other word is a float.
 
 use std::fmt;
 
 use scarlet_ir::core_ir::FuncIdx;
+
+use crate::heap::Cell;
 
 /// Set in every word that is not a float.
 const TAGGED: u64 = 0xFFF8_0000_0000_0000;
@@ -26,6 +29,7 @@ const PAYLOAD: u64 = 0x0000_FFFF_FFFF_FFFF;
 const TAG_INT: u64 = 0xFFF9_0000_0000_0000;
 const TAG_IMMEDIATE: u64 = 0xFFFA_0000_0000_0000;
 const TAG_FUNC: u64 = 0xFFFB_0000_0000_0000;
+const TAG_CELL: u64 = 0xFFFC_0000_0000_0000;
 
 /// The range a small Int covers. Outside it an Int is a big int, which the VM
 /// does not build yet.
@@ -34,9 +38,9 @@ const SMALL_INT_MAX: i64 = (1 << 47) - 1;
 
 /// One value.
 ///
-/// `Copy` on purpose: it is a word, and when heap values arrive their
-/// reference counts are kept by the VM explicitly, against the process's own
-/// heap, not by Rust's `Clone` and `Drop`.
+/// `Copy` on purpose: it is a word. A cell's reference count is kept by the
+/// VM explicitly, against the process's own heap, not by Rust's `Clone` and
+/// `Drop`: copying a `Value` does not add a reference.
 ///
 /// No `PartialEq`: comparing the bits is not Scarlet's `==` (`0.0 == -0.0`, and
 /// structural equality looks inside values).
@@ -51,6 +55,7 @@ pub(crate) enum View {
     Nil,
     Bool(bool),
     Func(FuncIdx),
+    Cell(Cell),
 }
 
 impl Value {
@@ -75,6 +80,16 @@ impl Value {
         Value(TAG_FUNC | u64::from(f.0))
     }
 
+    /// A heap cell. The value holds the one reference the caller gives it.
+    pub(crate) fn cell(c: Cell) -> Value {
+        Value(TAG_CELL | c.bits())
+    }
+
+    /// The cell this value points at, if it is one.
+    pub(crate) fn as_cell(self) -> Option<Cell> {
+        (self.0 & TAG == TAG_CELL).then(|| Cell::from_bits(self.0 & PAYLOAD))
+    }
+
     pub(crate) fn view(self) -> View {
         let bits = self.0;
         if bits & TAGGED != TAGGED {
@@ -86,6 +101,7 @@ impl Value {
             // arithmetic shift copies it into the top 16 bits.
             TAG_INT => View::Int(((payload << 16) as i64) >> 16),
             TAG_FUNC => View::Func(FuncIdx(payload as u32)),
+            TAG_CELL => View::Cell(Cell::from_bits(payload)),
             // Only the constructors above make a tagged word, so what is
             // left is an immediate.
             _ => {

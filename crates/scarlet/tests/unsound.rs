@@ -152,7 +152,6 @@ run_case! {
 
     // U4: a block-scoped type env with a function-scoped slot map lets an inner
     // `x = 'hi'` overwrite the outer slot while the outer type stays Int.
-    #[ignore = "needs the VM"]
     u4_block_scope_preserves_outer_slot: (
         "pub fn main() {\n\
          \tx = 1\n\

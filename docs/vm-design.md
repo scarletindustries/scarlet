@@ -158,17 +158,17 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 ## Order of work
 
-Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 310 after step 2.
+Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 310 after step 2, and 300 after step 4.
 
 1. The `scarlet_ir` crate. **Done.**
 2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, Int operations, calls, `Println`. `scarlet run` uses it. **Done.**
-3. Control flow: `If`, `Match`, `LetJoin`, `LetCont`/`Goto`.
-4. The per-process heap and reference counting, so there is somewhere to put a heap value.
+3. Control flow: `If` and `LetJoin`. **Done.** `Match` and `LetCont`/`Goto` come with constructors, which most matches are over.
+4. The per-process heap and reference counting, so there is somewhere to put a heap value. **Done** for one process, with strings as the first heap value: the smallest one, and enough to run `examples/hello.scrl`. The limit comes with processes.
 5. Big ints. Moved up: when step 2 landed, 119 of the parked tests stopped at a 64-bit constant, most of them in a stdlib module's toplevel (`int.max_value` and the like), before the test's own code ran.
 6. Constructors, tuples, fields, then Perceus's `Drop` and reuse. The allocation-count tests come back here.
 7. Closures that capture, and calling a function value.
 8. Floats with the no-NaN rule.
-9. Strings, binaries (with binary patterns), arrays and maps.
+9. The rest of strings, then binaries (with binary patterns), arrays and maps.
 10. The rest of the intrinsics, one stdlib module at a time.
 11. Processes: mailboxes, the scheduler, preemption, then links, monitors and supervisors.
 12. IO (files, sockets, TLS, HTTP), `os`, and `wire` after its redesign.

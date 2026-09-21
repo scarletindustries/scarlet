@@ -179,7 +179,6 @@ suite! {
     // asserts the child wrote zero bytes to stderr.
     examples: [
         // Language core.
-        #[ignore = "needs the VM"]
         hello,
         #[ignore = "needs the VM"]
         control_flow,

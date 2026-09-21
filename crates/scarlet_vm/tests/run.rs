@@ -120,16 +120,32 @@ fn a_deep_recursion_uses_memory_not_the_rust_stack() {
 /// it stops the run, and the stop says what it needs.
 #[test]
 fn only_calling_an_unbuilt_function_stops_the_run() {
-    let src = "fn greet() { println('hi') }\n\
+    let src = "fn pair() (Int, Int) { (1, 2) }\n\
                pub fn main() {\n\
                \tprintln(1)\n\
                }\n";
     prints(src, "1\n");
-    let calls = "fn greet() { println('hi') }\n\
+    let calls = "fn pair() (Int, Int) { (1, 2) }\n\
                  pub fn main() {\n\
-                 \tgreet()\n\
+                 \t_ = pair()\n\
                  }\n";
-    assert_eq!(run(calls), Err(Stop::NotBuiltYet("String".into())));
+    assert_eq!(
+        run(calls),
+        Err(Stop::NotBuiltYet("the operation MakeTuple".into()))
+    );
+}
+
+#[test]
+fn strings_print_join_and_interpolate() {
+    prints(
+        "fn greet(name String) String { 'hello, ' + name }\n\
+         pub fn main() {\n\
+         \tprintln('hello, world')\n\
+         \tprintln(greet('Scarlet'))\n\
+         \tprintln('2 + 2 = ${2 + 2}, and 3 < 4 is ${3 < 4}')\n\
+         }\n",
+        "hello, world\nhello, Scarlet\n2 + 2 = 4, and 3 < 4 is True\n",
+    );
 }
 
 /// Past 48 bits the exact answer needs a big int. Until those exist the run

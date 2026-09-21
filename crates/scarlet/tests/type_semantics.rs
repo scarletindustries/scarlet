@@ -1118,7 +1118,6 @@ reject_case! {
 }
 
 run_case! {
-    #[ignore = "needs the VM"]
     typed_discard_nil_println_ok: (
         "pub fn main() {\n\
          \tNil = println('x')\n\

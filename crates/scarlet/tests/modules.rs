@@ -9,7 +9,6 @@ const UTIL_SRC: &str =
     "pub fn quote(s String) String { '\"' + s + '\"' }\npub fn empty() String { '' }\n";
 
 #[test]
-#[ignore = "needs the VM"]
 fn relative_qualified() {
     let proj = Project::new("rel_qual");
     proj.write("util.scrl", UTIL_SRC);
@@ -40,7 +39,6 @@ fn labelled_args_on_a_qualified_call_take_declared_order() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn relative_selective_and_alias() {
     let proj = Project::new("rel_sel");
     proj.write("util.scrl", UTIL_SRC);
@@ -67,7 +65,6 @@ fn aliased_type_import_unifies_with_canonical() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn relative_import() {
     let proj = Project::new("rel_imp");
     proj.write("helper.scrl", "pub fn greet() String { 'hello' }\n");
@@ -333,7 +330,6 @@ fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
 
 /// `sub/mid.scrl` imports `./b`, which must be `sub/b.scrl`, not the root's.
 #[test]
-#[ignore = "needs the VM"]
 fn same_named_modules_in_different_directories_are_distinct() {
     let proj = Project::new("mod_identity");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
@@ -353,7 +349,6 @@ fn same_named_modules_in_different_directories_are_distinct() {
 /// The same file reached by two different spellings (`./b` from the root and
 /// `../b` from `sub/`) is ONE module: it must compile once and share state.
 #[test]
-#[ignore = "needs the VM"]
 fn one_file_reached_two_ways_is_one_module() {
     let proj = Project::new("mod_identity_alias");
     std::fs::create_dir_all(proj.dir.join("sub")).unwrap();
