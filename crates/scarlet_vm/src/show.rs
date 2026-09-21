@@ -19,9 +19,10 @@
 use std::collections::BTreeMap;
 
 use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::{TypeNames, VariantNames, VariantRef};
+use scarlet_ir::core_ir::{FuncIdx, TypeNames, VariantNames, VariantRef};
 
 use crate::Stop;
+use crate::code::Code;
 use crate::heap::{Cell, Heap, Kind};
 use crate::value::{Value, View};
 
@@ -48,7 +49,7 @@ enum Layout {
 }
 
 /// Append `v`, shown, to `out`.
-pub(crate) fn show(heap: &Heap, types: &Types, v: Value, out: &mut Vec<u8>) -> Result<(), Stop> {
+pub(crate) fn show(heap: &Heap, code: &Code, v: Value, out: &mut Vec<u8>) -> Result<(), Stop> {
     let mut todo = vec![Piece::Value(v, Layout::Open(0))];
     while let Some(piece) = todo.pop() {
         match piece {
@@ -59,7 +60,7 @@ pub(crate) fn show(heap: &Heap, types: &Types, v: Value, out: &mut Vec<u8>) -> R
                     out.extend_from_slice(b"  ");
                 }
             }
-            Piece::Value(v, layout) => value(heap, types, v, layout, out, &mut todo)?,
+            Piece::Value(v, layout) => value(heap, code, v, layout, out, &mut todo)?,
         }
     }
     Ok(())
@@ -67,7 +68,7 @@ pub(crate) fn show(heap: &Heap, types: &Types, v: Value, out: &mut Vec<u8>) -> R
 
 fn value<'t>(
     heap: &Heap,
-    types: &'t Types,
+    code: &'t Code,
     v: Value,
     layout: Layout,
     out: &mut Vec<u8>,
@@ -78,7 +79,7 @@ fn value<'t>(
         View::Nil => out.extend_from_slice(b"Nil"),
         View::Bool(true) => out.extend_from_slice(b"True"),
         View::Bool(false) => out.extend_from_slice(b"False"),
-        View::Nullary(variant) => match names(types, variant) {
+        View::Nullary(variant) => match names(&code.types, variant) {
             Some((_, names)) => out.extend_from_slice(names.name.as_bytes()),
             None => unnamed(variant, out),
         },
@@ -87,13 +88,24 @@ fn value<'t>(
             Some(Kind::BigInt) => {
                 out.extend_from_slice(heap.read_big_int(cell).to_string().as_bytes());
             }
-            Some(Kind::Ctor) => ctor(heap, types, cell, layout, out, todo),
+            Some(Kind::Ctor) => ctor(heap, &code.types, cell, layout, out, todo),
+            Some(Kind::Closure) => function(code, heap.closure_func(cell), out),
             None => return Err(Stop::NotBuiltYet("printing this value".into())),
         },
+        View::Func(f) => function(code, f, out),
         View::Float(_) => return Err(Stop::NotBuiltYet("printing a Float".into())),
-        View::Func(_) => return Err(Stop::NotBuiltYet("printing a function".into())),
     }
     Ok(())
+}
+
+/// A function shows as its name, `<fn#serve>`, whatever it captured.
+fn function(code: &Code, f: FuncIdx, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"<fn#");
+    match code.names.get(f) {
+        Some(name) => out.extend_from_slice(name.as_bytes()),
+        None => out.extend_from_slice(f.0.to_string().as_bytes()),
+    }
+    out.push(b'>');
 }
 
 /// Write the constructor's name and opening bracket now, and queue the rest:
@@ -164,7 +176,7 @@ fn small(heap: &Heap, v: Value) -> bool {
         | View::Nullary(_) => true,
         View::Cell(cell) => match heap.kind(cell) {
             Some(Kind::String) => heap.string_len(cell) < SMALL_STRING,
-            Some(Kind::BigInt) => true,
+            Some(Kind::BigInt | Kind::Closure) => true,
             Some(Kind::Ctor) | None => false,
         },
     }

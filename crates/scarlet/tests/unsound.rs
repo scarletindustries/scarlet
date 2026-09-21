@@ -385,7 +385,6 @@ fn u21_exhaustiveness_respects_field_labels_runs() {
 // re-binding a name in the scope that already binds it must allocate a fresh
 // slot; reusing the slot corrupts every closure that captured the old one.
 #[test]
-#[ignore = "needs the VM"]
 fn u22_same_scope_shadow_preserves_closure_capture() {
     // Each closure captures the binding live at its definition; later shadows
     // must not retroactively change what an earlier closure sees.

@@ -5,7 +5,6 @@ mod common;
 use common::{check_ok, check_rejects, run_outputs};
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_option() {
     run_outputs(
         "import scarlet/option\n\
@@ -55,7 +54,6 @@ fn stdlib_option() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_result() {
     run_outputs(
         "import scarlet/result\n\
@@ -116,7 +114,6 @@ fn stdlib_result() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn stdlib_resource() {
     // Acquire, use, release — in that order — and the use's value comes back.
     run_outputs(

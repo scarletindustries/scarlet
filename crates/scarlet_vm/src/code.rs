@@ -13,6 +13,12 @@
 //! test when its value does not fit the arm's pattern, and otherwise falls
 //! into the arm, which reads out the fields the pattern binds. A `LetCont`'s
 //! continuation is placed after its body, and a `Goto` is a jump to it.
+//!
+//! A call names its callee one of three ways, and each has its own
+//! instruction: a function known when the program loads (`Call`), the
+//! function running now (`CallSelf`, which keeps the closure it runs as, so
+//! a lambda calling itself still sees its captures), and a function value in
+//! a register (`CallValue`). Each has a tail form that replaces the frame.
 
 use std::collections::HashMap;
 
@@ -112,6 +118,42 @@ pub(crate) enum Instr {
         func: FuncIdx,
         args: Box<[Reg]>,
     },
+    /// A call to the function running now, as the same closure.
+    CallSelf {
+        dst: Reg,
+        args: Box<[Reg]>,
+    },
+    TailCallSelf {
+        args: Box<[Reg]>,
+    },
+    /// A call to the function value in `callee`, with or without captures.
+    CallValue {
+        dst: Reg,
+        callee: Reg,
+        args: Box<[Reg]>,
+    },
+    TailCallValue {
+        callee: Reg,
+        args: Box<[Reg]>,
+    },
+    /// A new closure cell running `func` over `captures`. A function with no
+    /// captures is a [`Instr::Const`] instead: it needs no cell.
+    Closure {
+        dst: Reg,
+        func: FuncIdx,
+        captures: Box<[Reg]>,
+    },
+    /// Capture `index` of the closure running now.
+    GetCapture {
+        dst: Reg,
+        index: u32,
+    },
+    /// The closure running now, as a value. `this` is its function, for when
+    /// it runs as a plain function, with no closure cell.
+    GetSelf {
+        dst: Reg,
+        this: FuncIdx,
+    },
     Ret {
         src: Reg,
     },
@@ -180,6 +222,13 @@ impl Instr {
             | Instr::Drop { .. }
             | Instr::Call { .. }
             | Instr::TailCall { .. }
+            | Instr::CallSelf { .. }
+            | Instr::TailCallSelf { .. }
+            | Instr::CallValue { .. }
+            | Instr::TailCallValue { .. }
+            | Instr::Closure { .. }
+            | Instr::GetCapture { .. }
+            | Instr::GetSelf { .. }
             | Instr::Ret { .. }
             | Instr::Field { .. }
             | Instr::Bad { .. } => None,
@@ -243,14 +292,18 @@ pub(crate) struct Code {
     pub(crate) main: Option<FuncIdx>,
     pub(crate) globals: u32,
     pub(crate) types: Types,
+    /// Each function's source name, for showing a function value.
+    pub(crate) names: TiVec<FuncIdx, String>,
 }
 
 pub(crate) fn load(program: &Program) -> Code {
     let consts = &program.consts;
     let mut fns = TiVec::new();
+    let mut names = TiVec::new();
     for f in &program.fns {
         let this = fns.next_idx();
         fns.push(load_fn(f, consts, Some(this)));
+        names.push(f.name.clone());
     }
     let toplevels = program
         .inits
@@ -264,6 +317,7 @@ pub(crate) fn load(program: &Program) -> Code {
         main: program.main,
         globals: program.globals,
         types: program.types.clone(),
+        names,
     }
 }
 
@@ -351,12 +405,30 @@ impl<'c> Loader<'c> {
         }
     }
 
-    /// A known callee, with `self` resolved to this function.
-    fn known(&self, callee: &Callee) -> Option<FuncIdx> {
-        match callee {
-            Callee::Known(f) => Some(*f),
-            Callee::Self_ => self.this,
-            Callee::Local(_) => None,
+    /// The call instruction for `callee`, in tail position or not.
+    fn call(&self, dst: Option<Reg>, callee: &Callee, args: &[LocalId]) -> Instr {
+        let args: Box<[Reg]> = args.iter().copied().map(Reg::of).collect();
+        match (callee, dst) {
+            (Callee::Known(func), Some(dst)) => Instr::Call {
+                dst,
+                func: *func,
+                args,
+            },
+            (Callee::Known(func), None) => Instr::TailCall { func: *func, args },
+            (Callee::Self_, _) if self.this.is_none() => Instr::Bad {
+                why: "a toplevel calls itself",
+            },
+            (Callee::Self_, Some(dst)) => Instr::CallSelf { dst, args },
+            (Callee::Self_, None) => Instr::TailCallSelf { args },
+            (Callee::Local(f), Some(dst)) => Instr::CallValue {
+                dst,
+                callee: Reg::of(*f),
+                args,
+            },
+            (Callee::Local(f), None) => Instr::TailCallValue {
+                callee: Reg::of(*f),
+                args,
+            },
         }
     }
 
@@ -386,13 +458,9 @@ impl<'c> Loader<'c> {
                 }
                 CoreExpr::Tail(atom) => {
                     match (dest, atom) {
-                        (Dest::Return, Atom::Call { callee, args })
-                            if self.known(callee).is_some() =>
-                        {
-                            let args = args.iter().copied().map(Reg::of).collect();
-                            if let Some(func) = self.known(callee) {
-                                self.instrs.push(Instr::TailCall { func, args });
-                            }
+                        (Dest::Return, Atom::Call { callee, args }) => {
+                            let call = self.call(None, callee, args);
+                            self.instrs.push(call);
                         }
                         (Dest::Return, atom) => {
                             let src = self.scratch();
@@ -533,20 +601,29 @@ impl<'c> Loader<'c> {
                 value: Value::bool(*b),
             },
             Atom::Load(Load::Global(slot)) => Instr::GetGlobal { dst, slot: *slot },
-            Atom::Load(_) => return Err("closures that capture".into()),
+            Atom::Load(Load::Capture(i)) => match u32::try_from(i.0) {
+                Ok(index) => Instr::GetCapture { dst, index },
+                Err(_) => Instr::Bad {
+                    why: "a capture with a negative index",
+                },
+            },
+            Atom::Load(Load::SelfClosure) => match self.this {
+                Some(this) => Instr::GetSelf { dst, this },
+                None => Instr::Bad {
+                    why: "a toplevel reads itself as a closure",
+                },
+            },
+            Atom::Load(Load::Slot(_)) => return Err("a raw frame slot".into()),
             Atom::Closure { func_idx, captures } if captures.is_empty() => Instr::Const {
                 dst,
                 value: Value::func(*func_idx),
             },
-            Atom::Closure { .. } => return Err("closures that capture".into()),
-            Atom::Call { callee, args } => match self.known(callee) {
-                Some(func) => Instr::Call {
-                    dst,
-                    func,
-                    args: args.iter().copied().map(Reg::of).collect(),
-                },
-                None => return Err("calling a function value".into()),
+            Atom::Closure { func_idx, captures } => Instr::Closure {
+                dst,
+                func: *func_idx,
+                captures: captures.iter().copied().map(Reg::of).collect(),
             },
+            Atom::Call { callee, args } => self.call(Some(dst), callee, args),
             Atom::PrimOp { op, args } => self.prim(dst, *op, args)?,
             Atom::Intrinsic {
                 intrinsic: Intrinsic::Println,

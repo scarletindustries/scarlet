@@ -419,3 +419,69 @@ fn a_list_is_walked() {
         "55\n100000\n",
     );
 }
+
+#[test]
+fn a_closure_sees_what_it_captured() {
+    prints(
+        "fn apply(f fn(Int) String, x Int) String { f(x) }\n\
+         pub fn main() {\n\
+         \tn = 5\n\
+         \ts = 'x'\n\
+         \tprintln(apply(fn(a) { '${s}${a + n}' }, 1))\n\
+         }\n",
+        "x6\n",
+    );
+}
+
+/// A closure made in one call and called after that call has returned.
+#[test]
+fn a_returned_closure_keeps_its_captures() {
+    prints(
+        "fn adder(n Int) fn(Int) Int { fn(x) { x + n } }\n\
+         fn twice(f fn(Int) Int, x Int) Int { f(f(x)) }\n\
+         pub fn main() {\n\
+         \tadd3 = adder(3)\n\
+         \tprintln(add3(1))\n\
+         \tprintln(twice(add3, 1))\n\
+         \tprintln(adder(2)(4))\n\
+         \tprintln(twice(adder(10), 0))\n\
+         }\n",
+        "4\n7\n6\n20\n",
+    );
+}
+
+/// A lambda that calls itself keeps its captures on every call, and one
+/// that loops by calling itself in tail position runs in constant space.
+#[test]
+fn a_lambda_calling_itself_keeps_its_captures() {
+    prints(
+        "pub fn main() {\n\
+         \tk = 7\n\
+         \tgo = fn(n) { if n == 0 { k } else { go(n - 1) } }\n\
+         \tprintln(go(3))\n\
+         \tprintln(go(100000))\n\
+         \tdepth = fn(n) { if n == 0 { k } else { 1 + depth(n - 1) } }\n\
+         \tprintln(depth(10))\n\
+         \th = fn(n) { if n == 0 { go } else { h(n - 1) } }\n\
+         \tprintln(h(2)(0))\n\
+         }\n",
+        "7\n7\n17\n7\n",
+    );
+}
+
+/// A named function works as a value as well as a lambda does.
+#[test]
+fn a_named_function_is_a_value() {
+    prints(
+        "fn double(x Int) Int { x * 2 }\n\
+         fn apply(f fn(Int) Int, x Int) Int { f(x) }\n\
+         pub fn main() {\n\
+         \tprintln(apply(double, 21))\n\
+         \tf = double\n\
+         \tprintln(f(4))\n\
+         \tprintln(double)\n\
+         \tprintln(Some(double))\n\
+         }\n",
+        "42\n8\n<fn#double>\nSome(<fn#double>)\n",
+    );
+}

@@ -210,7 +210,6 @@ ok_case! {
 
 /// Runtime counterpart of the case above.
 #[test]
-#[ignore = "needs the VM"]
 fn fn_type_without_return_in_binding_annotation_runs() {
     common::run_outputs(
         "pub fn main() {\n\tf fn(Int) = fn(x Int) { x * 2 }\n\tprintln(f(3))\n}\n",

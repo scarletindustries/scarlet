@@ -103,7 +103,6 @@ run_case! {
     // directly) emits `Op::PushSelf` at the self-reference site. `down` hands itself
     // to `step`, which invokes the callback — exercising the capture-free PushSelf
     // fast path (the cached closure clone) plus an indirect `Op::Call`.
-    #[ignore = "needs the VM"]
     recursive_fn_passed_as_value: (
         "fn step(f fn(Int) Int, n Int) Int {\n\
          \tif n <= 0 { 0 } else { f(n - 1) }\n\
@@ -167,7 +166,6 @@ run_case! {
     // A capturing closure naming itself in value position takes `PushSelf`'s
     // capture-carrying branch: rebuild from the live frame, not from the
     // cached capture-free closure, so the recursion still sees `base`.
-    #[ignore = "needs the VM"]
     capturing_self_referential_closure: (
         "fn apply(f fn(Int) Int, n Int) Int { f(n) }\n\
          fn make(base Int) Int {\n\
@@ -328,7 +326,6 @@ run_case! {
 // materialized into the closure at `MakeClosure` time.
 
 #[test]
-#[ignore = "needs the VM"]
 fn closure_captures_enclosing_function_local() {
     // Two closures over distinct captures: a shared or global slot would make
     // both print the last `x` written.
@@ -347,7 +344,6 @@ fn closure_captures_enclosing_function_local() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn closure_captures_multiple_enclosing_locals() {
     // Two captures: `MakeClosure(capture_count = 2)` plus `PushCapture` at
     // indices 0 and 1, read back in order.
@@ -366,7 +362,6 @@ fn closure_captures_multiple_enclosing_locals() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn closure_captures_non_parameter_local() {
     // `base` is a let-binding rather than a parameter, still `PushCapture`.
     run_outputs(
@@ -553,7 +548,6 @@ run_case! {
     // A callee that is a runtime value falls back to dynamic `Op::Call`.
     // `apply` compiles once but dispatches to two bodies, so a lowering that
     // baked in either target fails one line.
-    #[ignore = "needs the VM"]
     indirect_call_through_value_is_dynamic: (
         "fn inc(x Int) Int { x + 1 }\n\
          fn dbl(x Int) Int { x * 2 }\n\
@@ -567,7 +561,6 @@ run_case! {
 
     // `count` alternates `hop` (`TailCallKnown`) with `f` (dynamic
     // `TailCall`); at n = 200_000 both halves must reuse the frame.
-    #[ignore = "needs the VM"]
     indirect_tail_call_through_value_reuses_frame: (
         "fn hop(f fn(Int, Int) Int, acc Int, n Int) Int {\n\
          \tif n == 0 { acc } else { f(acc + 1, n - 1) }\n\
@@ -734,7 +727,6 @@ run_case! {
     // whatever the toplevel emit had parked there. This pins that `main`'s
     // body never takes that path. Only single-use nested-scope locals hit
     // this, so each captured name is read exactly once.
-    #[ignore = "needs the VM"]
     main_nested_scope_closure_capture: (
         "pub fn main() {\n\
          \tif True {\n\

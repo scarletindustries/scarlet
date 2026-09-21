@@ -17,7 +17,6 @@ use common::run_outputs;
 /// Recursive *calls* cannot catch this: both self-forms collapse to the same
 /// callee. Only a value load can.
 #[test]
-#[ignore = "needs the VM"]
 fn recursive_local_lambda_shadowing_a_module_fn_loads_itself() {
     run_outputs(
         "fn apply(f fn(Int) Int, x Int) Int { f(x) }\n\
@@ -37,7 +36,6 @@ fn recursive_local_lambda_shadowing_a_module_fn_loads_itself() {
 /// The same shape one frame deeper, so elaboration has to restore a two-deep
 /// scope chain rather than just the innermost one.
 #[test]
-#[ignore = "needs the VM"]
 fn nested_recursive_lambda_shadowing_resolves_through_the_whole_chain() {
     run_outputs(
         "fn apply(f fn(Int) Int, x Int) Int { f(x) }\n\
@@ -78,7 +76,6 @@ fn mutually_recursive_scc_jumps_over_every_parked_body() {
 /// A closure nested inside an SCC member has its body emitted first, ahead of
 /// both `a`'s and `b`'s. Nothing may fall into it.
 #[test]
-#[ignore = "needs the VM"]
 fn closure_inside_a_mutual_scc_is_skipped_by_the_enclosing_stream() {
     run_outputs(
         "fn apply(f fn(Int) Int, x Int) Int { f(x) }\n\

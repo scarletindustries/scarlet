@@ -161,20 +161,20 @@ The first VM PRs run one process on one thread. Processes come after the single-
 
 ## Order of work
 
-Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 311 after step 2, 301 after step 4, 300 after step 5, 294 once Bool and Nil stopped being constructors, 293 once constructors were built, and 248 once `match` ran. (Each count is one higher than first written: one Linux-only network test, which skips itself on a Mac, was parked late.)
+Each step is one PR or a few. Each PR removes the `#[ignore]` from exactly the tests it makes pass, so `cargo test -p scarlet -- --ignored` counts what's left: 311 after step 2, 301 after step 4, 300 after step 5, 294 once Bool and Nil stopped being constructors, 293 once constructors were built, 248 once `match` ran, and 227 once closures did. (Each count is one higher than first written: one Linux-only network test, which skips itself on a Mac, was parked late.)
 
 1. The `scarlet_ir` crate. **Done.**
 2. A VM that runs `pub fn main() { println(1 + 2) }`: the value word with small ints only, Int operations, calls, `Println`. `scarlet run` uses it. **Done.**
 3. Control flow: `If` and `LetJoin`. **Done.** `Match` and `LetCont`/`Goto` come with constructors, which most matches are over.
 4. The per-process heap and reference counting, so there is somewhere to put a heap value. **Done** for one process, with strings as the first heap value: the smallest one, and enough to run `examples/hello.scrl`. The limit comes with processes.
 5. Big ints. Moved up: when step 2 landed, 119 of the parked tests stopped at a 64-bit constant, most of them in a stdlib module's toplevel (`int.max_value` and the like), before the test's own code ran. **Done.** Those 119 then stopped one step later, at a constructor, so constructors are next. An Int *literal* past 64 bits is still a compile error, because the compiler keeps Int constants as `i64`; that is the compiler's to fix.
-6. Constructors, tuples, fields, then Perceus's `Drop` and reuse. The allocation-count tests come back here. Constructors are built, freed and printed: **done**. A constructor with fields is a heap cell, and one without is a value word of its own, like `True`. `match` on constructors, Ints and strings, its jumps between cases (`LetCont`/`Goto`), and reading a record's field: **done**. Each arm is a test that jumps to the next arm when the value doesn't fit. What the parked tests stop at next is spread out: arrays (32), binaries (31), calling a function value (21), processes (20), and captures, tuples and floats (about 10 each).
-7. Closures that capture, and calling a function value.
+6. Constructors, tuples, fields, then Perceus's `Drop` and reuse. The allocation-count tests come back here. Constructors are built, freed and printed: **done**. A constructor with fields is a heap cell, and one without is a value word of its own, like `True`. `match` on constructors, Ints and strings, its jumps between cases (`LetCont`/`Goto`), and reading a record's field: **done**. Each arm is a test that jumps to the next arm when the value doesn't fit.
+7. Closures that capture, and calling a function value. **Done.** A closure with captures is a heap cell (its function, then its captures); one without is a value word. Each frame holds the closure it runs as, so a lambda calling itself keeps its captures. What the parked tests stop at next: arrays (33), binaries (31), `wire` (17), processes (about 24), floats (13) and tuples (8).
 8. Floats with the no-NaN rule.
-9. The rest of strings, then binaries (with binary patterns), arrays and maps.
+9. The rest of strings, then binaries (with binary patterns), arrays and maps. **Decided:** an array stays the RRB tree the old VM had (`seq.rs` on master): fast at both ends, fast to index, join and slice. Scarlet code uses arrays like lists (walking with `[h, ..t]`, appending in `array.map`, prepending in `reverse`), and only the tree is fast at all three. `[h, ..t]` should give a view of the same tree rather than a copy.
 10. The rest of the intrinsics, one stdlib module at a time.
 11. Processes: mailboxes, the scheduler, preemption, then links, monitors and supervisors.
-12. IO (files, sockets, TLS, HTTP), `os`, and `wire` after its redesign.
+12. IO (files, sockets, TLS, HTTP), `os`, and `wire` after its redesign. The descriptor builder (`typed_ir/wire.rs` on master, removed with the old VM) comes back, and its descriptors reach the VM through `scarlet_ir`: today's Core IR says only `WireDecode(%0)`. **Decided:** a closure on the wire names its code, not its run: its module, its function and a fingerprint of the module's code, as BEAM's `NEW_FUN_EXT` does with the module's MD5. So the same code can decode it after a restart or on another machine, and changed code is a decode error. Handles (`Pid`, `Subject`, sockets) stay tied to the run that made them.
 
 ## Open, all in one place
 

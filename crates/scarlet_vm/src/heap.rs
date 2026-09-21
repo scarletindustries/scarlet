@@ -12,7 +12,8 @@
 //! Every cell starts with one header word: its reference count, its kind, and
 //! its size in words. A cell is freed when its count reaches zero, and its
 //! space is kept on a free list for the next cell of the same size. Freeing a
-//! constructor gives up its fields' references too, and so on down.
+//! constructor or a closure gives up the references it holds too, and so on
+//! down.
 //!
 //! Chunks are words, not bytes, and cells are named by chunk and word rather
 //! than by address, so the heap needs no `unsafe` and moves with its process
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 
 use num_bigint::{BigInt, Sign};
 use scarlet_ir::TypeId;
-use scarlet_ir::core_ir::VariantRef;
+use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::value::Value;
 
@@ -68,6 +69,10 @@ pub(crate) enum Kind {
     /// variant (bits 32 to 47), then each field's value word, in order. Each
     /// field holds one reference.
     Ctor = 3,
+    /// A function with captures: a word holding its `FuncIdx`, then each
+    /// capture's value word, in order. Each capture holds one reference. A
+    /// function with none is a value word of its own, and needs no cell.
+    Closure = 4,
 }
 
 /// A heap that has run out of the cells a [`Cell`] can name. It is a limit of
@@ -187,7 +192,7 @@ impl Heap {
                 self.set_word(cell, 0, h - 1);
                 continue;
             }
-            if kind_bits(h) == Kind::Ctor as u64 {
+            if kind_bits(h) == Kind::Ctor as u64 || kind_bits(h) == Kind::Closure as u64 {
                 for i in 2..size(h) {
                     if let Some(field) = Value::from_bits(self.word(cell, i)).as_cell() {
                         dying.push(field);
@@ -218,6 +223,7 @@ impl Heap {
             1 => Some(Kind::String),
             2 => Some(Kind::BigInt),
             3 => Some(Kind::Ctor),
+            4 => Some(Kind::Closure),
             _ => None,
         }
     }
@@ -309,6 +315,34 @@ impl Heap {
     /// Field `i` of a constructor cell, or `None` past its last. Reading it
     /// adds no reference.
     pub(crate) fn field(&self, cell: Cell, i: usize) -> Option<Value> {
+        self.held(cell, i)
+    }
+
+    /// A new cell for function `func` over `captures`. Each capture's
+    /// reference passes to the cell.
+    pub(crate) fn closure(&mut self, func: FuncIdx, captures: &[Value]) -> Result<Cell, Full> {
+        let cell = self.alloc(Kind::Closure, 1 + captures.len())?;
+        self.set_word(cell, 1, u64::from(func.0));
+        for (i, c) in captures.iter().enumerate() {
+            self.set_word(cell, 2 + i, c.bits());
+        }
+        Ok(cell)
+    }
+
+    /// The function a closure cell runs.
+    pub(crate) fn closure_func(&self, cell: Cell) -> FuncIdx {
+        FuncIdx(self.word(cell, 1) as u32)
+    }
+
+    /// Capture `i` of a closure cell, or `None` past its last. Reading it adds
+    /// no reference.
+    pub(crate) fn capture(&self, cell: Cell, i: usize) -> Option<Value> {
+        self.held(cell, i)
+    }
+
+    /// Value `i` of the ones a constructor or closure cell holds after its
+    /// tag word.
+    fn held(&self, cell: Cell, i: usize) -> Option<Value> {
         let n = size(self.word(cell, 0)).saturating_sub(2);
         (i < n).then(|| Value::from_bits(self.word(cell, 2 + i)))
     }
@@ -507,6 +541,27 @@ mod tests {
         heap.release(head);
         assert_eq!(heap.live(), 1, "only the string the test still holds");
         heap.release(shared);
+        assert_eq!(heap.live(), 0);
+    }
+
+    /// A closure holds its captures the way a constructor holds its fields,
+    /// and freeing it frees them.
+    #[test]
+    fn a_closure_holds_its_captures() {
+        let mut heap = Heap::default();
+        let s = heap.string(b"captured").expect("room");
+        let cell = heap
+            .closure(FuncIdx(9), &[Value::int(4).expect("small"), Value::cell(s)])
+            .expect("room");
+        assert_eq!(heap.kind(cell), Some(Kind::Closure));
+        assert_eq!(heap.closure_func(cell), FuncIdx(9));
+        assert_eq!(
+            heap.capture(cell, 0).map(Value::view),
+            Value::int(4).map(Value::view)
+        );
+        assert!(heap.capture(cell, 2).is_none());
+        assert_eq!(heap.live(), 2);
+        heap.release(cell);
         assert_eq!(heap.live(), 0);
     }
 

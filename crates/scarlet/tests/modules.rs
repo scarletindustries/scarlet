@@ -295,7 +295,6 @@ fn qualified_import_unknown_member_is_error() {
 /// env. An elaborator that re-probed the live env would read `util.empty()` as
 /// a field access, enter an expression the walk never entered, and abort.
 #[test]
-#[ignore = "needs the VM"]
 fn lambda_body_keeps_the_walks_qualifier_verdict() {
     let proj = Project::new("qual_pinned");
     proj.write("util.scrl", "pub fn empty() String { 'E' }\n");
@@ -310,7 +309,6 @@ fn lambda_body_keeps_the_walks_qualifier_verdict() {
 /// field of the member's name, so after it `one.go` really is a field read while
 /// inside the earlier-walked lambda it is still module `one`'s `go`.
 #[test]
-#[ignore = "needs the VM"]
 fn shadowed_qualifier_is_a_field_read_only_after_the_bind() {
     let proj = Project::new("qual_shadow");
     proj.write("one.scrl", "pub const go = 7\n");

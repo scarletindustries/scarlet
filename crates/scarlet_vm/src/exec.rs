@@ -29,6 +29,10 @@ struct Frame<'c> {
     /// The caller's register the result goes to. `None` for the frame a run
     /// started with.
     ret_to: Option<Reg>,
+    /// The closure this frame runs as, holding one reference: a closure cell,
+    /// a function value, or `NIL` for a call by name. Its captures are what
+    /// `GetCapture` reads.
+    env: Value,
 }
 
 pub(crate) struct Machine<'c, 'o> {
@@ -87,6 +91,7 @@ impl<'c, 'o> Machine<'c, 'o> {
             pc: 0,
             base,
             ret_to: None,
+            env: Value::NIL,
         }];
         loop {
             let Some(frame) = frames.last_mut() else {
@@ -194,26 +199,106 @@ impl<'c, 'o> Machine<'c, 'o> {
                         .map(|r| self.share(self.get(base, *r)))
                         .collect();
                     let new_base = base + frame.body.regs as usize;
-                    let ret_to = Some(*dst);
                     self.enter(callee, new_base, &values);
                     frames.push(Frame {
                         body: callee,
                         pc: 0,
                         base: new_base,
-                        ret_to,
+                        ret_to: Some(*dst),
+                        env: Value::NIL,
                     });
                 }
+                Instr::CallSelf { dst, args } => {
+                    let values = self.args(base, args);
+                    let body = frame.body;
+                    let env = self.share(frame.env);
+                    let new_base = base + body.regs as usize;
+                    self.enter(body, new_base, &values);
+                    frames.push(Frame {
+                        body,
+                        pc: 0,
+                        base: new_base,
+                        ret_to: Some(*dst),
+                        env,
+                    });
+                }
+                Instr::CallValue { dst, callee, args } => {
+                    let (body, env) = self.callee(self.get(base, *callee), args.len())?;
+                    let values = self.args(base, args);
+                    let new_base = base + frame.body.regs as usize;
+                    self.enter(body, new_base, &values);
+                    frames.push(Frame {
+                        body,
+                        pc: 0,
+                        base: new_base,
+                        ret_to: Some(*dst),
+                        env,
+                    });
+                }
+                // A tail call's callee takes over this frame, so a loop
+                // written as tail recursion runs in constant space.
                 Instr::TailCall { func, args } => {
                     let callee = self.body(*func)?;
-                    let values: Vec<Value> = args
-                        .iter()
-                        .map(|r| self.share(self.get(base, *r)))
-                        .collect();
-                    // The callee takes over this frame, so a loop written as
-                    // tail recursion runs in constant space.
+                    let values = self.args(base, args);
                     self.enter(callee, base, &values);
+                    let old = std::mem::replace(&mut frame.env, Value::NIL);
+                    self.release(old);
                     frame.body = callee;
                     frame.pc = 0;
+                }
+                Instr::TailCallSelf { args } => {
+                    let values = self.args(base, args);
+                    self.enter(frame.body, base, &values);
+                    frame.pc = 0;
+                }
+                // The callee's closure gets its own reference before `enter`
+                // releases this frame's registers, one of which may be the
+                // only other holder.
+                Instr::TailCallValue { callee, args } => {
+                    let (body, env) = self.callee(self.get(base, *callee), args.len())?;
+                    let values = self.args(base, args);
+                    self.enter(body, base, &values);
+                    let old = std::mem::replace(&mut frame.env, env);
+                    self.release(old);
+                    frame.body = body;
+                    frame.pc = 0;
+                }
+                Instr::Closure {
+                    dst,
+                    func,
+                    captures,
+                } => {
+                    let values = self.args(base, captures);
+                    let cell = self.heap.closure(*func, &values).map_err(full)?;
+                    self.set(base, *dst, Value::cell(cell));
+                }
+                Instr::GetCapture { dst, index } => {
+                    let capture = match frame.env.as_cell() {
+                        Some(cell) if self.heap.kind(cell) == Some(Kind::Closure) => {
+                            self.heap.capture(cell, *index as usize)
+                        }
+                        _ => None,
+                    };
+                    let Some(v) = capture else {
+                        return Err(Stop::BadProgram(format!(
+                            "{} read capture {index}, which the closure it runs as does not have",
+                            frame.body.name
+                        )));
+                    };
+                    let v = self.share(v);
+                    self.set(base, *dst, v);
+                }
+                Instr::GetSelf { dst, this } => {
+                    let v = match frame.env.view() {
+                        View::Nil => Value::func(*this),
+                        View::Float(_)
+                        | View::Int(_)
+                        | View::Bool(_)
+                        | View::Func(_)
+                        | View::Cell(_)
+                        | View::Nullary(_) => self.share(frame.env),
+                    };
+                    self.set(base, *dst, v);
                 }
                 Instr::Jump { to } => frame.pc = *to as usize,
                 Instr::JumpUnlessVariant { src, variant, to } => {
@@ -267,8 +352,10 @@ impl<'c, 'o> Machine<'c, 'o> {
                 Instr::Ret { src } => {
                     let v = self.share(self.get(base, *src));
                     let ret_to = frame.ret_to;
+                    let env = frame.env;
                     frames.pop();
                     self.leave(base);
+                    self.release(env);
                     match (ret_to, frames.last()) {
                         (Some(dst), Some(caller)) => {
                             let caller_base = caller.base;
@@ -279,6 +366,43 @@ impl<'c, 'o> Machine<'c, 'o> {
                 }
             }
         }
+    }
+
+    /// The values in `regs`, each with one more reference: for passing on.
+    fn args(&mut self, base: usize, regs: &[Reg]) -> Vec<Value> {
+        regs.iter()
+            .map(|r| self.share(self.get(base, *r)))
+            .collect()
+    }
+
+    /// The body function value `f` runs, and `f` with one more reference, for
+    /// the frame that runs it as its closure.
+    fn callee(&mut self, f: Value, argc: usize) -> Result<(&'c Body, Value), Stop> {
+        let func = match f.view() {
+            View::Func(func) => func,
+            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::Closure) => {
+                self.heap.closure_func(cell)
+            }
+            v @ (View::Float(_)
+            | View::Int(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Cell(_)
+            | View::Nullary(_)) => {
+                return Err(Stop::BadProgram(format!(
+                    "a call to {v:?}, which is not a function"
+                )));
+            }
+        };
+        let body = self.body(func)?;
+        if body.params.len() != argc {
+            return Err(Stop::BadProgram(format!(
+                "{} called with {argc} arguments, not {}",
+                body.name,
+                body.params.len()
+            )));
+        }
+        Ok((body, self.share(f)))
     }
 
     /// Give `body` a fresh frame at `base`, with `args` in its parameters.
@@ -377,7 +501,7 @@ impl<'c, 'o> Machine<'c, 'o> {
 
     /// How `println` and `${x}` show a value.
     fn show(&self, v: Value, out: &mut Vec<u8>) -> Result<(), Stop> {
-        show::show(&self.heap, &self.code.types, v, out)
+        show::show(&self.heap, self.code, v, out)
     }
 
     /// Cells not yet freed.
@@ -541,6 +665,37 @@ mod tests {
              }\n",
         );
         assert_eq!(out, "1000\n1\nempty\n");
+        assert_eq!(left, 0);
+    }
+
+    /// A closure holds its captures, and each call to it holds the closure:
+    /// closures made in a loop, returned, called and dropped leave nothing.
+    #[test]
+    fn closures_and_their_captures_are_all_freed() {
+        let (out, left) = cells_left_after(
+            "type Box {\n\
+             \tBox(s String)\n\
+             }\n\
+             fn greeter(name String) fn(String) String {\n\
+             \tb = Box(name)\n\
+             \tfn(greeting) {\n\
+             \t\tmatch b {\n\
+             \t\t\tBox(n) -> '${greeting}, ${n}'\n\
+             \t\t}\n\
+             \t}\n\
+             }\n\
+             fn spin(n Int, f fn(String) String) String {\n\
+             \tif n == 0 { f('bye') } else { spin(n - 1, greeter('${n}')) }\n\
+             }\n\
+             pub fn main() {\n\
+             \tprintln(greeter('you')('hi'))\n\
+             \tprintln(spin(1000, greeter('start')))\n\
+             \tk = 'kept'\n\
+             \tgo = fn(n) { if n == 0 { k } else { go(n - 1) } }\n\
+             \tprintln(go(100))\n\
+             }\n",
+        );
+        assert_eq!(out, "hi, you\nbye, 1\nkept\n");
         assert_eq!(left, 0);
     }
 

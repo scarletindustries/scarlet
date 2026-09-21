@@ -323,7 +323,6 @@ suite! {
         #[ignore = "needs the VM"]
         http_response,
         // Backpassing: `x <- f(args)` desugars to a trailing callback.
-        #[ignore = "needs the VM"]
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.
         pipe,
