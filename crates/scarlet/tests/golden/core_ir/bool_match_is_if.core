@@ -14,23 +14,35 @@ fn main.unit(%0:t0) -> :t1
   drop %0
   ret c2
 
+fn main.same(%0:t2) -> :t0
+  if %0 :t0
+    drop %0
+    ret false
+  else
+    let %1:t2 = %0
+    drop %0
+    ret %1
+
 fn main.main() -> :t0
   let %0:t3 = true
   let %1:t4 = call fn#0(%0)
   drop %0
-  let %2:t0 = call fn#1(%1)
+  let %2:t5 = call fn#1(%1)
   drop %1
-  let %3:t5 = nil
-  let %4:t6 = call fn#2(%3)
-  drop %3
-  ret IntAdd(%2, %4)
+  let %3:t0 = call fn#2(%2)
+  drop %2
+  let %4:t6 = nil
+  let %5:t7 = call fn#3(%4)
+  drop %4
+  ret IntAdd(%3, %5)
 
 toplevel:
-fn main.__main__() -> :t7
-  let %0:t8@g0 = closure fn#1()
-  let %1:t9@g1 = closure fn#0()
-  let %2:t3@g2 = closure fn#2()
-  let %3:t10@g3 = closure fn#3()
+fn main.__main__() -> :t8
+  let %0:t9@g0 = closure fn#2()
+  let %1:t10@g1 = closure fn#1()
+  let %2:t4@g2 = closure fn#3()
+  let %3:t11@g3 = closure fn#0()
+  let %4:t7@g4 = closure fn#4()
   ret nil
 where
   c0 = Int(1)

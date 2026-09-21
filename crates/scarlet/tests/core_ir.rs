@@ -347,7 +347,9 @@ core_golden!(
 );
 
 // `True`, `False` and `Nil` are immediates, never the prelude's
-// constructors, and a match on a Bool is an `if`. A match on Nil is its arm.
+// constructors, and a match on a Bool is an `if`. A match on Nil is its arm,
+// and an arm that binds the value binds it with a `let`. Perceus runs after,
+// so no drop of a Bool is marked as a cell to reuse.
 core_golden!(
     bool_match_is_if,
     "fn pick(b Bool) Int {\n\
@@ -367,8 +369,14 @@ core_golden!(
      \t\tNil -> 2\n\
      \t}\n\
      }\n\
+     fn same(b Bool) Bool {\n\
+     \tmatch b {\n\
+     \t\tTrue -> False\n\
+     \t\tx -> x\n\
+     \t}\n\
+     }\n\
      pub fn main() {\n\
-     \tpick(yes(True)) + unit(Nil)\n\
+     \tpick(yes(same(True))) + unit(Nil)\n\
      }\n"
 );
 

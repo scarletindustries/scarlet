@@ -7,6 +7,9 @@
 //! difference: each of those constructors becomes the atom, and a `match` on a
 //! Bool becomes an `If`. So a backend never needs to know which `TypeId` is
 //! the prelude's `Bool`, and a Bool only ever looks one way.
+//!
+//! It runs between `lower` and `perceus`, so Perceus never sees a Bool as a
+//! constructor: it never marks one's drop as a cell to reuse.
 
 use super::{Atom, CoreExpr, CoreFn, CorePat, LocalId, VariantRef};
 use crate::typed_ir::RTy;
@@ -40,23 +43,22 @@ impl Immediates {
         }
     }
 
-    /// `None` for any pattern that is not over a Bool or Nil, and for a
-    /// binding, which would need its local bound to the scrutinee.
+    /// `None` for any pattern that is not over a Bool or Nil.
     fn test(&self, p: &CorePat) -> Option<Test> {
         match p {
-            CorePat::Wild => Some(Test::Any),
+            CorePat::Wild | CorePat::Bind(_) => Some(Test::Any),
             CorePat::Ctor { variant, .. } if *variant == self.true_ => Some(Test::Is(true)),
             CorePat::Ctor { variant, .. } if *variant == self.false_ => Some(Test::Is(false)),
             CorePat::Ctor { variant, .. } if *variant == self.nil => Some(Test::Any),
-            CorePat::Ctor { .. } | CorePat::Lit(_) | CorePat::Bind(_) => None,
+            CorePat::Ctor { .. } | CorePat::Lit(_) => None,
         }
     }
 
     /// For a match whose arms all test a Bool or Nil, and at least one names
     /// `True`, `False` or `Nil`: the arm that runs when the value is `True`,
     /// and the one that runs when it is `False`. For a match on Nil, both are
-    /// the arm that runs. A match of only wildcards is left to the backend,
-    /// which does not need to know what type it is over.
+    /// the arm that runs. A match of only wildcards and bindings is left to
+    /// the backend, which does not need to know what type it is over.
     fn arms_taken(&self, arms: &[(CorePat, CoreExpr)]) -> Option<(usize, usize)> {
         if !arms.iter().any(|(p, _)| matches!(p, CorePat::Ctor { .. })) {
             return None;
@@ -122,7 +124,8 @@ fn immediate(atom: &mut Atom, im: &Immediates) {
 
 /// The match on `scrut` as the arms it can take: one arm when the same one
 /// runs whatever the value, else an `If` from the `True` arm to the `False`
-/// one. Every other arm can never run.
+/// one. Every other arm can never run. An arm that binds the value starts by
+/// binding it.
 fn branch(
     scrut: LocalId,
     arms: Vec<(CorePat, CoreExpr)>,
@@ -131,7 +134,15 @@ fn branch(
 ) -> CoreExpr {
     let mut then = None;
     let mut els = None;
-    for (i, (_, body)) in arms.into_iter().enumerate() {
+    for (i, (pat, body)) in arms.into_iter().enumerate() {
+        let body = match pat {
+            CorePat::Bind(bind) => CoreExpr::Let {
+                bind,
+                rhs: Atom::Local(scrut),
+                body: Box::new(body),
+            },
+            CorePat::Wild | CorePat::Lit(_) | CorePat::Ctor { .. } => body,
+        };
         if i == on_true {
             then = Some(body);
         } else if i == on_false {
@@ -230,6 +241,21 @@ mod tests {
 
         let wild = rewritten(m(vec![(ctor(vref(1, 0)), ret(7)), (CorePat::Wild, ret(8))]));
         assert!(wild.contains("if %0"), "{wild}");
+    }
+
+    /// `x -> ...` on a Bool binds `x` to the Bool, then runs the arm.
+    #[test]
+    fn a_binding_arm_binds_the_value() {
+        let text = rewritten(CoreExpr::Match {
+            scrut: local(0),
+            arms: vec![
+                (ctor(vref(1, 0)), ret(7)),
+                (CorePat::Bind(bind(9, RTy(0))), ret(9)),
+            ],
+            ty: RTy(0),
+        });
+        assert!(text.contains("if %0"), "{text}");
+        assert!(text.contains("let %9:0 = %0"), "{text}");
     }
 
     /// A match on Nil has one value to match, so its arm is all that is left.
