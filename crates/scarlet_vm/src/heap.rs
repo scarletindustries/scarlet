@@ -239,6 +239,16 @@ impl Heap {
         self.word(cell, 1) as usize
     }
 
+    /// Whether a string cell holds exactly `text`.
+    pub(crate) fn string_is(&self, cell: Cell, text: &[u8]) -> bool {
+        self.string_len(cell) == text.len()
+            && text.chunks(8).enumerate().all(|(i, bytes)| {
+                let mut word = [0u8; 8];
+                word[..bytes.len()].copy_from_slice(bytes);
+                self.word(cell, 2 + i) == u64::from_le_bytes(word)
+            })
+    }
+
     /// A string cell's bytes, appended to `out`.
     pub(crate) fn read_string(&self, cell: Cell, out: &mut Vec<u8>) {
         let len = self.word(cell, 1) as usize;
@@ -294,6 +304,13 @@ impl Heap {
             type_id: TypeId(tag as u32 as i32),
             variant_idx: (tag >> 32) as u16,
         }
+    }
+
+    /// Field `i` of a constructor cell, or `None` past its last. Reading it
+    /// adds no reference.
+    pub(crate) fn field(&self, cell: Cell, i: usize) -> Option<Value> {
+        let n = size(self.word(cell, 0)).saturating_sub(2);
+        (i < n).then(|| Value::from_bits(self.word(cell, 2 + i)))
     }
 
     /// A constructor cell's fields, in order. Reading one adds no reference.
@@ -436,6 +453,23 @@ mod tests {
         let positive = -big;
         let cell = heap.big_int(&positive).expect("room");
         assert_eq!(heap.read_big_int(cell), positive);
+    }
+
+    #[test]
+    fn a_string_is_only_its_own_text() {
+        let mut heap = Heap::default();
+        for text in ["", "a", "eight ch", "nine char", "a longer piece of text"] {
+            let cell = heap.string(text.as_bytes()).expect("room");
+            assert!(heap.string_is(cell, text.as_bytes()), "{text:?}");
+            let mut other = text.as_bytes().to_vec();
+            other.push(b'!');
+            assert!(!heap.string_is(cell, &other), "{text:?} is not {other:?}");
+            if let Some(last) = other.len().checked_sub(2) {
+                other.truncate(last + 1);
+                other[last] ^= 1;
+                assert!(!heap.string_is(cell, &other), "{text:?} is not {other:?}");
+            }
+        }
     }
 
     #[test]

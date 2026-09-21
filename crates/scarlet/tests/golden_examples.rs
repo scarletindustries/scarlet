@@ -326,7 +326,6 @@ suite! {
         #[ignore = "needs the VM"]
         backpassing,
         // The pipe operator: `x |> f(args)` desugars to `f(x, args)`.
-        #[ignore = "needs the VM"]
         pipe,
         // JSON: the SIMD parse, on-demand reads off the tape, typed decoding
         // with accumulated paths, and the three presence states — absent, null

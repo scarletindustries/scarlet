@@ -137,7 +137,6 @@ reject_case! {
 run_case! {
     // U3: `Err(x)` is an ordinary constructor, so a fn returning
     // `Result(Int, E)` may return it and `or` observes the error.
-    #[ignore = "needs the VM"]
     u3_err_constructor_typechecks: (
         "type E { E(msg String) }\n\
          fn f() Result(Int, E) {\n\
@@ -167,7 +166,6 @@ run_case! {
 
     // U6: a bare variant name over an unannotated subject must not compile to a
     // wildcard binding, which would send every value into the first arm.
-    #[ignore = "needs the VM"]
     u6_bare_variant_on_inferred_subject_dispatches: (
         "type E {\n\tA\n\tB\n}\n\
          fn f(e) {\n\
@@ -184,7 +182,6 @@ run_case! {
 
     // U14: payload types must be substituted before exhaustiveness, or a fully
     // exhaustive match over `Maybe(Bool)` is wrongly rejected.
-    #[ignore = "needs the VM"]
     u14_generic_enum_exhaustiveness_substitutes_payload: (
         "type Maybe(t) {\n\tJust(value t)\n\tNothing\n}\n\
          fn f(m Maybe(Bool)) Int {\n\
@@ -364,7 +361,6 @@ fn u21_exhaustiveness_respects_field_labels() {
 }
 
 #[test]
-#[ignore = "needs the VM"]
 fn u21_exhaustiveness_respects_field_labels_runs() {
     // False-positive direction: an exhaustive match whose third arm names
     // fields in reverse order covers (a=False, b=True), so f returns 3.

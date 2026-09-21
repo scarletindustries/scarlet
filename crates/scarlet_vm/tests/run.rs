@@ -297,3 +297,125 @@ fn a_long_list_is_built_and_freed() {
         "Cons(0, End)\n",
     );
 }
+
+#[test]
+fn a_match_picks_the_arm_that_fits() {
+    prints(
+        "type Shape {\n\
+         \tCircle(radius Int)\n\
+         \tRect(w Int, h Int)\n\
+         \tDot\n\
+         }\n\
+         fn area(s Shape) Int {\n\
+         \tmatch s {\n\
+         \t\tCircle(r) -> 3 * r * r\n\
+         \t\tRect(w, h) -> w * h\n\
+         \t\tDot -> 0\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(area(Circle(radius: 2)))\n\
+         \tprintln(area(Rect(w: 3, h: 4)))\n\
+         \tprintln(area(Dot))\n\
+         }\n",
+        "12\n12\n0\n",
+    );
+}
+
+/// A nested pattern becomes a match inside a match, and a case that fails
+/// part-way jumps on to the next one.
+#[test]
+fn a_nested_pattern_falls_through_to_the_next_case() {
+    prints(
+        "fn describe(o Option(Option(Int))) String {\n\
+         \tmatch o {\n\
+         \t\tSome(Some(0)) -> 'zero'\n\
+         \t\tSome(Some(n)) -> 'some ${n}'\n\
+         \t\tSome(None) -> 'some none'\n\
+         \t\tNone -> 'none'\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(describe(Some(Some(0))))\n\
+         \tprintln(describe(Some(Some(5))))\n\
+         \tprintln(describe(Some(None)))\n\
+         \tprintln(describe(None))\n\
+         }\n",
+        "zero\nsome 5\nsome none\nnone\n",
+    );
+}
+
+#[test]
+fn a_match_on_ints_and_strings() {
+    prints(
+        "fn count(n Int) String {\n\
+         \tmatch n {\n\
+         \t\t0 -> 'none'\n\
+         \t\t1 | 2 -> 'a few'\n\
+         \t\t_ -> 'many'\n\
+         \t}\n\
+         }\n\
+         fn greet(s String) String {\n\
+         \tmatch s {\n\
+         \t\t'hi' -> 'hello'\n\
+         \t\t'' -> 'nothing'\n\
+         \t\tother -> 'what is ${other}?'\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(count(0))\n\
+         \tprintln(count(2))\n\
+         \tprintln(count(9))\n\
+         \tprintln(count(9223372036854775807))\n\
+         \tprintln(greet('hi'))\n\
+         \tprintln(greet(''))\n\
+         \tprintln(greet('hiya'))\n\
+         }\n",
+        "none\na few\nmany\nmany\nhello\nnothing\nwhat is hiya?\n",
+    );
+}
+
+#[test]
+fn a_record_field_reads_by_name() {
+    prints(
+        "type Point {\n\
+         \tPoint(x Int, y Int)\n\
+         }\n\
+         pub fn main() {\n\
+         \tp = Point(x: 3, y: 4)\n\
+         \tprintln(p.x * p.x + p.y * p.y)\n\
+         }\n",
+        "25\n",
+    );
+}
+
+/// A list walked by recursion, and one walked by a loop, 100,000 long.
+#[test]
+fn a_list_is_walked() {
+    prints(
+        "type L {\n\
+         \tCons(h Int, t L)\n\
+         \tEnd\n\
+         }\n\
+         fn build(n Int, acc L) L {\n\
+         \tif n == 0 { acc } else { build(n - 1, Cons(n, acc)) }\n\
+         }\n\
+         fn sum(l L) Int {\n\
+         \tmatch l {\n\
+         \t\tCons(h, t) -> h + sum(t)\n\
+         \t\tEnd -> 0\n\
+         \t}\n\
+         }\n\
+         fn length(l L, n Int) Int {\n\
+         \tmatch l {\n\
+         \t\tCons(_, t) -> length(t, n + 1)\n\
+         \t\tEnd -> n\n\
+         \t}\n\
+         }\n\
+         pub fn main() {\n\
+         \tprintln(sum(build(10, End)))\n\
+         \tprintln(length(build(100000, End), 0))\n\
+         }\n",
+        "55\n100000\n",
+    );
+}

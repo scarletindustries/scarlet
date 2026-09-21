@@ -469,6 +469,9 @@ fn cmd_run(args: RunArgs) {
             die(format!("cannot run: the new VM does not run {what} yet"))
         }
         Err(scarlet_vm::Stop::HeapFull) => die("the program ran out of heap"),
+        Err(scarlet_vm::Stop::BadProgram(what)) => die(format!(
+            "internal error: {what}. This is a bug in the compiler, not in the program"
+        )),
     }
 }
 

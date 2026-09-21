@@ -201,7 +201,6 @@ run_case! {
     // middle, and last alternative, both as a function's tail expression and
     // as a binding's initialiser in `main`'s body (the two ways an arm's slot
     // gets allocated).
-    #[ignore = "needs the VM"]
     or_pattern_binds_same_slot_in_every_alternative: (
         "type Shape {\n\
          \tCircle(r Int)\n\
@@ -583,7 +582,6 @@ run_case! {
     // Bare constructor arms lower to `Op::SwitchTag`, one indexed jump on
     // `variant_idx`. Each arm yields a value only it can, so a mis-indexed
     // jump table fails a line.
-    #[ignore = "needs the VM"]
     exhaustive_variant_match_is_jump_table: (
         "type T {\n\
          \tA(x Int)\n\
@@ -608,7 +606,6 @@ run_case! {
     // Two arms share a variant tag, which `variant_idx` alone cannot
     // distinguish, so the compiler must fall back to sequential
     // `Op::MatchEnum`.
-    #[ignore = "needs the VM"]
     variant_match_with_nested_literal_falls_back: (
         "type T {\n\
          \tA(x Int)\n\
@@ -653,7 +650,6 @@ run_case! {
     // consult it. Nominal typing makes the receiver always a resolved `Con`,
     // so the checked `Op::GetField` fallback is unreachable from surface
     // syntax and is pinned only indirectly, here.
-    #[ignore = "needs the VM"]
     field_access_across_variants_ignores_runtime_tag: (
         "type S {\n\
          \tA(v Int, w Int)\n\
@@ -721,7 +717,6 @@ fn index_or_covers_both_encodings_and_every_boundary() {
 /// build against an absolute bar, never ran, and belongs in an interleaved
 /// min-of-N bench, not here.
 #[test]
-#[ignore = "needs the VM"]
 fn bench_typed_output_is_pinned() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/bench_typed.scrl");

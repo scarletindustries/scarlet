@@ -8,10 +8,17 @@
 //! The VM is being built one feature at a time. A function that uses
 //! something not built yet still loads, marked with what it needs, and only a
 //! call to it stops the run. So a program runs as far as the VM has come.
+//!
+//! A `match` becomes one test per arm, in order: each jumps to the next arm's
+//! test when its value does not fit the arm's pattern, and otherwise falls
+//! into the arm, which reads out the fields the pattern binds. A `LetCont`'s
+//! continuation is placed after its body, and a `Goto` is a jump to it.
+
+use std::collections::HashMap;
 
 use scarlet_ir::core_ir::{
-    Atom, Callee, Const, CoreExpr, CoreFn, FuncIdx, GlobalSlot, Load, LocalId, LoweredFn, PrimOp,
-    Program, VariantRef,
+    Atom, Callee, Const, CoreExpr, CoreFn, CorePat, FuncIdx, GlobalSlot, JoinId, Load, LocalId,
+    LoweredFn, PrimOp, Program, VariantRef,
 };
 use scarlet_ir::intrinsic::Intrinsic;
 use scarlet_ir::tivec::{Idx, TiVec};
@@ -117,6 +124,67 @@ pub(crate) enum Instr {
         cond: Reg,
         to: u32,
     },
+    /// Continue at `to` unless `src` is constructor `variant`.
+    JumpUnlessVariant {
+        src: Reg,
+        variant: VariantRef,
+        to: u32,
+    },
+    /// Continue at `to` unless `src` is the Int `n`.
+    JumpUnlessInt {
+        src: Reg,
+        n: i64,
+        to: u32,
+    },
+    /// Continue at `to` unless `src` is the string `text`.
+    JumpUnlessStr {
+        src: Reg,
+        text: Box<[u8]>,
+        to: u32,
+    },
+    /// Field `index` of the constructor in `src`.
+    Field {
+        dst: Reg,
+        src: Reg,
+        index: u16,
+    },
+    /// Stop the run: the program broke a promise the compiler makes, and this
+    /// says which. Placed where only such a program can reach, like after a
+    /// `match`'s last arm.
+    Bad {
+        why: &'static str,
+    },
+}
+
+impl Instr {
+    /// Where this instruction may jump, for a jump still waiting on its label.
+    fn target(&mut self) -> Option<&mut u32> {
+        match self {
+            Instr::Jump { to }
+            | Instr::JumpIfFalse { to, .. }
+            | Instr::JumpUnlessVariant { to, .. }
+            | Instr::JumpUnlessInt { to, .. }
+            | Instr::JumpUnlessStr { to, .. } => Some(to),
+            Instr::Const { .. }
+            | Instr::Str { .. }
+            | Instr::BigInt { .. }
+            | Instr::Move { .. }
+            | Instr::GetGlobal { .. }
+            | Instr::SetGlobal { .. }
+            | Instr::Int { .. }
+            | Instr::IntNeg { .. }
+            | Instr::Println { .. }
+            | Instr::ToString { .. }
+            | Instr::Concat { .. }
+            | Instr::Ctor { .. }
+            | Instr::Drop { .. }
+            | Instr::Call { .. }
+            | Instr::TailCall { .. }
+            | Instr::Ret { .. }
+            | Instr::Field { .. }
+            | Instr::Bad { .. } => None,
+        }
+    }
 }
 
 /// Where a Core IR expression's value goes.
@@ -220,6 +288,8 @@ struct Loader<'c> {
     /// Each label's instruction index once placed, and the jumps still
     /// waiting for it.
     labels: Vec<(Option<u32>, Vec<usize>)>,
+    /// The label of each `LetCont`'s continuation, for the `Goto`s to it.
+    conts: HashMap<JoinId, Label>,
     /// One past the highest register the function names. A value that no
     /// local holds, like a tail expression's, gets a register from here.
     next: u32,
@@ -237,6 +307,7 @@ impl<'c> Loader<'c> {
             this,
             instrs: Vec::new(),
             labels: Vec::new(),
+            conts: HashMap::new(),
             next: top,
         }
     }
@@ -262,8 +333,7 @@ impl<'c> Loader<'c> {
             None => Vec::new(),
         };
         for i in waiting {
-            if let Some(Instr::Jump { to } | Instr::JumpIfFalse { to, .. }) = self.instrs.get_mut(i)
-            {
+            if let Some(to) = self.instrs.get_mut(i).and_then(Instr::target) {
                 *to = here;
             }
         }
@@ -358,12 +428,83 @@ impl<'c> Loader<'c> {
                     self.place(otherwise);
                     e = els;
                 }
-                CoreExpr::LetCont { .. } | CoreExpr::Goto(_) => {
-                    return Err("pattern matching".into());
+                CoreExpr::Match { scrut, arms, .. } => {
+                    let src = Reg::of(*scrut);
+                    for (pat, arm) in arms {
+                        let next = self.label();
+                        self.pattern(src, pat, next)?;
+                        self.expr(arm, dest)?;
+                        self.place(next);
+                    }
+                    self.instrs.push(Instr::Bad {
+                        why: "a match found no arm for its value",
+                    });
+                    return Ok(());
                 }
-                CoreExpr::Match { .. } => return Err("match".into()),
+                // Every path through `body` ends in a return or a jump, so
+                // the continuation after it is reached only by its `Goto`s.
+                CoreExpr::LetCont { id, cont, body } => {
+                    let l = self.label();
+                    self.conts.insert(*id, l);
+                    self.expr(body, dest)?;
+                    self.place(l);
+                    e = cont;
+                }
+                CoreExpr::Goto(id) => {
+                    match self.conts.get(id) {
+                        Some(&l) => self.jump(l, |to| Instr::Jump { to }),
+                        None => self.instrs.push(Instr::Bad {
+                            why: "a jump to a case that no match declares",
+                        }),
+                    }
+                    return Ok(());
+                }
             }
         }
+    }
+
+    /// Test `src` against `pat`, jumping to `next` when it does not fit, and
+    /// read out what the pattern binds when it does.
+    fn pattern(&mut self, src: Reg, pat: &CorePat, next: Label) -> Result<(), String> {
+        match pat {
+            CorePat::Wild => {}
+            CorePat::Bind(b) => self.instrs.push(Instr::Move {
+                dst: Reg::of(b.id),
+                src,
+            }),
+            CorePat::Ctor { variant, fields } => {
+                let variant = *variant;
+                self.jump(next, |to| Instr::JumpUnlessVariant { src, variant, to });
+                for (i, f) in fields.iter().enumerate() {
+                    let index = u16::try_from(i)
+                        .map_err(|_| "a constructor with more than 65535 fields".to_string())?;
+                    self.instrs.push(Instr::Field {
+                        dst: Reg::of(f.id),
+                        src,
+                        index,
+                    });
+                }
+            }
+            CorePat::Lit(c) => match self.consts.get(c.index()) {
+                Some(Const::Int(n)) => {
+                    let n = *n;
+                    self.jump(next, |to| Instr::JumpUnlessInt { src, n, to });
+                }
+                Some(Const::String(text)) => {
+                    let text: Box<[u8]> = text.as_bytes().into();
+                    self.jump(next, |to| Instr::JumpUnlessStr { src, text, to });
+                }
+                Some(Const::Float(_)) => return Err("matching a Float".into()),
+                Some(Const::Binary { .. }) => return Err("matching a Binary".into()),
+                None => {
+                    return Err(format!(
+                        "constant c{}, which the program does not have",
+                        c.index()
+                    ));
+                }
+            },
+        }
+        Ok(())
     }
 
     fn atom(&mut self, dst: Reg, atom: &Atom) -> Result<(), String> {
@@ -479,6 +620,14 @@ impl<'c> Loader<'c> {
                     a: Reg::of(*a),
                 }),
                 _ => Err("IntNeg with other than one argument".into()),
+            },
+            PrimOp::FieldUnchecked(index) => match args {
+                [src] => Ok(Instr::Field {
+                    dst,
+                    src: Reg::of(*src),
+                    index,
+                }),
+                _ => Err("FieldUnchecked with other than one argument".into()),
             },
             other => Err(format!("the operation {other:?}")),
         }

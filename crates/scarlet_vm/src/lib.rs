@@ -40,6 +40,10 @@ pub enum Stop {
     /// The program's heap grew past what the VM can address. A limit of the
     /// machine, like running out of memory, not a bug in the program.
     HeapFull,
+    /// The program broke a promise the compiler makes about every program,
+    /// like a `match` having an arm for every value. Only a compiler bug
+    /// gives one, so this says what, rather than guessing on.
+    BadProgram(String),
 }
 
 /// Run `program`, writing what it prints to `out`.

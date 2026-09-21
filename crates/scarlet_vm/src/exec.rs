@@ -13,7 +13,7 @@
 
 use std::io::Write;
 
-use scarlet_ir::core_ir::FuncIdx;
+use scarlet_ir::core_ir::{FuncIdx, VariantRef};
 
 use crate::Stop;
 use crate::bigint::{self, Int};
@@ -93,8 +93,8 @@ impl<'c, 'o> Machine<'c, 'o> {
                 return Ok(Value::NIL);
             };
             let Some(instr) = frame.body.instrs.get(frame.pc) else {
-                return Err(Stop::NotBuiltYet(format!(
-                    "{} running past its end",
+                return Err(Stop::BadProgram(format!(
+                    "{} ran past its last instruction",
                     frame.body.name
                 )));
             };
@@ -216,6 +216,42 @@ impl<'c, 'o> Machine<'c, 'o> {
                     frame.pc = 0;
                 }
                 Instr::Jump { to } => frame.pc = *to as usize,
+                Instr::JumpUnlessVariant { src, variant, to } => {
+                    if !self.is_variant(self.get(base, *src), *variant) {
+                        frame.pc = *to as usize;
+                    }
+                }
+                Instr::JumpUnlessInt { src, n, to } => {
+                    if !self.is_int(self.get(base, *src), *n) {
+                        frame.pc = *to as usize;
+                    }
+                }
+                Instr::JumpUnlessStr { src, text, to } => {
+                    let v = self.get(base, *src);
+                    let is = match v.as_cell() {
+                        Some(cell) if self.is_string(v) => self.heap.string_is(cell, text),
+                        _ => false,
+                    };
+                    if !is {
+                        frame.pc = *to as usize;
+                    }
+                }
+                Instr::Field { dst, src, index } => {
+                    let field = match self.get(base, *src).as_cell() {
+                        Some(cell) if self.heap.kind(cell) == Some(Kind::Ctor) => {
+                            self.heap.field(cell, usize::from(*index))
+                        }
+                        _ => None,
+                    };
+                    let Some(field) = field else {
+                        return Err(Stop::BadProgram(format!(
+                            "field {index} read from a value with no such field"
+                        )));
+                    };
+                    let field = self.share(field);
+                    self.set(base, *dst, field);
+                }
+                Instr::Bad { why } => return Err(Stop::BadProgram((*why).into())),
                 Instr::JumpIfFalse { cond, to } => match self.get(base, *cond).view() {
                     View::Bool(true) => {}
                     View::Bool(false) => frame.pc = *to as usize,
@@ -297,6 +333,31 @@ impl<'c, 'o> Machine<'c, 'o> {
     fn is_string(&self, v: Value) -> bool {
         v.as_cell()
             .is_some_and(|c| self.heap.kind(c) == Some(Kind::String))
+    }
+
+    fn is_variant(&self, v: Value, variant: VariantRef) -> bool {
+        match v.view() {
+            View::Nullary(n) => n == variant,
+            View::Cell(cell) => {
+                self.heap.kind(cell) == Some(Kind::Ctor) && self.heap.variant(cell) == variant
+            }
+            View::Float(_) | View::Int(_) | View::Nil | View::Bool(_) | View::Func(_) => false,
+        }
+    }
+
+    fn is_int(&self, v: Value, n: i64) -> bool {
+        match v.view() {
+            View::Int(m) => m == n,
+            View::Cell(cell) if self.heap.kind(cell) == Some(Kind::BigInt) => {
+                self.heap.read_big_int(cell) == n.into()
+            }
+            View::Float(_)
+            | View::Nil
+            | View::Bool(_)
+            | View::Func(_)
+            | View::Cell(_)
+            | View::Nullary(_) => false,
+        }
     }
 
     fn int(&self, base: usize, r: Reg) -> Result<Int, Stop> {
@@ -444,6 +505,42 @@ mod tests {
             out,
             "Cons(\n  1,\n  Cons(2, End)\n)\nPoint{ x: 0, y: 0 }\nSome(\n  Point{ x: 0, y: 0 }\n)\n"
         );
+        assert_eq!(left, 0);
+    }
+
+    /// A match's arms read fields out of the value they match, and each field
+    /// read holds its own reference: walking, rebuilding and dropping lists
+    /// of strings leaves nothing behind.
+    #[test]
+    fn what_a_match_reads_out_is_all_freed() {
+        let (out, left) = cells_left_after(
+            "type L {\n\
+             \tCons(h String, t L)\n\
+             \tEnd\n\
+             }\n\
+             fn build(n Int, acc L) L {\n\
+             \tif n == 0 { acc } else { build(n - 1, Cons('${n}', acc)) }\n\
+             }\n\
+             fn rev(l L, acc L) L {\n\
+             \tmatch l {\n\
+             \t\tCons(h, t) -> rev(t, Cons(h, acc))\n\
+             \t\tEnd -> acc\n\
+             \t}\n\
+             }\n\
+             fn first(l L) String {\n\
+             \tmatch l {\n\
+             \t\tCons(h, _) -> h\n\
+             \t\tEnd -> 'empty'\n\
+             \t}\n\
+             }\n\
+             pub fn main() {\n\
+             \tl = build(1000, End)\n\
+             \tprintln(first(rev(l, End)))\n\
+             \tprintln(first(l))\n\
+             \tprintln(first(End))\n\
+             }\n",
+        );
+        assert_eq!(out, "1000\n1\nempty\n");
         assert_eq!(left, 0);
     }
 
